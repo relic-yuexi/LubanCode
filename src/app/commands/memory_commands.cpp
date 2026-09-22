@@ -17,9 +17,11 @@
 #include "app/model_router.hpp"
 #include "cli/console_input.hpp"
 #include "cli/i18n.hpp"
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 1:/memory 渲染段)
 #include "cli/terminal_port.hpp"
 #include "cli/theme.hpp"
 #include "memory/project_memory.hpp"
+#include "platform/console.hpp"  // GetScreenInfo:整条 /memory 的框宽同一把尺
 #include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger(旁路桥)
 #include "tools/path_utils.hpp"
 
@@ -30,6 +32,68 @@ using lubancode::cli::tr;
 using lubancode::cli::trf;
 
 namespace {
+
+namespace frame = lubancode::cli::frame;
+
+std::string TrimAscii(std::string value);  // 定义见下(拆句两侧衬空用)
+
+// ---- TUI 排版批 1(/memory 全套)的公共小件 --------------------------------
+//
+// 渲染段只调 cli::frame::* 三助手(批 0 基件,约定见
+// docs/development/tui_style.md);文案一律既有 tr()/trf() 键,i18n 不新增
+// (单子合同第 5 条)。表头与档位标识用数据字段名(job/state/.../weak)——
+// 是 schema 名不是待译文案,对中英文用户一视同仁。
+
+// 宽度统一:整条 /memory 各子命令的框吃同一把终端列宽(单子批 1 验收
+// "所有输出宽度统一");探不到(管道/重定向/CI)给 0 = 按内容自适应。
+int MemoryFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+// 三助手吐 vector<string>(行内无换行符),落盘由调用方逐行走 TermOut
+// ——基件只产行,端口不换(文档总规矩)。
+void EmitFrameLines(const std::vector<std::string>& lines) {
+    for (const std::string& line : lines) {
+        TermOut() << line << "\n";
+    }
+}
+
+// 一句既有文案 -> 键值对的一枚 Field:文案自带 "key: value" 句式的按第
+// 一个冒号拆两列(冒号两侧衬空剥掉——助手自带两格列距,双份空格难看);
+// 不带冒号的整句进 value。拆的是既有文案,不添不改一个字;中英两套
+// memory 文案的冒号都是半角,同一把尺通吃。
+frame::Field SentenceField(const std::string& sentence,
+                           frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    std::string key = TrimAscii(sentence.substr(0, colon));
+    std::string value = TrimAscii(sentence.substr(colon + 1));
+    return frame::Field{std::move(key), std::move(value), accent};
+}
+
+// 简短提示进 frame(单子批 1:"成功/失败提示收进 frame,不再裸打印"):
+// 一到几句既有文案 -> 一个键值对框。accent 递 Error/Stats 给失败/告警上
+// 语义色(文档:错误与警告仍走 theme.error/theme.stats,不另立色)。
+void PrintNotice(const lubancode::cli::Theme& theme, std::initializer_list<std::string> sentences,
+                 frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    EmitFrameLines(
+        frame::RenderKeyValues({}, fields, theme, frame::Light(), MemoryFrameWidth()));
+}
+
+// 同上,但吃现成的 Field 列表(一句一档 accent 的混排用)。
+void PrintNoticeFields(const lubancode::cli::Theme& theme, std::vector<frame::Field> fields) {
+    EmitFrameLines(
+        frame::RenderKeyValues({}, std::move(fields), theme, frame::Light(), MemoryFrameWidth()));
+}
 
 std::string TrimAscii(std::string value) {
     const auto not_space = [](unsigned char c) { return !std::isspace(c); };
@@ -69,14 +133,19 @@ void PrintMemoryUsage() {
 }
 
 // 入队结果的统一呈现(修复单 §五 B):排队成功只报纯 job_id(不混启动
-// 说明);启动失败另起一行短提示附诊断入口,不吞队列成功值。
-void PrintEnqueueResult(const lubancode::memory::MemoryEnqueueResult& result) {
-    TermOut() << trf("cmd.memory.queued", result.job_id) << "\n";
+// 说明);启动失败另起一行短提示附诊断入口,不吞队列成功值。批 1 起两句
+// 同进一个键值对框(成功句素净,启动失败句上 error 色)。
+void PrintEnqueueResult(const lubancode::cli::Theme& theme,
+                        const lubancode::memory::MemoryEnqueueResult& result) {
+    std::vector<frame::Field> fields{SentenceField(trf("cmd.memory.queued", result.job_id))};
     if (result.worker_state == lubancode::memory::MemoryWorkerLaunchState::StartFailed) {
-        TermOut() << trf("cmd.memory.worker_failed",
-                         result.worker_error.empty() ? result.worker_error_code : result.worker_error)
-                  << "\n";
+        fields.push_back(SentenceField(trf("cmd.memory.worker_failed",
+                                          result.worker_error.empty()
+                                              ? result.worker_error_code
+                                              : result.worker_error),
+                                       frame::FieldAccent::Error));
     }
+    PrintNoticeFields(theme, std::move(fields));
 }
 
 // (抽取的本地超时预算 kMemoryExtractTimeoutSecs:原先住这,回合总结
@@ -94,7 +163,7 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         }
     };
     if (project_memory == nullptr) {
-        TermOut() << tr("cmd.memory.unavailable") << "\n";
+        PrintNotice(theme, {tr("cmd.memory.unavailable")}, frame::FieldAccent::Error);
         return;
     }
 
@@ -106,20 +175,26 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
     if (action.empty() || action == "status") {
         const auto status = project_memory->Status();
         const auto toggle_word = [](bool enabled) { return enabled ? tr("cmd.memory.on") : tr("cmd.memory.off"); };
-        TermOut() << trf("cmd.memory.global", toggle_word(status.global_allowed)) << "\n"
-                  << trf("cmd.memory.status", toggle_word(status.enabled), toggle_word(status.use),
-                         toggle_word(status.generate))
-                  << "\n"
-                  << trf("cmd.memory.learn_status", status.learn) << "\n"
-                  << trf("cmd.memory.project", status.workspace_key) << "\n"
-                  << trf("cmd.memory.directory", lubancode::tools::PathToUtf8(status.memory_dir)) << "\n"
-                  << trf("cmd.memory.counts", status.entry_count, status.pending_jobs, status.failed_jobs) << "\n";
+        // 键值对助手(单子批 1):各句既有文案按 "key: value" 句式拆两列,
+        // key 列全表对齐;counts/status 一键塞多对的,首对进 key、余下整段
+        // 进 value(不拆分号——中英文分号全半角不一,拆了脆)。
+        std::vector<frame::Field> fields;
+        fields.push_back(SentenceField(trf("cmd.memory.global", toggle_word(status.global_allowed))));
+        fields.push_back(SentenceField(trf("cmd.memory.status", toggle_word(status.enabled),
+                                           toggle_word(status.use), toggle_word(status.generate))));
+        fields.push_back(SentenceField(trf("cmd.memory.learn_status", status.learn)));
+        fields.push_back(SentenceField(trf("cmd.memory.project", status.workspace_key)));
+        fields.push_back(
+            SentenceField(trf("cmd.memory.directory", lubancode::tools::PathToUtf8(status.memory_dir))));
+        fields.push_back(SentenceField(trf("cmd.memory.counts", status.entry_count, status.pending_jobs,
+                                           status.failed_jobs)));
         if (status.user_enabled) {
-            TermOut() << trf("cmd.memory.user_status", status.user_entry_count,
-                             lubancode::tools::PathToUtf8(status.user_memory_dir))
-                      << "\n";
+            fields.push_back(SentenceField(trf("cmd.memory.user_status", status.user_entry_count,
+                                               lubancode::tools::PathToUtf8(status.user_memory_dir))));
         }
-        TermOut() << trf("cmd.memory.candidates", status.pending_candidates) << "\n";
+        fields.push_back(SentenceField(trf("cmd.memory.candidates", status.pending_candidates)));
+        EmitFrameLines(
+            frame::RenderKeyValues({}, fields, theme, frame::Light(), MemoryFrameWidth()));
         return;
     }
     if (action == "jobs") {
@@ -134,28 +209,30 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             words >> target;
             if (!target.empty()) {
                 const auto retried = project_memory->RetryFailedJob(target);
-                TermOut() << (retried.has_value()
-                                  ? trf("cmd.memory.jobs.retry_queued", *retried)
-                                  : trf("cmd.memory.jobs.retry_rejected", retried.error()))
-                          << "\n";
+                PrintNotice(theme, {retried.has_value()
+                                        ? trf("cmd.memory.jobs.retry_queued", *retried)
+                                        : trf("cmd.memory.jobs.retry_rejected", retried.error())},
+                            retried.has_value() ? frame::FieldAccent::None : frame::FieldAccent::Error);
                 return;
             }
             const auto woken = project_memory->WakePendingWorker();
             switch (woken.state) {
                 case lubancode::memory::MemoryWorkerLaunchState::Started:
-                    TermOut() << tr("cmd.memory.jobs.retry_started") << "\n";
+                    PrintNotice(theme, {tr("cmd.memory.jobs.retry_started")});
                     break;
                 case lubancode::memory::MemoryWorkerLaunchState::StartFailed:
-                    TermOut() << trf("cmd.memory.worker_failed", woken.error) << "\n";
+                    PrintNotice(theme, {trf("cmd.memory.worker_failed", woken.error)},
+                                frame::FieldAccent::Error);
                     break;
                 case lubancode::memory::MemoryWorkerLaunchState::Unavailable:
-                    TermOut() << tr("cmd.memory.jobs.retry_unavailable") << "\n";
+                    PrintNotice(theme, {tr("cmd.memory.jobs.retry_unavailable")},
+                                frame::FieldAccent::Stats);
                     break;
                 case lubancode::memory::MemoryWorkerLaunchState::Idle:
-                    TermOut() << tr("cmd.memory.jobs.retry_idle") << "\n";
+                    PrintNotice(theme, {tr("cmd.memory.jobs.retry_idle")});
                     break;
                 case lubancode::memory::MemoryWorkerLaunchState::AlreadyRunning:
-                    TermOut() << tr("cmd.memory.jobs.retry_running") << "\n";
+                    PrintNotice(theme, {tr("cmd.memory.jobs.retry_running")});
                     break;
             }
             return;
@@ -166,25 +243,47 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         }
         const auto jobs = project_memory->ListWorkspaceJobs();
         if (jobs.empty()) {
-            TermOut() << tr("cmd.memory.jobs.empty") << "\n";
+            PrintNotice(theme, {tr("cmd.memory.jobs.empty")});
             return;
         }
-        TermOut() << tr("cmd.memory.jobs.header") << "\n";
+        // 主账表格(单子批 1):六段数据各成一列,表头用字段名(schema 名,
+        // 语言无关);state 上语义色——failed 走 error、pending 走 skip 档。
+        std::vector<frame::TableColumn> columns;
+        columns.push_back({"job"});
+        columns.push_back({"state"});
+        columns.push_back({"op"});
+        columns.push_back({"layer"});
+        columns.push_back({"wait"});
+        columns.push_back({"worker"});
+        std::vector<frame::TableRow> rows;
         for (const auto& job : jobs) {
-            TermOut() << trf("cmd.memory.jobs.line", job.job_id, job.state, job.operation, job.layer,
-                             job.wait_hint, job.worker_state)
-                      << "\n";
+            const frame::CellTone state_tone =
+                job.state == "failed" ? frame::CellTone::Fail
+                                      : (job.state == "pending" ? frame::CellTone::Skip
+                                                                : frame::CellTone::Normal);
+            rows.push_back(frame::TableRow{
+                {job.job_id, job.state, job.operation, job.layer, job.wait_hint, job.worker_state},
+                {frame::CellTone::Normal, state_tone}});
+        }
+        EmitFrameLines(frame::RenderTable(tr("cmd.memory.jobs.header"), columns, rows, theme,
+                                          frame::Light(), MemoryFrameWidth()));
+        // 附注框:标题/失败/worker 日志与 retry 用法是人话短注,另起一个
+        // 键值对框收口——塞主表会被列宽截断丢信息(表帽优先削最宽列)。
+        std::vector<frame::Field> notes;
+        for (const auto& job : jobs) {
             if (!job.title.empty()) {
-                TermOut() << trf("cmd.memory.jobs.title_line", job.title) << "\n";
+                notes.push_back(SentenceField(trf("cmd.memory.jobs.title_line", job.title)));
             }
             if (!job.error.empty()) {
-                TermOut() << trf("cmd.memory.jobs.error_line", job.error) << "\n";
+                notes.push_back(
+                    SentenceField(trf("cmd.memory.jobs.error_line", job.error), frame::FieldAccent::Error));
             }
         }
-        if (!jobs.empty() && !jobs.front().worker_log.empty()) {
-            TermOut() << trf("cmd.memory.jobs.log_line", jobs.front().worker_log) << "\n";
+        if (!jobs.front().worker_log.empty()) {
+            notes.push_back(SentenceField(trf("cmd.memory.jobs.log_line", jobs.front().worker_log)));
         }
-        TermOut() << tr("cmd.memory.jobs.hint") << "\n";
+        notes.push_back(SentenceField(tr("cmd.memory.jobs.hint")));
+        PrintNoticeFields(theme, std::move(notes));
         return;
     }
     if (action == "on" || action == "off") {
@@ -192,12 +291,12 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         // 不能凭本场命令翻开能力(规格"授权与本场状态分开")。
         const auto toggled = project_memory->set_enabled(action == "on");
         if (!toggled.has_value()) {
-            TermOut() << tr("cmd.memory.denied") << "\n";
+            PrintNotice(theme, {tr("cmd.memory.denied")}, frame::FieldAccent::Error);
             return;
         }
         if (action == "on") ensure_tool();
-        TermOut() << trf("cmd.memory.master", action == "on" ? tr("cmd.memory.on") : tr("cmd.memory.off"))
-                  << "\n";
+        PrintNotice(theme, {trf("cmd.memory.master",
+                                action == "on" ? tr("cmd.memory.on") : tr("cmd.memory.off"))});
         return;
     }
     if (action == "use") {
@@ -211,13 +310,12 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         }
         const bool enabled = value == "on";
         if (enabled && !project_memory->global_allowed()) {
-            TermOut() << tr("cmd.memory.denied") << "\n";
+            PrintNotice(theme, {tr("cmd.memory.denied")}, frame::FieldAccent::Error);
             return;
         }
         project_memory->set_use(enabled);
-        TermOut() << trf("cmd.memory.toggle", tr("cmd.memory.retrieval"),
-                         enabled ? tr("cmd.memory.on") : tr("cmd.memory.off"))
-                  << "\n";
+        PrintNotice(theme, {trf("cmd.memory.toggle", tr("cmd.memory.retrieval"),
+                                enabled ? tr("cmd.memory.on") : tr("cmd.memory.off"))});
         return;
     }
     if (action == "learn") {
@@ -236,32 +334,42 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         if (!switched.has_value()) {
             // 全局未授权(auto 上限之外的降档仍允许),给出指引。
             if (!project_memory->global_allowed()) {
-                TermOut() << tr("cmd.memory.denied") << "\n";
+                PrintNotice(theme, {tr("cmd.memory.denied")}, frame::FieldAccent::Error);
             } else {
-                TermOut() << trf("cmd.memory.learn_denied", switched.error()) << "\n";
+                PrintNotice(theme, {trf("cmd.memory.learn_denied", switched.error())},
+                            frame::FieldAccent::Error);
             }
             return;
         }
         ensure_tool();
-        TermOut() << trf("cmd.memory.learn_set", lubancode::memory::LearnModeName(*mode)) << "\n";
+        PrintNotice(theme,
+                    {trf("cmd.memory.learn_set", lubancode::memory::LearnModeName(*mode))});
         return;
     }
     if (action == "review") {
         const auto candidates = project_memory->ListCandidates();
         if (candidates.empty()) {
-            TermOut() << tr("cmd.memory.review.empty") << "\n";
+            PrintNotice(theme, {tr("cmd.memory.review.empty")});
             return;
         }
-        TermOut() << tr("cmd.memory.review.header") << "\n";
+        // 列表助手(与 /memory list 同构):id 对齐列 + kind/置信档/标题,
+        // summary 作行尾短注(key_hint 色)。候选未定层,项目符走 Project 档。
+        std::vector<frame::ListRow> rows;
         for (const auto& candidate : candidates) {
-            TermOut() << "- " << candidate.id << " [" << lubancode::memory::MemoryKindName(candidate.kind)
-                      << "/" << candidate.confidence << "] " << candidate.title;
+            frame::ListRow row;
+            row.label = candidate.id;
+            row.value = "[" + lubancode::memory::MemoryKindName(candidate.kind) + "/" +
+                        candidate.confidence + "] " + candidate.title;
             if (!candidate.summary.empty() && candidate.summary != candidate.title) {
-                TermOut() << " - " << candidate.summary;
+                row.hint = candidate.summary;
             }
-            TermOut() << "\n";
+            row.bullet = frame::Bullet::Project;
+            rows.push_back(std::move(row));
         }
-        TermOut() << tr("cmd.memory.review.hint") << "\n";
+        EmitFrameLines(
+            frame::RenderList(tr("cmd.memory.review.header"), rows, theme, frame::Light(),
+                              MemoryFrameWidth()));
+        PrintNotice(theme, {tr("cmd.memory.review.hint")});
         return;
     }
     if (action == "accept" || action == "reject") {
@@ -277,15 +385,19 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         if (action == "accept") {
             const auto queued = project_memory->AcceptCandidate(id);
             if (queued.has_value()) {
-                PrintEnqueueResult(*queued);
+                PrintEnqueueResult(theme, *queued);
             } else {
-                TermOut() << trf("cmd.memory.queue_failed", queued.error()) << "\n";
+                PrintNotice(theme, {trf("cmd.memory.queue_failed", queued.error())},
+                            frame::FieldAccent::Error);
             }
         } else {
             const auto rejected = project_memory->RejectCandidate(id, std::move(reason));
-            TermOut() << (rejected.has_value() ? tr("cmd.memory.reject.done")
-                                               : trf("cmd.memory.queue_failed", rejected.error()))
-                      << "\n";
+            if (rejected.has_value()) {
+                PrintNotice(theme, {tr("cmd.memory.reject.done")});
+            } else {
+                PrintNotice(theme, {trf("cmd.memory.queue_failed", rejected.error())},
+                            frame::FieldAccent::Error);
+            }
         }
         return;
     }
@@ -305,9 +417,12 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
                                   ? std::string()
                                   : TrimAscii(remainder.substr(separator + 2));
         const auto edited = project_memory->EditCandidate(id, title, content);
-        TermOut() << (edited.has_value() ? tr("cmd.memory.edit.done")
-                                         : trf("cmd.memory.queue_failed", edited.error()))
-                  << "\n";
+        if (edited.has_value()) {
+            PrintNotice(theme, {tr("cmd.memory.edit.done")});
+        } else {
+            PrintNotice(theme, {trf("cmd.memory.queue_failed", edited.error())},
+                        frame::FieldAccent::Error);
+        }
         return;
     }
     if (action == "why") {
@@ -315,15 +430,12 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         words >> id;
         const auto trace = project_memory->LastTrace();
         if (!trace.valid) {
-            TermOut() << tr("cmd.memory.why.none") << "\n";
+            PrintNotice(theme, {tr("cmd.memory.why.none")});
             return;
         }
-        TermOut() << trf("cmd.memory.why.header", trace.at) << "\n";
-        TermOut() << trf("cmd.memory.why.origin", trace.query_origin) << "\n";
-        if (trace.skipped) {
-            TermOut() << tr("cmd.memory.why.skipped_turn") << "\n";
-            return;
-        }
+        // 头部框:标题用 why.header 既有文案,来源进键值对;skipped 的早退
+        // 次序照旧(header/origin 之后即收,检索词与条目表都不出)。
+        std::vector<frame::Field> head{SentenceField(trf("cmd.memory.why.origin", trace.query_origin))};
         // 检索词带词路与权重:word=整词/词典实体,gram=中文二元,虚词碎片
         // 拿低权重——用户要看得出为何命中,不只见一把碎字。
         std::ostringstream joined_terms;
@@ -332,7 +444,28 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             joined_terms << trace.terms[i].text << "[" << trace.terms[i].kind << "/"
                          << trace.terms[i].source << " ×" << trace.terms[i].weight << "]";
         }
-        TermOut() << trf("cmd.memory.why.terms", joined_terms.str()) << "\n";
+        if (!trace.skipped) {
+            head.push_back(SentenceField(trf("cmd.memory.why.terms", joined_terms.str())));
+        }
+        EmitFrameLines(frame::RenderKeyValues(trf("cmd.memory.why.header", trace.at), head, theme,
+                                              frame::Light(), MemoryFrameWidth()));
+        if (trace.skipped) {
+            PrintNotice(theme, {tr("cmd.memory.why.skipped_turn")});
+            return;
+        }
+        // 条目表(单子批 1):id/四项数值列(右对齐)/result。注入行 Pass 色
+        // (弱档 result 标 weak——数据字段名),落选行 Skip 色带既有原因
+        // 短句;bytes 即原 hit/weak_hit 句尾的注入字节数,cooccur 是弱档
+        // 判据的单行共现词组数,非弱档为空。
+        std::vector<frame::TableColumn> columns;
+        columns.push_back({"id"});
+        columns.push_back({"score", 0, /*align_right=*/true});
+        columns.push_back({"hard", 0, /*align_right=*/true});
+        columns.push_back({"terms", 0, /*align_right=*/true});
+        columns.push_back({"bytes", 0, /*align_right=*/true});
+        columns.push_back({"cooccur", 0, /*align_right=*/true});
+        columns.push_back({"result"});
+        std::vector<frame::TableRow> rows;
         bool matched_id = id.empty();
         for (const auto& entry : trace.entries) {
             if (!id.empty() && entry.id != id) continue;
@@ -341,37 +474,38 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             // 须写清命中来自 user 还是某个 project key")。
             const std::string shown_id =
                 entry.layer == "user" ? entry.id + tr("cmd.memory.why.layer_user") : entry.id;
+            std::string result;
+            frame::CellTone tone = frame::CellTone::Normal;
             if (entry.injected) {
-                if (entry.weak) {
-                    TermOut() << trf("cmd.memory.why.weak_hit", shown_id, entry.score,
-                                     entry.hard_hits, entry.term_hits, entry.bytes, entry.cooccur)
-                              << "\n";
-                } else {
-                    TermOut() << trf("cmd.memory.why.hit", shown_id, entry.score, entry.hard_hits,
-                                     entry.term_hits, entry.bytes)
-                              << "\n";
-                }
-                continue;
+                tone = frame::CellTone::Pass;
+                if (entry.weak) result = "weak";
+            } else {
+                tone = frame::CellTone::Skip;
+                if (entry.expired) result = tr("cmd.memory.why.expired");
+                else if (entry.scope_blocked) result = tr("cmd.memory.why.scope");
+                else if (entry.stale_blocked) result = tr("cmd.memory.why.stale");
+                else if (entry.snapshot_failed) result = tr("cmd.memory.why.snapshot_failed");
+                else if (entry.layer_superseded) result = tr("cmd.memory.why.superseded");
+                else if (entry.duplicate_dropped) result = tr("cmd.memory.why.duplicate");
+                else if (entry.weak_dropped) result = tr("cmd.memory.why.weak_dropped");
+                else if (entry.below_threshold) result = tr("cmd.memory.why.below_threshold");
+                else if (entry.budget_dropped) result = tr("cmd.memory.why.budget");
+                else result = tr("cmd.memory.why.skipped");
             }
-            std::string reason;
-            if (entry.expired) reason = tr("cmd.memory.why.expired");
-            else if (entry.scope_blocked) reason = tr("cmd.memory.why.scope");
-            else if (entry.stale_blocked) reason = tr("cmd.memory.why.stale");
-            else if (entry.snapshot_failed) reason = tr("cmd.memory.why.snapshot_failed");
-            else if (entry.layer_superseded) reason = tr("cmd.memory.why.superseded");
-            else if (entry.duplicate_dropped) reason = tr("cmd.memory.why.duplicate");
-            else if (entry.weak_dropped) reason = tr("cmd.memory.why.weak_dropped");
-            else if (entry.below_threshold) reason = tr("cmd.memory.why.below_threshold");
-            else if (entry.budget_dropped) reason = tr("cmd.memory.why.budget");
-            else reason = tr("cmd.memory.why.skipped");
-            TermOut() << trf("cmd.memory.why.miss", shown_id, entry.score, entry.hard_hits,
-                             entry.term_hits, reason)
-                      << "\n";
+            rows.push_back(frame::TableRow{
+                {shown_id, std::to_string(entry.score), std::to_string(entry.hard_hits),
+                 std::to_string(entry.term_hits), std::to_string(entry.bytes),
+                 entry.injected && entry.weak ? std::to_string(entry.cooccur) : std::string(),
+                 std::move(result)},
+                {frame::CellTone::Normal, frame::CellTone::Normal, frame::CellTone::Normal,
+                 frame::CellTone::Normal, frame::CellTone::Normal, tone, tone}});
         }
+        EmitFrameLines(
+            frame::RenderTable({}, columns, rows, theme, frame::Light(), MemoryFrameWidth()));
         if (!matched_id) {
-            TermOut() << trf("cmd.memory.why.missing", id) << "\n";
+            PrintNotice(theme, {trf("cmd.memory.why.missing", id)}, frame::FieldAccent::Error);
         }
-        TermOut() << trf("cmd.memory.why.total", trace.injected_count, trace.injected_bytes) << "\n";
+        PrintNotice(theme, {trf("cmd.memory.why.total", trace.injected_count, trace.injected_bytes)});
         return;
     }
     if (action == "list") {
@@ -381,39 +515,57 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         //(管理读口,不看召回授权)。
         const auto entries = layer == "user" ? std::vector<lubancode::memory::MemoryEntry>{}
                                              : project_memory->ListEntries(&error);
-        if (!error.empty()) TermOut() << trf("cmd.memory.catalog_warning", error) << "\n";
+        if (!error.empty()) {
+            PrintNotice(theme, {trf("cmd.memory.catalog_warning", error)}, frame::FieldAccent::Stats);
+        }
         const auto user_entries =
             layer == "user" ? project_memory->ListGlobalEntriesForManagement(&error)
                             : project_memory->ListUserEntries(&error);
-        if (!error.empty()) TermOut() << trf("cmd.memory.catalog_warning", error) << "\n";
+        if (!error.empty()) {
+            PrintNotice(theme, {trf("cmd.memory.catalog_warning", error)}, frame::FieldAccent::Stats);
+        }
+        // 条目行:id 对齐列,label=id、value="[Kind] 标题 - 摘要"、hint=层
+        // 标注;项目符两档(list_bullet_user/project,批 0 主题字段的设计
+        // 用例)与行尾 "(全局记忆)"(key_hint 色)就是 layer 标色的两处落笔。
+        const auto entry_row = [](const lubancode::memory::MemoryEntry& entry, frame::Bullet bullet,
+                                  std::string layer_note) {
+            frame::ListRow row;
+            row.label = entry.id;
+            row.value = "[" + lubancode::memory::MemoryKindName(entry.kind) + "] " + entry.title;
+            if (!entry.summary.empty() && entry.summary != entry.title) {
+                row.value += " - " + entry.summary;
+            }
+            row.hint = std::move(layer_note);
+            row.bullet = bullet;
+            return row;
+        };
         if (entries.empty() && user_entries.empty()) {
-            TermOut() << tr("cmd.memory.empty") << "\n";
+            // 空态也带 frame(单子批 1):空库提示 + 待写/worker 两句同框。
+            std::vector<frame::ListRow> rows;
+            rows.push_back(frame::ListRow{tr("cmd.memory.empty"), {}, {}, frame::Bullet::None});
             const auto status = project_memory->Status();
             if (status.pending_jobs > 0 || status.failed_jobs > 0) {
-                TermOut() << trf("cmd.memory.pending_hint", status.pending_jobs) << "\n";
+                rows.push_back(frame::ListRow{trf("cmd.memory.pending_hint", status.pending_jobs), {},
+                                              {}, frame::Bullet::None});
                 if (const auto woken = project_memory->EnsureWorkerRunning();
                     woken.state == lubancode::memory::MemoryWorkerLaunchState::StartFailed) {
-                    TermOut() << trf("cmd.memory.worker_failed", woken.error) << "\n";
+                    rows.push_back(frame::ListRow{trf("cmd.memory.worker_failed", woken.error), {},
+                                                  {}, frame::Bullet::None});
                 }
             }
+            EmitFrameLines(
+                frame::RenderList({}, rows, theme, frame::Light(), MemoryFrameWidth()));
             return;
         }
+        std::vector<frame::ListRow> rows;
+        rows.reserve(entries.size() + user_entries.size());
         for (const auto& entry : entries) {
-            TermOut() << "- " << entry.id << " [" << lubancode::memory::MemoryKindName(entry.kind) << "] "
-                      << entry.title;
-            if (!entry.summary.empty() && entry.summary != entry.title) {
-                TermOut() << " - " << entry.summary;
-            }
-            TermOut() << "\n";
+            rows.push_back(entry_row(entry, frame::Bullet::Project, {}));
         }
         for (const auto& entry : user_entries) {
-            TermOut() << "- " << entry.id << " [" << lubancode::memory::MemoryKindName(entry.kind) << "] "
-                      << entry.title << " (" << tr("cmd.memory.global_layer") << ")";
-            if (!entry.summary.empty() && entry.summary != entry.title) {
-                TermOut() << " - " << entry.summary;
-            }
-            TermOut() << "\n";
+            rows.push_back(entry_row(entry, frame::Bullet::User, tr("cmd.memory.global_layer")));
         }
+        EmitFrameLines(frame::RenderList({}, rows, theme, frame::Light(), MemoryFrameWidth()));
         return;
     }
     if (action == "remember") {
@@ -432,7 +584,7 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         }
         const bool to_global = layer == "user";
         if (to_global && *kind == lubancode::memory::MemoryKind::Fact) {
-            TermOut() << tr("cmd.memory.global.no_fact") << "\n";
+            PrintNotice(theme, {tr("cmd.memory.global.no_fact")}, frame::FieldAccent::Error);
             return;
         }
         const std::size_t separator = remainder.find("::");
@@ -456,21 +608,22 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             static bool hinted = false;  // 每进程一次
             if (!hinted) {
                 hinted = true;
-                TermOut() << tr("cmd.memory.remember.legacy_hint") << "\n";
+                PrintNotice(theme, {tr("cmd.memory.remember.legacy_hint")}, frame::FieldAccent::Stats);
             }
         }
         // 全局层逐次确认(§6.1:写入永远须用户主动授权与主动命令)。
         if (to_global &&
             !ConfirmGlobalAction(theme, trf("cmd.memory.global.confirm", request.title))) {
-            TermOut() << tr("cmd.memory.global.cancelled") << "\n";
+            PrintNotice(theme, {tr("cmd.memory.global.cancelled")});
             return;
         }
         const auto queued = project_memory->EnqueueSave(request, /*user_initiated=*/true,
                                                         lubancode::memory::MemoryWriteSource::ExplicitCommandSave);
         if (queued.has_value()) {
-            PrintEnqueueResult(*queued);
+            PrintEnqueueResult(theme, *queued);
         } else {
-            TermOut() << trf("cmd.memory.queue_failed", queued.error()) << "\n";
+            PrintNotice(theme, {trf("cmd.memory.queue_failed", queued.error())},
+                        frame::FieldAccent::Error);
         }
         return;
     }
@@ -485,43 +638,50 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         // 全局层删除是破坏性动作:逐次确认(§6.4 只认用户级命令)。
         if (layer == "user" &&
             !ConfirmGlobalAction(theme, trf("cmd.memory.global.confirm_forget", id))) {
-            TermOut() << tr("cmd.memory.global.cancelled") << "\n";
+            PrintNotice(theme, {tr("cmd.memory.global.cancelled")});
             return;
         }
         const auto queued = project_memory->EnqueueForget(id, layer);
         if (queued.has_value()) {
-            PrintEnqueueResult(*queued);
+            PrintEnqueueResult(theme, *queued);
         } else {
-            TermOut() << trf("cmd.memory.queue_failed", queued.error()) << "\n";
+            PrintNotice(theme, {trf("cmd.memory.queue_failed", queued.error())},
+                        frame::FieldAccent::Error);
         }
         return;
     }
     if (action == "rebuild") {
         const auto queued = project_memory->EnqueueRebuild();
         if (queued.has_value()) {
-            PrintEnqueueResult(*queued);
+            PrintEnqueueResult(theme, *queued);
         } else {
-            TermOut() << trf("cmd.memory.queue_failed", queued.error()) << "\n";
+            PrintNotice(theme, {trf("cmd.memory.queue_failed", queued.error())},
+                        frame::FieldAccent::Error);
         }
         return;
     }
     if (action == "stale") {
         const auto stale = project_memory->ListStaleEntries();
         if (stale.empty()) {
-            TermOut() << tr("cmd.memory.stale.empty") << "\n";
+            PrintNotice(theme, {tr("cmd.memory.stale.empty")});
             return;
         }
-        TermOut() << tr("cmd.memory.stale.header") << "\n";
+        // 列表助手:id 对齐列,reason(数据值)与标题进 value,行尾短注给
+        // "文件已变/已过期"的人话标注(key_hint 色)。
+        std::vector<frame::ListRow> rows;
         for (const auto& item : stale) {
-            TermOut() << "- " << item.entry.id << " [" << item.reason << "] " << item.entry.title;
-            if (item.reason == "fingerprint") {
-                TermOut() << " (" << tr("cmd.memory.stale.fingerprint") << ")";
-            } else {
-                TermOut() << " (" << tr("cmd.memory.stale.expired") << ": " << item.entry.expires_at << ")";
-            }
-            TermOut() << "\n";
+            frame::ListRow row;
+            row.label = item.entry.id;
+            row.value = "[" + item.reason + "] " + item.entry.title;
+            row.hint = item.reason == "fingerprint"
+                           ? tr("cmd.memory.stale.fingerprint")
+                           : tr("cmd.memory.stale.expired") + ": " + item.entry.expires_at;
+            row.bullet = frame::Bullet::None;
+            rows.push_back(std::move(row));
         }
-        TermOut() << tr("cmd.memory.stale.hint") << "\n";
+        EmitFrameLines(frame::RenderList(tr("cmd.memory.stale.header"), rows, theme, frame::Light(),
+                                         MemoryFrameWidth()));
+        PrintNotice(theme, {tr("cmd.memory.stale.hint")});
         return;
     }
     if (action == "verify" || action == "refresh") {
@@ -534,9 +694,10 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         }
         const auto queued = project_memory->EnqueueVerify(id, action == "refresh", layer);
         if (queued.has_value()) {
-            PrintEnqueueResult(*queued);
+            PrintEnqueueResult(theme, *queued);
         } else {
-            TermOut() << trf("cmd.memory.queue_failed", queued.error()) << "\n";
+            PrintNotice(theme, {trf("cmd.memory.queue_failed", queued.error())},
+                        frame::FieldAccent::Error);
         }
         return;
     }
@@ -550,15 +711,22 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         }
         const auto topic = project_memory->ReadTopicForShow(id);
         if (!topic.has_value()) {
-            TermOut() << trf("cmd.memory.queue_failed", topic.error()) << "\n";
+            PrintNotice(theme, {trf("cmd.memory.queue_failed", topic.error())},
+                        frame::FieldAccent::Error);
             return;
         }
         const auto& [text, dir] = *topic;
         if (layer == "user" && dir != project_memory->user_memory_dir()) {
-            TermOut() << trf("cmd.memory.queue_failed", tr("cmd.memory.global.layer_mismatch")) << "\n";
+            PrintNotice(theme, {trf("cmd.memory.queue_failed", tr("cmd.memory.global.layer_mismatch"))},
+                        frame::FieldAccent::Error);
             return;
         }
-        TermOut() << trf("cmd.memory.show.header", id, lubancode::tools::PathToUtf8(dir)) << "\n" << text;
+        // 头部一行键值对框:id(加粗列)+ 所在目录(淡色);正文是 markdown
+        // 文档,框外原样跟出——塞框会被列帽截断劈行,保终端自然折行。
+        EmitFrameLines(frame::RenderKeyValues(
+            {}, {frame::Field{id, lubancode::tools::PathToUtf8(dir), frame::FieldAccent::Muted}},
+            theme, frame::Light(), MemoryFrameWidth()));
+        TermOut() << text;
         if (!text.empty() && text.back() != '\n') TermOut() << "\n";
         return;
     }
@@ -567,9 +735,12 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         words >> id;
         const auto edited = id.empty() ? project_memory->OpenIndexInEditor()
                                        : project_memory->EditTopicInEditor(id);
-        TermOut() << (edited.has_value() ? tr("cmd.memory.open.done")
-                                         : trf("cmd.memory.queue_failed", edited.error()))
-                  << "\n";
+        if (edited.has_value()) {
+            PrintNotice(theme, {tr("cmd.memory.open.done")});
+        } else {
+            PrintNotice(theme, {trf("cmd.memory.queue_failed", edited.error())},
+                        frame::FieldAccent::Error);
+        }
         return;
     }
     if (action == "migrate") {
@@ -577,28 +748,40 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         // .state/migration-backup/<时间>/,全部写妥、重建成功才报完成。
         const auto plan = project_memory->PlanMigration();
         if (plan.to_migrate == 0) {
-            TermOut() << trf("cmd.memory.migrate.none", plan.to_skip, plan.warnings) << "\n";
+            PrintNotice(theme, {trf("cmd.memory.migrate.none", plan.to_skip, plan.warnings)});
             return;
         }
-        TermOut() << trf("cmd.memory.migrate.plan", plan.to_migrate, plan.to_skip, plan.warnings) << "\n";
+        PrintNotice(theme,
+                    {trf("cmd.memory.migrate.plan", plan.to_migrate, plan.to_skip, plan.warnings)});
+        // 迁移账单走列表:id 对齐列,迁项带 (文件; 原因),警告项
+        // "[warn]" 是数据档标识(action 字段的值域)。
+        std::vector<frame::ListRow> rows;
         for (const auto& item : plan.items) {
             if (item.action == "migrate") {
-                TermOut() << "  - " << item.id << " (" << item.file << "; " << item.reason << ")\n";
+                rows.push_back(frame::ListRow{item.id, "(" + item.file + "; " + item.reason + ")",
+                                              {}, frame::Bullet::None});
             } else if (item.action == "warn") {
-                TermOut() << "  [warn] " << item.reason << "\n";
+                rows.push_back(frame::ListRow{"[warn]", item.reason, {}, frame::Bullet::None});
             }
+        }
+        if (!rows.empty()) {
+            EmitFrameLines(
+                frame::RenderList({}, rows, theme, frame::Light(), MemoryFrameWidth()));
         }
         const auto answer = lubancode::cli::ReadLine(theme.confirm + tr("cmd.memory.migrate.confirm") + theme.reset,
                                                      theme, /*esc_rejects=*/true);
         if (!answer.has_value() || (*answer != "y" && *answer != "Y")) {
-            TermOut() << tr("cmd.memory.migrate.cancelled") << "\n";
+            PrintNotice(theme, {tr("cmd.memory.migrate.cancelled")});
             return;
         }
         const auto result = project_memory->RunMigration();
-        TermOut() << (result.has_value()
-                          ? trf("cmd.memory.migrate.done", result->migrated, result->backup_dir)
-                          : trf("cmd.memory.queue_failed", result.error()))
-                  << "\n";
+        if (result.has_value()) {
+            PrintNotice(
+                theme, {trf("cmd.memory.migrate.done", result->migrated, result->backup_dir)});
+        } else {
+            PrintNotice(theme, {trf("cmd.memory.queue_failed", result.error())},
+                        frame::FieldAccent::Error);
+        }
         return;
     }
     PrintMemoryUsage();
