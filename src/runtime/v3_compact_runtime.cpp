@@ -5,6 +5,7 @@
 #include "runtime/v3_compact_runtime.hpp"
 
 #include <algorithm>
+#include <map>
 #include <memory>
 #include <set>
 #include <unordered_map>
@@ -279,12 +280,144 @@ CanonicalThinkingPayload ScanCanonicalThinkingPayload(const nlohmann::json& mess
     return payload;
 }
 
+// ---------------------------------------------------------------------------
+// 工具配对索引:材料消息集内 assistant 声明的调用号 + actionId→provider 号桥
+// ---------------------------------------------------------------------------
+//
+// 写侧按 §4.15/§4.18 双号落账:assistant.tool_calls[].id 带 provider 原生
+// 号,tool 结果消息 tool_call_id 带内部 action 号,配对靠 FoldToolActions
+// 的 providerToolCallId 桥换算。主对话的内存组装与压缩后换账
+//(EffectiveConversationFromV3)各自做了换算,compact 摘要材料的账本回放
+// 此前没做——role:"tool" 消息按内部号原样出网,provider 端查无此号(案发
+// 2013:tool id(action-000001) not found,/compact 对凡带工具调用的会话
+// 全链不可用)。投影按同一份桥把 tool_call_id 换算回 provider 号,与材料
+// 内 assistant 声明同号;配对够不着的(声明不在材料集、桥缺号、账本残缺)
+// 按孤儿兜底投影成普通文本,不再以 role:"tool"/tool_call_id 形态出网。
+// 只建视图,原始账本一字不动。
+struct MaterialToolPairingIndex {
+    std::set<std::string> declared_call_ids;  // 材料内 assistant 声明的调用号(provider 号)
+    std::map<std::string, std::string> action_to_provider;  // actionId → provider 原生号
+    std::map<std::string, std::string> action_tool_names;   // actionId → 工具名(孤儿标注用)
+};
+
+MaterialToolPairingIndex BuildMaterialToolPairingIndex(
+    const std::vector<std::string>& message_ids, const trajectory::v3::V3Ledger& ledger) {
+    MaterialToolPairingIndex index;
+    for (const auto& id : message_ids) {
+        const MessageLine* line = ledger.FindMessage(id);
+        if (line == nullptr) {
+            continue;  // 压缩指令 prompt 一类不在账上的 id 不进配对面
+        }
+        const auto calls_it = line->message.find("tool_calls");
+        if (calls_it != line->message.end() && calls_it->is_array()) {
+            for (const auto& call : *calls_it) {
+                if (!call.is_object()) {
+                    continue;
+                }
+                const std::string call_id = call.value("id", std::string());
+                if (!call_id.empty()) {
+                    index.declared_call_ids.insert(call_id);
+                }
+            }
+        }
+        // 防御面:assistant content 数组里的 tool_use 块(anthropic 原生形
+        // 态;现写侧统一 tool_calls,见了也认)。
+        const auto content_it = line->message.find("content");
+        if (content_it != line->message.end() && content_it->is_array()) {
+            for (const auto& part : *content_it) {
+                if (part.is_object() && part.value("type", std::string()) == "tool_use") {
+                    const std::string use_id = part.value("id", std::string());
+                    if (!use_id.empty()) {
+                        index.declared_call_ids.insert(use_id);
+                    }
+                }
+            }
+        }
+    }
+    for (const auto& action : trajectory::v3::FoldToolActions(ledger)) {
+        if (action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
+            index.action_to_provider[action.tool_call_id] = *action.provider_tool_call_id;
+        }
+        if (action.tool_name.has_value() && !action.tool_name->empty()) {
+            index.action_tool_names[action.tool_call_id] = *action.tool_name;
+        }
+    }
+    return index;
+}
+
+// 配对裁决:返回出网该用的调用号(空串 = 孤儿,须按文本投影)。先认桥接
+// 出的 provider 号(与材料内 assistant 声明同号),再认本号直配(同号落
+// 账的 fixture/老档形态)。
+std::string ResolvePairedToolCallId(const std::string& tool_call_id,
+                                    const MaterialToolPairingIndex& pairing) {
+    const auto bridged = pairing.action_to_provider.find(tool_call_id);
+    if (bridged != pairing.action_to_provider.end() &&
+        pairing.declared_call_ids.count(bridged->second) > 0) {
+        return bridged->second;
+    }
+    if (pairing.declared_call_ids.count(tool_call_id) > 0) {
+        return tool_call_id;
+    }
+    return std::string();
+}
+
+// 工具结果正文取文本:content 是字符串原样;块数组只拼 text 块(图片等
+// 载荷在文本投影里没有载体,不编内容)。
+std::string ToolResultBodyText(const nlohmann::json& content) {
+    if (content.is_string()) {
+        return content.get<std::string>();
+    }
+    if (!content.is_array()) {
+        return std::string();
+    }
+    std::string body;
+    for (const auto& part : content) {
+        if (part.is_object() && part.value("type", std::string()) == "text") {
+            const auto text_it = part.find("text");
+            if (text_it != part.end() && text_it->is_string()) {
+                if (!body.empty()) {
+                    body.push_back('\n');
+                }
+                body += text_it->get<std::string>();
+            }
+        }
+    }
+    return body;
+}
+
 // A 阶段投影:账本消息 → 摘要请求的材料视图。规范 thinking 块的协议载荷
 // (signature/responses_item)不出网——旧签名跨模型重放会被服务端拒,也不
 // 许伪装成摘要模型的新思考;可读思考正文按普通文本材料保留(标明来源,
-// 历史文本不冒充摘要指令),不透明块不解密、不猜内容、不进材料。只建
-// 视图,原始账本一字不动:不删签名、不改加密字节、不伪造 item id。
-nlohmann::json BuildCompactMaterialView(const nlohmann::json& message) {
+// 历史文本不冒充摘要指令),不透明块不解密、不猜内容、不进材料。工具结
+// 果按配对索引换号/兜底(见 MaterialToolPairingIndex 注)。只建视图,原始
+// 账本一字不动:不删签名、不改加密字节、不伪造 item id。
+nlohmann::json BuildCompactMaterialView(const nlohmann::json& message,
+                                        const MaterialToolPairingIndex& pairing) {
+    const std::string role = message.value("role", std::string());
+    // role:"tool" 消息:配对够得着 → 换算成与材料内声明同号(正文一字不
+    // 动);够不着 → 孤儿,按普通文本投影(照 thinking 块 A 投影的先例标
+    // 明来源),不带 role:"tool"/tool_call_id 形态出网。
+    if (role == "tool") {
+        const std::string tool_call_id = message.value("tool_call_id", std::string());
+        const std::string paired_id = ResolvePairedToolCallId(tool_call_id, pairing);
+        if (!paired_id.empty()) {
+            if (paired_id == tool_call_id) {
+                return message;  // 同号直配:原样保真
+            }
+            nlohmann::json projected = message;
+            projected["tool_call_id"] = paired_id;  // action 桥换号,只动这一个键
+            return projected;
+        }
+        std::string label = tool_call_id;
+        const auto name = pairing.action_tool_names.find(tool_call_id);
+        if (name != pairing.action_tool_names.end()) {
+            label = name->second + "(" + tool_call_id + ")";
+        }
+        return nlohmann::json::object(
+            {{"role", "user"},
+             {"content", "[工具结果 " + label + "]\n" +
+                              ToolResultBodyText(message.value("content", nlohmann::json()))}});
+    }
     const auto content_it = message.find("content");
     if (content_it == message.end() || !content_it->is_array()) {
         return message;
@@ -310,6 +443,31 @@ nlohmann::json BuildCompactMaterialView(const nlohmann::json& message) {
             }
             if (type == "redacted_thinking" || type == "reasoning.encrypted") {
                 changed = true;  // 不透明载荷:材料里没有它的一席,不编内容
+                continue;
+            }
+            // user content 里的 tool_result 块(anthropic 形态):配对裁决
+            // 与 role:"tool" 消息同款——够得着换号保真,够不着按文本投影。
+            if (type == "tool_result") {
+                const std::string use_id = part.value("tool_use_id", std::string());
+                const std::string paired_id = ResolvePairedToolCallId(use_id, pairing);
+                if (!use_id.empty() && paired_id == use_id) {
+                    content.push_back(part);  // 直配保真
+                    continue;
+                }
+                changed = true;
+                if (!paired_id.empty()) {
+                    nlohmann::json rewritten = part;
+                    rewritten["tool_use_id"] = paired_id;
+                    content.push_back(std::move(rewritten));
+                    continue;
+                }
+                const std::string body = ToolResultBodyText(part.contains("content")
+                                                                ? part["content"]
+                                                                : nlohmann::json());
+                if (!NormalizeWhitespace(body).empty()) {
+                    content.push_back(nlohmann::json{
+                        {"type", "text"}, {"text", "[工具结果 " + use_id + "]\n" + body}});
+                }
                 continue;
             }
         }
@@ -731,16 +889,23 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
 
     // A 阶段投影的唯一取用口:估算、指纹、prepared 与实发材料全吃这份
     // 视图——容量门禁必须按最终发送视图估,不许旧材料算预算、新材料
-    // 上网。material_ids 只回链上已验过的 id,这里不再判空。
-    const auto material_view = [&](const std::string& id) {
-        return BuildCompactMaterialView(ledger.FindMessage(id)->message);
+    // 上网。material_ids 只回链上已验过的 id,这里不再判空。工具配对索
+    // 引按同一份材料集算(换号/孤儿判定吃全集,不是逐条孤立投影)。
+    const auto material_view = [&](const std::string& id,
+                                   const MaterialToolPairingIndex& pairing) {
+        return BuildCompactMaterialView(ledger.FindMessage(id)->message, pairing);
+    };
+    const auto material_pairing = [&](const std::vector<std::string>& ids) {
+        return BuildMaterialToolPairingIndex(ids, ledger);
     };
 
     const auto estimate_input = [&](const ScopePlan& current, bool reference_included,
                                     const std::string& instruction) {
         std::uint64_t tokens = system_tokens + EstimateUtf8Div4(instruction);
-        for (const auto& id : material_ids(current, reference_included))
-            tokens += EstimateJsonMessageTokens(material_view(id));
+        const std::vector<std::string> ids = material_ids(current, reference_included);
+        const MaterialToolPairingIndex pairing = material_pairing(ids);
+        for (const auto& id : ids)
+            tokens += EstimateJsonMessageTokens(material_view(id, pairing));
         return tokens;
     };
 
@@ -757,8 +922,10 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         nlohmann::json snapshot = nlohmann::json::object();
         snapshot["system"] = special_system;
         nlohmann::json messages = nlohmann::json::array();
-        for (const auto& id : material_ids(current, reference_included))
-            messages.push_back(material_view(id));
+        const std::vector<std::string> ids = material_ids(current, reference_included);
+        const MaterialToolPairingIndex pairing = material_pairing(ids);
+        for (const auto& id : ids)
+            messages.push_back(material_view(id, pairing));
         snapshot["messages"] = std::move(messages);
         snapshot["instruction"] = instruction;
         auto estimated = input.estimate(snapshot);
@@ -1065,6 +1232,9 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
     }
     std::vector<std::string> input_ids = material_ids(plan, reference_included);
     input_ids.push_back(prompt_receipt.id);
+    // 工具配对索引按最终材料集算一次:指纹与实发材料共用,两道口径不岔
+    //(prompt 不在账上,索引里天然不进配对面)。
+    const MaterialToolPairingIndex pairing = material_pairing(input_ids);
     const std::string request_id = writer.NewRequestId();
     const std::string step_id = writer.NewStepId();
     // 快照里的估算与门禁同一口径(槽路再估一次);槽失败同路收口(fail
@@ -1083,15 +1253,16 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                                       : nlohmann::json(nullptr)},
          {"estimatedInputTokens", *prepared_tokens},
          // 材料视图与回放裁决入账:指纹吃投影、决策可追溯,dry-run/实跑/
-         // resume 对得上同一份口径。
-         {"materialView", "compact-material-projection-v1"},
+         // resume 对得上同一份口径。v2:工具结果配对投影(换号保真/孤儿
+         // 按文本兜底)并入同一视图口径。
+         {"materialView", "compact-material-projection-v2"},
          {"replaySupport", V3CompactReplaySupportName(input.replay_support)},
          {"retainedPrefixBoundPayload", result.retained_prefix_bound_payload}});
     nlohmann::json fingerprint_messages = nlohmann::json::array();
     for (const auto& id : input_ids) {
         if (id == prompt_receipt.id)
             fingerprint_messages.push_back({{"role", "user"}, {"content", instruction}});
-        else fingerprint_messages.push_back(material_view(id));
+        else fingerprint_messages.push_back(material_view(id, pairing));
     }
     const auto fingerprint_source = trajectory::CanonicalJsonDump(nlohmann::json{
         {"system", special_system}, {"messages", fingerprint_messages},
@@ -1140,9 +1311,12 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
 
     // ---- 6. 发给压缩模型;收回复按 assistant 留档(候选,§4.5 行 5)。
     // 无正文/失败不造空 assistant;截断候选标 truncated 不 applied。材料按
-    // A 投影视图发(签名/原生 item 不出网)。 ----
+    // A 投影视图发(签名/原生 item 不出网;工具结果换号保真/孤儿按文本
+    // 兜底)。 ----
     std::vector<nlohmann::json> material;
     material.reserve(input_ids.size());
+    int orphan_tool_results = 0;
+    int bridged_tool_results = 0;
     for (const auto& id : input_ids) {
         if (id == prompt_receipt.id) {
             material.push_back(nlohmann::json::object({{"role", "user"}, {"content", instruction}}));
@@ -1153,7 +1327,27 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
             finish_failed("compact.material_missing: " + id);
             return result;
         }
-        material.push_back(BuildCompactMaterialView(line->message));
+        if (line->message.value("role", std::string()) == "tool") {
+            const std::string tool_call_id = line->message.value("tool_call_id", std::string());
+            const std::string paired_id = ResolvePairedToolCallId(tool_call_id, pairing);
+            if (paired_id.empty()) {
+                ++orphan_tool_results;
+            } else if (paired_id != tool_call_id) {
+                ++bridged_tool_results;
+            }
+        }
+        material.push_back(BuildCompactMaterialView(line->message, pairing));
+    }
+    if (orphan_tool_results > 0) {
+        result.notes.push_back(
+            "compact.material.orphan_tool_projected: " + std::to_string(orphan_tool_results) +
+            " 条工具结果的配对声明不在材料内,按普通文本投影(不出 role:tool/"
+            "tool_call_id 形态)");
+    }
+    if (bridged_tool_results > 0) {
+        result.notes.push_back("compact.material.tool_call_id_bridged: " +
+                               std::to_string(bridged_tool_results) +
+                               " 条工具结果按 action 桥换算回 provider 号出网");
     }
     ++result.model_calls;
     const V3CompactModelReply reply = client.Send(special_system, material);
