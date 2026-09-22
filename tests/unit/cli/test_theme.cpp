@@ -125,3 +125,71 @@ TEST_CASE("DetectConsoleCapability: 能正常调用返回,不崩") {
     CHECK((cap.is_console == true || cap.is_console == false));
     CHECK((cap.colors_enabled == true || cap.colors_enabled == false));
 }
+
+// ---- TUI 排版基件批 0:11 枚 frame/list/table 字段 ----------------------------
+// 主题加载侧只认名字(dark/light/plain),名字不变即向后兼容——"旧主题
+// 文件(无新字段)"的合同由内置板各带缺省值扛:老字段一个不动,新字段
+// 三套板各配各的,plain 全空串(no-color 路径零转义字节)。
+
+TEST_CASE("BuiltinTheme: dark 的 11 枚排版字段带缺省值") {
+    const Theme t = BuiltinTheme("dark");
+    CHECK_FALSE(t.frame_title.empty());
+    CHECK_FALSE(t.frame_border.empty());
+    CHECK_FALSE(t.row_label.empty());
+    CHECK_FALSE(t.row_muted.empty());
+    CHECK_FALSE(t.table_header.empty());
+    CHECK_FALSE(t.table_pass.empty());
+    CHECK_FALSE(t.table_skip.empty());
+    CHECK_FALSE(t.list_bullet_user.empty());
+    CHECK_FALSE(t.list_bullet_project.empty());
+    CHECK_FALSE(t.key_hint.empty());
+    // row_value 故意留空:值列默认前景,与"模型正文保持原色"一脉——
+    // plain 板同为空不构成区分需求,两板一致即合同。
+    CHECK(t.row_value.empty());
+}
+
+TEST_CASE("BuiltinTheme: light 的排版字段与 dark 各配各的") {
+    const Theme dark = BuiltinTheme("dark");
+    const Theme light = BuiltinTheme("light");
+    CHECK_FALSE(light.frame_title.empty());
+    CHECK_FALSE(light.frame_border.empty());
+    CHECK_FALSE(light.row_label.empty());
+    CHECK_FALSE(light.table_pass.empty());
+    CHECK(light.frame_title != dark.frame_title);
+    CHECK(light.frame_border != dark.frame_border);
+    CHECK(light.row_label != dark.row_label);
+}
+
+TEST_CASE("BuiltinTheme: plain 的 11 枚排版字段全空串") {
+    const Theme t = BuiltinTheme("plain");
+    CHECK(t.frame_title.empty());
+    CHECK(t.frame_border.empty());
+    CHECK(t.row_label.empty());
+    CHECK(t.row_value.empty());
+    CHECK(t.row_muted.empty());
+    CHECK(t.table_header.empty());
+    CHECK(t.table_pass.empty());
+    CHECK(t.table_skip.empty());
+    CHECK(t.list_bullet_user.empty());
+    CHECK(t.list_bullet_project.empty());
+    CHECK(t.key_hint.empty());
+}
+
+TEST_CASE("ResolveTheme: enable_colors=false 时排版字段同样退化成空串") {
+    const Theme t = ResolveTheme("dark", /*enable_colors=*/false);
+    CHECK(t.frame_title.empty());
+    CHECK(t.frame_border.empty());
+    CHECK(t.table_pass.empty());
+    CHECK(t.list_bullet_user.empty());
+    CHECK(t.key_hint.empty());
+}
+
+TEST_CASE("BuiltinTheme: 不认得的名字在新字段上也兜底成 dark") {
+    const Theme t = BuiltinTheme("这个主题名字肯定不存在");
+    const Theme dark = BuiltinTheme("dark");
+    CHECK(t.frame_title == dark.frame_title);
+    CHECK(t.frame_border == dark.frame_border);
+    CHECK(t.row_label == dark.row_label);
+    CHECK(t.table_pass == dark.table_pass);
+    CHECK(t.key_hint == dark.key_hint);
+}

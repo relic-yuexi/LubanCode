@@ -9,6 +9,7 @@
 - [安全模型](security.md)
 - [界面多语言](i18n.md)
 - [UTF-8 编码关口](encoding.md)
+- [TUI 排版约定](tui-style.md)
 
 改用户可见行为时，先查[文档同步矩阵](documentation.md#10-改动同步矩阵)。
 提交前再跑：

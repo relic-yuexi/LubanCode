@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 
+#include "cli/theme.hpp"  // Theme:frame::* 助手的语义色全从主题取
 #include "platform/console.hpp"  // NativeRowCell:原生直写行的单元格(单 2 二轮)
 #include "platform/terminal_batch.hpp"
 
@@ -183,5 +184,105 @@ FooterResizeRecoveryPlan ComputeFooterResizeRecovery(
     int previous_top_row, int previous_input_row, int current_cursor_row,
     const std::vector<int>& previous_row_widths, std::size_t input_row_index,
     int input_cursor_column, int current_width);
+
+// ---------------------------------------------------------------------------
+// TUI 排版基件(TUI 界面美化单批 0):frame::BoxStyle 与列表/表格/键值对
+// 三套轻量渲染助手。
+//
+// 纯函数:吃 Theme + 结构化数据,吐逐行文本(行内无换行符、无前后缀空
+// 行),落盘由调用方逐行走 TermOut。批 1-8 的命令渲染段只许调这三件 +
+// cli::format::* / divider::line,不再手拼多行字符串(单子 5.3 调用约定)。
+// 颜色一律走 Theme 字段(批 0 新增的 11 枚),助手内部零写死 ANSI、零内
+// 嵌文案——空态/标题/表头全由调用方递(不新增 i18n 键的合同由此保住)。
+//
+// 降级合同(单子合同第 3 条):plain 主题(theme.reset 空串,与全仓既有
+// 探针同一把尺)下,不管 BoxStyle 要哪档,一律隐藏边框、不吐一个转义字
+// 节、项目符退成 "-"——T3/--no-color 路径上只有内容与空格对齐,没有乱码。
+//
+// width 口径:整行显示宽预算(含边框与衬空共 4 列开销;plain 无框,预算
+// 全给内容)。0 = 按内容自适应,不设帽;超预算时列内截断保字头(先丢
+// hint/削最宽列,再截正文)。约定细则见 docs/development/tui_style.md。
+// ---------------------------------------------------------------------------
+
+namespace frame {
+
+// 边框三档:Ascii(纯 7 位,降级形态)、Light(U+2500 族,默认)、Double
+// (U+2550 族,重框)。默认 Light;要降级的调用点拿 frame::Ascii() 工厂
+// 显式选,不靠助手猜。
+struct BoxStyle {
+    enum class Flavor { Ascii, Light, Double };
+    Flavor flavor = Flavor::Light;
+};
+
+constexpr BoxStyle Ascii() { return BoxStyle{BoxStyle::Flavor::Ascii}; }
+constexpr BoxStyle Light() { return BoxStyle{BoxStyle::Flavor::Light}; }
+constexpr BoxStyle Double() { return BoxStyle{BoxStyle::Flavor::Double}; }
+
+// ---- 列表助手:Row{label, value, hint?} + 项目符两档 ----------------------
+//
+// 行形:`<bullet> label  value  hint`。label 按全表最宽 label 对齐(左
+// 对齐),value 跟两格后起,hint 再跟两格(key_hint 色,plain 下原样跟排)。
+// bullet 走 list_bullet_user/project 两档主题色,plain 退成
+// "-"。标题非空时嵌进上边框;rows 为空返回空 vector(空态文案调用方管)。
+
+enum class Bullet { None, User, Project };
+
+struct ListRow {
+    std::string label;
+    std::string value;
+    std::string hint;           // 行尾短注(键提示),可空
+    Bullet bullet = Bullet::None;
+};
+
+std::vector<std::string> RenderList(std::string_view title, const std::vector<ListRow>& rows,
+                                    const Theme& theme, BoxStyle style, int width = 0);
+
+// ---- 表格助手:列定义 + 二维内容,pass/fail/skip 填色 ---------------------
+//
+// 列宽 = max(表头, 各行该列) 的显示宽,再与 min_width 取大;列间两格。
+// 首列走 row_label 色(单子"首列加粗"),表头走 table_header;单元格色调
+// tones:Pass -> table_pass、Skip -> table_skip、Fail -> theme.error(错不
+// 另立色,单子 5.3)、Normal -> 默认前景。align_right 的列(数值列)右对
+// 齐,走 format::AlignRight。plain 下:无边框、零转义,表头行下垫一条
+// divider 的 "-" 横线顶替颜色分隔。
+//
+// cells 比列定义短时缺位按空串;tones 比 cells 短时尾巴按 Normal。rows
+// 为空返回空 vector。
+
+enum class CellTone { Normal, Pass, Fail, Skip };
+
+struct TableColumn {
+    std::string header;
+    int min_width = 0;         // 列宽下限(显示列),0 = 不设
+    bool align_right = false;  // 数值列右对齐
+};
+
+struct TableRow {
+    std::vector<std::string> cells;
+    std::vector<CellTone> tones;  // 可空,短尾巴按 Normal
+};
+
+std::vector<std::string> RenderTable(std::string_view title, const std::vector<TableColumn>& columns,
+                                     const std::vector<TableRow>& rows, const Theme& theme,
+                                     BoxStyle style, int width = 0);
+
+// ---- 键值对助手:Field{key, value, accent?} 两列对齐 ----------------------
+//
+// 行形:`key  value`。key 按全表最宽 key 对齐,走 row_label 色;value 走
+// accent 选色,缺省 None -> row_value(主题里可空 = 默认前景)。rows 为空
+// 返回空 vector。
+
+enum class FieldAccent { None, Muted, Error, Stats, Pass, Skip, Title };
+
+struct Field {
+    std::string key;
+    std::string value;
+    FieldAccent accent = FieldAccent::None;
+};
+
+std::vector<std::string> RenderKeyValues(std::string_view title, const std::vector<Field>& fields,
+                                         const Theme& theme, BoxStyle style, int width = 0);
+
+}  // namespace lubancode::cli::frame
 
 }  // namespace lubancode::cli

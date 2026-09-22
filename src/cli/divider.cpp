@@ -12,6 +12,9 @@ namespace {
 // 不依赖任何宽字符转换函数——这条线只由这一个字符重复铺成,不需要走
 // line_editor.hpp 那套完整的 UTF-32/东亚宽度机器。footer 带字线同用。
 constexpr const char* kBoxDrawingHorizontal = "\xe2\x94\x80";
+// "━" (U+2501 BOX DRAWINGS HEAVY HORIZONTAL) 的 UTF-8 编码,divider::line
+// 的 Heavy 档专用,与上同一待遇:手写字节串,不引宽字符机器。
+constexpr const char* kBoxDrawingHeavyHorizontal = "\xe2\x94\x81";
 
 std::string RepeatRule(std::size_t count, bool plain) {
     const std::string unit = plain ? "-" : kBoxDrawingHorizontal;
@@ -19,6 +22,15 @@ std::string RepeatRule(std::size_t count, bool plain) {
     out.reserve(unit.size() * count);
     for (std::size_t i = 0; i < count; ++i) {
         out += unit;
+    }
+    return out;
+}
+
+std::string RepeatUnit(const char* unit, std::size_t unit_bytes, std::size_t count) {
+    std::string out;
+    out.reserve(unit_bytes * count);
+    for (std::size_t i = 0; i < count; ++i) {
+        out.append(unit, unit_bytes);
     }
     return out;
 }
@@ -52,5 +64,25 @@ std::string BuildTurnFooterLine(const std::string& text, int console_width, bool
     const std::size_t tail = static_cast<std::size_t>(width - 2 - 1 - text_cols - 1);
     return RepeatRule(2, plain) + " " + text + " " + RepeatRule(tail, plain);
 }
+
+namespace divider {
+
+std::string line(Style style, int width) {
+    if (width <= 0) {
+        return {};
+    }
+    const auto count = static_cast<std::size_t>(width);
+    switch (style) {
+        case Style::Ascii:
+            return RepeatUnit("-", 1, count);
+        case Style::Heavy:
+            return RepeatUnit(kBoxDrawingHeavyHorizontal, 3, count);
+        case Style::Light:
+        default:
+            return RepeatUnit(kBoxDrawingHorizontal, 3, count);
+    }
+}
+
+}  // namespace lubancode::cli::divider
 
 }  // namespace lubancode::cli

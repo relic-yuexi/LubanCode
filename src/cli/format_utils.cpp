@@ -777,4 +777,34 @@ std::string FormatApprovalWaitNote(std::int64_t approval_wait_ms) {
     return " · waited " + FormatTurnDuration(approval_wait_ms) + " for approval";
 }
 
+namespace format {
+
+std::string AlignLeft(std::string_view text, int width) {
+    if (width <= 0) {
+        return std::string();
+    }
+    const std::string text_str{text};
+    const int cols = static_cast<int>(DisplayWidthUtf8(text_str));
+    if (cols >= width) {
+        // 超宽:先截到 width(保字头,不劈宽字),截完恰好占满,不再补。
+        return TruncateUtf8ToDisplayWidth(text_str, width);
+    }
+    return text_str + std::string(static_cast<std::size_t>(width - cols), ' ');
+}
+
+std::string AlignRight(std::string_view text, int width) {
+    if (width <= 0) {
+        return std::string();
+    }
+    const std::string text_str{text};
+    const int cols = static_cast<int>(DisplayWidthUtf8(text_str));
+    if (cols >= width) {
+        // 同一把尺截断(保字头):右对齐列多是数字,真超宽保头不猜尾。
+        return TruncateUtf8ToDisplayWidth(text_str, width);
+    }
+    return std::string(static_cast<std::size_t>(width - cols), ' ') + text_str;
+}
+
+}  // namespace lubancode::cli::format
+
 }  // namespace lubancode::cli

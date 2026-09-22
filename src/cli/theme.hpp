@@ -57,6 +57,24 @@ struct Theme {
     std::string surface_user_fg;      // 用户块正文前景(保对比;空 = 默认前景)
     std::string surface_user_marker;  // "> " 提示符前景(与正文区分)
     std::string surface_padding;      // 块左右留白格的底色(缺省同 bg,可空)
+
+    // TUI 排版基件(TUI 界面美化单批 0):frame 边框/标题、列表行三段、表格
+    // 表头与 pass/skip 单元格、列表项目符两档、键提示。cli::frame::* 三助手
+    // 与 divider 统一从这里取色,不许在渲染层写死 ANSI。内置三套板各带缺省
+    // 值(本批之前没有这些字段,等价于"旧主题文件"——加载侧只认主题名,
+    // 名字不变即向后兼容);plain 全空串,no-color/T3 降级路径零转义字节。
+    // 语义分工见 docs/development/tui_style.md。
+    std::string frame_title;          // frame 标题文字(cli::frame::* 共用)
+    std::string frame_border;         // frame 边框字符(cli::frame::* 共用)
+    std::string row_label;            // 列表 label 列 / 键值对 key 列 / 表格首列
+    std::string row_value;            // 列表 value 列 / 键值对 value 列默认档;空 = 默认前景
+    std::string row_muted;            // 淡色附注:键值对 Muted accent、空态文案
+    std::string table_header;         // 表头行
+    std::string table_pass;           // 表格 pass 单元格
+    std::string table_skip;           // 表格 skip 单元格(fail 不另立色,走 error)
+    std::string list_bullet_user;     // 列表项目符·user 档
+    std::string list_bullet_project;  // 列表项目符·project 档
+    std::string key_hint;             // 列表行尾键提示/短注
 };
 
 // 按名字取内置主题;不认得的名字(不是 dark/light/plain)按 dark 处理,
