@@ -45,6 +45,8 @@ using lubancode::cli::TermErr;
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "cli/line_editor.hpp"  // ApprovalModeStartSlot:/doctor 总览的起手档行(单子 §七)
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 2:cache probe/usage 渲染段)
+#include "platform/console.hpp"    // GetScreenInfo:/doctor cache 的框宽同一把尺
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
 #include "insights/insights_health.hpp"  // CheckInsightsHealth:/doctor insights(Token 账本单 A5)
@@ -623,6 +625,24 @@ std::string CacheProbeVerdictLabel(CacheProbeVerdict verdict) {
     return std::string();
 }
 
+// 分型判词的语义色(TUI 排版批 2):稳定命中走 pass 档;固定阈值命中是
+// 部分可用,走 stats(黄);间歇 miss 与完全未见命中走 error;未报告无法
+// 判定,走 muted(不冒充结论)。纯函数,单测钉映射。
+cli::frame::FieldAccent CacheProbeVerdictAccent(CacheProbeVerdict verdict) {
+    switch (verdict) {
+        case CacheProbeVerdict::StableHit:
+            return cli::frame::FieldAccent::Pass;
+        case CacheProbeVerdict::FixedQuantumHit:
+            return cli::frame::FieldAccent::Stats;
+        case CacheProbeVerdict::IntermittentMiss:
+        case CacheProbeVerdict::NoHit:
+            return cli::frame::FieldAccent::Error;
+        case CacheProbeVerdict::NotReported:
+        default:
+            return cli::frame::FieldAccent::Muted;
+    }
+}
+
 std::size_t CommonPrefixBytes(const std::string& a, const std::string& b) {
     const std::size_t n = (std::min)(a.size(), b.size());
     std::size_t i = 0;
@@ -895,16 +915,84 @@ std::optional<PrefixCacheMetrics> ReadAndReportMetrics(const DoctorContext& cont
     return metrics;
 }
 
+namespace {
+namespace frame = lubancode::cli::frame;
+
+// ---- TUI 排版批 2(/doctor cache probe/usage)的公共小件 -------------------
+// 渲染段只调 cli::frame::* 三助手(约定见 docs/development/tui_style.md);
+// 文案全是既有 tr()/trf() 键,i18n 不新增(单子合同第 5 条),句内冒号按
+// SentenceField 拆两列(批 1 裁量)。
+
+int DoctorFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+void EmitFrameLines(const std::vector<std::string>& lines) {
+    for (const std::string& line : lines) {
+        TermOut() << line << "\n";
+    }
+}
+
+std::string TrimAscii(std::string value) {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}
+
+frame::Field SentenceField(const std::string& sentence,
+                           frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    return frame::Field{TrimAscii(sentence.substr(0, colon)), TrimAscii(sentence.substr(colon + 1)), accent};
+}
+
+void PrintNotice(const lubancode::cli::Theme& theme, std::initializer_list<std::string> sentences,
+                 frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), DoctorFrameWidth()));
+}
+
+// 一轮探针在汇总表里的行(渲染段的输入侧;收集在跑轮循环,出表在收尾)。
+struct ProbeRoundRow {
+    int round = 0;
+    std::string http;   // "HTTP 2xx" / "HTTP <码>" / "HTTP -"
+    std::string input;  // FormatTokenCount 或 "(未报告)"
+    std::string cached;
+    bool failed = false;
+    bool reported = true;
+};
+
+frame::TableRow ProbeRoundTableRow(const ProbeRoundRow& row) {
+    const frame::CellTone http_tone = row.failed ? frame::CellTone::Fail : frame::CellTone::Pass;
+    const frame::CellTone usage_tone = row.reported ? frame::CellTone::Normal : frame::CellTone::Skip;
+    return frame::TableRow{{std::to_string(row.round), row.http, row.input, row.cached},
+                           {frame::CellTone::Normal, http_tone, usage_tone, usage_tone}};
+}
+
+}  // namespace
+
 // /doctor cache probe:N 轮固定前缀对账(默认 2,上限 kCacheProbeMaxRounds)。
 // 公网 provider 走一次性确认门(问题 9):先披露轮数、token 上限与端点,
 // 答应才发;回环端与明配 metrics_url 的端照旧直发。
+// TUI 排版批 2:逐轮流式保留轮号进度行;轮结果收集进汇总表(round/http/
+// input/cached,数值列右对齐、http 列 pass/fail 色),尾部结论(前缀稳定
+// 性/分型/证据边界/服务端增量)进键值对框——"键值对+表格混排"(单子批 2)。
 void RunCacheProbe(const DoctorContext& context, int rounds) {
     const lubancode::config::Config& config = context.config;
     if (rounds < 2) {
         rounds = 2;
     }
     if (rounds > kCacheProbeMaxRounds) {
-        TermOut() << trf("doctor.cache.probe_rounds_capped", kCacheProbeMaxRounds) << "\n";
+        PrintNotice(context.theme, {trf("doctor.cache.probe_rounds_capped", kCacheProbeMaxRounds)});
         rounds = kCacheProbeMaxRounds;
     }
     const bool loopback = IsLoopbackUrl(config.base_url);
@@ -920,7 +1008,7 @@ void RunCacheProbe(const DoctorContext& context, int rounds) {
             lubancode::cli::ReadLine(tr("doctor.cache.probe_confirm_prompt"), context.theme);
         if (!answer.has_value() ||
             !AllowCacheProbeRun(loopback, !config.metrics_url.empty(), ParseProbeConsentAnswer(*answer))) {
-            TermOut() << tr("doctor.cache.probe_declined") << "\n";
+            PrintNotice(context.theme, {tr("doctor.cache.probe_declined")});
             TermOut().flush();
             return;
         }
@@ -931,28 +1019,11 @@ void RunCacheProbe(const DoctorContext& context, int rounds) {
     auto backend = BuildBackend(config);
     std::vector<CacheProbeRoundResult> round_results;
     round_results.reserve(probes.requests.size());
-
-    const auto describe_round = [&](int round, const ProbeOutcome& outcome) {
-        TermOut() << trf("doctor.cache.probe_round", round) << "\n";
-        if (!outcome.error.empty()) {
-            TermOut() << "  "
-                      << trf("doctor.effort.http_error", outcome.http_status > 0
-                                                                ? std::to_string(outcome.http_status)
-                                                                : std::string("-"))
-                      << "\n"
-                      << "  " << SanitizeProbeError(outcome.error) << "\n";
-            return;
-        }
-        TermOut() << tr("doctor.effort.http_ok") << "\n";
-        if (outcome.usage_reported) {
-            TermOut() << trf("doctor.cache.probe_usage",
-                             lubancode::cli::FormatTokenCount(api::TotalInputTokens(outcome.usage)),
-                             lubancode::cli::FormatTokenCount(outcome.usage.cache_read_tokens))
-                      << "\n";
-        } else {
-            TermOut() << tr("doctor.effort.usage_not_reported") << "\n";
-        }
-    };
+    // 渲染侧:轮号行照旧流式(每轮一发 HTTP,进度不能憋);轮结果收集进
+    // 汇总表,错误详情进收尾附注框(说明句 + 清洗后的错误文本)。
+    std::vector<ProbeRoundRow> round_rows;
+    round_rows.reserve(probes.requests.size());
+    std::vector<frame::Field> round_notes;
 
     for (std::size_t i = 0; i < probes.requests.size(); ++i) {
         // Token 账本单 A1:一轮前缀探针一只旁路桥(purpose=doctor_probe)。
@@ -962,8 +1033,31 @@ void RunCacheProbe(const DoctorContext& context, int rounds) {
                                                              context.trajectory_wire, "host"};
             probe_bridge = context.trajectory->NewBypassBridge(std::move(identity));
         }
+        TermOut() << trf("doctor.cache.probe_round", static_cast<int>(i) + 1) << "\n";
         const ProbeOutcome outcome = RunProbe(*backend, probes.requests[i], probe_bridge.get());
-        describe_round(static_cast<int>(i) + 1, outcome);
+        ProbeRoundRow row;
+        row.round = static_cast<int>(i) + 1;
+        if (!outcome.error.empty()) {
+            row.http = "HTTP " + (outcome.http_status > 0 ? std::to_string(outcome.http_status)
+                                                          : std::string("-"));
+            row.failed = true;
+            row.reported = false;
+            round_notes.push_back(SentenceField(
+                trf("doctor.effort.http_error", outcome.http_status > 0 ? std::to_string(outcome.http_status)
+                                                                        : std::string("-")),
+                frame::FieldAccent::Error));
+            round_notes.push_back(SentenceField(SanitizeProbeError(outcome.error), frame::FieldAccent::Error));
+        } else {
+            row.http = "HTTP 2xx";
+            if (outcome.usage_reported) {
+                row.input = lubancode::cli::FormatTokenCount(api::TotalInputTokens(outcome.usage));
+                row.cached = lubancode::cli::FormatTokenCount(outcome.usage.cache_read_tokens);
+            } else {
+                row.input = row.cached = tr("doctor.value.absent");
+                row.reported = false;
+            }
+        }
+        round_rows.push_back(std::move(row));
         CacheProbeRoundResult result;
         result.http_ok = outcome.error.empty();
         result.usage_reported = outcome.usage_reported;
@@ -973,9 +1067,32 @@ void RunCacheProbe(const DoctorContext& context, int rounds) {
         }
         round_results.push_back(result);
     }
+    TermOut().flush();
+
+    // 轮次汇总表(单子批 2"键值对+表格混排"的表格半边):round/http 左对
+    // 齐,input/cached 数值列右对齐;http 列 pass/fail 色,未报 usage 的轮
+    // 数值列走 skip 档(灰淡,不冒充 0)。
+    if (!round_rows.empty()) {
+        std::vector<frame::TableColumn> columns;
+        columns.push_back({"round"});
+        columns.push_back({"http"});
+        columns.push_back({"input", 0, /*align_right=*/true});
+        columns.push_back({"cached", 0, /*align_right=*/true});
+        std::vector<frame::TableRow> table_rows;
+        for (const ProbeRoundRow& row : round_rows) {
+            table_rows.push_back(ProbeRoundTableRow(row));
+        }
+        EmitFrameLines(
+            frame::RenderTable({}, columns, table_rows, context.theme, frame::Light(), DoctorFrameWidth()));
+    }
+    if (!round_notes.empty()) {
+        EmitFrameLines(
+            frame::RenderKeyValues({}, round_notes, context.theme, frame::Light(), DoctorFrameWidth()));
+    }
 
     // 前缀字节稳定性:按当前 wire 把各轮请求体序列化出来,量相邻两轮的
     // 公共前缀,取最小值——任意相邻一对不稳,前缀就是不稳。
+    std::vector<frame::Field> summary;
     {
         const auto dump_request = [&](const api::Request& request) {
             if (config.wire == lubancode::config::Wire::ChatCompletions) {
@@ -1001,19 +1118,21 @@ void RunCacheProbe(const DoctorContext& context, int rounds) {
             }
             previous = current;
         }
-        TermOut() << trf("doctor.cache.probe_prefix", common, probes.designed_prefix_bytes)
-                  << (common >= probes.designed_prefix_bytes ? tr("doctor.cache.probe_prefix_stable")
-                                                              : tr("doctor.cache.probe_prefix_broken"))
-                  << "\n";
+        summary.push_back(SentenceField(
+            trf("doctor.cache.probe_prefix", common, probes.designed_prefix_bytes) +
+            (common >= probes.designed_prefix_bytes ? tr("doctor.cache.probe_prefix_stable")
+                                                    : tr("doctor.cache.probe_prefix_broken"))));
     }
 
     // 分型(问题 9):多轮固定前缀的命中形状——稳定命中/固定阈值命中/
     // 间歇 miss/完全未见命中/无法判定,判词后紧跟证据边界,不越权背书。
     {
         const CacheProbeVerdict verdict = ClassifyCacheProbeRounds(round_results, probes.designed_prefix_tokens);
-        TermOut() << trf("doctor.cache.probe_verdict", CacheProbeVerdictLabel(verdict)) << "\n";
+        summary.push_back(
+            SentenceField(trf("doctor.cache.probe_verdict", CacheProbeVerdictLabel(verdict)),
+                          CacheProbeVerdictAccent(verdict)));
         if (!before.has_value() || !before->enabled.has_value()) {
-            TermOut() << tr("doctor.cache.probe_evidence_bound") << "\n";
+            summary.push_back(SentenceField(tr("doctor.cache.probe_evidence_bound"), frame::FieldAccent::Muted));
         }
     }
 
@@ -1030,14 +1149,18 @@ void RunCacheProbe(const DoctorContext& context, int rounds) {
                 }
                 return std::to_string(*a - *b);
             };
-            TermOut() << trf("doctor.cache.probe_delta", delta(before->queries_total, after.queries_total),
-                             delta(before->hits_total, after.hits_total),
-                             delta(before->prompt_tokens_cached_total, after.prompt_tokens_cached_total))
-                      << "\n";
+            summary.push_back(SentenceField(trf("doctor.cache.probe_delta",
+                                                delta(before->queries_total, after.queries_total),
+                                                delta(before->hits_total, after.hits_total),
+                                                delta(before->prompt_tokens_cached_total,
+                                                      after.prompt_tokens_cached_total))));
         } else {
-            TermOut() << trf("doctor.cache.metrics_read_failed", after_text.error()) << "\n";
+            summary.push_back(
+                SentenceField(trf("doctor.cache.metrics_read_failed", after_text.error()),
+                              frame::FieldAccent::Stats));
         }
     }
+    EmitFrameLines(frame::RenderKeyValues({}, summary, context.theme, frame::Light(), DoctorFrameWidth()));
     TermOut().flush();
 }
 
@@ -1056,15 +1179,17 @@ std::vector<lubancode::config::ProviderConfig> MakeStreamUsageCandidate(
 }  // namespace
 
 // /doctor cache usage:stream_usage 能力探针,结论写回 provider 配置。
+// TUI 排版批 2:前置条件不满足/失败走键值对框(error/stats 档),能力结
+// 论走 pass/skip 档;"发探针"的进度行照旧流式(跑网络前的提示不憋)。
 void RunStreamUsageProbe(const DoctorContext& context) {
     lubancode::config::Config& config = context.config;
     if (config.wire != lubancode::config::Wire::ChatCompletions) {
-        TermOut() << tr("doctor.usage.not_chat") << "\n";
+        PrintNotice(context.theme, {tr("doctor.usage.not_chat")}, frame::FieldAccent::Stats);
         return;
     }
     if (context.active_provider.empty() || lubancode::config::FindProvider(context.providers,
                                                                             context.active_provider) == nullptr) {
-        TermOut() << tr("doctor.usage.no_provider") << "\n";
+        PrintNotice(context.theme, {tr("doctor.usage.no_provider")}, frame::FieldAccent::Stats);
         return;
     }
     TermOut() << tr("doctor.usage.probing") << "\n";
@@ -1093,15 +1218,17 @@ void RunStreamUsageProbe(const DoctorContext& context) {
     }
     const ProbeOutcome outcome = RunProbe(backend, probe, probe_bridge.get());
     if (!outcome.error.empty()) {
-        TermOut() << trf("doctor.effort.http_error", outcome.http_status > 0
+        PrintNotice(context.theme,
+                    {trf("doctor.effort.http_error", outcome.http_status > 0
                                                          ? std::to_string(outcome.http_status)
-                                                         : std::string("-"))
-                  << "\n"
-                  << "  " << SanitizeProbeError(outcome.error) << "\n";
+                                                         : std::string("-")),
+                     SanitizeProbeError(outcome.error)},
+                    frame::FieldAccent::Error);
         return;
     }
     const bool supported = outcome.usage_reported;
-    TermOut() << (supported ? tr("doctor.usage.supported") : tr("doctor.usage.unsupported")) << "\n";
+    PrintNotice(context.theme, {supported ? tr("doctor.usage.supported") : tr("doctor.usage.unsupported")},
+                supported ? frame::FieldAccent::Pass : frame::FieldAccent::Skip);
     // 写回(HC-07 统一合同):先持久提交,提交成了内存才发布——盘上没有的
     // 改动不许留在会话里。项目级钉住时写项目路径(改的是候选副本,校验/
     // 落盘都不碰 live 列表),否则写全局;当前生效的 config.stream_usage 在
@@ -1114,7 +1241,8 @@ void RunStreamUsageProbe(const DoctorContext& context) {
                                                                                       supported))
             : lubancode::config::SetProviderStreamUsageInGlobalConfig(context.active_provider, supported);
     if (!saved.has_value()) {
-        TermOut() << trf("doctor.usage.write_failed", saved.error()) << "\n";
+        PrintNotice(context.theme, {trf("doctor.usage.write_failed", saved.error())},
+                    frame::FieldAccent::Error);
         return;
     }
     // 已提交:内存发布(含"已声明"标记与当前生效档)。
@@ -1122,9 +1250,10 @@ void RunStreamUsageProbe(const DoctorContext& context) {
     config.stream_usage = supported;
     config.stream_usage_declared = true;
     if (saved->outcome == lubancode::platform::WriteOutcome::CommittedDurabilityUnconfirmed) {
-        TermOut() << trf("cmd.provider.commit_unconfirmed", saved->path) << "\n";
+        PrintNotice(context.theme, {trf("cmd.provider.commit_unconfirmed", saved->path)},
+                    frame::FieldAccent::Stats);
     }
-    TermOut() << trf("doctor.usage.written", context.active_provider, saved->path) << "\n";
+    PrintNotice(context.theme, {trf("doctor.usage.written", context.active_provider, saved->path)});
     TermOut().flush();
 }
 

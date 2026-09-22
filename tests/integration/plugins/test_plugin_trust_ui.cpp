@@ -291,13 +291,25 @@ TEST_CASE("HandlePluginCommand:v2 inspect 六行 runtime/entry/profile/network/s
     app::HandlePluginCommand("inspect lua-inspect-probe", {}, manifests, std::string(), nullptr);
     out.flush();
     const std::string text = out.str();
-    // §10.3 的六行。
-    CHECK(text.find("runtime: embedded-lua") != std::string::npos);
-    CHECK(text.find("entry: probe.lua") != std::string::npos);
-    CHECK(text.find("profile: pure + host-http") != std::string::npos);
-    CHECK(text.find("network: POST https://api.example.com:443") != std::string::npos);
-    CHECK(text.find("secrets: api_key <- LUA_INSPECT_PROBE_KEY (optional, missing") != std::string::npos);
-    CHECK(text.find("limits: request 64 KiB, response 256 KiB, timeout 10 s") != std::string::npos);
+    // §10.3 的六行真账。TUI 排版批 2 起按 "标签: 值" 拆进键值对框——标签
+    // 与值同行分列出现,信息一项不少;断言按"同行两段都在"钉(整句连排
+    // 的旧形态已废,见 test_plugin_commands_frame.cpp 的形状册)。
+    const auto line_has = [&text](const std::string& key, const std::string& value) {
+        std::istringstream lines(text);
+        std::string line;
+        while (std::getline(lines, line)) {
+            if (line.find(key) != std::string::npos && line.find(value) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    CHECK(line_has("runtime", "embedded-lua"));
+    CHECK(line_has("entry", "probe.lua"));
+    CHECK(line_has("profile", "pure + host-http"));
+    CHECK(line_has("network", "POST https://api.example.com:443"));
+    CHECK(line_has("secrets", "api_key <- LUA_INSPECT_PROBE_KEY (optional, missing"));
+    CHECK(line_has("limits", "request 64 KiB, response 256 KiB, timeout 10 s"));
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +396,9 @@ TEST_CASE("HandlePluginCommand:trust/untrust 子命令回执照打,用法文案�
     out.str("");
     app::HandlePluginCommand("trust", {}, {}, project_root_utf8, &store);  // 缺 id
     out.flush();
-    CHECK(out.str().find("用法:/plugin trust <id>") != std::string::npos);
+    // 拆列后 key("用法")与 value("/plugin trust <id>...")同行分列。
+    CHECK(out.str().find("用法") != std::string::npos);
+    CHECK(out.str().find("/plugin trust <id>") != std::string::npos);
 
     out.str("");
     app::HandlePluginCommand("trust no-such-plugin", {}, {}, project_root_utf8, &store);

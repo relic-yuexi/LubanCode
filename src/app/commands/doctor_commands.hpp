@@ -33,6 +33,7 @@
 #include "api/types.hpp"
 #include "agent/runtime_profile.hpp"
 #include "cli/context_tracker.hpp"
+#include "cli/terminal_frame.hpp"  // frame::FieldAccent:分型判词的语义色(批 2)
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "config/project_instructions.hpp"  // ProjectInstructionResolver:/doctor instructions
@@ -181,6 +182,11 @@ CacheProbeVerdict ClassifyCacheProbeRounds(const std::vector<CacheProbeRoundResu
                                             std::int64_t designed_prefix_tokens,
                                             int coverage_threshold_percent = 90);
 std::string CacheProbeVerdictLabel(CacheProbeVerdict verdict);
+
+// 分型判词的语义色(TUI 排版批 2:/doctor cache probe 汇总框):StableHit
+// -> Pass、FixedQuantumHit -> Stats(部分可用)、IntermittentMiss/NoHit ->
+// Error、NotReported -> Muted(不冒充结论)。纯函数,单测钉映射。
+cli::frame::FieldAccent CacheProbeVerdictAccent(CacheProbeVerdict verdict);
 
 // 确认门(问题 9):公网 provider 不再一律拒发,改成一次性确认——先向
 // 用户披露要发几枚请求、预计 token 上限与目标端点,答应才发。

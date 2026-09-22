@@ -73,11 +73,14 @@ void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std:
 // 可热重载的钩子另立批次,不在这硬造。trust/untrust 走 runtime 侧的账务
 // 动作(概要 + 落账),project_root_utf8/project_trust 由会话的 ToolRuntime
 // 递入(缺省空 = 信任流不可用,打一句人话,不硬造)。
+// theme(TUI 排版批 2):渲染段 frame 三助手的配色来源;缺省空指针降级
+// plain(零转义字节,信息一字不少)——既有五参调用不动。
 void HandlePluginCommand(const std::string& args,
                          const std::vector<PluginMountInfo>& mounted,
                          const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& manifests,
                          const std::string& project_root_utf8 = std::string(),
-                         lubancode::config::PluginTrustStore* project_trust = nullptr);
+                         lubancode::config::PluginTrustStore* project_trust = nullptr,
+                         const lubancode::cli::Theme* theme = nullptr);
 
 
 // /mcp 命令:每个服务器一行状态(运行中/已退出)+ 工具数,底下缩进列出
