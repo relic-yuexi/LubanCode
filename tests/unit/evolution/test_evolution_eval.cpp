@@ -21,12 +21,14 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "evolution/coordinator.hpp"
 #include "evolution/eval.hpp"
 #include "evolution/observation_store.hpp"
 #include "platform/paths.hpp"
+#include "privacy/sensitive_keys.hpp"
 #include "skills/workflow_recorder.hpp"
 
 namespace {
@@ -265,6 +267,35 @@ TEST_CASE("评测.密钥扫描:键形态命中,占位值不冤枉") {
     CHECK(ScanTextForSecrets("token: [已打码]\napi_key: <your-key>\nsecret: {{token}}\n"
                              "password: ${ENV_PWD}\ncookie: null\nauth: xxxxxx")
               .empty());
+}
+
+TEST_CASE("评测.密钥扫描:敏感键词表三入口同源(SV-12)") {
+    // 词表只在 privacy::kSensitiveKeyWords 一处(SV-12):往后添一类凭据
+    // 键,改那一张表,三个入口——录制文本脱敏、JSON 入参键打码、候选
+    // 扫描——一并覆盖;谁也不许再在入口处另养词表。逐词验一遍,漏了
+    // 哪个入口哪个词当场红。
+    for (const std::string_view word : lubancode::privacy::kSensitiveKeyWords) {
+        const std::string key(word);
+        const std::string line = key + ": value123";
+
+        // 1) 录制文本脱敏:键名保留,值换 [已打码]。
+        const std::string redacted = lubancode::skills::RedactSecrets(line);
+        CHECK(redacted.find(key) != std::string::npos);
+        CHECK(redacted.find("value123") == std::string::npos);
+
+        // 2) JSON 入参:敏感键整值换 [已打码]。
+        const nlohmann::json sanitized =
+            lubancode::skills::SanitizeToolInput(nlohmann::json{{key, "value123"}});
+        CHECK(sanitized.at(key) == "[已打码]");
+
+        // 3) 候选扫描:报键名与行号,不回显值。
+        const std::vector<ScanFinding> findings = ScanTextForSecrets(line);
+        REQUIRE(findings.size() == 1);
+        CHECK(findings[0].kind == "secret");
+        CHECK(findings[0].line == 1);
+        CHECK(findings[0].detail.find(key) != std::string::npos);
+        CHECK(findings[0].detail.find("value123") == std::string::npos);
+    }
 }
 
 TEST_CASE("评测.绝对路径扫描:盘符/UNC/家目录命中,URL 不冤枉") {

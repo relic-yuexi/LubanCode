@@ -1,0 +1,72 @@
+# SV-12 录制脱敏与候选密钥扫描各养敏感词表
+
+- 状态：已实现，PR #203 CI 全绿待合并（rollup success，run 35687239810；macos-clang 腿 success。
+  本单未触平台敏感面/根 CMake 接线（新头 header-only 零登记），CI 门按设计只烧 macOS 腿，
+  windows-msvc 腿未跑，如实记）。
+- 审查日期：2026-09-21。
+- 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
+- 批次：1。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
+- 核验：已读源码及真实调用点；未修改源码、未编译、未跑测试。下列验收项交修复者执行。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象（最短证据） | 具体后果 | 建议方案 | 影响面与风险 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| SV-12 | A | 低 | src/skills/workflow_recorder.cpp:60<br>src/skills/workflow_recorder.cpp:197<br>src/evolution/eval.cpp:691<br>src/evolution/eval.cpp:694<br>src/evolution/eval.cpp:785 | 同一组 authorization/client_secret/private_key/access_key/session_key/.../secret 在 ContainsAnyKeyword、RedactSecrets、ScanTextForSecrets 内各列一份；eval 注释明写“与 skills::RedactSecrets 同一张关键词表”。 | 增加一类凭据键必须改三处；只更新录制或只更新候选扫描，会使“录制先打码、候选再拒绝明文”的覆盖集合漂移。当前三表相同，本轮没有把未发生的泄露当既成事实。 | 保留 RedactSecrets 的文本替换与 ScanTextForSecrets 的行号报告/占位值豁免；只把中立敏感键词表与明确可共用的词边界识别提为一处。JSON 键包含匹配、文本键前边界匹配分别保留，不强制共用整套策略。 | 低至中：误把策略合一会抹掉 eval 的占位值豁免，或缩小 JSON 键覆盖。第一步只合词表且冻结遍历顺序，行为差异另开测试说明。 |
+
+### 不应合并的差异
+
+录制器职责是修改文本，删除实际值；验收器职责是报告行号与原因，不修改候选材料。eval 还接受 `<token>`、`${TOKEN}`、`[已打码]` 等占位写法。二者应共享“哪些键属于敏感键”这一事实，不应共享最终允许/拒绝决定。
+
+`evolution/observation.cpp` 已直接委托 skills 脱敏，不再列作重复实现。预计净删约 8 行，只计两份重复常量声明扣掉新头引用；不承诺大幅减码。
+
+## 交接边界
+
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 并行与禁止共改：与其余 SV 项均可并行。独占 workflow_recorder.cpp/eval.cpp 内词表区；不改 platform 字符串通用件或 telemetry 脱敏。
+- 允许修改的现有文件：
+
+- `src/skills/workflow_recorder.cpp`
+- `src/evolution/eval.cpp`
+- `tests/unit/memory/test_workflow_recorder.cpp`
+- `tests/unit/evolution/test_evolution_eval.cpp`
+
+新增窄合同/实现文件若需登记 CMake，由修复者只追加自己一项，合并者统一核源清单；不得顺手重排整个 target。相邻功能或测试正在改同文件时，先串行合入，不另开同职责副本。
+
+## 分步落地
+
+1. 用以上位置复核当前 HEAD；若代码已变，更新证据再动手。
+2. 冻结本条语义差异及验收夹具，再执行建议迁移。先搬等价机械，后改合同，最后删除旧入口。
+3. 调用点全部迁妥后搜旧符号；公共别名若暂留，标明删除条件。
+4. 只跑本条相关验证及仓库必需门禁。遵循仓库远端 CI 纪律，回报真实结果，不把计划写成已完成。
+
+## 验收门槛
+
+- [x] 一份新增敏感词用例同时覆盖录制文本、JSON 输入及候选扫描，三个入口不各自添加词表。
+  （tests/unit/evolution/test_evolution_eval.cpp"三入口同源"册：遍历 privacy::kSensitiveKeyWords
+  逐词验 RedactSecrets/SanitizeToolInput/ScanTextForSecrets 三入口全命中;旧词表 kWords/
+  kKeyWords/kSecretKeyWords 退役,全仓 grep 零残留。）
+- [x] 现有占位值豁免、Bearer 处理、词边界及 JSON key 包含匹配结果保持原样。
+  （同词同序,匹配算法一字未动;既有 golden 册原样全绿:录制脱敏三幕、扫描占位不冤枉。）
+- [x] 日志与失败报告只含键名和位置，不在合并后把真实值打印出来。
+  （detail 串未动("密钥赋值(<键名>,值已隐去)");新册逐词断言 detail 不含值。）
+- [x] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。
+  （d3eea298 五文件:新头/两处退役/一册测试/todo 入库。行为零变更,回滚=revert;未验边界:
+  windows-msvc 腿（CI 门未放行）。）
+
+## 合并/删除口径
+
+职责：录制与候选验收共用的敏感键词表。
+
+现有：workflow_recorder.cpp 的 kWords/kKeyWords；evolution/eval.cpp 的 kSecretKeyWords。
+
+建议保留：一份中立 constexpr 词表；保留两个业务策略。
+
+预计净删 8 行。仅静态估算，落地后按 diff 重算；搬移、测试新增、接口适配不冒充删除。
+
+## 既有工作关联
+
+- src/evolution/observation.hpp:15 已声明复用录制件脱敏；本条补 eval 独立词表，不改 telemetry redactor 的截断任务。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 当前清单未见同文件冲突；新增公共头或CMake源登记先通知集成人。

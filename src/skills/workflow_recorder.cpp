@@ -14,6 +14,8 @@
 #include "platform/log_sink.hpp"
 #include "platform/text_encoding.hpp"
 
+#include "privacy/sensitive_keys.hpp"  // 敏感键词表唯一来源(SV-12)
+
 namespace lubancode::skills {
 
 namespace {
@@ -56,13 +58,11 @@ std::string NowIdTimestamp() { return FormatLocalTime("%Y%m%d-%H%M%S"); }
 constexpr std::string_view kRedactedMarker = "[已打码]";
 
 // 键形态的敏感词。比对前把文本小写化、'-' 换 '_',再做"包含"判定——
-// api-key/api_key/apikey 三种写法归一。
+// api-key/api_key/apikey 三种写法归一。词表是全仓唯一一份
+// (privacy/sensitive_keys.hpp,SV-12),录制脱敏与候选扫描共用,别在
+// 入口处另养副本。
 bool ContainsAnyKeyword(const std::string& normalized) {
-    static constexpr std::string_view kWords[] = {
-        "token", "secret", "password", "passwd", "authorization", "cookie", "api_key", "apikey",
-        "private_key", "access_key", "session_key", "client_secret",
-    };
-    for (const std::string_view word : kWords) {
+    for (const std::string_view word : privacy::kSensitiveKeyWords) {
         if (normalized.find(word) != std::string::npos) {
             return true;
         }
@@ -193,13 +193,10 @@ std::string RedactSecrets(std::string text) {
         //    词边界:词前不是字词字符(大小写按 lower 判,下同)。
         std::size_t match_len = 0;
         if (i == 0 || !IsWordChar(lower[i - 1])) {
-            // 逐词试探,取最长命中("client_secret" 压过 "secret")。
-            static constexpr std::string_view kKeyWords[] = {
-                "authorization", "client_secret", "private_key", "access_key", "session_key",
-                "api_key",      "apikey",        "password",    "passwd",     "cookie",
-                "token",        "secret",
-            };
-            for (const std::string_view word : kKeyWords) {
+            // 逐词试探,取最长命中("client_secret" 压过 "secret")。词表是
+            // 全仓唯一一份(privacy/sensitive_keys.hpp,SV-12),与 JSON 键
+            // 包含匹配、evolution 候选扫描同源,长度降序在那里冻结。
+            for (const std::string_view word : privacy::kSensitiveKeyWords) {
                 if (lower.compare(i, word.size(), word) == 0) {
                     match_len = word.size();
                     break;  // 列表已按长度降序,首个命中即最长
