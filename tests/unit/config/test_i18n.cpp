@@ -88,6 +88,35 @@ TEST_CASE("自动会话标题提示:标题先填入,再附 cheap 路由,不漏�
     CHECK(notice.find("首条消息落盘后") == std::string::npos);
 }
 
+TEST_CASE("会话标题精炼:失败行带死因与耗时,三道起飞门文案不回归") {
+    LangGuard guard;
+    cli::SetLanguage("zh-CN");
+    // 三道起飞门(no_ledger/no_model/no_provider)一字不动;失败行 {0}=死因、
+    // {1}=耗时(2026-09-22 报明单:超时/网络错/空回各报各的)。
+    CHECK(cli::tr("cmd.title.refine.no_ledger") ==
+          "[会话标题] 精炼没起飞:会话账房没开张,标题停在本地档。");
+    CHECK(cli::tr("cmd.title.refine.no_model") ==
+          "[会话标题] 精炼没起飞:标题路由没配上模型,标题停在本地档。");
+    CHECK(cli::trf("cmd.title.refine.no_provider", "old-relay") ==
+          "[会话标题] 精炼没起飞:provider「old-relay」在配置里找不到,标题停在本地档。");
+    CHECK(cli::trf("cmd.title.refine.failed", "采样超过 30 秒,被本地超时预算停止", 30123) ==
+          "[会话标题] 精炼失败: 采样超过 30 秒,被本地超时预算停止(耗时 30123ms),标题保留本地档。");
+
+    cli::SetLanguage("en");
+    CHECK(cli::tr("cmd.title.refine.no_ledger") ==
+          "[session title] Refinement did not start: the session ledger has no active writer; the "
+          "local title stays.");
+    CHECK(cli::tr("cmd.title.refine.no_model") ==
+          "[session title] Refinement did not start: no model routed for the title task; the local "
+          "title stays.");
+    CHECK(cli::trf("cmd.title.refine.no_provider", "old-relay") ==
+          "[session title] Refinement did not start: provider 'old-relay' is not in the config; "
+          "the local title stays.");
+    CHECK(cli::trf("cmd.title.refine.failed", "connection refused", 500) ==
+          "[session title] Refinement failed: connection refused (took 500ms); the local title "
+          "stays.");
+}
+
 TEST_CASE("/model 编号提示写明 Esc 可取消") {
     LangGuard guard;
     cli::SetLanguage("zh-CN");

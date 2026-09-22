@@ -22,9 +22,13 @@
 
 namespace lubancode::app {
 
-// 精炼的硬超时(秒):看门狗到点拉取消旗。单子预算 3-5 秒,取上限再留
-// 一分慢网余量——超了就保留本地标题,不为十几个 token 等下去。
-inline constexpr int kTitleRefineTimeoutSecs = 5;
+// 精炼的硬超时(秒):看门狗到点拉取消旗。直连 API 时几秒尽够;中转
+// (relay/代理)网络下建连+握手+排队+思考压 low+回包,5 秒打不住——
+// 2026-09-22 真机确诊:主回合同一网络能跑 2m41s,标题却 5 秒就毙。放宽
+// 到 30 秒:全程异步、收货在空闲边界,飞多久不卡前台,放宽零感知。代价
+// 是退出兜底窗(SessionTitleRefiner 的 kShutdownGrace)外的悬账被弃
+// ——本地标题已保住,usage 丢一笔可接受。
+inline constexpr int kTitleRefineTimeoutSecs = 30;
 
 // 精炼请求的输出上限(单子预算:标题十几个字,不预留 100 tokens)。
 inline constexpr int kTitleRefineMaxTokens = 24;
