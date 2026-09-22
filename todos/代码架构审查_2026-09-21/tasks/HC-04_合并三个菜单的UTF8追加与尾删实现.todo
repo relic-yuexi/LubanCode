@@ -1,6 +1,6 @@
 # HC-04：合并三个菜单的UTF8追加与尾删实现
 
-状态：待修复。本次只审查、建单，未改源码、未编译、未跑测试。
+状态：已修（PR #201，CI 绿，待合并）；提交 f1615e0a 纯合并，行为零变更。
 
 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`；先完成职责表，再据实际调用判定。
 
@@ -35,6 +35,14 @@ text.erase(pos);
 验收：三文件不再各自维护UTF-8位操作；组合字符、ZWJ序列保持原先码点删除行为；三个面板功能差别保留。
 
 相关已有 TODO：未找到专门负责这组三份函数的既有单。本单独立交付，不塞进终端大重构。
+
+## 勾账证据（2026-09-22）
+
+- 交付：PR #201（base main，分支 worktree-agent-ae8f960f3794ed775），提交 f1615e0a。
+- 修法与单子一致：三对同构函数抽成 src/cli/menu_text_edit.hpp 一份内核，函数体逐字节照搬原实现；三调用点只换函数来源——各删本地两函数、加一行 include，净删 87 行/增 3 行；状态机、光标、粘贴规则一字未动。
+- 测试：新增 tests/unit/cli/test_menu_text_edit.cpp（黄金字节 a/é/灰/🙂 逐位对齐；越界 0x110000/0xFFFFFFFF 整码点丢弃；代理项 3 字节照编；空串安全；孤立续字节退到串首；组合附标 U+0301 只掉附标、ZWJ 序列只掉末尾一个码点；同一键序列 gray🙂灰 打入退删，custom_text/filter/search 逐步逐串相等）。既有三册 golden（test_choice_menu/test_provider_switch/test_session_picker）零改动全绿。
+- CI：PR #201 run 35682436991（pull_request）rollup conclusion=success。macos-clang 腿全量 612 册测试 100% passed（含 unit.cli.menu_text_edit #256 Passed，0.03s），changes/lane/install-scripts(ubuntu+windows) 全 success。ci.yml lane 规则明写：非 main push、非记忆 worker/Windows 敏感面、非根 CMakeLists 的 PR 只跑 macOS 单腿——本单纯 cli 域，按设计单腿即全量。push 跛 run 35682421224 被并发组砍，PR #167/#169 同款常态，不作数。
+- 未夹带：line_editor.cpp 的 Utf32ToUtf8 原样未动（末支无条件编码、越界值不丢，合同不同，单子明令不替换）；platform 截断尺（TruncateUtf8Prefix 是字节帽前缀刀）未借用，纯逻辑头不挂 platform 依赖；src/memory/recall_engine.cpp 另有一份 AppendUtf8（uint32_t 形参、解码器语境）属 memory 域，不在本单 cli 域面内，未动。
 
 ## 交接边界
 
