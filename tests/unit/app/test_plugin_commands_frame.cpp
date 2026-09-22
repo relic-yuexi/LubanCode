@@ -14,7 +14,9 @@
 
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -119,9 +121,25 @@ std::string MakeV2ManifestText(int tool_count) {
 }
 
 std::vector<std::shared_ptr<const runtime::PluginManifest>> MakeManifests(int tool_count) {
+    // v2 的 runtime.entry 校验要求插件目录里真有那只 .lua(宿主合同:entry
+    // 是插件根下的普通文件)——manifest 配真 temp 目录,不传幽灵路径。
+    static const std::string run_id = std::to_string(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    static int sequence = 0;
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() /
+                                      ("lubancode-plugin-frame-" + run_id + "-" +
+                                       std::to_string(++sequence));
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    std::ofstream lua(dir / "probe.lua", std::ios::binary | std::ios::trunc);
+    lua << "return { go = function(input) return \"ok\" end }\n";
+    lua.close();
+
     const std::string text = MakeV2ManifestText(tool_count);
-    auto parsed = runtime::ParsePluginManifest(text, std::filesystem::path("/test/frame-probe"));
+    auto parsed = runtime::ParsePluginManifest(text, dir);
+    // 解析挂了直接亮错,不静默吞(manifest 造错时测试要报因,不是装没装)。
     if (!parsed.has_value()) {
+        REQUIRE_MESSAGE(false, "测试 manifest 解析失败: " + parsed.error());
         return {};
     }
     std::vector<std::shared_ptr<const runtime::PluginManifest>> manifests;
