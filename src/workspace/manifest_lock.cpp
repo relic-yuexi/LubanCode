@@ -167,19 +167,32 @@ struct LockOwnerRecord {
 
 // 无 owner 的锁目录多老才算"旧格式/陈"——更年轻的视作对手"建目录与写
 // owner 账之间"的在建窗口,按持有保守拒。取 2 秒:开房路的有界等锁
-//(20×100ms)撑得过整个窗口。
+// 撑得过整个窗口(等锁档见 manifest.cpp kLockWait*)。
 constexpr auto kOwnerEstablishingWindow = std::chrono::seconds(2);
 
-// 读 owner 账。文件在但开不进来/读不懂 → nullopt + 人话(error 透出)。
-// Windows 防病毒/过滤驱动的短拒:同一拍有界重开,烧完才算真失败。
-std::optional<LockOwnerRecord> ReadLockOwner(const fs::path& owner_file, std::string* error) {
+// owner 读档的短拒重试档(10×25ms=250ms 预算,首试即中则零等待)。档的
+// 依据:windows-msvc 腿三案间歇红(2026-09 run 35611620658 att1 /
+// 35668147611 att1 / 35667534366 att6,均挂 ledger 册并发开房段)的病灶
+// 之一——防病毒/过滤驱动对 owner 的拦截窗实测可达几十毫秒(manifest.cpp
+// kTransientRead* 同一宗实测),旧档 3×25ms=75ms 装不下,耗尽后被折成
+// BrokenLock 死拒(Acquire 对它不磨),一次短拒就把整段排队顶翻。250ms
+// 给足 5 倍余量;POSIX 无共享违例,重试路径零开销零行为变化。
+constexpr int kOwnerReadAttempts = 10;
+constexpr auto kOwnerReadBackoff = std::chrono::milliseconds(25);
+
+// 读 owner 账。文件在但开不进来/读不懂 → nullopt + 人话(error 透出);
+// vanished 置真 = 打开失败中途文件已消失(持有者正释放:remove_all 先删
+// owner 后拆目录的窗)——这不是"读不懂",调用方按无 owner 路重新裁决,
+// 不许折 BrokenLock 终局拒绝。
+std::optional<LockOwnerRecord> ReadLockOwner(const fs::path& owner_file, std::string* error,
+                                             bool* vanished = nullptr) {
     const auto fail = [error](const std::string& message) {
         if (error != nullptr) *error = message;
         return std::optional<LockOwnerRecord>{};
     };
     std::string text;
     bool opened = false;
-    for (int attempt = 0; attempt < 3 && !opened; ++attempt) {
+    for (int attempt = 0; attempt < kOwnerReadAttempts && !opened; ++attempt) {
         std::ifstream file(owner_file, std::ios::binary);
         if (file.is_open()) {
             std::ostringstream buffer;
@@ -188,7 +201,13 @@ std::optional<LockOwnerRecord> ReadLockOwner(const fs::path& owner_file, std::st
             opened = true;
             break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        std::error_code gone_ec;
+        if (!fs::exists(owner_file, gone_ec) && !gone_ec) {
+            if (vanished != nullptr) *vanished = true;
+            return fail("owner 文件在读取途中消失(持有者释放竞态): " +
+                        PathToUtf8(owner_file));
+        }
+        std::this_thread::sleep_for(kOwnerReadBackoff);
     }
     if (!opened) return fail("owner 文件开不进来(重试后仍失败): " + PathToUtf8(owner_file));
     const auto json = nlohmann::json::parse(text, nullptr, false);
@@ -313,7 +332,14 @@ ManifestLock::Result ManifestLock::TryAcquire(const fs::path& workspace_dir, Man
         std::error_code owner_ec;
         if (fs::exists(owner_file, owner_ec)) {
             std::string read_error;
-            const auto record = ReadLockOwner(owner_file, &read_error);
+            bool vanished = false;
+            const auto record = ReadLockOwner(owner_file, &read_error, &vanished);
+            if (!record.has_value() && vanished) {
+                // 持有者释放竞态(owner 先删、目录后拆):不是坏锁。退回去
+                // 下一轮重占——目录拆完即得手;残留空壳落 mtime/旧格式门。
+                std::this_thread::sleep_for(kOwnerReadBackoff);
+                continue;
+            }
             if (!record.has_value()) {
                 // owner 在但读不懂:不敢动,明报(看不懂就更不能删)。
                 result.status = Status::BrokenLock;
@@ -381,6 +407,23 @@ ManifestLock::Result ManifestLock::Acquire(const fs::path& workspace_dir, Manife
     return result;
 }
 
+// 无 owner 账(或 owner 读取途中消失)时的裁决:目录年轻=在建窗口,按
+// 持有;老=旧格式锁,交取锁路隔离。探不出时间按持有保守。
+bool OwnerlessHeld(const fs::path& dir, std::string* note) {
+    std::error_code mtime_ec;
+    const auto modified = fs::last_write_time(dir, mtime_ec);
+    if (mtime_ec) {
+        if (note != nullptr) *note = "锁目录在但读不出时间,按持有保守";
+        return true;
+    }
+    if (fs::file_time_type::clock::now() - modified < kOwnerEstablishingWindow) {
+        if (note != nullptr) *note = "锁正在建立";
+        return true;
+    }
+    if (note != nullptr) *note = "旧格式锁(无 owner)";
+    return false;
+}
+
 bool ManifestLock::HolderAlive(const fs::path& workspace_dir, std::string* detail) {
     const auto say = [detail](const std::string& note) {
         if (detail != nullptr) *detail = note;
@@ -399,21 +442,16 @@ bool ManifestLock::HolderAlive(const fs::path& workspace_dir, std::string* detai
         return true;
     }
     if (!has_owner) {
-        std::error_code mtime_ec;
-        const auto modified = fs::last_write_time(dir, mtime_ec);
-        if (mtime_ec) {
-            say("锁目录在但读不出时间,按持有保守");
-            return true;
-        }
-        if (fs::file_time_type::clock::now() - modified < kOwnerEstablishingWindow) {
-            say("锁正在建立");
-            return true;
-        }
-        say("旧格式锁(无 owner)");
-        return false;  // 交给取锁路隔离
+        return OwnerlessHeld(dir, detail);  // 交给取锁路隔离
     }
     std::string read_error;
-    const auto record = ReadLockOwner(owner_file, &read_error);
+    bool vanished = false;
+    const auto record = ReadLockOwner(owner_file, &read_error, &vanished);
+    if (!record.has_value() && vanished) {
+        // owner 在读取途中消失(持有者释放竞态):按无 owner 的 mtime 重新
+        // 裁决,不按"读不懂"保守判活。
+        return OwnerlessHeld(dir, detail);
+    }
     if (!record.has_value()) {
         say("owner 读不懂,按持有保守: " + read_error);
         return true;

@@ -437,7 +437,8 @@ TEST_CASE("manifest 事务锁: 他进程活持有——有界等待烧完回 wor
     REQUIRE(WaitForFile(ready, 20000));
     REQUIRE(Read(ready).rfind("ok", 0) == 0);
 
-    // 有界等待(20×100ms)烧完:如实回 workspace.locked,不悄悄覆盖旧账。
+    // 有界等待(60×100ms,ledger 册间歇红后加宽,见 manifest.cpp kLockWait*)
+    // 烧完:如实回 workspace.locked,不悄悄覆盖旧账。
     auto refused = workspace::OpenOrRegisterWorkspace(workspaces, identity, 2000);
     CHECK_FALSE(refused.has_value());
     CHECK(refused.error().find(std::string(workspace::contracts::kErrWorkspaceLocked)) !=

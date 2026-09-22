@@ -12,6 +12,16 @@ on:
   push:
     branches: [main, "worktree-agent-*", "ci/**"]
   pull_request:
+  # 手动单册反复跑:windows 间歇红(flake)诊治用(单子《workspace 索引册
+  # windows 间歇红》)。test_filter 填 ctest -R 正则(如
+  # "integration\.workspace\.workspace_index_ledger"),空 = 全量;dispatch
+  # 一律双平台跑 build-test(诊断 windows 时序,POSIX 腿顺带对账)。
+  workflow_dispatch:
+    inputs:
+      test_filter:
+        description: "ctest -R 正则,空 = 全量"
+        required: false
+        default: ""
 
 concurrency:
   # A branch push and its PR share one run slot; merge-to-main keeps its own slot.
@@ -37,6 +47,15 @@ jobs:
         id: c
         shell: bash
         run: |
+          # 手动 dispatch 不看 diff:指定 ref 上的代码就是要验的代码,直接
+          # 放双平台(build-test);asan/tsan 诊断腿不沾(单册诊断用不着)。
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo 'memory_worker=true' >> "$GITHUB_OUTPUT"
+            echo 'agent_lifetime=false' >> "$GITHUB_OUTPUT"
+            echo 'workflow_threads=false' >> "$GITHUB_OUTPUT"
+            echo 'code=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             BASE="${{ github.event.pull_request.base.sha }}"
           elif [ "$GITHUB_REF" != "refs/heads/main" ]; then
@@ -92,9 +111,12 @@ jobs:
             # 数秒,同为 windows 独有病灶,同列。
             # 平台原子写本体(FD-04 提交阶段合同):MoveFileExW 换名、目录
             # FlushFileBuffers 与过滤驱动短拒分类都在 windows 上显形,改到
-            # 这三个文件的 PR 须双平台验。
+            # 这三个文件的 PR 须双平台验。workspace 登记事务锁(SV-11)同
+            # 宗:owner 账读档/隔离改名/释放删除都会被防病毒/过滤驱动短拒
+            #(ledger 册 2026-09-22 三案 windows 间歇红),锁路径改动须双
+            # 平台验。
             case "$f" in
-              src/gateway/work_pump.cpp|src/gateway/work_pump.hpp|src/gateway/control_server.cpp|tests/unit/app/test_assistant_task_face.cpp|src/telemetry/*|tests/unit/telemetry/*|tests/integration/telemetry/*|src/platform/atomic_write.cpp|src/platform/atomic_write.hpp|tests/unit/platform/test_atomic_write.cpp)
+              src/gateway/work_pump.cpp|src/gateway/work_pump.hpp|src/gateway/control_server.cpp|tests/unit/app/test_assistant_task_face.cpp|src/telemetry/*|tests/unit/telemetry/*|tests/integration/telemetry/*|src/platform/atomic_write.cpp|src/platform/atomic_write.hpp|tests/unit/platform/test_atomic_write.cpp|src/workspace/manifest_lock.cpp|src/workspace/manifest_lock.hpp)
                 memory_worker=true ;;
             esac
             case "$f" in
@@ -331,7 +353,15 @@ jobs:
       - name: Test
         id: test
         shell: bash
-        run: ctest --test-dir build -C Release --parallel 4 --output-on-failure --no-tests=error
+        run: |
+          # 手动 dispatch 可带 ctest -R 正则单跑一册(windows 间歇红诊治);
+          # 空 = 全量,与 push/PR 行为一字不差。
+          FILTER="${{ inputs.test_filter }}"
+          if [ -n "$FILTER" ]; then
+            ctest --test-dir build -C Release -R "$FILTER" --parallel 4 --output-on-failure --no-tests=error
+          else
+            ctest --test-dir build -C Release --parallel 4 --output-on-failure --no-tests=error
+          fi
 
       - name: Upload test evidence (T16 baseline)
         if: always()
@@ -347,12 +377,12 @@ jobs:
       # 四件套的协议路(playwright 未装时浏览器幕按设计跳,协议与口子
       # 已钉)。别的腿是内核账,不掺和。
       - name: Shell static smoke (windows only)
-        if: matrix.name == 'windows-msvc'
+        if: matrix.name == 'windows-msvc' && inputs.test_filter == ''
         shell: bash
         run: node scripts/tests/app_shell_smoke.js
 
       - name: Web console end-to-end smoke (windows only)
-        if: matrix.name == 'windows-msvc'
+        if: matrix.name == 'windows-msvc' && inputs.test_filter == ''
         shell: bash
         run: node scripts/tests/app_server_web_console_smoke.js --binary build/Release/lubancode.exe
 
