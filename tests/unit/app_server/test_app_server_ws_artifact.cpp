@@ -16,6 +16,7 @@
 #include <string_view>
 #include <thread>
 
+#include "app_server/http_support.hpp"
 #include "app_server/ws_frames.hpp"
 #include "app_server/ws_sockets.hpp"
 #include "app_server/ws_transport.hpp"
@@ -246,6 +247,44 @@ TEST_CASE("artifact 面:HTTP 应答拼装(头与正文字节)") {
     CHECK(response.substr(response.size() - 6) == "\r\n\x89PNG"); // 头收尾 + 正文原样
 }
 
+// 公共加载器(HC-03:两套承载同一份;WS 与助理 Web 的线上测试分别在
+// 本册与 test_local_web_server.cpp 钉行为,这里钉函数本身的返回口径)。
+TEST_CASE("artifact 加载器:好名字读出字节与 MIME,其余一律 ok=false") {
+    const std::string dir = MakeTempDir("lubancode_test_ws_artifact_loader");
+    const std::string png = PngBytes("loader");
+    PlantFile(dir, "art-01234567.png", png);
+    PlantFile(dir, "art-89abcdef.jpg", "jpg-bytes");
+    PlantFile(dir, "art-abcdef01.jpeg", "jpeg-bytes");
+    PlantFile(dir, "secret.txt", "TOP-SECRET-BYTES");
+
+    SUBCASE("ok:字节原样,MIME 三选一") {
+        const auto got_png = app_server::LoadArtifactBytes(dir, "art-01234567.png");
+        REQUIRE(got_png.ok);
+        CHECK(got_png.bytes == png);
+        CHECK(std::string_view(got_png.mime) == "image/png");
+
+        const auto got_jpg = app_server::LoadArtifactBytes(dir, "art-89abcdef.jpg");
+        REQUIRE(got_jpg.ok);
+        CHECK(got_jpg.bytes == "jpg-bytes");
+        CHECK(std::string_view(got_jpg.mime) == "image/jpeg");
+
+        const auto got_jpeg = app_server::LoadArtifactBytes(dir, "art-abcdef01.jpeg");
+        REQUIRE(got_jpeg.ok);
+        CHECK(got_jpeg.bytes == "jpeg-bytes");
+        CHECK(std::string_view(got_jpeg.mime) == "image/jpeg");
+    }
+    SUBCASE("坏名字/没这枚/没配目录:统一按没有这枚回") {
+        CHECK_FALSE(app_server::LoadArtifactBytes(dir, "../secret.txt").ok);   // 穿越
+        CHECK_FALSE(app_server::LoadArtifactBytes(dir, "secret.txt").ok);      // 非内容寻址名
+        CHECK_FALSE(app_server::LoadArtifactBytes(dir, "art-ffffffff.png").ok); // 形状对但没这枚
+        CHECK_FALSE(app_server::LoadArtifactBytes("", "art-01234567.png").ok); // 口子没开
+    }
+    SUBCASE("超限:收窄上限走同一条 64MiB 路") {
+        CHECK(app_server::LoadArtifactBytes(dir, "art-01234567.png", png.size()).ok);
+        CHECK_FALSE(app_server::LoadArtifactBytes(dir, "art-01234567.png", png.size() - 1).ok);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 真监听回环:GET /artifact 一幕一幕
 // ---------------------------------------------------------------------------
@@ -407,5 +446,51 @@ TEST_CASE("ws artifact 面:GET 之后 WS 升级照常(承载面互不搅)") {
     auto session_future = session_promise.get_future();
     REQUIRE(session_future.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
     CHECK(session_future.get() != nullptr); // Accept 交出了升级 Session
+    accept_thread.join();
+}
+
+// 公共读头(http_support,HC-03 行为批):上限只算头部本体,越界(含终止
+// 符的最后一块拉过限、或超长流无终止符)一律拒断——两套承载同一只读头,
+// local web 侧的对偶测试在 test_local_web_server.cpp。
+TEST_CASE("ws artifact 面:头部越 16KiB 拒断,承载面照常伺候下一条") {
+    const std::string dir = MakeTempDir("lubancode_test_ws_artifact_headlimit");
+    PlantFile(dir, "art-01234567.png", PngBytes("after-limit"));
+
+    ArtifactHarness harness(dir);
+    std::thread accept_thread([&] {
+        while (harness.transport->Accept() != nullptr) {
+        }
+    });
+
+    const std::string upgrade_head =
+        "GET /ws HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        "Sec-WebSocket-Version: 13\r\n";
+
+    // 头部本体越过 16KiB(填充头一行顶过限):拒断——无 101 无 400,连接
+    // 直接收线(修复前含终止符的最后一块会漏过上限检查照常升级)。
+    {
+        RawHttpClient client(harness.port());
+        const std::string padded =
+            upgrade_head + "X-Pad: " + std::string(17 * 1024, 'x') + "\r\n\r\n";
+        CHECK(client.SendRaw(padded).empty());
+    }
+    // 超长流无终止符:到限即断。
+    {
+        RawHttpClient client(harness.port());
+        CHECK(client.SendRaw(upgrade_head + "X-Pad: " + std::string(20 * 1024, 'x')).empty());
+    }
+    // 下一条正常连接照常伺候(承载面没被捣乱的拖垮)。
+    {
+        RawHttpClient client(harness.port());
+        const auto shape = ParseResponse(client.Get("/artifact/art-01234567.png"));
+        CHECK(shape.status == 200);
+        CHECK(shape.body == PngBytes("after-limit"));
+    }
+
+    harness.transport->Stop();
     accept_thread.join();
 }

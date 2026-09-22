@@ -47,6 +47,7 @@
 #include "app/version.hpp"
 #include "app_server/connection_snapshot.hpp"
 #include "app_server/dispatcher.hpp"
+#include "app_server/http_support.hpp"
 #include "app_server/local_web_server.hpp"
 #include "app_server/protocol.hpp"
 #include "app_server/schema.hpp"
@@ -130,7 +131,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         const std::int64_t now = SteadyMs();
         for (auto it = pending_.begin(); it != pending_.end(); ++it) {
-            if (app_server::WebConstantTimeEqual(given, it->secret)) {
+            if (app_server::ConstantTimeEqual(given, it->secret)) {
                 const bool expired = now > it->expires_at_ms;
                 pending_.erase(it);  // 过期/用过都焚
                 if (expired) {
@@ -158,7 +159,7 @@ public:
 
     // 控制口凭据校验(锁文件里的 control_secret;恒时比较)。
     bool ValidateControlSecret(const std::string& given) const {
-        return app_server::WebConstantTimeEqual(given, control_secret_);
+        return app_server::ConstantTimeEqual(given, control_secret_);
     }
 
 private:

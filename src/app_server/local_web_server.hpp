@@ -130,8 +130,4 @@ private:
     std::string last_error_;
 };
 
-// 恒时比较(与 ws_transport 同一把尺;这里独立放一份给 bootstrap/control
-// 凭据用,不跨编译单元借私有静态)。
-bool WebConstantTimeEqual(std::string_view given, std::string_view expected);
-
 }  // namespace lubancode::app_server

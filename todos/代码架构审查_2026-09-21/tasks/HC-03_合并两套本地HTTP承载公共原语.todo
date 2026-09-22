@@ -1,0 +1,62 @@
+# HC-03：合并两套本地HTTP承载公共原语
+
+状态：已修。PR #200,CI run 35673570330 rollup 绿(windows-msvc/macos-clang/lane/install-scripts 双平台全过,2026-09-22)。纯搬移批 6e8daa33、边界修正批 e1ea3d85;两轮测试构造修复 88c3661b/9c69695f(产品码零改动)。
+
+基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`；先完成职责表，再据实际调用判定。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象(最短代码证据) | 具体后果 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| HC-03 | A | 中 | src/app_server/ws_transport.cpp:24<br>src/app_server/ws_transport.cpp:36<br>src/app_server/ws_transport.cpp:60<br>src/app_server/ws_transport.cpp:246<br>src/app_server/local_web_server.cpp:27<br>src/app_server/local_web_server.cpp:35<br>src/app_server/local_web_server.cpp:126<br>src/app_server/local_web_server.cpp:312 | 两处 ReadUntilHeaderEnd 都用16KiB上限与2048字节buffer；两处恒时比较逐字节异或；artifact都重复64MiB检查、读文件及MIME选择。 | 改头部边界、产物大小或读失败规则须改两套。两处读头还共同在Recv之前查上限，含终止符的最后一块可越过16KiB而直接成功。 | 抽出 app_server 内部 bounded HTTP head reader、恒时字节比较、只读artifact加载结果；两个宿主调用同一实现。保留各自认证门及响应头策略。先纯搬移，再单独修正头部边界。 | Assistant 使用Cookie/同源/CSP；独立WS使用token/CORS/不可变缓存。只能合并机制，不能统一认证策略或直接复用整段路由。 |
+
+职责依据：两个宿主均以 net::Socket 接收有界 HTTP 头、加载内容寻址图片；这些机制不依赖其认证方式。`local_web_server.cpp:33-34` 甚至明确说明“同尺复制”。
+
+最短证据：
+```cpp
+// 两个 ReadUntilHeaderEnd 都是同一顺序
+while (header.find("\r\n\r\n") == std::string::npos) {
+    if (header.size() > kMaxHeaderBytes) { return false; }
+    const long got = socket.Recv(buffer, sizeof(buffer));
+    if (got <= 0) { return false; }
+    header.append(buffer, buffer + got);
+}
+return true;
+```
+
+WS 那份常量名叫 kMaxUpgradeBytes，其余控制逻辑相同。最后一读若把缓冲从16KiB以内加到16KiB以上，且同块带终止符，循环直接退出，不再查上限。不是无限读取，但不符合两处声称的16KiB硬边界。artifact 两处同样先校验 `IsValidArtifactName`，再 `file_size > 64MiB`，最后整读 bytes、按 png/jpeg 选MIME。
+
+是否应合并：读头、恒时比较、产物加载应合并。路由认证不应合并：Assistant 的 Cookie、Host/Origin、CSP、no-store，与独立WS的首帧token、Bearer/query token、CORS、immutable缓存语义不同。POST body读取只在Assistant存在，不硬凑成重复。
+
+删除口径：保留一份约16行读头、约11行比较、约33行产物读入后，约60行重复逻辑可删除；不算注释、新增声明与路由错误消息，实际净减略小。
+
+实施步骤：
+- [x] 第一批只提取公共机制，固定现有返回/报错语义，让两个宿主通过自己的认证门调用。(6e8daa33:ReadUntilHeaderEnd/ConstantTimeEqual/LoadArtifactBytes 落 src/app_server/http_support.hpp/cpp 一处定义;两宿主经各自认证门调用,错误应答次序与话面逐字节不变;WebConstantTimeEqual 全仓引用(assistant_host 两处)切换后删除)
+- [x] 以单独提交修16KiB边界；定义上限仅计算头部，保留preread body，避免合法POST随包到达时误拒。(e1ea3d85:上限按头部本体(含终止符)计,找到终止符后 head_end+4<=16KiB 收口,未到终止符 size>=上限即拒;preread 不计入,随包 POST 不误拒)
+- [x] 覆盖拆包、边界内终止、最后一块越界、读失败、产物消失/超限。(test_local_web_server:劈两段发 healthz 照常、恰 16KiB 200、16KiB+1 与超长无终止符拒断、越界后下条连接照常;test_app_server_ws_artifact:LoadArtifactBytes 单测含没这枚/坏名字/没配目录/收窄上限同一条超限路,升级头越界拒断。读失败与产物消失共用 404 分支,未单独造截断竞态)
+- [x] 两种认证面分别验证未授权拒绝，保证CSP/CORS/缓存头仍按原合同。(既有测试全数保留:WS token 403/错 token 即断;助理 401/CSP/nosniff;ws artifact CORS/immutable;新增助理 artifact 正路径 200+Content-Type+CSP 断言,双 CI 平台过)
+
+验收：公共机制只有一份；相同边界输入在两宿主得到相同读取结果；策略差异保留。主批为无行为搬移，边界修正另列行为验收，不混报“全程无行为变化”。
+
+相关已有 TODO：`../../常驻助理Web主界面_CPP本地服务与Gateway总装.todo` W1 已要求HTTP有界并复用socket/HTTP设施；本单补公共机制落点。未覆盖 channel 的 WebSocket 客户端，也不统一 api/net 两类HTTP客户端。
+
+## 交接边界
+
+- 批次：第1批。
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 并行：可与修改文件不相交的HC任务并行。
+- 禁止共改：以下文件在本单实施期间只归本单负责人；其他任务先改自己的独立文件，接口变动等本单合入后再接。
+
+- `src/app_server/ws_transport.cpp`
+- `src/app_server/local_web_server.cpp`
+- `src/app_server/local_web_server.hpp`
+- `src/app_server/http_support.hpp（新增）`
+- `src/app_server/http_support.cpp（新增）`
+- `tests/unit/app_server/test_app_server_ws.cpp`
+- `tests/unit/app_server/test_app_server_ws_artifact.cpp`
+- `tests/unit/app_server/test_local_web_server.cpp`
+
+预计可删除旧重复代码：约60行；以正文口径为准。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 当前清单未见同文件冲突；新增公共头或CMake源登记先通知集成人。
