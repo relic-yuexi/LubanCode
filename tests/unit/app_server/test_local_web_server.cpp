@@ -583,15 +583,21 @@ TEST_CASE("local web:头部 16KiB 边界——恰在限内放行,越界拒断") 
     harness.Start();
     const int port = harness.port();
 
-    // 头部本体(含 \r\n\r\n 终止符)造到指定总长:固定部分之外用 X-Pad 填。
-    // X-Pad 行尾 \r\n 与头部终止 \r\n 分开写,长度账不混。
+    // 头部本体(含 \r\n\r\n 终止符)造到指定总长:先拼固定部分,填 pad 到
+    // total-4,末尾统一补 \r\n\r\n(其前半兼作 X-Pad 行尾)。
     const auto make_request = [port](std::size_t total_head_bytes) {
         const std::string fixed = "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:" +
                                   std::to_string(port) + "\r\nConnection: close\r\n";
-        const std::size_t overhead = std::string("X-Pad: ").size() + 2 + 4;  // 名字+行尾+终止符
-        const std::size_t pad = total_head_bytes - fixed.size() - overhead;
-        return fixed + "X-Pad: " + std::string(pad, 'x') + "\r\n" + "\r\n";
+        std::string request = fixed + "X-Pad: ";
+        if (total_head_bytes > request.size() + 4) {
+            request.append(total_head_bytes - request.size() - 4, 'x');
+        }
+        request += "\r\n\r\n";
+        return request;
     };
+    // 长度账自检:恰限/越限两案只差 1 字节,构造差 1 字节结论就反。
+    CHECK(make_request(app_server::kMaxHeaderBytes).size() == app_server::kMaxHeaderBytes);
+    CHECK(make_request(app_server::kMaxHeaderBytes + 1).size() == app_server::kMaxHeaderBytes + 1);
 
     SUBCASE("头部本体恰 16KiB(含终止符):照常应答") {
         RawHttpClient client(port);
