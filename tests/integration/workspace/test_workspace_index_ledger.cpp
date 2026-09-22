@@ -423,10 +423,10 @@ TEST_CASE("账本制: 并发开房——同路径一间房,异路径各开各,�
         opener.join();
     }
     if (open_failures.load() > 0) {
-        // FAIL 直接吃 string:传 char* 会被 doctest 当指针 stringify,首错
-        // 串整个丢失(三案间歇红全只打出一枚裸指针,诊断没账)。
-        FAIL("异路径并发开房失败 " + std::to_string(open_failures.load()) + "/8,首个错误: " +
-             first_failure_note);
+        // FAIL 逗号流式出账:传 char* 指针或整段 string 拼接都会编译炸/
+        // 被当指针 stringify,首错串整个丢失(三案间歇红全只打出一枚裸
+        // 指针,诊断没账)。
+        FAIL("异路径并发开房失败 ", open_failures.load(), "/8,首个错误: ", first_failure_note);
     }
     CHECK(RoomCount(workspaces) == 8);
     // 账本解得开、收得齐(读-改-写可能丢笔,丢了的下一段验自愈)。
@@ -467,8 +467,7 @@ TEST_CASE("账本制: 并发开房——同路径一间房,异路径各开各,�
         opener.join();
     }
     if (open_failures.load() > 0) {
-        FAIL("同路径并发开房失败 " + std::to_string(open_failures.load()) + "/8,首个错误: " +
-             first_failure_note);
+        FAIL("同路径并发开房失败 ", open_failures.load(), "/8,首个错误: ", first_failure_note);
     }
     CHECK(RoomCount(workspaces) == 9);
 }
