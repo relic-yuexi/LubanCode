@@ -40,4 +40,27 @@ std::string BuildTurnFooterLine(const std::string& text, int console_width, bool
 // 窄屏退化的门槛:比这窄就只写文案(单子:窄于四十列不硬塞左右长线)。
 inline constexpr int kTurnFooterMinColumns = 40;
 
+// ---------------------------------------------------------------------------
+// divider::line —— 分割线统一接口(TUI 界面美化单批 0)
+//
+// 批 5-6 要把散落各处的"── 组名 ──"手拼横线收口到这里:渲染层只调
+// divider::line,不再自己 repeat 字符。名字按单子点名的 `divider::line`
+// 小写(全仓 public API 唯一一枚小写函数,属单子钦定,不是笔误)。
+// 纯文本、不夹 ANSI——要不要包颜色由调用方拿主题自己裹。
+// ---------------------------------------------------------------------------
+
+namespace divider {
+
+enum class Style {
+    Ascii,  // "-"  :降级/重定向/纯 ASCII 终端
+    Light,  // "─" (U+2500):默认,与 BuildDividerLine 同一枚字符
+    Heavy,  // "━" (U+2501):重分割,分组标题下那一档
+};
+
+// width 是显示列数(不是字节数):返回 width 个所选字符铺成的横线;
+// width <= 0 返回空串,与 BuildDividerLine 同规。
+std::string line(Style style, int width);
+
+}  // namespace lubancode::cli::divider
+
 }  // namespace lubancode::cli

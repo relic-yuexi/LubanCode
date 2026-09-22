@@ -40,6 +40,19 @@ Theme DarkTheme() {
     t.surface_user_fg = std::string();
     t.surface_user_marker = t.stats;
     t.surface_padding = t.surface_user_bg;
+    // 排版基件批 0:标题走亮青加粗(与 banner 同族),边框压暗一档别抢正
+    // 文;首列亮白加粗,值列默认前景(与"模型正文保持原色"一脉,留空)。
+    t.frame_title = "\x1b[1;36m";
+    t.frame_border = "\x1b[2;36m";
+    t.row_label = "\x1b[1;37m";
+    t.row_value = std::string();
+    t.row_muted = t.stats;
+    t.table_header = "\x1b[1;36m";
+    t.table_pass = "\x1b[32m";
+    t.table_skip = t.stats;
+    t.list_bullet_user = "\x1b[35m";
+    t.list_bullet_project = "\x1b[36m";
+    t.key_hint = t.stats;
     return t;
 }
 
@@ -73,6 +86,18 @@ Theme LightTheme() {
     t.surface_user_fg = std::string();
     t.surface_user_marker = t.stats;
     t.surface_padding = t.surface_user_bg;
+    // 排版基件批 0:浅底配色全部压深一档,与 light 主题既有字段同尺。
+    t.frame_title = "\x1b[1;34m";
+    t.frame_border = "\x1b[2;34m";
+    t.row_label = "\x1b[1;30m";
+    t.row_value = std::string();
+    t.row_muted = t.stats;
+    t.table_header = "\x1b[1;34m";
+    t.table_pass = "\x1b[32m";
+    t.table_skip = "\x1b[90m";
+    t.list_bullet_user = "\x1b[35m";
+    t.list_bullet_project = "\x1b[36m";
+    t.key_hint = t.stats;
     return t;
 }
 

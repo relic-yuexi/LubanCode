@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <utility>
 
+#include "cli/format_utils.hpp"  // format::AlignLeft/AlignRight:表格列对齐同一把尺
 #include "cli/grapheme.hpp"
 #include "cli/line_editor.hpp"
 #include "cli/terminal_port.hpp"
@@ -761,5 +762,378 @@ FooterResizeRecoveryPlan ComputeFooterResizeRecovery(
     plan.cursor_reflowed = true;
     return plan;
 }
+
+// ---------------------------------------------------------------------------
+// TUI 排版基件(TUI 界面美化单批 0):frame::* 三助手。纯函数,零 IO、零
+// 写死 ANSI、零内嵌文案——颜色全从 Theme 字段来,文案全由调用方递。
+// ---------------------------------------------------------------------------
+
+namespace frame {
+
+namespace {
+
+// plain 探针:与全仓同一把尺(theme.reset 空串 = plain/no-color/T3 降级,
+// 见 format_utils.cpp FormatContextBreakdown 等处先例)。
+bool IsPlainTheme(const Theme& theme) {
+    return theme.reset.empty();
+}
+
+// 三档边框字符。UTF-8 字节串手写(与 divider.cpp 同一待遇,不引宽字符
+// 机器):Light 是 U+2500 族,Double 是 U+2550 族,Ascii 纯 7 位。
+struct BorderChars {
+    const char* horizontal;
+    const char* vertical;
+    const char* top_left;
+    const char* top_right;
+    const char* bottom_left;
+    const char* bottom_right;
+    std::size_t unit_bytes;  // horizontal 单枚字节数(竖线/角同宽族)
+};
+
+constexpr BorderChars kAsciiBorder{"-", "|", "+", "+", "+", "+", 1};
+constexpr BorderChars kLightBorder{"\xe2\x94\x80", "\xe2\x94\x82", "\xe2\x94\x8c", "\xe2\x94\x90",
+                                   "\xe2\x94\x94", "\xe2\x94\x98", 3};
+constexpr BorderChars kDoubleBorder{"\xe2\x95\x90", "\xe2\x95\x91", "\xe2\x95\x94", "\xe2\x95\x97",
+                                    "\xe2\x95\x9a", "\xe2\x95\x9d", 3};
+
+const BorderChars& BorderFor(BoxStyle style) {
+    switch (style.flavor) {
+        case BoxStyle::Flavor::Ascii:
+            return kAsciiBorder;
+        case BoxStyle::Flavor::Double:
+            return kDoubleBorder;
+        case BoxStyle::Flavor::Light:
+        default:
+            return kLightBorder;
+    }
+}
+
+std::string RepeatUnit(const char* unit, std::size_t bytes, int count) {
+    if (count <= 0) {
+        return {};
+    }
+    std::string out;
+    out.reserve(bytes * static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        out.append(unit, bytes);
+    }
+    return out;
+}
+
+// 颜色包裹:color 空串(或 plain 主题)时原样返回,一个转义字节不加。
+std::string Colorize(const std::string& color, std::string_view text, const Theme& theme) {
+    if (color.empty()) {
+        return std::string{text};
+    }
+    return color + std::string{text} + theme.reset;
+}
+
+// 一行"带 ANSI 的文本 + 自己记的显示宽"——框内补空格按 cols 算,不回头
+// 量含转义的字节串(ANSI 零宽,量了必错)。
+struct RowOut {
+    std::string text;
+    int cols = 0;
+};
+
+// 内容行包框:上下边框(标题嵌上边框),左右各一格衬空,竖线 frame_border
+// 色。width 是整行显示宽预算(含边框共 4 列开销);<= 0 按内容自适应。
+// plain(隐藏装饰)时不包框:标题独立成行,内容行原样返回,预算无关。
+std::vector<std::string> WrapInBox(const std::vector<RowOut>& content, std::string_view title,
+                                   const Theme& theme, const BorderChars& border, int width) {
+    int inner = width - 4;  // 两侧"竖线 + 衬空"共 4 列
+    if (inner <= 0) {
+        inner = 0;
+        for (const RowOut& row : content) {
+            inner = (std::max)(inner, row.cols);
+        }
+        inner = (std::max)(inner, static_cast<int>(DisplayWidthUtf8(std::string{title})) + 3);
+    }
+    std::vector<std::string> lines;
+    if (IsPlainTheme(theme)) {
+        // 隐藏装饰:不画框、不塞一个转义字节,标题降为独立内容行。
+        if (!title.empty()) {
+            lines.emplace_back(title);
+        }
+        for (const RowOut& row : content) {
+            lines.push_back(row.text);
+        }
+        return lines;
+    }
+    // 上边框:┌─ Title ────┐;无标题时整条横线。标题段的列账:
+    // interior = h(1) + 空格(1) + title + 空格(1) + tail 枚 h,合须等于 inner。
+    const int title_cols = static_cast<int>(DisplayWidthUtf8(std::string{title}));
+    std::string top = theme.frame_border + border.top_left;
+    if (title.empty()) {
+        top += RepeatUnit(border.horizontal, border.unit_bytes, inner);
+    } else {
+        const int tail = inner - title_cols - 3;
+        top += RepeatUnit(border.horizontal, border.unit_bytes, 1) + " " +
+               Colorize(theme.frame_title, title, theme) + " " +
+               RepeatUnit(border.horizontal, border.unit_bytes, (std::max)(0, tail));
+    }
+    top += border.top_right + theme.reset;
+    lines.push_back(std::move(top));
+    const std::string v = theme.frame_border;
+    const std::string v_reset = theme.reset;
+    for (const RowOut& row : content) {
+        const int pad = (std::max)(0, inner - row.cols);
+        lines.push_back(v + border.vertical + " " + row.text +
+                        std::string(static_cast<std::size_t>(pad), ' ') + " " + border.vertical +
+                        v_reset);
+    }
+    lines.push_back(theme.frame_border + border.bottom_left +
+                    RepeatUnit(border.horizontal, border.unit_bytes, inner) + border.bottom_right +
+                    theme.reset);
+    return lines;
+}
+
+// FieldAccent -> 主题色(单子 5.3:错误/统计/Pass/Skip 全用既有语义位,不
+// 另立色)。
+const std::string& AccentColor(FieldAccent accent, const Theme& theme) {
+    switch (accent) {
+        case FieldAccent::Muted:
+            return theme.row_muted;
+        case FieldAccent::Error:
+            return theme.error;
+        case FieldAccent::Stats:
+            return theme.stats;
+        case FieldAccent::Pass:
+            return theme.table_pass;
+        case FieldAccent::Skip:
+            return theme.table_skip;
+        case FieldAccent::Title:
+            return theme.frame_title;
+        case FieldAccent::None:
+        default:
+            return theme.row_value;
+    }
+}
+
+const std::string& ToneColor(CellTone tone, const Theme& theme) {
+    static const std::string kNoColor;
+    switch (tone) {
+        case CellTone::Pass:
+            return theme.table_pass;
+        case CellTone::Fail:
+            return theme.error;  // fail 不另立色,走 error(单子 5.3)
+        case CellTone::Skip:
+            return theme.table_skip;
+        case CellTone::Normal:
+        default:
+            return kNoColor;  // Normal = 默认前景,不包色
+    }
+}
+
+// 单元格对齐:数值列右对齐(补在前,右端跨行对齐);其余左对齐补在后;
+// 末列左对齐时不补尾随空格(裸输出不带看不见的尾巴),但仍按列宽截断
+// ——窄预算削过的列,末列内容不许撑破框。
+std::string AlignCell(std::string_view cell, int col_width, bool align_right, bool is_last) {
+    if (align_right) {
+        return format::AlignRight(cell, col_width);
+    }
+    if (is_last) {
+        const std::string text{cell};
+        if (static_cast<int>(DisplayWidthUtf8(text)) <= col_width) {
+            return text;
+        }
+        return TruncateUtf8ToDisplayWidth(text, col_width);
+    }
+    return format::AlignLeft(cell, col_width);
+}
+
+}  // namespace
+
+std::vector<std::string> RenderList(std::string_view title, const std::vector<ListRow>& rows,
+                                    const Theme& theme, BoxStyle style, int width) {
+    if (rows.empty()) {
+        return {};  // 空态文案由调用方递(不新增 i18n 键的合同)
+    }
+    const bool plain = IsPlainTheme(theme);
+    // 内容预算:整行宽减去装框开销(竖线+衬空共 4 列);plain 无框全给。
+    const int budget = width > 0 ? width - (plain ? 0 : 4) : 0;
+    int label_width = 0;
+    for (const ListRow& row : rows) {
+        label_width = (std::max)(label_width, static_cast<int>(DisplayWidthUtf8(row.label)));
+    }
+    if (budget > 0) {
+        // label 列帽:预算的三分之一(下限 8),超了截断保字头。
+        label_width = (std::min)(label_width, (std::max)(8, budget / 3));
+    }
+    std::vector<RowOut> content;
+    content.reserve(rows.size());
+    for (const ListRow& row : rows) {
+        std::string bullet;
+        switch (row.bullet) {
+            case Bullet::User:
+                // "•"(U+2022) 的 UTF-8 手写,与边框字符同一待遇。
+                bullet = plain ? std::string("- ")
+                               : Colorize(theme.list_bullet_user, "\xe2\x80\xa2", theme) + " ";
+                break;
+            case Bullet::Project:
+                bullet = plain ? std::string("- ")
+                               : Colorize(theme.list_bullet_project, "\xe2\x80\xa2", theme) + " ";
+                break;
+            case Bullet::None:
+            default:
+                bullet = "  ";
+                break;
+        }
+        const int bullet_cols = 2;  // 项目符 + 一格空,三档同宽
+        const std::string label_cell = format::AlignLeft(row.label, label_width);
+        const int value_cols = static_cast<int>(DisplayWidthUtf8(row.value));
+        const int hint_cols = static_cast<int>(DisplayWidthUtf8(row.hint));
+        // 宽预算下装不下时先丢 hint,再截 value(保字头)。
+        bool keep_hint = !row.hint.empty();
+        if (budget > 0 && keep_hint &&
+            value_cols + 2 + hint_cols > budget - bullet_cols - label_width - 2) {
+            keep_hint = false;
+        }
+        std::string value_text = row.value;
+        if (budget > 0) {
+            const int room =
+                budget - bullet_cols - label_width - 2 - (keep_hint ? 2 + hint_cols : 0);
+            if (value_cols > room) {
+                value_text = TruncateUtf8ToDisplayWidth(row.value, (std::max)(0, room));
+            }
+        }
+        std::string line = bullet + Colorize(theme.row_label, label_cell, theme) + "  " +
+                           Colorize(theme.row_value, value_text, theme);
+        int cols = bullet_cols + label_width + 2 + static_cast<int>(DisplayWidthUtf8(value_text));
+        if (keep_hint) {
+            line += "  " + Colorize(theme.key_hint, row.hint, theme);
+            cols += 2 + hint_cols;
+        }
+        content.push_back(RowOut{std::move(line), cols});
+    }
+    return WrapInBox(content, title, theme, BorderFor(style), width);
+}
+
+std::vector<std::string> RenderTable(std::string_view title, const std::vector<TableColumn>& columns,
+                                     const std::vector<TableRow>& rows, const Theme& theme,
+                                     BoxStyle style, int width) {
+    if (columns.empty() || rows.empty()) {
+        return {};
+    }
+    const bool plain = IsPlainTheme(theme);
+    const int budget = width > 0 ? width - (plain ? 0 : 4) : 0;
+    // 列宽 = max(表头, 各行该列, min_width),显示列口径。
+    std::vector<int> col_widths(columns.size(), 0);
+    for (std::size_t c = 0; c < columns.size(); ++c) {
+        col_widths[c] = (std::max)(col_widths[c],
+                                   static_cast<int>(DisplayWidthUtf8(columns[c].header)));
+        col_widths[c] = (std::max)(col_widths[c], columns[c].min_width);
+        for (const TableRow& row : rows) {
+            if (c < row.cells.size()) {
+                col_widths[c] =
+                    (std::max)(col_widths[c], static_cast<int>(DisplayWidthUtf8(row.cells[c])));
+            }
+        }
+    }
+    if (budget > 0) {
+        // 总宽超预算:从最宽列起逐列削 1(削到 3 保底),短列不动。
+        const int sep_total = static_cast<int>(columns.size() - 1) * 2;
+        int total = sep_total;
+        for (const int w : col_widths) {
+            total += w;
+        }
+        while (total > budget) {
+            std::size_t widest = 0;
+            for (std::size_t c = 1; c < col_widths.size(); ++c) {
+                if (col_widths[c] > col_widths[widest]) {
+                    widest = c;
+                }
+            }
+            if (col_widths[widest] <= 3) {
+                break;  // 全列都到保底还超:不再削,交给终端折行(极端窄屏)
+            }
+            --col_widths[widest];
+            --total;
+        }
+    }
+    std::vector<RowOut> content;
+    // 表头行整行走 table_header 色("首列加粗"是数据行的事,见表下)。列间
+    // 两格;表头的行宽 = 各列宽 + 列间格。
+    {
+        std::string line;
+        int cols = 0;
+        for (std::size_t c = 0; c < columns.size(); ++c) {
+            if (c > 0) {
+                line += "  ";
+                cols += 2;
+            }
+            const std::string aligned =
+                AlignCell(columns[c].header, col_widths[c], /*align_right=*/false,
+                          /*is_last=*/c + 1 == columns.size());
+            line += Colorize(theme.table_header, aligned, theme);
+            cols += static_cast<int>(DisplayWidthUtf8(aligned));
+        }
+        content.push_back(RowOut{std::move(line), cols});
+        if (plain) {
+            // 颜色没了,分隔感由一条 "-" 横线顶上(divider 的 Ascii 档字符)。
+            content.push_back(RowOut{RepeatUnit("-", 1, cols), cols});
+        }
+    }
+    static const std::string kEmptyCell;
+    for (const TableRow& row : rows) {
+        std::string line;
+        int cols = 0;
+        for (std::size_t c = 0; c < columns.size(); ++c) {
+            if (c > 0) {
+                line += "  ";
+                cols += 2;
+            }
+            const std::string& cell = c < row.cells.size() ? row.cells[c] : kEmptyCell;
+            const CellTone tone = c < row.tones.size() ? row.tones[c] : CellTone::Normal;
+            const std::string aligned =
+                AlignCell(cell, col_widths[c], columns[c].align_right,
+                          /*is_last=*/c + 1 == columns.size());
+            if (c == 0) {
+                // 首列加粗(单子 5.1):走 row_label(主题里配的是加粗档)。
+                line += Colorize(theme.row_label, aligned, theme);
+            } else {
+                line += Colorize(ToneColor(tone, theme), aligned, theme);
+            }
+            cols += static_cast<int>(DisplayWidthUtf8(aligned));
+        }
+        content.push_back(RowOut{std::move(line), cols});
+    }
+    return WrapInBox(content, title, theme, BorderFor(style), width);
+}
+
+std::vector<std::string> RenderKeyValues(std::string_view title, const std::vector<Field>& fields,
+                                         const Theme& theme, BoxStyle style, int width) {
+    if (fields.empty()) {
+        return {};
+    }
+    const bool plain = IsPlainTheme(theme);
+    const int budget = width > 0 ? width - (plain ? 0 : 4) : 0;
+    int key_width = 0;
+    for (const Field& field : fields) {
+        key_width = (std::max)(key_width, static_cast<int>(DisplayWidthUtf8(field.key)));
+    }
+    if (budget > 0) {
+        key_width = (std::min)(key_width, (std::max)(8, budget / 3));
+    }
+    std::vector<RowOut> content;
+    content.reserve(fields.size());
+    for (const Field& field : fields) {
+        const std::string key_cell = format::AlignLeft(field.key, key_width);
+        std::string value_text = field.value;
+        int cols = key_width + 2;
+        if (budget > 0) {
+            const int room = budget - cols;
+            if (static_cast<int>(DisplayWidthUtf8(field.value)) > room) {
+                value_text = TruncateUtf8ToDisplayWidth(field.value, (std::max)(0, room));
+            }
+        }
+        const std::string line = Colorize(theme.row_label, key_cell, theme) + "  " +
+                                 Colorize(AccentColor(field.accent, theme), value_text, theme);
+        cols += static_cast<int>(DisplayWidthUtf8(value_text));
+        content.push_back(RowOut{line, cols});
+    }
+    return WrapInBox(content, title, theme, BorderFor(style), width);
+}
+
+}  // namespace lubancode::cli::frame
 
 }  // namespace lubancode::cli

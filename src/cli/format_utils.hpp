@@ -207,4 +207,21 @@ std::string FormatTurnFooterText(std::int64_t milliseconds, TurnFooterTone tone)
 // 给空串(缺省不写,单子:缺省只留前半句)。
 std::string FormatApprovalWaitNote(std::int64_t approval_wait_ms);
 
+// ---- 列对齐小工具(TUI 界面美化单批 0) ------------------------------------
+// cli::frame::* 的表格/键值对列对齐共用这一把尺;渲染层不许再手写
+// pad/truncate。宽度全按 UTF-8 显示列算(中文/emoji 占双列),截断走
+// TruncateUtf8ToDisplayWidth 同一把尺——不劈半个宽字。
+
+namespace format {
+
+// 左对齐:短了右侧补空格到 width 显示列;超了先按显示宽截断(保字头,
+// 与 TruncateUtf8ToDisplayWidth 同一把尺)再补。width <= 0 给空串。
+std::string AlignLeft(std::string_view text, int width);
+
+// 右对齐:短了左侧补空格;超了同一把尺截断(保字头)后不再补空格。
+// width <= 0 给空串。
+std::string AlignRight(std::string_view text, int width);
+
+}  // namespace lubancode::cli::format
+
 }  // namespace lubancode::cli
