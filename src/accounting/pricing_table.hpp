@@ -6,8 +6,10 @@
 //   3. 订阅额度与 API 花费分开,订阅档写 not_applicable;
 //   4. 金额一律整数 micros。
 //
-// 表内 per_million 允许整数或小数(货币单位/百万 token);解析时一次折成
-// 整数 micros,之后全程整数,禁 float 漂移。
+// 表内 per_million 一律货币单位(整数或小数,货币单位/百万 token);内存
+// 一律整数 micros。读写走同一对转换件(ParsePriceMicros 折进、
+// PriceMicrosToJsonUnits 折回),往返逐 micros 相等;解析后全程整数,
+// 禁 float 漂移。
 #pragma once
 
 #include <cstdint>
@@ -30,6 +32,17 @@ struct ModelPrice {
     std::int64_t cache_creation_per_million_micros = 0;
     std::int64_t output_per_million_micros = 0;
 };
+
+// JSON 数值(货币单位)→ 整数 micros:整数当货币单位(3 → 3'000'000),
+// 小数一次 llround(x*1e6) 折完(1.25 → 1'250'000)。负数、超 9e12 单位、
+// 非数 → nullopt。读侧(FromJsonStrict)唯一入口,单测公开钉数。
+std::optional<std::int64_t> ParsePriceMicros(const nlohmann::json& value);
+
+// 整数 micros → JSON 货币单位数值,与 ParsePriceMicros 同一对转换件、互为
+// 逆函数:整百万 micros(= 整数单位价)出整数,任意大小都精确;否则出小数
+// (1'250'000 → 1.25),现实价格粒度(≤1e9 单位、六位小数)往返逐 micros
+// 相等。写侧(ToJson)唯一入口——读写单位不一,往返就 ×1e6 漂移。
+nlohmann::json PriceMicrosToJsonUnits(std::int64_t micros);
 
 class PricingTable {
 public:
