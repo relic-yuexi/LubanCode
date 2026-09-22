@@ -17,29 +17,13 @@ namespace lubancode::agent {
 // ---------------------------------------------------------------------------
 
 std::string ToString(ToolSourceKind kind) {
-    switch (kind) {
-        case ToolSourceKind::Builtin: return "builtin";
-        case ToolSourceKind::Mcp: return "mcp";
-        case ToolSourceKind::Lsp: return "lsp";
-        case ToolSourceKind::PluginLua: return "plugin-lua";
-        case ToolSourceKind::PluginNative: return "plugin-native";
-        case ToolSourceKind::Agent: return "agent";
-        case ToolSourceKind::Ptc: return "ptc";
-        case ToolSourceKind::Deferred: return "deferred";
-    }
-    return "builtin";
+    // 唯一真源在 tool_semantics.hpp(AR-08 尾巴收敛单);这里保住 agent 域
+    // 调用面,落盘标签一字不动。
+    return ToolSourceKindName(kind);
 }
 
 bool ParseToolSourceKind(const std::string& s, ToolSourceKind& out) {
-    if (s == "builtin") { out = ToolSourceKind::Builtin; return true; }
-    if (s == "mcp") { out = ToolSourceKind::Mcp; return true; }
-    if (s == "lsp") { out = ToolSourceKind::Lsp; return true; }
-    if (s == "plugin-lua") { out = ToolSourceKind::PluginLua; return true; }
-    if (s == "plugin-native") { out = ToolSourceKind::PluginNative; return true; }
-    if (s == "agent") { out = ToolSourceKind::Agent; return true; }
-    if (s == "ptc") { out = ToolSourceKind::Ptc; return true; }
-    if (s == "deferred") { out = ToolSourceKind::Deferred; return true; }
-    return false;
+    return ParseToolSourceKindName(s, out);
 }
 
 std::string ToString(EffectClass cls) {

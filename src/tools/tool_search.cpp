@@ -5,6 +5,7 @@
 #include <sstream>
 #include <vector>
 
+#include "tool_semantics.hpp"   // ToolSourceKindName:来源标签唯一真源(AR-08 尾巴收敛)
 #include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
 namespace lubancode::tools {
@@ -115,22 +116,6 @@ Tool::Result MakeSearchResult(std::string text, bool is_error, const char* mode)
 // ref、不悄悄截断(单子 §5.3)。延迟工具本就是外挂大 schema 的主力,
 // 32 KiB 已是单条 tool result 里能安全摊的量级;更大的该走专用方案。
 constexpr std::size_t kMaxDiscoverySchemaBytes = 32 * 1024;
-
-// 来源标签(与 agent 侧 ToolSourceKind 的 ToString 同一张表;tools 层不引
-// agent 头,这里照抄映射,新来源两边一起加)。
-std::string SourceKindLabel(ToolSourceKind kind) {
-    switch (kind) {
-        case ToolSourceKind::Builtin: return "builtin";
-        case ToolSourceKind::Mcp: return "mcp";
-        case ToolSourceKind::Lsp: return "lsp";
-        case ToolSourceKind::PluginLua: return "plugin-lua";
-        case ToolSourceKind::PluginNative: return "plugin-native";
-        case ToolSourceKind::Agent: return "agent";
-        case ToolSourceKind::Ptc: return "ptc";
-        case ToolSourceKind::Deferred: return "deferred";
-    }
-    return "builtin";
-}
 
 }  // namespace
 
@@ -391,7 +376,7 @@ Tool::Result ToolSearchTool::ExecuteProxy(const nlohmann::json& input) {
         }
         const ToolRegistration* registration = registry_.RegistrationOf(tool.name());
         if (registration != nullptr) {
-            item["source"] = SourceKindLabel(registration->source_kind);
+            item["source"] = ToolSourceKindName(registration->source_kind);
             if (!registration->source_instance.empty()) {
                 item["source_instance"] = registration->source_instance;
             }
