@@ -10,8 +10,8 @@
 #include <sstream>
 #include <system_error>
 
-#include "hooks/hash.hpp"
 #include "platform/paths.hpp"
+#include "platform/sha256.hpp"
 
 namespace lubancode::platform {
 
@@ -84,7 +84,7 @@ std::expected<std::string, std::string> PluginDirFingerprintV1(const std::filesy
         material += *bytes;
         material += '\0';
     }
-    return hooks::Sha256Hex(material);
+    return platform::Sha256Hex(material);
 }
 
 std::string PackageLedgerFingerprintV1(const std::vector<LedgerFile>& files) {
@@ -93,7 +93,7 @@ std::string PackageLedgerFingerprintV1(const std::vector<LedgerFile>& files) {
     for (const LedgerFile& file : files) {
         material << file.rel_utf8 << '\t' << file.size << '\t' << file.sha256 << '\n';
     }
-    return hooks::Sha256Hex(material.str());
+    return platform::Sha256Hex(material.str());
 }
 
 std::string FileSha256Hex(const std::filesystem::path& path) {
@@ -101,7 +101,7 @@ std::string FileSha256Hex(const std::filesystem::path& path) {
     if (!bytes.has_value()) {
         return std::string();  // 读不动:空串,调用方记账,这里不装看见
     }
-    return hooks::Sha256Hex(*bytes);
+    return platform::Sha256Hex(*bytes);
 }
 
 }  // namespace lubancode::platform
