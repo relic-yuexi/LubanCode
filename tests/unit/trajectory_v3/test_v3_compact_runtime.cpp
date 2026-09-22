@@ -1279,6 +1279,200 @@ TEST_CASE("业务 JSON 的 signature/encrypted_content 键不当思考签名") {
     CHECK(saw_business_key);
 }
 
+// ---------------------------------------------------------------------------
+// 工具配对投影:写侧双号落账(assistant.tool_calls[].id 带 provider 原生
+// 号、tool 结果消息 tool_call_id 带内部 action 号)是 §4.15/§4.18 的既定
+// 形态,配对靠 FoldToolActions 的 providerToolCallId 桥换算——主对话内存
+// 组装与压缩后换账(EffectiveConversationFromV3)各做了换算,compact 摘要
+// 材料的账本回放漏了,role:"tool" 按内部号原样出网,provider 端查无此号
+//(案发 2026-09-22 真机 /compact:"tool result's tool id(action-000001)
+// not found",凡带工具调用的会话全链不可用)。三验:双号换算保真、孤儿
+// 按文本兜底、同号直配一字不投影。
+// ---------------------------------------------------------------------------
+TEST_CASE("compact 材料工具配对:双号换算保真,孤儿按文本投影,直配零投影") {
+    // 案发轮复刻:user + assistant(thinking/text + tool_calls 带 provider
+    // 号)+ 收口 action 桥(provider 号留档)+ tool 结果消息(内部号)。
+    const auto seed_dual_number_turn = [](V3Writer& writer) {
+        MessageDraft user;
+        user.turn_id = "turn-old";
+        user.origin = MessageOrigin::Human;
+        user.message = {{"role", "user"}, {"content", BigText(600)}};
+        const auto user_receipt = writer.AppendMessage(std::move(user), Durability::PowerLoss);
+        REQUIRE(user_receipt.status == WriteReceipt::Status::Committed);
+        MessageDraft declaration;
+        declaration.turn_id = "turn-old";
+        declaration.step_id = "step-dual";
+        declaration.request_id = "request-dual";
+        declaration.provider = "deepseek";
+        declaration.wire = "openai-chat-completions";
+        declaration.model = "deepseek-chat";
+        declaration.response_model = nlohmann::json(nullptr);
+        declaration.usage = nlohmann::json(nullptr);
+        declaration.origin = MessageOrigin::SessionRuntime;
+        // 生产写侧形态(trajectory_turn_bridge §4.42):provider 原生号随
+        // 调用块留档,thinking 块同块在 content 里。
+        declaration.message = nlohmann::json::object(
+            {{"role", "assistant"},
+             {"content", nlohmann::json::array(
+                              {nlohmann::json{{"type", "thinking"}, {"text", BigText(200, 't')}},
+                               nlohmann::json{{"type", "text"}, {"text", "我去查一下"}}})},
+             {"tool_calls", nlohmann::json::array({nlohmann::json::object(
+                                {{"id", "call_prov_dual"},
+                                 {"type", "function"},
+                                 {"function", nlohmann::json{{"name", "search"},
+                                                             {"arguments", "{\"q\":\"tui\"}"}}}})})}});
+        const auto declaration_receipt =
+            writer.AppendMessage(std::move(declaration), Durability::PowerLoss);
+        REQUIRE(declaration_receipt.status == WriteReceipt::Status::Committed);
+        REQUIRE(writer.AdmitMessages({user_receipt.id, declaration_receipt.id}).status ==
+                WriteReceipt::Status::Committed);
+        // action 桥:tool 消息 tool_call_id 用内部号,providerToolCallId
+        // 留 provider 号(案发档 evt 形态)。
+        auto action = ToolActionSession::Admit(writer, "turn-old", "step-dual", "action-dual",
+                                               "queued", declaration_receipt.id, "call_prov_dual");
+        REQUIRE(action.Start(writer, "args-ref", ToolIdentity{"search", "builtin", "1", "test"})
+                    .status == WriteReceipt::Status::Committed);
+        REQUIRE(action.Finish(writer, 0).status == WriteReceipt::Status::Committed);
+        const auto persisted = action.PersistedResult(
+            writer,
+            {MakeArtifactRef("res-dual", "result_metadata", "artifacts/res-dual.json",
+                             std::string(64, '1'), 412, "application/json")},
+            action.last_event_id());
+        REQUIRE(persisted.status == WriteReceipt::Status::Committed);
+        REQUIRE(action.SelectResult(writer, {persisted.id}, {}, "done").status ==
+                WriteReceipt::Status::Committed);
+        REQUIRE(action.AppendToolMessage(writer, BigText(5000), action.selected_event_id()).status ==
+                WriteReceipt::Status::Committed);
+    };
+
+    SUBCASE("双号落账:材料投影换算回 provider 号,配对闭环出网") {
+        Harness harness("tool-pairing-dual");
+        auto writer = harness.Start();
+        REQUIRE(writer);
+        seed_dual_number_turn(*writer);
+        harness.SeedTurn(*writer, "turn-keep", BigText(600, 'y'));
+        auto client = StepSummaryClient();
+        auto input = ManualInput();
+        input.protected_turn_ids = {"turn-keep"};
+        const auto result =
+            lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), input);
+        REQUIRE(result.applied);
+        bool saw_bridged_tool = false;
+        bool saw_provider_declaration = false;
+        for (const auto& message : client.last_messages) {
+            if (message.value("role", std::string()) == "tool") {
+                // 换算后与材料内声明同号,正文一字不动。
+                CHECK(message.value("tool_call_id", std::string()) == "call_prov_dual");
+                CHECK(message.value("content", std::string()) == BigText(5000));
+                saw_bridged_tool = true;
+            }
+            if (message.value("role", std::string()) == "assistant" &&
+                message.contains("tool_calls")) {
+                REQUIRE(message["tool_calls"].is_array());
+                REQUIRE(message["tool_calls"].size() == 1);
+                CHECK(message["tool_calls"][0].value("id", std::string()) == "call_prov_dual");
+                // thinking 块照旧按文本投影(先例口径),签名不冒充。
+                const auto& content = message["content"];
+                REQUIRE(content.is_array());
+                for (const auto& part : content) {
+                    if (part.is_object()) {
+                        CHECK(part.value("type", std::string()) != "thinking");
+                    }
+                }
+                saw_provider_declaration = true;
+            }
+        }
+        REQUIRE(saw_bridged_tool);
+        REQUIRE(saw_provider_declaration);
+        CHECK(NotesStartWith(result, "compact.material.tool_call_id_bridged"));
+        CHECK(VerifyV3File(harness.jsonl).ok);
+    }
+
+    SUBCASE("孤儿 tool 消息:按普通文本投影,零 role:tool 孤儿形态出网") {
+        Harness harness("tool-pairing-orphan");
+        auto writer = harness.Start();
+        REQUIRE(writer);
+        seed_dual_number_turn(*writer);
+        // 旧档残缺形态:无 action 桥、无配对声明的孤儿 tool 消息。
+        MessageDraft orphan;
+        orphan.turn_id = "turn-old";
+        orphan.action_id = "action-ghost";
+        orphan.origin = MessageOrigin::SessionRuntime;
+        orphan.message = {{"role", "tool"}, {"tool_call_id", "action-ghost"},
+                          {"content", "孤儿结果"}};
+        const auto orphan_receipt =
+            writer.AppendMessage(std::move(orphan), Durability::PowerLoss);
+        REQUIRE(orphan_receipt.status == WriteReceipt::Status::Committed);
+        REQUIRE(writer.AdmitMessages({orphan_receipt.id}).status == WriteReceipt::Status::Committed);
+        harness.SeedTurn(*writer, "turn-keep", BigText(600, 'y'));
+        auto client = StepSummaryClient();
+        auto input = ManualInput();
+        input.protected_turn_ids = {"turn-keep"};
+        const auto result =
+            lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), input);
+        REQUIRE(result.applied);
+        bool saw_orphan_text = false;
+        for (const auto& message : client.last_messages) {
+            if (message.value("role", std::string()) == "tool") {
+                // 出网的 tool 消息只许是配对过的(双号换算后的那条)。
+                CHECK(message.value("tool_call_id", std::string()) != "action-ghost");
+                continue;
+            }
+            const std::string content = message.value("content", std::string());
+            if (message.value("role", std::string()) == "user" &&
+                content.rfind("[工具结果 ", 0) == 0 &&
+                content.find("action-ghost") != std::string::npos &&
+                content.find("孤儿结果") != std::string::npos) {
+                saw_orphan_text = true;
+            }
+        }
+        REQUIRE(saw_orphan_text);
+        CHECK(NotesStartWith(result, "compact.material.orphan_tool_projected"));
+        CHECK(VerifyV3File(harness.jsonl).ok);
+    }
+
+    SUBCASE("同号直配:配对完整的工具对原样保真,一字不投影") {
+        Harness harness("tool-pairing-direct");
+        auto writer = harness.Start();
+        REQUIRE(writer);
+        harness.SeedToolTurn(*writer, "turn-old", "action-direct");
+        // 直配轮体量补足(SeedToolTurn 本体小,压了没收益)。
+        MessageDraft filler;
+        filler.turn_id = "turn-old";
+        filler.origin = MessageOrigin::Human;
+        filler.message = {{"role", "user"}, {"content", BigText(800, 'z')}};
+        const auto filler_receipt =
+            writer.AppendMessage(std::move(filler), Durability::PowerLoss);
+        REQUIRE(filler_receipt.status == WriteReceipt::Status::Committed);
+        REQUIRE(writer.AdmitMessages({filler_receipt.id}).status == WriteReceipt::Status::Committed);
+        harness.SeedTurn(*writer, "turn-keep", BigText(600, 'y'));
+        auto client = StepSummaryClient();
+        auto input = ManualInput();
+        input.protected_turn_ids = {"turn-keep"};
+        const auto result =
+            lubancode::runtime::RunV3Compact(*writer, client, BaseProfile(), input);
+        REQUIRE(result.applied);
+        bool saw_tool_pair = false;
+        for (const auto& message : client.last_messages) {
+            if (message.value("role", std::string()) == "tool") {
+                // 同号直配:role/tool_call_id/正文逐字原样。
+                CHECK(message.value("tool_call_id", std::string()) == "action-direct");
+                CHECK(message.value("content", std::string()) == "结果正文");
+                saw_tool_pair = true;
+            }
+            if (message.value("role", std::string()) == "assistant" &&
+                message.contains("tool_calls")) {
+                REQUIRE(message["tool_calls"].size() == 1);
+                CHECK(message["tool_calls"][0].value("id", std::string()) == "action-direct");
+            }
+        }
+        REQUIRE(saw_tool_pair);
+        CHECK_FALSE(NotesStartWith(result, "compact.material.orphan_tool_projected"));
+        CHECK_FALSE(NotesStartWith(result, "compact.material.tool_call_id_bridged"));
+        CHECK(VerifyV3File(harness.jsonl).ok);
+    }
+}
+
 TEST_CASE("干跑与实跑同一份回放判定") {
     Harness harness("signed-dryrun");
     auto writer = harness.Start();
