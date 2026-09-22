@@ -859,14 +859,14 @@ std::vector<std::string> WrapInBox(const std::vector<RowOut>& content, std::stri
         }
         return lines;
     }
-    // 上边框:┌─ Title ────┐;无标题时整条横线。
+    // 上边框:┌─ Title ────┐;无标题时整条横线。标题段的列账:
+    // interior = h(1) + 空格(1) + title + 空格(1) + tail 枚 h,合须等于 inner。
     const int title_cols = static_cast<int>(DisplayWidthUtf8(std::string{title}));
     std::string top = theme.frame_border + border.top_left;
     if (title.empty()) {
         top += RepeatUnit(border.horizontal, border.unit_bytes, inner);
     } else {
-        const int lead = 3;               // "─ " + 标题前空格:"─ Title"
-        const int tail = inner - title_cols - lead - 1;  // 标题后空格 + 余线
+        const int tail = inner - title_cols - 3;
         top += RepeatUnit(border.horizontal, border.unit_bytes, 1) + " " +
                Colorize(theme.frame_title, title, theme) + " " +
                RepeatUnit(border.horizontal, border.unit_bytes, (std::max)(0, tail));
@@ -925,13 +925,18 @@ const std::string& ToneColor(CellTone tone, const Theme& theme) {
 }
 
 // 单元格对齐:数值列右对齐(补在前,右端跨行对齐);其余左对齐补在后;
-// 末列左对齐时不补——裸输出(plain)不带看不见的尾随空格尾巴。
+// 末列左对齐时不补尾随空格(裸输出不带看不见的尾巴),但仍按列宽截断
+// ——窄预算削过的列,末列内容不许撑破框。
 std::string AlignCell(std::string_view cell, int col_width, bool align_right, bool is_last) {
     if (align_right) {
         return format::AlignRight(cell, col_width);
     }
     if (is_last) {
-        return std::string{cell};
+        const std::string text{cell};
+        if (static_cast<int>(DisplayWidthUtf8(text)) <= col_width) {
+            return text;
+        }
+        return TruncateUtf8ToDisplayWidth(text, col_width);
     }
     return format::AlignLeft(cell, col_width);
 }

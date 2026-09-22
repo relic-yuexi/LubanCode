@@ -68,6 +68,16 @@ bool HasEscape(const std::string& text) {
     return text.find("\x1b") != std::string::npos;
 }
 
+// needle 在行里的**显示列**位置(不是字节位):ANSI 已剥,但 "•"/"─"/中文
+// 这类多字节字符字节位与列位对不上,对齐断言一律走这把尺。找不到给 -1。
+int DisplayColOf(const std::string& row, const std::string& needle) {
+    const std::size_t at = row.find(needle);
+    if (at == std::string::npos) {
+        return -1;
+    }
+    return static_cast<int>(DisplayWidthUtf8(row.substr(0, at)));
+}
+
 // UTF-8 字节串常量(手写,免在测试里拼转义看花眼)。
 constexpr const char* kBoxLightTopLeft = "\xe2\x94\x8c";      // ┌
 constexpr const char* kBoxLightHoriz = "\xe2\x94\x80";        // ─
@@ -195,17 +205,17 @@ TEST_CASE("frame: RenderList 行形与项目符两档色") {
     CHECK(Contains(lines[1], dark.list_bullet_user + kBullet + dark.reset));
     CHECK(Contains(lines[2], dark.list_bullet_project + kBullet + dark.reset));
 
-    // label 列按最宽者(9 列)补齐:三行 value 起点同字节位(中文等宽,
-    // 剥 ANSI 后可比)。
+    // label 列按最宽者(9 列)补齐:三行 value 起点同**显示列**(项目符 "•"
+    // 3 字节 2 列,字节位比不出对齐,走 DisplayColOf)。
     const std::string r1 = StripAnsi(lines[1]);
     const std::string r2 = StripAnsi(lines[2]);
     const std::string r3 = StripAnsi(lines[3]);
-    const std::size_t v1 = r1.find("架构观");
-    const std::size_t v2 = r2.find("工作流");
-    const std::size_t v3 = r3.find("无项目符行");
-    REQUIRE(v1 != std::string::npos);
-    REQUIRE(v2 != std::string::npos);
-    REQUIRE(v3 != std::string::npos);
+    const int v1 = DisplayColOf(r1, "架构观");
+    const int v2 = DisplayColOf(r2, "工作流");
+    const int v3 = DisplayColOf(r3, "无项目符行");
+    REQUIRE(v1 >= 0);
+    REQUIRE(v2 >= 0);
+    REQUIRE(v3 >= 0);
     CHECK(v1 == v2);
     CHECK(v1 == v3);
 
@@ -244,7 +254,7 @@ TEST_CASE("frame: RenderTable 列宽自适应、首列 row_label、tone 走主�
         TableRow{{"kimi", "999", "fail"}, {CellTone::Normal, CellTone::Normal, CellTone::Fail}},
     };
     const std::vector<std::string> lines = RenderTable("Usage", columns, rows, dark, Light());
-    REQUIRE(lines.size() == 5);  // 上边框 + 表头 + 3 行 + 下边框
+    REQUIRE(lines.size() == 6);  // 上边框 + 表头 + 3 行数据 + 下边框
     CHECK(Contains(lines[0], "Usage"));
 
     // 表头整行 table_header 色;列宽 NAME=7(数据定宽)、TOKENS=8(min_width)、
@@ -401,7 +411,8 @@ TEST_CASE("frame: /usage mock 数据走三助手的 demo 形状") {
     // 表格行:数值列右对齐(右端跨行齐)、状态列三档色都在。
     const std::string p1 = StripAnsi(purpose_lines[2]);
     const std::string p2 = StripAnsi(purpose_lines[3]);
-    CHECK(p1.find("890k") + 4 == p2.find("140k") + 5);
+    CHECK(p1.find("890k") + std::string("890k").size() ==
+          p2.find("140k") + std::string("140k").size());
     CHECK(p1.find("pass") == p2.find("skip"));
     CHECK(Contains(p1, "pass"));
     CHECK(Contains(p2, "skip"));
