@@ -96,7 +96,32 @@ plain 主题(`theme.reset` 空串——全仓既有探针,覆盖 `--no-color`、
 
 ## 批次索引
 
-- 批 0(本批):基件 API + 主题字段 + 约定文档,`tests/unit/cli/test_frame_helpers.cpp`
+- 批 0:基件 API + 主题字段 + 约定文档,`tests/unit/cli/test_frame_helpers.cpp`
   钉形状与降级合同。
 - 批 1-8:按单子"分期落地"逐批套用,批间不越次序——基件不到位时上层
   改完会回到拼字符串。
+
+## 批 1 落地时补的三条裁量(后续批次照办)
+
+`/memory` 全套(批 1,`src/app/commands/memory_commands.cpp`)落地时,
+"i18n 键不新增、cpp 不硬编码新文案"的合同与"表格要有表头/命令输出要
+有标题框"之间有三处空隙,裁量如下:
+
+1. **表头与档位标识用数据 schema 名**。表格列头(job/state/op/layer/
+   wait/worker、id/score/hard/terms/bytes/result)与档位标注(weak、
+   [warn])一律用数据字段的英文名——它们是 schema 标识符,不是待译
+   文案,对中英文用户一视同仁。真正需要翻译的句子(表标题、提示、
+   原因短句)仍走既有 `tr()/trf()` 键。
+2. **一句既有文案拆键值对("SentenceField" 模式)**。命令输出里大量
+   既有文案自带 "标签: 值" 句式(中英两套冒号都是半角),渲染段按第
+   一个冒号拆成 `Field{key, value}` 进键值对助手——拆的是既有文案,
+   不添不改一个字;没有冒号的整句进 value。一键塞多对的
+   ("已入库条目: {0}；待写任务: {1}"),首对进 key、余下整段进 value
+   (分号全半角中英不一,拆了脆)。
+3. **长正文不塞框**。`/memory show` 一类的 markdown 正文在头部键值对
+   框之外原样跟出——塞框会被列帽截断劈行,保终端自然折行。
+
+批 1 还有一处渲染改道:`jobs.title_line/error_line/log_line`、
+`show.header` 四枚既有键的**信息**(标题、失败原因、日志路径、所在目录)
+并进了新排版,键本身保留在 i18n 表里不删——信息一个不丢,只是不再逐句
+成行。
