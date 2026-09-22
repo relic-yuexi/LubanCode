@@ -13,8 +13,8 @@ namespace lubancode::app {
 namespace {
 // 退出兜底的有界等待窗:取消旗已拉(cpr 的合并取消口应速断),等不起
 // 看门狗的 45 秒全预算——到点 detach 放行,不冻退出。与
-// SessionTitleRefiner 析构同一副方子(它的窗按自己 5 秒看门狗配的,
-// 这里按"取消生效后应速断"配 5 秒)。
+// SessionTitleRefiner 析构同一副方子(它那窗 7 秒,已与自己的 30 秒看门狗
+// 预算脱钩;这里按"取消生效后应速断"配 5 秒)。
 constexpr auto kShutdownGrace = std::chrono::seconds(5);
 }  // namespace
 

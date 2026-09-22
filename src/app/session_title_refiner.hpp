@@ -6,7 +6,8 @@
 //(active_main_turn_id),v3 无轮账互斥,V3Writer 提交全程持锁,与主
 // turn 的写在盘上串行;HTTP 侧走独占裸 backend(ModelRouterService 的
 // RouteDetached 造,不与主会话共用 client,不抢流式回调)、只发一次
-// cheap 采样——首问截段 600 字节、max_tokens=24、5 秒看门狗、无工具。
+// cheap 采样——首问截段 600 字节、max_tokens=24、30 秒看门狗
+//(kTitleRefineTimeoutSecs,直连/中转取舍见那边注释)、无工具。
 // 起飞后谁也不等它,提示符照还。
 //
 // 完工的叫醒:Ready()(只读、线程安全)在结果备好待收时翻真,装配层把
@@ -35,6 +36,7 @@
 
 #include "agent/model_router.hpp"  // BackgroundCallAccounting
 #include "api/backend.hpp"
+#include "app/session_title.hpp"  // kTitleRefineTimeoutSecs(Inputs 默认预算)
 
 namespace lubancode::runtime {
 class TrajectorySessionLedger;
@@ -57,12 +59,19 @@ public:
         lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
         std::string trajectory_wire;  // 桥 identity 的渠道名(与主 turn 桥同源)
         std::string provider;         // 精炼路由的 provider(桥 identity)
+        // 采样看门狗预算(秒)。默认 kTitleRefineTimeoutSecs(30 秒,直连/
+        // 中转的取舍见那边注释)。测试注入口:stub 后端配短预算打真超时,
+        // 不为一次断言真等 30 秒。
+        int timeout_secs = kTitleRefineTimeoutSecs;
     };
     struct Outcome {
         bool ok = false;         // 采样成功且清洗后非空
         std::string title;      // ok 时非空
         std::string model;      // 实际用的模型(记账用)
         std::uint64_t generation = 0;
+        // 失败死因:RefineSessionTitle 的 std::unexpected 错误串原样带回
+        //(超时/网络错/空回各报各的),报明行拿它填 {0}。ok 时为空。
+        std::string error;
         lubancode::agent::BackgroundCallAccounting accounting;  // 失败半截也出账
     };
 

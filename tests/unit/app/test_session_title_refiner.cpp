@@ -4,6 +4,9 @@
 // 通知时序缺陷单补:Ready 只读查询的真值表、失败结局也要醒、主线程见
 // Ready 后收货数据全齐、IdleWakeCoordinator 挂 Ready 的唤醒源形制
 // (running 不醒/finished 醒/收完不再醒)。
+// 2026-09-22 报明单补:失败死因进 Outcome.error——超时(local_deadline
+// 带预算数)、网络错(发送失败原样透传)、流内错、空回各归各位;超时
+// 预算走 Inputs.timeout_secs 注入口,不为断言真等 30 秒。
 #include <doctest/doctest.h>
 
 #include <atomic>
@@ -168,7 +171,27 @@ TEST_CASE("精炼器:单飞——上一枚没收走之前不叠发") {
     CHECK(AwaitFinished(refiner, 2000).has_value());
 }
 
-TEST_CASE("精炼器:失败带回 ok=false,账照出;本地标题由调用方保留") {
+TEST_CASE("精炼器:失败带回 ok=false 与死因,账照出;本地标题由调用方保留") {
+    // 网络错:发送失败原样透传(kind 保留),错误串进 Outcome.error。
+    struct NetworkErrorBackend final : lubancode::api::Backend {
+        std::expected<void, lubancode::api::Error> send_stream(
+            const lubancode::api::Request&,
+            const std::function<void(const lubancode::api::StreamEvent&)>&,
+            const std::atomic<bool>*) override {
+            return std::unexpected(lubancode::api::Error{
+                lubancode::api::ErrorKind::Network, "connection refused", 0});
+        }
+    };
+    {
+        SessionTitleRefiner refiner;
+        CHECK(refiner.Start(MakeInputs(std::make_unique<NetworkErrorBackend>())));
+        const auto outcome = AwaitFinished(refiner, 2000);
+        REQUIRE(outcome.has_value());
+        CHECK_FALSE(outcome->ok);
+        CHECK(outcome->title.empty());
+        CHECK(outcome->error == "connection refused");  // 死因归位,报明行填 {0}
+    }
+    // 流内错(服务端 error 事件折 Api 分型):同样原样报明。
     struct ErrorBackend final : lubancode::api::Backend {
         std::expected<void, lubancode::api::Error> send_stream(
             const lubancode::api::Request&,
@@ -185,6 +208,7 @@ TEST_CASE("精炼器:失败带回 ok=false,账照出;本地标题由调用方保
     REQUIRE(outcome.has_value());
     CHECK_FALSE(outcome->ok);
     CHECK(outcome->title.empty());
+    CHECK(outcome->error == "cheap 不可用");
 }
 
 TEST_CASE("精炼器:RequestCancel 打断在飞请求,不重试") {
@@ -199,18 +223,24 @@ TEST_CASE("精炼器:RequestCancel 打断在飞请求,不重试") {
     CHECK_FALSE(outcome->ok);  // 取消收场:调用方保留本地标题
 }
 
-TEST_CASE("精炼器:看门狗 5 秒硬上限——慢后端到点被打断") {
+TEST_CASE("精炼器:看门狗到点打断慢后端,死因带预算数归 local_deadline") {
     auto backend = std::make_unique<FakeTitleBackend>();
     backend->delay_ms = 60'000;  // 不打断就跑不完的慢后端
+    SessionTitleRefiner::Inputs inputs = MakeInputs(std::move(backend));
+    inputs.timeout_secs = 1;  // 注入口打真超时:不为断言真等 30 秒常数
     SessionTitleRefiner refiner;
     const auto t0 = std::chrono::steady_clock::now();
-    CHECK(refiner.Start(MakeInputs(std::move(backend))));
-    const auto outcome = AwaitFinished(refiner, 12'000);
+    CHECK(refiner.Start(std::move(inputs)));
+    const auto outcome = AwaitFinished(refiner, 8'000);
     const auto elapsed = std::chrono::steady_clock::now() - t0;
     REQUIRE(outcome.has_value());
     CHECK_FALSE(outcome->ok);  // 看门狗拉取消:调用方保留本地标题
-    // 5 秒看门狗 + 收尾余量,不许拖到等待窗上限。
-    CHECK(elapsed < std::chrono::seconds(8));
+    // 死因归位:超时归 local_deadline,文案带预算数(采样层统一话),
+    // 报明行拿它填 {0}——超时/网络错/空回各报各的。
+    CHECK(outcome->error == "采样超过 1 秒,被本地超时预算停止");
+    CHECK(outcome->accounting.duration_ms >= 1000);  // 耗时随死因报明
+    // 短预算 + 收尾余量,不许拖到等待窗上限。
+    CHECK(elapsed < std::chrono::seconds(6));
 }
 
 TEST_CASE("精炼器:析构时在飞也不挂——取消 + 有界收尾 + detach 放行") {
@@ -302,6 +332,7 @@ TEST_CASE("失败结局也 Ready——失败也要叫醒来收账(usage 是真�
     REQUIRE(outcome.has_value());
     CHECK_FALSE(outcome->ok);
     CHECK(outcome->title.empty());
+    CHECK(outcome->error == "标题为空");  // 空回死因归位:清洗后一个字不剩
     CHECK(outcome->accounting.usage.input_tokens == 492);
     CHECK(outcome->accounting.usage_reported);
 }

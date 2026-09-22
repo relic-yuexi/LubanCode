@@ -423,10 +423,15 @@ void TerminalSessionController::DrainFinishedTitleRefinement() {
         return;
     }
     if (adopted != lubancode::app::SessionTitleAccount::AdoptResult::Adopted) {
-        // 采样真失败(网络/超时/空回)打一行——起飞了但没成,此前也静默,
-        // 用户分不清"没起飞"与"飞了没成"。迟到/取消是正常竞态,不打扰。
+        // 采样真失败(网络/超时/空回)打一行,死因报明:Outcome.error 原样
+        // 带回 RefineSessionTitle 的错误串,配 accounting.duration_ms 的耗时
+        // ——三种病各报各的,不再一个死法笼统了事。迟到/取消是正常竞态,
+        // 照旧口径。
         if (!outcome->ok) {
-            TermOut() << theme.stats << tr("cmd.title.refine.failed") << theme.reset << "\n";
+            TermOut() << theme.stats
+                      << trf("cmd.title.refine.failed", outcome->error,
+                             outcome->accounting.duration_ms)
+                      << theme.reset << "\n";
         }
         return;  // 失败/迟到/场子没了:本地标题保住,不重试
     }

@@ -2013,7 +2013,7 @@ const Entry kZhCN[] = {
     {"cmd.title.refine.no_ledger", "[会话标题] 精炼没起飞:会话账房没开张,标题停在本地档。"},
     {"cmd.title.refine.no_model", "[会话标题] 精炼没起飞:标题路由没配上模型,标题停在本地档。"},
     {"cmd.title.refine.no_provider", "[会话标题] 精炼没起飞:provider「{0}」在配置里找不到,标题停在本地档。"},
-    {"cmd.title.refine.failed", "[会话标题] 精炼失败,标题保留本地档。"},
+    {"cmd.title.refine.failed", "[会话标题] 精炼失败: {0}(耗时 {1}ms),标题保留本地档。"},
     {"cmd.peers.start_failed", "[跨会话] 传话未启用: {0}"},
     {"cmd.peers.off", "跨会话传话在本场未启用(只有交互会话才有)。"},
     {"cmd.peers.empty", "当前没有其它可见的会话。"},
@@ -3024,7 +3024,8 @@ const Entry kEn[] = {
     {"cmd.title.refine.no_provider",
      "[session title] Refinement did not start: provider '{0}' is not in the config; the local title "
      "stays."},
-    {"cmd.title.refine.failed", "[session title] Refinement failed; the local title stays."},
+    {"cmd.title.refine.failed",
+     "[session title] Refinement failed: {0} (took {1}ms); the local title stays."},
 
     // ---- 跨会话传话 /peers /send /peerperm ----
     {"cmd.peers.start_failed", "[peers] cross-session messaging failed to start: {0}"},

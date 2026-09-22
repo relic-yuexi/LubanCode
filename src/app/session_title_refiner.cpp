@@ -6,13 +6,15 @@
 #include <chrono>
 #include <utility>
 
-#include "app/session_title.hpp"  // RefineSessionTitle/kTitleRefineTimeoutSecs
+#include "app/session_title.hpp"  // RefineSessionTitle
 #include "runtime/trajectory_session.hpp"  // TrajectoryBypassBridge(Token 账本单 A1)
 
 namespace lubancode::app {
 namespace {
-// 退出兜底的有界等待窗:看门狗 5 秒 + 收尾余量。挂死绝境(cpr 卡死那类)
-// 到点 detach 放行,不冻退出——与 AgentTool 析构同一副方子。
+// 退出兜底的有界等待窗:取消旗先行,后端听话就快回;真挂死(cpr 卡死
+// 那类)到点 detach 放行,不冻退出——与 AgentTool 析构同一副方子。看门狗
+// 放宽到 30 秒后这窗不再覆盖整段预算:超窗的悬账被弃——本地标题已保住,
+// usage 丢一笔可接受(2026-09-22 超时放宽单认可)。
 constexpr auto kShutdownGrace = std::chrono::seconds(7);
 }  // namespace
 
@@ -45,7 +47,7 @@ bool SessionTitleRefiner::Start(Inputs&& inputs) {
         [shared, backend = std::move(inputs.backend), model = std::move(inputs.model),
          effort = std::move(inputs.effort), first_query = std::move(inputs.first_query),
          trajectory = inputs.trajectory, trajectory_wire = std::move(inputs.trajectory_wire),
-         provider = std::move(inputs.provider)]() mutable {
+         provider = std::move(inputs.provider), timeout_secs = inputs.timeout_secs]() mutable {
             Outcome outcome;
             outcome.model = model;
             outcome.generation = shared->generation;
@@ -70,13 +72,19 @@ bool SessionTitleRefiner::Start(Inputs&& inputs) {
             // 部旗(升旗人申报 Internal)。本地看门狗线程退役。
             lubancode::agent::BackgroundCallAccounting accounting;
             const auto title = RefineSessionTitle(*backend, model, effort, first_query,
-                                                  kTitleRefineTimeoutSecs, &shared->cancel, &accounting,
+                                                  timeout_secs, &shared->cancel, &accounting,
                                                   bypass.get());
             // 失败半截也出账(旧口径:先记账再判错)。
             outcome.accounting = std::move(accounting);
             if (title.has_value() && !title->empty()) {
                 outcome.ok = true;
                 outcome.title = *title;
+            } else if (!title.has_value()) {
+                // 死因原样带回(2026-09-22 报明单):超时/网络错/空回各报
+                // 各的,报明行拿它填 {0}——此前闭包只看 has_value,错误串
+                // 扔在门口。has_value 且空的半档按契不会出现(空回走
+                // unexpected),真出现就留空,报明行降级成无死因。
+                outcome.error = title.error();
             }
             {
                 std::lock_guard<std::mutex> lock(shared->mutex);
