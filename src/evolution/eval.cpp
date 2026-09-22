@@ -26,6 +26,7 @@
 #include "package/catalog.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
+#include "privacy/sensitive_keys.hpp"  // 敏感键词表唯一来源(SV-12)
 
 namespace lubancode::evolution {
 
@@ -688,15 +689,10 @@ bool LooksBinary(const std::string& text) {
 
 namespace {
 
-// 与 skills::RedactSecrets 同一张关键词表(最长优先),这里是"找出来"而不是
-// "掩掉":键形态后跟非占位值即命中。占位值({{…}}/<…>/$ {…}/[已打码]/
-// null/…)不算——那是抽象过的写法,恰是起草器该产出的样子。
-constexpr const char* kSecretKeyWords[] = {
-    "authorization", "client_secret", "private_key", "access_key", "session_key",
-    "api_key",       "apikey",        "password",    "passwd",     "cookie",
-    "token",         "secret",
-};
-
+// 敏感键词表唯一来源 privacy/sensitive_keys.hpp(SV-12):录制脱敏、JSON
+// 键匹配与这里的候选扫描三家共用。这里只做"找出来",不做"掩掉"
+// ——键形态后跟非占位值即命中;占位值({{…}}/<…>/${…}/[已打码]/null/…)
+// 不算,那是抽象过的写法,恰是起草器该产出的样子。
 bool IsPlaceholderValue(const std::string& value) {
     if (value.empty()) {
         return true;
@@ -782,12 +778,11 @@ std::vector<ScanFinding> ScanTextForSecrets(const std::string& text) {
             if (i != 0 && IsWordChar(lower[i - 1])) {
                 continue;
             }
-            for (const char* word : kSecretKeyWords) {
-                const std::size_t word_len = std::strlen(word);
-                if (lower.compare(i, word_len, word) != 0) {
+            for (const std::string_view word : privacy::kSensitiveKeyWords) {
+                if (lower.compare(i, word.size(), word) != 0) {
                     continue;
                 }
-                std::size_t p = i + word_len;
+                std::size_t p = i + word.size();
                 while (p < lower.size() && (lower[p] == ' ' || lower[p] == '\t')) {
                     ++p;
                 }
