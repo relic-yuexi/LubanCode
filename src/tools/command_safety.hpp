@@ -4,7 +4,9 @@
 //
 // 总纲是保守:不认识的首词 = NeedsConfirm。宁可多问一句,不能放走一条
 // 危险命令。规则细目(拆链、引号状态机、重定向、黑白名单、git 子命令、
-// 探版放行、$env: 前缀)见 .cpp 顶注释和实现处逐条注释。
+// 探版放行、$env: 前缀)见 .cpp 顶注释和实现处逐条注释。拆段/拆词/引号
+// 状态机这些词法件在 tools/shell_lexing(AR-07 起与 plan_mode 共用同一
+// 份),本文件只留判词。
 //
 // 放在 tools/ 但不碰任何 IO、不认识 Tool 接口——main.cpp 的 on_tool_confirm
 // 在 auto 档下拿 run_command 的 command/shell 两个字段来问一嘴,Safe 就
@@ -25,14 +27,9 @@ enum class CommandSafety { Safe, NeedsConfirm };
 // 工具的 shell 参数同一套语义)。别的 shell 值一律 NeedsConfirm。
 CommandSafety ClassifyCommand(const std::string& command, const std::string& shell);
 
-// 段内引号外有没有 PowerShell 脚本块起始 {(原是 plan_mode 的私有件,P2-3
-// 单落的;下沉到这儿与分档逻辑同一份,别写第二份):脚本块体内是任意代码
-// (Where-Object { Remove-Item x } 照样逐条执行),静态证明不了无害。segment
-// 是按分隔符拆好的段;single_quotes 语义同上(单引号算不算引号)。
-bool HasUnquotedScriptBlock(const std::string& segment, bool single_quotes);
-
 // 整条命令逐段查(段拆分与 ClassifyCommand 同一套):有没有引号外的
-// PowerShell 脚本块。给不走 ClassifyCommand 分档的调用方(Auto 档的
+// PowerShell 脚本块(段级判定 HasUnquotedScriptBlock 在 tools/shell_lexing,
+// AR-07 随词法件迁出)。给不走 ClassifyCommand 分档的调用方(Auto 档的
 // 放行账 allow_commands 直通)借这道闸。非 PowerShell shell 恒 false
 // (cmd 的 { } 无执行语义)。
 bool CommandHasUnquotedScriptBlock(const std::string& command, const std::string& shell);

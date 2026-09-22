@@ -6,6 +6,10 @@
 #include <string_view>
 #include <vector>
 
+// 词法件(拆段/拆词/引号状态机/重定向/子表达式/脚本块/词形归一)自本文件
+// 迁去 shell_lexing(AR-07:原先与 plan_mode 各写一套,现同吃一份)。
+#include "tools/shell_lexing.hpp"
+
 // 规则总表(保守为纲,不认识 = NeedsConfirm):
 //   1. 命令链拆段:引号外的 && || ; | & 和换行都当分隔符,逐段判,每段都
 //      Safe 整条才 Safe。单个 & 也拆——cmd 里它就是"顺序执行"分隔符,
@@ -32,140 +36,6 @@
 namespace lubancode::tools {
 
 namespace {
-
-std::string ToLower(std::string s) {
-    std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return s;
-}
-
-bool IsSpace(char c) {
-    return c == ' ' || c == '\t' || c == '\v' || c == '\f';
-}
-
-// 简单引号状态机走一遍,把命令按引号外的分隔符拆成段。single_quotes 表示
-// 单引号算不算引号(powershell 算,cmd 不算,理由见顶注释)。
-std::vector<std::string> SplitSegments(const std::string& command, bool single_quotes) {
-    std::vector<std::string> segments;
-    std::string current;
-    char quote = '\0';  // '\0' = 引号外,否则存着当前引号字符
-    for (const char c : command) {
-        if (quote != '\0') {
-            current.push_back(c);
-            if (c == quote) {
-                quote = '\0';
-            }
-            continue;
-        }
-        if (c == '"' || (single_quotes && c == '\'')) {
-            quote = c;
-            current.push_back(c);
-            continue;
-        }
-        if (c == '&' || c == '|' || c == ';' || c == '\n' || c == '\r') {
-            // 分隔符:当前段收工。&&/|| 连着的第二个字符走到这儿时 current
-            // 是空的,推出去也会在上层被"纯空白段跳过"处理掉。
-            segments.push_back(current);
-            current.clear();
-            continue;
-        }
-        current.push_back(c);
-    }
-    segments.push_back(current);
-    return segments;
-}
-
-// 段内引号外有没有重定向字符(> >> <)。
-bool HasUnquotedRedirection(const std::string& segment, bool single_quotes) {
-    char quote = '\0';
-    for (const char c : segment) {
-        if (quote != '\0') {
-            if (c == quote) {
-                quote = '\0';
-            }
-            continue;
-        }
-        if (c == '"' || (single_quotes && c == '\'')) {
-            quote = c;
-            continue;
-        }
-        if (c == '>' || c == '<') {
-            return true;
-        }
-    }
-    return false;
-}
-
-// 段内"单引号外"有没有 $((powershell 子表达式,双引号里照样执行)。
-// cmd 里 $( 是普通文本,也一并拦——顶多多问,不会漏。
-bool HasSubexpression(const std::string& segment, bool single_quotes) {
-    bool in_single = false;
-    char prev = '\0';
-    for (const char c : segment) {
-        if (single_quotes && c == '\'') {
-            in_single = !in_single;
-        } else if (!in_single && prev == '$' && c == '(') {
-            return true;
-        }
-        prev = c;
-    }
-    return false;
-}
-
-// 按引号外空白拆词,词身上的引号字符剥掉("C:\a b\git.exe" 是一个词)。
-std::vector<std::string> Tokenize(const std::string& segment, bool single_quotes) {
-    std::vector<std::string> tokens;
-    std::string current;
-    bool in_token = false;
-    char quote = '\0';
-    for (const char c : segment) {
-        if (quote != '\0') {
-            if (c == quote) {
-                quote = '\0';
-            } else {
-                current.push_back(c);
-            }
-            in_token = true;
-            continue;
-        }
-        if (c == '"' || (single_quotes && c == '\'')) {
-            quote = c;
-            in_token = true;
-            continue;
-        }
-        if (IsSpace(c)) {
-            if (in_token) {
-                tokens.push_back(current);
-                current.clear();
-                in_token = false;
-            }
-            continue;
-        }
-        current.push_back(c);
-        in_token = true;
-    }
-    if (in_token) {
-        tokens.push_back(current);
-    }
-    return tokens;
-}
-
-// 词形归一:剥路径前缀取文件名、剥可执行扩展、小写化。首词查表用,
-// sudo/写盘 cmdlet 扫全段的时候也用同一套。
-std::string NormalizeWord(const std::string& token) {
-    std::string word = token;
-    if (const std::size_t pos = word.find_last_of("/\\"); pos != std::string::npos) {
-        word = word.substr(pos + 1);
-    }
-    word = ToLower(std::move(word));
-    for (const std::string_view ext : {".exe", ".bat", ".cmd", ".com"}) {
-        if (word.size() > ext.size() && word.ends_with(ext)) {
-            word.resize(word.size() - ext.size());
-            break;
-        }
-    }
-    return word;
-}
 
 template <std::size_t N>
 bool InList(const std::array<std::string_view, N>& list, std::string_view word) {
@@ -227,7 +97,7 @@ CommandSafety ClassifySegment(const std::string& segment, bool is_powershell, bo
 
     // 环境变量赋值前缀:$env:X=...(powershell)/ set X=...(cmd,set 已进
     // 黑名单)。$env: 打头的首词不成词形,单独拦。
-    if (ToLower(tokens.front()).rfind("$env:", 0) == 0) {
+    if (ToLowerWord(tokens.front()).rfind("$env:", 0) == 0) {
         return CommandSafety::NeedsConfirm;
     }
 
@@ -248,7 +118,7 @@ CommandSafety ClassifySegment(const std::string& segment, bool is_powershell, bo
     if (tokens.size() >= 2) {
         bool all_probe = true;
         for (std::size_t i = 1; i < tokens.size(); ++i) {
-            if (!InList(kProbeFlags, ToLower(tokens[i]))) {
+            if (!InList(kProbeFlags, ToLowerWord(tokens[i]))) {
                 all_probe = false;
                 break;
             }
@@ -262,13 +132,13 @@ CommandSafety ClassifySegment(const std::string& segment, bool is_powershell, bo
     // branch/remote 两个子命令能改状态(git branch -D、git remote add),
     // 只放裸命令与只读旗标,带其余参数照问。
     if (first == "git") {
-        if (tokens.size() >= 2 && InList(kGitSafeSubcommands, ToLower(tokens[1]))) {
-            const std::string sub = ToLower(tokens[1]);
+        if (tokens.size() >= 2 && InList(kGitSafeSubcommands, ToLowerWord(tokens[1]))) {
+            const std::string sub = ToLowerWord(tokens[1]);
             if (sub == "branch" || sub == "remote") {
                 static constexpr std::array<std::string_view, 6> kGitReadOnlyFlags = {
                     "-v", "-vv", "-a", "--list", "--all", "show"};
                 for (std::size_t i = 2; i < tokens.size(); ++i) {
-                    if (!InList(kGitReadOnlyFlags, ToLower(tokens[i]))) {
+                    if (!InList(kGitReadOnlyFlags, ToLowerWord(tokens[i]))) {
                         return CommandSafety::NeedsConfirm;
                     }
                 }
@@ -291,31 +161,6 @@ CommandSafety ClassifySegment(const std::string& segment, bool is_powershell, bo
 }
 
 }  // namespace
-
-// 引号外有没有 PowerShell 脚本块起始 {(原是 plan_mode 的私有件,P2-3 单
-// 落的;下沉到这儿与分档逻辑同一份,别写第二份):脚本块体内是任意代码
-// (Where-Object { Remove-Item x } 照样逐条执行),静态证明不了无害;引号
-// 里的 { 不算(引号状态机),无脚本块的简化写法(Where-Object Name -eq
-// 'x')不受影响。cmd 的 { } 没有执行语义,调用方自行按 shell 分流。
-bool HasUnquotedScriptBlock(const std::string& segment, bool single_quotes) {
-    char quote = '\0';
-    for (const char c : segment) {
-        if (quote != '\0') {
-            if (c == quote) {
-                quote = '\0';
-            }
-            continue;
-        }
-        if (c == '"' || (single_quotes && c == '\'')) {
-            quote = c;
-            continue;
-        }
-        if (c == '{') {
-            return true;
-        }
-    }
-    return false;
-}
 
 CommandSafety ClassifyCommand(const std::string& command, const std::string& shell) {
     const bool is_powershell = (shell == "powershell" || shell == "pwsh");
@@ -420,7 +265,7 @@ std::optional<std::string> FindIsolationGitRedirect(const std::string& command, 
             // 环境变量赋值把 git 改道的:GIT_DIR=... / GIT_WORK_TREE=... /
             // $env:GIT_DIR=... / set GIT_DIR=...。赋了就是改道,不管值指哪
             // (静态层证明不了它无害,一律拦)。
-            const std::string lowered = ToLower(tokens[i]);
+            const std::string lowered = ToLowerWord(tokens[i]);
             if (lowered.starts_with("git_dir=") || lowered.starts_with("git_work_tree=") ||
                 lowered.starts_with("$env:git_dir=") || lowered.starts_with("$env:git_work_tree=") ||
                 lowered.starts_with("set git_dir=") || lowered.starts_with("set git_work_tree=")) {
