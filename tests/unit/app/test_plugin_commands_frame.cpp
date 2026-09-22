@@ -139,7 +139,8 @@ std::vector<std::shared_ptr<const runtime::PluginManifest>> MakeManifests(int to
     auto parsed = runtime::ParsePluginManifest(text, dir);
     // 解析挂了直接亮错,不静默吞(manifest 造错时测试要报因,不是装没装)。
     if (!parsed.has_value()) {
-        REQUIRE_MESSAGE(false, "测试 manifest 解析失败: " + parsed.error());
+        const std::string reason = "测试 manifest 解析失败: " + parsed.error();
+        REQUIRE_MESSAGE(false, reason.c_str());
         return {};
     }
     std::vector<std::shared_ptr<const runtime::PluginManifest>> manifests;
