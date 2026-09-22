@@ -1,6 +1,6 @@
 # SV-10 包组件集合用三种结构重复维护按类型查名
 
-- 状态：已实施(2026-09-22,PR #197,CI run 35660447496 rollup 绿:changes/lane/install-scripts×2/macos-clang 俱 success)。轻合同 ComponentNameIndex 落 src/package/component_name_index.hpp(header-only,免登记 CMake),三份 set+switch 并一份;PackageComponentSet 组合索引只留包身份,catalog 与 mounting 各建各的值,挂载四类内容组件过滤留在构建处。行为零变更,既有测试册全保。
+- 状态：已实施(2026-09-22,PR #197。代码提交 run 35660447496 rollup 绿(macos-clang 腿);PR 头 run 35663459158 双平台 rollup 绿:windows-msvc 与 macos-clang 俱 success——windows 腿前两回环境抖挂 app_server/workspace 锁族与 project_memory worker 族,与本改动无涉的既有 flaky,同夜 main 自身 run 35667914349 亦挂同族 app_server_browser,第三次全绿)。轻合同 ComponentNameIndex 落 src/package/component_name_index.hpp(header-only,免登记 CMake),三份 set+switch 并一份;PackageComponentSet 组合索引只留包身份,catalog 与 mounting 各建各的值,挂载四类内容组件过滤留在构建处。行为零变更,既有测试册全保。
 - 审查日期：2026-09-21。
 - 源码基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 批次：1。第一批只合并等价实现，第二批收敛合同，第三批拆职责。高优先行为缺陷应先以窄补丁处理，不必等低风险整理。
@@ -42,8 +42,8 @@
 - [x] 七种 ComponentKind 查名都走同一存储机械，新增种类无需复制第三份 Has。(ComponentNameIndex::Add/Has 一份机械,按声明序的 array 档位;PackageComponentSet::Has 一行转发;kAllComponentKinds 档位表配 static_assert,新增种类漏补即编译错)
 - [x] catalog 中坏组件仍可被引用定位并给诊断；未通过验证的包不因索引统一而挂载。(ResolveCtx::own 构建处只加不减,坏组件照 Add 进账;挂载的 rejected/disabled 分支一字未动;CI run 35660447496 全绿)
 - [x] mounting 只对四类内容组件折 canonical，Plugin/MCP/Channel 规则不变。(CollectOwn 显式四 case 入账,plugin/mcp/channel 档恒空,Has 同旧 default 分支返 false)
-- [x] 包内同名跨 kind、显式跨包名、外部裸名及空/default 引用夹具保持原输出。(test_package_catalog.cpp 既有夹具全保,仅 other.skills.insert 一行随组合迁移为 other.names.Add;CI run 35660447496 macos-clang 腿测试册全绿)
-- [x] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。(单笔提交 060dd559 只碰 src/package 三件+新头+一处测试构造行;行为零变更,回滚 revert 即可;尚未验证边界=无,纯静态合并交远端 CI)
+- [x] 包内同名跨 kind、显式跨包名、外部裸名及空/default 引用夹具保持原输出。(test_package_catalog.cpp 既有夹具全保,仅 other.skills.insert 一行随组合迁移为 other.names.Add;CI run 35660447496 与 35663459158 测试册全绿)
+- [x] 提交只覆盖本条职责；说明行为变化、回滚方式及尚未验证边界。(代码单笔提交 060dd559 只碰 src/package 三件+新头+一处测试构造行;行为零变更,回滚 revert 即可;尚未验证边界=无,纯静态合并交远端 CI——windows 腿两次红均为 app_server/workspace 锁与 memory worker 族环境抖,main 同夜同族亦红,非本改动所伤)
 
 ## 合并/删除口径
 
