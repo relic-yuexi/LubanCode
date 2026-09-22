@@ -527,8 +527,10 @@ TEST_CASE("local web:头部拆包到齐才处理(公共读头循环收)") {
 }
 
 TEST_CASE("local web:artifact 过会话门——401 在前,200 带字节与 CSP,404 同一只加载器") {
+    // artifact 目录与夹具的 assets 目录必须分开:AssetsDir 构造时会清空
+    // 自己的目录,同名就把种进去的 artifact 抹了。
     const std::filesystem::path artifact_root =
-        std::filesystem::temp_directory_path() / "lubancode_test_webui_artifact";
+        std::filesystem::temp_directory_path() / "lubancode_test_webui_artifact_store";
     {
         std::error_code ec;
         std::filesystem::remove_all(artifact_root, ec);
@@ -582,11 +584,13 @@ TEST_CASE("local web:头部 16KiB 边界——恰在限内放行,越界拒断") 
     const int port = harness.port();
 
     // 头部本体(含 \r\n\r\n 终止符)造到指定总长:固定部分之外用 X-Pad 填。
+    // X-Pad 行尾 \r\n 与头部终止 \r\n 分开写,长度账不混。
     const auto make_request = [port](std::size_t total_head_bytes) {
         const std::string fixed = "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:" +
                                   std::to_string(port) + "\r\nConnection: close\r\n";
-        const std::size_t pad = total_head_bytes - fixed.size() - std::string("X-Pad: ").size() - 2 - 4;
-        return fixed + "X-Pad: " + std::string(pad, 'x') + "\r\n\r\n";
+        const std::size_t overhead = std::string("X-Pad: ").size() + 2 + 4;  // 名字+行尾+终止符
+        const std::size_t pad = total_head_bytes - fixed.size() - overhead;
+        return fixed + "X-Pad: " + std::string(pad, 'x') + "\r\n" + "\r\n";
     };
 
     SUBCASE("头部本体恰 16KiB(含终止符):照常应答") {
