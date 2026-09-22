@@ -502,15 +502,18 @@ TEST_CASE("账本制: Windows junction 进出——查账同门同房") {
 // BrokenLock 而 Acquire 对它即刻死拒不磨。一把真句柄(无 FILE_SHARE_READ)
 // 把 owner 攥住 150ms:旧档 75ms 内必耗尽(本用例即红);新档 10×25ms
 // 穿得过,穿出后核出的仍是"持有者活着"——短拒是瞬态,不是坏锁。
+//
+// 夹具用手搓锁目录(产品同构:目录 + owner 账,pid 记本进程),不起
+// ManifestLock 实例——真持有锁的实例会用 _wfsopen 攥 owner 只读句柄
+//(共享含读),注入句柄"不给读共享"与它互斥,攥不上。
 TEST_CASE("账本制: 锁短拒注入——owner 被无读共享句柄攥住,穿透重试不折坏锁") {
     const fs::path root = TempRoot("lock-denied");
     const fs::path room = root / "room";
-    fs::create_directories(room);
-
-    workspace::ManifestLock holder;
-    REQUIRE(workspace::ManifestLock::TryAcquire(room, &holder).status ==
-            workspace::ManifestLock::Status::Acquired);
-    const fs::path owner_file = workspace::ManifestLockDir(room) / "owner";
+    const fs::path lock_dir = workspace::ManifestLockDir(room);
+    fs::create_directories(lock_dir);
+    const fs::path owner_file = lock_dir / "owner";
+    Write(owner_file, "{\"schema_version\":1,\"pid\":" +
+                          std::to_string(GetCurrentProcessId()) + "}\n");
     REQUIRE(fs::exists(owner_file));
 
     // 攥句柄:允许别人写/删、独独不许读—— ifstream(共享读写)打不开,
@@ -537,8 +540,8 @@ TEST_CASE("账本制: 锁短拒注入——owner 被无读共享句柄攥住,穿
            std::chrono::steady_clock::now() < grip_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    // 攥住期间取锁:短拒烧穿后核身份——持有者是本进程,如实报活,绝不
-    // BrokenLock 死拒(旧码这里 75ms 耗尽即折坏锁,断言当场翻红)。
+    // 攥住期间取锁:短拒烧穿后核身份——owner 账的 pid 是本进程,如实报
+    // 活,绝不 BrokenLock 死拒(旧码这里 75ms 耗尽即折坏锁,当场翻红)。
     workspace::ManifestLock contender;
     const auto refused = workspace::ManifestLock::Acquire(room, &contender, 3, 50);
     snatcher.join();
@@ -547,8 +550,9 @@ TEST_CASE("账本制: 锁短拒注入——owner 被无读共享句柄攥住,穿
     CHECK(refused.detail.find("持有者活着") != std::string::npos);
     CHECK_FALSE(contender.holds());
 
-    // 放手放锁,后来者即刻接上:短拒没留残账。
-    holder.Release();
+    // 放手拆壳,后来者即刻占上:短拒没留残账。
+    std::error_code cleanup_ec;
+    fs::remove_all(lock_dir, cleanup_ec);
     const auto after = workspace::ManifestLock::Acquire(room, &contender, 20, 100);
     REQUIRE(after.status == workspace::ManifestLock::Status::Acquired);
     contender.Release();
@@ -558,16 +562,15 @@ TEST_CASE("账本制: 锁短拒注入——owner 被无读共享句柄攥住,穿
 // 释放竞态的近似注入:持有者释放是先删 owner 后拆目录,撞上取锁者时
 // owner 已不在、锁目录还年轻——这不是坏锁,是在建窗口,拒绝重试;绝
 // 不折 BrokenLock。锁住语义:将来谁把"无 owner 年轻目录"改判坏锁,这里
-// 当场翻红。
+// 当场翻红。同样手搓锁目录(真锁实例攥着 owner 句柄,测试删不动)。
 TEST_CASE("账本制: owner 读取途中被删——按在建窗口拒绝,不折坏锁") {
     const fs::path root = TempRoot("lock-vanish");
     const fs::path room = root / "room";
-    fs::create_directories(room);
-
-    workspace::ManifestLock holder;
-    REQUIRE(workspace::ManifestLock::TryAcquire(room, &holder).status ==
-            workspace::ManifestLock::Status::Acquired);
-    const fs::path owner_file = workspace::ManifestLockDir(room) / "owner";
+    const fs::path lock_dir = workspace::ManifestLockDir(room);
+    fs::create_directories(lock_dir);
+    const fs::path owner_file = lock_dir / "owner";
+    Write(owner_file, "{\"schema_version\":1,\"pid\":" +
+                          std::to_string(GetCurrentProcessId()) + "}\n");
 
     // 模拟释放竞态的前半:owner 没了、目录还在(年轻)。
     std::error_code remove_ec;
@@ -583,12 +586,8 @@ TEST_CASE("账本制: owner 读取途中被删——按在建窗口拒绝,不折
     CHECK(workspace::ManifestLock::HolderAlive(room, &detail));
     CHECK(detail.find("正在建立") != std::string::npos);
 
-    // 收尾:holder 的核账读不到 owner(被本用例删了),按合同保守不删,
-    // 残壳由测试端自拆——这里顺带验证"核不上账不乱删"的释放合同。
-    holder.Release();
-    CHECK(fs::exists(workspace::ManifestLockDir(room)));
     std::error_code cleanup_ec;
-    fs::remove_all(workspace::ManifestLockDir(room), cleanup_ec);
+    fs::remove_all(lock_dir, cleanup_ec);
 }
 #endif
 
