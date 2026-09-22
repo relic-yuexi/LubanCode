@@ -1,39 +1,11 @@
 #include "cli/choice_menu.hpp"
+#include "cli/menu_text_edit.hpp"  // AppendUtf8/EraseLastUtf8:三菜单共用的文本槽内核(HC-04)
 
 #include <algorithm>
 
 namespace lubancode::cli {
 
 namespace {
-
-void AppendUtf8(std::string& out, char32_t cp) {
-    if (cp <= 0x7F) {
-        out.push_back(static_cast<char>(cp));
-    } else if (cp <= 0x7FF) {
-        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp <= 0xFFFF) {
-        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp <= 0x10FFFF) {
-        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    }
-}
-
-void EraseLastUtf8(std::string& text) {
-    if (text.empty()) {
-        return;
-    }
-    std::size_t pos = text.size() - 1;
-    while (pos > 0 && (static_cast<unsigned char>(text[pos]) & 0xC0) == 0x80) {
-        --pos;
-    }
-    text.erase(pos);
-}
 
 bool HasVisibleText(const std::string& text) {
     return std::any_of(text.begin(), text.end(), [](unsigned char ch) { return ch > 0x20 && ch != 0x7F; });

@@ -12,6 +12,7 @@
 #include "cli/console_input.hpp"
 #include "cli/i18n.hpp"
 #include "cli/line_editor.hpp"
+#include "cli/menu_text_edit.hpp"  // AppendUtf8/EraseLastUtf8:三菜单共用的文本槽内核(HC-04)
 #include "platform/console.hpp"
 
 namespace lubancode::cli {
@@ -26,35 +27,6 @@ std::string ToLowerAscii(const std::string& s) {
         }
     }
     return out;
-}
-
-void AppendUtf8(std::string& out, char32_t cp) {
-    if (cp <= 0x7F) {
-        out.push_back(static_cast<char>(cp));
-    } else if (cp <= 0x7FF) {
-        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp <= 0xFFFF) {
-        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp <= 0x10FFFF) {
-        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    }
-}
-
-void EraseLastUtf8(std::string& text) {
-    if (text.empty()) {
-        return;
-    }
-    std::size_t pos = text.size() - 1;
-    while (pos > 0 && (static_cast<unsigned char>(text[pos]) & 0xC0) == 0x80) {
-        --pos;
-    }
-    text.erase(pos);
 }
 
 // platform::KeyInput -> cli::KeyEvent 的本地映射(本面板用得上的那几个键)。

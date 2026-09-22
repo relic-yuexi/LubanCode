@@ -1,0 +1,59 @@
+# HC-04：合并三个菜单的UTF8追加与尾删实现
+
+状态：待修复。本次只审查、建单，未改源码、未编译、未跑测试。
+
+基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`；先完成职责表，再据实际调用判定。
+
+| 编号 | 类别(A/B/C) | 严重度 | 位置(文件:行) | 现象(最短代码证据) | 具体后果 | 建议方案 | 影响面与风险 |
+|---|---|---|---|---|---|---|---|
+| HC-04 | A | 中 | src/cli/choice_menu.cpp:9<br>src/cli/choice_menu.cpp:27<br>src/cli/provider_switch.cpp:31<br>src/cli/provider_switch.cpp:49<br>src/cli/session_picker.cpp:24<br>src/cli/session_picker.cpp:42<br>src/cli/line_editor.cpp:367 | ChoiceMenu、ProviderSwitch、SessionPicker各自定义同样的 AppendUtf8 与 EraseLastUtf8。 | 同一字符编码或尾删规则要改三遍；三个输入场景各自承受边界修正。LineEditor 的整串UTF32编码又有不同非法码点行为，盲目替换会悄悄改变合同。 | 先抽取三个菜单完全相同的单码点追加/码点尾删内核；三个状态机继续独立。另列整串编码的非法码点策略对照，未定清之前不替换LineEditor实现。 | 不得把现有“删一码点”偷偷改成“删一字素簇”；多选、搜索过滤、粘贴归一化均不属于这次合并。 |
+
+职责依据：三个面板接收同一 `KeyEvent::Char(char32_t)`，都向UTF-8字符串末尾追加，再用同一续字节扫描删除末尾码点。函数体逐分支相同，既非相似命名，也非不同协议适配。
+
+最短证据：
+```cpp
+// 三处尾删函数完全同构
+std::size_t pos = text.size() - 1;
+while (pos > 0 && (static_cast<unsigned char>(text[pos]) & 0xC0) == 0x80) {
+    --pos;
+}
+text.erase(pos);
+```
+
+调用证据：choice_menu.cpp:101/112 写 custom_text；provider_switch.cpp:208/219 写 filter；session_picker.cpp:241/257 写 search。三个字段业务含义不同，文本增删职责相同。
+
+是否应合并：三对完全同构函数应合并。`line_editor.cpp:367` 的 Utf32ToUtf8 在最后一个 `else` 无条件编码，菜单版只在 `cp <= 0x10FFFF` 编码，因此对越界值确有不同处理；本单不把它直接换成同一函数。标准库没有可直接替换且合同等价的C++23 UTF-8编辑器，不以“标准库已有”硬报。
+
+删除口径：三份各约27行，留一份公共内核，约54行重复函数体可删；含新增声明/include后的净减约40–50行。
+
+实施步骤：
+- [x] 提取当前算法，保持空串、ASCII、双/三/四字节、越界码点的现有结果。（src/cli/menu_text_edit.hpp 内核逐字节照搬三份原实现；tests/unit/cli/test_menu_text_edit.cpp 钉黄金字节 a/é/灰/🙂、越界 0x110000/0xFFFFFFFF 整码点丢弃、代理项 3 字节照编、空串安全、孤立续字节退到串首）
+- [x] 三个调用者仅替换函数来源，不改状态机、光标及粘贴规则。（choice_menu/provider_switch/session_picker 各删本地两函数、加一行 include，调用点一字未动，diff 净删 87 行/增 3 行）
+- [x] 以同一输入序列验证三个文本槽增删结果相同。（test_menu_text_edit.cpp"同一键序列在三块面板文本槽上增删结果相同"：gray🙂灰 打入再退 4 个码点，custom_text/filter/search 逐步逐串相等）
+- [x] 对字素簇删除另立需求；这轮明确仍删码点。（内核头注释写明"删码点不删字素簇，整簇删除另立需求"；测试钉组合附标 U+0301 只掉附标、ZWJ 序列只掉末尾一个码点）
+
+验收：三文件不再各自维护UTF-8位操作；组合字符、ZWJ序列保持原先码点删除行为；三个面板功能差别保留。
+
+相关已有 TODO：未找到专门负责这组三份函数的既有单。本单独立交付，不塞进终端大重构。
+
+## 交接边界
+
+- 批次：第1批。
+- 前置：无硬前置；共改文件须协调。（以全局排期复核为准）。
+- 并行：可与修改文件不相交的HC任务并行。
+- 禁止共改：以下文件在本单实施期间只归本单负责人；其他任务先改自己的独立文件，接口变动等本单合入后再接。
+
+- `src/cli/choice_menu.cpp`
+- `src/cli/provider_switch.cpp`
+- `src/cli/session_picker.cpp`
+- `src/cli/menu_text_edit.hpp（新增）`
+- `tests/unit/cli/test_choice_menu.cpp`
+- `tests/unit/config/test_provider_switch.cpp`
+- `tests/unit/sessions/test_session_picker.cpp`
+
+预计可删除旧重复代码：约54行；以正文口径为准。
+## 全局排期复核
+
+- 前置／文件接手次序：无硬前置；共改文件须协调。
+- 总排期：[三批重构与并行交接](../07_三批重构与并行交接.md)。本节含跨组复核结果，优先于早期本组可并行提示。
+- 当前清单未见同文件冲突；新增公共头或CMake源登记先通知集成人。
