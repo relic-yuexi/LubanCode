@@ -1413,14 +1413,17 @@ TEST_CASE("compact 材料工具配对:双号换算保真,孤儿按文本投影,�
         REQUIRE(result.applied);
         bool saw_orphan_text = false;
         for (const auto& message : client.last_messages) {
-            if (message.value("role", std::string()) == "tool") {
+            const std::string role = message.value("role", std::string());
+            if (role == "tool") {
                 // 出网的 tool 消息只许是配对过的(双号换算后的那条)。
                 CHECK(message.value("tool_call_id", std::string()) != "action-ghost");
                 continue;
             }
+            if (role != "user") {
+                continue;  // assistant 的 content 是块数组,不当字符串取
+            }
             const std::string content = message.value("content", std::string());
-            if (message.value("role", std::string()) == "user" &&
-                content.rfind("[工具结果 ", 0) == 0 &&
+            if (content.rfind("[工具结果 ", 0) == 0 &&
                 content.find("action-ghost") != std::string::npos &&
                 content.find("孤儿结果") != std::string::npos) {
                 saw_orphan_text = true;
