@@ -1,6 +1,6 @@
 # FD-07 目录指纹直接依赖平台哈希内核
 
-- 状态：待实现；本次仅审查并建单。
+- 状态：已实现；PR #202 CI 双平台绿,待合并。
 - 日期：2026-09-21。
 - 基线：`693d3ddb5607fc67f37c262b8b8873c9f7dc07eb`。
 - 类别：C；严重度：低；重构批次：1。
@@ -19,12 +19,17 @@
 
 ## 实施顺序
 
-- [ ] 改一处include与三处限定名，审diff确认没有算法改动。
+- [x] 改一处include与三处限定名，审diff确认没有算法改动。（PR #202：include `hooks/hash.hpp`→`platform/sha256.hpp`，三处 `hooks::Sha256Hex`→`platform::Sha256Hex`；diff 仅此四行，材料拼法/分隔符/摘要格式零改动）
 
 ## 验收门
 
-- [ ] Plugin与Package存量golden指纹不变。
-- [ ] platform目录无hooks include（当前唯一反向边）。
+- [x] Plugin与Package存量golden指纹不变。（同一内核同一 string_view 薄口，输出逐字节相同；tests/unit/packages/test_package_trust.cpp 指纹底座用例与 plugin 信任集成测试全过）
+- [x] platform目录无hooks include（当前唯一反向边）。（改后 `grep '#include "hooks/' src/platform/` 零命中）
+
+### 勾账证据
+
+- PR：https://github.com/relic-yuexi/LubanCode/pull/202（commit 8524118c）
+- CI：run 35685677915，rollup conclusion=success（changes/lane/install-scripts 双平台/macos-clang 全绿；run 35685666209 为并发组抢占 cancelled，非真红）。
 
 - CI：实现者提交独立PR后跑仓库远程CI；本审查未运行测试。
 
