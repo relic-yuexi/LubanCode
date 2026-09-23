@@ -4,12 +4,13 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
+#include <iostream>  // std::cerr:错误行照旧走 stderr(批 7 不动错误流)
 #include <string>
 
 #include <nlohmann/json.hpp>
 
 #include "app/version.hpp"
+#include "cli/frame_notice.hpp"  // 批 7:产物提示走 frame 键值对框
 #include "config/config.hpp"
 #include "kanban/kanban_html.hpp"
 #include "platform/process.hpp"
@@ -104,6 +105,19 @@ nlohmann::json BuildBoardData(const std::filesystem::path& workspaces_root) {
 
 }  // namespace
 
+std::vector<std::string> RenderKanbanNotice(const std::string& output_path,
+                                            std::size_t project_count, std::size_t session_count,
+                                            const Theme& theme, int width) {
+    // 两句既有文案原样进框:第一句按句内冒号拆两列,第二句(无冒号)整句
+    // 进 value。标题 kanban 是命令名(schema 标识符),不添文案。
+    const std::vector<frame::Field> fields = {
+        SentenceField("看板已生成: " + output_path),
+        SentenceField(std::to_string(project_count) + " 个项目," + std::to_string(session_count) +
+                      " 场会话"),
+    };
+    return frame::RenderKeyValues("kanban", fields, theme, frame::Light(), width);
+}
+
 int RunKanbanCommand(const KanbanCommandArgs& args) {
     const auto state_root = config::StateRootDir();
     if (!state_root.has_value() || state_root->empty()) {
@@ -149,8 +163,12 @@ int RunKanbanCommand(const KanbanCommandArgs& args) {
 
     const auto session_count = data["sessions"].size();
     const auto project_count = data["projects"].size();
-    std::cout << "看板已生成:" << tools::PathToUtf8(output) << "\n"
-              << "  " << project_count << " 个项目," << session_count << " 场会话\n";
+    // 批 7:产物提示走 frame 键值对框(RenderKanbanNotice 纯函数渲染,
+    // 形状册直调钉形状);输出端口收口 TermOut(默认 stdout,与 std::cout
+    // 同一目的地)。错误行(上面的 std::cerr)照旧,一字不动。
+    EmitFrameLines(RenderKanbanNotice(tools::PathToUtf8(output), project_count, session_count,
+                                      CliTheme(), CliFrameWidth()));
+    TermOut().flush();
     if (!args.no_open) {
         OpenBrowserFor(tools::PathToUtf8(std::filesystem::absolute(output, ec)));
     }

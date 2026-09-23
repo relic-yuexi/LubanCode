@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "channel/channel_config.hpp"
+#include "cli/frame_notice.hpp"  // 批 7:配对回执走 frame 键值对框
 #include "gateway/pairing_command.hpp"
 #include "gateway/process.hpp"
 #include "gateway/profile.hpp"
@@ -62,6 +63,23 @@ std::string NewCommandId() {
 }
 
 }  // namespace
+
+std::vector<std::string> RenderPairingReceipt(const std::string& action,
+                                              const std::string& channel_id,
+                                              const std::string& account_id,
+                                              const std::string& sender_id, const Theme& theme,
+                                              int width) {
+    // 两句既有文案原样进框(逐句按冒号拆列);批准走 Pass 语义色
+    //(table_pass,批 4 裁量),拒绝不上色。
+    const bool approve = action == "approve";
+    return frame::RenderKeyValues(
+        "channel pairing",
+        {SentenceField(std::string(approve ? "已批准" : "已拒绝") + " " + channel_id + "/" +
+                           account_id + " 的配对身份:" + sender_id,
+                       approve ? frame::FieldAccent::Pass : frame::FieldAccent::None),
+         SentenceField("提醒:批准不会自动补跑对方已发的消息——让 TA 重新发一遍。")},
+        theme, frame::Light(), width);
+}
 
 int RunChannelPairingCommand(const ChannelPairingCommandArgs& args) {
     // 渠道/账号 id 先过守门:命令要进 Gateway 的账号目录体系。
@@ -125,8 +143,11 @@ int RunChannelPairingCommand(const ChannelPairingCommandArgs& args) {
         std::fprintf(stderr, "channel pairing: 命令写不进控制面——%s\n", write_error.c_str());
         return 2;
     }
-    std::fprintf(stdout, "已向 Gateway(boot %s)提交 %s,等待回执...\n", gate.boot_id.c_str(),
-                 args.action == "approve" ? "批准" : "拒绝");
+    // 批 7:进度行(等待回执,轮询中)不进框(批 2 裁量 2 同源),只收口
+    // 端口(fprintf stdout -> TermOut,同一目的地,文字不变)。
+    TermOut() << "已向 Gateway(boot " << gate.boot_id << ")提交 "
+              << (args.action == "approve" ? "批准" : "拒绝") << ",等待回执...\n";
+    TermOut().flush();
 
     // 等回执(100ms 轮询;读到即由 TakePairingCommandResult 删走)。
     const std::int64_t deadline = platform::WallClockNowMs() + args.timeout_ms;
@@ -136,11 +157,12 @@ int RunChannelPairingCommand(const ChannelPairingCommandArgs& args) {
                                                               command.command_id, &result_error);
         if (result.has_value()) {
             if (result->ok) {
-                std::fprintf(stdout, "%s %s/%s 的配对身份:%s\n",
-                             args.action == "approve" ? "已批准" : "已拒绝",
-                             args.channel_id.c_str(), args.account_id.c_str(),
-                             result->sender_id.c_str());
-                std::fprintf(stdout, "提醒:批准不会自动补跑对方已发的消息——让 TA 重新发一遍。\n");
+                // 批 7:成功回执走键值对框(RenderPairingReceipt 纯函数
+                // 渲染,形状册直调)。
+                EmitFrameLines(RenderPairingReceipt(args.action, args.channel_id,
+                                                    args.account_id, result->sender_id,
+                                                    CliTheme(), CliFrameWidth()));
+                TermOut().flush();
                 return 0;
             }
             std::fprintf(stderr, "channel pairing: %s 失败(%s)——%s\n", args.action.c_str(),

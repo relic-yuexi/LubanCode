@@ -13,6 +13,7 @@
 
 #include "skills/skill_drafter.hpp"
 #include "cli/console_input.hpp"
+#include "cli/frame_notice.hpp"  // 批 7:清单/回执走 frame 三助手
 #include "cli/i18n.hpp"
 #include "cli/slash_commands.hpp"
 #include "config/skill_store.hpp"
@@ -56,17 +57,26 @@ std::vector<std::string> DraftFiles(const fs::path& draft_dir) {
 bool InstallDraftWithConfirm(const fs::path& draft_dir, const fs::path& skills_root,
                              RecordCommandContext& ctx, const Theme& theme) {
     const std::vector<std::string> files = DraftFiles(draft_dir);
-    TermOut() << trf("record.install.files", PathToUtf8(skills_root) + "/<"
-                                               + tr("record.skill_name_placeholder") + ">")
-              << "\n";
-    for (const std::string& file : files) {
-        TermOut() << "  " << file << "\n";
+    // 批 7:引导句(尾冒号剥掉)做 frame 标题,文件清单走列表;空清单时
+    // 句子照旧平铺(空态文案调用方管,框内无行可装)。
+    const std::string files_sentence = trf("record.install.files",
+                                           PathToUtf8(skills_root) + "/<" +
+                                               tr("record.skill_name_placeholder") + ">");
+    if (files.empty()) {
+        TermOut() << files_sentence << "\n";
+    } else {
+        std::vector<frame::ListRow> rows;
+        for (const std::string& file : files) {
+            rows.push_back(frame::ListRow{file, {}, {}, frame::Bullet::None});
+        }
+        EmitFrameLines(frame::RenderList(StripTrailingColon(files_sentence), rows, theme,
+                                         frame::Light(), CliFrameWidth()));
     }
     const auto answer = ReadLine(theme.confirm + tr("record.install.confirm") + theme.reset, theme,
                                  /*esc_rejects=*/true);
     const bool confirmed = answer.has_value() && (*answer == "y" || *answer == "Y");
     if (!confirmed) {
-        TermOut() << tr("record.install.cancelled") << "\n";
+        PrintNotice(theme, {tr("record.install.cancelled")});
         return false;
     }
     const auto installed = config::InstallDraftSkill(
@@ -77,11 +87,10 @@ bool InstallDraftWithConfirm(const fs::path& draft_dir, const fs::path& skills_r
         TermOut() << theme.error << trf("record.install.failed", installed.error()) << theme.reset << "\n";
         return false;
     }
-    TermOut() << trf("record.install.done", installed->installed_names.empty()
-                                                ? std::string("?")
-                                                : installed->installed_names.front(),
-                     PathToUtf8(skills_root))
-              << "\n";
+    PrintNotice(theme, {trf("record.install.done", installed->installed_names.empty()
+                                                        ? std::string("?")
+                                                        : installed->installed_names.front(),
+                             PathToUtf8(skills_root))});
     if (ctx.refresh_skills) {
         ctx.refresh_skills();
     }
@@ -108,7 +117,7 @@ void FinishRecording(RecordCommandContext& ctx, const Theme& theme, const fs::pa
     const auto answer = ReadLine(theme.confirm + tr("record.install.prompt") + theme.reset, theme,
                                  /*esc_rejects=*/true);
     if (!answer.has_value()) {
-        TermOut() << tr("record.install.cancelled") << "\n";
+        PrintNotice(theme, {tr("record.install.cancelled")});
         return;
     }
     const std::string choice = *answer;
@@ -116,7 +125,7 @@ void FinishRecording(RecordCommandContext& ctx, const Theme& theme, const fs::pa
                                  (choice == "p" || choice == "P" || choice.empty()) ? ctx.project_skills_root
                                                                                     : fs::path());
     if (skills_root.empty()) {
-        TermOut() << tr("record.install.cancelled") << "\n";
+        PrintNotice(theme, {tr("record.install.cancelled")});
         return;
     }
     InstallDraftWithConfirm(draft->draft_dir, skills_root, ctx, theme);
@@ -147,13 +156,12 @@ void HandleRecordSelection(const ParsedRecordCommand& command, const std::string
     switch (command.action) {
         case RecordCommandAction::Status:
             if (selection.active()) {
-                TermOut() << trf("record.status.recording",
-                                 selection.paused() ? tr("record.status.paused_word")
-                                                    : tr("record.status.recording_word"),
-                                 selection.record_id(), std::string("trajectory"))
-                          << "\n";
+                PrintNotice(theme, {trf("record.status.recording",
+                                        selection.paused() ? tr("record.status.paused_word")
+                                                           : tr("record.status.recording_word"),
+                                        selection.record_id(), std::string("trajectory"))});
             } else {
-                TermOut() << tr("record.status.idle") << "\n";
+                PrintNotice(theme, {tr("record.status.idle")});
             }
             return;
         case RecordCommandAction::Start: {
@@ -179,8 +187,8 @@ void HandleRecordSelection(const ParsedRecordCommand& command, const std::string
                 fail(error);
                 return;
             }
-            TermOut() << trf("record.started", selection.record_id(), std::string("trajectory selection"))
-                      << "\n";
+            PrintNotice(theme, {trf("record.started", selection.record_id(),
+                                    std::string("trajectory selection"))});
             return;
         }
         case RecordCommandAction::Note: {
@@ -189,7 +197,7 @@ void HandleRecordSelection(const ParsedRecordCommand& command, const std::string
                 fail(error);
                 return;
             }
-            TermOut() << tr("record.note_saved") << "\n";
+            PrintNotice(theme, {tr("record.note_saved")});
             return;
         }
         case RecordCommandAction::Pause: {
@@ -198,7 +206,7 @@ void HandleRecordSelection(const ParsedRecordCommand& command, const std::string
                 fail(error);
                 return;
             }
-            TermOut() << tr("record.paused_msg") << "\n";
+            PrintNotice(theme, {tr("record.paused_msg")});
             return;
         }
         case RecordCommandAction::Resume: {
@@ -207,7 +215,7 @@ void HandleRecordSelection(const ParsedRecordCommand& command, const std::string
                 fail(error);
                 return;
             }
-            TermOut() << tr("record.resumed_msg") << "\n";
+            PrintNotice(theme, {tr("record.resumed_msg")});
             return;
         }
         case RecordCommandAction::Stop: {
@@ -221,11 +229,11 @@ void HandleRecordSelection(const ParsedRecordCommand& command, const std::string
                 fail(error);
                 return;
             }
-            TermOut() << trf("record.stop_done", id, std::string("trajectory selection")) << "\n";
-            TermOut() << theme.stats
-                      << "选段已封口(canonical 事件段与末 hash 已落 Journal);"
-                         "技能草稿由轨迹导出(P0-5)从同一 selection 确定性重编。"
-                      << theme.reset << "\n";
+            PrintNotice(theme, {trf("record.stop_done", id, std::string("trajectory selection")),
+                                // 硬编码老文案(不走 i18n)原样进框,一字不改
+                                //(批 2 裁量 1);stats 色由键值对助手降为默认档。
+                                std::string("选段已封口(canonical 事件段与末 hash 已落 Journal);"
+                                            "技能草稿由轨迹导出(P0-5)从同一 selection 确定性重编。")});
             return;
         }
         case RecordCommandAction::Cancel: {
@@ -234,7 +242,7 @@ void HandleRecordSelection(const ParsedRecordCommand& command, const std::string
                 fail(error);
                 return;
             }
-            TermOut() << tr("record.cancel_done") << "\n";
+            PrintNotice(theme, {tr("record.cancel_done")});
             return;
         }
         default:
@@ -267,14 +275,13 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
             return;
         case RecordCommandAction::Status:
             if (ctx.recorder.has_value()) {
-                TermOut() << trf("record.status.recording",
-                                 ctx.recorder->state() == skills::RecorderState::Paused
-                                     ? tr("record.status.paused_word")
-                                     : tr("record.status.recording_word"),
-                                 ctx.recorder->name(), PathToUtf8(ctx.recorder->dir()))
-                          << "\n";
+                PrintNotice(theme, {trf("record.status.recording",
+                                        ctx.recorder->state() == skills::RecorderState::Paused
+                                            ? tr("record.status.paused_word")
+                                            : tr("record.status.recording_word"),
+                                        ctx.recorder->name(), PathToUtf8(ctx.recorder->dir()))});
             } else {
-                TermOut() << tr("record.status.idle") << "\n";
+                PrintNotice(theme, {tr("record.status.idle")});
             }
             return;
         case RecordCommandAction::Start: {
@@ -307,7 +314,7 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
                 TermOut() << theme.error << trf("record.start.failed", started.error()) << theme.reset << "\n";
                 return;
             }
-            TermOut() << trf("record.started", started->id(), PathToUtf8(started->dir())) << "\n";
+            PrintNotice(theme, {trf("record.started", started->id(), PathToUtf8(started->dir()))});
             ctx.recorder.emplace(std::move(*started));
             return;
         }
@@ -320,7 +327,7 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
                 TermOut() << theme.error << trf("record.op_failed", noted.error()) << theme.reset << "\n";
                 return;
             }
-            TermOut() << tr("record.note_saved") << "\n";
+            PrintNotice(theme, {tr("record.note_saved")});
             return;
         case RecordCommandAction::Pause:
             if (!ctx.recorder.has_value()) {
@@ -331,7 +338,7 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
                 TermOut() << theme.error << trf("record.op_failed", paused.error()) << theme.reset << "\n";
                 return;
             }
-            TermOut() << tr("record.paused_msg") << "\n";
+            PrintNotice(theme, {tr("record.paused_msg")});
             return;
         case RecordCommandAction::Resume:
             if (!ctx.recorder.has_value()) {
@@ -342,7 +349,7 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
                 TermOut() << theme.error << trf("record.op_failed", resumed.error()) << theme.reset << "\n";
                 return;
             }
-            TermOut() << tr("record.resumed_msg") << "\n";
+            PrintNotice(theme, {tr("record.resumed_msg")});
             return;
         case RecordCommandAction::Stop: {
             if (!ctx.recorder.has_value()) {
@@ -361,7 +368,7 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
                 TermOut() << theme.error << trf("record.op_failed", stopped.error()) << theme.reset << "\n";
                 return;
             }
-            TermOut() << trf("record.stop_done", id, PathToUtf8(dir)) << "\n";
+            PrintNotice(theme, {trf("record.stop_done", id, PathToUtf8(dir))});
             FinishRecording(ctx, theme, dir);
             return;
         }
@@ -376,7 +383,7 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
                 TermOut() << theme.error << trf("record.op_failed", cancelled.error()) << theme.reset << "\n";
                 return;
             }
-            TermOut() << tr("record.cancel_done") << "\n";
+            PrintNotice(theme, {tr("record.cancel_done")});
             return;
         }
         case RecordCommandAction::List: {
@@ -389,13 +396,28 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
                 TermOut() << tr("record.list.empty") << "\n";
                 return;
             }
-            TermOut() << tr("record.list.header") << "\n";
+            // 批 7:清单走表格。列头用数据 schema 名(批 1 裁量 1);state/
+            // draft 两列的值是既有 i18n 文案,一字不改;record.list.entry
+            // 的五段信息全数入列(不再拼句)。语义色:已停止=Pass、未完成=
+            // Fail(error 色)、有草稿=Pass。
+            std::vector<frame::TableColumn> columns;
+            columns.push_back({"id"});
+            columns.push_back({"name"});
+            columns.push_back({"started"});
+            columns.push_back({"state"});
+            columns.push_back({"draft"});
+            std::vector<frame::TableRow> rows;
             for (const auto& status : recordings) {
-                TermOut() << trf("record.list.entry", status.id, status.name, status.started_at,
-                                 status.finished ? tr("record.list.finished") : tr("record.list.unfinished"),
-                                 status.has_draft ? tr("record.list.has_draft") : tr("record.list.no_draft"))
-                          << "\n";
+                rows.push_back(frame::TableRow{
+                    {status.id, status.name, status.started_at,
+                     status.finished ? tr("record.list.finished") : tr("record.list.unfinished"),
+                     status.has_draft ? tr("record.list.has_draft") : tr("record.list.no_draft")},
+                    {frame::CellTone::Normal, frame::CellTone::Normal, frame::CellTone::Normal,
+                     status.finished ? frame::CellTone::Pass : frame::CellTone::Fail,
+                     status.has_draft ? frame::CellTone::Pass : frame::CellTone::Normal}});
             }
+            EmitFrameLines(frame::RenderTable(StripTrailingColon(tr("record.list.header")), columns,
+                                              rows, theme, frame::Light(), CliFrameWidth()));
             return;
         }
         case RecordCommandAction::Discard: {
@@ -408,7 +430,7 @@ void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, con
                 TermOut() << theme.error << trf("record.op_failed", discarded.error()) << theme.reset << "\n";
                 return;
             }
-            TermOut() << trf("record.discard_done", command.name) << "\n";
+            PrintNotice(theme, {trf("record.discard_done", command.name)});
             return;
         }
         case RecordCommandAction::Install: {

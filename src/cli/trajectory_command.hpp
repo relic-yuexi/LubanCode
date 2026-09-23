@@ -8,6 +8,7 @@
 //   usage/gc/doctor 照 P0-4。退出码按结果。
 #pragma once
 
+#include <filesystem>
 #include <string>
 
 namespace lubancode::cli {
@@ -32,5 +33,11 @@ struct TrajectoryCommandArgs {
 
 // 返回进程退出码:0 = 过;1 = 用法/找不到;2 = 验账/replay/导出未过。
 int RunTrajectoryCommand(const TrajectoryCommandArgs& args);
+
+// usage/gc 子命令执行体(workspace 目录已按 key 解析;批 7 形状册直调,
+// RunTrajectoryCommand 的入口在 key 反查之后才到这)。0 正常;gc 里有
+// 删除失败时退 2。
+int RunUsageReport(const std::filesystem::path& workspace_dir, const std::string& key);
+int RunGc(const std::filesystem::path& workspace_dir, const std::string& key, bool derived_only);
 
 }  // namespace lubancode::cli
