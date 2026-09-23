@@ -153,17 +153,17 @@ TEST_CASE("清单表:55 项长清单列对齐不破,一行不掉出框(dark)") {
     CHECK(framed_rows == static_cast<int>(kModelCount));  // 一行都不掉出框
     CHECK(col_consistent);  // model 列起始显示列处处一致
     CHECK(label_col > 0);
-    // 编号列右对齐:第 1 行的 "1" 与第 54 行(model-053-turbo)的 "54"
-    // 个位在同一显示列。
+    // 编号列右对齐:第 1 行的 "1" 与第 54 行(model-053-turbo)的 "4"
+    //(个位,后跟列距空格)在同一显示列。
     int unit_of_1 = -1;
     int unit_of_54 = -1;
     for (const std::string& line : lines) {
         const std::string plain = StripAnsiLight(line);
         if (plain.find("model-000") != std::string::npos) {
-            unit_of_1 = DisplayColOf(plain, "1");
+            unit_of_1 = DisplayColOf(plain, "1 ");
         }
         if (plain.find("model-053-turbo") != std::string::npos) {
-            unit_of_54 = DisplayColOf(plain, "5");
+            unit_of_54 = DisplayColOf(plain, "4 ");
         }
     }
     CHECK(unit_of_1 > 0);
