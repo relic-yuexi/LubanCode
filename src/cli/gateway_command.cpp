@@ -9,6 +9,7 @@
 
 #include "app/version.hpp"
 #include "app/launcher.hpp"  // GitHubRelease自动更新单 P1:固定入口布局识别
+#include "cli/frame_notice.hpp"  // 批 7:status/job/doctor/运维回执走 frame
 #include "gateway/automation_store.hpp"
 #include "gateway/control_server.hpp"
 #include "gateway/doctor.hpp"
@@ -81,12 +82,20 @@ int PrintGatewayStatus(const gateway::GatewayProfilePaths& paths, bool json) {
         std::printf("%s\n", json_out.dump().c_str());
         return probe.state == gateway::GatewayProbe::State::Running ? 0 : 1;
     }
+    // 批 7:probe 行(首行 detail + "  标签: 值" 句)逐句按冒号拆进键值
+    // 对框(标题=命令名 gateway status);sections 三栏的行形状归
+    // FormatSectionLines(有册钉着),原样逐行落,只收口端口。
+    const Theme theme = CliTheme();
+    std::vector<frame::Field> fields;
     for (const std::string& line : gateway::FormatProbeLines(probe)) {
-        std::printf("%s\n", line.c_str());
+        fields.push_back(SentenceField(line));
     }
+    EmitFrameLines(
+        frame::RenderKeyValues("gateway status", fields, theme, frame::Light(), CliFrameWidth()));
     for (const std::string& line : gateway::FormatSectionLines(sections)) {
-        std::printf("%s\n", line.c_str());
+        TermOut() << line << "\n";
     }
+    TermOut().flush();
     return probe.state == gateway::GatewayProbe::State::Running ? 0 : 1;
 }
 
@@ -206,7 +215,9 @@ int RunGatewayJobCommand(const gateway::GatewayProfilePaths& paths, const Gatewa
             std::fprintf(stderr, "gateway job add 失败: %s\n", error.c_str());
             return 1;
         }
-        std::printf("任务命令已落(等待运行中的 Gateway 消费;没在跑则下次启动时受理)。\n");
+        // 批 7:写回执进键值对框(printf 散打收口 TermOut,文字不变)。
+        PrintNotice(CliTheme(), {"任务命令已落(等待运行中的 Gateway 消费;没在跑则下次启动时受理)。"});
+        TermOut().flush();
         return 0;
     }
     if (args.job_verb == "run-now") {
@@ -219,7 +230,8 @@ int RunGatewayJobCommand(const gateway::GatewayProfilePaths& paths, const Gatewa
             std::fprintf(stderr, "gateway job run-now 失败: %s\n", error.c_str());
             return 1;
         }
-        std::printf("触发命令已落(等待运行中的 Gateway 消费)。\n");
+        PrintNotice(CliTheme(), {"触发命令已落(等待运行中的 Gateway 消费)。"});
+        TermOut().flush();
         return 0;
     }
     if (args.job_verb == "update") {
@@ -235,7 +247,8 @@ int RunGatewayJobCommand(const gateway::GatewayProfilePaths& paths, const Gatewa
             std::fprintf(stderr, "gateway job update 失败: %s\n", error.c_str());
             return 1;
         }
-        std::printf("更新命令已落(等待运行中的 Gateway 消费)。\n");
+        PrintNotice(CliTheme(), {"更新命令已落(等待运行中的 Gateway 消费)。"});
+        TermOut().flush();
         return 0;
     }
     if (args.job_verb == "pause" || args.job_verb == "resume" || args.job_verb == "cancel") {
@@ -251,7 +264,8 @@ int RunGatewayJobCommand(const gateway::GatewayProfilePaths& paths, const Gatewa
                          error.c_str());
             return 1;
         }
-        std::printf("%s 命令已落(等待运行中的 Gateway 消费)。\n", args.job_verb.c_str());
+        PrintNotice(CliTheme(), {args.job_verb + " 命令已落(等待运行中的 Gateway 消费)。"});
+        TermOut().flush();
         return 0;
     }
     if (args.job_verb == "import-loop") {
@@ -267,9 +281,9 @@ int RunGatewayJobCommand(const gateway::GatewayProfilePaths& paths, const Gatewa
             std::fprintf(stderr, "gateway job import-loop 失败: %s\n", error.c_str());
             return 1;
         }
-        std::printf(
-            "导入命令已落(等待运行中的 Gateway 消费;导入即产 receipt,原 /loop 状态只读"
-            "留档,不会被暗搬)。\n");
+        PrintNotice(CliTheme(), {"导入命令已落(等待运行中的 Gateway 消费;导入即产 receipt,原 /loop 状态只读"
+                                 "留档,不会被暗搬)。"});
+        TermOut().flush();
         return 0;
     }
     if (args.job_verb == "read") {
@@ -284,7 +298,8 @@ int RunGatewayJobCommand(const gateway::GatewayProfilePaths& paths, const Gatewa
         }
         const auto job = projection.jobs.find(args.job_id);
         if (job == projection.jobs.end()) {
-            std::printf("任务不存在: %s\n", args.job_id.c_str());
+            TermOut() << "任务不存在: " << args.job_id << "\n";
+            TermOut().flush();
             return 1;
         }
         if (args.json) {
@@ -302,31 +317,51 @@ int RunGatewayJobCommand(const gateway::GatewayProfilePaths& paths, const Gatewa
             std::printf("%s\n", json.dump().c_str());
             return 0;
         }
-        std::printf("%s\t%s\t%s\trev %llu\n", job->second.job_id.c_str(),
-                    gateway::ToString(job->second.state).c_str(),
-                    ScheduleSummary(job->second).c_str(),
-                    static_cast<unsigned long long>(job->second.revision));
-        std::printf("  正文: %s\n", job->second.prompt.c_str());
-        if (occurrences.empty()) {
-            std::printf("  (尚无 occurrence)\n");
-            return 0;
-        }
-        std::sort(occurrences.begin(), occurrences.end(),
-                  [](const gateway::AutomationOccurrence& a,
-                     const gateway::AutomationOccurrence& b) { return a.slot_ms < b.slot_ms; });
-        for (const auto& occurrence : occurrences) {
-            const char* state =
-                occurrence.state == gateway::AutomationOccurrence::State::Scheduled
-                    ? "scheduled"
-                    : (occurrence.state == gateway::AutomationOccurrence::State::Claimed
-                           ? "claimed"
-                           : "settled");
-            std::printf("  %s\tslot %lldms\t%s\tattempt %llu\tmissed %u\t%s\n",
-                        occurrence.occurrence_id.c_str(),
-                        static_cast<long long>(occurrence.slot_ms), state,
-                        static_cast<unsigned long long>(occurrence.attempt),
-                        occurrence.missed_count,
-                        occurrence.outcome.empty() ? "-" : occurrence.outcome.c_str());
+        // 批 7:头部 tab 行拆四键进键值对框;occurrences 走表格(slot/
+        // attempt/missed 数值列右对齐)。空态句照旧平铺。
+        {
+            const Theme theme = CliTheme();
+            EmitFrameLines(frame::RenderKeyValues(
+                "job read",
+                {{"job_id", job->second.job_id},
+                 {"state", gateway::ToString(job->second.state)},
+                 {"schedule", ScheduleSummary(job->second)},
+                 {"rev", std::to_string(job->second.revision)},
+                 SentenceField("  正文: " + job->second.prompt)},
+                theme, frame::Light(), CliFrameWidth()));
+            if (occurrences.empty()) {
+                TermOut() << "  (尚无 occurrence)\n";
+            } else {
+                std::sort(occurrences.begin(), occurrences.end(),
+                          [](const gateway::AutomationOccurrence& a,
+                             const gateway::AutomationOccurrence& b) {
+                              return a.slot_ms < b.slot_ms;
+                          });
+                std::vector<frame::TableColumn> columns;
+                columns.push_back({"occurrence"});
+                columns.push_back({"slot", 0, /*align_right=*/true});
+                columns.push_back({"state"});
+                columns.push_back({"attempt", 0, /*align_right=*/true});
+                columns.push_back({"missed", 0, /*align_right=*/true});
+                columns.push_back({"outcome"});
+                std::vector<frame::TableRow> rows;
+                for (const auto& occurrence : occurrences) {
+                    const char* state =
+                        occurrence.state == gateway::AutomationOccurrence::State::Scheduled
+                            ? "scheduled"
+                            : (occurrence.state == gateway::AutomationOccurrence::State::Claimed
+                                   ? "claimed"
+                                   : "settled");
+                    rows.push_back(frame::TableRow{
+                        {occurrence.occurrence_id,
+                         std::to_string(occurrence.slot_ms) + "ms", state,
+                         std::to_string(occurrence.attempt), std::to_string(occurrence.missed_count),
+                         occurrence.outcome.empty() ? std::string("-") : occurrence.outcome}});
+                }
+                EmitFrameLines(frame::RenderTable("occurrences", columns, rows, theme,
+                                                  frame::Light(), CliFrameWidth()));
+            }
+            TermOut().flush();
         }
         return 0;
     }
@@ -342,13 +377,28 @@ int RunGatewayJobCommand(const gateway::GatewayProfilePaths& paths, const Gatewa
         return 0;
     }
     if (projection.jobs.empty()) {
-        std::printf("没有持久任务(账为空或尚无账)。\n");
+        TermOut() << "没有持久任务(账为空或尚无账)。\n";
+        TermOut().flush();
         return 0;
     }
-    for (const auto& [id, job] : projection.jobs) {
-        std::printf("%s\t%s\t%s\trev %llu\t%s\n", job.job_id.c_str(),
-                    gateway::ToString(job.state).c_str(), ScheduleSummary(job).c_str(),
-                    static_cast<unsigned long long>(job.revision), job.prompt.c_str());
+    // 批 7:tab 分隔的平铺行升为表格(列头 schema 名,rev 数值列右对齐)。
+    {
+        const Theme theme = CliTheme();
+        std::vector<frame::TableColumn> columns;
+        columns.push_back({"job_id"});
+        columns.push_back({"state"});
+        columns.push_back({"schedule"});
+        columns.push_back({"rev", 0, /*align_right=*/true});
+        columns.push_back({"prompt"});
+        std::vector<frame::TableRow> rows;
+        for (const auto& [id, job] : projection.jobs) {
+            rows.push_back(frame::TableRow{{job.job_id, gateway::ToString(job.state),
+                                            ScheduleSummary(job), std::to_string(job.revision),
+                                            job.prompt}});
+        }
+        EmitFrameLines(
+            frame::RenderTable("jobs", columns, rows, theme, frame::Light(), CliFrameWidth()));
+        TermOut().flush();
     }
     return 0;
 }
@@ -359,7 +409,17 @@ int StopGatewayProcess(const gateway::GatewayProfilePaths& paths,
     // §13.2:超时才由 supervisor 收进程组)。
     const int wait_ms = config.shutdown_grace_secs * 1000 + 5000;
     const gateway::GatewayStopOutcome outcome = gateway::StopGateway(paths, wait_ms);
-    std::printf("%s\n", outcome.detail.c_str());
+    // 批 7:停机回执进键值对框;非净停(超时/拒写)整句上 Error 语义色。
+    {
+        const bool clean = outcome.status == gateway::GatewayStopOutcome::Status::Stopped ||
+                           outcome.status == gateway::GatewayStopOutcome::Status::NotRunning ||
+                           outcome.status == gateway::GatewayStopOutcome::Status::StoppedUnclean;
+        EmitFrameLines(frame::RenderKeyValues(
+            {}, {SentenceField(outcome.detail, clean ? frame::FieldAccent::None
+                                                     : frame::FieldAccent::Error)},
+            CliTheme(), frame::Light(), CliFrameWidth()));
+        TermOut().flush();
+    }
     switch (outcome.status) {
         case gateway::GatewayStopOutcome::Status::Stopped:
         case gateway::GatewayStopOutcome::Status::NotRunning:
@@ -457,24 +517,35 @@ int RunGatewayInstall(const gateway::GatewayProfilePaths& paths) {
                      outcome.op.error_code.c_str(), outcome.op.detail.c_str());
         return 1;
     }
-    std::printf("服务已注册(平台 %s;单元 %s;记录 %s)。\n",
-                gateway::ServicePlatformName(gateway::CurrentServicePlatform()),
-                platform::PathToUtf8(outcome.unit_file).c_str(),
-                platform::PathToUtf8(outcome.record_file).c_str());
-    std::printf("钉死:exe=%s 参数=gateway run --profile %s --gateway-root %s\n",
-                platform::PathToUtf8(spec.exe_path).c_str(), spec.profile.c_str(),
-                platform::PathToUtf8(spec.gateway_root).c_str());
-    std::printf("下一步:gateway start 拉起;gateway doctor --wait-ready 30 验证。\n");
-    // 凭据失效明列(不自动修,向导归 channel setup):跑 doctor 的配置/
-    // 凭据面,只打 Warn 及以上,给装机的人当场看见。
-    gateway::DoctorOptions doctor_options;
-    doctor_options.lubancode_version = std::string(app::kVersion);
-    const gateway::DoctorReport report = gateway::RunGatewayDoctor(paths, doctor_options);
-    for (const auto& check : report.checks) {
-        if (check.severity == gateway::DoctorSeverity::Warn ||
-            check.severity == gateway::DoctorSeverity::Fail) {
-            std::printf("[装机体检] %s: %s\n", check.code.c_str(), check.detail.c_str());
+    // 批 7:三句回执进键值对框;装机体检 Warn 及以上逐条走列表(标题=
+    // "[装机体检] " 前缀里的现成词,前缀剥掉升标题,code/detail 拆列)。
+    {
+        const Theme theme = CliTheme();
+        PrintNotice(theme, {"服务已注册(平台 " +
+                                    std::string(gateway::ServicePlatformName(
+                                        gateway::CurrentServicePlatform())) +
+                                    ";单元 " + platform::PathToUtf8(outcome.unit_file) + ";记录 " +
+                                    platform::PathToUtf8(outcome.record_file) + ")。",
+                            "钉死:exe=" + platform::PathToUtf8(spec.exe_path) +
+                                " 参数=gateway run --profile " + spec.profile +
+                                " --gateway-root " + platform::PathToUtf8(spec.gateway_root),
+                            "下一步:gateway start 拉起;gateway doctor --wait-ready 30 验证。"});
+        gateway::DoctorOptions doctor_options;
+        doctor_options.lubancode_version = std::string(app::kVersion);
+        const gateway::DoctorReport report = gateway::RunGatewayDoctor(paths, doctor_options);
+        std::vector<frame::ListRow> rows;
+        for (const auto& check : report.checks) {
+            if (check.severity == gateway::DoctorSeverity::Warn ||
+                check.severity == gateway::DoctorSeverity::Fail) {
+                rows.push_back(frame::ListRow{check.code, check.detail, {},
+                                              frame::Bullet::None});
+            }
         }
+        if (!rows.empty()) {
+            EmitFrameLines(
+                frame::RenderList("装机体检", rows, theme, frame::Light(), CliFrameWidth()));
+        }
+        TermOut().flush();
     }
     return 0;
 }
@@ -502,8 +573,9 @@ int RunGatewayUninstall(const gateway::GatewayProfilePaths& paths) {
                      outcome.error_code.c_str(), outcome.detail.c_str());
         return 1;
     }
-    std::printf("服务已摘除;任务账与 boot history 保留在 %s(不删数据)。\n",
-                platform::PathToUtf8(paths.profile_dir).c_str());
+    PrintNotice(CliTheme(), {"服务已摘除;任务账与 boot history 保留在 " +
+                                     platform::PathToUtf8(paths.profile_dir) + "(不删数据)。"});
+    TermOut().flush();
     return 0;
 }
 
@@ -541,8 +613,11 @@ int RunGatewayStart(const gateway::GatewayProfilePaths& paths,
                      outcome.detail.c_str());
         return 1;
     }
-    std::printf("已通过服务管理器拉起(平台 %s);gateway doctor --wait-ready 30 可验证。\n",
-                gateway::ServicePlatformName(gateway::CurrentServicePlatform()));
+    PrintNotice(CliTheme(), {"已通过服务管理器拉起(平台 " +
+                                     std::string(gateway::ServicePlatformName(
+                                         gateway::CurrentServicePlatform())) +
+                                     ");gateway doctor --wait-ready 30 可验证。"});
+    TermOut().flush();
     return 0;
 }
 
@@ -567,7 +642,8 @@ int RunGatewayRestart(const gateway::GatewayProfilePaths& paths,
                      outcome.detail.c_str());
         return 1;
     }
-    std::printf("已停净并经服务管理器重新拉起。\n");
+    PrintNotice(CliTheme(), {"已停净并经服务管理器重新拉起。"});
+    TermOut().flush();
     return 0;
 }
 
@@ -579,13 +655,18 @@ int RunGatewayDoctor(const gateway::GatewayProfilePaths& paths, const GatewayCom
             std::fprintf(stderr, "[gateway] ack 落账失败: %s\n", error.c_str());
             return 1;
         }
-        std::printf("已记 ack_safe_mode:SafeMode 连击清零(账上保留人工确认事实)。\n");
+        PrintNotice(CliTheme(), {"已记 ack_safe_mode:SafeMode 连击清零(账上保留人工确认事实)。"});
+        TermOut().flush();
     }
     // 健康探针先等(install 后验证/外部监控用);超时如实退 1,不假 ready。
     if (args.wait_ready_secs > 0) {
         const gateway::WaitReadyOutcome wait =
             gateway::WaitForGatewayReady(paths, args.wait_ready_secs, {}, {});
-        std::printf("%s\n", wait.detail.c_str());
+        EmitFrameLines(frame::RenderKeyValues(
+            {}, {SentenceField(wait.detail, wait.ready ? frame::FieldAccent::Pass
+                                                       : frame::FieldAccent::Error)},
+            CliTheme(), frame::Light(), CliFrameWidth()));
+        TermOut().flush();
         if (!wait.ready) {
             return 1;
         }
@@ -597,9 +678,45 @@ int RunGatewayDoctor(const gateway::GatewayProfilePaths& paths, const GatewayCom
     if (args.json) {
         std::printf("%s\n", report.ToJson().dump().c_str());
     } else {
-        for (const std::string& line : report.FormatLines()) {
-            std::printf("%s\n", line.c_str());
+        // 批 7:check 清单走表格(result 列 [ok]/[warn]/[FAIL] 既有记号,
+        // Pass/Skip/Fail 三态语义色——与 FormatLines 的 tag 定宽同款信息);
+        // 退出码句进键值对框。
+        const Theme theme = CliTheme();
+        std::vector<frame::TableColumn> columns;
+        columns.push_back({"result"});
+        columns.push_back({"code"});
+        columns.push_back({"detail"});
+        std::vector<frame::TableRow> rows;
+        for (const auto& check : report.checks) {
+            const char* tag = "[info]";
+            frame::CellTone tone = frame::CellTone::Normal;
+            switch (check.severity) {
+                case gateway::DoctorSeverity::Ok:
+                    tag = "[ok]";
+                    tone = frame::CellTone::Pass;
+                    break;
+                case gateway::DoctorSeverity::Warn:
+                    tag = "[warn]";
+                    tone = frame::CellTone::Skip;
+                    break;
+                case gateway::DoctorSeverity::Fail:
+                    tag = "[FAIL]";
+                    tone = frame::CellTone::Fail;
+                    break;
+                case gateway::DoctorSeverity::Info:
+                default:
+                    break;
+            }
+            rows.push_back(
+                frame::TableRow{{tag, check.code, check.detail}, {tone}});
         }
+        if (!rows.empty()) {
+            EmitFrameLines(frame::RenderTable("gateway doctor", columns, rows, theme,
+                                              frame::Light(), CliFrameWidth()));
+        }
+        PrintNotice(theme, {"退出码 " + std::to_string(report.ExitCode()) +
+                            "(0=全绿 1=有警 2=有病)"});
+        TermOut().flush();
     }
     return report.ExitCode();
 }
@@ -628,47 +745,51 @@ std::vector<std::string> ReadTailLines(const std::filesystem::path& file, int ta
 }
 
 int RunGatewayLogs(const gateway::GatewayProfilePaths& paths, const GatewayCommandArgs& args) {
+    // 批 7裁量:日志原文与 "== 节头 ==" 保持原样(长正文不塞框,批 1
+    // 裁量 3 同源;与 grep/journalctl 的输出习惯一致),只收口输出端口
+    // (printf -> TermOut,同一 stdout 目的地,落盘字节不变)。
     const int tail = args.tail_lines > 0 ? args.tail_lines : 20;
-    std::printf("== boot history 尾 %d 行(%s) ==\n", tail,
-                platform::PathToUtf8(paths.boot_history).c_str());
+    TermOut() << "== boot history 尾 " << tail << " 行(" << platform::PathToUtf8(paths.boot_history)
+              << ") ==\n";
     {
         const auto lines = ReadTailLines(paths.boot_history, tail);
         if (lines.empty()) {
-            std::printf("(还没有 boot history)\n");
+            TermOut() << "(还没有 boot history)\n";
         } else {
             for (const std::string& line : lines) {
-                std::printf("%s\n", line.c_str());
+                TermOut() << line << "\n";
             }
         }
     }
-    std::printf("== gateway.log 尾 %d 行(%s) ==\n", tail,
-                platform::PathToUtf8(paths.log_file).c_str());
+    TermOut() << "== gateway.log 尾 " << tail << " 行(" << platform::PathToUtf8(paths.log_file)
+              << ") ==\n";
     {
         const auto lines = ReadTailLines(paths.log_file, tail);
         if (lines.empty()) {
-            std::printf("(还没有 gateway.log)\n");
+            TermOut() << "(还没有 gateway.log)\n";
         } else {
             for (const std::string& line : lines) {
-                std::printf("%s\n", line.c_str());
+                TermOut() << line << "\n";
             }
         }
     }
     // 服务 stdout/stderr 落位指引(不做聚合,只指路)。
-    std::printf("== 服务输出落位 ==\n");
+    TermOut() << "== 服务输出落位 ==\n";
     if (gateway::CurrentServicePlatform() == gateway::ServicePlatform::Linux) {
-        std::printf("systemd user 单元走 journal:journalctl --user -u %s\n",
-                    gateway::SystemdUnitName(paths.name.empty()
-                                                 ? std::string(gateway::kDefaultGatewayProfile)
-                                                 : paths.name)
-                        .c_str());
+        TermOut() << "systemd user 单元走 journal:journalctl --user -u "
+                  << gateway::SystemdUnitName(paths.name.empty()
+                                                  ? std::string(gateway::kDefaultGatewayProfile)
+                                                  : paths.name)
+                  << "\n";
     } else {
-        std::printf("计划任务/LaunchAgent 的 stdout+stderr 追加在:\n  %s\n",
-                    platform::PathToUtf8(paths.logs_dir / "service.log").c_str());
+        TermOut() << "计划任务/LaunchAgent 的 stdout+stderr 追加在:\n  "
+                  << platform::PathToUtf8(paths.logs_dir / "service.log") << "\n";
         if (gateway::CurrentServicePlatform() == gateway::ServicePlatform::MacOS) {
-            std::printf("launchd stderr 另落在:\n  %s\n",
-                        platform::PathToUtf8(paths.logs_dir / "service.err.log").c_str());
+            TermOut() << "launchd stderr 另落在:\n  "
+                      << platform::PathToUtf8(paths.logs_dir / "service.err.log") << "\n";
         }
     }
+    TermOut().flush();
     return 0;
 }
 

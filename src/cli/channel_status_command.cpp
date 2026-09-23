@@ -13,6 +13,7 @@
 #include "channel/manager.hpp"
 #include "channel/pairing.hpp"
 #include "channel/work_ledger.hpp"
+#include "cli/frame_notice.hpp"  // 批 7:人看输出走 frame 三节
 #include "config/config.hpp"
 #include "gateway/profile.hpp"
 #include "gateway/reply_outbox.hpp"
@@ -410,6 +411,49 @@ ChannelAccountConfigProbe ProbeChannelAccountConfig(
     return probe;
 }
 
+std::vector<std::string> RenderChannelStatusView(
+    const std::string& channel_id, const std::string& account_id,
+    const std::vector<std::string>& four_state_lines,
+    const std::vector<std::string>& verdict_lines, const std::vector<std::string>& chain_lines,
+    const Theme& theme, int width) {
+    // 批 7:三节排版。行文本由三个纯构造器定(旧册与 Web 面共用的数据
+    // 面),一字不动;这里逐句按冒号拆列。来信链首行是引导句(尾冒号剥
+    // 掉做列表标题),日志样行整行进列表(一行多冒号,拆了碎)。
+    std::vector<std::string> out;
+    std::vector<frame::Field> four_fields;
+    for (const std::string& line : four_state_lines) {
+        four_fields.push_back(SentenceField(line));
+    }
+    if (!four_fields.empty()) {
+        std::vector<std::string> block = frame::RenderKeyValues(
+            channel_id + "/" + account_id + " 状态", four_fields, theme, frame::Light(), width);
+        out.insert(out.end(), block.begin(), block.end());
+    }
+    std::vector<frame::Field> verdict_fields;
+    for (const std::string& line : verdict_lines) {
+        verdict_fields.push_back(SentenceField(line));
+    }
+    if (!verdict_fields.empty()) {
+        std::vector<std::string> block =
+            frame::RenderKeyValues("连接明细", verdict_fields, theme, frame::Light(), width);
+        out.insert(out.end(), block.begin(), block.end());
+    }
+    if (!chain_lines.empty()) {
+        const std::string title = StripTrailingColon(chain_lines.front());
+        std::vector<frame::ListRow> rows;
+        for (std::size_t i = 1; i < chain_lines.size(); ++i) {
+            rows.push_back(frame::ListRow{chain_lines[i], {}, {}, frame::Bullet::None});
+        }
+        std::vector<std::string> block =
+            rows.empty()
+                ? frame::RenderKeyValues({}, {SentenceField(chain_lines.front())}, theme,
+                                         frame::Light(), width)
+                : frame::RenderList(title, rows, theme, frame::Light(), width);
+        out.insert(out.end(), block.begin(), block.end());
+    }
+    return out;
+}
+
 int RunChannelStatusCommand(const ChannelStatusCommandArgs& args) {
     // 渠道/账号 id 先过守门:它们直接拼状态根下的路径,带路径段 = 越界。
     if (!channel::IsValidChannelId(args.channel_id)) {
@@ -576,17 +620,12 @@ int RunChannelStatusCommand(const ChannelStatusCommandArgs& args) {
         report["recent_chain"] = chain.report;
         std::printf("%s\n", report.dump().c_str());
     } else {
-        std::printf("%s/%s 状态:\n", args.channel_id.c_str(), args.account_id.c_str());
-        for (const std::string& line : four.lines) {
-            std::printf("%s\n", line.c_str());
-        }
-        std::printf("连接明细:\n");
-        for (const std::string& line : verdict.lines) {
-            std::printf("%s\n", line.c_str());
-        }
-        for (const std::string& line : chain.lines) {
-            std::printf("%s\n", line.c_str());
-        }
+        // 批 7:三节走 frame(RenderChannelStatusView 纯函数渲染,形状册
+        // 直调);printf 散打收口 TermOut。
+        EmitFrameLines(RenderChannelStatusView(args.channel_id, args.account_id, four.lines,
+                                               verdict.lines, chain.lines, CliTheme(),
+                                               CliFrameWidth()));
+        TermOut().flush();
     }
     return verdict.exit_code;
 }

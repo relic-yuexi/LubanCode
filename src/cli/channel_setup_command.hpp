@@ -10,6 +10,9 @@
 #pragma once
 
 #include <string>
+#include <vector>
+
+#include "cli/theme.hpp"
 
 namespace lubancode::cli {
 
@@ -18,6 +21,16 @@ struct ChannelSetupCommandArgs {
     std::string account;   // 空 = main
     bool permissions_only = false;
 };
+
+// TUI 排版批 7:向导头部信息块的 frame 渲染(纯函数,形状册直调——向导
+// 全程要交互终端,CI 里测不到,头部块抽出来钉形状)。既有四句(横幅句
+// 做标题 + 三句"标签: 值")原样进键值对框,一字不添不改。
+std::vector<std::string> RenderChannelSetupBanner(const std::string& platform_display_name,
+                                                  const std::string& platform_id,
+                                                  const std::string& account_id,
+                                                  const std::string& config_file,
+                                                  const std::string& secrets_root_utf8,
+                                                  const Theme& theme, int width);
 
 // 返回进程退出码:0 保存成功(或差异确认后取消);1 用法/环境/保存失败;
 // 2 非交互终端拒开向导。

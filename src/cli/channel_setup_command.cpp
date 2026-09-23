@@ -11,6 +11,7 @@
 #include "channel/channel_setup.hpp"
 #include "channel/credential_store.hpp"
 #include "channel/credentials.hpp"
+#include "cli/frame_notice.hpp"  // 批 7:向导回显块走 frame;问答行不动
 #include "config/config.hpp"
 #include "platform/hidden_input.hpp"
 #include "platform/paths.hpp"
@@ -99,6 +100,21 @@ std::optional<std::string> AskToolsPreset(bool existing) {
 
 }  // namespace
 
+std::vector<std::string> RenderChannelSetupBanner(const std::string& platform_display_name,
+                                                  const std::string& platform_id,
+                                                  const std::string& account_id,
+                                                  const std::string& config_file,
+                                                  const std::string& secrets_root_utf8,
+                                                  const Theme& theme, int width) {
+    // 四句既有文案原样进框:横幅句做标题,三句"标签: 值"按冒号拆列。
+    return frame::RenderKeyValues(
+        "渠道配置向导 —— " + platform_display_name,
+        {SentenceField("目标账号: " + platform_id + "/" + account_id),
+         SentenceField("配置文件: " + config_file),
+         SentenceField("受管密钥目录: " + secrets_root_utf8)},
+        theme, frame::Light(), width);
+}
+
 int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
     // 0) 平台守门:未知平台/未实现平台先报,不进问答。认得清单从平台表拼
     // (与注册表同源——新渠道注册后自动跟上,不手抄第二份)。
@@ -150,11 +166,13 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
         std::fprintf(stderr, "channel setup: %s\n", options.error().detail.c_str());
         return 1;
     }
-    std::printf("渠道配置向导 —— %s\n", platform->display_name.c_str());
-    std::printf("目标账号: %s/%s\n", platform->id.c_str(), account_id.c_str());
-    std::printf("配置文件: %s\n", options->config_file.c_str());
-    std::printf("受管密钥目录: %s\n", platform::PathToUtf8(options->secrets_root).c_str());
-    std::printf("\n");
+    // 批 7:头部信息块走键值对框(RenderChannelSetupBanner 纯函数渲染,
+    // 形状册直调);printf 散打收口 TermOut。
+    EmitFrameLines(RenderChannelSetupBanner(platform->display_name, platform->id, account_id,
+                                            options->config_file,
+                                            platform::PathToUtf8(options->secrets_root),
+                                            CliTheme(), CliFrameWidth()));
+    TermOut() << "\n";
 
     // 3) 既有账号现况(旧密钥绝不回显,只报有无与权限结论)。
     const auto config_loaded = config::LoadFromEnv();
@@ -179,13 +197,16 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
             old_secret_managed = status.secret_file_managed;
             old_secret_secure = status.secret_file_secure;
             old_security_detail = status.security_detail;
-            std::printf("该账号已配置:渠道 %s,账号 %s,AppID %s,密钥文件 %s\n",
-                        channel_enabled ? "已启用" : "未启用",
-                        account_enabled ? "已启用" : "未启用", has_app_id ? "已填" : "未填",
-                        old_secret_file.empty() ? "未配" : "已配");
+            PrintNotice(CliTheme(), {"该账号已配置:渠道 " +
+                                             std::string(channel_enabled ? "已启用" : "未启用") +
+                                             ",账号 " +
+                                             std::string(account_enabled ? "已启用" : "未启用") +
+                                             ",AppID " + std::string(has_app_id ? "已填" : "未填") +
+                                             ",密钥文件 " +
+                                             std::string(old_secret_file.empty() ? "未配" : "已配")});
         } else {
-            std::printf("该账号尚未配置,将按 %s 模板新建(websocket、私聊配对、群聊禁用、final 回复)。\n",
-                        platform->display_name.c_str());
+            PrintNotice(CliTheme(), {"该账号尚未配置,将按 " + platform->display_name +
+                                             " 模板新建(websocket、私聊配对、群聊禁用、final 回复)。"});
         }
     }
 
@@ -204,10 +225,10 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
                             current.preset == "auto" ? "自动执行" :
                             current.preset == "readonly" ? "只读查询" :
                             default_ask ? "操作前询问（默认）" : "自定义工具名单";
-        std::printf("当前策略: %s\n", label);
+        PrintNotice(CliTheme(), {"当前策略: " + std::string(label)});
         const auto selected = AskToolsPreset(true);
         if (!selected || selected->empty()) {
-            std::printf("未修改权限。\n");
+            PrintNotice(CliTheme(), {"未修改权限。"});
             return 0;
         }
         channel::ChannelSetupCommitRequest request;
@@ -221,7 +242,16 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
             std::fprintf(stderr, "%s\n", preview.error().detail.c_str());
             return 1;
         }
-        for (const auto& change : preview->changes) std::printf("  - %s\n", change.c_str());
+        {
+            std::vector<frame::ListRow> rows;
+            for (const auto& change : preview->changes) {
+                rows.push_back(frame::ListRow{change, {}, {}, frame::Bullet::None});
+            }
+            if (!rows.empty()) {
+                EmitFrameLines(frame::RenderList({}, rows, CliTheme(), frame::Light(),
+                                                 CliFrameWidth()));
+            }
+        }
         if (!AskYesNo("确认保存权限", false) || !std::cin) return 0;
         request.dry_run = false;
         const auto saved = channel::ChannelConfigService::Commit(*options, request);
@@ -229,15 +259,15 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
             std::fprintf(stderr, "%s\n", saved.error().detail.c_str());
             return 1;
         }
-        std::printf("权限已保存。重启 Gateway 后生效；在 QQ 发 /tools 查看实际可用项。\n");
+        PrintNotice(CliTheme(), {"权限已保存。重启 Gateway 后生效；在 QQ 发 /tools 查看实际可用项。"});
         return 0;
     }
 
     // 4) 已有密钥文件权限不合(§5.3):受管件给"收紧"选项;外部路径默认
     //    引导重存受管位置。owner 不符时不夺权,准确报错后走重存。
     if (!old_secret_file.empty() && !old_secret_secure) {
-        std::printf("\n现有密钥文件权限不合格: %s\n", old_secret_file.c_str());
-        std::printf("原因: %s\n", old_security_detail.c_str());
+        PrintNotice(CliTheme(), {"现有密钥文件权限不合格: " + old_secret_file,
+                                 "原因: " + old_security_detail});
         if (old_secret_managed) {
             if (AskYesNo("收紧这份密钥文件权限(程序代改 ACL,不需要管理员)", true)) {
                 const channel::CredentialStore store(options->secrets_root);
@@ -248,7 +278,7 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
                     canon_ec ? platform::Utf8ToPath(old_secret_file) : target);
                 if (tightened.has_value()) {
                     old_secret_secure = true;
-                    std::printf("已收紧并复验通过。\n");
+                    PrintNotice(CliTheme(), {"已收紧并复验通过。"});
                 } else {
                     std::fprintf(stderr, "收紧失败: %s\n", tightened.error().detail.c_str());
                     std::fprintf(stderr,
@@ -256,9 +286,9 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
                 }
             }
         } else {
-            std::printf("这是外部自定义路径。默认做法:重新输入密钥,保存到受管位置(%s)。\n",
-                        platform::PathToUtf8(options->secrets_root).c_str());
-            std::printf("不会改动旧外部文件与其父目录。\n");
+            PrintNotice(CliTheme(), {"这是外部自定义路径。默认做法:重新输入密钥,保存到受管位置(" +
+                                             platform::PathToUtf8(options->secrets_root) + ")。",
+                                     "不会改动旧外部文件与其父目录。"});
         }
     }
 
@@ -315,7 +345,7 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
 
     const auto selected_tools = AskToolsPreset(account_exists);
     if (!selected_tools) {
-        std::printf("已取消保存。\n");
+        PrintNotice(CliTheme(), {"已取消保存。"});
         return 0;
     }
     // 7) 差异预览(dry_run,一页未写)→ 确认 → 提交。
@@ -333,13 +363,18 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
                      preview.error().reason.c_str());
         return 1;
     }
-    std::printf("\n将保存以下改动:\n");
-    for (const std::string& change : preview->changes) {
-        std::printf("  - %s\n", change.c_str());
+    // 批 7:预览标题句(尾冒号剥掉)做 frame 标题,变更清单走列表。
+    {
+        std::vector<frame::ListRow> rows;
+        for (const std::string& change : preview->changes) {
+            rows.push_back(frame::ListRow{change, {}, {}, frame::Bullet::None});
+        }
+        EmitFrameLines(frame::RenderList("将保存以下改动", rows, CliTheme(), frame::Light(),
+                                         CliFrameWidth()));
+        PrintNotice(CliTheme(), {"其他账号、模型配置与未认得的字段原样保留。"});
     }
-    std::printf("其他账号、模型配置与未认得的字段原样保留。\n");
     if (!AskYesNo("确认保存", true)) {
-        std::printf("已取消。未做任何修改。\n");
+        PrintNotice(CliTheme(), {"已取消。未做任何修改。"});
         return 0;
     }
     request.dry_run = false;
@@ -352,11 +387,12 @@ int RunChannelSetupCommand(const ChannelSetupCommandArgs& args) {
     }
 
     // 8) 收尾:明示"已保存/尚未验证",给 gateway run 入口;提醒不热更新。
-    std::printf("\n配置已保存: %s\n", committed->config_file.c_str());
-    std::printf("密钥文件: %s(权限已按仅当前用户收紧)\n", committed->secret_file.c_str());
-    std::printf("尚未验证连接:本向导没有连 %s。\n", platform->display_name.c_str());
-    std::printf("启动:在当前目录运行 `lubancode gateway run`(或 `lubancode im`)。\n");
-    std::printf("注意:正在运行的 Gateway 不会热加载配置,须重启后生效。\n");
+    PrintNotice(CliTheme(), {"配置已保存: " + committed->config_file,
+                             "密钥文件: " + committed->secret_file + "(权限已按仅当前用户收紧)",
+                             "尚未验证连接:本向导没有连 " + platform->display_name + "。",
+                             "启动:在当前目录运行 `lubancode gateway run`(或 `lubancode im`)。",
+                             "注意:正在运行的 Gateway 不会热加载配置,须重启后生效。"});
+    TermOut().flush();
     return 0;
 }
 

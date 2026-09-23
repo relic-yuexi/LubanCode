@@ -15,6 +15,7 @@
 
 #include "app/launcher.hpp"
 #include "app/version.hpp"
+#include "cli/frame_notice.hpp"  // 批 7:check 人看分支走 frame 键值对框
 #include "config/config.hpp"
 #include "config/update_checker.hpp"
 #include "platform/paths.hpp"
@@ -130,16 +131,17 @@ std::optional<Target> ResolveTarget(bool prerelease, std::string* error_out) {
     return target;
 }
 
-void PrintLayoutLine(const launcher::LayoutInfo& layout) {
+std::string LayoutLine(const launcher::LayoutInfo& layout) {
     const char* name = "便携/源码构建";
     if (layout.layout == launcher::Layout::VersionedEntry) name = "版本化(固定入口)";
     if (layout.layout == launcher::Layout::FlatInstall) name = "平铺安装";
     if (layout.layout == launcher::Layout::RootLauncher) name = "安装根启动器";
-    std::printf("安装布局: %s", name);
+    std::string line = "安装布局: ";
+    line += name;
     if (!layout.install_root.empty()) {
-        std::printf("(%s)", platform::PathToUtf8(layout.install_root).c_str());
+        line += "(" + platform::PathToUtf8(layout.install_root) + ")";
     }
-    std::printf("\n");
+    return line;
 }
 
 int RunCheck(bool prerelease, bool json) {
@@ -186,25 +188,13 @@ int RunCheck(bool prerelease, bool json) {
         return 0;
     }
 
-    std::printf("当前版本: %s\n", std::string(app::kVersion).c_str());
-    PrintLayoutLine(layout);
-    std::printf("远端 %s 通道: %s(%s)%s\n", target->channel.c_str(),
-                target->release.tag_name.c_str(), target->release.version.c_str(),
-                target->release.prerelease ? " [预发布]" : "");
-    if (!target->release.html_url.empty()) {
-        std::printf("发布页: %s\n", target->release.html_url.c_str());
-    }
-    std::printf("资产: %s(%s)%s\n", target->asset.name.c_str(),
-                target->asset.size ? MiB(target->asset.size).c_str() : "大小未知",
-                target->asset.digest.empty() ? " [未带摘要:不能自动安装,见下]" : "");
-    if (newer) {
-        std::printf("结论: 有新版可装。执行 lubancode update 一键更新"
-                    "(技能保护预检、整包校验、指针切换、健康检查都在事务里)。\n");
-    } else {
-        std::printf("结论: 已是最新(本地 %s,远端 %s)。本地不低于 Latest,不降级;"
-                    "回退用 lubancode update --rollback。\n",
-                    std::string(app::kVersion).c_str(), target->release.version.c_str());
-    }
+    // 批 7:人看分支走 frame 键值对框(RenderUpdateCheckView 纯函数渲染,
+    // 形状册直调);printf 散打收口 TermOut(同一 stdout 目的地)。--json
+    // 分支(上面)字节级不动。
+    EmitFrameLines(RenderUpdateCheckView(std::string(app::kVersion), target->release,
+                                         target->asset, target->channel, LayoutLine(layout),
+                                         newer, CliTheme(), CliFrameWidth()));
+    TermOut().flush();
     return 0;
 }
 
@@ -288,6 +278,40 @@ std::vector<std::string> HelperTailFromTarget(const std::filesystem::path& insta
 }
 
 }  // namespace
+
+std::vector<std::string> RenderUpdateCheckView(const std::string& current_version,
+                                               const config::ReleaseInfo& release,
+                                               const config::ReleaseAssetInfo& asset,
+                                               const std::string& channel,
+                                               const std::string& layout_line, bool newer,
+                                               const Theme& theme, int width) {
+    // 六句既有文案原样进框(逐句按冒号拆列,一字不添不改);结论句按有无
+    // 新版上语义色(Pass=table_pass,批 4 裁量:Theme 无 tool_accent)。
+    std::vector<frame::Field> fields;
+    fields.push_back(SentenceField("当前版本: " + current_version));
+    fields.push_back(SentenceField(layout_line));
+    fields.push_back(SentenceField("远端 " + channel + " 通道: " + release.tag_name + "(" +
+                                   release.version + ")" +
+                                   (release.prerelease ? " [预发布]" : "")));
+    if (!release.html_url.empty()) {
+        fields.push_back(SentenceField("发布页: " + release.html_url));
+    }
+    fields.push_back(SentenceField("资产: " + asset.name + "(" +
+                                   (asset.size > 0 ? MiB(asset.size) : std::string("大小未知")) +
+                                   ")" +
+                                   (asset.digest.empty() ? " [未带摘要:不能自动安装,见下]"
+                                                         : "")));
+    if (newer) {
+        fields.push_back(SentenceField("结论: 有新版可装。执行 lubancode update 一键更新"
+                                       "(技能保护预检、整包校验、指针切换、健康检查都在事务里)。",
+                                       frame::FieldAccent::Pass));
+    } else {
+        fields.push_back(SentenceField("结论: 已是最新(本地 " + current_version + ",远端 " +
+                                       release.version + ")。本地不低于 Latest,不降级;"
+                                       "回退用 lubancode update --rollback。"));
+    }
+    return frame::RenderKeyValues("update check", fields, theme, frame::Light(), width);
+}
 
 int RunUpdateCommand(const UpdateCommandArgs& args) {
     if (args.verb == "check") {
@@ -382,9 +406,13 @@ int RunUpdateCommand(const UpdateCommandArgs& args) {
     const auto comparison =
         config::CompareSemanticVersions(target->release.version, std::string(app::kVersion));
     if (comparison.has_value() && *comparison <= 0) {
-        std::printf("已是最新(本地 %s,远端 %s)。本地不低于远端,不降级;"
-                    "回退用 lubancode update --rollback。\n",
-                    std::string(app::kVersion).c_str(), target->release.version.c_str());
+        // 批 7:人看回执进键值对框;printf 散打收口 TermOut。
+        const Theme theme = CliTheme();
+        PrintNotice(theme, {"已是最新(本地 " + std::string(app::kVersion) + ",远端 " +
+                                       target->release.version +
+                                       ")。本地不低于远端,不降级;"
+                                       "回退用 lubancode update --rollback。"});
+        TermOut().flush();
         return 0;
     }
     // 最低更新器版本门槛:update-meta.json 里声明了就得过,过不了先走包内

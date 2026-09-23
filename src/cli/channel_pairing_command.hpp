@@ -13,6 +13,9 @@
 #pragma once
 
 #include <string>
+#include <vector>
+
+#include "cli/theme.hpp"
 
 namespace lubancode::cli {
 
@@ -41,5 +44,14 @@ ChannelPairingGate JudgePairingGate(bool lock_present, bool lock_readable,
 
 // 命令入口(cli_app 调):锁探测 → 投命令 → 等回执 → 打印 → 退出码。
 int RunChannelPairingCommand(const ChannelPairingCommandArgs& args);
+
+// TUI 排版批 7:配对回执的 frame 渲染(纯函数,形状册直调)。既有两句
+// ("已批准/已拒绝 <渠道>/<账号> 的配对身份: <身份>" / "提醒: …")原样
+// 按冒号拆进键值对框,标题用命令名 channel pairing(schema 标识符)。
+std::vector<std::string> RenderPairingReceipt(const std::string& action,
+                                              const std::string& channel_id,
+                                              const std::string& account_id,
+                                              const std::string& sender_id, const Theme& theme,
+                                              int width);
 
 }  // namespace lubancode::cli

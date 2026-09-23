@@ -10,6 +10,10 @@
 #pragma once
 
 #include <string>
+#include <vector>
+
+#include "cli/theme.hpp"             // Theme:渲染纯函数吃主题
+#include "config/update_checker.hpp" // ReleaseInfo/ReleaseAssetInfo
 
 namespace lubancode::cli {
 
@@ -19,6 +23,17 @@ struct UpdateCommandArgs {
     bool json = false;         // check 的机器可读输出
     std::string from_archive;  // --from <发行包>;空 = GitHub 资产
 };
+
+// TUI 排版批 7:check 人看分支的 frame 渲染(纯函数,形状册直调;check
+// 主路径要发网,CI 里测不到 RunCheck 的落盘)。六句既有文案逐句按冒号拆
+// 进键值对框,标题用命令名 update check(schema 标识符)。layout_line 是
+// cpp 侧拼好的 "安装布局" 句值(cli 不反引 app,LayoutInfo 不进头文件)。
+std::vector<std::string> RenderUpdateCheckView(const std::string& current_version,
+                                               const config::ReleaseInfo& release,
+                                               const config::ReleaseAssetInfo& asset,
+                                               const std::string& channel,
+                                               const std::string& layout_line, bool newer,
+                                               const Theme& theme, int width);
 
 // 退出码:0 成功/已是最新;1 失败(旧版继续可用);2 needs-review(冲突
 // 未决);3 rolled-back(已恢复旧版)——后两码由更新助手原样透传。

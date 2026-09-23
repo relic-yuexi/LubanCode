@@ -22,6 +22,7 @@
 
 #include "channel/channel_config.hpp"
 #include "channel/ingress_store.hpp"
+#include "cli/theme.hpp"
 
 namespace lubancode::cli {
 
@@ -141,5 +142,15 @@ ChannelAccountConfigProbe ProbeChannelAccountConfig(
 
 // 命令入口(cli_app 调):解析参数 → 定位快照 → 裁决 → 打印 → 退出码。
 int RunChannelStatusCommand(const ChannelStatusCommandArgs& args);
+
+// TUI 排版批 7:人看输出的 frame 渲染(纯函数,形状册直调)。三节 lines
+// 的文本由上面三个纯构造器定(旧册与 Web 面共用的数据面,一字不动),
+// 这里只管排版:四步/连接明细逐句按冒号拆列进键值对框,来信链首行(尾
+// 冒号剥掉)做列表标题、日志样行整行进列表。
+std::vector<std::string> RenderChannelStatusView(
+    const std::string& channel_id, const std::string& account_id,
+    const std::vector<std::string>& four_state_lines,
+    const std::vector<std::string>& verdict_lines, const std::vector<std::string>& chain_lines,
+    const Theme& theme, int width);
 
 }  // namespace lubancode::cli
