@@ -28,7 +28,7 @@
 #include "cli/console_input.hpp"
 #include "cli/keymap.hpp"
 #include "cli/markdown.hpp"
-#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 5b:/update 渲染段)
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 4/5b:/model 清单角色表与 /update 渲染段)
 #include "cli/terminal_port.hpp"
 #include "platform/clipboard.hpp"
 #include "platform/console.hpp"
@@ -743,50 +743,163 @@ void ApplyModelCatalog(const lubancode::config::ModelCatalog& catalog, const std
     }
 }
 
-// /model roles:三角色路由短表(模型分工第一期)。回落行写明
-// "回落到 normal",不把同名重印一遍(规格"界面"节)。
-void PrintModelRolesTable(const lubancode::agent::ModelRouteTable* roles_table) {
-    if (roles_table == nullptr) {
-        TermOut() << tr("cmd.model.roles_unavailable") << "\n";
-        return;
+// ---- TUI 排版批 4(/model 清单与角色表)的公共小件 --------------------------
+//
+// 渲染段只调 cli::frame::* 三助手(约定见 docs/development/tui_style.md);
+// 列名用数据 schema 名(role/provider/model/effort/source、#/model/current),
+// 与批 1 裁量同一条;行值折法与旧输出一字不差。
+
+namespace {
+
+int ModelListFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
     }
-    TermOut() << tr("cmd.model.roles_header") << "\n";
-    for (const std::string& line : lubancode::app::FormatModelRolesTable(*roles_table)) {
-        TermOut() << "  " << line << "\n";
-    }
+    return 0;
 }
 
-// /model 裸敲的清单选择(全注释见头文件):交互菜单/非交互编号选一项,
-// 只返回 id——不切换、不碰配置,提交统一走 runtime::CommandService::SetModel,
-// 与带参直切同一条路。
-std::optional<std::string> ChooseModelId(const lubancode::runtime::ModelQueryResult& query,
-                                         const lubancode::config::ModelCatalog& catalog) {
-    std::size_t default_idx = 0;
-    std::vector<std::string> ids;
-    std::vector<lubancode::cli::ChoiceMenuItem> items;
-    ids.reserve(query.models.size());
-    items.reserve(query.models.size());
-    for (std::size_t i = 0; i < query.models.size(); ++i) {
-        const auto& m = query.models[i];
-        const bool current = m.id == query.current_model;
-        if (current) default_idx = i;
+// 引导下文的尾冒号剥掉(批 2 裁量 3):标题化时 "……:" 的尾冒号是废话。
+// 全角冒号是三字节 UTF-8,不能当 char 字面量比(clang 报 character too
+// large),按字节串后缀比。
+std::string StripTrailingColon(std::string text) {
+    static const std::string kFullWidthColon = "\xef\xbc\x9a";  // 全角冒号
+    while (true) {
+        if (!text.empty() && text.back() == ':') {
+            text.pop_back();
+            continue;
+        }
+        if (text.size() >= kFullWidthColon.size() &&
+            text.compare(text.size() - kFullWidthColon.size(), kFullWidthColon.size(),
+                         kFullWidthColon) == 0) {
+            text.resize(text.size() - kFullWidthColon.size());
+            continue;
+        }
+        break;
+    }
+    return text;
+}
+
+// /model 裸敲清单的一行:交互菜单(ChoiceMenuItem)与管道编号表(批 4
+// RenderModelChoiceList)两路共用同一份 label 折法。
+struct ModelChoiceRow {
+    std::string id;
+    std::string label;
+    bool current = false;
+};
+
+std::vector<ModelChoiceRow> BuildModelChoiceRows(
+    const lubancode::runtime::ModelQueryResult& query,
+    const lubancode::config::ModelCatalog& catalog) {
+    std::vector<ModelChoiceRow> rows;
+    rows.reserve(query.models.size());
+    for (const auto& m : query.models) {
+        ModelChoiceRow row;
+        row.id = m.id;
+        row.current = m.id == query.current_model;
         const auto* entry = catalog.FindBySlug(m.id);
-        std::string label;
         if (entry != nullptr && !entry->display_name.empty()) {
             // 目录条目的 display_name 优先,后面括号带上 slug——选完切换
             // 用的还是 API 模型名,展示名和真名对得上号。
-            label = entry->display_name + "(" + m.id + ")";
+            row.label = entry->display_name + "(" + m.id + ")";
         } else {
-            label = m.display_name.empty() ? m.id : m.display_name;
+            row.label = m.display_name.empty() ? m.id : m.display_name;
         }
         // 端点相性标记(ccmoon 巡检单 P1):Realtime 模型混进菜单时挂
         // 醒目标记,不当普通可用项。判词边界见 ClassifyModelEndpoint。
         if (lubancode::config::ClassifyModelEndpoint(entry, m.id) ==
             lubancode::config::ModelEndpointKind::Realtime) {
-            label += " [Realtime]";
+            row.label += " [Realtime]";
         }
-        ids.push_back(m.id);
-        items.push_back({label, current ? tr("cmd.model.current") : std::string{}});
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+}  // namespace
+
+// /model roles:三角色路由短表(模型分工第一期)。回落行写明
+// "回落到 normal",不把同名重印一遍(规格"界面"节)。批 4 起走 frame
+// 表格:roles_header(尾冒号剥掉)作标题,五列 schema 名。
+void PrintModelRolesTable(const lubancode::agent::ModelRouteTable* roles_table,
+                          const lubancode::cli::Theme& theme) {
+    namespace frame = lubancode::cli::frame;
+    if (roles_table == nullptr) {
+        for (const std::string& line :
+             frame::RenderKeyValues({}, {frame::Field{"", tr("cmd.model.roles_unavailable")}},
+                                    theme, frame::Light(), ModelListFrameWidth())) {
+            TermOut() << line << "\n";
+        }
+        return;
+    }
+    // 行值折法与 FormatModelRolesTable 一字不差(空 provider=活跃端、空
+    // model=未定、空 effort=-、空 source=未定)。
+    const auto make_cells = [](const char* role, const lubancode::agent::ModelRoute& route) {
+        return std::vector<std::string>{
+            role,
+            route.provider.empty() ? "(活跃端)" : route.provider,
+            route.model.empty() ? "(未定)" : route.model,
+            route.effort.empty() ? "-" : route.effort,
+            route.source.empty() ? "未定" : route.source};
+    };
+    std::vector<frame::TableColumn> columns;
+    columns.push_back({"role"});
+    columns.push_back({"provider"});
+    columns.push_back({"model"});
+    columns.push_back({"effort"});
+    columns.push_back({"source"});
+    std::vector<frame::TableRow> rows;
+    rows.push_back(frame::TableRow{make_cells("cheap", roles_table->cheap)});
+    rows.push_back(frame::TableRow{make_cells("normal", roles_table->normal)});
+    rows.push_back(frame::TableRow{make_cells("lao", roles_table->lao)});
+    for (const std::string& line :
+         frame::RenderTable(StripTrailingColon(tr("cmd.model.roles_header")), columns, rows, theme,
+                            frame::Light(), ModelListFrameWidth())) {
+        TermOut() << line << "\n";
+    }
+}
+
+// /model 裸敲清单的管道形态(批 4):编号表走 frame,编号列右对齐,
+// current 行的 current 单元格走 table_pass 语义色(单子写的 tool_accent
+// 在主题里不存在,批 0 合同"色全走 Theme 字段"取 pass 档)。纯函数,
+// 形状册直接钉。
+std::vector<std::string> RenderModelChoiceList(const lubancode::runtime::ModelQueryResult& query,
+                                               const lubancode::config::ModelCatalog& catalog,
+                                               const lubancode::cli::Theme& theme, int width) {
+    namespace frame = lubancode::cli::frame;
+    const std::vector<ModelChoiceRow> rows = BuildModelChoiceRows(query, catalog);
+    std::vector<frame::TableColumn> columns;
+    columns.push_back({"#", 3, /*align_right=*/true});
+    columns.push_back({"model"});
+    columns.push_back({"current"});
+    std::vector<frame::TableRow> table_rows;
+    table_rows.reserve(rows.size());
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        table_rows.push_back(frame::TableRow{
+            {std::to_string(i + 1), rows[i].label,
+             rows[i].current ? TrimAscii(tr("cmd.model.current")) : std::string()},
+            {frame::CellTone::Normal, frame::CellTone::Normal,
+             rows[i].current ? frame::CellTone::Pass : frame::CellTone::Normal}});
+    }
+    return frame::RenderTable({}, columns, table_rows, theme, frame::Light(), width);
+}
+
+// /model 裸敲的清单选择(全注释见头文件):交互菜单/非交互编号选一项,
+// 只返回 id——不切换、不碰配置,提交统一走 runtime::CommandService::SetModel,
+// 与带参直切同一条路。批 4:管道路的编号清单走 RenderModelChoiceList;
+// theme 空指针按 /plugin 先例退 plain。
+std::optional<std::string> ChooseModelId(const lubancode::runtime::ModelQueryResult& query,
+                                         const lubancode::config::ModelCatalog& catalog,
+                                         const lubancode::cli::Theme* theme) {
+    const std::vector<ModelChoiceRow> choice_rows = BuildModelChoiceRows(query, catalog);
+    std::size_t default_idx = 0;
+    std::vector<lubancode::cli::ChoiceMenuItem> items;
+    items.reserve(choice_rows.size());
+    for (std::size_t i = 0; i < choice_rows.size(); ++i) {
+        if (choice_rows[i].current) {
+            default_idx = i;
+        }
+        items.push_back({choice_rows[i].label,
+                         choice_rows[i].current ? tr("cmd.model.current") : std::string{}});
     }
     std::size_t idx = default_idx;
     const bool interactive_menu = lubancode::platform::StdinIsInteractive() &&
@@ -802,9 +915,11 @@ std::optional<std::string> ChooseModelId(const lubancode::runtime::ModelQueryRes
         }
         idx = sel->selected_indices.empty() ? default_idx : sel->selected_indices.front();
     } else {
-        for (std::size_t i = 0; i < items.size(); ++i) {
-            TermOut() << "  " << (i + 1) << ") " << items[i].label
-                      << (items[i].description.empty() ? "" : "  " + items[i].description) << "\n";
+        for (const std::string& line :
+             RenderModelChoiceList(query, catalog,
+                                   theme != nullptr ? *theme : lubancode::cli::Theme{},
+                                   ModelListFrameWidth())) {
+            TermOut() << line << "\n";
         }
         const std::optional<std::string> selection = lubancode::cli::ReadLine(
             trf("cmd.model.choose", default_idx + 1), {}, /*esc_rejects=*/true);
@@ -816,7 +931,8 @@ std::optional<std::string> ChooseModelId(const lubancode::runtime::ModelQueryRes
             try {
                 std::size_t consumed = 0;
                 const int n = std::stoi(*selection, &consumed);
-                if (consumed != selection->size() || n < 1 || static_cast<std::size_t>(n) > ids.size()) {
+                if (consumed != selection->size() || n < 1 ||
+                    static_cast<std::size_t>(n) > choice_rows.size()) {
                     TermOut() << tr("cmd.model.bad_number") << "\n";
                     return std::nullopt;
                 }
@@ -827,7 +943,7 @@ std::optional<std::string> ChooseModelId(const lubancode::runtime::ModelQueryRes
             }
         }
     }
-    return ids[idx];
+    return choice_rows[idx].id;
 }
 void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& providers,
                        const lubancode::config::Config& current_config,

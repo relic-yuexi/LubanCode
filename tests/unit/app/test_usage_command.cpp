@@ -13,6 +13,7 @@
 #include "accounting/usage_aggregate.hpp"
 #include "accounting/usage_sample.hpp"
 #include "app/commands/usage_commands.hpp"
+#include "cli/theme.hpp"
 
 using namespace lubancode;
 using namespace lubancode::app;
@@ -163,7 +164,9 @@ TEST_CASE("FormatUsageReport:默认画面——coverage、cache、purpose、成�
     model.pricing_note = "未配价格表";
     model.aggregate = lubancode::accounting::AggregateUsage(samples);
 
-    const std::string text = Join(FormatUsageReport(model));
+    // plain 主题:句子级内容断言不受框影响(框形状另有形状册钉)。
+    const std::string text =
+        Join(FormatUsageReport(model, cli::BuiltinTheme("plain"), /*width=*/0));
     // 标题带 provisional。
     CHECK(text.find("Usage · 20260831-000001-UC0001(未封口 provisional)") != std::string::npos);
     // coverage:2/3 报了,1 笔 unknown 不折 0。
@@ -192,8 +195,9 @@ TEST_CASE("FormatUsageReport:空账不猜;--by purpose 分账表;缺口点名截
         UsageReportModel model;
         model.session_id = "20260831-000009-EMPTY9";
         model.aggregate = lubancode::accounting::AggregateUsage({});
-        const auto lines = FormatUsageReport(model);
-        REQUIRE(lines.size() == 2);
+        const auto lines =
+            FormatUsageReport(model, cli::BuiltinTheme("plain"), /*width=*/0);
+        REQUIRE(lines.size() == 2);  // plain 无框:标题行 + 空态句
         CHECK(lines[1].find("还没有模型请求账") != std::string::npos);
     }
     SUBCASE("--by purpose 分账表") {
@@ -204,7 +208,8 @@ TEST_CASE("FormatUsageReport:空账不猜;--by purpose 分账表;缺口点名截
         model.session_id = "s";
         model.aggregate = lubancode::accounting::AggregateUsage(samples);
         model.by = ParsedUsageCommand::By::Purpose;
-        const std::string text = Join(FormatUsageReport(model));
+        const std::string text =
+            Join(FormatUsageReport(model, cli::BuiltinTheme("plain"), /*width=*/0));
         CHECK(text.find("按 purpose 分账") != std::string::npos);
         CHECK(text.find("main_turn") != std::string::npos);
         CHECK(text.find("subagent_turn") != std::string::npos);
@@ -220,7 +225,8 @@ TEST_CASE("FormatUsageReport:空账不猜;--by purpose 分账表;缺口点名截
             model.aggregate.warnings.push_back(std::string("usage.purpose_missing: req-") +
                                                std::to_string(i));
         }
-        const std::string text = Join(FormatUsageReport(model));
+        const std::string text =
+            Join(FormatUsageReport(model, cli::BuiltinTheme("plain"), /*width=*/0));
         CHECK(text.find("缺口点名") != std::string::npos);
         CHECK(text.find("…另有 2 条") != std::string::npos);
     }

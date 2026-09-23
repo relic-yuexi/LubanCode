@@ -4,6 +4,7 @@
 #include "app/commands/insights_commands.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -14,11 +15,14 @@
 #include "cli/console_input.hpp"              // ReadLine:clean 的二次确认
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 4:报告/状态/列账渲染段)
 #include "cli/terminal_port.hpp"
+#include "cli/theme.hpp"
 #include "insights/derived_store.hpp"  // kDerivedAnalyzerDir(status 的摘要计数)
 #include "insights/html_renderer.hpp"
 #include "insights/insights_health.hpp"
 #include "insights/report_store.hpp"
+#include "platform/console.hpp"  // GetScreenInfo:/insights 的框宽同一把尺
 #include "platform/paths.hpp"
 #include "privacy/secret_scan.hpp"
 #include "trajectory/directory.hpp"  // ReadSessionJson(workspace readable name)
@@ -28,7 +32,59 @@
 namespace lubancode::app {
 namespace {
 
+namespace frame = lubancode::cli::frame;
+
 using lubancode::cli::TermOut;
+
+// TUI 排版批 4(/insights 全族)的公共小件。渲染段只调 cli::frame::* 三助手
+//(约定见 docs/development/tui_style.md);文案是既有硬编码中文(不走
+// i18n 表),按批 2 裁量一字不添不改;节名/键名沿用旧排版的标签,句内冒号
+// 按 SentenceField 拆两列(批 1 裁量)。
+
+int InsightsFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+std::string TrimAscii(std::string value) {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}
+
+frame::Field SentenceField(const std::string& sentence,
+                           frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    return frame::Field{TrimAscii(sentence.substr(0, colon)), TrimAscii(sentence.substr(colon + 1)),
+                        accent};
+}
+
+// 引导下文的尾冒号剥掉(批 2 裁量 3):标题化时 "将删 N 个文件(...):"
+// 的尾冒号是废话。全角冒号是三字节 UTF-8,不能当 char 字面量比(clang
+// 报 character too large),按字节串后缀比。
+std::string StripTrailingColon(std::string text) {
+    static const std::string kFullWidthColon = "\xef\xbc\x9a";  // 全角冒号
+    while (true) {
+        if (!text.empty() && text.back() == ':') {
+            text.pop_back();
+            continue;
+        }
+        if (text.size() >= kFullWidthColon.size() &&
+            text.compare(text.size() - kFullWidthColon.size(), kFullWidthColon.size(),
+                         kFullWidthColon) == 0) {
+            text.resize(text.size() - kFullWidthColon.size());
+            continue;
+        }
+        break;
+    }
+    return text;
+}
 
 std::string FormatBytes(std::uintmax_t bytes) {
     std::ostringstream out;
@@ -247,9 +303,11 @@ ParsedInsightsCommand ParseInsightsCommand(const std::string& args) {
 std::vector<std::string> FormatInsightsDigestLines(
     const lubancode::insights::InsightsGenerateResult& result,
     const std::filesystem::path& json_path, const std::filesystem::path& html_path,
-    bool show_paths) {
+    bool show_paths, const lubancode::cli::Theme& theme, int width) {
     using lubancode::cli::FormatTokenCount;
-    std::vector<std::string> lines;
+    // 长报告保持"先收集再 flush":fields 一节一节攒,末尾一把进键值对框
+    //(单子合同第 4 条)。七节节名沿用旧排版标签,一字不改。
+    std::vector<frame::Field> fields;
     const lubancode::insights::InsightsReport& report = result.report;
     const lubancode::insights::WorkspaceAggregate& agg = result.aggregate;
 
@@ -258,12 +316,12 @@ std::vector<std::string> FormatInsightsDigestLines(
                                        std::to_string(result.extras.workspace_names.size()) +
                                        " 个)"
                                  : report.scope.workspace_key;
-    lines.push_back("Insights · " + scope_text + " · " + report.scope.since + " 至 " +
-                    report.scope.until);
+    const std::string title =
+        "Insights · " + scope_text + " · " + report.scope.since + " 至 " + report.scope.until;
     // 一 工作概览。
     {
         std::ostringstream out;
-        out << "  概览        " << agg.sessions << " 场(micro " << agg.micro_sessions
+        out << agg.sessions << " 场(micro " << agg.micro_sessions
             << ",usage 照收) · turns " << agg.turns << " · 工具 " << agg.tool_calls
             << " · 验证 " << agg.verifications << " · outcome: ";
         if (agg.outcome_counts.empty()) {
@@ -277,12 +335,12 @@ std::vector<std::string> FormatInsightsDigestLines(
                     << agg.outcome_counts[i].sessions;
             }
         }
-        lines.push_back(out.str());
+        fields.push_back(frame::Field{"概览", out.str()});
     }
     // 二 Token 与 Cache。
     {
         std::ostringstream out;
-        out << "  Token       覆盖 " << agg.requests_with_usage << "/" << agg.requests_total
+        out << "覆盖 " << agg.requests_with_usage << "/" << agg.requests_total
             << " 笔有 provider usage";
         if (agg.requests_unknown > 0) {
             out << "(" << agg.requests_unknown << " 笔 unknown,不折 0)";
@@ -300,53 +358,54 @@ std::vector<std::string> FormatInsightsDigestLines(
             out << "(推理 " << FormatTokenCount(agg.reasoning_tokens) << ",已含)";
         }
         out << " · 费用 not_priced(逐笔看 /usage)";
-        lines.push_back(out.str());
+        fields.push_back(frame::Field{"Token", out.str()});
     }
     // 三 Prompt 构成。
     {
         std::ostringstream out;
-        out << "  Prompt      " << agg.prompt_rollups.size() << " 条规则命中(汇总)";
+        out << agg.prompt_rollups.size() << " 条规则命中(汇总)";
         for (std::size_t i = 0; i < agg.prompt_rollups.size() && i < 3; ++i) {
             out << " · " << agg.prompt_rollups[i].finding_id;
         }
-        lines.push_back(out.str());
+        fields.push_back(frame::Field{"Prompt", out.str()});
     }
     // 四 摩擦点。
     {
         std::ostringstream out;
-        out << "  摩擦        " << agg.frictions.size() << " 类(按场次计)";
+        out << agg.frictions.size() << " 类(按场次计)";
         for (std::size_t i = 0; i < agg.frictions.size() && i < 4; ++i) {
             out << " · " << agg.frictions[i].category << " " << agg.frictions[i].sessions
                 << " 场";
         }
-        lines.push_back(out.str());
+        fields.push_back(frame::Field{"摩擦", out.str()});
     }
     // 五 交互形状。
     {
         std::ostringstream out;
-        out << "  交互形状    样本 " << agg.sample_sessions << " 场 · 有验证 "
+        out << "样本 " << agg.sample_sessions << " 场 · 有验证 "
             << agg.sessions_with_verification << " · 有 outcome " << agg.sessions_outcome_assessed
             << " · 取消 " << agg.sessions_cancelled << " 场(语义类不猜,不评人)";
-        lines.push_back(out.str());
+        fields.push_back(frame::Field{"交互形状", out.str()});
     }
     // 六 建议。
     {
         if (agg.signals.empty()) {
-            lines.push_back("  建议        0 条(先决不满足就不出,不硬凑)");
+            fields.push_back(frame::Field{"建议", "0 条(先决不满足就不出,不硬凑)"});
         } else {
             std::ostringstream out;
-            out << "  建议        " << agg.signals.size() << " 条";
+            out << agg.signals.size() << " 条";
             for (std::size_t i = 0; i < agg.signals.size() && i < 3; ++i) {
                 out << " · " << agg.signals[i].signal_id << " "
                     << agg.signals[i].sessions << " 场";
             }
-            lines.push_back(out.str());
+            fields.push_back(frame::Field{"建议", out.str()});
         }
     }
-    // 七 覆盖与限制。
+    // 七 覆盖与限制。排除明细与"另有 N 场"是覆盖节的续行(key 空,值列
+    // 对齐在七节同一栏)。
     {
         std::ostringstream out;
-        out << "  覆盖        found " << result.counts.found << " · verified "
+        out << "found " << result.counts.found << " · verified "
             << result.counts.verified << " · analyzed " << result.counts.analyzed
             << "(fresh 复用 " << result.counts.reused << " / 重算 "
             << result.counts.written << ")";
@@ -354,7 +413,7 @@ std::vector<std::string> FormatInsightsDigestLines(
             out << " · pending " << result.counts.pending << "(再跑一回继续收)";
         }
         out << " · excluded " << result.counts.excluded;
-        lines.push_back(out.str());
+        fields.push_back(frame::Field{"覆盖", out.str()});
         std::size_t shown = 0;
         for (const auto& entry : result.extras.excluded) {
             if (shown >= 3) {
@@ -364,108 +423,128 @@ std::vector<std::string> FormatInsightsDigestLines(
             if (reason.size() > 60) {
                 reason = reason.substr(0, 60) + "…";
             }
-            lines.push_back("    排除 " + entry.session_id + "(" + entry.status +
-                            (reason.empty() ? "" : ": " + reason) + ")");
+            fields.push_back(frame::Field{"", "排除 " + entry.session_id + "(" + entry.status +
+                                                  (reason.empty() ? "" : ": " + reason) + ")"});
             shown += 1;
         }
         if (result.extras.excluded.size() > shown) {
-            lines.push_back("    …另有 " + std::to_string(result.extras.excluded.size() - shown) +
-                            " 场(明细在报告)");
+            fields.push_back(frame::Field{"", "…另有 " +
+                                                  std::to_string(result.extras.excluded.size() - shown) +
+                                                  " 场(明细在报告)"});
         }
-        lines.push_back("  限制        汇总层无逐模型/用途分账(逐笔在 /usage);active/"
-                        "corrupt/incomplete 不进分母;model review off(A6)");
+        fields.push_back(frame::Field{
+            "限制", "汇总层无逐模型/用途分账(逐笔在 /usage);active/"
+                    "corrupt/incomplete 不进分母;model review off(A6)"});
         if (!result.extras.derived_errors.empty()) {
-            lines.push_back("  落盘缺口    " + std::to_string(result.extras.derived_errors.size()) +
-                            " 条摘要写失败(本地报告照出,明细在报告限制节)");
+            fields.push_back(frame::Field{
+                "落盘缺口", std::to_string(result.extras.derived_errors.size()) +
+                                " 条摘要写失败(本地报告照出,明细在报告限制节)"});
         }
     }
-    lines.push_back("  报告        " + lubancode::platform::PathToUtf8(json_path));
-    lines.push_back("              " + lubancode::platform::PathToUtf8(html_path) +
-                    "(自包含,零网络;latest.* 同步替换)");
+    fields.push_back(frame::Field{"报告", lubancode::platform::PathToUtf8(json_path)});
+    fields.push_back(frame::Field{
+        "", lubancode::platform::PathToUtf8(html_path) + "(自包含,零网络;latest.* 同步替换)"});
     if (show_paths) {
         for (const auto& [key, name] : result.extras.workspace_names) {
-            lines.push_back("  workspace   " + name + " · " + key);
+            fields.push_back(frame::Field{"workspace", name + " · " + key});
         }
     }
-    return lines;
+    return frame::RenderKeyValues(title, fields, theme, frame::Light(), width);
 }
 
 std::vector<std::string> FormatInsightsStatusLines(
     const std::vector<lubancode::insights::InsightsReportFile>& reports,
     const std::string& latest_note, std::int64_t derived_summaries,
-    const std::filesystem::path& insights_home) {
-    std::vector<std::string> lines;
-    lines.push_back("Insights 状态 · " + lubancode::platform::PathToUtf8(insights_home));
-    lines.push_back("  最近报告    " +
-                    (latest_note.empty() ? "还没有(跑一回 /insights 生成)" : latest_note));
-    lines.push_back("  历史报告    " + std::to_string(reports.size()) +
-                    " 份(保留;清理只走 /insights clean --derived-only,且不碰报告)");
+    const std::filesystem::path& insights_home, const lubancode::cli::Theme& theme, int width) {
+    std::vector<frame::Field> fields;
+    fields.push_back(frame::Field{
+        "最近报告", latest_note.empty() ? "还没有(跑一回 /insights 生成)" : latest_note});
+    fields.push_back(frame::Field{"历史报告", std::to_string(reports.size()) +
+                                              " 份(保留;清理只走 /insights clean --derived-only,且不碰报告)"});
     const std::size_t shown = std::min<std::size_t>(reports.size(), 8);
     for (std::size_t i = 0; i < shown; ++i) {
-        lines.push_back("    " + reports[i].path.filename().string() + "  " +
-                        FormatBytes(reports[i].bytes));
+        fields.push_back(frame::Field{"", reports[i].path.filename().string() + "  " +
+                                               FormatBytes(reports[i].bytes)});
     }
     if (reports.size() > shown) {
-        lines.push_back("    …另有 " + std::to_string(reports.size() - shown) + " 份");
+        fields.push_back(frame::Field{"", "…另有 " + std::to_string(reports.size() - shown) + " 份"});
     }
-    lines.push_back("  会话摘要    " + std::to_string(derived_summaries) +
-                    " 份长期摘要(派生,可删可重算)");
-    return lines;
+    fields.push_back(frame::Field{"会话摘要", std::to_string(derived_summaries) +
+                                                " 份长期摘要(派生,可删可重算)"});
+    return frame::RenderKeyValues("Insights 状态 · " + lubancode::platform::PathToUtf8(insights_home),
+                                  fields, theme, frame::Light(), width);
 }
 
 std::vector<std::string> FormatInsightsCleanPlanLines(
-    const lubancode::insights::InsightsCleanPlan& plan) {
-    std::vector<std::string> lines;
+    const lubancode::insights::InsightsCleanPlan& plan, const lubancode::cli::Theme& theme,
+    int width) {
     if (plan.items.empty()) {
-        lines.push_back("没有可清的派生摘要(derived/ 下是空的)。");
-        return lines;
+        return frame::RenderKeyValues({}, {frame::Field{"", "没有可清的派生摘要(derived/ 下是空的)。"}},
+                                      theme, frame::Light(), width);
     }
-    lines.push_back("将删 " + std::to_string(plan.items.size()) + " 个文件,共 " +
-                    FormatBytes(plan.total_bytes) + "(只删会话摘要,不碰 Journal,不碰报告):");
+    std::vector<frame::Field> fields;
     const std::size_t shown = std::min<std::size_t>(plan.items.size(), 10);
     for (std::size_t i = 0; i < shown; ++i) {
-        lines.push_back("  " + plan.items[i].path.string() + "  " +
-                        FormatBytes(plan.items[i].bytes));
+        fields.push_back(frame::Field{"", plan.items[i].path.string() + "  " +
+                                               FormatBytes(plan.items[i].bytes)});
     }
     if (plan.items.size() > shown) {
-        lines.push_back("  …另有 " + std::to_string(plan.items.size() - shown) + " 个(明细略)");
+        fields.push_back(frame::Field{"", "…另有 " + std::to_string(plan.items.size() - shown) + " 个(明细略)"});
     }
-    return lines;
+    return frame::RenderKeyValues(
+        StripTrailingColon("将删 " + std::to_string(plan.items.size()) + " 个文件,共 " +
+                           FormatBytes(plan.total_bytes) + "(只删会话摘要,不碰 Journal,不碰报告):"),
+        fields, theme, frame::Light(), width);
 }
 
 // ---------------- 执行(IO) ----------------
+
+namespace {
+
+// 反馈/错误通知:句子进键值对框(句内冒号拆列;错误走 error 语义色)。
+void PrintNotice(const lubancode::cli::Theme& theme, const std::vector<std::string>& sentences,
+                 frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    for (const std::string& line :
+         frame::RenderKeyValues({}, fields, theme, frame::Light(), InsightsFrameWidth())) {
+        TermOut() << line << "\n";
+    }
+}
+
+}  // namespace
 
 void HandleInsightsCommand(const std::string& args, const InsightsCommandContext& context) {
     using lubancode::cli::tr;
     using lubancode::cli::trf;
     const ParsedInsightsCommand parsed = ParseInsightsCommand(args);
     if (parsed.invalid) {
-        TermOut() << context.theme.error << trf("cmd.insights.unknown_arg", parsed.bad_word)
-                  << "\n"
-                  << tr("cmd.insights.usage_line") << "\n"
-                  << context.theme.reset << "\n";
+        PrintNotice(context.theme,
+                    {trf("cmd.insights.unknown_arg", parsed.bad_word), tr("cmd.insights.usage_line")},
+                    frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
     if (parsed.mode == ParsedInsightsCommand::Mode::Clean && !parsed.clean_derived_only) {
         // §10.3:clean 只认 --derived-only;裸 clean 不进 dry-run(那门在
         // trajectory gc),明说用法。
-        TermOut() << context.theme.error << tr("cmd.insights.clean_needs_flag") << "\n"
-                  << context.theme.reset << "\n";
+        PrintNotice(context.theme, {tr("cmd.insights.clean_needs_flag")},
+                    frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
     if (parsed.later_model_review) {
-        TermOut() << tr("cmd.insights.later_model_review") << "\n";
+        PrintNotice(context.theme, {tr("cmd.insights.later_model_review")});
     }
     if (parsed.later_open) {
-        TermOut() << tr("cmd.insights.later_open") << "\n";
+        PrintNotice(context.theme, {tr("cmd.insights.later_open")});
     }
 
     // ---- 账未开:明说,不猜(§口径三戒) ----
     if (context.trajectory == nullptr) {
-        TermOut() << context.theme.stats << tr("cmd.insights.ledger_off") << "\n"
-                  << context.theme.reset;
+        PrintNotice(context.theme, {tr("cmd.insights.ledger_off")});
         TermOut().flush();
         return;
     }
@@ -489,8 +568,7 @@ void HandleInsightsCommand(const std::string& args, const InsightsCommandContext
     if (parsed.mode == ParsedInsightsCommand::Mode::Status) {
         const std::filesystem::path home = InsightsHome(context);
         if (home.empty()) {
-            TermOut() << context.theme.error << tr("cmd.insights.no_home") << "\n"
-                      << context.theme.reset << "\n";
+            PrintNotice(context.theme, {tr("cmd.insights.no_home")}, frame::FieldAccent::Error);
             TermOut().flush();
             return;
         }
@@ -535,8 +613,9 @@ void HandleInsightsCommand(const std::string& args, const InsightsCommandContext
                 }
             }
         }
-        for (const auto& line :
-             FormatInsightsStatusLines(reports, latest_note, derived_count, home)) {
+        for (const auto& line : FormatInsightsStatusLines(reports, latest_note, derived_count,
+                                                          home, context.theme,
+                                                          InsightsFrameWidth())) {
             TermOut() << line << "\n";
         }
         TermOut().flush();
@@ -548,12 +627,12 @@ void HandleInsightsCommand(const std::string& args, const InsightsCommandContext
         const lubancode::insights::InsightsCleanPlan plan =
             lubancode::insights::PlanInsightsDerivedClean(sessions_roots);
         if (!plan.ok) {
-            TermOut() << context.theme.error << plan.error << "\n"
-                      << context.theme.reset << "\n";
+            PrintNotice(context.theme, {plan.error}, frame::FieldAccent::Error);
             TermOut().flush();
             return;
         }
-        for (const auto& line : FormatInsightsCleanPlanLines(plan)) {
+        for (const auto& line :
+             FormatInsightsCleanPlanLines(plan, context.theme, InsightsFrameWidth())) {
             TermOut() << line << "\n";
         }
         if (plan.items.empty()) {
@@ -564,19 +643,21 @@ void HandleInsightsCommand(const std::string& args, const InsightsCommandContext
                                                     context.theme);
         if (!answer.has_value() || (*answer != "y" && *answer != "Y" && *answer != "yes" &&
                                     *answer != "是")) {
-            TermOut() << tr("cmd.insights.clean_cancelled") << "\n";
+            PrintNotice(context.theme, {tr("cmd.insights.clean_cancelled")});
             TermOut().flush();
             return;
         }
         const lubancode::insights::InsightsCleanResult clean_result =
             lubancode::insights::ApplyInsightsClean(plan);
-        TermOut() << trf("cmd.insights.clean_done",
-                         static_cast<std::int64_t>(clean_result.deleted_files),
-                         FormatBytes(clean_result.deleted_bytes))
-                  << "\n";
+        std::vector<std::string> done_lines{trf("cmd.insights.clean_done",
+                                                static_cast<std::int64_t>(clean_result.deleted_files),
+                                                FormatBytes(clean_result.deleted_bytes))};
         for (const auto& error : clean_result.errors) {
-            TermOut() << "  " << error << "\n";
+            done_lines.push_back(error);
         }
+        PrintNotice(context.theme, {done_lines.begin(), done_lines.end()},
+                    clean_result.errors.empty() ? frame::FieldAccent::None
+                                                : frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
@@ -584,8 +665,7 @@ void HandleInsightsCommand(const std::string& args, const InsightsCommandContext
     // ---- generate:管线 -> 报告仓 ----
     const std::filesystem::path home = InsightsHome(context);
     if (home.empty()) {
-        TermOut() << context.theme.error << tr("cmd.insights.no_home") << "\n"
-                  << context.theme.reset << "\n";
+        PrintNotice(context.theme, {tr("cmd.insights.no_home")}, frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
@@ -600,8 +680,7 @@ void HandleInsightsCommand(const std::string& args, const InsightsCommandContext
     lubancode::insights::InsightsGenerateResult result =
         lubancode::insights::GenerateInsightsReport(workspaces, options);
     if (!result.ok) {
-        TermOut() << context.theme.error << result.message << "\n"
-                  << context.theme.reset << "\n";
+        PrintNotice(context.theme, {result.message}, frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
@@ -627,18 +706,20 @@ void HandleInsightsCommand(const std::string& args, const InsightsCommandContext
                                                       html_text);
     if (!written.ok) {
         // §14.5:派生写失败即停,临时文件已清,Journal 不受影响。
-        TermOut() << context.theme.error
-                  << trf("cmd.insights.write_failed", written.message) << "\n"
-                  << context.theme.reset << "\n";
+        PrintNotice(context.theme, {trf("cmd.insights.write_failed", written.message)},
+                    frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
     if (parsed.json) {
+        // --json 机器面字节级不变(批 4 合同 2):RedactSecrets 后原样落盘,
+        // 不进任何框。
         TermOut() << lubancode::privacy::RedactSecrets(json_text) << "\n";
     }
     for (const auto& line :
          FormatInsightsDigestLines(result, written.paths.json_path,
-                                   written.paths.html_path, parsed.show_paths)) {
+                                   written.paths.html_path, parsed.show_paths, context.theme,
+                                   InsightsFrameWidth())) {
         TermOut() << line << "\n";
     }
     TermOut().flush();

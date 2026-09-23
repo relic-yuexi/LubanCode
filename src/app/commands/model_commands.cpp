@@ -9,17 +9,21 @@
 // 的 include 随行搬走(底下那枚 provider_catalog 是
 // ModelProviderHopFor 等纯函数要的,与装包段无关,照留)。
 
+#include <algorithm>
 #include <cctype>
+#include <vector>
 
 #include "app/commands/settings_commands.hpp"  // PrintModelRolesTable/ChooseModelId
 #include "app/model_router.hpp"
 #include "cli/console_input.hpp"
 #include "cli/i18n.hpp"
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 4:/model 渲染段)
 #include "cli/terminal_port.hpp"
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
+#include "platform/console.hpp"  // GetScreenInfo:/model 的框宽同一把尺
 #include "runtime/command_service.hpp"
 
 namespace lubancode::app {
@@ -30,11 +34,47 @@ using lubancode::cli::trf;
 
 namespace {
 
+namespace frame = lubancode::cli::frame;
+
+// TUI 排版批 4(/model 全族)的公共小件。渲染段只调 cli::frame::* 三助手
+//(约定见 docs/development/tui_style.md);文案全是既有 tr()/trf() 键,
+// i18n 不新增(单子合同第 4 条),句内冒号按 SentenceField 拆两列(批 1
+// 裁量)。theme 空指针(单测/未递)按 /plugin 先例退 plain。
+
+int ModelFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+lubancode::cli::Theme ResolveModelTheme(const lubancode::cli::Theme* theme) {
+    return theme != nullptr ? *theme : lubancode::cli::Theme{};
+}
+
 std::string TrimAscii(std::string value) {
     const auto not_space = [](unsigned char c) { return !std::isspace(c); };
     value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
     value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
     return value;
+}
+
+void PrintModelNotice(const lubancode::cli::Theme& theme, const std::vector<std::string>& sentences,
+                      frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        const std::size_t colon = sentence.find(':');
+        if (colon == std::string::npos) {
+            fields.push_back(frame::Field{"", sentence, accent});
+        } else {
+            fields.push_back(frame::Field{TrimAscii(sentence.substr(0, colon)),
+                                          TrimAscii(sentence.substr(colon + 1)), accent});
+        }
+    }
+    for (const std::string& line :
+         frame::RenderKeyValues({}, fields, theme, frame::Light(), ModelFrameWidth())) {
+        TermOut() << line << "\n";
+    }
 }
 
 // /model <role> <id> 的角色词归一:小写 + 去首尾空白(TrimAscii 只去空白
@@ -113,12 +153,14 @@ std::optional<ModelProviderHop> ModelProviderHopFor(const lubancode::config::Mod
 void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args) {
     lubancode::config::Config& config = *ctx.config;
     const lubancode::config::ModelCatalog& model_catalog = *ctx.model_catalog;
+    // 批 4:渲染段走 frame;theme 空指针按 /plugin 先例退 plain。
+    const lubancode::cli::Theme theme = ResolveModelTheme(ctx.theme);
     if (args == "roles") {
         const std::optional<lubancode::agent::ModelRouteTable> roles_table =
             ctx.model_router != nullptr
                 ? std::optional<lubancode::agent::ModelRouteTable>(ctx.model_router->Table())
                 : std::nullopt;
-        PrintModelRolesTable(roles_table.has_value() ? &*roles_table : nullptr);
+        PrintModelRolesTable(roles_table.has_value() ? &*roles_table : nullptr, theme);
         return;
     }
     lubancode::runtime::CommandService::Options command_options;
@@ -160,20 +202,24 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
                         const auto answer = lubancode::cli::ReadLine(trf("cmd.write_config_prompt", *write_target));
                         write_config = answer.has_value() && (*answer == "y" || *answer == "Y");
                     } else {
-                        TermOut() << tr("cmd.session_only") << "\n";
+                        PrintModelNotice(theme, {tr("cmd.session_only")});
                     }
                     const auto result = command_service.SetRoleModel(role_word, rest, write_config);
                     if (result.switched) {
-                        TermOut() << trf("cmd.model.role_switched", result.role, result.model) << "\n";
+                        std::vector<std::string> notes{
+                            trf("cmd.model.role_switched", result.role, result.model)};
                         if (write_config && result.config_written) {
-                            TermOut() << trf("cmd.write_config.updated", *write_target) << "\n";
+                            notes.push_back(trf("cmd.write_config.updated", *write_target));
                         } else if (write_config && !result.error.empty()) {
-                            TermOut() << trf("cmd.write_config.failed", result.error) << "\n";
+                            notes.push_back(trf("cmd.write_config.failed", result.error));
                         }
+                        PrintModelNotice(theme, notes);
                     } else if (result.error == "unknown_role") {
-                        TermOut() << trf("cmd.model.role_unknown", role_word) << "\n";
+                        PrintModelNotice(theme, {trf("cmd.model.role_unknown", role_word)},
+                                         frame::FieldAccent::Error);
                     } else {
-                        TermOut() << trf("cmd.model.fetch_failed", result.error) << "\n";
+                        PrintModelNotice(theme, {trf("cmd.model.fetch_failed", result.error)},
+                                         frame::FieldAccent::Error);
                     }
                     return;
                 }
@@ -216,26 +262,29 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
                 return out;
             }();
             if (!static_query.has_value() || static_query->models.empty()) {
-                TermOut() << trf("cmd.model.fetch_failed", query.fetch_error) << "\n";
+                PrintModelNotice(theme, {trf("cmd.model.fetch_failed", query.fetch_error)},
+                                 frame::FieldAccent::Error);
                 return;
             }
-            TermOut() << trf("cmd.model.static_list_header", query.fetch_error) << "\n";
-            const std::optional<std::string> picked = ChooseModelId(*static_query, model_catalog);
+            PrintModelNotice(theme, {trf("cmd.model.static_list_header", query.fetch_error)});
+            const std::optional<std::string> picked = ChooseModelId(*static_query, model_catalog, ctx.theme);
             if (!picked.has_value()) {
                 return;
             }
             chosen = *picked;
         } else {
             if (query.models.empty()) {
-                TermOut() << tr("cmd.model.list_empty") << "\n";
+                PrintModelNotice(theme, {tr("cmd.model.list_empty")});
                 return;
             }
             // 成功的真机清单自带 provider 证据:先说清这一单是谁家的,
             // 从这张单选出的项本轮按本家算(下面先落痕再切,不查跨家)。
             if (ctx.active_provider != nullptr && !ctx.active_provider->empty()) {
-                TermOut() << trf("cmd.model.live_list_header", query.models.size(), *ctx.active_provider) << "\n";
+                PrintModelNotice(
+                    theme,
+                    {trf("cmd.model.live_list_header", query.models.size(), *ctx.active_provider)});
             }
-            const std::optional<std::string> picked = ChooseModelId(query, model_catalog);
+            const std::optional<std::string> picked = ChooseModelId(query, model_catalog, ctx.theme);
             if (!picked.has_value()) {
                 return;  // 取消/编号作废,提示已就地打出。
             }
@@ -250,9 +299,10 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
         const auto* entry = model_catalog.FindBySlug(chosen);
         if (lubancode::config::ClassifyModelEndpoint(entry, chosen) ==
             lubancode::config::ModelEndpointKind::Realtime) {
-            TermOut() << trf("cmd.model.realtime_hint", chosen,
-                             lubancode::config::ProviderWireName(ctx.config->wire))
-                      << "\n";
+            PrintModelNotice(
+                theme, {trf("cmd.model.realtime_hint", chosen,
+                            lubancode::config::ProviderWireName(ctx.config->wire))},
+                frame::FieldAccent::Stats);
         }
     }
     // 活列表证据先行:选自本家真机清单的项,先把"这家确实用过这模型"
@@ -266,7 +316,9 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
             const auto remembered = lubancode::config::RememberModelChoiceInCatalog(*models_path, *ctx.active_provider,
                                                                                     chosen, chosen);
             if (!remembered.has_value()) {
-                TermOut() << trf("cmd.model.remember_choice_failed", remembered.error()) << "\n";
+                PrintModelNotice(
+                    theme, {trf("cmd.model.remember_choice_failed", remembered.error())},
+                    frame::FieldAccent::Error);
             }
         }
     }
@@ -290,11 +342,15 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
             if (hop->ambiguous) {
                 // 多家已配目录都列这名:不自动跳(只吃权威且唯一的映射),
                 // 留在本家切,提示一句。
-                TermOut() << trf("cmd.model.hop_ambiguous", chosen, hop->provider_id) << "\n";
+                PrintModelNotice(theme, {trf("cmd.model.hop_ambiguous", chosen, hop->provider_id)},
+                                 frame::FieldAccent::Stats);
             } else if (!hop->configured) {
                 unconfigured_provider = hop->provider_id;
             } else if (!ctx.switch_provider) {
-                TermOut() << trf("cmd.model.other_provider_unswitchable", chosen, hop->provider_id) << "\n";
+                PrintModelNotice(
+                    theme,
+                    {trf("cmd.model.other_provider_unswitchable", chosen, hop->provider_id)},
+                    frame::FieldAccent::Stats);
             } else if (ctx.switch_provider(hop->provider_id)) {
                 switched_provider = true;
             } else {
@@ -311,7 +367,8 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
     // <项目>/.lubancode/config.json。
     const auto result = command_service.SetModel(chosen, /*write_config=*/false);
     if (!result.switched) {
-        TermOut() << trf("cmd.model.fetch_failed", result.error) << "\n";
+        PrintModelNotice(theme, {trf("cmd.model.fetch_failed", result.error)},
+                         frame::FieldAccent::Error);
         return;
     }
     // 活列表选择落痕(第三轮返件):切成的模型在当前家写一条用户条目进
@@ -324,7 +381,9 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
             const auto remembered = lubancode::config::RememberModelChoiceInCatalog(
                 *models_path, *ctx.active_provider, result.model, result.model);
             if (!remembered.has_value()) {
-                TermOut() << trf("cmd.model.remember_choice_failed", remembered.error()) << "\n";
+                PrintModelNotice(
+                    theme, {trf("cmd.model.remember_choice_failed", remembered.error())},
+                    frame::FieldAccent::Error);
             }
         }
     }
@@ -335,38 +394,46 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
     if (ctx.sync_request_policy) {
         ctx.sync_request_policy();
     }
-    // 跨家切开的回执多带一顶帽子:明说模型连同 provider 一起换了家。
+    // 切换回执一组进同一只键值对框(批 4):跨家帽子/目录收录备注/目录
+    // 应用三行(apply_think/apply_window/apply_instructions)都是这一单
+    // 的账,拆框反而碎。
+    std::vector<std::string> switch_notes;
     if (switched_provider) {
-        TermOut() << trf("cmd.model.switched_with_provider", result.model, *ctx.active_provider) << "\n";
+        // 跨家切开的回执多带一顶帽子:明说模型连同 provider 一起换了家。
+        switch_notes.push_back(
+            trf("cmd.model.switched_with_provider", result.model, *ctx.active_provider));
     } else {
-        TermOut() << trf("cmd.model.switched", result.model) << "\n";
+        switch_notes.push_back(trf("cmd.model.switched", result.model));
     }
     if (!unconfigured_provider.empty()) {
         // 直输路径的静态归属只说"某家目录也收录",不断言中转站不认
         //(巡检单 P1:自动跳家只吃权威且唯一的映射,提示口径同步放软)。
-        TermOut() << trf("cmd.model.catalog_also_lists", unconfigured_provider, result.model) << "\n";
+        switch_notes.push_back(
+            trf("cmd.model.catalog_also_lists", unconfigured_provider, result.model));
     }
     if (result.think_from_catalog) {
-        TermOut() << trf("catalog.apply_think", result.think) << "\n";
+        switch_notes.push_back(trf("catalog.apply_think", result.think));
     }
     if (result.applied_context_window.has_value()) {
-        TermOut() << trf("catalog.apply_window", *result.applied_context_window) << "\n";
+        switch_notes.push_back(trf("catalog.apply_window", *result.applied_context_window));
     }
     if (result.instructions_replaced) {
-        TermOut() << trf("catalog.apply_instructions", result.model) << "\n";
+        switch_notes.push_back(trf("catalog.apply_instructions", result.model));
     }
+    PrintModelNotice(theme, switch_notes);
     if (write_target.has_value()) {
         const auto answer = lubancode::cli::ReadLine(trf("cmd.write_config_prompt", *write_target));
         if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
             const auto written = command_service.WriteModelToConfig(result.model);
             if (written.has_value()) {
-                TermOut() << trf("cmd.write_config.updated", *write_target) << "\n";
+                PrintModelNotice(theme, {trf("cmd.write_config.updated", *write_target)});
             } else {
-                TermOut() << trf("cmd.write_config.failed", written.error()) << "\n";
+                PrintModelNotice(theme, {trf("cmd.write_config.failed", written.error())},
+                                 frame::FieldAccent::Error);
             }
         }
     } else {
-        TermOut() << tr("cmd.session_only") << "\n";
+        PrintModelNotice(theme, {tr("cmd.session_only")});
     }
 }
 

@@ -7,6 +7,7 @@
 
 #include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
 #include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
+#include "cli/theme.hpp"                   // Theme(批 4:渲染段配色)
 
 #include <functional>
 #include <memory>
@@ -16,6 +17,9 @@
 
 namespace lubancode::config {
 struct Config;
+}
+namespace lubancode::cli {
+struct Theme;
 }
 namespace lubancode::package {
 struct PackageMount;
@@ -33,6 +37,9 @@ namespace lubancode::app {
 struct PackageCommandContext {
     // <home_lubancode> 根(user 层扫描位 + package-store 选中版本折算)。
     const std::optional<std::string>* home_lubancode = nullptr;
+    // 会话主题(批 4:渲染段走 frame 三助手)。空 = 没递(纯函数装配/
+    // 单测),按 /plugin 先例退 plain。
+    const lubancode::cli::Theme* theme = nullptr;
     // --package-dir 攒下的 dev 层目录(InteractiveSessionOptions.package_dirs
     // 的借用;不直接递 opts,域文件不进会话层头)。空 = 没有 dev 层。
     const std::vector<std::string>* dev_package_dirs = nullptr;

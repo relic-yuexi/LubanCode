@@ -7,7 +7,10 @@
 // 迁移全走 EvolutionCoordinator(唯一写口),这里只递材料、只打印。
 #include "app/commands/evolve_commands.hpp"
 #include "memory/project_memory.hpp"  // /evolve 的分层账(ctx.project_memory)
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 5c:status/list/show/propose 渲染段)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:统一走输出端口
+#include "cli/theme.hpp"          // Theme/ResolveTheme/DetectConsoleCapability
+#include "platform/console.hpp"   // GetScreenInfo:/evolve 的框宽同一把尺
 
 #include <algorithm>
 #include <cctype>
@@ -17,6 +20,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -38,6 +42,29 @@ using lubancode::cli::TermOut;
 
 namespace {
 
+namespace frame = lubancode::cli::frame;
+
+// TUI 排版批 5c(/evolve)的公共小件,与批 2-4 各命令族同款:渲染段只调
+// cli::frame::* 三助手;文案是既有硬编码中文(不走 i18n 表),按批 2 裁量
+// 一字不添不改;句内冒号按 SentenceField 拆两列(批 1 裁量)。
+
+// 会话主题没递(裸 CLI/测试)就按终端能力起板(批 2 裁量 4):管道/重定向
+// 自然降 plain,测试进程里钉的就是 plain 形状。
+lubancode::cli::Theme EvolveTheme(const EvolveCommandContext& ctx) {
+    if (ctx.theme != nullptr) {
+        return *ctx.theme;
+    }
+    return lubancode::cli::ResolveTheme(std::string(),
+                                        lubancode::cli::DetectConsoleCapability().colors_enabled);
+}
+
+int EvolveFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
 std::string Trimmed(std::string s) {
     std::size_t begin = 0;
     while (begin < s.size() && std::isspace(static_cast<unsigned char>(s[begin])) != 0) {
@@ -48,6 +75,30 @@ std::string Trimmed(std::string s) {
         --end;
     }
     return s.substr(begin, end - begin);
+}
+
+frame::Field SentenceField(const std::string& sentence,
+                           frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    return frame::Field{Trimmed(sentence.substr(0, colon)), Trimmed(sentence.substr(colon + 1)),
+                        accent};
+}
+
+// 反馈/错误通知:句子进键值对框(句内冒号拆列;错误走 error 语义色)。
+void PrintEvolveNotice(const lubancode::cli::Theme& theme,
+                       const std::vector<std::string>& sentences,
+                       frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    for (const std::string& line :
+         frame::RenderKeyValues({}, fields, theme, frame::Light(), EvolveFrameWidth())) {
+        TermOut() << line << "\n";
+    }
 }
 
 std::string ToLowerAscii(std::string_view s) {
@@ -229,9 +280,11 @@ void RunSuggestionPass(const EvolveCommandContext& ctx,
 
 // ---- status:采集 + 落账 + 账面(+ 阶段 7:开着时顺手提示一回) ----
 void RunEvolveStatus(const EvolveCommandContext& ctx) {
+    const lubancode::cli::Theme theme = EvolveTheme(ctx);
     const std::filesystem::path store_root = BuildStoreRoot(ctx);
     if (store_root.empty()) {
-        TermOut() << "没有主目录(.lubancode),观察账无处落。\n";
+        PrintEvolveNotice(theme, {"没有主目录(.lubancode),观察账无处落。"},
+                          frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
@@ -273,22 +326,26 @@ void RunEvolveStatus(const EvolveCommandContext& ctx) {
         ++by_source[lubancode::evolution::ToString(observation.source)];
     }
 
-    TermOut() << "自进化观察账(阶段 1:只观察,不生成 Package):\n";
-    TermOut() << "  采集: 录制件 " << report.recordings_scanned << "(跳过半截 "
-              << report.recordings_skipped << "),workflow run " << report.runs_scanned
-              << ",memory " << report.memory_entries << "\n";
-    TermOut() << "  落账: 新增 " << appended << ",重采跳过 " << duplicates << ",被拒压下 "
-              << suppressed << "\n";
-    TermOut() << "  账面: 观察 " << ledger.size() << " 条,同类簇 " << clusters.size() << " 个";
+    EvolveStatusModel model;
+    model.recordings_scanned = report.recordings_scanned;
+    model.recordings_skipped = report.recordings_skipped;
+    model.runs_scanned = report.runs_scanned;
+    model.memory_entries = report.memory_entries;
+    model.appended = appended;
+    model.duplicates = duplicates;
+    model.suppressed = suppressed;
+    model.ledger_size = ledger.size();
+    model.cluster_count = clusters.size();
     for (const auto& [source, count] : by_source) {
-        TermOut() << "," << source << " " << count;
+        model.by_source.emplace_back(source, count);
     }
-    TermOut() << "\n";
-    TermOut() << "  账本: " << lubancode::platform::PathToUtf8(store.observations_file()) << "\n";
-    if (!error.empty()) {
-        TermOut() << "  警告: 有观察没落住账(" << error << ")\n";
+    model.observations_file = lubancode::platform::PathToUtf8(store.observations_file());
+    model.error = error;
+    for (const std::string& line : FormatEvolveStatusLines(model, theme, EvolveFrameWidth())) {
+        TermOut() << line << "\n";
     }
     // 阶段 7:开着才提示(缺省关;关着时连命中账都不写,更不另收材料)。
+    // 提示回合是逐簇短句,保持原样平铺(批 2 裁量 2:框只装结论)。
     if (lubancode::evolution::LoadSuggestEnabled(BuildEvolutionRoot(ctx))) {
         RunSuggestionPass(ctx, new_observation_ids);
     }
@@ -368,11 +425,12 @@ void RunEvolveSuggest(const EvolveCommandContext& ctx, const std::string& arg) {
 
 // ---- list:按指纹聚类 ----
 void RunEvolveList(const EvolveCommandContext& ctx, const std::string& source_filter) {
+    const lubancode::cli::Theme theme = EvolveTheme(ctx);
     const std::filesystem::path store_root = BuildStoreRoot(ctx);
     lubancode::evolution::ObservationStore store(store_root);
     const std::vector<lubancode::evolution::EvolutionObservation> ledger = store.Load();
     if (ledger.empty()) {
-        TermOut() << "观察账是空的(先 /evolve status 采集一回)。\n";
+        PrintEvolveNotice(theme, {"观察账是空的(先 /evolve status 采集一回)。"});
         TermOut().flush();
         return;
     }
@@ -399,25 +457,31 @@ void RunEvolveList(const EvolveCommandContext& ctx, const std::string& source_fi
         return a.first < b.first;
     });
 
-    TermOut() << "观察账(按同类指纹聚类," << ledger.size() << " 条 / " << rows.size()
-              << " 簇):\n";
+    std::vector<EvolveClusterRow> cluster_rows;
     for (const auto& [fingerprint, cluster] : rows) {
         const auto& first = *cluster.items.front();
-        TermOut() << "  " << fingerprint << "  x" << cluster.items.size() << "  ["
-                  << lubancode::evolution::ToString(first.source) << " "
-                  << lubancode::evolution::ToString(first.outcome) << "]  "
-                  << Ellipsize(first.summary, 72) << "\n";
+        EvolveClusterRow row;
+        row.fingerprint = fingerprint;
+        row.count = "x" + std::to_string(cluster.items.size());
+        row.source = lubancode::evolution::ToString(first.source);
+        row.outcome = lubancode::evolution::ToString(first.outcome);
+        row.summary = Ellipsize(first.summary, 72);
         if (cluster.items.size() > 1) {
-            TermOut() << "    同类: ";
+            std::ostringstream peers;
             for (std::size_t i = 0; i < cluster.items.size() && i < 6; ++i) {
-                if (i > 0) TermOut() << " ";
-                TermOut() << cluster.items[i]->id;
+                if (i > 0) peers << " ";
+                peers << cluster.items[i]->id;
             }
             if (cluster.items.size() > 6) {
-                TermOut() << " +" << (cluster.items.size() - 6);
+                peers << " +" << (cluster.items.size() - 6);
             }
-            TermOut() << "\n";
+            row.peers = peers.str();
         }
+        cluster_rows.push_back(std::move(row));
+    }
+    for (const std::string& line :
+         FormatEvolveClusterLines(ledger.size(), cluster_rows, theme, EvolveFrameWidth())) {
+        TermOut() << line << "\n";
     }
 
     // ---- 候选区(阶段 2):观察与候选同一张账面看 ----
@@ -426,15 +490,20 @@ void RunEvolveList(const EvolveCommandContext& ctx, const std::string& source_fi
         const std::vector<lubancode::evolution::CandidateSummary> candidates =
             lubancode::evolution::CandidateStore(candidate_root).LoadAll();
         if (!candidates.empty()) {
-            TermOut() << "\n候选仓(" << candidates.size() << " 只,均在候选区,未进 /package):\n";
+            std::vector<EvolveCandidateRow> candidate_rows;
             for (const lubancode::evolution::CandidateSummary& candidate : candidates) {
-                TermOut() << "  " << candidate.candidate_id << "  ["
-                          << lubancode::evolution::ToString(candidate.state) << "]  "
-                          << candidate.package_id << "  ";
+                EvolveCandidateRow row;
+                row.candidate_id = candidate.candidate_id;
+                row.state = lubancode::evolution::ToString(candidate.state);
+                row.package_id = candidate.package_id;
                 if (candidate.record.has_value()) {
-                    TermOut() << Ellipsize(candidate.record->objective, 56);
+                    row.objective = Ellipsize(candidate.record->objective, 56);
                 }
-                TermOut() << "\n";
+                candidate_rows.push_back(std::move(row));
+            }
+            for (const std::string& line : FormatEvolveCandidateListLines(
+                     candidate_rows, theme, EvolveFrameWidth())) {
+                TermOut() << line << "\n";
             }
         }
     }
@@ -449,33 +518,34 @@ void RunEvolveShow(const EvolveCommandContext& ctx, const std::string& target) {
         RunEvolveShowCandidate(ctx, target);
         return;
     }
+    const lubancode::cli::Theme theme = EvolveTheme(ctx);
     lubancode::evolution::ObservationStore store(BuildStoreRoot(ctx));
     const auto found = store.Find(target);
     if (!found.has_value()) {
-        TermOut() << "没找到观察 \"" << target << "\"(先 /evolve list 看指纹与 id)\n";
+        PrintEvolveNotice(theme, {"没找到观察 \"" + target + "\"(先 /evolve list 看指纹与 id)"},
+                          frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
     const lubancode::evolution::EvolutionObservation& observation = *found;
-    TermOut() << observation.id << "  [" << lubancode::evolution::ToString(observation.source)
-              << " " << lubancode::evolution::ToString(observation.outcome) << "]\n";
-    TermOut() << "  来源: " << lubancode::evolution::ToString(observation.source) << " "
-              << observation.source_id << "\n";
-    TermOut() << "  原始账: " << (observation.source_ref.empty() ? "(无)" : observation.source_ref)
-              << "\n";
-    TermOut() << "  指纹: " << observation.fingerprint << "\n";
-    TermOut() << "  摘要: " << observation.summary << "\n";
-    if (!observation.created_at.empty()) {
-        TermOut() << "  时间: " << observation.created_at << "\n";
-    }
+    EvolveObservationModel model;
+    model.id = observation.id;
+    model.source = lubancode::evolution::ToString(observation.source);
+    model.outcome = lubancode::evolution::ToString(observation.outcome);
+    model.source_id = observation.source_id;
+    model.source_ref = observation.source_ref;
+    model.fingerprint = observation.fingerprint;
+    model.summary = observation.summary;
+    model.created_at = observation.created_at;
     if (!observation.details.empty()) {
-        TermOut() << "  账目: " << observation.details.dump() << "\n";
+        model.details_json = observation.details.dump();
     }
-    if (!observation.evidence.empty()) {
-        TermOut() << "  证据(" << observation.evidence.size() << " 条):\n";
-        for (const lubancode::evolution::EvidenceRef& ref : observation.evidence) {
-            TermOut() << "    " << ref.ref << "  -- " << ref.note << "\n";
-        }
+    for (const lubancode::evolution::EvidenceRef& ref : observation.evidence) {
+        model.evidence.emplace_back(ref.ref, ref.note);
+    }
+    for (const std::string& line :
+         FormatEvolveObservationLines(model, theme, EvolveFrameWidth())) {
+        TermOut() << line << "\n";
     }
     TermOut().flush();
 }
@@ -536,112 +606,123 @@ void PrintEvalSummary(const lubancode::evolution::EvalSummary& summary, const ch
 
 // ---- show 候选页:演化账 + 批准账 + 状态 + 来源回指 ----
 void RunEvolveShowCandidate(const EvolveCommandContext& ctx, const std::string& target) {
+    const lubancode::cli::Theme theme = EvolveTheme(ctx);
     lubancode::evolution::CandidateStore store(BuildCandidateRoot(ctx));
     const auto found = store.Find(target);
     if (!found.has_value()) {
-        TermOut() << "没找到候选 \"" << target << "\"(先 /evolve list 看候选区)\n";
+        PrintEvolveNotice(theme, {"没找到候选 \"" + target + "\"(先 /evolve list 看候选区)"},
+                          frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
-    TermOut() << found->candidate_id << "  [" << lubancode::evolution::ToString(found->state)
-              << "]  " << found->package_id << "\n";
-    TermOut() << "  目录: " << lubancode::platform::PathToUtf8(found->dir) << "\n";
-    TermOut() << "  整包哈希: " << (found->content_hash.empty() ? "(package/ 缺失)" : found->content_hash)
-              << "\n";
+    EvolveCandidatePageModel model;
+    model.candidate_id = found->candidate_id;
+    model.state = lubancode::evolution::ToString(found->state);
+    model.package_id = found->package_id;
+    model.dir_utf8 = lubancode::platform::PathToUtf8(found->dir);
+    model.content_hash = found->content_hash;
     // 形状照盘上现状说(代码草稿[Plugin 或 MCP]/组合/最小),复杂度顺带亮一笔。
     {
         const lubancode::evolution::ComplexityCost cost =
             lubancode::evolution::ComputeComplexityCost(found->dir / "package");
         if (!cost.shape.empty()) {
-            TermOut() << "  形状: "
-                      << (cost.shape == "code-draft"
-                              ? (cost.has_mcp ? "code-bearing-draft(MCP server 草稿 + skill)"
-                                              : "code-bearing-draft(process Plugin 草稿 + skill)")
-                              : (cost.shape == "combination" ? "组合包" : "最小 Skill-only 包"))
-                      << ";复杂度 " << cost.SummaryLine() << "\n";
+            model.has_shape = true;
+            // 三目链包进 std::string 再相加:裸 char* + char* 编译不过(纪律警钟)。
+            model.shape =
+                std::string(cost.shape == "code-draft"
+                                ? (cost.has_mcp ? "code-bearing-draft(MCP server 草稿 + skill)"
+                                                : "code-bearing-draft(process Plugin 草稿 + skill)")
+                                : (cost.shape == "combination" ? "组合包" : "最小 Skill-only 包")) +
+                ";复杂度 " + cost.SummaryLine();
         }
     }
     if (found->record.has_value()) {
         const lubancode::evolution::EvolutionRecord& record = *found->record;
-        TermOut() << "  候选版本: " << record.candidate_version;
+        model.has_record = true;
+        std::ostringstream version;
+        version << record.candidate_version;
         if (record.parent.has_value()) {
-            TermOut() << "(父版 " << record.parent->version << " " << record.parent->content_hash
-                      << ")";
+            version << "(父版 " << record.parent->version << " " << record.parent->content_hash
+                    << ")";
         } else {
-            TermOut() << "(无父版,与空对照)";
+            version << "(无父版,与空对照)";
         }
-        TermOut() << "\n";
-        TermOut() << "  目标: " << Ellipsize(record.objective, 96) << "\n";
+        model.candidate_version = version.str();
+        model.objective = Ellipsize(record.objective, 96);
         // 来源回指:稳定来源 ID -> 观察账 id(可再 /evolve show 追到原始账)。
-        TermOut() << "  来源: ";
+        std::ostringstream sources;
         bool any_source = false;
         for (const std::string& id : record.sources.recording_ids) {
-            TermOut() << (any_source ? ", " : "") << "recording " << id << " = 观察 "
-                      << lubancode::evolution::MakeObservationId(
-                             lubancode::evolution::ObservationSource::Recording, id);
+            sources << (any_source ? ", " : "") << "recording " << id << " = 观察 "
+                    << lubancode::evolution::MakeObservationId(
+                           lubancode::evolution::ObservationSource::Recording, id);
             any_source = true;
         }
         for (const std::string& id : record.sources.run_ids) {
-            TermOut() << (any_source ? ", " : "") << "run " << id;
+            sources << (any_source ? ", " : "") << "run " << id;
             any_source = true;
         }
         for (const std::string& id : record.sources.goal_ids) {
-            TermOut() << (any_source ? ", " : "") << "goal " << id;
+            sources << (any_source ? ", " : "") << "goal " << id;
             any_source = true;
         }
         for (const std::string& id : record.sources.memory_ids) {
-            TermOut() << (any_source ? ", " : "") << "memory " << id;
+            sources << (any_source ? ", " : "") << "memory " << id;
             any_source = true;
         }
         if (!any_source) {
-            TermOut() << "(演化账未记来源)";
+            sources << "(演化账未记来源)";
         }
-        TermOut() << "\n";
-        TermOut() << "  生成器: " << record.generator.provider << " / " << record.generator.model
-                  << " / " << record.generator.prompt_revision << "\n";
-        TermOut() << "  改动: 新增组件 ";
+        model.sources = sources.str();
+        model.generator = record.generator.provider + " / " + record.generator.model + " / " +
+                          record.generator.prompt_revision;
+        std::ostringstream changes;
+        changes << "新增组件 ";
         for (const std::string& item : record.changes.components_added) {
-            TermOut() << item << " ";
+            changes << item << " ";
         }
-        TermOut() << "权限差异 " << record.changes.permissions_added.size() << " 条,新工具 "
-                  << record.changes.tools_added.size() << " 件\n";
-        // 阶段 6:代码档草稿的权限差异逐条亮(一条一权,env 只记名)。
+        changes << "权限差异 " << record.changes.permissions_added.size() << " 条,新工具 "
+                << record.changes.tools_added.size() << " 件";
+        model.changes = changes.str();
+        // 阶段 6:代码档草稿的权限差异逐条亮(一条一权,env 只记名;帽 8 条)。
         for (std::size_t i = 0; i < record.changes.tools_added.size() && i < 8; ++i) {
-            TermOut() << "    tool " << record.changes.tools_added[i] << "\n";
+            model.tools_added.push_back(record.changes.tools_added[i]);
         }
         for (std::size_t i = 0; i < record.changes.permissions_added.size() && i < 8; ++i) {
-            TermOut() << "    perm " << record.changes.permissions_added[i] << "\n";
+            model.permissions_added.push_back(record.changes.permissions_added[i]);
         }
-        if (!record.changes.tools_added.empty() || !record.changes.permissions_added.empty()) {
-            TermOut() << "    code-bearing-draft:零进程零挂载,不自动启用;"
-                      << "补实现走 /package trust 人工审查线\n";
-        }
-        TermOut() << "  起草于: " << (record.created_at.empty() ? "(未记)" : record.created_at) << "\n";
+        model.created_at = record.created_at.empty() ? "(未记)" : record.created_at;
     }
     if (found->approval.has_value()) {
-        TermOut() << "  批准账: " << found->approval->tier << " / " << found->approval->status;
+        model.has_approval = true;
+        std::ostringstream approval;
+        approval << found->approval->tier << " / " << found->approval->status;
         if (found->approval->decision.has_value()) {
-            TermOut() << "(由 " << found->approval->decision->decided_by << " 于 "
-                      << found->approval->decision->decided_at << " 决定;指纹 "
-                      << found->approval->decision->fingerprint << ")";
+            approval << "(由 " << found->approval->decision->decided_by << " 于 "
+                     << found->approval->decision->decided_at << " 决定;指纹 "
+                     << found->approval->decision->fingerprint << ")";
         }
-        TermOut() << "\n";
-    } else {
-        TermOut() << "  批准账: (缺——候选不完整)\n";
+        model.approval = approval.str();
     }
     // ---- 评测账摘要(阶段 3):通过几项、没测什么、比基线贵多少 ----
     const std::vector<lubancode::evolution::EvalResultLine> results =
         lubancode::evolution::LoadEvalResults(found->dir / "eval-results.jsonl");
-    if (results.empty()) {
-        TermOut() << "  评测账: 空(先 /evolve test " << found->candidate_id << ")\n";
-    } else {
+    model.has_eval = !results.empty();
+    model.eval_rows = results.size();
+    for (const std::string& line :
+         FormatEvolveCandidatePageLines(model, theme, EvolveFrameWidth())) {
+        TermOut() << line << "\n";
+    }
+    // 评测摘要是 PrintEvalSummary 的多行正文(与 test/approve 共用),长正文
+    // 不塞框(批 1 裁量 3),在框外原样跟出。
+    if (!results.empty()) {
         const lubancode::evolution::EvalSummary summary =
             lubancode::evolution::SummarizeEvalLedger(results);
-        TermOut() << "  评测账(" << results.size() << " 行,只追加):\n";
         PrintEvalSummary(summary, "    ");
     }
-    TermOut() << "  下一步: /evolve diff " << found->candidate_id << ";评测入账后 /evolve approve "
-              << found->candidate_id << " 出批准页(只认当前哈希)\n";
+    PrintEvolveNotice(theme, {"下一步: /evolve diff " + found->candidate_id +
+                                  ";评测入账后 /evolve approve " + found->candidate_id +
+                                  " 出批准页(只认当前哈希)"});
     TermOut().flush();
 }
 
@@ -651,15 +732,17 @@ void RunEvolveShowCandidate(const EvolveCommandContext& ctx, const std::string& 
 // ProposeFromCluster——两把尺(成功路序列同形/全场工具面同形)在起草器里
 // 判;账上没有同类或只有这一场,簇就只有点名场,照旧 Skill-only。
 void RunEvolvePropose(const EvolveCommandContext& ctx, const std::string& target) {
+    const lubancode::cli::Theme theme = EvolveTheme(ctx);
     const std::filesystem::path store_root = BuildStoreRoot(ctx);
     const std::filesystem::path candidate_root = BuildCandidateRoot(ctx);
     if (store_root.empty() || candidate_root.empty()) {
-        TermOut() << "没有主目录(.lubancode),候选无处落。\n";
+        PrintEvolveNotice(theme, {"没有主目录(.lubancode),候选无处落。"},
+                          frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
     if (ctx.recordings_root == nullptr) {
-        TermOut() << "没有录制件根,找不到录制。\n";
+        PrintEvolveNotice(theme, {"没有录制件根,找不到录制。"}, frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
@@ -670,14 +753,16 @@ void RunEvolvePropose(const EvolveCommandContext& ctx, const std::string& target
     if (target.rfind("obs-", 0) == 0) {
         const auto found = observations.Find(target);
         if (!found.has_value()) {
-            TermOut() << "没找到观察 \"" << target << "\"(先 /evolve status 采集一回)\n";
+            PrintEvolveNotice(theme, {"没找到观察 \"" + target + "\"(先 /evolve status 采集一回)"},
+                              frame::FieldAccent::Error);
             TermOut().flush();
             return;
         }
         if (found->source != lubancode::evolution::ObservationSource::Recording) {
-            TermOut() << "观察 \"" << target << "\" 的来源是 "
-                      << lubancode::evolution::ToString(found->source)
-                      << ",propose 只从 recording 起草。\n";
+            PrintEvolveNotice(theme, {"观察 \"" + target + "\" 的来源是 " +
+                                          lubancode::evolution::ToString(found->source) +
+                                          ",propose 只从 recording 起草。"},
+                              frame::FieldAccent::Error);
             TermOut().flush();
             return;
         }
@@ -686,7 +771,8 @@ void RunEvolvePropose(const EvolveCommandContext& ctx, const std::string& target
     if (recording_id.find('/') != std::string::npos ||
         recording_id.find('\\') != std::string::npos ||
         recording_id.find("..") != std::string::npos) {
-        TermOut() << "录制件 id 只认单段目录名: \"" << recording_id << "\"\n";
+        PrintEvolveNotice(theme, {"录制件 id 只认单段目录名: \"" + recording_id + "\""},
+                          frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
@@ -705,7 +791,9 @@ void RunEvolvePropose(const EvolveCommandContext& ctx, const std::string& target
     };
     const auto named = find_recording(recording_id);
     if (!named.has_value()) {
-        TermOut() << "找不到录制件 \"" << recording_id << "\"(先 /record 录一回,再 /evolve status)\n";
+        PrintEvolveNotice(
+            theme, {"找不到录制件 \"" + recording_id + "\"(先 /record 录一回,再 /evolve status)"},
+            frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
@@ -755,67 +843,75 @@ void RunEvolvePropose(const EvolveCommandContext& ctx, const std::string& target
     lubancode::evolution::EvolutionCoordinator coordinator(candidate_root, &observations);
     const auto result = coordinator.ProposeFromCluster(cluster);
     if (!result.has_value()) {
-        TermOut() << "起草失败: " << result.error() << "\n";
+        PrintEvolveNotice(theme, {"起草失败: " + result.error()}, frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
-    TermOut() << "候选已落(只进候选仓,/package 看不见它):\n";
-    TermOut() << "  候选: " << result->candidate_id << "  [" << result->package_id << " "
-              << result->candidate_version << "]\n";
-    TermOut() << "  整包哈希: " << result->content_hash << "\n";
-    TermOut() << "  目录: " << lubancode::platform::PathToUtf8(result->candidate_dir) << "\n";
+    EvolveProposeModel model;
+    model.candidate = result->candidate_id + "  [" + result->package_id + " " +
+                      result->candidate_version + "]";
+    model.content_hash = result->content_hash;
+    model.dir_utf8 = lubancode::platform::PathToUtf8(result->candidate_dir);
     // 分档亮形:代码草稿(Plugin 或 MCP)、组合还是最小包,簇多大,组件几件。
     if (result->code_draft) {
         if (result->mcp_draft) {
-            TermOut() << "  形状: code-bearing-draft(MCP server 草稿)——mcp.yaml + server 脚手架"
-                      << " + Skill,簇内 " << result->cluster_size << " 场任务同求 "
-                      << result->wanted_tools.size() << " 件不存在的工具(\""
-                      << result->wanted_tool << "\" 等;现有工具办不了,录到的是 "
-                      << "registry.unknown_tool 失败;同求多件,封一只 server 合账)\n";
-            TermOut() << "  草稿规矩: 零进程零挂载,不自动启用;server 是未实现占位,"
-                      << "补实现走人工审查线\n";
+            model.shape =
+                "code-bearing-draft(MCP server 草稿)——mcp.yaml + server 脚手架 + Skill,簇内 " +
+                std::to_string(result->cluster_size) + " 场任务同求 " +
+                std::to_string(result->wanted_tools.size()) + " 件不存在的工具(\"" +
+                result->wanted_tool +
+                "\" 等;现有工具办不了,录到的是 registry.unknown_tool 失败;同求多件,封一只 "
+                "server 合账)";
+            model.rule = "零进程零挂载,不自动启用;server 是未实现占位,补实现走人工审查线";
         } else {
-            TermOut() << "  形状: code-bearing-draft(process Plugin 草稿)——plugin.json + runner"
-                      << " 脚手架 + Skill,簇内 " << result->cluster_size << " 场任务同求工具 \""
-                      << result->wanted_tool
-                      << "\"(现有工具办不了,录到的是 registry.unknown_tool 失败)\n";
-            TermOut() << "  草稿规矩: 零进程零挂载,不自动启用;runner 是未实现占位,"
-                      << "补实现走人工审查线\n";
+            model.shape =
+                "code-bearing-draft(process Plugin 草稿)——plugin.json + runner 脚手架 + "
+                "Skill,簇内 " +
+                std::to_string(result->cluster_size) + " 场任务同求工具 \"" + result->wanted_tool +
+                "\"(现有工具办不了,录到的是 registry.unknown_tool 失败)";
+            model.rule = "零进程零挂载,不自动启用;runner 是未实现占位,补实现走人工审查线";
         }
     } else if (result->shape == "combination") {
-        TermOut() << "  形状: 组合候选(簇 " << result->cluster_size
-                  << " 场同形任务;两把尺过门)——workflow" << (result->agent_drafted ? " + Agent" : "")
-                  << " + Skill\n";
+        model.shape = "组合候选(簇 " + std::to_string(result->cluster_size) +
+                      " 场同形任务;两把尺过门)——workflow" +
+                      (result->agent_drafted ? " + Agent" : "") + " + Skill";
     } else {
-        TermOut() << "  形状: 最小 Skill-only 包(默认答案;Agent 是升档不是标配)\n";
+        model.shape = "最小 Skill-only 包(默认答案;Agent 是升档不是标配)";
     }
-    TermOut() << "  组件: ";
-    for (std::size_t i = 0; i < result->component_paths.size(); ++i) {
-        TermOut() << (i > 0 ? ", " : "") << result->component_paths[i];
-    }
-    if (result->code_draft) {
-        TermOut() << "(code-bearing:新工具 " << result->tools_added.size() << " 件,新权限 "
-                  << result->permissions_added.size() << " 条)\n";
-        for (const std::string& tool : result->tools_added) {
-            TermOut() << "    tool " << tool << "\n";
+    {
+        std::ostringstream components;
+        for (std::size_t i = 0; i < result->component_paths.size(); ++i) {
+            components << (i > 0 ? ", " : "") << result->component_paths[i];
         }
-        for (const std::string& perm : result->permissions_added) {
-            TermOut() << "    perm " << perm << "\n";
+        if (result->code_draft) {
+            components << "(code-bearing:新工具 " << result->tools_added.size()
+                       << " 件,新权限 " << result->permissions_added.size() << " 条)";
+            for (const std::string& tool : result->tools_added) {
+                model.tools_added.push_back(tool);
+            }
+            for (const std::string& perm : result->permissions_added) {
+                model.permissions_added.push_back(perm);
+            }
+            model.gate =
+                "code-bearing 候选不自动晋升——评测可跑(全静态,零进程),/evolve approve 会明拒"
+                "并指路 /package trust 人工审查线";
+        } else {
+            components << "(content-only,无进程无网络)";
         }
-        TermOut() << "  档位门: code-bearing 候选不自动晋升——评测可跑(全静态,零进程),"
-                  << "/evolve approve 会明拒并指路 /package trust 人工审查线\n";
-    } else {
-        TermOut() << "(content-only,无进程无网络)\n";
+        model.components = components.str();
     }
     if (!result->downgrade_note.empty()) {
-        TermOut() << "  降档: " << Ellipsize(result->downgrade_note, 160) << "\n";
+        model.downgrade = Ellipsize(result->downgrade_note, 160);
     }
-    if (cluster_skipped > 0) {
-        TermOut() << "  注: 簇外另有 " << cluster_skipped
-                  << " 条同指纹观察找不到可读录制件,未进簇\n";
+    model.cluster_skipped = cluster_skipped;
+    model.next_step = "/evolve diff " + result->candidate_id + "(分档看形状)或 /evolve test " +
+                      result->candidate_id + "(评测五道门)";
+    for (const std::string& line :
+         FormatEvolveProposeLines(model, theme, EvolveFrameWidth())) {
+        TermOut() << line << "\n";
     }
     // 阶段 7:点了头的建议记一笔接受账(同一指纹只记头一笔;接受是真动作,
-    // 与建议开关无关——关着建议也能起草,账照实记)。
+    // 与建议开关无关——关着建议也能起草,账照实记)。失败警告在框后明说。
     if (!fingerprint.empty()) {
         lubancode::evolution::SuggestLedger suggest_ledger(BuildEvolutionRoot(ctx) / "suggest.jsonl");
         if (suggest_ledger.HasOpenSuggestion(fingerprint)) {
@@ -824,12 +920,11 @@ void RunEvolvePropose(const EvolveCommandContext& ctx, const std::string& target
             event.fingerprint = fingerprint;
             event.candidate_id = result->candidate_id;
             if (const auto append_error = suggest_ledger.Append(event); append_error.has_value()) {
-                TermOut() << "  警告: 接受账没记上(" << *append_error << ")\n";
+                PrintEvolveNotice(theme, {"警告: 接受账没记上(" + *append_error + ")"},
+                                  frame::FieldAccent::Error);
             }
         }
     }
-    TermOut() << "  下一步: /evolve diff " << result->candidate_id << "(分档看形状)或 /evolve test "
-              << result->candidate_id << "(评测五道门)\n";
     TermOut().flush();
 }
 
@@ -1121,6 +1216,187 @@ void RunEvolveRollback(const EvolveCommandContext& ctx, const std::string& targe
 }
 
 }  // namespace
+
+// ---------------- 纯渲染(TUI 排版批 5c,单测钉) ----------------
+
+std::vector<std::string> FormatEvolveStatusLines(const EvolveStatusModel& model,
+                                                 const lubancode::cli::Theme& theme, int width) {
+    std::vector<frame::Field> fields;
+    {
+        std::ostringstream out;
+        out << "录制件 " << model.recordings_scanned << "(跳过半截 " << model.recordings_skipped
+            << "),workflow run " << model.runs_scanned << ",memory " << model.memory_entries;
+        fields.push_back(frame::Field{"采集", out.str()});
+    }
+    {
+        std::ostringstream out;
+        out << "新增 " << model.appended << ",重采跳过 " << model.duplicates << ",被拒压下 "
+            << model.suppressed;
+        fields.push_back(frame::Field{"落账", out.str()});
+    }
+    {
+        std::ostringstream out;
+        out << "观察 " << model.ledger_size << " 条,同类簇 " << model.cluster_count << " 个";
+        for (const auto& [source, count] : model.by_source) {
+            out << "," << source << " " << count;
+        }
+        fields.push_back(frame::Field{"账面", out.str()});
+    }
+    fields.push_back(frame::Field{"账本", model.observations_file});
+    if (!model.error.empty()) {
+        fields.push_back(
+            frame::Field{"警告", "有观察没落住账(" + model.error + ")", frame::FieldAccent::Error});
+    }
+    return frame::RenderKeyValues("自进化观察账(阶段 1:只观察,不生成 Package)", fields,
+                                  theme, frame::Light(), width);
+}
+
+std::vector<std::string> FormatEvolveClusterLines(std::size_t ledger_size,
+                                                  const std::vector<EvolveClusterRow>& rows,
+                                                  const lubancode::cli::Theme& theme, int width) {
+    std::vector<frame::TableColumn> columns;
+    columns.push_back(frame::TableColumn{"fingerprint"});
+    columns.push_back(frame::TableColumn{"n", 0, /*align_right=*/true});
+    columns.push_back(frame::TableColumn{"source"});
+    columns.push_back(frame::TableColumn{"outcome"});
+    columns.push_back(frame::TableColumn{"summary"});
+    columns.push_back(frame::TableColumn{"ids"});
+    std::vector<frame::TableRow> table_rows;
+    table_rows.reserve(rows.size());
+    for (const EvolveClusterRow& row : rows) {
+        table_rows.push_back(frame::TableRow{
+            {row.fingerprint, row.count, row.source, row.outcome, row.summary, row.peers}, {}});
+    }
+    std::ostringstream title;
+    title << "观察账(按同类指纹聚类," << ledger_size << " 条 / " << rows.size() << " 簇)";
+    return frame::RenderTable(title.str(), columns, table_rows, theme, frame::Light(), width);
+}
+
+std::vector<std::string> FormatEvolveCandidateListLines(const std::vector<EvolveCandidateRow>& rows,
+                                                        const lubancode::cli::Theme& theme,
+                                                        int width) {
+    std::vector<frame::TableColumn> columns;
+    columns.push_back(frame::TableColumn{"id"});
+    columns.push_back(frame::TableColumn{"state"});
+    columns.push_back(frame::TableColumn{"package"});
+    columns.push_back(frame::TableColumn{"objective"});
+    std::vector<frame::TableRow> table_rows;
+    table_rows.reserve(rows.size());
+    for (const EvolveCandidateRow& row : rows) {
+        table_rows.push_back(
+            frame::TableRow{{row.candidate_id, row.state, row.package_id, row.objective}, {}});
+    }
+    std::ostringstream title;
+    title << "候选仓(" << rows.size() << " 只,均在候选区,未进 /package)";
+    return frame::RenderTable(title.str(), columns, table_rows, theme, frame::Light(), width);
+}
+
+std::vector<std::string> FormatEvolveObservationLines(const EvolveObservationModel& model,
+                                                      const lubancode::cli::Theme& theme,
+                                                      int width) {
+    std::vector<frame::Field> fields;
+    fields.push_back(frame::Field{"来源", model.source + " " + model.source_id});
+    fields.push_back(
+        frame::Field{"原始账", model.source_ref.empty() ? "(无)" : model.source_ref});
+    fields.push_back(frame::Field{"指纹", model.fingerprint});
+    fields.push_back(frame::Field{"摘要", model.summary});
+    if (!model.created_at.empty()) {
+        fields.push_back(frame::Field{"时间", model.created_at});
+    }
+    if (!model.details_json.empty()) {
+        fields.push_back(frame::Field{"账目", model.details_json});
+    }
+    std::vector<std::string> lines = frame::RenderKeyValues(
+        model.id + "  [" + model.source + " " + model.outcome + "]", fields, theme,
+        frame::Light(), width);
+    if (!model.evidence.empty()) {
+        std::vector<frame::TableColumn> columns;
+        columns.push_back(frame::TableColumn{"ref"});
+        columns.push_back(frame::TableColumn{"note"});
+        std::vector<frame::TableRow> rows;
+        rows.reserve(model.evidence.size());
+        for (const auto& [ref, note] : model.evidence) {
+            rows.push_back(frame::TableRow{{ref, note}, {}});
+        }
+        for (const std::string& line :
+             frame::RenderTable("证据(" + std::to_string(model.evidence.size()) + " 条)",
+                                columns, rows, theme, frame::Light(), width)) {
+            lines.push_back(line);
+        }
+    }
+    return lines;
+}
+
+std::vector<std::string> FormatEvolveCandidatePageLines(const EvolveCandidatePageModel& model,
+                                                        const lubancode::cli::Theme& theme,
+                                                        int width) {
+    std::vector<frame::Field> fields;
+    fields.push_back(frame::Field{"目录", model.dir_utf8});
+    fields.push_back(
+        frame::Field{"整包哈希", model.content_hash.empty() ? "(package/ 缺失)" : model.content_hash});
+    if (model.has_shape) {
+        fields.push_back(frame::Field{"形状", model.shape});
+    }
+    if (model.has_record) {
+        fields.push_back(frame::Field{"候选版本", model.candidate_version});
+        fields.push_back(frame::Field{"目标", model.objective});
+        fields.push_back(frame::Field{"来源", model.sources});
+        fields.push_back(frame::Field{"生成器", model.generator});
+        fields.push_back(frame::Field{"改动", model.changes});
+        for (const std::string& tool : model.tools_added) {
+            fields.push_back(frame::Field{"", "tool " + tool});
+        }
+        for (const std::string& perm : model.permissions_added) {
+            fields.push_back(frame::Field{"", "perm " + perm});
+        }
+        if (!model.tools_added.empty() || !model.permissions_added.empty()) {
+            fields.push_back(frame::Field{
+                "", "code-bearing-draft:零进程零挂载,不自动启用;补实现走 /package trust 人工审查线"});
+        }
+        fields.push_back(frame::Field{"起草于", model.created_at});
+    }
+    fields.push_back(frame::Field{
+        "批准账", model.has_approval ? model.approval : std::string("(缺——候选不完整)")});
+    fields.push_back(frame::Field{
+        "评测账", model.has_eval ? std::to_string(model.eval_rows) + " 行,只追加"
+                                 : "空(先 /evolve test " + model.candidate_id + ")"});
+    return frame::RenderKeyValues(
+        model.candidate_id + "  [" + model.state + "]  " + model.package_id, fields, theme,
+        frame::Light(), width);
+}
+
+std::vector<std::string> FormatEvolveProposeLines(const EvolveProposeModel& model,
+                                                  const lubancode::cli::Theme& theme, int width) {
+    std::vector<frame::Field> fields;
+    fields.push_back(frame::Field{"候选", model.candidate});
+    fields.push_back(frame::Field{"整包哈希", model.content_hash});
+    fields.push_back(frame::Field{"目录", model.dir_utf8});
+    fields.push_back(frame::Field{"形状", model.shape});
+    if (!model.rule.empty()) {
+        fields.push_back(frame::Field{"草稿规矩", model.rule});
+    }
+    fields.push_back(frame::Field{"组件", model.components});
+    for (const std::string& tool : model.tools_added) {
+        fields.push_back(frame::Field{"", "tool " + tool});
+    }
+    for (const std::string& perm : model.permissions_added) {
+        fields.push_back(frame::Field{"", "perm " + perm});
+    }
+    if (!model.gate.empty()) {
+        fields.push_back(frame::Field{"档位门", model.gate});
+    }
+    if (!model.downgrade.empty()) {
+        fields.push_back(frame::Field{"降档", model.downgrade});
+    }
+    if (model.cluster_skipped > 0) {
+        fields.push_back(frame::Field{
+            "注", "簇外另有 " + std::to_string(model.cluster_skipped) +
+                      " 条同指纹观察找不到可读录制件,未进簇"});
+    }
+    fields.push_back(frame::Field{"下一步", model.next_step});
+    return frame::RenderKeyValues("候选已落(只进候选仓,/package 看不见它)", fields, theme,
+                                  frame::Light(), width);
+}
 
 // ---------------- 纯解析(单测钉) ----------------
 

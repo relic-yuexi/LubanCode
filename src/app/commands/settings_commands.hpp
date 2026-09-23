@@ -163,8 +163,9 @@ void ApplyModelCatalog(const lubancode::config::ModelCatalog& catalog, const std
 
 // /model roles:打三档模型角色路由短表(模型分工第一期)。roles_table 是
 // 会话 ModelRouter 的路由表,空指针时打"路由未建(单发/测试路径)"——不装
-// 没事发生。
-void PrintModelRolesTable(const lubancode::agent::ModelRouteTable* roles_table);
+// 没事发生。TUI 排版批 4 起走 frame 表格(roles_header 剥尾冒号作标题)。
+void PrintModelRolesTable(const lubancode::agent::ModelRouteTable* roles_table,
+                          const lubancode::cli::Theme& theme);
 
 
 // /model 裸敲的清单选择:拿 QueryModels 的结果(终端侧取数已由调用方做完),
@@ -173,8 +174,17 @@ void PrintModelRolesTable(const lubancode::agent::ModelRouteTable* roles_table);
 // runtime::CommandService::SetModel,与带参直切同一条路。
 // catalog:列表优先显示目录条目的 display_name(其次接口给的
 // display_name,最后 id 兜底),选完切换用的仍是 API 模型名。
+// 批 4:管道路的编号清单走 RenderModelChoiceList;theme 空指针退 plain。
 std::optional<std::string> ChooseModelId(const lubancode::runtime::ModelQueryResult& query,
-                                         const lubancode::config::ModelCatalog& catalog);
+                                         const lubancode::config::ModelCatalog& catalog,
+                                         const lubancode::cli::Theme* theme = nullptr);
+
+// /model 裸敲清单的管道(编号)形态:编号列右对齐、model 列自适应、
+// current 标记走 table_pass 语义色。纯函数,形状册直接钉;ChooseModelId
+// 的非交互分支与它是同一份行折法。
+std::vector<std::string> RenderModelChoiceList(const lubancode::runtime::ModelQueryResult& query,
+                                               const lubancode::config::ModelCatalog& catalog,
+                                               const lubancode::cli::Theme& theme, int width);
 
 void PrintProviderList(const std::vector<lubancode::config::ProviderConfig>& providers,
                        const lubancode::config::Config& current_config,
