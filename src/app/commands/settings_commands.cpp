@@ -722,9 +722,22 @@ int ModelListFrameWidth() {
 }
 
 // 引导下文的尾冒号剥掉(批 2 裁量 3):标题化时 "……:" 的尾冒号是废话。
+// 全角冒号是三字节 UTF-8,不能当 char 字面量比(clang 报 character too
+// large),按字节串后缀比。
 std::string StripTrailingColon(std::string text) {
-    while (!text.empty() && (text.back() == ':' || text.back() == '：')) {
-        text.pop_back();
+    static const std::string kFullWidthColon = "\xef\xbc\x9a";  // 全角冒号
+    while (true) {
+        if (!text.empty() && text.back() == ':') {
+            text.pop_back();
+            continue;
+        }
+        if (text.size() >= kFullWidthColon.size() &&
+            text.compare(text.size() - kFullWidthColon.size(), kFullWidthColon.size(),
+                         kFullWidthColon) == 0) {
+            text.resize(text.size() - kFullWidthColon.size());
+            continue;
+        }
+        break;
     }
     return text;
 }
