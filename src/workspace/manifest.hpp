@@ -82,9 +82,9 @@ std::expected<void, std::string> WriteWorkspaceManifestAtomic(const std::filesys
 //     落盘的登记再并账,union 保留、first_seen 不被后写重置;
 //   - last_opened_at_ms / checkout.last_seen_at_ms 取盘上值与 now 的单调
 //     最大值,后写的旧钟不许把账改回去;
-//   - 争用有界等待(20×100ms):烧完仍撞回 workspace.locked(错误码
-//     contracts::kErrWorkspaceLocked),不无限等、不悄悄覆盖旧账;真 IO
-//     失败回 workspace.open_failed;
+//   - 争用有界等待(60×100ms,档的账见 manifest.cpp kLockWait*):烧完仍
+//     撞回 workspace.locked(错误码 contracts::kErrWorkspaceLocked),不无限
+//     等、不悄悄覆盖旧账;真 IO 失败回 workspace.open_failed;
 //   - 持有者暴毙/PID 复用:身份核判死,陈锁整目录隔离留证后接手;
 //   - 锁粒度 = 一间房:不同 workspace 并发开张互不阻塞;index.json 记账
 //     在锁外(可重建缓存,丢写容错合同不变)。

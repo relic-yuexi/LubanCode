@@ -37,11 +37,16 @@ constexpr int kTransientWriteAttempts = 10;
 constexpr std::chrono::milliseconds kTransientReadBackoff{10};
 constexpr std::chrono::milliseconds kTransientWriteBackoff{10};
 
-// SV-11:登记事务锁的有界等待档(20×100ms=2s)。对头活持有者放手要时间
+// SV-11:登记事务锁的有界等待档(60×100ms=6s)。对头活持有者放手要时间
 // ——锁内只做一份小 JSON 的读改写,常态毫秒级;开房是启动路径,烧完仍
-// 撞就如实回 workspace.locked,不无限等、不悄悄覆盖旧账(对齐 memory.lock
-// 的 20×100ms 纪律)。持有者暴毙不等钟:身份核判死即隔离接手。
-constexpr int kLockWaitAttempts = 20;
+// 撞就如实回 workspace.locked,不无限等、不悄悄覆盖旧账。持有者暴毙不等
+// 钟:身份核判死即隔离接手。档的账:等待窗要装下"同房排队深度×单手
+// 持锁时长"——单手持锁含读档/原子写/记账各自的瞬态重试档(windows 慢
+// 盘单手可达数百 ms),旧档 2s 装不下三手以上排队,windows-msvc 腿 ledger
+// 册并发开房段(8 手同房)三案间歇红(2026-09 run 35611620658 att1 /
+// 35668147611 att1 / 35667534366 att6):队尾烧窗被顶翻。6s 对 8 手×
+// 500ms 仍有余量;正常路径首次即得,零等待。
+constexpr int kLockWaitAttempts = 60;
 constexpr int kLockWaitIntervalMs = 100;
 
 }  // namespace

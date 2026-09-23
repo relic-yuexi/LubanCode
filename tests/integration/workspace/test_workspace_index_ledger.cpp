@@ -28,6 +28,16 @@
 
 #include <nlohmann/json.hpp>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 #include "platform/paths.hpp"
 #include "runtime/trajectory_session.hpp"
 #include "trajectory/blob_store.hpp"
@@ -36,6 +46,7 @@
 #include "workspace/identity.hpp"
 #include "workspace/index.hpp"
 #include "workspace/manifest.hpp"
+#include "workspace/manifest_lock.hpp"
 #include "workspace/storage_contracts.hpp"
 
 using namespace lubancode;
@@ -415,9 +426,10 @@ TEST_CASE("账本制: 并发开房——同路径一间房,异路径各开各,�
         opener.join();
     }
     if (open_failures.load() > 0) {
-        FAIL(("异路径并发开房失败 " + std::to_string(open_failures.load()) + "/8,首个错误: " +
-              first_failure_note)
-                 .c_str());
+        // FAIL 逗号流式出账:传 char* 指针或整段 string 拼接都会编译炸/
+        // 被当指针 stringify,首错串整个丢失(三案间歇红全只打出一枚裸
+        // 指针,诊断没账)。
+        FAIL("异路径并发开房失败 ", open_failures.load(), "/8,首个错误: ", first_failure_note);
     }
     CHECK(RoomCount(workspaces) == 8);
     // 账本解得开、收得齐(读-改-写可能丢笔,丢了的下一段验自愈)。
@@ -458,9 +470,7 @@ TEST_CASE("账本制: 并发开房——同路径一间房,异路径各开各,�
         opener.join();
     }
     if (open_failures.load() > 0) {
-        FAIL(("同路径并发开房失败 " + std::to_string(open_failures.load()) + "/8,首个错误: " +
-              first_failure_note)
-                 .c_str());
+        FAIL("同路径并发开房失败 ", open_failures.load(), "/8,首个错误: ", first_failure_note);
     }
     CHECK(RoomCount(workspaces) == 9);
 }
@@ -482,6 +492,102 @@ TEST_CASE("账本制: Windows junction 进出——查账同门同房") {
     const fs::path via_junction = OpenRoom(workspaces, junction);
     CHECK(direct == via_junction);  // 解链后同 identity_root,查账同门
     CHECK(RoomCount(workspaces) == 1);
+}
+
+// ---------------------------------------------------------------------------
+// Windows 专有的锁短拒失败注入(单子《workspace 索引册 windows 间歇红》):
+// 三案(run 35611620658 att1 / 35668147611 att1 / 35667534366 att6,windows-msvc
+// 腿)全挂本册并发开房段,病根在锁侧两处——owner 读档短拒重试档太窄
+//(旧 3×25ms,实测防病毒/过滤驱动拦截窗几十毫秒)、打不开一律折
+// BrokenLock 而 Acquire 对它即刻死拒不磨。一把真句柄(无 FILE_SHARE_READ)
+// 把 owner 攥住 150ms:旧档 75ms 内必耗尽(本用例即红);新档 10×25ms
+// 穿得过,穿出后核出的仍是"持有者活着"——短拒是瞬态,不是坏锁。
+//
+// 夹具用手搓锁目录(产品同构:目录 + owner 账,pid 记本进程),不起
+// ManifestLock 实例——真持有锁的实例会用 _wfsopen 攥 owner 只读句柄
+//(共享含读),注入句柄"不给读共享"与它互斥,攥不上。
+TEST_CASE("账本制: 锁短拒注入——owner 被无读共享句柄攥住,穿透重试不折坏锁") {
+    const fs::path root = TempRoot("lock-denied");
+    const fs::path room = root / "room";
+    const fs::path lock_dir = workspace::ManifestLockDir(room);
+    fs::create_directories(lock_dir);
+    const fs::path owner_file = lock_dir / "owner";
+    Write(owner_file, "{\"schema_version\":1,\"pid\":" +
+                          std::to_string(GetCurrentProcessId()) + "}\n");
+    REQUIRE(fs::exists(owner_file));
+
+    // 攥句柄:允许别人写/删、独独不许读—— ifstream(共享读写)打不开,
+    // 这正是过滤驱动/防病毒短拒的机械形状。先攥上(原子旗为号)再开抢。
+    // 断言全部押后到 join 之后:子线程未 join 时任何 fatal 断言都会把
+    // std::thread 析构成 terminate(本册 run 34316108135 的老死法)。
+    std::atomic<bool> gripped{false};
+    std::atomic<bool> grip_failed{false};
+    std::thread snatcher([&] {
+        const HANDLE handle =
+            CreateFileW(owner_file.wstring().c_str(), GENERIC_READ,
+                        FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            grip_failed.store(true);
+            return;
+        }
+        gripped.store(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        CloseHandle(handle);
+    });
+    const auto grip_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!gripped.load() && !grip_failed.load() &&
+           std::chrono::steady_clock::now() < grip_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    // 攥住期间取锁:短拒烧穿后核身份——owner 账的 pid 是本进程,如实报
+    // 活,绝不 BrokenLock 死拒(旧码这里 75ms 耗尽即折坏锁,当场翻红)。
+    workspace::ManifestLock contender;
+    const auto refused = workspace::ManifestLock::Acquire(room, &contender, 3, 50);
+    snatcher.join();
+    CHECK(gripped.load());
+    CHECK(refused.status == workspace::ManifestLock::Status::HeldByLiveHolder);
+    CHECK(refused.detail.find("持有者活着") != std::string::npos);
+    CHECK_FALSE(contender.holds());
+
+    // 放手拆壳,后来者即刻占上:短拒没留残账。
+    std::error_code cleanup_ec;
+    fs::remove_all(lock_dir, cleanup_ec);
+    const auto after = workspace::ManifestLock::Acquire(room, &contender, 20, 100);
+    REQUIRE(after.status == workspace::ManifestLock::Status::Acquired);
+    contender.Release();
+    CHECK_FALSE(fs::exists(workspace::ManifestLockDir(room)));
+}
+
+// 释放竞态的近似注入:持有者释放是先删 owner 后拆目录,撞上取锁者时
+// owner 已不在、锁目录还年轻——这不是坏锁,是在建窗口,拒绝重试;绝
+// 不折 BrokenLock。锁住语义:将来谁把"无 owner 年轻目录"改判坏锁,这里
+// 当场翻红。同样手搓锁目录(真锁实例攥着 owner 句柄,测试删不动)。
+TEST_CASE("账本制: owner 读取途中被删——按在建窗口拒绝,不折坏锁") {
+    const fs::path root = TempRoot("lock-vanish");
+    const fs::path room = root / "room";
+    const fs::path lock_dir = workspace::ManifestLockDir(room);
+    fs::create_directories(lock_dir);
+    const fs::path owner_file = lock_dir / "owner";
+    Write(owner_file, "{\"schema_version\":1,\"pid\":" +
+                          std::to_string(GetCurrentProcessId()) + "}\n");
+
+    // 模拟释放竞态的前半:owner 没了、目录还在(年轻)。
+    std::error_code remove_ec;
+    fs::remove(owner_file, remove_ec);
+    REQUIRE(!remove_ec);
+
+    workspace::ManifestLock contender;
+    const auto refused = workspace::ManifestLock::TryAcquire(room, &contender);
+    CHECK(refused.status == workspace::ManifestLock::Status::HeldByLiveHolder);
+    CHECK(refused.detail.find("正在建立") != std::string::npos);
+
+    std::string detail;
+    CHECK(workspace::ManifestLock::HolderAlive(room, &detail));
+    CHECK(detail.find("正在建立") != std::string::npos);
+
+    std::error_code cleanup_ec;
+    fs::remove_all(lock_dir, cleanup_ec);
 }
 #endif
 
