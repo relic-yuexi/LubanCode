@@ -1,0 +1,69 @@
+# Compact 材料孤儿工具消息——读侧投影防御与写侧落账保真
+
+- 状态：已收官(PR #208,2026-09-23 合入 main,+406/−15,CI 绿,远端分支已删)。**尸检修正**(与立单初判不同,PR 已写明):写侧没剥 tool_use——assistant 落顶层 tool_calls(provider 原生号),tool 结果落内部 action 号,双号+桥是 §4.15/§4.18 既定设计;主对话与 resume/换账两路都做了桥换算,唯独 compact 材料回放漏第三路,role:"tool" 按内部号出网被拒(2013)。故写侧零改动,读侧 MaterialToolPairingIndex 补齐配对索引+换号投影即闭环;存量旧档(含案发档)经桥换算直接配对,零迁移。配对号选 provider 原生号(assistant 保真原样出网,只动 tool 结果一个顶层键)。
+- 日期：2026-09-22
+- 源码基线：1dd83bc2。
+- 级别：P1(/compact 全链不可用,凡带工具调用的会话压不动)。
+- 范围:v3 compact 材料组装读侧防御 + 账本写侧 assistant tool_use 保真。
+
+## 一、现场证据
+
+用户 /compact 报错链:
+
+```
+compact.material.payload_projected: 可压范围含 17 枚签名/加密思考块,摘要材料按普通文本投影,签名与原生 item 不出网
+压缩模型请求失败: {"type":"error","error":{"type":"invalid_request_error","message":"invalid params, tool result's tool id(action-000001) not found (2013)"},"request_id":"0701c6e7e776beb7fb8df0bfe4be1963"}
+压缩失败: provider_error
+```
+
+案发账本(实证):`~/.lubancode/workspaces/D--lubancode--claude-worktrees-agent-aea-4d95553f/sessions/20260922-143735-AT986V/20260922-143735-AT986V.jsonl`
+
+- **全档 0 个 tool_use 块**:所有 assistant 消息(msg-000009 等)content 只有
+  thinking+text——模型回复里的 tool_use 块落账时被剥掉,不在消息链。
+- **75 条 role:"tool" 结果消息全部孤悬**:每条带 `tool_call_id:"action-N"`
+  (IdAuthority 内部号,writer.cpp:475 前缀表 7 号槽),配对的 tool_use 不存在。
+- **双号并存只在事件流**:evt-000043(tool.execution.pending)里
+  `tool_call_id:"action-000001"` 与 `provider_tool_call_id:"call_01a0c98f211775c78db60eb4"`
+  同存——provider 原生号只进事件,不进消息。
+- 主对话靠内存上下文组装无事;/compact 走 `ReadV3Ledger` 账本回放组材料
+  (v3_compact_runtime.cpp:1144-1157),`BuildCompactMaterialView` 只投影
+  thinking/opaque 块,role:"tool" 消息原样出网→请求里 75 枚孤儿 tool 消息,
+  DeepSeek 端 2013(tool id not found)直接拒。
+
+上一轮"compact签名修复"(v0.26.280)治的是签名/加密思考块投影,孤儿 tool
+消息这条没治。
+
+## 二、病根两层
+
+1. **写侧不闭环**(治本):assistant 回复落账剥掉 tool_use 块;tool 结果用
+   内部号 action-N 落 role:"tool"。账本消息链自始不带工具调用意图,任何
+   走账本回放出网的路径(compact 材料/resume 回放)必出孤儿。
+2. **读侧无防御**(救命,救不了旧档的写侧修复都是半吊子):材料组装对
+   role:"tool" 消息不做配对校验,孤儿原样出网。
+
+## 三、方案方向
+
+- **读侧投影(必做,先做)**:`BuildCompactMaterialView`(v3_compact_runtime.cpp:287)
+  增加孤儿防御——role:"tool" 消息(或 user content 里的 tool_result 块)若
+  配对 tool_use 不在材料消息集内,按普通文本投影(照 thinking 块 A 投影的
+  先例:`[工具结果 <名或号>]` + 正文),不再以 role:"tool"/tool_call_id 形态
+  出网。配对完整的原样保真。范围计划的整轮保护(§4.8"工具配对")同步把
+  role:"tool" 与 assistant 的配对纳入考量。
+- **写侧保真(治本)**:assistant 回复落账时 tool_use 块不剥,id 与 tool
+  结果消息严格同号(选 provider 原生号还是内部号以工头对 wire 兼容与
+  跨请求稳定性的论证为准,两处必须一号)。存量旧档零迁移——读侧投影兜底。
+- 修复合同沿用上一轮的两道检查框架:A 材料(本单读侧)/B 回放(主模型
+  侧的孤儿风险由写侧保真消除)。
+
+## 四、验收
+
+- [ ] fixture 复刻案发形态(0 tool_use + N 孤儿 role:"tool"):compact 材料
+      投影后零孤儿(全部按文本投影),摘要请求可成功(可 stub provider)。
+- [ ] 配对完整的新档:tool_use/tool_result 原样保真出网,一字不投影。
+- [ ] 写侧:新会话 assistant 消息含 tool_use 块落账,与 tool 结果同号;
+      事件流 provider_tool_call_id 对账不破。
+- [ ] 主对话回归零变(内存上下文组装不受影响)。
+- [ ] resume/回放路径扫一遍:同形态旧档不再出孤儿(与 compact 同一防御或
+      各自防御,以实际代码路径为准)。
+- [ ] **禁止本地 build/ctest,验证一律交 CI**(rollup.conclusion 判绿,
+      windows-msvc 腿绿才合)。

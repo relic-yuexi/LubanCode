@@ -1,0 +1,47 @@
+# 会话标题精炼——超时放宽与失败原因报明
+
+- 状态：已收官(PR #206,commit 65c133ba,CI macos 全量腿绿;2026-09-22 合入 main,远端分支已删)。
+- 日期：2026-09-22
+- 源码基线：1dd83bc2。
+- 级别：P3。
+- 范围:标题精炼采样的超时常数放宽;失败 Outcome 补错误串;报明行带死因。
+
+## 一、现场证据
+
+用户真机回合 2m41s 打断后,空闲拍收货才见"[会话标题] 精炼失败,标题保留
+本地档。"——报账排队本身是设计(收货点在空闲边界,主回合占场期间失败账
+攒着),非病。病是两处:
+
+- **5 秒就毙**:`src/app/session_title.hpp:27`
+  `kTitleRefineTimeoutSecs = 5`。中转网络下建连+握手+排队+思考压 low
+  +回包,5 秒打不住;主回合能跑 2m41s 是它预算大得多。撞线归
+  local_deadline,ok=false,本地标题保住——起飞了,5 秒内没活着回来。
+- **死因被扔**:`RefineSessionTitle` 回
+  `std::expected<std::string, std::string>`,错误串好好的在里头;可
+  `src/app/session_title_refiner.cpp:72-80` 闭包收货只看 `has_value()`,
+  错误串没进 `Outcome`(结构里只有 ok/title/model/generation/accounting)。
+  `src/app/interactive_session.cpp:425-431` Drain 那头只看 `!outcome->ok`
+  打一句笼统的 `cmd.title.refine.failed`——超时/网络错/空回三种病一个
+  死法,用户与台账都无从分辨。
+
+## 二、方案方向
+
+- **超时放宽 5→30 秒**:全程异步,飞多久不卡前台;收货点在空闲边界
+  (interactive_session.cpp:1362/1621),主回合在跑时本就不报,放宽零感知。
+  唯一代价:退出兜底窗(kShutdownGrace 7 秒)外悬账被弃——本地标题已保住,
+  usage 丢一笔可接受。常数写 30,注释写明直连/中转取舍,工头可裁量。
+- **Outcome 补 error 与耗时**:`std::unexpected` 的错误串原样进
+  `Outcome.error`;耗时用 `accounting.duration_ms`(已有,不新造)。
+- **报明行带参数**:`cmd.title.refine.failed` 文案改带 {0} 死因(可含
+  耗时),中英两册同改;迟到/取消是正常竞态,照旧安静不打扰。
+- **成功路零变更**:起飞/采纳/换名/账分账一字不动。
+
+## 三、验收
+
+- [ ] 超时常数放宽并注释理由; Outcome 带 error 与耗时字段。
+- [ ] 失败行分病报明(超时/网络错/空回各报各的),迟到/取消仍安静。
+- [ ] 成功路行为零变更(本地标题/精修采纳/cheap 分账/peer 改名照旧)。
+- [ ] 单测钉住:stub backend 注入超时与网络错,Outcome.error 各归各位;
+      三道起飞门(no_ledger/no_model/no_provider)文案不回归。
+- [ ] **禁止本地 build/ctest,验证一律交 CI**(rollup.conclusion 判绿,
+      windows-msvc 腿绿才合)。

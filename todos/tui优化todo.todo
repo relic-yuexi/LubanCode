@@ -1,0 +1,264 @@
+# TUI 界面美化——批量升级客户端面板与命令输出
+
+- 状态：待实现（落一批改一笔：待实现 → 某批进行中 → 已收官（删档或保留由主人定夺））
+- 日期：2026-09-22
+- 级别：P1（体验/一致性/可读性，非核心正确性）
+- 范围：`src/cli/` 全套渲染基件 + `src/app/commands/` 下 23 个 slash 命令实现 + `src/app/status_panel_assembly.cpp` 等会话内常驻面板装配
+- 依赖：`src/cli/terminal_frame.hpp`、`src/cli/theme.hpp`、`src/cli/format_utils.hpp`、`src/cli/divider.hpp`、`src/cli/spinner.hpp`（既有,可直接升级,无需新增依赖）
+- 关联：`欠账与观察清单.todo`、`TUI主子代理视图彻底隔离_单写者与按代理状态投影.todo`、`CtrlO展开收起_旧界面堆叠与思考提示失真.todo`、`Kanban看板功能_任务列视图与状态流.todo`
+- 不在本单：不动现成命令的对外语义与参数;不改动 `prompts/` 下文档;不引入第三方 UI 库;不动 `src/runtime/` 业务逻辑
+
+## 一、先下断语
+
+只做"排版层"的统一升级——所有 slash 命令的文本输出、常驻面板的边框/底栏/键提示,都走同一套 frame/列对齐/主题色;不改任何命令的语义、参数、副作用、退出码。
+
+- 排版是 UX 的横切关注点,不是某条命令的事——先升级基件 API,再按界面族逐类套用,顺序固定。
+- 不重写各命令的 handler,只调它们内部的 render 段;handler 返回的 `CommandFlow` 不变。
+- 颜色与边框视主题而定,不写死 ANSI:沿用现有 `cli::Theme` 体系,新增字段需提供缺省值,旧主题文件向后兼容。
+
+## 二、现状证据（当前真相）
+
+扫描覆盖了 `D:\lubancode\src` 下所有 TUI 渲染入口,共分三层。
+
+### 1. slash 命令渲染层（`src/app/commands/`,23 个 cpp）
+
+| 命令族 | 文件 | 关键 action 行号（render 段） | 现状 |
+| --- | --- | --- | --- |
+| `/memory`（用户已点名） | `src/app/commands/memory_commands.cpp` | list 377、status 106、jobs 125、why 313、remember 419、forget 477、rebuild 499、stale 508、verify/refresh 527、show 543、open 565、migrate 575、on/off 190、use 203、learn 223、review 249、accept/reject 267 | 平铺 `- id [Kind] title - summary`,无 frame/无列对齐/无 layer 标色 |
+| `/hook` | `src/app/commands/hook_commands.cpp` | list 150、runs 154、trust/untrust/disable/enable 171-194 | 拼字符串,无对齐 |
+| `/hook-check` | `src/app/commands/hook_check_commands.cpp` | check 156-178、scaffold 218-221 | 散打 `TermOut` |
+| `/doctor` | `src/app/commands/doctor_commands.cpp` | probe 1405、usage 1421 | 散打 |
+| `/workspace` | `src/app/commands/workspace_commands.cpp` | inspect 274、doctor 368、test 497、trust/untrust 592、reload 618、enable/disable 622 | 散打 |
+| `/agent` | `src/app/commands/agent_commands.cpp` | render 段 494、520、546、552、562、567 | 平铺 |
+| `/background` | `src/app/commands/background_commands.cpp` | list 305-345、show 357-375、logs 388-432、stop 442-465、stop-all 507-540 | 有 `theme.tool_line` 颜色但无 frame |
+| `/loop` | `src/app/commands/loop_commands.cpp` | List/Status/Pause/Resume/Stop/Run/Create 122/143/175/192/211/227/375 | enum dispatch,平铺 |
+| `/workflow` | `src/app/commands/workflow_commands.cpp` | MermaidGraph 1266、AsciiGraph 1270、Run 1798、Invalid 1177 | 图渲染无标题 frame |
+| `/goal` | `src/app/commands/goal_commands.cpp` | View/Status/Create/Edit/Pause/Resume/Clear 426/435/459/474/498/513、578/592/628/673/700/828 | enum dispatch,平铺 |
+| `/insights` | `src/app/commands/insights_commands.cpp` | aggregate 报告段 266-358、命令入口 443-644、HTML 出口 618 | 已用 `context.theme.error/stats`,但拼装位各算各的 |
+| `/model` | `src/app/commands/model_commands.cpp` | switch/list/static/live/remember 163-369 | 散打 |
+| `/package` | `src/app/commands/package_commands.cpp` | case List/Show/Doctor/Trust/Untrust/Enable/Disable/Reload 847-871 | case 分发,平铺 |
+| `/peer` | `src/app/commands/peer_commands.cpp` | peers 24-141 | 有 `theme.tool_line` 但无 frame |
+| `/prompt` | `src/app/commands/prompt_commands.cpp` | soul/prompt 69-306 | 散打 |
+| `/prompt-audit` | `src/app/commands/prompt_audit_commands.cpp` | 报告 170-618、命令入口 451-631 | 已用 theme,拼装分散 |
+| `/session` | `src/app/commands/session_commands.cpp` | /context 输出 159-440、compact 干跑 631-707、工具预览 707+ | 大量 `TermOut`,按"── 组名 ──"分组但无 frame |
+| `/settings` | `src/app/commands/settings_commands.cpp` | check 221 | 短输出 |
+| `/telemetry` | `src/app/commands/telemetry_commands.cpp` | 67-318 | 用 `ctx.theme->stats/error` 但散打 |
+| `/trace` | `src/app/commands/trace_commands.cpp` | 44-172 | 散打 |
+| `/usage` | `src/app/commands/usage_commands.cpp` | 行 58-514 | 大量 lines.push_back 后逐行 TermOut |
+| `/evolve` | `src/app/commands/evolve_commands.cpp` | 行 140-540 | 长篇报告,无 frame |
+| `/channel` | `src/app/commands/channel_commands.cpp` | show 拼装 181-340、命令入口 487/529/539 | 拼字符串,有 `DmPolicyName/GroupPolicyName` 但无对齐 |
+
+### 2. 常驻面板层（`src/cli/` + `src/app/`）
+
+- 输入与底栏：`src/cli/console_input.cpp`、`console_input_composer.cpp`、`console_input_turn_listener.cpp`、`console_input_stream_footer.cpp`、`bottom_chrome.cpp`
+- Agent 面板：`src/cli/agent_panel.cpp`、`agent_panel_host.cpp`、`agent_view_state.hpp`
+- Session 选择：`src/cli/session_picker.cpp`、`session_picker_panel.cpp`
+- Provider 面板/向导/切换：`src/cli/provider_panel.cpp`、`provider_panel_core.cpp`、`provider_wizard.cpp`、`provider_switch.cpp`
+- 上下文窗口：`src/cli/context_window_panel.cpp`、`context_window_panel_core.cpp`
+- 设置向导：`src/cli/wizard_panel.cpp`、`setup_wizard.cpp`
+- 询问与菜单：`src/cli/ask_user_prompt.cpp`、`choice_menu.cpp`、`mention_menu.cpp`
+- 工具确认：`src/cli/tool_confirm_ui.cpp`、`tool_display.hpp`
+- 历史搜索：`src/cli/history_search.cpp`
+- 待办渲染：`src/cli/todo_render.cpp`
+- 转录与轮渲染：`src/cli/transcript.cpp`、`transcript_controller.cpp`、`turn_renderer.cpp`、`live_transcript.hpp`、`queue_model.cpp`
+- 状态装配与事件泵：`src/app/status_panel_assembly.cpp`、`ui_event_pump.cpp`、`session_ui_dispatcher.cpp`
+
+现状:每个面板独立起样式,主题字段各取所需,frame 风格不统一(有的 box,有的纯 `──` 横线,有的无边框)。
+
+### 3. CLI 子命令独立 TUI（`src/cli/`）
+
+- `src/cli/kanban_command.cpp`（kanban 看板 HTML,见 `src/kanban/kanban_html.cpp`）
+- `src/cli/record_command.cpp`
+- `src/cli/trajectory_command.cpp`
+- `src/cli/update_command.cpp`
+- `src/cli/gateway_command.cpp`
+- `src/cli/channel_pairing_command.cpp`、`channel_setup_command.cpp`、`channel_status_command.cpp`
+
+现状:非交互形态,统一走 `TermOut`,部分已有 frame,大部分裸输出。
+
+### 4. 渲染基件（`src/cli/`）
+
+- `terminal_frame.cpp/hpp`：标题/边框/BoxStyle
+- `theme.cpp/hpp`：配色字段（error/stats/tool_line/...）
+- `format_utils.cpp/hpp`：token/字节/时间格式化（已被多处复用,基线正确）
+- `divider.cpp/hpp`：分割线
+- `spinner.cpp/hpp`+`spinner_backend.cpp`
+- `markdown.cpp/hpp`、`diff.cpp`+`diff_syntax.cpp`、`latex_math.cpp`
+- `terminal_caps.cpp/hpp`、`terminal_port.cpp/hpp`、`line_editor.cpp`、`image_input.cpp`、`keymap.cpp`
+- `i18n.cpp/hpp`、`grapheme.cpp`
+
+现状:基件齐全但 API 不成体系——没有统一的"列表/表格/键值对"渲染助手,各命令各自拼字符串。
+
+## 三、外部依据与版本裁决
+
+不引外部协议。本单是纯客户端排版升级,所改输出格式对用户为本地 UI 影响,不进入对外 API/契约。
+
+主题兼容:`cli::Theme` 字段增加需保证旧主题文件可解析——新增字段一律带缺省值;现有字段不动。
+
+## 四、不可破的合同
+
+1. 所有 slash 命令的子命令名、参数顺序、退出语义、`CommandFlow` 返回值不变。
+2. `/memory list` 等命令对机器消费（脚本/管道）的输出格式不变——若涉及"人看"vs"机器看"分流,沿用既有 `--json`/`--format` 标识,新增的 frame 只走"人看"分支。
+3. 颜色与边框随主题切换,终端能力检测（T3）禁用时不降级到乱码,而是隐藏装饰（沿用 `terminal_caps.hpp` 既有判定）。
+4. `TermOut/TermErr` 输出端口不切换;不直接 `std::cout`（已有 `hook_check_commands.cpp:151` 处违规,本单收口）。
+5. i18n 文案键名不新增；用现有 `tr()/trf()` 取文案,不允许在 cpp 里硬编码新字符串。
+6. 性能:在已有 `--no-color`/T3 路径下的输出长度变化不超过 20%（不让终端刷新变慢）。
+
+## 五、设计细节
+
+### 5.1 基件 API 升级
+
+在 `src/cli/terminal_frame.hpp/cpp` 暴露三套轻量渲染助手,签名参考（实现细节待落批时定稿）:
+
+- 列表助手：输入若干 `Row{label, value, hint?}`,自动按主题宽度对齐、按 layer/kind 标色、上下加 frame 标题与分割线
+- 表格助手：输入列定义 + 二维内容,自动计算列宽、单元格填色（pass/fail/skip）、首列加粗
+- 键值对助手：输入若干 `Field{key, value, accent?}`,两列对齐,accent 走主题色
+
+`BoxStyle` 升级:支持 ASCII/Unicode-light/Unicode-double 三档,默认 light,主题可覆盖;现有调用点用 `frame::Ascii()` 工厂选择降级形态。
+
+### 5.2 主题字段补全
+
+`cli::Theme` 在不破坏旧字段的前提下,新增:`frame_title`、`frame_border`、`row_label`、`row_value`、`row_muted`、`table_header`、`table_pass`、`table_skip`、`list_bullet_user`、`list_bullet_project`、`key_hint`；全部带缺省值。
+
+### 5.3 调用约定
+
+- render 段只能调 `cli::frame::*` 与 `cli::format::*`,不再直接拼 `\n` 多行字符串到 `TermOut`
+- 长报告类（insights/usage/prompt-audit/evolve）保留先收集 `lines: vector<string>` 再 flush 的模式,只在每条 `lines.push_back` 之前改用助手
+- 错误与警告仍走 `theme.error`/`theme.stats`,不另立色
+
+## 分期落地（迁移批次）
+
+> 顺序:批 0 先行,其余按"先 slash 命令(高频)→ 常驻面板(影响每次会话)→ CLI 子命令(低频)→ 收口"走。每批勾掉即附落点。批间不越次序——基件不到位时上层改完会回到拼字符串。
+
+### P0：批 0 — 渲染基件 API 升级（已收官,PR #207,2026-09-23 合入 main,+1257 行零删改）
+
+- [x] `src/cli/terminal_frame.hpp/cpp` 新增列表/表格/键值对助手三件,导出 `cli::frame::*`（RenderList/RenderTable/RenderKeyValues）
+- [x] `src/cli/terminal_frame.cpp` BoxStyle 增 ASCII/Unicode-light/Unicode-double 三档（BoxStyle 系白手新建——单子"现状证据"说已有,实际没有;`Ascii()/Light()/Double()` 工厂齐）
+- [x] `src/cli/theme.hpp/cpp` 新增 11 个 frame/list/table 字段,带缺省值（dark/light 各配,plain 全空;主题系内置三套无盘上文件,兼容合同由缺省值承载）
+- [x] `src/cli/divider.hpp/cpp` 暴露 `divider::line(style, width)` 统一接口（全仓唯一小写函数名,单子点名保留）
+- [x] 在 `src/cli/format_utils.cpp` 已有 token/字节/时间工具旁,补 `format::AlignLeft/AlignRight`（按仓库 PascalCase 规矩;显示列口径,截断不劈宽字）
+- [x] 写一段 `docs/development/tui_style.md` 记录 frame/列对齐/键提示约定（已登记 catalog.txt + development/README.md）
+
+验收：demo 以测试承载（tests/unit/cli/test_frame_helpers.cpp 形状/配色/对齐/降级全钉,真机截屏留后续批次）;macos-clang 27m59s + push 腿 + docs 腿全绿。width 口径定为整行显示宽（含边框 4 列开销）,0=自适应,文档写死。
+
+### P1：批 1 — `/memory` 全套（已收官,PR #210,2026-09-23 合入 main,+697/−152）
+
+- [x] `/memory list` 走列表助手,id 对齐列,layer 标色两处(bullet 两档+行尾"（全局记忆）"key_hint 色),空态带 frame
+- [x] `/memory status` 走键值对(既有文案按第一个冒号拆两列,中英通吃,零新增 i18n 键)
+- [x] `/memory jobs`、`/memory why` 走表格(state 上语义色,title/error/log 另起附注框防截断;why 注入行 Pass 色/落选行 Skip 色)
+- [x] `/memory show` 头部键值对框+markdown 正文框外原样(塞框会被列帽截断劈行)——裁量已进约定文档
+- [x] `remember/forget/rebuild/stale/verify/refresh/open/migrate` 提示全进 frame(失败 error 色/告警 stats 色)
+- [x] `on/off/use/learn/review/accept/reject` 走键值对,review 清单与 list 同构
+- [x] 整条 /memory 框宽同一把尺(GetScreenInfo,探不到 0=自适应);`--json` 分支源码核实不存在,天然满足;--no-color/T3 降级零转义无框字形,测试钉死
+
+验收：输出形状册 tests/unit/app/test_memory_commands_frame.cpp 钉死;CI 全绿(macos-clang 31m5s);真机三条(会话内连敲)留主人验。旧 i18n 四键信息并进新排版、键保留不删。
+
+### P2：批 2 — 高频资源类（已收官,PR #211,2026-09-23 合入 main,+1487/−217）
+
+**勘误**：单子此段写的"/workspace"（行号 274/368/497/592/618/622）实为 `workspace_commands.cpp` 里的 **/plugin 一族**——全仓没有 /workspace 命令,行号精确对应 plugin 分支,批 2 按实干活。
+
+- [x] `/hooks list`（主表+明细表+动作提示框）/`runs`（outcome 三档色,stderr 挂 #id 附注）+trust/untrust/disable/enable 键值对框
+- [x] `/hook-check` 静态检查/fixtures 两表（pass/FAIL/SKIP 三态色）;**--json 分支收口 TermOut（std::cout 旧账）,与引擎 ToJson().dump(2) 逐字节对账**
+- [x] `/doctor probe/usage` 键值对+表格混排（轮号进度行照旧流式,轮结果收汇总表;`CacheProbeVerdictAccent` 纯函数导出钉单测;探针本体要真网络,留真机验）
+- [x] `/plugin` 全族走表格/键值对（inspect 头部框+工具清单列表框、doctor v2 检查行拆列上色、test 回执进框日志正文框外原样;55 件工具长清单全在框内 label 列对齐一致）
+
+验收：frame 标题/主题切换色/≥50 行对齐全由四册测试钉死（test_hooks_commands_frame 等）;真机连敲留主人验。`src/workspace/`（manifest_lock）他单领地一字未碰。
+
+### P3：批 3 — 任务调度类（`/agent`、`/background`、`/loop`、`/workflow`）
+
+- [ ] `/agent doctor/inspect` 走键值对 + 表格;`/agent reload` 提示收 frame
+- [ ] `/background list` 走表格(status/PID/elapsed/command/log),`/background show/logs/stop/stop-all` 走键值对
+- [ ] `/loop list/status` 走表格,`/loop create/pause/resume/stop/run` 反馈收 frame
+- [ ] `/workflow` 列表/历史走表格;`RenderMermaidGraph`/`RenderAsciiGraph` 走 frame 标题
+
+验收：4 个命令族任意切换主题,边框/标题色一致;graph 渲染在 80 列与 200 列终端都不破框。
+
+### P4：批 4 — 资源/配置类（`/goal`、`/insights`、`/model`、`/package`）
+
+- [ ] `/goal list/create/view/status/edit/pause/resume/clear` 走表格 + 键值对
+- [ ] `/insights` aggregate 报告走 frame 标题 + 表格分段;HTML 出口不变
+- [ ] `/model list` 走表格(current 列用 `tool_accent` 标色),`/model switch` 反馈收 frame
+- [ ] `/package list/show/doctor/trust/untrust/enable/disable/reload` 走表格
+
+验收：`/insights` 长报告不超出 80 列终端时仍可读;`/package list` 列宽自适应终端宽度。
+
+### P5：批 5 — 渠道/会话/审计/状态类（`/channel`、`/session`、`/peer`、`/prompt`、`/prompt-audit`、`/settings`、`/telemetry`、`/trace`、`/usage`、`/evolve`）
+
+- [ ] `/channel show/doctor/start/stop/pairing` 走表格 + 键值对
+- [ ] `/session`(/context) 走 frame 标题 + 键值对分组(── 分组横线改用 `divider::line`)
+- [ ] `/peer` 走卡片或表格二选一(待落批时定)
+- [ ] `/prompt`、`/prompt-audit` 报告走 frame
+- [ ] `/settings check` 走表格
+- [ ] `/telemetry` 走键值对 + 表格,spool/consent 用 frame 包裹
+- [ ] `/trace export/failures/show` 走表格
+- [ ] `/usage` 走 frame + 表格
+- [ ] `/evolve status/propose/list/show` 走表格 + 键值对
+
+验收：所有上述命令输出都有 frame;`/usage` 与 `/prompt-audit` 在 JSON 分支(`--json`)输出字节级不变。
+
+### P6：批 6 — 常驻面板统一（src/cli/ + src/app/）
+
+- [ ] `bottom_chrome.cpp` 状态栏/键提示走统一键值对助手
+- [ ] `agent_panel.cpp`、`agent_panel_host.cpp`、`agent_view_state.hpp` 主题字段从 `cli::Theme` 取,frame 走 `cli::frame::*`
+- [ ] `session_picker.cpp/panel.cpp` 走表格
+- [ ] `provider_panel.cpp/core.cpp`、`provider_switch.cpp`、`provider_wizard.cpp` 走 frame + 表格
+- [ ] `context_window_panel.cpp/core.cpp` 走键值对 + 表格(已有 `──` 分组横线替换为 `divider::line`)
+- [ ] `wizard_panel.cpp`、`setup_wizard.cpp` 走 frame 标题
+- [ ] `ask_user_prompt.cpp`、`choice_menu.cpp`、`mention_menu.cpp` 走 frame + 列表
+- [ ] `tool_confirm_ui.cpp`、`tool_display.hpp` 走 frame + 表格(diff 预览保持原样)
+- [ ] `history_search.cpp` 走列表
+- [ ] `todo_render.cpp` 走列表助手,完成态/进行中/待办三态标色
+- [ ] `transcript.cpp`、`transcript_controller.cpp`、`turn_renderer.cpp`、`live_transcript.hpp`、`queue_model.cpp` 主题字段统一收口
+- [ ] `src/app/status_panel_assembly.cpp`、`ui_event_pump.cpp`、`session_ui_dispatcher.cpp` 装配层仅消费新基件,不引入新样式字段
+
+验收：起一个会话,从 `bottom_chrome` → `session_picker` → `provider_wizard` → `ask_user` → `tool_confirm` → `transcript` 全程截图,所有 frame 边框风格一致,主题切换同步。
+
+### P7：批 7 — CLI 子命令（src/cli/）
+
+- [ ] `kanban_command.cpp`、`record_command.cpp`、`trajectory_command.cpp`、`update_command.cpp`、`gateway_command.cpp` 走 frame + 表格
+- [ ] `channel_pairing_command.cpp`、`channel_setup_command.cpp`、`channel_status_command.cpp` 走 frame
+
+验收：`lubancode.exe kanban --no-open` 输出的提示文本也有 frame 标题;`--json` 分支输出不变。
+
+### P8：批 8 — 收口
+
+- [ ] 全量 `TermOut()`/`TextOutput` 走主题字段的覆盖率检查(禁止裸 `"\033["`)
+- [ ] `hook_check_commands.cpp:151` 处违规的 `std::cout` 替换为 `TermOut`
+- [ ] 全量 ctest 绿
+- [ ] 三个平台 syntax check
+- [ ] CHANGELOG 落点
+
+验收：grep 不到 `\\033\\[` 出现在 `src/`（CI 加 lint）；ctest 三平台绿；真机项未验的如实标"未验"。
+
+## 改动边界（预计）
+
+- 新增/改动文件：
+  - `src/cli/terminal_frame.hpp/cpp`（主战场）
+  - `src/cli/theme.hpp/cpp`（字段补全）
+  - `src/cli/divider.hpp/cpp`
+  - `src/cli/format_utils.hpp/cpp`（补小工具）
+  - `docs/development/tui_style.md`（新增约定文档）
+  - 上述分期落地列出的 23 个 `src/app/commands/*.cpp` + 7 个常驻面板 cpp + 7 个 CLI 子命令 cpp + `src/app/status_panel_assembly.cpp` 等装配文件
+- 不动：
+  - `src/runtime/`、`src/api/`、`src/agent/`、`src/memory/`、`src/trajectory/`、`src/insights/` 业务实现
+  - `prompts/` 下文档
+  - `src/hooks/`、`src/lsp/`、`src/mcp/` 后端协议
+  - 任何 cmake 列表外的目录
+
+## 不做什么
+
+- 不引入第三方 UI 库（如 `ftxui`、`ncurses`、`curses`）——已有基件够用,引库会拉编译/链接体积
+- 不改命令语义或退出码
+- 不新增 i18n 键
+- 不重写 `terminal_frame` 的现有 API（向后兼容,只增不删）
+- 不把 TUI 拆成独立进程或独立线程——仍然跑在主交互循环里
+- 不动 Tauri/Android/Web 外壳（它们各有自己的前端栈）
+
+## 最终验收门
+
+- [ ] 批 0–8 全部勾完,每条落点附文件/文档名
+- [ ] 全量 ctest 绿,三平台 syntax check 绿
+- [ ] 真机人工验过的命令清单（不验的标"未验",不伪造）
+- [ ] CHANGELOG 落点
+- [ ] `docs/development/tui_style.md` 发布
+- [ ] CI 加 lint：禁止 `\\033\\[` 出现在 `src/`

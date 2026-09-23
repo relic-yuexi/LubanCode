@@ -1,0 +1,39 @@
+# workspace 索引册 windows 间歇红——锁实现或 racer 夹具诊治
+
+- 状态：待实现。已汇集三单现场证据；未定位根因。
+- 日期：2026-09-22
+- 源码基线：96db52f1。按函数名定位,勿只靠行号。
+- 级别：P2。CI 护栏被反复"重跑即绿"侵蚀,大家开始习惯性忽略 windows 红。
+- 范围:`integration.workspace.workspace_index_ledger` 一册的 windows-msvc 间歇红。
+
+## 一、现场证据(三单同病)
+
+| 单 | PR | 现场 |
+| --- | --- | --- |
+| FD-01 | #198 | windows-msvc 首跑挂 `workspace_index_ledger`,重跑绿;工头注"记忆在案的老面" |
+| SV-06 | #187 | windows-msvc 首跑挂同册,零文件交集,重跑绿 |
+| AR-07 | #196 | 三轮重跑,两轮挂同册(另轮挂别的域外册);代码轮三腿全绿 |
+
+时间线:SV-11(PR #181,workspace manifest 锁)合入于 2026-09-22 早,此后该册的
+windows 间歇红报告开始出现。嫌疑最大:SV-11 的 racer 真子进程
+(hold/crash/register 三态)或 `workspace::ManifestLock` 在 windows 上的时序。
+
+## 二、两种病根,分头查
+
+- **夹具病**:racer 子进程在 windows 上起得慢/收得慢,断言窗太紧——
+  修夹具(起子进程前预热/放宽等待上界),不改产品码。
+- **真锁病**:ManifestLock 在 windows 短拒(防病毒/过滤驱动)下重试路径有缝,
+  或锁目录操作跨进程语义在 windows 与 POSIX 有偏差——修产品码,
+  照 SV-01/SV-11 的身份核验范式,别退化回年龄夺锁。
+
+## 三、验收
+
+- [ ] 定位根因(夹具病/真锁病二选一,附证据——复现日志或失败注入)。
+- [ ] 修后 windows-msvc 腿连跑 5 次该册零红(可手动 dispatch 或连推)。
+- [ ] 若是真锁病:补一条 windows 专有的失败注入册(短拒重试路径)。
+- [ ] POSIX 侧行为零变更(既有 workspace 册全绿)。
+
+## 四、明示不做
+
+- 不动 SV-11 立的锁语义合同(身份核验/隔离留证/释放核账)。
+- 不顺手放宽别的 windows flaky 册;别的册各立各单。

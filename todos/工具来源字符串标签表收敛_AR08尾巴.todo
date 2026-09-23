@@ -1,0 +1,35 @@
+# 工具来源字符串标签表收敛——AR-08 尾巴
+
+- 状态：已收官(PR #205,commit c0ac9229,六腿绿;2026-09-22 合入 main,远端分支已删。真源落 tool_semantics.hpp,取舍:tool_trace.hpp 会拖 nlohmann 进 tools 层)。
+- 日期：2026-09-22
+- 源码基线：96db52f1。
+- 级别：P3。
+- 范围:两处手抄的来源字符串标签表并入唯一真源。
+
+## 一、现场证据
+
+AR-08(PR #199)已把 `ToolSourceKind`/`EffectClass` 类型归中立头
+`src/tool_semantics.hpp`(零 include 纯枚举),但工头如实留痕:
+
+- `src/tools/tool_search.cpp`:一份手抄来源字符串标签表。
+- `src/app/commands/prompt_audit_commands.cpp`:同款手抄,注释自认
+  "与 agent 侧同表"。
+- `src/agent/tool_trace.cpp`:字符串编解码与落盘标签的真身(AR-08 原样保留,
+  线上账本不按数值迁移)。
+
+三处同表,漏改一格就静默漂移——正是 AR-08 并类型要治的病,字符串这半边没治完。
+
+## 二、方案方向
+
+- 字符串编解码收进唯一真源(挂 `src/tool_semantics.hpp` 同家或
+  `agent/tool_trace` 公开口),两处手抄表改引,全仓 grep 零残留。
+- 行为零变更:落盘标签/枚举序列化名一字不动(线上账本兼容),
+  既有册 golden 钉死。
+- 照 AR-08 的先例:纯头文件优先,CMake 无需登记。
+
+## 三、验收
+
+- [ ] 唯一真源立住,两处手抄退役,全仓 grep 零残留。
+- [ ] 落盘标签与序列化名字节不变(旧账本回读兼容)。
+- [ ] tool_search 与 prompt_audit 既有测试册零改动全绿。
+- [ ] CI rollup 绿(该域普通 PR 单 macOS 腿,以实际派腿为准)。
