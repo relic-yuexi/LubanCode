@@ -112,7 +112,26 @@ TEST_CASE("默认表:三域键位在位,固定键入账") {
     CHECK(map.Lookup(KeyScope::Composer, Ctrl(U'n')) == ActionId::ChatHistoryNext);
     CHECK(map.Lookup(KeyScope::Composer, Ctrl(U'g')) == ActionId::ChatExternalEditor);
     CHECK(map.Lookup(KeyScope::Composer, Plain(U'?')) == ActionId::HelpShow);
-    CHECK(map.Lookup(KeyScope::Composer, Plain(U'{')) == ActionId::TranscriptPrevUserTurn);
+    // 转录导航四键默认无绑定:裸字母/裸符号做默认键抢打字(v 起头的词、
+    // 贴 JSON 起手 { [ 全误触)。四键落回普通字符,动作名仍在账上。
+    CHECK(map.Lookup(KeyScope::Composer, Plain(U'{')) == ActionId::None);
+    CHECK(map.Lookup(KeyScope::Composer, Plain(U'}')) == ActionId::None);
+    CHECK(map.Lookup(KeyScope::Composer, Plain(U'[')) == ActionId::None);
+    CHECK(map.Lookup(KeyScope::Composer, Plain(U'v')) == ActionId::None);
+    CHECK_FALSE(map.ChordFor(ActionId::TranscriptPrevUserTurn).has_value());
+    CHECK_FALSE(map.ChordFor(ActionId::TranscriptViewInEditor).has_value());
+    CHECK(ActionFromName("transcript.prev_user_turn").has_value());
+    CHECK(ActionFromName("transcript.next_user_turn").has_value());
+    CHECK(ActionFromName("transcript.to_scrollback").has_value());
+    CHECK(ActionFromName("transcript.view_in_editor").has_value());
+    // 用户 /keymap set 绑回来,查表立即生效(合同:只撤默认,不改分发)。
+    std::string bind_error;
+    REQUIRE(map.SetBinding(ActionId::TranscriptViewInEditor, Plain(U'v'), bind_error));
+    CHECK(map.Lookup(KeyScope::Composer, Plain(U'v')) == ActionId::TranscriptViewInEditor);
+    // 复位回"未绑键":出厂无默认,reset 不许翻成全零假和弦。
+    REQUIRE(map.ResetBinding(ActionId::TranscriptViewInEditor, bind_error));
+    CHECK(map.Lookup(KeyScope::Composer, Plain(U'v')) == ActionId::None);
+    CHECK_FALSE(map.ChordFor(ActionId::TranscriptViewInEditor).has_value());
     // 固定键入账可查(展示层反查),但 BindableAction 为假。
     CHECK(map.Lookup(KeyScope::Composer, Ctrl(U'o')) == ActionId::TranscriptToggleExpand);
     CHECK(map.Lookup(KeyScope::Composer, Ctrl(U'l')) == ActionId::ScreenRedraw);
@@ -180,9 +199,10 @@ TEST_CASE("改绑与冲突:同域撞车拒绝,跨域并存") {
     CHECK_FALSE(map.SetBinding(ActionId::ScreenRedraw, Plain(U'r'), error));
     CHECK_FALSE(map.SetBinding(ActionId::TranscriptToggleExpand, Plain(U'o'), error));
 
-    // 复位:stash 回"无默认",Ctrl+S 在 Composer 域重新查不到。
+    // 复位:stash 回"无默认",Ctrl+S 在 Composer 域重新查不到,反查也为空。
     REQUIRE(map.ResetBinding(ActionId::ComposerStash, error));
     CHECK(map.Lookup(KeyScope::Composer, Ctrl(U's')) == ActionId::None);
+    CHECK_FALSE(map.ChordFor(ActionId::ComposerStash).has_value());
     // 复位一个改过键的可绑动作:回出厂默认。
     REQUIRE(map.SetBinding(ActionId::ChatSearchHistory, Ctrl(U'f'), error));
     REQUIRE(map.ResetBinding(ActionId::ChatSearchHistory, error));

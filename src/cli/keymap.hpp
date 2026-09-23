@@ -96,11 +96,11 @@ enum class ActionId : std::uint16_t {
     ClipboardSmartPaste,    // clipboard.smart_paste:Ctrl+V 智能粘贴,图优先文本兜底
     HelpShow,               // help.show:当前场景按键帮助(空 composer 的 ?)
 
-    // ---- 转录导航(空 composer 生效,不抢正文输入) ----
-    TranscriptPrevUserTurn,  // transcript.prev_user_turn:{
-    TranscriptNextUserTurn,  // transcript.next_user_turn:}
-    TranscriptToScrollback,  // transcript.to_scrollback:[
-    TranscriptViewInEditor,  // transcript.view_in_editor:v
+    // ---- 转录导航(空 composer 生效,不抢正文输入;默认无绑定,/keymap 可自绑) ----
+    TranscriptPrevUserTurn,  // transcript.prev_user_turn:上一条用户提问(默认无绑定)
+    TranscriptNextUserTurn,  // transcript.next_user_turn:下一条用户提问(默认无绑定)
+    TranscriptToScrollback,  // transcript.to_scrollback:转录写进 scrollback(默认无绑定)
+    TranscriptViewInEditor,  // transcript.view_in_editor:转录交外部编辑器查看(默认无绑定)
 
     // ---- 搜索框作用域(Ctrl+R 打开后) ----
     SearchOlder,        // search.older:再按往更早一条

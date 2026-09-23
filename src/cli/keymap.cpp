@@ -230,10 +230,12 @@ constexpr ActionInfo kActionTable[] = {
     {ActionId::ImagePasteClipboard, KeyScope::Composer, "image.paste_clipboard", "alt+v", true},
     {ActionId::ClipboardSmartPaste, KeyScope::Composer, "clipboard.smart_paste", "ctrl+v", true},
     {ActionId::HelpShow, KeyScope::Composer, "help.show", "?", true},
-    {ActionId::TranscriptPrevUserTurn, KeyScope::Composer, "transcript.prev_user_turn", "{", true},
-    {ActionId::TranscriptNextUserTurn, KeyScope::Composer, "transcript.next_user_turn", "}", true},
-    {ActionId::TranscriptToScrollback, KeyScope::Composer, "transcript.to_scrollback", "[", true},
-    {ActionId::TranscriptViewInEditor, KeyScope::Composer, "transcript.view_in_editor", "v", true},
+    // 转录导航四键默认无绑定:裸字母/裸符号做默认键会抢打字(想打 v 起头
+    // 的词、贴 JSON 起手 { [ 都误触)。动作在、可绑,/keymap set 自取。
+    {ActionId::TranscriptPrevUserTurn, KeyScope::Composer, "transcript.prev_user_turn", nullptr, true},
+    {ActionId::TranscriptNextUserTurn, KeyScope::Composer, "transcript.next_user_turn", nullptr, true},
+    {ActionId::TranscriptToScrollback, KeyScope::Composer, "transcript.to_scrollback", nullptr, true},
+    {ActionId::TranscriptViewInEditor, KeyScope::Composer, "transcript.view_in_editor", nullptr, true},
     // 既有固定键:入账可查可显(footer/? 帮助反查),不改绑——它们嵌在
     // 编辑器核心与流式监听的安全路径里,不是一层皮。
     {ActionId::TranscriptToggleExpand, KeyScope::Composer, "transcript.toggle_expand", "ctrl+o", false},
@@ -444,7 +446,10 @@ bool Keymap::ResetBinding(ActionId action, std::string& error) {
     for (auto& entry : entries_) {
         if (entry.action == action) {
             entry.chord = entry.default_chord;
-            entry.has_default = true;
+            // 出厂无默认的动作(composer.stash、转录导航四键)复位即回
+            // "未绑键":default_chord 全零(NUL 和弦)就是"出厂无默认"的
+            // 记号,不得翻成 has_default 真绑一枚假弦。
+            entry.has_default = entry.default_chord != KeyChord{};
             applied = true;
         }
     }

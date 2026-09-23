@@ -266,11 +266,11 @@ enum class UiKeyAction {
     // Ctrl+L 整屏重画:终端层已作废帧锚点、清了可视区,应用层把 transcript
     // 快照重铺一遍(横幅+最近条目)。回调返回 true 表示真铺了正文。
     RepaintScreen,
-    // 0.30.x 第四批转录导航(空 composer 的 { } [ v,键位走 keymap):
-    PrevUserTurn,  // {:跳上一条用户提问,状态行写"第 N/M 轮"
-    NextUserTurn,  // }:跳下一条
-    ToScrollback,  // [:完整转录写进终端 scrollback(用终端自带搜索)
-    ViewInEditor,  // v:转录写临时 Markdown 交 $VISUAL/$EDITOR 只读查看
+    // 0.30.x 第四批转录导航(空 composer 生效;默认无绑定,/keymap 可自绑):
+    PrevUserTurn,  // 跳上一条用户提问,状态行写"第 N/M 轮"
+    NextUserTurn,  // 跳下一条
+    ToScrollback,  // 完整转录写进终端 scrollback(用终端自带搜索)
+    ViewInEditor,  // 转录写临时 Markdown 交 $VISUAL/$EDITOR 只读查看
 };
 using TranscriptUiHandler = std::function<bool(UiKeyAction)>;
 
