@@ -34,10 +34,14 @@ TEST_CASE("FormatTodoList: dark 主题下,三种状态各自的符号都出现")
     CHECK(out.find("已完成的事") != std::string::npos);
     CHECK(out.find("进行中的事") != std::string::npos);
     CHECK(out.find("待办的事") != std::string::npos);
-    // 完成项、进行中项各自套了主题颜色(dark 主题非空),reset 也该出现。
-    CHECK(out.find(theme.stats) != std::string::npos);
-    CHECK(out.find(theme.prompt) != std::string::npos);
+    // 排版批 6 三态语义档:完成 table_pass(绿)、进行中 spinner(青);
+    // 待办不包色。reset 照常收口。
+    CHECK(out.find(theme.table_pass) != std::string::npos);
+    CHECK(out.find(theme.spinner) != std::string::npos);
     CHECK(out.find(theme.reset) != std::string::npos);
+    // 三态各走各的档:完成的灯不是 spinner 色,进行中的灯不是 table_pass 色。
+    CHECK(out.find(theme.table_pass + std::string("\xE2\x98\x91")) != std::string::npos);
+    CHECK(out.find(theme.spinner + std::string("\xE2\x96\xB8")) != std::string::npos);
 }
 
 TEST_CASE("FormatTodoList: 每一项前面缩进两格") {
@@ -90,8 +94,9 @@ TEST_CASE("FormatTodoList: 更新项点亮正文,其余项不额外着色") {
         TodoItem{"没有变化", TodoStatus::Pending},
     };
     const std::string out = FormatTodoList(items, theme, {0});
-    CHECK(out.find(theme.prompt + std::string("刚完成") + theme.reset) != std::string::npos);
-    CHECK(out.find(theme.prompt + std::string("没有变化") + theme.reset) == std::string::npos);
+    // 排版批 6:高亮行走 confirm 焦点色(与菜单焦点同一档),不再借 prompt。
+    CHECK(out.find(theme.confirm + std::string("刚完成") + theme.reset) != std::string::npos);
+    CHECK(out.find(theme.confirm + std::string("没有变化") + theme.reset) == std::string::npos);
 
     const auto plain = BuiltinTheme("plain");
     CHECK(FormatTodoList(items, plain, {0}).find('\x1b') == std::string::npos);

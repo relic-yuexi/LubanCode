@@ -712,7 +712,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             }
             const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
             const int width = info_now.has_value() ? info_now->width : 80;
-            return BuildHistorySearchLines(history_search, query, width, theme.stats, theme.reset);
+            // 排版批 6:选中行高亮换 confirm 焦点档(与菜单焦点同一语义),
+            // 不再借 stats 淡色;❯ 前缀照旧,plain 自然无色。
+            return BuildHistorySearchLines(history_search, query, width, theme.confirm, theme.reset);
         }
         if (const auto* matches = mention_menu_for(state); matches != nullptr) {
             const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();

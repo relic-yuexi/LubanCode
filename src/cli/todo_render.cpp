@@ -22,12 +22,15 @@ std::string FormatTodoList(const std::vector<tools::TodoItem>& items, const Them
     for (std::size_t i = 0; i < items.size(); ++i) {
         const auto& item = items[i];
         out += "  ";
+        // 排版批 6:三态标色走语义档——完成 table_pass(绿)、进行中
+        // spinner(青,活动色)、待办不包色;高亮行(刚更新的那一拍)走
+        // confirm 焦点色,与菜单焦点同一档。plain 全空串,退 [x]/[>]/[ ]。
         switch (item.status) {
             case tools::TodoStatus::Completed:
-                out += plain ? "[x] " : (theme.stats + kCheckedBox + " " + theme.reset);
+                out += plain ? "[x] " : (theme.table_pass + kCheckedBox + " " + theme.reset);
                 break;
             case tools::TodoStatus::InProgress:
-                out += plain ? "[>] " : (theme.prompt + kInProgressMark + " " + theme.reset);
+                out += plain ? "[>] " : (theme.spinner + kInProgressMark + " " + theme.reset);
                 break;
             case tools::TodoStatus::Pending:
                 out += plain ? "[ ] " : (std::string(kEmptyBox) + " ");
@@ -36,7 +39,7 @@ std::string FormatTodoList(const std::vector<tools::TodoItem>& items, const Them
         const bool highlighted = !plain &&
                                  std::find(highlighted_indices.begin(), highlighted_indices.end(), i) !=
                                      highlighted_indices.end();
-        out += highlighted ? (theme.prompt + item.content + theme.reset) : item.content;
+        out += highlighted ? (theme.confirm + item.content + theme.reset) : item.content;
         out += "\n";
     }
     return out;

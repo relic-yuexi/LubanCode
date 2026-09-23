@@ -668,8 +668,8 @@ struct ToolDisplay {
         if (!is_console && !silent_) {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
             TermOut() << "\n"
-                       << theme.stats << tr("pipe.subtool_start") << name << " " << input.dump() << theme.reset
-                       << "\n";
+                       << theme.row_muted << tr("pipe.subtool_start") << name << " " << input.dump()
+                       << theme.reset << "\n";
             TermOut().flush();
         }
         sub_input = input;
