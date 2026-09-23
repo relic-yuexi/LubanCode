@@ -117,9 +117,10 @@ std::string RelationText(const lubancode::agent::ToolExecutionRecord& record) {
 
 // 枚账表格(批 5b):一行一枚 execution,短字段进列(#/exec/tool/outcome/
 // error/ms),关系边进 rel 列——塞不下的长字段批 2 先例是另起明细表,这里
-// 关系边本就是短串,同表可容。
+// 关系边本就是短串,同表可容。records 按值收:调用侧的 ledger 是本函数
+// 栈外的局部,指针账跨栈易成悬垂,值拷贝绝缘(CI 实证)。
 void PrintExecutionTable(const lubancode::cli::Theme& theme, const std::string& title,
-                         const std::vector<const lubancode::agent::ToolExecutionRecord*>& records) {
+                         const std::vector<lubancode::agent::ToolExecutionRecord>& records) {
     std::vector<frame::TableColumn> columns;
     columns.push_back({"#"});
     columns.push_back({"exec"});
@@ -129,13 +130,13 @@ void PrintExecutionTable(const lubancode::cli::Theme& theme, const std::string& 
     columns.push_back({"ms", 0, /*align_right=*/true});
     columns.push_back({"rel"});
     std::vector<frame::TableRow> rows;
-    for (const auto* record : records) {
+    for (const auto& record : records) {
         rows.push_back(frame::TableRow{
-            {"#" + std::to_string(record->sequence_in_batch), record->execution_id, record->tool_name,
-             lubancode::agent::ToString(record->outcome), record->error_code,
-             std::to_string(record->duration_ms), RelationText(*record)},
+            {"#" + std::to_string(record.sequence_in_batch), record.execution_id, record.tool_name,
+             lubancode::agent::ToString(record.outcome), record.error_code,
+             std::to_string(record.duration_ms), RelationText(record)},
             {frame::CellTone::Normal, frame::CellTone::Normal, frame::CellTone::Normal,
-             OutcomeTone(*record), OutcomeTone(*record), frame::CellTone::Normal, frame::CellTone::Normal}});
+             OutcomeTone(record), OutcomeTone(record), frame::CellTone::Normal, frame::CellTone::Normal}});
     }
     EmitFrameLines(frame::RenderTable(title, columns, rows, theme, frame::Light(), TraceFrameWidth()));
 }
@@ -229,7 +230,7 @@ void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args)
         // 表格化(批 5b):取数从 ErrorLines() 的行串改为 ledger 同口径过滤
         //(Succeeded/CancelledBeforeStart 除外,与 hub 的过滤同一对枚举值),
         // 行集不变,只是一行一枚进列。
-        std::vector<const lubancode::agent::ToolExecutionRecord*> failed;
+        std::vector<lubancode::agent::ToolExecutionRecord> failed;
         if (ctx.trace_hub != nullptr) {
             const auto ledger = ctx.trace_hub->BuildRecentLedger();
             for (const auto& record : ledger.executions()) {
@@ -237,7 +238,7 @@ void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args)
                     record.outcome == lubancode::agent::ToolOutcome::CancelledBeforeStart) {
                     continue;
                 }
-                failed.push_back(&record);
+                failed.push_back(record);  // 值拷贝:ledger 是短命局部,不存指针
             }
         }
         if (failed.empty()) {
@@ -257,16 +258,19 @@ void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args)
             const auto ledger = ctx.trace_hub->BuildRecentLedger();
             if (args.rfind("toolu ", 0) == 0) {
                 const std::string id = args.substr(6);
-                const auto records = ledger.FindByToolUse(id);
+                std::vector<lubancode::agent::ToolExecutionRecord> records;
+                for (const auto* record : ledger.FindByToolUse(id)) {
+                    records.push_back(*record);  // 值拷贝,见 PrintExecutionTable 注
+                }
                 if (!records.empty()) {
                     PrintExecutionTable(theme, "toolu " + id, records);
                 }
             } else if (args.rfind("turn ", 0) == 0) {
                 const std::string id = args.substr(5);
-                std::vector<const lubancode::agent::ToolExecutionRecord*> records;
+                std::vector<lubancode::agent::ToolExecutionRecord> records;
                 for (const auto& record : ledger.executions()) {
                     if (record.turn_id == id) {
-                        records.push_back(&record);
+                        records.push_back(record);
                     }
                 }
                 if (!records.empty()) {
