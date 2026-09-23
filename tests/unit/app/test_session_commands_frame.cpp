@@ -19,6 +19,7 @@
 #include <string>
 
 #include "api/types.hpp"
+#include "agent/context_budget.hpp"  // ContextBudgetPlan:预算总账材料
 #include "app/commands/session_commands.hpp"
 #include "agent/runtime_profile.hpp"
 #include "cli/context_tracker.hpp"
@@ -107,27 +108,46 @@ std::string RunContext(const cli::Theme& theme, const app::ContextLayersReport* 
     return capture.text();
 }
 
-}  // namespace
-
-TEST_CASE("context:三组各进键值对框,组名嵌框顶标题") {
+// 带 v2 预算计划的分层材料(预算总账/开销明细/压缩预算出自这里)。
+app::ContextLayersReport MakeLayersWithBudget() {
     app::ContextLayersReport layers;
     layers.inline_full_results = 4;
     layers.artifact_previews = 2;
     layers.reclaimable_bytes = 4096;
     layers.last_compact_line = "cheap:m · 62k→18k · 3.2s · 校验通过";
+    agent::ContextBudgetPlan plan;
+    plan.window = 200000;
+    plan.compactable_history_budget = 100000;
+    plan.stable_system = 4000;
+    plan.tool_schemas = 6000;
+    plan.protected_hot_zone = 8000;
+    plan.requested_output_reserve = 8192;
+    plan.compact_prompt_overhead = 4000;
+    plan.protocol_headroom = 1000;
+    plan.tokenizer_error_margin = 2000;
+    plan.compact_call_input_budget = 50000;
+    layers.budget = plan;
+    return layers;
+}
+
+}  // namespace
+
+TEST_CASE("context:三组各进键值对框,组名嵌框顶标题") {
+    const app::ContextLayersReport layers = MakeLayersWithBudget();
     agent::AgentRuntimeProfile profile;
 
     const std::string out = RunContext(dark, &layers, &profile);
     const std::string text = StripAnsi(out);
 
-    // 占用卡片(cli 层)原样在前,三组框标题跟后。
+    // 占用卡片(cli 层)原样在前——表头是"── 占用 ──(窗口 ...)"(group.usage
+    // 键,bd.header 是退役残留键),三组框标题跟后。
     REQUIRE(Contains(out, kBoxLightTopLeft));
-    CHECK(Contains(text, "上下文占用分析"));
+    CHECK(Contains(text, "── 占用 ──"));
     CHECK(Contains(text, "缓存"));
     CHECK(Contains(text, "结构与回收"));
     CHECK(Contains(text, "预算与角色账"));
-    // 旧"── 组名 ──"手拼横线不再出现(占用卡片的表头行含"──"属 cli 层
-    // 遗留;组名横线三处已收口,此处探针只对组名行)。
+    // 旧"── 组名 ──"手拼横线不再出现(占用卡片表头是 cli 层既有形态,
+    // 领地外;批 5a 收口的是命令层三处组名横线)。
     CHECK(text.find("── 缓存 ──") == std::string::npos);
     CHECK(text.find("── 结构与回收 ──") == std::string::npos);
     CHECK(text.find("── 预算与角色账 ──") == std::string::npos);
@@ -139,35 +159,38 @@ TEST_CASE("context:三组各进键值对框,组名嵌框顶标题") {
     CHECK(Contains(text, "分层占用"));
     CHECK(Contains(text, "预算总账"));
     CHECK(Contains(text, "最近请求预算"));
+    CHECK(Contains(text, "开销明细"));
+    CHECK(Contains(text, "压缩预算"));
     CHECK_FALSE(Contains(text, "口径说明"));  // 口径小节无组名,无标题
     CHECK(Contains(text, "不是累计花销"));     // note.semantics 的正文仍在
 }
 
 TEST_CASE("context:键值对按最宽 key 对齐,value 起始列处处一致") {
-    app::ContextLayersReport layers;
+    const app::ContextLayersReport layers = MakeLayersWithBudget();
     agent::AgentRuntimeProfile profile;
     const std::string out = RunContext(dark, &layers, &profile);
     const std::string text = StripAnsi(out);
 
     // 缓存组:epoch 行与会话累计行的 value 同列(RenderKeyValues 按全组最
-    // 宽 key 补齐)。"60.0k" 是 cache_read 的折算值(FormatTokenCount 同尺)。
-    const std::string hit_value = cli::FormatTokenCount(60000);
+    // 宽 key 补齐)。探针用"命中 60.0k"(两行 value 同头,且不会被
+    // note.semantics 长句里的"缓存命中/会话累计"字样截胡)。
+    const std::string hit_head = "命中 " + cli::FormatTokenCount(60000);
     int epoch_col = -1;
     int session_col = -1;
     std::istringstream lines(text);
     std::string line;
     while (std::getline(lines, line)) {
-        if (Contains(line, "前缀 epoch 2")) epoch_col = DisplayColOf(line, "命中");
-        if (Contains(line, "会话累计")) session_col = DisplayColOf(line, "命中");
+        if (Contains(line, "前缀 epoch 2")) epoch_col = DisplayColOf(line, hit_head);
+        if (Contains(line, "会话累计")) session_col = DisplayColOf(line, hit_head);
     }
     CHECK(epoch_col > 0);
     CHECK(session_col > 0);
     CHECK(epoch_col == session_col);
-    CHECK(Contains(text, hit_value));
+    CHECK(Contains(text, hit_head));
 }
 
 TEST_CASE("context:键列走 row_label 语义色,占用卡片在前组框在后") {
-    app::ContextLayersReport layers;
+    const app::ContextLayersReport layers = MakeLayersWithBudget();
     agent::AgentRuntimeProfile profile;
     const std::string out = RunContext(dark, &layers, &profile);
     // 键列色:row_label 包着"前缀 epoch 2"与"预算总账"。
@@ -175,7 +198,7 @@ TEST_CASE("context:键列走 row_label 语义色,占用卡片在前组框在后"
     CHECK(Contains(out, dark.row_label + "预算总账"));
     // 顺序:占用卡片表头在三组框标题之前。
     const std::string text = StripAnsi(out);
-    CHECK(text.find("上下文占用分析") < text.find("缓存"));
+    CHECK(text.find("── 占用 ──") < text.find("缓存"));
     CHECK(text.find("缓存") < text.find("结构与回收"));
 }
 
@@ -199,8 +222,7 @@ TEST_CASE("context:v3 会话口径行照出(v3_estimator/结果仓/结构压缩�
 }
 
 TEST_CASE("plain 主题:全输出零转义字节、无框字形(T3/--no-color 路径)") {
-    app::ContextLayersReport layers;
-    layers.inline_full_results = 1;
+    const app::ContextLayersReport layers = MakeLayersWithBudget();
     agent::AgentRuntimeProfile profile;
     const std::string out = RunContext(plain, &layers, &profile);
     CHECK(out.find("\x1b") == std::string::npos);

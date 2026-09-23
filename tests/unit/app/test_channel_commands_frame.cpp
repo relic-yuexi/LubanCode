@@ -265,7 +265,7 @@ TEST_CASE("pairing list:列表行带 sender/剩余/操作提示,空态进框") {
     {
         std::vector<ChannelManager::PendingPairingView> pending(2);
         pending[0].sender_id = "sender-a";
-        pending[0].expires_at_ms = 1060000;  // 剩 6 秒
+        pending[0].expires_at_ms = 1060000;  // 剩 60 秒(60000ms)
         pending[1].sender_id = "sender-b";
         pending[1].expires_at_ms = 900000;  // 已过期
         const auto lines = FormatChannelPairingList("qqbot/main", &pending, 1000000, dark);
@@ -276,7 +276,7 @@ TEST_CASE("pairing list:列表行带 sender/剩余/操作提示,空态进框") {
         REQUIRE(Contains(plain_text, kBoxLightTopLeft));
         CHECK(Contains(plain_text, "qqbot/main 待审配对(2 条)"));
         CHECK(Contains(plain_text, "sender sender-a"));
-        CHECK(Contains(plain_text, "剩 6 秒"));
+        CHECK(Contains(plain_text, "剩 60 秒"));
         CHECK(Contains(plain_text, "(已过期)"));
         CHECK(Contains(plain_text, "/channel pairing approve <channel> <code>"));
     }
@@ -284,13 +284,16 @@ TEST_CASE("pairing list:列表行带 sender/剩余/操作提示,空态进框") {
 
 TEST_CASE("handler:用法/引导/失败反馈进 frame,不裸打印") {
     {
-        // 无参子命令词:用法清单进键值对框("用法"做标题)。
+        // 无参子命令词:用法清单进键值对框("用法"做标题;首空格拆列后
+        // key 与 value 之间是键值对分隔,不再连排)。
         const std::string out = RunChannel("bogus qqbot", dark);
         REQUIRE(Contains(out, kBoxLightTopLeft));
         const std::string text = StripAnsi(out);
         CHECK(Contains(text, "认不得"));
         CHECK(Contains(text, "用法"));
-        CHECK(Contains(text, "/channel show <channel> [account]"));
+        CHECK(Contains(text, "/channel"));
+        CHECK(Contains(text, "show <channel> [account]"));
+        CHECK(Contains(text, "pairing approve|reject <channel> [account] <code>"));
     }
     {
         // 普通交互形态的 start:引导句进框。
@@ -302,7 +305,7 @@ TEST_CASE("handler:用法/引导/失败反馈进 frame,不裸打印") {
         // 空目标:用法框。
         const std::string out = RunChannel("show", dark);
         REQUIRE(Contains(out, kBoxLightTopLeft));
-        CHECK(Contains(StripAnsi(out), "/channel show"));
+        CHECK(Contains(StripAnsi(out), "show <channel> [account]"));
     }
 }
 
@@ -329,7 +332,8 @@ TEST_CASE("plain 主题:全族输出零转义字节、无框字形(T3/--no-color
         CHECK(!Contains(out, kBoxLightTopLeft));
         CHECK(!Contains(out, kBoxLightVert));
     }
-    // 信息一字不少:表头与状态文本都在,只是没了色与框。
+    // 信息一字不少:表头与状态文本都在,只是没了色与框。gateway 引导句只在
+    // 没挂运行态(snapshots=nullptr)时出现,单列一档验证。
     const auto overview = FormatChannelsOverview(&channels, &snapshots, plain);
     std::string joined;
     for (const std::string& line : overview) {
@@ -337,5 +341,10 @@ TEST_CASE("plain 主题:全族输出零转义字节、无框字形(T3/--no-color
     }
     CHECK(Contains(joined, "channel"));
     CHECK(Contains(joined, "running"));
-    CHECK(Contains(joined, "gateway not running"));
+    const auto no_runtime = FormatChannelsOverview(&channels, nullptr, plain);
+    std::string no_runtime_text;
+    for (const std::string& line : no_runtime) {
+        no_runtime_text += line + "\n";
+    }
+    CHECK(Contains(no_runtime_text, "gateway not running"));
 }
