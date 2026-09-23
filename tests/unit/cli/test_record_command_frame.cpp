@@ -24,6 +24,7 @@
 #include "skills/skill_drafter.hpp"
 
 using namespace lubancode;
+using namespace lubancode::cli;
 
 namespace {
 

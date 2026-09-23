@@ -25,6 +25,7 @@
 #include "cli/theme.hpp"
 
 using namespace lubancode;
+using namespace lubancode::cli;
 
 namespace {
 

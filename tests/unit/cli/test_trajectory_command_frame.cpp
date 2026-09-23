@@ -23,6 +23,7 @@
 #include "platform/paths.hpp"
 
 using namespace lubancode;
+using namespace lubancode::cli;
 
 namespace {
 

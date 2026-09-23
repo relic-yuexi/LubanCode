@@ -26,6 +26,7 @@
 #include "gateway/profile.hpp"
 
 using namespace lubancode;
+using namespace lubancode::cli;
 
 namespace {
 
