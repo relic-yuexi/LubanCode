@@ -1841,6 +1841,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     materials.usage.memory_ledger = model_router != nullptr ? &model_router->ledger() : nullptr;
     materials.usage.home_lubancode = home_lubancode;
     materials.package.home_lubancode = &home_lubancode;
+    materials.package.theme = &theme;  // TUI 排版批 4:/package 渲染段走 frame
     materials.package.dev_package_dirs = &opts_.package_dirs;
     materials.package.config = &config;
     materials.package.skills = &skills;
