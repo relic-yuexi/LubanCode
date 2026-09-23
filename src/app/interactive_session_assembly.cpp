@@ -2004,6 +2004,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     materials.evolve.home_lubancode = &home_lubancode;
     materials.evolve.recordings_root = &recordings_root;
     materials.evolve.project_memory = project_memory.get();
+    materials.evolve.theme = &theme;  // TUI 排版批 5c:/evolve 长报告走 frame
     // ---- goal/loop 域(装配 ensure 与材料包)
     materials.goal.theme = &theme;
     materials.goal.ensure_goal_coordinator = [this]() { goal_wiring_.Ensure(config); };
