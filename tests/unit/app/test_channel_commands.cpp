@@ -3,11 +3,14 @@
 #include <doctest/doctest.h>
 
 #include "app/commands/channel_commands.hpp"
+#include "cli/theme.hpp"  // Theme:Format* 行生成批 5a 起吃主题(钉 plain 形状)
 
 using namespace lubancode::app;
 using namespace lubancode::channel;
 
 namespace {
+
+const lubancode::cli::Theme theme;  // 默认构造=全空字段=plain(零转义无框)
 
 ChannelManager::AccountSnapshot MakeSnapshot() {
     ChannelManager::AccountSnapshot snapshot;
@@ -67,7 +70,7 @@ TEST_CASE("二级解析:子命令与目标") {
 TEST_CASE("总览:没配渠道、配了没挂 manager、配了且在跑") {
     // 没配。
     {
-        const auto lines = FormatChannelsOverview(nullptr, nullptr);
+        const auto lines = FormatChannelsOverview(nullptr, nullptr, theme);
         REQUIRE_FALSE(lines.empty());
         CHECK(lines[0].find("没配渠道") != std::string::npos);
     }
@@ -83,7 +86,7 @@ TEST_CASE("总览:没配渠道、配了没挂 manager、配了且在跑") {
         channel.accounts.emplace("main", account);
         channels.emplace("qqbot", channel);
 
-        const auto lines = FormatChannelsOverview(&channels, nullptr);
+        const auto lines = FormatChannelsOverview(&channels, nullptr, theme);
         bool saw_gateway_hint = false;
         bool saw_account_row = false;
         for (const auto& line : lines) {
@@ -100,7 +103,7 @@ TEST_CASE("总览:没配渠道、配了没挂 manager、配了且在跑") {
         const auto snapshot = MakeSnapshot();
         const std::vector<ChannelManager::AccountSnapshot> snapshots = {snapshot};
         std::map<std::string, ChannelUserConfig> channels;
-        const auto lines = FormatChannelsOverview(&channels, &snapshots);
+        const auto lines = FormatChannelsOverview(&channels, &snapshots, theme);
         bool saw_running = false;
         for (const auto& line : lines) {
             if (line.find("running") != std::string::npos && line.find("qqbot/main") != std::string::npos) {
@@ -113,7 +116,7 @@ TEST_CASE("总览:没配渠道、配了没挂 manager、配了且在跑") {
 
 TEST_CASE("show:详情行含状态/策略/密钥来源/水位/迁移账") {
     const auto snapshot = MakeSnapshot();
-    const auto lines = FormatChannelShow(&snapshot);
+    const auto lines = FormatChannelShow(&snapshot, theme);
     std::string joined;
     for (const auto& line : lines) joined += line + "\n";
     CHECK(joined.find("running") != std::string::npos);
@@ -124,7 +127,7 @@ TEST_CASE("show:详情行含状态/策略/密钥来源/水位/迁移账") {
     CHECK(joined.find("connecting -> running") != std::string::npos);
 
     // 空指针:一行不在册。
-    const auto none = FormatChannelShow(nullptr);
+    const auto none = FormatChannelShow(nullptr, theme);
     REQUIRE_FALSE(none.empty());
     CHECK(none[0].find("不在册") != std::string::npos);
 }
@@ -134,7 +137,7 @@ TEST_CASE("doctor:明文密钥给 warning,缺失给 CredentialsMissing,不打印
     {
         auto snapshot = MakeSnapshot();
         snapshot.credential = CredentialSource::InlinePlaintext;
-        const auto lines = FormatChannelDoctor(&snapshot);
+        const auto lines = FormatChannelDoctor(&snapshot, theme);
         std::string joined;
         for (const auto& line : lines) joined += line + "\n";
         CHECK(joined.find("WARNING") != std::string::npos);
@@ -143,7 +146,7 @@ TEST_CASE("doctor:明文密钥给 warning,缺失给 CredentialsMissing,不打印
     {
         auto snapshot = MakeSnapshot();
         snapshot.credential = CredentialSource::Missing;
-        const auto lines = FormatChannelDoctor(&snapshot);
+        const auto lines = FormatChannelDoctor(&snapshot, theme);
         std::string joined;
         for (const auto& line : lines) joined += line + "\n";
         CHECK(joined.find("CredentialsMissing") != std::string::npos);
@@ -151,7 +154,7 @@ TEST_CASE("doctor:明文密钥给 warning,缺失给 CredentialsMissing,不打印
     // env 正常 + 体检不发外部请求的说明。
     {
         const auto snapshot = MakeSnapshot();
-        const auto lines = FormatChannelDoctor(&snapshot);
+        const auto lines = FormatChannelDoctor(&snapshot, theme);
         std::string joined;
         for (const auto& line : lines) joined += line + "\n";
         CHECK(joined.find("体检不发平台请求") != std::string::npos);
@@ -163,7 +166,7 @@ TEST_CASE("doctor:明文密钥给 warning,缺失给 CredentialsMissing,不打印
         snapshot.state = ChannelAccountState::Backoff;
         snapshot.retry_at_ms = 1724700001000;
         snapshot.backoff_attempt = 3;
-        const auto lines = FormatChannelDoctor(&snapshot);
+        const auto lines = FormatChannelDoctor(&snapshot, theme);
         std::string joined;
         for (const auto& line : lines) joined += line + "\n";
         CHECK(joined.find("backoff") != std::string::npos);

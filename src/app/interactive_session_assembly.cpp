@@ -1999,6 +1999,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     // 的铁律;命令面只显示配置侧与 gateway 引导)。
     materials.channel.config = &config;
     materials.channel.channel_manager = nullptr;
+    materials.channel.theme = &theme;  // TUI 排版批 5a:渲染段语义色走会话主题
     // ---- /evolve 域(观察账/演化目录/分层账)
     materials.evolve.home_lubancode = &home_lubancode;
     materials.evolve.recordings_root = &recordings_root;
