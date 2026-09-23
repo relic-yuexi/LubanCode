@@ -134,6 +134,15 @@ jobs:
           echo "agent_lifetime=$agent_lifetime" >> "$GITHUB_OUTPUT"
           echo "workflow_threads=$workflow_threads" >> "$GITHUB_OUTPUT"
 
+      # TUI 排版批 8 收口:src/ 禁止八进制 ESC 裸转义(\033)。批 6 已把
+      # 全仓硬编码 ANSI 清零、统一 \x1b 十六进制写法,这道门把成果焊死。
+      # 放门房最划算:checkout 是现成的,重腿没起跑先红;pull_request 事件
+      # 查的是 merge ref,合流带进的回归同样拦。--selftest 先种探针验证
+      # lint 真能红,防"常绿的假门"。
+      - name: Lint src bare ANSI escapes
+        shell: bash
+        run: bash scripts/check_src_ansi.sh --selftest
+
   # 腿单预备(2026-09-06):job 级 if 不认 matrix 上下文(GitHub 上下文可用
   # 表没有它,写在 jobs.<id>.if 里整炉 0 秒死于 workflow file issue——
   # 5daf4989 在 main 上就是这么翻的),按事件现挑腿单,build-test 用
