@@ -35,7 +35,8 @@ CommandFlow HandleSendCommand(PeerCommandState& state, const std::string& args,
                               const lubancode::cli::Theme& theme);
 
 // /peerperm [auto|accept|hold|refuse]:看/设来信权限档。
-CommandFlow HandlePeerpermCommand(PeerCommandState& state, const std::string& args);
+CommandFlow HandlePeerpermCommand(PeerCommandState& state, const std::string& args,
+                                  const lubancode::cli::Theme& theme);
 
 // ---------------------------------------------------------------------------
 // 命令分派注册制(会话终章):跨会话传话域的分派位(peers/send/peerperm)。

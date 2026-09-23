@@ -25,6 +25,7 @@
 #include "channel/channel_config.hpp"
 #include "channel/manager.hpp"
 #include "cli/slash_commands.hpp"
+#include "cli/theme.hpp"  // Theme:Format* 行生成的语义色(TUI 排版批 5a)
 
 namespace lubancode::config {
 struct Config;  // 配置侧账号表(指针借用,定义在 config/config.hpp)
@@ -59,27 +60,39 @@ struct ParsedChannelCommand {
 ParsedChannelCommand ParseChannelCommand(const std::string& args);
 
 // ---------------- 行生成(纯函数,单测钉) ----------------
+//
+// TUI 排版批 5a:行生成走 cli::frame 三助手(表格/键值对/列表,约定见
+// docs/development/tui_style.md)。本文件的历史文案是硬编码中文(不走
+// i18n 表),单子合同"不新增文案"在此读作:既有句子原样进 frame,一字
+// 不添不改(批 2 裁量 1 同款);句内冒号按 SentenceField 拆两列,表头与
+// 列名用数据 schema 名(state/dm/group/secret/...,批 1 裁量 1)。
 
 // /channels 总览。channels 可空(没配渠道);snapshots 可空(本进程没挂
 // ChannelManager = 普通交互进程,给 gateway 引导行)。
 std::vector<std::string> FormatChannelsOverview(
     const std::map<std::string, lubancode::channel::ChannelUserConfig>* channels,
-    const std::vector<lubancode::channel::ChannelManager::AccountSnapshot>* snapshots);
+    const std::vector<lubancode::channel::ChannelManager::AccountSnapshot>* snapshots,
+    const lubancode::cli::Theme& theme);
 
 // /channel show:单账号详情。找不到目标账号时返回一行"不在册"。
 std::vector<std::string> FormatChannelShow(
-    const lubancode::channel::ChannelManager::AccountSnapshot* snapshot);
+    const lubancode::channel::ChannelManager::AccountSnapshot* snapshot,
+    const lubancode::cli::Theme& theme);
 
 // /channel doctor:密钥来源只报名不报值(InlinePlaintext 给 warning,
 // configuration.md §4)。
 std::vector<std::string> FormatChannelDoctor(
-    const lubancode::channel::ChannelManager::AccountSnapshot* snapshot);
+    const lubancode::channel::ChannelManager::AccountSnapshot* snapshot,
+    const lubancode::cli::Theme& theme);
 
 // /channel pairing list:待审配对清单(sender id + 过期时刻)。空表给一行
-// "没有待审";manager 为空给引导行。
+// "没有待审";manager 为空给引导行。account_label 是 "<channel>/<account>"
+// 定位串,并进表标题(批 2 裁量 3:引导下文的冒号不再连排)。
 std::vector<std::string> FormatChannelPairingList(
+    const std::string& account_label,
     const std::vector<lubancode::channel::ChannelManager::PendingPairingView>* pending,
-    std::int64_t now_ms);
+    std::int64_t now_ms,
+    const lubancode::cli::Theme& theme);
 
 // ---------------- 执行(handler) ----------------
 
@@ -91,6 +104,9 @@ struct ChannelCommandContext {
     // configuration.md §3),命令面只显示配置侧与 gateway 引导,不产生任何
     // 后台动作。Gateway 装配(阶段 9)与测试 wiring 才填这个口。
     lubancode::channel::ChannelManager* channel_manager = nullptr;
+    // 会话主题(TUI 排版批 5a):渲染段语义色的唯一来源。绑定期注入;空时
+    // handler 按批 2 裁量 4 自起(管道/重定向自然降 plain)。
+    const lubancode::cli::Theme* theme = nullptr;
 };
 
 CommandFlow HandleSlashChannels(const ChannelCommandContext& ctx,

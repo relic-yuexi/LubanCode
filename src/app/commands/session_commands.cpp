@@ -6,6 +6,8 @@
 #include "cli/record_command.hpp"                 // /record 的 presenter(cli 层)
 #include "tools/agent_tool.hpp"                   // 归档/删除的后台忙查
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <ctime>
 #include <chrono>
@@ -48,7 +50,9 @@
 #include "app/runtime_profile.hpp"
 #include "cli/console_input.hpp"
 #include "cli/terminal_port.hpp"
+#include "cli/divider.hpp"          // divider::line(TUI 排版批 5a:分组横线收口)
 #include "cli/format_utils.hpp"
+#include "cli/terminal_frame.hpp"   // frame::*(TUI 排版批 5a:/context 渲染段)
 #include "hooks/dispatcher.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:P0-2 compact 状态指纹
 #include "tools/path_utils.hpp"
@@ -122,6 +126,70 @@ std::string FormatEstimateDeviation(int deviation_percent) {
     return out.str();
 }
 
+namespace {
+
+// ---- TUI 排版批 5a(/session·/context 渲染段)的公共小件 --------------------
+//
+// 渲染段只调 cli::frame::* 三助手 + divider::line(批 0 基件,约定见
+// docs/development/tui_style.md)。文案全走既有 tr()/trf() 键(不新增);
+// 句内冒号按 SentenceField 拆两列(批 1 裁量 2);表头/键名用 schema 名。
+
+namespace frame = lubancode::cli::frame;
+
+int SessionFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+void EmitFrameLines(const std::vector<std::string>& lines) {
+    for (const std::string& line : lines) {
+        TermOut() << line << "\n";
+    }
+}
+
+std::string TrimAscii(std::string value) {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}
+
+frame::Field SentenceField(const std::string& sentence,
+                           frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    return frame::Field{TrimAscii(sentence.substr(0, colon)), TrimAscii(sentence.substr(colon + 1)), accent};
+}
+
+// 单句/多句通知 → 无标题键值对框。
+void PrintNotice(const lubancode::cli::Theme& theme, std::initializer_list<std::string> sentences,
+                 frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), SessionFrameWidth()));
+}
+
+// 分组横线统一走 divider::line(批 0 约定:"── 组名 ──"手拼横线批 5-6 收口
+// 全部替换,组名本身进 frame 框顶标题)。plain 主题按降级合同退 Ascii 档;
+// 探测不到终端宽(测试进程/重定向)时返回空串,不画线。
+void EmitGroupDivider(const lubancode::cli::Theme& theme) {
+    const bool plain = theme.reset.empty();
+    const std::string rule = lubancode::cli::divider::line(
+        plain ? lubancode::cli::divider::Style::Ascii : lubancode::cli::divider::Style::Light,
+        SessionFrameWidth());
+    if (!rule.empty()) {
+        TermOut() << rule << "\n";
+    }
+}
+
+}  // namespace
+
 // P0-2 轨迹:compact 前后的 effective history 指纹(compact.applied 的
 // old/new state hash)。投影标记用——角色序 + 各块正文拼串再 hash,不是
 // 密码学真值;同一份历史两次算必然同值(确定性重放的锚点)。
@@ -186,7 +254,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
             context_tracker.window_tokens(), context_tracker.current_tokens(), theme,
             /*bar_width=*/16, context_tracker.last_cache_hit_percent());
         // 占用卡片(核心,第一组):系统/工具/历史条形图 + 已用/触发线/剩余。
-        // FormatContextBreakdown 自带表头"上下文占用分析(窗口 {0})"。
+        // FormatContextBreakdown 自带表头"上下文占用分析(窗口 {0})",拼装
+        // 规则在 cli 层(批 5a 领地外),原样逐行落盘。
         for (const auto& line : lines) {
             TermOut() << line << "\n";
         }
@@ -194,242 +263,264 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         if (context_tracker.ShouldAutoCompact()) {
             TermOut() << tr("cmd.context.compact_hint") << "\n";
         }
+        // 占用卡片与其后各组分界:旧"── 组名 ──"手拼横线批 5a 收口——组名
+        // 进 frame 框顶标题(下各组),卡片尾部垫一条 divider::line(批 0
+        // 约定;plain 退 Ascii,探测不到宽时不画)。
+        EmitGroupDivider(theme);
 
         // 缓存卡片(第二组):前缀 epoch 与最近一次请求的命中率。
         // 命中跌下去时,用户看得出是主动换了哪根梁(epoch 断因在回合统计
         // 行/逐步流水账里),不再笼统赖服务端。没实测过就明说。
         if (context_tracker.last_total_input_tokens() > 0) {
-            TermOut() << "\n── " << trf("cmd.context.group.cache") << " ──\n";
+            std::vector<frame::Field> cache_fields;
             const int hit_percent = context_tracker.last_cache_hit_percent();
-            TermOut() << "  " << trf("cmd.context.epoch", cache_epoch,
-                                     lubancode::cli::FormatTokenCount(context_tracker.last_cache_read_tokens()),
-                                     lubancode::cli::FormatTokenCount(context_tracker.last_total_input_tokens()),
-                                     hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?"))
-                      << "\n";
+            cache_fields.push_back(SentenceField(
+                trf("cmd.context.epoch", cache_epoch,
+                    lubancode::cli::FormatTokenCount(context_tracker.last_cache_read_tokens()),
+                    lubancode::cli::FormatTokenCount(context_tracker.last_total_input_tokens()),
+                    hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?"))));
             // 前缀缓存守恒单 §五 D:epoch 只数本地前缀断点(压缩/换梁也算),
             // 不等于服务端缓存失效次数;本地指纹稳定也不保证服务端命中——
             // 命中以 provider usage 为准,不写成确定承诺。
-            TermOut() << "  " << tr("cmd.context.epoch_note") << "\n";
+            cache_fields.push_back(
+                SentenceField(tr("cmd.context.epoch_note"), frame::FieldAccent::Muted));
             // 会话累计总账:Σ命中 / Σ输入。跟单轮口径分开,并明确标注
             // "会话累计"——它回答"整个 session 发了多少输入、多少走了
             // 缓存读",不是"每轮都这么多"。
             if (context_tracker.session_input_total() > 0) {
                 const int session_percent = context_tracker.session_cache_hit_percent();
-                TermOut() << "  "
-                          << trf("cmd.context.cache_session",
-                                 lubancode::cli::FormatTokenCount(context_tracker.session_cache_read_total()),
-                                 lubancode::cli::FormatTokenCount(context_tracker.session_input_total()),
-                                 session_percent >= 0 ? std::to_string(session_percent) : std::string("?"))
-                          << "\n";
+                cache_fields.push_back(SentenceField(
+                    trf("cmd.context.cache_session",
+                        lubancode::cli::FormatTokenCount(context_tracker.session_cache_read_total()),
+                        lubancode::cli::FormatTokenCount(context_tracker.session_input_total()),
+                        session_percent >= 0 ? std::to_string(session_percent) : std::string("?"))));
             }
+            EmitFrameLines(frame::RenderKeyValues(trf("cmd.context.group.cache"), cache_fields, theme,
+                                                  frame::Light(), SessionFrameWidth()));
             // 逐请求命中率趋势(问题 5):一行是一次模型请求(不是用户轮),
             // 按外层用户轮次分组,上限/总数/未回报全说破——拼装在
-            // BuildCacheRequestHistoryLines(纯函数,单测钉)。
+            // BuildCacheRequestHistoryLines(纯函数,单测钉),cli 层行原样。
             for (const std::string& line : lubancode::cli::BuildCacheRequestHistoryLines(context_tracker)) {
                 TermOut() << line << "\n";
             }
         }
 
-        // 口径说明(挂在占用卡片末尾,不再散落):状态栏与这里读的是同一只
+        // 口径说明 + 校准(无组名小节,无标题框):状态栏与这里读的是同一只
         // tracker,都是"最近一次主请求的占用",不是会话累计花销,也不含
         // 独立子代理的 token。最近一次请求没带回 usage 时再补一行旧值提醒。
-        {
-            TermOut() << "\n" << tr("cmd.context.note.semantics") << "\n";
-            if (context_tracker.usage_stale()) {
-                TermOut() << tr("cmd.context.note.stale") << "\n";
-            }
-        }
-
-        // token 估算校准行(token 估算校准单):上面三类估算数字的定盘星
-        //——多少对样本、tokens/byte 比率、默认尺偏差几何。样本不足两对
-        // 显示"未校准",估算全按默认口径,如实说破,不装准。
+        // token 估算校准行(校准单):上面三类估算数字的定盘星——多少对
+        // 样本、tokens/byte 比率、默认尺偏差几何。样本不足两对显示"未校
+        // 准",估算全按默认口径,如实说破,不装准。
         // v3 会话(V3-REAL-03):主路消费 utf8_bytes_div4、不记校准样本、
         // 不乘在线系数——校准行只属于 v2 口径,v3 明说自己的尺,不把进程
         // 级校准器里别处(v2 旁路/子代理)记下的系数拿来充数。
-        if (session_facts.v3_session) {
-            TermOut() << "  " << tr("cmd.context.v3_estimator") << "\n";
-        } else if (token_calibration != nullptr) {
-            if (token_calibration->calibrated) {
-                TermOut() << "  "
-                          << trf("cmd.context.calibration", token_calibration->sample_count,
-                                 FormatTokensPerByte(token_calibration->tokens_per_byte),
-                                 FormatEstimateDeviation(token_calibration->estimate_deviation_percent),
-                                 FormatCalibrationCoefficient(token_calibration->coefficient))
-                          << "\n";
-            } else {
-                TermOut() << "  " << tr("cmd.context.calibration_none") << "\n";
+        {
+            std::vector<frame::Field> note_fields;
+            note_fields.push_back(
+                SentenceField(tr("cmd.context.note.semantics"), frame::FieldAccent::Muted));
+            if (context_tracker.usage_stale()) {
+                note_fields.push_back(
+                    SentenceField(tr("cmd.context.note.stale"), frame::FieldAccent::Muted));
             }
+            if (session_facts.v3_session) {
+                note_fields.push_back(
+                    SentenceField(tr("cmd.context.v3_estimator"), frame::FieldAccent::Muted));
+            } else if (token_calibration != nullptr) {
+                if (token_calibration->calibrated) {
+                    note_fields.push_back(SentenceField(
+                        trf("cmd.context.calibration", token_calibration->sample_count,
+                            FormatTokensPerByte(token_calibration->tokens_per_byte),
+                            FormatEstimateDeviation(token_calibration->estimate_deviation_percent),
+                            FormatCalibrationCoefficient(token_calibration->coefficient))));
+                } else {
+                    note_fields.push_back(
+                        SentenceField(tr("cmd.context.calibration_none"), frame::FieldAccent::Muted));
+                }
+            }
+            EmitFrameLines(
+                frame::RenderKeyValues({}, note_fields, theme, frame::Light(), SessionFrameWidth()));
         }
 
         // 结构与回收卡片(第三组):分层占用、回收字节、最近 compact——
         // "原文还能去哪找、token 花在哪、何时会压"一张单子。
-        if (layers != nullptr || deferred_tool_summary != nullptr) {
-            TermOut() << "\n── " << trf("cmd.context.group.structure") << " ──\n";
-        }
-        // deferred_tool_mode(动态工具 PromptCache 守恒单 P0 起;P1 补
-        // proxy_reference 档,P3 补 native_reference 档):如实展示当前这一
-        // 档。proxy 路提示"发现走 tool_search、调用走 tool_invoke,前缀不断";
-        // native 路提示"发现走 provider 服务端搜索、defer_loading 保前缀";
-        // legacy 路照旧提示断前缀(cache-hostile 兼容路)。
-        if (deferred_tool_summary != nullptr) {
-            TermOut() << "  "
-                      << trf("cmd.context.deferred_tool_mode", deferred_tool_summary->mode_label,
-                             deferred_tool_summary->pending, deferred_tool_summary->total)
-                      << "\n";
-            if (deferred_tool_summary->enabled) {
-                TermOut() << tr(deferred_tool_summary->mode_label == "proxy_reference"
-                                    ? "cmd.context.deferred_tool_mode.proxy_hint"
-                                    : deferred_tool_summary->mode_label == "native_reference"
-                                          ? "cmd.context.deferred_tool_mode.native_hint"
-                                          : "cmd.context.deferred_tool_mode.legacy_hint")
-                          << "\n";
+        {
+            std::vector<frame::Field> fields;
+            // deferred_tool_mode(动态工具 PromptCache 守恒单 P0 起;P1 补
+            // proxy_reference 档,P3 补 native_reference 档):如实展示当前这
+            // 一档。proxy 路提示"发现走 tool_search、调用走 tool_invoke,前
+            // 缀不断";native 路提示"发现走 provider 服务端搜索、
+            // defer_loading 保前缀";legacy 路照旧提示断前缀(cache-hostile
+            // 兼容路)。
+            if (deferred_tool_summary != nullptr) {
+                fields.push_back(SentenceField(
+                    trf("cmd.context.deferred_tool_mode", deferred_tool_summary->mode_label,
+                        deferred_tool_summary->pending, deferred_tool_summary->total)));
+                if (deferred_tool_summary->enabled) {
+                    fields.push_back(SentenceField(
+                        tr(deferred_tool_summary->mode_label == "proxy_reference"
+                               ? "cmd.context.deferred_tool_mode.proxy_hint"
+                               : deferred_tool_summary->mode_label == "native_reference"
+                                     ? "cmd.context.deferred_tool_mode.native_hint"
+                                     : "cmd.context.deferred_tool_mode.legacy_hint"),
+                        frame::FieldAccent::Muted));
+                }
             }
-        }
-        if (session_facts.has_result_store_stats) {
-            // v3 结果仓(V3-REAL-A02):工具结果在提交边界存盘(res-*),模型
-            // 侧收预算内预览——"已保存但当前仍以预览/inline 进模型"如实
-            // 说,不笼统写没落盘;原文追回走预览里的绝对路径 + read_file
-            // (T17:旧 context_search/context_read 口径已退役)。
-            if (session_facts.result_store_results > 0) {
-                TermOut() << "  "
-                          << trf("cmd.context.v3_result_store", session_facts.result_store_results,
-                                 session_facts.result_store_bytes)
-                          << "\n";
-            } else {
-                TermOut() << "  " << tr("cmd.context.v3_result_store_none") << "\n";
+            if (session_facts.has_result_store_stats) {
+                // v3 结果仓(V3-REAL-A02):工具结果在提交边界存盘(res-*),
+                // 模型侧收预算内预览——"已保存但当前仍以预览/inline 进模
+                // 型"如实说,不笼统写没落盘;原文追回走预览里的绝对路径 +
+                // read_file(T17:旧 context_search/context_read 口径已退役)。
+                if (session_facts.result_store_results > 0) {
+                    fields.push_back(SentenceField(
+                        trf("cmd.context.v3_result_store", session_facts.result_store_results,
+                            session_facts.result_store_bytes)));
+                } else {
+                    fields.push_back(SentenceField(tr("cmd.context.v3_result_store_none")));
+                }
             }
-        }
-        if (session_facts.v3_session) {
-            // v3 会话:结构压缩层未启用(预览在工具结果提交边界定形,请求
-            // 视图原样重放)——inline/artifact 的旧统计口径没有数据源,明说
-            // 而不是打两枚 0 冒充(A02 探账:CompressWorkingView 被短路,
-            // memo/stats 恒空)。
-            TermOut() << "  " << tr("cmd.context.v3_layers_off") << "\n";
-            if (layers != nullptr && !layers->last_compact_line.empty()) {
-                TermOut() << "  " << trf("cmd.context.last_compact", layers->last_compact_line) << "\n";
+            if (session_facts.v3_session) {
+                // v3 会话:结构压缩层未启用(预览在工具结果提交边界定形,请
+                // 求视图原样重放)——inline/artifact 的旧统计口径没有数据源,
+                // 明说而不是打两枚 0 冒充(A02 探账:CompressWorkingView 被
+                // 短路,memo/stats 恒空)。
+                fields.push_back(
+                    SentenceField(tr("cmd.context.v3_layers_off"), frame::FieldAccent::Muted));
+                if (layers != nullptr && !layers->last_compact_line.empty()) {
+                    fields.push_back(
+                        SentenceField(trf("cmd.context.last_compact", layers->last_compact_line)));
+                }
+            } else if (layers != nullptr) {
+                fields.push_back(SentenceField(trf("cmd.context.layers", layers->inline_full_results,
+                                                   layers->artifact_previews)));
+                if (layers->reclaimable_bytes > 0) {
+                    fields.push_back(
+                        SentenceField(trf("cmd.context.reclaimable", layers->reclaimable_bytes)));
+                }
+                if (!layers->last_compact_line.empty()) {
+                    fields.push_back(
+                        SentenceField(trf("cmd.context.last_compact", layers->last_compact_line)));
+                }
             }
-        } else if (layers != nullptr) {
-            TermOut() << "  " << trf("cmd.context.layers", layers->inline_full_results,
-                                     layers->artifact_previews)
-                      << "\n";
-            if (layers->reclaimable_bytes > 0) {
-                TermOut() << "  " << trf("cmd.context.reclaimable", layers->reclaimable_bytes) << "\n";
-            }
-            if (!layers->last_compact_line.empty()) {
-                TermOut() << "  " << trf("cmd.context.last_compact", layers->last_compact_line) << "\n";
+            if (!fields.empty()) {
+                EmitFrameLines(frame::RenderKeyValues(trf("cmd.context.group.structure"), fields, theme,
+                                                      frame::Light(), SessionFrameWidth()));
             }
         }
 
-        // 预算与角色账卡片(第四组):输出上限、预算总账、开销明细、压缩预算、
-        // 分角色 usage 台账——模型分工各归各的账,一眼见底。
-        if (main_profile != nullptr || layers != nullptr || usage_ledger != nullptr) {
-            TermOut() << "\n── " << trf("cmd.context.group.budget") << " ──\n";
-        }
-        // 输出上限与来源(规格根因一):本轮每份请求给模型留的输出空间,
-        // unset 也说破——"交服务端默认"比一枚看不见的 4096 诚实。
-        if (main_profile != nullptr) {
-            if (main_profile->max_output_tokens.has_value()) {
-                TermOut() << "  " << trf("cmd.context.output_budget", *main_profile->max_output_tokens,
-                                         app::OutputBudgetSourceText(main_profile->max_output_tokens_source, false))
-                          << "\n";
-            } else {
-                TermOut() << "  " << tr("cmd.context.output_budget_unset") << "\n";
-            }
-        }
-        // 最近请求的冻结预算(V3-REAL-08):历史实报(context_tracker 的
-        // usage 卡)、当前估算(上面三类)、配置声明(上一行)之外,把最近
-        // 一次请求实际定形的预算分栏说清——声明 524288 / 策略预留 32768 /
-        // 实发限额 511635 三枚值各有其名,不再混作一个"预留"。本场还没发
-        // 过请求就明说,不拿今天现算冒充昨日请求。
-        if (session_facts.last_request_budget != nullptr) {
-            const auto& budget = *session_facts.last_request_budget;
-            TermOut() << "  "
-                      << trf("cmd.context.last_request_budget",
-                             lubancode::cli::FormatTokenCount(
-                                 static_cast<std::int64_t>(budget.context_window_tokens)),
-                             budget.declared_max_output_tokens > 0
-                                 ? lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(
-                                       budget.declared_max_output_tokens))
-                                 : std::string("unset"),
-                             lubancode::cli::FormatTokenCount(
-                                 static_cast<std::int64_t>(budget.policy_reserve_tokens)),
-                             lubancode::cli::FormatTokenCount(
-                                 static_cast<std::int64_t>(budget.final_reserve_tokens)),
-                             budget.effective_output_limit_tokens > 0
-                                 ? lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(
-                                       budget.effective_output_limit_tokens))
-                                 : std::string("unset"))
-                      << "\n";
-        } else {
-            TermOut() << "  " << tr("cmd.context.last_request_budget_none") << "\n";
-        }
-        // compact turn 策略(§八):compact_partition_count 配成几份、前几份
-        // map、末份热区,一行说清——不调模型,纯配置展示。
-        if (compact_partition_count > 0) {
-            TermOut() << "  "
-                      << trf("cmd.context.compact_turns", compact_partition_count,
-                             compact_partition_count - 1)
-                      << "\n";
-        }
-        if (layers != nullptr && layers->budget.has_value()) {
-            const auto& plan = *layers->budget;
-            TermOut() << "  " << trf("cmd.context.budget", plan.window,
-                                     plan.compactable_history_budget.has_value()
-                                         ? lubancode::cli::FormatTokenCount(*plan.compactable_history_budget)
-                                         : std::string("?"),
-                                     lubancode::cli::FormatTokenCount(plan.overhead_total()))
-                      << "\n";
-            TermOut() << "  " << trf("cmd.context.budget_detail", plan.stable_system + plan.model_instructions,
-                                     plan.tool_schemas, plan.protected_hot_zone, plan.requested_output_reserve,
-                                     plan.compact_prompt_overhead + plan.protocol_headroom,
-                                     plan.tokenizer_error_margin)
-                      << "\n";
-            if (plan.compact_call_input_budget.has_value()) {
-                // v3 会话(V3-REAL-08):compact 走独立规划器(RunV3Compact 全
-                // 链,bytes/4 口径),这份 v2 公式的摘要目标不能拿来预测它——
-                // 明说"另有规划器",不冒充 v3 会真的生成这么大摘要(本场
-                // cheap 调用为 0 的教训)。
-                if (session_facts.v3_session) {
-                    TermOut() << "  " << tr("cmd.context.v3_compact_note") << "\n";
+        // 预算与角色账卡片(第四组):输出上限、预算总账、开销明细、压缩预
+        // 算、分角色 usage 台账——模型分工各归各的账,一眼见底。
+        {
+            std::vector<frame::Field> fields;
+            // 输出上限与来源(规格根因一):本轮每份请求给模型留的输出空间,
+            // unset 也说破——"交服务端默认"比一枚看不见的 4096 诚实。
+            if (main_profile != nullptr) {
+                if (main_profile->max_output_tokens.has_value()) {
+                    fields.push_back(SentenceField(
+                        trf("cmd.context.output_budget", *main_profile->max_output_tokens,
+                            app::OutputBudgetSourceText(main_profile->max_output_tokens_source, false))));
                 } else {
-                    TermOut() << "  " << trf("cmd.context.compact_budget",
-                                             lubancode::cli::FormatTokenCount(*plan.compact_call_input_budget),
-                                             lubancode::cli::FormatTokenCount(plan.summary_target_budget))
-                              << "\n";
+                    fields.push_back(SentenceField(tr("cmd.context.output_budget_unset")));
                 }
             }
-            // 下一触发线:自动压缩线(§〇.1 用户定案:窗口×80% − 压缩提示词
-            // 4k − 压缩结果预留 8k,与 ShouldAutoCompact/projected 双闸同一只
-            // AutoCompactTriggerLine)与当前占用的差,迟滞/分道在各自层里另有账。
-            const std::size_t window = context_tracker.window_tokens();
-            if (window > 0) {
-                const std::size_t line = lubancode::agent::AutoCompactTriggerLine(window);
-                const auto used = static_cast<std::int64_t>(context_tracker.current_tokens());
-                TermOut() << "  " << trf("cmd.context.next_line", lubancode::cli::FormatTokenCount(line),
-                                         used >= 0 ? lubancode::cli::FormatTokenCount(used) : std::string("0"),
-                                         used >= static_cast<std::int64_t>(line)
-                                                 ? tr("cmd.context.next_line_over")
-                                                 : lubancode::cli::FormatTokenCount(
-                                                       static_cast<std::int64_t>(line) - used))
-                          << "\n";
+            // 最近请求的冻结预算(V3-REAL-08):历史实报(context_tracker 的
+            // usage 卡)、当前估算(上面三类)、配置声明(上一行)之外,把
+            // 最近一次请求实际定形的预算分栏说清——声明 524288 / 策略预留
+            // 32768 / 实发限额 511635 三枚值各有其名,不再混作一个"预留"。
+            // 本场还没发过请求就明说,不拿今天现算冒充昨日请求。
+            if (session_facts.last_request_budget != nullptr) {
+                const auto& budget = *session_facts.last_request_budget;
+                fields.push_back(SentenceField(
+                    trf("cmd.context.last_request_budget",
+                        lubancode::cli::FormatTokenCount(
+                            static_cast<std::int64_t>(budget.context_window_tokens)),
+                        budget.declared_max_output_tokens > 0
+                            ? lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(
+                                  budget.declared_max_output_tokens))
+                            : std::string("unset"),
+                        lubancode::cli::FormatTokenCount(
+                            static_cast<std::int64_t>(budget.policy_reserve_tokens)),
+                        lubancode::cli::FormatTokenCount(
+                            static_cast<std::int64_t>(budget.final_reserve_tokens)),
+                        budget.effective_output_limit_tokens > 0
+                            ? lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(
+                                  budget.effective_output_limit_tokens))
+                            : std::string("unset"))));
+            } else {
+                fields.push_back(SentenceField(tr("cmd.context.last_request_budget_none")));
             }
-        }
-        // 分角色 usage 台账(模型分工第一期,规格"路由看得见"):普通 turn
-        // 归 normal,压缩/抽取/标题的后台采样归 cheap,回退单独留痕。
-        // 三角色固定列全(问题 6):零调用角色也露脸,写明"本场未触发 +
-        // 默认职责";回落关系与 /model roles 同一份 routes(source 同源)。
-        if (usage_ledger != nullptr) {
-            const auto role_lines = usage_ledger->ReportLines(roles_table);
-            if (!role_lines.empty()) {
-                TermOut() << "  " << tr("router.usage.header") << "\n";
-                for (const std::string& line : role_lines) {
-                    TermOut() << "    " << line << "\n";
+            // compact turn 策略(§八):compact_partition_count 配成几份、前
+            // 几份 map、末份热区,一行说清——不调模型,纯配置展示。
+            if (compact_partition_count > 0) {
+                fields.push_back(SentenceField(
+                    trf("cmd.context.compact_turns", compact_partition_count, compact_partition_count - 1)));
+            }
+            if (layers != nullptr && layers->budget.has_value()) {
+                const auto& plan = *layers->budget;
+                fields.push_back(SentenceField(
+                    trf("cmd.context.budget", plan.window,
+                        plan.compactable_history_budget.has_value()
+                            ? lubancode::cli::FormatTokenCount(*plan.compactable_history_budget)
+                            : std::string("?"),
+                        lubancode::cli::FormatTokenCount(plan.overhead_total()))));
+                fields.push_back(SentenceField(
+                    trf("cmd.context.budget_detail", plan.stable_system + plan.model_instructions,
+                        plan.tool_schemas, plan.protected_hot_zone, plan.requested_output_reserve,
+                        plan.compact_prompt_overhead + plan.protocol_headroom,
+                        plan.tokenizer_error_margin)));
+                if (plan.compact_call_input_budget.has_value()) {
+                    // v3 会话(V3-REAL-08):compact 走独立规划器(RunV3Compact
+                    // 全链,bytes/4 口径),这份 v2 公式的摘要目标不能拿来预
+                    // 测它——明说"另有规划器",不冒充 v3 会真的生成这么大
+                    // 摘要(本场 cheap 调用为 0 的教训)。
+                    if (session_facts.v3_session) {
+                        fields.push_back(
+                            SentenceField(tr("cmd.context.v3_compact_note"), frame::FieldAccent::Muted));
+                    } else {
+                        fields.push_back(SentenceField(
+                            trf("cmd.context.compact_budget",
+                                lubancode::cli::FormatTokenCount(*plan.compact_call_input_budget),
+                                lubancode::cli::FormatTokenCount(plan.summary_target_budget))));
+                    }
+                }
+                // 下一触发线:自动压缩线(§〇.1 用户定案:窗口×80% − 压缩提
+                // 示词 4k − 压缩结果预留 8k,与 ShouldAutoCompact/projected 双
+                // 闸同一只 AutoCompactTriggerLine)与当前占用的差,迟滞/分道
+                // 在各自层里另有账。
+                const std::size_t window = context_tracker.window_tokens();
+                if (window > 0) {
+                    const std::size_t line = lubancode::agent::AutoCompactTriggerLine(window);
+                    const auto used = static_cast<std::int64_t>(context_tracker.current_tokens());
+                    fields.push_back(SentenceField(
+                        trf("cmd.context.next_line", lubancode::cli::FormatTokenCount(line),
+                            used >= 0 ? lubancode::cli::FormatTokenCount(used) : std::string("0"),
+                            used >= static_cast<std::int64_t>(line)
+                                ? tr("cmd.context.next_line_over")
+                                : lubancode::cli::FormatTokenCount(
+                                      static_cast<std::int64_t>(line) - used))));
                 }
             }
-            if (!usage_ledger->fallback_notes().empty()) {
-                TermOut() << "  " << tr("router.usage.fallback_header") << "\n";
-                for (const std::string& note : usage_ledger->fallback_notes()) {
-                    TermOut() << "    " << note << "\n";
+            if (!fields.empty()) {
+                EmitFrameLines(frame::RenderKeyValues(trf("cmd.context.group.budget"), fields, theme,
+                                                      frame::Light(), SessionFrameWidth()));
+            }
+            // 分角色 usage 台账(模型分工第一期,规格"路由看得见"):普通
+            // turn 归 normal,压缩/抽取/标题的后台采样归 cheap,回退单独留
+            // 痕。三角色固定列全(问题 6):零调用角色也露脸,写明"本场未触
+            // 发 + 默认职责";回落关系与 /model roles 同一份 routes(source
+            // 同源)。ReportLines 是 cli 层既有行,原样。
+            if (usage_ledger != nullptr) {
+                const auto role_lines = usage_ledger->ReportLines(roles_table);
+                if (!role_lines.empty()) {
+                    TermOut() << tr("router.usage.header") << "\n";
+                    for (const std::string& line : role_lines) {
+                        TermOut() << line << "\n";
+                    }
+                }
+                if (!usage_ledger->fallback_notes().empty()) {
+                    TermOut() << tr("router.usage.fallback_header") << "\n";
+                    for (const std::string& note : usage_ledger->fallback_notes()) {
+                        TermOut() << note << "\n";
+                    }
                 }
             }
         }
@@ -625,48 +716,54 @@ public:
 };
 
 // T12-B:干跑数字的打印(只报结构可回收量,不编造摘要实际 token)。
+// TUI 排版批 5a:进键值对框,标题=干跑首句,句内冒号按 SentenceField 拆列。
 void PrintV3CompactDryRun(const lubancode::runtime::V3CompactRunResult& result,
                           const lubancode::agent::CompactOptions& options,
                           const lubancode::cli::Theme& theme) {
-    auto& out = lubancode::cli::TermOut();
-    out << theme.stats << "v3 compact 干跑(只算不压;未发请求、未动上下文)" << theme.reset << "\n";
+    std::vector<frame::Field> fields;
     if (result.terminal_kind == "rejected") {
-        out << theme.error << "按当前口径真压会被拒:" << result.reason << theme.reset << "\n";
+        fields.push_back(SentenceField("按当前口径真压会被拒: " + result.reason,
+                                       frame::FieldAccent::Error));
     }
-    out << "  压缩前上下文(估算): " << lubancode::cli::FormatTokenCount(result.tokens_before)
-        << " tokens(bytes/4)\n";
-    out << "  可压范围: " << result.removed_messages << " 条消息,~"
-        << lubancode::cli::FormatTokenCount(result.removed_tokens)
-        << " tokens";
-    if (!result.removed_turns.empty()) {
-        out << "(" << result.removed_turns.front();
-        if (result.removed_turns.size() > 1) {
-            out << " … " << result.removed_turns.back();
+    fields.push_back(SentenceField("压缩前上下文(估算): " +
+                                       lubancode::cli::FormatTokenCount(result.tokens_before) +
+                                       " tokens(bytes/4)"));
+    {
+        std::ostringstream row;
+        row << "可压范围: " << result.removed_messages << " 条消息,~"
+            << lubancode::cli::FormatTokenCount(result.removed_tokens) << " tokens";
+        if (!result.removed_turns.empty()) {
+            row << "(" << result.removed_turns.front();
+            if (result.removed_turns.size() > 1) {
+                row << " … " << result.removed_turns.back();
+            }
+            row << ")";
         }
-        out << ")";
+        fields.push_back(SentenceField(row.str()));
     }
-    out << "\n";
-    out << "  保留尾部: " << result.retained_messages << " 条消息(受保护轮 "
-        << (result.protected_turns.empty()
-                ? std::string("无")
-                : std::to_string(result.protected_turns.size()))
-        << " 只)\n";
+    fields.push_back(SentenceField(
+        "保留尾部: " + std::to_string(result.retained_messages) + " 条消息(受保护轮 " +
+        (result.protected_turns.empty() ? std::string("无")
+                                        : std::to_string(result.protected_turns.size())) +
+        " 只)"));
     if (!result.step_scope.empty()) {
-        out << "  容量恢复会动当前轮闭合旧 step: " << result.step_scope.dump() << "\n";
+        fields.push_back(
+            SentenceField("容量恢复会动当前轮闭合旧 step: " + result.step_scope.dump()));
     }
     if (result.window_unknown) {
-        out << "  " << tr("cmd.compact.window_unknown") << "\n";
+        fields.push_back(SentenceField(tr("cmd.compact.window_unknown"), frame::FieldAccent::Muted));
     } else if (result.gate_checked) {
-        out << "  发送前门禁: 估算输入 "
-            << lubancode::cli::FormatTokenCount(result.estimated_input_tokens) << " / 预算 "
-            << lubancode::cli::FormatTokenCount(result.gate_budget_tokens)
-            << "(窗口 " << lubancode::cli::FormatTokenCount(options.budget.window_tokens.value_or(0))
-            << " − 输出预留 " << options.budget.output_reserve_tokens << " − 余量 "
-            << options.budget.protocol_headroom_tokens << ")";
+        std::ostringstream row;
+        row << "发送前门禁: 估算输入 " << lubancode::cli::FormatTokenCount(result.estimated_input_tokens)
+            << " / 预算 " << lubancode::cli::FormatTokenCount(result.gate_budget_tokens) << "(窗口 "
+            << lubancode::cli::FormatTokenCount(options.budget.window_tokens.value_or(0)) << " − 输出预留 "
+            << options.budget.output_reserve_tokens << " − 余量 " << options.budget.protocol_headroom_tokens
+            << ")";
         if (result.retreat_steps > 0) {
-            out << " → 装不下,需回退 " << result.retreat_steps << " 步";
+            row << " → 装不下,需回退 " << result.retreat_steps << " 步";
         }
-        out << (result.fits_budget ? " → 装得下" : " → 仍装不下") << "\n";
+        row << (result.fits_budget ? " → 装得下" : " → 仍装不下");
+        fields.push_back(SentenceField(row.str()));
     }
     // 签名/加密思考载荷的兼容决策与窗口未知是两笔账,分行如实报:
     // 干跑与实跑吃同一份判定。
@@ -678,13 +775,16 @@ void PrintV3CompactDryRun(const lubancode::runtime::V3CompactRunResult& result,
                    lubancode::runtime::V3CompactReplaySupport::Unsupported) {
             key = "cmd.compact.replay_note_unsupported";
         }
-        out << "  " << theme.stats << tr(key) << theme.reset << "\n";
+        fields.push_back(SentenceField(tr(key), frame::FieldAccent::Stats));
     }
-    out << "  输出预留: " << options.budget.output_reserve_tokens
-        << " tokens;以上均为结构可回收量估算,摘要实际 token 须真压才可知。\n";
+    fields.push_back(SentenceField(
+        std::string("输出预留: ") + std::to_string(options.budget.output_reserve_tokens) +
+        " tokens;以上均为结构可回收量估算,摘要实际 token 须真压才可知。"));
     for (const std::string& note : result.notes) {
-        out << "  " << theme.stats << note << theme.reset << "\n";
+        fields.push_back(SentenceField(note, frame::FieldAccent::Stats));
     }
+    EmitFrameLines(frame::RenderKeyValues("v3 compact 干跑(只算不压;未发请求、未动上下文)",
+                                          fields, theme, frame::Light(), SessionFrameWidth()));
 }
 
 // T12-E(V3-GAP-07):AfterHardTrim 的 v3 收口——hard trim 动了刀,把损失
@@ -704,7 +804,6 @@ void PrintV3CompactDryRun(const lubancode::runtime::V3CompactRunResult& result,
 // 某枚在新档装不下(preview_unrepresentable)则整次降档不做(fail
 // closed——保命索对本次请求已兜底,后续请求仍按旧档发,不硬塞残次品)。
 void ReduceV3ToolPreviewsAfterHardTrim(const CompactSessionInputs& in) {
-    auto& out = lubancode::cli::TermOut();
     const lubancode::cli::Theme& theme = *in.theme;
     lubancode::runtime::TrajectorySessionLedger* ledger = in.trajectory;
     lubancode::trajectory::v3::V3Writer* writer = ledger->v3_main_writer();
@@ -719,16 +818,15 @@ void ReduceV3ToolPreviewsAfterHardTrim(const CompactSessionInputs& in) {
         }
     }
     if (next_budget == 0) {
-        out << theme.stats << "工具预览已在最低档 " << current_budget
-            << " bytes,降档梯已尽;本次截断仅为请求视图的保命索,后续请求仍按最低档"
-               "的失败门槛收口(预览装不下即明败,不静默放行全文)。"
-            << theme.reset << "\n";
+        PrintNotice(theme, {"工具预览已在最低档 " + std::to_string(current_budget) +
+                            " bytes,降档梯已尽;本次截断仅为请求视图的保命索,后续请求仍按最低档"
+                            "的失败门槛收口(预览装不下即明败,不静默放行全文)。"});
         return;
     }
     auto ledger_or = lubancode::trajectory::v3::ReadV3Ledger(writer->path());
     if (!ledger_or.has_value()) {
-        out << theme.error << "工具预览降档读不了账(" << ledger_or.error() << "),本次未提交降档。"
-            << theme.reset << "\n";
+        PrintNotice(theme, {"工具预览降档读不了账(" + ledger_or.error() + "),本次未提交降档。"},
+                    frame::FieldAccent::Error);
         return;
     }
     const std::filesystem::path session_dir = writer->path().parent_path();
@@ -764,15 +862,16 @@ void ReduceV3ToolPreviewsAfterHardTrim(const CompactSessionInputs& in) {
             }
         }
         if (metadata_path.empty()) {
-            out << theme.error << "工具预览降档取不到结果原文(" << line->message_id
-                << " 的选用链缺 result_metadata),本次未提交降档。" << theme.reset << "\n";
+            PrintNotice(theme, {"工具预览降档取不到结果原文(" + line->message_id +
+                                " 的选用链缺 result_metadata),本次未提交降档。"},
+                        frame::FieldAccent::Error);
             return;
         }
         std::ifstream metadata_file(session_dir / lubancode::tools::Utf8ToPath(metadata_path),
                                      std::ios::binary);
         if (!metadata_file.is_open()) {
-            out << theme.error << "工具预览降档读不了结果仓描述(" << metadata_path
-                << "),本次未提交降档。" << theme.reset << "\n";
+            PrintNotice(theme, {"工具预览降档读不了结果仓描述(" + metadata_path + "),本次未提交降档。"},
+                        frame::FieldAccent::Error);
             return;
         }
         std::string metadata_text((std::istreambuf_iterator<char>(metadata_file)),
@@ -781,8 +880,8 @@ void ReduceV3ToolPreviewsAfterHardTrim(const CompactSessionInputs& in) {
             nlohmann::json::parse(metadata_text, nullptr, /*allow_exceptions=*/false);
         if (metadata.is_discarded() || !metadata.is_object() || !metadata.contains("outputs") ||
             !metadata["outputs"].is_array()) {
-            out << theme.error << "工具预览降档的结果仓描述不可解析(" << metadata_path
-                << "),本次未提交降档。" << theme.reset << "\n";
+            PrintNotice(theme, {"工具预览降档的结果仓描述不可解析(" + metadata_path + "),本次未提交降档。"},
+                        frame::FieldAccent::Error);
             return;
         }
         lubancode::trajectory::v3::PreviewRequest preview_request;
@@ -819,9 +918,9 @@ void ReduceV3ToolPreviewsAfterHardTrim(const CompactSessionInputs& in) {
         const auto preview = lubancode::trajectory::v3::BuildToolPreview(preview_request);
         if (preview.preview_unrepresentable || preview.listing_overflow ||
             preview.text.size() > next_budget) {
-            out << theme.error << "工具预览降到 " << next_budget
-                << " bytes 装不下必要来源(" << line->message_id
-                << "),本次未提交降档——最低档失败门槛不放宽。" << theme.reset << "\n";
+            PrintNotice(theme, {"工具预览降到 " + std::to_string(next_budget) + " bytes 装不下必要来源(" +
+                                line->message_id + "),本次未提交降档——最低档失败门槛不放宽。"},
+                        frame::FieldAccent::Error);
             return;
         }
         hash_material += line->message_id;
@@ -860,24 +959,25 @@ void ReduceV3ToolPreviewsAfterHardTrim(const CompactSessionInputs& in) {
         next_budget, lubancode::hooks::Sha256Hex(hash_material), tokens_before, tokens_after,
         replacements, pairing_refs);
     if (!reduced.ok) {
-        out << theme.error << "工具预览降档提交失败(" << reduced.error << ");本次请求已按硬截断视图"
-            << "发出,链未动,下次仍按 " << current_budget << " bytes 档发。" << theme.reset << "\n";
+        PrintNotice(theme, {"工具预览降档提交失败(" + reduced.error + ");本次请求已按硬截断视图" +
+                            "发出,链未动,下次仍按 " + std::to_string(current_budget) + " bytes 档发。"},
+                    frame::FieldAccent::Error);
         return;
     }
     // 换账:与 compact applied 同一安全点(投影重读验卷,读回即确认)。
     auto swapped = ledger->ProjectV3ContextHistory();
     if (swapped.has_value()) {
         in.agent->ReplaceHistory(std::move(*swapped));
-        out << theme.stats << "工具预览已降档提交(" << current_budget << " → " << next_budget
-            << " bytes," << replacements.size() << " 枚派生版本,原 artifact 未动);后续请求按新档发。"
-            << theme.reset << "\n";
+        PrintNotice(theme, {"工具预览已降档提交(" + std::to_string(current_budget) + " → " +
+                            std::to_string(next_budget) + " bytes," + std::to_string(replacements.size()) +
+                            " 枚派生版本,原 artifact 未动);后续请求按新档发。"});
     } else {
         // T12-A 同款纪律:链已提交、内存换账失败——设置会话级执行阻断,
         // 话术照实,不带病继续发。
         ledger->BlockV3Execution(swapped.error());
-        out << theme.error << "预览降档已提交,运行态未恢复(" << swapped.error()
-            << ");本场已停止后续模型请求,已提交链原样保留——请 /resume 沿已提交链重开。"
-            << theme.reset << "\n";
+        PrintNotice(theme, {"预览降档已提交,运行态未恢复(" + swapped.error() +
+                            ");本场已停止后续模型请求,已提交链原样保留——请 /resume 沿已提交链重开。"},
+                    frame::FieldAccent::Error);
     }
 }
 

@@ -270,7 +270,7 @@ TEST_CASE("/send 与 /peerperm 状态账:off 档、空名册、权限档切换")
     // 没起服务:/send /peerperm 只说明一句,不碰任何状态。
     PeerCommandState off{idle_runtime, false, ready, held};
     CHECK(HandleSendCommand(off, "alpha 在吗", theme) == CommandFlow::Continue);
-    CHECK(HandlePeerpermCommand(off, "hold") == CommandFlow::Continue);
+    CHECK(HandlePeerpermCommand(off, "hold", theme) == CommandFlow::Continue);
     CHECK(HandlePeersCommand(off, theme, false) == CommandFlow::Continue);
 
     // 起真服务(临时名册目录):空名册里 /send 找不到人;权限档可设可查。
@@ -287,11 +287,11 @@ TEST_CASE("/send 与 /peerperm 状态账:off 档、空名册、权限档切换")
     PeerCommandState on{idle_runtime, true, ready, held};
     CHECK(HandleSendCommand(on, "who-is-this 你好", theme) == CommandFlow::Continue);  // 名册没人
     CHECK(HandleSendCommand(on, "no-space", theme) == CommandFlow::Continue);          // 缺正文
-    CHECK(HandlePeerpermCommand(on, "hold") == CommandFlow::Continue);
+    CHECK(HandlePeerpermCommand(on, "hold", theme) == CommandFlow::Continue);
     CHECK(idle_runtime->tier() == lubancode::peers::PeerPermissionTier::Hold);
-    CHECK(HandlePeerpermCommand(on, "refuse") == CommandFlow::Continue);
+    CHECK(HandlePeerpermCommand(on, "refuse", theme) == CommandFlow::Continue);
     CHECK(idle_runtime->tier() == lubancode::peers::PeerPermissionTier::Refuse);
-    CHECK(HandlePeerpermCommand(on, "nonsense") == CommandFlow::Continue);  // 认不出的值不改档
+    CHECK(HandlePeerpermCommand(on, "nonsense", theme) == CommandFlow::Continue);  // 认不出的值不改档
     CHECK(idle_runtime->tier() == lubancode::peers::PeerPermissionTier::Refuse);
 
     idle_runtime->Stop();
