@@ -1,11 +1,19 @@
-// TUI 排版批 7:`lubancode trajectory usage` 的输出形状册。
-//   - 头句键值对框(标题 usage)+ 逐 session 表格(字节/文件数列右对齐)
-//     + 尾注键值对;
+// TUI 排版批 7:`lubancode trajectory` 人看分支的输出形状册。
+//   - usage:头句键值对框(标题 usage)+ 逐 session 表格(字节/文件数列
+//     右对齐)+ 尾注键值对;
+//   - gc:逐 session 表格 + dry-run 尾句键值对;
+//   - verify:头句键值对(标题 verify,未过档 Error 语义色);
+//   - 错误路径(缺 key/找不到 session)走 stderr 原样,一字不动;
 //   - plain 零转义、无框;dark 有框角。
 //
-// RunUsageReport 吃已解析的 workspace 目录(直调,零全局状态)。gc 档
-// 拆去 test_trajectory_gc_frame(该册在 macos-clang 上 Bus error,拆册
-// 二分定位崩点);verify/缺 key 全流程两 case 也已拆下(真机未验)。
+// RunUsageReport/RunGc 吃已解析的 workspace 目录(直调,零全局状态);
+// RunTrajectoryCommand 走 trajectories_root 注入临时树。verify 绿档/
+// replay/export 要真 Journal 账,本册不造(真机未验),只钉可控形状。
+//
+// 崩点复盘:首轮版本 OutputCapture 的 out()/err() 返回 const string&
+// 绑定 ostringstream::str() 的局部临时,调用方拷贝即悬垂 UB——macos
+// clang 落 SIGBUS(clang -Wreturn-stack-address 点名),其余平台碰巧活。
+// 已改按值返回。
 
 #include <doctest/doctest.h>
 
@@ -28,13 +36,13 @@ namespace fs = std::filesystem;
 
 class OutputCapture {
 public:
-    // 双流都截:stdout 钉 frame 形状,stderr 钉错误行原样。
-    OutputCapture() {
-        cli::TermPort().Redirect(&out_, &err_);
-    }
+    // 双流都截:stdout 钉 frame 形状,stderr 钉错误行原样。out()/err()
+    // 按值返回——str() 出来的是临时,绑引用即悬垂(macos-clang 实锤
+    // SIGBUS,见册头复盘)。
+    OutputCapture() { cli::TermPort().Redirect(&out_, &err_); }
     ~OutputCapture() { cli::TermPort().Reset(); }
-    const std::string& out() const { return out_.str(); }
-    const std::string& err() const { return err_.str(); }
+    std::string out() const { return out_.str(); }
+    std::string err() const { return err_.str(); }
 
 private:
     std::ostringstream out_;
@@ -48,7 +56,7 @@ bool Contains(const std::string& haystack, const std::string& needle) {
 const cli::Theme dark = cli::BuiltinTheme("dark");
 const cli::Theme plain = cli::BuiltinTheme("plain");
 
-constexpr const char* kBoxTopLeft = "\xe2\x94\x8c";  // ┌
+constexpr const char* kBoxTopLeft = "┌";  // ┌
 
 fs::path TempRoot(const std::string& name) {
     const fs::path path = fs::temp_directory_path() / ("lubancode-trajectory-frame-" + name);
@@ -117,4 +125,60 @@ TEST_CASE("usage:dark 有框,表格标题 workspace <key>") {
     const std::string out = capture.out();
     CHECK(Contains(out, kBoxTopLeft));
     CHECK(Contains(out, "workspace k1"));
+}
+
+TEST_CASE("gc:dry-run 表格 + 尾句键值对,退出码 0") {
+    const fs::path root = TempRoot("gc");
+    const fs::path ws = MakeWorkspace(root);
+
+    OutputCapture capture;
+    const int code = RunGc(ws, "k1", /*derived_only=*/false);
+    CHECK(code == 0);
+    const std::string out = capture.out();
+
+    CHECK(out.find("\x1b") == std::string::npos);
+    CHECK(Contains(out, "gc"));                 // 表标题
+    CHECK(Contains(out, "s-alpha"));            // 表行
+    CHECK(Contains(out, "KiB"));                // reclaim 列值
+    CHECK(Contains(out, "dry-run 只报账;真清加 --derived-only。"));  // 尾句
+}
+
+TEST_CASE("gc:sessions 目录不在,退 1,stdout 无 frame 无转义") {
+    // 错误行走 std::cerr 直写 C 流(批 7 不动错误流),TermPort 的
+    // Redirect 截不到——文字未动由 diff 核实(PR body),这里钉退出码与
+    // stdout 面。
+    const fs::path root = TempRoot("gc-missing");
+    fs::create_directories(root / "ws-empty");
+
+    OutputCapture capture;
+    const int code = RunGc(root / "ws-empty", "k1", false);
+    CHECK(code == 1);
+    CHECK(capture.out().find("\x1b") == std::string::npos);
+}
+
+TEST_CASE("verify:空 session 目录如实未过,退 2,键值对形状") {
+    const fs::path root = TempRoot("verify");
+    fs::create_directories(root / "ws-a" / "sessions" / "s-none");
+
+    TrajectoryCommandArgs args;
+    args.verb = "verify";
+    args.session_id = "s-none";
+    args.trajectories_root = platform::PathToUtf8(root);
+    OutputCapture capture;
+    const int code = RunTrajectoryCommand(args);
+    CHECK(code == 2);
+    const std::string out = capture.out();
+    CHECK(out.find("\x1b") == std::string::npos);
+    CHECK(Contains(out, "verify"));       // 标题
+    CHECK(Contains(out, "s-none"));       // key
+    CHECK(Contains(out, "verify 未过"));  // 值
+}
+
+TEST_CASE("缺 workspace key:stderr 原样 + 退 1") {
+    TrajectoryCommandArgs args;
+    args.verb = "usage";
+    args.trajectories_root = platform::PathToUtf8(TempRoot("noid"));
+    OutputCapture capture;
+    const int code = RunTrajectoryCommand(args);
+    CHECK(code == 1);  // 错误行走 std::cerr 直写,文字未动由 diff 核实
 }

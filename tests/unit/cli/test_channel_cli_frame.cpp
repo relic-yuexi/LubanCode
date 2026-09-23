@@ -34,8 +34,8 @@ public:
     // 双流都截:setup 守门断 stderr。
     OutputCapture() { cli::TermPort().Redirect(&out_, &err_); }
     ~OutputCapture() { cli::TermPort().Reset(); }
-    const std::string& out() const { return out_.str(); }
-    const std::string& err() const { return err_.str(); }
+    std::string out() const { return out_.str(); }  // 按值:str() 是临时,绑引用即悬垂
+    std::string err() const { return err_.str(); }
 
 private:
     std::ostringstream out_;
