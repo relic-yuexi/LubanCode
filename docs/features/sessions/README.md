@@ -41,7 +41,7 @@ LubanCode 留一份只追加的 v3 会话原账，再分别投出完整聊天历
 
 ## 归档：日常收拾
 
-> **V3-GAP-09：** 归档与取消归档目前仍要求 `session.json`，默认 v3 场缺该文件会报 `session.not_found`。下列步骤仅说明旧 v2 场行为；新版生命周期待接线，见[清理清单](../../development/v3-legacy-audit.md)。
+> **V3-GAP-09（2026-09-23 复核已销项）：** T15-B 起归档/取消归档不再要求 `session.json`——v3 场归档状态落 workspace lifecycle 账，删除走四段流程加引用核验，一场只删一次。下列命令 v2/v3 场都可用；旧 `session.json` 要求只属 v2 场。销项记录见[清理清单·已销项](../../development/v3-legacy-audit.md#已销项)。
 
 不想要的场子先归档，转录仍留着：
 
