@@ -12,7 +12,7 @@
 
 #include <string>
 
-#include "cli/context_window_panel_core.hpp"
+#include "cli/context_window_panel.hpp"  // BuildContextWindowPanelFrame(纯帧拼装)
 #include "cli/i18n.hpp"
 #include "cli/panel_chrome.hpp"
 #include "cli/provider_panel_core.hpp"
