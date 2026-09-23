@@ -196,9 +196,15 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
                          ++g) {
                         lines.push_back(std::string());
                     }
-                    lines.push_back(theme.stats +
-                                    lubancode::cli::BuildDividerLine(width, options.plain, width) +
-                                    theme.reset);
+                    // 排版批 6:轮界横线收口 divider::line(与 BuildDividerLine
+                    // 同一枚字符、同一 width-1 口径),颜色走 frame_border 档
+                    // ——全仓横线同一语义色;plain 退 Ascii 零转义。
+                    lines.push_back(
+                        theme.frame_border +
+                        lubancode::cli::divider::line(options.plain ? lubancode::cli::divider::Style::Ascii
+                                                                    : lubancode::cli::divider::Style::Light,
+                                                      width - 1) +
+                        theme.reset);
                 } else if (first_printed) {
                     for (int g = 0; g < lubancode::cli::GapBetween(previous_role,
                                                                    lubancode::cli::BlockRole::UserPrompt);

@@ -13,6 +13,7 @@
 
 #include "cli/console_input.hpp"
 #include "cli/i18n.hpp"
+#include "cli/terminal_frame.hpp"  // frame::RenderList:管道路选项清单(排版批 6)
 #include "cli/terminal_port.hpp"
 #include "platform/console.hpp"
 
@@ -33,18 +34,19 @@ void PrintAskUserDeclined(const lubancode::tools::AskUserQuestion& question, con
                           const std::optional<std::string>& discussion = std::nullopt) {
     // P3(过渡批收编:ask_user 菜单渲染进调度口):回显行与工具确认菜单的
     // 显示半边同款纪律——经 RunUiSync 提交,统一提交锁内落笔;槽未接就地
-    // 直走,与旧路一字不差。
+    // 直走,与旧路一字不差。排版批 6:淡色回显走 row_muted 语义档(与旧
+    // stats 同值,零视觉变化)。
     lubancode::cli::RunUiSync([&] {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        TermOut() << theme.stats << "• " << tr("ask_user.declined") << theme.reset << "\n";
-        TermOut() << theme.stats << "  └─ " << question.question << " (";
+        TermOut() << theme.row_muted << "• " << tr("ask_user.declined") << theme.reset << "\n";
+        TermOut() << theme.row_muted << "  └─ " << question.question << " (";
         for (std::size_t i = 0; i < question.options.size(); ++i) {
             TermOut() << (i == 0 ? "" : " / ") << question.options[i].label;
         }
         TermOut() << ")" << theme.reset << "\n";
         if (discussion.has_value()) {
-            TermOut() << theme.stats << "     " << tr("ask_user.discussion_recorded") << theme.reset << " "
-                      << *discussion << "\n";
+            TermOut() << theme.row_muted << "     " << tr("ask_user.discussion_recorded") << theme.reset
+                      << " " << *discussion << "\n";
         }
         TermOut().flush();
     });
@@ -72,19 +74,29 @@ std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         TermOut() << "\n";
         if (!interactive_menu) {
-            if (!question.header.empty()) {
-                TermOut() << theme.banner << question.header << theme.reset << "\n";
-            }
+            // 管道路(排版批 6):问话原样一行,选项清单走 frame::RenderList
+            // ——标题嵌上边框(空 header 用面板默认题),编号进 label、描述
+            // 进 hint(key_hint 档)。plain 主题退无框纯文本,零转义。
             TermOut() << question.question << "\n";
+            std::vector<lubancode::cli::frame::ListRow> rows;
             for (std::size_t i = 0; i < question.options.size(); ++i) {
-                TermOut() << "  " << (i + 1) << ". " << question.options[i].label;
-                if (!question.options[i].description.empty()) {
-                    TermOut() << theme.stats << " - " << question.options[i].description << theme.reset;
-                }
-                TermOut() << "\n";
+                rows.push_back(lubancode::cli::frame::ListRow{
+                    std::to_string(i + 1) + ". " + question.options[i].label, std::string(),
+                    question.options[i].description});
             }
-            TermOut() << "  " << (question.options.size() + 1) << ". " << tr("ask_user.other") << "\n";
-            TermOut() << "  " << (question.options.size() + 2) << ". " << tr("ask_user.discuss") << "\n";
+            rows.push_back(lubancode::cli::frame::ListRow{
+                std::to_string(question.options.size() + 1) + ". " + std::string(tr("ask_user.other")),
+                std::string(), std::string()});
+            rows.push_back(lubancode::cli::frame::ListRow{
+                std::to_string(question.options.size() + 2) + ". " + std::string(tr("ask_user.discuss")),
+                std::string(), std::string()});
+            const std::string title = question.header.empty()
+                                          ? std::string(tr("ask_user.panel_title"))
+                                          : question.header;
+            for (const std::string& line :
+                 lubancode::cli::frame::RenderList(title, rows, theme, lubancode::cli::frame::Light())) {
+                TermOut() << line << "\n";
+            }
         }
         TermOut().flush();
     });
@@ -246,9 +258,11 @@ std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
 
     lubancode::cli::RunUiSync([&] {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        TermOut() << theme.banner << "✓ "
+        // 排版批 6:✓ 标题走 frame_title(与 banner 同值)、箭头注记走
+        // key_hint(与 stats 同值)——语义落位,视觉不动。
+        TermOut() << theme.frame_title << "✓ "
                   << (question.header.empty() ? tr("ask_user.panel_title") : question.header) << theme.reset
-                  << theme.stats << " ->" << theme.reset;
+                  << theme.key_hint << " ->" << theme.reset;
         for (std::size_t i = 0; i < answers.size(); ++i) {
             TermOut() << (i == 0 ? " " : ", ") << answers[i];
         }

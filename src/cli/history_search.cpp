@@ -180,7 +180,7 @@ const PromptHistoryEntry* HistorySearchSession::SelectedEntry() const {
 
 std::vector<std::string> BuildHistorySearchLines(const HistorySearchSession& session,
                                                  const std::string& query, int width,
-                                                 const std::string& highlight_stats,
+                                                 const std::string& highlight_color,
                                                  const std::string& highlight_reset) {
     std::vector<std::string> lines;
     // 首行:范围 + 可用键。键名从 keymap 反查(用户改绑后提示跟着改,
@@ -218,9 +218,10 @@ std::vector<std::string> BuildHistorySearchLines(const HistorySearchSession& ses
         std::string ts = entry.ts.size() >= 16 ? entry.ts.substr(0, 16) : entry.ts;
         std::string where = entry.title.empty() ? ProjectShortName(entry.project_key) : entry.title;
         const std::string meta = " · " + ts + (where.empty() ? std::string() : " · " + where);
-        const std::string prefix_color = selected ? highlight_stats : std::string();
+        const std::string prefix_color = selected ? highlight_color : std::string();
         const std::string reset = highlight_reset;
-        // 选中行整行着色(plain 主题色串为空,自然无 ANSI);截宽后收色。
+        // 选中行整行着色(高亮色由调用方递,批 6 起 TTY 传 confirm 焦点档,
+        // 与菜单焦点同一语义;plain 主题色串为空,自然无 ANSI);截宽后收色。
         std::string body = prefix_color + line + reset;
         const int body_width = static_cast<int>(DisplayWidthUtf8(line));
         const int meta_room = width - 2 - body_width - static_cast<int>(DisplayWidthUtf8(meta));
@@ -229,7 +230,7 @@ std::vector<std::string> BuildHistorySearchLines(const HistorySearchSession& ses
             const int keep = (std::max)(1, width - 2 - static_cast<int>(DisplayWidthUtf8(meta)) - 1);
             body = prefix_color + TruncateUtf8ToDisplayWidth(line, keep) + reset;
         }
-        lines.push_back(body + (selected ? highlight_stats : std::string()) + meta +
+        lines.push_back(body + (selected ? highlight_color : std::string()) + meta +
                         (selected ? highlight_reset : std::string()));
     }
     return lines;

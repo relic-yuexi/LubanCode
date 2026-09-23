@@ -218,12 +218,15 @@ TEST_CASE("FormatTranscriptItem: 彩色主题只染状态灯,正文参数不染�
         TranscriptStatus status;
         std::string color;
     } cases[] = {
-        {TranscriptStatus::Running, theme.tool_line},           // 执行中:黄
-        {TranscriptStatus::Pending, theme.tool_line},           // 待确认:黄
-        {TranscriptStatus::Ok, theme.prompt},                   // 成功:绿
-        {TranscriptStatus::Error, theme.error},                 // 失败:红
-        {TranscriptStatus::Cancelled, theme.stats},             // 拒绝:灰
-        {TranscriptStatus::Interrupted, "\x1b[2m" + theme.tool_line},  // 打断:灰黄(dim + 黄)
+        // 排版批 6:状态灯走语义档——成功 table_pass、拒绝 table_skip、
+        // 打断 row_muted(旧路裸写 "\x1b[2m"+tool_line 拼 dim,已收进语义
+        // 档,全仓再无硬编码 ANSI)。
+        {TranscriptStatus::Running, theme.tool_line},    // 执行中:黄
+        {TranscriptStatus::Pending, theme.tool_line},    // 待确认:黄
+        {TranscriptStatus::Ok, theme.table_pass},        // 成功:绿
+        {TranscriptStatus::Error, theme.error},          // 失败:红
+        {TranscriptStatus::Cancelled, theme.table_skip}, // 拒绝:灰
+        {TranscriptStatus::Interrupted, theme.row_muted},  // 打断:淡灰
     };
     for (const auto& c : cases) {
         const std::string out = FormatTranscriptItem(MakeItem(c.status), theme, 120);

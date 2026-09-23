@@ -8,6 +8,7 @@
 #include <iostream>
 #include <mutex>
 
+#include "cli/divider.hpp"  // divider::line:面板横线收口(排版批 6)
 #include "cli/line_editor.hpp"
 #include "platform/console.hpp"
 
@@ -20,15 +21,13 @@ namespace {
 constexpr const char* kPanelSyncBegin = "\x1b[?2026h";
 constexpr const char* kPanelSyncEnd = "\x1b[?2026l";
 
-// 一条横贯终端宽度的分隔线。窄终端跟着窄,不写死六十列。
+// 一条横贯终端宽度的分隔线(排版批 6 收口 divider::line)。窄终端跟着窄,
+// 不写死六十列。这条链没有 Theme 可接(装配端在 app/commands 领地,批 6
+// 合同禁碰),横线不包色、只换字符:真 TTY 面板用 Light 档 "─",与基件
+// 横线同一枚字;朴素路(管道/单测)在 setup_wizard.cpp 用 Ascii 档。
 std::string PanelRule(int width) {
     const int n = width > 4 ? width - 2 : 20;
-    std::string rule;
-    rule.reserve(static_cast<std::size_t>(n));
-    for (int i = 0; i < n; ++i) {
-        rule += '-';
-    }
-    return rule;
+    return divider::line(divider::Style::Light, n);
 }
 
 // 标题居左、进度贴右的头部行。宽度不够(窄终端)就折成两行,不许重叠。

@@ -10,9 +10,11 @@
 #include <mutex>
 
 #include "cli/console_input.hpp"
+#include "cli/divider.hpp"  // divider::line:面板横线收口(排版批 6)
 #include "cli/i18n.hpp"
 #include "cli/line_editor.hpp"
 #include "cli/menu_text_edit.hpp"  // AppendUtf8/EraseLastUtf8:三菜单共用的文本槽内核(HC-04)
+#include "cli/panel_chrome.hpp"    // PanelRowTone:行级语义档(排版批 6)
 #include "platform/console.hpp"
 
 namespace lubancode::cli {
@@ -215,14 +217,14 @@ namespace {
 constexpr std::size_t kEmptyAddIndex = 0;
 constexpr std::size_t kEmptyCancelIndex = 1;
 
-std::string PanelRule(int width) {
+// 面板上下横线(排版批 6 收口):字符走 divider::line(Light 档;plain 退
+// Ascii),颜色 frame_border 档——与 cli::frame::* 边框、底栏 BoxRuleLine
+// 同一语义。宽度口径不变(width-2,面板左右各让一格)。
+std::string PanelRule(const Theme& theme, int width) {
     const int n = width > 4 ? width - 2 : 20;
-    std::string rule;
-    rule.reserve(static_cast<std::size_t>(n));
-    for (int i = 0; i < n; ++i) {
-        rule += '-';
-    }
-    return rule;
+    const bool plain = theme.reset.empty();
+    return theme.frame_border +
+           divider::line(plain ? divider::Style::Ascii : divider::Style::Light, n) + theme.reset;
 }
 
 }  // namespace
@@ -281,19 +283,31 @@ ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderC
         const bool fixed_pair = visible.empty();  // 空列表或筛空:添加/取消两项
 
         std::vector<std::string> lines;
-        lines.push_back(PanelRule(width));
-        lines.push_back(tr(edit_on_enter ? "provider_switch.edit_title" : "provider_switch.title"));
-        lines.push_back("");
+        // 行档并行账(排版批 6):横线自带色(PanelRule),其余行按结构角色
+        // 取语义档,画的时候统一查表;焦点("> " 前缀)仍是 confirm,交互
+        // 语义一字不动。
+        std::vector<PanelRowTone> tones;
+        const auto push_line = [&](std::string line, PanelRowTone tone) {
+            lines.push_back(std::move(line));
+            tones.push_back(tone);
+        };
+        lines.push_back(PanelRule(theme, width));
+        tones.push_back(PanelRowTone::Body);  // 横线自带色,画时不再包
+        push_line(tr(edit_on_enter ? "provider_switch.edit_title" : "provider_switch.title"),
+                  PanelRowTone::Title);
+        push_line("", PanelRowTone::Body);
         if (!notice.empty()) {
-            lines.push_back(TruncateUtf8ToDisplayWidth("! " + notice, width - 2));
+            push_line(TruncateUtf8ToDisplayWidth("! " + notice, width - 2), PanelRowTone::Warning);
         }
         if (fixed_pair) {
-            lines.push_back(empty_list ? tr("provider_switch.empty_hint")
-                                       : tr("provider_switch.no_match_hint"));
-            lines.push_back((core.state().cursor == kEmptyAddIndex ? "> " : "  ") +
-                            std::string(tr("provider_switch.opt_add")));
-            lines.push_back((core.state().cursor == kEmptyCancelIndex ? "> " : "  ") +
-                            std::string(tr("provider_switch.opt_cancel")));
+            push_line(empty_list ? tr("provider_switch.empty_hint") : tr("provider_switch.no_match_hint"),
+                      PanelRowTone::Muted);
+            push_line((core.state().cursor == kEmptyAddIndex ? "> " : "  ") +
+                          std::string(tr("provider_switch.opt_add")),
+                      PanelRowTone::Body);
+            push_line((core.state().cursor == kEmptyCancelIndex ? "> " : "  ") +
+                          std::string(tr("provider_switch.opt_cancel")),
+                      PanelRowTone::Body);
         } else {
             for (std::size_t i = 0; i < visible.size(); ++i) {
                 const ProviderSwitchEntry& entry = entries[visible[i]];
@@ -302,16 +316,19 @@ ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderC
                 if (entry.is_current) {
                     line += "  " + std::string(tr("cmd.provider.current"));
                 }
-                lines.push_back(TruncateUtf8ToDisplayWidth(line, width - 2));
+                push_line(TruncateUtf8ToDisplayWidth(line, width - 2), PanelRowTone::Body);
             }
         }
-        lines.push_back("");
-        lines.push_back(trf("provider_switch.filter_line",
-                            core.state().filter.empty()
-                                ? std::string(tr("provider_switch.filter_empty"))
-                                : core.state().filter));
-        lines.push_back(tr(edit_on_enter ? "provider_switch.footer_edit" : "provider_switch.footer"));
-        lines.push_back(PanelRule(width));
+        push_line("", PanelRowTone::Body);
+        push_line(trf("provider_switch.filter_line",
+                      core.state().filter.empty()
+                          ? std::string(tr("provider_switch.filter_empty"))
+                          : core.state().filter),
+                  PanelRowTone::Muted);
+        push_line(tr(edit_on_enter ? "provider_switch.footer_edit" : "provider_switch.footer"),
+                  PanelRowTone::Hint);
+        lines.push_back(PanelRule(theme, width));
+        tones.push_back(PanelRowTone::Body);
 
         const int rows_needed = static_cast<int>(lines.size()) + 2;
         // 首帧从当前光标起画。后续重画先回旧帧顶再核空间；若从上一帧
@@ -341,7 +358,13 @@ ProviderSwitchResult RunProviderSwitchPicker(const std::vector<config::ProviderC
             if (line.rfind("> ", 0) == 0 && !theme.confirm.empty()) {
                 TermOut() << theme.confirm << line << theme.reset;  // 光标行上色
             } else {
-                TermOut() << line;
+                const std::string& color =
+                    PanelRowToneColor(theme, tones[static_cast<std::size_t>(r)]);
+                if (!line.empty() && !color.empty()) {
+                    TermOut() << color << line << theme.reset;
+                } else {
+                    TermOut() << line;
+                }
             }
         }
         rows_drawn = rows_to_draw;

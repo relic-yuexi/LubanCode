@@ -4,6 +4,7 @@
 // ToolConfirmRequest,画屏与问话不出这个抽屉。
 #include "cli/tool_confirm_ui.hpp"
 
+#include <cctype>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -12,6 +13,7 @@
 
 #include "cli/console_input.hpp"
 #include "cli/i18n.hpp"
+#include "cli/terminal_frame.hpp"  // frame::RenderKeyValues:参数详情键值对(排版批 6)
 #include "cli/terminal_port.hpp"
 #include "cli/tool_display.hpp"
 #include "config/settings_local.hpp"  // "允许并记住"写 settings.local.json + gitignore(问题 7 拆出,config.hpp 不再捎带)
@@ -48,20 +50,50 @@ void PrintFirstLines(const std::string& text, int max_lines) {
 // 确认前把工具的入参打印清楚,好让人一眼看明白将要发生什么:
 // write_file/edit_file 显示路径和内容/改动的前几行摘要,run_command 显示
 // 完整命令,别的按通用 JSON 打印兜底。
-void PrintConfirmDetails(const std::string& name, const nlohmann::json& input) {
+//
+// 排版批 6:"标签: 值"句(路径/命令/行数这类)按批 5a 的 SentenceField
+// 裁量拆两列进 frame::RenderKeyValues(无标题框,plain 退无框纯文本);
+// 长正文(文件内容/新旧串预览)不塞框,原样跟出——塞框会被列帽截断劈行。
+void PrintConfirmDetails(const std::string& name, const nlohmann::json& input, const Theme& theme) {
+    // 既有文案按第一个冒号拆两列(半角全角都是半角冒号打头,与批 5a 同尺);
+    // 没有冒号的整句进 value。一句不添不改。
+    const auto sentence_field = [](const std::string& sentence,
+                                   lubancode::cli::frame::FieldAccent accent =
+                                       lubancode::cli::frame::FieldAccent::None) {
+        const std::size_t colon = sentence.find(':');
+        if (colon == std::string::npos) {
+            return lubancode::cli::frame::Field{"", sentence, accent};
+        }
+        std::string key = sentence.substr(0, colon);
+        std::string value = sentence.substr(colon + 1);
+        while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back())) != 0) {
+            key.pop_back();
+        }
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())) != 0) {
+            value.erase(value.begin());
+        }
+        return lubancode::cli::frame::Field{key, value, accent};
+    };
+    const auto emit_fields = [&](std::vector<lubancode::cli::frame::Field> fields) {
+        for (const std::string& line :
+             lubancode::cli::frame::RenderKeyValues({}, fields, theme, lubancode::cli::frame::Light())) {
+            TermOut() << line << "\n";
+        }
+    };
     if (name == "write_file") {
         const std::string path = input.value("path", std::string());
         const std::string content = input.value("content", std::string());
-        TermOut() << trf("confirm.detail.path", path) << "\n";
-        TermOut() << trf("confirm.detail.content", content.size()) << "\n";
+        emit_fields({sentence_field(trf("confirm.detail.path", path)),
+                     sentence_field(trf("confirm.detail.content", content.size()))});
         PrintFirstLines(content, 5);
     } else if (name == "edit_file") {
         const std::string path = input.value("path", std::string());
         const std::string old_s = input.value("old_string", std::string());
         const std::string new_s = input.value("new_string", std::string());
         const bool replace_all = input.value("replace_all", false);
-        TermOut() << trf("confirm.detail.path", path) << (replace_all ? tr("confirm.detail.replace_all") : "")
-                  << "\n";
+        emit_fields({sentence_field(trf("confirm.detail.path", path) +
+                                     (replace_all ? std::string(tr("confirm.detail.replace_all"))
+                                                  : std::string()))});
         TermOut() << tr("confirm.detail.old") << "\n";
         PrintFirstLines(old_s, 3);
         TermOut() << tr("confirm.detail.new") << "\n";
@@ -69,19 +101,22 @@ void PrintConfirmDetails(const std::string& name, const nlohmann::json& input) {
     } else if (name == "run_command") {
         const std::string command = input.value("command", std::string());
         const std::string shell = input.value("shell", std::string("powershell"));
-        TermOut() << trf("confirm.detail.command", shell, command) << "\n";
+        std::vector<lubancode::cli::frame::Field> fields;
+        fields.push_back(sentence_field(trf("confirm.detail.command", shell, command)));
         // 进程生命线单 P2:确认框至少展示 shell、cwd 与完整命令——用户
         // 确认的是"在哪跑什么",不是只看半张票。cwd 不填时也明示
         //(当前会话目录),别让人误以为进了别处。
         const std::string cwd = input.value("cwd", std::string());
         if (!cwd.empty()) {
-            TermOut() << trf("confirm.detail.workdir", cwd) << "\n";
+            fields.push_back(sentence_field(trf("confirm.detail.workdir", cwd)));
         }
         if (input.value("run_in_background", false)) {
-            TermOut() << tr("confirm.detail.background") << "\n";
+            fields.push_back(sentence_field(tr("confirm.detail.background"),
+                                            lubancode::cli::frame::FieldAccent::Muted));
         }
+        emit_fields(std::move(fields));
     } else {
-        TermOut() << trf("confirm.detail.args", input.dump()) << "\n";
+        emit_fields({sentence_field(trf("confirm.detail.args", input.dump()))});
     }
     TermOut().flush();
 }
@@ -152,7 +187,7 @@ bool AskToolConfirm(const ToolConfirmRequest& request) {
     });
     if (!(file_tool && display.is_console)) {
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        PrintConfirmDetails(name, input);
+        PrintConfirmDetails(name, input, theme);
     }
     // 审批悬起旁听(loop 单遗留:WaitingPermission 真接线):真要问用户了,
     // 先报 asked;答完在收尾处报 answered。装配层拿它推 scheduler 的

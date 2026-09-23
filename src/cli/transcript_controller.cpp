@@ -90,8 +90,8 @@ void TranscriptUiController::PrintViewedTranscript(int viewed_task_id, int tail_
 
     if (viewed_task_id == 0) {
         // 回 main:首个可辨标题写明 main(规格"Esc 回 main"五条件)。
-        print_line(theme_.stats + tr("agent_panel.main_header") + theme_.reset);
-        print_line(theme_.stats + tr("agent_panel.back_to_main") + theme_.reset);
+        print_line(theme_.row_muted + tr("agent_panel.main_header") + theme_.reset);
+        print_line(theme_.row_muted + tr("agent_panel.back_to_main") + theme_.reset);
         if (live_main_turn != nullptr) {
             // 活回合账(按代理状态投影单 P1):整轮重铺当前回合——与
             // Ctrl+L 同一颗 renderer,含正文、思考与工具条目的当前状态。
@@ -186,7 +186,7 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
             if (viewed_task != 0) {
                 agent_view_expanded_ = !agent_view_expanded_;
                 TermOut() << "\n"
-                          << theme_.stats
+                          << theme_.row_muted
                           << (agent_view_expanded_ ? tr("ui.expanded") : tr("ui.compact")) << theme_.reset << "\n";
                 PrintViewedTranscript(viewed_task, /*tail_rows=*/0);
                 return true;
@@ -196,11 +196,11 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
             focus_view_active_ = false;
             if (count == 0) {
                 expand_latest_ = false;
-                TermOut() << "\n" << theme_.stats << tr("ui.no_items") << theme_.reset << "\n";
+                TermOut() << "\n" << theme_.row_muted << tr("ui.no_items") << theme_.reset << "\n";
                 return true;
             }
             expand_latest_ = !expand_latest_;
-            TermOut() << "\n" << theme_.stats << (expand_latest_ ? tr("ui.expanded") : tr("ui.compact"))
+            TermOut() << "\n" << theme_.row_muted << (expand_latest_ ? tr("ui.expanded") : tr("ui.compact"))
                       << theme_.reset << "\n";
             TermOut() << lubancode::cli::FormatTranscriptItems(items_, theme_, width, expanded_, focus_index_,
                                                                expand_latest_ ? count - 1 : -1);
@@ -220,7 +220,7 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
             } else if (focus_index_ + 1 < count) {
                 ++focus_index_;  // 到最新一条停住
             }
-            TermOut() << "\n" << theme_.stats << trf("ui.focus", focus_index_ + 1, count) << theme_.reset << "\n";
+            TermOut() << "\n" << theme_.row_muted << trf("ui.focus", focus_index_ + 1, count) << theme_.reset << "\n";
             TermOut() << lubancode::cli::FormatTranscriptItem(items_[static_cast<std::size_t>(focus_index_)], theme_,
                                                               width, /*expanded=*/false, /*focused=*/true);
             return true;
@@ -230,7 +230,7 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
                 // 再按 Ctrl+E:返回。简化重画:横幅 + 最近几条摘要,
                 // 聚焦画面留在滚动历史里。
                 focus_view_active_ = false;
-                TermOut() << "\n" << theme_.stats << tr("ui.back") << theme_.reset << "\n";
+                TermOut() << "\n" << theme_.row_muted << tr("ui.back") << theme_.reset << "\n";
                 if (hooks_.repaint_banner) {
                     hooks_.repaint_banner();
                 }
@@ -242,7 +242,7 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
             }
             const int idx = focus_index_ >= 0 ? focus_index_ : count - 1;
             focus_view_active_ = true;
-            TermOut() << "\n" << theme_.banner << trf("ui.focus_view", idx + 1, count) << theme_.reset << "\n";
+            TermOut() << "\n" << theme_.frame_title << trf("ui.focus_view", idx + 1, count) << theme_.reset << "\n";
             // width=0:标题 + 完整参数 + full_output 全文如实铺,不截宽,
             // 超长靠终端自然折行/滚动(不真清屏——conhost 的滚回缓冲跟
             // 屏幕缓冲是同一块,真清会把历史一并抹掉,取舍见报告)。
@@ -261,13 +261,13 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
             // 不在控制器里另立第二本屏幕账。
             if (CurrentAgentViewedTaskId() != 0) {
                 ResetAgentPanelSession();
-                TermOut() << "\n" << theme_.stats << tr("agent_panel.back_to_main") << theme_.reset << "\n";
+                TermOut() << "\n" << theme_.row_muted << tr("agent_panel.back_to_main") << theme_.reset << "\n";
                 TermOut().flush();
                 return true;
             }
             if (focus_view_active_) {
                 focus_view_active_ = false;
-                TermOut() << "\n" << theme_.stats << tr("ui.back") << theme_.reset << "\n";
+                TermOut() << "\n" << theme_.row_muted << tr("ui.back") << theme_.reset << "\n";
                 if (hooks_.repaint_banner) {
                     hooks_.repaint_banner();
                 }
@@ -283,7 +283,7 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
             if (!lubancode::cli::ComposerStashHasContent() && hooks_.stop_active_loops) {
                 const int stopped = hooks_.stop_active_loops();
                 if (stopped > 0) {
-                    TermOut() << theme_.stats
+                    TermOut() << theme_.row_muted
                               << "已停 " << stopped
                               << " 只 loop 任务(ESC;定义保留,续跑 /loop resume <id>)。" << theme_.reset
                               << "\n";
@@ -396,11 +396,11 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
             const auto& message = (*history)[turn];
             const auto* text = std::get_if<lubancode::api::TextBlock>(&message.content.front());
             TermOut() << "\n"
-                      << theme_.stats
+                      << theme_.row_muted
                       << trf("ui.turn_nav", nav_turn_index_ + 1, turn_indexes.size()) << theme_.reset << "\n";
             if (text != nullptr) {
                 const std::string clipped = text->text.substr(0, 400);
-                TermOut() << theme_.stats << clipped << (text->text.size() > 400 ? "…" : "")
+                TermOut() << theme_.row_muted << clipped << (text->text.size() > 400 ? "…" : "")
                           << theme_.reset << "\n";
             }
             return true;
@@ -413,7 +413,7 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
                 return false;
             }
             TermOut() << "\n"
-                      << theme_.stats << tr("ui.to_scrollback") << theme_.reset << "\n";
+                      << theme_.row_muted << tr("ui.to_scrollback") << theme_.reset << "\n";
             TermOut() << lubancode::cli::FormatTranscriptItems(items_, theme_, width, expanded_);
             TermOut().flush();
             return true;
@@ -477,7 +477,7 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
                 }
                 out << markdown;
             }
-            TermOut() << theme_.stats << trf("ui.view_in_editor", editor_cmd) << theme_.reset << "\n";
+            TermOut() << theme_.row_muted << trf("ui.view_in_editor", editor_cmd) << theme_.reset << "\n";
             TermOut().flush();
             (void)lubancode::platform::RunInteractiveCommand(editor_cmd + " \"" +
                                                              lubancode::tools::PathToUtf8(file) + "\"");

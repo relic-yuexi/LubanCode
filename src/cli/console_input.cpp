@@ -566,9 +566,10 @@ std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int 
         }
     }
     if (right_width >= max_width) {
-        return theme.stats + TruncateUtf8ToDisplayWidth(right, max_width) + theme.reset;
+        return theme.key_hint + TruncateUtf8ToDisplayWidth(right, max_width) + theme.reset;
     }
-    return colored_left + std::string(static_cast<std::size_t>(spaces), ' ') + theme.stats + right + theme.reset;
+    return colored_left + std::string(static_cast<std::size_t>(spaces), ' ') + theme.key_hint + right +
+           theme.reset;
 }
 
 // 正式资料行构造器(收口审计单 §二 P0):输入框下横线之下那行完整状态
@@ -637,20 +638,22 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
         }
         if (emitted) {
             const std::string separator = TruncateUtf8ToDisplayWidth(data.separator, remaining);
-            line += theme.stats + separator + theme.reset;
+            line += theme.row_muted + separator + theme.reset;
             remaining -= static_cast<int>(DisplayWidthUtf8(separator));
             if (remaining <= 0) {
                 break;
             }
         }
         const std::string text = TruncateUtf8ToDisplayWidth(segment.text, remaining);
-        std::string color = theme.stats;
+        // 排版批 6:资料行按键值对语义取色——model 是这行的"键",走
+        // row_label(首列档);其余段与分隔符都是淡色附注(row_muted)、
+        // 分支这类短注走 key_hint。全从 Theme 语义字段取,plain 全空串,
+        // 输出与旧路一字节不差。
+        std::string color = theme.row_muted;
         if (segment.key == "model") {
-            color = theme.tool_line;
-        } else if (segment.key == "cwd") {
-            color = theme.prompt;
+            color = theme.row_label;
         } else if (segment.key == "git_branch") {
-            color = theme.banner;
+            color = theme.key_hint;
         }
         line += color + text + (color.empty() ? std::string() : theme.reset);
         remaining -= static_cast<int>(DisplayWidthUtf8(text));
@@ -1260,14 +1263,14 @@ std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMen
             }
             TermOut() << prefix << label << theme.reset;
             if (!items[original].description.empty() && description_room > 0) {
-                TermOut() << theme.stats << " - "
+                TermOut() << theme.key_hint << " - "
                           << TruncateUtf8ToDisplayWidth(items[original].description, description_room)
                           << theme.reset;
             }
         }
         if (view.empty()) {
             platform::SetCursorPos(0, start_row + 1);
-            TermOut() << theme.stats << TruncateUtf8ToDisplayWidth(std::string("无匹配项"), width - 1)
+            TermOut() << theme.row_muted << TruncateUtf8ToDisplayWidth(std::string("无匹配项"), width - 1)
                       << theme.reset;
         }
         // hint 区(§六):注意行(错误/翻页)在上、常驻操作提示在最末行;
@@ -1275,11 +1278,11 @@ std::optional<ChoiceMenuResult> ReadChoiceMenuSearch(const std::vector<ChoiceMen
         // 净,不留残字。
         if (!attention_line.empty()) {
             platform::SetCursorPos(0, start_row + rows_now - 2);
-            TermOut() << (menu.state().invalid ? theme.error : theme.stats)
+            TermOut() << (menu.state().invalid ? theme.error : theme.row_muted)
                       << TruncateUtf8ToDisplayWidth(attention_line, width - 1) << theme.reset;
         }
         platform::SetCursorPos(0, start_row + rows_now - 1);
-        TermOut() << theme.stats << TruncateUtf8ToDisplayWidth(ops_line, width - 1) << theme.reset
+        TermOut() << theme.key_hint << TruncateUtf8ToDisplayWidth(ops_line, width - 1) << theme.reset
                   << kSyncOutputEnd;
         TermOut().flush();
         frame_rows = rows_now;
@@ -1471,7 +1474,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
             if (!options.question_panel->header.empty()) {
                 platform::ClearRowHardFrom(0, start_row + row, width);
                 platform::SetCursorPos(0, start_row + row++);
-                TermOut() << theme.banner
+                TermOut() << theme.frame_title
                           << TruncateUtf8ToDisplayWidth("□ " + options.question_panel->header, width - 1)
                           << theme.reset;
                 platform::ClearRowHardFrom(0, start_row + row, width);
@@ -1526,7 +1529,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
             platform::ClearRowHardFrom(0, start_row + row, width);
             platform::SetCursorPos(0, start_row + row++);
             if (active) {
-                TermOut() << (question_panel ? theme.banner : theme.confirm);
+                TermOut() << (question_panel ? theme.frame_title : theme.confirm);
             }
             TermOut() << prefix << label << theme.reset;
             if (!items[i].description.empty()) {
@@ -1534,7 +1537,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
                     const std::string indent(static_cast<std::size_t>(options.multi_select ? 9 : 5), ' ');
                     platform::ClearRowHardFrom(0, start_row + row, width);
                     platform::SetCursorPos(0, start_row + row++);
-                    TermOut() << theme.stats << indent
+                    TermOut() << theme.key_hint << indent
                               << TruncateUtf8ToDisplayWidth(
                                      items[i].description,
                                      (std::max)(0, width - static_cast<int>(indent.size()) - 1))
@@ -1542,7 +1545,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
                 } else {
                     const int description_room = room - static_cast<int>(DisplayWidthUtf8(label)) - 3;
                     if (description_room > 0) {
-                        TermOut() << theme.stats << " - "
+                        TermOut() << theme.key_hint << " - "
                                   << TruncateUtf8ToDisplayWidth(items[i].description, description_room)
                                   << theme.reset;
                     }
@@ -1579,7 +1582,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
             platform::ClearRowHardFrom(0, start_row + row, width);
             platform::SetCursorPos(0, start_row + row);
         }
-        TermOut() << theme.stats << TruncateUtf8ToDisplayWidth(ops_hint, width - 1) << theme.reset
+        TermOut() << theme.key_hint << TruncateUtf8ToDisplayWidth(ops_hint, width - 1) << theme.reset
                   << kSyncOutputEnd;
         TermOut().flush();
         return true;

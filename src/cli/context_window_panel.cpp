@@ -13,6 +13,7 @@
 #include <mutex>
 
 #include "cli/console_input.hpp"
+#include "cli/panel_chrome.hpp"  // PanelRowTone:行级语义档(排版批 6)
 #include "platform/console.hpp"
 
 namespace lubancode::cli {
@@ -121,6 +122,21 @@ ContextWindowPanelResult RunContextWindowPanel(const ContextWindowPanelView& vie
             const std::string& line = frame.lines[static_cast<std::size_t>(r)];
             if (line.rfind("> ", 0) == 0 && !theme.confirm.empty()) {
                 TermOut() << theme.confirm << line << theme.reset;  // 焦点行上色
+                continue;
+            }
+            // 行级语义档(排版批 6):[0] 模型标题行 frame_title、末两行
+            // 键位底栏 key_hint(BuildContextWindowPanelFrame 的行序契约:
+            // 尾部固定 footer_nav + footer_save),其余正文行默认前景;
+            // plain 全空串零转义。
+            PanelRowTone tone = PanelRowTone::Body;
+            if (r == 0) {
+                tone = PanelRowTone::Title;
+            } else if (r >= rows_to_draw - 2) {
+                tone = PanelRowTone::Hint;
+            }
+            const std::string& color = PanelRowToneColor(theme, tone);
+            if (!line.empty() && !color.empty()) {
+                TermOut() << color << line << theme.reset;
             } else {
                 TermOut() << line;
             }
