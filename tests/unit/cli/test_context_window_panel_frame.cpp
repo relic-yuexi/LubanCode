@@ -81,7 +81,7 @@ TEST_CASE("provider 帧行位契约:首行标题,次行当前端,末行键提示
     const ProviderPanelFrame frame = BuildProviderPanelFrame(view, 80);
     REQUIRE(frame.lines.size() >= 6);
     CHECK(frame.lines[0] == std::string(tr("provider_panel.title")));       // r==0 Title
-    CHECK(frame.lines[1].find(std::string(tr("cmd.provider.current"))) !=   // r==1 Muted
-          std::string::npos || frame.lines[1] == std::string(tr("provider_panel.current_none")));
+    // r==1 当前行:夹具里 "one" 是当前端,行文必含其名(Muted 档落位)。
+    CHECK(frame.lines[1].find("one") != std::string::npos);
     CHECK(frame.lines.back() == std::string(tr("provider_panel.footer")));  // 末行 Hint
 }
