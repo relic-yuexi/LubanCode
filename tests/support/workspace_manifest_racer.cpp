@@ -5,10 +5,10 @@
 //
 // 用法:
 //   workspace_manifest_racer hold <workspace_dir> <ready_file> [release_file]
-//       TryAcquire 锁 → ready 写 "ok"/"fail: ..." → 轮询 release_file 出现
+//       Acquire 磨档占锁 → ready 写 "ok"/"fail: ..." → 轮询 release_file 出现
 //       (20ms 一拍,120s 兜底)→ 退出(析构按 owner 核账后放锁)。
 //   workspace_manifest_racer crash <workspace_dir> <ready_file>
-//       TryAcquire 锁 → ready 写 "ok"/"fail: ..." → std::_Exit(9):不跑析
+//       Acquire 磨档占锁 → ready 写 "ok"/"fail: ..." → std::_Exit(9):不跑析
 //       构、不放锁,owner 账与锁目录原样留在盘上——模拟开房进程暴毙
 //       (句柄由内核回收,持有者身份已死)。
 //   workspace_manifest_racer register <workspaces_root> <project_root> <now_ms>
@@ -17,6 +17,10 @@
 //       的发令枪,两边同一拍起跑)→ OpenOrRegisterWorkspace 走生产同一条
 //       读改写事务路。退出码 0 = 开房成功;5 = 开房失败(fail 文本在
 //       ready_file 里)。
+// 占锁用 Acquire 磨档(60×100ms,与生产开房路同配),不单发 TryAcquire:
+// 单发撞"锁正在建立"在建窗(2s)保守拒即刻死——#209 后实锤的释放残壳竞
+// 态(2026-09-23 main run 35814135429 windows 腿),生产 Acquire 磨 6s 穿
+// 透 2s 在建窗,夹具照同路占。
 // 退出码:0 = 正常收场;2 = 用法错;3 = 没取到锁/身份解析失败;4 = 等不到
 // 放行令;5 = 开房失败。栅栏协议:ready 文件是"就绪"屏障,release/go 文件
 // 是"放行"屏障——交错由文件控制,不靠两头掐表。
@@ -98,8 +102,9 @@ int main(int argc, char** argv) {
     const fs::path workspace_dir = argv[2];
     const fs::path ready = argv[3];
     lubancode::workspace::ManifestLock lock;
-    const auto result =
-        lubancode::workspace::ManifestLock::TryAcquire(workspace_dir, &lock);
+    // 磨档占锁(60×100ms,与生产开房路同配):单发撞在建窗即刻死,见头注。
+    const auto result = lubancode::workspace::ManifestLock::Acquire(
+        workspace_dir, &lock, /*attempts=*/60, /*interval_ms=*/100);
     if (result.status != lubancode::workspace::ManifestLock::Status::Acquired) {
         WriteText(ready, "fail: " + result.detail + "\n");
         return 3;
