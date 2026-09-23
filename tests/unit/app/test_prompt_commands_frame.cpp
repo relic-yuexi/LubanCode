@@ -22,6 +22,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <utility>  // std::pair:plain 用例的两路参数
 
 #include "app/commands/prompt_commands.hpp"
 #include "cli/terminal_port.hpp"
