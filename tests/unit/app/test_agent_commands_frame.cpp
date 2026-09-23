@@ -239,8 +239,9 @@ TEST_CASE("doctor: 键值对框 + 诊断表,缺项 ✗ 上 error 档、结论按
     // tone 只上非首列——级别色从简,信息靠文案。
     CHECK(Contains(joined, rig.theme.row_label + "[警告]"));
     CHECK(Contains(plain, "agent.legacy_step_budget"));
-    // ✗ 缺项:技能清单里没有 preload 名,整个值上 error 档。
-    CHECK(Contains(joined, rig.theme.error + "missing-skill ✗(不在已扫描技能清单)"));
+    // ✗ 缺项如实摆(✓/✗ 混排的整值不整体染 error,信息靠 ✗ 文本;缺项
+    // 计数由下面的结论文本核对)。
+    CHECK(Contains(plain, "missing-skill ✗(不在已扫描技能清单)"));
     // 交叠与 runtime 账照登。
     CHECK(Contains(plain, "allow 与 deny 交叠  read_file(deny 胜出)"));
     CHECK(LineWithText(plain, {"runtime", "max_output_tokens=继承"}));
