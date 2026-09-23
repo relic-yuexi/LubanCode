@@ -608,7 +608,8 @@ void RunPackageShow(const lubancode::cli::Theme& theme,
     // 头部键值对框:标题 = id + 版本;状态/来源/启停等按句内冒号拆列。
     std::vector<frame::Field> fields;
     fields.push_back(frame::Field{
-        "状态", (inventory.valid ? "valid" : "invalid") + (disabled ? "(已停用)" : "") +
+        "状态", std::string(inventory.valid ? "valid" : "invalid") +
+                    (disabled ? "(已停用)" : "") +
                     (inventory.manifest_ok ? "" : "(根清单解析失败)") +
                     (inventory.code_bearing() ? "  [code-bearing]" : "")});
     fields.push_back(frame::Field{
