@@ -665,9 +665,11 @@ TEST_CASE("同源布局:dark/light 着色,plain 不夹一个转义字节") {
         model.composer.placeholder = "占位";
         model.composer.prompt = theme.prompt + "> " + theme.reset;
         const auto layout = BuildBottomChromeLayout(model, theme, 40);
-        // 横线/队列/坞行带主题淡色;宽度账只记纯文本宽。
-        CHECK(Contains(layout.frame.rows[0].text, theme.stats));
-        CHECK(Contains(layout.frame.rows[2].text, theme.stats));
+        // 队列行带主题淡色(row_muted 档,与 stats 同值);横线走 frame_border
+        // 语义档(排版批 6:输入框横线就是框,与 cli::frame::* 边框同色);
+        // 宽度账只记纯文本宽。
+        CHECK(Contains(layout.frame.rows[0].text, theme.row_muted));
+        CHECK(Contains(layout.frame.rows[2].text, theme.frame_border));
         CHECK(layout.painted_row_widths[0] == 6);   // 队列行"队列行" 三个汉字
         CHECK(layout.painted_row_widths[1] == 6);   // 模式行测试占位 "status"
         CHECK(layout.painted_row_widths[2] == 39);  // 其下才是满宽横线

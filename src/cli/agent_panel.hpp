@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include "cli/theme.hpp"  // Theme:BuildRuleWithTag 的横线/标签色(排版批 6)
+
 namespace lubancode::cli {
 
 // 监督色辅助(监督器单 P1-1 §十):颜色只作辅助,行文本自身已带语义
@@ -286,11 +288,12 @@ std::vector<AgentHealthTint> DockRowTints(const AgentDockLayout& layout);
 
 // 满宽横线右端挂一枚紧凑标签(查看态的子代理短述)。tag 先按"横线至少留
 // kMinRuleCols 列"截宽,塞不下就整个退回无标签横线——先保住横线与提示符,
-// 窄窗宁可缩标签。stats/reset 是主题色(plain 主题两串皆空,输出纯文本,
+// 窄窗宁可缩标签。排版批 6 起:横线字符走 divider::line、颜色从 Theme 取
+// (横线 frame_border 档、标签 frame_title 档——上边框嵌标题,与
+// cli::frame::* 同一语义;plain 主题两串皆空、divider 退 Ascii,输出纯文本,
 // 不夹 ANSI)。
 constexpr int kMinRuleCols = 8;
-std::string BuildRuleWithTag(const std::string& stats, const std::string& reset, const std::string& tag,
-                             int width);
+std::string BuildRuleWithTag(const Theme& theme, const std::string& tag, int width);
 
 // 标签截断(测试也直接用):terminal 太窄时按 display width 截,保前弃后。
 std::string TruncatePanelTag(const std::string& tag, int max_width);

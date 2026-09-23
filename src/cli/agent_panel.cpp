@@ -544,13 +544,13 @@ std::string TruncatePanelTag(const std::string& tag, int max_width) {
     return TruncateUtf8ToDisplayWidth(tag, max_width);
 }
 
-std::string BuildRuleWithTag(const std::string& stats, const std::string& reset, const std::string& tag,
-                             int width) {
-    const bool plain = reset.empty();
-    // 画 n 格横线。BuildDividerLine(w,·,w) 吐 w-1 格(BoxRuleLine 同款口径),
-    // 这里想要精确 n 格,传 n+1 即可。
+std::string BuildRuleWithTag(const Theme& theme, const std::string& tag, int width) {
+    const bool plain = theme.reset.empty();
+    const divider::Style style = plain ? divider::Style::Ascii : divider::Style::Light;
+    // 画 n 格横线:divider::line 按显示列直给,不再借 BuildDividerLine 的
+    // "传 n+1"口径补。
     const auto glyphs = [&](int n) {
-        return stats + BuildDividerLine(n + 1, plain, n + 1) + reset;
+        return theme.frame_border + divider::line(style, n) + theme.reset;
     };
     if (width <= kMinRuleCols + 2 || tag.empty()) {
         return glyphs(width - 1);  // 与 BoxRuleLine(theme, width) 同宽
@@ -569,7 +569,8 @@ std::string BuildRuleWithTag(const std::string& stats, const std::string& reset,
     if (rule_width < kMinRuleCols) {
         return glyphs(width - 1);
     }
-    return glyphs(rule_width) + " " + truncated;
+    // 标签就是这条上边框嵌进的标题,走 frame_title 档(plain 空串,纯文本)。
+    return glyphs(rule_width) + " " + theme.frame_title + truncated + theme.reset;
 }
 
 }  // namespace lubancode::cli

@@ -14,6 +14,7 @@
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "cli/terminal_frame.hpp"
+#include "cli/theme.hpp"
 #include "platform/terminal_batch.hpp"
 
 using namespace lubancode::cli;
@@ -787,15 +788,17 @@ TEST_CASE("会话级 AgentPanelSession:快照与键处理共用同一份状态,�
 // -----------------------------------------------------------------------
 
 TEST_CASE("标签:挂在不短于保底的横线右端,整行恰为 width-1 列") {
-    const std::string line = BuildRuleWithTag("", "", "修 ask_user 被遮挡", 80);
+    const Theme plain;
+    const std::string line = BuildRuleWithTag(plain, "修 ask_user 被遮挡", 80);
     CHECK(Contains(line, "修 ask_user 被遮挡"));
     CHECK(line.find('\x1b') == std::string::npos);  // plain 主题不夹 ANSI
     CHECK(DisplayWidthUtf8(line) == 79);
 }
 
 TEST_CASE("标签:超长短述按宽截断,先保横线与提示符") {
+    const Theme plain;
     const std::string long_tag = "这一段任务说明写得特别长特别长,长得把横线都快挤没了还得继续写";
-    const std::string line = BuildRuleWithTag("", "", long_tag, 40);
+    const std::string line = BuildRuleWithTag(plain, long_tag, 40);
     CHECK(DisplayWidthUtf8(line) == 39);
     // 整段塞不下:尾巴的字被截掉,不撑破行宽。
     CHECK_FALSE(Contains(line, "还得继续写"));
@@ -806,21 +809,24 @@ TEST_CASE("标签:超长短述按宽截断,先保横线与提示符") {
 }
 
 TEST_CASE("标签:窄终端塞不下就退回无标签横线;无标签时就是普通满宽横线") {
-    const std::string narrow = BuildRuleWithTag("", "", "修遮挡", 10);
+    const Theme plain;
+    const std::string narrow = BuildRuleWithTag(plain, "修遮挡", 10);
     CHECK(narrow.find("修遮挡") == std::string::npos);
     CHECK(DisplayWidthUtf8(narrow) == 9);
-    const std::string empty_tag = BuildRuleWithTag("", "", "", 80);
+    const std::string empty_tag = BuildRuleWithTag(plain, "", 80);
     CHECK(DisplayWidthUtf8(empty_tag) == 79);
     CHECK(Contains(empty_tag, "-"));
 }
 
-TEST_CASE("标签:彩色主题横线带色码,标签本身不夹 ANSI,截断仍按显示宽算") {
-    const std::string stats = "\x1b[90m";
-    const std::string reset = "\x1b[0m";
-    const std::string line = BuildRuleWithTag(stats, reset, "查调用链", 60);
-    CHECK(Contains(line, stats));
+TEST_CASE("标签:彩色主题横线走 frame_border、标签走 frame_title,截断仍按显示宽算") {
+    // 排版批 6:横线字符 divider::line、颜色按语义档取——横线 frame_border、
+    // 标签是嵌进上边框的标题,走 frame_title。
+    const Theme dark = BuiltinTheme("dark");
+    const std::string line = BuildRuleWithTag(dark, "查调用链", 60);
+    CHECK(Contains(line, dark.frame_border));
+    CHECK(Contains(line, dark.frame_title + "查调用链" + dark.reset));
     // ANSI 之外的实际显示宽度仍按 width-1 收口(去掉色码再量)。
-    std::string plain;
+    std::string visible;
     bool in_escape = false;
     for (char c : line) {
         if (c == '\x1b') {
@@ -833,9 +839,10 @@ TEST_CASE("标签:彩色主题横线带色码,标签本身不夹 ANSI,截断仍�
             }
             continue;
         }
-        plain += c;
+        visible += c;
     }
-    CHECK(DisplayWidthUtf8(plain) == 59);
+    CHECK(DisplayWidthUtf8(visible) == 59);
+    CHECK(Contains(visible, "─"));  // Light 档字符,不再是 ASCII '-'
 }
 
 // -----------------------------------------------------------------------

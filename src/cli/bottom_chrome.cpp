@@ -8,9 +8,15 @@
 
 namespace lubancode::cli {
 
+// 排版批 6:横线字符统一走 divider::line(批 0 基件;与 BuildDividerLine
+// 同一枚字符,口径上不再借"传 n+1"的补),颜色从 frame_border 语义档取
+// ——底栏横线就是输入框的"框",与 cli::frame::* 的边框同一档色。plain
+// 主题 frame_border 为空串、divider 退 Ascii 档,零转义字节照旧。
 std::string BoxRuleLine(const Theme& theme, int console_width) {
     const bool plain = theme.reset.empty();
-    return theme.stats + BuildDividerLine(console_width, plain, console_width) + theme.reset;
+    return theme.frame_border +
+           divider::line(plain ? divider::Style::Ascii : divider::Style::Light, console_width - 1) +
+           theme.reset;
 }
 
 std::string BottomChromeFingerprint(const BottomChromeFrame& frame) {
@@ -138,7 +144,11 @@ std::string ClampAnsiRowToWidth(const std::string& row, int width) {
     if (used + 1 <= limit) {
         out += ".";  // 截断的省略记号(还剩格子才写)
     }
-    out += "\x1b[0m";
+    // 收尾 reset 只在行里真有转义段时补(截口可能开在色段中间,得关掉);
+    // plain 主题行零转义,截断后也不许凭空多一枚——T3 降级零转义字节合同。
+    if (out.find('\x1b') != std::string::npos) {
+        out += "\x1b[0m";
+    }
     return out;
 }
 
@@ -311,11 +321,16 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     }
 
     BottomChromeLayout layout;
-    // 淡色行包装:plain 主题 stats/reset 都是空串,自动退化成纯文本,不用
+    // 淡色行包装:plain 主题这些字段全是空串,自动退化成纯文本,不用
     // 另判断(合流前 Busy 给队列/坞行包色、Idle 不包,这里统一成包——
-    // 两条路从此同色)。
-    const auto tinted = [&](const std::string& text) {
-        return theme.stats + TruncateUtf8ToDisplayWidth(text, width - 1) + theme.reset;
+    // 两条路从此同色)。排版批 6 起按语义拆两档:队列这类"淡色附注"走
+    // row_muted,帮助层/速览行这类"键提示"走 key_hint(两档在内置主题
+    // 里同值,拆的是语义不是色)。
+    const auto muted = [&](const std::string& text) {
+        return theme.row_muted + TruncateUtf8ToDisplayWidth(text, width - 1) + theme.reset;
+    };
+    const auto hinted = [&](const std::string& text) {
+        return theme.key_hint + TruncateUtf8ToDisplayWidth(text, width - 1) + theme.reset;
     };
     // 坞行的监督色辅助(监督器单 P1-1 §十):颜色只作辅助——行文本自身已
     // 带阶段/静默龄/重连次数。映射只用既有主题档(黄=tool_line,青=
@@ -350,20 +365,20 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
                         theme.reset);
     }
     for (std::size_t i = 0; i < help_count; ++i) {
-        // 帮助层垫帧最顶:与队列同款淡色包装,超宽按屏宽截断。
-        push(false, tinted(model.help_rows[i]));
+        // 帮助层垫帧最顶:键提示语义(key_hint 档),超宽按屏宽截断。
+        push(false, hinted(model.help_rows[i]));
     }
     for (std::size_t i = 0; i < activity_count; ++i) {
         push(false, model.activity_rows[i]);  // Working 行自带配色,布局只管摆位
     }
     for (std::size_t i = 0; i < queue_count; ++i) {
-        push(false, tinted(model.queue_rows[i]));
+        push(false, muted(model.queue_rows[i]));
     }
     // 左右槽速览行只在空 composer 出现(收口审计单 §二 P1):左槽常用键,
     // 右槽帮助入口右对齐、与模式行右端 skills 同列。slash/搜索/提及等面板
     // 仍走 transient_rows 留在输入框下,两类提示不混位。
     if (assist_count > 0) {
-        push(false, tinted(ComposeAssistRowText(model.assist_row, width)));
+        push(false, hinted(ComposeAssistRowText(model.assist_row, width)));
     }
     // Shift+Tab 说明固定在常驻状态行紧上方，黄色且只取第一物理行。
     for (std::size_t i = 0; i < notice_count; ++i) {
@@ -378,10 +393,8 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
         }
     }
     if (draw_rules) {
-        const std::string rule =
-            model.rule_tag.empty()
-                ? BoxRuleLine(theme, width)
-                : BuildRuleWithTag(theme.stats, theme.reset, model.rule_tag, width);
+        const std::string rule = model.rule_tag.empty() ? BoxRuleLine(theme, width)
+                                                        : BuildRuleWithTag(theme, model.rule_tag, width);
         push(true, rule);
     }
     for (int i = 0; i < top_padding; ++i) {
@@ -405,15 +418,15 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
                                         Utf32ToUtf8(wrapped.rows[i].text);
         const bool is_last_input_row = draw_g_hint && i + 1 == window_first + window_count;
         if (i == 0 && show_placeholder) {
-            text += theme.stats + TruncateUtf8ToDisplayWidth(composer.placeholder,
-                                                             width - 1 - prompt_width) +
+            text += theme.row_muted + TruncateUtf8ToDisplayWidth(composer.placeholder,
+                                                                 width - 1 - prompt_width) +
                     theme.reset;
         }
         if (is_last_input_row) {
             const int body_width = PlainDisplayWidth(text);
             const int hint_width = static_cast<int>(DisplayWidthUtf8(composer.g_hint));
             const int hint_room = (std::max)(0, width - 1 - body_width - hint_width);
-            text += std::string(static_cast<std::size_t>(hint_room), ' ') + theme.stats +
+            text += std::string(static_cast<std::size_t>(hint_room), ' ') + theme.key_hint +
                     composer.g_hint + theme.reset;
         }
         // 续行缩进只落在文本里。若再把绘制起点右移两格,屏上会缩进四格,
