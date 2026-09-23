@@ -17,6 +17,7 @@
 #include "agent/prompt_assembler.hpp"  // PackageProfileRoot:包层 Profile 根(阶段 3)
 #include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
 #include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
+#include "cli/theme.hpp"                   // Theme(批 3:frame 渲染材料)
 #include "tools/registry.hpp"
 #include "tools/skill_loader.hpp"  // SkillMeta
 
@@ -55,24 +56,29 @@ struct AgentPromptContext {
 
 // ---------------- 纯函数(单测钉住) ----------------
 
-// /agents 的全部输出行:每名一志(名称/层/可用性/描述/模型/Profile/工具/
-// Skill 数),不可用带第一条错,跨层覆盖带"盖住"账,末尾摆加载警告。
-// 不摸 IO,行怎么打由调用方定。
-std::vector<std::string> FormatAgentCatalogListing(const lubancode::agent::AgentCatalog& catalog);
+// /agents 的全部输出行(TUI 排版批 3:经 cli::frame 三助手出框,形状由
+// theme 定;plain 主题零转义无框):每名一志(名称/层/可用性/描述/模型/
+// Profile/工具/Skill 数),不可用带第一条错,跨层覆盖带"盖住"账,末尾摆
+// 加载警告。不摸 IO,行怎么打由调用方定。
+std::vector<std::string> FormatAgentCatalogListing(const lubancode::agent::AgentCatalog& catalog,
+                                                   const lubancode::cli::Theme& theme);
 
 // /agent doctor <name> 的静态预检报告(单子八"agent doctor"清单里阶段 1
 // 能查的:定义解析、覆盖链、Skill/MCP/工具引用、模型角色写法、runtime 与
 // permissions 登账;Profile 覆盖存在性阶段 2 已查,权限越界比对属阶段 3,
 // 都如实写明,不装查过了)。查无此名给一行"没这个 Agent,先 /agents"。
+// 批 3:键值对框 + 诊断表渲染,theme 必递。
 std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCatalog& catalog,
                                                  const std::string& name, const AgentDoctorMaterials& materials,
-                                                 const AgentPromptContext& prompts = {});
+                                                 const AgentPromptContext& prompts,
+                                                 const lubancode::cli::Theme& theme);
 
 // /agent inspect <name> 的报告(阶段 2):定义来源与覆盖链、prompt 段三笔
 // 开关、PromptSourceLedger 逐模块来源账(单子 §5.5)。依赖预检归 doctor,
-// 这里不重复。
+// 这里不重复。批 3:键值对框 + 来源账本列表渲染。
 std::vector<std::string> FormatAgentInspectReport(const lubancode::agent::AgentCatalog& catalog,
-                                                  const std::string& name, const AgentPromptContext& prompts);
+                                                  const std::string& name, const AgentPromptContext& prompts,
+                                                  const lubancode::cli::Theme& theme);
 
 // ---------------- 执行(IO) ----------------
 
@@ -100,6 +106,9 @@ struct AgentCommandContext {
     std::vector<lubancode::tools::SkillMeta>* skills = nullptr;
     lubancode::tools::ToolRegistry* registry = nullptr;
     const std::vector<McpServerRuntime>* mcp_servers = nullptr;
+    // 会话主题(TUI 排版批 3:frame 三助手配色);空 = 没接(测试/空表),
+    // handler 按批 2 CLI 裁量现起(管道/重定向自然降 plain)。
+    const lubancode::cli::Theme* theme = nullptr;
 };
 
 // 命令分派注册制:/agents 与 /agent 的分派位。

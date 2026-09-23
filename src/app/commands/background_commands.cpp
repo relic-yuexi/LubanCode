@@ -22,7 +22,9 @@ using lubancode::cli::TermErr;
 
 #include "cli/console_input.hpp"  // ReadLine:stop all 的本地确认
 #include "cli/format_utils.hpp"   // FormatTurnDuration:已跑时长的人话
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 3:/background 渲染段)
 #include "cli/theme.hpp"
+#include "platform/console.hpp"      // GetScreenInfo:整条 /background 的框宽同一把尺
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:清单尾巴的外部字节
 #include "tools/background_tasks.hpp"
 
@@ -142,6 +144,89 @@ std::string NormalizeTaskId(const std::string& target) {
         return target.substr(1);
     }
     return target;
+}
+
+// ---- TUI 排版批 3(/background 全族)的公共小件 --------------------------------
+//
+// 渲染段只调 cli::frame::* 三助手(约定见 docs/development/tui_style.md)。
+// 本文件文案走字面量(同清单页先例),合同"不新增文案"读作:既有句子原样
+// 进 frame,一字不添不改(批 2 裁量 1);表头用 schema 名(id/status/pid/
+// elapsed/command/log)。例外三处不塞框:对齐排好的用法块、"正在停止"流式
+// 进度行(批 2 裁量 2)、logs 正文与首尾横线(长正文,批 1 裁量 3)。
+
+namespace frame = lubancode::cli::frame;
+
+int BackgroundFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+void EmitFrameLines(const std::vector<std::string>& lines) {
+    for (const std::string& line : lines) {
+        TermOut() << line << "\n";
+    }
+}
+
+std::string TrimAscii(std::string value) {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}
+
+frame::Field SentenceField(const std::string& sentence,
+                           frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    return frame::Field{TrimAscii(sentence.substr(0, colon)), TrimAscii(sentence.substr(colon + 1)), accent};
+}
+
+void PrintNotice(const lubancode::cli::Theme& theme, std::initializer_list<std::string> sentences,
+                 frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), BackgroundFrameWidth()));
+}
+
+// status 列语义色(单子批 3):在跑走 pass 档绿;停止中走 skip 档;失败/
+// 停止失败走 error 档(fail 不另立色,批 0 合同);完成/已停止默认前景。
+frame::CellTone StatusTone(lubancode::tools::BackgroundTaskStatus s) {
+    switch (s) {
+        case lubancode::tools::BackgroundTaskStatus::Running:
+            return frame::CellTone::Pass;
+        case lubancode::tools::BackgroundTaskStatus::Stopping:
+            return frame::CellTone::Skip;
+        case lubancode::tools::BackgroundTaskStatus::Failed:
+        case lubancode::tools::BackgroundTaskStatus::StopFailed:
+            return frame::CellTone::Fail;
+        case lubancode::tools::BackgroundTaskStatus::Completed:
+        case lubancode::tools::BackgroundTaskStatus::Stopped:
+        default:
+            return frame::CellTone::Normal;
+    }
+}
+
+// 同一把语义账的键值对档(show 详情页用)。
+frame::FieldAccent StatusAccent(lubancode::tools::BackgroundTaskStatus s) {
+    switch (s) {
+        case lubancode::tools::BackgroundTaskStatus::Running:
+            return frame::FieldAccent::Pass;
+        case lubancode::tools::BackgroundTaskStatus::Stopping:
+            return frame::FieldAccent::Skip;
+        case lubancode::tools::BackgroundTaskStatus::Failed:
+        case lubancode::tools::BackgroundTaskStatus::StopFailed:
+            return frame::FieldAccent::Error;
+        case lubancode::tools::BackgroundTaskStatus::Completed:
+        case lubancode::tools::BackgroundTaskStatus::Stopped:
+        default:
+            return frame::FieldAccent::None;
+    }
 }
 
 void PrintBackgroundUsage() {
@@ -296,28 +381,39 @@ std::string BuildBackgroundStatusSegment(const std::vector<lubancode::tools::Bac
 
 namespace {
 
-// 清单页(0.30.x 起的老账面原样搬来:每项带三行尾巴、启动与时长;日志被
-// 删/非法 UTF-8/进程已死都只是那一项少几行,菜单不带崩)。
+// 清单页(批 3 走表格:id/status/pid/elapsed/command/log 六列,status 列
+// 语义色;每只任务最近三行非空输出以 id 标签跟在表后,日志被删/非法
+// UTF-8/进程已死都只是那一项少几行,菜单不带崩)。
 void RunBackgroundList(const lubancode::cli::Theme& theme) {
     auto& registry = lubancode::tools::BackgroundTaskRegistry::Instance();
     const auto tasks = registry.List();
     if (tasks.empty()) {
-        TermOut() << "当前没有后台任务。" << "\n";
+        PrintNotice(theme, {"当前没有后台任务。"});
         TermOut().flush();
         return;
     }
-    TermOut() << "后台任务共 " << tasks.size() << " 个:" << "\n" << "\n";
+    // 主表:一任务一行。status 列把终态的 exit 账并进单元格(旧清单行的
+    // "(exit …)" 原样保留);pid 是数值列右对齐。
+    std::vector<frame::TableColumn> columns;
+    columns.push_back({"id"});
+    columns.push_back({"status"});
+    columns.push_back({"pid", 0, /*align_right=*/true});
+    columns.push_back({"elapsed"});
+    columns.push_back({"command"});
+    columns.push_back({"log"});
+    std::vector<frame::TableRow> rows;
+    std::vector<std::vector<std::string>> tails;  // 每任务最近三行非空输出(id 标签挂回表行)
     for (const auto& t : tasks) {
-        TermOut() << theme.tool_line << "[#" << t.task_id << "] " << StatusLabel(t.status);
+        std::string status = StatusLabel(t.status);
         if (IsTerminal(t.status)) {
-            TermOut() << " (exit " << ExitText(t.exit) << ")";
+            status += " (exit " + ExitText(t.exit) + ")";
         }
-        TermOut() << theme.reset << "  PID=" << t.pid << "  已跑 " << FormatElapsed(t) << "\n"
-                  << theme.stats << "  命令: " << t.command << theme.reset << "\n"
-                  << theme.stats << "  日志: " << t.log_path << theme.reset << "\n";
+        rows.push_back(frame::TableRow{{"#" + t.task_id, std::move(status), std::to_string(t.pid),
+                                        FormatElapsed(t), t.command, t.log_path},
+                                       {frame::CellTone::Normal, StatusTone(t.status)}});
+        std::vector<std::string> task_tail;
         if (const std::string tail = registry.ReadOutput(t.task_id, 24); !tail.empty()) {
             std::string safe = lubancode::platform::SanitizeExternalText(tail);
-            std::vector<std::string> non_empty;
             std::size_t line_start = 0;
             while (line_start <= safe.size()) {
                 const std::size_t line_end = safe.find('\n', line_start);
@@ -327,94 +423,119 @@ void RunBackgroundList(const lubancode::cli::Theme& theme) {
                     line.pop_back();
                 }
                 if (!line.empty()) {
-                    non_empty.push_back(std::move(line));
+                    task_tail.push_back(std::move(line));
                 }
                 if (line_end == std::string::npos) {
                     break;
                 }
                 line_start = line_end + 1;
             }
-            if (non_empty.size() > 3) {
-                non_empty.erase(non_empty.begin(), non_empty.end() - 3);  // 只要最近三行非空
-            }
-            for (const std::string& line : non_empty) {
-                TermOut() << theme.stats << "  ⎿ " << line << theme.reset << "\n";
+            if (task_tail.size() > 3) {
+                task_tail.erase(task_tail.begin(), task_tail.end() - 3);  // 只要最近三行非空
             }
         }
-        TermOut() << "\n";
+        tails.push_back(std::move(task_tail));
     }
+    EmitFrameLines(frame::RenderTable(
+        "后台任务共 " + std::to_string(tasks.size()) + " 个",  // 旧首句进框顶,尾冒号剥掉
+        columns, rows, theme, frame::Light(), BackgroundFrameWidth()));
+    // 尾巴:日志正文属长文本,以 id 标签列表跟出,不塞主表(批 1 裁量 3)。
+    std::vector<frame::ListRow> tail_rows;
+    for (std::size_t i = 0; i < tasks.size(); ++i) {
+        for (const std::string& line : tails[i]) {
+            tail_rows.push_back(frame::ListRow{"#" + tasks[i].task_id, line});
+        }
+    }
+    EmitFrameLines(frame::RenderList({}, tail_rows, theme, frame::Light(), BackgroundFrameWidth()));
     TermOut().flush();
 }
 
-// 详情页:单子点名的字段一个不少;停止失败的缘故也照摆。
+// 详情页:单子点名的字段一个不少;停止失败的缘故也照摆(批 3:键值对框,
+// 标题嵌 "后台任务 #<id>")。
 void RunBackgroundShow(const lubancode::cli::Theme& theme, const std::string& target) {
     const auto info = lubancode::tools::BackgroundTaskRegistry::Instance().Get(target);
     if (!info.has_value()) {
-        TermOut() << "找不到 #" << target << " 的后台任务。先 /background 看清单,拿编号来查。\n";
+        PrintNotice(theme, {"找不到 #" + target + " 的后台任务。先 /background 看清单,拿编号来查。"},
+                    frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
-    TermOut() << "后台任务 #" << info->task_id << "\n";
-    TermOut() << "  状态:  " << StatusLabel(info->status) << "\n";
-    TermOut() << "  PID:   " << info->pid << "\n";
-    TermOut() << "  命令:  " << info->command << "\n";
-    TermOut() << "  shell: " << info->shell << "\n";
-    TermOut() << "  cwd:   " << (info->cwd.empty() ? "(未记录)" : info->cwd) << "\n";
-    TermOut() << "  启动:  " << FormatStartTime(info->start_time) << "\n";
-    TermOut() << "  已跑:  " << FormatElapsed(*info) << "\n";
-    if (IsTerminal(info->status)) {
-        TermOut() << "  退出码: " << ExitText(info->exit) << "\n";
-    } else {
-        TermOut() << "  退出码: (还没退出)\n";
-    }
+    std::vector<frame::Field> fields;
+    fields.push_back(frame::Field{"状态", StatusLabel(info->status), StatusAccent(info->status)});
+    fields.push_back(frame::Field{"PID", std::to_string(info->pid)});
+    fields.push_back(frame::Field{"命令", info->command});
+    fields.push_back(frame::Field{"shell", info->shell});
+    fields.push_back(frame::Field{"cwd", info->cwd.empty() ? "(未记录)" : info->cwd});
+    fields.push_back(frame::Field{"启动", FormatStartTime(info->start_time)});
+    fields.push_back(frame::Field{"已跑", FormatElapsed(*info)});
+    fields.push_back(frame::Field{
+        "退出码", IsTerminal(info->status) ? ExitText(info->exit) : std::string("(还没退出)")});
     if (info->status == lubancode::tools::BackgroundTaskStatus::StopFailed && !info->stop_error.empty()) {
-        TermOut() << theme.error << "  停止失败原因: " << info->stop_error << theme.reset << "\n";
+        fields.push_back(frame::Field{"停止失败原因", info->stop_error, frame::FieldAccent::Error});
     }
-    TermOut() << "  日志:  " << info->log_path << "\n";
-    TermOut() << "  查看:  /background logs " << info->task_id << "(查看日志,只读)\n";
+    fields.push_back(frame::Field{"日志", info->log_path});
+    fields.push_back(
+        frame::Field{"查看", "/background logs " + info->task_id + "(查看日志,只读)"});
+    EmitFrameLines(frame::RenderKeyValues("后台任务 #" + info->task_id, fields, theme, frame::Light(),
+                                          BackgroundFrameWidth()));
     TermOut().flush();
 }
 
 // 日志页:空/删/坏/超长/已退出各有各的如实话。本期只做查看,不写"进入终端"。
+// 批 3:头部与各分支提示收键值对框;日志正文与首尾横线框外原样跟出(长正
+// 文不塞框,防列帽截断劈行——与批 2 plugin test 的日志正文同一条裁量)。
 void RunBackgroundLogs(const lubancode::cli::Theme& theme, const std::string& target, int tail_lines) {
     auto& registry = lubancode::tools::BackgroundTaskRegistry::Instance();
     const auto info = registry.Get(target);
     if (!info.has_value()) {
-        TermOut() << "找不到 #" << target << " 的后台任务。先 /background 看清单,拿编号来查。\n";
+        PrintNotice(theme, {"找不到 #" + target + " 的后台任务。先 /background 看清单,拿编号来查。"},
+                    frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
     const auto log = registry.ReadLogDetail(target, tail_lines);
-    TermOut() << "后台任务 #" << info->task_id << " 日志(查看日志:只读,不动进程)\n";
-    TermOut() << theme.stats << "  状态: " << StatusLabel(info->status) << "  日志: " << info->log_path
-              << theme.reset << "\n";
+    {
+        std::vector<frame::Field> head;
+        head.push_back(frame::Field{"状态", StatusLabel(info->status), frame::FieldAccent::Stats});
+        head.push_back(frame::Field{"日志", info->log_path, frame::FieldAccent::Stats});
+        EmitFrameLines(frame::RenderKeyValues(
+            "后台任务 #" + info->task_id + " 日志(查看日志:只读,不动进程)", head, theme, frame::Light(),
+            BackgroundFrameWidth()));
+    }
     switch (log.kind) {
         case lubancode::tools::BackgroundLogRead::Kind::TaskNotFound:
             // Get 已认得,这里不该到;到就说实话。
-            TermOut() << "  日志读不了:任务账在,台账里没有这份日志的路径。\n";
+            PrintNotice(theme, {"日志读不了:任务账在,台账里没有这份日志的路径。"}, frame::FieldAccent::Error);
             break;
         case lubancode::tools::BackgroundLogRead::Kind::FileMissing:
-            TermOut() << "  日志文件已不存在(可能已被清理):" << info->log_path << "\n";
+            PrintNotice(theme, {"日志文件已不存在(可能已被清理):" + info->log_path},
+                        frame::FieldAccent::Stats);
             break;
         case lubancode::tools::BackgroundLogRead::Kind::Empty:
-            TermOut() << "  日志暂时没有内容(进程可能还没开始写):" << info->log_path << "\n";
+            PrintNotice(theme, {"日志暂时没有内容(进程可能还没开始写):" + info->log_path},
+                        frame::FieldAccent::Stats);
             break;
         case lubancode::tools::BackgroundLogRead::Kind::ReadFailed:
-            TermOut() << theme.error << "  日志文件打不开(权限/占用):" << info->log_path << theme.reset
-                      << "\n";
+            PrintNotice(theme, {"日志文件打不开(权限/占用):" + info->log_path}, frame::FieldAccent::Error);
             break;
         case lubancode::tools::BackgroundLogRead::Kind::Ok: {
+            std::vector<std::string> notes;  // 读档口径注记:收进框,正文前一并摆
             if (log.head_omitted) {
-                TermOut() << theme.stats << "  [日志超过单次读档上限(64KB),前部已省略,这里是最末一段]"
-                          << theme.reset << "\n";
+                notes.push_back("[日志超过单次读档上限(64KB),前部已省略,这里是最末一段]");
             }
             if (log.sanitized) {
-                TermOut() << theme.stats << "  [日志里混有非法 UTF-8 字节,已按替换符清洗显示]" << theme.reset
-                          << "\n";
+                notes.push_back("[日志里混有非法 UTF-8 字节,已按替换符清洗显示]");
             }
             if (IsTerminal(info->status)) {
-                TermOut() << theme.stats << "  [任务已退出(" << StatusLabel(info->status)
-                          << "),以下为最终输出]" << theme.reset << "\n";
+                notes.push_back("[任务已退出(" + std::string(StatusLabel(info->status)) + "),以下为最终输出]");
+            }
+            if (!notes.empty()) {
+                std::vector<frame::Field> note_fields;
+                for (const std::string& note : notes) {
+                    note_fields.push_back(frame::Field{"", note, frame::FieldAccent::Stats});
+                }
+                EmitFrameLines(
+                    frame::RenderKeyValues({}, note_fields, theme, frame::Light(), BackgroundFrameWidth()));
             }
             const std::string head_line = tail_lines > 0
                                               ? "── 末尾 " + std::to_string(tail_lines) + " 行 ──"
@@ -435,32 +556,36 @@ void RunBackgroundLogs(const lubancode::cli::Theme& theme, const std::string& ta
 // 停一只:先报"停止信号已发"(此刻台账已进 Stopping),Stop 返回时树已死透
 // 或收不动——再按终态如实回话。Stop() 是同步的,内部走
 // Running→Stopping→Stopped/StopFailed 三段;这里前后各取一次台账,
-// 用户在 /background 里看到的就是这三段。
+// 用户在 /background 里看到的就是这三段。批 3:结论句收键值对框,
+//"正在停止"流式进度行不进框(批 2 裁量 2)。
 void ReportStopOutcome(const lubancode::cli::Theme& theme, const lubancode::tools::BackgroundTaskInfo& after) {
     switch (after.status) {
         case lubancode::tools::BackgroundTaskStatus::Stopped:
-            TermOut() << theme.tool_line << "后台任务 #" << after.task_id
-                      << " 已停止:整棵进程树已收净(exit " << ExitText(after.exit) << ")" << theme.reset
-                      << "\n";
+            PrintNotice(theme, {"后台任务 #" + after.task_id + " 已停止:整棵进程树已收净(exit " +
+                                ExitText(after.exit) + ")"});
             break;
         case lubancode::tools::BackgroundTaskStatus::StopFailed:
-            TermOut() << theme.error << "后台任务 #" << after.task_id << " 停止失败:进程可能还活着。"
-                      << (after.stop_error.empty() ? std::string("原因未知") : after.stop_error)
-                      << theme.reset << "\n"
-                      << "  可重试 /background stop " << after.task_id << ",或照详情里的 PID 手动收。\n";
+            PrintNotice(theme,
+                        {"后台任务 #" + after.task_id + " 停止失败:进程可能还活着。" +
+                            (after.stop_error.empty() ? std::string("原因未知") : after.stop_error),
+                         "可重试 /background stop " + after.task_id + ",或照详情里的 PID 手动收。"},
+                        frame::FieldAccent::Error);
             break;
         case lubancode::tools::BackgroundTaskStatus::Completed:
         case lubancode::tools::BackgroundTaskStatus::Failed:
-            TermOut() << theme.stats << "后台任务 #" << after.task_id << " 在停止前已自己退出("
-                      << StatusLabel(after.status) << ",exit " << ExitText(after.exit) << ")" << theme.reset
-                      << "\n";
+            PrintNotice(theme,
+                        {"后台任务 #" + after.task_id + " 在停止前已自己退出(" + StatusLabel(after.status) +
+                            ",exit " + ExitText(after.exit) + ")"},
+                        frame::FieldAccent::Stats);
             break;
         case lubancode::tools::BackgroundTaskStatus::Running:
         case lubancode::tools::BackgroundTaskStatus::Stopping:
             // Stop 返回了还活着:账没落终态,照实说,不装成功。
-            TermOut() << theme.error << "后台任务 #" << after.task_id << " 还在"
-                      << (after.status == lubancode::tools::BackgroundTaskStatus::Running ? "运行" : "停止中")
-                      << ",停止没有收口。稍后再查 /background show " << after.task_id << theme.reset << "\n";
+            PrintNotice(theme,
+                        {"后台任务 #" + after.task_id + " 还在" +
+                            (after.status == lubancode::tools::BackgroundTaskStatus::Running ? "运行" : "停止中") +
+                            ",停止没有收口。稍后再查 /background show " + after.task_id},
+                        frame::FieldAccent::Error);
             break;
     }
 }
@@ -469,14 +594,16 @@ void RunBackgroundStop(const lubancode::cli::Theme& theme, const std::string& ta
     auto& registry = lubancode::tools::BackgroundTaskRegistry::Instance();
     const auto before = registry.Get(target);
     if (!before.has_value()) {
-        TermOut() << "找不到 #" << target << " 的后台任务。先 /background 看清单,拿编号来停。\n";
+        PrintNotice(theme, {"找不到 #" + target + " 的后台任务。先 /background 看清单,拿编号来停。"},
+                    frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
     if (IsTerminal(before->status)) {
         // 已终态:不重复杀(老账里 StopFailed 也算没停成,可再试)。
-        TermOut() << theme.stats << "后台任务 #" << before->task_id << " 已是终态(" << StatusLabel(before->status)
-                  << "),不重复杀。" << theme.reset << "\n";
+        PrintNotice(theme,
+                    {"后台任务 #" + before->task_id + " 已是终态(" + StatusLabel(before->status) + "),不重复杀。"},
+                    frame::FieldAccent::Stats);
         TermOut().flush();
         return;
     }
@@ -504,27 +631,38 @@ void RunBackgroundStopAll(const lubancode::cli::Theme& theme) {
         }
     }
     if (live.empty()) {
-        TermOut() << "没有在跑的后台任务";
+        std::string text = "没有在跑的后台任务";
         if (terminal > 0) {
-            TermOut() << "(" << terminal << " 个已终态,不重复杀)";
+            text += "(" + std::to_string(terminal) + " 个已终态,不重复杀)";
         }
-        TermOut() << "。\n";
+        text += "。";
+        PrintNotice(theme, {std::move(text)});
         TermOut().flush();
         return;
     }
-    TermOut() << "将停止以下 " << live.size() << " 个后台任务:\n";
-    for (const auto& t : live) {
-        TermOut() << theme.stats << "  [#" << t.task_id << "] " << StatusLabel(t.status) << "  "
-                  << t.command << theme.reset << "\n";
+    // 将停清单:与 /background list 同一副表格骨架(id/status/command)。
+    {
+        std::vector<frame::TableColumn> columns;
+        columns.push_back({"id"});
+        columns.push_back({"status"});
+        columns.push_back({"command"});
+        std::vector<frame::TableRow> rows;
+        for (const auto& t : live) {
+            rows.push_back(frame::TableRow{{"#" + t.task_id, StatusLabel(t.status), t.command},
+                                           {frame::CellTone::Normal, StatusTone(t.status)}});
+        }
+        EmitFrameLines(frame::RenderTable("将停止以下 " + std::to_string(live.size()) + " 个后台任务", columns,
+                                          rows, theme, frame::Light(), BackgroundFrameWidth()));
     }
     if (terminal > 0) {
-        TermOut() << theme.stats << "另有 " << terminal << " 个已终态任务,不重复杀。" << theme.reset << "\n";
+        PrintNotice(theme, {"另有 " + std::to_string(terminal) + " 个已终态任务,不重复杀。"},
+                    frame::FieldAccent::Stats);
     }
     const auto answer = lubancode::cli::ReadLine(
         theme.confirm + "确认停止以上 " + std::to_string(live.size()) + " 个任务? [y/N] " + theme.reset,
         theme, /*esc_rejects=*/true);
     if (!answer.has_value() || !(*answer == "y" || *answer == "Y")) {
-        TermOut() << "已取消,一只都没停。\n";
+        PrintNotice(theme, {"已取消,一只都没停。"});
         TermOut().flush();
         return;
     }
@@ -565,7 +703,8 @@ CommandFlow HandleSlashBackground(const BackgroundCommandContext& ctx,
             }
             return CommandFlow::Continue;
         case BackgroundCommandAction::Invalid:
-            TermOut() << "认不得 \"" << command.bad_word << "\"。\n";
+            PrintNotice(theme, {"认不得 \"" + command.bad_word + "\"。"}, frame::FieldAccent::Error);
+            // 用法块是手工对齐的多行帮助文,不塞框(批 1"长正文"裁量)。
             PrintBackgroundUsage();
             return CommandFlow::Continue;
     }

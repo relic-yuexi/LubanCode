@@ -35,19 +35,22 @@ namespace lubancode::app {
 // env 总闸(LUBANCODE_DISABLE_LOOP=1 只关功能不改存档;装配层读同一枚)。
 bool LoopDisabledByEnv();
 
-// /loop 的执行结果:ok 由 scheduler 判;lines 是终端直接印的行。
+// /loop 的执行结果:ok 由 scheduler 判;lines 是终端直接印的行(TUI 排版
+// 批 3 起经 frame 三助手预渲染——行内自带配色,调用方原样落盘,不再包
+// 主题色;prompt 全稿这类长正文的尾行也会以裸行跟在框后)。
 struct LoopCommandOutcome {
     bool ok = false;
     std::vector<std::string> lines;
 };
 
-// create 之外的所有动作(list/status/pause/resume/stop/run)。
+// create 之外的所有动作(list/status/pause/resume/stop/run)。批 3:theme
+// 必递——list/status 走表格/键值对,反馈句收键值对框。
 LoopCommandOutcome HandleLoopManageCommand(lubancode::runtime::loop::LoopScheduler& scheduler,
                                            const lubancode::cli::ParsedLoopCommand& command,
-                                           std::int64_t now_ms);
+                                           std::int64_t now_ms, const lubancode::cli::Theme& theme);
 
 // create:interval 已在会话层解成 seconds;prompt 为空表示走 loop.md/内置
-// 源(源解析在会话层做,这里只收成品)。
+// 源(源解析在会话层做,这里只收成品)。批 3:反馈句收键值对框。
 LoopCommandOutcome HandleLoopCreateCommand(lubancode::runtime::loop::LoopScheduler& scheduler,
                                            const std::string& prompt,
                                            std::chrono::seconds interval,
@@ -55,7 +58,8 @@ LoopCommandOutcome HandleLoopCreateCommand(lubancode::runtime::loop::LoopSchedul
                                            const std::string& session_id,
                                            std::int64_t now_ms,
                                            lubancode::runtime::loop::LoopPromptSource source,
-                                           const std::string& prompt_file);
+                                           const std::string& prompt_file,
+                                           const lubancode::cli::Theme& theme);
 
 // 内置 maintenance prompt(裸 /loop 且没有 loop.md 时的兜底;单子"内置
 // maintenance prompt"节原文收窄到三件事)。

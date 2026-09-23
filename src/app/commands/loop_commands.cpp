@@ -3,17 +3,22 @@
 #include "app/commands/loop_commands.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <fstream>
 #include <sstream>
+#include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "app/commands/command_flow.hpp"
 #include "cli/line_editor.hpp"
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 3:/loop 渲染段)
 #include "cli/terminal_port.hpp"
 #include "cli/theme.hpp"
+#include "platform/console.hpp"  // GetScreenInfo:整条 /loop 的框宽同一把尺
 #include "platform/paths.hpp"
 #include "runtime/event_sink.hpp"
 #include "runtime/replay.hpp"
@@ -95,6 +100,98 @@ std::string StateLabel(LoopTaskState state) {
     return ToString(state);
 }
 
+// ---- TUI 排版批 3(/loop 全族)的公共小件 --------------------------------------
+//
+// 渲染段只调 cli::frame::* 三助手(约定见 docs/development/tui_style.md)。
+// 本文件文案走字面量(硬编码中文),合同"不新增文案"读作:既有句子原样进
+// frame,一字不添不改(批 2 裁量 1);表头用 schema 名(id/state/interval/
+// next/prompt)。status 的 prompt 全稿与多行正文以裸行跟在框外(批 1 裁量 3)。
+
+namespace frame = lubancode::cli::frame;
+
+int LoopFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+void EmitFrameLines(const std::vector<std::string>& lines) {
+    for (const std::string& line : lines) {
+        lubancode::cli::TermOut() << line << "\n";
+    }
+}
+
+std::string TrimAscii(std::string value) {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}
+
+frame::Field SentenceField(const std::string& sentence,
+                           frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    return frame::Field{TrimAscii(sentence.substr(0, colon)), TrimAscii(sentence.substr(colon + 1)), accent};
+}
+
+// 反馈句收键值对框:直接落盘(HandleLoopCommand 的门禁/用法错误用)。
+void PrintNotice(const lubancode::cli::Theme& theme, std::initializer_list<std::string> sentences,
+                 frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), LoopFrameWidth()));
+}
+
+// 同一副键值对框,攒进 outcome.lines(HandleLoopManageCommand/Create 用,
+// 行内自带配色,调用方原样落盘)。
+void AppendNotice(std::vector<std::string>& out, const lubancode::cli::Theme& theme,
+                  std::initializer_list<std::string> sentences,
+                  frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    for (const std::string& line :
+         frame::RenderKeyValues({}, fields, theme, frame::Light(), LoopFrameWidth())) {
+        out.push_back(line);
+    }
+}
+
+void AppendFrame(std::vector<std::string>& out, std::vector<std::string> lines) {
+    for (std::string& line : lines) {
+        out.push_back(std::move(line));
+    }
+}
+
+// state 语义色(单子批 3):在跑走 pass 档;暂停/等审批/退避走 skip 档;
+// 损坏走 error 档;到点待取与终态默认前景。
+frame::CellTone StateTone(LoopTaskState state) {
+    switch (state) {
+        case LoopTaskState::Active:
+        case LoopTaskState::Running:
+            return frame::CellTone::Pass;
+        case LoopTaskState::Paused:
+        case LoopTaskState::WaitingPermission:
+        case LoopTaskState::BackingOff:
+            return frame::CellTone::Skip;
+        case LoopTaskState::Broken:
+            return frame::CellTone::Fail;
+        case LoopTaskState::Due:
+        case LoopTaskState::Completed:
+        case LoopTaskState::Cancelled:
+        case LoopTaskState::Expired:
+        default:
+            return frame::CellTone::Normal;
+    }
+}
+
+
 // prompt 预览:首行按显示宽度截 30 列(list 默认只给 preview,status 给
 // 全稿)。用 TruncateUtf8ToDisplayWidth——CJK 一字两列、绝不切半个字;
 // 旧实现按字节截,汉字 prompt 会被拦腰截出非法 UTF-8。
@@ -117,27 +214,38 @@ std::string PromptPreview(const std::string& prompt) {
 }  // namespace
 
 LoopCommandOutcome HandleLoopManageCommand(LoopScheduler& scheduler, const ParsedLoopCommand& command,
-                                           std::int64_t now_ms) {
+                                           std::int64_t now_ms, const lubancode::cli::Theme& theme) {
     LoopCommandOutcome out;
     if (command.action == LoopCommandAction::List) {
         const auto views = scheduler.Snapshot(now_ms);
         if (views.empty()) {
             out.ok = true;
-            out.lines.push_back("没有 loop 任务。/loop [间隔] [正文] 建一只。");
+            AppendNotice(out.lines, theme, {"没有 loop 任务。/loop [间隔] [正文] 建一只。"});
             return out;
         }
         out.ok = true;
-        out.lines.push_back("loop 任务(" + std::to_string(views.size()) + " 只):");
+        // 主表:一任务一行(id/state/interval/next/prompt);state 列语义色,
+        // 延迟账并进 next 单元格(旧句的 " · 已延迟" 原样保留)。
+        std::vector<frame::TableColumn> columns;
+        columns.push_back({"id"});
+        columns.push_back({"state"});
+        columns.push_back({"interval"});
+        columns.push_back({"next"});
+        columns.push_back({"prompt"});
+        std::vector<frame::TableRow> rows;
         for (const auto& v : views) {
-            std::string line = "  " + v.task.task_id + "  [" + StateLabel(v.task.state) + "] " +
-                               FormatLoopInterval(v.task.interval) + " · 下一拍 " +
-                               FormatLoopDelta(now_ms, v.task.next_due_at_ms);
+            std::string next = FormatLoopDelta(now_ms, v.task.next_due_at_ms);
             if (v.delayed) {
-                line += " · 已延迟";
+                next += " · 已延迟";
             }
-            line += " · " + PromptPreview(v.task.prompt);
-            out.lines.push_back(line);
+            rows.push_back(frame::TableRow{{v.task.task_id, StateLabel(v.task.state),
+                                            FormatLoopInterval(v.task.interval), std::move(next),
+                                            PromptPreview(v.task.prompt)},
+                                           {frame::CellTone::Normal, StateTone(v.task.state)}});
         }
+        AppendFrame(out.lines,
+                    frame::RenderTable("loop 任务(" + std::to_string(views.size()) + " 只)",  // 尾冒号剥掉
+                                       columns, rows, theme, frame::Light(), LoopFrameWidth()));
         return out;
     }
     if (command.action == LoopCommandAction::Status) {
@@ -148,28 +256,45 @@ LoopCommandOutcome HandleLoopManageCommand(LoopScheduler& scheduler, const Parse
                     list.action = LoopCommandAction::List;
                     return list;
                 }(),
-                now_ms);
+                now_ms, theme);
         }
         const std::string id = scheduler.ResolveTaskId(command.task_ref);
         const auto view = scheduler.Find(id, now_ms);
         if (!view.has_value()) {
-            out.lines.push_back("任务不存在: " + command.task_ref);
+            AppendNotice(out.lines, theme, {"任务不存在: " + command.task_ref},
+                         frame::FieldAccent::Error);
             return out;
         }
         out.ok = true;
         const auto& t = view->task;
-        out.lines.push_back(id + "  [" + StateLabel(t.state) + "]");
-        out.lines.push_back("  间隔: " + FormatLoopInterval(t.interval) +
-                            " · 已跑 " + std::to_string(t.run_count) + " 拍 · 合并掉 " +
-                            std::to_string(t.skipped_count) + " 拍");
-        out.lines.push_back("  下一拍: " + FormatLoopDelta(now_ms, t.next_due_at_ms) +
-                            " · 过期: " + FormatLoopDelta(now_ms, t.expires_at_ms));
+        // 键值对框:标题嵌 "id  [状态]";prompt 全稿多行时首行进框、余稿
+        // 裸行跟出(长正文不塞框,批 1 裁量 3)。
+        std::vector<frame::Field> fields;
+        fields.push_back(frame::Field{
+            "间隔", FormatLoopInterval(t.interval) + " · 已跑 " + std::to_string(t.run_count) +
+                        " 拍 · 合并掉 " + std::to_string(t.skipped_count) + " 拍"});
+        fields.push_back(frame::Field{"下一拍", FormatLoopDelta(now_ms, t.next_due_at_ms) + " · 过期: " +
+                                                    FormatLoopDelta(now_ms, t.expires_at_ms)});
         if (t.consecutive_failures > 0) {
-            out.lines.push_back("  连败 " + std::to_string(t.consecutive_failures) + " 拍(到 " +
-                                std::to_string(LoopDefaults::kProviderFailPauseThreshold) + " 拍自动暂停)");
+            fields.push_back(frame::Field{"", "连败 " + std::to_string(t.consecutive_failures) + " 拍(到 " +
+                                                  std::to_string(LoopDefaults::kProviderFailPauseThreshold) +
+                                                  " 拍自动暂停)"});
         }
-        out.lines.push_back("  prompt(" + ToString(t.prompt_source) + "): " +
-                            (t.prompt.empty() ? "(来自 loop.md/内置维护提示)" : t.prompt));
+        std::string prompt_text = t.prompt.empty() ? std::string("(来自 loop.md/内置维护提示)") : t.prompt;
+        std::string prompt_first = prompt_text;
+        std::string prompt_rest;
+        const std::size_t prompt_cut = prompt_first.find('\n');
+        if (prompt_cut != std::string::npos) {
+            prompt_rest = prompt_first.substr(prompt_cut + 1);
+            prompt_first.resize(prompt_cut);
+        }
+        fields.push_back(
+            frame::Field{"prompt(" + ToString(t.prompt_source) + ")", std::move(prompt_first)});
+        AppendFrame(out.lines, frame::RenderKeyValues(id + "  [" + StateLabel(t.state) + "]", fields,
+                                                      theme, frame::Light(), LoopFrameWidth()));
+        if (!prompt_rest.empty()) {
+            out.lines.push_back(std::move(prompt_rest));  // 多行全稿:余稿裸行跟出
+        }
         return out;
     }
     if (command.action == LoopCommandAction::Pause) {
@@ -178,14 +303,15 @@ LoopCommandOutcome HandleLoopManageCommand(LoopScheduler& scheduler, const Parse
                                        now_ms, "user");
         out.ok = r.ok;
         if (!r.ok) {
-            out.lines.push_back("暂停失败: " + r.error_message);
+            AppendNotice(out.lines, theme, {"暂停失败: " + r.error_message}, frame::FieldAccent::Error);
             return out;
         }
         if (command.task_ref == "all") {
-            out.lines.push_back("已暂停 " + std::to_string(r.payload.value("paused", 0)) + " 只任务。");
+            AppendNotice(out.lines, theme, {"已暂停 " + std::to_string(r.payload.value("paused", 0)) + " 只任务。"});
         } else {
-            out.lines.push_back("已暂停 " + r.payload.value("task_id", std::string()) +
-                                ";定义保留,resume 从现在起再排。");
+            AppendNotice(out.lines, theme,
+                         {"已暂停 " + r.payload.value("task_id", std::string()) +
+                          ";定义保留,resume 从现在起再排。"});
         }
         return out;
     }
@@ -195,16 +321,17 @@ LoopCommandOutcome HandleLoopManageCommand(LoopScheduler& scheduler, const Parse
                                         now_ms);
         out.ok = r.ok;
         if (!r.ok) {
-            out.lines.push_back("续跑失败: " + r.error_message);
+            AppendNotice(out.lines, theme, {"续跑失败: " + r.error_message}, frame::FieldAccent::Error);
             return out;
         }
         if (command.task_ref == "all") {
-            out.lines.push_back("已续跑 " + std::to_string(r.payload.value("resumed", 0)) + " 只任务。");
+            AppendNotice(out.lines, theme, {"已续跑 " + std::to_string(r.payload.value("resumed", 0)) + " 只任务。"});
         } else {
-            out.lines.push_back("已续跑 " + r.payload.value("task_id", std::string()) + ",下一拍 " +
-                                FormatLoopDelta(now_ms, static_cast<std::int64_t>(
-                                                            r.payload.value("next_due_at_ms", 0))) +
-                                "。");
+            AppendNotice(out.lines, theme,
+                         {"已续跑 " + r.payload.value("task_id", std::string()) + ",下一拍 " +
+                          FormatLoopDelta(now_ms, static_cast<std::int64_t>(
+                                                      r.payload.value("next_due_at_ms", 0))) +
+                          "。"});
         }
         return out;
     }
@@ -214,13 +341,14 @@ LoopCommandOutcome HandleLoopManageCommand(LoopScheduler& scheduler, const Parse
                                       now_ms, "user");
         out.ok = r.ok;
         if (!r.ok) {
-            out.lines.push_back("停止失败: " + r.error_message);
+            AppendNotice(out.lines, theme, {"停止失败: " + r.error_message}, frame::FieldAccent::Error);
             return out;
         }
         if (command.task_ref == "all") {
-            out.lines.push_back("已停止 " + std::to_string(r.payload.value("stopped", 0)) + " 只任务。");
+            AppendNotice(out.lines, theme, {"已停止 " + std::to_string(r.payload.value("stopped", 0)) + " 只任务。"});
         } else {
-            out.lines.push_back("已停止 " + r.payload.value("task_id", std::string()) + ";账保留在会话存档。");
+            AppendNotice(out.lines, theme,
+                         {"已停止 " + r.payload.value("task_id", std::string()) + ";账保留在会话存档。"});
         }
         return out;
     }
@@ -228,35 +356,36 @@ LoopCommandOutcome HandleLoopManageCommand(LoopScheduler& scheduler, const Parse
         const auto r = scheduler.RunNow(scheduler.ResolveTaskId(command.task_ref), now_ms);
         out.ok = r.ok;
         if (!r.ok) {
-            out.lines.push_back("补拍失败: " + r.error_message);
+            AppendNotice(out.lines, theme, {"补拍失败: " + r.error_message}, frame::FieldAccent::Error);
             return out;
         }
-        out.lines.push_back("已为 " + r.payload.value("task_id", std::string()) +
-                            " 排一次立即补拍(不改原间隔)。");
+        AppendNotice(out.lines, theme,
+                     {"已为 " + r.payload.value("task_id", std::string()) + " 排一次立即补拍(不改原间隔)。"});
         return out;
     }
-    out.lines.push_back("认不得的 /loop 动作。");
+    AppendNotice(out.lines, theme, {"认不得的 /loop 动作。"}, frame::FieldAccent::Error);
     return out;
 }
 
 LoopCommandOutcome HandleLoopCreateCommand(LoopScheduler& scheduler, const std::string& prompt,
                                            std::chrono::seconds interval, const std::string& cwd_identity,
                                            const std::string& session_id, std::int64_t now_ms,
-                                           LoopPromptSource source, const std::string& prompt_file) {
+                                           LoopPromptSource source, const std::string& prompt_file,
+                                           const lubancode::cli::Theme& theme) {
     LoopCommandOutcome out;
     const auto r = scheduler.Create(prompt, interval, now_ms, cwd_identity, session_id, source,
                                     prompt_file);
     out.ok = r.ok;
     if (!r.ok) {
-        out.lines.push_back("建任务失败: " + r.error_message);
+        AppendNotice(out.lines, theme, {"建任务失败: " + r.error_message}, frame::FieldAccent::Error);
         return out;
     }
-    out.lines.push_back("loop 任务已建: " + r.payload.value("task_id", std::string()) + "(" +
-                        FormatLoopInterval(interval) + ",下一拍 " +
-                        FormatLoopDelta(now_ms, static_cast<std::int64_t>(
-                                                    r.payload.value("next_due_at_ms", 0))) +
-                        ")。");
-    out.lines.push_back("查看 /loop list;暂停 /loop pause <id>;停止 /loop stop <id>。");
+    AppendNotice(out.lines, theme,
+                 {"loop 任务已建: " + r.payload.value("task_id", std::string()) + "(" +
+                  FormatLoopInterval(interval) + ",下一拍 " +
+                  FormatLoopDelta(now_ms, static_cast<std::int64_t>(r.payload.value("next_due_at_ms", 0))) +
+                  ")。",
+                  "查看 /loop list;暂停 /loop pause <id>;停止 /loop stop <id>。"});
     return out;
 }
 
@@ -342,16 +471,15 @@ int HandleLoopCommand(const lubancode::cli::ParsedLoopCommand& command, const Lo
     const int flow_continue = static_cast<int>(lubancode::app::CommandFlow::Continue);
     // 无交互入口明拒(pipe/one-shot 没人回来答审批,loop 会挂死)。
     if (!wiring.interactive) {
-        out << theme.error
-            << "当前不是交互终端,不能建常驻 loop(无人可答审批会挂死)。"
-            << theme.reset << "\n";
+        PrintNotice(theme, {"当前不是交互终端,不能建常驻 loop(无人可答审批会挂死)。"},
+                    frame::FieldAccent::Error);
         return flow_continue;
     }
     if (!wiring.feature_enabled) {
-        out << theme.error
-            << "loop 功能未开启:配置文件里 [features] loop = true(环境变量 "
-               "LUBANCODE_DISABLE_LOOP=1 是总闸)。"
-            << theme.reset << "\n";
+        PrintNotice(theme,
+                    {"loop 功能未开启:配置文件里 [features] loop = true(环境变量 "
+                     "LUBANCODE_DISABLE_LOOP=1 是总闸)。"},
+                    frame::FieldAccent::Error);
         return flow_continue;
     }
     const auto now_ms = [] {
@@ -361,14 +489,14 @@ int HandleLoopCommand(const lubancode::cli::ParsedLoopCommand& command, const Lo
     }();
 
     if (command.action == lubancode::cli::LoopCommandAction::Invalid) {
-        out << theme.error;
         if (!command.error_hint.empty()) {
-            out << command.error_hint;
+            PrintNotice(theme, {command.error_hint}, frame::FieldAccent::Error);
         } else {
-            out << "用法: /loop [间隔] [正文] | list | status <id|all> | pause <id|all> | "
-                   "resume <id|all> | stop <id|all> | run <id>";
+            PrintNotice(theme,
+                        {"用法: /loop [间隔] [正文] | list | status <id|all> | pause <id|all> | "
+                         "resume <id|all> | stop <id|all> | run <id>"},
+                        frame::FieldAccent::Error);
         }
-        out << theme.reset << "\n";
         return flow_continue;
     }
 
@@ -376,9 +504,9 @@ int HandleLoopCommand(const lubancode::cli::ParsedLoopCommand& command, const Lo
         // inline prompt 以 '/' 开头:拒绝(首版不许调度 slash 命令;单子
         // "Slash prompt 的边界"——/exit /clear 这类定时执行会出事)。
         if (!command.prompt.empty() && command.prompt.front() == '/') {
-            out << theme.error
-                << "loop 正文不能以 / 开头(定时执行 slash 命令首版不支持);请改写成自然语言。"
-                << theme.reset << "\n";
+            PrintNotice(theme,
+                        {"loop 正文不能以 / 开头(定时执行 slash 命令首版不支持);请改写成自然语言。"},
+                        frame::FieldAccent::Error);
             return flow_continue;
         }
         // interval:显式 token 解析;空则默认 10m。
@@ -386,8 +514,9 @@ int HandleLoopCommand(const lubancode::cli::ParsedLoopCommand& command, const Lo
         if (!command.interval_text.empty()) {
             const auto parsed_interval = lubancode::runtime::loop::ParseLoopInterval(command.interval_text);
             if (!parsed_interval.has_value()) {
-                out << theme.error << "间隔写法不对: " << command.interval_text
-                    << "(只认 <正整数>m|h|d,最小 1m,最大 7d)。" << theme.reset << "\n";
+                PrintNotice(theme,
+                            {"间隔写法不对: " + command.interval_text + "(只认 <正整数>m|h|d,最小 1m,最大 7d)。"},
+                            frame::FieldAccent::Error);
                 return flow_continue;
             }
             interval = *parsed_interval;
@@ -396,7 +525,7 @@ int HandleLoopCommand(const lubancode::cli::ParsedLoopCommand& command, const Lo
         // 文件源每拍重读)。
         const auto resolved = ResolveLoopPrompt(wiring, command.prompt);
         if (!resolved.error.empty()) {
-            out << theme.error << resolved.error << theme.reset << "\n";
+            PrintNotice(theme, {resolved.error}, frame::FieldAccent::Error);
             return flow_continue;
         }
         std::string loop_session_id;
@@ -405,9 +534,9 @@ int HandleLoopCommand(const lubancode::cli::ParsedLoopCommand& command, const Lo
         }
         const auto outcome = lubancode::app::HandleLoopCreateCommand(
             scheduler, resolved.text, interval, lubancode::platform::CurrentDirUtf8(),
-            loop_session_id, now_ms, resolved.source, resolved.file);
+            loop_session_id, now_ms, resolved.source, resolved.file, theme);
         for (const std::string& line : outcome.lines) {
-            out << theme.stats << line << theme.reset << "\n";
+            out << line << "\n";  // 行内已带 frame 配色,原样落盘
         }
         if (wiring.flush_events) {
             wiring.flush_events();
@@ -415,9 +544,9 @@ int HandleLoopCommand(const lubancode::cli::ParsedLoopCommand& command, const Lo
         return flow_continue;
     }
 
-    const auto outcome = lubancode::app::HandleLoopManageCommand(scheduler, command, now_ms);
+    const auto outcome = lubancode::app::HandleLoopManageCommand(scheduler, command, now_ms, theme);
     for (const std::string& line : outcome.lines) {
-        out << theme.stats << line << theme.reset << "\n";
+        out << line << "\n";  // 行内已带 frame 配色,原样落盘
     }
     if (wiring.flush_events) {
         wiring.flush_events();

@@ -1987,6 +1987,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     materials.agent.skills = &skills;
     materials.agent.registry = &registry();
     materials.agent.mcp_servers = &mcp_servers();
+    materials.agent.theme = &theme;  // TUI 排版批 3:/agents 与 /agent 的 frame 配色
     // ---- peer 域(peers/send/peerperm)
     materials.peer.theme = &theme;
     materials.peer.spinner_enabled = spinner_enabled;
