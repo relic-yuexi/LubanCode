@@ -130,6 +130,7 @@ TEST_CASE("errors 档: 失败枚进表格,成功枚不进;outcome 列 error 语�
 
     REQUIRE(Contains(out, kBoxLightTopLeft));
     const std::string plain = StripAnsi(out);
+    INFO(out);  // 诊断:断言挂时把 errors 档原文打进日志(挂了才打印)
     // 表头:schema 名列头一行齐(exec/tool/outcome/error/ms/rel)。
     CHECK(Contains(plain, "exec"));
     CHECK(Contains(plain, "tool"));

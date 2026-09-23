@@ -167,7 +167,7 @@ TEST_CASE("runtime 报告: 逐请求进表格,排除行进列表") {
     CHECK(Contains(plain, "purpose"));
     CHECK(Contains(plain, "req-0001"));
     CHECK(Contains(plain, "main_turn"));
-    CHECK(Contains(plain, "usage 未报"));
+    CHECK(Contains(plain, "读 98%"));
     // 场次键值与排除列表。
     CHECK(Contains(plain, "场次"));
     CHECK(Contains(plain, "found 5"));

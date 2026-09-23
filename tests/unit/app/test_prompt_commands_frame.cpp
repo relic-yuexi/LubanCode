@@ -225,13 +225,21 @@ TEST_CASE("/prompt 裸敲: 首行做框标题,来源/字数拆键值") {
 TEST_CASE("plain 主题: 两族输出零转义字节、无框字形(T3/--no-color 路径)") {
     PromptRig rig("plain");
     rig.session.content = "plain 形状册的魂正文";
-    for (const auto& run : {std::pair<std::string, int>("", 0), std::pair<std::string, int>("off", 1)}) {
-        CAPTURE(run.first);
-        const std::string soul_out = rig.RunSoul(run.first, rig.plain_theme);
+    {
+        // 裸敲:信息一字不少。
+        const std::string soul_out = rig.RunSoul("", rig.plain_theme);
         CHECK(soul_out.find("\x1b") == std::string::npos);
         CHECK(!Contains(soul_out, kBoxLightTopLeft));
         CHECK(!Contains(soul_out, kBoxLightVert));
         CHECK(Contains(soul_out, "本会话魂"));
+    }
+    {
+        // off 回执:零转义无框照样成立(回执文案里没有"本会话魂")。
+        const std::string soul_out = rig.RunSoul("off", rig.plain_theme);
+        CHECK(soul_out.find("\x1b") == std::string::npos);
+        CHECK(!Contains(soul_out, kBoxLightTopLeft));
+        CHECK(!Contains(soul_out, kBoxLightVert));
+        CHECK(Contains(soul_out, "已设置"));
     }
     const std::string prompt_out = rig.RunPrompt("", rig.plain_theme);
     CHECK(prompt_out.find("\x1b") == std::string::npos);
