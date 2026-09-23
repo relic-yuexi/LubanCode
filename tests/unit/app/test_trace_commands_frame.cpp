@@ -126,6 +126,12 @@ TEST_CASE("errors 档: 失败枚进表格,成功枚不进;outcome 列 error 语�
     FeedExecution(rig.hub, "exe-001", "edit_file", 1, agent::ToolOutcome::ToolError,
                   "schema_rejected", 3);
     FeedExecution(rig.hub, "exe-002", "read_file", 2, agent::ToolOutcome::Succeeded, "", 5);
+    // 交叉验证:hub 的 ErrorLines() 与表格取数是同一份账同一口径,失败枚
+    // 恰一枚(此断言挂时,下面 INFO 把 hub 折出的原文打进日志定音)。
+    const std::vector<std::string> error_lines = rig.hub.ErrorLines();
+    INFO("ErrorLines[0]: ", error_lines.empty() ? std::string("(empty)") : error_lines[0]);
+    REQUIRE(error_lines.size() == 1);
+    REQUIRE(Contains(error_lines[0], "exe-001"));
     const std::string out = rig.Run("errors", rig.theme);
 
     REQUIRE(Contains(out, kBoxLightTopLeft));
