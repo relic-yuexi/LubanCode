@@ -12,10 +12,13 @@
 #include "cli/agent_panel_host.hpp"
 #include "cli/console_input.hpp"
 #include "cli/format_utils.hpp"
+#include "cli/line_editor.hpp"  // TruncateUtf8ToDisplayWidth:框顶标题帽(批 3)
 #include "cli/markdown.hpp"  // RenderMarkdown(原先经 turn_runner.hpp 间接带进,显式化)
 #include "cli/i18n.hpp"  // trf:/unknown 的"不认得"行(原先经注册表头间接带进)
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 3:list/history/graph 标题)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 #include "cli/transcript.hpp"
+#include "platform/console.hpp"  // GetScreenInfo:graph 标题框宽同一把尺
 
 using lubancode::cli::TermOut;
 using lubancode::cli::TermErr;
@@ -1024,6 +1027,43 @@ void PrintUsage(const lubancode::cli::Theme& theme) {
     (void)theme;
 }
 
+// ---- TUI 排版批 3(/workflow list/history/graph 标题)的公共小件 --------------
+//
+// 渲染段只调 cli::frame::* 三助手(约定见 docs/development/tui_style.md);
+// 批 3 只收这三个子命令,show/validate/doctor 等其余分支照旧。文案原样进
+// frame 一字不改(批 2 裁量 1);表头用 schema 名(workflow/id/source/alias/
+// state/run/started)。graph 图本体不塞框——mermaid/ascii 图自身有排版,
+// 只加标题 frame(批 1"长正文不塞框"同一条裁量)。
+
+namespace frame = lubancode::cli::frame;
+
+int WorkflowFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+void EmitFrameLines(const std::vector<std::string>& lines) {
+    for (const std::string& line : lines) {
+        TermOut() << line << "\n";
+    }
+}
+
+// 框顶标题帽:WrapInBox 不截标题,超预算会撑破框——先按"预算-7"(两侧
+// 边框衬空 4 列 + 标题前后衬 3 列)截掉,保字头不劈宽字。80 列窄终端上
+// 长图名也不破框(批 3 验收点,窄/宽两档在形状册里钉)。
+std::string ClampFrameTitle(std::string title, int width) {
+    if (width <= 0) {
+        return title;
+    }
+    const int cap = width - 7;
+    if (cap <= 0) {
+        return {};
+    }
+    return lubancode::cli::TruncateUtf8ToDisplayWidth(std::move(title), cap);
+}
+
 void PrintIssues(const std::string& title, const std::vector<lubancode::workflow::ParseIssue>& issues,
                  const lubancode::cli::Theme& theme) {
     TermOut() << theme.error << title << theme.reset << "\n";
@@ -1191,6 +1231,16 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
                 if (scope == "project") return entry.scope == lubancode::workflow::WorkflowScope::Project;
                 return entry.scope == lubancode::workflow::WorkflowScope::User;
             };
+            // 主表(workflow/id/source/alias/state)+ 明细列表(描述/诊断是长
+            // 字段,以 id 标签跟出——批 2"长字段另表"裁量)。
+            std::vector<frame::TableColumn> columns;
+            columns.push_back({"workflow"});
+            columns.push_back({"id"});
+            columns.push_back({"source"});
+            columns.push_back({"alias"});
+            columns.push_back({"state"});
+            std::vector<frame::TableRow> rows;
+            std::vector<frame::ListRow> notes;
             std::size_t shown = 0;
             for (const auto& entry : catalog.entries) {
                 if (!scope_matches(entry)) {
@@ -1199,35 +1249,55 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
                 ++shown;
                 const std::string source = lubancode::workflow::ToString(entry.scope);
                 if (entry.broken) {
-                    TermOut() << theme.error << "  " << entry.definition.id << " [损坏] (" << source << ")"
-                              << theme.reset << "\n";
+                    rows.push_back(frame::TableRow{
+                        {entry.definition.id, "", source, "", "[损坏]"},
+                        {frame::CellTone::Normal, frame::CellTone::Normal, frame::CellTone::Normal,
+                         frame::CellTone::Normal, frame::CellTone::Fail}});
                     for (const auto& issue : entry.issues) {
-                        TermOut() << "      " << issue.location << ": " << issue.message << "\n";
+                        notes.push_back(frame::ListRow{entry.definition.id,
+                                                       issue.location + ": " + issue.message});
                     }
                     continue;
                 }
-                TermOut() << "  " << entry.definition.name << "  [" << entry.definition.id << " v"
-                          << entry.definition.version << "] (" << source << ")";
                 // 包层(阶段 3)不抢裸 alias:列表不显示直呼名,免得许一个
-                // 死的 /<alias>;canonical id 正门(上面的 [id])才通。
+                // 死的 /<alias>;canonical id 正门(上面的 id 列)才通。
+                std::string alias;
+                bool alias_disabled = false;
                 if (!entry.definition.alias.empty() &&
                     entry.scope != lubancode::workflow::WorkflowScope::Package) {
-                    TermOut() << "  /" << entry.definition.alias;
+                    alias = "/" + entry.definition.alias;
                     if (catalog.disabled_aliases.count(entry.definition.alias) > 0) {
-                        TermOut() << theme.error << "(禁用:" << catalog.disabled_aliases.at(entry.definition.alias)
-                                  << ")" << theme.reset;
+                        alias += "(禁用:" + catalog.disabled_aliases.at(entry.definition.alias) + ")";
+                        alias_disabled = true;
                     }
                 }
-                if (!entry.definition.enabled) TermOut() << "  [已停用]";
-                TermOut() << "\n      " << entry.definition.description << "\n";
+                rows.push_back(frame::TableRow{
+                    {entry.definition.name, entry.definition.id + " v" + entry.definition.version, source,
+                     alias, entry.definition.enabled ? std::string() : std::string("[已停用]")},
+                    {frame::CellTone::Normal, frame::CellTone::Normal, frame::CellTone::Normal,
+                     alias_disabled ? frame::CellTone::Fail : frame::CellTone::Normal,
+                     entry.definition.enabled ? frame::CellTone::Normal : frame::CellTone::Skip}});
+                notes.push_back(frame::ListRow{entry.definition.id, entry.definition.description});
             }
             if (shown == 0) {
-                TermOut() << theme.stats << "(没有" << (scope == "all" ? "" : " " + scope)
-                          << " workflow;.lubancode/workflows/ 下装一份就有)" << theme.reset << "\n";
+                std::vector<frame::Field> empty;
+                empty.push_back(frame::Field{"", "(没有" + (scope == "all" ? std::string() : " " + scope) +
+                                                     " workflow;.lubancode/workflows/ 下装一份就有)",
+                                             frame::FieldAccent::Muted});
+                EmitFrameLines(
+                    frame::RenderKeyValues({}, empty, theme, frame::Light(), WorkflowFrameWidth()));
+            } else {
+                EmitFrameLines(
+                    frame::RenderTable({}, columns, rows, theme, frame::Light(), WorkflowFrameWidth()));
+                EmitFrameLines(
+                    frame::RenderList({}, notes, theme, frame::Light(), WorkflowFrameWidth()));
             }
             for (const auto& conflict : catalog.conflicts) {
-                TermOut() << theme.stats << "[冲突] " << conflict.alias << ": " << conflict.owner << " ("
-                          << conflict.kind << ")" << theme.reset << "\n";
+                std::vector<frame::Field> fields;
+                fields.push_back(frame::Field{"[冲突] " + conflict.alias, conflict.owner + " (" + conflict.kind + ")",
+                                              frame::FieldAccent::Muted});
+                EmitFrameLines(
+                    frame::RenderKeyValues({}, fields, theme, frame::Light(), WorkflowFrameWidth()));
             }
             break;
         }
@@ -1262,11 +1332,24 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
                 TermOut() << theme.error << "找不到 workflow: " << parsed.id << theme.reset << "\n";
                 return true;
             }
+            // 标题 frame:图名进框顶、format 进框行;图本体框外原样——
+            // mermaid/ascii 图自身有排版,塞框会被列帽截断劈行(批 3)。
+            const auto emit_graph_title = [&] {
+                const int width = WorkflowFrameWidth();
+                const std::string title = ClampFrameTitle(
+                    entry->definition.name + " [" + entry->definition.id + " v" + entry->definition.version +
+                        "]",
+                    width);
+                const std::vector<frame::Field> fields{frame::Field{"graph", parsed.format}};
+                EmitFrameLines(frame::RenderKeyValues(title, fields, theme, frame::Light(), width));
+            };
             if (parsed.format == "mermaid") {
+                emit_graph_title();
                 TermOut() << lubancode::workflow::RenderMermaidGraph(entry->definition);
             } else if (parsed.format == "json") {
                 TermOut() << entry->definition.normalized.dump(2) << "\n";
             } else {
+                emit_graph_title();
                 TermOut() << lubancode::workflow::RenderAsciiGraph(entry->definition);
             }
             break;
@@ -1317,16 +1400,28 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
             if (context.home_lubancode.has_value()) {
                 const std::filesystem::path runs_root = *context.home_lubancode / "workflow-runs";
                 const auto runs = lubancode::workflow::ListRuns(runs_root);
-                std::size_t shown = 0;
+                // 运行账走表格(run/workflow/state/started);未完成的括注原样。
+                std::vector<frame::TableColumn> columns;
+                columns.push_back({"run"});
+                columns.push_back({"workflow"});
+                columns.push_back({"state"});
+                columns.push_back({"started"});
+                std::vector<frame::TableRow> rows;
                 for (const auto& run : runs) {
                     if (!parsed.id.empty() && run.workflow_id != parsed.id) continue;
-                    ++shown;
-                    TermOut() << "  " << run.run_id << "  " << run.workflow_id << " v" << run.workflow_version
-                              << "  " << (run.final_state.empty() ? "(未完成)" : run.final_state) << "  "
-                              << run.started_at << "\n";
+                    rows.push_back(frame::TableRow{
+                        {run.run_id, run.workflow_id + " v" + run.workflow_version,
+                         run.final_state.empty() ? std::string("(未完成)") : run.final_state,
+                         run.started_at}});
                 }
-                if (shown == 0) {
-                    TermOut() << theme.stats << "(没有运行账)" << theme.reset << "\n";
+                if (rows.empty()) {
+                    std::vector<frame::Field> empty;
+                    empty.push_back(frame::Field{"", "(没有运行账)", frame::FieldAccent::Muted});
+                    EmitFrameLines(
+                        frame::RenderKeyValues({}, empty, theme, frame::Light(), WorkflowFrameWidth()));
+                } else {
+                    EmitFrameLines(frame::RenderTable({}, columns, rows, theme, frame::Light(),
+                                                      WorkflowFrameWidth()));
                 }
             }
             break;
