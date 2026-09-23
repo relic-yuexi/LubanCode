@@ -77,7 +77,6 @@ int DisplayColOf(const std::string& row, const std::string& needle) {
 
 constexpr const char* kBoxLightTopLeft = "\xe2\x94\x8c";  // ┌
 constexpr const char* kBoxLightVert = "\xe2\x94\x82";     // │
-constexpr const char* kGroupRuleOld = "──";                // 旧手拼横线残留探针
 
 const cli::Theme dark = cli::BuiltinTheme("dark");
 const cli::Theme plain = cli::BuiltinTheme("plain");
@@ -139,15 +138,17 @@ TEST_CASE("context:三组各进键值对框,组名嵌框顶标题") {
     const std::string out = RunContext(dark, &layers, &profile);
     const std::string text = StripAnsi(out);
 
-    // 占用卡片(cli 层)原样在前——表头是"── 占用 ──(窗口 ...)"(group.usage
-    // 键,bd.header 是退役残留键),三组框标题跟后。
+    // 占用卡片(cli 层)在前——排版批 6 起表头也收口:组名进标题
+    // (frame_title 色,无框卡片就一行标题文字),旧"── 占用 ──"手拼横线
+    // 绝迹;三组框标题跟后。
     REQUIRE(Contains(out, kBoxLightTopLeft));
-    CHECK(Contains(text, "── 占用 ──"));
+    CHECK(Contains(text, "占用(窗口"));
+    CHECK(text.find("── 占用 ──") == std::string::npos);
     CHECK(Contains(text, "缓存"));
     CHECK(Contains(text, "结构与回收"));
     CHECK(Contains(text, "预算与角色账"));
-    // 旧"── 组名 ──"手拼横线不再出现(占用卡片表头是 cli 层既有形态,
-    // 领地外;批 5a 收口的是命令层三处组名横线)。
+    // 旧"── 组名 ──"手拼横线不再出现(批 5a 收口命令层三处组名横线,
+    // 批 6 把占用卡片表头也收进标题——全输出再无手拼组名横线)。
     CHECK(text.find("── 缓存 ──") == std::string::npos);
     CHECK(text.find("── 结构与回收 ──") == std::string::npos);
     CHECK(text.find("── 预算与角色账 ──") == std::string::npos);

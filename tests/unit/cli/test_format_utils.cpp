@@ -379,6 +379,25 @@ TEST_CASE("FormatContextBreakdown: plain 主题回退 # 和 -,不掺 Unicode 条
     CHECK(lines[4].find("-") != std::string::npos);
 }
 
+TEST_CASE("FormatContextBreakdown: 表头组名走 frame_title,旧 ── 手拼横线绝迹(批 6)") {
+    const auto dark = BuiltinTheme("dark");
+    const auto dark_lines = FormatContextBreakdown(10000, 5000, 20000, 0, 256000, 0, dark, 16);
+    // 组名进标题:frame_title 包色、窗口注记跟排,行里不再有 "── " 手拼横线。
+    CHECK(dark_lines[0].find(dark.frame_title) != std::string::npos);
+    CHECK(dark_lines[0].find("占用") != std::string::npos);
+    CHECK(dark_lines[0].find("(窗口 256k)") != std::string::npos);
+    CHECK(dark_lines[0].find("──") == std::string::npos);
+    // 分隔线走 divider::line 的 Light 档(─),与旧路同字符。
+    CHECK(dark_lines[4].find("─") != std::string::npos);
+
+    // T3/plain:表头零转义、零框线字符,窗口注记照读。
+    const auto plain_lines = FormatContextBreakdown(10000, 5000, 20000, 0, 256000, 0,
+                                                    BuiltinTheme("plain"), 16);
+    CHECK(plain_lines[0].find('\x1b') == std::string::npos);
+    CHECK(plain_lines[0].find("(窗口 256k)") != std::string::npos);
+    CHECK(plain_lines[0].find("──") == std::string::npos);
+}
+
 TEST_CASE("FormatContextBreakdown: 窄宽度条形照比例取整") {
     // 50 tokens,窗口 100 → 50%,宽度 4 → 2 实 2 空。
     const auto lines = FormatContextBreakdown(50, 0, 0, 0, 100, 0, BuiltinTheme("dark"), 4);

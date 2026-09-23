@@ -10,6 +10,7 @@
 
 #include "agent/context.hpp"       // AutoCompactTriggerLine:自动压缩线与触发同一只(§〇.1)
 #include "cli/context_tracker.hpp"  // kAutoCompactThresholdPercent
+#include "cli/divider.hpp"          // divider::line:占用卡片分隔线收口(排版批 6)
 #include "cli/i18n.hpp"
 
 namespace lubancode::cli {
@@ -539,8 +540,12 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
     };
 
     std::vector<std::string> lines;
-    // 占用卡片表头,与其他分组(── 缓存 ── / ── 结构与回收 ──)同一风格。
-    lines.push_back("── " + tr("cmd.context.group.usage") + " ──(窗口 " + TokenText(window_tokens) + ")");
+    // 占用卡片表头(排版批 6 收口):旧"── 组名 ──(窗口 N)"手拼横线按
+    // 批 5a 同款裁量换掉——组名进标题、走 frame_title 档(其余分组在
+    // session_commands 已进 frame 框顶标题),窗口注记跟排;plain 主题
+    // frame_title 空串,纯文本标题。
+    lines.push_back(theme.frame_title + tr("cmd.context.group.usage") + "(窗口 " + TokenText(window_tokens) +
+                    ")" + theme.reset);
     // 系统提示/工具永远是字符估(可单独算,但口径仍是字符/3),带 ~。
     lines.push_back(category_row(label_sys, sys_tokens, /*estimated=*/true));
     lines.push_back(category_row(label_tools, tools_tokens, /*estimated=*/true));
@@ -559,9 +564,10 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
         }
         lines.push_back(std::move(history_row));
     }
-    // 分隔线长度盖住"标签 + 数字 + 条形 + 百分比"那几列。
+    // 分隔线长度盖住"标签 + 数字 + 条形 + 百分比"那几列;字符统一走
+    // divider::line(排版批 6 收口,plain 退 Ascii 同旧路)。
     const int sep_cols = static_cast<int>(label_cols + tok_cols) + bar_width + 6;
-    lines.push_back("  " + RepeatGlyph(plain ? "-" : "─", sep_cols));
+    lines.push_back("  " + divider::line(plain ? divider::Style::Ascii : divider::Style::Light, sep_cols));
     {
         std::string used_row = "  " + PadRightCols(label_used, label_cols) +
                                tok_cell(used, /*estimated=*/!have_measured) +

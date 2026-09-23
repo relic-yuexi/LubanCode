@@ -17,21 +17,23 @@ namespace {
 constexpr const char* kElbow = "\xE2\x8E\xBF";  // ⎿ U+23BF
 constexpr const char* kDot = "\xE2\x97\x8F";    // ● U+25CF
 
-// 状态灯颜色:只染灯,不染正文——Running/Pending 黄(tool_line),成功绿
-// (prompt),失败红(error),拒绝灰(stats),打断灰黄(dim + tool_line)。
+// 状态灯颜色:只染灯,不染正文。排版批 6 起全从 Theme 语义档取——
+// Running/Pending 黄(tool_line,活动档),成功绿(table_pass),失败红
+// (error),拒绝灰(table_skip),打断淡灰(row_muted;旧路是裸写
+// "\x1b[2m"+tool_line 拼 dim,基件合同禁硬编码 ANSI,收进语义档)。
 std::string StatusColor(TranscriptStatus status, const Theme& theme) {
     switch (status) {
         case TranscriptStatus::Pending:
         case TranscriptStatus::Running:
             return theme.tool_line;
         case TranscriptStatus::Ok:
-            return theme.prompt;
+            return theme.table_pass;
         case TranscriptStatus::Error:
             return theme.error;
         case TranscriptStatus::Cancelled:
-            return theme.stats;
+            return theme.table_skip;
         case TranscriptStatus::Interrupted:
-            return "\x1b[2m" + theme.tool_line;
+            return theme.row_muted;
         case TranscriptStatus::Blocked:
             return theme.error;  // 拦下用失败色,但措辞是"未执行",不冒充跑过
     }
@@ -332,7 +334,7 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
         ThinkingHasVisibleText(item.full_output)) {
         const std::vector<std::string> rows = ThinkingPreviewRows(item.full_output, width, kThinkingPreviewMaxRows);
         for (const std::string& row : rows) {
-            out += indent + "  " + theme.stats + row + theme.reset + "\n";
+            out += indent + "  " + theme.row_muted + row + theme.reset + "\n";
         }
     }
 
@@ -550,7 +552,7 @@ void AppendRestoredMessage(std::string& out, const api::Message& message, const 
     separate();
     const bool assistant = message.role == api::Role::Assistant;
     if (assistant) {
-        out += theme.banner + "● " + tr("cmd.resume.history.assistant") + theme.reset + "\n";
+        out += theme.frame_title + "● " + tr("cmd.resume.history.assistant") + theme.reset + "\n";
     } else {
         // 用户消息:不印 "> 你" 标头,正文直接铺成背景块——与 live 提交、
         // Ctrl+L 重画同一颗 formatter。只含工具结果的 user 消息不会走到
@@ -658,7 +660,7 @@ std::string FormatRestoredHistory(const std::vector<api::Message>& messages, con
     const auto emit_compact_notes = [&](std::size_t message_index) {
         while (next_compact < compact_positions.size() && compact_positions[next_compact] <= message_index) {
             separate();
-            out += theme.stats + tr("cmd.resume.history.compact") + theme.reset + "\n";
+            out += theme.row_muted + tr("cmd.resume.history.compact") + theme.reset + "\n";
             ++next_compact;
         }
     };
@@ -705,13 +707,13 @@ std::string FormatRestoredHistory(const runtime::RestoredHistoryView& history, c
             // 顺序);token 数字读持久字段,不在 resume 时重算(§4.11)。
             separate();
             if (item.compact.context_tokens_before > 0 || item.compact.context_tokens_after > 0) {
-                out += theme.stats +
+                out += theme.row_muted +
                        trf("cmd.resume.history.compact_tokens",
                            FormatRestoredTokenCount(item.compact.context_tokens_before),
                            FormatRestoredTokenCount(item.compact.context_tokens_after)) +
                        theme.reset + "\n";
             } else {
-                out += theme.stats + tr("cmd.resume.history.compact") + theme.reset + "\n";
+                out += theme.row_muted + tr("cmd.resume.history.compact") + theme.reset + "\n";
             }
             continue;
         }
