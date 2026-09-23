@@ -172,16 +172,20 @@ TEST_CASE("context:键值对按最宽 key 对齐,value 起始列处处一致") {
     const std::string text = StripAnsi(out);
 
     // 缓存组:epoch 行与会话累计行的 value 同列(RenderKeyValues 按全组最
-    // 宽 key 补齐)。探针用"命中 60.0k"(两行 value 同头,且不会被
-    // note.semantics 长句里的"缓存命中/会话累计"字样截胡)。
+    // 宽 key 补齐)。行选与探针共守:note.semantics 长句里也有"会话累计"
+    // 字样,单按行选会截胡(不含"命中 60.0k"则不是缓存组的行)。
     const std::string hit_head = "命中 " + cli::FormatTokenCount(60000);
     int epoch_col = -1;
     int session_col = -1;
     std::istringstream lines(text);
     std::string line;
     while (std::getline(lines, line)) {
-        if (Contains(line, "前缀 epoch 2")) epoch_col = DisplayColOf(line, hit_head);
-        if (Contains(line, "会话累计")) session_col = DisplayColOf(line, hit_head);
+        if (Contains(line, "前缀 epoch 2") && Contains(line, hit_head)) {
+            epoch_col = DisplayColOf(line, hit_head);
+        }
+        if (Contains(line, "会话累计") && Contains(line, hit_head)) {
+            session_col = DisplayColOf(line, hit_head);
+        }
     }
     CHECK(epoch_col > 0);
     CHECK(session_col > 0);
