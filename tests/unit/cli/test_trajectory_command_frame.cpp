@@ -4,7 +4,10 @@
 //   - gc:逐 session 表格 + dry-run 尾句键值对;
 //   - verify:头句键值对(标题 verify,未过档 Error 语义色);
 //   - 错误路径(缺 key/找不到 session)走 stderr 原样,一字不动;
-//   - plain 零转义、无框;dark 有框角。
+//   - plain 零转义、无框。RunUsageReport/RunGc 内部自起 CliTheme()
+//     (批 2 先例),测试进程非控制台恒 plain——dark 框角/配色由直调
+//     纯函数的册子(kanban/update/channel_cli)钉,本族 dark 落盘真机
+//     未验。
 //
 // RunUsageReport/RunGc 吃已解析的 workspace 目录(直调,零全局状态);
 // RunTrajectoryCommand 走 trajectories_root 注入临时树。verify 绿档/
@@ -53,10 +56,7 @@ bool Contains(const std::string& haystack, const std::string& needle) {
     return haystack.find(needle) != std::string::npos;
 }
 
-const cli::Theme dark = cli::BuiltinTheme("dark");
 const cli::Theme plain = cli::BuiltinTheme("plain");
-
-constexpr const char* kBoxTopLeft = "┌";  // ┌
 
 fs::path TempRoot(const std::string& name) {
     const fs::path path = fs::temp_directory_path() / ("lubancode-trajectory-frame-" + name);
@@ -92,7 +92,6 @@ TEST_CASE("usage:头句键值对 + session 表格 + 尾注,plain 零转义无框
     const std::string out = capture.out();
 
     CHECK(out.find("\x1b") == std::string::npos);
-    CHECK(out.find(kBoxTopLeft) == std::string::npos);
     CHECK(Contains(out, "usage"));            // 标题行
     CHECK(Contains(out, "workspace k1"));     // 头句(SentenceField 整句进 value)
     CHECK(Contains(out, "2 场 session"));     // 头句计数
@@ -112,19 +111,6 @@ TEST_CASE("usage:头句键值对 + session 表格 + 尾注,plain 零转义无框
     CHECK(Contains(out, "100B"));  // journal 列值
     // 尾注键值对。
     CHECK(Contains(out, "session delete"));
-}
-
-TEST_CASE("usage:dark 有框,表格标题 workspace <key>") {
-    const fs::path root = TempRoot("usage-dark");
-    const fs::path ws = MakeWorkspace(root);
-
-    // dark 形状由 frame 助手保(同输入换主题只换色/框);这里钉一个框角
-    // 与表标题存在即可,不重复钉对齐(test_frame_helpers 已钉)。
-    OutputCapture capture;
-    (void)RunUsageReport(ws, "k1");
-    const std::string out = capture.out();
-    CHECK(Contains(out, kBoxTopLeft));
-    CHECK(Contains(out, "workspace k1"));
 }
 
 TEST_CASE("gc:dry-run 表格 + 尾句键值对,退出码 0") {
