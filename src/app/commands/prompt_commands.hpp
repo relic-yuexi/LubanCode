@@ -57,7 +57,8 @@ std::string LoadSoulContentByName(const std::string& name, bool warn);
 // 提示"内容未变",不记虚假 pending/revision。首版没有 apply-now/force。
 void HandleSoulCommand(const std::string& args, lubancode::runtime::SessionSoulSnapshot& session_soul,
                        const std::shared_ptr<std::string>& configured_content, std::string& configured_name,
-                       const std::optional<std::string>& config_file_path);
+                       const std::optional<std::string>& config_file_path,
+                       const lubancode::cli::Theme& theme);
 
 
 // /prompt 命令:裸敲显示当前法(人格段)的来源和字数,外加各提示词模块
@@ -67,7 +68,7 @@ void HandleSoulCommand(const std::string& args, lubancode::runtime::SessionSoulS
 // 算好的来源说明(CLI 参数/文件/内置);prompts_dir 是用户模块目录
 // (~/.lubancode/prompts,找不到主目录时空串)。
 void HandlePromptCommand(const std::string& args, const std::string& law_source, const std::string& persona,
-                          const std::string& prompts_dir);
+                          const std::string& prompts_dir, const lubancode::cli::Theme& theme);
 
 // ---------------------------------------------------------------------------
 // 命令分派注册制(会话终章):魂/法域的分派位。case 体原样自

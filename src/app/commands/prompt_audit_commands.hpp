@@ -92,7 +92,10 @@ struct PromptAuditReportModel {
 };
 
 // 终端人话。行不带换行符。
-std::vector<std::string> FormatPromptAuditReport(const PromptAuditReportModel& model);
+// theme/width 是 TUI 排版批 5b 的渲染参数:报告内部走 cli::frame 三助手,
+// 纯函数语义不变(plain 主题下零转义无框)。
+std::vector<std::string> FormatPromptAuditReport(const PromptAuditReportModel& model,
+                                                 const lubancode::cli::Theme& theme, int width);
 
 // JSON 输出(schema: lubancode.prompt.audit v1)。content_policy 钉
 // metadata_only;prompt_text_included 恒 false(隐私合同自描述)。

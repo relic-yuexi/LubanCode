@@ -13,7 +13,9 @@
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派位用)
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 5b:报告拼装)
 #include "cli/terminal_port.hpp"
+#include "platform/console.hpp"  // GetScreenInfo:报告框宽同一把尺
 #include "privacy/secret_scan.hpp"
 #include "tool_semantics.hpp"  // ToolSourceKindName:来源标签唯一真源(AR-08 尾巴收敛)
 #include "tools/registry.hpp"
@@ -22,11 +24,28 @@
 namespace lubancode::app {
 namespace {
 
+namespace frame = lubancode::cli::frame;
+
 using lubancode::cli::TermOut;
 using lubancode::insights::EvidenceItem;
 using lubancode::insights::Finding;
 using lubancode::insights::FindingConfidence;
 using lubancode::insights::FindingSeverity;
+
+// ---- TUI 排版批 5b(/prompt audit 报告)的小件(批 2 同款) ---------------
+
+int AuditFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+void EmitFrameLines(const std::vector<std::string>& lines) {
+    for (const std::string& line : lines) {
+        TermOut() << line << "\n";
+    }
+}
 
 const char* SeverityLabel(FindingSeverity severity) {
     switch (severity) {
@@ -137,7 +156,8 @@ ParsedPromptAuditCommand ParsePromptAuditCommand(const std::string& args) {
     return parsed;
 }
 
-std::vector<std::string> FormatPromptAuditReport(const PromptAuditReportModel& model) {
+std::vector<std::string> FormatPromptAuditReport(const PromptAuditReportModel& model,
+                                                 const lubancode::cli::Theme& theme, int width) {
     std::vector<std::string> lines;
     std::string title = "Prompt audit · " + model.mode;
     if (model.mode == "runtime") {
@@ -146,13 +166,15 @@ std::vector<std::string> FormatPromptAuditReport(const PromptAuditReportModel& m
             title += "(未封口 provisional)";
         }
     }
-    lines.push_back(std::move(title));
+    // 事实账进键值对框:标题嵌框顶,构成/段级各拆两列(批 5b;原手工对齐
+    // 空格由助手接管)。
+    std::vector<frame::Field> fact_fields;
 
     // static 事实账:system/魂/模型指令/工具定义四栏 + 段级表。
     if (model.has_static) {
         const auto& facts = model.facts;
         std::ostringstream out;
-        out << "  构成        system " << lubancode::cli::FormatTokenCount(facts.system_tokens)
+        out << "system " << lubancode::cli::FormatTokenCount(facts.system_tokens)
             << " · 魂 " << lubancode::cli::FormatTokenCount(facts.soul_tokens)
             << " · 模型指令 "
             << lubancode::cli::FormatTokenCount(facts.model_instructions_tokens)
@@ -168,7 +190,7 @@ std::vector<std::string> FormatPromptAuditReport(const PromptAuditReportModel& m
         } else {
             out << " · 预算未知,占比不判";
         }
-        lines.push_back(out.str());
+        fact_fields.push_back(frame::Field{"构成", out.str()});
         if (!facts.segments.empty()) {
             // 段级 Top 5(token 降序,同份字典序):常驻的大头一眼可见。
             std::vector<const insights::PromptAuditFacts::SegmentFact*> sorted;
@@ -183,7 +205,6 @@ std::vector<std::string> FormatPromptAuditReport(const PromptAuditReportModel& m
                           return a->segment_id < b->segment_id;
                       });
             std::ostringstream seg_line;
-            seg_line << "  段级 Top    ";
             for (std::size_t i = 0; i < sorted.size() && i < 5; ++i) {
                 if (i > 0) {
                     seg_line << " · ";
@@ -197,46 +218,75 @@ std::vector<std::string> FormatPromptAuditReport(const PromptAuditReportModel& m
             if (sorted.size() > 5) {
                 seg_line << " · …共 " << sorted.size() << " 段";
             }
-            lines.push_back(seg_line.str());
+            fact_fields.push_back(frame::Field{"段级 Top", seg_line.str()});
         }
     }
+    if (!fact_fields.empty()) {
+        for (const std::string& line :
+             frame::RenderKeyValues(title, fact_fields, theme, frame::Light(), width)) {
+            lines.push_back(line);
+        }
+    } else {
+        lines.push_back(std::move(title));
+    }
 
-    // runtime 逐请求表(最多 6 行,超了计数;只摆事实)。
+    // runtime 逐请求表(最多 6 行,超了计数;只摆事实)。表格化(批 5b):
+    // 列头用数据 schema 名,usage 未报/snapshot 缺席的原文照进单元格。
     if (model.mode == "runtime" || model.mode == "all") {
         if (model.requests.empty()) {
-            lines.push_back("  请求        这场 session 没有模型请求账——不猜");
+            std::vector<frame::Field> fields;
+            fields.push_back(frame::Field{"请求", "这场 session 没有模型请求账——不猜"});
+            for (const std::string& line :
+                 frame::RenderKeyValues({}, fields, theme, frame::Light(), width)) {
+                lines.push_back(line);
+            }
         } else {
             std::size_t shown = std::min<std::size_t>(model.requests.size(), 6);
+            std::vector<frame::TableColumn> columns;
+            columns.push_back({"request"});
+            columns.push_back({"purpose"});
+            columns.push_back({"tools"});
+            columns.push_back({"messages", 0, /*align_right=*/true});
+            columns.push_back({"cache"});
+            std::vector<frame::TableRow> rows;
             for (std::size_t i = 0; i < shown; ++i) {
                 const auto& view = model.requests[i];
-                std::ostringstream out;
-                out << "  请求 " << view.request_id << "  purpose=" << view.purpose;
+                std::string tools;
+                std::string messages;
                 if (view.snapshot.has_value()) {
-                    out << " · tools "
-                        << view.snapshot->request_shape.tool_count << " 枚/"
-                        << lubancode::cli::FormatTokenCount(
-                               view.snapshot->request_shape.tool_definition_tokens_estimated)
-                        << " · messages "
-                        << view.snapshot->request_shape.message_count;
+                    tools = std::to_string(view.snapshot->request_shape.tool_count) + " 枚/" +
+                            lubancode::cli::FormatTokenCount(
+                                view.snapshot->request_shape.tool_definition_tokens_estimated);
+                    messages = std::to_string(view.snapshot->request_shape.message_count);
                 } else {
-                    out << " · 无 snapshot";
+                    tools = "无 snapshot";
+                    messages = "无 snapshot";
                 }
+                std::string cache;
                 if (view.usage_reported) {
                     const int ratio = view.total_input_tokens > 0
                                           ? static_cast<int>((view.cache_read_tokens * 200 +
                                                               view.total_input_tokens) /
                                                              (view.total_input_tokens * 2))
                                           : 0;
-                    out << " · cache 读 " << ratio << "%";
+                    cache = "读 " + std::to_string(ratio) + "%";
                 } else {
-                    out << " · usage 未报";
+                    cache = "usage 未报";
                 }
-                lines.push_back(out.str());
+                rows.push_back(frame::TableRow{{view.request_id, view.purpose, tools, messages, cache}});
+            }
+            for (const std::string& line :
+                 frame::RenderTable({}, columns, rows, theme, frame::Light(), width)) {
+                lines.push_back(line);
             }
             if (model.requests.size() > shown) {
-                std::ostringstream out;
-                out << "    …另有 " << (model.requests.size() - shown) << " 笔";
-                lines.push_back(out.str());
+                std::vector<frame::Field> fields;
+                fields.push_back(frame::Field{"", "…另有 " + std::to_string(model.requests.size() - shown) +
+                                                     " 笔"});
+                for (const std::string& line :
+                     frame::RenderKeyValues({}, fields, theme, frame::Light(), width)) {
+                    lines.push_back(line);
+                }
             }
         }
     }
@@ -244,11 +294,17 @@ std::vector<std::string> FormatPromptAuditReport(const PromptAuditReportModel& m
     // outcome coverage:active/incomplete/corrupt 单列,不混分母。
     if (model.has_outcome) {
         std::ostringstream out;
-        out << "  场次        found " << model.sessions_found;
+        out << "found " << model.sessions_found;
         for (const auto& [status, count] : model.status_counts) {
             out << " · " << status << " " << count;
         }
-        lines.push_back(out.str());
+        std::vector<frame::Field> fields;
+        fields.push_back(frame::Field{"场次", out.str()});
+        for (const std::string& line :
+             frame::RenderKeyValues({}, fields, theme, frame::Light(), width)) {
+            lines.push_back(line);
+        }
+        std::vector<frame::ListRow> excluded;
         for (const auto& entry : model.scan) {
             if (entry.status == lubancode::insights::SessionGateStatus::Analyzed ||
                 entry.reason.empty()) {
@@ -258,55 +314,102 @@ std::vector<std::string> FormatPromptAuditReport(const PromptAuditReportModel& m
             if (reason.size() > 90) {
                 reason = reason.substr(0, 90) + "…";
             }
-            lines.push_back("    排除 " + entry.session_id + ": " + reason);
+            excluded.push_back(frame::ListRow{"排除 " + entry.session_id, reason, {},
+                                              frame::Bullet::None});
+        }
+        for (const std::string& line :
+             frame::RenderList({}, excluded, theme, frame::Light(), width)) {
+            lines.push_back(line);
         }
     }
 
-    // 发现:每条四行起(头/摘要/建议/证据);explain 模式换全账渲染。
+    // 发现:主表一行一条(id/severity/confidence/category,severity 上语义
+    // 色:high 走 error、warning 走 skip、info 走 pass);摘要/建议/证据/
+    // 反证是长字段,进附注列表,行头挂 finding_id 对回主表(批 2 先例)。
     if (!model.findings.empty()) {
-        std::ostringstream head;
-        head << "  发现 " << model.findings.size() << " 条";
-        lines.push_back(head.str());
+        std::vector<frame::TableColumn> columns;
+        columns.push_back({"id"});
+        columns.push_back({"severity"});
+        columns.push_back({"confidence"});
+        columns.push_back({"category"});
+        std::vector<frame::TableRow> rows;
+        std::vector<frame::ListRow> notes;
         for (const auto& finding : model.findings) {
-            lines.push_back("    " + finding.finding_id + " · " +
-                            SeverityLabel(finding.severity) + " · 证据置信 " +
-                            ConfidenceLabel(finding.confidence) + " · " + finding.category);
-            lines.push_back("      " + finding.summary);
-            lines.push_back("      建议: " + finding.recommendation);
+            const frame::CellTone severity_tone =
+                finding.severity == FindingSeverity::High    ? frame::CellTone::Fail
+                : finding.severity == FindingSeverity::Warning ? frame::CellTone::Skip
+                                                               : frame::CellTone::Pass;
+            rows.push_back(frame::TableRow{{finding.finding_id, SeverityLabel(finding.severity),
+                                            ConfidenceLabel(finding.confidence), finding.category},
+                                           {frame::CellTone::Normal, severity_tone,
+                                            frame::CellTone::Normal, frame::CellTone::Normal}});
+            notes.push_back(frame::ListRow{finding.finding_id, finding.summary, {}, frame::Bullet::None});
+            notes.push_back(frame::ListRow{finding.finding_id, "建议: " + finding.recommendation, {},
+                                           frame::Bullet::None});
             for (const auto& item : finding.evidence) {
-                lines.push_back(EvidenceLine(item));
+                notes.push_back(frame::ListRow{finding.finding_id, EvidenceLine(item).substr(6), {},
+                                               frame::Bullet::None});
             }
             for (const auto& item : finding.counter_evidence) {
-                lines.push_back("      反证 " + EvidenceLine(item).substr(6));
+                notes.push_back(frame::ListRow{finding.finding_id,
+                                               "反证 " + EvidenceLine(item).substr(6), {},
+                                               frame::Bullet::None});
             }
         }
+        for (const std::string& line :
+             frame::RenderTable("发现 " + std::to_string(model.findings.size()) + " 条", columns,
+                                rows, theme, frame::Light(), width)) {
+            lines.push_back(line);
+        }
+        for (const std::string& line :
+             frame::RenderList({}, notes, theme, frame::Light(), width)) {
+            lines.push_back(line);
+        }
     } else {
-        lines.push_back("  发现 0 条(规则没命中不硬凑;语义复核属 --model-review,A6)");
+        std::vector<frame::Field> fields;
+        fields.push_back(frame::Field{
+            "发现", "0 条(规则没命中不硬凑;语义复核属 --model-review,A6)"});
+        for (const std::string& line :
+             frame::RenderKeyValues({}, fields, theme, frame::Light(), width)) {
+            lines.push_back(line);
+        }
     }
 
-    // 功能信号(A4 的建议面:只指现成功能)。
+    // 功能信号(A4 的建议面:只指现成功能)。一行一信号,先决挂行尾 hint。
     if (!model.signals.empty()) {
-        lines.push_back("  可少走弯路  " + std::to_string(model.signals.size()) + " 条");
+        std::vector<frame::ListRow> rows;
         for (const auto& signal : model.signals) {
-            lines.push_back("    " + signal.signal_id + " · " + signal.feature);
-            lines.push_back("      " + signal.summary);
-            lines.push_back("      先决: " + signal.precondition);
+            rows.push_back(frame::ListRow{signal.signal_id, signal.feature + " · " + signal.summary,
+                                          "先决: " + signal.precondition, frame::Bullet::None});
+        }
+        for (const std::string& line :
+             frame::RenderList("可少走弯路 " + std::to_string(model.signals.size()) + " 条", rows,
+                               theme, frame::Light(), width)) {
+            lines.push_back(line);
         }
     }
 
     if (!model.warnings.empty()) {
-        lines.push_back("  缺口点名");
+        std::vector<frame::ListRow> rows;
         const std::size_t shown = std::min<std::size_t>(model.warnings.size(), 5);
         for (std::size_t i = 0; i < shown; ++i) {
-            lines.push_back("    " + model.warnings[i]);
+            rows.push_back(frame::ListRow{"", model.warnings[i], {}, frame::Bullet::None});
         }
         if (model.warnings.size() > shown) {
-            std::ostringstream out;
-            out << "    …另有 " << (model.warnings.size() - shown) << " 条";
-            lines.push_back(out.str());
+            rows.push_back(frame::ListRow{"", "…另有 " + std::to_string(model.warnings.size() - shown) +
+                                                 " 条", {}, frame::Bullet::None});
+        }
+        for (const std::string& line :
+             frame::RenderList("缺口点名", rows, theme, frame::Light(), width)) {
+            lines.push_back(line);
         }
     }
-    lines.push_back("  口径        只摆事实;prompt 正文与绝对路径不进报告;语义类仅 suspected");
+    std::vector<frame::Field> caliber;
+    caliber.push_back(frame::Field{"口径", "只摆事实;prompt 正文与绝对路径不进报告;语义类仅 suspected"});
+    for (const std::string& line :
+         frame::RenderKeyValues({}, caliber, theme, frame::Light(), width)) {
+        lines.push_back(line);
+    }
     return lines;
 }
 
@@ -433,15 +536,20 @@ std::string NowYyyymmdd(const PromptAuditContext& context) {
 void HandlePromptAuditCommand(const std::string& args, const PromptAuditContext& context) {
     const ParsedPromptAuditCommand parsed = ParsePromptAuditCommand(args);
     if (parsed.mode == ParsedPromptAuditCommand::Mode::Invalid) {
-        TermOut() << context.theme.error
-                  << lubancode::cli::trf("cmd.prompt.audit.unknown_arg", parsed.bad_word) << "\n"
-                  << lubancode::cli::tr("cmd.prompt.audit.usage_line") << "\n"
-                  << context.theme.reset << "\n";
+        std::vector<frame::Field> fields;
+        fields.push_back(frame::Field{"", lubancode::cli::trf("cmd.prompt.audit.unknown_arg", parsed.bad_word),
+                                      frame::FieldAccent::Error});
+        fields.push_back(frame::Field{"", lubancode::cli::tr("cmd.prompt.audit.usage_line")});
+        EmitFrameLines(
+            frame::RenderKeyValues({}, fields, context.theme, frame::Light(), AuditFrameWidth()));
         TermOut().flush();
         return;
     }
     if (parsed.later_model_review) {
-        TermOut() << lubancode::cli::tr("cmd.prompt.audit.later_model_review") << "\n";
+        std::vector<frame::Field> fields;
+        fields.push_back(frame::Field{"", lubancode::cli::tr("cmd.prompt.audit.later_model_review")});
+        EmitFrameLines(
+            frame::RenderKeyValues({}, fields, context.theme, frame::Light(), AuditFrameWidth()));
     }
 
     PromptAuditReportModel model;
@@ -486,11 +594,12 @@ void HandlePromptAuditCommand(const std::string& args, const PromptAuditContext&
             if (!parsed.session_id.empty()) {
                 session_dir = context.sessions_root / parsed.session_id;
                 if (!std::filesystem::is_directory(session_dir)) {
-                    TermOut() << context.theme.error
-                              << lubancode::cli::trf("cmd.prompt.audit.session_not_found",
-                                                     parsed.session_id)
-                              << "\n"
-                              << context.theme.reset << "\n";
+                    std::vector<frame::Field> fields;
+                    fields.push_back(frame::Field{
+                        "", lubancode::cli::trf("cmd.prompt.audit.session_not_found", parsed.session_id),
+                        frame::FieldAccent::Error});
+                    EmitFrameLines(frame::RenderKeyValues({}, fields, context.theme, frame::Light(),
+                                                          AuditFrameWidth()));
                     TermOut().flush();
                     return;
                 }
@@ -500,8 +609,10 @@ void HandlePromptAuditCommand(const std::string& args, const PromptAuditContext&
             lubancode::insights::RuntimeRequestsRead read =
                 lubancode::insights::CollectRuntimeRequests(session_dir);
             if (!read.ok) {
-                TermOut() << context.theme.error << read.message << "\n"
-                          << context.theme.reset << "\n";
+                std::vector<frame::Field> fields;
+                fields.push_back(frame::Field{"", read.message, frame::FieldAccent::Error});
+                EmitFrameLines(frame::RenderKeyValues({}, fields, context.theme, frame::Light(),
+                                                      AuditFrameWidth()));
                 TermOut().flush();
                 return;
             }
@@ -570,11 +681,12 @@ void HandlePromptAuditCommand(const std::string& args, const PromptAuditContext&
                                          return finding.finding_id == parsed.finding_id;
                                      });
         if (it == model.findings.end()) {
-            TermOut() << context.theme.error
-                      << lubancode::cli::trf("cmd.prompt.audit.finding_not_found",
-                                             parsed.finding_id)
-                      << "\n"
-                      << context.theme.reset << "\n";
+            std::vector<frame::Field> fields;
+            fields.push_back(frame::Field{
+                "", lubancode::cli::trf("cmd.prompt.audit.finding_not_found", parsed.finding_id),
+                frame::FieldAccent::Error});
+            EmitFrameLines(frame::RenderKeyValues({}, fields, context.theme, frame::Light(),
+                                                  AuditFrameWidth()));
             TermOut().flush();
             return;
         }
@@ -583,23 +695,29 @@ void HandlePromptAuditCommand(const std::string& args, const PromptAuditContext&
             TermOut().flush();
             return;
         }
+        // 全账进键值对框 + 证据/反证列表(批 5b;原文一字不改,只拆列)。
         const Finding& finding = *it;
-        TermOut() << finding.finding_id << " · " << finding.category << "\n"
-                  << "  严重度 " << SeverityLabel(finding.severity) << "(讲影响) · 置信 "
-                  << ConfidenceLabel(finding.confidence) << "(讲证据;两者不换算)\n"
-                  << "  " << finding.summary << "\n"
-                  << "  证据\n";
+        std::vector<frame::Field> fields;
+        fields.push_back(frame::Field{"", finding.finding_id + " · " + finding.category});
+        fields.push_back(frame::Field{"严重度", std::string(SeverityLabel(finding.severity)) + "(讲影响)"});
+        fields.push_back(frame::Field{"置信",
+                                      std::string(ConfidenceLabel(finding.confidence)) +
+                                          "(讲证据;两者不换算)"});
+        fields.push_back(frame::Field{"", finding.summary});
+        fields.push_back(frame::Field{"建议", finding.recommendation});
+        fields.push_back(frame::Field{"规则", finding.rule_version + "(deterministic_rule)"});
+        EmitFrameLines(
+            frame::RenderKeyValues({}, fields, context.theme, frame::Light(), AuditFrameWidth()));
+        std::vector<frame::ListRow> rows;
         for (const auto& item : finding.evidence) {
-            TermOut() << "    " << EvidenceLine(item).substr(6) << "\n";
+            rows.push_back(frame::ListRow{"证据", EvidenceLine(item).substr(6), {},
+                                          frame::Bullet::None});
         }
-        if (!finding.counter_evidence.empty()) {
-            TermOut() << "  反证\n";
-            for (const auto& item : finding.counter_evidence) {
-                TermOut() << "    " << EvidenceLine(item).substr(6) << "\n";
-            }
+        for (const auto& item : finding.counter_evidence) {
+            rows.push_back(frame::ListRow{"反证", EvidenceLine(item).substr(6), {},
+                                          frame::Bullet::None});
         }
-        TermOut() << "  建议  " << finding.recommendation << "\n"
-                  << "  规则  " << finding.rule_version << "(deterministic_rule)\n";
+        EmitFrameLines(frame::RenderList({}, rows, context.theme, frame::Light(), AuditFrameWidth()));
         TermOut().flush();
         return;
     }
@@ -610,7 +728,7 @@ void HandlePromptAuditCommand(const std::string& args, const PromptAuditContext&
         TermOut().flush();
         return;
     }
-    for (const auto& line : FormatPromptAuditReport(model)) {
+    for (const auto& line : FormatPromptAuditReport(model, context.theme, AuditFrameWidth())) {
         TermOut() << line << "\n";
     }
     TermOut().flush();

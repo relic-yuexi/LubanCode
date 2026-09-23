@@ -840,8 +840,13 @@ int RunCli(const std::vector<std::string>& args) {
             PrintHelp();
             return 0;
         case CliAction::CheckUpdate:
+            // CLI 子命令没有会话主题,按 ManageSession 先例现起(批 2 裁量 4):
+            // 管道/重定向自然降 plain。
             return HandleUpdateCommand(std::string(), lubancode::config::kDefaultConnectTimeoutMs,
-                                       lubancode::config::kDefaultRequestTimeoutSecs)
+                                       lubancode::config::kDefaultRequestTimeoutSecs,
+                                       lubancode::cli::ResolveTheme(
+                                           std::string(),
+                                           lubancode::cli::DetectConsoleCapability().colors_enabled))
                        ? 0
                        : 1;
         case CliAction::MissingSystemPromptValue:

@@ -28,7 +28,7 @@
 #include "cli/console_input.hpp"
 #include "cli/keymap.hpp"
 #include "cli/markdown.hpp"
-#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 4:/model 清单与角色表)
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 4/5b:/model 清单角色表与 /update 渲染段)
 #include "cli/terminal_port.hpp"
 #include "platform/clipboard.hpp"
 #include "platform/console.hpp"
@@ -69,6 +69,38 @@ std::string TrimAscii(std::string value) {
     value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
     value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
     return value;
+}
+
+// ---- TUI 排版批 5b(/update)的小件(批 2 同款) -----------------------------
+
+namespace frame = lubancode::cli::frame;
+
+int UpdateFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+frame::Field UpdateSentenceField(const std::string& sentence,
+                                 frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    return frame::Field{TrimAscii(sentence.substr(0, colon)), TrimAscii(sentence.substr(colon + 1)), accent};
+}
+
+void PrintUpdateNotice(const lubancode::cli::Theme& theme, std::initializer_list<std::string> sentences,
+                       frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(UpdateSentenceField(sentence, accent));
+    }
+    for (const std::string& line :
+         frame::RenderKeyValues({}, fields, theme, frame::Light(), UpdateFrameWidth())) {
+        TermOut() << line << "\n";
+    }
 }
 
 // HC-07 统一发布合同:Provider 配置变更一律"持久提交在前、内存发布在后",
@@ -214,13 +246,16 @@ lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& th
     };
     return io;
 }
-bool HandleUpdateCommand(const std::string& args, int connect_timeout_ms, int request_timeout_secs) {
+// /update [check] 的结果反馈(TUI 排版批 5b):句内冒号拆键值,整句原文
+// 进 value,一字不添不改;"正在检查"流式行等网络,不进框(批 2 裁量 2)。
+bool HandleUpdateCommand(const std::string& args, int connect_timeout_ms, int request_timeout_secs,
+                         const lubancode::cli::Theme& theme) {
     std::string action = TrimAscii(args);
     for (char& ch : action) {
         ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     }
     if (!action.empty() && action != "check") {
-        TermOut() << tr("cmd.update.usage") << "\n";
+        PrintUpdateNotice(theme, {tr("cmd.update.usage")});
         return false;
     }
 
@@ -229,17 +264,19 @@ bool HandleUpdateCommand(const std::string& args, int connect_timeout_ms, int re
     const auto checked = lubancode::config::CheckForUpdate(
         std::string(kVersion), connect_timeout_ms, request_timeout_secs);
     if (!checked.has_value()) {
-        TermOut() << trf("cmd.update.failed", checked.error()) << "\n";
+        PrintUpdateNotice(theme, {trf("cmd.update.failed", checked.error())},
+                          lubancode::cli::frame::FieldAccent::Error);
         return false;
     }
     if (!checked->update_available) {
-        TermOut() << trf("cmd.update.current", checked->current_version, checked->latest_version) << "\n";
+        PrintUpdateNotice(
+            theme, {trf("cmd.update.current", checked->current_version, checked->latest_version)});
         return true;
     }
 
-    TermOut() << trf("cmd.update.available", checked->current_version, checked->latest_version) << "\n"
-              << trf("cmd.update.release", checked->release_url) << "\n"
-              << tr("cmd.update.install_hint") << "\n";
+    PrintUpdateNotice(theme, {trf("cmd.update.available", checked->current_version, checked->latest_version),
+                              trf("cmd.update.release", checked->release_url),
+                              tr("cmd.update.install_hint")});
     return true;
 }
 
@@ -2474,7 +2511,8 @@ CommandFlow HandleSlashConfig(const SettingsCommandContext& ctx, const lubancode
 }
 
 CommandFlow HandleSlashUpdate(const SettingsCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
-    HandleUpdateCommand(parsed.args, ctx.config->connect_timeout_ms, ctx.config->request_timeout_secs);
+    HandleUpdateCommand(parsed.args, ctx.config->connect_timeout_ms, ctx.config->request_timeout_secs,
+                        *ctx.theme);
     return CommandFlow::Continue;
 }
 

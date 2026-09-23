@@ -15,6 +15,7 @@
 #include <system_error>
 
 #include "app/commands/prompt_commands.hpp"
+#include "cli/theme.hpp"  // 排版批 5b:HandleSoulCommand 新递 Theme(测试进程钉 plain)
 #include "config/config.hpp"  // HomeLubancodeDir:命令层读魂文件的同一只口
 #include "config/prompt_files.hpp"
 #include "runtime/session_soul.hpp"
@@ -95,7 +96,8 @@ struct SoulCommandFixture {
     }
 
     void Run(const std::string& args) {
-        app::HandleSoulCommand(args, session, configured, configured_name, /*config_file_path=*/std::nullopt);
+        app::HandleSoulCommand(args, session, configured, configured_name, /*config_file_path=*/std::nullopt,
+                               cli::BuiltinTheme("plain"));
     }
 
     static int counter_;

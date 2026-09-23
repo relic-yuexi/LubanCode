@@ -68,7 +68,9 @@ void ClearAndPrintBanner(const lubancode::config::Config& config, const lubancod
 // interactive 让 ReadChoice 在管道/重定向时回落编号。两处向导共用,免得注入逻辑漂移。
 lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& theme);
 
-bool HandleUpdateCommand(const std::string& args, int connect_timeout_ms, int request_timeout_secs);
+// theme 参数是 TUI 排版批 5b 的渲染配套:结果反馈进键值对框。
+bool HandleUpdateCommand(const std::string& args, int connect_timeout_ms, int request_timeout_secs,
+                         const lubancode::cli::Theme& theme);
 
 
 // /skills 命令:列出扫描到的技能,按来源分组,走主题配色(plain 主题下
