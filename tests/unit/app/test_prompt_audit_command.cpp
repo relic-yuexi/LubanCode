@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include "app/commands/prompt_audit_commands.hpp"
+#include "cli/theme.hpp"  // 排版批 5b:报告函数新递 Theme(纯函数册钉 plain 形状)
 
 using namespace lubancode;
 using namespace lubancode::app;
@@ -108,7 +109,7 @@ TEST_CASE("FormatPromptAuditReport:标题/事实账/发现/口径行") {
                                                 "host_generated", 180, 90, true});
     model.findings.push_back(SampleFinding());
 
-    const std::string text = Join(FormatPromptAuditReport(model));
+    const std::string text = Join(FormatPromptAuditReport(model, cli::BuiltinTheme("plain"), 0));
     CHECK(text.find("Prompt audit · static") != std::string::npos);
     CHECK(text.find("system 4200") != std::string::npos);
     CHECK(text.find("工具定义 9200(42 枚)") != std::string::npos);
@@ -117,16 +118,24 @@ TEST_CASE("FormatPromptAuditReport:标题/事实账/发现/口径行") {
     CHECK(text.find("runtime/environment") != std::string::npos);
     CHECK(text.find("(动态)") != std::string::npos);
     CHECK(text.find("发现 1 条") != std::string::npos);
-    CHECK(text.find("P-AUD-S02 · warning · 证据置信 high · prompt.duplicate_content") !=
-          std::string::npos);
+    // 发现头行拆进主表四列(批 5b):分项各在,severity/confidence 表头在。
+    CHECK(text.find("P-AUD-S02") != std::string::npos);
+    CHECK(text.find("warning") != std::string::npos);
+    CHECK(text.find("prompt.duplicate_content") != std::string::npos);
+    CHECK(text.find("severity") != std::string::npos);
+    CHECK(text.find("confidence") != std::string::npos);
     CHECK(text.find("建议: 重复段留一份") != std::string::npos);
-    CHECK(text.find("口径        只摆事实;prompt 正文与绝对路径不进报告") != std::string::npos);
+    // 口径拆两列(批 5b):key/value 分段各在。
+    CHECK(text.find("口径") != std::string::npos);
+    CHECK(text.find("只摆事实;prompt 正文与绝对路径不进报告") != std::string::npos);
 
     // 零发现不硬凑。
     PromptAuditReportModel empty_model;
     empty_model.mode = "static";
-    const std::string empty_text = Join(FormatPromptAuditReport(empty_model));
-    CHECK(empty_text.find("发现 0 条") != std::string::npos);
+    const std::string empty_text =
+        Join(FormatPromptAuditReport(empty_model, cli::BuiltinTheme("plain"), 0));
+    CHECK(empty_text.find("发现") != std::string::npos);
+    CHECK(empty_text.find("0 条") != std::string::npos);
     CHECK(empty_text.find("A6") != std::string::npos);
 }
 
@@ -168,14 +177,23 @@ TEST_CASE("FormatPromptAuditReport:runtime 逐请求表与 outcome coverage 单�
         insights::WorkspaceScanEntry{"20260831-000010-OK010",
                                      insights::SessionGateStatus::Analyzed, ""});
 
-    const std::string text = Join(FormatPromptAuditReport(model));
+    const std::string text = Join(FormatPromptAuditReport(model, cli::BuiltinTheme("plain"), 0));
     CHECK(text.find("(未封口 provisional)") != std::string::npos);
-    CHECK(text.find("请求 req-0001  purpose=main_turn") != std::string::npos);
-    CHECK(text.find("tools 42 枚/9200") != std::string::npos);
-    CHECK(text.find("messages 17") != std::string::npos);
-    CHECK(text.find("cache 读 98%") != std::string::npos);
+    // 逐请求拆进表格(批 5b):request/purpose 各在,tools/messages/cache
+    // 表头在,数值/短句在单元格。
+    CHECK(text.find("request") != std::string::npos);
+    CHECK(text.find("purpose") != std::string::npos);
+    CHECK(text.find("req-0001") != std::string::npos);
+    CHECK(text.find("main_turn") != std::string::npos);
+    CHECK(text.find("tools") != std::string::npos);
+    CHECK(text.find("42 枚/9200") != std::string::npos);
+    CHECK(text.find("messages") != std::string::npos);
+    CHECK(text.find("17") != std::string::npos);
+    CHECK(text.find("cache") != std::string::npos);
+    CHECK(text.find("读 98%") != std::string::npos);
     CHECK(text.find("无 snapshot") != std::string::npos);
-    CHECK(text.find("场次        found 5") != std::string::npos);
+    CHECK(text.find("场次") != std::string::npos);
+    CHECK(text.find("found 5") != std::string::npos);
     CHECK(text.find("corrupt 1") != std::string::npos);
     CHECK(text.find("排除 20260831-000009-BAD009") != std::string::npos);
     // analyzed 且无理由的场不打排除行。

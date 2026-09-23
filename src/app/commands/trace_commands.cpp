@@ -5,22 +5,140 @@
 
 #include "app/commands/trace_commands.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <fstream>
+#include <sstream>
 #include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "agent/tool_trace.hpp"
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 5b:/trace 渲染段)
 #include "cli/terminal_port.hpp"
 #include "cli/theme.hpp"
-#include "platform/console.hpp"
+#include "platform/console.hpp"  // GetScreenInfo:整条 /trace 的框宽同一把尺
 #include "runtime/tool_trace_hub.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/session_utils.hpp"  // NowTimestamp(P0-6 自 sessions 迁来)
 
 namespace lubancode::app {
 
-using lubancode::cli::TermOut;
+namespace {
+
+namespace frame = lubancode::cli::frame;
+
+// ---- TUI 排版批 5b(/trace 全族)的公共小件(批 2 同款) --------------------
+//
+// 本文件文案是硬编码中文(不走 i18n 表),单子合同"不新增文案"在此读作:
+// 既有句子原样进 frame,一字不添不改;表格列头用数据 schema 名(#/exec/
+// tool/outcome/error/ms/rel),SentenceField 拆句内冒号。
+
+int TraceFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+void EmitFrameLines(const std::vector<std::string>& lines) {
+    for (const std::string& line : lines) {
+        TermOut() << line << "\n";
+    }
+}
+
+std::string TrimAscii(std::string value) {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}
+
+frame::Field SentenceField(const std::string& sentence,
+                           frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    return frame::Field{TrimAscii(sentence.substr(0, colon)), TrimAscii(sentence.substr(colon + 1)), accent};
+}
+
+void PrintTraceNotice(const lubancode::cli::Theme& theme, std::initializer_list<std::string> sentences,
+                      frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), TraceFrameWidth()));
+}
+
+// outcome 单元格的语义色:成功 pass;取消/未启动 skip;其余(工具错/未知/
+// schema 拒/闸拒...)是明确失败,走 error 档(fail 不另立色,批 0 合同)。
+frame::CellTone OutcomeTone(const lubancode::agent::ToolExecutionRecord& record) {
+    using lubancode::agent::ToolOutcome;
+    switch (record.outcome) {
+        case ToolOutcome::Succeeded:
+            return frame::CellTone::Pass;
+        case ToolOutcome::CancelledBeforeStart:
+            return frame::CellTone::Skip;
+        default:
+            return frame::CellTone::Fail;
+    }
+}
+
+// 关系边连排(rel 列):parent/retry/blocked/compensates 与 corrupt 标注,
+// 与旧 summary 行的附注同一套词,一字不改。
+std::string RelationText(const lubancode::agent::ToolExecutionRecord& record) {
+    std::ostringstream out;
+    if (record.corrupt) {
+        out << "[trace_corrupt] ";
+    }
+    if (!record.parent_execution_id.empty()) {
+        out << "(parent " << record.parent_execution_id << ") ";
+    }
+    if (!record.retry_of.empty()) {
+        out << "(retry of " << record.retry_of << ") ";
+    }
+    if (!record.blocked_by.empty()) {
+        out << "(blocked by " << record.blocked_by << ") ";
+    }
+    if (!record.compensates.empty()) {
+        out << "(compensates " << record.compensates << ") ";
+    }
+    std::string text = out.str();
+    if (!text.empty() && text.back() == ' ') {
+        text.pop_back();
+    }
+    return text;
+}
+
+// 枚账表格(批 5b):一行一枚 execution,短字段进列(#/exec/tool/outcome/
+// error/ms),关系边进 rel 列——塞不下的长字段批 2 先例是另起明细表,这里
+// 关系边本就是短串,同表可容。
+void PrintExecutionTable(const lubancode::cli::Theme& theme, const std::string& title,
+                         const std::vector<const lubancode::agent::ToolExecutionRecord*>& records) {
+    std::vector<frame::TableColumn> columns;
+    columns.push_back({"#"});
+    columns.push_back({"exec"});
+    columns.push_back({"tool"});
+    columns.push_back({"outcome"});
+    columns.push_back({"error"});
+    columns.push_back({"ms", 0, /*align_right=*/true});
+    columns.push_back({"rel"});
+    std::vector<frame::TableRow> rows;
+    for (const auto* record : records) {
+        rows.push_back(frame::TableRow{
+            {"#" + std::to_string(record->sequence_in_batch), record->execution_id, record->tool_name,
+             lubancode::agent::ToString(record->outcome), record->error_code,
+             std::to_string(record->duration_ms), RelationText(*record)},
+            {frame::CellTone::Normal, frame::CellTone::Normal, frame::CellTone::Normal,
+             OutcomeTone(*record), OutcomeTone(*record), frame::CellTone::Normal, frame::CellTone::Normal}});
+    }
+    EmitFrameLines(frame::RenderTable(title, columns, rows, theme, frame::Light(), TraceFrameWidth()));
+}
+
+}  // namespace
 
 void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args) {
     const lubancode::cli::Theme& theme = *ctx.theme;
@@ -41,15 +159,15 @@ void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args)
             out_path.erase(out_path.begin());
         }
         if (out_path == "--raw" || out_path.rfind("--raw ", 0) == 0) {
-            TermOut() << theme.error << "导出件会离开本机,一律脱敏,没有 --raw 档。" << theme.reset << "\n";
+            PrintTraceNotice(theme, {"导出件会离开本机,一律脱敏,没有 --raw 档。"}, frame::FieldAccent::Error);
             return;
         }
         if (out_path.empty()) {
-            TermOut() << theme.error << "用法: /trace export <路径>" << theme.reset << "\n";
+            PrintTraceNotice(theme, {"用法: /trace export <路径>"}, frame::FieldAccent::Error);
             return;
         }
         if (ctx.trace_hub == nullptr) {
-            TermOut() << theme.error << "本会话没有追踪 hub,没有可导出的追踪账。" << theme.reset << "\n";
+            PrintTraceNotice(theme, {"本会话没有追踪 hub,没有可导出的追踪账。"}, frame::FieldAccent::Error);
             return;
         }
         // P0-6:旧 session 存档已删,导出吃 hub 的进程内最近账(有界 512
@@ -95,24 +213,35 @@ void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args)
 
         std::ofstream out_file(lubancode::tools::Utf8ToPath(out_path), std::ios::binary | std::ios::trunc);
         if (!out_file.is_open()) {
-            TermOut() << theme.error << "导出文件打不开: " << out_path << theme.reset << "\n";
+            PrintTraceNotice(theme, {"导出文件打不开: " + out_path}, frame::FieldAccent::Error);
             return;
         }
         const std::string body = bundle.dump(2);
         out_file.write(body.data(), static_cast<std::streamsize>(body.size()));
         out_file.close();
-        TermOut() << theme.stats << "已导出脱敏追踪账(" << ledger.executions().size()
-                  << " 枚 execution): " << out_path << theme.reset << "\n";
+        PrintTraceNotice(theme, {"已导出脱敏追踪账(" + std::to_string(ledger.executions().size()) +
+                                 " 枚 execution): " + out_path});
         return;
     }
     if (args == "errors") {
-        const auto lines = ctx.trace_hub != nullptr ? ctx.trace_hub->ErrorLines() : std::vector<std::string>{};
-        if (lines.empty()) {
-            TermOut() << theme.stats << "本会话没有明确失败或 unknown 的工具调用。" << theme.reset << "\n";
-        } else {
-            for (const std::string& line : lines) {
-                TermOut() << theme.stats << line << theme.reset << "\n";
+        // 表格化(批 5b):取数从 ErrorLines() 的行串改为 ledger 同口径过滤
+        //(Succeeded/CancelledBeforeStart 除外,与 hub 的过滤同一对枚举值),
+        // 行集不变,只是一行一枚进列。
+        std::vector<const lubancode::agent::ToolExecutionRecord*> failed;
+        if (ctx.trace_hub != nullptr) {
+            const auto ledger = ctx.trace_hub->BuildRecentLedger();
+            for (const auto& record : ledger.executions()) {
+                if (record.outcome == lubancode::agent::ToolOutcome::Succeeded ||
+                    record.outcome == lubancode::agent::ToolOutcome::CancelledBeforeStart) {
+                    continue;
+                }
+                failed.push_back(&record);
             }
+        }
+        if (failed.empty()) {
+            PrintTraceNotice(theme, {"本会话没有明确失败或 unknown 的工具调用。"});
+        } else {
+            PrintExecutionTable(theme, "明确失败或 unknown 的工具调用", failed);
         }
         return;
     }
@@ -126,40 +255,39 @@ void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args)
             const auto ledger = ctx.trace_hub->BuildRecentLedger();
             if (args.rfind("toolu ", 0) == 0) {
                 const std::string id = args.substr(6);
-                for (const auto* record : ledger.FindByToolUse(id)) {
-                    TermOut() << theme.stats
-                              << lubancode::agent::FormatExecutionSummaryLine(*record, false)
-                              << theme.reset << "\n";
+                const auto records = ledger.FindByToolUse(id);
+                if (!records.empty()) {
+                    PrintExecutionTable(theme, "toolu " + id, records);
                 }
             } else if (args.rfind("turn ", 0) == 0) {
                 const std::string id = args.substr(5);
+                std::vector<const lubancode::agent::ToolExecutionRecord*> records;
                 for (const auto& record : ledger.executions()) {
                     if (record.turn_id == id) {
-                        TermOut() << theme.stats
-                                  << lubancode::agent::FormatExecutionSummaryLine(record, false)
-                                  << theme.reset << "\n";
+                        records.push_back(&record);
                     }
+                }
+                if (!records.empty()) {
+                    PrintExecutionTable(theme, "turn " + id, records);
                 }
             } else {
                 const auto* record = ledger.FindByExecution(args);
                 if (record != nullptr) {
-                    TermOut() << theme.stats
-                              << lubancode::agent::FormatExecutionSummaryLine(*record, false)
-                              << theme.reset << "\n";
+                    std::vector<frame::Field> fields;
+                    fields.push_back(frame::Field{"", lubancode::agent::FormatExecutionSummaryLine(*record, false)});
                     if (!record->error_code.empty()) {
-                        TermOut() << theme.stats << "  error_code: " << record->error_code
-                                  << theme.reset << "\n";
+                        fields.push_back(frame::Field{"error_code", record->error_code});
                     }
                     if (!record->source_instance.empty()) {
-                        TermOut() << theme.stats << "  source: " << record->source_instance
-                                  << theme.reset << "\n";
+                        fields.push_back(frame::Field{"source", record->source_instance});
                     }
-                    TermOut() << theme.stats << "  recovery: "
-                              << lubancode::agent::ToString(record->Classify()) << theme.reset
-                              << "\n";
+                    fields.push_back(frame::Field{
+                        "recovery", lubancode::agent::ToString(record->Classify()),
+                        OutcomeTone(*record) == frame::CellTone::Pass ? frame::FieldAccent::None
+                                                                      : frame::FieldAccent::Error});
+                    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), TraceFrameWidth()));
                 } else {
-                    TermOut() << theme.stats << "没有这枚 execution 的账: " << args
-                              << theme.reset << "\n";
+                    PrintTraceNotice(theme, {"没有这枚 execution 的账: " + args});
                 }
             }
         }
@@ -167,9 +295,9 @@ void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args)
     }
     const std::string summary = ctx.trace_hub != nullptr ? ctx.trace_hub->LastBatchSummary() : std::string();
     if (summary.empty()) {
-        TermOut() << theme.stats << "还没有工具调用的追踪账(本会话尚未跑过工具)。" << theme.reset << "\n";
+        PrintTraceNotice(theme, {"还没有工具调用的追踪账(本会话尚未跑过工具)。"});
     } else {
-        TermOut() << theme.stats << summary << theme.reset;
+        PrintTraceNotice(theme, {summary});
     }
 }
 
