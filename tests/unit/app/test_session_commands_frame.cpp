@@ -201,9 +201,10 @@ TEST_CASE("context:键列走 row_label 语义色,占用卡片在前组框在后"
     // 键列色:row_label 包着"前缀 epoch 2"与"预算总账"。
     CHECK(Contains(out, dark.row_label + "前缀 epoch 2"));
     CHECK(Contains(out, dark.row_label + "预算总账"));
-    // 顺序:占用卡片表头在三组框标题之前。
+    // 顺序:占用卡片表头(批 6 起组名进标题,不再有 ── 手拼横线)在三组
+    // 框标题之前。
     const std::string text = StripAnsi(out);
-    CHECK(text.find("── 占用 ──") < text.find("缓存"));
+    CHECK(text.find("占用(窗口") < text.find("缓存"));
     CHECK(text.find("缓存") < text.find("结构与回收"));
 }
 
