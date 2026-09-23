@@ -1,6 +1,6 @@
 # TUI 界面美化——批量升级客户端面板与命令输出
 
-- 状态：待实现（落一批改一笔：待实现 → 某批进行中 → 已收官（删档或保留由主人定夺））
+- 状态：**已收官**(批 0-8 九批全落,PR #207/#210/#211/#214/#215/#216/#218/#219/#220/#221/#222,2026-09-23 一日合入 main。删档或保留由主人定夺)
 - 日期：2026-09-22
 - 级别：P1（体验/一致性/可读性，非核心正确性）
 - 范围：`src/cli/` 全套渲染基件 + `src/app/commands/` 下 23 个 slash 命令实现 + `src/app/status_panel_assembly.cpp` 等会话内常驻面板装配
@@ -164,68 +164,66 @@
 
 验收：frame 标题/主题切换色/≥50 行对齐全由四册测试钉死（test_hooks_commands_frame 等）;真机连敲留主人验。`src/workspace/`（manifest_lock）他单领地一字未碰。
 
-### P3：批 3 — 任务调度类（`/agent`、`/background`、`/loop`、`/workflow`）
+### P3：批 3 — 任务调度类（已收官,PR #214,2026-09-23 合入 main,+2315/−364）
 
-- [ ] `/agent doctor/inspect` 走键值对 + 表格;`/agent reload` 提示收 frame
-- [ ] `/background list` 走表格(status/PID/elapsed/command/log),`/background show/logs/stop/stop-all` 走键值对
-- [ ] `/loop list/status` 走表格,`/loop create/pause/resume/stop/run` 反馈收 frame
-- [ ] `/workflow` 列表/历史走表格;`RenderMermaidGraph`/`RenderAsciiGraph` 走 frame 标题
+- [x] `/agent doctor/inspect` 走键值对 + 表格;`/agent reload` 提示收 frame
+- [x] `/background list` 走表格(status/PID/elapsed/command/log),`/background show/logs/stop/stop-all` 走键值对(logs 日志正文框外原样防截断劈行)
+- [x] `/loop list/status` 走表格,`/loop create/pause/resume/stop/run` 反馈收 frame
+- [x] `/workflow` 列表/历史走表格;`RenderMermaidGraph`/`RenderAsciiGraph` 走 frame 标题(图本体不塞框,标题帽=预算−7 截断保字头)
 
-验收：4 个命令族任意切换主题,边框/标题色一致;graph 渲染在 80 列与 200 列终端都不破框。
+验收：四本形状册(test_agent/background/loop/workflow_commands_frame.cpp)钉死,graph 标题 80/200 列不破框进测试;另 `test_agent_commands.cpp` 旧册随形状适配。真机终端宽未验。
 
-### P4：批 4 — 资源/配置类（`/goal`、`/insights`、`/model`、`/package`）
+### P4：批 4 — 资源/配置类（已收官,PR #216,2026-09-23 合入 main,+2051/−490）
 
-- [ ] `/goal list/create/view/status/edit/pause/resume/clear` 走表格 + 键值对
-- [ ] `/insights` aggregate 报告走 frame 标题 + 表格分段;HTML 出口不变
-- [ ] `/model list` 走表格(current 列用 `tool_accent` 标色),`/model switch` 反馈收 frame
-- [ ] `/package list/show/doctor/trust/untrust/enable/disable/reload` 走表格
+- [x] `/goal` 全族:状态首行进 frame 标题、反馈/错误进键值对框
+- [x] `/insights` digest 七节键值对+标题框;HTML 与 `--json` JSON 字节流不动
+- [x] `/model` 管道路清单走表格(current 列 `RenderModelChoiceList`)、roles 表、切换回执进框
+- [x] `/package` list 主表(state 语义色)+明细表、show/doctor 键值对+组件表、trust/enable/disable/reload 进框
 
-验收：`/insights` 长报告不超出 80 列终端时仍可读;`/package list` 列宽自适应终端宽度。
+验收：四册形状册;80 列帽钉死。**勘误**：单子写的 `tool_accent` 不在 Theme(批 0 只落 11 枚),按合同取 `table_pass`(裁量记 PR body)。--json 仅 /insights 有,字节级不变;/model /package /goal 无机器面旗(逐文件核实)。
 
-### P5：批 5 — 渠道/会话/审计/状态类（`/channel`、`/session`、`/peer`、`/prompt`、`/prompt-audit`、`/settings`、`/telemetry`、`/trace`、`/usage`、`/evolve`）
+### P5：批 5 — 渠道/会话/审计/状态类（已收官,拆三单并行:5a=PR #215 +1646/−436、5b=PR #218 +1781/−315、5c=PR #219 +1429/−222,均 2026-09-23 合入 main）
 
-- [ ] `/channel show/doctor/start/stop/pairing` 走表格 + 键值对
-- [ ] `/session`(/context) 走 frame 标题 + 键值对分组(── 分组横线改用 `divider::line`)
-- [ ] `/peer` 走卡片或表格二选一(待落批时定)
-- [ ] `/prompt`、`/prompt-audit` 报告走 frame
-- [ ] `/settings check` 走表格
-- [ ] `/telemetry` 走键值对 + 表格,spool/consent 用 frame 包裹
-- [ ] `/trace export/failures/show` 走表格
-- [ ] `/usage` 走 frame + 表格
-- [ ] `/evolve status/propose/list/show` 走表格 + 键值对
+- [x] `/channel` 总览拆配置表+运行态表(state 语义三档),show/doctor 键值对框,pairing 列表(5a)
+- [x] `/session`(/context) 三处"── 组名 ──"手拼横线收口——组名嵌框顶标题、尾垫 `divider::line`(全仓首个 divider::line 调用点);compact 干跑整段框化(5a)
+- [x] `/peer` 定案表格档,明细键值对框,/send、/peerperm 反应句进框(5a)
+- [x] `/prompt`(/soul) 裸敲四段框+回执框;`/prompt-audit` 报告五段拆框、发现主表 severity 语义色,`--json` 字节不动(5b)
+- [x] `/update check` 键值对框,流式行保持裸(**勘误**:单子写"/settings check",settings 无 check 子命令,实为 /update check 族;cli_app 侧按批 2 裁量现起 ResolveTheme)(5b)
+- [x] `/telemetry` status 拆键值、选项单列表框、spool/consent 披露框(5b)
+- [x] `/trace` errors/详细档表格、export 回执框(**勘误**:单子写"failures/show"实为 errors 族)(5b)
+- [x] `/usage` 主报告八节键值对框、`--by` 分账五列表格(数值列右对齐)(5c)
+- [x] `/evolve` status 键值对、list 两表、show 观察页/候选页、propose 一框收口(5c)
 
-验收：所有上述命令输出都有 frame;`/usage` 与 `/prompt-audit` 在 JSON 分支(`--json`)输出字节级不变。
+验收：十册形状册齐;`/usage`、`/prompt-audit`、`luban evolve test` 机器面字节级不变(全 diff grep 核实);31 处 json 均为 nlohmann 数据处理非命令输出侧。
 
-### P6：批 6 — 常驻面板统一（src/cli/ + src/app/）
+### P6：批 6 — 常驻面板统一（已收官,PR #220,2026-09-23 合入 main,29 文件 +642/−184）
 
-- [ ] `bottom_chrome.cpp` 状态栏/键提示走统一键值对助手
-- [ ] `agent_panel.cpp`、`agent_panel_host.cpp`、`agent_view_state.hpp` 主题字段从 `cli::Theme` 取,frame 走 `cli::frame::*`
-- [ ] `session_picker.cpp/panel.cpp` 走表格
-- [ ] `provider_panel.cpp/core.cpp`、`provider_switch.cpp`、`provider_wizard.cpp` 走 frame + 表格
-- [ ] `context_window_panel.cpp/core.cpp` 走键值对 + 表格(已有 `──` 分组横线替换为 `divider::line`)
-- [ ] `wizard_panel.cpp`、`setup_wizard.cpp` 走 frame 标题
-- [ ] `ask_user_prompt.cpp`、`choice_menu.cpp`、`mention_menu.cpp` 走 frame + 列表
-- [ ] `tool_confirm_ui.cpp`、`tool_display.hpp` 走 frame + 表格(diff 预览保持原样)
-- [ ] `history_search.cpp` 走列表
-- [ ] `todo_render.cpp` 走列表助手,完成态/进行中/待办三态标色
-- [ ] `transcript.cpp`、`transcript_controller.cpp`、`turn_renderer.cpp`、`live_transcript.hpp`、`queue_model.cpp` 主题字段统一收口
-- [ ] `src/app/status_panel_assembly.cpp`、`ui_event_pump.cpp`、`session_ui_dispatcher.cpp` 装配层仅消费新基件,不引入新样式字段
+- [x] `bottom_chrome.cpp` 状态栏/键提示走统一键值对语义取色(BoxRuleLine/BuildRuleWithTag 收口 divider::line+frame_border/frame_title)
+- [x] `agent_panel.cpp`、`agent_panel_host.cpp` 走新查表 `cli/panel_chrome.hpp` 四宿主行级语义档;`agent_view_state.hpp` 本无主题字段(单子该条前提过时,记档)
+- [x] `session_picker.cpp/panel.cpp`、`provider_panel.cpp/core.cpp`、`provider_switch.cpp`、`provider_wizard.cpp` 手拼横线绝迹,走 frame
+- [x] `context_window_panel.cpp/core.cpp` 走键值对+表格,分组横线替换 `divider::line`(PanelRowTone 查表+帧行位契约钉测试)
+- [x] `wizard_panel.cpp`、`setup_wizard.cpp` 字符收口(Theme 接线被 app/commands 领地边界阻塞,记档)
+- [x] `ask_user_prompt.cpp` 管道路选项走 RenderList、确认详情走 RenderKeyValues;`choice_menu.cpp`、`mention_menu.cpp` 同办
+- [x] `tool_confirm_ui.cpp`、`tool_display.hpp` 走 frame+表格(diff 预览原样)
+- [x] `todo_render.cpp` 走列表助手,三态语义色
+- [x] `transcript.cpp` 收掉**全仓最后一枚硬编码 ANSI**(`\x1b[2m`);`transcript_controller.cpp` HandleKey 键位行为未动一字(#214 前 #212 刚撤裸键默认);占用卡片表头/分隔线收口(批 5a 点名的 format_utils.cpp 手拼横线)
+- [x] 装配层只消费新基件;顺带修 ClampAnsiRowToWidth 在 plain 截断时漏转义的存量合同漏
 
-验收：起一个会话,从 `bottom_chrome` → `session_picker` → `provider_wizard` → `ask_user` → `tool_confirm` → `transcript` 全程截图,所有 frame 边框风格一致,主题切换同步。
+验收：新增两册(test_bottom_chrome_frame/test_context_window_panel_frame)+随改六册旧钉;真机全程截图留主人验。
 
-### P7：批 7 — CLI 子命令（src/cli/）
+### P7：批 7 — CLI 子命令（已收官,PR #221,2026-09-23 合入 main,21 文件 +1777/−276）
 
-- [ ] `kanban_command.cpp`、`record_command.cpp`、`trajectory_command.cpp`、`update_command.cpp`、`gateway_command.cpp` 走 frame + 表格
-- [ ] `channel_pairing_command.cpp`、`channel_setup_command.cpp`、`channel_status_command.cpp` 走 frame
+- [x] `kanban/record/trajectory/update/gateway` 人看输出走三助手;printf/std::cout 收口 TermOut(端口流向不动);新增 header-only 共用样板 `src/cli/frame_notice.hpp`
+- [x] `channel_pairing/setup/status` 三件走 frame
 
-验收：`lubancode.exe kanban --no-open` 输出的提示文本也有 frame 标题;`--json` 分支输出不变。
+验收：六册形状册(tests/unit/cli/);--json 与 stderr 分支逐文件 grep 核实一字未动;windows-msvc 首编本批过(一次时序偶红 rerun 收平)。update printf string_view 旧修(c_str 写法)未回退。真机未验项:发网主路径/真服务管理器/向导交互全程。
 
-### P8：批 8 — 收口
+### P8：批 8 — 收口（已收官,PR #222,2026-09-23 合入 main,3 文件 +62）
 
-- [ ] 全量 `TermOut()`/`TextOutput` 走主题字段的覆盖率检查(禁止裸 `"\033["`)
-- [ ] `hook_check_commands.cpp:151` 处违规的 `std::cout` 替换为 `TermOut`
-- [ ] 全量 ctest 绿
-- [ ] 三个平台 syntax check
+- [x] CI 加 lint:`scripts/check_src_ansi.sh`(`git grep '\033' -- src`,禁八进制 ESC 一切变体)挂 ci.yml `changes` 门房,重腿起跑前秒拦;违规发 `::error` 注解附改法;`--selftest` 先种探针自证门真能红(防常绿假门);豁免清单空
+- [x] 复核:`\033` src 零命中;`\x1b[` 21 文件全系规范住家(platform 原语/theme.cpp 字段表/交互件);`std::cout` 在 src/app/commands 仅剩 evolve 四处且全在 `--json` 机器面(合同允许);hook_check_commands.cpp 旧 151 行违规批 2 已收口,现为 fixture 数据
+- [x] 全量 ctest 绿 + 三平台 syntax check(CI 承载,macos-clang/linux-asan 双腿真跑)
+- [x] CHANGELOG `[Unreleased]` 段两行总目落批 0-7,不写版本号(发版时定)
 - [ ] CHANGELOG 落点
 
 验收：grep 不到 `\\033\\[` 出现在 `src/`（CI 加 lint）；ctest 三平台绿；真机项未验的如实标"未验"。
@@ -256,9 +254,9 @@
 
 ## 最终验收门
 
-- [ ] 批 0–8 全部勾完,每条落点附文件/文档名
-- [ ] 全量 ctest 绿,三平台 syntax check 绿
-- [ ] 真机人工验过的命令清单（不验的标"未验",不伪造）
-- [ ] CHANGELOG 落点
-- [ ] `docs/development/tui_style.md` 发布
-- [ ] CI 加 lint：禁止 `\\033\\[` 出现在 `src/`
+- [x] 批 0–8 全部勾完,每条落点附文件/文档名(批 5 拆 5a/5b/5c 三单并行,余批各一 PR)
+- [x] 全量 ctest 绿,三平台 syntax check 绿(各批 CI 承载;windows-msvc 经 main 全量兜底,含批 7 首编)
+- [ ] 真机人工验过的命令清单(各批"未验"项已如实标注:框宽实机观感/向导交互全程/update 发网/gateway 真服务/探针真网络——**留主人验**)
+- [x] CHANGELOG 落点([Unreleased] 段,版本号发版时定)
+- [x] `docs/development/tui_style.md` 发布(批 0 落,catalog.txt + development/README.md 已登记)
+- [x] CI 加 lint：禁止 `\033` 出现在 `src/`(批 8 `scripts/check_src_ansi.sh` 挂 changes 门房,自证探针,豁免清单空)
