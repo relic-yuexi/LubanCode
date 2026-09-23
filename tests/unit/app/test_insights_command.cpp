@@ -118,9 +118,11 @@ TEST_CASE("ParseInsightsCommand:裸敲/flag/子命令/坏词") {
 
 TEST_CASE("FormatInsightsDigestLines:七节齐,路径与覆盖账在册") {
     const insights::InsightsGenerateResult result = MakeResult();
+    // 批 4:渲染 frame 化,调用侧递主题与宽(0=自适应);逻辑册钉 plain 形状。
+    const cli::Theme plain = cli::BuiltinTheme("plain");
     const std::vector<std::string> lines = FormatInsightsDigestLines(
         result, std::filesystem::path("Z:/reports/a.json"),
-        std::filesystem::path("Z:/reports/a.html"), /*show_paths=*/false);
+        std::filesystem::path("Z:/reports/a.html"), /*show_paths=*/false, plain, /*width=*/0);
     CHECK(Contains(lines, "Insights · ws-000000000000"));
     CHECK(Contains(lines, "概览"));
     CHECK(Contains(lines, "Token"));
@@ -138,12 +140,15 @@ TEST_CASE("FormatInsightsDigestLines:七节齐,路径与覆盖账在册") {
     // show_paths 才显 workspace 明细。
     const std::vector<std::string> with_paths = FormatInsightsDigestLines(
         result, std::filesystem::path("a.json"), std::filesystem::path("a.html"),
-        /*show_paths=*/true);
-    CHECK(Contains(with_paths, "workspace   测试仓"));
-    CHECK(!Contains(lines, "workspace   测试仓"));
+        /*show_paths=*/true, plain, /*width=*/0);
+    CHECK(Contains(with_paths, "workspace"));
+    CHECK(Contains(with_paths, "测试仓"));
+    CHECK(Contains(with_paths, "ws-000000000000"));
+    CHECK(!Contains(lines, "测试仓"));
 }
 
 TEST_CASE("FormatInsightsStatusLines 与 clean 列账") {
+    const cli::Theme plain = cli::BuiltinTheme("plain");
     std::vector<insights::InsightsReportFile> reports;
     insights::InsightsReportFile file;
     file.path = std::filesystem::path("Z:/insights/reports/20260831-101500-ws-7d.json");
@@ -151,22 +156,26 @@ TEST_CASE("FormatInsightsStatusLines 与 clean 列账") {
     reports.push_back(file);
     const std::vector<std::string> status =
         FormatInsightsStatusLines(reports, "generated_at=2026-08-31T10:15:00Z · analyzer=x",
-                                  3, std::filesystem::path("Z:/insights"));
-    CHECK(Contains(status, "最近报告    generated_at=2026-08-31T10:15:00Z"));
-    CHECK(Contains(status, "历史报告    1 份"));
-    CHECK(Contains(status, "会话摘要    3 份"));
+                                  3, std::filesystem::path("Z:/insights"), plain, /*width=*/0);
+    CHECK(Contains(status, "最近报告"));
+    CHECK(Contains(status, "generated_at=2026-08-31T10:15:00Z"));
+    CHECK(Contains(status, "历史报告"));
+    CHECK(Contains(status, "1 份"));
+    CHECK(Contains(status, "会话摘要"));
+    CHECK(Contains(status, "3 份"));
 
     insights::InsightsCleanPlan plan;
     plan.items.push_back(insights::InsightsCleanItem{
         std::filesystem::path("Z:/t/s1/derived/insights-v1/session-summary.json"),
         std::filesystem::path("Z:/t/s1/derived/insights-v1"), 1200, "derived-file"});
     plan.total_bytes = 1200;
-    const std::vector<std::string> clean_lines = FormatInsightsCleanPlanLines(plan);
+    const std::vector<std::string> clean_lines =
+        FormatInsightsCleanPlanLines(plan, plain, /*width=*/0);
     CHECK(Contains(clean_lines, "将删 1 个文件"));
     CHECK(Contains(clean_lines, "session-summary.json"));
     // 空账。
     const std::vector<std::string> empty =
-        FormatInsightsCleanPlanLines(insights::InsightsCleanPlan{});
+        FormatInsightsCleanPlanLines(insights::InsightsCleanPlan{}, plain, /*width=*/0);
     CHECK(Contains(empty, "没有可清的派生摘要"));
 }
 

@@ -53,21 +53,26 @@ struct ParsedInsightsCommand {
 };
 ParsedInsightsCommand ParseInsightsCommand(const std::string& args);
 
-// 生成完毕的终端摘要(七节的紧凑面 + 报告路径)。行不带换行符。
+// 生成完毕的终端摘要(七节的紧凑面 + 报告路径)。行不带换行符。TUI 排版
+// 批 4 起 frame 化:首行作 frame 标题,七节按节名拆键值对;theme/width 由
+// 调用方递(width 0 = 按内容自适应,不设帽)。
 std::vector<std::string> FormatInsightsDigestLines(
     const lubancode::insights::InsightsGenerateResult& result,
     const std::filesystem::path& json_path, const std::filesystem::path& html_path,
-    bool show_paths);
+    bool show_paths, const lubancode::cli::Theme& theme, int width);
 
 // /insights status 的行(报告仓清单 + 最近报告账;纯渲染,数据由调用方递)。
+// 批 4 起 frame 化:首行作标题,报告清单按句内冒号拆键值对。
 std::vector<std::string> FormatInsightsStatusLines(
     const std::vector<lubancode::insights::InsightsReportFile>& reports,
     const std::string& latest_note, std::int64_t derived_summaries,
-    const std::filesystem::path& insights_home);
+    const std::filesystem::path& insights_home, const lubancode::cli::Theme& theme, int width);
 
 // /insights clean 的列账行(将删文件与字节;二次确认前给用户看的面)。
+// 批 4 起 frame 化:首行(尾冒号剥掉)作标题,文件行进键值对框。
 std::vector<std::string> FormatInsightsCleanPlanLines(
-    const lubancode::insights::InsightsCleanPlan& plan);
+    const lubancode::insights::InsightsCleanPlan& plan, const lubancode::cli::Theme& theme,
+    int width);
 
 // ---------------- 执行(IO) ----------------
 

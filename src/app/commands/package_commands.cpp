@@ -35,11 +35,62 @@ using lubancode::cli::TermErr;
 #include "package/state.hpp"
 #include "package/trust.hpp"
 #include "evolution/promoter.hpp"  // VersionStore(阶段 4:store 选中版本并进 /package 账面)
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 4:/package 渲染段)
+#include "cli/theme.hpp"
+#include "platform/console.hpp"  // GetScreenInfo:/package 的框宽同一把尺
 #include "platform/paths.hpp"
 
 namespace lubancode::app {
 
 namespace {
+
+namespace frame = lubancode::cli::frame;
+
+// ---- TUI 排版批 4(/package 全族)的公共小件 ------------------------------
+//
+// 渲染段只调 cli::frame::* 三助手(约定见 docs/development/tui_style.md)。
+// 本文件文案是硬编码中文(不走 i18n 表),按批 2 裁量一字不添不改;列名用
+// 数据 schema 名(id/scope/state、kind/status/path),句内冒号按 SentenceField
+// 拆两列(批 1 裁量);引导下文的尾冒号标题化时剥掉(批 2 裁量 3)。
+
+int PackageFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+void EmitFrameLines(const std::vector<std::string>& lines) {
+    for (const std::string& line : lines) {
+        TermOut() << line << "\n";
+    }
+}
+
+std::string TrimAscii(std::string value) {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}
+
+frame::Field SentenceField(const std::string& sentence,
+                           frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    return frame::Field{TrimAscii(sentence.substr(0, colon)), TrimAscii(sentence.substr(colon + 1)),
+                        accent};
+}
+
+void PrintNotice(const lubancode::cli::Theme& theme, const std::vector<std::string>& sentences,
+                 frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), PackageFrameWidth()));
+}
 
 std::string Trimmed(std::string s) {
     std::size_t begin = 0;
@@ -155,34 +206,54 @@ std::vector<lubancode::package::PackageCandidate> ScanAllLayers(
     return candidates;
 }
 
-// 一只包的"列表行":id、版本、来源、状态、六类组件计数、code-bearing。
-// mount 非空时按会话钉快照如实标挂载状态(阶段 3):内容组件挂了几件、
-// 代码组件的门禁(阶段 4)、现扫到但会话没挂的(启动后才放进目录)注明
-// 下回启动才见。state_store 非空时现查启停账(阶段 6):停用的标 disabled
-// ——扫描发现照旧,挂载跳过;本会话快照仍挂着的如实注明(下回装配不再
-// 挂)。trust 非空时另摆一行现查的信任状态。
-std::string DescribePackage(const lubancode::package::PackageInventory& inventory,
-                            const std::string& state,
-                            const lubancode::package::PackageMount* mount,
-                            const lubancode::package::PackageTrustStore* trust,
-                            const lubancode::package::PackageStateStore* state_store) {
+// 一只包在 list 主表里的 id 单元格:版本随 id(旧输出同款连排)。
+std::string PackageIdCell(const lubancode::package::PackageInventory& inventory) {
+    std::string cell = inventory.package_id;
+    if (!inventory.version_text.empty()) {
+        cell += " " + inventory.version_text;
+    }
+    return cell;
+}
+
+// 一只包在 list 主表里的 state 单元格(含启停合并口径):valid → disabled
+// 盖掉;shadowed/invalid 一类另注一笔,两头都看得见。
+std::string PackageStateCell(const lubancode::package::PackageInventory& inventory,
+                             const std::string& state,
+                             const lubancode::package::PackageStateStore* state_store) {
+    const bool disabled =
+        state_store != nullptr && !state_store->IsEnabled(inventory.package_id);
+    if (disabled) {
+        return state == "valid" ? "disabled" : state + ";disabled";
+    }
+    return state;
+}
+
+// state 单元格的语义色(批 4):valid → pass;invalid → fail(走 error);
+// shadowed/disabled → skip。
+frame::CellTone PackageStateTone(const std::string& state_cell) {
+    if (state_cell.find("invalid") != std::string::npos) {
+        return frame::CellTone::Fail;
+    }
+    if (state_cell == "valid") {
+        return frame::CellTone::Pass;
+    }
+    return frame::CellTone::Skip;
+}
+
+// 一只包在 list 明细表里的长文本(挂载状态/组件计数/信任)。mount 非空时
+// 按会话钉快照如实标挂载状态(阶段 3):内容组件挂了几件、代码组件的门禁
+//(阶段 4)、现扫到但会话没挂的(启动后才放进目录)注明下回启动才见。
+// trust 非空且 code-bearing 时另附一句现查的信任状态(阶段 4)。
+std::string PackageDetailCell(const lubancode::package::PackageInventory& inventory,
+                              const lubancode::package::PackageMount* mount,
+                              const lubancode::package::PackageTrustStore* trust,
+                              const lubancode::package::PackageStateStore* state_store) {
     const bool disabled =
         state_store != nullptr && !state_store->IsEnabled(inventory.package_id);
     std::ostringstream out;
-    out << "  " << inventory.package_id;
-    if (!inventory.version_text.empty()) {
-        out << " " << inventory.version_text;
-    }
-    out << " [" << lubancode::package::ScopeToString(inventory.scope) << "] ";
-    if (disabled) {
-        // valid → disabled 盖掉;shadowed/invalid 一类另注一笔,两头都看得见。
-        out << (state == "valid" ? "disabled" : state + ";disabled");
-    } else {
-        out << state;
-    }
     if (mount != nullptr) {
         if (const auto* mounted = mount->Find(inventory.package_id)) {
-            out << "  已挂载内容组件 " << mounted->mounted_canonical_ids.size() << " 件";
+            out << "已挂载内容组件 " << mounted->mounted_canonical_ids.size() << " 件";
             if (disabled) {
                 out << "(已停用;本会话快照钉着启动那折,在跑的不拆,下回装配不再挂)";
             }
@@ -191,12 +262,13 @@ std::string DescribePackage(const lubancode::package::PackageInventory& inventor
             } else if (mounted->code_trust == lubancode::package::CodeTrustStatus::Trusted) {
                 out << ";Plugin/MCP/Channel 已过信任门(挂载事务随会话启动跑,整包成整包败)";
             }
+            out << "  ";
         } else if (inventory.valid) {
-            out << (disabled ? "  已停用(挂载跳过,连内容组件一件不挂)"
-                             : "  未挂载(会话启动后才见;下回启动生效)");
+            out << (disabled ? "已停用(挂载跳过,连内容组件一件不挂)  "
+                             : "未挂载(会话启动后才见;下回启动生效)  ");
         }
     }
-    out << "  agents:" << inventory.agents.size()
+    out << "agents:" << inventory.agents.size()
         << " prompts:" << inventory.prompt_profiles.size()
         << " skills:" << inventory.skills.size()
         << " workflows:" << inventory.workflows.size()
@@ -205,25 +277,28 @@ std::string DescribePackage(const lubancode::package::PackageInventory& inventor
         << " channels:" << inventory.channels.size();
     if (inventory.code_bearing()) {
         out << "  [code-bearing]";
-    }
-    if (inventory.code_bearing()) {
-        out << "\n    信任: " << lubancode::package::DescribeTrustStatus(inventory, trust);
+        // 明细里信任一句与主表同行(旧输出第二行的内容并进同一单元格,信息
+        // 一字不丢)。
+        out << "  信任: " << lubancode::package::DescribeTrustStatus(inventory, trust);
     }
     return out.str();
 }
 
-void PrintDiagnostics(const lubancode::package::PackageInventory& inventory) {
+void PrintDiagnostics(const lubancode::cli::Theme& theme,
+                      const lubancode::package::PackageInventory& inventory) {
     if (inventory.diagnostics.empty()) {
-        TermOut() << "  诊断:无(干净)\n";
+        PrintNotice(theme, {"诊断:无(干净)"});
         return;
     }
-    TermOut() << "  诊断(" << inventory.diagnostics.size() << " 条):\n";
+    std::vector<frame::Field> fields{frame::Field{"诊断", std::to_string(inventory.diagnostics.size()) + " 条"}};
     for (const auto& diagnostic : inventory.diagnostics) {
-        TermOut() << "    " << diagnostic.Format() << "\n";
+        fields.push_back(frame::Field{"", diagnostic.Format()});
     }
+    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), PackageFrameWidth()));
 }
 
-void PrintComponents(const lubancode::package::PackageInventory& inventory) {
+void PrintComponents(const lubancode::cli::Theme& theme,
+                     const lubancode::package::PackageInventory& inventory) {
     const struct {
         const char* label;
         const std::vector<lubancode::package::PackageComponent>* items;
@@ -236,17 +311,21 @@ void PrintComponents(const lubancode::package::PackageInventory& inventory) {
         {"mcp_servers", &inventory.mcp_servers},
         {"channels", &inventory.channels},
     };
+    std::vector<frame::Field> fields;
     for (const auto& group : groups) {
-        TermOut() << "  " << group.label << "(" << group.items->size() << "):";
+        // 组头:group 名作 key,件数 "(N)" 作 value(旧文案 "agents(N):" 拆
+        // 冒号);空组旧文案是 "agents(0): 无",value 记 "(0) 无"。条目是
+        // 组下的续行(key 空,值列与七组对齐)。
+        std::string head = "(" + std::to_string(group.items->size()) + ")";
         if (group.items->empty()) {
-            TermOut() << " 无\n";
-            continue;
+            head += " 无";
         }
-        TermOut() << "\n";
+        fields.push_back(frame::Field{group.label, head});
         for (const auto& component : *group.items) {
-            TermOut() << "    " << component.canonical_id << "  (" << component.rel_path << ")\n";
+            fields.push_back(frame::Field{"", component.canonical_id + "  (" + component.rel_path + ")"});
         }
     }
+    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), PackageFrameWidth()));
 }
 
 // id(或精确目录名)在全部候选里选份:优先级高的胜,其余进 shadowed 账。
@@ -387,25 +466,28 @@ ParsedPackageCommand ParsePackageCommand(const std::string& args) {
 
 namespace {
 
-void PrintUsage() {
-    TermOut() << "用法: /package list [all|user|project|store|official|dev]\n"
-                 "      /package show <id>\n"
-                 "      /package doctor <id|路径>\n"
-                 "      /package trust <id>    批准整包内容哈希(重启生效;文件一改即失效)\n"
-                 "      /package untrust <id>  销信任账\n"
-                 "      /package enable <id>   复启(下回启动或 reload 后的装配生效)\n"
-                 "      /package disable <id>  停用(挂载一律跳过;扫描发现照旧)\n"
-                 "      /package reload        重扫五路折新快照(折好才换;code 组件须新会话)\n"
-                 "只读:list/show 只查静态账;doctor 另诊组件(逐件原生 parser)、引用解析与\n"
-                 "MountPlan 摘要。trust 亮全份审批材料(逐件命令面 + 完整指纹)才落账——\n"
-                 "未信任的 code 组件(Plugin/MCP)一件不挂不启动。启停账在包外\n"
-                 "(~/.lubancode/package-state.json),enable/disable 只落账不拆在跑的。\n"
-                 "store 一路是自进化闭环装进 package-store 的选中版本(/evolve approve 落架,\n"
-                 "/evolve use 点灰度)。\n";
+void PrintUsage(const lubancode::cli::Theme& theme) {
+    // 用法块进键值对框(批 4):逐行作 value 行,续行的缩进由值列对齐顶替。
+    PrintNotice(theme,
+                {"用法: /package list [all|user|project|store|official|dev]",
+                 "/package show <id>",
+                 "/package doctor <id|路径>",
+                 "/package trust <id>    批准整包内容哈希(重启生效;文件一改即失效)",
+                 "/package untrust <id>  销信任账",
+                 "/package enable <id>   复启(下回启动或 reload 后的装配生效)",
+                 "/package disable <id>  停用(挂载一律跳过;扫描发现照旧)",
+                 "/package reload        重扫五路折新快照(折好才换;code 组件须新会话)",
+                 "只读:list/show 只查静态账;doctor 另诊组件(逐件原生 parser)、引用解析与"
+                 "MountPlan 摘要。trust 亮全份审批材料(逐件命令面 + 完整指纹)才落账——"
+                 "未信任的 code 组件(Plugin/MCP)一件不挂不启动。启停账在包外"
+                 "(~/.lubancode/package-state.json),enable/disable 只落账不拆在跑的。",
+                 "store 一路是自进化闭环装进 package-store 的选中版本(/evolve approve 落架,"
+                 "/evolve use 点灰度)。"});
     TermOut().flush();
 }
 
-void RunPackageList(const lubancode::package::ScanOptions& options,
+void RunPackageList(const lubancode::cli::Theme& theme,
+                    const lubancode::package::ScanOptions& options,
                     const std::optional<std::string>& scope_filter,
                     const lubancode::package::PackageMount* mount,
                     const std::vector<lubancode::package::PackageCandidate>& candidates) {
@@ -449,195 +531,261 @@ void RunPackageList(const lubancode::package::ScanOptions& options,
     std::size_t shown = 0;
     auto [trust_store, trust_error] = LoadTrustStoreReadOnly();
     if (trust_error.has_value()) {
-        TermOut() << "警告: " << *trust_error << "\n";
+        PrintNotice(theme, {"警告: " + *trust_error}, frame::FieldAccent::Error);
     }
     const lubancode::package::PackageTrustStore* trust =
         trust_store.has_value() ? &*trust_store : nullptr;
     auto [state_store, state_error] = LoadStateStoreReadOnly();
     if (state_error.has_value()) {
-        TermOut() << "警告: " << *state_error << "\n";
+        PrintNotice(theme, {"警告: " + *state_error}, frame::FieldAccent::Error);
     }
     const lubancode::package::PackageStateStore* state =
         state_store.has_value() ? &*state_store : nullptr;
-    TermOut() << "Package(五路: dev > project > store > user > official;store 是自进化装架):\n";
+    // 主表:id/scope/state 三列,state 列上 pass/fail/skip 语义色(批 4)。
+    // 长字段(挂载/组件计数/信任)另起明细表——塞主表会被列帽截断(批 2
+    // "主表+明细表"同款)。
+    std::vector<frame::TableColumn> columns;
+    columns.push_back({"id"});
+    columns.push_back({"scope"});
+    columns.push_back({"state"});
+    std::vector<frame::TableRow> main_rows;
+    std::vector<frame::TableColumn> detail_columns;
+    detail_columns.push_back({"id"});
+    detail_columns.push_back({"detail"});
+    std::vector<frame::TableRow> detail_rows;
     for (const auto& row : rows) {
         if (!scope_matches(row)) continue;
         ++shown;
-        if (row.shadowed) {
-            TermOut() << DescribePackage(row.inventory,
-                                         "shadowed(被 " + row.shadowed_by + " 遮住)", mount, trust, state);
-        } else {
-            TermOut() << DescribePackage(row.inventory,
-                                         row.inventory.valid ? "valid" : "invalid", mount, trust, state);
-        }
-        TermOut() << "\n";
+        const std::string state_text =
+            row.shadowed ? "shadowed(被 " + row.shadowed_by + " 遮住)"
+                         : (row.inventory.valid ? "valid" : "invalid");
+        const std::string state_cell = PackageStateCell(row.inventory, state_text, state);
+        main_rows.push_back(frame::TableRow{
+            {PackageIdCell(row.inventory),
+             lubancode::package::ScopeToString(row.inventory.scope), state_cell},
+            {frame::CellTone::Normal, frame::CellTone::Normal, PackageStateTone(state_cell)}});
+        detail_rows.push_back(frame::TableRow{
+            {PackageIdCell(row.inventory), PackageDetailCell(row.inventory, mount, trust, state)}});
     }
     if (shown == 0) {
-        TermOut() << "  (没有可列的包;放一只 <package-root>/package.yaml 进四层任一层即被发现)\n";
+        PrintNotice(theme, {"(没有可列的包;放一只 <package-root>/package.yaml 进四层任一层即被发现)"});
+        TermOut().flush();
+        return;
     }
+    EmitFrameLines(frame::RenderTable(
+        "Package(五路: dev > project > store > user > official;store 是自进化装架)", columns,
+        main_rows, theme, frame::Light(), PackageFrameWidth()));
+    EmitFrameLines(
+        frame::RenderTable({}, detail_columns, detail_rows, theme, frame::Light(), PackageFrameWidth()));
     TermOut().flush();
 }
 
-void RunPackageShow(const lubancode::package::ScanOptions& options, const std::string& target,
+void RunPackageShow(const lubancode::cli::Theme& theme,
+                    const lubancode::package::ScanOptions& options, const std::string& target,
                     const lubancode::package::PackageMount* mount,
                     const std::vector<lubancode::package::PackageCandidate>& candidates) {
     const PackageLookup lookup = LookupPackage(candidates, target);
     if (lookup.winner == nullptr && lookup.shadowed.empty()) {
-        TermOut() << "没找到包 \"" << target << "\"(按 id 或目录名查;先 /package list 看全账)\n";
+        PrintNotice(theme, {"没找到包 \"" + target + "\"(按 id 或目录名查;先 /package list 看全账)"},
+                    frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
     const auto inventory = lubancode::package::BuildPackageInventory(*lookup.winner, options);
     auto [trust_store, trust_error] = LoadTrustStoreReadOnly();
     if (trust_error.has_value()) {
-        TermOut() << "警告: " << *trust_error << "\n";
+        PrintNotice(theme, {"警告: " + *trust_error}, frame::FieldAccent::Error);
     }
     const lubancode::package::PackageTrustStore* trust =
         trust_store.has_value() ? &*trust_store : nullptr;
     auto [state_store, state_error] = LoadStateStoreReadOnly();
     if (state_error.has_value()) {
-        TermOut() << "警告: " << *state_error << "\n";
+        PrintNotice(theme, {"警告: " + *state_error}, frame::FieldAccent::Error);
     }
     const lubancode::package::PackageStateStore* state =
         state_store.has_value() ? &*state_store : nullptr;
     const bool disabled = state != nullptr && !state->IsEnabled(inventory.package_id);
-    TermOut() << inventory.package_id
-              << (inventory.version_text.empty() ? "" : " " + inventory.version_text) << "\n";
-    TermOut() << "  状态: " << (inventory.valid ? "valid" : "invalid")
-              << (disabled ? "(已停用)" : "")
-              << (inventory.manifest_ok ? "" : "(根清单解析失败)")
-              << (inventory.code_bearing() ? "  [code-bearing]" : "") << "\n";
-    TermOut() << "  来源: [" << lubancode::package::ScopeToString(inventory.scope) << "] "
-              << lubancode::platform::PathToUtf8(inventory.package_root) << "\n";
-    TermOut() << "  启停: " << lubancode::package::DescribeStateStatus(inventory, state) << "\n";
+    // 头部键值对框:标题 = id + 版本;状态/来源/启停等按句内冒号拆列。
+    std::vector<frame::Field> fields;
+    fields.push_back(frame::Field{
+        "状态", (inventory.valid ? "valid" : "invalid") + (disabled ? "(已停用)" : "") +
+                    (inventory.manifest_ok ? "" : "(根清单解析失败)") +
+                    (inventory.code_bearing() ? "  [code-bearing]" : "")});
+    fields.push_back(frame::Field{
+        "来源", "[" + lubancode::package::ScopeToString(inventory.scope) + "] " +
+                    lubancode::platform::PathToUtf8(inventory.package_root)});
+    fields.push_back(frame::Field{"启停", lubancode::package::DescribeStateStatus(inventory, state)});
     if (inventory.code_bearing()) {
-        TermOut() << "  信任: " << lubancode::package::DescribeTrustStatus(inventory, trust) << "\n";
+        fields.push_back(frame::Field{"信任", lubancode::package::DescribeTrustStatus(inventory, trust)});
     }
     if (mount != nullptr) {
         if (const auto* mounted = mount->Find(inventory.package_id)) {
-            TermOut() << "  挂载: 内容组件 " << mounted->mounted_canonical_ids.size()
-                      << " 件已挂(canonical id 见下;会话钉快照)";
+            std::string value = "内容组件 " + std::to_string(mounted->mounted_canonical_ids.size()) +
+                                " 件已挂(canonical id 见下;会话钉快照)";
             if (mounted->code_trust == lubancode::package::CodeTrustStatus::PendingTrust) {
-                TermOut() << ";Plugin/MCP 待信任门,一件不挂不执行";
+                value += ";Plugin/MCP 待信任门,一件不挂不执行";
             } else if (mounted->code_trust == lubancode::package::CodeTrustStatus::Trusted) {
-                TermOut() << ";Plugin/MCP 已过信任门(挂载事务随会话启动跑,整包成整包败)";
+                value += ";Plugin/MCP 已过信任门(挂载事务随会话启动跑,整包成整包败)";
             }
             if (disabled) {
-                TermOut() << ";已停用,本会话照旧跑完,下回装配不再挂";
+                value += ";已停用,本会话照旧跑完,下回装配不再挂";
             }
-            TermOut() << "\n";
+            fields.push_back(frame::Field{"挂载", value});
         } else if (inventory.valid) {
-            TermOut() << (disabled ? "  挂载: 已停用(挂载跳过,连内容组件一件不挂)\n"
-                                   : "  挂载: 本会话未挂(启动后才放进目录;下回启动生效)\n");
+            fields.push_back(frame::Field{
+                "挂载", disabled ? "已停用(挂载跳过,连内容组件一件不挂)"
+                                 : "本会话未挂(启动后才放进目录;下回启动生效)"});
         } else {
-            TermOut() << "  挂载: 无效包,一件不挂(整包成整包败)\n";
+            fields.push_back(frame::Field{"挂载", "无效包,一件不挂(整包成整包败)"});
         }
     }
-    TermOut() << "  内容哈希: " << inventory.content_hash << "  (盘点文件 "
-              << inventory.total_file_count << " 个)\n";
+    fields.push_back(frame::Field{"内容哈希", inventory.content_hash + "  (盘点文件 " +
+                                                       std::to_string(inventory.total_file_count) +
+                                                       " 个)"});
     if (!lookup.shadowed.empty()) {
-        TermOut() << "  被遮住的候选(" << lookup.shadowed.size() << " 份):\n";
+        fields.push_back(frame::Field{"被遮住的候选", "(" + std::to_string(lookup.shadowed.size()) + " 份)"});
         for (const auto* shadow : lookup.shadowed) {
-            TermOut() << "    [" << lubancode::package::ScopeToString(shadow->scope) << "] "
-                      << lubancode::platform::PathToUtf8(shadow->package_root) << "\n";
+            fields.push_back(frame::Field{"", "[" + lubancode::package::ScopeToString(shadow->scope) +
+                                                 "] " + lubancode::platform::PathToUtf8(shadow->package_root)});
         }
     }
-    PrintComponents(inventory);
-    PrintDiagnostics(inventory);
+    EmitFrameLines(frame::RenderKeyValues(
+        inventory.package_id +
+            (inventory.version_text.empty() ? "" : " " + inventory.version_text),
+        fields, theme, frame::Light(), PackageFrameWidth()));
+    PrintComponents(theme, inventory);
+    PrintDiagnostics(theme, inventory);
     TermOut().flush();
 }
 
-// doctor 的三段新账:组件逐件诊断、引用解析、MountPlan 摘要(只读)。
-void PrintAnalyzedComponents(const lubancode::package::PackageRecord& record) {
-    TermOut() << "  组件(" << record.components.size()
-              << " 件,逐件过原生 parser;坏件照列,不因第一个错停):\n";
+// doctor 的三段新账:组件逐件诊断、引用解析、MountPlan 摘要(只读)。批 4:
+// 组件走表格(kind/id/status/path,status 列 pass/fail 色),附注与 issue 进
+// 键值对框;引用与 MountPlan 走键值对框。
+void PrintAnalyzedComponents(const lubancode::cli::Theme& theme,
+                             const lubancode::package::PackageRecord& record) {
     if (record.components.empty()) {
-        TermOut() << "    (没有组件;七类目录里没有可认的件)\n";
+        PrintNotice(theme,
+                    {"组件(0 件,逐件过原生 parser;坏件照列,不因第一个错停)",
+                     "(没有组件;七类目录里没有可认的件)"});
         return;
     }
+    std::vector<frame::TableColumn> columns;
+    columns.push_back({"kind"});
+    columns.push_back({"id"});
+    columns.push_back({"status"});
+    columns.push_back({"path"});
+    std::vector<frame::TableRow> rows;
+    std::vector<frame::Field> notes;
     for (const auto& component : record.components) {
         const bool has_error = component.HasError();
-        TermOut() << "    " << std::string(lubancode::package::ComponentKindName(component.kind))
-                  << "  " << component.canonical_id << "  "
-                  << (has_error ? "[error]" : (component.ok ? "ok" : "[error]")) << "  "
-                  << component.rel_path;
+        const std::string status = has_error ? "[error]" : (component.ok ? "ok" : "[error]");
+        rows.push_back(frame::TableRow{
+            {std::string(lubancode::package::ComponentKindName(component.kind)),
+             component.canonical_id, status, component.rel_path},
+            {frame::CellTone::Normal, frame::CellTone::Normal,
+             has_error ? frame::CellTone::Fail : frame::CellTone::Pass}});
+        // 附注(工具数/权限概要/覆盖文件)挂 canonical id 标签对回主表行
+        //(批 2 hooks 的 stderr 附注同款);issue 是坏件的明账,同随。
         if (component.kind == lubancode::package::ComponentKind::Plugin && component.plugin.has_value()) {
-            TermOut() << "  (" << component.plugin->tools.size() << " 件工具)";
+            std::string note = "(" + std::to_string(component.plugin->tools.size()) + " 件工具)";
             // v2 embedded-lua 的权限概要(§13.5:/plugin 与 /package 摆同一份
             // 权限真账;完整材料看 /package trust 的审批页)。
             if (component.plugin->manifest_version == lubancode::runtime::kPluginManifestVersionV2) {
-                TermOut() << "  [embedded-lua entry " << component.plugin->runtime_entry << ";网络 "
-                          << component.plugin->network_permissions.size() << " 目的地;Secret "
-                          << component.plugin->secret_declarations.size() << " 件]";
+                note += "  [embedded-lua entry " + component.plugin->runtime_entry + ";网络 " +
+                        std::to_string(component.plugin->network_permissions.size()) +
+                        " 目的地;Secret " +
+                        std::to_string(component.plugin->secret_declarations.size()) + " 件]";
             }
+            notes.push_back(frame::Field{component.canonical_id, note});
         }
         if (component.kind == lubancode::package::ComponentKind::PromptProfile &&
             !component.profile_files.empty()) {
-            TermOut() << "  (" << component.profile_files.size() << " 个覆盖文件)";
+            notes.push_back(frame::Field{component.canonical_id,
+                                         "(" + std::to_string(component.profile_files.size()) +
+                                             " 个覆盖文件)"});
         }
-        TermOut() << "\n";
         for (const auto& issue : component.issues) {
-            TermOut() << "      " << issue.Format() << "\n";
+            notes.push_back(frame::Field{component.canonical_id, issue.Format(),
+                                         frame::FieldAccent::Error});
         }
+    }
+    EmitFrameLines(frame::RenderTable(
+        "组件(" + std::to_string(record.components.size()) +
+            " 件,逐件过原生 parser;坏件照列,不因第一个错停)",
+        columns, rows, theme, frame::Light(), PackageFrameWidth()));
+    if (!notes.empty()) {
+        EmitFrameLines(
+            frame::RenderKeyValues({}, notes, theme, frame::Light(), PackageFrameWidth()));
     }
 }
 
-void PrintReferences(const lubancode::package::PackageRecord& record) {
-    TermOut() << "  引用解析(" << record.references.size() << " 条):\n";
+void PrintReferences(const lubancode::cli::Theme& theme,
+                     const lubancode::package::PackageRecord& record) {
     if (record.references.empty()) {
-        TermOut() << "    (没有包内引用)\n";
+        PrintNotice(theme, {"引用解析(0 条)", "(没有包内引用)"});
         return;
     }
+    std::vector<frame::Field> fields{frame::Field{"引用解析", std::to_string(record.references.size()) + " 条"}};
     for (const auto& ref : record.references) {
-        TermOut() << "    " << ref.Format() << "\n";
+        fields.push_back(frame::Field{"", ref.Format()});
     }
+    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), PackageFrameWidth()));
 }
 
-void PrintMountPlan(const lubancode::package::PackageRecord& record) {
+void PrintMountPlan(const lubancode::cli::Theme& theme,
+                    const lubancode::package::PackageRecord& record) {
     if (!record.mount_plan.has_value()) {
-        TermOut() << "  MountPlan: 不产(整包 invalid,一件也不挂——整包成整包败)\n";
+        PrintNotice(theme, {"MountPlan: 不产(整包 invalid,一件也不挂——整包成整包败)"},
+                    frame::FieldAccent::Error);
         return;
     }
     const auto& plan = *record.mount_plan;
-    TermOut() << "  MountPlan(只读计划,不启动 Plugin 与 MCP):\n";
-    TermOut() << "    " << plan.entries.size() << " 件待挂:agent " << plan.CountKind(lubancode::package::ComponentKind::Agent)
-              << " / prompt " << plan.CountKind(lubancode::package::ComponentKind::PromptProfile)
-              << " / skill " << plan.CountKind(lubancode::package::ComponentKind::Skill)
-              << " / workflow " << plan.CountKind(lubancode::package::ComponentKind::Workflow)
-              << " / plugin " << plan.CountKind(lubancode::package::ComponentKind::Plugin)
-              << " / mcp " << plan.CountKind(lubancode::package::ComponentKind::McpServer)
-              << " / channel " << plan.CountKind(lubancode::package::ComponentKind::Channel);
-    if (plan.HasCodeBearing()) {
-        TermOut() << "  [code-bearing," << lubancode::package::CodeTrustStatusText(plan.code_trust)
-                  << "]";
-    }
-    TermOut() << "\n";
-    for (const auto& entry : plan.entries) {
-        TermOut() << "    " << entry.canonical_id << " -> " << entry.target_table << "  (源 "
-                  << entry.source_root << ")";
-        if (entry.code_bearing) {
-            const char* gate = entry.trusted ? "已信任" : "待信任";
-            TermOut() << "  [" << gate << "]";
+    std::vector<frame::Field> fields;
+    {
+        std::string value = std::to_string(plan.entries.size()) + " 件待挂:agent " +
+                            std::to_string(plan.CountKind(lubancode::package::ComponentKind::Agent)) +
+                            " / prompt " +
+                            std::to_string(plan.CountKind(lubancode::package::ComponentKind::PromptProfile)) +
+                            " / skill " +
+                            std::to_string(plan.CountKind(lubancode::package::ComponentKind::Skill)) +
+                            " / workflow " +
+                            std::to_string(plan.CountKind(lubancode::package::ComponentKind::Workflow)) +
+                            " / plugin " +
+                            std::to_string(plan.CountKind(lubancode::package::ComponentKind::Plugin)) +
+                            " / mcp " +
+                            std::to_string(plan.CountKind(lubancode::package::ComponentKind::McpServer)) +
+                            " / channel " +
+                            std::to_string(plan.CountKind(lubancode::package::ComponentKind::Channel));
+        if (plan.HasCodeBearing()) {
+            value += "  [code-bearing," +
+                     std::string(lubancode::package::CodeTrustStatusText(plan.code_trust)) + "]";
         }
-        TermOut() << "\n";
+        fields.push_back(frame::Field{"MountPlan(只读计划,不启动 Plugin 与 MCP)", value});
+    }
+    for (const auto& entry : plan.entries) {
+        std::string line = entry.canonical_id + " -> " + entry.target_table + "  (源 " +
+                           entry.source_root + ")";
+        if (entry.code_bearing) {
+            line += std::string("  [") + (entry.trusted ? "已信任" : "待信任") + "]";
+        }
+        fields.push_back(frame::Field{"", line});
         for (const auto& tool : entry.tools) {
-            TermOut() << "      工具 " << tool.wire_name << "\n"
-                      << "         展示 " << tool.display_name << "\n";
+            fields.push_back(frame::Field{"", "工具 " + tool.wire_name + "  展示 " + tool.display_name});
         }
         if (!entry.depends_on.empty()) {
-            TermOut() << "      依赖 " << [&] {
-                std::string joined;
-                for (const auto& dep : entry.depends_on) {
-                    if (!joined.empty()) joined += ", ";
-                    joined += dep;
-                }
-                return joined;
-            }() << "\n";
+            std::string joined;
+            for (const auto& dep : entry.depends_on) {
+                if (!joined.empty()) joined += ", ";
+                joined += dep;
+            }
+            fields.push_back(frame::Field{"", "依赖 " + joined});
         }
     }
+    EmitFrameLines(frame::RenderKeyValues({}, fields, theme, frame::Light(), PackageFrameWidth()));
 }
 
-void RunPackageDoctor(const lubancode::package::ScanOptions& options,
+void RunPackageDoctor(const lubancode::cli::Theme& theme,
+                      const lubancode::package::ScanOptions& options,
                       const lubancode::package::ExternalNamespaces& external, const std::string& target,
                       const std::vector<lubancode::package::PackageCandidate>& scanned) {
     // doctor 收 id 或路径:路径存在(目录)就当包根直接诊,否则按 id 查。
@@ -663,7 +811,7 @@ void RunPackageDoctor(const lubancode::package::ScanOptions& options,
     // 信任账的只读快照:code 件在 plan 里的门禁标随它定(阶段 4)。
     auto [trust_store, trust_error] = LoadTrustStoreReadOnly();
     if (trust_error.has_value()) {
-        TermOut() << "警告: " << *trust_error << "\n";
+        PrintNotice(theme, {"警告: " + *trust_error}, frame::FieldAccent::Error);
     }
     const lubancode::package::PackageTrustSnapshot trust_snapshot =
         trust_store.has_value() ? trust_store->Snapshot()
@@ -676,7 +824,8 @@ void RunPackageDoctor(const lubancode::package::ScanOptions& options,
     } else {
         const PackageLookup lookup = LookupPackage(candidates, target);
         if (lookup.winner == nullptr && lookup.shadowed.empty()) {
-            TermOut() << "没找到包 \"" << target << "\"(doctor 收 id 或包路径)\n";
+            PrintNotice(theme, {"没找到包 \"" + target + "\"(doctor 收 id 或包路径)"},
+                        frame::FieldAccent::Error);
             TermOut().flush();
             return;
         }
@@ -685,51 +834,59 @@ void RunPackageDoctor(const lubancode::package::ScanOptions& options,
     }
 
     const auto& inventory = record.inventory;
-    TermOut() << "诊断 " << inventory.package_id << ":\n";
-    TermOut() << "  根清单: " << (inventory.manifest_ok ? "解析通过(schema 1, SemVer)"
-                                                          : "解析失败")
-              << (inventory.version_text.empty() ? "" : ",version " + inventory.version_text) << "\n";
+    std::vector<frame::Field> fields;
+    fields.push_back(frame::Field{
+        "根清单", (inventory.manifest_ok ? "解析通过(schema 1, SemVer)" : "解析失败") +
+                      (inventory.version_text.empty() ? "" : ",version " + inventory.version_text)});
     if (options.current_lubancode.has_value()) {
-        TermOut() << "  LubanCode: 当前 " << options.current_lubancode->text
-                  << ",平台 " << options.current_platform << "(写了 compatibility 就检查)\n";
+        fields.push_back(frame::Field{"LubanCode", "当前 " + options.current_lubancode->text +
+                                                       ",平台 " + options.current_platform +
+                                                       "(写了 compatibility 就检查)"});
     }
-    TermOut() << "  包根: [" << lubancode::package::ScopeToString(inventory.scope) << "] "
-              << lubancode::platform::PathToUtf8(inventory.package_root) << "\n";
+    fields.push_back(frame::Field{
+        "包根", "[" + lubancode::package::ScopeToString(inventory.scope) + "] " +
+                    lubancode::platform::PathToUtf8(inventory.package_root)});
     // 启停一行(阶段 6,doctor 表的"信任、启停与 runtime"项):现查启停账。
     {
         auto [state_store, state_error] = LoadStateStoreReadOnly();
         if (state_error.has_value()) {
-            TermOut() << "警告: " << *state_error << "\n";
+            PrintNotice(theme, {"警告: " + *state_error}, frame::FieldAccent::Error);
         }
-        TermOut() << "  启停: "
-                  << lubancode::package::DescribeStateStatus(
-                         inventory, state_store.has_value() ? &*state_store : nullptr)
-                  << "\n";
+        fields.push_back(frame::Field{
+            "启停", lubancode::package::DescribeStateStatus(
+                        inventory, state_store.has_value() ? &*state_store : nullptr)});
     }
-    TermOut() << "  盘点: 文件 " << inventory.total_file_count << "(assets "
-              << inventory.assets_file_count << " / docs " << inventory.docs_file_count
-              << " / code-bearing " << inventory.code_bearing_file_count
-              << "),内容哈希 " << inventory.content_hash << "\n";
-    PrintDiagnostics(inventory);
-    PrintAnalyzedComponents(record);
-    PrintReferences(record);
-    PrintMountPlan(record);
-    TermOut() << "  结论: " << (record.valid ? "valid(静态账干净;挂载是后续阶段的事)"
-                                             : "invalid(按清单修好再看)") << "\n";
+    fields.push_back(frame::Field{
+        "盘点", "文件 " + std::to_string(inventory.total_file_count) + "(assets " +
+                    std::to_string(inventory.assets_file_count) + " / docs " +
+                    std::to_string(inventory.docs_file_count) + " / code-bearing " +
+                    std::to_string(inventory.code_bearing_file_count) + "),内容哈希 " +
+                    inventory.content_hash});
+    EmitFrameLines(frame::RenderKeyValues("诊断 " + inventory.package_id, fields, theme,
+                                          frame::Light(), PackageFrameWidth()));
+    PrintDiagnostics(theme, inventory);
+    PrintAnalyzedComponents(theme, record);
+    PrintReferences(theme, record);
+    PrintMountPlan(theme, record);
+    PrintNotice(theme, {"结论: " + std::string(record.valid
+                                                    ? "valid(静态账干净;挂载是后续阶段的事)"
+                                                    : "invalid(按清单修好再看)")});
     TermOut().flush();
 }
 
 // /package trust|untrust <id>(阶段 4):扫描定胜者 -> AnalyzePackage 出全份
 // 材料与状态 -> 账务(TrustPackage/UntrustPackage,回执逐行)。落账即时,
 // 生效在重启(会话钉快照,阶段 3 语义)。
-void RunPackageTrust(const PackageCommandContext& ctx, const std::string& target, bool trust_action) {
+void RunPackageTrust(const lubancode::cli::Theme& theme, const PackageCommandContext& ctx,
+                     const std::string& target, bool trust_action) {
     const lubancode::package::ScanOptions options = BuildScanOptions(ctx);
     const std::vector<lubancode::package::PackageCandidate> candidates =
         lubancode::package::ScanPackages(options);
     const PackageLookup lookup = LookupPackage(candidates, target);
     if (lookup.winner == nullptr && lookup.shadowed.empty()) {
-        TermOut() << "没找到包 \"" << target
-                  << "\"(trust/untrust 按 id 或目录名查;先 /package list 看全账)\n";
+        PrintNotice(theme, {"没找到包 \"" + target +
+                            "\"(trust/untrust 按 id 或目录名查;先 /package list 看全账)"},
+                    frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
@@ -744,7 +901,7 @@ void RunPackageTrust(const PackageCommandContext& ctx, const std::string& target
         path.has_value()) {
         auto [loaded, load_error] = lubancode::package::PackageTrustStore::Load(path);
         if (load_error.has_value()) {
-            TermOut() << "警告: " << *load_error << "\n";
+            PrintNotice(theme, {"警告: " + *load_error}, frame::FieldAccent::Error);
         }
         store = std::move(loaded);
     }
@@ -753,11 +910,9 @@ void RunPackageTrust(const PackageCommandContext& ctx, const std::string& target
                      : lubancode::package::UntrustPackage(record,
                                                           store.has_value() ? &*store : nullptr);
     if (!result.ok) {
-        TermOut() << result.error << "\n";
+        PrintNotice(theme, {result.error}, frame::FieldAccent::Error);
     } else {
-        for (const std::string& line : result.lines) {
-            TermOut() << line << "\n";
-        }
+        PrintNotice(theme, result.lines);
     }
     TermOut().flush();
 }
@@ -765,14 +920,16 @@ void RunPackageTrust(const PackageCommandContext& ctx, const std::string& target
 // /package enable|disable <id>(阶段 6):扫描定胜者 -> 轻盘点出身份 ->
 // 账务(EnableDisablePackage,回执逐行)。落账即时,生效在下回装配(会话
 // 钉快照,不拆在跑的)——回执里如实说,另注明本会话快照还给它挂着几件。
-void RunPackageEnableDisable(const PackageCommandContext& ctx, const std::string& target, bool enable) {
+void RunPackageEnableDisable(const lubancode::cli::Theme& theme, const PackageCommandContext& ctx,
+                             const std::string& target, bool enable) {
     const lubancode::package::ScanOptions options = BuildScanOptions(ctx);
     const std::vector<lubancode::package::PackageCandidate> candidates =
         ScanAllLayers(ctx, options);
     const PackageLookup lookup = LookupPackage(candidates, target);
     if (lookup.winner == nullptr && lookup.shadowed.empty()) {
-        TermOut() << "没找到包 \"" << target
-                  << "\"(enable/disable 按 id 或目录名查;先 /package list 看全账)\n";
+        PrintNotice(theme, {"没找到包 \"" + target +
+                            "\"(enable/disable 按 id 或目录名查;先 /package list 看全账)"},
+                    frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
@@ -785,7 +942,7 @@ void RunPackageEnableDisable(const PackageCommandContext& ctx, const std::string
         path.has_value()) {
         auto [loaded, load_error] = lubancode::package::PackageStateStore::Load(path);
         if (load_error.has_value()) {
-            TermOut() << "警告: " << *load_error << "\n";
+            PrintNotice(theme, {"警告: " + *load_error}, frame::FieldAccent::Error);
         }
         store = std::move(loaded);
     }
@@ -805,27 +962,24 @@ void RunPackageEnableDisable(const PackageCommandContext& ctx, const std::string
     const lubancode::package::PackageStateActionResult result = lubancode::package::EnableDisablePackage(
         inventory, store.has_value() ? &*store : nullptr, enable, mounted_count);
     if (!result.ok) {
-        TermOut() << result.error << "\n";
+        PrintNotice(theme, {result.error}, frame::FieldAccent::Error);
     } else {
-        for (const std::string& line : result.lines) {
-            TermOut() << line << "\n";
-        }
+        PrintNotice(theme, result.lines);
     }
     TermOut().flush();
 }
 
 // /package reload(阶段 6):会话侧重折快照 + 原子换档 + 刷下游。回执行
 //(含折不动的诊断)逐行打印;没接会话执行体(纯函数装配)如实明说。
-void RunPackageReload(const PackageCommandContext& ctx) {
+void RunPackageReload(const lubancode::cli::Theme& theme, const PackageCommandContext& ctx) {
     if (ctx.reload_packages == nullptr) {
-        TermOut() << "这个装配没接会话 reload 口(单发/无交互栈),折不了新快照。\n"
-                     "重启会话即可按最新目录与启停账装配。\n";
+        PrintNotice(theme,
+                    {"这个装配没接会话 reload 口(单发/无交互栈),折不了新快照。",
+                     "重启会话即可按最新目录与启停账装配。"});
         TermOut().flush();
         return;
     }
-    for (const std::string& line : ctx.reload_packages()) {
-        TermOut() << line << "\n";
-    }
+    PrintNotice(theme, ctx.reload_packages());
     TermOut().flush();
 }
 
@@ -834,6 +988,8 @@ void RunPackageReload(const PackageCommandContext& ctx) {
 CommandFlow HandleSlashPackage(const PackageCommandContext& ctx,
                                const lubancode::cli::ParsedSlashCommand& parsed) {
     const ParsedPackageCommand command = ParsePackageCommand(parsed.args);
+    // 批 4:渲染段走 frame;theme 空指针按 /plugin 先例退 plain。
+    const lubancode::cli::Theme theme = ctx.theme != nullptr ? *ctx.theme : lubancode::cli::Theme{};
     const lubancode::package::ScanOptions options = BuildScanOptions(ctx);
     const std::vector<lubancode::package::PackageCandidate> candidates = ScanAllLayers(ctx, options);
     // 挂载账从 provider 现取现行快照(HC-06 第三小批:reload 换档后旧快照
@@ -845,32 +1001,33 @@ CommandFlow HandleSlashPackage(const PackageCommandContext& ctx,
         package_snapshot != nullptr ? &package_snapshot->mount() : nullptr;
     switch (command.action) {
         case PackageCommandAction::List:
-            RunPackageList(options, command.scope_filter, package_mount, candidates);
+            RunPackageList(theme, options, command.scope_filter, package_mount, candidates);
             return CommandFlow::Continue;
         case PackageCommandAction::Show:
-            RunPackageShow(options, command.target, package_mount, candidates);
+            RunPackageShow(theme, options, command.target, package_mount, candidates);
             return CommandFlow::Continue;
         case PackageCommandAction::Doctor:
-            RunPackageDoctor(options, BuildExternalNamespaces(ctx), command.target, candidates);
+            RunPackageDoctor(theme, options, BuildExternalNamespaces(ctx), command.target,
+                             candidates);
             return CommandFlow::Continue;
         case PackageCommandAction::Trust:
-            RunPackageTrust(ctx, command.target, /*trust_action=*/true);
+            RunPackageTrust(theme, ctx, command.target, /*trust_action=*/true);
             return CommandFlow::Continue;
         case PackageCommandAction::Untrust:
-            RunPackageTrust(ctx, command.target, /*trust_action=*/false);
+            RunPackageTrust(theme, ctx, command.target, /*trust_action=*/false);
             return CommandFlow::Continue;
         case PackageCommandAction::Enable:
-            RunPackageEnableDisable(ctx, command.target, /*enable=*/true);
+            RunPackageEnableDisable(theme, ctx, command.target, /*enable=*/true);
             return CommandFlow::Continue;
         case PackageCommandAction::Disable:
-            RunPackageEnableDisable(ctx, command.target, /*enable=*/false);
+            RunPackageEnableDisable(theme, ctx, command.target, /*enable=*/false);
             return CommandFlow::Continue;
         case PackageCommandAction::Reload:
-            RunPackageReload(ctx);
+            RunPackageReload(theme, ctx);
             return CommandFlow::Continue;
         case PackageCommandAction::Invalid:
-            TermOut() << "认不得 \"" << command.bad_word << "\"。\n";
-            PrintUsage();
+            PrintNotice(theme, {"认不得 \"" + command.bad_word + "\"。"}, frame::FieldAccent::Error);
+            PrintUsage(theme);
             return CommandFlow::Continue;
     }
     return CommandFlow::Continue;
