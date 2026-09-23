@@ -235,9 +235,11 @@ TEST_CASE("graph: 标题 frame + 图本体框外原样(ascii 与 mermaid)") {
         REQUIRE(Contains(out, kBoxLightTopLeft));
         CHECK(Contains(plain, "探针工作流 [probe v1.0.0]"));
         CHECK(Contains(plain, "graph  ascii"));
-        // 图本体框外原样:树形缩进字符与节点行在框外裸打。
+        // 图本体框外原样:树形缩进字符与节点行在框外裸打(NodeSummaryLine
+        // 用 label 不用 id)。
         CHECK(Contains(plain, "`- "));
-        CHECK(Contains(plain, "start"));
+        CHECK(Contains(plain, "开工 [tool] echo_tool"));
+        CHECK(Contains(plain, "收口"));
     }
     {
         const std::string out = fx.Run("graph probe mermaid", fx.theme);
@@ -274,12 +276,13 @@ TEST_CASE("graph 标题 frame: 80 列与 200 列都不破框(窄/宽两档钉)")
             cli::frame::RenderKeyValues(capped, fields, fx.theme, cli::frame::Light(), width);
         REQUIRE(lines.size() >= 3);
         for (const std::string& line : lines) {
+            // 不破框:每一行(含嵌标题的顶边框)显示宽都不超预算。内容行
+            // 恰好抵预算;边框行按批 0 基件口径窄 2 列,不越预算即可。
             const std::string bare = StripAnsi(line);
             CHECK(static_cast<int>(cli::DisplayWidthUtf8(bare)) <= width);
         }
-        // 顶边框行是整行铺满的那一行:恰好抵预算,不越一格。
-        const std::string bare_top = StripAnsi(lines.front());
-        CHECK(static_cast<int>(cli::DisplayWidthUtf8(bare_top)) == width);
+        const std::string bare_content = StripAnsi(lines[1]);
+        CHECK(static_cast<int>(cli::DisplayWidthUtf8(bare_content)) == width);
     }
     // 80 列窄档下标题被截(保字头),200 列宽档全名在。
     const std::string capped80 = cli::TruncateUtf8ToDisplayWidth(raw_title, 80 - 7);

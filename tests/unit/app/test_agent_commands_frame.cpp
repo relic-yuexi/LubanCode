@@ -239,8 +239,8 @@ TEST_CASE("doctor: 键值对框 + 诊断表,缺项 ✗ 上 error 档、结论按
     // tone 只上非首列——级别色从简,信息靠文案。
     CHECK(Contains(joined, rig.theme.row_label + "[警告]"));
     CHECK(Contains(plain, "agent.legacy_step_budget"));
-    // ✗ 缺项:技能清单里没有 preload 名,值上 error 档。
-    CHECK(Contains(joined, rig.theme.error + "✗(不在已扫描技能清单)"));
+    // ✗ 缺项:技能清单里没有 preload 名,整个值上 error 档。
+    CHECK(Contains(joined, rig.theme.error + "missing-skill ✗(不在已扫描技能清单)"));
     // 交叠与 runtime 账照登。
     CHECK(Contains(plain, "allow 与 deny 交叠  read_file(deny 胜出)"));
     CHECK(LineWithText(plain, {"runtime", "max_output_tokens=继承"}));
@@ -267,9 +267,13 @@ TEST_CASE("doctor: 解析通过零缺项时结论上 pass 档;查无此名给 er
         const std::vector<std::string> lines =
             app::FormatAgentDoctorReport(catalog, "no-such", {}, {}, rig.theme);
         REQUIRE(lines.size() >= 1);
-        const std::string plain = StripAnsi(lines[0]);
+        std::string joined;
+        for (const std::string& line : lines) {
+            joined += line + "\n";
+        }
+        const std::string plain = StripAnsi(joined);
         CHECK(Contains(plain, "没有叫 \"no-such\""));
-        CHECK(Contains(lines[0], rig.theme.error));
+        CHECK(Contains(joined, rig.theme.error));
     }
 }
 
@@ -292,7 +296,7 @@ TEST_CASE("inspect: 键值对框 + 迁移片段框 + 来源账本列表,语义�
 
     REQUIRE(Contains(joined, kBoxLightTopLeft));
     CHECK(Contains(plain, "agent inspect: legacy"));
-    CHECK(Contains(plain, "定义来源  user test://legacy.yaml"));
+    CHECK(LineWithText(plain, {"定义来源", "user test://legacy.yaml"}));
     CHECK(LineWithText(plain, {"prompt", "profile=继承(落回 default)"}));
     CHECK(Contains(plain, "runtime 并流  显式声明 max_steps_per_turn=9"));
     // 迁移片段:YAML 行进框,语义长注(批 1 裁量 3)框外原样一行不截。

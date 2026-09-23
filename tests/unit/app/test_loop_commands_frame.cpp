@@ -241,10 +241,10 @@ TEST_CASE("pause/resume/run/stop: 反馈句收 frame;错误句 error 档") {
 TEST_CASE("门禁与用法错误收 error 框") {
     LoopRig rig;
     {
-        // 间隔写法不对:create 前置校验。
-        const std::string out = rig.Run("xx 巡检", rig.theme);
+        // 坏间隔形状(数字+错单位):二级解析明报,不当 prompt 静默收。
+        const std::string out = rig.Run("5x 巡检", rig.theme);
         REQUIRE(Contains(out, kBoxLightTopLeft));
-        CHECK(Contains(StripAnsi(out), "间隔写法不对"));
+        CHECK(Contains(StripAnsi(out), "interval 只认 <正整数>m|h|d,最小 1m,最大 7d"));
         CHECK(Contains(out, rig.theme.error));
     }
     {
@@ -277,7 +277,7 @@ TEST_CASE("门禁与用法错误收 error 框") {
 
 TEST_CASE("plain 主题: 全族输出零转义字节、无框字形(T3/--no-color 路径)") {
     LoopRig rig;
-    for (const std::string& args : {"5m plain 巡检", "list", "status loop-999", "xx 巡检"}) {
+    for (const std::string& args : {"5m plain 巡检", "list", "status loop-999", "5x 巡检"}) {
         CAPTURE(args);
         const std::string out = rig.Run(args, rig.plain_theme);
         CHECK(out.find("\x1b") == std::string::npos);
