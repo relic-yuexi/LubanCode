@@ -302,14 +302,15 @@ TEST_CASE("invalid: 认不得一句收 error 框,用法块照旧裸打(对齐正
     CHECK(Contains(out, rig.theme.error));
     // 用法块是手工对齐的多行帮助文,不塞框,原样落盘。
     CHECK(Contains(plain, "/background show <id>"));
-    CHECK(!Contains(plain, kBoxLightVert + "      /background"));
+    CHECK(!Contains(plain, std::string(kBoxLightVert) + "      /background"));
 }
 
 TEST_CASE("plain 主题: 全族输出零转义字节、无框字形(T3/--no-color 路径)") {
     BackgroundRig rig;
     const std::filesystem::path log = rig.dir.Write("frame-plain.log", "plain-tail\n");
     const std::string id = rig.SpawnRunning("plain", log);
-    for (const std::string& args : {"list", "show #" + id, "logs #" + id, "stop 999999", "frobnicate"}) {
+    const std::vector<std::string> cases{"list", "show #" + id, "logs #" + id, "stop 999999", "frobnicate"};
+    for (const std::string& args : cases) {
         CAPTURE(args);
         const std::string out = rig.Run(args, rig.plain_theme);
         CHECK(out.find("\x1b") == std::string::npos);

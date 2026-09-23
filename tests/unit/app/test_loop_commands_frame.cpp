@@ -101,8 +101,8 @@ struct LoopRig {
 
     LoopRig() : theme(cli::BuiltinTheme("dark")), plain_theme(cli::BuiltinTheme("plain")) {}
 
-    LoopWiring Wiring(const cli::Theme& use_theme) {
-        LoopWiring wiring;
+    app::LoopWiring Wiring(const cli::Theme& use_theme) {
+        app::LoopWiring wiring;
         wiring.interactive = true;
         wiring.feature_enabled = true;
         wiring.theme = &use_theme;
@@ -255,7 +255,7 @@ TEST_CASE("门禁与用法错误收 error 框") {
     }
     {
         // 非交互终端:明拒。
-        LoopWiring wiring = rig.Wiring(rig.theme);
+        app::LoopWiring wiring = rig.Wiring(rig.theme);
         wiring.interactive = false;
         OutputCapture capture;
         app::HandleLoopCommand(cli::ParseLoopCommand("5m x"), wiring);
@@ -265,7 +265,7 @@ TEST_CASE("门禁与用法错误收 error 框") {
     }
     {
         // feature 关:明说开法。
-        LoopWiring wiring = rig.Wiring(rig.theme);
+        app::LoopWiring wiring = rig.Wiring(rig.theme);
         wiring.feature_enabled = false;
         OutputCapture capture;
         app::HandleLoopCommand(cli::ParseLoopCommand("5m x"), wiring);
