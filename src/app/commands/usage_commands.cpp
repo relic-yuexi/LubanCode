@@ -3,6 +3,7 @@
 #include "app/commands/usage_commands.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 
@@ -13,11 +14,18 @@
 #include "agent/model_router.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
+#include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 5c:报告/分账表渲染段)
 #include "cli/terminal_port.hpp"
+#include "cli/theme.hpp"
+#include "platform/console.hpp"  // GetScreenInfo:/usage 的框宽同一把尺
 #include "runtime/trajectory_session.hpp"
 
 namespace lubancode::app {
 namespace {
+
+namespace frame = lubancode::cli::frame;
+
+using lubancode::cli::TermOut;
 
 // 四舍五入的整数百分比;分母 <= 0 给 0(调用方先判 unknown)。
 int SharePercent(std::int64_t part, std::int64_t whole) {
@@ -65,6 +73,68 @@ std::string ShareLine(const std::vector<lubancode::accounting::UsageBreakdown>& 
         line << " · …共 " << sorted.size() << " 类";
     }
     return line.str();
+}
+
+// TUI 排版批 5c(/usage)的公共小件,与批 4 insights_commands.cpp 同款:
+// 渲染段只调 cli::frame::* 三助手;报告正文是既有硬编码中文,一字不添不改;
+// tr()/trf() 的通知句按句内冒号拆两列(批 1 裁量 SentenceField)。
+
+int UsageFrameWidth() {
+    if (const auto info = lubancode::platform::GetScreenInfo()) {
+        return info->width;
+    }
+    return 0;
+}
+
+std::string TrimAscii(std::string value) {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}
+
+frame::Field SentenceField(const std::string& sentence,
+                           frame::FieldAccent accent = frame::FieldAccent::None) {
+    const std::size_t colon = sentence.find(':');
+    if (colon == std::string::npos) {
+        return frame::Field{"", sentence, accent};
+    }
+    return frame::Field{TrimAscii(sentence.substr(0, colon)), TrimAscii(sentence.substr(colon + 1)),
+                        accent};
+}
+
+// 引导下文的尾冒号剥掉(批 2 裁量 3):标题化时 "按 model 分账(...):" 的尾
+// 冒号是废话。全角冒号是三字节 UTF-8,不能当 char 字面量比(clang 报
+// character too large),按字节串后缀比。
+std::string StripTrailingColon(std::string text) {
+    static const std::string kFullWidthColon = "\xef\xbc\x9a";  // 全角冒号
+    while (true) {
+        if (!text.empty() && text.back() == ':') {
+            text.pop_back();
+            continue;
+        }
+        if (text.size() >= kFullWidthColon.size() &&
+            text.compare(text.size() - kFullWidthColon.size(), kFullWidthColon.size(),
+                         kFullWidthColon) == 0) {
+            text.resize(text.size() - kFullWidthColon.size());
+            continue;
+        }
+        break;
+    }
+    return text;
+}
+
+// 反馈/错误通知:句子进键值对框(句内冒号拆列;错误走 error 语义色)。
+void PrintNotice(const lubancode::cli::Theme& theme, const std::vector<std::string>& sentences,
+                 frame::FieldAccent accent = frame::FieldAccent::None) {
+    std::vector<frame::Field> fields;
+    for (const std::string& sentence : sentences) {
+        fields.push_back(SentenceField(sentence, accent));
+    }
+    for (const std::string& line :
+         frame::RenderKeyValues({}, fields, theme, frame::Light(), UsageFrameWidth())) {
+        TermOut() << line << "\n";
+    }
 }
 
 }  // namespace
@@ -166,7 +236,8 @@ void ApplyCostEstimates(std::vector<lubancode::accounting::UsageSample>& samples
     }
 }
 
-std::vector<std::string> FormatUsageReport(const UsageReportModel& model) {
+std::vector<std::string> FormatUsageReport(const UsageReportModel& model,
+                                           const lubancode::cli::Theme& theme, int width) {
     using lubancode::accounting::UsageTotals;
     std::vector<std::string> lines;
     const UsageTotals& totals = model.aggregate.totals;
@@ -176,17 +247,25 @@ std::vector<std::string> FormatUsageReport(const UsageReportModel& model) {
     if (model.provisional) {
         title += "(未封口 provisional)";
     }
-    lines.push_back(std::move(title));
 
     if (totals.requests_total == 0) {
-        lines.push_back("  这场 session 还没有模型请求账(Journal 里一笔没有)——不猜。");
+        // 空账不猜:一句进键值对框(批 4 空态同款)。
+        for (const std::string& line : frame::RenderKeyValues(
+                 title,
+                 {frame::Field{"", "这场 session 还没有模型请求账(Journal 里一笔没有)——不猜。"}},
+                 theme, frame::Light(), width)) {
+            lines.push_back(line);
+        }
         return lines;
     }
 
+    // 主报告:先收集 fields 再一把进键值对框(单子合同第 4 条);八节节名
+    // 沿用旧排版标签,句子一字不改——旧平铺的手工补空对齐交给助手。
+    std::vector<frame::Field> fields;
     // 覆盖:unknown 单列,不冒充(§14.3)。
     {
         std::ostringstream out;
-        out << "  覆盖        " << totals.requests_with_usage << "/" << totals.requests_total
+        out << totals.requests_with_usage << "/" << totals.requests_total
             << " 笔有 provider usage";
         if (totals.requests_unknown > 0) {
             out << " · " << totals.requests_unknown << " 笔 unknown(未报,不折 0)";
@@ -194,12 +273,12 @@ std::vector<std::string> FormatUsageReport(const UsageReportModel& model) {
         if (totals.requests_retry > 0) {
             out << " · 重试 " << totals.requests_retry << " 笔(各记各账)";
         }
-        lines.push_back(out.str());
+        fields.push_back(frame::Field{"覆盖", out.str()});
     }
     // 输入(§7.4)。
     {
         std::ostringstream out;
-        out << "  输入        " << lubancode::cli::FormatTokenCount(totals.input_tokens);
+        out << lubancode::cli::FormatTokenCount(totals.input_tokens);
         if (const auto ratio = totals.cache_read_ratio_percent()) {
             out << " · cache 读 " << lubancode::cli::FormatTokenCount(totals.cache_read_tokens)
                 << "(" << *ratio << "%)";
@@ -210,58 +289,57 @@ std::vector<std::string> FormatUsageReport(const UsageReportModel& model) {
         out << " · cache 写 "
             << lubancode::cli::FormatTokenCount(totals.cache_creation_tokens);
         out << " · 合计输入 " << lubancode::cli::FormatTokenCount(totals.total_input_tokens);
-        lines.push_back(out.str());
+        fields.push_back(frame::Field{"输入", out.str()});
     }
     // 输出:reasoning 是子集,注明(§四.4)。
     {
         std::ostringstream out;
-        out << "  输出        " << lubancode::cli::FormatTokenCount(totals.output_tokens);
+        out << lubancode::cli::FormatTokenCount(totals.output_tokens);
         if (totals.reasoning_tokens > 0) {
             out << " · 推理 " << lubancode::cli::FormatTokenCount(totals.reasoning_tokens)
                 << "(已含在输出,不另加)";
         }
-        lines.push_back(out.str());
+        fields.push_back(frame::Field{"输出", out.str()});
     }
     // 模型与用途:份额行,分母注明(§7.4"任何比例都要注明分母")。
     {
         const std::int64_t whole = totals.total_billed_shape_tokens;
-        lines.push_back("  模型        " + ShareLine(model.aggregate.by_model, whole, 3) +
-                        "(按 input+output token 占比)");
-        lines.push_back("  用途        " + ShareLine(model.aggregate.by_purpose, whole, 4) +
-                        "(按 input+output token 占比)");
+        fields.push_back(frame::Field{"模型", ShareLine(model.aggregate.by_model, whole, 3) +
+                                               "(按 input+output token 占比)"});
+        fields.push_back(frame::Field{"用途", ShareLine(model.aggregate.by_purpose, whole, 4) +
+                                               "(按 input+output token 占比)"});
     }
     // 费用(§6.3 四条线):没配表照样报 token,费用 not_priced。
     {
         std::ostringstream out;
         if (model.pricing.has_value()) {
-            out << "  估算费用    " << FormatMicrosAmount(totals.cost_micros, "$") << " · 价格表 "
+            out << FormatMicrosAmount(totals.cost_micros, "$") << " · 价格表 "
                 << model.pricing->id << " · 本地估算,非账单";
             if (totals.requests_priced < totals.requests_with_usage) {
                 out << " · 命中 " << totals.requests_priced << "/"
                     << totals.requests_with_usage << " 笔(其余 not_priced)";
             }
         } else {
-            out << "  估算费用    not_priced(" << model.pricing_note
-                << ";token 照报,不估不猜)";
+            out << "not_priced(" << model.pricing_note << ";token 照报,不估不猜)";
         }
-        lines.push_back(out.str());
+        fields.push_back(frame::Field{"估算费用", out.str()});
     }
     // cache 观察:只报 observed,不判罪(§7.2)。
     {
         const auto& cache = model.aggregate.cache;
         std::ostringstream out;
-        out << "  cache 观察  epoch 重建 " << cache.expected_rebuild_events << " 次 · 疑似未命中 "
+        out << "epoch 重建 " << cache.expected_rebuild_events << " 次 · 疑似未命中 "
             << cache.unexpected_miss_candidates << " 笔(候选:TTL 过期/端不稳也长这模样) · 前缀改写 "
             << cache.append_only_breaks << " 笔";
         if (cache.epoch_unlabeled > 0) {
             out << " · 无 epoch 标注 " << cache.epoch_unlabeled << " 笔";
         }
-        lines.push_back(out.str());
+        fields.push_back(frame::Field{"cache 观察", out.str()});
     }
     // 成色:账的来历说明,不混"异常"语气。
     {
         std::ostringstream out;
-        out << "  成色        " << model.aggregate.run_ids.size() << " 条 run";
+        out << model.aggregate.run_ids.size() << " 条 run";
         if (model.format == "v3") {
             out << " · v3 账";
         } else if (model.format == "v2") {
@@ -274,10 +352,16 @@ std::vector<std::string> FormatUsageReport(const UsageReportModel& model) {
             out << " · 断链 " << model.aggregate.incomplete_linkage_samples << " 笔";
         }
         out << " · session status=" << model.status;
-        lines.push_back(out.str());
+        fields.push_back(frame::Field{"成色", out.str()});
+    }
+    for (const std::string& line :
+         frame::RenderKeyValues(title, fields, theme, frame::Light(), width)) {
+        lines.push_back(line);
     }
 
-    // --by 分账表(要哪张打哪张;份额分母同上)。
+    // --by 分账表(要哪张打哪张;份额分母同上)。列头是数据 schema 名
+    //(批 1 裁量),share/req/cost 数值列右对齐;行内句子按旧粒度拆列,
+    // 一字不改。
     const std::vector<lubancode::accounting::UsageBreakdown>* table = nullptr;
     const char* table_title = nullptr;
     switch (model.by) {
@@ -300,42 +384,62 @@ std::vector<std::string> FormatUsageReport(const UsageReportModel& model) {
         case ParsedUsageCommand::By::None:
             break;
     }
-    if (table != nullptr && table_title != nullptr) {
-        lines.push_back(std::string("  ") + table_title + "(占比分母:input+output token):");
+    if (table != nullptr && table_title != nullptr && !table->empty()) {
+        std::vector<frame::TableColumn> columns;
+        columns.push_back(frame::TableColumn{"label"});
+        columns.push_back(frame::TableColumn{"share", 0, /*align_right=*/true});
+        columns.push_back(frame::TableColumn{"req", 0, /*align_right=*/true});
+        columns.push_back(frame::TableColumn{"tokens"});
+        columns.push_back(frame::TableColumn{"cost", 0, /*align_right=*/true});
+        std::vector<frame::TableRow> rows;
         for (const auto& row : *table) {
             const UsageTotals& t = row.totals;
-            std::ostringstream out;
-            out << "    " << row.label << "  " << SharePercent(t.total_billed_shape_tokens,
-                                                               totals.total_billed_shape_tokens)
-                << "% · " << t.requests_total << " 笔";
+            std::ostringstream req;
+            req << t.requests_total << " 笔";
             if (t.requests_retry > 0) {
-                out << "(重试 " << t.requests_retry << ")";
+                req << "(重试 " << t.requests_retry << ")";
             }
             if (t.requests_unknown > 0) {
-                out << "[" << t.requests_unknown << " 笔 unknown]";
+                req << "[" << t.requests_unknown << " 笔 unknown]";
             }
-            out << " · 输入 " << lubancode::cli::FormatTokenCount(t.total_input_tokens) << "(读 "
-                << lubancode::cli::FormatTokenCount(t.cache_read_tokens) << "/写 "
-                << lubancode::cli::FormatTokenCount(t.cache_creation_tokens) << ")"
-                << " · 输出 " << lubancode::cli::FormatTokenCount(t.output_tokens);
-            if (t.requests_priced > 0) {
-                out << " · " << FormatMicrosAmount(t.cost_micros, "$");
-            }
-            lines.push_back(out.str());
+            std::ostringstream tokens;
+            tokens << "输入 " << lubancode::cli::FormatTokenCount(t.total_input_tokens) << "(读 "
+                   << lubancode::cli::FormatTokenCount(t.cache_read_tokens) << "/写 "
+                   << lubancode::cli::FormatTokenCount(t.cache_creation_tokens) << ")"
+                   << " · 输出 " << lubancode::cli::FormatTokenCount(t.output_tokens);
+            rows.push_back(frame::TableRow{
+                {row.label,
+                 std::to_string(
+                     SharePercent(t.total_billed_shape_tokens, totals.total_billed_shape_tokens)) +
+                     "%",
+                 req.str(), tokens.str(),
+                 t.requests_priced > 0 ? FormatMicrosAmount(t.cost_micros, "$") : std::string()},
+                {}});
+        }
+        for (const std::string& line : frame::RenderTable(
+                 StripTrailingColon(std::string(table_title) +
+                                    "(占比分母:input+output token):"),
+                 columns, rows, theme, frame::Light(), width)) {
+            lines.push_back(line);
         }
     }
 
-    // 缺口点名:projector warnings 透传,最多 5 条,超了计数。
+    // 缺口点名:projector warnings 透传,最多 5 条,超了计数(空 key 续行,
+    // 值列同栏)。
     if (!model.aggregate.warnings.empty()) {
-        lines.push_back("  缺口点名");
+        std::vector<frame::Field> warn_fields;
         const std::size_t shown = std::min<std::size_t>(model.aggregate.warnings.size(), 5);
         for (std::size_t i = 0; i < shown; ++i) {
-            lines.push_back("    " + model.aggregate.warnings[i]);
+            warn_fields.push_back(frame::Field{"", model.aggregate.warnings[i]});
         }
         if (model.aggregate.warnings.size() > shown) {
             std::ostringstream out;
-            out << "    …另有 " << (model.aggregate.warnings.size() - shown) << " 条";
-            lines.push_back(out.str());
+            out << "…另有 " << (model.aggregate.warnings.size() - shown) << " 条";
+            warn_fields.push_back(frame::Field{"", out.str()});
+        }
+        for (const std::string& line :
+             frame::RenderKeyValues("缺口点名", warn_fields, theme, frame::Light(), width)) {
+            lines.push_back(line);
         }
     }
     return lines;
@@ -412,17 +516,17 @@ void HandleUsageCommand(const std::string& args, const UsageCommandContext& cont
     using lubancode::cli::TermOut;
     const ParsedUsageCommand parsed = ParseUsageCommand(args);
     if (parsed.invalid) {
-        TermOut() << context.theme->error << lubancode::cli::tr("cmd.usage.unknown_arg") << " ["
-                  << parsed.bad_word << "]\n"
-                  << lubancode::cli::tr("cmd.usage.usage_line") << "\n"
-                  << context.theme->reset << "\n";
+        PrintNotice(*context.theme,
+                    {lubancode::cli::tr("cmd.usage.unknown_arg") + " [" + parsed.bad_word + "]",
+                     lubancode::cli::tr("cmd.usage.usage_line")},
+                    frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
     if (!parsed.later_scope.empty()) {
         // day/week/workspace/all:A5 的 insights 管线管跨场汇总,本批明说不冒充。
-        TermOut() << lubancode::cli::tr("cmd.usage.later_scope") << " [" << parsed.later_scope
-                  << "]\n";
+        PrintNotice(*context.theme, {lubancode::cli::tr("cmd.usage.later_scope") + " [" +
+                                         parsed.later_scope + "]"});
         TermOut().flush();
         return;
     }
@@ -451,14 +555,16 @@ void HandleUsageCommand(const std::string& args, const UsageCommandContext& cont
             TermOut().flush();
             return;
         }
-        TermOut() << context.theme->stats << lubancode::cli::tr("cmd.usage.flag_off") << "\n"
-                  << context.theme->reset;
+        PrintNotice(*context.theme, {lubancode::cli::tr("cmd.usage.flag_off")},
+                    frame::FieldAccent::Stats);
         if (context.memory_ledger != nullptr) {
+            // 内存粗账是 ModelUsageLedger 的现成行,长正文不塞框(批 1 裁量 3)。
             for (const auto& line : context.memory_ledger->ReportLines()) {
                 TermOut() << "  " << line << "\n";
             }
         }
-        TermOut() << lubancode::cli::tr("cmd.usage.memory_caveat") << "\n";
+        PrintNotice(*context.theme, {lubancode::cli::tr("cmd.usage.memory_caveat")},
+                    frame::FieldAccent::Muted);
         TermOut().flush();
         return;
     }
@@ -468,10 +574,9 @@ void HandleUsageCommand(const std::string& args, const UsageCommandContext& cont
     if (parsed.scope == ParsedUsageCommand::Scope::NamedSession) {
         session_dir = context.sessions_root / parsed.session_id;
         if (!std::filesystem::is_directory(session_dir)) {
-            TermOut() << context.theme->error
-                      << lubancode::cli::trf("cmd.usage.session_not_found", parsed.session_id)
-                      << "\n"
-                      << context.theme->reset << "\n";
+            PrintNotice(*context.theme,
+                        {lubancode::cli::trf("cmd.usage.session_not_found", parsed.session_id)},
+                        frame::FieldAccent::Error);
             TermOut().flush();
             return;
         }
@@ -482,7 +587,7 @@ void HandleUsageCommand(const std::string& args, const UsageCommandContext& cont
     lubancode::accounting::SessionUsageRead read =
         lubancode::accounting::ReadSessionUsage(session_dir);
     if (!read.ok) {
-        TermOut() << context.theme->error << read.message << "\n" << context.theme->reset << "\n";
+        PrintNotice(*context.theme, {read.message}, frame::FieldAccent::Error);
         TermOut().flush();
         return;
     }
@@ -508,7 +613,7 @@ void HandleUsageCommand(const std::string& args, const UsageCommandContext& cont
         TermOut().flush();
         return;
     }
-    for (const auto& line : FormatUsageReport(model)) {
+    for (const auto& line : FormatUsageReport(model, *context.theme, UsageFrameWidth())) {
         TermOut() << line << "\n";
     }
     TermOut().flush();

@@ -84,8 +84,13 @@ struct UsageReportModel {
     ParsedUsageCommand::By by = ParsedUsageCommand::By::None;
 };
 
-// 终端人话(§7.4 默认画面;--by 时换分账表)。行不带换行符。
-std::vector<std::string> FormatUsageReport(const UsageReportModel& model);
+// 终端人话(§7.4 默认画面;--by 时换分账表)。行不带换行符。TUI 排版批
+// 5c:主报告走键值对框、--by 分账表走表格(frame 三助手,约定见
+// docs/development/tui_style.md);theme/width 由 handler 递,批 4 的
+// FormatInsightsDigestLines 同款口径。账目数字仍出自同一份 UsageTotals,
+// 与 /insights digest 的表口径同源。
+std::vector<std::string> FormatUsageReport(const UsageReportModel& model,
+                                           const lubancode::cli::Theme& theme, int width);
 
 // JSON 输出(schema: lubancode.usage.report v1;报告面合同,派生可删可重算)。
 nlohmann::json BuildUsageReportJson(const UsageReportModel& model);
