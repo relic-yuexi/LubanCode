@@ -27,6 +27,8 @@ namespace lubancode::app {
 
 namespace {
 
+using lubancode::cli::TermOut;
+
 namespace frame = lubancode::cli::frame;
 
 // ---- TUI 排版批 5b(/trace 全族)的公共小件(批 2 同款) --------------------
