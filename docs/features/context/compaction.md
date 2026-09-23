@@ -32,7 +32,7 @@
 
 手动入口与自动入口都先辨认当前 writer，再走 `RunV3Compact`。自动入口沿主循环压力检查，在回合前或下一请求发送前进入；命令接线分别记录 `threshold` 或 `pre_send_overflow` 原因。水位触发与压缩请求自身的容量检查是两道门。
 
-源码还留着共用 loop 的结构压缩、hard trim 与旧 v2 分支。v3 提供预览降档事件和链提交能力，但不能据此声称所有工作视图裁剪都已接入同一条链。剩余工作见[清理清单 V3-GAP-07](../../development/v3-legacy-audit.md)。
+干跑、回合关联、overflow 恢复与 hard trim/预览降档收口已由 T12-B–E 落地（V3-GAP-07 销项，见[清理清单·已销项](../../development/v3-legacy-audit.md#已销项)）。源码还留着共用 loop 的结构压缩与旧 v2 分支（V3-LEGACY-03），不能据此声称所有工作视图裁剪都已接入同一条链。
 
 ## 一次成功怎样落账
 

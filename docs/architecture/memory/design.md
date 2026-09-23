@@ -1,6 +1,6 @@
 # 项目记忆
 
-> **V3-GAP-03：** 本页保留现行 memory 模块说明。召回桥仍取旧 recorder；新版作用域、CAS、忘记屏障和正式 memory 消息合同尚待实施。v3 默认启用不代表记忆链已迁完，见 [Session v3](../session-v3.md)。
+> **V3-GAP-03（2026-09-23 复核已销项）：** 召回桥已由 T08 接 v3 受管 writer——v3 场注入走正式隐藏消息进链，写入因果边落 `memory.save.requested`；v2 场照旧走 recorder。作用域、CAS、遗忘屏障仍归总设计 §4.71（V3-GAP-08 伞下追踪），v3 默认启用不代表记忆链全迁完，见 [Session v3](../session-v3.md)。
 
 [文档首页](../../README.md) · [项目记忆流程](flow.md) · [上下文压缩机制](../../features/context/compaction.md) · [配置手册](../../reference/configuration.md) · [会话与上下文](../../features/sessions/README.md) · [架构说明](../README.md) · [安全模型](../../development/security.md)
 
