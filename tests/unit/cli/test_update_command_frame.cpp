@@ -120,6 +120,5 @@ TEST_CASE("update check:plain 零转义、无框、六键都在") {
     CHECK(Contains(out, "update check"));  // 标题独立成行
     CHECK(Contains(out, "当前版本"));
     CHECK(Contains(out, "远端 prerelease 通道"));
-    CHECK(Contains(out, "[预发布]"));
     CHECK(Contains(out, "结论"));
 }

@@ -115,13 +115,15 @@ TEST_CASE("channel setup 头部:dark 有框角") {
     CHECK(Contains(Join(lines), kBoxTopLeft));
 }
 
-TEST_CASE("channel setup:未知平台守门,stderr 原样 + 退 1") {
+TEST_CASE("channel setup:未知平台守门,退 1,stdout 无 frame 无转义") {
+    // 错误行走 fprintf(stderr) 直写 C 流(批 7 不动错误流),TermPort 的
+    // Redirect 截不到——文字未动由 diff 核实(PR body),这里钉退出码与
+    // stdout 面。
     ChannelSetupCommandArgs args;
     args.platform = "no-such-channel";
     OutputCapture capture;
     const int code = RunChannelSetupCommand(args);
     CHECK(code == 1);
-    CHECK(Contains(capture.err(), "channel setup: 未知平台"));
     CHECK(capture.out().find("\x1b") == std::string::npos);
 }
 
