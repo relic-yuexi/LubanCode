@@ -13,6 +13,7 @@
 #include <mutex>
 
 #include "cli/console_input.hpp"
+#include "cli/panel_chrome.hpp"  // PanelRowTone:行级语义档(排版批 6)
 #include "platform/console.hpp"
 
 namespace lubancode::cli {
@@ -127,6 +128,22 @@ ProviderPanelResult RunProviderPanel(const ProviderPanelView& view, const Theme&
             const std::string& line = frame.lines[static_cast<std::size_t>(r)];
             if (line.rfind("> ", 0) == 0 && !theme.confirm.empty()) {
                 TermOut() << theme.confirm << line << theme.reset;  // 焦点行上色
+                continue;
+            }
+            // 行级语义档(排版批 6):[0] 标题 frame_title、[1] 当前端行
+            // row_muted、末行键提示 footer key_hint(BuildProviderPanelFrame
+            // 的行序契约),其余正文行默认前景;plain 全空串零转义。
+            PanelRowTone tone = PanelRowTone::Body;
+            if (r == 0) {
+                tone = PanelRowTone::Title;
+            } else if (r == 1) {
+                tone = PanelRowTone::Muted;
+            } else if (r == rows_to_draw - 1) {
+                tone = PanelRowTone::Hint;
+            }
+            const std::string& color = PanelRowToneColor(theme, tone);
+            if (!line.empty() && !color.empty()) {
+                TermOut() << color << line << theme.reset;
             } else {
                 TermOut() << line;
             }

@@ -2,6 +2,7 @@
 
 #include <cctype>
 
+#include "cli/divider.hpp"  // divider::line:朴素路分隔线收口(排版批 6)
 #include "cli/i18n.hpp"
 
 namespace lubancode::cli {
@@ -38,7 +39,9 @@ void DrawWizardFrame(WizardIO& io, const WizardFrame& frame) {
         io.draw_frame(frame);
         return;
     }
-    io.print("------------------------------------------------------------");
+    // 朴素路(管道/单测)的分隔线:排版批 6 收口 divider::line 的 Ascii
+    // 档,与旧 60 连字符字节一致——这条路上没有主题,不该出整宽字形。
+    io.print(divider::line(divider::Style::Ascii, 60));
     std::string header = frame.title;
     if (!frame.progress.empty()) {
         header += header.empty() ? frame.progress : "  " + frame.progress;
@@ -59,7 +62,7 @@ void DrawWizardFrame(WizardIO& io, const WizardFrame& frame) {
     if (!frame.footer.empty()) {
         io.print(frame.footer);
     }
-    io.print("------------------------------------------------------------");
+    io.print(divider::line(divider::Style::Ascii, 60));
 }
 
 // 读一个导航事件:注入了 read_event(TTY 面板)就交给它;没注入回落

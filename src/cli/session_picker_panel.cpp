@@ -14,6 +14,7 @@
 #include "cli/console_input.hpp"
 #include "cli/i18n.hpp"
 #include "cli/line_editor.hpp"
+#include "cli/panel_chrome.hpp"  // PanelRowTone:行级语义档(排版批 6)
 #include "platform/console.hpp"
 
 #include <utility>
@@ -220,8 +221,13 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
             if (match != SessionPickerFrame::kNoMatch && match == core.selected()) {
                 TermOut() << theme.confirm << TruncateUtf8ToDisplayWidth(line, width - 1) << theme.reset;
             } else if (match == SessionPickerFrame::kNoMatch) {
-                // 标题/搜索/筛选行与底栏:淡色;列表普通行原色。
-                TermOut() << theme.stats << TruncateUtf8ToDisplayWidth(line, width - 1) << theme.reset;
+                // 结构行按语义档(排版批 6):标题行(两套帧的第 0 行都是
+                // 标题)走 frame_title,搜索/筛选行与底栏这类淡色附注走
+                // row_muted;列表普通行原色。
+                const PanelRowTone tone = r == 0 ? PanelRowTone::Title : PanelRowTone::Muted;
+                const std::string& color = PanelRowToneColor(theme, tone);
+                TermOut() << color << TruncateUtf8ToDisplayWidth(line, width - 1)
+                          << (color.empty() ? std::string() : theme.reset);
             } else {
                 TermOut() << TruncateUtf8ToDisplayWidth(line, width - 1);
             }
