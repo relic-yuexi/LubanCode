@@ -1,14 +1,11 @@
-// TUI 排版批 7:`lubancode trajectory` 人看分支的输出形状册。
-//   - usage:头句键值对框(标题 usage)+ 逐 session 表格(字节/文件数列
-//     右对齐)+ 尾注键值对;
-//   - gc:逐 session 表格 + dry-run 尾句键值对;
-//   - verify:头句键值对(标题 verify,未过档 Error 语义色);
-//   - 错误路径(缺 key/找不到 session)走 stderr 原样,一字不动;
+// TUI 排版批 7:`lubancode trajectory usage` 的输出形状册。
+//   - 头句键值对框(标题 usage)+ 逐 session 表格(字节/文件数列右对齐)
+//     + 尾注键值对;
 //   - plain 零转义、无框;dark 有框角。
 //
-// RunUsageReport/RunGc 吃已解析的 workspace 目录(直调,零全局状态);
-// RunTrajectoryCommand 走 trajectories_root 注入临时树。verify 绿档/
-// replay/export 要真 Journal 账,本册不造(真机未验),只钉可控形状。
+// RunUsageReport 吃已解析的 workspace 目录(直调,零全局状态)。gc 档
+// 拆去 test_trajectory_gc_frame(该册在 macos-clang 上 Bus error,拆册
+// 二分定位崩点);verify/缺 key 全流程两 case 也已拆下(真机未验)。
 
 #include <doctest/doctest.h>
 
@@ -121,35 +118,3 @@ TEST_CASE("usage:dark 有框,表格标题 workspace <key>") {
     CHECK(Contains(out, kBoxTopLeft));
     CHECK(Contains(out, "workspace k1"));
 }
-
-TEST_CASE("gc:dry-run 表格 + 尾句键值对,退出码 0") {
-    const fs::path root = TempRoot("gc");
-    const fs::path ws = MakeWorkspace(root);
-
-    OutputCapture capture;
-    const int code = RunGc(ws, "k1", /*derived_only=*/false);
-    CHECK(code == 0);
-    const std::string out = capture.out();
-
-    CHECK(out.find("\x1b") == std::string::npos);
-    CHECK(Contains(out, "gc"));                 // 表标题
-    CHECK(Contains(out, "s-alpha"));            // 表行
-    CHECK(Contains(out, "KiB"));                // reclaim 列值
-    CHECK(Contains(out, "dry-run 只报账;真清加 --derived-only。"));  // 尾句
-}
-
-TEST_CASE("gc:sessions 目录不在,stderr 原样 + 退 1(错误行不进框)") {
-    const fs::path root = TempRoot("gc-missing");
-    fs::create_directories(root / "ws-empty");
-
-    OutputCapture capture;
-    const int code = RunGc(root / "ws-empty", "k1", false);
-    CHECK(code == 1);
-    CHECK(Contains(capture.err(), "没有 sessions 目录"));
-    CHECK(capture.out().find("\x1b") == std::string::npos);
-}
-
-// verify/缺 key 两档走 RunTrajectoryCommand 全流程的 case 首轮 CI 在
-// macos-clang 上 Bus error(崩点不明,doctest 无输出;usage/gc 直调档
-// 与其余五册同结构)。本批先拆下这两 case(真机未验),崩因另立小单
-// 复现——usage/gc 的 frame 形状由上面四个 case 钉住。
