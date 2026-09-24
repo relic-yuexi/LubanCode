@@ -188,9 +188,14 @@ void RegisterMcpTools(std::vector<McpServerRuntime>& mcp_servers, lubancode::too
             registration.tool = std::make_unique<lubancode::tools::DeferredTool>(
                 std::make_unique<lubancode::mcp::McpTool>(*runtime.client, runtime.name, tool_info,
                                                           std::move(display_server)));
+            // 来源账不分 packaged/standalone(逐枚追踪单):无论走不走 Package
+            // 封装,这都是一枚 MCP 工具——之前只在 packaged 分支里记 source_kind,
+            // standalone(config.json 直配的 MCP server,常见路)全落回默认
+            // Builtin,/tools、/trace、/context 分类都会把它错认成内置工具。
+            registration.source_kind = lubancode::tools::ToolSourceKind::Mcp;
+            registration.source_instance =
+                runtime.package_origin.has_value() ? runtime.package_origin->component_id : runtime.name;
             if (runtime.package_origin.has_value()) {
-                registration.source_kind = lubancode::tools::ToolSourceKind::Mcp;
-                registration.source_instance = runtime.package_origin->component_id;
                 registration.package_origin = runtime.package_origin;
             }
             registry.Register(std::move(registration));
@@ -212,6 +217,10 @@ void PublishPackagedPlugins(const lubancode::package::PackageCodeMountResult& st
             lubancode::tools::ToolRegistration registration;
             registration.tool = std::make_unique<lubancode::runtime::PluginToolAdapter>(
                 plugin.manifest, &tool, wire_name);
+            // 与 PublishPackagedLuaPlugins(紧随其后的同类函数)本该同款打
+            // source_kind,这里漏了一直落默认 Builtin——process 插件在
+            // /tools、/context 分类里被错认成内置工具。
+            registration.source_kind = lubancode::tools::ToolSourceKind::PluginNative;
             registration.source_instance = plugin.canonical_id;
             registration.package_origin = lubancode::tools::ToolOrigin{
                 plugin.package_id, plugin.package_version, plugin.canonical_id};
@@ -289,7 +298,13 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
             if (report) {
                 mounted.push_back({tool->name(), "DLL"});
             }
-            registry.Register(std::move(tool));
+            // 旧门 Register(unique_ptr) 按 builtin 记账(逐枚追踪单的保守默认)
+            // ——C ABI DLL 插件走新门带上真实来源,/tools、/context 分类才认得出。
+            lubancode::tools::ToolRegistration registration;
+            registration.source_kind = lubancode::tools::ToolSourceKind::PluginNative;
+            registration.source_instance = wrapped.stem;
+            registration.tool = std::move(tool);
+            registry.Register(std::move(registration));
         }
     }
 
@@ -308,7 +323,11 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
         }
     }
     for (auto& adapter : lua_runtime.MakeAdapters()) {
-        registry.Register(std::move(adapter));
+        // 旧门按 builtin 记账——独立 .lua 单文件插件走新门带上真实来源。
+        lubancode::tools::ToolRegistration registration;
+        registration.source_kind = lubancode::tools::ToolSourceKind::PluginLua;
+        registration.tool = std::move(adapter);
+        registry.Register(std::move(registration));
     }
 
     // process 插件(plugin.json 一插件一目录,plugins 单第 7 步挂进):Scan
@@ -365,8 +384,12 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
     }
     for (auto& adapter : manifest_lua_runtime.MakeAdapters()) {
         // 只收 standalone 件(packaged 件由 PublishPackagedLuaPlugins 发布,
-        // 两边各注册会撞名);MakeAdapters 内部已按 package_id 过滤。
-        registry.Register(std::move(adapter));
+        // 两边各注册会撞名);MakeAdapters 内部已按 package_id 过滤。旧门按
+        // builtin 记账——这里走新门带上真实来源。
+        lubancode::tools::ToolRegistration registration;
+        registration.source_kind = lubancode::tools::ToolSourceKind::PluginLua;
+        registration.tool = std::move(adapter);
+        registry.Register(std::move(registration));
     }
     if (report) {
         for (const auto& warning : process_warnings) {
@@ -389,7 +412,12 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
             continue;  // v2 embedded-lua 走 ManifestLuaToolAdapter(上面已注册)
         }
         for (const auto& tool : manifest->tools) {
-            registry.Register(std::make_unique<lubancode::runtime::PluginToolAdapter>(manifest, &tool));
+            // 旧门按 builtin 记账——standalone process 插件走新门带上真实来源。
+            lubancode::tools::ToolRegistration registration;
+            registration.source_kind = lubancode::tools::ToolSourceKind::PluginNative;
+            registration.source_instance = manifest->id;
+            registration.tool = std::make_unique<lubancode::runtime::PluginToolAdapter>(manifest, &tool);
+            registry.Register(std::move(registration));
         }
     }
 }
