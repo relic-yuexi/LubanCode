@@ -9,7 +9,7 @@
   - `多租户隔离_身份授权与隔离Worker落地设计.todo` 的身份合同（§三）是 D6 的硬前置。
   - Gateway V0/V1/V2/V4 已落的持久化原语（PowerLoss 提交、ownerEpoch 认领、durable outbox）是直接复用件；Gateway V3（渠道）与集群无依赖，V5（长任务/异步工具执行账）是 D8"未知副作用裁决"的软前置。
 - 关联：`多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`（目标形态、对象模型、Session 状态机以它为准；本单给出它缺的：协议、存储、算法、数字、测试方法和按批落点）、`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`OpenTelemetry接入V3_现状与落地路线.todo`、`跨平台ExecutionProvider与通用强化沙箱设计.todo`、`SessionV3异步工具_任务执行协议配对与结果投递.todo`
-- 不在本单：跨节点热迁移（D9 只做"人工冷迁移"）、跨 Region 部署、Control Plane 多活写、任意工具 exactly-once、公网节点入站、把 Redis/消息队列作必选依赖
+- 不在本单：节点模式下的跨节点热迁移（D9 只做"人工冷迁移"；池化模式的自动接管见 D10）、跨 Region 部署、Control Plane 多活写、任意工具 exactly-once、公网节点入站、把 Redis/消息队列作必选依赖
 
 ---
 
@@ -26,6 +26,8 @@
 
 1. **翻"本单只排期不设计"。** 畅想单画的是目标形态和对象关系，没有协议帧、没有存储表、没有租约算法、没有超时数字、没有故障矩阵、没有测试方法——照它开工，每个实现者会各自发明一套，最后焊出五种心跳。本单现在负责这些**工程合同**，畅想单继续负责**产品形态与边界**，两者不重复。
 2. **翻"LubanCore 全部完成前一行分布式代码都不写"。** 这条把能并行的活也锁死了。分布式系统里最难、最该早做的是**与 Core 无关的纯逻辑**：协议编解码、租约/fencing 状态机、确定性仿真测试台、控制面存储合同、mTLS 传输。这些只依赖标准库 + nlohmann + mbedTLS，不 include 任何 CLI/Runtime 头，不存在"焊死"风险。所以：**D0~D3 现在就能开工；D4（第一次接 Core）起才受 LubanCore B/C 门约束。** 原断语第三条的精神（Node Bridge 不得耦合 CLI 内部类）不变，由第十四节的依赖守门测试机械保证，而不是靠"不许开工"保证。
+
+**（2026-09-24 第三次补记：接中间件、角色分机）** 用户追问能否接 Kafka 一类中间件、分出"专职执行机 / 专职队列机 / 专职存储机"。结论：**可以，且应该作为第二种部署形态正式立项**，见 ADR-11（中间件各就各位）、ADR-12（节点模式与池化模式双形态）、§9.3（退出与恢复）、D10 批次。下面第一条"节点是事实的主人"限定为**节点模式**；池化模式下事实的主人是中央 Session Store。两种模式共同的铁律是：**每场 Session 创建时钉死唯一一个权威账后端，运行中不换**（LubanCore 单 §8.2）。
 
 **本版核心判断（后续章节不得相悖）：**
 
@@ -207,6 +209,74 @@ Node Bridge（每节点一只守护进程）
 - 最终层：两台以上真机 + 72h soak。
 
 ---
+
+### ADR-11 中间件接入：每种中间件只能接到一个有名有合同的 SPI 上，不当万能总线
+
+先把"消息队列能解决什么"说清楚，否则接了 Kafka 反而更难恢复。集群里其实有**四种性质完全不同的"消息"**，各要各的中间件：
+
+| 数据流 | 性质 | 合适的承载 | **不**合适 |
+|---|---|---|---|
+| ① Session 事实账（消息、工具开始/结束、审批） | 需要按 session 随机读、整场回放、单写者 CAS、长期保留 | 节点模式：节点本地 Trajectory v3；池化模式：**PostgreSQL**（行）+ 对象存储（大块） | Kafka 作唯一真账：按 session 读整场要扫分区；无法对"session 下一行必须是 seq=k 且 epoch=e"做条件写；保留期到了事实就没了 |
+| ② 待执行工作（新 turn、定时触发、恢复任务） | 需要领取-续租-确认、失败重投、**单个任务可能跑几十分钟甚至等审批几小时** | 默认 **PG 任务表 + `SELECT … FOR UPDATE SKIP LOCKED` + 租约**；可选 NATS JetStream / RabbitMQ（带 ack 超时与重投） | Kafka 消费组：一个分区同一时刻只给一个消费者，一场长 turn 会**堵住同分区所有 session**（队头阻塞）；超 `max.poll.interval.ms` 触发 rebalance，同一工作被两台机器同时拿到；分区数决定并行上限，扩容要重分区 |
+| ③ 已提交事件的扇出（给浏览器、审计、计费、训练导出、BI） | 一写多读、可重放、消费者各自进度、量大 | **Kafka 最合适**（或 NATS JetStream / Redpanda）；topic 按 `session_id` 分区保序 | 直接由 Agent Worker 边跑边发 Kafka（"双写"）：发成功但账没写成、或反之，两边对不上 |
+| ④ 控制命令与心跳（打断、审批答复、续租） | 低延迟、点对点、要回执 | 本单 §五 的长连接帧 | 走 Kafka：延迟与"必须送到指定那台机器"都不对路 |
+
+裁决：
+
+1. **Kafka 只承担③事件扇出**，而且只从**事务 outbox** 或 **CDC（Debezium 读 PG WAL）** 出：先在 Session Store 的同一事务里写事实行 + outbox 行，再由 relay 投进 Kafka。这样 Kafka 里有的必然已在账上，账上有的最终必进 Kafka（至少一次，消费者按 `(session_id, seq)` 去重）。**Kafka 挂了不影响 Agent 运行**，只是下游延迟。
+2. **②工作分发默认不用 Kafka**：用 PG 任务表（零新增组件，和租约同库同事务，领取即授予 epoch，天然原子）。规模超过 PG 能力（实测 > 5 000 次领取/秒）再换 NATS JetStream，仍须满足同一 `WorkQueue` SPI 合同：领取带租约、可续、可重投、消费端幂等。
+3. **①事实账绝不放消息队列**。
+4. 每种中间件对应一个 SPI（LubanCore 单 §七已列）：`SessionPersistence`（PG）、`ArtifactStore`（S3/MinIO）、`WorkQueue`（PG/NATS）、`EventBus`（Kafka/NATS，本单新增，只读扇出语义）、`ExecutionEnvironment`（沙箱池）、`OwnershipCoordinator`（PG 租约）。启动时组合校验：例如"声明需要崩溃恢复但 WorkQueue 选了内存实现"→ 拒绝启动。
+5. C++ 客户端：Kafka 用 librdkafka（C 库，三平台可编译，可选编译开关 `LUBANCODE_CLUSTER_KAFKA=OFF` 默认关）；PG 用 libpq；S3 用 cpr 直接签 SigV4（已有 cpr 依赖，不引 AWS SDK）。
+
+### ADR-12 两种部署形态：节点模式（BYO 机器）与池化模式（角色分机）
+
+两种形态共用同一个控制面、同一套协议、同一个 Session 状态机，差别只在"事实放哪、执行在哪"。
+
+```text
+【节点模式】适合：开发者自己的电脑/工作站、项目只在某台机器上、GPU 专机
+  控制面 ──mTLS── Node Bridge（事实 + 执行 + 工作区 全在同一台）
+
+【池化模式】适合：服务器集群、SaaS、CI 类批量任务、需要强沙箱
+  ┌──────────── 控制面（API ×N 无状态 + Coordinator 主备）────────────┐
+  └───┬──────────────────┬──────────────────┬─────────────────────────┘
+      │                  │                  │
+  ┌───▼────────┐   ┌─────▼──────────┐   ┌───▼──────────────────────┐
+  │ Session    │   │ 事件总线        │   │ Agent Worker 池（"大脑"）  │
+  │ Store      │──▶│ Kafka（可选）    │   │ 无本地状态；领工作→拿租约→ │
+  │ PG + S3    │   │ 只做扇出        │   │ 从 Store 读账→跑 turn→    │
+  │ 唯一真账    │   │ 浏览器/审计/计费 │   │ 带 epoch 追加写回 Store     │
+  └────▲───────┘   └────────────────┘   └───┬──────────────────────┘
+       │ 带 epoch 的条件追加                  │ 工具调用 RPC（带 epoch + toolCallId）
+       └──────────────────────────────────────┤
+                                          ┌───▼──────────────────────┐
+                                          │ Sandbox Executor 池（"手"）│
+                                          │ 容器/microVM；工作区在持久 │
+                                          │ 卷或快照上；执行 shell/读写 │
+                                          │ 文件/MCP/浏览器             │
+                                          └──────────────────────────┘
+```
+
+**为什么把"大脑"和"手"分开**：Agent 回合 90% 以上时间在等模型，CPU 很低，一台 Worker 可以同时推进几百场；而工具执行（编译、测试、浏览器）重、危险、要隔离。分开后：Worker 按模型并发扩，Sandbox 按计算量扩；Sandbox 可以跑在不可信隔离域（gVisor/Firecracker/Windows 容器），Worker 与凭证不进沙箱。这正对应用户说的"一台专门执行、当 sandbox 用"。
+
+**池化模式的关键合同**：
+
+1. **账写入的条件追加**（替代节点模式的"本地单写者 + 上行验链"）：
+   ```sql
+   INSERT INTO session_events(session_id, seq, epoch, prev_hash, line_hash, body)
+   SELECT :sid, :seq, :epoch, :prev, :hash, :body
+    WHERE EXISTS (SELECT 1 FROM runtime_leases WHERE session_id=:sid AND epoch=:epoch AND state='Active')
+      AND (SELECT coalesce(max(seq),0) FROM session_events WHERE session_id=:sid) = :seq - 1;
+   -- 0 行 = 已被围栏或并发冲突：Worker 立刻停止这场 session
+   ```
+   主键 `(session_id, seq)` 再兜底防双写。同一事务里写 outbox 行（ADR-11 第 1 条）。
+2. **副作用也能围栏**（这是池化模式比节点模式强的地方）：Worker 调 Sandbox 时带 `(session_id, epoch, toolCallId)`；Sandbox 持有该 session 工作区的"执行租约"，**拒收比已见 epoch 小的调用**，且对同一 `toolCallId` 返回缓存结果而不重跑。于是旧 Worker 断网后迟到的工具调用不会在工作区里再改一次文件——节点模式做不到这一点（节点模式里执行和写账在同一进程，只能靠自失效）。
+3. **Worker 无状态**：Worker 崩溃 = 丢掉内存里的上下文缓存，别无他物。租约到期后任何一台 Worker 可接手：从 Store 读账、按 §9.3 裁决、继续。**这就是"换一台机器接着跑"的真正前提：账在中央、工作区在持久卷、Worker 不存东西。**
+4. **工作区归属**：一场可写 session 绑定一个工作区卷（PVC / 云盘 / 节点本地盘 + 定期快照），同一时刻只挂给一个 Sandbox。Sandbox 死了，卷挂到新 Sandbox；卷所在机器死了，从最近快照 + 账里的工具记录恢复，恢复点之后的文件改动进入 `NeedsReview`（账上记着改了什么，但盘上没了）。
+5. **Worker ↔ Sandbox 的时延**：同可用区 RPC 往返 ~1 ms 量级，相对模型秒级响应可忽略；但 `read_file`/`grep` 这类高频小调用要支持批量（一次 RPC 多个只读操作，对齐 `只读工具并行与写入串行` 单的批次屏障）。
+6. **全局模型限流**：多台 Worker 共用同一个 Provider 账号时，限流是整个集群的真实瓶颈。池化模式必须有**集群级令牌桶**（按 provider × key × model，存 PG 或 Redis，Redis 此处是可选的限流适配，不是事实账），429 退避也要集群共享，否则 50 台 Worker 各自重试会把配额打爆。
+
+**两种模式如何选（控制面按 Project 或 Node Pool 配置）**：工作区在用户本机、不能上传代码 → 节点模式；工作区在服务端、要多人共享、要强隔离、要自动接管 → 池化模式。同一个控制面可以同时有两种。
 
 ## 四、领域对象与状态机
 
@@ -589,6 +659,44 @@ WSS `/api/v1/sessions/{id}/events?afterSeq=N`：服务端先补历史（投影�
 
 ---
 
+### 9.3 退出与恢复：记下了什么、丢了什么、怎么接着跑
+
+先说现状（单机，今天就成立）：Trajectory v3 是追加写的哈希链账，每条消息、每次工具开始/结束、每次审批都是一行，按 PowerLoss/ProcessCrash 等级落盘；崩溃最多留下一个半截尾行，reader 能识别并修复（`V3EventLedgerReport.truncated_tail`）。恢复走 **resume-as-new**：从旧场事实开一场新场接续，旧场只读保留（`/resume` 列表里的「(续)」即此，见 `Resume接入SessionV3…todo` §七）。所以"**记没记清楚**"答案是：**已提交的事实都在，且可验证没被改过**；"**能不能恢复**"的答案取决于退出方式和那一刻手上有什么在跑：
+
+| 退出方式 | 账上状态 | 丢失的东西 | 恢复方式 | 是否自动 |
+|---|---|---|---|---|
+| 正常关闭 / `/exit` / Close 命令 | 回合已收口，写 session 结束事件，释放租约 | 无（MCP 连接、后台进程按关闭流程清理并记账） | resume-as-new，完全等价 | 用户一键 |
+| 用户打断（Esc / Interrupt） | 在跑回合记 `interrupted`，工具按取消流程收口 | 模型未说完的半截输出（记为 interrupted，不当完整消息） | 同上 | 用户一键 |
+| 浏览器/客户端断开 | **无影响**，Session 继续跑（I7） | 无 | 重连按 `afterSeq` 补流 | 自动 |
+| 进程崩溃 / kill -9 / 断电 | 最后一个完整行之前全部在；尾行可能截断 | 正在流式生成的模型回复；在跑工具的结果；MCP 进程、浏览器页、PTY 后台进程 | 截断修复 → §9 节点恢复裁决表：已收口的直接续；只读/幂等工具记 abandoned 后续；**有副作用且结果未知的工具 → NeedsReview** | 大部分自动，未知副作用人工一步 |
+| 机器永久丢失（节点模式） | 取决于该机磁盘是否有备份 | 无备份则全丢；控制面只有投影（最近 1 万行），不足以恢复 | 从备份导入（D9），强制 NeedsReview | 人工 |
+| Worker 崩溃（池化模式） | 账在 Store，一行不丢 | 仅 Worker 内存缓存 | 租约到期（≤40 s）后别的 Worker 接手 | **自动** |
+| Sandbox 崩溃（池化模式） | 账不受影响；工具调用记为结果未知 | 沙箱内进程、未落卷的临时文件 | 工作区卷重挂新 Sandbox；未知工具按分类裁决 | 大部分自动 |
+| 工作区卷所在机器丢失（池化模式） | 账不受影响 | 最近快照之后的文件改动 | 从快照恢复卷；快照后执行过的写类工具列入 NeedsReview（账上有它们的参数，可人工选择重放） | 半自动 |
+
+**恢复永远是"读事实 → 裁决 → 开新 Runtime"，不是把旧进程的调用栈救回来。** 以下东西**天然不可恢复**，设计上不假装能恢复，只保证"如实记账 + 明确告知"：模型流式半截输出、正在运行的子进程/编译、MCP 进程内存状态与其登录态、浏览器页面与 cookie（除非另存 profile）、PTY 会话屏幕。
+
+**要让恢复更容易，需要补的（纳入 D4/D10）**：
+- [ ] 每个工具在注册时声明副作用类别（只读 / 幂等 / 需补偿 / 未知），缺省按"未知"——这决定了崩溃后能否自动继续（对齐 `失败与恢复_写账闸门工具结果与重试收口.todo`）。
+- [ ] 写类工具在执行**前**落 `tool.started`（含参数与目标路径），执行**后**落 `tool.finished`（含结果摘要与文件哈希），这样 NeedsReview 时 UI 能直接展示"它想改哪个文件、现在盘上是什么"。
+- [ ] 周期性 checkpoint（上下文压缩后的摘要 + 工作区 git stash/快照引用）写入账，缩短恢复时的重放长度。
+- [ ] `lubancode session verify <id>` / `session recover --dry-run <id>`：恢复前先告诉用户"将自动继续 / 需要你确认哪几步"。
+
+### 9.4 多并发下必须同时守住的事（清单，逐条有测试）
+
+| # | 问题 | 守法 |
+|---|---|---|
+| C1 | 同一 session 被两台机器同时跑 | RuntimeLease + epoch 条件写（节点模式自失效 + 上行拒收；池化模式 Store 条件追加 + Sandbox 拒收旧 epoch） |
+| C2 | 同一工作被队列投递两次 | 工作项幂等键；领取即在同事务授予租约，拿不到租约的重复投递直接丢弃 |
+| C3 | 同一工具调用被执行两次 | `toolCallId` 在 Sandbox/节点侧去重缓存结果；未知结果不自动重放 |
+| C4 | 两场 session 改同一个工作区 | 可写 session 独占 worktree/卷；共享需显式 write lease |
+| C5 | 同一 session 内并行工具互相踩 | 只读并行、写入串行的批次屏障（沿用既有单子） |
+| C6 | 多人同时操作同一 session | operator 租约；审批答复带 operator epoch，过期回 stale |
+| C7 | 集群共享模型配额被打爆 | 集群级令牌桶 + 共享 429 退避（ADR-12 第 6 条） |
+| C8 | 慢消费者拖垮生产者 | 事件先落账后扇出；浏览器与 Kafka 消费者都只影响自己的延迟 |
+| C9 | 队列/总线挂掉 | Kafka 挂：Agent 照跑，扇出延迟；WorkQueue（PG）挂：等同 Store 挂，停接新工作、在跑回合写账失败即暂停，不静默丢 |
+| C10 | 配置/能力版本在运行中变化 | CapabilitySnapshot 钉在 session 上，升级只影响新 session |
+
 ## 十、不变量（仿真台逐步检查，测试名直接用编号）
 
 - **I1 单写者**：任一时刻，对任一 session，控制面接受的事件只来自唯一 `(node_id, epoch)`；且任一 epoch 只对应一个节点。
@@ -843,6 +951,22 @@ tests/manual/cluster/{load,soak,multi_host}/
 
 ---
 
+### ── D10 开工门：D4~D6 已落；LubanCore 单 D 批（第二种存储：PG 后端）已落；ExecutionProvider 单已有远程执行接口 ──
+
+### D10：池化模式（角色分机：Session Store / WorkQueue / Agent Worker / Sandbox / 可选 Kafka）
+
+- [ ] `SessionPersistence` PG 后端接入集群：`session_events` 条件追加（ADR-12 第 1 条）+ 同事务 outbox；与节点模式的 v3 行格式**逐字节相同**（导出的 JSONL 与本地账可互相 verify）。
+- [ ] `ArtifactStore` S3/MinIO 实现：先传后引用，孤儿 GC。
+- [ ] `WorkQueue` PG 实现：`SKIP LOCKED` 领取 + 同事务授予 RuntimeLease；合同测试含"领取后崩溃""重复投递""领取与续租竞争"。
+- [ ] Agent Worker 进程 `lubancode-worker`：无本地持久状态；拿租约 → 读账（带 checkpoint 加速）→ 跑 turn → 条件追加；围栏失败立即停场。
+- [ ] Sandbox Executor `lubancode-sandbox`：工具 RPC（带 epoch + toolCallId 去重）、工作区卷挂载与执行租约、只读批量调用；首版容器隔离，接 ExecutionProvider 单的强化沙箱。
+- [ ] `EventBus` SPI + outbox relay；Kafka 实现（librdkafka，可选编译）；消费者样例：审计落库、计费汇总、浏览器扇出。
+- [ ] 集群级模型限流（令牌桶 + 共享退避）。
+- [ ] 仿真台扩展：Worker/Sandbox/Store/Kafka 故障注入；新增不变量 I10「Sandbox 不执行旧 epoch 调用」、I11「Kafka 中每条事件都能在 Store 找到同 seq 同 hash 的行」。
+- [ ] 真机演练：3 Worker + 2 Sandbox + PG 主从 + 3 broker Kafka；随机 kill Worker/Sandbox/Kafka broker/PG 主，全程 I1~I11 成立，Worker 崩溃后 session 自动接手时间 P99 < 60 s。
+
+验收：同一场 session 在 Worker A 上跑一半被 kill，Worker B 自动接手跑完，账 verify 通过、无工具重复执行、浏览器全程只看到一条连续事件流；Kafka 全部停掉 10 分钟期间 Agent 不受影响，恢复后下游追平且无重复（按 seq 去重后）。
+
 ## 十六、第一版批次 → 本版批次映射
 
 | 第一版 | 本版 | 变化 |
@@ -882,7 +1006,7 @@ tests/manual/cluster/{load,soak,multi_host}/
 - 不因节点短暂失联自动重跑任何工具；不做自动漂移 Session 的按钮。
 - 不宣称 exactly-once；UI 与文档一律写"至少一次投递 + 幂等去重；未知副作用人工裁决"。
 - 不首版开放节点入站端口；不首版做控制面多活写。
-- 不引入 Redis/Kafka/etcd 作必选依赖；需要时按 LubanCore 单 §九以可选组件接入并单独验合同。
+- 不引入 Redis/Kafka/etcd 作必选依赖；需要时按 LubanCore 单 §九以可选组件接入并单独验合同（Kafka 的位置见 ADR-11：只做已提交事件扇出，不做事实账、不做长 turn 分发）。
 - 不写未经实测的容量与可用性数字到 README/CHANGELOG；第十二节是"目标"，不是"能力声明"。
 
 ---
