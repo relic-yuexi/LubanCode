@@ -243,14 +243,10 @@ TEST_CASE("thread/archive -> thread/unarchive:manifest 转态,事件各归各位
     }
     CHECK(in_archived);
 
-    // unarchive:manifest 转 closed。
+    // unarchive:回执 state=active 即证(v3 场无 session.json,归档/解归档
+    // 态都在 lifecycle 账上)。
     const nlohmann::json back = harness.Call("thread/unarchive", {{"threadId", thread_id}});
     CHECK(back["result"]["state"] == "active");
-    {
-        const auto manifest = trajectory::ReadSessionJson(session_dir);
-        REQUIRE(manifest.has_value());
-        CHECK(manifest->status == "closed");
-    }
 
     std::error_code cleanup_ec;
     std::filesystem::remove_all(U8(dir), cleanup_ec);

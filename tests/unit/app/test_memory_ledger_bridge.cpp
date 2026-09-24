@@ -155,10 +155,10 @@ TEST_CASE("P0-3: 召回快照进 v3 主账,Memory 改后旧账不动") {
     CHECK(payload.value("memoryId", std::string()) == "fact.deploy");
     CHECK(payload.value("memorySchema", 0) == 3);
     CHECK(payload.value("contentSha256", std::string()).size() == 64);
-    // 快照两形都算有账:超限走 snapshotRef(blob),不超走 snapshotInline
-    //(v3 合同同 v2,BuildTurnContext 实际注入的选段定形)。
-    const bool has_ref = payload.contains("snapshotRef");
-    CHECK(has_ref + payload.contains("snapshotInline") >= 1);
+    // 主会话注入的快照本体就是那枚隐藏 user 消息:messageRef 五键之一
+    // 指它(v3 合同;snapshotRef/Inline 只在派工分支出现)。注入正文由
+    // 下方 saw_hidden_snapshot 断言。
+    CHECK_FALSE(payload.value("messageRef", std::string()).empty());
     CHECK(payload.value("injectedBytes", 0) > 0);
     // 注入本体:隐藏 user 快照消息进了链(display=hidden,重放不冒充人类)。
     bool saw_hidden_snapshot = false;
@@ -174,16 +174,8 @@ TEST_CASE("P0-3: 召回快照进 v3 主账,Memory 改后旧账不动") {
     }
     CHECK(saw_hidden_snapshot);
 
-    // 快照走 blob 时可从 session artifacts 读回,指纹对得上。
-    if (has_ref) {
-        trajectory::BlobStore blobs(ledger->session_dir() / "artifacts");
-        trajectory::BlobRef ref;
-        ref.sha256 = payload.value("contentSha256", std::string());
-        ref.size = payload.value("injectedBytes", std::uint64_t{0});
-        const auto snapshot = blobs.ReadVerified(ref);
-        REQUIRE(snapshot.has_value());
-        CHECK(hooks::Sha256Hex(*snapshot) == payload.value("contentSha256", std::string()));
-    }
+    // (口径注)主会话分支无 blob 引用可读;快照指纹由 contentSha256 与
+    // 隐藏消息正文共同自证。
 
     // 改掉当前 Memory(用户手编正文,绕过 worker):旧事件与快照一字不动,
     // 新一轮召回出新一枚事件。

@@ -226,8 +226,18 @@ struct LedgerCount {
                 continue;
             }
             nlohmann::json row = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
-            if (!row.is_object() || row.value("type", std::string()) != "event" ||
-                !row.contains("kind")) {
+            if (!row.is_object()) {
+                continue;
+            }
+            // v3 合同:成功路的 usage 落 assistant 消息本体(消息行内联),
+            // 只有半截失败/取消才补 model.usage.appended 事件。夹具主回合
+            // 的 assistant usage 恒 null——带 usage 的 assistant 即精修产物。
+            if (row.value("type", std::string()) == "message" &&
+                row.contains("message") && row["message"].value("role", "") == "assistant" &&
+                row.contains("usage") && !row["usage"].is_null()) {
+                refine_usage++;
+            }
+            if (row.value("type", std::string()) != "event" || !row.contains("kind")) {
                 continue;
             }
             const std::string kind = row.value("kind", "");

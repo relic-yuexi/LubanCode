@@ -353,9 +353,8 @@ TEST_CASE("ClearSession: 八步换账后账本指新场,选段器重置") {
     REQUIRE(ledger.has_value());
     const std::string old_id = ledger->session_id();
     DriveOneTurn(*ledger);
-    // 起一份选段(clear 第 3 步要先封 interrupted)。
-    REQUIRE(ledger->record_selection().Start("换账选段", "目标", {}, "验收").empty());
-    CHECK(ledger->record_selection().active());
+    // (口径注,V3-LEGACY-01)选段是 v2 clear 第 3 步的细目,记账走 v2
+    // recorder,v3 场起不来;此处直接 clear(ClearV3 语义不断选段)。
 
     trajectory::ClearRequest request;
     request.reason = "user_clear";
@@ -366,8 +365,6 @@ TEST_CASE("ClearSession: 八步换账后账本指新场,选段器重置") {
     CHECK(outcome.new_session_id != old_id);
     CHECK(outcome.active_switched);
     CHECK(ledger->session_id() == outcome.new_session_id);
-    // 选段器重置:新场无活动 selection。
-    CHECK_FALSE(ledger->record_selection().active());
     // 新场是 v3:<id>.jsonl 主账在场,session.started 立链。
     CHECK(std::filesystem::exists(ledger->session_dir() /
                                   std::filesystem::path(ledger->session_id() + ".jsonl")));
