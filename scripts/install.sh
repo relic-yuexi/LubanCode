@@ -345,7 +345,7 @@ elif [ "$SRC_EXE" != "$DEST" ]; then
     fi
 
     # 根级文件(EXE 上面已拷;这里:声明/许可证/README/脚本)
-    for f in LICENSE THIRD_PARTY_NOTICES.md README.md README.en.md install.sh install_plan.py; do
+    for f in LICENSE THIRD_PARTY_NOTICES.md README.md README.zh-CN.md install.sh install_plan.py; do
         if [ -f "$SCRIPT_DIR/$f" ] && ! same_file "$SCRIPT_DIR/$f" "$RECORD_DIR/$f"; then
             cp "$SCRIPT_DIR/$f" "$RECORD_DIR/$f" || err "复制 $f 失败。"
         fi
