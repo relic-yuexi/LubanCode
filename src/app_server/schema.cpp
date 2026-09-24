@@ -381,9 +381,10 @@ ParamsCheck CheckTraceQueryParams(const nlohmann::json& params, std::string& out
 
 ParamsCheck CheckThreadHistoryParams(const nlohmann::json& params, std::string_view method,
                                       std::string& out_thread_id, std::uint64_t& out_last_seq,
-                                      bool& out_include_hidden) {
+                                      bool& out_include_hidden, bool& out_start_execution) {
     out_last_seq = 0;          // 缺省全量(与 trace/query 同口径)
     out_include_hidden = false; // 缺省:hidden 消息只回标志不回正文(§4.28)
+    out_start_execution = false; // 缺省:只读预览,不启动执行(V3-GAP-04)
     const ParamsCheck base = CheckParamsIsObject(params, method);
     if (!base.ok) {
         return base;
@@ -411,6 +412,21 @@ ParamsCheck CheckThreadHistoryParams(const nlohmann::json& params, std::string_v
                                std::string(method) + ": includeHidden 必须是布尔"};
         }
         out_include_hidden = params["includeHidden"].get<bool>();
+    }
+    // startExecution:仅 thread/resume 认(V3-GAP-04)。缺省 false = 只读
+    // 预览;true = 经 SessionService 恢复执行(resume-as-new/续接源场,
+    // 与 CLI --continue 同一条服务路)。thread/read 是纯读面,带它即拒
+    // ——不许把读面误当恢复口。
+    if (params.contains("startExecution") && !params["startExecution"].is_null()) {
+        if (method != kMethodThreadResume) {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(method) + ": startExecution 是 thread/resume 专属参数"};
+        }
+        if (!params["startExecution"].is_boolean()) {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(method) + ": startExecution 必须是布尔"};
+        }
+        out_start_execution = params["startExecution"].get<bool>();
     }
     return ParamsCheck{};
 }

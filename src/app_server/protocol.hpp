@@ -109,7 +109,7 @@ inline constexpr std::string_view kMethodThreadList = "thread/list";
 inline constexpr std::string_view kMethodThreadArchive = "thread/archive";
 inline constexpr std::string_view kMethodThreadUnarchive = "thread/unarchive";
 inline constexpr std::string_view kMethodThreadDelete = "thread/delete";
-inline constexpr std::string_view kMethodThreadResume = "thread/resume"; // 只读:恢复视图预览
+inline constexpr std::string_view kMethodThreadResume = "thread/resume"; // 只读:恢复视图预览(startExecution=true 走真恢复,V3-GAP-04)
 inline constexpr std::string_view kMethodThreadRead = "thread/read";    // 只读:完整时间线详情
 
 // workflow:run 账的只读查询(阶段 4:wf 线的事件出口,快照 + 增量)。

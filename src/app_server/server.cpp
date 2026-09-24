@@ -829,36 +829,102 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
                                              {"executions", std::move(executions)}});
         });
 
-    // thread/resume|thread/read(轨迹 v3 P3 第二棒):只读旧史两法,骨架
-    // 与 trace/query 同一条——活 thread 从账本拿 session_dir,冷 thread
-    // 经索引跨 workspace 定位;分页沿用 lastSeq 游标(回 seq 大于它的条
-    // 目,缺省 0 = 全量)。零模型调用、零工具重跑、零外部消息重发
-    //(§5.1"只读 replay"):这两法子只回 v3 显示投影,不推进任何执行。
+    // thread/resume|thread/read(轨迹 v3 P3 第二棒 + V3-GAP-04):只读旧史
+    // 两法,骨架与 trace/query 同一条——活 thread 从账本拿 session_dir,冷
+    // thread 经索引跨 workspace 定位;分页沿用 lastSeq 游标(回 seq 大于
+    // 它的条目,缺省 0 = 全量)。缺省零模型调用、零工具重跑、零外部消息
+    // 重发(§5.1"只读 replay"):这两法子只回 v3 显示投影,不推进任何执行。
     //   - thread/read:完整时间线(kind=message|compact_marker,含已压缩
     //     原文与降档原版,逐条带上下文状态标志);
     //   - thread/resume:恢复视图预览——只回当前上下文链上的消息
     //     (inCurrentContext)与压缩标记,外加"现在上下文多大"的摘要,
-    //     前端画"resume 后模型看得到哪段"用。
+    //     前端画"resume 后模型看得到哪段"用。带 startExecution=true 时
+    //     走真恢复执行(V3-GAP-04:经 SessionService 的 resume-at-launch,
+    //     与 CLI --continue 同一条服务路,不另立恢复协议)——缺省仍是
+    //     只读预览,老客户端行为一字不动。
     // v2 旧账没有四角色/上下文投影:如实回 sourceFormat="v2" + 空 items,
     // 不冒充(§4.10"源缺失时报告缺口,不假称齐全")。
     const auto thread_history_handler =
         [this](std::string_view method, bool resume_view) -> MethodHandler {
-        return [this, method, resume_view](const IncomingRequest& request, DispatchContext&)
+        return [this, method, resume_view](const IncomingRequest& request, DispatchContext& context)
                    -> std::optional<nlohmann::json> {
             std::string thread_id;
             std::uint64_t last_seq = 0;
             bool include_hidden = false;
-            const ParamsCheck base =
-                CheckThreadHistoryParams(request.params, method, thread_id, last_seq, include_hidden);
+            bool start_execution = false;
+            const ParamsCheck base = CheckThreadHistoryParams(request.params, method, thread_id,
+                                                               last_seq, include_hidden, start_execution);
             if (!base.ok) {
                 return MakeError(request.id, base.code, base.message);
             }
+            // V3-GAP-04:startExecution=true = 真恢复执行(参数检查已拒
+            // thread/read 带参)。活场明拒——场还开着就续用 turn/start,
+            // 恢复执行是冷场(进程重启/封口后)的接续路,不能悄悄让查询
+            // 调用变成第二只 agent。
+            std::string resumed_thread_id;
+            if (start_execution) {
+                {
+                    std::lock_guard<std::mutex> lock(threads_mutex_);
+                    if (threads_.count(thread_id) > 0) {
+                        return MakeError(request.id, kErrInvalidParams,
+                                         std::string(method) +
+                                             ": thread 还开着,续用 turn/start;恢复执行是冷场接续路",
+                                         nlohmann::json{{"code", "active_thread"}});
+                    }
+                }
+                if (workspaces_dir_.empty()) {
+                    return MakeError(request.id, kErrInvalidParams,
+                                     std::string(method) +
+                                         ": 没有会话账(纯内存 thread 或未配置 workspaces 根)");
+                }
+                // 冷场定位(经索引,与 trace/query 同一条路):cwd 用源场
+                // 账上的(索引 summary 的 control.cwd.changed,空回落服务
+                // cwd)——恢复开张的 workspace 身份裁决要落在源场原来的
+                // 房里,不按服务进程 cwd 乱迁。
+                std::string source_cwd;
+                bool located = false;
+                {
+                    trajectory::SessionIndexQuery index_query;
+                    index_query.all_workspaces = true;
+                    const auto page =
+                        trajectory::QueryWorkspaceSessions(tools::Utf8ToPath(workspaces_dir_), index_query);
+                    for (const auto& summary : page.entries) {
+                        if (summary.session_id == thread_id) {
+                            source_cwd = summary.cwd;
+                            located = true;
+                            break;
+                        }
+                    }
+                }
+                if (!located) {
+                    return MakeError(request.id, kErrInvalidParams,
+                                     std::string(method) +
+                                         ": 没有会话账(纯内存 thread 或未配置 workspaces 根)");
+                }
+                std::string error_code;
+                const nlohmann::json resumed = HandleThreadResumeExecution(
+                    thread_id, source_cwd.empty() ? options_.cwd : source_cwd, error_code);
+                if (!error_code.empty()) {
+                    return MakeError(request.id, kErrInvalidParams,
+                                     std::string(method) + " 恢复失败: " + error_code,
+                                     nlohmann::json{{"code", error_code}});
+                }
+                // thread/started 先于响应出(与 thread/start 同口径):前端
+                // 先见事件认识新场身份,再拿恢复视图对账。
+                resumed_thread_id = resumed.value("threadId", std::string());
+                context.emit_event(
+                    kEventThreadStarted,
+                    MakeThreadStartedParams(resumed_thread_id, resumed.value("cwd", std::string())),
+                    false);
+            }
             // 源定位:活 thread 从账本,冷 thread 经索引(与 trace/query
-            // 同一条路,thread 的 cwd 各归各的 workspace)。
+            // 同一条路,thread 的 cwd 各归各的 workspace)。恢复过的场此
+            // 刻已是活 thread——从账本拿恢复后场的目录(同 id 续接 = 源
+            // 场目录,迁移新场 = 新目录)。
             std::filesystem::path session_dir;
             {
                 std::lock_guard<std::mutex> lock(threads_mutex_);
-                const auto it = threads_.find(thread_id);
+                const auto it = threads_.find(resumed_thread_id.empty() ? thread_id : resumed_thread_id);
                 if (it != threads_.end() && it->second->session_service != nullptr &&
                     it->second->session_service->trajectory() != nullptr) {
                     session_dir = it->second->session_service->trajectory()->session_dir();
@@ -884,24 +950,44 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
             // 报格式,空表不冒充。
             const auto v3_stream = runtime::FindV3HistoryStream(session_dir);
             if (!v3_stream.has_value()) {
-                return MakeResult(request.id,
-                                  nlohmann::json{{"threadId", thread_id},
-                                                 {"sourceFormat", "v2"},
-                                                 {"lastSeq", last_seq},
-                                                 {"count", 0},
-                                                 {"items", nlohmann::json::array()}});
+                nlohmann::json result{{"threadId", thread_id},
+                                      {"sourceFormat", "v2"},
+                                      {"lastSeq", last_seq},
+                                      {"count", 0},
+                                      {"items", nlohmann::json::array()}};
+                if (!resumed_thread_id.empty()) {
+                    // v2 源恢复成的新场此刻仍无 v3 投影可读(开关关着时
+                    // 迁移新场也是 v2):恢复事实照报,视图缺口如实,不冒充。
+                    result["resumed"] = true;
+                    result["resumedThreadId"] = resumed_thread_id;
+                }
+                return MakeResult(request.id, std::move(result));
             }
             const runtime::RestoredHistoryView view = runtime::ProjectRestoredHistory(*v3_stream);
+            // V3-GAP-04 游标粒度对齐账行:合流时间线里祖先段与本场段的
+            // seq 各自从 1 起(§4.10"seq 各段各自有效,不跨文件混排")。
+            // 全局 max(seq) 会拿祖先段的高 seq 当水位,本场段后续低于它
+            // 的新行会被增量过滤误滤——漏账。水位改取本场段:祖先段是
+            // 静态前缀(resume 源文件不追加),合流序在最后;段界 = seq
+            // 回落(段内严格递增)。祖先段 seq 高于水位的条目可能在增量
+            // 页里重发——at-least-once,客户端按 messageId 去重,不漏账
+            // 优先。
+            std::size_t own_begin = 0;
+            for (std::size_t i = 1; i < view.items.size(); ++i) {
+                if (view.items[i].seq < view.items[i - 1].seq) {
+                    own_begin = i;  // 最后一次回落点之后 = 本场段
+                }
+            }
             nlohmann::json items = nlohmann::json::array();
-            // 水位记全时间线的最大 seq(与 trace/query 的 folded.max_seq 同
-            // 口径):哪怕本页被 lastSeq/恢复视图滤掉,下次增量也不会把
-            // 老条目重发一遍。
             std::uint64_t max_seq = last_seq;
             std::uint64_t in_context_messages = 0;
             std::uint64_t compact_count = 0;
             std::optional<std::uint64_t> latest_tokens_after;
-            for (const auto& item : view.items) {
-                max_seq = std::max(max_seq, item.seq);
+            for (std::size_t i = 0; i < view.items.size(); ++i) {
+                const runtime::RestoredHistoryItem& item = view.items[i];
+                if (i >= own_begin) {
+                    max_seq = std::max(max_seq, item.seq);  // 水位只记本场段
+                }
                 if (item.kind == runtime::RestoredHistoryItem::Kind::Compact) {
                     ++compact_count;
                     latest_tokens_after = item.compact.context_tokens_after;
@@ -924,6 +1010,19 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
                                   {"lastSeq", max_seq},
                                   {"count", items.size()},
                                   {"items", std::move(items)}};
+            // 来源链亮给客户端(游标带会话来源的读面基础,§5.2"跨 resume
+            // 来源链使用固定来源清单"):祖先在前、本场在后,单场单元素。
+            {
+                nlohmann::json source_sessions = nlohmann::json::array();
+                for (const std::string& source : view.source_sessions) {
+                    source_sessions.push_back(source);
+                }
+                result["sourceSessions"] = std::move(source_sessions);
+            }
+            if (!resumed_thread_id.empty()) {
+                result["resumed"] = true;
+                result["resumedThreadId"] = resumed_thread_id;
+            }
             if (resume_view) {
                 // 恢复预览的上下文摘要:链上消息数、压缩次数与最近一次
                 // applied 后的持久 token 数(§4.11:读持久字段,不重算)。
@@ -1239,7 +1338,17 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         return nlohmann::json();
     }
     record->thread_id = ledger->session_id();
-    record->session_main_path = (ledger->session_dir() / "main.jsonl").generic_string();
+    // V3-GAP-04:主账路径按场格式分派,不硬拼 main.jsonl——v3 场主账名是
+    // <sessionId>.jsonl(504fddb1),旧场仍读 main.jsonl(两代兼容,不是
+    // 只认新的)。v3_format() 按盘上主账识别,v3 开场即落首行 system,
+    // 开张时刻即是真值。
+    {
+        const std::string main_file =
+            record->session_service->v3_format() ? record->thread_id + ".jsonl"
+                                                 : std::string("main.jsonl");
+        record->session_main_path =
+            (ledger->session_dir() / tools::Utf8ToPath(main_file)).generic_string();
+    }
 
     // 工业化多协议接入单 P1(G01/G02):本场会话级运行材料一次装配——
     // backend、工具表、MCP 子进程、Agent 档案同场多轮复用。两档语义:
@@ -1359,6 +1468,115 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         result["degradedComponents"] = std::move(degraded);
     }
     return result;
+}
+
+// thread/resume 的真恢复执行体(V3-GAP-04:startExecution=true 路)。与
+// thread/start 的建场同形状(goal/loop 各一本、SessionService 开张、装配、
+// threads_ 注册),差别一处:开张走 resume-at-launch——来源校验、写者
+// 所有权、队列恢复(来源链种操作去重表、accepted 未派发的输入重排进
+// pending)都在 SessionService 与账本侧,这里只递合同,不另立恢复协议。
+// v3 源续接源场(同 id 续写,2026-09-19 拍板);v2 源开迁移新场。
+nlohmann::json Server::HandleThreadResumeExecution(const std::string& source_thread_id,
+                                                    const std::string& source_cwd,
+                                                    std::string& out_error_code) {
+    out_error_code.clear();
+    auto record = std::make_shared<ThreadRecord>(std::string());
+    record->cwd = source_cwd.empty() ? options_.cwd : source_cwd;
+
+    // goal 单合流批:typed 命令面的会话级状态按 thread 各起一本(与
+    // thread/start 同形状;关着也建实例——命令面回稳定禁用码)。
+    record->goal_coordinator = [this] {
+        runtime::goal::GoalCoordinator::Options goal_options;
+        goal_options.goals_enabled = options_.features_goal;
+        return std::make_unique<runtime::goal::GoalCoordinator>(goal_options);
+    }();
+    {
+        runtime::loop::LoopScheduler::Options loop_options;
+        loop_options.enabled = options_.features_loop;
+        record->loop_scheduler = std::make_unique<runtime::loop::LoopScheduler>(loop_options);
+    }
+    // 真恢复路:SessionService 的 resume-at-launch 开张(CLI --continue
+    // 同一条服务路)。
+    {
+        runtime::SessionLaunchRequest launch_request;
+        launch_request.cwd_utf8 = record->cwd;
+        launch_request.lubancode_version = options_.lubancode_version;
+        if (!workspaces_dir_.empty()) {
+            launch_request.workspaces_root = tools::Utf8ToPath(workspaces_dir_);
+        }
+        launch_request.resume_at_launch = true;
+        launch_request.resume_source_session_id = source_thread_id;
+        record->session_service = std::make_unique<runtime::SessionService>(std::move(launch_request));
+    }
+    const runtime::TrajectorySessionLedger* ledger = record->session_service->trajectory();
+    if (ledger == nullptr) {
+        // 开不出账恢复明败,不回退普通开张(§十七失败合同)。
+        Diagnose("恢复开张失败: " + record->session_service->launch_error());
+        out_error_code = "trajectory.open_failed";
+        return nlohmann::json();
+    }
+    if (!ledger->resumed_at_launch()) {
+        // 点名的源场没接上(验不过/活锁/one_shot),服务侧按 --continue
+        // 的 quiet_if_none 语义回落开了普通新场——这不是客户端要的恢复。
+        // 关掉误开的场如实报 resume_source_rejected,不冒充恢复成功、不
+        // 留挂羊头的空场。
+        const auto closed = record->session_service->Close("thread_stop");
+        if (!closed.error_code.empty()) {
+            Diagnose("恢复回落场的封口失败(" + closed.error_code + "): " + ledger->session_id());
+        }
+        Diagnose("thread/resume 源场验不过,恢复拒绝: " + source_thread_id);
+        out_error_code = "resume_source_rejected";
+        return nlohmann::json();
+    }
+    record->thread_id = ledger->session_id();
+    // V3-GAP-04:主账路径按场格式分派(v3 场 <id>.jsonl,旧场 main.jsonl,
+    // 与 thread/start 同一口)。
+    {
+        const std::string main_file =
+            record->session_service->v3_format() ? record->thread_id + ".jsonl"
+                                                 : std::string("main.jsonl");
+        record->session_main_path =
+            (ledger->session_dir() / tools::Utf8ToPath(main_file)).generic_string();
+    }
+    // 装配(两档语义与 thread/start 一致):显式工厂失败即恢复失败;未递
+    // 工厂的老注入形态不因装配拒,回合驱动里走 AssembleSession 兜底。注:
+    // prompt_composition 事实不落——那是 thread/start 部署档组合路的事实,
+    // 恢复场没有这个组合动作,不伪造。
+    if (options_.assembly_factory) {
+        SessionAssemblyResult assembled = options_.assembly_factory();
+        if (assembled.assembly == nullptr) {
+            Diagnose("恢复场装配失败: " + assembled.error);
+            out_error_code = assembled.error_code.empty() ? "assembly.failed" : assembled.error_code;
+            return nlohmann::json();
+        }
+        record->assembly = std::move(assembled.assembly);
+    }
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        // v3 续接同 id:活场已在入口拒,这里理论不撞;真撞了(同秒同尾)
+        // 按旧行为追加序号(与 thread/start 同款兜底)。
+        if (threads_.count(record->thread_id) > 0) {
+            std::string candidate = record->thread_id;
+            const std::string base = candidate;
+            for (int n = 2; threads_.count(candidate) > 0; ++n) {
+                candidate = base + "-" + std::to_string(n);
+            }
+            record->thread_id = candidate;
+        }
+        threads_[record->thread_id] = record;
+    }
+    record->interactions = std::make_unique<InteractionLedger>(record->thread_id);
+    Diagnose("thread 已恢复: " + record->thread_id + "(源: " + source_thread_id + ")");
+    return nlohmann::json{{"threadId", record->thread_id}, {"cwd", record->cwd}, {"active", true}};
+}
+
+// 测试直驱:一场 thread 的主账路径(V3-GAP-04 两代兼容断言用)。
+std::string Server::ThreadMainPathForTest(const std::string& thread_id) {
+    const std::shared_ptr<ThreadRecord> record = FindThread(thread_id);
+    if (record == nullptr) {
+        return std::string();
+    }
+    return record->session_main_path;
 }
 
 nlohmann::json Server::HandleThreadList(const nlohmann::json& params) {
