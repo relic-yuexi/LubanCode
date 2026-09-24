@@ -140,7 +140,7 @@ void TurnInputListener::ThreadMain() {
     // RenderState(见下面 refresh_footer),不再养第二套提示状态机。方向键
     // 直选菜单关掉:流式期间 Up/Down 分给代理面板、队列条目编辑与历史浏览
     // (规格五),本单只补 Tab。
-    LineEditorCore editor(BuildSlashCompletionCandidates());
+    LineEditorCore editor(BuildSlashCompletionCandidates(), BuildSlashSubcommandCompletionCandidates());
     editor.set_menu_selection_enabled(false);
     editor.BeginLine(/*composer=*/true);
 

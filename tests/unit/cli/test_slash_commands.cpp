@@ -2,6 +2,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <set>
 #include <string>
 #include <vector>
@@ -568,6 +569,67 @@ TEST_CASE("ParseProviderCommand: Invalid 时 bad_word 带着第一词原始拼�
     CHECK(cli::ParseProviderCommand("Swtich").bad_word == "Swtich");        // 保留大小写
     CHECK(cli::ParseProviderCommand("refresh now").bad_word == "refresh");  // 错参也算
     CHECK(cli::ParseProviderCommand("switch glm").bad_word == "switch");    // 合法路径也带着,不用而已
+}
+
+// ---------------------------------------------------------------------------
+// AllSlashSubcommandGroups(多级 Tab 补全单):二级子命令补全词表。只登记
+// provider/instructions/goal/loop/plan/record 这几个词汇本就固定的命令,
+// 词表逐一核对对应 Parse*Command 函数得出。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("AllSlashSubcommandGroups: /provider 组与 ProviderSubcommands() 词表一致") {
+    const auto& groups = cli::AllSlashSubcommandGroups();
+    const auto it = std::find_if(groups.begin(), groups.end(),
+                                  [](const auto& g) { return g.command == "/provider"; });
+    REQUIRE(it != groups.end());
+    const std::vector<std::string> expected = cli::ProviderSubcommands();
+    REQUIRE(it->entries.size() == expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        CHECK(it->entries[i].name == expected[i]);
+        CHECK_FALSE(it->entries[i].description.empty());
+    }
+}
+
+TEST_CASE("AllSlashSubcommandGroups: 已登记的命令与子命令词表覆盖 Parse*Command 的字面量") {
+    const auto& groups = cli::AllSlashSubcommandGroups();
+    auto entries_for = [&](const std::string& command) -> std::vector<std::string> {
+        const auto it = std::find_if(groups.begin(), groups.end(),
+                                      [&](const auto& g) { return g.command == command; });
+        REQUIRE(it != groups.end());
+        std::vector<std::string> names;
+        for (const auto& e : it->entries) {
+            CHECK_FALSE(e.description.empty());  // 每条子命令都得有说明,不是裸词
+            names.push_back(e.name);
+        }
+        return names;
+    };
+
+    CHECK(entries_for("/instructions") == std::vector<std::string>{"path", "reload"});
+    CHECK(entries_for("/goal") == std::vector<std::string>{"status", "pause", "resume", "clear", "edit"});
+    CHECK(entries_for("/loop") ==
+          std::vector<std::string>{"list", "status", "pause", "resume", "stop", "run"});
+    CHECK(entries_for("/plan") == std::vector<std::string>{"status", "off", "review"});
+    CHECK(entries_for("/record") == std::vector<std::string>{"status", "start", "note", "pause", "resume",
+                                                               "stop", "cancel", "list", "install", "discard"});
+}
+
+TEST_CASE("AllSlashSubcommandGroups: 没有登记二级词表的命令查无(比如 /model)") {
+    const auto& groups = cli::AllSlashSubcommandGroups();
+    CHECK(std::none_of(groups.begin(), groups.end(), [](const auto& g) { return g.command == "/model"; }));
+}
+
+TEST_CASE("BuildSlashSubcommandCompletionCandidates: 与 AllSlashSubcommandGroups 逐条对齐") {
+    const auto candidates = cli::BuildSlashSubcommandCompletionCandidates();
+    const auto& groups = cli::AllSlashSubcommandGroups();
+    REQUIRE(candidates.size() == groups.size());
+    for (std::size_t i = 0; i < groups.size(); ++i) {
+        CHECK(candidates[i].command == groups[i].command);
+        REQUIRE(candidates[i].subcommands.size() == groups[i].entries.size());
+        for (std::size_t j = 0; j < groups[i].entries.size(); ++j) {
+            CHECK(candidates[i].subcommands[j].name == groups[i].entries[j].name);
+            CHECK(candidates[i].subcommands[j].description == groups[i].entries[j].description);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

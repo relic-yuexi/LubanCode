@@ -388,6 +388,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
 
     LineEditorCore& editor = SharedEditor();
     editor.SetSlashCandidates(BuildSlashCompletionCandidates());
+    editor.SetSlashSubcommandCandidates(BuildSlashSubcommandCompletionCandidates());
     editor.BeginLine(composer);
 
     // 0.17.0:composer 读取开输入框(上横线 + 按内容长高的正文区 + 下横线 +
