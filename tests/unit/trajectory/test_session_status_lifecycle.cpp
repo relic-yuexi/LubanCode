@@ -7,6 +7,8 @@
 #include <fstream>
 #include <string>
 
+#include "trajectory/directory.hpp"      // 手植 v2 目录夹具(V3-LEGACY-01)
+#include "trajectory/session_index.hpp"  // v3 归档态索引断言
 #include "trajectory/session_manager.hpp"
 
 using namespace lubancode::trajectory;
@@ -109,8 +111,24 @@ TEST_CASE("生命周期: session.json 转态原子写与折叠豁免") {
     const std::filesystem::path root = MakeRoot("transition");
     FakeClock clock;
     SessionManager manager(Opts(root), &clock);
-    REQUIRE(manager.LaunchSession().has_value());
-    const std::filesystem::path dir = manager.active()->session_dir();
+    REQUIRE(manager.LaunchSession().has_value());  // 顺带把 workspace 房间落成
+    // V3-LEGACY-01 后新建唯一 v3(无 session.json);本案测的是 v2 manifest
+    // 转态机,改手植 v2 目录夹具——session.json 由 CreateSession 落,状态
+    // 机只认它,主账无关紧要。
+    SessionManifest plant;
+    plant.schema_version = 2;
+    plant.workspace_key = manager.workspace_key();
+    plant.session_id = "20260924-130000-TRANS1";
+    plant.main_run_id = "main-0001";
+    plant.run_kind = RunKindName(RunKind::MainSession);
+    plant.status = SessionStatusName(SessionStatus::Running);
+    plant.created_at_ms = 1;
+    plant.lubancode_version = "test";
+    plant.event_schema_version = 2;
+    auto planted = TrajectoryDirectory::CreateSession(
+        Opts(root).workspaces_root, manager.workspace_key(), plant);
+    REQUIRE(planted.has_value());
+    const std::filesystem::path dir = planted->session_dir();
     SessionManifest manifest = *ReadSessionJson(dir);
 
     // preparing -> running 已由 Launch 办妥。
@@ -220,11 +238,15 @@ TEST_CASE("lifecycle: archive 只吃 closed,active running 拒绝") {
     const std::string id = manager.active()->session_id();
     // running 的 active session 不能 archive。
     CHECK(manager.ArchiveSession(id).error().rfind("session.archive_active", 0) == 0);
-    // 干净 close 后 archive:closed -> archived。
+    // 干净 close 后 archive:closed -> archived(v3 场无 session.json,
+    // 归档态落 lifecycle 账,由索引投影证)。
     NullClearParticipant participant;
     REQUIRE(manager.Close(CloseRequest{}, &participant).error_code.empty());
     REQUIRE(manager.ArchiveSession(id).has_value());
-    CHECK(ReadSessionJson(manager.SessionDirOf(id))->status == "archived");
+    SessionIndexQuery archived;
+    archived.current_workspace_key = manager.workspace_key();
+    archived.archived_only = true;
+    CHECK(QueryWorkspaceSessions(Opts(root).workspaces_root, archived).total == 1);
     // 再 archive 非法(自环)。
     CHECK_FALSE(manager.ArchiveSession(id).has_value());
 }

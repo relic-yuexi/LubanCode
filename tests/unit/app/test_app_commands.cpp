@@ -443,14 +443,10 @@ TEST_CASE("顶层 archive/unarchive 往返;归档后默认列表不见、archive
     const auto dir = fixture.SessionDirOf(id);
     REQUIRE_FALSE(dir.empty());
 
-    // archive(标题命中):目录不搬,session.json 转 archived + lifecycle 记账。
+    // archive(标题命中):目录不搬——v3 场无 session.json,归档态落
+    // lifecycle 账(T15-B),由下方索引断言证(active 不见、archived 见)。
     CHECK(HandleSessionManagementCommand(fixture.root(), /*kind=archive=*/0, "甲的场", false, theme,
                                          nullptr) == 0);
-    {
-        const auto manifest = lubancode::trajectory::ReadSessionJson(dir);
-        REQUIRE(manifest.has_value());
-        CHECK(manifest->status == "archived");
-    }
 
     // 默认列表(active)不见;archived 只读入口见。
     lubancode::trajectory::SessionIndexQuery active;
@@ -464,14 +460,9 @@ TEST_CASE("顶层 archive/unarchive 往返;归档后默认列表不见、archive
     archived.archived_only = true;
     CHECK(lubancode::trajectory::QueryWorkspaceSessions(fixture.root(), archived).total == 1);
 
-    // unarchive(完整 id)搬回 closed,默认列表又见。
+    // unarchive(完整 id)搬回 closed,默认列表又见(索引即证)。
     CHECK(HandleSessionManagementCommand(fixture.root(), /*kind=unarchive=*/1, id, false, theme,
                                          nullptr) == 0);
-    {
-        const auto manifest = lubancode::trajectory::ReadSessionJson(dir);
-        REQUIRE(manifest.has_value());
-        CHECK(manifest->status == "closed");
-    }
     CHECK(lubancode::trajectory::QueryWorkspaceSessions(fixture.root(), active).total == 1);
 }
 

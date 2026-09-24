@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@
 #include "runtime/trajectory_session.hpp"
 #include "trajectory/blob_store.hpp"
 #include "trajectory/journal.hpp"
+#include "trajectory/v3/reader.hpp"  // VerifyV3File(V3-LEGACY-01 后 v3 主账)
 #include "trajectory/recorder.hpp"
 #include "trajectory/replay.hpp"
 
@@ -124,6 +126,47 @@ std::vector<std::string> KindsOf(const std::filesystem::path& stream) {
         kinds.push_back(parsed.is_discarded() ? "<bad>" : parsed.value("kind", std::string()));
     }
     return kinds;
+}
+
+// V3-LEGACY-01 后新建唯一 v3:ledger 级事件落 <id>.jsonl(直写夹具的 v2
+// 账面仍走 KindsOf/FirstPayloadOf,读兼容不动)。
+std::filesystem::path V3StreamOf(const std::filesystem::path& session_dir) {
+    return session_dir / std::filesystem::path(session_dir.filename().string() + ".jsonl");
+}
+
+std::vector<std::string> V3KindsOf(const std::filesystem::path& session_dir) {
+    std::vector<std::string> kinds;
+    std::ifstream in(V3StreamOf(session_dir), std::ios::binary);
+    REQUIRE(in.is_open());
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+        const auto parsed = nlohmann::json::parse(line, nullptr, false);
+        kinds.push_back(parsed.is_discarded()
+                            ? "<bad>"
+                            : (parsed.value("type", std::string()) == "event"
+                                   ? parsed.value("kind", std::string())
+                                   : std::string("message")));
+    }
+    return kinds;
+}
+
+nlohmann::json V3FirstPayloadOf(const std::filesystem::path& session_dir, const std::string& kind) {
+    std::ifstream in(V3StreamOf(session_dir), std::ios::binary);
+    REQUIRE(in.is_open());
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+        const auto parsed = nlohmann::json::parse(line, nullptr, false);
+        if (parsed.is_discarded() || parsed.value("type", std::string()) != "event" ||
+            parsed.value("kind", std::string()) != kind) {
+            continue;
+        }
+        return parsed.contains("payload") ? parsed["payload"] : nlohmann::json::object();
+    }
+    return nlohmann::json::object();
 }
 
 }  // namespace
@@ -377,35 +420,12 @@ TEST_CASE("没验过的 turn 不落 outcome.assessed(§11.5 成功门的账面�
     CHECK(trajectory::VerifyJournalFile(dir / "main.jsonl").ok);
 }
 
-TEST_CASE("ledger 排队账:enqueued/dequeued/cancelled/expired 全链进 Journal") {
-    const auto root = FreshDir("lubancode-p4-queue");
-    TrajectorySessionLedger::Options options;
-    options.workspaces_root = root / "workspaces";
-    options.workspace_root = root / "repo";
-    options.lubancode_version = "test";
-    std::error_code ec;
-    std::filesystem::create_directories(root / "repo", ec);
-    auto ledger = TrajectorySessionLedger::Open(options);
-    REQUIRE(ledger.has_value());
-
-    ledger->NoteQueueEnqueued("q-1", "main", "busy_enqueue");
-    ledger->NoteQueueEnqueued("q-2", "#3", "busy_enqueue");
-    ledger->NoteQueueDequeued("q-1", "tool_boundary_delivery");
-    ledger->NoteQueueCancelled("q-2", "session_clear");
-    ledger->NoteQueueExpired("q-3", "");  // 未 enqueued 的 expired:状态机拒,不入账
-
-    const auto kinds = KindsOf(ledger->session_dir() / "main.jsonl");
-    CHECK(std::count(kinds.begin(), kinds.end(), "control.queue.item.enqueued") == 2);
-    CHECK(std::count(kinds.begin(), kinds.end(), "control.queue.item.dequeued") == 1);
-    CHECK(std::count(kinds.begin(), kinds.end(), "control.queue.item.cancelled") == 1);
-    CHECK(std::count(kinds.begin(), kinds.end(), "control.queue.item.expired") == 0);
-    CHECK(trajectory::VerifyJournalFile(ledger->session_dir() / "main.jsonl").ok);
-
-    // 折叠侧:open queue 清干净(两枚都终态)。
-    const auto fold = trajectory::FoldStreamReplay(ledger->session_dir() / "main.jsonl");
-    REQUIRE(fold.ok());
-    CHECK(fold.state.control.open_queue_items.empty());
-}
+// (退役,V3-LEGACY-01)原此处有"ledger 排队账:enqueued/dequeued/cancelled/
+// expired 全链进 Journal"案:靠注入 0 开 v2 场,验 NoteQueue* 控制事件入
+// v2 Journal 与折叠侧 open_queue 清空。v2 新建写口退役后该场造不出;
+// NoteQueue* 走 v2 recorder,对 v3 场无落点(静默 no-op)——v3 场的排队
+// 事实由 turn 桥的 input.enqueued 一族记账,归 v3 bridge 册;本案随写口
+// 一并退役,不迁就造不出的前提。
 
 TEST_CASE("ledger 环境快照:非 git 仓如实降档,字段全账可回读") {
     const auto root = FreshDir("lubancode-p4-environment");
@@ -431,19 +451,18 @@ TEST_CASE("ledger 环境快照:非 git 仓如实降档,字段全账可回读") {
     // 幂等:第二次是 no-op。
     CHECK(ledger->CaptureEnvironment(facts).empty());
 
-    const auto kinds = KindsOf(ledger->session_dir() / "main.jsonl");
-    CHECK(std::count(kinds.begin(), kinds.end(), "run.environment.captured") == 1);
+    // v3 场:session.environment.captured(T11-C),载荷键 camelCase。
+    const auto kinds = V3KindsOf(ledger->session_dir());
+    CHECK(std::count(kinds.begin(), kinds.end(), "session.environment.captured") == 1);
 
-    // 事件 payload 三键(snapshot_ref/replay_level/gaps,schema 钉死)。
-    const auto payload = FirstPayloadOf(ledger->session_dir() / "main.jsonl",
-                                        "run.environment.captured");
-    REQUIRE(payload.contains("snapshot_ref"));
-    CHECK(payload["replay_level"] == "input_only");  // 非 git 仓:source 轴缺
+    const auto payload = V3FirstPayloadOf(ledger->session_dir(), "session.environment.captured");
+    REQUIRE(payload.contains("snapshotRef"));
+    CHECK(payload["replayLevel"] == "input_only");  // 非 git 仓:source 轴缺
     const auto gaps = payload["gaps"];
     CHECK(std::find(gaps.begin(), gaps.end(), "not_a_git_repository") != gaps.end());
 
     // 快照 blob 落在 artifacts/,读得回、字段齐。
-    const auto snapshot_ref = trajectory::BlobRef::FromJson(payload["snapshot_ref"]);
+    const auto snapshot_ref = trajectory::BlobRef::FromJson(payload["snapshotRef"]);
     REQUIRE(snapshot_ref.has_value());
     trajectory::BlobStore blobs(ledger->session_dir() / "artifacts");
     const auto snapshot = blobs.ReadVerified(*snapshot_ref);
@@ -457,5 +476,5 @@ TEST_CASE("ledger 环境快照:非 git 仓如实降档,字段全账可回读") {
     CHECK(parsed.contains("system_prompt_ref"));
     CHECK(parsed["git"]["in_repo"] == false);
     CHECK(parsed["env_allowlist"].is_object());
-    CHECK(trajectory::VerifyJournalFile(ledger->session_dir() / "main.jsonl").ok);
+    CHECK(trajectory::v3::VerifyV3File(V3StreamOf(ledger->session_dir())).ok);
 }

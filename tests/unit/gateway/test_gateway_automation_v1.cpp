@@ -303,10 +303,12 @@ TEST_CASE("闭环:once 任务 -> V3 执行(含工具轮)-> reply selection -> �
     CHECK(sections.delivery_pending == 0);
 }
 
-TEST_CASE("v2 场明报拒绝:pin 0 时执行不偷偷双写") {
+TEST_CASE("pin 0 写口已退役:执行照走 v3,不因显式关而拒") {
+    // V3-LEGACY-01:gateway.requires_v3 拒绝分支随 v2 新建写口一并退役——
+    // pin 0 只在建场记一条迁移告警,执行照常 V3 跑通。
     EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
-    V1Fixture fixture("v2refuse");
-    fixture.scripts = {TextScript("不该跑到这里")};
+    V1Fixture fixture("v2retired");
+    fixture.scripts = {TextScript("照常跑完")};
 
     auto backend = fixture.MakeBackend();
     tools::ToolRegistry registry = MakeRegistry(fixture.counter_file);
@@ -319,8 +321,8 @@ TEST_CASE("v2 场明报拒绝:pin 0 时执行不偷偷双写") {
     REQUIRE(projection.occurrences.size() == 1);
     const auto& occurrence = projection.occurrences.begin()->second;
     CHECK(occurrence.state == gateway::AutomationOccurrence::State::Settled);
-    CHECK(occurrence.outcome == "failed");
-    CHECK(CountOf(fixture.counter_file, "model") == 0);  // 模型一次都没调
+    CHECK(occurrence.outcome == "succeeded");
+    CHECK(CountOf(fixture.counter_file, "model") == 1);  // v3 场照常执行一次
 }
 
 TEST_CASE("取消链:cancel 旗置位即掐断,occurrence 如实 failed") {

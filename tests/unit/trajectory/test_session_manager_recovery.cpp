@@ -2,13 +2,14 @@
 //   崩在收口半路/封链后/session.json 转态前/新账开张半路,恢复器一律以
 //   Journal 可证事实为准续办:不合并两本 JSONL,不复用旧 session_id,空
 //   preparing 可标 aborted_before_start(tombstone 齐全)。
+//   V3-LEGACY-01 起 v2 新建写口退役(LaunchSession 只产 v3),v2 活场一律
+//   手植——恢复链认的是盘上事实,不问账是谁写的,v2 换账崩溃恢复的回归
+//   覆盖就靠这批手植档保住。
 #include <doctest/doctest.h>
 
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <memory>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -81,22 +82,151 @@ void SetSessionStatus(const std::filesystem::path& dir, const std::string& statu
     REQUIRE(WriteSessionJsonAtomic(dir, *manifest).has_value());
 }
 
-// 铺一场带活账的 session(活动 turn + 活 queue + 活选段 + 子流)。
+// ---------------------------------------------------------------------------
+// v2 活场手植配方(V3-LEGACY-01 后唯一来路)
+// ---------------------------------------------------------------------------
+
+// 手植场的 recorder 档:event_schema_version 与 manifest 同拍(2)。
+RecorderOptions PlantRecorderOptions() {
+    RecorderOptions options;
+    options.event_schema_version = 2;
+    return options;
+}
+
+// 生产 MainBaseScope 同款:宿主控制面,HostOnly,不入训练。
+EventScope PlantMainScope(const std::string& workspace_key, const std::string& session_id,
+                          const std::string& main_run_id) {
+    EventScope scope;
+    scope.workspace_key = workspace_key;
+    scope.session_id = session_id;
+    scope.run_id = main_run_id;
+    scope.run_kind = RunKind::MainSession;
+    scope.actor = Actor::Host;
+    scope.origin = Origin::ScheduledHost;
+    scope.visibility = {Visibility::HostOnly};
+    scope.training_policy = TrainingPolicy::Exclude;
+    return scope;
+}
+
+SessionManifest PlantManifest(const SessionManagerOptions& options,
+                              const std::string& workspace_key, const std::string& session_id,
+                              const std::string& main_run_id, std::int64_t now_ms) {
+    SessionManifest manifest;
+    manifest.schema_version = 2;
+    manifest.workspace_key = workspace_key;
+    manifest.session_id = session_id;
+    manifest.launch_cwd = options.launch_cwd;
+    manifest.main_run_id = main_run_id;
+    manifest.run_kind = RunKindName(RunKind::MainSession);
+    manifest.start_reason = "process_launch";
+    manifest.status = "preparing";
+    manifest.created_at_ms = now_ms;
+    manifest.lubancode_version = options.lubancode_version;
+    manifest.event_schema_version = 2;
+    return manifest;
+}
+
+// 手植一场开着账的 v2 main 场:目录 + preparing manifest + run.started。
+// recorder 随结构递回,调用方写完事件便弃——句柄一放,"进程"就算死透。
+struct PlantedMain {
+    TrajectoryDirectory directory;
+    std::optional<TrajectoryRecorder> main;
+};
+
+PlantedMain PlantMainSession(const SessionManagerOptions& options,
+                             const std::string& workspace_key, FakeClock* clock,
+                             const std::string& session_id, const std::string& main_run_id) {
+    PlantedMain planted;
+    auto directory = TrajectoryDirectory::CreateSession(
+            options.workspaces_root, workspace_key,
+            PlantManifest(options, workspace_key, session_id, main_run_id, clock->WallMs()));
+    REQUIRE(directory.has_value());
+    planted.directory = *directory;
+    auto recorder =
+            TrajectoryRecorder::Start(planted.directory.main_stream_path(),
+                                      planted.directory.artifacts_root(),
+                                      PlantMainScope(workspace_key, session_id, main_run_id),
+                                      PlantRecorderOptions(), clock);
+    REQUIRE(recorder.has_value());
+    nlohmann::json extra;
+    extra["start_reason"] = "process_launch";
+    REQUIRE(recorder->WriteRunStarted(extra, Durability::PowerLoss).status ==
+            RecordReceipt::Status::Committed);
+    planted.main = std::move(*recorder);
+    return planted;
+}
+
+// 手植 clear 第 1 步落定的空 preparing 新场:不挂 recorder——开张是第 6 步
+// 的事,崩溃点在它之前。main_run_id 此刻已写死进 session.json。
+std::filesystem::path PlantPreparingSession(const SessionManagerOptions& options,
+                                            const std::string& workspace_key, FakeClock* clock,
+                                            const std::string& session_id,
+                                            const std::string& main_run_id,
+                                            const std::string& previous_session_id) {
+    SessionManifest manifest =
+            PlantManifest(options, workspace_key, session_id, main_run_id, clock->WallMs());
+    manifest.start_reason = "clear";
+    manifest.previous_session_id = previous_session_id;
+    auto directory = TrajectoryDirectory::CreateSession(options.workspaces_root, workspace_key,
+                                                        manifest);
+    REQUIRE(directory.has_value());
+    return directory->session_dir();
+}
+
+// 手植 clear 第 2 步:旧 main 落 qualified requested + session.clear_requested
+// (payload 照生产 Clear 逐键抄,恢复器认的 facts 全在这两枚里)。返回
+// requested 的事件 id——第 6 步的跨 session completed 要反指它。
+std::string PlantClearRequested(TrajectoryRecorder* main, const std::string& new_id,
+                                const std::string& boundary_operation_id) {
+    RecordRequest command_request;
+    command_request.kind = EventKind::ControlCommandRequested;
+    command_request.scope = main->base_scope();
+    command_request.scope.actor = Actor::User;
+    command_request.scope.origin = Origin::ExternalUser;
+    command_request.payload["command_id"] = "cmd-clear-0001";
+    command_request.payload["command_name"] = "clear";
+    command_request.payload["action_name"] = "clear";
+    command_request.payload["effect_class"] = "session_boundary";
+    command_request.payload["args_ref"] =
+            nlohmann::json{{"boundary_operation_id", boundary_operation_id}};
+    command_request.links.correlation_id = boundary_operation_id;
+    const auto requested = main->Record(command_request, Durability::PowerLoss);
+    REQUIRE(requested.status == RecordReceipt::Status::Committed);
+
+    RecordRequest clear_requested;
+    clear_requested.kind = EventKind::SessionClearRequested;
+    clear_requested.scope = main->base_scope();
+    clear_requested.payload["next_session_id"] = new_id;
+    clear_requested.payload["reason"] = "user_clear";
+    clear_requested.links.correlation_id = boundary_operation_id;
+    const auto receipt = main->Record(clear_requested, Durability::PowerLoss);
+    REQUIRE(receipt.status == RecordReceipt::Status::Committed);
+    return requested.event_id;
+}
+
+// 铺一场"崩在 clear 第 2/3 步之间"的现场:旧 v2 场带活账(活动 turn +
+// 活 queue + 活选段 + 子流),换账第 1/2 步已 durable,收口一步没跑。
 struct CrashFixture {
     FakeClock clock;
-    std::unique_ptr<SessionManager> manager;
-    std::optional<TrajectoryRecorder> child;
     std::filesystem::path root;
+    std::filesystem::path workspace;
     std::filesystem::path old_dir;
     std::string old_id;
+    std::filesystem::path new_dir;
+    std::string new_id;
 
     explicit CrashFixture(const char* tag, bool with_child = true) : root(MakeRoot(tag)) {
-        manager = std::make_unique<SessionManager>(Opts(root), &clock);
-        auto* active = manager->LaunchSession().value_or(nullptr);
-        REQUIRE(active != nullptr);
-        old_id = active->session_id();
-        old_dir = active->session_dir();
-        TrajectoryRecorder* main = &*active->main;
+        const SessionManagerOptions options = Opts(root);
+        auto room = TrajectoryDirectory::CreateWorkspace(options.workspaces_root,
+                                                         options.identity, clock.WallMs());
+        REQUIRE(room.has_value());
+        workspace = room->workspace_dir();
+        const std::string& workspace_key = options.identity.workspace_key;
+
+        old_id = "20260924-100001-R00001";
+        PlantedMain old = PlantMainSession(options, workspace_key, &clock, old_id, "main-0001");
+        old_dir = old.directory.session_dir();
+        TrajectoryRecorder* main = &*old.main;
 
         RecordRequest turn_start;
         turn_start.kind = EventKind::TurnStarted;
@@ -134,39 +264,29 @@ struct CrashFixture {
                 RecordReceipt::Status::Committed);
 
         if (with_child) {
-            auto stream = active->directory.ReserveSubagentStream("agent-0007");
+            auto stream = old.directory.ReserveSubagentStream("agent-0007");
             REQUIRE(stream.has_value());
             EventScope child_scope = main->base_scope();
             child_scope.run_id = "agent-0007";
             child_scope.run_kind = RunKind::Subagent;
-            auto started = TrajectoryRecorder::Start(*stream, active->directory.artifacts_root(),
-                                                     child_scope, RecorderOptions{}, &clock);
+            auto started = TrajectoryRecorder::Start(*stream, old.directory.artifacts_root(),
+                                                     child_scope, PlantRecorderOptions(), &clock);
             REQUIRE(started.has_value());
-            child = std::move(*started);
             nlohmann::json extra;
             extra["agent_run_id"] = "agent-0007";
             extra["owner_run_id"] = "main-0001";
-            REQUIRE(child->WriteRunStarted(extra, Durability::PowerLoss).status ==
+            REQUIRE(started->WriteRunStarted(extra, Durability::PowerLoss).status ==
                     RecordReceipt::Status::Committed);
         }
+        SetSessionStatus(old_dir, "running");  // launch 早已转 running(活场)
+
+        // 换账第 1/2 步:新场目录 + 旧 main 两枚边界事件。
+        new_id = "20260924-100002-R00002";
+        new_dir = PlantPreparingSession(options, workspace_key, &clock, new_id, "main-0002",
+                                        old_id);
+        PlantClearRequested(main, new_id, "20260924-100003-R00003");
+        // 构造退栈,recorder 句柄全放:不 Close、不封账,"进程"死透。
     }
-};
-
-// 崩在收口半路的参与者:抛异常模拟进程暴毙(账面停在第 2/3 步之间)。
-struct ExplodingParticipant : ClearParticipant {
-    std::string CancelActiveTurn() override { throw std::runtime_error("boom"); }
-    std::vector<ChildClosure> CancelActiveChildren() override { return {}; }
-    std::vector<std::string> CancelQueuedItems() override { return {}; }
-    std::string ActiveRecordSelectionId() override { return {}; }
-    void ResetInMemoryState() override {}
-};
-
-struct QuietParticipant : ClearParticipant {
-    std::string CancelActiveTurn() override { return {}; }
-    std::vector<ChildClosure> CancelActiveChildren() override { return {}; }
-    std::vector<std::string> CancelQueuedItems() override { return {}; }
-    std::string ActiveRecordSelectionId() override { return {}; }
-    void ResetInMemoryState() override {}
 };
 
 }  // namespace
@@ -179,21 +299,15 @@ TEST_CASE("崩溃点: 崩在第 2 步后收口半路——旧账补封,新账续
     CrashFixture fixture("step3");
     const std::string old_id = fixture.old_id;
     const std::filesystem::path old_dir = fixture.old_dir;
+    const std::string new_id = fixture.new_id;
+    const std::filesystem::path new_dir = fixture.new_dir;
 
-    // 崩:requested + clear_requested 已 durable,收口没跑。
-    ExplodingParticipant exploding;
-    CHECK_THROWS_AS(fixture.manager->Clear(ClearRequest{}, &exploding), std::runtime_error);
-    const std::filesystem::path workspaces = fixture.manager->workspace_dir();
-    std::string new_id;
+    // 崩点即手植点:requested + clear_requested 已 durable,收口没跑。
     {
         const MainJournalFacts facts = ScanStreamFacts(old_dir / "main.jsonl");
         REQUIRE(facts.clear_requested);
-        new_id = facts.clear_requested_next_session_id;
+        REQUIRE(facts.clear_requested_next_session_id == new_id);
     }
-    const std::filesystem::path new_dir =
-        workspaces / "sessions" / std::filesystem::path(new_id);
-    fixture.child.reset();     // 子流句柄也放干净
-    fixture.manager.reset();  // "进程"死透:句柄全放
 
     // 重开:恢复器续办。
     FakeClock clock2;
@@ -248,7 +362,9 @@ TEST_CASE("崩溃点: 崩在第 2 步后收口半路——旧账补封,新账续
 
 namespace {
 
-// 跑完整场 clear 再"倒带"出各崩溃点(第 4/5/6/7 步之间的盘上状态)。
+// 手植一场"clear 八步办完"的盘上终局,再"倒带"出各崩溃点(第 4/5/6/7
+// 步之间的盘上状态)。旧账封口两枚、新账开张两枚,payload 照生产 Clear
+// 逐键抄;净场(无活动执行)封出来是 clean closed。
 struct RewoundClear {
     std::filesystem::path old_dir;
     std::filesystem::path new_dir;
@@ -258,16 +374,67 @@ struct RewoundClear {
 
     explicit RewoundClear(const char* tag) : root(MakeRoot(tag)) {
         FakeClock clock;
-        SessionManager manager(Opts(root), &clock);
-        auto* active = manager.LaunchSession().value_or(nullptr);
-        REQUIRE(active != nullptr);
-        old_id = active->session_id();
-        old_dir = active->session_dir();
-        QuietParticipant participant;
-        const ClearOutcome outcome = manager.Clear(ClearRequest{}, &participant);
-        REQUIRE(outcome.error_code.empty());
-        new_id = outcome.new_session_id;
-        new_dir = manager.active()->session_dir();
+        const SessionManagerOptions options = Opts(root);
+        auto room = TrajectoryDirectory::CreateWorkspace(options.workspaces_root,
+                                                         options.identity, clock.WallMs());
+        REQUIRE(room.has_value());
+        const std::string& workspace_key = options.identity.workspace_key;
+
+        // 旧场:干净活账,一路办到八步走完。
+        old_id = "20260924-110001-R00001";
+        PlantedMain old = PlantMainSession(options, workspace_key, &clock, old_id, "main-0001");
+        old_dir = old.directory.session_dir();
+        SetSessionStatus(old_dir, "running");
+
+        new_id = "20260924-110002-R00002";
+        new_dir = PlantPreparingSession(options, workspace_key, &clock, new_id, "main-0002",
+                                        old_id);
+        const std::string boundary_operation_id = "20260924-110003-R00003";
+        const std::string requested_event_id =
+                PlantClearRequested(&*old.main, new_id, boundary_operation_id);
+
+        // 第 3/4 步:无活动可收,run terminal + session.ended 封链(净场 clean)。
+        REQUIRE(old.main->FinishRun(EventKind::RunCompleted, "clear", Durability::PowerLoss)
+                        .status == RecordReceipt::Status::Committed);
+        const auto ended = old.main->EndSession("clear", new_id, "clean", Durability::PowerLoss);
+        REQUIRE(ended.status == RecordReceipt::Status::Committed);
+
+        // 第 5 步:旧 session.json 转 closed。
+        SetSessionStatus(old_dir, "closed");
+
+        // 第 6 步:新 main 首两条——run.started 反指旧终态,跨 session
+        // completed 反指旧 requested。
+        const TrajectoryDirectory new_directory = TrajectoryDirectory::OpenExisting(new_dir);
+        auto new_main =
+                TrajectoryRecorder::Start(new_directory.main_stream_path(),
+                                          new_directory.artifacts_root(),
+                                          PlantMainScope(workspace_key, new_id, "main-0002"),
+                                          PlantRecorderOptions(), &clock);
+        REQUIRE(new_main.has_value());
+        nlohmann::json start_extra;
+        start_extra["start_reason"] = "clear";
+        start_extra["previous_session_id"] = old_id;
+        start_extra["caused_by_event_ref"] =
+                EventRef{old_id, ended.event_id, ended.event_hash}.ToJson();
+        REQUIRE(new_main->WriteRunStarted(start_extra, Durability::PowerLoss).status ==
+                RecordReceipt::Status::Committed);
+
+        RecordRequest completed;
+        completed.kind = EventKind::ControlCommandCompleted;
+        completed.scope = new_main->base_scope();
+        completed.scope.actor = Actor::User;
+        completed.scope.origin = Origin::ExternalUser;
+        completed.payload["command_id"] = "cmd-clear-0001";
+        completed.payload["status"] = "completed";
+        completed.payload["qualified_requested_ref"] =
+                nlohmann::json{{"session_id", old_id}, {"event_id", requested_event_id}};
+        completed.payload["boundary_operation_id"] = boundary_operation_id;
+        completed.links.correlation_id = boundary_operation_id;
+        REQUIRE(new_main->Record(completed, Durability::PowerLoss).status ==
+                RecordReceipt::Status::Committed);
+
+        // 第 7 步:新 session.json 转 running。八步办完,等各案倒带。
+        SetSessionStatus(new_dir, "running");
     }
 
     void RewindOldStatus(const std::string& status) { SetSessionStatus(old_dir, status); }
@@ -390,11 +557,7 @@ TEST_CASE("崩溃点: 崩在第 7 步前——只补 session.json,不添事件")
 
 TEST_CASE("策略 AbortEmptyPreparing: 空 preparing 清账,tombstone 齐全") {
     CrashFixture fixture("abort", /*with_child=*/false);
-    const std::filesystem::path workspace = fixture.manager->workspace_dir();
-    ExplodingParticipant exploding;
-    CHECK_THROWS_AS(fixture.manager->Clear(ClearRequest{}, &exploding), std::runtime_error);
-    fixture.manager.reset();
-
+    const std::filesystem::path workspace = fixture.workspace;
     FakeClock clock;
     SessionManager recovered(Opts(fixture.root), &clock);
     const WorkspaceRecoveryReport report =
@@ -424,12 +587,15 @@ TEST_CASE("孤儿 preparing(开场半路崩): 恢复器清账 + tombstone") {
     FakeClock clock;
     SessionManagerOptions options = Opts(root);
     {
-        // 只办到第 1 步:目录 + preparing manifest,没有 main.jsonl。
+        // 开房:LaunchSession 顺手把 workspace 落成。如今它产的是 v3 场,
+        // 恢复器对 v3 卷原样保留,不掺和本案。
         SessionManager manager(options, &clock);
         auto* active = manager.LaunchSession().value_or(nullptr);
         REQUIRE(active != nullptr);
     }
-    // 直接手植一只空 preparing(不带锁):launch 崩在锁之后、开张之前。
+    // 手植一只空 preparing v2 目录(不带锁):旧盘上 v2 launch 崩在锁之后、
+    // 开账之前的遗物——V3-LEGACY-01 后 v2 新建写口退役,这种孤儿只剩
+    // 旧盘有,新写口产不出。
     SessionManifest manifest;
     manifest.schema_version = 1;
     manifest.workspace_key = lubancode::workspace::MakeFallbackIdentity(options.workspace_root).workspace_key;
@@ -461,4 +627,43 @@ TEST_CASE("孤儿 preparing(开场半路崩): 恢复器清账 + tombstone") {
         ReadSessionTombstone(recovered.workspace_dir() / "tombstones", manifest.session_id);
     REQUIRE(tombstone.has_value());
     CHECK(tombstone->reason == "aborted_before_start");
+}
+
+TEST_CASE("v3 场过恢复器: 原样保留,不误办") {
+    const std::filesystem::path root = MakeRoot("v3keep");
+    std::string v3_id;
+    std::filesystem::path v3_stream;
+    {
+        FakeClock clock;
+        SessionManager manager(Opts(root), &clock);
+        auto* active = manager.LaunchSession().value_or(nullptr);
+        REQUIRE(active != nullptr);
+        REQUIRE(active->is_v3());
+        v3_id = active->session_id();
+        v3_stream = active->directory.v3_stream_path();
+        NullClearParticipant participant;
+        REQUIRE(manager.Close(CloseRequest{}, &participant).error_code.empty());
+    }
+
+    // v2 状态机的恢复器不碰 v3 卷:不清账、不续办、不收养,盘上一根毛
+    // 不动(v3 自己的崩溃恢复另有归属)。
+    FakeClock clock;
+    SessionManager recovered(Opts(root), &clock);
+    const WorkspaceRecoveryReport report = recovered.RecoverWorkspace();
+    CHECK(std::filesystem::exists(v3_stream));
+    CHECK(report.adopted_session_id.empty());
+    CHECK(recovered.active() == nullptr);
+    CHECK_FALSE(
+        ReadSessionTombstone(recovered.workspace_dir() / "tombstones", v3_id).has_value());
+    bool saw_keep = false;
+    for (const SessionRecoveryEntry& entry : report.sessions) {
+        if (entry.session_id != v3_id) {
+            continue;
+        }
+        saw_keep = true;
+        CHECK_FALSE(entry.aborted_before_start);
+        CHECK_FALSE(entry.clear_continued);
+        CHECK_FALSE(entry.session_json_corrected);
+    }
+    CHECK(saw_keep);
 }

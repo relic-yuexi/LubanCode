@@ -49,17 +49,6 @@ std::optional<TrajectorySessionLedger> OpenLedger(const std::filesystem::path& r
     return std::move(*ledger);
 }
 
-std::string MainRunIdOf(const TrajectorySessionLedger& ledger) {
-    const auto lines = trajectory::ReadJournalLines(ledger.session_dir() / "main.jsonl");
-    if (!lines.has_value() || lines->empty()) {
-        return std::string();
-    }
-    const auto parsed = nlohmann::json::parse(lines->front(), nullptr, false);
-    if (parsed.is_discarded()) {
-        return std::string();
-    }
-    return parsed.value("run_id", std::string());
-}
 
 std::vector<std::string> KindsOf(const std::filesystem::path& stream) {
     std::vector<std::string> kinds;
@@ -76,20 +65,6 @@ std::vector<std::string> KindsOf(const std::filesystem::path& stream) {
 }
 
 // subagents/ 下 *.jsonl 正式 stream 的文件名清单。
-std::vector<std::string> SubagentJsonlFiles(const TrajectorySessionLedger& ledger) {
-    std::vector<std::string> names;
-    std::error_code ec;
-    const auto dir = ledger.session_dir() / "subagents";
-    if (!std::filesystem::exists(dir, ec)) {
-        return names;
-    }
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (entry.is_regular_file(ec) && entry.path().extension() == ".jsonl") {
-            names.push_back(entry.path().filename().generic_string());
-        }
-    }
-    return names;
-}
 
 api::Message UserMessage(const std::string& text) {
     api::Message message;
@@ -140,155 +115,92 @@ agent::ToolTraceEvent TraceEvent(agent::ToolTraceEventKind kind, const std::stri
 // 5.1 SpawnSubagent fault injection
 // ---------------------------------------------------------------------------
 
-TEST_CASE("SpawnSubagent:run.started 被 schema 类拒绝——结构化失败,无 0 字节 .jsonl") {
-    const auto root = FreshDir("lubancode-traj-spawn-reject");
-    auto ledger = OpenLedger(root, [] { return std::string("schema.payload_missing_field"); });
-    REQUIRE(ledger.has_value());
+// (退役,V3-LEGACY-01)原此处有"SpawnSubagent:run.started 被 schema 类拒绝"案:env 注入 0 开 v2 父场,经
+// ledger 级 SpawnSubagent 的 v2 故障钩子/占名术验失败分档与凭据清理。写口
+// 退役后 v2 父场造不出(v2 故障钩子只挂 v2 派工路, SpawnSubagentV3 无此
+// 注入口;占名术亦随 subagents/<run_id>.jsonl 平铺布局退役)——该前提在
+// 公开口径下无法再造。v3 派工的五步失败语义(fail closed/无残留)由
+// SpawnSubagentV3 的生产代码与 v3 子账册守;旧盘 v2 活场的派工故障回归
+// 随恢复收养夹具另立(旧档消费路径)。
 
-    const auto child = ledger->SpawnSubagent("toolu-1", "读文件并数行数");
-    REQUIRE_FALSE(child.has_value());
-    const SubagentSpawnFailure& failure = child.error();
-    CHECK(failure.stage == "run_started");
-    CHECK(failure.error_code.find("trajectory.subagent_run_started") == 0);
-    CHECK(failure.error_code.find("schema.payload_missing_field") != std::string::npos);
-    CHECK(failure.reserved_run_id.rfind("agent-1-", 0) == 0);
-    CHECK_FALSE(failure.retryable);  // schema 类拒绝不可重试
+// (退役,V3-LEGACY-01)原此处有"SpawnSubagent:run.started I/O 失败(目标名被占)"案:env 注入 0 开 v2 父场,经
+// ledger 级 SpawnSubagent 的 v2 故障钩子/占名术验失败分档与凭据清理。写口
+// 退役后 v2 父场造不出(v2 故障钩子只挂 v2 派工路, SpawnSubagentV3 无此
+// 注入口;占名术亦随 subagents/<run_id>.jsonl 平铺布局退役)——该前提在
+// 公开口径下无法再造。v3 派工的五步失败语义(fail closed/无残留)由
+// SpawnSubagentV3 的生产代码与 v3 子账册守;旧盘 v2 活场的派工故障回归
+// 随恢复收养夹具另立(旧档消费路径)。
 
-    // 错误码没吞:recent_io_errors 里留着阶段与码。
-    const auto errors = ledger->recent_io_errors();
-    REQUIRE_FALSE(errors.empty());
-    bool seen = false;
-    for (const std::string& note : errors) {
-        if (note.find("subagent.start_failed:run_started") != std::string::npos &&
-            note.find("schema.payload_missing_field") != std::string::npos) {
-            seen = true;
-        }
-    }
-    CHECK(seen);
+// (退役,V3-LEGACY-01)原此处有"SpawnSubagent:注入 io.append_failed"案:env 注入 0 开 v2 父场,经
+// ledger 级 SpawnSubagent 的 v2 故障钩子/占名术验失败分档与凭据清理。写口
+// 退役后 v2 父场造不出(v2 故障钩子只挂 v2 派工路, SpawnSubagentV3 无此
+// 注入口;占名术亦随 subagents/<run_id>.jsonl 平铺布局退役)——该前提在
+// 公开口径下无法再造。v3 派工的五步失败语义(fail closed/无残留)由
+// SpawnSubagentV3 的生产代码与 v3 子账册守;旧盘 v2 活场的派工故障回归
+// 随恢复收养夹具另立(旧档消费路径)。
 
-    // P0-C:正式 .jsonl 只在 run.started 提交事务里创建——一枚都没有。
-    CHECK(SubagentJsonlFiles(*ledger).empty());
-    // 失败事实可进父账(P0-B):typed 事件落得下。
-    ledger->NoteSubagentStartFailed(failure, std::string(), "toolu-1", std::string());
-    const auto main_kinds = KindsOf(ledger->session_dir() / "main.jsonl");
-    REQUIRE(std::find(main_kinds.begin(), main_kinds.end(), "subagent.run.start_failed") !=
-            main_kinds.end());
-}
+// (退役,V3-LEGACY-01)原此处有"SpawnSubagent:目标名被 0 字节文件占住"案:env 注入 0 开 v2 父场,经
+// ledger 级 SpawnSubagent 的 v2 故障钩子/占名术验失败分档与凭据清理。写口
+// 退役后 v2 父场造不出(v2 故障钩子只挂 v2 派工路, SpawnSubagentV3 无此
+// 注入口;占名术亦随 subagents/<run_id>.jsonl 平铺布局退役)——该前提在
+// 公开口径下无法再造。v3 派工的五步失败语义(fail closed/无残留)由
+// SpawnSubagentV3 的生产代码与 v3 子账册守;旧盘 v2 活场的派工故障回归
+// 随恢复收养夹具另立(旧档消费路径)。
 
-TEST_CASE("SpawnSubagent:run.started I/O 失败(目标名被占)——无残留,retryable,verify 过") {
-    const auto root = FreshDir("lubancode-traj-spawn-iofail");
-    auto ledger = OpenLedger(root);
-    REQUIRE(ledger.has_value());
-    const std::string main_run_id = MainRunIdOf(*ledger);
-    REQUIRE_FALSE(main_run_id.empty());
-
-    // 占名:同名的"目录"让独占创建必败(io.create_failed)。
-    const std::string reserved = "agent-1-" + main_run_id;
-    const auto jam = ledger->session_dir() / "subagents" / (reserved + ".jsonl");
-    std::error_code ec;
-    std::filesystem::create_directories(jam, ec);
-    REQUIRE(std::filesystem::is_directory(jam));
-
-    const auto child = ledger->SpawnSubagent("toolu-1", "读文件并数行数");
-    REQUIRE_FALSE(child.has_value());
-    CHECK(child.error().stage == "run_started");
-    CHECK(child.error().error_code.find("io.create_failed") != std::string::npos);
-    CHECK(child.error().retryable);  // I/O 类失败可重试
-    CHECK(child.error().reserved_run_id == reserved);
-
-    // 所有权凭据:目录不是"未开卷残留",清理不碰它;也没有别的 .jsonl 诞生。
-    CHECK(std::filesystem::is_directory(jam));
-    CHECK(SubagentJsonlFiles(*ledger).empty());
-
-    // P0-B:失败事实进父账 typed 事件;io 细节里的绝对路径按 <session_dir>
-    // 占位符 redact,不抄敏感路径。(turn 绑定由整合 2 的真实接线覆盖——
-    // 这里 main 没开轮,turn_id 如实不带。)
-    ledger->NoteSubagentStartFailed(child.error(), std::string(), "toolu-1", std::string());
-    const auto lines = trajectory::ReadJournalLines(ledger->session_dir() / "main.jsonl");
-    REQUIRE(lines.has_value());
-    bool saw_event = false;
-    for (const std::string& line : *lines) {
-        const auto parsed = nlohmann::json::parse(line, nullptr, false);
-        if (parsed.is_discarded() || parsed.value("kind", std::string()) != "subagent.run.start_failed") {
-            continue;
-        }
-        saw_event = true;
-        const auto& payload = parsed["payload"];
-        CHECK(payload["stage"] == "run_started");
-        CHECK(payload["error_code"].get<std::string>().find("io.create_failed") != std::string::npos);
-        CHECK(payload["parent_run_id"] == main_run_id);  // 空串解析回 main_run_id
-        CHECK(payload["parent_call_id"] == "toolu-1");
-        CHECK(payload["reserved_run_id"] == reserved);
-        CHECK(payload["stream_ref"] == "subagents/" + reserved + ".jsonl");
-        CHECK(payload["retryable"] == true);
-        CHECK_FALSE(parsed.contains("turn_id"));
-        const std::string detail = payload.value("detail", std::string());
-        CHECK(detail.find("<session_dir>") != std::string::npos);
-        CHECK(detail.find(ledger->session_dir().generic_string()) == std::string::npos);
-    }
-    CHECK(saw_event);
-
-    // 占名的是目录,不是正式 stream——session verify 照样过。
-    const auto report = ledger->VerifySession();
-    CHECK(report.error_code.empty());
-}
-
-TEST_CASE("SpawnSubagent:注入 io.append_failed(flush 类)——IoFailed 收口,retryable") {
-    const auto root = FreshDir("lubancode-traj-spawn-flushfail");
-    auto ledger = OpenLedger(root, [] { return std::string("io.append_failed"); });
-    REQUIRE(ledger.has_value());
-
-    const auto child = ledger->SpawnSubagent("toolu-1", "读文件并数行数");
-    REQUIRE_FALSE(child.has_value());
-    CHECK(child.error().stage == "run_started");
-    CHECK(child.error().error_code.find("io.append_failed") != std::string::npos);
-    CHECK(child.error().retryable);  // append/flush 类失败可重试(schema 类不可)
-    // 无正式子账诞生,verify 照过。
-    CHECK(SubagentJsonlFiles(*ledger).empty());
-    const auto report = ledger->VerifySession();
-    CHECK(report.error_code.empty());
-}
-
-TEST_CASE("SpawnSubagent:目标名被 0 字节文件占住——残留按凭据清走,不冒充 Journal") {
-    const auto root = FreshDir("lubancode-traj-spawn-zerobyte");
-    auto ledger = OpenLedger(root);
-    REQUIRE(ledger.has_value());
-    const std::string main_run_id = MainRunIdOf(*ledger);
-    REQUIRE_FALSE(main_run_id.empty());
-    // 真实 I/O 失败形状:预留名上已有一枚 0 字节文件,独占创建必败。
-    const std::string reserved = "agent-1-" + main_run_id;
-    const auto jam = ledger->session_dir() / "subagents" / (reserved + ".jsonl");
-    std::error_code ec;
-    std::filesystem::create_directories(jam.parent_path(), ec);
-    { std::ofstream file(jam, std::ios::binary); }
-    REQUIRE(std::filesystem::exists(jam));
-
-    const auto child = ledger->SpawnSubagent("toolu-1", "读文件并数行数");
-    REQUIRE_FALSE(child.has_value());
-    CHECK(child.error().stage == "run_started");
-    CHECK(child.error().error_code.find("io.create_failed") != std::string::npos);
-    CHECK(child.error().retryable);
-    // 所有权凭据清理:0 字节残留被 fail_out 清走,subagents/ 不剩任何 .jsonl。
-    CHECK_FALSE(std::filesystem::exists(jam));
-    CHECK(SubagentJsonlFiles(*ledger).empty());
-    const auto report = ledger->VerifySession();
-    CHECK(report.error_code.empty());
-}
-
-TEST_CASE("SpawnSubagent:正常开卷——文件只在 run.started 之后存在;0 字节残留按凭据清") {
+TEST_CASE("SpawnSubagent:正常开卷(v3 五步)——子账目录立得住;0 字节残留按凭据清") {
     const auto root = FreshDir("lubancode-traj-spawn-normal");
     auto ledger = OpenLedger(root);
     REQUIRE(ledger.has_value());
 
     const auto child = ledger->SpawnSubagent("toolu-1", "读文件并数行数");
     REQUIRE(child.has_value());
-    const auto path = ledger->session_dir() / "subagents" / ((*child)->run_id() + ".jsonl");
-    REQUIRE(std::filesystem::exists(path));
-    const auto report = trajectory::VerifyJournalFile(path);
-    CHECK(report.ok);
-    CHECK(report.events >= 1);  // run.started 已提交,不是空账
+    // V3-LEGACY-01 后父场唯一 v3:子账是 subagents/<childSessionId>/
+    // <childSessionId>.jsonl(首行 system,五步开卷)。枚举定位。
+    std::filesystem::path path;
+    {
+        std::error_code walk_ec;
+        for (const auto& entry :
+             std::filesystem::recursive_directory_iterator(ledger->session_dir() / "subagents",
+                                                           walk_ec)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".jsonl") {
+                path = entry.path();
+            }
+        }
+    }
+    REQUIRE_FALSE(path.empty());
+    {
+        std::ifstream head(path, std::ios::binary);
+        std::string first_line;
+        std::getline(head, first_line);
+        if (!first_line.empty() && first_line.back() == '\r') first_line.pop_back();
+        const auto first = nlohmann::json::parse(first_line, nullptr, false);
+        REQUIRE_FALSE(first.is_discarded());
+        CHECK(first.value("type", std::string()) == "message");
+        CHECK(first.at("message").value("role", std::string()) == "system");
+    }
+    // 父账:subagent.spawn.requested 已落(派工事实,childRef 指子账路径)。
+    bool saw_spawn_requested = false;
+    {
+        const std::filesystem::path main_stream = ledger->session_dir() /
+            std::filesystem::path(ledger->session_id() + ".jsonl");
+        std::ifstream in(main_stream, std::ios::binary);
+        REQUIRE(in.is_open());
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const auto row = nlohmann::json::parse(line, nullptr, false);
+            if (row.is_discarded() || row.value("type", std::string()) != "event" ||
+                row.value("kind", std::string()) != "subagent.spawn.requested") {
+                continue;
+            }
+            saw_spawn_requested = true;
+        }
+    }
+    CHECK(saw_spawn_requested);
 
-    // DiscardUncommittedStream 的所有权凭据:0 字节才清,有内容/目录不碰。
+    // DiscardUncommittedStream 的所有权凭据:0 字节才清,有内容/目录不碰
+    //(格式无关,原样保留)。
     const auto zero = ledger->session_dir() / "subagents" / "zero.jsonl";
     { std::ofstream file(zero, std::ios::binary); }
     CHECK(trajectory::DiscardUncommittedStream(zero));

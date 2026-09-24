@@ -22,6 +22,7 @@
 
 #include "platform/paths.hpp"
 #include "trajectory/journal.hpp"
+#include "trajectory/recorder.hpp"  // PlantV2Source:真 recorder 写 v2 源档
 #include "trajectory/replay.hpp"
 #include "trajectory/session_index.hpp"
 #include "trajectory/session_manager.hpp"
@@ -84,17 +85,18 @@ std::string PlantV3Session(const std::filesystem::path& sessions_dir, const char
     return session_id;
 }
 
-// 开一场 v2 脚手架场只为把 workspace 目录建出来;回 sessions/ 根与本场 id。
+// 开一场脚手架场把 workspace 目录建出来;回 sessions/ 根与本场 id。
+// V3-LEGACY-01 后新建唯一 v3,这场也是 v3——v2 形状一律走 PlantV2Source。
 struct Scaffold {
     std::filesystem::path root;
     std::unique_ptr<SessionManager> manager;
-    std::string v2_id;
+    std::string open_id;
 
     explicit Scaffold(const char* tag) : root(MakeRoot(tag)) {
         manager = std::make_unique<SessionManager>(Opts(root));
         auto* active = manager->LaunchSession().value_or(nullptr);
         REQUIRE(active != nullptr);
-        v2_id = active->session_id();
+        open_id = active->session_id();
         sessions_dir = active->session_dir().parent_path();
         NullClearParticipant participant;
         REQUIRE(manager->Close({"exit"}, &participant).error_code.empty());
@@ -102,6 +104,51 @@ struct Scaffold {
 
     std::filesystem::path sessions_dir;
 };
+
+// 手植 v2 源场:场目录+session.json 走 CreateSession,主账由真 recorder 写
+// 封口链(run.started → run.completed → session.ended)——v2 源只能盘上
+// 旧档夹具,读兼容面(fork 迁移)不动。
+class PlantClock : public RecorderClock {
+public:
+    std::int64_t WallMs() const override { return 1760000000000LL; }
+    std::int64_t MonotonicNs() const override { return 0LL; }
+};
+
+std::string PlantV2Source(const Scaffold& scaffold, const std::string& session_id) {
+    SessionManifest manifest;
+    manifest.schema_version = 2;
+    manifest.workspace_key = scaffold.manager->workspace_key();
+    manifest.session_id = session_id;
+    manifest.main_run_id = "main-plant-1";
+    manifest.run_kind = RunKindName(RunKind::MainSession);
+    manifest.start_reason = "process_launch";
+    manifest.status = SessionStatusName(SessionStatus::Closed);
+    manifest.created_at_ms = 1760000000000LL;
+    manifest.lubancode_version = "0.26.238-test";
+    manifest.event_schema_version = 2;
+    auto directory = TrajectoryDirectory::CreateSession(Opts(scaffold.root).workspaces_root,
+                                                        manifest.workspace_key, manifest);
+    REQUIRE(directory.has_value());
+    PlantClock clock;
+    EventScope scope;
+    scope.workspace_key = manifest.workspace_key;
+    scope.session_id = session_id;
+    scope.run_id = manifest.main_run_id;
+    scope.run_kind = RunKind::MainSession;
+    scope.visibility = {Visibility::HostOnly};
+    auto recorder = TrajectoryRecorder::Start(directory->main_stream_path(),
+                                              directory->artifacts_root(), scope,
+                                              RecorderOptions{}, &clock);
+    REQUIRE(recorder.has_value());
+    REQUIRE(recorder->WriteRunStarted(nlohmann::json{{"start_reason", "process_launch"}},
+                                      Durability::PowerLoss)
+                 .status == RecordReceipt::Status::Committed);
+    REQUIRE(recorder->FinishRun(EventKind::RunCompleted, "exit", Durability::PowerLoss).status ==
+            RecordReceipt::Status::Committed);
+    REQUIRE(recorder->EndSession("exit", std::nullopt, "clean", Durability::PowerLoss).status ==
+            RecordReceipt::Status::Committed);
+    return session_id;
+}
 
 std::vector<nlohmann::json> Events(const std::filesystem::path& stream) {
     const auto lines = ReadJournalLines(stream);
@@ -129,17 +176,17 @@ std::string ReadFileBytes(const std::filesystem::path& path) {
 TEST_CASE("清单: LatestResumableSessionId 认 v3 场,识别不改盘、不迁移旧档") {
     Scaffold scaffold("list");
     const std::string v3_id = PlantV3Session(scaffold.sessions_dir, "compact_full.jsonl");
-    // 默认源取"最近一场可恢复":2027 的 v2 脚手架场比 2026-09-10 的 v3
-    // 场新——拿一只没挂 active 的 manager 问(Close 后 active 残留的场,
-    // 本 manager 自己会跳过)。
+    // 默认源取"最近一场可恢复":脚手架场(V3-LEGACY-01 后也是 v3,时间
+    // 戳新)比 2026-09-10 的手植 v3 场新——拿一只没挂 active 的 manager 问
+    //(Close 后 active 残留的场,本 manager 自己会跳过)。
     {
         SessionManager picker(Opts(scaffold.root));
-        CHECK(picker.LatestResumableSessionId() == scaffold.v2_id);
+        CHECK(picker.LatestResumableSessionId() == scaffold.open_id);
     }
-    // v2 场退场(Close 已放锁,直删目录):v3 场顶上。
+    // 脚手架场退场(Close 已放锁,直删目录):手植 v3 场顶上。
     std::error_code ec;
     std::filesystem::remove_all(
-        scaffold.sessions_dir / platform::Utf8ToPath(scaffold.v2_id), ec);
+        scaffold.sessions_dir / platform::Utf8ToPath(scaffold.open_id), ec);
     {
         SessionManager picker(Opts(scaffold.root));
         CHECK(picker.LatestResumableSessionId() == v3_id);
@@ -444,8 +491,17 @@ TEST_CASE("格式探针: 双账冲突/坏首行/异版本各有稳定状态,resu
     CHECK(probe.status == v3::V3StreamProbe::Status::BadFirstLine);
     probe = v3::ProbeV3SessionStream(old_dir);
     CHECK(probe.status == v3::V3StreamProbe::Status::NotV3Schema);
-    // 正主:v2 布局与 v3 流照旧认得。
-    probe = v3::ProbeV3SessionStream(scaffold.sessions_dir / platform::Utf8ToPath(scaffold.v2_id));
+    // 正主:v2 布局与 v3 流照旧认得——v2 布局手植(main.jsonl 在即 v2,
+    // 新建已造不出,识别读侧不动)。
+    const std::string v2_layout_id = "20260912-170004-V2LAYT";
+    const std::filesystem::path v2_layout_dir =
+        scaffold.sessions_dir / platform::Utf8ToPath(v2_layout_id);
+    std::filesystem::create_directories(v2_layout_dir, ec);
+    {
+        std::ofstream v2_file(v2_layout_dir / "main.jsonl", std::ios::binary);
+        v2_file << "{}\n";
+    }
+    probe = v3::ProbeV3SessionStream(v2_layout_dir);
     CHECK(probe.status == v3::V3StreamProbe::Status::V2Layout);
     const std::string v3_id = PlantV3Session(scaffold.sessions_dir, "startup.jsonl");
     probe = v3::ProbeV3SessionStream(scaffold.sessions_dir / platform::Utf8ToPath(v3_id));
@@ -467,12 +523,14 @@ TEST_CASE("格式探针: 双账冲突/坏首行/异版本各有稳定状态,resu
     CHECK(std::filesystem::file_size(conflict_dir / "main.jsonl") == before_bytes);
 }
 
-TEST_CASE("v2 源行为不变: 照旧 fork 迁移开新场(FoldStreamReplay),不标 v3") {
+TEST_CASE("v2 源行为不变: 照旧 fork 迁移开新场(如今新场唯一 v3),源账不动") {
     Scaffold scaffold("v2only");
-    // 只留 v2 场(不种 v3):走原 v2 回路(fork 迁移,v2 账写不动)。
+    // v2 源手植(封口干净的空转场):走 v2 读回路折叠,v2 账写不动,
+    // fork 新场另开——V3-LEGACY-01 后新场唯一 v3。
+    const std::string source_id = PlantV2Source(scaffold, "20260924-140000-V2FORK");
     SessionManager manager(Opts(scaffold.root));
     ResumeRequest request;
-    request.source_session_id = scaffold.v2_id;
+    request.source_session_id = source_id;
     const ResumeOutcome outcome = manager.ResumeAsNew(request);
     CAPTURE(outcome.error_code);
     CAPTURE(outcome.message);
@@ -482,19 +540,42 @@ TEST_CASE("v2 源行为不变: 照旧 fork 迁移开新场(FoldStreamReplay),不
     CHECK(outcome.replay_version == std::to_string(kReplayProjectionVersion));
     CHECK(outcome.source_verified);
     CHECK(outcome.new_session_running);
-    // fork 语义保留:新场另有其 id(与 v3 源的续接落点相区别),
-    // run.started 带 resumed_from_session_id(列表"(续)"标记的 v2 来路)。
-    CHECK(outcome.new_session_id != scaffold.v2_id);
+    // fork 语义保留:新场另有其 id(与 v3 源的续接落点相区别)。
+    CHECK(outcome.new_session_id != source_id);
     ActiveSession* active = manager.active();
     REQUIRE(active != nullptr);
-    const auto events = Events(active->directory.main_stream_path());
-    REQUIRE(events.size() >= 2);
-    CHECK(events[0].at("kind").get<std::string>() == "run.started");
-    CHECK(events[0].at("payload").at("resumed_from_session_id").get<std::string>() ==
-          scaffold.v2_id);
-    CHECK(events[1].at("kind").get<std::string>() == "resume.source.attached");
-    // v2 空转场的有效对话为空(user 输入没写过,脚手架只开了张)——不冒充。
+    REQUIRE(active->is_v3());
+    const std::filesystem::path new_stream =
+        active->session_dir() / platform::Utf8ToPath(active->session_id() + ".jsonl");
+    CHECK(std::filesystem::exists(new_stream));
+    CHECK_FALSE(std::filesystem::exists(active->session_dir() / "main.jsonl"));
+    // resume.source.attached 五键指源末行(§4.10),列表"(续)"的 v2 来路。
+    bool saw_attached = false;
+    {
+        std::ifstream in(new_stream, std::ios::binary);
+        REQUIRE(in.is_open());
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const auto row = nlohmann::json::parse(line, nullptr, false);
+            if (row.is_discarded() || row.value("type", std::string()) != "event" ||
+                row.value("kind", std::string()) != "resume.source.attached") {
+                continue;
+            }
+            saw_attached = true;
+            CHECK(row.at("payload").at("sourceRef").value("sessionId", std::string()) ==
+                  source_id);
+        }
+    }
+    CHECK(saw_attached);
+    // v2 空转源的有效对话为空(user 输入没写过)——不冒充。
     CHECK(outcome.effective_conversation.empty());
+    // v2 源账写不动:主账字节不再变。
+    const auto source_stream = scaffold.sessions_dir / platform::Utf8ToPath(source_id) /
+                               "main.jsonl";
+    const auto source_bytes = std::filesystem::file_size(source_stream);
+    CHECK(source_bytes > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -506,7 +587,7 @@ TEST_CASE("session_index: v3 场进列表,摘要如实,坏尾标 damaged") {
     const std::string v3_id = PlantV3Session(scaffold.sessions_dir, "compact_full.jsonl");
     std::error_code ec;
     std::filesystem::remove_all(
-        scaffold.sessions_dir / platform::Utf8ToPath(scaffold.v2_id), ec);
+        scaffold.sessions_dir / platform::Utf8ToPath(scaffold.open_id), ec);
 
     SessionIndexQuery query;
     query.current_workspace_key = scaffold.manager->workspace_key();

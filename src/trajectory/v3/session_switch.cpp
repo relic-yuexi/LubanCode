@@ -1,22 +1,29 @@
-// 新会话 v3 开关实现 + 接线点 2 的目录发现助手。接线点清单见
+// 新会话格式退役告警 + 接线点 2 的目录发现助手。接线点清单见
 // session_switch.hpp 头注。
 #include "trajectory/v3/session_switch.hpp"
 
 #include <ctime>
 #include <fstream>
 
+#include "platform/log_sink.hpp"
 #include "platform/paths.hpp"
 #include "trajectory/v3/envelope.hpp"
 
 namespace lubancode::trajectory::v3 {
 
-bool NewSessionV3WriteEnabled() {
-    // 2026-09-11 翻默认:判据四条全绿(v3 Continue 全家福、P2 读取侧矩阵、
-    // P3 显示侧吃上 HistoryTimeline、P4 wire 合同),端到端验收矩阵 25 行
-    // 209 断言全绿,D1/D2/D3 三缺陷修复合入——新会话默认写 v3 账。
-    // 显式逃生口:LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0 回 v2(过渡期保命)。
-    auto value = platform::GetEnvVar("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
-    return !value.has_value() || *value != "0";
+void WarnV2NewSessionRetired() {
+    // 2026-09-11 翻默认,2026-09-24 收口(V3-LEGACY-01):判据四条全绿
+    // (v3 Continue 全家福、P2 读取侧矩阵、P3 显示侧吃上 HistoryTimeline、
+    // P4 wire 合同)后,旧逃生口退役——v3 是唯一新建格式。显式 "0" 不再
+    // 新建 v2,只记这条迁移告警,建场照走 v3;盘上已有 v2 档(main.jsonl)
+    // 照常读取。每次建场现读环境变量,不缓存。
+    const auto value = platform::GetEnvVar("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+    if (value.has_value() && *value == "0") {
+        platform::LogSink::Instance().Warn(
+            "trajectory",
+            "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0 已退役: 新会话一律写 v3 账, "
+            "不再新建 v2(main.jsonl); 旧 v2 档照常读取");
+    }
 }
 
 std::optional<nlohmann::json> ReadV3FirstLine(const std::filesystem::path& stream) {

@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "platform/paths.hpp"          // Utf8ToPath(手植 v2 目录名,V3-LEGACY-01)
 #include "runtime/trajectory_history_view.hpp"
 #include "runtime/trajectory_session.hpp"
 #include "workspace/identity.hpp"
@@ -210,8 +211,19 @@ struct LedgerFixture {
         auto opened = lubancode::runtime::TrajectorySessionLedger::Open(options);
         REQUIRE(opened.has_value());
         ledger.emplace(std::move(*opened));
-        v2_id = ledger->session_id();
         sessions_dir = ledger->session_dir().parent_path();
+        // V3-LEGACY-01 后新建唯一 v3(活场即 v3):v2 布局只能手植旧档
+        //(main.jsonl 在即 v2),回落路的读侧识别不动。
+        v2_id = "20260924-150000-V2PAGE";
+        std::error_code v2_ec;
+        std::filesystem::create_directories(
+            sessions_dir / lubancode::platform::Utf8ToPath(v2_id), v2_ec);
+        {
+            std::ofstream v2_file(sessions_dir / lubancode::platform::Utf8ToPath(v2_id) /
+                                      "main.jsonl",
+                                  std::ios::binary);
+            v2_file << "{}\n";
+        }
         // v3 场种进同一 workspace 的 sessions/ 根(布局合同 §1.2)。
         const auto fixture = Fixture("compact_full.jsonl");
         std::error_code copy_ec;
@@ -274,14 +286,18 @@ TEST_CASE("账本分页: v3 场游标翻页,一路翻到头") {
 
 TEST_CASE("账本分页: v2 场与找不着的场给 nullopt(浮层走旧路)") {
     LedgerFixture fx("fallback");
-    // 活场是 v2(main.jsonl 在):nullopt,调用方照旧头尾截断。
+    // 手植 v2 场(main.jsonl 在):nullopt,调用方照旧头尾截断。
     CHECK_FALSE(fx.ledger->ReadTranscriptPage(fx.v2_id, std::nullopt, std::nullopt, 40)
                      .has_value());
     // 没这个场:nullopt(不是空页——v2 老路自己给空表)。
     CHECK_FALSE(fx.ledger->ReadTranscriptPage("20260101-000000-NOPE", std::nullopt,
                                               std::nullopt, 40)
                      .has_value());
-    // FindV3HistoryStream 的转发:v2 目录不给 v3 流。
-    CHECK_FALSE(FindV3HistoryStream(fx.ledger->session_dir()).has_value());
+    // FindV3HistoryStream 的转发:v2 目录不给 v3 流;活场(V3-LEGACY-01
+    // 后唯一 v3)与手植 v3 场都给。
+    CHECK_FALSE(FindV3HistoryStream(fx.sessions_dir /
+                                    lubancode::platform::Utf8ToPath(fx.v2_id))
+                    .has_value());
+    REQUIRE(FindV3HistoryStream(fx.ledger->session_dir()).has_value());
     REQUIRE(FindV3HistoryStream(fx.sessions_dir / "20260910-083000-V3FIX4").has_value());
 }

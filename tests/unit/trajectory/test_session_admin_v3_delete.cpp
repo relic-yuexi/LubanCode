@@ -26,6 +26,8 @@
 #include "api/types.hpp"
 #include "platform/paths.hpp"
 #include "runtime/trajectory_session.hpp"
+#include "trajectory/directory.hpp"  # 手植 v2 旧档夹具(V3-LEGACY-01)
+#include "trajectory/recorder.hpp"   # 手植 v2 旧档夹具
 #include "trajectory/session_manager.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
@@ -304,8 +306,9 @@ TEST_CASE("v3 删除门: 封口完好可删,tombstone 带实际末行 hash") {
     CHECK(tombstone->reason == "user_delete");
 }
 
-TEST_CASE("v2 老门回归: 未封口 main.jsonl 场仍拒删(一字不动)") {
-    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
+TEST_CASE("v2 老门回归: 未封口 main.jsonl 场(手植旧档)仍拒删(一字不动)") {
+    // V3-LEGACY-01 后 v2 场造不出:手植未封口 v2 旧档——真 recorder 只写
+    // run.started(无 terminal、无 session.ended),老门照判 unsealed。
     const auto root = FreshRoot("v2-unsealed");
     std::filesystem::path main_jsonl;
     std::string session_id;
@@ -313,11 +316,46 @@ TEST_CASE("v2 老门回归: 未封口 main.jsonl 场仍拒删(一字不动)") {
     {
         auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
         REQUIRE(ledger.has_value());
-        DriveTurn(*ledger, "v2 未封口的一轮");
-        main_jsonl = ledger->session_dir() / "main.jsonl";
-        REQUIRE(std::filesystem::exists(main_jsonl));
-        session_id = ledger->session_id();
         workspace_dir = WorkspaceDirOf(*ledger);
+        REQUIRE(ledger->CloseSession("exit").error_code.empty());
+        session_id = "20260924-170000-V2UNSL";
+        trajectory::SessionManifest manifest;
+        manifest.schema_version = 2;
+        manifest.workspace_key = ledger->workspace_key();
+        manifest.session_id = session_id;
+        manifest.main_run_id = "main-plant-1";
+        manifest.run_kind = trajectory::RunKindName(trajectory::RunKind::MainSession);
+        manifest.start_reason = "process_launch";
+        manifest.status = trajectory::SessionStatusName(trajectory::SessionStatus::Running);
+        manifest.created_at_ms = 1760000000000LL;
+        manifest.lubancode_version = "test";
+        manifest.event_schema_version = 2;
+        auto directory = trajectory::TrajectoryDirectory::CreateSession(
+            root / "workspaces", ledger->workspace_key(), manifest);
+        REQUIRE(directory.has_value());
+        class PlantClock : public trajectory::RecorderClock {
+        public:
+            std::int64_t WallMs() const override { return 1760000000000LL; }
+            std::int64_t MonotonicNs() const override { return 0LL; }
+        };
+        PlantClock clock;
+        trajectory::EventScope scope;
+        scope.workspace_key = ledger->workspace_key();
+        scope.session_id = session_id;
+        scope.run_id = manifest.main_run_id;
+        scope.run_kind = trajectory::RunKind::MainSession;
+        scope.visibility = {trajectory::Visibility::HostOnly};
+        auto recorder = trajectory::TrajectoryRecorder::Start(
+            directory->main_stream_path(), directory->artifacts_root(), scope,
+            trajectory::RecorderOptions{}, &clock);
+        REQUIRE(recorder.has_value());
+        REQUIRE(recorder->WriteRunStarted(nlohmann::json{{"start_reason", "process_launch"}},
+                                          trajectory::Durability::PowerLoss)
+                     .status == trajectory::RecordReceipt::Status::Committed);
+        main_jsonl = directory->main_stream_path();
+        REQUIRE(std::filesystem::exists(main_jsonl));
+        // 不写 terminal/ended,不封口:recorder 析构放句柄,档留在"跑到
+        // 一半"的事实里。
     }
     const auto outcome =
         trajectory::DeleteSessionDir(workspace_dir, session_id, "user_delete", 1759468800000LL);

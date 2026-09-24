@@ -207,14 +207,31 @@ TEST_CASE("worktree 共享: 同 key 同 workspace.json,checkouts 双登记,sessi
     CHECK(read.manifest.checkouts[1].root ==
           workspace::NormalizeIdentityPathText(wt_identity.checkout_root));
 
-    // session 各带 checkout 现场:launch_cwd 各是各的检出根。
-    const auto main_manifest = trajectory::ReadSessionJson(main_session_dir);
-    const auto wt_manifest = trajectory::ReadSessionJson(wt_session_dir);
-    REQUIRE(main_manifest.has_value());
-    REQUIRE(wt_manifest.has_value());
-    CHECK(main_manifest->launch_cwd == platform::PathToUtf8(main_identity.launch_cwd));
-    CHECK(wt_manifest->launch_cwd == platform::PathToUtf8(wt_identity.launch_cwd));
-    CHECK(main_manifest->launch_cwd != wt_manifest->launch_cwd);
+    // session 各带 checkout 现场:v3 场现场在 session.started 的 launchCwd
+    //(V3-LEGACY-01 后新建唯一 v3,无 session.json 可读)。
+    const auto V3LaunchCwd = [](const fs::path& session_dir) {
+        const fs::path stream =
+            session_dir / fs::path(session_dir.filename().string() + ".jsonl");
+        std::ifstream file(stream, std::ios::binary);
+        REQUIRE(file.is_open());
+        std::string line;
+        while (std::getline(file, line)) {
+            if (!line.empty() && line.back() == '') line.pop_back();
+            if (line.empty()) continue;
+            const auto json = nlohmann::json::parse(line, nullptr, false);
+            if (json.is_discarded()) continue;
+            if (json.value("type", std::string()) == "event" &&
+                json.value("kind", std::string()) == "session.started") {
+                return json["payload"].value("launchCwd", std::string());
+            }
+        }
+        return std::string();
+    };
+    const std::string main_cwd = V3LaunchCwd(main_session_dir);
+    const std::string wt_cwd = V3LaunchCwd(wt_session_dir);
+    CHECK(main_cwd == platform::PathToUtf8(main_identity.launch_cwd));
+    CHECK(wt_cwd == platform::PathToUtf8(wt_identity.launch_cwd));
+    CHECK(main_cwd != wt_cwd);
 
     // 两场都进同一份 sessions 索引(按 workspace 查,不按 cwd 分家)。
     trajectory::SessionIndexQuery query;
@@ -275,20 +292,25 @@ TEST_CASE("跨 workspace 切换: 封旧开新,回执两笔,旧账一字不搬") 
         *workspace::index::ResolveDirByWorkspaceKey(root / "workspaces", identity_b.workspace_key);
     CHECK(second_session_dir.parent_path() == workspace_b / "sessions");
 
-    // 旧场:closed + workspace_switch 收口,留在旧房。
-    const auto old_manifest = trajectory::ReadSessionJson(first_session_dir);
-    REQUIRE(old_manifest.has_value());
-    CHECK(old_manifest->status == "closed");
+    // 旧场:封口落 v3 session.ended(reason=workspace_switch),留在旧房。
     bool ended_switch = false;
-    const auto journal = trajectory::ReadJournalLines(first_session_dir / "main.jsonl");
-    REQUIRE(journal.has_value());
-    for (const std::string& line : *journal) {
-        const auto event = nlohmann::json::parse(line, nullptr, false);
-        if (event.is_discarded() ||
-            (event.value("kind", std::string()) != "session.ended")) {
-            continue;
+    {
+        const fs::path stream =
+            first_session_dir / fs::path(first_session_dir.filename().string() + ".jsonl");
+        std::ifstream file(stream, std::ios::binary);
+        REQUIRE(file.is_open());
+        std::string line;
+        while (std::getline(file, line)) {
+            if (!line.empty() && line.back() == '') line.pop_back();
+            if (line.empty()) continue;
+            const auto event = nlohmann::json::parse(line, nullptr, false);
+            if (event.is_discarded() ||
+                event.value("type", std::string()) != "event" ||
+                event.value("kind", std::string()) != "session.ended") {
+                continue;
+            }
+            ended_switch = event["payload"].value("reason", std::string()) == "workspace_switch";
         }
-        ended_switch = event["payload"].value("reason", std::string()) == "workspace_switch";
     }
     CHECK(ended_switch);
 

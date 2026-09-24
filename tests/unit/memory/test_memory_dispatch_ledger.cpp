@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
@@ -33,6 +34,7 @@
 #include "runtime/turn_event_adapter.hpp"
 #include "tools/registry.hpp"
 #include "trajectory/journal.hpp"
+#include "trajectory/v3/reader.hpp"  // VerifyV3File(V3-LEGACY-01 后读 v3 主账)
 #include "trajectory/schema.hpp"
 #include "workspace/identity.hpp"
 
@@ -98,6 +100,30 @@ std::vector<nlohmann::json> EventsOfKind(const fs::path& stream, const std::stri
     std::vector<nlohmann::json> found;
     for (const auto& event : ReadEvents(stream)) {
         if (event.value("kind", std::string()) == kind) found.push_back(event);
+    }
+    return found;
+}
+
+// V3-LEGACY-01 后新建唯一 v3:assessed/receipted 落 <id>.jsonl,键名随 v3
+// 合同走 camelCase(memory_extract.cpp 的 V3 写口)。
+fs::path V3StreamOf(const fs::path& session_dir) {
+    return session_dir / fs::path(session_dir.filename().string() + ".jsonl");
+}
+
+std::vector<nlohmann::json> V3EventsOfKind(const fs::path& session_dir, const std::string& kind) {
+    std::vector<nlohmann::json> found;
+    std::ifstream in(V3StreamOf(session_dir), std::ios::binary);
+    REQUIRE(in.is_open());
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+        const auto parsed = nlohmann::json::parse(line, nullptr, false);
+        if (parsed.is_discarded()) continue;
+        if (parsed.value("type", std::string()) == "event" &&
+            parsed.value("kind", std::string()) == kind) {
+            found.push_back(parsed);
+        }
     }
     return found;
 }
@@ -520,10 +546,10 @@ TEST_CASE("ProjectMemory: remember/forget/accept/memory_save 四路回执") {
 }
 
 // ---------------------------------------------------------------------------
-// typed event 端到端:真 TrajectorySessionLedger,读回 main.jsonl 逐条
+// typed event 端到端:真 TrajectorySessionLedger,读回 <id>.jsonl 逐条
 // 过 schema(ParseAndValidateEventLine)。
 // ---------------------------------------------------------------------------
-TEST_CASE("typed event: assessed 与 receipted 落 main.jsonl 且过 schema") {
+TEST_CASE("typed event: assessed 与 receipted 落 v3 主账且过验卷") {
     const fs::path root = TempRoot("typed");
     const fs::path repo = root / "repo";
     const fs::path home = root / "home";
@@ -581,59 +607,49 @@ TEST_CASE("typed event: assessed 与 receipted 落 main.jsonl 且过 schema") {
     ledger.OnMemoryWriteReceipt(auto_write);
     ledger.FinishTurn(930);
 
-    const fs::path main_stream = session->session_dir() / "main.jsonl";
+    const fs::path session_dir = session->session_dir();
 
-    // 全部行逐条过 schema(含既有事件,防新事件破坏整链)。
-    for (const auto& event : ReadEvents(main_stream)) {
-        trajectory::EventEnvelope envelope;
-        const auto error = trajectory::ParseAndValidateEventLine(event, &envelope);
-        if (error.has_value()) {
-            const std::string detail = "schema 拒收: " + error->error_code + " " + error->message +
-                                       " kind=" + event.value("kind", std::string());
-            FAIL(detail.c_str());
-        }
-    }
+    // 整卷过 v3 验账(含既有事件,防新事件破坏整链)。
+    CHECK(trajectory::v3::VerifyV3File(V3StreamOf(session_dir)).ok);
 
-    const auto assessed = EventsOfKind(main_stream, "memory.extraction.assessed");
+    const auto assessed = V3EventsOfKind(session_dir, "memory.extraction.assessed");
     REQUIRE(assessed.size() == 2);
 
     const auto& first = assessed[0]["payload"];
     CHECK(first.value("trigger", std::string()) == "every_turn");
-    CHECK(first.value("turn_id", std::string()) == "turn-100");
+    CHECK(first.value("turnId", std::string()) == "turn-100");
     CHECK(first.value("decision", std::string()) == "skipped");
-    CHECK(first.value("skip_reason", std::string()) == "disabled");
-    CHECK(first.value("foreground_tail_ms", std::int64_t{0}) == 4);
-    CHECK(first.contains("input_tokens") == false);
-    CHECK(first["user_text_stats"].value("cjk_char_count", std::uint64_t{0}) == 5);
+    CHECK(first.value("skipReason", std::string()) == "disabled");
+    CHECK(first.value("foregroundTailMs", std::int64_t{0}) == 4);
+    CHECK(first.contains("inputTokens") == false);
+    CHECK(first["userTextStats"].value("cjkCharCount", std::uint64_t{0}) == 5);
 
     const auto& second = assessed[1]["payload"];
-    CHECK(second.value("turn_id", std::string()) == "turn-101");
+    CHECK(second.value("turnId", std::string()) == "turn-101");
     CHECK(second.value("decision", std::string()) == "called");
-    CHECK(second.contains("skip_reason") == false);
-    CHECK(second.value("extract_outcome", std::string()) == "completed");
-    CHECK(second.value("input_tokens", std::int64_t{0}) == 1584);
-    CHECK(second.value("output_tokens", std::int64_t{0}) == 173);
-    CHECK(second.value("cached_tokens", std::int64_t{0}) == 512);
-    CHECK(second.value("extract_wall_ms", std::int64_t{0}) == 812);
-    CHECK(second.value("review_candidates", std::uint64_t{0}) == 1);
-    // 修复单 §五 D:自动直写排队数落新名 auto_queued;旧名只在旧账里。
-    CHECK(second.value("auto_queued", std::uint64_t{0}) == 2);
-    CHECK(second.contains("auto_written") == false);
+    CHECK(second.contains("skipReason") == false);
+    CHECK(second.value("extractOutcome", std::string()) == "completed");
+    CHECK(second.value("inputTokens", std::int64_t{0}) == 1584);
+    CHECK(second.value("outputTokens", std::int64_t{0}) == 173);
+    CHECK(second.value("cachedTokens", std::int64_t{0}) == 512);
+    CHECK(second.value("extractWallMs", std::int64_t{0}) == 812);
+    CHECK(second.value("reviewCandidates", std::uint64_t{0}) == 1);
+    // 修复单 §五 D:自动直写排队数落新名 autoQueued;旧名只在旧账里。
+    CHECK(second.value("autoQueued", std::uint64_t{0}) == 2);
+    CHECK(second.contains("autoWritten") == false);
     CHECK(app::AutoQueuedFromAssessedPayload(second) == 2);
-    CHECK(second.value("foreground_tail_ms", std::int64_t{0}) == 930);
+    CHECK(second.value("foregroundTailMs", std::int64_t{0}) == 930);
 
-    const auto receipted = EventsOfKind(main_stream, "memory.write.receipted");
+    const auto receipted = V3EventsOfKind(session_dir, "memory.write.receipted");
     REQUIRE(receipted.size() == 2);
     CHECK(receipted[0]["payload"].value("source", std::string()) == "explicit_command_save");
     CHECK(receipted[0]["payload"].value("outcome", std::string()) == "rejected");
-    CHECK(receipted[0]["payload"].value("error_code", std::string()) == "write_disabled");
-    CHECK(receipted[0].value("actor", std::string()) == "user");
-    CHECK(receipted[0]["payload"].value("turn_id", std::string()) == "turn-100");
+    CHECK(receipted[0]["payload"].value("errorCode", std::string()) == "write_disabled");
+    CHECK(receipted[0]["payload"].value("turnId", std::string()) == "turn-100");
     CHECK(receipted[1]["payload"].value("source", std::string()) == "auto_extraction");
     CHECK(receipted[1]["payload"].value("outcome", std::string()) == "queued");
-    CHECK(receipted[1]["payload"].value("job_id", std::string()) == "job-x.json");
-    CHECK(receipted[1]["payload"].value("turn_id", std::string()) == "turn-101");
-    CHECK(receipted[1].value("origin", std::string()) == "scheduled_host");
+    CHECK(receipted[1]["payload"].value("jobId", std::string()) == "job-x.json");
+    CHECK(receipted[1]["payload"].value("turnId", std::string()) == "turn-101");
 }
 
 // ---------------------------------------------------------------------------
@@ -895,34 +911,26 @@ TEST_CASE("P1 e2e: ExtractTurnMemory 的同轮去重与必跳层") {
         // 过了门:真起飞(现行路不因 shadow 改一字)。
         CHECK(ledger.funnel().extract_batches == 1);
 
-        const fs::path main_stream = session->session_dir() / "main.jsonl";
-        // 全链逐行过 schema(P1 新键在内,新事件不许破坏整链)。
-        for (const auto& event : ReadEvents(main_stream)) {
-            trajectory::EventEnvelope envelope;
-            const auto error = trajectory::ParseAndValidateEventLine(event, &envelope);
-            if (error.has_value()) {
-                const std::string detail = "schema 拒收: " + error->error_code + " " + error->message +
-                                           " kind=" + event.value("kind", std::string());
-                FAIL(detail.c_str());
-            }
-        }
+        const fs::path session_dir = session->session_dir();
+        // 整卷过 v3 验账(P1 新键在内,新事件不许破坏整链)。
+        CHECK(trajectory::v3::VerifyV3File(V3StreamOf(session_dir)).ok);
 
-        const auto assessed = EventsOfKind(main_stream, "memory.extraction.assessed");
+        const auto assessed = V3EventsOfKind(session_dir, "memory.extraction.assessed");
         REQUIRE(assessed.size() == 1);
         const auto& payload = assessed[0]["payload"];
         CHECK(payload.value("decision", std::string()) == "called");
-        CHECK(payload.value("has_tool_evidence", true) == false);
+        CHECK(payload.value("hasToolEvidence", true) == false);
         // 六键统计齐(§3.2 补全的三项在内),门槛判定离线可复算。
-        CHECK(payload["user_text_stats"].contains("unicode_scalar_count"));
-        CHECK(payload["user_text_stats"].contains("cjk_char_count"));
-        CHECK(payload["user_text_stats"].contains("latin_word_count"));
-        CHECK(payload["user_text_stats"].contains("code_token_count"));
-        CHECK(payload["user_text_stats"].contains("only_acknowledgement"));
-        CHECK(payload["user_text_stats"].contains("only_slash_command"));
+        CHECK(payload["userTextStats"].contains("unicodeScalarCount"));
+        CHECK(payload["userTextStats"].contains("cjkCharCount"));
+        CHECK(payload["userTextStats"].contains("latinWordCount"));
+        CHECK(payload["userTextStats"].contains("codeTokenCount"));
+        CHECK(payload["userTextStats"].contains("onlyAcknowledgement"));
+        CHECK(payload["userTextStats"].contains("onlySlashCommand"));
         // shadow 判断落账:偏好案命中(词法上"以后"必中)。
-        REQUIRE(payload.contains("shadow_gate"));
-        const auto& shadow = payload.at("shadow_gate");
-        CHECK(shadow.value("durable_signal", std::string()) == "hit");
+        REQUIRE(payload.contains("shadowGate"));
+        const auto& shadow = payload.at("shadowGate");
+        CHECK(shadow.value("durableSignal", std::string()) == "hit");
         bool has_preference = false;
         for (const auto& signal : shadow.at("signals")) {
             if (signal == "preference_or_correction") has_preference = true;
@@ -1072,14 +1080,14 @@ TEST_CASE("抽取收口 e2e: 坏 JSON/截断/流内错的回合尾账,主回合�
 
         Outcome outcome;
         const auto assessed =
-            EventsOfKind(session->session_dir() / "main.jsonl", "memory.extraction.assessed");
+            V3EventsOfKind(session->session_dir(), "memory.extraction.assessed");
         REQUIRE(assessed.size() == 1);
         const auto& payload = assessed[0]["payload"];
-        CHECK(payload.value("extract_outcome", std::string()) == "failed");
-        outcome.error_code = payload.value("error_code", std::string());
-        outcome.usage_reported = payload.value("usage_reported", false);
-        outcome.input_tokens = payload.value("input_tokens", std::int64_t{0});
-        outcome.output_tokens = payload.value("output_tokens", std::int64_t{0});
+        CHECK(payload.value("extractOutcome", std::string()) == "failed");
+        outcome.error_code = payload.value("errorCode", std::string());
+        outcome.usage_reported = payload.value("usageReported", false);
+        outcome.input_tokens = payload.value("inputTokens", std::int64_t{0});
+        outcome.output_tokens = payload.value("outputTokens", std::int64_t{0});
         outcome.extract_calls = extract_calls;
         return outcome;
     };

@@ -39,7 +39,6 @@
 #include "tools/registry.hpp"
 #include "trajectory/session_manager.hpp"
 #include "trajectory/v3/reader.hpp"
-#include "trajectory/v3/session_switch.hpp"  // NewSessionV3WriteEnabled(前提断言)
 #include "workspace/identity.hpp"
 
 namespace platform = lubancode::platform;
@@ -203,8 +202,6 @@ std::vector<nlohmann::json> ReadLines(const std::filesystem::path& path) {
 
 TEST_CASE("默认-v3 冒烟: 未设变量时 ledger 开场即 v3,一轮 turn 账面齐全") {
     EnvUnset unset("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
-    CHECK(lubancode::trajectory::v3::NewSessionV3WriteEnabled());  // 前提钉死
-
     const auto root = FreshRoot("open-turn-close");
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(ledger.has_value());

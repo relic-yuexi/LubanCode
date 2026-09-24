@@ -21,6 +21,7 @@
 
 #include "api/types.hpp"
 #include "runtime/trajectory_session.hpp"
+#include "trajectory/v3/reader.hpp"  // VerifyV3File(V3-LEGACY-01 后 v3 主账)
 #include "trajectory/journal.hpp"
 #include "trajectory/replay.hpp"
 
@@ -150,7 +151,7 @@ TEST_CASE("--continue 启动路: resume_at_launch 开新场,history 投影可取
             }
             for (const auto& session : std::filesystem::directory_iterator(workspace.path() / "sessions")) {
                 if (session.path().filename().generic_string() == source_id) {
-                    main_path = session.path() / "main.jsonl";
+                    main_path = session.path() / (source_id + ".jsonl");
                 }
             }
         }
@@ -160,31 +161,23 @@ TEST_CASE("--continue 启动路: resume_at_launch 开新场,history 投影可取
     const auto bytes_before = std::filesystem::file_size(main_path, ec);
     REQUIRE_FALSE(ec);
 
-    // --continue:同一 workspace 重开,resume_at_launch。
+    // --continue:同一 workspace 重开,resume_at_launch——v3 源续接源场
+    //(2026-09-19 拍板;V3-LEGACY-01 后唯一 v3,不再 fork 另开)。
     auto options = LedgerOptions(root);
     options.resume_at_launch = true;
     auto ledger = TrajectorySessionLedger::Open(std::move(options));
     REQUIRE(ledger.has_value());
     CHECK(ledger->resumed_at_launch());
-    CHECK(ledger->session_id() != source_id);  // 新 session,绝不复用 id
+    CHECK(ledger->session_id() == source_id);  // 同场续写
     const std::vector<api::Message> history = ledger->LaunchResumeHistory();
     REQUIRE(history.size() == 2);  // user + assistant
     CHECK(history[0].role == api::Role::User);
     CHECK(history[1].role == api::Role::Assistant);
-    // source 只读:字节数不变(永不 reopen append)。
-    CHECK(std::filesystem::file_size(main_path, ec) == bytes_before);
-
-    // 新场折叠:run.started(resume) + resume.source.attached 在头两条。
-    const auto fold = ledger->FoldMainReplay();
-    REQUIRE(fold.ok());
-    CHECK(fold.state.start_reason == "resume");
-    CHECK(fold.state.control.resumed_from_session_id.value_or("") == source_id);
-    // exact replay 口:hash 确定,折两次一致。
-    const auto exact_a = ledger->ExactReplayMain();
-    const auto exact_b = ledger->ExactReplayMain();
-    REQUIRE(exact_a.ok);
-    CHECK(exact_a.state_hash == exact_b.state_hash);  // 折两次同 hash(§10.2)
-    CHECK(exact_a.state_hash != fold.state.integrity.last_event_hash);  // 两种 hash 各是各的
+    // 续接是 append-only:前缀一字节不动,账只许长。
+    const auto bytes_after = std::filesystem::file_size(main_path, ec);
+    CHECK_FALSE(ec);
+    CHECK(bytes_after > bytes_before);
+    CHECK(lubancode::trajectory::v3::VerifyV3File(main_path).ok);
 }
 
 TEST_CASE("ResumeInteractive: 旧场封口 + 新场七步 + 跨 session command") {
@@ -206,44 +199,31 @@ TEST_CASE("ResumeInteractive: 旧场封口 + 新场七步 + 跨 session command"
     const TrajectoryResumeSummary summary = ledger->ResumeInteractive(source_id, "resume");
     REQUIRE(summary.outcome.error_code.empty());
     CHECK(summary.outcome.source_session_id == source_id);
-    CHECK(summary.outcome.new_session_id != source_id);
-    CHECK(summary.outcome.new_session_id != current_id);
+    // v3 源续接源场:同 id 续写(不是 current_id 那场,fork 不复存在)。
+    CHECK(ledger->session_id() == source_id);
+    CHECK(ledger->session_id() != current_id);
     REQUIRE(summary.history.size() == 2);
     CHECK(summary.history[0].role == api::Role::User);
 
-    // 新场账面:run.started(resume) → resume.source.attached → 跨 session
-    // control.command.completed。
-    const auto fold = ledger->FoldMainReplay();
-    REQUIRE(fold.ok());
-    CHECK(fold.state.start_reason == "resume");
-    CHECK(fold.state.control.resumed_from_session_id.value_or("") == source_id);
-    // 旧场封口为 switch_to_resume。
+    // 当前场封口为 switch_to_resume(v3 落 session.ended 事件)。
     bool old_ended = false;
     {
-        const auto workspaces = root / "workspaces";
-        for (const auto& workspace : std::filesystem::directory_iterator(workspaces)) {
-            std::error_code dir_ec;
-            if (!workspace.is_directory(dir_ec) || dir_ec) {
-                continue;  // 账本制:index.json 是文件,不是房
+        const auto current_stream = ledger->session_dir().parent_path() /
+                                    std::filesystem::path(current_id) /
+                                    std::filesystem::path(current_id + ".jsonl");
+        std::ifstream file(current_stream, std::ios::binary);
+        REQUIRE(file.is_open());
+        std::string line;
+        while (std::getline(file, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const auto event = nlohmann::json::parse(line, nullptr, false);
+            if (event.is_discarded() || event.value("type", std::string()) != "event" ||
+                event.value("kind", std::string()) != "session.ended") {
+                continue;
             }
-            for (const auto& session : std::filesystem::directory_iterator(workspace.path() / "sessions")) {
-                if (session.path().filename().generic_string() != current_id) {
-                    continue;
-                }
-                const auto lines = trajectory::ReadJournalLines(session.path() / "main.jsonl");
-                if (!lines.has_value()) {
-                    continue;
-                }
-                for (const std::string& line : *lines) {
-                    const auto event = nlohmann::json::parse(line, nullptr, false);
-                    if (event.is_discarded()) {
-                        continue;
-                    }
-                    if (event.at("kind").get<std::string>() == "session.ended" &&
-                        event.at("payload").at("reason").get<std::string>() == "switch_to_resume") {
-                        old_ended = true;
-                    }
-                }
+            if (event.at("payload").value("reason", std::string()) == "switch_to_resume") {
+                old_ended = true;
             }
         }
     }
@@ -388,10 +368,29 @@ TEST_CASE("ClearSession: 八步换账后账本指新场,选段器重置") {
     CHECK(ledger->session_id() == outcome.new_session_id);
     // 选段器重置:新场无活动 selection。
     CHECK_FALSE(ledger->record_selection().active());
-    // 新场 run.started(start_reason=clear) 反指旧终态。
-    const auto fold = ledger->FoldMainReplay();
-    REQUIRE(fold.ok());
-    CHECK(fold.state.start_reason == "clear");
-    // 旧场封链:session.ended + close_quality 记录在案。
+    // 新场是 v3:<id>.jsonl 主账在场,session.started 立链。
+    CHECK(std::filesystem::exists(ledger->session_dir() /
+                                  std::filesystem::path(ledger->session_id() + ".jsonl")));
+    CHECK_FALSE(std::filesystem::exists(ledger->session_dir() / "main.jsonl"));
+    // 旧场封链:v3 落 session.ended,close_quality 记录在案。
     CHECK(outcome.old_close_quality == "clean");
+    bool old_ended = false;
+    {
+        const auto old_stream = ledger->session_dir().parent_path() /
+                                std::filesystem::path(old_id) /
+                                std::filesystem::path(old_id + ".jsonl");
+        std::ifstream file(old_stream, std::ios::binary);
+        REQUIRE(file.is_open());
+        std::string line;
+        while (std::getline(file, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const auto event = nlohmann::json::parse(line, nullptr, false);
+            if (!event.is_discarded() && event.value("type", std::string()) == "event" &&
+                event.value("kind", std::string()) == "session.ended") {
+                old_ended = true;
+            }
+        }
+    }
+    CHECK(old_ended);
 }

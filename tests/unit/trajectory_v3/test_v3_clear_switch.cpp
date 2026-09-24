@@ -327,46 +327,8 @@ TEST_CASE("v3 clear: 运行侧没收口的活动如实标 incomplete") {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 开关关:v2 clear 八步原路(回归钉——v3 分支不扰动 v2)
-// ---------------------------------------------------------------------------
-
-TEST_CASE("开关关: v2 clear 八步照旧走 main.jsonl 换账") {
-    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
-    const auto root = FreshRoot("v2-regression");
-    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
-    REQUIRE(ledger.has_value());
-    const std::string old_id = ledger->session_id();
-    const std::filesystem::path old_main = ledger->session_dir() / "main.jsonl";
-    CHECK(std::filesystem::exists(old_main));  // v2 布局
-    {
-        auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
-        REQUIRE(bridge != nullptr);
-        bridge->BeginTurn("turn-1", "external_user");
-        bridge->RecordInput(UserMessage("v2 场的一问"));
-        const std::string request_id =
-            bridge->OnRequestPrepared(MakeRequest("SYSTEM-V2", {UserMessage("v2 场的一问")}),
-                                      PreparedContext());
-        REQUIRE_FALSE(request_id.empty());
-        bridge->OnRequestSent(request_id);
-        REQUIRE(bridge->OnOutputCompleted(request_id, AssistantText("v2 场的一答"), "end_turn",
-                                          "resp-1"));
-        bridge->EndTurn(/*ok=*/true, /*cancelled=*/false, "");
-    }
-    trajectory::NullClearParticipant participant;
-    trajectory::ClearRequest request;
-    const auto outcome = ledger->ClearSession(request, &participant);
-    REQUIRE(outcome.error_code.empty());
-    // v2 证据字段齐活(run terminal/session.json 落定)。
-    CHECK_FALSE(outcome.old_run_terminal_event_id.empty());
-    CHECK(outcome.old_run_terminal_kind == "run.completed");
-    CHECK(outcome.old_session_json_finalized);
-    CHECK_FALSE(outcome.new_run_started_event_id.empty());
-    CHECK(std::filesystem::exists(ledger->session_dir() / "main.jsonl"));
-    CHECK(ledger->session_id() != old_id);
-    // 旧场 session.json 落 closed(incomplete 前提没有,干净收口)。
-    const auto old_manifest = trajectory::ReadSessionJson(
-        ledger->session_dir().parent_path() / platform::Utf8ToPath(old_id));
-    REQUIRE(old_manifest.has_value());
-    CHECK(old_manifest->status == "closed");
-}
+// (退役,V3-LEGACY-01)原此处有"开关关: v2 clear 八步照旧走 main.jsonl
+// 换账"案:env=0 建出 v2 活场再验 clear 走 v2 原路。写口退役后新建唯一
+// v3,v2 活场只剩恢复收养旧盘未竟换账一个来路——v2 clear 分支作为旧盘
+// 善后保留在代码里,其回归改由"手植旧盘中断换账 + 恢复收养 + clear"的
+// 夹具单另守(旧档消费路径,随 V3-LEGACY-02 一并排期),不在此处伪造前提。

@@ -365,7 +365,7 @@ TEST_CASE("任务 turn 账边界(§11.1,P1-1):sent 带 index/limit/input round,�
     }
 }
 
-TEST_CASE("ledger:开账出 main.jsonl,子代理拿独立 JSONL 与父边界") {
+TEST_CASE("ledger:开账出 v3 主账,子代理拿独立 JSONL(五步子账)") {
     const auto root = FreshDir("lubancode-traj-p2-ledger");
     TrajectorySessionLedger::Options options;
     options.workspaces_root = root / "workspaces";
@@ -375,7 +375,12 @@ TEST_CASE("ledger:开账出 main.jsonl,子代理拿独立 JSONL 与父边界") {
     std::filesystem::create_directories(root / "repo", ec);
     auto ledger = TrajectorySessionLedger::Open(options);
     REQUIRE(ledger.has_value());
-    CHECK(std::filesystem::exists(ledger->session_dir() / "main.jsonl"));
+    // V3-LEGACY-01 后新建唯一 v3:<id>.jsonl 主账在,v2 文件一枚不长。
+    const std::filesystem::path main_stream =
+        ledger->session_dir() /
+        std::filesystem::path(ledger->session_id() + ".jsonl");
+    CHECK(std::filesystem::exists(main_stream));
+    CHECK_FALSE(std::filesystem::exists(ledger->session_dir() / "main.jsonl"));
     CHECK_FALSE(ledger->session_id().empty());
 
     // 主轮桥挂上,派一只子代理。
@@ -397,14 +402,31 @@ TEST_CASE("ledger:开账出 main.jsonl,子代理拿独立 JSONL 与父边界") {
     const std::string terminal_hash = (*child)->Finish(true, "done");
     CHECK_FALSE(terminal_hash.empty());
 
-    // 子文件独立存在,hash chain 完整。
-    const auto sub_path = ledger->session_dir() / "subagents" / ((*child)->run_id() + ".jsonl");
+    // 子账独立存在(v3 布局 subagents/<childSessionId>/<childSessionId>.jsonl,
+    // 首行 system):枚举子账目录定位。
+    std::filesystem::path sub_path;
+    {
+        std::error_code walk_ec;
+        for (const auto& entry :
+             std::filesystem::recursive_directory_iterator(ledger->session_dir() / "subagents",
+                                                           walk_ec)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".jsonl") {
+                sub_path = entry.path();
+            }
+        }
+    }
+    REQUIRE_FALSE(sub_path.empty());
     REQUIRE(std::filesystem::exists(sub_path));
-    const auto sub_report = trajectory::VerifyJournalFile(sub_path);
-    REQUIRE(sub_report.ok);
-    const auto sub_kinds = KindsOf(sub_path);
-    CHECK(sub_kinds.front() == "run.started");
-    CHECK(sub_kinds.back() == "run.completed");
+    {
+        std::ifstream head(sub_path, std::ios::binary);
+        std::string first_line;
+        std::getline(head, first_line);
+        if (!first_line.empty() && first_line.back() == '\r') first_line.pop_back();
+        const auto first = nlohmann::json::parse(first_line, nullptr, false);
+        REQUIRE_FALSE(first.is_discarded());
+        CHECK(first.value("type", std::string()) == "message");
+        CHECK(first.at("message").value("role", std::string()) == "system");
+    }
 
     // 父账:边界引用落在 agent 调用的执行终态上。
     main_bridge->BeginTurn("turn-1", "external_user");
@@ -429,93 +451,25 @@ TEST_CASE("ledger:开账出 main.jsonl,子代理拿独立 JSONL 与父边界") {
     main_bridge->OnToolResultsCommitted("batch-1", agent_result);
     main_bridge->EndTurn(true, false, "done");
 
-    const auto main_report = trajectory::VerifyJournalFile(ledger->session_dir() / "main.jsonl");
-    REQUIRE(main_report.ok);
-    const auto lines = trajectory::ReadJournalLines(ledger->session_dir() / "main.jsonl");
-    REQUIRE(lines.has_value());
-    bool saw_child_edge = false;
-    for (const std::string& line : *lines) {
-        const auto parsed = nlohmann::json::parse(line, nullptr, false);
-        if (parsed.is_discarded() || parsed.value("kind", std::string()) != "tool.execution.finished") {
-            continue;
-        }
-        // 边界引用:relations.child_run_id + result_ref 的子账终态 hash。
-        if (parsed.value("relations", nlohmann::json::object()).value("child_run_id", std::string()) ==
-                (*child)->run_id() &&
-            parsed["payload"]["result_ref"].value("child_run_id", std::string()) == (*child)->run_id() &&
-            parsed["payload"]["result_ref"].value("child_terminal_event_hash", std::string()) ==
-                terminal_hash) {
-            saw_child_edge = true;
-        }
-    }
-    CHECK(saw_child_edge);
-    // main.jsonl 不内联子账正文:子的 input 文本只出现在子文件。
+    // (退役,V3-LEGACY-01)原尾段断言 v2 父账的 relations.child_run_id 边、
+    // result_ref 子终态 hash 与 12 枚事件序——v2 信封概念,新建唯一 v3 后
+    // 造不出。v3 等价面(父账 subagent.spawn.requested/linked、子账终态
+    // 引用)由 subagent 域册守(见 test_subagent_spawn_integrity)。此处保留
+    // 格式无关的核心:主账不内联子账正文。
     const auto main_text = [&] {
-        std::ifstream file(ledger->session_dir() / "main.jsonl", std::ios::binary);
+        std::ifstream file(main_stream, std::ios::binary);
         std::stringstream buffer;
         buffer << file.rdbuf();
         return buffer.str();
     }();
     CHECK(main_text.find("读文件并数行数") == std::string::npos);
-    // main 一轮的事件数(只有父侧那一份事实)。
-    const auto main_kinds = KindsOf(ledger->session_dir() / "main.jsonl");
-    REQUIRE(main_kinds.size() == 12);
-    CHECK(main_kinds[5] == "model.output.completed");
-    CHECK(main_kinds[6] == "tool.execution.planned");
 }
 
-// 读一份子账 run.started 的 relations.parent_run_id(P1-2 嵌套轨迹边测试用)。
-std::string ParentRunIdOf(const std::filesystem::path& stream) {
-    const auto lines = trajectory::ReadJournalLines(stream);
-    if (!lines.has_value() || lines->empty()) {
-        return std::string();
-    }
-    const auto parsed = nlohmann::json::parse(lines->front(), nullptr, false);
-    if (parsed.is_discarded()) {
-        return std::string();
-    }
-    return parsed.value("relations", nlohmann::json::object()).value("parent_run_id", std::string());
-}
-
-TEST_CASE("SpawnSubagent:嵌套派工的 parent_run_id 指向父任务自己的 run,不冒充 main(P1-2)") {
-    const auto root = FreshDir("lubancode-traj-p1-2-nested");
-    TrajectorySessionLedger::Options options;
-    options.workspaces_root = root / "workspaces";
-    options.workspace_root = root / "repo";
-    options.lubancode_version = "test";
-    std::error_code ec;
-    std::filesystem::create_directories(root / "repo", ec);
-    auto ledger = TrajectorySessionLedger::Open(options);
-    REQUIRE(ledger.has_value());
-
-    // main 自己的 run id(main.jsonl 首行 run.started 的顶层 run_id)。
-    const auto main_lines = trajectory::ReadJournalLines(ledger->session_dir() / "main.jsonl");
-    REQUIRE(main_lines.has_value());
-    REQUIRE_FALSE(main_lines->empty());
-    const auto main_started = nlohmann::json::parse(main_lines->front(), nullptr, false);
-    REQUIRE_FALSE(main_started.is_discarded());
-    const std::string main_run_id = main_started.value("run_id", std::string());
-    REQUIRE_FALSE(main_run_id.empty());
-
-    // main 直派(parent_run_id 缺省 = 空串):relations.parent_run_id 落回
-    // main_run_id——旧行为一字不改。
-    auto direct_child = ledger->SpawnSubagent("toolu-1", "main 直派的孩子");
-    REQUIRE(direct_child.has_value());
-    const auto direct_path = ledger->session_dir() / "subagents" / ((*direct_child)->run_id() + ".jsonl");
-    CHECK(ParentRunIdOf(direct_path) == main_run_id);
-
-    // 嵌套派工:parent_run_id 显式传"直派孩子"自己的 run id——它是派出
-    // 孙任务的那只子代理,relations.parent_run_id 必须认它,不能冒充 main
-    //(单子 §12.3 第一条,"嵌套 headless 路的父亲是父任务的 run,不是 main")。
-    auto grandchild = ledger->SpawnSubagent(/*parent_call_id=*/std::string(), "孙任务",
-                                            (*direct_child)->run_id());
-    REQUIRE(grandchild.has_value());
-    CHECK((*grandchild)->run_id() != (*direct_child)->run_id());
-    const auto grandchild_path = ledger->session_dir() / "subagents" / ((*grandchild)->run_id() + ".jsonl");
-    const std::string grandchild_parent = ParentRunIdOf(grandchild_path);
-    CHECK(grandchild_parent == (*direct_child)->run_id());
-    CHECK(grandchild_parent != main_run_id);
-}
+// (退役,V3-LEGACY-01)原此处有"SpawnSubagent:嵌套派工的 parent_run_id
+// 指向父任务自己的 run,不冒充 main(P1-2)"案:读 v2 子账 run.started 的
+// relations.parent_run_id 验嵌套轨迹边。relations.* 是 v2 信封概念,新建
+// 唯一 v3 后造不出;v3 嵌套派工的父子边(subagent.spawn.requested 的
+// parentRef)归 subagent 域册另守(见 test_subagent_spawn_integrity)。
 
 TEST_CASE("SessionRuntime 轨迹档:恒开,旧档建档/轮末补抄路已删净") {
     // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,ledger 恒在;
@@ -528,5 +482,9 @@ TEST_CASE("SessionRuntime 轨迹档:恒开,旧档建档/轮末补抄路已删净
     std::filesystem::create_directories(root / "repo", ec);
     runtime::SessionRuntime session(options);
     REQUIRE(session.trajectory() != nullptr);
-    CHECK(std::filesystem::exists(session.trajectory()->session_dir() / "main.jsonl"));
+    // V3-LEGACY-01 后新建唯一 v3:主账是 <id>.jsonl。
+    CHECK(std::filesystem::exists(
+        session.trajectory()->session_dir() /
+        std::filesystem::path(session.trajectory()->session_id() + ".jsonl")));
+    CHECK_FALSE(std::filesystem::exists(session.trajectory()->session_dir() / "main.jsonl"));
 }

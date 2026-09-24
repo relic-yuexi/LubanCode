@@ -1,6 +1,10 @@
 // SessionManager 与 clear 八步换账测试(§3.3.1 逐字/§16.4 clear 幕):
 // 开场换账全程落盘次序、旧账封链后拒写、新账新命名空间、并发重复请求回
 // clear_in_progress、unknown child 不装成功、/exit 封口与 closed 硬门。
+// V3-LEGACY-01(2026-09-24)起 launch 只建 v3 场,v2 活场唯一来路是恢复
+// 收养旧盘上未竟的 v2 换账——本册夹具手植一场封好链的 v2 换账,再让
+// RecoverWorkspace 把空 preparing 的新侧收养成 v2 活场,clear/close 八步
+// 照旧在这场上验。
 #include <doctest/doctest.h>
 
 #include <algorithm>
@@ -17,10 +21,12 @@
 #include <nlohmann/json.hpp>
 
 #include "platform/process.hpp"
+#include "trajectory/directory.hpp"  // 手植 v2 场目录(收养夹具,V3-LEGACY-01)
 #include "trajectory/journal.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/session_index.hpp"
 #include "trajectory/session_manager.hpp"
+#include "workspace/identity.hpp"  // one_shot 旧档开房的直造身份
 
 using namespace lubancode::trajectory;
 
@@ -48,12 +54,14 @@ std::filesystem::path MakeRoot(const char* tag) {
     return root;
 }
 
-SessionManagerOptions Opts(const std::filesystem::path& root) {
+SessionManagerOptions Opts(const std::filesystem::path& root,
+                           RunKind run_kind = RunKind::MainSession) {
     SessionManagerOptions options;
     options.workspaces_root = root / "workspaces";
     options.workspace_root = root / "ws";
     options.launch_cwd = "D:/tmp/ws";
     options.lubancode_version = "0.26.128-test";
+    options.main_run_kind = run_kind;
     return options;
 }
 
@@ -82,7 +90,12 @@ long IndexOf(const std::vector<std::string>& kinds, const std::string& kind) {
     return static_cast<long>(it - kinds.begin());
 }
 
-// 旧 session 里铺一层"正在干活"的事实:一场完整 turn + 活 queue item +
+// 收养夹具(V3-LEGACY-01):launch 建不出 v2 场,v2 活场只能从旧盘恢复来。
+// 铺台四步:launch(v3)+close 把 workspace 房间落成;手植旧场 BUSY01——
+// 一场换账旧侧已封完的账(requested → clear_requested → run terminal →
+// session.ended 全 durable);手植新场 BUSY02——空 preparing(第 1 步办完,
+// 第 6 步未起);换一只 manager RecoverWorkspace 把 BUSY02 收养成 v2 活场。
+// 收养后往 active 里铺一层"正在干活"的事实:一场完整 turn + 活 queue item +
 // 活动 /record 选段 + 一只 subagent 子流(recorder 归测试掌管)。
 struct BusySessionFixture {
     FakeClock clock;
@@ -93,10 +106,99 @@ struct BusySessionFixture {
     bool reset_called = false;
     bool child_terminal_written = false;
 
-    explicit BusySessionFixture(const char* tag, bool with_child = true) {
-        manager = std::make_unique<SessionManager>(Opts(MakeRoot(tag)), &clock);
-        auto* active = manager->LaunchSession().value_or(nullptr);
+    explicit BusySessionFixture(const char* tag, bool with_child = true,
+                                RunKind run_kind = RunKind::MainSession) {
+        const SessionManagerOptions options = Opts(MakeRoot(tag), run_kind);
+        std::string key;
+        {
+            SessionManager opener(options, &clock);
+            REQUIRE(opener.LaunchSession().has_value());
+            key = opener.workspace_key();
+            CloseRequest close;
+            close.reason = "exit";
+            NullClearParticipant null_participant;
+            REQUIRE(opener.Close(close, &null_participant).error_code.empty());
+        }
+        const std::string prev_scene = "20260924-180000-BUSY01";
+        const std::string next_scene = "20260924-180001-BUSY02";
+        {
+            SessionManifest manifest;
+            manifest.schema_version = 2;
+            manifest.workspace_key = key;
+            manifest.session_id = prev_scene;
+            manifest.launch_cwd = options.launch_cwd;
+            manifest.main_run_id = "main-0001";
+            manifest.run_kind = RunKindName(run_kind);
+            manifest.status = "running";
+            manifest.created_at_ms = clock.WallMs();
+            manifest.lubancode_version = options.lubancode_version;
+            manifest.event_schema_version = 2;
+            auto directory =
+                TrajectoryDirectory::CreateSession(options.workspaces_root, key, manifest);
+            REQUIRE(directory.has_value());
+            EventScope scope;
+            scope.workspace_key = key;
+            scope.session_id = prev_scene;
+            scope.run_id = "main-0001";
+            scope.run_kind = run_kind;
+            scope.visibility = {Visibility::HostOnly};
+            auto main = TrajectoryRecorder::Start(directory->main_stream_path(),
+                                                  directory->artifacts_root(), scope,
+                                                  RecorderOptions{}, &clock);
+            REQUIRE(main.has_value());
+            nlohmann::json start_extra;
+            start_extra["start_reason"] = "process_launch";
+            REQUIRE(main->WriteRunStarted(start_extra, Durability::PowerLoss).status ==
+                    RecordReceipt::Status::Committed);
+            // 照真 clear 第 2 步的落法:requested 在前,clear_requested 在后。
+            RecordRequest command_requested;
+            command_requested.kind = EventKind::ControlCommandRequested;
+            command_requested.scope = main->base_scope();
+            command_requested.scope.actor = Actor::User;
+            command_requested.scope.origin = Origin::ExternalUser;
+            command_requested.payload["command_id"] = "cmd-plant-0001";
+            command_requested.payload["command_name"] = "clear";
+            command_requested.payload["action_name"] = "clear";
+            command_requested.payload["effect_class"] = "session_boundary";
+            command_requested.links.correlation_id = "op-plant-0001";
+            REQUIRE(main->Record(command_requested, Durability::PowerLoss).status ==
+                    RecordReceipt::Status::Committed);
+            RecordRequest clear_requested;
+            clear_requested.kind = EventKind::SessionClearRequested;
+            clear_requested.scope = main->base_scope();
+            clear_requested.payload["next_session_id"] = next_scene;
+            clear_requested.links.correlation_id = "op-plant-0001";
+            REQUIRE(main->Record(clear_requested, Durability::PowerLoss).status ==
+                    RecordReceipt::Status::Committed);
+            REQUIRE(main->FinishRun(EventKind::RunCompleted, "clear", Durability::PowerLoss)
+                        .status == RecordReceipt::Status::Committed);
+            REQUIRE(main->EndSession("clear", next_scene, "clean", Durability::PowerLoss).status ==
+                    RecordReceipt::Status::Committed);
+        }
+        {
+            SessionManifest manifest;
+            manifest.schema_version = 2;
+            manifest.workspace_key = key;
+            manifest.session_id = next_scene;
+            manifest.launch_cwd = options.launch_cwd;
+            manifest.main_run_id = "main-0002";
+            manifest.run_kind = RunKindName(run_kind);
+            manifest.start_reason = "clear";
+            manifest.previous_session_id = prev_scene;
+            manifest.status = "preparing";
+            manifest.created_at_ms = clock.WallMs();
+            manifest.lubancode_version = options.lubancode_version;
+            manifest.approval_mode = options.approval_mode;
+            manifest.event_schema_version = 2;
+            REQUIRE(TrajectoryDirectory::CreateSession(options.workspaces_root, key, manifest)
+                        .has_value());
+        }
+        manager = std::make_unique<SessionManager>(options, &clock);
+        const WorkspaceRecoveryReport report = manager->RecoverWorkspace();
+        REQUIRE(report.adopted_session_id == next_scene);
+        ActiveSession* active = manager->active();
         REQUIRE(active != nullptr);
+        REQUIRE_FALSE(active->is_v3());  // 收养的正是 v2 活场,main 在手
         old_id = active->session_id();
         old_dir = active->session_dir();
         TrajectoryRecorder* main = &*active->main;
@@ -158,7 +260,7 @@ struct BusySessionFixture {
             child = std::move(*started);
             nlohmann::json extra;
             extra["agent_run_id"] = "agent-0001";
-            extra["owner_run_id"] = "main-0001";
+            extra["owner_run_id"] = main->base_scope().run_id;
             REQUIRE(child->WriteRunStarted(extra, Durability::PowerLoss).status ==
                     RecordReceipt::Status::Committed);
         }
@@ -198,7 +300,7 @@ struct BusySessionFixture {
 // 开场与换账主路
 // ---------------------------------------------------------------------------
 
-TEST_CASE("开场: preparing->running,run.started(process_launch),lifecycle 齐") {
+TEST_CASE("收养开场: preparing->running,run.started 打头,lifecycle 齐") {
     BusySessionFixture fixture("launch", /*with_child=*/false);
     const ActiveSession* active = fixture.manager->active();
     REQUIRE(active != nullptr);
@@ -214,17 +316,21 @@ TEST_CASE("开场: preparing->running,run.started(process_launch),lifecycle 齐"
     const auto manifest = ReadSessionJson(active->session_dir());
     REQUIRE(manifest.has_value());
     CHECK(manifest->status == "running");
-    CHECK(manifest->start_reason == "process_launch");
-    CHECK(manifest->main_run_id == "main-0001");
+    // 收养场是换账新侧的续办:start_reason=clear,来历指 BUSY01。
+    CHECK(manifest->start_reason == "clear");
+    CHECK(manifest->previous_session_id == "20260924-180000-BUSY01");
+    CHECK(manifest->main_run_id == "main-0002");
 
-    // fixture 铺了完整 turn + queue + 选段:开场仍是 run.started 打头。
+    // fixture 铺了完整 turn + queue + 选段:账面 run.started 打头,第二枚是
+    // 恢复器补的跨场 command.completed。
     const std::vector<std::string> kinds = Kinds(active->session_dir() / "main.jsonl");
-    REQUIRE(kinds.size() == 6);
+    REQUIRE(kinds.size() == 7);
     CHECK(kinds[0] == "run.started");
+    CHECK(kinds[1] == "control.command.completed");
 
     const auto report = VerifyJournalFile(active->session_dir() / "main.jsonl");
     CHECK(report.ok);
-    // lifecycle:create_session 的 intent/result 一只目录。
+    // lifecycle:create_session 的 intent/result 一只目录(开房那场 v3 launch)。
     std::error_code ec;
     int op_dirs = 0;
     for (const auto& entry :
@@ -256,8 +362,8 @@ TEST_CASE("clear 八步: 旧账封口新账开张,落盘次序与证据齐") {
     CHECK(fixture.child_terminal_written);          // child 在旧目录收口
     CHECK(outcome.old_session_id == old_id);
     CHECK(outcome.new_session_id != old_id);        // 绝不复用 session_id
-    CHECK(outcome.old_main_run_id == "main-0001");
-    CHECK(outcome.new_main_run_id == "main-0002");  // 新命名空间
+    CHECK(outcome.old_main_run_id == "main-0002");  // 收养场的 run 号
+    CHECK(outcome.new_main_run_id == "main-0003");  // 新命名空间(盘上最大号+1)
     CHECK(outcome.new_session_prepared);
     CHECK(outcome.old_session_json_finalized);
     CHECK(outcome.new_session_running);
@@ -333,8 +439,8 @@ TEST_CASE("clear 八步: 旧账封口新账开张,落盘次序与证据齐") {
     CHECK(new_kinds[1] == "control.command.completed");
     const std::vector<nlohmann::json> new_events = Events(new_dir / "main.jsonl");
     const nlohmann::json& run_started = new_events[0];
-    CHECK(run_started.at("run_id") == "main-0002");
-    CHECK(run_started.at("event_id") == "main-0002:evt-00000001");
+    CHECK(run_started.at("run_id") == "main-0003");
+    CHECK(run_started.at("event_id") == "main-0003:evt-00000001");
     CHECK(run_started.at("payload").at("start_reason") == "clear");
     CHECK(run_started.at("payload").at("previous_session_id") == old_id);
     // 反指旧 session 终态事件(session.ended)。
@@ -356,7 +462,7 @@ TEST_CASE("clear 八步: 旧账封口新账开张,落盘次序与证据齐") {
     CHECK(new_manifest->status == "running");
     CHECK(new_manifest->start_reason == "clear");
     CHECK(new_manifest->previous_session_id == old_id);
-    CHECK(new_manifest->main_run_id == "main-0002");
+    CHECK(new_manifest->main_run_id == "main-0003");
 
     // ---- 两本各自验得过;不拼接 ----
     CHECK(VerifyJournalFile(old_dir / "main.jsonl").ok);
@@ -365,7 +471,7 @@ TEST_CASE("clear 八步: 旧账封口新账开张,落盘次序与证据齐") {
     CHECK(new_facts.previous_session_id == old_id);  // 只留来历引用
     CHECK(new_facts.event_count == 2);
 
-    // lifecycle:launch + clear 各一只 create op。
+    // lifecycle:开房 launch + clear 各一只 create op。
     int op_dirs = 0;
     for (const auto& entry :
          std::filesystem::directory_iterator(fixture.manager->workspace_dir() / "lifecycle", ec)) {
@@ -394,7 +500,7 @@ TEST_CASE("clear 后旧账封链: 再写必拒,新账照常写") {
     CHECK(receipt.status == RecordReceipt::Status::Rejected);
     CHECK(receipt.error_code == "state.session_ended");
 
-    // 新账照常收活:链条从 main-0002 续。
+    // 新账照常收活:链条从 main-0003 续。
     RecordRequest title;
     title.kind = EventKind::ControlTitleChanged;
     title.scope = fixture.manager->active()->main->base_scope();
@@ -515,19 +621,16 @@ TEST_CASE("close 硬门: 盘上漏收的子流记 unknown,标 incomplete") {
 // 索引可标、resume 候选排除、指名 resume 明拒。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("one_shot 开场: manifest/信封/run.started 三处 run_kind 同源") {
-    const std::filesystem::path root = MakeRoot("oneshot-launch");
-    SessionManagerOptions options = Opts(root);
-    options.main_run_kind = RunKind::OneShot;
-    FakeClock clock;
-    SessionManager manager(options, &clock);
-    auto* active = manager.LaunchSession().value_or(nullptr);
+TEST_CASE("one_shot 收养场: manifest/信封/run.started 三处 run_kind 同源") {
+    BusySessionFixture fixture("oneshot-launch", /*with_child=*/false, RunKind::OneShot);
+    const ActiveSession* active = fixture.manager->active();
     REQUIRE(active != nullptr);
 
     const auto manifest = ReadSessionJson(active->session_dir());
     REQUIRE(manifest.has_value());
     CHECK(manifest->run_kind == "one_shot");
-    CHECK(manifest->start_reason == "process_launch");  // 冻结枚举不动,种类归 run_kind
+    // 收养场是换账新侧续办:start_reason=clear(冻结枚举不动,种类归 run_kind)。
+    CHECK(manifest->start_reason == "clear");
 
     const std::vector<nlohmann::json> events = Events(active->session_dir() / "main.jsonl");
     REQUIRE_FALSE(events.empty());
@@ -540,7 +643,7 @@ TEST_CASE("one_shot 开场: manifest/信封/run.started 三处 run_kind 同源")
     CloseRequest close;
     close.reason = "exit";
     NullClearParticipant null_participant;
-    const CloseOutcome outcome = manager.Close(close, &null_participant);
+    const CloseOutcome outcome = fixture.manager->Close(close, &null_participant);
     REQUIRE(outcome.error_code.empty());
     CHECK(outcome.run_terminal_kind == "run.completed");
     const std::vector<std::string> kinds = Kinds(active->session_dir() / "main.jsonl");
@@ -552,23 +655,53 @@ TEST_CASE("one_shot 开场: manifest/信封/run.started 三处 run_kind 同源")
 
 TEST_CASE("one_shot 场: 索引可标 run_kind,resume 候选排除,指名 resume 明拒") {
     const std::filesystem::path root = MakeRoot("oneshot-resume");
+    SessionManagerOptions options = Opts(root);
+    // V3-LEGACY-01:launch 只建 v3 场,而 one_shot 排除是 v2 manifest 的账
+    //(v3 源不适用)——留一场 v3 会抢 resume 候选,断了 LatestResumable 为
+    // 空的断言。本案改手植 v2 one_shot 封口旧档,开房走 CreateWorkspace。
+    options.identity = lubancode::workspace::MakeFallbackIdentity(options.workspace_root);
     std::string one_shot_id;
-    std::filesystem::path workspaces;
-    std::string workspace_key;
+    std::filesystem::path workspaces = options.workspaces_root;
+    std::string workspace_key = options.identity.workspace_key;
+    FakeClock clock;
     {
-        SessionManagerOptions options = Opts(root);
-        options.main_run_kind = RunKind::OneShot;
-        FakeClock clock;
-        SessionManager manager(options, &clock);
-        auto* active = manager.LaunchSession().value_or(nullptr);
-        REQUIRE(active != nullptr);
-        one_shot_id = active->session_id();
-        workspace_key = manager.workspace_key();
-        CloseRequest close;
-        close.reason = "exit";
-        NullClearParticipant null_participant;
-        REQUIRE(manager.Close(close, &null_participant).error_code.empty());
-        workspaces = options.workspaces_root;
+        REQUIRE(TrajectoryDirectory::CreateWorkspace(options.workspaces_root, options.identity,
+                                                     clock.WallMs())
+                    .has_value());
+        one_shot_id = "20260924-180000-SHOT01";
+        SessionManifest manifest;
+        manifest.schema_version = 2;
+        manifest.workspace_key = workspace_key;
+        manifest.session_id = one_shot_id;
+        manifest.launch_cwd = options.launch_cwd;
+        manifest.main_run_id = "main-0001";
+        manifest.run_kind = RunKindName(RunKind::OneShot);
+        manifest.start_reason = "process_launch";
+        manifest.status = "closed";
+        manifest.created_at_ms = clock.WallMs();
+        manifest.lubancode_version = options.lubancode_version;
+        manifest.event_schema_version = 2;
+        auto directory = TrajectoryDirectory::CreateSession(options.workspaces_root,
+                                                            workspace_key, manifest);
+        REQUIRE(directory.has_value());
+        EventScope scope;
+        scope.workspace_key = workspace_key;
+        scope.session_id = one_shot_id;
+        scope.run_id = "main-0001";
+        scope.run_kind = RunKind::OneShot;
+        scope.visibility = {Visibility::HostOnly};
+        auto main = TrajectoryRecorder::Start(directory->main_stream_path(),
+                                              directory->artifacts_root(), scope,
+                                              RecorderOptions{}, &clock);
+        REQUIRE(main.has_value());
+        nlohmann::json start_extra;
+        start_extra["start_reason"] = "process_launch";
+        REQUIRE(main->WriteRunStarted(start_extra, Durability::PowerLoss).status ==
+                RecordReceipt::Status::Committed);
+        REQUIRE(main->FinishRun(EventKind::RunCompleted, "exit", Durability::PowerLoss).status ==
+                RecordReceipt::Status::Committed);
+        REQUIRE(main->EndSession("exit", std::nullopt, "clean", Durability::PowerLoss).status ==
+                RecordReceipt::Status::Committed);
     }
     // 索引里认得出 one_shot,exclude_one_shot 滤得掉。
     {
@@ -584,8 +717,6 @@ TEST_CASE("one_shot 场: 索引可标 run_kind,resume 候选排除,指名 resume
     }
     // 新进程的 LatestResumable 不落在 one_shot 上;指名 resume 也明拒。
     {
-        SessionManagerOptions options = Opts(root);
-        FakeClock clock;
         SessionManager manager(options, &clock);
         CHECK(manager.LatestResumableSessionId().empty());
         ResumeRequest request;
@@ -607,15 +738,12 @@ TEST_CASE("one_shot 场: 索引可标 run_kind,resume 候选排除,指名 resume
 // ---------------------------------------------------------------------------
 
 TEST_CASE("UpdateApprovalMode: 写盘与内存同拍,clear 继承新档,无活动场明拒") {
-    const std::filesystem::path root = MakeRoot("approval-mode-update");
-    SessionManagerOptions options = Opts(root);
-    options.approval_mode = lubancode::ApprovalMode::Default;
-    FakeClock clock;
-    SessionManager manager(options, &clock);
-    auto* active = manager.LaunchSession().value_or(nullptr);
+    BusySessionFixture fixture("approval-mode-update", /*with_child=*/false);
+    SessionManager& manager = *fixture.manager;
+    ActiveSession* active = manager.active();
     REQUIRE(active != nullptr);
 
-    // 起手档按 options 落 manifest。
+    // 起手档按 options 落 manifest(收养场承手植 manifest,同一份 options)。
     {
         const auto manifest = ReadSessionJson(active->session_dir());
         REQUIRE(manifest.has_value());

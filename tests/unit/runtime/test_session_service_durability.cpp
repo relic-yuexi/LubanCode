@@ -164,8 +164,7 @@ TEST_CASE("受理落稳:原件与账行都在,正文含图片整份可读回") {
 // 2. 放行门:accepted 落稳、内存入队前崩 → 重开重建,不丢不双
 // ---------------------------------------------------------------------------
 
-TEST_CASE("崩溃窗口重建:未派发输入沿 resume 链重排进 pending,正文与键都在") {
-    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
+TEST_CASE("崩溃窗口重建:未派发输入续接后重排进 pending,正文与键都在") {
     const auto root = FreshRoot("revive");
     std::string source_id;
     std::filesystem::path source_dir;
@@ -185,6 +184,10 @@ TEST_CASE("崩溃窗口重建:未派发输入沿 resume 链重排进 pending,正
 
     runtime::SessionService resumed(ResumeRequestOf(root, source_id));
     REQUIRE(resumed.trajectory() != nullptr);
+    // V3-LEGACY-01 后 v3 源续接同场(2026-09-19 拍板):active 就是源场,
+    // 未派发输入在本场直接重排,不沿来源链搬。
+    CHECK(resumed.trajectory()->session_id() == source_id);
+    CHECK(resumed.trajectory()->session_dir() == source_dir);
     // 重建:两笔都回来,正文完整、次序 FIFO。
     REQUIRE(resumed.pending_input_count() == 2);
     auto first = resumed.PopPendingInput();
@@ -196,20 +199,19 @@ TEST_CASE("崩溃窗口重建:未派发输入沿 resume 链重排进 pending,正
     auto drained = resumed.PopPendingInput();
     CHECK(drained.status == runtime::SessionService::PendingPop::Status::Empty);
 
-    // 重落在账:新场的 operations.jsonl 有两笔带 origin 审计的 accepted
-    // 行,指向来源场与原操作号。
+    // 账面对账:本场 operations.jsonl 就是源场那本——2 笔原生 accepted
+    //(续接不重落,无 origin 审计行)+ 2 笔 dispatched(Pop 落账)。
     const auto lines = ReadJsonl(resumed.trajectory()->session_dir() / "operations.jsonl");
-    REQUIRE(lines.size() == 4);  // 2 accepted(重落) + 2 dispatched(Pop 落账)
-    int relocated = 0;
+    REQUIRE(lines.size() == 4);
+    int native_accepted = 0;
     for (const auto& line : lines) {
-        if (line.value("kind", std::string()) == "operation.accepted" &&
-            line.contains("originSessionId") && line.value("originSessionId", std::string()) == source_id) {
-            ++relocated;
-            CHECK(line.contains("originOperationId"));
+        if (line.value("kind", std::string()) == "operation.accepted") {
+            ++native_accepted;
+            CHECK_FALSE(line.contains("originSessionId"));  // 同场续接,无来源链
             CHECK(line.value("inputRef", std::string()).find("operations-inputs/") == 0);
         }
     }
-    CHECK(relocated == 2);
+    CHECK(native_accepted == 2);
 
     // 同键重发:回 duplicate(原意图不重复执行),队列不涨。
     const auto again = resumed.SubmitInput(InputOf("OP-K1", "第一句要接住"));

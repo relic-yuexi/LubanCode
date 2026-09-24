@@ -6,7 +6,7 @@
 
 ## 默认格式与目录
 
-`NewSessionV3WriteEnabled()` 默认返回 true。只有环境变量 `LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS` **恰为字符串 `0`**，新会话才走 v2。未设置、`1` 或其他值都走 v3。旧目录按自身格式读取，不改旧文件，不自动转换。
+新会话一律写 v3——V3-LEGACY-01（2026-09-24）退役了 v2 新建写口。环境变量 `LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS` 不再影响格式：设成 `0` 只在建场时记一条迁移告警，照走 v3。旧目录按自身格式读取，不改旧文件，不自动转换；v2 活场只剩旧盘恢复收养（未竟换账的续办）一个来路。
 
 ```text
 ~/.lubancode/workspaces/<workspace_key>/sessions/<sessionId>/

@@ -1,8 +1,9 @@
-// 新会话格式选择与目录发现。新会话默认写 v3；只有环境变量
-// LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS 恰为 "0" 才回 v2。
-// V3-LEGACY-01:旧写口与开关待退役；见 docs/development/v3-legacy-audit.md。
+// 新会话格式选择与目录发现。新会话一律写 v3——V3-LEGACY-01(2026-09-24)
+// 退役 v2 新建写口:旧逃生口 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0 不再
+// 生效,建场见显式 "0" 只记一条迁移告警(WarnV2NewSessionRetired),照走 v3。
 //
-// 写侧由 TrajectorySessionLedger 选择 <id>.jsonl 或 main.jsonl。
+// 写侧由 TrajectorySessionLedger 落 <id>.jsonl;v2 建账只剩旧盘善后两路
+// (恢复收养 ContinueNewSide 补旧账、v2 活场 clear 换账),不经本文件。
 // 读侧按源格式分派：v3 走 ReadV3Ledger/ProjectModelContext，v2 保留旧路。
 // resume-as-new 不追加源文件；子代理随父场格式，Workflow 编排账另管。
 // 终端历史投影和 AppServer 1.2 只读视图已接；完整 2.0 恢复协议另行推进。
@@ -17,9 +18,11 @@
 
 namespace lubancode::trajectory::v3 {
 
-// 每次调用现读环境变量，不缓存。未设置或非 "0" 均开；只影响以后
-// 新建会话的格式选择，不转换已有目录。
-bool NewSessionV3WriteEnabled();
+// V3-LEGACY-01(2026-09-24)退役:v2 新建写口已死,v3 是唯一新建格式。
+// 建场时若见 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS 恰为 "0",记一条迁移
+// 告警(人话:写口已退役);每次建场现读环境变量,不缓存。旧 v2 档的
+// 读取兼容不在此处——盘上 main.jsonl 照常可读可续。
+void WarnV2NewSessionRetired();
 
 // ---------------------------------------------------------------------------
 // 接线点 2 的目录发现助手(P3):v3 会话目录的并列识别。

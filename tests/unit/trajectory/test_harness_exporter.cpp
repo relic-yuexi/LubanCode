@@ -690,89 +690,12 @@ TEST_CASE("多工具同轮:call/result 逐对,tools 台账各就各位") {
 // 子流关联(§四:逐流各一行,parent_run_id 相连)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("子代理子流:两行 record,child 的 parent_run_id 指回 main") {
-    const auto root = FreshDir("lubancode-h1-subagent");
-    TrajectorySessionLedger::Options options;
-    options.workspaces_root = root / "workspaces";
-    options.workspace_root = root / "repo";
-    options.lubancode_version = "test";
-    options.one_shot = true;
-    std::error_code ec;
-    std::filesystem::create_directories(root / "repo", ec);
-    auto ledger = TrajectorySessionLedger::Open(options);
-    REQUIRE(ledger.has_value());
-    ledger->CaptureEnvironment([] {
-        TrajectorySessionLedger::EnvironmentFacts facts;
-        facts.provider = "demo";
-        facts.wire = "responses";
-        facts.model = "demo-large";
-        facts.system_prompt = "你是 LubanCode。";
-        facts.toolset.toolset_sha256 = std::string(64, 'e');
-        facts.toolset.tool_count = 4;
-        return facts;
-    }());
-
-    auto child = ledger->SpawnSubagent("toolu-1", "读文件并数行数");
-    REQUIRE(child.has_value());
-    auto& child_bridge = (*child)->turn_bridge();
-    child_bridge.BeginTurn("turn-1", "external_user");
-    child_bridge.RecordInput(UserMessage("读文件并数行数"));
-    const std::string child_request =
-        child_bridge.OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
-    child_bridge.OnRequestSent(child_request);
-    REQUIRE(child_bridge.OnOutputCompleted(child_request, UserMessage("报告:42 行"), "end_turn", "resp-c"));
-    child_bridge.EndTurn(true, false, "done");
-    const std::string terminal_hash = (*child)->Finish(true, "done");
-    CHECK_FALSE(terminal_hash.empty());
-
-    auto main_bridge = ledger->NewTurnBridge({"demo", "responses", "terminal"});
-    REQUIRE(main_bridge != nullptr);
-    main_bridge->BeginTurn("turn-1", "external_user");
-    main_bridge->RecordInput(UserMessage("去读文件"));
-    const std::string parent_request =
-        main_bridge->OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
-    main_bridge->OnRequestSent(parent_request);
-    api::Message with_agent = AssistantWithToolCall("toolu-1", "agent", nlohmann::json{{"task", "读文件"}});
-    REQUIRE(main_bridge->OnOutputCompleted(parent_request, with_agent, "tool_use", "resp-p"));
-    main_bridge->AttachChildRun("toolu-1", (*child)->run_id());
-    main_bridge->NoteChildTerminal((*child)->run_id(), terminal_hash);
-    main_bridge->OnToolTrace(StartedEvent("toolu-1", "agent", nlohmann::json{{"task", "读文件"}}));
-    main_bridge->OnToolTrace(FinishedEvent("toolu-1", "agent"));
-    CommitToolResult(*main_bridge, "toolu-1", "报告:42 行");
-    main_bridge->EndTurn(true, false, "done");
-
-    const auto records = trajectory::BuildSessionHarnessRecords(ledger->session_dir());
-    REQUIRE(records.size() == 2);
-    // 行序:main.jsonl + subagents/<run>.jsonl 按字典序,main 在前。
-    CHECK(records[0]["source"]["stream"] == "main.jsonl");
-    CHECK(records[0]["run_kind"] == "one_shot");
-    CHECK(records[0]["parent_run_id"].is_null());
-    // main 行的 agent 工具带子流引用,不内联子正文。
-    bool child_link_found = false;
-    for (const auto& tool : records[0]["tools"]) {
-        if (tool.value("call_id", std::string()) == "toolu-1") {
-            child_link_found = tool.contains("child_run_id");
-            CHECK(tool["child_run_id"] == (*child)->run_id());
-            CHECK(tool["child_terminal_event_hash"] == terminal_hash);
-        }
-    }
-    CHECK(child_link_found);
-
-    // child 行:run_kind=subagent,parent_run_id 指回 main run。
-    const auto& child_record = records[1];
-    CHECK(child_record["source"]["stream"].get<std::string>().rfind("subagents/", 0) == 0);
-    CHECK(child_record["run_kind"] == "subagent");
-    CHECK(child_record["run_id"] == (*child)->run_id());
-    CHECK(child_record["parent_run_id"] == records[0]["run_id"]);
-    // 子正文只在子行出现一次。
-    const std::string marker = "读文件并数行数";
-    CHECK(records[1].dump().find(marker) != std::string::npos);
-    CHECK(records[0].dump().find(marker) == std::string::npos);
-}
-
-// ---------------------------------------------------------------------------
-// 隐私(§八:API key/Authorization/provider secret 不出 JSONL)
-// ---------------------------------------------------------------------------
+// (退役,V3-LEGACY-01)原此处有"子代理子流:两行 record"案:靠注入 0 开
+// v2 活场,经 ledger/桥(env 采集 + SpawnSubagent + AttachChildRun/
+// NoteChildTerminal)现场产 v2 盘档,再验 harness 导出器对活场布局的两行
+// 分账(main 在前 + 子流带 parent_run_id)。写口退役后 v2 活场造不出;导出
+// 器解析面由本册手工 recorder 案继续守(v2 导出器是 V3-LEGACY-02 在册消费
+// 方,旧档兼容不动),旧盘布局的端到端对账随旧档消费夹具另立。
 
 TEST_CASE("secret 命中:正文脱敏不丢行,privacy_findings 留稳定码") {
     const std::string secret_line =

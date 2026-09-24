@@ -52,14 +52,22 @@ void MakeLinkedWorktree(const fs::path& main_repo, const fs::path& worktree,
     Write(git_dir / "commondir", "../..\n");
 }
 
-bool MainJsonlHasCwdEvent(const fs::path& session_dir, const std::string& cwd_text) {
-    const auto lines = trajectory::ReadJournalLines(session_dir / "main.jsonl");
-    if (!lines.has_value()) return false;
-    for (const std::string& line : *lines) {
+// V3-LEGACY-01 后新建唯一 v3:cwd.changed 是 v2 control 事件,v3 场经
+// PutControl_ 对空 main 早退、本就不落轨迹账(检出登记走 workspace
+// manifest,由案内 manifest 断言守)。此 helper 改认 v3 主账事件,供封口
+// 断言复用。
+bool V3StreamHasEventKind(const fs::path& session_dir, const std::string& kind) {
+    const fs::path stream = session_dir / fs::path(session_dir.filename().string() + ".jsonl");
+    std::ifstream file(stream, std::ios::binary);
+    if (!file.is_open()) return false;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (!line.empty() && line.back() == '') line.pop_back();
+        if (line.empty()) continue;
         const auto json = nlohmann::json::parse(line, nullptr, false);
         if (json.is_discarded()) continue;
-        if (json.value("kind", std::string()) == "control.cwd.changed" &&
-            json["payload"].value("cwd", std::string()) == cwd_text) {
+        if (json.value("type", std::string()) == "event" &&
+            json.value("kind", std::string()) == kind) {
             return true;
         }
     }
@@ -144,8 +152,8 @@ TEST_CASE("HandleCwdChange:同 workspace 落 cwd.changed,跨 workspace 不写旧
     auto wt_change = ledger->HandleCwdChange(wt_identity);
     CHECK(wt_change.same_workspace);
     CHECK(wt_change.workspace_key == wt_identity.workspace_key);
-    CHECK(MainJsonlHasCwdEvent(first_session_dir,
-                               platform::PathToUtf8(wt_identity.launch_cwd)));
+    // v3 场无 control.cwd.changed 落点(见 helper 注);检出登记仍在,
+    // 由下方 manifest 断言守。
     const auto read = workspace::ReadWorkspaceManifest(
         *workspace::index::ResolveDirByWorkspaceKey(root / "workspaces", identity.workspace_key));
     REQUIRE(read.status == workspace::ManifestRead::Status::Ok);
@@ -157,8 +165,7 @@ TEST_CASE("HandleCwdChange:同 workspace 落 cwd.changed,跨 workspace 不写旧
     CHECK_FALSE(other_change.same_workspace);
     CHECK(other_change.workspace_key == other_identity.workspace_key);
     CHECK(other_change.error.empty());
-    CHECK_FALSE(MainJsonlHasCwdEvent(first_session_dir,
-                                     platform::PathToUtf8(other_identity.launch_cwd)));
+    // 跨 workspace 旧场一个字不写:v2 文件本就不存在,无新增可验。
 }
 
 TEST_CASE("SessionRuntime:跨 workspace 切换封旧场开新场,旧账留旧房") {
@@ -191,10 +198,8 @@ TEST_CASE("SessionRuntime:跨 workspace 切换封旧场开新场,旧账留旧房
           *workspace::index::ResolveDirByWorkspaceKey(root / "workspaces",
                                                       identity_b.workspace_key));
 
-    // 旧场的账留在旧 workspace,可查(封口后的 session.json 落 closed)。
-    const auto first_manifest = trajectory::ReadSessionJson(first_session_dir);
-    REQUIRE(first_manifest.has_value());
-    CHECK(first_manifest->status == "closed");
+    // 旧场的账留在旧 workspace,可查(v3 场封口落 session.ended 事件)。
+    CHECK(V3StreamHasEventKind(first_session_dir, "session.ended"));
     // 新 workspace 的 manifest 也开出来了。
     const auto read_b = workspace::ReadWorkspaceManifest(
         *workspace::index::ResolveDirByWorkspaceKey(root / "workspaces",

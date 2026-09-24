@@ -457,13 +457,15 @@ TEST_CASE("ResumeThread:序号、id、空串三条解析路,新账接上") {
     CHECK(result.restored_messages == 2);
     CHECK(loop.History().size() == 2);
     CHECK(runtime.trajectory() != nullptr);
-    CHECK(runtime.trajectory()->session_id() != id_b);  // resume 开的是新场
+    // v3 源续接同场(2026-09-19 拍板"resume 就是 resume";V3-LEGACY-01 后
+    // 新建唯一 v3,不再 fork 另开):active 就是源场本身。
+    CHECK(runtime.trajectory()->session_id() == id_b);
 
-    // 空串 = 最近一场可恢复的(跳过本进程 active 的那场——上一步 resume
-    // 开出的新场;此刻最近的可恢复场就是第二场)。
+    // 空串 = 最近一场可恢复的(跳过本进程 active 的那场——此刻 active 已
+    // 续接在第二场上,最近的可恢复场落到第一场)。
     result = service.ResumeThread(loop, runtime, "", "/tmp");
     CHECK(result.resumed);
-    CHECK(result.id == id_b);
+    CHECK(result.id == id_a);
 
     // 按 id 恢复(旧场)。
     result = service.ResumeThread(loop, runtime, id_a, "/tmp");

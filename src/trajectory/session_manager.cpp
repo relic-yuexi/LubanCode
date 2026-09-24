@@ -896,94 +896,13 @@ std::expected<ActiveSession*, std::string> SessionManager::LaunchSession() {
     if (!EnsureWorkspace(&error)) {
         return std::unexpected(error);
     }
-    // 轨迹 v3 接线点 1(session_switch.hpp"唯一需要二选一的点"):开关只在
-    // 建场时读这一次,场中格式不变;开 = v3 主账,关 = 下方 v2 原路一字
-    // 不动。子账跟随父会话,不在此另读开关。
-    if (v3::NewSessionV3WriteEnabled()) {
-        return LaunchSessionV3Locked();
-    }
-
-    // create-new 建目录,session.json(status=preparing)。
-    SessionManifest manifest;
-    manifest.schema_version = 2;
-    manifest.workspace_key = workspace_key_;
-    manifest.session_id = NewStampId();
-    manifest.launch_cwd = options_.launch_cwd;
-    manifest.main_run_id = NextMainRunId();
-    manifest.run_kind = RunKindName(options_.main_run_kind);
-    manifest.start_reason = "process_launch";
-    manifest.status = SessionStatusName(SessionStatus::Preparing);
-    manifest.created_at_ms = clock_->WallMs();
-    manifest.lubancode_version = options_.lubancode_version;
-    manifest.approval_mode = options_.approval_mode;
-    // event schema major 钉进 manifest(存储 v2:recorder 写 v2 就得报 v2,
-    // 读侧不重放整本也能认);从前漏写,session.json 恒报 1。
-    manifest.event_schema_version = options_.recorder.event_schema_version;
-
-    auto directory = TrajectoryDirectory::CreateSession(options_.workspaces_root,
-                                                        workspace_key_, manifest);
-    if (!directory.has_value()) {
-        return std::unexpected("session.create_failed: " + directory.error());
-    }
-    auto lock_file = SessionLock::Acquire(directory->session_dir(), clock_->LockOwner());
-    if (!lock_file.has_value()) {
-        return std::unexpected("session.lock_failed: " + lock_file.error());
-    }
-    // lifecycle:create_session 一次管理操作一只目录(§3.2)。
-    const std::string create_op = NewStampId();
-    LifecycleIntent intent;
-    intent.operation_id = create_op;
-    intent.operation = LifecycleOperationName(LifecycleOperation::CreateSession);
-    intent.workspace_key = workspace_key_;
-    intent.session_id = manifest.session_id;
-    intent.requested_at_ms = clock_->WallMs();
-    intent.parameters["start_reason"] = manifest.start_reason;
-    if (const auto intent_dir = lifecycle().WriteIntent(intent); !intent_dir.has_value()) {
-        return std::unexpected("session.lifecycle_intent_failed: " + intent_dir.error());
-    }
-
-    // 开张:独占锁已握,main recorder 起 run.started(process_launch)。
-    auto recorder = TrajectoryRecorder::Start(directory->main_stream_path(),
-                                              directory->artifacts_root(), MainBaseScope(manifest),
-                                              options_.recorder, clock_);
-    if (!recorder.has_value()) {
-        return std::unexpected("session.recorder_failed: " + recorder.error());
-    }
-    const auto started = recorder->WriteRunStarted(nlohmann::json{{"start_reason", "process_launch"}},
-                                                   Durability::PowerLoss);
-    if (started.status != RecordReceipt::Status::Committed) {
-        // 子代理空轨迹单 P0-C:run.started 没提交,这场 session 没开成——
-        // main.jsonl 不算开卷。先放掉 recorder(Windows 攥句柄删不掉文件),
-        // 再按所有权凭据清 0 字节残留(路径=本次 launch 的目标名、大小=0),
-        // 不扫目录、不删非 0 文件。
-        { auto drop_recorder = std::move(recorder); }
-        (void)DiscardUncommittedStream(directory->main_stream_path());
-        return std::unexpected("session.run_start_failed: " + started.error_code);
-    }
-    ActiveSession session;
-    session.directory = *directory;
-    session.main = std::move(*recorder);
-    session.manifest = manifest;
-    session.lock = std::move(*lock_file);
-    if (const auto transition = TransitionSessionStatus(session.session_dir(), &session.manifest,
-                                                        SessionStatus::Running);
-        !transition.has_value()) {
-        // Journal 已 durable run.started;session.json 落后由恢复器按事实补正。
-        return std::unexpected("session.status_write_failed: " + transition.error());
-    }
-    session.status = SessionStatus::Running;
-
-    LifecycleResult result;
-    result.operation_id = create_op;
-    result.status = "completed";
-    result.completed_at_ms = clock_->WallMs();
-    result.outcome["session_dir"] = platform::PathToUtf8(session.session_dir());
-    result.outcome["main_run_id"] = session.manifest.main_run_id;
-    if (const auto written = lifecycle().WriteResult(result); !written.has_value()) {
-        return std::unexpected("session.lifecycle_result_failed: " + written.error());
-    }
-    active_ = std::move(session);
-    return &*active_;
+    // 轨迹 v3 接线点 1 收口(V3-LEGACY-01,2026-09-24):v2 新建写口退役,
+    // 建场唯一 v3。旧开关 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0 不再分流
+    // ——显式关只经 WarnV2NewSessionRetired 记一条迁移告警,照走 v3。
+    // v2 建账只剩旧盘善后两路:恢复收养(ContinueNewSide 补旧账)与 v2
+    // 活场 clear 换账,不经此函数。
+    v3::WarnV2NewSessionRetired();
+    return LaunchSessionV3Locked();
 }
 
 SessionManager::ClosureEvidence SessionManager::CloseActiveWork(
@@ -1077,7 +996,9 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
         ~Gate() { flag = false; }
     } gate{boundary_in_progress_};
     // 接线点 1 收尾棒:v3 场走 clear 八步的 v3 折算(关当前场开新场,
-    // §3.3.1 语义同源);v2 原路(下方)一字不动。
+    // §3.3.1 语义同源);v2 原路(下方)一字不动。V3-LEGACY-01(2026-09-24)
+    // 起 v2 活场只剩一个来路:恢复收养旧盘上未竟的 v2 换账(ContinueNewSide)
+    // ——launch/resume 已建不出 v2 场,这条 v2 clear 是旧盘善后,不是新写口。
     if (active_->is_v3()) {
         return ClearV3Locked(request, participant);
     }
@@ -2396,155 +2317,19 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
                                      std::move(outcome));
     }
 
-    // ---- 第 5 步(v2 源的 fork 路):建新 session 与新 main.jsonl,首条
-    // run.started(resume)。
+    // ---- 第 5 步(v2 源的 fork 路):建新 session 接续源账。接线点 1 的
+    // 同款收口(V3-LEGACY-01,2026-09-24):v2 源的 fork 新场也唯一 v3
+    //(首行 system + resume.source.attached 五键指源末行,§4.10)。旧开关
+    // 不再分流——显式关只经 WarnV2NewSessionRetired 记一条迁移告警,照走
+    // v3。源格式(v2/v3)只管读侧怎么折;旧 v2 源账写不动,新场一律 v3。
     std::string previous_session_id = request.previous_session_id;
     if (previous_session_id.empty() && !request.interactive) {
         previous_session_id = source_id;  // --continue:直接前驱就是 source
     }
-    // 接线点 1 的同款二选一(建场时读一次开关):开 = 新场也走 v3
-    //(首行 system + resume.source.attached 五键指源末行,§4.10);
-    // 关 = 下方 v2 原路一字不动。源格式(v2/v3)与新场格式彼此独立。
-    if (v3::NewSessionV3WriteEnabled()) {
-        return ResumeAsNewV3Locked(request, source_id, previous_session_id, source_run_id,
-                                   source_last_event_id, source_seq, std::move(outcome),
-                                   has_chain_fold ? &chain_fold : nullptr);
-    }
-    SessionManifest manifest;
-    manifest.schema_version = 2;
-    manifest.workspace_key = workspace_key_;
-    manifest.session_id = NewStampId();
-    manifest.launch_cwd = options_.launch_cwd;
-    manifest.main_run_id = NextMainRunId();
-    manifest.start_reason = "resume";
-    manifest.previous_session_id =
-        previous_session_id.empty() ? std::optional<std::string>{} : std::optional(previous_session_id);
-    manifest.status = SessionStatusName(SessionStatus::Preparing);
-    manifest.created_at_ms = clock_->WallMs();
-    manifest.lubancode_version = options_.lubancode_version;
-    manifest.run_kind = RunKindName(options_.main_run_kind);
-    manifest.event_schema_version = options_.recorder.event_schema_version;
-    manifest.approval_mode = outcome.approval_mode.value_or(options_.approval_mode);
-
-    auto directory = TrajectoryDirectory::CreateSession(options_.workspaces_root,
-                                                        workspace_key_, manifest);
-    if (!directory.has_value()) {
-        return fail("resume.step5_failed", directory.error());
-    }
-    auto lock_file = SessionLock::Acquire(directory->session_dir(), clock_->LockOwner());
-    if (!lock_file.has_value()) {
-        return fail("resume.step5_failed", lock_file.error());
-    }
-    // lifecycle:create_session + resume_reference(§3.2 恢复引用账)。
-    const std::string create_op = NewStampId();
-    LifecycleIntent intent;
-    intent.operation_id = create_op;
-    intent.operation = LifecycleOperationName(LifecycleOperation::CreateSession);
-    intent.workspace_key = workspace_key_;
-    intent.session_id = manifest.session_id;
-    intent.requested_at_ms = clock_->WallMs();
-    intent.parameters["start_reason"] = "resume";
-    intent.parameters["resumed_from_session_id"] = source_id;
-    if (const auto intent_dir = lifecycle().WriteIntent(intent); !intent_dir.has_value()) {
-        return fail("resume.step5_failed", intent_dir.error());
-    }
-    auto recorder = TrajectoryRecorder::Start(directory->main_stream_path(),
-                                              directory->artifacts_root(), MainBaseScope(manifest),
-                                              options_.recorder, clock_);
-    if (!recorder.has_value()) {
-        return fail("resume.step5_failed", recorder.error());
-    }
-    nlohmann::json start_extra;
-    start_extra["start_reason"] = "resume";
-    start_extra["resumed_from_session_id"] = source_id;
-    if (!previous_session_id.empty()) {
-        start_extra["previous_session_id"] = previous_session_id;
-    }
-    // source 末枚事件的 qualified ref(seq 折叠高水位;v3 源取末行实 id)。
-    start_extra["caused_by_event_ref"] =
-        EventRef{source_id, source_last_event_id, outcome.source_main_last_event_hash}.ToJson();
-    const auto started = recorder->WriteRunStarted(start_extra, Durability::PowerLoss);
-    if (started.status != RecordReceipt::Status::Committed) {
-        return fail("resume.step5_failed", "新 main run.started 落不了: " + started.error_code);
-    }
-    outcome.new_session_id = manifest.session_id;
-    outcome.new_main_run_id = manifest.main_run_id;
-    outcome.new_run_started_event_id = started.event_id;
-
-    // ---- 第 6 步:resume.source.attached(source id/末 hash/replay 版本/
-    // imported state hash/checkpoint ref/qualified refs);交互路再补跨
-    // session command.completed(qualified ref 指回旧 requested)。
-    RecordRequest attached;
-    attached.kind = EventKind::ResumeSourceAttached;
-    attached.scope = recorder->base_scope();
-    attached.payload["source_session_id"] = source_id;
-    attached.payload["source_terminal_event_hash"] = outcome.source_main_last_event_hash;
-    attached.payload["replay_version"] = outcome.replay_version;
-    attached.payload["imported_state_hash"] = outcome.imported_state_hash;
-    if (outcome.from_checkpoint) {
-        attached.payload["checkpoint_ref"] = nlohmann::json{
-            {"seq", outcome.checkpoint_seq}, {"source_event_hash", outcome.checkpoint_event_hash}};
-    }
-    attached.payload["qualified_event_refs"] = nlohmann::json::array({EventRef{
-        source_id, source_last_event_id, outcome.source_main_last_event_hash}.ToJson()});
-    const auto attached_receipt = recorder->Record(attached, Durability::PowerLoss);
-    if (attached_receipt.status != RecordReceipt::Status::Committed) {
-        return fail("resume.step6_failed",
-                    "resume.source.attached 落不了: " + attached_receipt.error_code);
-    }
-    outcome.resume_attached_event_id = attached_receipt.event_id;
-
-    if (request.interactive) {
-        RecordRequest completed;
-        completed.kind = EventKind::ControlCommandCompleted;
-        completed.scope = recorder->base_scope();
-        if (request.user_initiated) {
-            completed.scope.actor = Actor::User;
-            completed.scope.origin = Origin::ExternalUser;
-        }
-        completed.payload["command_id"] = request.boundary_command.command_id;
-        completed.payload["status"] = "completed";
-        completed.payload["qualified_requested_ref"] =
-            nlohmann::json{{"session_id", request.boundary_command.requested_session_id},
-                           {"event_id", request.boundary_command.requested_event_id}};
-        completed.payload["boundary_operation_id"] = request.boundary_command.boundary_operation_id;
-        completed.links.correlation_id = request.boundary_command.boundary_operation_id;
-        const auto completed_receipt = recorder->Record(completed, Durability::PowerLoss);
-        if (completed_receipt.status != RecordReceipt::Status::Committed) {
-            return fail("resume.step6_failed",
-                        "跨 session command completed 落不了: " + completed_receipt.error_code);
-        }
-        outcome.command_completed_event_id = completed_receipt.event_id;
-    }
-
-    // ---- 第 7 步:session.json 转 running,切 active;新 turn/request/
-    // call/seq 全从新命名空间起号(新 recorder 天然新号,§10.4 第 7 步)。
-    ActiveSession session;
-    session.directory = *directory;
-    session.main = std::move(*recorder);
-    session.manifest = manifest;
-    session.lock = std::move(*lock_file);
-    if (const auto transition = TransitionSessionStatus(session.session_dir(), &session.manifest,
-                                                        SessionStatus::Running);
-        !transition.has_value()) {
-        return fail("resume.step7_failed", transition.error());
-    }
-    session.status = SessionStatus::Running;
-    outcome.new_session_running = true;
-
-    LifecycleResult result;
-    result.operation_id = create_op;
-    result.status = "completed";
-    result.completed_at_ms = clock_->WallMs();
-    result.outcome["session_dir"] = platform::PathToUtf8(session.session_dir());
-    result.outcome["resumed_from_session_id"] = source_id;
-    result.outcome["imported_state_hash"] = outcome.imported_state_hash;
-    if (const auto written = lifecycle().WriteResult(result); !written.has_value()) {
-        return fail("resume.step5_failed", written.error());
-    }
-    active_ = std::move(session);
-    outcome.active_switched = true;
-    return outcome;
+    v3::WarnV2NewSessionRetired();
+    return ResumeAsNewV3Locked(request, source_id, previous_session_id, source_run_id,
+                               source_last_event_id, source_seq, std::move(outcome),
+                               has_chain_fold ? &chain_fold : nullptr);
 }
 
 ResumeOutcome SessionManager::ResumeAsNewV3Locked(const ResumeRequest& request,

@@ -1,8 +1,8 @@
 // SessionService 测试册(AppServer 接入 Session v3 第一棒:统一服务入口
 // 与身份)。四块:
-//   1. 开张/v3 开关两路回归——开关关 = v2 布局(main.jsonl + session.json),
-//      开关开 = v3 流(首行 system,§1.2);服务只是递合同,开关在
-//      SessionManager 建场时二选一(接线点 1)。
+//   1. 开张回归——新建唯一 v3(V3-LEGACY-01 后 v2 写口退役):pin 0 也
+//      走 v3 流并记迁移告警;服务只是递合同,格式在 SessionManager 建场
+//      一锤定音(接线点 1)。
 //   2. 输入接纳与幂等(§4.2)——同键同载荷回原回执(重发只接纳一次)、
 //      同键异载荷 operation_conflict、先账后回执(回执到手时 operations
 //      .jsonl 已有该笔)、resume 沿来源链识别原键(新 sessionId 不洗掉
@@ -31,9 +31,14 @@
 
 #include "app/one_shot.hpp"
 #include "config/config.hpp"
+#include "platform/log_sink.hpp"  // 迁移告警捕获(V3-LEGACY-01)
 #include "platform/sha256.hpp"
 #include "runtime/session_service.hpp"
 #include "tools/path_utils.hpp"
+#include "trajectory/directory.hpp"  // PlantV2Source:SessionManifest/CreateSession
+#include "trajectory/event.hpp"      // PlantV2Source:EventScope/RunKind/Visibility
+#include "trajectory/recorder.hpp"   // PlantV2Source:TrajectoryRecorder/RecorderClock
+#include "trajectory/session_manager.hpp"  // PlantV2Source:SessionStatusName
 #include "workspace/identity.hpp"
 
 using namespace lubancode;
@@ -97,26 +102,96 @@ std::filesystem::path V3StreamOf(const std::filesystem::path& session_dir) {
     return session_dir / (tools::PathToUtf8(session_dir.filename()) + ".jsonl");
 }
 
+// 手植 v2 源场(V3-LEGACY-01 后新建唯一 v3,v2 源只能靠盘上旧档夹具):
+// 场目录与 session.json 走 CreateSession,主账由真 recorder 写封口链
+//(run.started → run.completed → session.ended),可作 resume 源。读兼容
+// 面不动,这夹具只造档、不换任何读写行为。
+class PlantClock : public trajectory::RecorderClock {
+public:
+    std::int64_t WallMs() const override { return 1760000000000LL; }
+    std::int64_t MonotonicNs() const override { return 0LL; }
+};
+
+struct PlantedV2 {
+    std::string id;
+    std::filesystem::path dir;
+};
+
+PlantedV2 PlantV2Source(const std::filesystem::path& workspaces_root,
+                        const std::string& workspace_key, const std::string& session_id) {
+    trajectory::SessionManifest manifest;
+    manifest.schema_version = 2;
+    manifest.workspace_key = workspace_key;
+    manifest.session_id = session_id;
+    manifest.main_run_id = "main-plant-1";
+    manifest.run_kind = trajectory::RunKindName(trajectory::RunKind::MainSession);
+    manifest.start_reason = "process_launch";
+    manifest.status = trajectory::SessionStatusName(trajectory::SessionStatus::Closed);
+    manifest.created_at_ms = 1760000000000LL;
+    manifest.lubancode_version = "0.26.238-test";
+    manifest.event_schema_version = 2;
+    auto directory = trajectory::TrajectoryDirectory::CreateSession(workspaces_root, workspace_key,
+                                                                    manifest);
+    REQUIRE(directory.has_value());
+    PlantClock clock;
+    trajectory::EventScope scope;
+    scope.workspace_key = workspace_key;
+    scope.session_id = session_id;
+    scope.run_id = manifest.main_run_id;
+    scope.run_kind = trajectory::RunKind::MainSession;
+    scope.visibility = {trajectory::Visibility::HostOnly};
+    auto recorder = trajectory::TrajectoryRecorder::Start(
+        directory->main_stream_path(), directory->artifacts_root(), scope,
+        trajectory::RecorderOptions{}, &clock);
+    REQUIRE(recorder.has_value());
+    REQUIRE(recorder->WriteRunStarted(nlohmann::json{{"start_reason", "process_launch"}},
+                                      trajectory::Durability::PowerLoss)
+                 .status == trajectory::RecordReceipt::Status::Committed);
+    REQUIRE(recorder->FinishRun(trajectory::EventKind::RunCompleted, "exit",
+                                trajectory::Durability::PowerLoss)
+                 .status == trajectory::RecordReceipt::Status::Committed);
+    REQUIRE(recorder->EndSession("exit", std::nullopt, "clean", trajectory::Durability::PowerLoss)
+                 .status == trajectory::RecordReceipt::Status::Committed);
+    return PlantedV2{session_id, directory->session_dir()};
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
 // 1. 开张与 v3 开关两路回归(§十.1"创建会话接 v3 写侧开关")
 // ---------------------------------------------------------------------------
 
-TEST_CASE("服务开张:开关关走 v2 布局,v3 流一枚不长") {
+TEST_CASE("服务开张:pin 0 写口已退役,照走 v3 布局并记迁移告警") {
+    // V3-LEGACY-01:显式关不再开 v2 场——v3 是唯一新建格式,建场记一条
+    // 迁移告警(人话:写口已退役)。
     EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
-    const auto root = FreshRoot("launch-v2");
+    std::vector<platform::LogRecord> logs;
+    platform::LogSink::Instance().SetWriter([&logs](const platform::LogRecord& record) {
+        logs.push_back(record);
+    });
+    struct WriterGuard {
+        ~WriterGuard() { platform::LogSink::Instance().SetWriter(nullptr); }
+    } writer_guard;
+    const auto root = FreshRoot("launch-pin0");
     runtime::SessionService service(LaunchRequestOf(root));
     REQUIRE(service.runtime() != nullptr);
     REQUIRE(service.trajectory() != nullptr);
     CHECK(service.launch_error().empty());
-    CHECK_FALSE(service.v3_format());
+    CHECK(service.v3_format());
 
     const std::filesystem::path session_dir = service.trajectory()->session_dir();
-    CHECK(std::filesystem::exists(session_dir / "main.jsonl"));
-    CHECK(std::filesystem::exists(session_dir / "session.json"));
-    CHECK_FALSE(std::filesystem::exists(V3StreamOf(session_dir)));
+    CHECK(std::filesystem::exists(V3StreamOf(session_dir)));
+    CHECK_FALSE(std::filesystem::exists(session_dir / "main.jsonl"));
+    CHECK_FALSE(std::filesystem::exists(session_dir / "session.json"));
     CHECK_FALSE(service.trajectory()->session_id().empty());
+    bool saw_retirement_warn = false;
+    for (const auto& record : logs) {
+        if (record.level == platform::LogLevel::Warn && record.component == "trajectory" &&
+            record.message.find("已退役") != std::string::npos) {
+            saw_retirement_warn = true;
+        }
+    }
+    CHECK(saw_retirement_warn);
 
     // 台账文件随首笔接纳出现,不在开张时空造。
     CHECK_FALSE(std::filesystem::exists(session_dir / "operations.jsonl"));
@@ -290,16 +365,27 @@ TEST_CASE("载荷 hash 同源:同一正文与图片,两条服务路算出同一 
 // 3. 恢复:resume-at-launch(ResumeAsNew 两路分派在账本侧,服务递合同)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("恢复:v2 源 resume-at-launch 开新段,来源可查(§10.4)") {
-    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
+TEST_CASE("恢复:v2 源(盘上旧档)resume-at-launch 开新段 v3,来源可查(§10.4)") {
+    // V3-LEGACY-01 后 v2 场造不出,v2 源改为手植旧档:真 recorder 写封口
+    // 干净的 main.jsonl + session.json。既有合同不变——v2 账写不动,fork
+    // 新场另开(新场如今唯一 v3)。
     const auto root = FreshRoot("resume-v2");
+    const auto identity = LaunchRequestOf(root).workspace_identity;
     std::string source_id;
+    std::filesystem::path source_dir;
     {
-        runtime::SessionService source(LaunchRequestOf(root));
-        REQUIRE(source.trajectory() != nullptr);
-        source_id = source.trajectory()->session_id();
-        const auto closed = source.Close("exit");
-        CHECK(closed.error_code.empty());
+        // 先真开一场把 workspace 房间落成,再手植 v2 源(比暖场新,才是
+        // 最近可恢复源)。
+        runtime::SessionService warm(LaunchRequestOf(root));
+        REQUIRE(warm.trajectory() != nullptr);
+        const auto warm_closed = warm.Close("exit");
+        CHECK(warm_closed.error_code.empty());
+        const PlantedV2 planted =
+            PlantV2Source(root / "workspaces", identity.workspace_key, "20260924-120000-V2SRC1");
+        source_id = planted.id;
+        source_dir = planted.dir;
+        CHECK(std::filesystem::exists(source_dir / "main.jsonl"));
+        CHECK(std::filesystem::exists(source_dir / "session.json"));
     }
     runtime::SessionLaunchRequest resume_request = LaunchRequestOf(root);
     resume_request.resume_at_launch = true;
@@ -310,7 +396,10 @@ TEST_CASE("恢复:v2 源 resume-at-launch 开新段,来源可查(§10.4)") {
     CHECK(resumed.trajectory()->session_id() == resumed.runtime()->trajectory()->session_id());
     // 直接来源可查(操作台账种账的钥匙)。
     CHECK(resumed.runtime()->trajectory()->launch_resume_source_session_id() == source_id);
-    CHECK_FALSE(resumed.v3_format());
+    CHECK(resumed.v3_format());
+    CHECK(std::filesystem::exists(V3StreamOf(resumed.trajectory()->session_dir())));
+    // v2 源账写不动:新场不是源场的续卷。
+    CHECK(resumed.trajectory()->session_dir() != source_dir);
 
     const auto closed = resumed.Close("exit");
     CHECK(closed.error_code.empty());
@@ -455,12 +544,12 @@ TEST_CASE("三端同路:CLI 路(one-shot 折算)与服务路,开张/接纳/收�
     CHECK(cli_lines[0].value("payloadHash", std::string()) ==
           server_lines[0].value("payloadHash", std::string()));
 
-    // 布局合同同款:都是 v2 场(main.jsonl + session.json 在,v3 流不在)。
+    // 布局合同同款:都是 v3 场(V3-LEGACY-01 后新建唯一 v3)。
     for (const runtime::SessionService* service : {&cli_service, &server_service}) {
         const std::filesystem::path session_dir = service->trajectory()->session_dir();
-        CHECK(std::filesystem::exists(session_dir / "main.jsonl"));
-        CHECK(std::filesystem::exists(session_dir / "session.json"));
-        CHECK_FALSE(std::filesystem::exists(V3StreamOf(session_dir)));
+        CHECK(std::filesystem::exists(V3StreamOf(session_dir)));
+        CHECK_FALSE(std::filesystem::exists(session_dir / "main.jsonl"));
+        CHECK_FALSE(std::filesystem::exists(session_dir / "session.json"));
     }
 
     // 幂等同规矩:重发一次只接纳一次,两路都如此。
@@ -476,23 +565,20 @@ TEST_CASE("三端同路:CLI 路(one-shot 折算)与服务路,开张/接纳/收�
     const auto server_closed = server_service.Close("thread_stop");
     CHECK(cli_closed.error_code.empty());
     CHECK(server_closed.error_code.empty());
-    for (const std::filesystem::path& root : {cli_root, service_root}) {
-        bool found_closed = false;
-        std::error_code walk_ec;
-        for (const auto& entry :
-             std::filesystem::recursive_directory_iterator(root / "workspaces", walk_ec)) {
-            if (entry.is_regular_file() && entry.path().filename() == "session.json") {
-                std::ifstream in(entry.path(), std::ios::binary);
-                std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-                const nlohmann::json manifest =
-                    nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
-                if (manifest.is_object() && manifest.contains("status") &&
-                    manifest["status"] == "closed") {
-                    found_closed = true;
-                }
-            }
+    // v3 场封口落 session.ended 事件(无 session.json 可走)。
+    for (const runtime::SessionService* service : {&cli_service, &server_service}) {
+        const std::filesystem::path stream = V3StreamOf(service->trajectory()->session_dir());
+        std::ifstream in(stream, std::ios::binary);
+        REQUIRE(in.is_open());
+        std::string last_line;
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) last_line = line;
         }
-        CHECK(found_closed);
+        const nlohmann::json tail =
+            nlohmann::json::parse(last_line, nullptr, /*allow_exceptions=*/false);
+        CHECK(tail.value("kind", std::string()) == "session.ended");
     }
 }
 

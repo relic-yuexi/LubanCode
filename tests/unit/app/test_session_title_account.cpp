@@ -176,48 +176,54 @@ bool AwaitReady(lubancode::app::SessionTitleRefiner& refiner, int wait_ms) {
     return refiner.Ready();
 }
 
-// main.jsonl 逐行解析后的数账器:按 kind 计数,并按 request_id 关联出
-// purpose=title_refine 的请求再数它的 usage/output 事件。
+// <id>.jsonl 逐行解析后的数账器(V3-LEGACY-01 后新建唯一 v3,旁路桥走
+// v3 写口):按事件 kind 计数,并按 requestId 关联出 purpose=title_refine
+// 的请求再数它的 usage/output 事件。
 struct LedgerCount {
     std::map<std::string, int> by_kind;
     std::set<std::string> refine_request_ids;
-    int refine_usage = 0;      // title_refine 请求上的 model.usage.recorded
-    int refine_output = 0;     // title_refine 请求上的 output 终态(completed/failed/cancelled)
-    int title_changed = 0;     // control.title.changed
-    int turn_overlap = 0;      // state.turn_overlap(不许出现)
+    int refine_usage = 0;   // title_refine 请求上的 model.usage.appended
+    int refine_output = 0;  // title_refine 请求上的 response 终态(completed/failed/cancelled)
+    int title_changed = 0;  // session.title.applied
+    int turn_overlap = 0;   // state.turn_overlap(v2 概念,v3 不许出现同名)
 
     explicit LedgerCount(const lubancode::runtime::TrajectorySessionLedger& ledger) {
-        std::ifstream file(ledger.session_dir() / "main.jsonl", std::ios::binary);
+        const std::filesystem::path session_dir = ledger.session_dir();
+        std::ifstream file(session_dir / std::filesystem::path(session_dir.filename().string() +
+                                                              ".jsonl"),
+                           std::ios::binary);
         std::string line;
         while (std::getline(file, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty()) {
                 continue;
             }
-            nlohmann::json envelope = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
-            if (!envelope.is_object() || !envelope.contains("kind")) {
+            nlohmann::json row = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+            if (!row.is_object() || row.value("type", std::string()) != "event" ||
+                !row.contains("kind")) {
                 continue;
             }
-            const std::string kind = envelope.value("kind", "");
+            const std::string kind = row.value("kind", "");
             by_kind[kind]++;
-            if (kind == "control.title.changed") {
+            if (kind == "session.title.applied") {
                 title_changed++;
             }
             if (kind == "state.turn_overlap") {
                 turn_overlap++;
             }
-            const bool has_request = envelope.contains("request_id");
+            const bool has_request = row.contains("requestId");
             if (kind == "model.request.prepared" && has_request &&
-                envelope.value("payload", nlohmann::json::object()).value("purpose", "") ==
+                row.value("payload", nlohmann::json::object()).value("purpose", "") ==
                     "title_refine") {
-                refine_request_ids.insert(envelope.value("request_id", ""));
+                refine_request_ids.insert(row.value("requestId", ""));
             }
-            if ((kind == "model.usage.recorded") && has_request &&
-                refine_request_ids.count(envelope.value("request_id", "")) > 0) {
+            if ((kind == "model.usage.appended") && has_request &&
+                refine_request_ids.count(row.value("requestId", "")) > 0) {
                 refine_usage++;
             }
-            if ((kind == "model.output.completed" || kind == "model.output.failed" ||
-                 kind == "model.output.cancelled") &&
-                has_request && refine_request_ids.count(envelope.value("request_id", "")) > 0) {
+            if ((kind == "model.response.completed" || kind == "model.response.failed" ||
+                 kind == "model.response.cancelled") &&
+                has_request && refine_request_ids.count(row.value("requestId", "")) > 0) {
                 refine_output++;
             }
         }
