@@ -518,10 +518,14 @@ TEST_CASE("FormatContextBreakdown: detail 的 deferred 三项全零时不画延�
     CHECK(found_system_deferred);
 }
 
-TEST_CASE("FormatContextBreakdown: detail 的 MCP server 明细按 tokens 降序展开") {
+TEST_CASE("FormatContextBreakdown: detail 的 MCP server 明细按给定顺序原样展开（排序是调用方的活）") {
+    // FormatContextBreakdown 是纯渲染函数,不自己排序 mcp_servers——头文件
+    // 注释已说破"调用方按 tokens 降序排好,这里只管原样打"(真排序在
+    // RunContextCommand 里的 std::sort)。这里按调用方已排好的降序传入,
+    // 断言渲染保序,不在渲染层重新验证排序算法。
     lubancode::cli::ContextBreakdownDetail detail;
-    detail.mcp_servers.push_back({"small-server", 2, 100});
     detail.mcp_servers.push_back({"big-server", 5, 900});
+    detail.mcp_servers.push_back({"small-server", 2, 100});
     const auto lines =
         FormatContextBreakdown(10000, 5000, 20000, 0, 256000, 0, BuiltinTheme("dark"), 16, -1, &detail);
     std::size_t big_index = 0, small_index = 0;
@@ -536,7 +540,7 @@ TEST_CASE("FormatContextBreakdown: detail 的 MCP server 明细按 tokens 降序
     }
     CHECK(big_index > 0);
     CHECK(small_index > 0);
-    CHECK(big_index < small_index);  // 降序:tokens 更大的 server 排前头
+    CHECK(big_index < small_index);  // 保序:给的什么顺序,打出来就是什么顺序
 }
 
 // ---- WrapStatusRows(P3-3 括号断行) --------------------------------------------------
