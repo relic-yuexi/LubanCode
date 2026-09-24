@@ -279,13 +279,14 @@ TEST_CASE("GAP-05 案1:模型节点各开独立场,usage 并进 /usage 主账口
     CHECK(meta.value("nodeExecutionId", std::string()) == "run-ns-a-d1");
     CHECK(meta.value("attemptId", std::string()) == "run-ns-a-d1-a1");
     CHECK(meta.at("spawnEventRef").value("sessionId", std::string()) == parent_sid);
-    // 场内有 assistant(usage owner 落在这)。
+    // 场内有 assistant(usage owner 落在这;§4.12 usage 是行顶层键)。
     bool has_assistant = false;
     for (const auto& line : a_lines) {
         if (line.value("type", std::string()) == "message" &&
             line.at("message").value("role", std::string()) == "assistant") {
             has_assistant = true;
-            CHECK(line.at("message").contains("usage"));
+            CHECK(line.contains("usage"));
+            CHECK(line.at("usage").is_object());
         }
     }
     CHECK(has_assistant);
@@ -399,6 +400,41 @@ TEST_CASE("GAP-05 案2:kill 中途崩溃——resume 从最后 commit 续,不重
     for (const auto& sample : usage.samples) {
         if (sample.session_id != ledger->session_id()) {
             ++node_samples;
+        }
+    }
+    if (node_samples != 2) {
+        // 诊断(只在失配时打):树走警告 + 样本身份 + b 场账卷的行角色,
+        // 下轮 CI 日志直接看穿缺哪环。
+        for (const auto& warning : usage.warnings) {
+            MESSAGE("usage-warning: ", warning);
+        }
+        for (const auto& sample : usage.samples) {
+            MESSAGE("usage-sample: sid=", sample.session_id, " run=", sample.run_id,
+                    " in=", sample.total_input_tokens);
+        }
+        const fs::path b_dir = root / "workflow-runs" / "run-ns" / "nodes" / "run-ns-b-d2" /
+                               "sessions";
+        std::error_code list_ec;
+        for (const auto& entry : fs::directory_iterator(b_dir, list_ec)) {
+            const fs::path b_jsonl = entry.path() / (entry.path().filename().string() + ".jsonl");
+            MESSAGE("b-session-file: ", b_jsonl.string());
+            for (const auto& line : LinesOf(b_jsonl)) {
+                if (!line.is_object()) continue;
+                const std::string role =
+                    line.value("type", std::string()) == "message"
+                        ? line.at("message").value("role", std::string())
+                        : line.value("kind", std::string());
+                MESSAGE("  line: ", role);
+            }
+        }
+        for (const auto& line : LinesOf(ledger->session_dir() /
+                                        (ledger->session_id() + ".jsonl"))) {
+            if (line.is_object() &&
+                line.value("kind", std::string()) == "subagent.spawn.requested") {
+                MESSAGE("spawn-edge: ",
+                        line.at("payload").at("childSessionRef").value("journalPath",
+                                                                       std::string()));
+            }
         }
     }
     CHECK(node_samples == 2);
