@@ -8,7 +8,12 @@
 //   - 迟到实报(model.usage.appended)只作观察单列,不二次累计;
 //   - compact 内部请求记 CompactReduce,Goal 验收 purpose unmapped 如实点名;
 //   - 失败请求无 assistant:unknown sample + appended 观察覆盖缺口;
-//   - 坏账 ok=false 不伪装零消耗;空目录走 v2 老路;格式冲突/异版本拒读。
+//   - 坏账 ok=false 不伪装零消耗;空目录走 v2 老路;异版本拒读。
+// V3-GAP-01 并账半场(两代账并出):
+//   - ListSessionStreams 两代清单:v3 主账+递归子账目录,v2 布局照旧;
+//   - 两代并存以 v3 为准:旧 main.jsonl/平铺子账只补 v3 开账前段,
+//     开账后一笔不计(防双计),并账/弃账各自点名;坏旧账点名不拦 v3;
+//   - <id>.jsonl 验不明(异版本)仍按冲突拒读,不猜格式。
 // 合法账一律经 V3Writer 现场生成;坏形状在合法账上注入。
 #include <doctest/doctest.h>
 
@@ -29,6 +34,8 @@
 #include "trajectory/v3/subagent.hpp"
 #include "trajectory/v3/writer.hpp"
 
+#include "../insights/insights_fixtures.hpp"
+
 namespace v3 = lubancode::trajectory::v3;
 using namespace lubancode::accounting;
 
@@ -42,6 +49,14 @@ namespace {
 class FixedClock : public v3::V3Clock {
 public:
     std::int64_t WallMs() const override { return 1759468800000LL; }
+};
+
+// 旧 v2 账用钟:晚于 v3 开账(上面 FixedClock 的 1759468800000)。旧账
+// 事件落在 v3 之后 = 同代重叠段,并账时须弃(防双计)。insights 夹具的
+// 默认 FixedClock(1759000000000)早于 v3 开账 = 可补的前段。
+class LateLegacyClock : public lubancode::insights_fixtures::FixedClock {
+public:
+    std::int64_t WallMs() const override { return 1759468900000LL; }
 };
 
 struct SessionsRoot {
@@ -592,7 +607,7 @@ TEST_CASE("prepared 未发出的请求不计,completed 而消息丢失点名") {
 // 格式分派:v2 老路 / 冲突 / 异版本
 // ---------------------------------------------------------------------------
 
-TEST_CASE("格式分派:空目录走 v2 老路;冲突与异版本拒读") {
+TEST_CASE("格式分派:空目录走 v2 老路;验不明的并存与异版本拒读") {
     // 光杆目录:既无 main.jsonl 也无 <id>.jsonl——v2 老路零请求(合法空账)。
     {
         SessionsRoot root("empty");
@@ -603,15 +618,13 @@ TEST_CASE("格式分派:空目录走 v2 老路;冲突与异版本拒读") {
         CHECK(read.samples.empty());
         CHECK(HasWarning(read, "usage.session_manifest_missing"));
     }
-    // 两种主账并存:冲突拒读。
+    // 两种主账并存且 <id>.jsonl 验不明(异版本):仍按冲突拒读,不猜格式。
     {
-        SessionsRoot root("conflict");
-        {
-            auto writer = StartSession(root, "S-DUAL");
-            REQUIRE(writer.has_value());
-        }
-        WriteFileBytes(root.Dir("S-DUAL") / "main.jsonl", "{}\n");
-        const SessionUsageRead read = ReadSessionUsage(root.Dir("S-DUAL"));
+        SessionsRoot root("stillconflict");
+        WriteFileBytes(root.Dir("S-CONFLICT") / "S-CONFLICT.jsonl",
+                       "{\"schemaVersion\":2,\"type\":\"event\"}\n");
+        WriteFileBytes(root.Dir("S-CONFLICT") / "main.jsonl", "{}\n");
+        const SessionUsageRead read = ReadSessionUsage(root.Dir("S-CONFLICT"));
         CHECK_FALSE(read.ok);
         CHECK(read.error_code == "usage.session_format_conflict");
         CHECK(read.samples.empty());
@@ -633,5 +646,239 @@ TEST_CASE("格式分派:空目录走 v2 老路;冲突与异版本拒读") {
         const SessionUsageRead read = ReadSessionUsage(root.Dir("S-BADFIRST"));
         CHECK_FALSE(read.ok);
         CHECK(read.error_code == "usage.session_format_unreadable");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// V3-GAP-01 两代并账:v3 为准,旧账只补开账前段
+// ---------------------------------------------------------------------------
+
+TEST_CASE("两代并存:旧账只补 v3 开账前段,开账后一笔不计(不双计)") {
+    SessionsRoot root("merge");
+    const std::filesystem::path dir = root.Dir("S-MERGE");
+    {
+        auto writer = StartSession(root, "S-MERGE");
+        REQUIRE(writer.has_value());
+        InstallRequest(*writer, "turn-000001",
+                       nlohmann::json{{"inputTokens", 120}, {"outputTokens", 30}});
+    }
+    // 旧 main.jsonl:夹具钟(1759000000000)早于 v3 开账(1759468800000)
+    // → 前段,补缺并入。
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(dir / "artifacts", ec);
+        const lubancode::insights_fixtures::FixedClock early;
+        lubancode::insights_fixtures::FixtureStream main(
+            dir / "main.jsonl", dir / "artifacts", "ws-000000000000", "S-MERGE", "main-0001",
+            lubancode::insights_fixtures::RunKind::MainSession, 2, early);
+        main.StartRun();
+        main.StartTurn("turn-0001");
+        lubancode::insights_fixtures::UsageSpec usage;
+        usage.input = 500;
+        usage.output = 50;
+        main.ModelExchange("turn-0001", "req-0001", "main_turn", usage);
+        main.EndTurn("turn-0001");
+        main.Seal();
+    }
+    // 平铺旧子账:晚钟(v3 开账之后)→ 同代重叠段,弃,不双计。
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(dir / "subagents", ec);
+        const LateLegacyClock late;
+        lubancode::insights_fixtures::FixtureStream sub(
+            dir / "subagents" / "subagent-0001.jsonl", dir / "artifacts", "ws-000000000000",
+            "S-MERGE", "subagent-0001", lubancode::insights_fixtures::RunKind::Subagent, 2, late);
+        sub.StartRun("subagent_dispatch");
+        sub.StartTurn("turn-0001", "peer_agent");
+        lubancode::insights_fixtures::UsageSpec sub_usage;
+        sub_usage.input = 4000;
+        sub_usage.output = 700;
+        sub.ModelExchange("turn-0001", "req-0001", "subagent_turn", sub_usage);
+        sub.EndTurn("turn-0001");
+        sub.Seal();
+    }
+    const SessionUsageRead read = ReadSessionUsage(dir);
+    REQUIRE(read.ok);
+    CHECK(read.format == "v3");
+    // v3 一笔 + 旧前段一笔;开账后的平铺子账一笔不计。
+    REQUIRE(read.samples.size() == 2);
+    std::int64_t total_input = 0;
+    std::int64_t legacy_kept = 0;
+    for (const auto& sample : read.samples) {
+        REQUIRE(sample.usage.has_value());
+        total_input += sample.total_input_tokens;
+        if (sample.provider == "ccmoon") {
+            legacy_kept += 1;
+            CHECK(sample.total_input_tokens == 500);
+        }
+    }
+    CHECK(legacy_kept == 1);
+    // 人工可复算:120(v3)+ 500(旧前段),一个不多一个不少。
+    CHECK(total_input == 120 + 500);
+    CHECK(HasWarning(read, "usage.legacy_merged: main.jsonl: 1 笔"));
+    CHECK(HasWarning(read, "usage.legacy_overlap_dropped: subagent-0001.jsonl: 1 笔"));
+}
+
+TEST_CASE("两代并存:旧账整卷落在 v3 开账后 → 一笔不计,总数不虚") {
+    // 双计防护的对面:旧账若不当弃,同一场会 120+999 两遍;钉死只认 v3。
+    SessionsRoot root("mergelate");
+    const std::filesystem::path dir = root.Dir("S-LATE3");
+    {
+        auto writer = StartSession(root, "S-LATE3");
+        REQUIRE(writer.has_value());
+        InstallRequest(*writer, "turn-000001",
+                       nlohmann::json{{"inputTokens", 120}, {"outputTokens", 30}});
+    }
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(dir / "artifacts", ec);
+        const LateLegacyClock late;
+        lubancode::insights_fixtures::FixtureStream main(
+            dir / "main.jsonl", dir / "artifacts", "ws-000000000000", "S-LATE3", "main-0001",
+            lubancode::insights_fixtures::RunKind::MainSession, 2, late);
+        main.StartRun();
+        main.StartTurn("turn-0001");
+        lubancode::insights_fixtures::UsageSpec usage;
+        usage.input = 999;
+        usage.output = 99;
+        main.ModelExchange("turn-0001", "req-0001", "main_turn", usage);
+        main.EndTurn("turn-0001");
+        main.Seal();
+    }
+    const SessionUsageRead read = ReadSessionUsage(dir);
+    REQUIRE(read.ok);
+    REQUIRE(read.samples.size() == 1);
+    REQUIRE(read.samples[0].usage.has_value());
+    CHECK(read.samples[0].total_input_tokens == 120);
+    CHECK_FALSE(HasWarning(read, "usage.legacy_merged"));
+    CHECK(HasWarning(read, "usage.legacy_overlap_dropped: main.jsonl: 1 笔"));
+}
+
+TEST_CASE("两代并存:坏旧账点名,v3 部分照读") {
+    SessionsRoot root("mergebad");
+    const std::filesystem::path dir = root.Dir("S-BADLEGACY");
+    {
+        auto writer = StartSession(root, "S-BADLEGACY");
+        REQUIRE(writer.has_value());
+        InstallRequest(*writer, "turn-000001",
+                       nlohmann::json{{"inputTokens", 40}, {"outputTokens", 8}});
+    }
+    // 旧 main.jsonl 首行不是合法信封:点名弃掉,不拦 v3 的账。
+    WriteFileBytes(dir / "main.jsonl", "{}\n");
+    const SessionUsageRead read = ReadSessionUsage(dir);
+    REQUIRE(read.ok);
+    CHECK(read.format == "v3");
+    REQUIRE(read.samples.size() == 1);
+    REQUIRE(read.samples[0].usage.has_value());
+    CHECK(read.samples[0].total_input_tokens == 40);
+    CHECK(HasWarning(read, "usage.stream_unreadable: main.jsonl"));
+}
+
+// ---------------------------------------------------------------------------
+// V3-GAP-01 ListSessionStreams:两代清单
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ListSessionStreams:v3 主账与递归子账全列,v2 布局照旧") {
+    // v3 场:父 → 子(同层 subagents/)→ 孙(子卷同层再嵌套),三账全列。
+    {
+        SessionsRoot root("listv3");
+        {
+            auto parent = StartSession(root, "S-PARENT3");
+            REQUIRE(parent.has_value());
+            const v3::ChildSessionRef child_ref{"S-CHILD3", "run-S-CHILD3",
+                                                "subagents/S-CHILD3/S-CHILD3.jsonl"};
+            const v3::ParentActionRef parent_action{"S-PARENT3", "run-S-PARENT3", "turn-000001",
+                                                    "step-000001", "action-000001", "msg-000001"};
+            auto spawn = v3::SubagentSpawn::Request(*parent, "action-000001", "turn-000001",
+                                                    "step-000001", "task-000001", child_ref,
+                                                    parent_action, nlohmann::json::object(),
+                                                    nlohmann::json::object());
+            auto boot = spawn.BootstrapChild(*parent, "run-S-CHILD3", "你是孩子。", "去查。");
+            REQUIRE(boot.child_writer.has_value());
+            REQUIRE(spawn.Link(*parent, boot.checkpoint).status ==
+                    v3::WriteReceipt::Status::Committed);
+            const v3::ChildSessionRef grandchild_ref{"S-GRAND3", "run-S-GRAND3",
+                                                     "subagents/S-GRAND3/S-GRAND3.jsonl"};
+            const v3::ParentActionRef child_action{"S-CHILD3", "run-S-CHILD3", "turn-000001",
+                                                   "step-000001", "action-000002", "msg-000002"};
+            auto spawn2 = v3::SubagentSpawn::Request(*boot.child_writer, "action-000002",
+                                                     "turn-000001", "step-000001", "task-000002",
+                                                     grandchild_ref, child_action,
+                                                     nlohmann::json::object(),
+                                                     nlohmann::json::object());
+            auto boot2 = spawn2.BootstrapChild(*boot.child_writer, "run-S-GRAND3",
+                                               "你是孙子。", "再查。");
+            REQUIRE(boot2.child_writer.has_value());
+            REQUIRE(spawn2.Link(*boot.child_writer, boot2.checkpoint).status ==
+                    v3::WriteReceipt::Status::Committed);
+        }
+        const auto listed = ListSessionStreams(root.Dir("S-PARENT3"));
+        REQUIRE(listed.has_value());
+        REQUIRE(listed->size() == 3);
+        CHECK((*listed)[0].filename().string() == "S-PARENT3.jsonl");
+        CHECK((*listed)[1].filename().string() == "S-CHILD3.jsonl");
+        CHECK((*listed)[2].filename().string() == "S-GRAND3.jsonl");
+        CHECK((*listed)[1].parent_path().filename().string() == "S-CHILD3");
+        CHECK((*listed)[2].parent_path().parent_path().parent_path().filename().string() ==
+              "S-CHILD3");
+    }
+    // v2 场:main + 平铺 subagent + workflow 两件,一枚不多一枚不少。目录名
+    // 就是 S-V2LIST——同名 .jsonl 才是 v3 主账候选位,拿来钉异版本不收。
+    {
+        const auto dir = lubancode::insights_fixtures::PrepareDir(
+            std::filesystem::temp_directory_path() / "lubancode-v3-usage-listv2" / "S-V2LIST");
+        const lubancode::insights_fixtures::FixedClock clock;
+        const auto open_stream = [&](const std::filesystem::path& stream_path,
+                                     const std::string& run_id,
+                                     lubancode::insights_fixtures::RunKind kind) {
+            return lubancode::insights_fixtures::FixtureStream(
+                stream_path, dir / "artifacts", "ws-000000000000", "S-V2LIST", run_id, kind, 2,
+                clock);
+        };
+        {
+            auto main = open_stream(dir / "main.jsonl", "main-0001",
+                                    lubancode::insights_fixtures::RunKind::MainSession);
+            main.StartRun();
+            main.Seal();
+        }
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(dir / "subagents", ec);
+            auto sub = open_stream(dir / "subagents" / "subagent-0001.jsonl", "subagent-0001",
+                                   lubancode::insights_fixtures::RunKind::Subagent);
+            sub.StartRun("subagent_dispatch");
+            sub.Seal();
+        }
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(dir / "workflows" / "workflow-0001" / "nodes",
+                                                ec);
+            auto wf = open_stream(dir / "workflows" / "workflow-0001" / "workflow.jsonl",
+                                  "workflow-0001", lubancode::insights_fixtures::RunKind::Workflow);
+            wf.StartRun("workflow_node");
+            wf.Seal();
+        }
+        // 异种 <id>.jsonl(S-V2LIST.jsonl,schemaVersion 2)混进目录:不算
+        // v3 布局件,清单不收。
+        {
+            std::ofstream out(dir / "S-V2LIST.jsonl", std::ios::binary);
+            out << "{\"schemaVersion\":2,\"type\":\"event\"}\n";
+        }
+        const auto listed = ListSessionStreams(dir);
+        REQUIRE(listed.has_value());
+        REQUIRE(listed->size() == 3);
+        CHECK((*listed)[0].filename().string() == "main.jsonl");
+        CHECK((*listed)[1].filename().string() == "subagent-0001.jsonl");
+        CHECK((*listed)[2].filename().string() == "workflow.jsonl");
+    }
+    // 光杆目录:空表(不是 nullopt);不存在的目录:nullopt。
+    // 注意 no-such 不能经 root.Dir()(它会顺手建目录,CI 上栽过一回)。
+    {
+        SessionsRoot root("listempty");
+        root.Dir("S-BARE");
+        const auto listed = ListSessionStreams(root.Dir("S-BARE"));
+        REQUIRE(listed.has_value());
+        CHECK(listed->empty());
+        CHECK_FALSE(ListSessionStreams(root.root / "no-such").has_value());
     }
 }
