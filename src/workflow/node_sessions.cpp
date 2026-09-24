@@ -35,7 +35,7 @@ std::string MintNodeSessionId(std::uint64_t counter) {
 #if defined(_WIN32)
     gmtime_s(&parts, &now);
 #else
-    gmtime_r(&parts, &now);
+    gmtime_r(&now, &parts);
 #endif
     char suffix[16];
     std::snprintf(suffix, sizeof(suffix), "W%06llu",
