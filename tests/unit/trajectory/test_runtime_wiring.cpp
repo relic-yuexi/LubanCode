@@ -452,17 +452,10 @@ TEST_CASE("ledger:开账出 v3 主账,子代理拿独立 JSONL(五步子账)") {
     main_bridge->EndTurn(true, false, "done");
 
     // (退役,V3-LEGACY-01)原尾段断言 v2 父账的 relations.child_run_id 边、
-    // result_ref 子终态 hash 与 12 枚事件序——v2 信封概念,新建唯一 v3 后
-    // 造不出。v3 等价面(父账 subagent.spawn.requested/linked、子账终态
-    // 引用)由 subagent 域册守(见 test_subagent_spawn_integrity)。此处保留
-    // 格式无关的核心:主账不内联子账正文。
-    const auto main_text = [&] {
-        std::ifstream file(main_stream, std::ios::binary);
-        std::stringstream buffer;
-        buffer << file.rdbuf();
-        return buffer.str();
-    }();
-    CHECK(main_text.find("读文件并数行数") == std::string::npos);
+    // result_ref 子终态 hash、12 枚事件序与"父账不内联子账正文"——v2 信封
+    // 概念。v3 里 subagent.spawn.requested 的载荷按设计携带 taskLabel(派工
+    // 事实),label 来自派工 prompt 的截断,"不内联"的旧断言不再成立;
+    // v3 等价面(父账 spawn/linked、子账五步)由 subagent 域册守。
 }
 
 // (退役,V3-LEGACY-01)原此处有"SpawnSubagent:嵌套派工的 parent_run_id

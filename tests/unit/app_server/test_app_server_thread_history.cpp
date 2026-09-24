@@ -312,11 +312,11 @@ TEST_CASE("thread/resume: 冷 v3 场——只回当前链 + 压缩标记 + conte
 }
 
 // ---------------------------------------------------------------------------
-// 活/冷 v2 thread:如实报格式,不冒充
+// 活/冷 thread:如实报格式,不冒充(V3-LEGACY-01 后新建唯一 v3)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("thread/read|resume: 活 thread(v2 账)走账本路,如实回 v2") {
-    const std::string dir = MakeTempDir("lubancode-as-thr-hot-v2");
+TEST_CASE("thread/read|resume: 活 thread(v3 账)走账本路,如实回 v3") {
+    const std::string dir = MakeTempDir("lubancode-as-thr-hot-v3");
     {
         HistoryHarness harness(dir);
         const std::string thread_id = harness.StartThread();  // 不停场:活 thread
@@ -324,21 +324,19 @@ TEST_CASE("thread/read|resume: 活 thread(v2 账)走账本路,如实回 v2") {
         for (const char* method : {"thread/read", "thread/resume"}) {
             const nlohmann::json read = harness.Call(method, {{"threadId", thread_id}});
             CHECK(read.contains("result"));
-            CHECK(read["result"]["sourceFormat"] == "v2");
+            CHECK(read["result"]["sourceFormat"] == "v3");
             CHECK(read["result"]["count"] == 0);
             CHECK(read["result"]["items"].empty());
-            if (std::string(method) == "thread/resume") {
-                // v2 场没有上下文摘要可报:不给 contextSummary,不编数。
-                CHECK_FALSE(read["result"].contains("contextSummary"));
-            }
+            // contextSummary 的有无归读面合同(有摘要才报,不编数),不再钉
+            // "v2 场必无"的旧口径。
         }
     }
     std::error_code cleanup_ec;
     std::filesystem::remove_all(U8(dir), cleanup_ec);
 }
 
-TEST_CASE("thread/read: 冷 v2 场(停场后经索引定位)回 v2 空表") {
-    const std::string dir = MakeTempDir("lubancode-as-thr-cold-v2");
+TEST_CASE("thread/read: 冷 v3 场(停场后经索引定位)回 v3 空表") {
+    const std::string dir = MakeTempDir("lubancode-as-thr-cold-v3");
     {
         HistoryHarness harness(dir);
         const std::string thread_id = harness.StartThread();
@@ -346,7 +344,7 @@ TEST_CASE("thread/read: 冷 v2 场(停场后经索引定位)回 v2 空表") {
 
         const nlohmann::json read = harness.Call("thread/read", {{"threadId", thread_id}});
         CHECK(read.contains("result"));
-        CHECK(read["result"]["sourceFormat"] == "v2");
+        CHECK(read["result"]["sourceFormat"] == "v3");
         CHECK(read["result"]["items"].empty());
     }
     std::error_code cleanup_ec;

@@ -127,7 +127,9 @@ PlantedV2 PlantV2Source(const std::filesystem::path& workspaces_root,
     manifest.run_kind = trajectory::RunKindName(trajectory::RunKind::MainSession);
     manifest.start_reason = "process_launch";
     manifest.status = trajectory::SessionStatusName(trajectory::SessionStatus::Closed);
-    manifest.created_at_ms = 1760000000000LL;
+    // created_at 钉 2030:必须比暖场 v3 会话(真墙钟)新,resume_at_launch
+    // 的"最近一场可恢复"才落到这份手植 v2 源上。
+    manifest.created_at_ms = 1893456000000LL;
     manifest.lubancode_version = "0.26.238-test";
     manifest.event_schema_version = 2;
     auto directory = trajectory::TrajectoryDirectory::CreateSession(workspaces_root, workspace_key,

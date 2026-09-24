@@ -175,6 +175,9 @@ struct SourceSession {
                                                  RecorderOptions{}, &clock);
         REQUIRE(started.has_value());
         main.emplace(std::move(*started));
+        REQUIRE(main->WriteRunStarted(nlohmann::json{{"start_reason", "process_launch"}},
+                                      Durability::PowerLoss)
+                    .status == RecordReceipt::Status::Committed);
         WriteFullTurn(*main, "数一数文件");
         if (with_child) {
             // 一只已完成的子代理:父侧派发(started+终态带 hash),子账自
@@ -549,6 +552,9 @@ TEST_CASE("第 2/4 步: checkpoint 高水位与悬空工具分档") {
         REQUIRE(started_recorder.has_value());
         auto main_owner = std::move(*started_recorder);
         TrajectoryRecorder& main = main_owner;
+        REQUIRE(main.WriteRunStarted(nlohmann::json{{"start_reason", "process_launch"}},
+                                     Durability::PowerLoss)
+                    .status == RecordReceipt::Status::Committed);
         EventScope turn = main.base_scope();
         turn.turn_id = "turn-0001";
         turn.actor = Actor::User;

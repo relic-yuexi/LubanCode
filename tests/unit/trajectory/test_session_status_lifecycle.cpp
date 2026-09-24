@@ -247,8 +247,9 @@ TEST_CASE("lifecycle: archive 只吃 closed,active running 拒绝") {
     archived.current_workspace_key = manager.workspace_key();
     archived.archived_only = true;
     CHECK(QueryWorkspaceSessions(Opts(root).workspaces_root, archived).total == 1);
-    // 再 archive 非法(自环)。
-    CHECK_FALSE(manager.ArchiveSession(id).has_value());
+    // 再 archive:v3 归档幂等(ScanSessionArchiveState 见 archived 直接
+    // 成功,v2 session.json 状态机的自环拒绝口径不适用)。
+    CHECK(manager.ArchiveSession(id).has_value());
 }
 
 TEST_CASE("lifecycle: delete 先 intent 后 tombstone 再删目录;未封口不删") {

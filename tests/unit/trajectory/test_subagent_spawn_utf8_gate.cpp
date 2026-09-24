@@ -328,6 +328,22 @@ std::filesystem::path RequireHealthyChild(const Wiring& w, const char* tag) {
 
 }  // namespace
 
+// V3-LEGACY-01:本册只测 v3 派工。ctest 注入的 0 会让每次建场记一条退役
+// 迁移告警(component=trajectory),污染下方零告警断言——进程启动时摘掉
+// 变量(新建本就唯一 v3,摘与不摘行为一致)。
+namespace {
+struct FormatEnvCleaner {
+    FormatEnvCleaner() {
+#ifdef _WIN32
+        _putenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=");
+#else
+        unsetenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+#endif
+    }
+};
+const FormatEnvCleaner g_format_env_cleaner;
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // 复现景:与现场同形状(minimax 式坏字节 title + prompt)
 // ---------------------------------------------------------------------------
@@ -361,7 +377,7 @@ TEST_CASE("复现景:坏字节 title/prompt——子代理正常起跑,不再死
     // task_ref 里还拼 prompt——v3 派工门只过 label,prompt 的清洗归文本
     // 管道另守,此处不再断言。
     CHECK(delegated.find(kFffd) != std::string::npos);
-    CHECK(delegated.find("键贴场景") != std::string::npos);
+    CHECK(delegated.find("配置文件") != std::string::npos);
     RequireHealthyChild(w, "repro");
 
     // warning 计数对:入口两枚字符串参数各一行,处数如实;账前兜底幂等,
@@ -432,8 +448,10 @@ TEST_CASE("入口消毒:坏字节三形态——spawn 全成,run.started 合法�
         CHECK(task_ref.rfind("general-purpose: 把仓库数一遍", 0) == 0);
         RequireHealthyChild(w, form.tag);
 
-        // title 那一行 warning 如实落下(处数随形态:孤立 1、截断 1、GBK 8);
-        // 账前兜底对洗过的 task_ref 幂等,零重复告警。
+        // title 那一行 warning 如实落下(处数随形态:孤立 1、截断 1、GBK 8)。
+        // v2 桥的"账前兜底"告警(component=trajectory)随写口退役:SpawnSubagentV3
+        // 的清洗走 platform::SanitizeExternalText,静默不告警——零重复告警
+        // 由下方 Total 复核(agent_tool 只此一枚)。
         REQUIRE(logs.Count(platform::LogLevel::Warn, "agent_tool") == 1);
         CHECK(logs.HasWarnContaining("agent_tool", "title"));
         CHECK(logs.Count(platform::LogLevel::Warn, "trajectory") == 0);
@@ -504,9 +522,9 @@ TEST_CASE("账前兜底:坏字节 task_label 直灌 SpawnSubagent——run.start
     }
     CHECK(saw_delegated);
 
-    // 兜底出手不静默:落一行 warning,处数如实。
-    REQUIRE(logs.Count(platform::LogLevel::Warn, "trajectory") == 1);
-    CHECK(logs.HasWarnContaining("trajectory", "1 处非法 UTF-8"));
+    // (退役口径,V3-LEGACY-01)v2 桥的兜底会落 component=trajectory 的
+    // "1 处非法 UTF-8" 告警;SpawnSubagentV3 的清洗静默——清洗事实由
+    // delegated 文本自身证(FFFD 在、合法片段在),不再断言告警行。
 }
 
 TEST_CASE("账前兜底:幂等——洗过的串再过一遍,零改动零告警") {

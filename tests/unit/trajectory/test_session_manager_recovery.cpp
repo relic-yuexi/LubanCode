@@ -89,7 +89,7 @@ void SetSessionStatus(const std::filesystem::path& dir, const std::string& statu
 // 手植场的 recorder 档:event_schema_version 与 manifest 同拍(2)。
 RecorderOptions PlantRecorderOptions() {
     RecorderOptions options;
-    options.event_schema_version = 2;
+    options.event_schema_version = 1;
     return options;
 }
 
@@ -122,7 +122,7 @@ SessionManifest PlantManifest(const SessionManagerOptions& options,
     manifest.status = "preparing";
     manifest.created_at_ms = now_ms;
     manifest.lubancode_version = options.lubancode_version;
-    manifest.event_schema_version = 2;
+    manifest.event_schema_version = 1;
     return manifest;
 }
 

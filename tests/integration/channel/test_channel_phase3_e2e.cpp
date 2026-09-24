@@ -214,14 +214,18 @@ struct MiniGateway {
     // 给假后端排一份纯文本回复脚本(一轮一份,按请求次序消费)。
     void QueueTextReply(const std::string& text) { backend.scripts.push_back(TextScript(text)); }
 
-    // 会话存档目录里落了几份 .jsonl(引擎建档数)。
-    // P0-2:会话账住 workspaces/<key>/sessions/<id>/main.jsonl(数有几场)。
+    // 会话存档目录里落了几份主账(引擎建档数)。
+    // V3-LEGACY-01 后新建唯一 v3:主账是 workspaces/<key>/sessions/<id>/
+    // <id>.jsonl(父名是 sessions 的目录下那枚;子账在更深层不算)。
     std::vector<std::string> SessionFiles() const {
         std::vector<std::string> files;
         std::error_code ec;
         for (const auto& entry :
              std::filesystem::recursive_directory_iterator(root / "workspaces", ec)) {
-            if (entry.is_regular_file() && entry.path().filename() == "main.jsonl") {
+            if (!entry.is_regular_file(ec) || entry.path().extension() != ".jsonl") {
+                continue;
+            }
+            if (entry.path().parent_path().parent_path().filename() == "sessions") {
                 files.push_back(entry.path().string());
             }
         }
@@ -406,8 +410,8 @@ TEST_CASE("渠道轮的真账落 Journal:P0-2 起进 workspaces,provenance 投�
     const auto files = gw.SessionFiles();
     REQUIRE(files.size() == 1);
 
-    // 真账是 main.jsonl:来信与回话都在。provenance 字段进 Journal 的
-    // typed 投影是 channel 线后续批次的活(轮末补抄路已停,不伪造账)。
+    // 真账是 v3 主账(<id>.jsonl):来信与回话都在。provenance 字段进
+    // 账的 typed 投影是 channel 线后续批次的活(轮末补抄路已停,不伪造账)。
     std::ifstream in(files[0], std::ios::binary);
     std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     CHECK(content.find("从哪儿来的") != std::string::npos);

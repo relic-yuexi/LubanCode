@@ -24,6 +24,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "accounting/purpose.hpp"  // RequestPurpose(主回合起号,V3-LEGACY-01)
+#include "agent/loop.hpp"           // RequestPreparedContext
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "app/session_title_account.hpp"
@@ -87,6 +89,31 @@ struct TitleFixture {
             auto opened = lubancode::runtime::TrajectorySessionLedger::Open(options);
             REQUIRE(opened.has_value());
             ledger.emplace(std::move(*opened));
+            // V3-LEGACY-01 后新建唯一 v3:v3 旁路桥(title_refine 一路)要求
+            // 主回合号在场(trajectory_bypass_bridge.cpp 的 active_main_turn_id
+            // 门)——精修本就发生在"首个主回合收口后的空闲边界",夹具照生产
+            // 时序先跑一轮完整主回合。
+            auto bridge = ledger->NewTurnBridge({"fake", "anthropic", "host"});
+            REQUIRE(bridge != nullptr);
+            bridge->BeginTurn("turn-1", "external_user");
+            lubancode::api::Message input;
+            input.role = lubancode::api::Role::User;
+            input.content.push_back(lubancode::api::TextBlock{"做一个图书管理系统"});
+            bridge->RecordInput(input);
+            lubancode::api::Request request;
+            request.model = "cheap-m";
+            request.system = "SYSTEM-BASE";
+            request.messages.push_back(input);
+            lubancode::agent::RequestPreparedContext ctx;
+            ctx.purpose = lubancode::accounting::RequestPurpose::MainTurn;
+            const std::string request_id = bridge->OnRequestPrepared(request, ctx);
+            REQUIRE_FALSE(request_id.empty());
+            REQUIRE(bridge->OnRequestSent(request_id));
+            lubancode::api::Message answer;
+            answer.role = lubancode::api::Role::Assistant;
+            answer.content.push_back(lubancode::api::TextBlock{"先看看需求。"});
+            REQUIRE(bridge->OnOutputCompleted(request_id, answer, "end_turn", "resp-1"));
+            bridge->EndTurn(true, false, "done");
         }
         account = std::make_unique<SessionTitleAccount>(title, ledger.has_value() ? &*ledger : nullptr);
     }

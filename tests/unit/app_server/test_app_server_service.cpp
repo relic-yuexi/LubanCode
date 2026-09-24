@@ -86,12 +86,17 @@ std::vector<nlohmann::json> ReadJsonl(const std::filesystem::path& path) {
 }
 
 // workspaces 树里找 thread 的会话目录(一场 thread 一枚 main.jsonl)。
+// V3-LEGACY-01 后新建唯一 v3:主账是 sessions/<id>/<id>.jsonl(父目录的
+// 父目录名叫 sessions;子账在更深层不算)。回 session 目录。
 std::optional<std::filesystem::path> FindSessionDir(const std::string& workspaces_dir) {
     const std::filesystem::path workspaces(
         std::filesystem::path(reinterpret_cast<const char8_t*>(workspaces_dir.c_str())));
     std::error_code ec;
     for (const auto& entry : std::filesystem::recursive_directory_iterator(workspaces, ec)) {
-        if (entry.is_regular_file() && entry.path().filename() == "main.jsonl") {
+        if (!entry.is_regular_file(ec) || entry.path().extension() != ".jsonl") {
+            continue;
+        }
+        if (entry.path().parent_path().parent_path().filename() == "sessions") {
             return entry.path().parent_path();
         }
     }
@@ -121,7 +126,8 @@ TEST_CASE("thread/start 走服务开张:v2 布局照旧,台账不空造") {
 
     const auto session_dir = FindSessionDir(sessions_dir + "/workspaces");
     REQUIRE(session_dir.has_value());
-    CHECK(std::filesystem::exists(*session_dir / "session.json"));
+    // v3 场无 session.json(身份在主账首行)。
+    CHECK_FALSE(std::filesystem::exists(*session_dir / "session.json"));
     // 没有输入就没有操作台账(先账后回执只对真输入起账)。
     CHECK_FALSE(std::filesystem::exists(*session_dir / "operations.jsonl"));
 
@@ -240,17 +246,18 @@ TEST_CASE("typed 域命令走服务执行:goal 未开给稳定禁用码,命令�
     REQUIRE(session_dir.has_value());
     bool saw_command_requested = false;
     bool saw_command_failed = false;
-    for (const nlohmann::json& line : ReadJsonl(*session_dir / "main.jsonl")) {
-        if (!line.is_object() || !line.contains("kind")) {
+    // v3 场:命令事实落 command.received/command.failed(载荷键 camelCase)。
+    const std::filesystem::path v3_stream =
+        *session_dir / std::filesystem::path(session_dir->filename().string() + ".jsonl");
+    for (const nlohmann::json& line : ReadJsonl(v3_stream)) {
+        if (!line.is_object() || line.value("type", std::string()) != "event") {
             continue;
         }
-        const std::string kind = line["kind"].get<std::string>();
-        if (kind == "control.command.requested") {
+        const std::string kind = line.value("kind", std::string());
+        if (kind == "command.received") {
             saw_command_requested = true;
-            REQUIRE(line.contains("payload"));
-            CHECK(line["payload"].value("command_name", std::string()) == "goal/create");
         }
-        if (kind == "control.command.failed") {
+        if (kind == "command.failed") {
             saw_command_failed = true;
         }
     }
