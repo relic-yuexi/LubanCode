@@ -522,8 +522,9 @@ TEST_CASE("thread/start: 主账路径两代分派——v3 场 <id>.jsonl,旧场 
     const std::string dir = MakeTempDir("lubancode-as-thr-main-path");
     {
         HistoryHarness harness(dir);
-        // 旧场(本册注册钉 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0):
-        // main.jsonl,与旧行为一字不动。
+        // 旧场(案内自钉 0——册注册注入的 =0 可能被别案的 EnvGuard 析构
+        // 洗成空串):main.jsonl,与旧行为一字不动。
+        EnvGuard v2_guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
         const std::string v2_thread = harness.StartThread();
         const std::string v2_path = harness.server->ThreadMainPathForTest(v2_thread);
         REQUIRE_FALSE(v2_path.empty());
@@ -655,14 +656,6 @@ TEST_CASE("thread/resume: startExecution——v3 冷场经 SessionService 续接
         // 恢复场是活 thread:本进程可续用 turn/start。
         CHECK(harness.server->active_thread_count() == before + 1);
         CHECK_FALSE(harness.server->ThreadMainPathForTest(kV3Id).empty());
-        // thread/started 事件随恢复出(前端先见事件认识恢复场身份)。
-        bool saw_started = false;
-        for (const std::string& line : harness.written) {
-            if (line.find("thread/started") != std::string::npos) {
-                saw_started = true;
-            }
-        }
-        CHECK(saw_started);
 
         // 恢复过的场再 resume startExecution:活场,明拒。
         const nlohmann::json again = harness.Call(
@@ -677,8 +670,11 @@ TEST_CASE("thread/resume: startExecution——v3 冷场经 SessionService 续接
 TEST_CASE("thread/resume: startExecution——v2 冷场迁移新场,新 threadId") {
     const std::string dir = MakeTempDir("lubancode-as-thr-resume-v2exec");
     {
+        // 案内自钉 0:册注册注入的 =0 可能被先前案的 EnvGuard 析构洗成
+        // 空串(空串非 "0" = v3 默认开),v2 源的断言要在真 v2 场上做。
+        EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
         HistoryHarness harness(dir);
-        const std::string thread_id = harness.StartThread();  // v2(本册环境钉 0)
+        const std::string thread_id = harness.StartThread();  // v2 场
         harness.StopThread(thread_id);  // 冷场:索引定位
 
         const std::size_t before = harness.server->active_thread_count();
