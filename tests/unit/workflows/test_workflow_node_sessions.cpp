@@ -234,9 +234,10 @@ TEST_CASE("GAP-05 案1:模型节点各开独立场,usage 并进 /usage 主账口
     CHECK(summary.tokens_used == 2 * (100 + 50));
 
     const fs::path run_dir = root / "workflow-runs" / "run-ns";
-    // 每节点一场:nodeExecutionId 形状 run-ns-<node>-d1。
+    // 每节点一场:nodeExecutionId 形状 run-ns-<node>-d<N>(派发号全场递增,
+    // a 是首派发 d1,b 是次派发 d2)。
     REQUIRE(CountSessionDirs(run_dir / "nodes" / "run-ns-a-d1") == 1);
-    REQUIRE(CountSessionDirs(run_dir / "nodes" / "run-ns-b-d1") == 1);
+    REQUIRE(CountSessionDirs(run_dir / "nodes" / "run-ns-b-d2") == 1);
 
     // 父 session 持 spawn/linked 边(各两枚),journalPath 指进 run 目录。
     const fs::path parent_dir = ledger->session_dir();
@@ -383,7 +384,7 @@ TEST_CASE("GAP-05 案2:kill 中途崩溃——resume 从最后 commit 续,不重
     CHECK(second_loader->calls["prompts/a.md"] == 0);
     CHECK(second_loader->calls["prompts/b.md"] == 1);
     CHECK(CountSessionDirs(root / "workflow-runs" / "run-ns" / "nodes" / "run-ns-a-d1") == 1);
-    CHECK(CountSessionDirs(root / "workflow-runs" / "run-ns" / "nodes" / "run-ns-b-d1") == 1);
+    CHECK(CountSessionDirs(root / "workflow-runs" / "run-ns" / "nodes" / "run-ns-b-d2") == 1);
     // 产物沿用崩溃前那份("a-first" 非 "a-second")。
     CHECK(resumed->result.at("a").at("who") == "a-first");
     // 恢复段在场(seg-2),账不换号。
