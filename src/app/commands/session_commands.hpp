@@ -38,6 +38,7 @@
 #include "config/config.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
+#include "cli/format_utils.hpp"  // ContextBreakdownDetail(/context 精细分类明细)
 #include "cli/i18n.hpp"
 #include "cli/theme.hpp"
 #include "runtime/worktree.hpp"
@@ -139,7 +140,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            int compact_partition_count = 0,
                            const DeferredToolModeSummary* deferred_tool_summary = nullptr,
                            const lubancode::agent::TokenCalibrationStatus* token_calibration = nullptr,
-                           const ContextSessionFacts& session_facts = ContextSessionFacts{});
+                           const ContextSessionFacts& session_facts = ContextSessionFacts{},
+                           const lubancode::cli::ContextBreakdownDetail* breakdown_detail = nullptr);
 
 // ---- /context 的会话现场收集(终端接线收尾单自大类搬出) ------------------
 //

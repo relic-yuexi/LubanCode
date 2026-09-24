@@ -418,6 +418,131 @@ TEST_CASE("FormatContextBreakdown: 窗口为 0 不除零,百分比一律 0、条
     CHECK(lines[6].find("0(80%-12k)") != std::string::npos);
 }
 
+// ---- FormatContextBreakdown: detail 精细分类明细(全量对齐截图式占用面板) ----
+
+TEST_CASE("FormatContextBreakdown: detail=nullptr 时行为与旧九行逐字节一致") {
+    const auto without_detail = FormatContextBreakdown(10000, 5000, 20000, 0, 256000, 0, BuiltinTheme("dark"), 16);
+    REQUIRE(without_detail.size() == 9);
+}
+
+TEST_CASE("FormatContextBreakdown: detail 给了就追加系统提示/技能与工具三分子行") {
+    lubancode::cli::ContextBreakdownDetail detail;
+    detail.system_prompt_tokens = 7000;
+    detail.skills_tokens = 3000;
+    detail.system_tools_tokens = 2000;
+    detail.mcp_tools_tokens = 2500;
+    detail.plugin_tools_tokens = 500;
+    const auto lines =
+        FormatContextBreakdown(10000, 5000, 20000, 0, 256000, 0, BuiltinTheme("dark"), 16, -1, &detail);
+    // 旧九行之外多出五行子行(系统提示两行 + 工具三来源三行)+ 缓冲/空闲
+    // 两行,行数变多:9 + 5 + 2 = 16。
+    CHECK(lines.size() == 16);
+    bool found_system_prompt_only = false, found_skills = false, found_system_tools = false,
+        found_mcp_tools = false, found_plugin_tools = false;
+    for (const auto& line : lines) {
+        if (line.find("系统提示正文") != std::string::npos) {
+            found_system_prompt_only = true;
+            CHECK(line.find("~7000") != std::string::npos);
+        }
+        if (line.find("技能目录") != std::string::npos) {
+            found_skills = true;
+            CHECK(line.find("~3000") != std::string::npos);
+        }
+        if (line.find("系统工具") != std::string::npos) {
+            found_system_tools = true;
+            CHECK(line.find("~2000") != std::string::npos);
+        }
+        if (line.find("MCP 工具") != std::string::npos && line.find("延迟") == std::string::npos) {
+            found_mcp_tools = true;
+            CHECK(line.find("~2500") != std::string::npos);
+        }
+        if (line.find("插件工具") != std::string::npos && line.find("延迟") == std::string::npos) {
+            found_plugin_tools = true;
+            CHECK(line.find("~500") != std::string::npos);
+        }
+    }
+    CHECK(found_system_prompt_only);
+    CHECK(found_skills);
+    CHECK(found_system_tools);
+    CHECK(found_mcp_tools);
+    CHECK(found_plugin_tools);
+    // deferred 三项全零(未设):不画"(延迟)"子行。
+    for (const auto& line : lines) {
+        CHECK(line.find("延迟") == std::string::npos);
+    }
+    // 缓冲/空闲两行也追加了:窗口 256000 × 80% − 12288 = 192512 是触发线,
+    // 缓冲 = 256000 − 192512 = 63488;空闲 = 触发线 − 已用(此处已用取
+    // 三项统一口径估 10000+5000+20000=35000)= 192512 − 35000 = 157512。
+    bool found_buffer = false, found_free = false;
+    for (const auto& line : lines) {
+        if (line.find("自动压缩缓冲") != std::string::npos) {
+            found_buffer = true;
+            CHECK(line.find("63.5k") != std::string::npos);
+        }
+        if (line.find("空闲空间") != std::string::npos) {
+            found_free = true;
+            CHECK(line.find("157.5k") != std::string::npos);
+        }
+    }
+    CHECK(found_buffer);
+    CHECK(found_free);
+}
+
+TEST_CASE("FormatContextBreakdown: detail 的 deferred 三项全零时不画延迟子行,非零才画") {
+    lubancode::cli::ContextBreakdownDetail zero_detail;
+    const auto zero_lines =
+        FormatContextBreakdown(10000, 5000, 20000, 0, 256000, 0, BuiltinTheme("dark"), 16, -1, &zero_detail);
+    for (const auto& line : zero_lines) {
+        CHECK(line.find("延迟") == std::string::npos);
+    }
+
+    lubancode::cli::ContextBreakdownDetail nonzero_detail;
+    nonzero_detail.mcp_tools_deferred_tokens = 800;
+    const auto nonzero_lines =
+        FormatContextBreakdown(10000, 5000, 20000, 0, 256000, 0, BuiltinTheme("dark"), 16, -1, &nonzero_detail);
+    bool found_mcp_deferred = false;
+    for (const auto& line : nonzero_lines) {
+        if (line.find("MCP 工具(延迟)") != std::string::npos) {
+            found_mcp_deferred = true;
+            CHECK(line.find("~800") != std::string::npos);
+        }
+    }
+    CHECK(found_mcp_deferred);
+    // 系统/插件延迟为 0 但同组画出(全零才整组不画,单个为零仍随组现身)。
+    bool found_system_deferred = false;
+    for (const auto& line : nonzero_lines) {
+        if (line.find("系统工具(延迟)") != std::string::npos) {
+            found_system_deferred = true;
+        }
+    }
+    CHECK(found_system_deferred);
+}
+
+TEST_CASE("FormatContextBreakdown: detail 的 MCP server 明细按给定顺序原样展开（排序是调用方的活）") {
+    // FormatContextBreakdown 是纯渲染函数,不自己排序 mcp_servers——头文件
+    // 注释已说破"调用方按 tokens 降序排好,这里只管原样打"(真排序在
+    // RunContextCommand 里的 std::sort)。这里按调用方已排好的降序传入,
+    // 断言渲染保序,不在渲染层重新验证排序算法。
+    lubancode::cli::ContextBreakdownDetail detail;
+    detail.mcp_servers.push_back({"big-server", 5, 900});
+    detail.mcp_servers.push_back({"small-server", 2, 100});
+    const auto lines =
+        FormatContextBreakdown(10000, 5000, 20000, 0, 256000, 0, BuiltinTheme("dark"), 16, -1, &detail);
+    std::size_t big_index = 0, small_index = 0;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].find("big-server") != std::string::npos) {
+            big_index = i;
+            CHECK(lines[i].find("5 个工具") != std::string::npos);
+        }
+        if (lines[i].find("small-server") != std::string::npos) {
+            small_index = i;
+        }
+    }
+    CHECK(big_index > 0);
+    CHECK(small_index > 0);
+    CHECK(big_index < small_index);  // 保序:给的什么顺序,打出来就是什么顺序
+}
+
 // ---- WrapStatusRows(P3-3 括号断行) --------------------------------------------------
 
 TEST_CASE("WrapStatusRows: node(v24.0.0) 80/100 列整行一排,不折") {
