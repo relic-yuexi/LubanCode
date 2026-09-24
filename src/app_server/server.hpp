@@ -109,8 +109,9 @@ struct ThreadRecord {
     // turn_running 旗 + 操作号对上才报 running,其余一律按账面事实报)。
     // 读线程受理时写,查询也走读线程,无锁;先看 turn_running 旗再用。
     std::string running_operation_id;
-    // 本场 main.jsonl 的绝对路径(trace/query 断线补账/冷回放用;账本
-    // 开张成功后由 thread/start 填)。
+    // 本场主账的绝对路径(V3-GAP-04 两代兼容:v3 场是 <sessionId>.jsonl
+    // ——504fddb1 定的主账名;旧场仍是 main.jsonl。开张成功后由 thread/
+    // start 按场格式分派填,不硬拼)。
     std::string session_main_path;
 
     // goal 单合流批:typed 命令面(goal 六 + loop 七 + plan 三)的会话级
@@ -349,8 +350,22 @@ public:
     nlohmann::json HandleTypedDomainCommand(const IncomingRequest& request, bool& out_error,
                                             std::string& out_error_code, std::string& out_error_message);
 
+    // thread/resume 的真恢复执行体(V3-GAP-04:startExecution=true 路)。
+    // 冷场专用:经 SessionService 的 resume-at-launch 开张(与 CLI
+    // --continue 同一条服务路,不另立恢复协议)——v3 源续接源场(同 id
+    // 续写),v2 源开迁移新场。成功回 {threadId(恢复后的场 id),cwd,
+    // active:true};失败 out_error_code 带稳定串(active_thread/
+    // resume_source_rejected/trajectory.open_failed/assembly.failed 一类)。
+    // 调用方负责把恢复视图字段一并拼进响应。
+    nlohmann::json HandleThreadResumeExecution(const std::string& source_thread_id,
+                                               const std::string& source_cwd, std::string& out_error_code);
+
     // 当前活着的 thread 数(测试断言用)。
     std::size_t active_thread_count();
+
+    // 测试直驱:一场 thread 的主账路径(V3-GAP-04 两代兼容断言用——v3 场
+    // <id>.jsonl、旧场 main.jsonl)。场不在线内回空串。
+    std::string ThreadMainPathForTest(const std::string& thread_id);
 
     // ---- 测试直驱:browser 面的持有体(注入假 sidecar / 直查状态用) ----
     BrowserService& browser_service() { return *browser_; }
