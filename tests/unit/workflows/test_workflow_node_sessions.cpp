@@ -34,6 +34,27 @@ namespace {
 namespace fs = std::filesystem;
 using namespace lubancode::workflow;
 
+// 会话格式守卫(T16 分账:本册经 TrajectorySessionLedger::Open 建场口且
+// 断言 v3 行为,册内自证 explicit-v3——ctest 对未迁域注入的
+// LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0 在这被盖成 1,与生产默认同拍)。
+struct EnvGuard {
+    explicit EnvGuard(const char* name, const char* value) : name_(name) {
+#ifdef _WIN32
+        _putenv((std::string(name_) + "=" + value).c_str());
+#else
+        setenv(name_, value, 1);
+#endif
+    }
+    ~EnvGuard() {
+#ifdef _WIN32
+        _putenv((std::string(name_) + "=").c_str());
+#else
+        unsetenv(name_);
+#endif
+    }
+    const char* name_;
+};
+
 fs::path FreshDir(const std::string& name) {
     static int counter = 0;
     ++counter;
@@ -185,6 +206,7 @@ result:
 }  // namespace
 
 TEST_CASE("GAP-05 案1:模型节点各开独立场,usage 并进 /usage 主账口径") {
+    EnvGuard v3_pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const fs::path root = FreshDir("two-llm");
     auto opened = OpenLedger(root);
     REQUIRE(opened.has_value());
@@ -305,6 +327,7 @@ TEST_CASE("GAP-05 案1:模型节点各开独立场,usage 并进 /usage 主账口
 }
 
 TEST_CASE("GAP-05 案2:kill 中途崩溃——resume 从最后 commit 续,不重跑不重开") {
+    EnvGuard v3_pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const fs::path root = FreshDir("kill-resume");
     const WorkflowDefinition def = ParseOrDie(kTwoLlmYaml);
 
@@ -381,6 +404,7 @@ TEST_CASE("GAP-05 案2:kill 中途崩溃——resume 从最后 commit 续,不重
 }
 
 TEST_CASE("GAP-05 案3:重试新开一场,attempt 递增入账") {
+    EnvGuard v3_pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const fs::path root = FreshDir("retry");
     const char* yaml = R"YAML(
 schema_version: 1
@@ -436,6 +460,7 @@ result:
 }
 
 TEST_CASE("GAP-05 案4:非模型节点零伪造——纯 transform 图不开任何场") {
+    EnvGuard v3_pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     const fs::path root = FreshDir("pure");
     const char* yaml = R"YAML(
 schema_version: 1
