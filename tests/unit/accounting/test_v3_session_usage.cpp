@@ -872,12 +872,13 @@ TEST_CASE("ListSessionStreams:v3 主账与递归子账全列,v2 布局照旧") {
         CHECK((*listed)[2].filename().string() == "workflow.jsonl");
     }
     // 光杆目录:空表(不是 nullopt);不存在的目录:nullopt。
+    // 注意 no-such 不能经 root.Dir()(它会顺手建目录,CI 上栽过一回)。
     {
         SessionsRoot root("listempty");
         root.Dir("S-BARE");
         const auto listed = ListSessionStreams(root.Dir("S-BARE"));
         REQUIRE(listed.has_value());
         CHECK(listed->empty());
-        CHECK_FALSE(ListSessionStreams(root.Dir("no-such")).has_value());
+        CHECK_FALSE(ListSessionStreams(root.root / "no-such").has_value());
     }
 }
