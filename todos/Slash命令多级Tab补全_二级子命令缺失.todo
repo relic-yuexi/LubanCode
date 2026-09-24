@@ -1,0 +1,56 @@
+# Slash 命令多级 Tab 补全：二级子命令缺失
+
+- 状态：待实现；已查源码定位根因，尚未改生产代码。
+- 日期：2026-09-24
+- 级别：P2（终端交互体验）
+- 范围：`src/cli/line_editor.{hpp,cpp}`、`src/cli/console_input.{hpp,cpp}`、`src/cli/console_input_composer.cpp`、`src/cli/console_input_turn_listener.cpp`、`src/cli/slash_commands.{hpp,cpp}`、`src/cli/i18n.cpp`。
+
+## 一、现象
+
+`/provider` 这类一级命令词 Tab 补全正常（`/prov<Tab>` 能补成 `/provider `），但敲到第二级子命令时（比如 `/provider swi<Tab>` 想补成 `/provider switch `）Tab 完全不生效，也没有候选提示行。用户预期多级都能补。
+
+## 二、根因
+
+- `LineEditorCore` 的补全候选只有一份扁平表 `slash_candidates_`（`CompletionCandidate{name, description}`），来自 `AllSlashCommands()`——只收一级命令词，`slash_commands.hpp` 里各命令的子命令词汇（`ProviderCommandAction`、`InstructionsCommandAction`、`GoalCommandAction` 等）从未转成补全候选。
+- `LineEditorCore::HandleTab()`（`src/cli/line_editor.cpp:840`）顶部就用 `CurrentWord(lines_[0])` 取"第一个空格前的词"当唯一补全目标；`col_ > word.size()` 时（光标已经过了第一个词、落在参数区）直接 `return`——这一条挡死了任何二级补全，不管光标停在哪个词上。
+- `LineEditorCore::BuildRenderState()` 里构造提示候选的分支（`src/cli/line_editor.cpp:928-950`）同理：命令词后有空格时，只做"整词精确匹配 → 单行提示"，不会把子命令词按前缀过滤出候选列表。
+- `CompleteToCandidate()`（`line_editor.cpp:832`）把整行替换成 `name + suffix`，天生假设"补全对象是整行第一个词"，没有"保留前缀、只替换某个词"的能力，二级补全没法直接复用。
+
+## 三、修复方案（已定，未实现）
+
+1. **数据源**：在 `slash_commands.hpp/.cpp` 新增二级词汇表——只登记子命令词汇本就固定、由 cli 层纯解析出 action 枚举的命令（`provider`/`instructions`/`goal`/`loop`/`plan`/`record`，词表逐一核对对应 `Parse*Command` 函数得出，不凭注释猜）：
+   - `/provider`：list / refresh / add / switch / remove / set / edit（复用已有 `ProviderSubcommands()` 的词，i18n 补描述）
+   - `/instructions`：path / reload
+   - `/goal`：status / pause / resume / clear / edit
+   - `/loop`：list / status / pause / resume / stop / run
+   - `/plan`：status / off / review
+   - `/record`：status / start / note / pause / resume / stop / cancel / list / install / discard
+   新增 `SlashCommandSubcommands{command, entries}` 结构与 `AllSlashSubcommandGroups()`，仿 `AllSlashCommands()` 的"表 + i18n 现查 + 语言切换重建"写法，`desc_key` 走新的 `slash.sub.<command>.<word>` i18n 键（中英文都补，遵循 P0 全量惯例）。
+   - 其余命令（skill/plugin/workflow/channel/agent/worktree/background/peerperm/keymap/package/evolve/insights/soul/update/copy/memory）子命令词汇分散在各域 handler，本单不动；后续要接，在这张表加一组即可，不需要再碰 `line_editor`。
+2. **接线层**：`console_input.hpp/.cpp` 新增 `BuildSlashSubcommandCompletionCandidates()`，把 `AllSlashSubcommandGroups()` 转成 `line_editor.hpp` 新增的 `SlashSubcommandGroup{command, subcommands: vector<CompletionCandidate>}`。`SharedEditor()`、`ReadLineKeyByKey()`（`console_input_composer.cpp`）、`TurnInputListener` 里三处构造/刷新 `LineEditorCore` 的地方都要带上这份候选（跟现有 `BuildSlashCompletionCandidates()` 并列传）。
+3. **核心层**：
+   - `LineEditorCore` 新增成员 `subcommand_candidates_`，构造函数/`SetSlashSubcommandCandidates()` 对齐 `SetSlashCandidates()` 的写法（切换后清 `tab_cycle_`/`menu_selection_`）。
+   - `TabCycleState` 加 `prefix`（词前面原样保留的部分，一级补全恒为空）与 `group`（当前用哪张二级词表渲染描述，一级补全恒 `nullptr`）。
+   - `CompleteToCandidate()` 加 `prefix` 参数：`lines_[0] = prefix + name + (suffix 或补空格)`，一级调用点传空前缀，行为不变。
+   - `HandleTab()` 按光标位置分流：光标落在第一个空格之前（或整行没空格）→ 走原一级逻辑（不变）；光标落在第一个空格之后 → 查第一个词是否在二级词表里登记，登记了就对"第二个词"做同款前缀匹配 / 公共前缀补齐 / 多候选轮转（复用现成的 `LongestCommonPrefix`），光标已经越过第二个词（落进它自己的参数区）时维持"不补全"老规矩；命令没有二级词表，`Tab` 保持现状什么都不做。
+   - 提示行同理：`BuildRenderState()` 的现算分支识别"命令词已敲完 + 有二级词表"时，按第二词前缀现算候选列表（而不是只做整词精确匹配单行提示）；`BuildHintLines()` 加一个可选 `group` 参数，非空时从该组里找描述，为空时保持原来查 `slash_candidates_` 的老路径。
+   - 二级功能不碰 0.16.0 的方向键直选菜单（`menu_selection_`）——那部分入口本就只在"整行没有空格"时触发，天然只覆盖一级，本单不扩展，避免打乱既有键位测试。
+
+## 四、测试计划
+
+- `tests/unit/cli/test_line_editor.cpp`：新增用例覆盖
+  - `/provider swi<Tab>` → 补成 `/provider switch `（唯一匹配直接补）。
+  - `/provider <Tab>` → 列出全部子命令候选（空前缀，等价"刚敲完命令词+空格"）。
+  - `/provider s<Tab>` 连续两次 → 公共前缀先补到 `s`... 视实际重叠再补 `se`/`st` 之类，之后再 Tab 进入轮转（`set`/`status` 若有重叠要验证清楚，按实际词表核对，不能想当然）。
+  - `/provider switch anthropic<Tab>` → 光标在第三个词（参数区），Tab 不动，行为同现状。
+  - 没有二级词表的命令（如 `/model xy<Tab>`）→ 行为不变，维持"参数区不补全"。
+  - 提示行：`/provider sw` 展示候选列表而非单行描述；`/provider switch ` （子命令已敲完+空格）展示 `switch` 自己的单行描述，行为对齐一级"命令词敲完显示该命令说明"的老规矩。
+- `tests/unit/cli/test_slash_commands.cpp`：`AllSlashSubcommandGroups()` 对齐词表（数量、词、command 归属），语言切换后描述跟着变。
+- 跑 `ctest`（或项目现有测试跑法）确认不破坏既有 Tab 补全 / 帮助 / i18n 相关用例。
+
+## 五、验收标准
+
+- [ ] `/provider switch` 一类二级子命令可 Tab 补全、公共前缀补齐、多候选轮转，行为与一级命令词一致。
+- [ ] 无二级词表的命令 Tab 行为不变（参数区不补全）。
+- [ ] 新增/改动的单测全绿，且不破坏既有 `test_line_editor.cpp`、`test_slash_commands.cpp`、i18n 相关测试。
+- [ ] 中英文界面下二级候选描述都有文案（不是裸 key 回退）。
