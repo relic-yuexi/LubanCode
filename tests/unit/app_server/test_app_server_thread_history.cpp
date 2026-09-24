@@ -264,7 +264,7 @@ std::optional<trajectory::v3::V3Writer> PlantWrittenV3Session(
 }
 
 // resume.source.attached:五键指源末行(来源链续场的链头)。
-void AttachSource(trajectory::v3::V3Writer& writer, const std::string& sessions_root,
+void AttachSource(trajectory::v3::V3Writer& writer, const std::filesystem::path& sessions_root,
                   const std::string& source_id) {
     const auto source = trajectory::v3::ReadV3Ledger(
         sessions_root / U8(source_id) / U8(source_id + ".jsonl"));
