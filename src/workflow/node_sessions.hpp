@@ -23,7 +23,6 @@
 // 账提供者,旧 v2 SpawnNodeStream 路不再启(单事实源)。
 #pragma once
 
-#include <atomic>
 #include <expected>
 #include <filesystem>
 #include <memory>
@@ -64,9 +63,9 @@ struct NodeSessionSpawn {
     NodeSessionRef ref;
 };
 
-// 一场 run 的节点场发号局:铸 session id、算 journalPath、开卷建桥。
-// 线程安全(map/parallel 的 worker 并发各开各的场;父账写者自带锁,
-// 计数用原子)。
+// 一场 run 的节点场发号局:铸 session id(id 掺 nodeExecutionId+attempt
+// 的内容哈希,跨进程恢复不撞号)、算 journalPath、开卷建桥。线程安全
+// (map/parallel 的 worker 并发各开各的场;父账写者自带锁)。
 class WorkflowNodeSessions {
 public:
     WorkflowNodeSessions(NodeSessionMaterial material, std::filesystem::path run_dir,
@@ -84,7 +83,6 @@ private:
     NodeSessionMaterial material_;
     std::filesystem::path run_dir_;
     std::string workflow_run_id_;
-    std::atomic<std::uint64_t> counter_{0};
     mutable std::mutex errors_mutex_;
     std::vector<std::string> io_errors_;
     // 各节点场的错误汇(桥在 worker 线程写自己那份;run 收口后聚合读)。

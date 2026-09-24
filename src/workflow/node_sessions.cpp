@@ -12,6 +12,7 @@
 #include <system_error>
 #include <utility>
 
+#include "hooks/hash.hpp"  // Sha256Hex:session id 的内容寻址(跨进程不撞)
 #include "platform/log_sink.hpp"
 #include "runtime/trajectory_session.hpp"
 #include "runtime/trajectory_turn_bridge.hpp"
@@ -28,8 +29,10 @@ using trajectory::Durability;
 using trajectory::EventScope;
 
 // 节点场 session id:YYYYMMDD-HHMMSS-XXXXXX 形状(单段名过目录门),尾缀
-// W+计数防同秒撞号(S=subagent、W=workflow 节点,同形不同字)。
-std::string MintNodeSessionId(std::uint64_t counter) {
+// W+内容寻址(nodeExecutionId|attempt 的 SHA-256 前 12 hex)——进程内计数
+// 会随恢复归零,纯计数在同秒撞号(树走的 sessionId 去重会把后开的那场
+// 当环丢掉);exec id 含 runId、attempt 逐次递增,内容哈希跨进程不撞。
+std::string MintNodeSessionId(const std::string& node_execution_id, int attempt) {
     const std::time_t now = std::time(nullptr);
     std::tm parts{};
 #if defined(_WIN32)
@@ -37,9 +40,9 @@ std::string MintNodeSessionId(std::uint64_t counter) {
 #else
     gmtime_r(&now, &parts);
 #endif
-    char suffix[16];
-    std::snprintf(suffix, sizeof(suffix), "W%06llu",
-                  static_cast<unsigned long long>(counter % 1000000));
+    const std::string digest =
+        hooks::Sha256Hex(node_execution_id + "|a" + std::to_string(attempt));
+    const std::string suffix = "W" + digest.substr(0, 12);
     return trajectory::GenerateSessionId(parts.tm_year + 1900, parts.tm_mon + 1, parts.tm_mday,
                                          parts.tm_hour, parts.tm_min, parts.tm_sec, suffix);
 }
@@ -149,7 +152,7 @@ std::expected<NodeSessionSpawn, runtime::WorkflowSpawnFailure> WorkflowNodeSessi
     };
 
     // ---- 场身份与目录(§三:nodes/<nodeExecutionId>/sessions/<sid>/)----
-    const std::string session_id = MintNodeSessionId(counter_.fetch_add(1) + 1);
+    const std::string session_id = MintNodeSessionId(identity.node_execution_id, attempt);
     const std::string session_run_id = identity.attempt_id();
     const std::filesystem::path session_dir =
         run_dir_ / "nodes" / identity.node_execution_id / "sessions" / session_id;
