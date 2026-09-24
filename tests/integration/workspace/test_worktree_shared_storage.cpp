@@ -216,7 +216,7 @@ TEST_CASE("worktree 共享: 同 key 同 workspace.json,checkouts 双登记,sessi
         REQUIRE(file.is_open());
         std::string line;
         while (std::getline(file, line)) {
-            if (!line.empty() && line.back() == '') line.pop_back();
+            if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty()) continue;
             const auto json = nlohmann::json::parse(line, nullptr, false);
             if (json.is_discarded()) continue;
@@ -301,7 +301,7 @@ TEST_CASE("跨 workspace 切换: 封旧开新,回执两笔,旧账一字不搬") 
         REQUIRE(file.is_open());
         std::string line;
         while (std::getline(file, line)) {
-            if (!line.empty() && line.back() == '') line.pop_back();
+            if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty()) continue;
             const auto event = nlohmann::json::parse(line, nullptr, false);
             if (event.is_discarded() ||

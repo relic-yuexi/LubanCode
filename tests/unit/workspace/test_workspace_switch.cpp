@@ -62,7 +62,7 @@ bool V3StreamHasEventKind(const fs::path& session_dir, const std::string& kind) 
     if (!file.is_open()) return false;
     std::string line;
     while (std::getline(file, line)) {
-        if (!line.empty() && line.back() == '') line.pop_back();
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty()) continue;
         const auto json = nlohmann::json::parse(line, nullptr, false);
         if (json.is_discarded()) continue;
