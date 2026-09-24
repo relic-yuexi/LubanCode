@@ -381,7 +381,8 @@ TEST_CASE("恢复:v2 源(盘上旧档)resume-at-launch 开新段 v3,来源可查
         const auto warm_closed = warm.Close("exit");
         CHECK(warm_closed.error_code.empty());
         const PlantedV2 planted =
-            PlantV2Source(root / "workspaces", identity.workspace_key, "20260924-120000-V2SRC1");
+            PlantV2Source(root / "workspaces", identity->workspace_key,
+                          "20260924-120000-V2SRC1");
         source_id = planted.id;
         source_dir = planted.dir;
         CHECK(std::filesystem::exists(source_dir / "main.jsonl"));
