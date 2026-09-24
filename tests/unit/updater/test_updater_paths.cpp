@@ -36,7 +36,7 @@ TEST_CASE("ValidRelpath: 官方包内正常路径放行") {
     CHECK(ValidRelpath(std::string_view("web/assistant/index.html")));
     CHECK(ValidRelpath(std::string_view("libexec/rg")));
     CHECK(ValidRelpath(std::string_view("updater/updater.py")));
-    CHECK(ValidRelpath(std::string_view("README.en.md")));
+    CHECK(ValidRelpath(std::string_view("README.zh-CN.md")));
     CHECK(ValidRelpath(std::string_view("LICENSE")));
     // UTF-8 段:字节 >= 0x80 不在非法字符域,放行(与 python codepoint 口径一致)。
     CHECK(ValidRelpath(std::string_view("docs/中文/说明.md")));
