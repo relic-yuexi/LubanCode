@@ -1,6 +1,6 @@
 # 分布式支持路线图：从单机宿主到集群控制面的分期落地计划
 
-- 状态：设计已定稿，待开工（2026-09-24 第二版：从"只做验收复核的排期表"改成"可直接按批开工的实施单"；第一版 P0~P6 由本版 D0~D9 取代，映射见第十六节）
+- 状态：设计已定稿，待开工（2026-09-24 第二版：从"只做验收复核的排期表"改成"可直接按批开工的实施单"；第一版 P0~P6 由本版 D0~D9 取代，映射见第十六节；同日补中间件与池化模式、配置、日志、生命周期、排期章节）
 - 日期：2026-09-24
 - 级别：P1（方向性工程，D0~D3 不依赖 LubanCore 分离，可与近期 P0 单子并行；D4 起受前置门约束）
 - 范围：新增 `src/cluster/`（protocol / lease / sim / node_bridge / control_plane / store）、`src/channel/transport/tls.*`（补 mTLS 与服务端角色）、`src/app_server/ws_*`（抽服务端 WS 承载给控制面复用）、`src/trajectory/v3/`（上行游标读口）、`src/runtime/session_service.*`（按 Host API 接入）、CMake 新目标 `lubancode_cluster_proto`/`lubancode_cluster_node`/`lubancode_cluster_cp`、新文档目录 `docs/architecture/cluster/`
@@ -9,7 +9,7 @@
   - `多租户隔离_身份授权与隔离Worker落地设计.todo` 的身份合同（§三）是 D6 的硬前置。
   - Gateway V0/V1/V2/V4 已落的持久化原语（PowerLoss 提交、ownerEpoch 认领、durable outbox）是直接复用件；Gateway V3（渠道）与集群无依赖，V5（长任务/异步工具执行账）是 D8"未知副作用裁决"的软前置。
 - 关联：`多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`（目标形态、对象模型、Session 状态机以它为准；本单给出它缺的：协议、存储、算法、数字、测试方法和按批落点）、`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`OpenTelemetry接入V3_现状与落地路线.todo`、`跨平台ExecutionProvider与通用强化沙箱设计.todo`、`SessionV3异步工具_任务执行协议配对与结果投递.todo`
-- 不在本单：节点模式下的跨节点热迁移（D9 只做"人工冷迁移"；池化模式的自动接管见 D10）、跨 Region 部署、Control Plane 多活写、任意工具 exactly-once、公网节点入站、把 Redis/消息队列作必选依赖
+- 不在本单：数据驻留（按地域放置，首版单地域）、节点模式下的跨节点热迁移（D9 只做"人工冷迁移"；池化模式的自动接管见 D10）、跨 Region 部署、Control Plane 多活写、任意工具 exactly-once、公网节点入站、把 Redis/消息队列作必选依赖
 
 ---
 
@@ -713,6 +713,8 @@ WSS `/api/v1/sessions/{id}/events?afterSeq=N`：服务端先补历史（投影�
 
 ## 十一、可观测性清单
 
+（本章为指标与告警摘要；日志、审计、trace 的完整设计见第二十一章。）
+
 指标（Prometheus 暴露于 `/metrics`；OTel 接出由 OTel 单负责）：
 
 | 指标 | 类型 | 标签 |
@@ -759,6 +761,8 @@ WSS `/api/v1/sessions/{id}/events?afterSeq=N`：服务端先补历史（投影�
 
 ## 十三、配置与部署
 
+（本章为部署摘要；配置体系的完整设计——分层、生效档、校验、下发灰度、全量键目录——见第二十章。）
+
 ### 13.1 配置文件
 
 `cp.yaml`（控制面）/ `node.yaml`（节点），yaml-cpp 已在依赖里：
@@ -803,6 +807,7 @@ src/cluster/
   node_fsm/        控制面视角 Node 状态机（纯逻辑）                                    （同上）
   command_fsm/     命令状态机（纯逻辑）                                                （同上）
   scheduler/       过滤打分、DRR 队列（纯逻辑）                                        （同上）
+  common/          config（分层加载/校验/热重载，§20）、log（LogContext/异步队列/sink，§21）、periodic（周期任务，§22.2）
   sim/             确定性仿真台（仅测试链接）                                          （target: lubancode_cluster_sim，TESTONLY）
   transport/       mTLS WSS 客户端/服务端封装（依赖 channel/transport、app_server/ws_* 抽出件）
   node_bridge/     Link, NodeLedger, LeaseGuard, Admission, UplinkPump, CoreHostAdapter, Supervisor
@@ -847,6 +852,8 @@ tests/manual/cluster/{load,soak,multi_host}/
 - [ ] CMake 目标 `lubancode_cluster_proto` + 依赖守门检查。
 
 验收：`ctest -R cluster_(protocol|lease|fsm|scheduler)` 全绿；三平台 CI 编译通过；`lubancode_cluster_proto` 链接闭包只有 std + nlohmann（CMake 检查）。
+
+### D1.5：配置与日志底座（现在可开工，零 Core 依赖；清单与验收见 §23.6）
 
 ### D2：mTLS 与服务端传输（现在可开工；修 G1）
 
@@ -1020,6 +1027,476 @@ D0~D8 全部勾选，且：
 - [ ] 集成测试：第九节 F1~F20 每项至少一个自动化用例（F5/F15/F16 可为半自动），三平台记录；
 - [ ] D7 容量报告 + D8 soak 报告 + D8 HA 切换报告 + 安全评审报告存档于 `docs/architecture/cluster/reports/`；
 - [ ] 三份关联设计单状态字段更新为"已落"或"进行中有明确批次"；
+- [ ] 配置 schema 与 `config-reference.md` 一致，全部键七属性齐全；日志事件目录与代码中实际 `event` 名一致（CI 扫描比对）；
+- [ ] 泄漏测试（日志、指标、trace、审计、崩溃文件、支持包）零命中；
+- [ ] 第二十二章全部周期任务有"最近一次成功时间"指标且在 soak 期间无漏跑；一次真实备份恢复演练记录在案；
+- [ ] 第二十六章完整性核对表无"待设计"项；
 - [ ] CHANGELOG 有发布记录，写明**实测过的拓扑与数字**。
 
 在此之前，对外只能说"LubanCode 集群模式：第 Dn 批已落，支持 ××（附测试证据）"，不能笼统说"支持分布式"。
+
+---
+
+以下第二十~二十六章为 2026-09-24 第四次补充：配置体系、日志体系、生命周期与周期任务、实施排期、发布工程、管理面、完整性核对。第十一章（可观测）与第十三章（配置与部署）是摘要，以本部分为准。
+
+## 二十、配置体系
+
+### 20.1 原则
+
+1. **一份 schema 是唯一真源。** 每个配置键在 `schema/cluster/v1/config/*.schema.json` 里登记，文档表、校验器、`config explain` 输出、默认值全部从它生成或对它做单测比对；代码里不允许出现 schema 外的"暗键"。
+2. **每个键必须声明七个属性**：类型、默认值、取值范围、**生效方式**（见 20.3）、**作用域**（见 20.2）、**敏感度**（普通 / 仅 SecretRef）、引入版本（及弃用版本）。缺一项，schema 单测失败。
+3. **进程配置与业务策略分开存。** 监听地址、证书路径、存储连接串这类"机器怎么跑"的配置放文件；配额、模型白名单、工具权限这类"谁能做什么"的策略放控制面数据库，带版本号、审计、可回滚。两者不混在一个文件里。
+4. **Secret 不以明文出现在任何配置里**，只写引用：`env:NAME`、`file:/path`（权限须 0600，否则拒绝启动）、`vault:path#key`、`kms:arn`（后两者 D8 起）。
+5. **与现有 `config.json` 语义兼容，不另造第二套 Agent 配置。** 现有四层合并规则（`src/config/config.hpp`：专属环境变量 > 项目 `config.json` > 全局 `config.json` > 内置默认，按字段逐个取值）继续管单机。集群 Session 的 Agent 配置（providers、models、hooks、mcpServers、预算……）由控制面策略层物化成 `SessionSpec` + `CapabilitySnapshot` 下发，**节点不读节点上某个用户主目录的 `~/.lubancode/config.json` 来跑集群 Session**（租户隔离；节点主人本机的 `LUBAN_API_KEY` 不得被集群 Session 借用）。
+
+### 20.2 分层与优先级
+
+**进程配置**（cp / node / worker / sandbox 各自一份），优先级从低到高：
+
+```text
+内置默认（schema default）
+  < 系统文件   /etc/lubancode/<role>.yaml        （Windows: %ProgramData%\lubancode\<role>.yaml）
+  < 用户文件   ~/.lubancode/cluster/<role>.yaml
+  < 环境变量   LUBANCODE_CLUSTER_<PATH>          （如 LUBANCODE_CLUSTER_STORE_DSN；点号路径转大写下划线）
+  < 命令行     --set key.path=value 或专用 flag
+  < 控制面下发 （仅节点/worker/sandbox 的"集群参数"类键；CP 在 WELCOME / CONFIG_UPDATE 中给出）
+```
+
+控制面下发层对"集群参数"类键（心跳、租约、上行批大小……）**恒最高**，本地配置的这些键只在未连上控制面前生效；这保证全集群时序参数一致（ADR-05 的安全论证依赖两端一致的 ttl/margin）。
+
+**业务策略**（存控制面库 `policies` 表），作用域从宽到窄：
+
+```text
+cluster（全局默认） → tenant → project → user → session
+```
+
+- 窄作用域默认覆盖宽作用域；
+- 宽作用域可把某键标 `locked: true`，下层不得覆盖（例：tenant 锁定"禁止 shell 联网"，项目与个人都不能打开）；
+- 数值类限额取 **min**（下层只能更严，不能更松），布尔"允许"类取 **与**（任一层禁止即禁止）；这两条合并规则写死在 schema 的 `x-merge: min|and|override` 属性里，不靠实现者记忆；
+- 每次 Session 创建时把合并结果冻结进 CapabilitySnapshot，记录 `policy_version`；运行中策略变化不影响已创建 Session，除非是**撤权类**变更（撤 Secret、封禁工具、冻结租户）——撤权立即生效（见 20.5）。
+
+### 20.3 生效方式三档
+
+| 档 | 含义 | 例子 | 机制 |
+|---|---|---|---|
+| `restart` | 改了须重启进程 | 监听地址、存储 DSN、TLS 私钥路径、角色 | 启动时读；运行中文件变化只告警 `config.restart_required` |
+| `reload` | 进程内热生效 | 日志级别、限流、超时、调度权重、保留期 | `SIGHUP` / Windows 服务控制码 / `lubancode-cp config reload` / 控制面下发；**原子切换**（新配置整体校验通过才替换，失败保留旧的并报错） |
+| `policy` | 存库的业务策略 | 配额、模型白名单、工具权限、成员 | REST/CLI 修改 → 新 `policy_version` → 审计 → 新 Session 生效；撤权类同时推送到持有相关 Session 的节点 |
+
+### 20.4 校验与可解释
+
+- **严格解析**：未知键报错并给出最相近的合法键（编辑距离提示）；`x-` 前缀的键允许存在（留给运维自注释）。
+- **跨字段约束**（schema 里用 `x-constraints` 表达，校验器统一执行），首批：
+  - `cluster.node_self_fence_margin < cluster.node_lease_ttl`
+  - `cluster.node_lease_ttl ≥ 2 × cluster.node_suspect_after`
+  - `cluster.node_suspect_after ≥ 3 × cluster.heartbeat_interval`
+  - `store.dsn` 为 sqlite 时 `role` 不得为 `api` 或 `coordinator`（HA 角色必须 PG）
+  - `workqueue.kind=memory` 与 `durability.require_crash_recovery=true` 互斥
+  - `tls.min_version` 只能是 `1.3`
+  - `log.allow_content=true` 必须同时有 `log.allow_content_expires_at`
+- **工具命令**：
+  - `lubancode-cp config validate [--file f]`：只校验不启动，退出码 0/1；
+  - `lubancode-cp config explain <key>`：给出最终值 + 来自哪一层 + 哪个文件第几行 / 哪个环境变量 / 哪次下发 revision；
+  - `lubancode-cp config dump --effective`：整份最终配置，Secret 打码；
+  - `lubancode-cp config diff --from <rev> --to <rev>`；
+  - 节点同名命令 `lubancode-node config …`。
+- **启动日志**：INFO 打印"有效配置哈希 + 非默认键清单（值打码）"；DEBUG 才打印完整有效配置（仍打码）。启动失败的配置错误一律退出码 78（`EX_CONFIG`），stderr 给出键名和修正建议。
+
+### 20.5 下发、灰度与回滚
+
+- 控制面表 `config_revisions(revision, scope, target_selector, patch_json, created_by, created_at, rollout_state)`；节点在 `WELCOME` 拿到当前 revision，之后收 `CONFIG_UPDATE{revision, patch}`，本地校验 → 原子应用 → 回 `CONFIG_APPLIED{revision}` 或 `CONFIG_REJECTED{revision, errors}`。
+- **灰度**：`target_selector` 可按节点标签 / 百分比 / 指定节点；默认流程 canary 5% → 观察 `config.soak_period`（默认 15 min，关键指标无回退）→ 50% → 100%。任一阶段拒收率 > 0 或告警触发，自动停在当前阶段。
+- **回滚** = 下发上一个 revision（新 revision 号，内容等于旧的），不是"撤销"。保留最近 100 个 revision。
+- **漂移检查**：每 10 min 协调器比对各节点上报的 `applied_revision`，不一致的节点告警并重推。
+- **撤权类策略**（撤 Secret、封禁工具/模型、冻结租户/用户）：立即推送持有受影响 Session 的节点；节点在下一个工具调用/模型调用边界生效，不中断正在进行的单次调用（除非策略标 `abort_inflight: true`）。
+
+### 20.6 特性开关
+
+`features.<name>: off | canary | on`，可按 tenant 覆盖。所有"实验性"能力（池化模式、Kafka 扇出、命令签名、自动放置、Worker 子进程化）上线时默认 `off`，在 CHANGELOG 与 `/api/v1/features` 里标成熟度（experimental / beta / stable）。开关本身是 `reload` 档；关闭某特性时已在用的 Session 行为由特性自身声明（`on_disable: drain | immediate`）。
+
+### 20.7 配置键目录（首版全量，D0 冻结；生效档 R=restart / H=reload / P=policy）
+
+**控制面 `cp.yaml`**
+
+| 键 | 默认 | 档 | 说明 |
+|---|---|---|---|
+| `role` | `all` | R | `all`/`api`/`coordinator` |
+| `listen.client` | `0.0.0.0:8443` | R | 浏览器/SDK HTTPS+WSS |
+| `listen.node` | `0.0.0.0:7443` | R | 节点 mTLS |
+| `listen.metrics` | `127.0.0.1:9464` | R | Prometheus；默认只本机 |
+| `listen.admin_socket` | `/run/lubancode/cp.sock` | R | 本机管理 CLI；Windows 为命名管道 |
+| `tls.cert` / `tls.key` | — | R | 服务端证书；key 为 SecretRef 或 0600 文件 |
+| `tls.min_version` | `1.3` | R | 仅允许 1.3 |
+| `pki.ca_dir` | `/var/lib/lubancode/ca` | R | 内部 CA |
+| `pki.node_cert_ttl` | `30d` | H | 节点证书寿命 |
+| `pki.rotate_at_fraction` | `0.33` | H | 剩余寿命比例触发轮换 |
+| `store.dsn` | `sqlite:/var/lib/lubancode/cp.db` | R | 或 `postgres://…`（密码走 SecretRef） |
+| `store.pool.max_read` | `8` | R | 读连接池 |
+| `store.busy_timeout` | `5s` | H | SQLite |
+| `store.statement_timeout` | `5s` | H | PG |
+| `auth.oidc.issuer` / `.client_id` / `.client_secret` | — | R | secret 为 SecretRef |
+| `auth.oidc.scopes` | `openid profile email` | R | |
+| `auth.local_accounts` | `false` | R | 仅开发 |
+| `auth.session_ttl` | `12h` | H | 浏览器登录会话 |
+| `auth.api_token_max_ttl` | `90d` | H | |
+| `cluster.heartbeat_interval` | `5s` | H | 下发给节点 |
+| `cluster.node_suspect_after` | `15s` | H | |
+| `cluster.node_lease_ttl` | `30s` | H | |
+| `cluster.node_self_fence_margin` | `5s` | H | |
+| `cluster.cp_reassign_grace` | `10s` | H | |
+| `cluster.node_lost_after` | `24h` | H | |
+| `cluster.drain_timeout` | `30m` | H | |
+| `commands.receipt_timeout` | `10s` | H | |
+| `commands.max_attempts` | `6` | H | |
+| `commands.default_deadline` | `10m` | H | |
+| `commands.retention` | `30d` | H | 终态命令行保留 |
+| `uplink.max_batch_lines` | `256` | H | 下发 |
+| `uplink.max_batch_bytes` | `512KiB` | H | 下发 |
+| `uplink.per_node_rate` | `8MiB/s` | H | |
+| `protocol.max_frame_bytes` | `1MiB` | R | |
+| `projection.retention_lines` | `10000` | H | |
+| `projection.retention_age` | `7d` | H | |
+| `projection.inline_max_bytes` | `64KiB` | H | 更大的存 blobRef |
+| `client.ws_send_buffer_max` | `4MiB` | H | 慢客户端阈值 |
+| `client.ws_ping_interval` | `20s` | H | |
+| `scheduler.weights.slots/mem/locality` | `0.5/0.3/0.2` | H | |
+| `scheduler.node_reject_cooldown` | `10s` | H | |
+| `scheduler.queue_max_per_tenant` | `10000` | H | 超了 REST 回 429 |
+| `ratelimit.api.per_user` | `20 rps, burst 40` | H | REST 限流 |
+| `ratelimit.model.<provider>.<model>` | 无（不限） | P | 集群级模型令牌桶（池化模式必配） |
+| `quota.*` | 见 §15 D7 | P | resident/running/heavy/每日 token |
+| `policy.*` | — | P | 模型白名单、工具权限、网络策略、Secret 可用范围 |
+| `audit.retention` | `365d` | H | |
+| `audit.sink.syslog` / `.kafka_topic` | 关 | H | SIEM 转发 |
+| `backup.sqlite.interval` | `5m` | H | 在线备份 |
+| `backup.retention` | `30d` | H | |
+| `log.*` | 见 21.9 | H | |
+| `metrics.enabled` | `true` | R | |
+| `tracing.otlp_endpoint` | 空（关） | H | |
+| `tracing.sample_ratio` | `0.05` | H | |
+| `features.*` | 均 `off` | H | 20.6 |
+
+**节点 `node.yaml`**
+
+| 键 | 默认 | 档 | 说明 |
+|---|---|---|---|
+| `cp.url` | — | R | enroll 时写入 |
+| `cp.ca_fingerprint` | — | R | enroll 时钉住 |
+| `node.root` | `~/.lubancode/node`（服务模式 `/var/lib/lubancode/node`） | R | 6.2 目录 |
+| `node.name` / `node.labels` | 主机名 / `{}` | H | 标签供调度选择与灰度选择 |
+| `admission.turn_slots` | CPU 核数 | H | |
+| `admission.heavy_slots` | `2` | H | |
+| `admission.resident_max` | `1000` | H | |
+| `admission.disk_reject_new_session` | `5GiB 或 5%` | H | |
+| `admission.disk_reject_new_turn` | `1GiB` | H | |
+| `admission.mem_reject_new_turn` | `10%` 可用 | H | |
+| `workers.mode` | `inprocess` | R | `inprocess`（D4）/ `subprocess`（D8） |
+| `workers.sessions_per_worker` | `8` | H | subprocess 模式 |
+| `workspace.worktree_gc_after` | `7d` | H | 22.2 |
+| `ledger.command_dedup_window` | `7d` | H | |
+| `reconnect.backoff_initial/max/jitter` | `0.5s/30s/20%` | H | |
+| `sandbox.provider` | `none` | R | 对接 ExecutionProvider 单 |
+| `log.*` / `tracing.*` / `metrics.*` | 同 cp | H | |
+
+**池化模式 `worker.yaml` / `sandbox.yaml`（D10）**：`store.dsn`、`artifact.s3.{endpoint,bucket,region,access_key,secret_key}`、`workqueue.kind(pg|nats)`、`workqueue.claim_batch`（默认 8）、`eventbus.kind(none|kafka|nats)`、`eventbus.kafka.{brokers,topic_prefix,acks=all,compression=zstd,sasl.*}`、`worker.max_sessions`（默认 200）、`worker.context_cache_mb`（默认 2048）、`sandbox.isolation(container|gvisor|firecracker)`、`sandbox.cpu/mem/disk/pids limits`、`sandbox.network_policy`、`sandbox.idle_reclaim_after`（默认 10m）、`sandbox.tool_result_cache_ttl`（默认 24h）。同样逐键登记七属性。
+
+## 二十一、日志体系
+
+### 21.1 五本账分开，谁也不替谁
+
+| 账 | 回答什么 | 写者 | 格式 | 保留 | 可含用户内容？ | 谁能读 |
+|---|---|---|---|---|---|---|
+| **Trajectory（事实账）** | 这场 Session 发生了什么 | Session 单写者 | v3 JSONL 哈希链 | 随 Session 生命周期（22.1） | 是（本来就是） | Session 成员（ACL） |
+| **审计账** | 谁在何时对什么做了什么操作 | 控制面（节点附回执） | 哈希链 JSONL / 表 | 默认 365 天，可配更长 | **否**（只记操作与对象 id、结果） | auditor、tenant_admin |
+| **运行日志** | 程序为什么这么表现、出了什么错 | 每个进程 | `lubancode.log.v1` JSON 行 | 本机默认 14 天 | **默认否**（21.6） | 运维 |
+| **指标** | 现在健康吗、趋势如何 | 每个进程 | Prometheus / OTLP | 由监控系统定 | 否 | 运维 |
+| **Trace** | 一次请求穿过了哪些组件、慢在哪 | 每个进程 | OTLP | 由后端定（采样） | 否（只 id 与耗时） | 运维 |
+
+另有现成的 **Telemetry 导出**（`src/telemetry/`，allowlist 脱敏 + 本地分段 spool + OTLP JSON），它是"端云协同上报"的通道，集群运行日志与指标**复用它的脱敏器与 spool**，不另写第二套。
+
+铁律：审计不从运行日志里"grep 出来"；运行日志不当事实账用；Trajectory 不写诊断噪声。
+
+### 21.2 运行日志格式 `lubancode.log.v1`
+
+```json
+{"ts":"2026-09-24T08:15:02.123Z","level":"info","component":"cp.lease","event":"lease.granted",
+ "msg":"runtime lease granted","version":"0.27.0","pid":4412,"tid":17,
+ "node_id":"node-01J8…","boot_id":"boot-01J8…","tenant_id":"t-acme","session_id":"20260924-081500-K3P9QX",
+ "epoch":7,"command_id":"cmd-01J8…","trace_id":"4bf92f…","span_id":"00f067…",
+ "fields":{"ttl_ms":30000,"reason":"session_resume"}}
+```
+
+- `ts` UTC RFC3339 毫秒；`level` ∈ trace/debug/info/warn/error/fatal；
+- `component` 为点分层级（`cp.scheduler`、`node.uplink`、`worker.turn`、`sandbox.exec`），可按前缀调级别；
+- **`event` 是稳定事件名**（机器可聚合、可告警），`msg` 是给人看的句子（可改措辞）；告警规则只能依据 `event`，不能匹配 `msg`；
+- 上下文字段（node/tenant/session/epoch/command/trace）由 **LogContext** 自动附加，不靠每行手填（21.4）；
+- 开发时 `--log-format=text` 输出单行人读格式，内容相同。
+
+### 21.3 级别语义（写进编码规范，代码审查按此检查）
+
+| 级别 | 何时用 | 例 |
+|---|---|---|
+| `fatal` | 进程即将退出 | 存储迁移版本不匹配、私钥读不出 |
+| `error` | 需要人处理，或某能力已丧失 | 事件链断、审计链校验失败、证书轮换失败、写账失败导致 Session 暂停 |
+| `warn` | 已降级但自动兜住了，频繁出现需关注 | 节点 Suspect、命令重发、上行 NACK、配置下发被某节点拒 |
+| `info` | **每个状态机迁移**、每个生命周期事件、每次配置变更 | `node.state_changed`、`lease.granted`、`command.accepted`、`session.observed_state_changed`、`config.applied` |
+| `debug` | 排障细节 | 每个帧的类型与大小、调度打分明细 |
+| `trace` | 载荷级 | 帧体（仍过脱敏）；生产默认禁用，开启需 `log.allow_trace_until` |
+
+规则：一条错误只在"最终处理它的那一层"记一次 error，途经层最多记 debug（沿用 `platform/log_sink.hpp` 头注释"不重复三遍"的分账规矩）。
+
+### 21.4 实现：演进现有 `platform::LogSink`，不另起炉灶
+
+- `LogRecord` 增加 `event`、`fields`（小型键值数组，避免每行构造 json）、`context` 快照；旧三参调用 `Info(component, message)` 保持可用（`event` 缺省为 `component + ".message"`），存量代码零改动。
+- 新增 `LogContext`：RAII 作用域 + 线程局部栈；`LogContext ctx{{"session_id", sid}, {"epoch", e}};` 之后本线程所有日志自动带上。跨线程投递任务时显式捕获/恢复上下文（线程池封装里做，不靠使用者记得）。
+- 落笔改成**异步有界队列**（默认 65 536 条）+ 单写线程；满了按级别丢：先丢 trace/debug，再丢 info；**warn 以上永不丢**（满时同步写，宁可慢不可丢）；丢弃计数每 10 s 汇总一条 `log.dropped{count, by_level}`。
+- **同位置限速**：每个 `(component, event)` 默认每秒最多 10 条，超出只计数，窗口结束时补一条 `log.suppressed{event, count}`——防断网重连循环刷屏。
+- 进程崩溃：安装 fatal 信号/SEH 处理器，把最近 **1 000 条环形缓冲**（含 debug 级，即使未输出）与调用栈写到 `<log_dir>/crash/crash-<ts>.log`；Windows 同时写 minidump（D8）。
+
+### 21.5 输出目的地（可同时开多个）
+
+| sink | 默认 | 说明 |
+|---|---|---|
+| stderr | 容器/前台模式开 | 12-factor；容器平台自己收 |
+| 滚动文件 | 服务模式开 | `<log_dir>/<role>.log`，单文件 100 MiB 或每日滚动，保留 14 个，旧文件 gzip（miniz 已在依赖里） |
+| journald / syslog | 关 | Linux 服务模式可选（RFC 5424） |
+| Windows 事件日志 | 仅 error/fatal | 服务无法启动时管理员能在事件查看器里看到原因 |
+| OTLP logs | 关 | 送到 OTel Collector（OTel 单负责下游） |
+
+默认目录：Linux `/var/log/lubancode/`（服务）或 `~/.lubancode/logs/cluster/`（用户态）；Windows `%ProgramData%\lubancode\logs\`；macOS `~/Library/Logs/lubancode/`。
+
+### 21.6 脱敏与内容边界
+
+- 运行日志 **info 及以上默认不含用户内容**：不记 prompt、模型输出、工具参数正文、文件内容、环境变量值；只记长度、哈希前 8 位、条数、路径的伪名化（复用 `telemetry/redactor.hpp` 的 path pseudonymizer）。
+- 所有字符串字段写出前过 **allowlist 脱敏器**（同 telemetry D1 管道：字段白名单 → secret 规则 → URL 只留 scheme+host → 路径伪名 → token 检测 → 长度截断 → 最终 denylist 扫描）。
+- 排障确需内容：tenant_admin 对指定 Session 开 `log.allow_content`，**必须带过期时间（最长 24 h）**，开启与关闭都写审计；到期自动关闭。
+- **泄漏测试**（CI 必跑）：在测试输入里种 20 种伪造 Secret（API key、JWT、私钥 PEM、AWS key、连接串密码……），跑完 E2E 后扫描全部日志、指标、trace、审计、崩溃文件，命中数必须为 0。
+
+### 21.7 审计账细节
+
+- 事件清单（首版全量，D0 冻结）：登录成功/失败/登出、API token 创建/吊销/使用失败、join token 创建/消费、节点 enroll/证书轮换/吊销/drain、Session 创建/关闭/归档/删除/导出、命令下发（kind + 目标，不含正文）、审批答复（批准/拒绝/超时）、operator 租约获取/强抢、策略变更（前后 diff）、配置下发、Secret **使用**（记"谁的哪个 Session 用了哪个 SecretRef"，不记值）、`log.allow_content` 开关、成员变更、租户冻结。
+- 每条：`audit_id, seq, ts, tenant_id, actor{user_id|token_id|node_id|system, ip, user_agent}, action, target{type,id}, outcome(success|denied|failed), reason, request_id, trace_id, prev_hash, line_hash`。
+- 防篡改：哈希链（复用 v3 canonical + 链算法）；每日 `audit verify` 任务，失败即 error 告警；可选每日把链头哈希写到外部（对象存储 WORM 桶或另一系统），防止整链被重写。
+- 输出：`GET /api/v1/audit`（按 tenant 隔离、分页、按 action/actor/时间过滤）、`lubancode-cp audit export --since … --format jsonl|csv`、可选实时转发 syslog（CEF）或 Kafka topic `lubancode.audit`。
+- 审计写失败 = 该操作失败（fail-closed）：写不进审计的管理操作不执行。
+
+### 21.8 关联与排障路径
+
+- 浏览器每个请求带或被分配 `request_id`（响应头 `X-Request-Id` 回显）→ 写进命令 `command_id` 的审计与日志 → 下发帧带 `traceparent` → 节点日志同 trace_id → Trajectory 里 user 行带 `origin.requestId`。一条 id 能串起"谁点了按钮 → 控制面 → 节点 → 模型调用 → 工具"。
+- `lubancode-cp debug trace <request_id|command_id>`：汇总控制面本地日志 + 通过节点链路拉取节点端同 trace 的日志片段（节点返回前再脱敏一遍），按时间合并展示。
+- **支持包**：`lubancode-node doctor --bundle` / `lubancode-cp doctor --bundle` 生成 zip：版本与构建信息、有效配置（打码）、最近 24 h 运行日志、状态机快照、租约表、最近 1 h 指标快照、崩溃文件；打包前整包跑一遍泄漏扫描，命中则拒绝生成并指出位置。
+
+### 21.9 日志配置键
+
+| 键 | 默认 | 档 |
+|---|---|---|
+| `log.level` | `info` | H |
+| `log.levels.<component 前缀>` | — | H（如 `log.levels.cp.scheduler: debug`） |
+| `log.format` | 服务模式 `json`，前台 `text` | H |
+| `log.sinks` | 见 21.5 | R |
+| `log.dir` | 见 21.5 | R |
+| `log.file.max_size` / `.max_files` / `.compress` | `100MiB` / `14` / `true` | H |
+| `log.queue_capacity` | `65536` | R |
+| `log.rate_limit_per_event` | `10/s` | H |
+| `log.allow_content` / `log.allow_content_expires_at` | `false` / — | P |
+| `log.allow_trace_until` | — | H |
+| `log.crash_ring_size` | `1000` | R |
+
+临时调级：`lubancode-cp log level set cp.scheduler debug --ttl 30m`（到期自动恢复，写审计）；对节点：`lubancode-cp log level set --node node-… node.uplink debug --ttl 30m`（经 CONFIG_UPDATE 下发）。
+
+### 21.10 容量预算
+
+- 空闲节点 info 级 ≤ 1 MiB/h；每个 turn 平均 ≤ 20 条 info；控制面 200 节点下 info ≤ 200 MiB/天。超出预算视为日志缺陷（多半是某处把 debug 写成了 info），D7 容量报告里单列日志量。
+
+## 二十二、生命周期与周期任务
+
+### 22.1 数据与对象生命周期
+
+| 对象 | 生命周期 | 默认期限 | 到期动作 | 可配键 |
+|---|---|---|---|---|
+| Session（Trajectory） | Active → Closed → Archived → Deleted | 关闭 30 天后归档；归档保留由 tenant 策略定（默认永久） | 归档：压缩、可迁冷存储（对象存储），投影清空；删除：见 22.3 | `retention.session.archive_after`、`.delete_after` |
+| 控制面投影 | 随 Session | 1 万行 / 7 天 | 淘汰，补读转节点 | `projection.*` |
+| 工作区 worktree | 随 Session | Session 关闭后 7 天 | **干净**则删除；**有未提交改动**则保留并告警，永不静默删脏工作区 | `workspace.worktree_gc_after` |
+| Artifact / blob | 被引用期间 | 引用归零后 7 天 | GC | `retention.blob.orphan_after` |
+| CapabilitySnapshot / 旧包 | 被未归档 Session 引用期间 | 引用归零后 30 天 | GC | `retention.capability.orphan_after` |
+| 命令记录 | Pending → 终态 | 终态 30 天 | 删除（节点去重索引 7 天） | `commands.retention` |
+| 审计 | 追加 | 365 天 | 归档到冷存储后删除（链头哈希保留） | `audit.retention` |
+| 运行日志 | 滚动 | 14 个文件 | 删除 | `log.file.*` |
+| 配置 revision | 追加 | 最近 100 个 | 删除更旧 | `config.revisions_keep` |
+| join token | 创建 → 用完/过期 | ≤ 24 h（默认 1 h） | 失效 | `pki.join_token_max_ttl` |
+| API token | 创建 → 过期/吊销 | ≤ 90 天 | 失效；到期前 7 天提醒 | `auth.api_token_max_ttl` |
+| 节点证书 | 签发 → 轮换 → 过期/吊销 | 30 天，剩 1/3 轮换 | 过期拒连 | `pki.*` |
+| 内部 CA | 创建 → 轮换 | 5 年；到期前 6 个月启动轮换 | **双根信任期**：新旧 CA 同时受信 60 天，期间节点逐台换发新证书，完成后撤旧根 | `pki.ca_*` |
+| 节点 | Enrolled → … → Decommissioned | Offline 超 90 天提示下线 | 下线：吊销证书、Session 标 NodeLost/归档、清理绑定 | `cluster.node_decommission_hint_after` |
+| Kafka topic 数据 | 追加 | 7 天 | broker 删除（非真账，删了无害） | `eventbus.kafka.retention` |
+| 备份 | 周期生成 | 30 天日备 + 12 个月备 | 删除 | `backup.*` |
+| 软件版本 | 发布 → 支持 → 停止支持 | 当前版 + 前一版 minor | 停止支持的节点版本在控制面标 `upgrade_required` | — |
+
+### 22.2 周期任务总表（都由协调器或节点的统一定时器驱动，全部可观测、可手动触发）
+
+| 任务 | 运行位置 | 周期 | 做什么 | 失败处理 |
+|---|---|---|---|---|
+| 心跳 | 节点 | 5 s | 续租、报水位 | ADR-05 |
+| 失效扫描 | 协调器 | 1 s | Suspect/Offline 判定 | — |
+| 租约过期 | 协调器 | 1 s | Expired 标记 | — |
+| reconcile | 协调器 | 1 s | 期望态 vs 观测态收敛 | 重试、告警 |
+| 命令重发 | 协调器 | 1 s | 回执超时重发 | DeliveryUnknown |
+| 调度出队 | 协调器 | 事件驱动 + 1 s 兜底 | — | — |
+| 上行泵兜底扫描 | 节点 | 1 s | — | — |
+| 配置漂移检查 | 协调器 | 10 min | 20.5 | 重推 + 告警 |
+| 证书轮换检查 | 节点 / 协调器 | 1 h | 到阈值即轮换 | 每日告警直到成功 |
+| SQLite 在线备份 | 控制面 | 5 min | 22.1 | error 告警 |
+| 备份校验 | 控制面 | 每日 | 打开备份跑 `PRAGMA integrity_check` + 合同冒烟 | error 告警 |
+| 恢复演练 | 人工（有 runbook） | 每月 | 真的从备份恢复到临时实例 | 记录演练结果 |
+| 审计链校验 | 控制面 | 每日 | 21.7 | error 告警 |
+| GC（blob、快照、命令、revision、worktree） | 控制面 / 节点 | 每小时 | 22.1 | warn |
+| Session 归档 | 控制面 → 节点 | 每日 | 22.1 | 重试 |
+| 投影淘汰 | 控制面 | 每小时 | 7.4 | — |
+| 僵尸 Session 检测 | 协调器 | 每日 | 期望 running 但 7 天无事件、或 NeedsReview 超 3 天 | 通知 owner |
+| 容量报告 | 控制面 | 每日 | 水位、排队、拒绝、日志量汇总 | — |
+| 时钟健康检查 | 节点 | 10 min | 墙钟与控制面偏差 > 2 s 告警（只影响展示，但说明 NTP 坏了） | warn |
+
+定时器实现：协调器单线程 tick（7.1）；节点统一 `PeriodicScheduler`（复用 `src/runtime/loop_scheduler.*` 的思路，不另写），每个任务记录上次开始/结束/结果，暴露指标 `lubancode_cluster_periodic_task_last_success_timestamp{task}`，超 3 个周期未成功即告警。
+
+### 22.3 删除与数据主体请求
+
+- 删除分两步：**逻辑删除**（立即不可见，写审计）→ **物理删除**（宽限 7 天后执行，期间 tenant_admin 可撤销）。
+- 物理删除覆盖：节点 Trajectory 与工作区、控制面投影与目录行、blob、Kafka（无法定点删，依赖其 7 天保留期到期，文档写明）、备份（依赖备份保留期到期，文档写明"最长 N 天后从备份中消失"）。
+- 用户注销/租户注销：批量执行上述流程并生成**删除证明**（清单 + 每处的完成时间），存审计。
+- （D8 可选）按租户密钥加密 blob 与归档，租户注销时销毁密钥（crypto-shredding），解决备份与冷存储里的残留。
+
+## 二十三、实施排期
+
+### 23.1 假设
+
+- 团队：**4 人**——A 分布式/基础设施（协议、租约、仿真、存储）、B 运行时（LubanCore 接入、Node Bridge、恢复）、C 平台/安全（mTLS、PKI、身份、审计、配置、日志）、D 前端 + QA/SRE 各半人。
+- LubanCore 单 B+C 由另一组（或同组分时）推进，**本排期把它当外部依赖**，估计第 12 周交付；这是全计划的**关键路径**。
+- 一周 = 一个人全职一周；日历周已含评审与 20% 缓冲。
+
+### 23.2 批次工作量与日历
+
+| 批次 | 人周 | 负责 | 日历周（从 W1 起） | 前置 |
+|---|---|---|---|---|
+| D0 合同冻结与文档 | 4 | A+C | W1–W2 | — |
+| D1 协议库与状态机 | 8 | A | W3–W6 | D0 |
+| **D1.5 配置与日志底座** | 6 | C | W3–W6 | D0 |
+| D2 mTLS 与服务端传输 | 6 | C | W7–W9 | D0 |
+| D3 ControlStore + SQLite | 6 | A | W7–W9 | D1 |
+| D3.5 确定性仿真台 | 8 | A+B | W5–W10 | D1 |
+| — 缓冲 / 评审 M2 | — | 全员 | W11–W12 | — |
+| D4 Node Bridge + CP MVP | 16 | A+B+C | W13–W18 | **LubanCore B+C**、D1–D3.5 |
+| D5 续看与多订阅 | 6 | B+D | W19–W21 | D4 |
+| D6 身份租户授权 | 10 | C | W19–W23 | D4、多租户单 §三 |
+| D7 多节点调度配额容量 | 10 | A+D | W22–W26 | D5 |
+| D8 生产化 | 24 | 全员 | W27–W36 | D7、Gateway V5 |
+| D10 池化模式 | 24 | A+B+C | W37–W46 | D8、LubanCore D、ExecutionProvider |
+| D9 冷迁移（另立单） | 待定 | — | W47 起 | D8 |
+
+合计约 **128 人周**（不含 D9 与外部依赖）；4 人团队约 **46 个日历周**到池化模式 beta。
+
+### 23.3 里程碑（每个都有可演示产物与退出标准）
+
+| 里程碑 | 周 | 可演示 | 退出标准 |
+|---|---|---|---|
+| **M1 合同冻结** | W2 | 七篇文档 + schema + 配置键目录 + 日志事件目录 | 评审通过，第十七节十问有结论 |
+| **M2 地基可证** | W12 | 仿真台跑 2000 种子，演示"去掉自失效 → 抓到双写"；mTLS 三平台握手；SQLite 合同测试；结构化日志与 `config explain` | D1–D3.5 验收全绿 |
+| **M3 单节点闭环（内部 alpha）** | W18 | 浏览器 → 控制面 → 节点跑一场 Session，拔网线/杀进程后自动恢复 | D4 验收；内部 dogfood 开始 |
+| **M4 多用户（外部 alpha）** | W23 | 两个租户、四种角色、续看、审计 | D5+D6 验收；越权测试零泄漏 |
+| **M5 多节点（beta）** | W26 | 3 节点调度、配额排队、drain | D7 容量报告达标 |
+| **M6 生产 GA（节点模式）** | W36 | HA 控制面、72 h soak 报告、runbook 演练 | D8 验收；CHANGELOG 发布 |
+| **M7 池化模式 beta** | W46 | Worker 被杀自动接管、Kafka 停机不影响 Agent | D10 验收 |
+
+### 23.4 节奏
+
+- **两周一迭代**，迭代末：合并到主干（特性开关关着）、演示、更新本单勾选与落点。
+- 每个里程碑后 **重估一次**后续排期；实际偏差 > 25% 必须在本单写"排期修订补记"，不静默顺延。
+- 主干每日：单元 + 仿真 2000 种子；每晚：仿真 10 万种子 + 集成测试 + 泄漏测试；每周：24 h 小 soak（D4 起）。
+
+### 23.5 风险登记
+
+| 风险 | 概率 | 影响 | 缓解 | 触发信号 |
+|---|---|---|---|---|
+| LubanCore B+C 延期 | 高 | D4 起全部顺延 | D0–D3.5 不依赖它，先把地基做厚；D4 可先用"假 Core Host"打通协议链路，真 Core 到位后替换 | W10 仍未有 B 批可用头文件 |
+| mbedTLS 服务端/mTLS 在 Windows 上的坑 | 中 | D2 延期 | D2 第一周先做三平台握手 spike | spike 失败 |
+| 仿真台与真实实现偏差（模型不准） | 中 | 假安全感 | 仿真驱动的是**同一份**状态机代码；集成测试用同一批故障剧本对照 | 集成测试发现仿真没抓到的 bug（每次都要补进仿真） |
+| libpq / librdkafka 三平台构建 | 中 | D8/D10 延期 | 可选编译开关；Windows 先只保证节点，控制面/Worker 以 Linux 为一等平台 | 构建时间 > 30 min |
+| 容量不达标 | 中 | M5 延期 | D7 前期先做单项压测（心跳、上行、调度分开测） | 单项压测不及目标一半 |
+| 人手被 P0 单子抢走 | 高 | 全局顺延 | 每迭代声明本单投入人周，偏离即补记 | 连续两迭代投入 < 计划 50% |
+| 安全评审发现架构级问题 | 低 | 返工 | D0 就做威胁模型；D6 做一次中期安全评审 | — |
+
+### 23.6 D1.5：配置与日志底座（新增批次，W3–W6，零 Core 依赖）
+
+- [ ] `schema/cluster/v1/config/`：第二十章全部键登记七属性；生成 `docs/architecture/cluster/config-reference.md`（生成物，CI 校验与 schema 一致）。
+- [ ] `src/cluster/common/config/`：分层加载（20.2）、严格解析与近似键提示、跨字段约束执行器、合并规则（override/min/and）、原子热重载、`explain/dump/diff/validate` 的纯逻辑。
+- [ ] `platform::LogSink` 演进（21.4）：`event`/`fields`/LogContext、异步有界队列与按级丢弃、同位置限速、崩溃环形缓冲；存量调用零改动（全仓编译 + 现有测试通过即证）。
+- [ ] 日志 sink：stderr、滚动文件（含 gzip）、journald/syslog、Windows 事件日志；`log.v1` JSON Schema + 输出一致性单测。
+- [ ] 运行日志接入 telemetry 脱敏器；泄漏测试框架（21.6）。
+- [ ] 审计写入库（与 D3 的 `AppendAudit` 合流，本批做客户端 API 与事件目录）。
+- [ ] `PeriodicScheduler`（22.2）纯逻辑 + 指标。
+
+验收：配置 schema 单测（七属性齐全、约束生效、合并规则正确）；日志队列压测（100 万条/分钟下 warn 以上零丢失）；泄漏测试 20 种 Secret 零命中；App Server/CLI 现有测试零改动通过。
+
+## 二十四、发布工程与兼容
+
+- **产物**：`lubancode-cp`、`lubancode-node`、（D10）`lubancode-worker`、`lubancode-sandbox`；与 `lubancode` 主程序同一版本号（当前 `0.26.x` 线），同一发布流水线；控制面额外发容器镜像（`linux/amd64`、`linux/arm64`）。
+- **平台矩阵**：节点 = Windows / Linux / macOS 一等；控制面、Worker、Sandbox = Linux 一等，Windows/macOS 仅开发用途（文档写明）。
+- **供应链**：SBOM（SPDX）、产物签名（与现有 GitHub Release 自动更新单的签名方案一致）、新增第三方（SQLite、libpq、librdkafka）写入 `THIRD_PARTY_NOTICES.md` 并钉版本与哈希。
+- **兼容承诺**（写进 `docs/architecture/cluster/compat.md`）：协议 N−1 minor；控制面存储 schema 只进不退、expand→migrate→contract；REST `/api/v1` 在 v1 内只增不改；配置键弃用至少跨两个 minor，弃用期内读到旧键打 warn 并自动映射；CLI 输出 `--json` 视为稳定接口。
+- **升级手册**：每个 minor 附"升级前检查"（`lubancode-cp upgrade preflight`：存储迁移可行性、在线节点版本分布、即将过期证书）与"回滚条件"（存储迁移 contract 步骤之前可回滚二进制）。
+- **成熟度标签**：每个能力在 `/api/v1/features` 与文档标 experimental / beta / stable；stable 之前不写进 README 首页能力表。
+
+## 二十五、管理面命令总表
+
+| 命令 | 作用 |
+|---|---|
+| `lubancode-cp init` | 生成默认 `cp.yaml`、CA、首个管理员引导 token |
+| `lubancode-cp run [--role]` / `service install\|start\|stop\|status` | 运行与服务化 |
+| `lubancode-cp config validate\|explain\|dump\|diff\|reload\|push\|rollback` | 第二十章 |
+| `lubancode-cp ca init\|rotate\|status` | PKI |
+| `lubancode-cp node token create\|list\|revoke` | join token |
+| `lubancode-cp node list\|show\|drain\|undrain\|revoke\|decommission` | 节点 |
+| `lubancode-cp session list\|show\|close\|archive\|delete\|reproject\|review` | Session 运维（review = 处理 NeedsReview） |
+| `lubancode-cp tenant\|user\|member\|token …` | 身份与成员 |
+| `lubancode-cp policy get\|set\|diff\|history` | 策略 |
+| `lubancode-cp quota …` | 配额 |
+| `lubancode-cp audit query\|export\|verify` | 审计 |
+| `lubancode-cp log level set\|reset` | 临时调级 |
+| `lubancode-cp debug trace <id>` | 跨组件关联 |
+| `lubancode-cp backup now\|list\|verify\|restore` | 备份恢复 |
+| `lubancode-cp store migrate [--dry-run]` / `upgrade preflight` | 升级 |
+| `lubancode-cp doctor [--bundle]` | 自检与支持包 |
+| `lubancode-node enroll\|run\|service …\|status\|drain\|doctor [--bundle]\|config …\|session list\|session recover --dry-run` | 第六章 |
+
+所有命令：`--json` 稳定输出、非零退出码有稳定含义（0 成功 / 1 一般失败 / 2 用法错误 / 69 服务不可达 / 75 暂时失败可重试 / 77 权限不足 / 78 配置错误）、修改类命令写审计。
+
+## 二十六、完整性核对表（每次里程碑评审逐项过）
+
+| 维度 | 本单落点 | 状态 |
+|---|---|---|
+| 目标形态与边界 | 畅想单 + 第一、三章 | 已设计 |
+| 部署形态（节点 / 池化） | ADR-12、第十三章 | 已设计 |
+| 线协议与版本兼容 | 第五章、ADR-08 | 已设计 |
+| 状态机 | 第四章 | 已设计 |
+| 单写者 / 租约 / fencing | ADR-05、4.2、ADR-12 | 已设计 |
+| 投递语义与幂等 | ADR-04、9.4 | 已设计 |
+| 存储与事务 | ADR-02、第七章 | 已设计 |
+| 中间件定位 | ADR-11 | 已设计 |
+| 调度、配额、限流 | ADR-07、20.7、ADR-12 第 6 条 | 已设计 |
+| 故障矩阵与恢复 | 第九章、9.3 | 已设计 |
+| 不变量与测试方法 | 第十章、ADR-10 | 已设计 |
+| 身份、认证、授权 | ADR-06、D6、多租户单 | 已设计 |
+| Secret | 畅想单 §十一、20.1 | 已设计 |
+| 配置体系 | 第二十章 | 已设计 |
+| 日志、审计、指标、trace | 第十一、二十一章 | 已设计 |
+| 数据生命周期、保留、删除 | 第二十二章 | 已设计 |
+| 周期任务 | 22.2 | 已设计 |
+| 备份与灾备 | 22.1、22.2、F7 | 已设计 |
+| 容量与 SLO | 第十二章 | 目标已定，待实测 |
+| 发布、升级、兼容 | 第二十四章、ADR-08 | 已设计 |
+| 运维工具与 runbook | 第二十五章、D8 | 命令已定，runbook 待 D8 |
+| 安全评审与威胁模型 | D0 security.md、D8 | 待 D0 产出 |
+| 成本（模型费用、存储） | D7 配额与每日 token 预算、22.1 | 部分；**缺：按租户的费用账单导出**（并入 `catalog价格账本` 单，D7 补） |
+| 前端工作台 | D4 最小查看；完整工作台归多前端单 | 依赖外单 |
+| 国际化与文档 | 运行日志 `msg` 英文、用户文案走现有语言包；运维文档中英 | D8 |
+| 合规（数据驻留、导出） | 22.3 删除证明；**缺：数据驻留（按地域放置）**——首版单地域，写入"不在本单" | 明确不做 |
+| 排期与风险 | 第二十三章 | 已排 |
