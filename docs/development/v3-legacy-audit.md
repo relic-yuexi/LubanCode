@@ -28,7 +28,7 @@
 | V3-LEGACY-04 | `src/agent/loop.cpp:2930` `tool_result_message.role = api::Role::User`；`:1323/2312/2571` 中断补配对仍用 User | 四角色枚举/adapter 已落地，生产内部容器尚未收敛。替成独立 Tool 时须联改 turn 切分、配对、回调、恢复和 wire 映射；不能只换枚举 |
 | V3-LEGACY-05 | `src/hooks/` 下 `dispatcher.cpp`、`protocol.cpp`、`loader.cpp`、`outbox.cpp` 俱在；`docs/features/extensions/hooks.md` 的 legacy adapter | command hooks 与 Lua 中间件并存。按挂点迁移配置、权限、执行顺序、效果采用和恢复；Post/outbox 尚有调用，不能先删旧分派器 |
 | V3-GAP-01 | `src/accounting/session_usage_reader.cpp:28/34/41`（`ParseStream` 只吐 `EventEnvelope`）、`:166`（只列 main.jsonl） | `/usage` 离线读口未消费 v3 主账/递归子账。接 assistant usage owner 和来源去重后，才可宣称跨会话统计完整；不能把空样本当零消耗 |
-| V3-GAP-04 | `src/app_server/server.cpp:1242` `session_main_path` 拼 main.jsonl；`:832–839` thread/read、thread/resume 仍只读旧史面 | SessionService 入口已统一，协议仍是过渡读面。清理硬编码路径并接 session 来源游标、真正恢复执行与 2.0 合同；保留"只读预览"说明直到行为改变 |
+| V3-GAP-04 | 第一棒已清（2026-09-24）：`src/app_server/server.cpp` 的 `session_main_path` 按场格式分派（v3 场 `<sessionId>.jsonl`、旧场 main.jsonl，`SessionService::v3_format()` 裁决，不再硬拼）；thread/read、thread/resume 的 lastSeq 游标对齐本场段账行并亮 `sourceSessions` 来源链；thread/resume `startExecution=true` 经 SessionService resume-at-launch 真恢复（v3 源续接同 id、v2 源迁移新场；活场拒、坏源 `resume_source_rejected`），缺省仍只读——行为未变，"只读预览"口径保留在缺省档 | 部分销项。残余归 AppServer 2.0 单：完整 2.0 合同（session 命名空间、事件订阅游标、attach/pause/continue）仍是后续工作 |
 | V3-GAP-05 | `src/workflow/journal.cpp` 全文零处 nodeExecutionId；`workflow/account.hpp:61/83` 字段已有，落账未接 | 编排账与节点执行不能靠换事件名完成迁移。独立节点 session、nodeExecutionId/attempt、output.commit 与失败恢复落地后再清旧桥 |
 | V3-GAP-08 | 总设计 §4.67–4.71；现行 goal/loop/memory 各域与命令入口 | 伞条。Goal、Loop、btw、Memory 新合同含独立实施清单；memory 域召回桥已由 T08 推进（见[已销项](#已销项) V3-GAP-03），其余各域状态照旧。旧功能可用不等于新增持久事务已接；按各自实施项推进，不批量删除现行功能 |
 
