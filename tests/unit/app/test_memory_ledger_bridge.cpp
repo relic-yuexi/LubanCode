@@ -158,7 +158,7 @@ TEST_CASE("P0-3: 召回快照进 v3 主账,Memory 改后旧账不动") {
     // 快照两形都算有账:超限走 snapshotRef(blob),不超走 snapshotInline
     //(v3 合同同 v2,BuildTurnContext 实际注入的选段定形)。
     const bool has_ref = payload.contains("snapshotRef");
-    CHECK(has_ref || payload.contains("snapshotInline"));
+    CHECK(has_ref + payload.contains("snapshotInline") >= 1);
     CHECK(payload.value("injectedBytes", 0) > 0);
     // 注入本体:隐藏 user 快照消息进了链(display=hidden,重放不冒充人类)。
     bool saw_hidden_snapshot = false;
