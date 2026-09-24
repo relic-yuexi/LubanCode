@@ -1,6 +1,10 @@
 # Slash 命令多级 Tab 补全：二级子命令缺失
 
-- 状态：待实现；已查源码定位根因，尚未改生产代码。
+- 状态：已实现；按三、四节方案改动生产代码并补单测,分支 `claude/relaxed-carson-81xlv5`。
+  - 语法层面已用 `g++ -fsyntax-only`(补装 nlohmann-json3-dev/doctest-dev 后)逐个验证过全部改动的
+    翻译单元与两份测试文件,均无报错;沙箱网络拦了 FetchContent 拉 curl 源码(github.com 403),
+    没能跑通完整 CMake 构建/ctest,新增单测未获得二进制真实跑绿的证据,只有手工按实现逐行推演
+    覆盖过的分支结果。合入前建议在能联网/已有 vcpkg 缓存的机器上补跑一遍 ctest。
 - 日期：2026-09-24
 - 级别：P2（终端交互体验）
 - 范围：`src/cli/line_editor.{hpp,cpp}`、`src/cli/console_input.{hpp,cpp}`、`src/cli/console_input_composer.cpp`、`src/cli/console_input_turn_listener.cpp`、`src/cli/slash_commands.{hpp,cpp}`、`src/cli/i18n.cpp`。
