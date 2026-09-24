@@ -1,124 +1,901 @@
 # 分布式支持路线图：从单机宿主到集群控制面的分期落地计划
 
-- 状态：研究与规划中（本单不含代码改动，先把既有畅想单落成可执行分期）
+- 状态：设计已定稿，待开工（2026-09-24 第二版：从"只做验收复核的排期表"改成"可直接按批开工的实施单"；第一版 P0~P6 由本版 D0~D9 取代，映射见第十六节）
 - 日期：2026-09-24
-- 级别：P1（方向性摸底，不抢占近期 P0 单子的排期）
-- 范围：`src/runtime`、`src/app_server`、`src/gateway`、`src/peers`、`src/channel`、`src/sessions`、`src/workspace`、CMake 目标分层（`lubancode_engine/runtime/core/app`）
-- 依赖：`LubanCore与CLI分离_核心库独立成宿主底座设计.todo`（硬前置，未完成前本单四~六节不可开工）
-- 关联：`多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`（目标形态与对象模型以它为准，本单不重复画图，只把"远期畅想"切成可排期的批次）、`多租户隔离_身份授权与隔离Worker落地设计.todo`、`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`持久Agent_Gateway接入SessionV3_常驻助理与可靠自动任务总装计划.todo(旧总装单已删,2026-09-17)`
-- 不在本单：重画集群对象模型（已有畅想单）、动手实现 LubanCore SDK 分离本身（那是它自己的单子）、承诺具体发布日期
+- 级别：P1（方向性工程，D0~D3 不依赖 LubanCore 分离，可与近期 P0 单子并行；D4 起受前置门约束）
+- 范围：新增 `src/cluster/`（protocol / lease / sim / node_bridge / control_plane / store）、`src/channel/transport/tls.*`（补 mTLS 与服务端角色）、`src/app_server/ws_*`（抽服务端 WS 承载给控制面复用）、`src/trajectory/v3/`（上行游标读口）、`src/runtime/session_service.*`（按 Host API 接入）、CMake 新目标 `lubancode_cluster_proto`/`lubancode_cluster_node`/`lubancode_cluster_cp`、新文档目录 `docs/architecture/cluster/`
+- 依赖：
+  - `LubanCore与CLI分离_核心库独立成宿主底座设计.todo` 的 **B（本地 SDK）+ C（隔离与并发基线）** 是 D4 起的硬前置（不是"全部验收"——那张单自己的 A 节第四条已写明把集群硬前置改成 B/C 基线，第一版本单写成"全部验收"是错的，本版纠正）。
+  - `多租户隔离_身份授权与隔离Worker落地设计.todo` 的身份合同（§三）是 D6 的硬前置。
+  - Gateway V0/V1/V2/V4 已落的持久化原语（PowerLoss 提交、ownerEpoch 认领、durable outbox）是直接复用件；Gateway V3（渠道）与集群无依赖，V5（长任务/异步工具执行账）是 D8"未知副作用裁决"的软前置。
+- 关联：`多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`（目标形态、对象模型、Session 状态机以它为准；本单给出它缺的：协议、存储、算法、数字、测试方法和按批落点）、`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`OpenTelemetry接入V3_现状与落地路线.todo`、`跨平台ExecutionProvider与通用强化沙箱设计.todo`、`SessionV3异步工具_任务执行协议配对与结果投递.todo`
+- 不在本单：跨节点热迁移（D9 只做"人工冷迁移"）、跨 Region 部署、Control Plane 多活写、任意工具 exactly-once、公网节点入站、把 Redis/消息队列作必选依赖
+
+---
 
 ## 一、先下断语
+
+（第一版原文保留，下附 2026-09-24 第二版补记）
 
 - LubanCode 现在是单机单进程宿主，这是架构决策，不是遗漏——不为赶进度绕开这层判断硬凑。
 - 分布式能力不是加一个 RPC 端口就有的，是身份/租约/调度这层缺失，本单不假装能跳过。
 - 唯一务实的路径：先把 LubanCore 从 CLI 里剥离成可嵌入 SDK，再谈第二个宿主（Node Bridge）挂上去；顺序颠倒会把单机 Gateway 和集群控制面焊成一坨改不动的代码。
 - 本单产出是"排期表"，不是"设计图"——设计图已经有了（见畅想单），缺的是把它切成可以一批一批验收、每批都对当前 HEAD 可核实的路标。
 
-## 二、现状证据（2026-09-24 复核）
+**（2026-09-24 第二版补记，翻案两条，理由如下）**
 
-- CMake 已有四层目标：`lubancode_engine -> lubancode_runtime -> lubancode_core -> lubancode_app`（`CMakeLists.txt:419/1071/1236/1358`），层次骨架在，但 `lubancode_core` 仍夹带部分 `src/cli/` 纯逻辑，不是可独立发布的宿主底座。
-- `src/app_server/server.hpp` 用 `ThreadRecord` 证明"一进程多 Session"可行，但 WS 只服务单条前端连接、断线打断在跑回合、无 durable cursor 补流、无 tenant/ACL——离"多用户订阅总线"还差一整层。
-- `src/gateway/` 的持久性分五层（P1 状态持久 ~ P5 运维持久），按 `docs/architecture/gateway/README.md` 批次地图：V0/V1/V2/V4 已落，V3（渠道总装与真 transport）、V5（长任务/Goal/Workflow）、V6（发布验收）仍待实现——单机这条线自己都没走完。
-- `src/peers/`（peer_registry / peer_mailbox）是唯一现成的"跨会话"通信，但源码首行注释即"同机首版"：注册表是同用户主目录下的 JSON 文件，传输是 Windows Named Pipe / POSIX Unix socket，协议设计上就不具备跨机器条件。
-- `src/channel/transport/`（tcp_socket、tls、ws_client）和 `src/net/http_transport` 已有可用的网络原语（TLS、WebSocket 客户端），是 Node Bridge 回连 Control Plane 时可复用的底层积木，但目前只服务于"连第三方 IM 平台"这一个方向，从未承担过"节点对控制面"的语义。
-- `src/channel/work_ledger.hpp` + Gateway 的 durable outbox 模式（先落盘、再上报、失败重试不重跑模型）已经是"本地事实优先、网络只做同步"的正确范式，集群设计里 Node Bridge 的"本地先落盘，再上报"就是同一思路的跨机器版本，可以直接抄作业而不是重新发明。
-- 三份关键设计文档状态原样未变：集群控制面"远期畅想，暂不实施"、LubanCore/CLI 分离"设计待实现"、多租户隔离"源码审查与设计，未实施"——过去三周（截至本次复核）没有任何提交触碰这三份单子或 `NodeBridge`/`ControlPlane`/`RuntimeLease` 相关代码。
+1. **翻"本单只排期不设计"。** 畅想单画的是目标形态和对象关系，没有协议帧、没有存储表、没有租约算法、没有超时数字、没有故障矩阵、没有测试方法——照它开工，每个实现者会各自发明一套，最后焊出五种心跳。本单现在负责这些**工程合同**，畅想单继续负责**产品形态与边界**，两者不重复。
+2. **翻"LubanCore 全部完成前一行分布式代码都不写"。** 这条把能并行的活也锁死了。分布式系统里最难、最该早做的是**与 Core 无关的纯逻辑**：协议编解码、租约/fencing 状态机、确定性仿真测试台、控制面存储合同、mTLS 传输。这些只依赖标准库 + nlohmann + mbedTLS，不 include 任何 CLI/Runtime 头，不存在"焊死"风险。所以：**D0~D3 现在就能开工；D4（第一次接 Core）起才受 LubanCore B/C 门约束。** 原断语第三条的精神（Node Bridge 不得耦合 CLI 内部类）不变，由第十四节的依赖守门测试机械保证，而不是靠"不许开工"保证。
 
-## 三、为什么必须按这个顺序（阻塞链）
+**本版核心判断（后续章节不得相悖）：**
+
+- **节点是事实的主人，控制面是索引与裁判。** Session 的 canonical 事实永远是节点上的 Trajectory v3 主账；控制面只存目录、租约、命令回执、事件投影缓存与审计。控制面数据库丢了，可从节点重建投影；节点账丢了，控制面不冒充有真相。
+- **一切跨网络动作按"至少一次 + 幂等键"设计，不宣称 exactly-once。** 命令有 `command_id`，事件有 `(session_id, epoch, seq, line_hash)`，重复一律被接收方吃掉。
+- **单写者靠 fencing epoch，不靠心跳。** 心跳只用来发现故障；写权只由控制面库事务铸造的单调 epoch 决定，且节点侧有自失效（lease 到期前自停写）。
+- **所有超时、上限、数字写在本单，不写"合理值"。** 数字是首版默认，可调，但必须有默认，且每个都有测试覆盖到它的边界。
+- **先确定性仿真，后真网络。** 协议状态机在单线程仿真里跑过上万个随机故障种子、不变量全绿，才允许上真 socket。
+
+---
+
+## 二、现状证据（2026-09-24 复核，行号按当日 HEAD `0c3268e`）
+
+### 2.1 能直接复用的
+
+| 现成件 | 位置 | 在集群里的角色 |
+|---|---|---|
+| Trajectory v3 信封：单写者发 `seq`、SHA256 哈希链、canonical JSON | `src/trajectory/v3/envelope.hpp`（`kGenesisHash`、`lineHash = SHA256(prevHash‖canonical)`） | **上行事件流的天然游标**：`(seq, lineHash)` 即断点续传位置，控制面可逐行验链，不用另造序号 |
+| v3 事件账 profile（只写 event 行、整卷验、续写） | `src/trajectory/v3/event_ledger.hpp` | Node Bridge 本地"节点账"（注册、租约、命令回执）的落盘原语 |
+| 认领带 ownerEpoch | `src/gateway/automation_store.cpp:1290` `ClaimDue(owner_epoch)`；`src/gateway/process.hpp:50` 锁文件 schema v2 | 本机版 fencing 已有先例，集群版把 epoch 的发号权搬到控制面库 |
+| Durable outbox（先落盘、确定性 deliveryId、`delivery_unknown` 不虚 exactly-once） | `src/gateway/reply_outbox.hpp` | Node Bridge 上行队列、命令回执的同构模式 |
+| 渠道工作绑定账（claim 后崩 → `needs_review`，不盲重跑） | `src/channel/work_ledger.hpp` | 节点崩溃恢复裁决的同构模式 |
+| 按 `lastSeq` 断线补账 + 冷回放 | `src/app_server/server.cpp:743-802`、`src/app_server/protocol.hpp:71-122`（`kSeqField`） | 浏览器 ↔ 控制面续看的协议形状已定型，集群版照抄语义 |
+| 同场单飞、优先级取件 | `src/runtime/session_work_scheduler.hpp`（`WorkKind`/`WorkPriority`） | 节点内调度不重写，集群只加"节点级槽位"一层 |
+| TLS 客户端（mbedTLS 3.6，三平台同源，证书验证恒 REQUIRED，稳定错误码） | `src/channel/transport/tls.hpp/.cpp` | Node Bridge 出站连接底座 |
+| WS 客户端 / 帧编解码 | `src/channel/transport/ws_client.*`、`ws_frame.*` | 同上 |
+| 最小 WS 服务端 socket 层 | `src/app_server/ws_sockets.hpp`（Winsock2/POSIX 镜像、select accept） | 控制面服务端承载的起点（需抽出 + 加 TLS 服务端） |
+| 信封版本化、去重、限速、有界队列 | `src/peers/peer_mailbox.hpp`（`kPeerEnvelopeVersion`、message_id 去重） | 集群信封照抄"新增字段一律可选"与去重纪律 |
+| 进程起始 token 核身份（防 PID 复用） | `src/trajectory/session_lock.hpp` | Node Bridge 的 `boot_id` 生成思路 |
+| Secret 按引用解析 | `src/runtime/secret_resolver.cpp` | 节点侧最后一刻解析 SecretRef |
+
+### 2.2 必须补的缺口（每条都在第十五节对应到某个批次）
+
+| # | 缺口 | 证据 | 落批 |
+|---|---|---|---|
+| G1 | **TLS 只有客户端角色，没有客户端证书（mTLS 不可用），没有服务端角色** | `tls.cpp:816` 只 `MBEDTLS_SSL_IS_CLIENT`；无 `mbedtls_ssl_conf_own_cert`/`mbedtls_pk_parse_key` 调用 | D2 |
+| G2 | **没有嵌入式数据库**，第三方依赖只有 cpr、nlohmann、yaml-cpp、lua、mbedtls、miniz、doctest | `vcpkg.json`、`CMakeLists.txt` 的 FetchContent 清单 | D3 |
+| G3 | **ID 不是全局唯一**：`IdAuthority` 发 `thread-<n>`/`turn-<n>` 是进程内计数；session_id 为 `YYYYMMDD-HHMMSS-XXXXXX`（6 位随机） | `src/runtime/id_authority.hpp`、`src/trajectory/directory.hpp:46` | D1（控制面发号规则） |
+| G4 | **App Server 出站队列满了就丢事件**（有 overflow 通报，但不是 durable cursor） | `src/app_server/outbox.hpp` BoundedOutbox | D5（控制面订阅改从投影缓存/节点账补读，不从内存队列补） |
+| G5 | **单连接、断线打断回合** | `src/app_server/server.cpp:2081-2119`（interrupt/超时/断线同一收口） | Core C 批 + D5 |
+| G6 | **Session 锁是本机 PID 锁**，跨机不成立 | `src/trajectory/session_lock.hpp` | D1/D4（RuntimeLease 叠加在本机锁之上，不替换它） |
+| G7 | **无任何集群身份类型**（tenant/user/node），`principal` 只区分 user/agent | 多租户单 §二 `dispatcher.hpp:45` | D6 |
+| G8 | **无指标/trace 传播合同** | OpenTelemetry 单现状 | D1 信封预留 `traceparent`，D8 接出 |
+
+### 2.3 前置单当日状态
+
+- LubanCore/CLI 分离：设计待实现，A~F 全未勾。→ D0~D3 不受影响；D4 等它的 B+C。
+- 多租户隔离：源码审查与设计，未实施。→ D6 等它的 §三身份合同落码。
+- Gateway：V0/V1/V2/V4 已落，V3/V5/V6 待实现（`docs/architecture/gateway/README.md:154-160`）。→ 不阻塞 D0~D7；V5 是 D8 软前置。
+- 过去三周无提交触碰 `NodeBridge`/`ControlPlane`/`RuntimeLease`，`src/cluster/` 不存在。
+
+---
+
+## 三、架构裁决记录（ADR）
+
+每条：裁决 / 理由 / 被否方案 / 翻案条件。翻案须在本节加日期戳补记，旧文不删。
+
+### ADR-01 拓扑：单控制面 + 出站回连节点，控制面分"无状态 API 层 + 单主协调器"
 
 ```text
-LubanCore/CLI 分离（宿主 API + 组件 SPI 冻结）
-        │  没有这层，Node Bridge 只能反过来耦合 CLI 内部类
+Browser / Desktop / SDK client
+        │ HTTPS + WSS（OIDC 会话 / API token）
         ▼
-单机 Gateway 收官（V3/V5/V6，P1~P5 持久性全绿）
-        │  连单机崩溃恢复都没做扎实，集群故障恢复无从谈起
-        ▼
-身份与租户层（Tenant/User/ACL，独立于会话执行）
-        │  Node/Project/Session 的所有权判定都要靠它
-        ▼
-Node Bridge MVP（单控制面 + 单节点，mTLS 回连、心跳、租约）
-        │  先验证"节点主动连回控制面"这条最小闭环能不能打通
-        ▼
-多节点调度与配额（Node Registry、Scheduler、Capability Registry）
+┌──────────────── Control Plane ────────────────┐
+│  API Gateway（无状态，可多副本）              │
+│    ├─ AuthN/AuthZ（OIDC、ACL 裁决）            │
+│    ├─ Client Session Hub（浏览器订阅、cursor）│
+│    └─ Node Link Hub（节点 mTLS 长连接）       │
+│  Coordinator（单主，持 leader epoch）         │
+│    ├─ Node Registry / 失效探测                │
+│    ├─ Lease Manager（RuntimeLease 发号）       │
+│    ├─ Scheduler / Admission                   │
+│    └─ Command Router（命令表、重投、超时）    │
+│  ControlStore（SQLite 单机 / PostgreSQL HA）  │
+│  Event Projection Cache（可丢、可重建）       │
+│  Audit Log（追加写，哈希链）                  │
+└───────────────────────────────────────────────┘
+        ▲ mTLS WSS，节点主动出站，控制面不连节点
         │
-        ▼
-生产化（断线续看、故障恢复裁决、审计、72h soak、发布验收）
+Node Bridge（每节点一只守护进程）
+  ├─ Link（重连、退避、帧收发）
+  ├─ Node Ledger（v3 事件账：注册/租约/命令回执）
+  ├─ Lease Guard（本地自失效计时）
+  ├─ Admission（本地槽位与资源水位，最终拒绝权）
+  ├─ Uplink Pump（按 session 游标读 Trajectory 上行）
+  ├─ Core Host（LubanCore Host API，持多 SessionRuntime）
+  └─ Worker Supervisor（D8 起：Worker 子进程）
 ```
 
-后一环开工前，前一环没进"验收门"严禁排期——这是畅想单"硬前置"条款的具体化，不是本单新加的限制。
+- **理由**：节点常在 NAT/内网后，出站回连免开入站端口；无状态 API 层好扩；协调器单主让租约/调度的正确性论证简单（一个写者 + 库事务），吞吐瓶颈远在我们需要的规模之外（见第十二节容量目标）。
+- **被否**：① 节点间 gossip 自组织（SWIM/Serf）——节点不互信、不互联，运维与安全面翻倍；② 控制面多活写（多主）——需要分布式共识才能保单写者，首版不值；③ 自研 Raft——正确性成本极高，用 PostgreSQL 同步复制 + advisory lock 拿到同等语义。
+- **翻案条件**：单协调器实测成为瓶颈（>2000 节点或调度延迟 P99 > 1s），再议分片协调器（按 tenant 哈希分片）。
 
-## 四、分期落地（迁移批次）
+### ADR-02 控制面存储：`ControlStore` SPI；开发/单机用 SQLite，生产 HA 用 PostgreSQL
 
-### P0：地基盘点与合同冻结（不写新分布式代码，只做冻结与复用）
+- **SQLite**（FetchContent 拉 amalgamation 3.46+，与 mbedTLS 同一引入方式）：WAL 模式、`synchronous=FULL`、`busy_timeout=5000`、单写连接 + 读连接池。用于 `lubancode-cp --store=sqlite:<path>` 单机控制面与全部合同测试。
+- **PostgreSQL 15+**（libpq，D8 引入，可选编译 `LUBANCODE_CLUSTER_PG=ON`）：`SERIALIZABLE` 不是必需，关键写走 `SELECT ... FOR UPDATE` + 行级 CAS（`WHERE epoch = $expected`）；同步流复制 `synchronous_commit=on`，RPO=0。
+- **两者跑同一套合同测试**（`tests/unit/cluster/store_contract/`），合同见第七节。内存 mock 不算数据库验收（对齐 LubanCore 单 D 阶段纪律）。
+- **理由**：SQLite 零运维、单文件、可随发行包走，足够单控制面几百节点；PG 是 HA 的最短路径（成熟复制、备份、PITR）。统一 SPI 让两者同语义。
+- **被否**：etcd（存储上限小、事件投影放不下，且多引入一门运维）；Redis 当事实库（持久性/一致性合同不够，LubanCore 单 §九已否）；只用 JSONL 文件（控制面需要按 tenant/node/状态多维查询与事务 CAS，文件做不了跨表原子）。
+- **翻案条件**：出现"控制面必须随节点离线运行"的需求，再议 SQLite 为唯一后端 + Litestream 类复制。
 
-- [ ] 核对 `lubancode_core` 当前仍夹带的 `src/cli/` 纯逻辑清单，产出"待迁出"文件表 → 落点并入 `LubanCore与CLI分离...todo` 现有的现状小节，不在本单另存一份。
-- [ ] 给 `src/channel/transport/`（tcp_socket/tls/ws_client）补一份"可否作为 Node Bridge 回连传输层"的能力核查：TLS 双向认证（mTLS）当前是否支持客户端证书，缺口记录。
-- [ ] 给 `src/channel/work_ledger.hpp` 与 Gateway durable outbox 补一句"跨机器版复用备注"，供 P3 阶段直接引用，不重写文档。
+### ADR-03 线协议：WSS 上的版本化 JSON 帧，schema 先行
 
-验收：产出三份核查记录（文件清单 + mTLS 能力表 + 复用备注），不涉及编译产物，评审通过即算完工。
+- 传输：TLS 1.3（mbedTLS 3.6 支持；禁 1.2 以下），WebSocket（RFC 6455），单连接多路复用所有 session 流。
+- 帧：一条 WS text message = 一个 JSON 帧（UTF-8，canonical 不要求，但字段名 camelCase 与 v3 信封一致）。单帧上限 **1 MiB**；超限的事件行以 `blobRef` 形式引用，另走 `BLOB_GET` 分块（每块 256 KiB）。
+- schema 先行：每种帧一个 JSON Schema 文件，放 `schema/cluster/v1/*.schema.json`，C++ 编解码器单测逐帧对 schema 校验；浏览器侧（TS）可据此生成类型。
+- **理由**：仓库已有 WS 客户端、帧编解码、nlohmann；JSON 可调试、可审计；与 App Server 协议同一风格，浏览器可以复用心智。
+- **被否**：gRPC/protobuf（新增 protobuf+grpc+abseil 依赖链，Windows 构建成本高，与现有 JSON 体系双轨）；自定义二进制 TCP（调试和中间件支持差）。
+- **翻案条件**：实测 JSON 编解码占控制面 CPU > 30%，再引 CBOR（同 schema，换编码，帧头协商）。
 
-### P1：LubanCore SDK 化（严格跟随 `LubanCore与CLI分离...todo` 自身分期，本单只做"是否已满足集群前置"的验收复核）
+### ADR-04 投递语义：至少一次 + 幂等键；事件以 Trajectory 为唯一源
 
-- [ ] 宿主 API（创建会话/提交回合/取消/审批/查询/订阅/关闭）四种接入面中的"远程协议"面是否已有 AppServer 之外的第二个实现者验证过（哪怕是测试桩）。
-- [ ] 组件 SPI（存储/执行环境/身份/调度适配）是否已有至少一种"非默认实现"通过统一合同测试，证明"可换组件"不是纸面承诺。
+- **命令（控制面 → 节点）**：控制面先把命令写进 `commands` 表（`status=pending`）再发；节点先把 `command_id` 写进节点账再执行；重复 `command_id` 回原回执（`duplicate=true`），不再执行。节点回执后控制面置 `accepted`/`rejected`；超时未回执按 `delivery_unknown` 重发同一 `command_id`（安全，因为节点去重）。节点侧 `command_id` 去重窗口 = **7 天**（大于任何重试窗口）。
+- **事件（节点 → 控制面）**：不另造事件队列。节点的 Uplink Pump 按 `(session_id, epoch)` 维护"已被控制面确认到哪一行"（`ackedSeq` + `ackedLineHash`），从 Trajectory v3 主账续读上行；控制面收到 `EVENT_BATCH` 后**逐行验哈希链**（prevHash 必须等于投影里上一行的 lineHash），通过才入投影并回 `EVENT_ACK{upToSeq}`。链断 → 拒收 + 告警 + 要求节点从 `ackedSeq` 重发；连续 3 次仍断 → 该 session 投影置 `projection_broken`，只读不再接收，等人工 `cluster session reproject`。
+- **浏览器（控制面 → 客户端）**：客户端带 `lastSeq` 订阅；控制面从投影缓存补；投影缓存没有（被淘汰/控制面重启丢了）则向节点发 `SNAPSHOT_REQ`/`EVENTS_REQ{fromSeq}` 拉取，拉不到（节点离线）回 `cursor_unavailable{nodeOffline:true}`，**不伪造空流**。
+- **不承诺**：端到端 exactly-once 副作用。工具副作用的四分类（只读 / 幂等可重试 / 需补偿 / 未知）沿用 LubanCore 单 §十，未知 → `NeedsReview`。
 
-验收：两项皆为"是"，方可视为畅想单硬前置满足，进入 P2。任一为"否"，本单在此长期挂起，不允许绕过。
+### ADR-05 故障探测与租约：固定周期心跳 + 双层租约（节点租约、运行租约）+ 自失效
 
-### P2：单机 Gateway 收官（跟随 `docs/architecture/gateway/README.md` 自身批次表，本单只做验收复核）
+数字（首版默认，全部可配，配置项名见第十三节）：
 
-- [ ] V3 渠道总装与真 transport 落地。
-- [ ] V5 长任务/Goal/Workflow 与异步工具执行账打通。
-- [ ] V6 发布验收（回归、72h soak、容量扫点、安全、能力表）全绿。
+| 参数 | 默认 | 约束 |
+|---|---|---|
+| `heartbeat_interval` | 5 s | — |
+| `node_suspect_after` | 15 s（3 次未到） | ≥ 3 × interval |
+| `node_lease_ttl` | 30 s | ≥ 2 × suspect_after |
+| `runtime_lease_ttl` | 30 s，随心跳批量续 | = node_lease_ttl（首版简化） |
+| `node_self_fence_margin` | 5 s | 节点在"收到授予时刻 + ttl − margin"（**按本机单调时钟**）停写 |
+| `cp_reassign_grace` | 10 s | 控制面在 `expires_at + grace` 之后才可把写权交给别人 |
+| `max_clock_skew_assumed` | 2 s | 只影响展示；正确性不依赖墙钟（见下） |
+| `reconnect_backoff` | 0.5 s 起，×2，封顶 30 s，±20% 抖动 | — |
 
-验收：Gateway 批次地图三项全部由"待实现"转为"已落"，且当次复核未发现新增待实现批次。
+- **正确性论证（不依赖时钟同步，也不依赖网络时延上界）**：采用经典租约做法——**节点从"发出请求"那一刻起算，不从"收到确认"起算**。
+  - 节点发 `HEARTBEAT{hbSeq=k}`（或 `LEASE_ACCEPTED{reqSeq=k}`）时记本机单调时刻 `t_req[k]`；
+  - 控制面处理该请求时（必然晚于 `t_req[k]`）把 `expires_at` 设为 `now_cp + ttl`，在 `HEARTBEAT_ACK{hbSeq=k}` / `LEASE_ACTIVE{reqSeq=k}` 里确认；
+  - 节点收到确认后把本地截止设为 `max(旧截止, t_req[k] + ttl − margin)`。
+  - 由于 `t_req[k]` 早于控制面续租时刻，节点截止 **恒早于** 控制面的 `expires_at`，再加 `grace` 才可改授——无论确认包在路上走多久（迟到的确认只会给出更早的截止，被 `max` 吃掉），节点都先停写。唯一假设是两端单调时钟**速率**偏差很小（见下），不需要时钟对齐。
+  - 第二道防线：`grace` 覆盖控制面处理延迟与速率漂移；第三道防线：**控制面按 epoch 拒收旧事件**（ADR-04 上行验 epoch），即使前两道因实现 bug 失守，旧写者的事实也进不了投影。
+- **时钟漂移**：单调时钟速率偏差按 < 1000 ppm 假设（30 s 内 < 30 ms），`margin = 5 s` 留足两个数量级余量；虚拟机暂停/休眠造成的"单调时钟停走"只会让节点更晚察觉——所以节点在进程恢复后首先检查 `now_mono − last_confirm_mono`，若跨度 > ttl，立即自围栏，不写任何一行再去续租。
+- **心跳里带什么**：见第五节 `HEARTBEAT` 帧；续租是**批量**的（一次心跳续本节点全部 runtime lease），避免 N 个 session 各自心跳。
+- **被否**：φ-accrual 自适应探测（首版固定阈值足够，可观测、可解释）；仅靠 TCP keepalive（半开连接探测太慢且不可控）。
 
-### P3：身份与租户层（对齐 `多租户隔离_身份授权与隔离Worker落地设计.todo`，本单只做接口面复核）
+### ADR-06 身份与信任：内部 CA + 加入令牌签发节点证书；用户走 OIDC
 
-- [ ] Tenant/User/Group/Role 的最小模型是否已有非集群场景（例如单机多用户共用一台 Gateway）先落地验证，避免第一次实现就绑定在集群协议上。
-- [ ] `SecretRef`/`Policy`/`Quota` 是否已有独立于 Session 执行路径的存取合同（不与 Trajectory 正文混账）。
+- **节点**：控制面自带一只内部 CA（ECDSA P-256；根私钥可放 HSM/KMS，首版放加密文件 + 口令）。节点加入：管理员 `lubancode-cp node token create --tenant T --ttl 1h --uses 1` 得一次性 **join token**（256 bit 随机，库里只存 SHA-256）→ 节点 `lubancode-node enroll --cp https://cp:7443 --token ... --ca-fingerprint sha256:...`（首次信任靠指纹钉住，防 TOFU 劫持）→ 节点本地生成私钥与 CSR → 控制面签发证书（SAN 里写 `urn:lubancode:node:<node_id>`，有效期 **30 天**）→ 节点在剩余寿命 **1/3** 时自动轮换（用旧证书认证申请新证书）。吊销：`nodes.revoked_at` + 连接层每次握手查表（节点数量级小，不上 CRL/OCSP）。
+- **控制面服务端证书**：可用内部 CA 签，也可用公网 CA；节点只信任 enroll 时钉住的 CA 指纹。
+- **用户**：OIDC（Authorization Code + PKCE）是生产唯一推荐；本地账号（argon2id）只给开发与离线部署，默认关闭。API token（给 SDK/CI 用）：前缀可识别（`lbc_`），库里存哈希，绑定 tenant + scope + 过期时间。
+- **命令授权**：浏览器声称的一切不算数；控制面按 `AuthenticatedSubject`（多租户单 §三）+ 资源 ACL 裁决后，把 `actor` 上下文写进命令；节点**不重新认证用户**（节点不接触用户凭证），但**重新校验**：命令的 tenant 与本节点归属一致、目标 session 的 lease epoch 与本地持有一致、命令未过期（`deadline`）。
+- **命令签名**：首版靠 mTLS 通道认证控制面身份；D8 加 detached JWS（控制面签命令体，节点验签后才执行，审计里留签名），防"控制面 API 层被攻破后直接伪造命令"——签名私钥只在协调器，不在 API 层。
 
-验收：身份层可在无 Node Bridge 的情况下独立跑通单元/集成测试。
+### ADR-07 调度：显式放置优先，约束过滤 + 最少负载打分；控制面排队，节点终审
 
-### P4：Node Bridge MVP（单控制面 + 单节点）
+- 首版 Session 放置：用户选节点（或选 Project checkout，节点随之确定）是默认路径；"自动放置"只在用户选"任意可用节点"时生效。
+- 自动放置算法：**过滤**（tenant 归属、os/arch、所需 toolchain/能力、WorkspaceBinding 存在、未 draining、磁盘高于低水位）→ **打分**（`score = w1·(1 − running_turns/turn_slots) + w2·(1 − mem_used/mem_total) + w3·已有同 Project checkout`，默认 w = 0.5/0.3/0.2）→ 取最高，同分按 node_id 哈希稳定打散。
+- **排队在控制面**：每 tenant 一条 FIFO，tenant 之间 **加权公平**（DRR，权重来自 quota）；每节点 turn 槽位由节点心跳上报的 `turnSlotsFree` 驱动。
+- **节点有最终拒绝权**：节点收到 `SESSION_START`/`TURN_ENQUEUE` 时本地再判资源，不够回 `rejected{reason:"node_capacity"}`，控制面把工作放回队首并对该节点冷却 10 s。控制面视图可能滞后，节点本地是真值。
+- **"在线不等于烧算力"**：配额分三种槽：`resident_sessions`（很便宜，默认上限 1000/节点）、`running_turns`（贵，默认 = CPU 核数，上限可配）、`heavy_jobs`（构建/浏览器，默认 2）。等模型、等审批、等 timer 时释放 `running_turns` 槽（依赖 Core C 批"有界 Worker pool"）。
 
-- [ ] 定义 Control Plane ↔ Node Bridge 的最小信封协议（复用 `src/peers/peer_mailbox.hpp` 的信封/去重/限速设计思路，不是照搬同机实现）。
-- [ ] Node Bridge 主动出站连接控制面（mTLS），实现注册、心跳、租约续期三个动作，不要求节点开放入站端口（与畅想单第四节目标形态一致）。
-- [ ] 本地事实先落盘（复用 P0 核查过的 work_ledger/outbox 模式），网络仅做同步，断线重连后从 durable cursor 续传，不重放已执行副作用。
-- [ ] 最小验收场景：一台控制面 + 一台节点，节点跑一个 headless Session，杀节点进程重启后，控制面视图与节点本地账本恢复一致。
+### ADR-08 版本与兼容：协议 major.minor 协商，N−1 兼容窗口，先升控制面再升节点
 
-验收：单控制面单节点场景下，断线、重启、命令重放三类故障注入均不产生重复执行或状态丢失。
+- `HELLO` 带 `protocol: {major, minMinor, maxMinor}`、`bridgeVersion`、`coreVersion`；控制面选双方交集最高 minor 回 `WELCOME`。major 不同直接拒（`protocol_major_mismatch`），节点进入 `upgrade_required` 并停止重连风暴（退避到 5 分钟）。
+- 规矩：minor 只加可选字段/新帧类型；接收方忽略未知字段、对未知帧类型回 `ERROR{code:"unknown_frame", fatal:false}`。
+- 兼容窗口：控制面同时支持当前与前一 minor 的节点（**N−1**）；升级顺序固定：**先控制面，后节点**（逐台 drain → 升级 → 回填）。
+- 存储 schema：`schema_migrations` 表 + 只进不退的迁移脚本；每个迁移必须"新旧代码都能读"（expand → migrate → contract 三步），跨两个发布完成破坏性变更。
 
-### P5：多节点调度与配额
+### ADR-09 可观测性：指标、trace、结构化日志三件套，命名与 OpenTelemetry 单对齐
 
-- [ ] Node Registry 支持多节点注册与租约到期回收。
-- [ ] Scheduler 按节点配额（同场单飞、跨场并发上限）分配 Session，遵循畅想单"在线不等于正在烧算力"的判断。
-- [ ] Capability Registry 只搬运已冻结的能力快照与授权，不把"发现到了"当"可以执行"（畅想单第三节 3.4 的边界照搬）。
+- 每帧信封预留 `traceparent`（W3C Trace Context），控制面发命令时注入，节点执行 turn 时作为父 span。
+- 指标名前缀 `lubancode.cluster.*`，完整清单见第十一节；`session_id` **不作指标标签**（高基数），只进日志与 trace。
+- 日志：JSON 行，必带 `ts, level, component, node_id?, tenant_id?, session_id?, epoch?, command_id?, trace_id?`；Secret 与用户正文不进日志（沿用畅想单 §十一）。
 
-验收：三节点场景下，配额耗尽时新 Session 排队而非抢占，节点掉线后其上 Session 转入"待重新调度"而非静默丢失。
+### ADR-10 测试方法：确定性仿真 + 故障注入代理 + 真机多节点 + soak，四层证据
 
-### P6：生产化验收
+- 纯逻辑（协议状态机、租约、调度、命令路由）一律写成 **"输入事件 → 新状态 + 输出动作"** 的纯函数/纯类，时钟、随机、网络全部注入。
+- 在此之上建 **确定性仿真台**（`src/cluster/sim/`，仅测试链接）：单线程离散事件循环，模拟 1 个控制面 + N 个节点 + 可编程网络（延迟、丢包、重复、乱序、分区、半开连接）+ 进程崩溃/重启 + 时钟跳变；一个 64 位种子完全决定一次运行，失败种子可重放。CI 每次跑 **2000 种子 × 每种子 10 分钟仿真时间**，夜间跑 **10 万种子**。
+- 不变量在每一步检查（第十节）。
+- 真网络层用进程内 **故障代理**（`tests/support/cluster/fault_proxy`，TCP 转发，可注入延迟/断开/黑洞）跑真实二进制。
+- 最终层：两台以上真机 + 72h soak。
 
-- [ ] 断线续看：浏览器/客户端断线重连后，Session 事件按 durable cursor 补齐，不丢事件也不重复。
-- [ ] 故障恢复裁决：节点崩溃后，未知副作用的 Session 停在 `NeedsReview`，不假定可安全重跑（与 Gateway P3 执行持久层同一裁决原则）。
-- [ ] 审计与安全：AuditEvent 覆盖控制命令来源，通过一轮安全评审。
-- [ ] 三平台真机验证 Node Bridge 的服务安装/监督路径（参照 Gateway V4 已有的三平台 supervisor 经验）。
+---
 
-验收：满足畅想单第一节"断线回来还能续看，宿主重启后还能按事实账恢复"这句总纲，且不是靠人工介入达成。
+## 四、领域对象与状态机
 
-## 五、不做什么
+对象模型沿用畅想单 §五，不重复。本节只补**状态机的精确迁移表**——实现直接照表写，测试照表穷举。
 
-- 不在 LubanCore 分离完成前动手写 Node Bridge 代码——这会把集群协议和 CLI 内部类焊死，畅想单已明确排除。
-- 不在单机 Gateway 持久性（P1~P5）没打满之前承诺集群故障恢复——单机都靠不住，集群只会把问题放大到多机。
-- 不把 `src/peers/` 现有的同机机制直接改成跨机——它的信封/限速/去重设计可以抄思路，但底层传输（Named Pipe/Unix socket）本身不具备跨机条件，需要在 P4 用 TLS+WS 重新实现。
-- 不首版就要求跨节点热迁移（Session 从节点 A 无缝搬到节点 B）——畅想单已明确排除，本单不重新引入。
-- 不为了"看起来有进展"而提前开放公网入站端口——Node Bridge 首版只做出站回连。
+### 4.1 Node（控制面视角）
 
-## 六、最终验收门
+```text
+                enroll ok
+  (none) ───────────────────▶ Registered
+                                  │ HELLO 成功
+                                  ▼
+            ┌──────────────── Ready ◀─────────────┐
+            │ 心跳缺 ≥ suspect_after               │ 心跳恢复（同 boot_id）
+            ▼                                      │
+         Suspect ──────────────────────────────────┘
+            │ node_lease 到期 + grace
+            ▼
+         Offline ──── HELLO（新 boot_id）──▶ Recovering ──对账完成──▶ Ready
+            │
+  管理员 drain（任意在线态）──▶ Draining ──无 running turn──▶ Drained
+  管理员 revoke（任意态）──▶ Revoked（终态；证书作废，连接立断）
+```
 
-P0~P6 全部勾选，且：
-- 三份既有设计文档（LubanCore/CLI 分离、集群控制面畅想、多租户隔离）状态字段全部从"未实施/设计待实现/远期畅想"转为"已落"或"进行中有明确批次"；
-- P4/P6 涉及的故障注入场景（断线、重启、命令重放）有可重跑的自动化测试，不是一次性人工验证；
-- CHANGELOG 有对应发布记录，不是只改了 `todos/` 文档就算数。
+| 当前 | 事件 | 下一 | 动作 |
+|---|---|---|---|
+| Ready | 心跳到 | Ready | 批量续 runtime lease；更新水位 |
+| Ready | `now − last_hb ≥ suspect_after` | Suspect | 停止向该节点调度新工作；**不**撤租约 |
+| Suspect | 心跳到（boot_id 相同） | Ready | 续租；补发未回执命令 |
+| Suspect | `now ≥ node_lease_expires + grace` | Offline | 该节点所有 runtime lease 置 `Expired`；其上 Session 投影状态改 `NodeLost`（业务状态不变） |
+| Offline/Suspect | HELLO，boot_id **不同** | Recovering | 节点已重启：旧 lease 全部作废，epoch 在重新授予时 +1；节点上报本地 session 清单与各自 `lastSeq/lastHash` |
+| Recovering | 对账完成 | Ready | 按第九节恢复裁决表处理每场 session |
+| 任意在线 | drain | Draining | 不再放置新 Session/turn；在跑的跑完；超时 `drain_timeout`（默认 30 min）后对剩余 turn 发 Interrupt |
 
-在此之前，"LubanCode 支持分布式"这句话只能说"有蓝图、地基未完成"，不能说"已支持"。
+### 4.2 RuntimeLease（每场可写 Session 零或一枚）
+
+字段：`session_id, epoch(u64, 单调), node_id, node_boot_id, granted_at, expires_at, state`
+
+| 当前 | 事件 | 下一 | 规则 |
+|---|---|---|---|
+| — | 调度决定放到节点 N | Granted | 库事务：`UPDATE runtime_leases SET epoch=epoch+1, node_id=N, ... WHERE session_id=? AND (state IN ('Released','Expired') OR ...)`；返回新 epoch |
+| Granted | 节点回 `LEASE_ACCEPTED{epoch, reqSeq}` | Active | `expires_at = now + ttl`，回 `LEASE_ACTIVE`；节点收到后才开始写 |
+| Granted | `ttl` 内未收到 ACCEPTED | Expired | 节点没接住（离线/拒绝），可重新调度 |
+| Active | 心跳批量续 | Active | `expires_at = now + ttl`（控制面单调时钟） |
+| Active | 节点 `LEASE_RELEASE{epoch}` | Released | Session 关闭/暂停/节点 drain 时 |
+| Active | 控制面 `LEASE_REVOKE`（管理员/配额/策略） | Revoking → Released | 节点收到后在下一个安全边界停写并回 RELEASE；超时则等自然到期 |
+| Active | `now ≥ expires_at + grace` | Expired | 只有此后才可再 Granted（epoch+1） |
+| 任意 | 收到 epoch < 当前的任何写/事件 | 不变 | **拒收**，回 `stale_epoch`，计指标，审计 |
+
+**节点侧**额外规则：本地持有 `(session_id, epoch, local_deadline_mono)`；每次 Trajectory append 前检查 `now_mono < local_deadline_mono`，否则拒写并把 Session 置本地 `Fenced`（停泵、不取新工作、在跑工具进入取消流程）。这一检查放在 **TrajectoryTurnBridge 写入口的前置钩子**，不散落在各工具里。
+
+### 4.3 Command（控制面命令表）
+
+```text
+Pending ─发出─▶ Sent ─节点回执 accepted─▶ Accepted ─结果─▶ Completed
+   │              │                          └──结果 failed──▶ Failed
+   │              ├─节点回执 rejected──▶ Rejected
+   │              └─回执超时（10 s）──▶ Sent（重发同 command_id，最多 6 次，退避）──仍无──▶ DeliveryUnknown
+   └─deadline 到──▶ Expired（从未发出或节点离线）
+```
+
+- `DeliveryUnknown` 不自动重发，UI 显示"节点未确认，可能已执行"，由用户选"重发（同 id，安全）"或"放弃"。因为节点按 id 去重，"重发同 id"永远安全——这就是给用户的正确按钮。
+- 命令种类（首版）：`SessionCreate`、`SessionResume`、`SessionClose`、`TurnEnqueue`、`TurnInterrupt`、`InteractionAnswer`、`SessionPause`、`LeaseRevoke`、`NodeDrain`、`CapabilityRefresh`。每种的参数 schema 在 `schema/cluster/v1/commands/`。
+
+### 4.4 Session（沿用畅想单 §12.1 业务状态，补"期望 vs 观测"双字段）
+
+控制面 `sessions` 表同时存 `desired_state`（用户/控制面想要的：`running|paused|closed|archived`）与 `observed_state`（节点最后上报的业务状态）+ `observed_at_seq`。协调器循环做 **reconcile**：两者不符且节点在线 → 下发对应命令；节点离线 → 只标 `NodeLost` 投影，不猜。这是 Kubernetes 式期望态收敛，比"命令发了就算"耐故障。
+
+---
+
+## 五、线协议 v1（节点 ↔ 控制面）
+
+完整 schema 在 `schema/cluster/v1/`；本节是冻结摘要。
+
+### 5.1 公共信封
+
+```json
+{
+  "v": 1,
+  "type": "HEARTBEAT",
+  "id": "f-01J8Z6...",          // 帧 id（ULID），仅用于日志关联与 ACK
+  "ts": 1727164800123,         // 发送方墙钟 ms，仅展示/诊断
+  "nodeId": "node-01J8...",
+  "bootId": "boot-01J8...",
+  "traceparent": "00-...",     // 可选
+  "body": { ... }
+}
+```
+
+规则：未知字段忽略；`type` 未知回非致命 `ERROR`；`body` 严格按类型 schema 校验，失败回 `ERROR{code:"bad_frame"}` 并丢帧（不断连，同连接 1 分钟内 > 20 个坏帧则断连）。
+
+### 5.2 帧清单
+
+| 方向 | type | body 要点 | 说明 |
+|---|---|---|---|
+| N→C | `HELLO` | `protocol{major,minMinor,maxMinor}`, `bridgeVersion`, `coreVersion`, `capabilities`（静态能力）, `sessions[]{sessionId, epoch, lastSeq, lastLineHash, localState}` | 连接后第一帧；带本地全部 session 摘要供对账 |
+| C→N | `WELCOME` | `protocolMinor`, `leaderEpoch`, `config{heartbeatInterval, ttl, margin,...}`, `reconcile[]{sessionId, action}` | 控制面下发参数，节点以此为准（不用本地配置的超时） |
+| N→C | `HEARTBEAT` | `seq`（心跳自身序号）, `watermarks{cpu,mem,disk,turnSlotsFree,residentSessions,runningTurns,queuedTurns,heavyJobs}`, `leases[]{sessionId,epoch}`, `drainState` | 每 5 s |
+| C→N | `HEARTBEAT_ACK` | `hbSeq`, `renewed[]{sessionId, epoch, ttlMs}`, `revoked[]{sessionId, epoch, reason}` | 续租确认；节点以**对应 HEARTBEAT 的发出时刻**起算（ADR-05） |
+| C→N | `LEASE_GRANT` | `sessionId, epoch, ttlMs` | 伴随 SessionCreate/Resume；**此时节点尚无写权** |
+| N→C | `LEASE_ACCEPTED` | `sessionId, epoch, reqSeq` | 节点记发出时刻 |
+| C→N | `LEASE_ACTIVE` | `sessionId, epoch, reqSeq, ttlMs` | 确认后节点才获写权，截止 = `t_req + ttl − margin` |
+| N→C | `LEASE_RELEASE` | `sessionId, epoch, reason` | — |
+| C→N | `COMMAND` | `commandId, kind, sessionId?, epoch?, actor{tenantId,userId,actorKind}, deadline, args` | — |
+| N→C | `COMMAND_RECEIPT` | `commandId, status: accepted\|rejected\|duplicate, code?, message?` | 节点**落盘后**才回 |
+| N→C | `COMMAND_RESULT` | `commandId, outcome: ok\|failed\|interrupted, result?` | 长命令（如 TurnEnqueue）完成时 |
+| N→C | `EVENT_BATCH` | `sessionId, epoch, fromSeq, lines[]`（原样 v3 行，含 prevHash/lineHash） | 每 session 同时最多 1 个在途批；每批 ≤ 256 行或 512 KiB |
+| C→N | `EVENT_ACK` | `sessionId, epoch, upToSeq, upToLineHash` | 累积确认 |
+| C→N | `EVENT_NACK` | `sessionId, expectedSeq, code: chain_broken\|stale_epoch\|gap` | 节点从 expectedSeq 重发 |
+| C→N | `EVENTS_REQ` | `sessionId, fromSeq, limit` | 控制面缓存缺失时向节点补拉（浏览器续看用） |
+| C→N | `BLOB_GET` / N→C `BLOB_CHUNK` | `blobRef, offset, len` / `data(base64), eof` | 大产物分块 |
+| C→N | `DRAIN` / `GOODBYE` | `reason, deadline` | — |
+| 双向 | `ERROR` | `code, message, fatal, refFrameId?` | 稳定错误码见 5.4 |
+
+### 5.3 流控
+
+- 每 session 上行"一批在途、等 ACK 再发下一批"（stop-and-wait per stream，跨 session 并行）；控制面落后时自然背压到节点本地，而本地是 Trajectory 主账——**背压不会丢事件，也不阻塞 Agent 运行**，只是上行延迟变大（指标 `uplink_lag_seq`）。
+- 控制面对单节点上行入口限速（默认 8 MiB/s），超限不 ACK 即背压。
+- 命令方向：每节点在途未回执命令 ≤ 64。
+
+### 5.4 稳定错误码（节选，完整表进 `docs/architecture/cluster/protocol.md`）
+
+`protocol_major_mismatch`、`bad_frame`、`unknown_frame`、`unauthenticated`、`node_revoked`、`tenant_mismatch`、`stale_epoch`、`lease_not_held`、`lease_expired_locally`、`chain_broken`、`gap`、`session_not_found`、`session_busy`、`node_capacity`、`node_draining`、`deadline_exceeded`、`capability_missing`、`duplicate`（非错误，仅回执状态）、`internal`。
+
+### 5.5 ID 规则（修 G3）
+
+- 集群新增实体（node、boot、command、frame、lease 记录、audit）一律 **ULID**（时间有序、全局唯一、可排序），前缀区分类型：`node-`、`boot-`、`cmd-`、`f-`、`aud-`。
+- **SessionId 不另造**：控制面创建 Session 时按现有 `GenerateSessionId` 格式（`YYYYMMDD-HHMMSS-XXXXXX`）发号，库表 `UNIQUE(session_id)` 保证全局不撞（撞了重抽），再经 `SessionCreate.args.sessionId` 交给节点使用——节点**不自发号**。这样满足畅想单"不另造一套 session id"，同时解决多节点撞号。
+- 节点本地原有、在接入集群前就存在的 Session：通过 `HELLO.sessions[]` 上报后由控制面登记（`import`），撞号时拒绝登记并提示改名导入，不静默覆盖。
+- `turn-<n>`/`item-<n>` 保持 session 内局部号（它们本就只在 session 内有意义），跨 session 引用一律带 `session_id` 前缀。
+
+---
+
+## 六、Node Bridge 设计
+
+### 6.1 进程形态（分两段，不一步到位）
+
+- **D4 MVP**：`lubancode-node` 单进程，内嵌 LubanCore Host，持多只 SessionRuntime（依赖 Core C 批的同进程多会话隔离）。故障半径 = 整个节点，可接受于 MVP。
+- **D8 生产**：`lubancode-node` 守护进程只管 Link/Ledger/Lease/Admission/Supervisor；Session 跑在 **Worker 子进程**（默认"一 Worker 至多 8 场 Session"，按 tenant 分 Worker，不同 tenant 永不同进程——多租户单 §一裁决）。守护进程与 Worker 之间走本机 Unix socket / Named Pipe（复用 `src/peers/` 的同机传输思路），协议即本节第五节帧的子集。Worker 崩溃 → 守护进程标记其 session `Recovering`，按第九节恢复。
+
+### 6.2 本地目录布局
+
+```text
+<node_root>/                         # 默认 ~/.lubancode/node/，可配
+  identity/
+    node.key (0600)  node.crt  ca.crt  enrollment.json
+  ledger/node.jsonl                  # v3 事件账 profile：enroll/hello/lease/command 回执
+  ledger/command_index/              # command_id → 回执（去重索引，可由 node.jsonl 重建）
+  uplink/<session_id>.cursor.json    # {epoch, ackedSeq, ackedLineHash}，原子替换写
+  leases/<session_id>.json           # {epoch, grantedAtMono, ttlMs}（重启后一律视为失效，仅供诊断）
+  workspaces/…                       # 沿用 workspace-storage-v2 布局，不另立
+```
+
+- 节点账写入走 `JournalWriter::AppendLine(PowerLoss)`（与 Gateway 同级持久）。
+- **重启后所有 lease 一律视为失效**（boot_id 变了，控制面也会作废），不尝试"续上次的租"——简单且安全。
+
+### 6.3 命令执行管线（每条命令）
+
+```text
+收到 COMMAND
+ → 校验：帧 schema / tenant 归属 / deadline 未过 / 若带 epoch 则本地持有且未自失效
+ → 查 command_index：已有 → 回原 RECEIPT(duplicate)，结束
+ → 节点账 append {command.accepted, commandId, kind, argsHash}（PowerLoss）
+ → 回 COMMAND_RECEIPT(accepted)
+ → 交 Core Host（EnqueueTurn/AnswerInteraction/...）
+ → 完成后节点账 append {command.completed|failed}，回 COMMAND_RESULT
+```
+
+崩在"accepted 已落盘、交 Core 之前" → 重启后扫描未完成命令：幂等类（Close/Pause/Interrupt/Answer 对已收口 interaction）直接重做；`TurnEnqueue` 查 Trajectory 是否已有该 `commandId` 对应的 user 行（Core Host 的 EnqueueTurn 把 `commandId` 作为 turn 的 `origin.requestId` 落账，**这是 D4 需要 Core 提供的唯一新字段**）——有则视为已入队，无则入队。
+
+### 6.4 Uplink Pump
+
+- 每个持租 session 一个逻辑游标，一个共享线程轮询（事件驱动为主：Trajectory writer 的 append 回调唤醒；兜底每 1 s 扫描）。
+- 读：从 `ackedSeq+1` 起用 `src/trajectory/v3/reader.hpp` 读行（D4 需要给 reader 加 `ReadAfter(seq, limit)` 的有界读口，不整卷加载）。
+- 断线期间不发；重连后先发 HELLO（带 lastSeq），控制面在 WELCOME 里告诉它每个 session 从哪里续（控制面投影的 `upToSeq`），以控制面为准（控制面可能在 ACK 丢失的情况下已经收到）。
+
+### 6.5 本地 Admission
+
+节点对每个 `SessionCreate`/`TurnEnqueue` 本地终审：槽位、磁盘低水位（默认剩余 < 5 GiB 或 < 5% 拒新 Session，< 1 GiB 拒新 turn）、内存（可用 < 10% 拒新 turn）。拒绝回 `node_capacity` + 当前水位。
+
+### 6.6 CLI 面（运维与用户可见）
+
+```text
+lubancode-node enroll --cp <url> --token <t> --ca-fingerprint <fp>
+lubancode-node run            # 前台
+lubancode-node service install|uninstall|start|stop|status   # 复用 Gateway V4 三平台 supervisor 生成器
+lubancode-node status [--json]   # 连接态、租约、上行延迟、槽位
+lubancode-node drain [--timeout 30m]
+lubancode-node doctor         # 证书寿命、时钟、磁盘、CP 可达、协议版本
+```
+
+---
+
+## 七、Control Plane 设计
+
+### 7.1 进程与模块
+
+`lubancode-cp` 一个可执行文件，按 `--role=all|api|coordinator` 启动（单机部署用 `all`；HA 部署 API 多副本 + coordinator 主备）。模块：
+
+| 模块 | 目录 | 职责 |
+|---|---|---|
+| `store/` | `src/cluster/control_plane/store/` | `ControlStore` SPI + sqlite/pg 实现 + 迁移 |
+| `node_link/` | `…/node_link/` | mTLS WSS 服务端、帧收发、每连接一个状态机实例 |
+| `registry/` | `…/registry/` | Node 状态机（4.1）、心跳处理、失效探测 |
+| `lease/` | `…/lease/` | RuntimeLease 发号与过期扫描（4.2） |
+| `scheduler/` | `…/scheduler/` | 过滤打分、tenant DRR 队列、reconcile 循环 |
+| `commands/` | `…/commands/` | 命令表、重发、超时（4.3） |
+| `projection/` | `…/projection/` | 事件验链入库、按 cursor 补读、淘汰 |
+| `client_api/` | `…/client_api/` | 浏览器/SDK 的 HTTPS REST + WSS 订阅 |
+| `auth/` | `…/auth/` | OIDC、API token、ACL 裁决、join token、内部 CA |
+| `audit/` | `…/audit/` | 审计追加写，哈希链（复用 v3 canonical + 链算法） |
+
+协调器循环（单线程事件循环 + 定时器，便于仿真）：每 1 s tick 做 失效扫描 → 租约过期 → reconcile → 调度出队 → 命令重发。所有逻辑以 "tick(now, inputs) → outputs" 形态实现，生产由真实时钟驱动，仿真由虚拟时钟驱动——**同一份代码**。
+
+### 7.2 ControlStore 表结构（SQLite 方言；PG 同构）
+
+```sql
+CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+CREATE TABLE coordinator_leader(id INTEGER PRIMARY KEY CHECK(id=1), leader_epoch INTEGER NOT NULL,
+  holder TEXT NOT NULL, expires_at INTEGER NOT NULL);
+
+CREATE TABLE tenants(tenant_id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL,
+  weight INTEGER NOT NULL DEFAULT 1, disabled_at INTEGER);
+CREATE TABLE users(user_id TEXT PRIMARY KEY, oidc_issuer TEXT, oidc_subject TEXT, display TEXT,
+  UNIQUE(oidc_issuer, oidc_subject));
+CREATE TABLE memberships(tenant_id TEXT, user_id TEXT, role TEXT NOT NULL,   -- tenant_admin|node_admin|auditor|member
+  PRIMARY KEY(tenant_id, user_id));
+CREATE TABLE api_tokens(token_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  hash BLOB NOT NULL, scopes TEXT NOT NULL, expires_at INTEGER, revoked_at INTEGER);
+
+CREATE TABLE join_tokens(token_hash BLOB PRIMARY KEY, tenant_id TEXT NOT NULL, uses_left INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL, created_by TEXT NOT NULL);
+CREATE TABLE nodes(node_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL,
+  cert_serial TEXT NOT NULL, cert_expires_at INTEGER NOT NULL, revoked_at INTEGER,
+  state TEXT NOT NULL, boot_id TEXT, last_heartbeat_at INTEGER, lease_expires_at INTEGER,
+  capabilities_json TEXT, watermarks_json TEXT, drain_state TEXT, bridge_version TEXT, core_version TEXT);
+
+CREATE TABLE projects(project_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL,
+  git_remote TEXT, UNIQUE(tenant_id, name));
+CREATE TABLE workspace_bindings(binding_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, node_id TEXT NOT NULL,
+  workspace_key TEXT NOT NULL, path_hint TEXT, UNIQUE(node_id, workspace_key));
+
+CREATE TABLE sessions(session_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT,
+  binding_id TEXT, node_id TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
+  desired_state TEXT NOT NULL, observed_state TEXT, observed_at_seq INTEGER,
+  projection_state TEXT NOT NULL DEFAULT 'ok',     -- ok|lagging|broken
+  capability_snapshot_id TEXT, revision INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE session_members(session_id TEXT, user_id TEXT, role TEXT NOT NULL,  -- viewer|collaborator|operator|owner
+  PRIMARY KEY(session_id, user_id));
+CREATE TABLE operator_leases(session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, epoch INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL);
+
+CREATE TABLE runtime_leases(session_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL, node_id TEXT,
+  node_boot_id TEXT, state TEXT NOT NULL, granted_at INTEGER, expires_at INTEGER);
+CREATE TABLE epoch_counters(session_id TEXT PRIMARY KEY, max_epoch INTEGER NOT NULL);  -- 删 session 不删此行，epoch 永不复用
+
+CREATE TABLE commands(command_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, node_id TEXT NOT NULL,
+  session_id TEXT, epoch INTEGER, kind TEXT NOT NULL, actor_json TEXT NOT NULL, args_json TEXT NOT NULL,
+  idempotency_key TEXT, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL, deadline INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  result_json TEXT, UNIQUE(tenant_id, idempotency_key));
+CREATE INDEX commands_pending ON commands(node_id, status) WHERE status IN ('pending','sent');
+
+CREATE TABLE event_projection(session_id TEXT NOT NULL, seq INTEGER NOT NULL, epoch INTEGER NOT NULL,
+  line_hash TEXT NOT NULL, kind TEXT NOT NULL, line_json TEXT NOT NULL, received_at INTEGER NOT NULL,
+  PRIMARY KEY(session_id, seq));
+CREATE TABLE projection_heads(session_id TEXT PRIMARY KEY, up_to_seq INTEGER NOT NULL,
+  up_to_line_hash TEXT NOT NULL, epoch INTEGER NOT NULL, evicted_before_seq INTEGER NOT NULL DEFAULT 0);
+
+CREATE TABLE capability_snapshots(snapshot_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL, body_json TEXT NOT NULL);
+CREATE TABLE quotas(tenant_id TEXT, scope TEXT, key TEXT, limit_value INTEGER NOT NULL,
+  PRIMARY KEY(tenant_id, scope, key));
+CREATE TABLE audit_events(audit_id TEXT PRIMARY KEY, seq INTEGER NOT NULL UNIQUE, ts INTEGER NOT NULL,
+  tenant_id TEXT, actor_json TEXT NOT NULL, action TEXT NOT NULL, target TEXT, outcome TEXT NOT NULL,
+  detail_json TEXT, prev_hash TEXT NOT NULL, line_hash TEXT NOT NULL);
+```
+
+**所有涉及租约与命令的写都是单事务 CAS**，例如授予租约：
+
+```sql
+BEGIN IMMEDIATE;
+-- 首次授予前由 SessionCreate 同事务插入 runtime_leases(state='Released', epoch=0) 与 epoch_counters 行
+UPDATE epoch_counters SET max_epoch = max_epoch + 1 WHERE session_id = :sid;   -- 先推进全局计数
+UPDATE runtime_leases
+   SET epoch = (SELECT max_epoch FROM epoch_counters WHERE session_id = :sid), node_id = :node, node_boot_id = :boot, state = 'Granted',
+       granted_at = :now, expires_at = :now + :ttl
+ WHERE session_id = :sid
+   AND (state IN ('Released','Expired') OR node_id IS NULL)
+RETURNING epoch;                      -- 0 行 = 有人持租：ROLLBACK（计数不推进），调用方回 session_busy
+INSERT INTO commands(...) VALUES(... 'SessionResume' ..., :epoch_returned, ...);
+INSERT INTO audit_events(...);
+COMMIT;
+```
+
+### 7.3 ControlStore SPI 合同（合同测试逐条覆盖）
+
+1. `GrantLease(session, node, boot, now, ttl) -> epoch | Busy`：epoch 严格单调，永不复用，即使行被删除重建（epoch 存在独立的 `max_epoch` 计数里，删 session 也不回退）。
+2. `RenewLeases(node, boot, [(session, epoch)], now) -> [renewed], [rejected]`：boot 或 epoch 对不上的一律 rejected。
+3. `ExpireLeases(now, grace) -> [expired]`：幂等。
+4. `EnqueueCommand(cmd)`：`(tenant, idempotency_key)` 冲突 → 返回原命令（客户端重试安全）。
+5. `AppendProjection(session, epoch, lines)`：校验 `lines[0].prevHash == head.up_to_line_hash` 且 `lines[0].seq == head.up_to_seq + 1` 且 `epoch >= head.epoch`（epoch 可以升，不能降）；全部通过才整体提交，否则整体拒绝并给出 `gap|chain_broken|stale_epoch`。
+6. `ReadProjection(session, afterSeq, limit)`：有序；`afterSeq < evicted_before_seq` → `CursorEvicted`（上层转向节点补拉）。
+7. `AppendAudit(event)`：单调 seq + 哈希链；`VerifyAudit()` 整链校验。
+8. 所有写在"响应丢失"后重试结果一致（合同测试里注入"提交成功但返回前断连"）。
+
+### 7.4 投影缓存保留策略
+
+- 默认每 session 保留最近 **10 000 行或 7 天**（先到先淘汰），大字段（工具输出 > 64 KiB）只存 `blobRef` 不存正文。
+- 淘汰只移 `evicted_before_seq`，不影响正确性：补读自动转向节点。
+- 控制面**永不**把投影当 Session 真账（畅想单 §十七第 3 条）：导出、训练、审计追溯都从节点拉原账。
+
+### 7.5 客户端 API（浏览器 / SDK）
+
+REST（JSON，`/api/v1`）：
+
+```text
+POST   /sessions                          {projectId|bindingId|nodeId, spec}   -> {sessionId}   Idempotency-Key 头必需
+GET    /sessions?tenant=&project=&node=&state=&cursor=
+GET    /sessions/{id}                     快照：desired/observed、节点、租约、投影进度
+POST   /sessions/{id}/turns               {input}                              -> {commandId}   Idempotency-Key 必需
+POST   /sessions/{id}/interrupt | /pause | /resume | /close
+POST   /sessions/{id}/interactions/{iid}  {reply}                              operator 租约必需
+POST   /sessions/{id}/operator-lease      抢/续/放 operator 租约
+GET    /nodes | /nodes/{id} ;  POST /nodes/{id}/drain ; POST /nodes/{id}/revoke
+POST   /nodes/join-tokens
+GET    /audit?…
+GET    /healthz  /readyz  /metrics
+```
+
+WSS `/api/v1/sessions/{id}/events?afterSeq=N`：服务端先补历史（投影或节点补拉），再推实时；每帧带 `seq`；心跳 20 s；慢客户端（发送缓冲 > 4 MiB）断开并让其按 cursor 重连——**断开浏览器永不影响 Session 运行**。
+
+---
+
+## 八、Session 放置、多节点与工作区
+
+- **Project 身份**：控制面 `projects` 为权威（ADR 默认裁决见第十七节 Q3）。节点上的 checkout 以 `workspace_bindings(node_id, workspace_key)` 关联到 Project；同一 Git remote 不自动视为同一 Project（多租户单 §三：不能凭 remote 授权）。
+- **写冲突**：沿用畅想单 §7.4：一场可写 Session 一份独立 worktree（节点本地 `src/runtime/worktree.*` 已有能力）；共享 checkout 需 `workspace write lease`（节点本地锁，不上控制面——它只在同节点有意义）。
+- **Session 固定在节点**：首版 Session 生命周期内不换节点。节点 Offline 期间 Session 投影显示 `NodeLost`，可读已投影历史；不自动搬迁。人工冷迁移见 D9。
+
+---
+
+## 九、故障矩阵与恢复裁决
+
+实现与测试都以此表为准。"检测"列是谁、凭什么发现；"不变量"列是仿真台要检查的条款号（第十节）。
+
+| # | 故障 | 检测 | 处理 | 不变量 |
+|---|---|---|---|---|
+| F1 | 节点↔控制面网络短断（< 15 s） | 双方读超时/写失败 | 节点退避重连；同 boot_id → Ready；租约仍在（未过期）继续；补发未 ACK 事件与未回执命令 | I1 I3 I4 |
+| F2 | 网络分区（> ttl） | 控制面：心跳缺；节点：续租确认缺 | 节点在 `ttl − margin` 自停写（Session 本地 `Fenced`，在跑工具走取消）；控制面在 `ttl + grace` 置 Expired、Session `NodeLost`；**不自动在别处重建** | I1 I2 I6 |
+| F3 | 分区恢复后旧节点发旧 epoch 事件 | 控制面 epoch 比较 | `EVENT_NACK{stale_epoch}`；节点把该段标为"围栏后孤儿段"，本地保留不删，Session 置 `NeedsReview` | I1 I4 |
+| F4 | 节点进程崩溃重启（boot_id 变） | HELLO 带新 boot_id | 旧租约全作废；按下表"节点恢复裁决"逐 session 处理 | I1 I3 I6 |
+| F5 | 节点机器永久丢失 | Offline 超过 `node_lost_after`（默认 24 h） | 告警；Session 保持 `NodeLost`；管理员可"标记放弃"（→ Closed/NeedsReview）或 D9 冷迁移（需另有备份） | I5 |
+| F6 | 控制面进程崩溃（单机） | 节点连接断 | 节点照常运行已持租 session 直到自失效（30 s 内控制面回来则无感）；控制面重启后从库恢复全部状态，节点重连 HELLO 对账 | I1 I2 |
+| F7 | 控制面库丢失（SQLite 文件坏） | 启动校验失败 | 从备份恢复；备份之后的租约 epoch 可能回退 → **恢复流程强制把全部 lease 置 Expired 且 `max_epoch += 1_000_000`**（跳号保证单调） | I2 |
+| F8 | 协调器主备切换（HA） | PG advisory lock + `coordinator_leader.leader_epoch` | 新主 leader_epoch+1；所有控制面 → 节点帧带 `leaderEpoch`，节点拒收比已见更小的 leaderEpoch 的帧 | I2 |
+| F9 | 命令重复投递 | 节点 command_index | 回原回执，不重复执行 | I3 |
+| F10 | 命令回执丢失 | 控制面 10 s 超时 | 重发同 id（安全）；6 次后 `DeliveryUnknown` | I3 |
+| F11 | 事件批 ACK 丢失 | 节点超时 | 从 ackedSeq 重发；控制面按 seq 去重（已有的行 hash 相同则忽略） | I4 |
+| F12 | 事件链断（节点账损坏/被篡改） | 控制面验链 | NACK；3 次后 `projection_broken`；告警 | I4 |
+| F13 | 节点磁盘满 | 水位 / Trajectory 写失败 | Admission 拒新工作；已满则 Session 置 `Paused(disk_full)`，不丢账（v3 writer 写失败即 broken，不静默） | I5 |
+| F14 | 时钟跳变（墙钟回拨/前跳） | 正确性只用单调时钟 | 仅展示受影响；审计 ts 可能乱序，`seq` 保序 | I1 |
+| F15 | 节点证书过期 | 握手失败 `tls_cert_expired` | 节点 `doctor` 提示；自动轮换本应在 1/3 寿命时完成，失败从第 20 天起每天告警 | — |
+| F16 | 协议版本不兼容 | HELLO 协商 | `upgrade_required`，节点慢退避；控制面列出待升级节点 | — |
+| F17 | 浏览器慢/断线 | WS 缓冲超限 | 断开浏览器，Session 不受影响；重连按 afterSeq 补 | I7 |
+| F18 | Worker 子进程崩溃（D8） | 守护进程 waitpid | 该 Worker 上 session → 恢复裁决；守护进程与其它 Worker 不受影响 | I1 I6 |
+| F19 | MCP/工具子进程卡死 | 工具超时 | 走现有工具取消/超时路径；结果未知 → indeterminate | I6 |
+| F20 | 半开 TCP（对端消失无 FIN） | 应用层心跳 | 按 F1/F2 处理，不依赖 TCP keepalive | — |
+
+**节点恢复裁决（F4/F18 后逐 session）**：
+
+| 本地账尾部状态 | 裁决 |
+|---|---|
+| 最后一轮已收口（turn completed/interrupted 已落账），无在跑工具 | 重新申请租约 → `Idle`，可继续 |
+| 有 `tool.started` 无 `tool.finished`，工具类别 = 只读 / 幂等 | 记 `tool.abandoned`，按现有 Session 恢复路径以"新 Runtime 接续旧场"恢复 → `Idle` |
+| 有 `tool.started` 无 `tool.finished`，工具类别 = 需补偿 / 未知 | `NeedsReview`，UI 展示该工具调用与参数，由 operator 选"标记已完成/标记失败/重试" |
+| 有已接受的 `TurnEnqueue` 命令但无对应 user 行 | 重新入队（命令幂等） |
+| 模型请求在途（无副作用） | 视为中断，按现有中断语义收口；是否自动重发由 Session 策略 `auto_resume_interrupted_turn`（默认 false） |
+| 账尾截断（崩溃半行） | 沿用 v3 reader 的截断修复规则；修复失败 → `NeedsReview` |
+
+---
+
+## 十、不变量（仿真台逐步检查，测试名直接用编号）
+
+- **I1 单写者**：任一时刻，对任一 session，控制面接受的事件只来自唯一 `(node_id, epoch)`；且任一 epoch 只对应一个节点。
+- **I2 epoch 单调**：同一 session 的 epoch 在控制面库、节点账、投影中都严格递增，跨控制面重启、库恢复、主备切换不回退。
+- **I3 命令至多执行一次**：同一 `command_id` 在节点账里至多一个 `command.accepted` 与至多一个终态。
+- **I4 投影是前缀**：任一时刻 `event_projection[session]` 是节点主账（同 epoch 段）的前缀，逐行 hash 相同。
+- **I5 不丢已确认事实**：控制面回过 `EVENT_ACK(upTo=k)` 的行，在控制面存储未整体丢失前永远可读（淘汰后可从节点读；节点也丢了则明确报 `unavailable`，不返回假数据）。
+- **I6 未知副作用不自动重放**：状态机中不存在从"工具已开始、结果未知"到"自动再执行该工具"的迁移。
+- **I7 客户端寿命与 Session 寿命无关**：任何客户端断开/超时序列都不产生 `TurnInterrupt`（除非客户端显式发送）。
+- **I8 租户隔离**：任何帧/查询/投影读取，tenant 不匹配一律拒绝（仿真里注入跨 tenant 请求）。
+- **I9 活性（有限条件下）**：网络恢复且节点在线后，在 `3 × heartbeat_interval` 内，所有 desired 与 observed 不一致的 session 都收到 reconcile 命令；投影在 `uplink_lag` 目标内追平。
+
+---
+
+## 十一、可观测性清单
+
+指标（Prometheus 暴露于 `/metrics`；OTel 接出由 OTel 单负责）：
+
+| 指标 | 类型 | 标签 |
+|---|---|---|
+| `lubancode_cluster_nodes` | gauge | `state`, `tenant` |
+| `lubancode_cluster_node_heartbeat_age_seconds` | histogram | — |
+| `lubancode_cluster_leases` | gauge | `state` |
+| `lubancode_cluster_lease_grants_total` / `_expirations_total` / `_stale_epoch_rejects_total` | counter | `reason` |
+| `lubancode_cluster_commands_total` | counter | `kind`, `outcome` |
+| `lubancode_cluster_command_latency_seconds` | histogram | `kind`, `phase`（receipt/result） |
+| `lubancode_cluster_uplink_lag_seq` | histogram | — |
+| `lubancode_cluster_uplink_bytes_total` | counter | `direction` |
+| `lubancode_cluster_projection_chain_breaks_total` | counter | — |
+| `lubancode_cluster_scheduler_queue_depth` | gauge | `tenant` |
+| `lubancode_cluster_scheduler_wait_seconds` | histogram | `tenant` |
+| `lubancode_cluster_client_subscribers` | gauge | — |
+| `lubancode_cluster_store_txn_seconds` | histogram | `op` |
+| 节点侧 `lubancode_node_slots` | gauge | `kind`（resident/running/heavy）, `state`（used/free） |
+| 节点侧 `lubancode_node_fenced_sessions_total` | counter | — |
+
+告警（`docs/architecture/cluster/runbook.md` 给处置步骤）：节点 Suspect > 1 min；stale_epoch 拒收 > 0（说明发生过分区写，必须人工看）；链断 > 0；uplink_lag P99 > 30 s 持续 5 min；命令 DeliveryUnknown > 0；证书 < 10 天；存储事务 P99 > 200 ms；审计链校验失败。
+
+健康检查：`/healthz`（进程活）；`/readyz`（库可写 + 协调器已选主或本实例为 API 且能连库 + 迁移版本匹配）。节点 `lubancode-node status --json` 同样分 live/ready。
+
+---
+
+## 十二、容量与 SLO 目标（首版冻结目标值，D7/D8 实测验证，未测不写"已支持"）
+
+| 项 | 目标 |
+|---|---|
+| 单控制面（4 vCPU / 8 GiB / SQLite on SSD）承载 | 200 节点、10 000 resident sessions、500 并发 running turns |
+| 心跳处理 | 200 节点 × 0.2 Hz 下协调器 CPU < 20% |
+| 命令受理延迟（REST 返回到节点 RECEIPT） | P50 < 100 ms，P99 < 500 ms（LAN） |
+| 事件上行延迟（节点落账到控制面可读） | P50 < 300 ms，P99 < 2 s（LAN，正常负载） |
+| 浏览器续看补流 | 1 000 行补读 < 1 s |
+| 分区后写权释放 | ≤ ttl = 30 s（节点自停）；新授予 ≥ ttl + grace = 40 s |
+| 控制面单机重启 RTO | < 30 s（节点无感：租约未过期） |
+| 控制面 HA（PG）切换 RTO / RPO | < 60 s / 0（同步复制） |
+| 可用性（控制面 API） | 99.9%（单机模式不承诺，HA 模式承诺） |
+
+压测夹具：`tests/manual/cluster/load/`，用"假 Core Host"（按脚本回放 Trajectory 行、模拟模型延迟与工具耗时）产生负载，不烧真模型费用；另有一组 10% 真模型的混合负载做抽检。
+
+---
+
+## 十三、配置与部署
+
+### 13.1 配置文件
+
+`cp.yaml`（控制面）/ `node.yaml`（节点），yaml-cpp 已在依赖里：
+
+```yaml
+# cp.yaml
+listen: { client: "0.0.0.0:8443", node: "0.0.0.0:7443" }
+tls: { cert: /etc/lubancode/cp.crt, key: /etc/lubancode/cp.key, node_ca: /etc/lubancode/ca/ }
+store: "sqlite:/var/lib/lubancode/cp.db"      # 或 "postgres://…"（D8）
+auth: { oidc: { issuer: "...", client_id: "...", client_secret_ref: "env:OIDC_SECRET" }, local_accounts: false }
+cluster:
+  heartbeat_interval: 5s
+  node_suspect_after: 15s
+  node_lease_ttl: 30s
+  node_self_fence_margin: 5s
+  cp_reassign_grace: 10s
+  node_lost_after: 24h
+  command_receipt_timeout: 10s
+  command_max_attempts: 6
+  projection_retention: { lines: 10000, age: 7d }
+scheduler: { weights: { slots: 0.5, mem: 0.3, locality: 0.2 }, node_reject_cooldown: 10s }
+```
+
+启动时做**组合校验**（LubanCore 单 §七纪律）：`self_fence_margin < node_lease_ttl`、`node_lease_ttl ≥ 2 × suspect_after`、HA 角色 + sqlite 存储 → 拒绝启动，等。
+
+### 13.2 三种部署形态
+
+1. **Dev 单机**：`lubancode-cp --role=all --store=sqlite:./cp.db` + 同机 `lubancode-node`；自签 CA 一条命令生成（`lubancode-cp ca init`）。
+2. **单控制面生产**：一台 CP（systemd/Windows 服务，复用 Gateway V4 supervisor 生成器）+ N 节点；SQLite 每 5 分钟在线备份（`sqlite3_backup_*` API）+ 备份校验。
+3. **HA 生产（D8）**：PG 主从同步复制；`--role=api` × 2+ 在 LB 后；`--role=coordinator` × 2 主备（PG advisory lock 选主 + leader_epoch fencing）。
+
+容器镜像与 Helm chart：D8 产出，不是前置。
+
+---
+
+## 十四、代码落点与依赖守门
+
+```text
+src/cluster/
+  protocol/        envelope, frames, codec, version negotiate, error codes, ulid     （target: lubancode_cluster_proto；只依赖 std + nlohmann）
+  lease/           runtime lease 状态机、节点自失效计时（纯逻辑）                      （同上）
+  node_fsm/        控制面视角 Node 状态机（纯逻辑）                                    （同上）
+  command_fsm/     命令状态机（纯逻辑）                                                （同上）
+  scheduler/       过滤打分、DRR 队列（纯逻辑）                                        （同上）
+  sim/             确定性仿真台（仅测试链接）                                          （target: lubancode_cluster_sim，TESTONLY）
+  transport/       mTLS WSS 客户端/服务端封装（依赖 channel/transport、app_server/ws_* 抽出件）
+  node_bridge/     Link, NodeLedger, LeaseGuard, Admission, UplinkPump, CoreHostAdapter, Supervisor
+                   （target: lubancode_cluster_node；依赖 lubancore 公开头 + cluster_proto + cluster transport）
+  control_plane/   store/{spi,sqlite,pg}, node_link, registry, lease, commands, projection,
+                   client_api, auth, audit, coordinator                               （target: lubancode_cluster_cp）
+apps/  (或 src/cluster/*/main.cpp)  lubancode-node, lubancode-cp
+schema/cluster/v1/*.schema.json
+docs/architecture/cluster/{README,protocol,state-machines,store,security,runbook,testing}.md
+tests/unit/cluster/{protocol,lease,node_fsm,command_fsm,scheduler,store_contract,sim}/
+tests/integration/cluster/{two_process,fault_proxy,tls}/
+tests/manual/cluster/{load,soak,multi_host}/
+```
+
+**依赖守门（CMake + 测试双保险）**：
+- `lubancode_cluster_proto` 禁止链接任何 `lubancode_*` 目标（CMake 里 `get_target_property` 检查，违规配置期即失败）。
+- `lubancode_cluster_node` 只许 include `include/lubancore/`（LubanCore 公开头）+ `src/cluster/`；新增 `tests/unit/cluster/test_include_guard.cpp` 用脚本扫描 `#include "cli/`、`"app/`、`"app_server/`（除抽出的 ws 服务端件）即失败。——这就是第一版"不许焊死"的机械化实现。
+- 控制面不链接 LubanCore（控制面不跑 Agent，不执行用户代码——多租户单 §一）。
+
+---
+
+## 十五、分期落地（迁移批次）
+
+纪律：每批"验收"都是可执行命令或可复查产物；完工即勾并附落点。D0~D3 可并行；D4 起按序。
+
+### D0：合同冻结与文档落地（现在可开工，纯文档 + schema）
+
+- [ ] 建 `docs/architecture/cluster/`：README（本单第三节 ADR 摘要 + 拓扑图）、protocol.md（第五节全量 + 错误码全表）、state-machines.md（第四节迁移表）、store.md（第七节 DDL + SPI 合同）、security.md（ADR-06 + 威胁模型：STRIDE 逐项）、testing.md（第十节不变量 + 第十一节告警）、runbook.md（占位，D8 填）。
+- [ ] 写 `schema/cluster/v1/` 全部帧与命令 JSON Schema，含正/反例样本 `schema/cluster/v1/examples/`。
+- [ ] 同步三张关联单：畅想单"硬前置"改指 LubanCore B/C（与 LubanCore 单 A 节第四条一致）；LubanCore 单 C 批加一条"Host API EnqueueTurn 接受外部 requestId 并落账"（本单 6.3 需要）；多租户单 §三加注"集群身份类型由其定义，集群单只消费"。
+- [ ] 对第十七节十个开放问题逐条确认或翻案（默认裁决已给），结果写回本单。
+
+验收：文档评审通过；`schema/cluster/v1/examples/` 下每个样本用任意 JSON Schema 校验器通过/拒绝符合预期（D1 起由单测自动跑）。
+
+### D1：协议库与纯逻辑状态机（现在可开工，零 Core 依赖）
+
+- [ ] `src/cluster/protocol/`：信封与全部帧的 C++ 类型、`Encode/Decode`（`std::expected<Frame, ProtocolError>`）、版本协商纯函数、ULID 生成（时钟与随机注入）、稳定错误码常量。
+- [ ] `src/cluster/lease/`：`RuntimeLeaseTable`（控制面侧，纯内存 + 注入持久回调）与 `LeaseGuard`（节点侧，单调时钟注入）。
+- [ ] `src/cluster/node_fsm/`、`src/cluster/command_fsm/`：按第四节迁移表实现，表外迁移一律 `assert` + 返回错误。
+- [ ] `src/cluster/scheduler/`：过滤、打分、DRR；纯函数，输入节点快照数组与待调度队列。
+- [ ] 单测：每张迁移表**穷举**（状态 × 事件全组合，表外组合断言拒绝）；编解码对 schema 样本往返一致；ULID 单调与唯一性（同毫秒内 10^6 个）。
+- [ ] CMake 目标 `lubancode_cluster_proto` + 依赖守门检查。
+
+验收：`ctest -R cluster_(protocol|lease|fsm|scheduler)` 全绿；三平台 CI 编译通过；`lubancode_cluster_proto` 链接闭包只有 std + nlohmann（CMake 检查）。
+
+### D2：mTLS 与服务端传输（现在可开工；修 G1）
+
+- [ ] `tls.cpp` 增加客户端证书：`TlsClientOptions` 加 `client_cert_pem/client_key_pem`，内部 `mbedtls_pk_parse_key` + `mbedtls_ssl_conf_own_cert`；私钥内存用后 `mbedtls_platform_zeroize`。
+- [ ] 新增 TLS **服务端角色**（`TlsServerStream`）：`MBEDTLS_SSL_IS_SERVER`、`MBEDTLS_SSL_VERIFY_REQUIRED`（节点端口）/ `NONE`（客户端 API 端口，用户走 OIDC）、仅 TLS 1.3、握手超时 10 s；导出对端证书 SAN 供身份提取。
+- [ ] 把 `src/app_server/ws_sockets.*` + `ws_frames.*` 中与 App Server 无关的服务端 WS 承载抽成 `src/net/ws_server/`（App Server 改为引用，行为不变，App Server 现有测试不改即过）。
+- [ ] `src/cluster/transport/`：`NodeLinkClient`（重连、退避、抖动、读写超时、帧大小上限）与 `NodeLinkServer`（accept 循环、每连接一线程或事件循环——首版每连接一线程，200 连接可接受，记录为 D7 容量复核项）。
+- [ ] 内部 CA 工具：`lubancode-cp ca init|issue|revoke`（ECDSA P-256，mbedTLS x509write）。
+- [ ] 测试：自签 CA 下双向认证成功；错 CA / 过期 / 被吊销 / 无客户端证书 / SAN 不符 各一例拒绝且错误码稳定；Windows/Linux/macOS 三平台。
+
+验收：`tests/integration/cluster/tls/` 三平台全绿；App Server 全部既有测试零改动通过。
+
+### D3：ControlStore SPI + SQLite 实现（现在可开工；修 G2）
+
+- [ ] FetchContent 引入 SQLite amalgamation（钉版本与 SHA256，写进 `THIRD_PARTY_NOTICES.md`；public domain）。
+- [ ] `src/cluster/control_plane/store/spi.hpp`：第 7.3 节八条合同对应的接口。
+- [ ] `store/sqlite/`：第 7.2 节 DDL、迁移框架（`schema_migrations`）、单写连接 + 读池、`BEGIN IMMEDIATE` 事务包装、在线备份。
+- [ ] `tests/unit/cluster/store_contract/`：参数化合同测试（D8 PG 实现复用同一套），含"提交成功但响应丢失后重试"、并发 GrantLease 竞争（16 线程争同一 session，恰一个成功）、epoch 跨删除/备份恢复不回退（F7）、投影验链三种拒绝。
+- [ ] 审计链：`AppendAudit`/`VerifyAudit`，复用 `src/trajectory/v3/` canonical JSON 与链算法（不复制实现，抽公共函数）。
+
+验收：`ctest -R cluster_store_contract` 全绿；kill -9 注入测试（写事务中途杀进程 100 次）后库可打开、合同测试仍绿。
+
+### D3.5：确定性仿真台（依赖 D1；可与 D2/D3 并行）
+
+- [ ] `src/cluster/sim/`：离散事件调度器、虚拟单调时钟与墙钟（可独立跳变）、可编程网络（延迟分布、丢包、重复、乱序、分区、半开）、进程崩溃/重启（丢内存态、保留"磁盘"态）、内存版 ControlStore（**仅仿真用**，语义对齐 SPI 合同测试）。
+- [ ] 被测对象：D1 的真实状态机代码 + 一个"仿真节点"（用 D1 的 LeaseGuard/command 去重/uplink 游标逻辑 + 内存 Trajectory）。
+- [ ] 第十节 I1~I9 全部实现为检查器，每步执行。
+- [ ] 故障剧本库：F1~F4、F6~F12、F14、F17、F20 各一个定向剧本 + 随机混合剧本。
+- [ ] CI：2000 种子；夜间 10 万种子；失败自动输出最小化种子与事件轨迹。
+
+验收：CI 2000 种子全绿；故意注入三个已知 bug（去掉自失效 / 去掉 epoch 拒收 / 去掉命令去重），仿真台分别在 2000 种子内抓到违反 I1/I1/I3——**抓不到说明仿真台不合格，不许进 D4**。
+
+### ── D4 开工门：LubanCore B + C 验收通过；D1~D3.5 全绿 ──
+
+### D4：Node Bridge MVP + 控制面 MVP（单控制面 + 单节点，端到端第一次打通）
+
+- [ ] `CoreHostAdapter`：只经 `include/lubancore/` 调 Create/Resume/Close/EnqueueTurn(带 requestId)/Interrupt/AnswerInteraction/QuerySnapshot/订阅。
+- [ ] Node Bridge：enroll、HELLO/WELCOME、心跳、LeaseGuard 接到 Trajectory 写入口前置钩子、命令管线（6.3）、Uplink Pump（给 v3 reader 加 `ReadAfter(seq, limit)`）、本地 Admission、`status/doctor/drain`。
+- [ ] 控制面 MVP：`--role=all`、SQLite、node_link、registry、lease、commands、projection、最小 client_api（**单租户、单管理员 API token**，身份层 D6 才上；接口已按 tenant 参数化，只是只有一个 tenant）。
+- [ ] 最小 Web 查看：复用多前端单的 Web 壳，只接 sessions 列表 + 事件流 + 发消息 + 审批（不做完整工作台）。
+- [ ] 集成测试 `tests/integration/cluster/two_process/`：真实二进制 cp + node，经 fault_proxy：
+  - 建 session → 发 3 轮 turn（假模型后端）→ 浏览器按 afterSeq 续看一致；
+  - F1 短断、F2 分区（节点自停写，时间点误差 < 1 s）、F4 节点 kill -9 重启、F6 控制面 kill -9 重启、F9/F10 命令重复与回执丢失、F11 ACK 丢失；
+  - 每个用例结束后跑一致性检查：节点主账 verify 通过、投影是前缀（I4）、命令无重复执行（I3）。
+
+验收：上述集成测试三平台（Linux 必须；Windows、macOS 至少各跑一次记录）全绿，连续 50 次无 flake；`lubancode-node doctor` 在五种人为错误配置下给出正确诊断。
+
+### D5：客户端续看与多订阅（浏览器寿命与 Session 寿命彻底解耦）
+
+- [ ] 控制面 WSS 事件订阅：投影补读 → 节点补拉（`EVENTS_REQ`）→ 实时推送的无缝衔接（补读与实时之间无缝隙无重复：以 seq 去重）。
+- [ ] 多个浏览器同时订阅同一 session；慢客户端断开不影响他人（F17）。
+- [ ] operator 租约（畅想单 §8.2）：抢/续/放、过期、审批答复必须带当前 operator epoch，stale 回 `stale_operator`。
+- [ ] 节点离线时的读：已投影部分可读，未投影部分明确 `cursor_unavailable{nodeOffline}`。
+
+验收：I7 在仿真与集成测试中均成立；10 个并发订阅者 + 1 个每 5 s 断线重连的"坏客户端"跑 1 h，所有订阅者最终事件序列与节点主账逐行一致。
+
+### ── D6 开工门：多租户单 §三身份合同落码 ──
+
+### D6：身份、租户与授权
+
+- [ ] OIDC 登录（Authorization Code + PKCE）；本地账号（argon2id，默认关）；API token。
+- [ ] tenants/users/memberships/session_members 全链路；所有 REST/WSS 入口过 ACL；节点归属 tenant，跨 tenant 命令节点侧二次拒绝（I8）。
+- [ ] join token 绑定 tenant；节点证书 SAN 带 node_id，控制面由证书反查 tenant，不信帧里的 tenant 字段。
+- [ ] 审计：每个改变状态的 API 与每个节点回执入审计链；`GET /audit` 按 tenant 隔离。
+- [ ] 越权测试集 `tests/integration/cluster/authz/`：两个 tenant、同名 project、互猜 session_id/command_id/blobRef/cursor，全部拒绝；viewer/collaborator/operator/owner 四角色 × 全部 API 的矩阵测试。
+
+验收：授权矩阵测试全绿；越权测试零泄漏；审计链 verify 通过。
+
+### D7：多节点调度、配额与容量
+
+- [ ] 调度器接入真实节点水位；tenant DRR 公平队列；节点拒绝冷却；drain 流程。
+- [ ] 配额：每 tenant/user/project 的 resident/running/heavy 上限与每日 token 预算（与 `src/runtime/budget_gate.*` 对齐，控制面汇总、节点执行）。
+- [ ] reconcile 循环（4.4）。
+- [ ] 容量压测（第十二节目标值）：假 Core Host 夹具 + 200 模拟节点（可在少量真机上多开节点进程）。
+- [ ] 三节点真机场景：配额耗尽时排队不抢占；一节点下线其 session 转 `NodeLost` 而非静默丢失；drain 一节点后新工作全部落到其余节点。
+
+验收：第十二节单控制面各项目标实测达标并出报告（机器规格、负载、P50/P95/P99、内存曲线、瓶颈分析）；未达标项写入本单并调整目标或进 D8 优化，不许默认"应该没问题"。
+
+### ── D8 开工门：D7 报告评审通过；Gateway V5（异步工具执行账）已落 ──
+
+### D8：生产化
+
+- [ ] Worker 子进程化（6.1）：按 tenant 分 Worker、Worker 崩溃隔离（F18）、进程树清理；接 `跨平台ExecutionProvider与通用强化沙箱设计.todo` 的沙箱。
+- [ ] PostgreSQL 后端 + 合同测试复用 + 协调器主备（advisory lock + leader_epoch，F8）。
+- [ ] 命令 detached JWS 签名（ADR-06）。
+- [ ] 证书自动轮换、吊销即时生效、`doctor` 全项。
+- [ ] 滚动升级演练：控制面 N→N+1，节点 N−1 共存 24 h；schema expand/contract 迁移演练。
+- [ ] 备份恢复演练：SQLite 与 PG 各一次，含 F7 epoch 跳号验证。
+- [ ] 72 h soak（2 控制面 API + 主备协调器 + 5 节点），期间脚本化注入：每 10 min 随机断网 30~90 s、每 2 h kill 一个节点、每 6 h 协调器切主、一次磁盘写满、一次证书轮换。
+- [ ] runbook.md：每条告警的处置步骤，每种故障（F1~F20）的人工操作。
+- [ ] 安全评审：STRIDE 复核 + 依赖漏洞扫描 + 至少一轮外部视角渗透（越权、伪造节点、重放命令、事件注入）。
+- [ ] 容器镜像、systemd/Windows 服务包、（可选）Helm chart。
+
+验收：soak 结束时 I1~I8 事后校验全部成立（节点主账 verify、投影前缀、命令无重复、审计链完整）；HA 切换 RTO/RPO 实测达标；runbook 被一位未参与开发的人按文档完成一次故障处置演练。
+
+### D9：人工冷迁移（另立单，本单只定边界）
+
+- [ ] 设计单：Session 从节点 A 到 B 的冷迁移——A 上 drain 该 session 并释放租约 → 打包 Trajectory + worktree 未提交改动（明确不带 `.env`/密钥）→ B 导入并校验哈希链 → 控制面 epoch+1 授予 B。MCP/浏览器状态不迁，CapabilitySnapshot 缺失走 `CapabilityDegraded`。
+- [ ] A 不可达时的迁移只允许从备份导入，且强制 `NeedsReview`。
+
+验收：另立单子后再定。
+
+---
+
+## 十六、第一版批次 → 本版批次映射
+
+| 第一版 | 本版 | 变化 |
+|---|---|---|
+| P0 地基盘点 | D0 + D2（mTLS 核查变成直接实现） | 核查结论已在第二节给出（mTLS 缺失、无 DB、ID 非全局），直接进实现 |
+| P1 LubanCore SDK 验收复核 | D4 开工门 | 前置从"全部验收"改为 B+C |
+| P2 单机 Gateway 收官 | D8 开工门（只要 V5） | V3 渠道与集群无关，V6 的 soak 方法论由 D8 自带 |
+| P3 身份租户接口复核 | D6 | 从"复核"变成落码 |
+| P4 Node Bridge MVP | D1 + D3.5 + D4 | 先纯逻辑与仿真，再真网络 |
+| P5 多节点调度配额 | D7 | 补算法与容量目标 |
+| P6 生产化验收 | D5（续看）+ D8 | 续看提前到 D5，因为它是用户第一个可感知价值 |
+
+---
+
+## 十七、畅想单 §十八 开放问题的默认裁决（D0 确认或翻案）
+
+| # | 问题 | 默认裁决 | 理由 |
+|---|---|---|---|
+| Q1 | 单组织部署还是多组织托管？ | **首版单组织多团队**（tenant = 团队/部门，彼此不完全互不信任）；数据模型按多组织设计，但不承诺互不信任组织的托管安全等级，直到 D8 安全评审 + Worker 沙箱落地 | 互不信任多组织托管要求沙箱逃逸级防护，D8 之前做不到 |
+| Q2 | 身份先接什么？ | OIDC（覆盖企业 SSO：Azure AD/Okta/Keycloak/飞书/企业微信均支持 OIDC 或可桥接）；本地账号仅开发 | 一次实现覆盖大多数企业 |
+| Q3 | 跨节点 clone 怎样映射同一 Project？ | 控制面 `projects` 为权威；节点 checkout 由用户显式绑定（`workspace_bindings`），可按 git remote **提示**但不自动绑定 | 自动按 remote 绑定会越权（多租户单 §三） |
+| Q4 | 控制面存多少投影？离线可读到什么程度？ | 最近 10 000 行或 7 天；节点离线时只读已投影部分，明确标注不完整 | 控制面不做第二真账 |
+| Q5 | Worker 一场一进程还是少量一进程？ | D4 同进程；D8 起"同 tenant 至多 8 场一进程"，可配为 1 | 进程开销与故障半径折中，按 tenant 切保证隔离底线 |
+| Q6 | 哪些 MCP 能 tenant 级复用？ | 首版**全部按 Session 独占**；tenant 级复用需 MCP 定义显式声明 `shareable: tenant` 且由 tenant_admin 批准 | 默认最安全，复用是优化 |
+| Q7 | 管理员能否强抢 operator 租约？ | 能；强抢使旧 operator epoch 失效，其在途审批答复回 `stale_operator`，审计记录强抢 | 生产必须有破窗手段 |
+| Q8 | 共用工作区最低策略？ | 默认禁止两场可写 Session 共用一个 checkout；显式开启时需节点本地 write lease + UI 警示 | 同畅想单 §7.4 |
+| Q9 | 协议兼容窗口多长？ | N−1 minor；major 升级需全量停机窗口或双栈过渡（另立单） | ADR-08 |
+| Q10 | 旧 Skill/Package 谁保留多久？ | 控制面按 content_hash 保留被任一未归档 Session 的 CapabilitySnapshot 引用的包，引用归零后 30 天 GC | 恢复可用性与存储成本折中 |
+
+---
+
+## 十八、不做什么
+
+- 不在 D3.5 仿真台证明不变量之前上真网络——分布式 bug 在真网络上几乎不可复现，仿真是唯一便宜的地方。
+- 不让 Node Bridge include CLI/App 内部头（第十四节守门测试保证）。
+- 不把控制面库写成 Session 第二真账；不从投影导出训练数据或审计追溯正文。
+- 不因节点短暂失联自动重跑任何工具；不做自动漂移 Session 的按钮。
+- 不宣称 exactly-once；UI 与文档一律写"至少一次投递 + 幂等去重；未知副作用人工裁决"。
+- 不首版开放节点入站端口；不首版做控制面多活写。
+- 不引入 Redis/Kafka/etcd 作必选依赖；需要时按 LubanCore 单 §九以可选组件接入并单独验合同。
+- 不写未经实测的容量与可用性数字到 README/CHANGELOG；第十二节是"目标"，不是"能力声明"。
+
+---
+
+## 十九、最终验收门
+
+D0~D8 全部勾选，且：
+
+- [ ] `docs/architecture/cluster/` 七篇文档与代码一致（协议 schema 由单测对照，状态机表由穷举单测对照）；
+- [ ] 仿真台：夜间 10 万种子连续 14 天全绿；
+- [ ] 集成测试：第九节 F1~F20 每项至少一个自动化用例（F5/F15/F16 可为半自动），三平台记录；
+- [ ] D7 容量报告 + D8 soak 报告 + D8 HA 切换报告 + 安全评审报告存档于 `docs/architecture/cluster/reports/`；
+- [ ] 三份关联设计单状态字段更新为"已落"或"进行中有明确批次"；
+- [ ] CHANGELOG 有发布记录，写明**实测过的拓扑与数字**。
+
+在此之前，对外只能说"LubanCode 集群模式：第 Dn 批已落，支持 ××（附测试证据）"，不能笼统说"支持分布式"。
