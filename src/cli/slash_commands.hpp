@@ -334,6 +334,27 @@ struct SlashCommandInfo {
 };
 const std::vector<SlashCommandInfo>& AllSlashCommands();
 
+// ---------------------------------------------------------------------------
+// 二级(子命令)Tab 补全词汇表:只登记子命令词汇本就固定、由 cli 层纯解析出
+// action 枚举的命令(provider/instructions/goal/loop/plan/record——各自的
+// Parse*Command 函数逐词核对过,不是凭注释猜的)。其余命令(skill/plugin/
+// workflow/channel/agent/...)的子命令词汇分散在各域 handler 里,本表暂不
+// 收;后续要接多级补全,在 AllSlashSubcommandGroups() 的实现里加一组即可,
+// 不需要再碰 line_editor 那一层。
+// ---------------------------------------------------------------------------
+
+// 一个子命令一条:名字(不带 '/'，比如 "switch") + 一句话说明,复用
+// SlashCommandInfo 的形状(名字 + 说明,跟层级无关)。
+struct SlashCommandSubcommands {
+    std::string command;                    // 一级命令词,小写、带 '/'，如 "/provider"
+    std::vector<SlashCommandInfo> entries;   // 该命令的子命令词(name 不带 '/') + 一句话说明
+};
+
+// 按命令分组返回子命令补全候选(表序即展示序);查无该命令 = 没有二级补全。
+// i18n:说明文字经 tr(slash.sub.<command>.<word>) 取值,语言切换后下一次调用
+// 重建,与 AllSlashCommands 同一套"现折 + 记语言"写法。
+const std::vector<SlashCommandSubcommands>& AllSlashSubcommandGroups();
+
 // 把 AllSlashCommands 排成帮助清单(每命令一行:"  /名字<补白>一句话说明",
 // 名字列按最长命令名对齐)。顶层 --help 的斜杠命令节与交互内 /help 的正文
 // 都打这份(P3-2:三份名单——--help、/help、Tab 补全——同出 AllSlashCommands,

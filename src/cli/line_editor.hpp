@@ -185,6 +185,18 @@ struct CompletionCandidate {
 // std::vector<CompletionCandidate>,空闲 SharedEditor() 与流式监听线程的
 // 本地编辑器共用,核心层自己不认得任何具体命令名字,不写第二份命令清单。
 
+// 二级(子命令)补全候选,按一级命令词分组:多级 Tab 补全单。command 是
+// 一级命令词(小写、带 '/'，比如 "/provider"),subcommands 是该命令的子
+// 命令补全候选(CompletionCandidate::name 不带 '/'，比如 "switch")。查无
+// 该命令 = 没有二级补全,Tab 在它的参数区维持"不动"的老规矩。来源转换口
+// 同上,在 console_input.hpp 的 BuildSlashSubcommandCompletionCandidates()
+// (由 slash_commands 的 AllSlashSubcommandGroups() 现转),核心层自己不认得
+// 任何具体子命令词。
+struct SlashSubcommandGroup {
+    std::string command;
+    std::vector<CompletionCandidate> subcommands;
+};
+
 // 单码点显示宽(Unicode emoji 治理单 P1 起由 grapheme.cpp 的共享表供数,
 // 内嵌 Unicode 15.1 紧凑区间):CJK 统一表意、假名、韩文音节、全角标点、
 // emoji 呈现区段按 2 列;组合附标/VS15/VS16/ZWJ/肤色修饰按 0 列(零宽跟
@@ -299,13 +311,19 @@ struct RenderState {
 
 class LineEditorCore {
 public:
-    // slash_candidates 是全部 slash 命令的补全候选,构造时传入一次
-    // (调用方从 slash_commands 现有定义转换过来,核心层不重复定义)。
-    explicit LineEditorCore(std::vector<CompletionCandidate> slash_candidates = {});
+    // slash_candidates 是全部 slash 命令的补全候选,subcommand_candidates 是
+    // 按命令分组的二级(子命令)补全候选,构造时各传入一次(调用方从
+    // slash_commands 现有定义转换过来,核心层不重复定义)。
+    explicit LineEditorCore(std::vector<CompletionCandidate> slash_candidates = {},
+                             std::vector<SlashSubcommandGroup> subcommand_candidates = {});
 
     // 会话运行中会安装/停用 workflow alias。新一轮读取前换入最新候选，
     // 保留历史与确认档，只清掉依赖旧候选的菜单/Tab 状态。
     void SetSlashCandidates(std::vector<CompletionCandidate> slash_candidates);
+
+    // 二级(子命令)补全候选同理:命令词汇变化(i18n 语言切换等)后重传一份,
+    // 清掉依赖旧候选的菜单/Tab 状态。
+    void SetSlashSubcommandCandidates(std::vector<SlashSubcommandGroup> subcommand_candidates);
 
     // 开始读新的一行:清空行缓冲、光标、Tab 补全会话状态、历史浏览位置
     // (回到"底部");历史列表本身和确认模式是会话级的,跨多轮 BeginLine()
@@ -358,10 +376,16 @@ public:
 
 private:
     struct TabCycleState {
-        std::vector<std::string> matches;  // 命中的候选全名
+        std::vector<std::string> matches;  // 命中的候选全名(一级是完整命令词,二级是子命令词,不带前缀)
         int index = -1;                    // -1: 还没真正开始轮转(刚补了公共前缀);>=0: 轮转到第几个
-        std::u32string suffix;             // 触发这次补全会话时,命令词后面剩下的内容(比如已经打的参数),
+        std::u32string suffix;             // 触发这次补全会话时,补全词后面剩下的内容(比如已经打的参数),
                                             // 补全/轮转时原样接在候选名后面,不吞用户打的东西
+        std::u32string prefix;             // 补全词前面原样保留的部分:一级补全恒为空串;二级补全是
+                                            // "命令词 + 空格"(比如 "/provider "),补全时原样接在候选名前面
+        const SlashSubcommandGroup* group = nullptr;  // 这次补全用哪张二级词表渲染提示描述;一级补全恒 nullptr
+                                                        // (描述改查 slash_candidates_)。指向 subcommand_candidates_
+                                                        // 的元素,SetSlashSubcommandCandidates 会连带清空本状态,
+                                                        // 不会有悬空指针存活到下一轮补全会话。
     };
 
     // 0.16.0 slash 候选菜单直选:单行、以 / 开头、候选非空时按 ↓ 进入。
@@ -383,6 +407,7 @@ private:
     };
 
     std::vector<CompletionCandidate> slash_candidates_;
+    std::vector<SlashSubcommandGroup> subcommand_candidates_;
 
     // UI-A:行缓冲从单 u32string 升级成 vector<u32string> + (row, col) 光标。
     // 不变式:lines_ 永远至少一个元素(空 composer 就是一个空串)。
@@ -418,16 +443,27 @@ private:
     void LoadJoined(const std::u32string& joined);  // 按 '\n' 拆开装进 lines_,光标落到末尾
     void MoveHistory(bool up);
     void HandleTab();
-    void CompleteToCandidate(const std::string& name, const std::u32string& suffix);
+    // prefix 是补全词前面原样保留的部分(一级补全传空串,二级补全传
+    // "命令词 + 空格");最终整行是 prefix + name + (suffix 或补的那个空格)。
+    void CompleteToCandidate(const std::u32string& prefix, const std::string& name, const std::u32string& suffix);
     RenderState BuildRenderState(bool submitted, bool cleared, bool eof_requested, bool mode_changed) const;
     std::vector<std::string> MatchingCandidateNames(const std::u32string& word) const;
+    // 按一级命令词(大小写不敏感)查它的二级词表;查无返回 nullptr——命令
+    // 没登记二级词汇,调用方按"参数区不补全"的老规矩处理。
+    const SlashSubcommandGroup* FindSubcommandGroup(const std::u32string& command_word) const;
+    // 二级版 MatchingCandidateNames:在给定的子命令词表里按前缀过滤。
+    std::vector<std::string> MatchingSubcommandNames(const SlashSubcommandGroup& group,
+                                                       const std::u32string& word) const;
 
     // 把匹配到的候选名单排成 hint_lines:一行一个 `  /name  说明`,最多 6 行,
     // 超出加一行 "  … 共 N 个命令";selected_index >= 0 时,那一行的前缀
     // 换成 "> ",标出当前选中的是谁(Tab 轮转或菜单选择态共用;-1 表示还没
     // 真正选中任何一个)。0.16.0 起:选中项落到第 6 行之外时,展示窗口往下
-    // 挪,保证 "> " 标记永远看得见(窗口起点 = 选中下标 - 5)。
-    std::vector<std::string> BuildHintLines(const std::vector<std::string>& matches, int selected_index) const;
+    // 挪,保证 "> " 标记永远看得见(窗口起点 = 选中下标 - 5)。group 非空时,
+    // 描述改从该二级词表里查(而不是 slash_candidates_)——二级补全的候选名
+    // (比如 "switch")不在一级候选表里,查了也是空。
+    std::vector<std::string> BuildHintLines(const std::vector<std::string>& matches, int selected_index,
+                                             const SlashSubcommandGroup* group = nullptr) const;
 
     std::vector<std::u32string> pasted_contents_;
     std::optional<PasteRunState> paste_run_;

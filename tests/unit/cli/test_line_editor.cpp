@@ -2083,3 +2083,111 @@ TEST_CASE("编辑行窗口: 窗口起点不落在 ZWJ 序列中间") {
     CHECK(tail.text == Fixture({U'b', U'b', U'b', U'b', U'b'}));
     CHECK(tail.cursor_display_col == 5);
 }
+
+// ---------------------------------------------------------------------------
+// 多级 Tab 补全单:二级(子命令)补全。/provider 这类命令词已经登记了二级
+// 词表(AllSlashSubcommandGroups),Tab 在第二个词上也该能补;没登记二级词表
+// 的命令(比如 /model)参数区行为不变。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+LineEditorCore MakeEditorWithSubcommands() {
+    return LineEditorCore(BuildSlashCompletionCandidates(), BuildSlashSubcommandCompletionCandidates());
+}
+
+}  // namespace
+
+TEST_CASE("二级补全: /provider swi<Tab> 唯一命中,直接补成 /provider switch ") {
+    LineEditorCore editor = MakeEditorWithSubcommands();
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/provider swi");
+
+    const RenderState before = editor.CurrentRenderState();
+    REQUIRE(before.hint_lines.size() == 1);  // 前缀只命中 switch 一个
+    CHECK(before.hint_lines[0].find("switch") != std::string::npos);
+
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/provider switch ");
+    CHECK(state.cursor == state.line.size());
+}
+
+TEST_CASE("二级补全: /provider 后空前缀列出全部子命令(超 6 个带 more 行)") {
+    LineEditorCore editor = MakeEditorWithSubcommands();
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/provider ");
+
+    const RenderState state = editor.CurrentRenderState();
+    // provider 有 list/refresh/add/switch/remove/set/edit 七个子命令,
+    // 超过 kMaxLines(6),末尾多一行 "… 共 N 个命令"。
+    REQUIRE(state.hint_lines.size() == 7);
+    CHECK(state.hint_lines.back().find('7') != std::string::npos);
+}
+
+TEST_CASE("二级补全: /provider s 两枚同前缀(switch/set),连续 Tab 轮转、选中标记跟随") {
+    LineEditorCore editor = MakeEditorWithSubcommands();
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/provider s");
+
+    auto marked_name = [](const RenderState& s) {
+        for (const auto& line : s.hint_lines) {
+            if (line.rfind("> ", 0) == 0) {
+                return line;
+            }
+        }
+        return std::string();
+    };
+
+    // "s" 已经是 switch/set 的公共前缀极限(两者除了 "s" 没有更长公共前缀),
+    // 第一下 Tab 直接进入轮转,不会先补一段公共前缀。
+    RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/provider switch ");
+    REQUIRE(state.hint_lines.size() == 2);
+    CHECK(marked_name(state).find("switch") != std::string::npos);
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/provider set ");
+    CHECK(marked_name(state).find("set") != std::string::npos);
+
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/provider switch ");  // 转一圈回来
+}
+
+TEST_CASE("二级补全: 光标越过子命令词、落进它自己的参数区,Tab 不补") {
+    LineEditorCore editor = MakeEditorWithSubcommands();
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/provider switch anthropic");
+
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/provider switch anthropic");  // 不动
+}
+
+TEST_CASE("二级补全: 子命令词已敲完+空格,提示行换成该子命令自己的单行说明") {
+    LineEditorCore editor = MakeEditorWithSubcommands();
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/provider switch ");
+
+    const RenderState state = editor.CurrentRenderState();
+    REQUIRE(state.hint_lines.size() == 1);
+    CHECK(state.hint_lines[0].find("switch") != std::string::npos);
+    CHECK(state.hint_lines[0].rfind("  ", 0) == 0);  // 非轮转/菜单态,无 "> " 标记
+}
+
+TEST_CASE("二级补全: 没有登记二级词表的命令(/model)参数区行为不变") {
+    LineEditorCore editor = MakeEditorWithSubcommands();
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/model xy");
+
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    CHECK(state.line == U"/model xy");  // 没有二级词表,老规矩:参数区不补全
+}
+
+TEST_CASE("二级补全: 大小写不敏感,命令词与子命令词都认") {
+    LineEditorCore editor = MakeEditorWithSubcommands();
+    editor.BeginLine(/*composer=*/true);
+    TypeString(editor, "/PROVIDER SWI");
+
+    const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
+    // 补全写回二级词表里登记的规范拼写(小写)。
+    CHECK(state.line == U"/PROVIDER switch ");
+}
