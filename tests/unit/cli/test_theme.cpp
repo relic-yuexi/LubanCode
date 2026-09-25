@@ -36,6 +36,8 @@ TEST_CASE("BuiltinTheme: dark 是默认主题,着色字段非空") {
     CHECK_FALSE(t.surface_user_bg.empty());
     CHECK_FALSE(t.surface_user_marker.empty());
     CHECK_FALSE(t.surface_padding.empty());
+    // 常驻选择面板(SessionPicker 等)光标行底色:dark 铺深紫底。
+    CHECK_FALSE(t.row_selected_bg.empty());
 }
 
 TEST_CASE("BuiltinTheme: light 主题着色字段非空,且跟 dark 不完全一样") {
@@ -49,6 +51,9 @@ TEST_CASE("BuiltinTheme: light 主题着色字段非空,且跟 dark 不完全一
     // 用户块底色也各有一份,且 dark 与 light 不同(深浅终端各配各的灰)。
     CHECK_FALSE(light.surface_user_bg.empty());
     CHECK(dark.surface_user_bg != light.surface_user_bg);
+    // 选中行底色也各有一份,深浅终端不共用同一枚色号。
+    CHECK_FALSE(light.row_selected_bg.empty());
+    CHECK(dark.row_selected_bg != light.row_selected_bg);
     // 两套主题不能是同一份配色(不然分两套毫无意义)。
     CHECK((dark.banner != light.banner || dark.prompt != light.prompt || dark.stats != light.stats));
     CHECK(dark.diff_add_bg != light.diff_add_bg);
@@ -80,6 +85,7 @@ TEST_CASE("BuiltinTheme: plain 主题所有字段都是空串") {
     CHECK(t.surface_user_fg.empty());
     CHECK(t.surface_user_marker.empty());
     CHECK(t.surface_padding.empty());
+    CHECK(t.row_selected_bg.empty());
 }
 
 TEST_CASE("BuiltinTheme: 不认得的名字兜底成 dark") {

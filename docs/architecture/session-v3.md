@@ -65,7 +65,7 @@ Host API 已有文件、状态、上下文追加、日志与工具调用服务�
 
 | 范围 | 当前边界 |
 | --- | --- |
-| Telemetry | projector 仍解析旧 `EventEnvelope`，服务仍枚举 `main.jsonl`；配置能开不等于能投影 v3 |
+| Telemetry | v3 已接（T07，V3-GAP-02 已销）：`ProjectV3LedgerFile` 投 v3 账、流发现认 `<id>.jsonl` 与递归子账、游标记到行粒度；两代账并存各自投，重启补投与不重复累计有测试册钉。旧 `EventEnvelope` 投影路保留给旧档，退役归 V3-LEGACY-02 |
 | Memory | 召回桥仍取旧 recorder；新版作用域、CAS、忘记屏障、正式 memory 消息与请求引用合同尚待实施 |
 | Workflow | 编排账已接 v3（WorkflowRunAccount 单事实源，生产 `/workflow run` 走账路）；llm/agent/skill 节点开独立 v3 session（GAP-05，2026-09-24），output.commit 与恢复按账判据；WorkflowService 收拢装配、实例级 Store 与持久交互归后续棒 |
 | Goal / Loop / btw | 现有功能按原实现运行；新增持久事务、独立上下文、验收与联合调度合同不能据已有命令认定完成 |

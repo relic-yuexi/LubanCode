@@ -163,15 +163,51 @@ std::expected<NodeSessionSpawn, runtime::WorkflowSpawnFailure> WorkflowNodeSessi
         return fail_out("reserve_stream", "workflow.node_session.mkdir_failed", ec.message(), false);
     }
 
-    // journalPath:相对父 session 目录(/usage 树走按它定位);跨盘算不出
-    // 相对路径时退绝对路径(同机可读,不假装相对)。
+    // journalPath:相对父 session 目录(/usage 树走按它定位)——契约与读侧
+    // 严格对齐:reader.cpp WalkSessionTreeRecursive 拿父账 jsonl 的
+    // parent_path() 拼 journalPath 找子账;这里的"父 session 目录"
+    // (material_.parent_session_dir,即 ledger->session_dir())就是父账
+    // 自己 jsonl 所在的那个目录,两边基准同一个锚点,不该对不上。
+    //
+    // GAP-05 windows-msvc 真根因(诊断日志钉死,不再是本段的猜测):不在
+    // relative() 本身,在读侧拼回去之后没有折叠"../../../…"——父子两棵
+    // 树离得越深,未折叠前的字符串越长,windows-msvc CI 临时目录前缀本
+    // 就长,量到过未折叠 297 字符、折叠后 192 字符,正好跨过 Win32 传统
+    // MAX_PATH=260 这条线,未开长路径支持时直接判"不存在"。修法在
+    // reader.cpp:child.jsonl_path 拼出来后补一步 lexically_normal()。
+    // 这里的自证保留作为独立防线(relative() 本身若真算错,同一份自证
+    // 依然能兜住,退绝对路径分支),不因根因已经找到就撤掉。
     std::string journal_path;
-    if (auto relative = std::filesystem::relative(session_jsonl, material_.parent_session_dir, ec);
-        !ec && !relative.empty()) {
-        journal_path = relative.generic_string();
-    } else {
-        ec.clear();
-        journal_path = std::filesystem::absolute(session_jsonl, ec).generic_string();
+    {
+        std::error_code canon_ec;
+        const auto parent_canonical =
+            std::filesystem::weakly_canonical(material_.parent_session_dir, canon_ec);
+        bool ok = !canon_ec;
+        std::filesystem::path child_canonical;
+        if (ok) {
+            child_canonical = std::filesystem::weakly_canonical(session_jsonl, canon_ec);
+            ok = !canon_ec;
+        }
+        std::filesystem::path relative;
+        if (ok) {
+            relative = std::filesystem::relative(child_canonical, parent_canonical, canon_ec);
+            ok = !canon_ec && !relative.empty();
+        }
+        if (ok) {
+            // 兜底验证:按读侧的真实拼法——原始(未 canonicalize)的
+            // parent_session_dir 拼上这条 relative、词法规整——必须对得上
+            // 原始(未 canonicalize)的 session_jsonl 本尊。此刻文件本身
+            // 还没有落地(写者未开卷),但两侧目录前缀都已存在,词法拼接
+            // 足以核实这条相对路径按读侧拼法是否真的指得回去。
+            const auto rebuilt = (material_.parent_session_dir / relative).lexically_normal();
+            ok = rebuilt == session_jsonl.lexically_normal();
+        }
+        if (ok) {
+            journal_path = relative.generic_string();
+        } else {
+            std::error_code abs_ec;
+            journal_path = std::filesystem::absolute(session_jsonl, abs_ec).generic_string();
+        }
     }
     if (journal_path.empty()) {
         return fail_out("reserve_stream", "workflow.node_session.no_journal_path",

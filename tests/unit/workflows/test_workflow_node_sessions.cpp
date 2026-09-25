@@ -26,6 +26,7 @@
 #include "runtime/trajectory_session.hpp"
 #include "workflow/account.hpp"
 #include "workflow/host_executors.hpp"  // LlmExecutor(真执行器,走 SampleModel 边界)
+#include "workflow/node_sessions.hpp"   // 窄证直接开场:NodeSessionMaterial/WorkflowNodeSessions
 #include "workflow/parser.hpp"
 #include "workflow/runtime.hpp"
 
@@ -324,6 +325,9 @@ TEST_CASE("GAP-05 案1:模型节点各开独立场,usage 并进 /usage 主账口
     // 会话验卷:父子边全过(spawn/linked 与子卷首行互指)。
     const auto report = ledger->VerifySession();
     for (const auto& edge : report.child_edges) {
+        if (!edge.error_code.empty()) {
+            MESSAGE("child_edge error_code=", edge.error_code);
+        }
         CHECK(edge.error_code.empty());
     }
 }
@@ -549,4 +553,60 @@ edges:
             CHECK(line.value("kind", std::string()) != "subagent.spawn.requested");
         }
     }
+}
+
+// GAP-05 windows-msvc 回归窄断言(main run 36082526799):写端算的
+// journalPath 拼回父 session 目录后必须真实存在,且真的指回那份
+// session_jsonl 本尊——不是"relative() 静默算出一个不指向真文件的偏移
+// 量,ec 不报错还非空"这种静默错误。直接开 WorkflowNodeSessions(绕开完
+// 整 WorkflowRuntime),把写端产物与读端拼法(reader.cpp
+// WalkSessionTreeRecursive 的 `jsonl.parent_path() / journalPath`)对齐
+// 验一遍,钉死这条契约。
+TEST_CASE("GAP-05 窄证:journalPath 写入→读侧拼回去必须真实存在") {
+    EnvGuard v3_pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const fs::path root = FreshDir("journal-path");
+    auto opened = OpenLedger(root);
+    REQUIRE(opened.has_value());
+    auto ledger = std::make_unique<lubancode::runtime::TrajectorySessionLedger>(std::move(*opened));
+    REQUIRE(ledger->v3_main_writer() != nullptr);
+
+    auto material = NodeSessionMaterial::FromLedger(ledger.get());
+    REQUIRE(material.has_value());
+
+    const fs::path run_dir = root / "workflow-runs" / "run-jp";
+    WorkflowNodeSessions node_sessions(*material, run_dir, "run-jp");
+
+    NodeExecutionIdentity identity;
+    identity.node_id = "a";
+    identity.node_execution_id = "run-jp-a-d1";
+    identity.attempt = 1;
+    WorkflowNode node;
+    node.id = "a";
+    node.kind = NodeKind::Llm;
+
+    auto spawn = node_sessions.Open(identity, node, 1);
+    REQUIRE(spawn.has_value());
+    const std::string journal_path = spawn->ref.journal_path;
+    REQUIRE_FALSE(journal_path.empty());
+
+    // 读端拼法:jsonl.parent_path() / journalPath——这里的 jsonl 就是父账
+    // 自己那份,parent_path() 就是 material->parent_session_dir。
+    const fs::path rebuilt = (material->parent_session_dir / journal_path).lexically_normal();
+    const fs::path real_jsonl = run_dir / "nodes" / identity.node_execution_id / "sessions" /
+                               spawn->ref.session_id / (spawn->ref.session_id + ".jsonl");
+    std::error_code exists_ec;
+    const bool exists = fs::exists(rebuilt, exists_ec);
+    if (!exists) {
+        // 失配才打诊断,平时不吵(与案2 窄断言同款风格)。
+        MESSAGE("journalPath 拼回去没找到文件: parent_session_dir=",
+                material->parent_session_dir.string(), " journalPath=", journal_path,
+                " rebuilt=", rebuilt.string(), " real_jsonl=", real_jsonl.string());
+    }
+    REQUIRE(exists);
+    // 不是巧合撞上别处文件:必须就是那份真实 session_jsonl 本尊。
+    std::error_code eq_ec;
+    CHECK(fs::equivalent(rebuilt, real_jsonl, eq_ec));
+    CHECK_FALSE(eq_ec);
+
+    spawn->bridge->Finish(true, false, "");
 }

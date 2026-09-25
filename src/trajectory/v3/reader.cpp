@@ -1169,8 +1169,21 @@ void WalkSessionTreeRecursive(const std::filesystem::path& jsonl, SubagentSessio
         }
         child.session_id = JsonString(*child_ref, "sessionId").value_or("");
         child.run_id = JsonString(*child_ref, "runId").value_or("");
-        child.jsonl_path = jsonl.parent_path() /
-                           JsonString(*child_ref, "journalPath").value_or("");
+        // GAP-05 windows-msvc 真根因(诊断日志钉死):journalPath 是
+        // "../../../../…" 形状的相对路径,父子两棵树离得越深、这串前缀
+        // 越长——拼回去之前不收窄,拼接结果(父目录原样 + 未折叠的 ".."
+        // 段)整条字符串的长度会先冲一遍高峰才收敛。CI 的 windows-msvc
+        // 临时目录前缀本就长(GitHub Actions 短文件名 + 多层内容寻址子
+        // 目录),实测量到未折叠前 297 字符、折叠后 192 字符——正好跨过
+        // Win32 传统 MAX_PATH=260 这条线:没开长路径支持的 CreateFileW
+        // 等调用对超限路径直接判不存在,不报"路径太长",报"文件不存在"
+        // (child_missing),伪装成一个位置错误。lexically_normal() 纯词法
+        // 折叠 ".."段,不摸文件系统,折叠后再传给 exists()/ReadV3Ledger()
+        // 就落回 260 字符以内——写侧自证与窄证案二者都先 normalize 过
+        // 才比对,一直没能在这条链路上复现,读侧生产代码这步一直缺着。
+        child.jsonl_path =
+            (jsonl.parent_path() / JsonString(*child_ref, "journalPath").value_or(""))
+                .lexically_normal();
         // 父侧终态:linked 落稳才算关联建立;spawn.failed 是失败终态。
         std::string link_status = "not_linked";
         for (const auto& probe : ledger.events) {
