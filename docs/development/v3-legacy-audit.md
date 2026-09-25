@@ -2,16 +2,17 @@
 
 [文档首页](../README.md) · [当前 v3 实现](../architecture/session-v3.md) · [字段合同](../architecture/trajectory-v3-schema.md) · [文档规范](documentation.md)
 
-核查日期：2026-09-11 首查；2026-09-23 复核翻新——T08/T11/T12/T15-B 销项 4 条入档，余 10 条逐条重验证据；2026-09-24 V3-GAP-01 销项入档。基线为当前工作区源码（版本入口 `src/app/version.hpp`）。两轮都只查代码和文档、标记后续清理项，不删除实现或用户存档。下面都是静态检查结果，不冒充运行验收。
+核查日期：2026-09-11 首查；2026-09-23 复核翻新——T08/T11/T12/T15-B 销项 4 条入档，余 10 条逐条重验证据；2026-09-24 V3-GAP-01 销项入档；2026-09-25 V3-GAP-05 销项入档（workflow 域 v3 化棒二落地后移入）。基线为当前工作区源码（版本入口 `src/app/version.hpp`）。两轮都只查代码和文档、标记后续清理项，不删除实现或用户存档。下面都是静态检查结果，不冒充运行验收。
 
 `V3-LEGACY` 标记沿用旧合同的代码或文档；`V3-GAP` 标记新版尚未接全之处。条目各有编号，清理时连同引用、测试与文档一起销项。不是所有 v2 都该删：插件 manifest v2、原生 ABI v2、JSON-RPC 2.0 与会话格式无关。
 
 ## 已销项
 
-2026-09-16 的 T 系列单子销掉四条，2026-09-23 复核源码后入档；2026-09-24 V3-GAP-01 销项入档。销的是"新版缺口"；旧路退役另有在册条目的，仍留在下表追。
+2026-09-16 的 T 系列单子销掉四条，2026-09-23 复核源码后入档；2026-09-24 V3-GAP-01 销项入档；2026-09-25 V3-GAP-05 销项入档。销的是"新版缺口"；旧路退役另有在册条目的，仍留在下表追。
 
 | 编号 | 销项提交与落点 |
 | --- | --- |
+| V3-GAP-05 | 2026-09-24 销项（workflow 域 v3 化棒二）。三件事落地：其一，独立节点 session——`src/workflow/node_sessions.cpp` 的 `WorkflowNodeSessions`：llm/agent/skill 节点每次 attempt 开独立 v3 场（`workflow-runs/<runId>/nodes/<execId>/sessions/<sid>/<sid>.jsonl`），父 session 落既有 `subagent.spawn.requested/linked` 对（actionId=attemptId、taskArgs 带 nodeExecutionRef），子卷首行 systemMeta `cause=workflow_node`；usage 经 `/usage` 会话树递归可见（GAP-01 余项收口），非模型节点零伪造。其二，nodeExecutionId/attempt 消费与生产接线——生产 `/workflow run` 切 `account_root`（`src/app/commands/workflow_commands.cpp`，与旧 run 同根两代并存；subflow 经 `WorkflowExecutorContext` 传播），ListRuns 认 v3 布局。其三，失败恢复按 v3 账回放已有账路（ResumeAccount）补 kill-续跑用例钉死（`tests/unit/workflows/test_workflow_node_sessions.cpp` 案2：commit 落稳后注入崩溃，resume 不重跑不重开场）。旧桥清理：生产不再走 v2 编排桥/旧 RunJournal（旧 run 读取恢复保留）；runtime 的 v2 桥分支与 `tests/unit/workflows/test_workflow_trajectory_runtime.cpp` 留作旧路证据，退役归棒二 WorkflowService 收拢。测试册：node_sessions 四案（独立场+并账、kill-续跑、重试新场、零伪造） |
 | V3-GAP-03 | T08，提交 `1ddc48bd`：召回/写入桥接 v3。`RecordRecallInjection` 在 v3 writer 在手时改走 `RecordRecallInjectionV3`（`src/app/memory_ledger_bridge.cpp:37`）——召回注入落 display=hidden 的正式 user 消息经 AdmitMessages 进链，`memory.recall.injected` 带 memoryId/revision/hash/messageRef，写入因果边落 `memory.save.requested`。残余：MemoryStore 版本/CAS/遗忘屏障仍归总设计 §4.71，挂 V3-GAP-08 伞下追踪；v2 场 recorder 老路退役归 V3-LEGACY-02 |
 | V3-GAP-06 | T11，提交 `7352b867`：五域遗漏事实按域落 v3，早退分支拆除。T11-A 标题来源分家（`src/runtime/trajectory_session.cpp:1748`）、T11-B 审批档 `approval.mode.applied`（`src/trajectory/session_manager.cpp:1600`）、T11-C 环境快照 `session.environment.captured`（`trajectory_session.cpp:1129`）、T11-D 验证簿 `tool.verification.recorded/invalidated`、`tool.observation.late`（`src/runtime/trajectory_turn_bridge.cpp:1828` 起）、T11-E 容量裁决 `context.pressure.recorded`（`trajectory_turn_bridge.cpp:537`）。事实族进字段合同第二节 |
 | V3-GAP-07 | T12-B–E，提交 `afd5e6bb`：compact 余项收口。干跑哑客户端不发模型（`src/app/commands/session_commands.cpp:610/967`）、midturn `parentTurnId` 递真实主轮号（1017–1021）、overflow 恢复（2614，`pre_send_overflow` 触发）、hard trim/预览降档 v3 收口（690/2622）。原条目末句"applied 后投影失败只报错、不挡后续请求"一并收口：T12-A `BlockV3Execution`（1146–1156）设会话级执行阻断，后续模型请求/新工具/自动续跑在准入处被拒。无残余 |
@@ -29,7 +30,6 @@
 | V3-LEGACY-05 | `src/hooks/` 下 `dispatcher.cpp`、`protocol.cpp`、`loader.cpp`、`outbox.cpp` 俱在；`docs/features/extensions/hooks.md` 的 legacy adapter | command hooks 与 Lua 中间件并存。按挂点迁移配置、权限、执行顺序、效果采用和恢复；Post/outbox 尚有调用，不能先删旧分派器 |
 | V3-GAP-02 | `src/telemetry/projector.cpp:138` `Fold(const EventEnvelope&)`；`service.cpp:556` `DiscoverStreams`、`:565/588` 仍只认 main.jsonl | OTLP 投影未迁 v3。先换流发现、上下文/请求/usage 取数与游标，再验重启补投、不重复累计；Collector 配置本身不证明数据链通 |
 | V3-GAP-04 | 第一棒已清（2026-09-24）：`src/app_server/server.cpp` 的 `session_main_path` 按场格式分派（v3 场 `<sessionId>.jsonl`、旧场 main.jsonl，`SessionService::v3_format()` 裁决，不再硬拼）；thread/read、thread/resume 的 lastSeq 游标对齐本场段账行并亮 `sourceSessions` 来源链；thread/resume `startExecution=true` 经 SessionService resume-at-launch 真恢复（v3 源续接同 id、v2 源迁移新场；活场拒、坏源 `resume_source_rejected`），缺省仍只读——行为未变，"只读预览"口径保留在缺省档 | 部分销项。残余归 AppServer 2.0 单：完整 2.0 合同（session 命名空间、事件订阅游标、attach/pause/continue）仍是后续工作 |
-| V3-GAP-05 | `src/workflow/journal.cpp` 全文零处 nodeExecutionId；`workflow/account.hpp:61/83` 字段已有，落账未接 | 编排账与节点执行不能靠换事件名完成迁移。独立节点 session、nodeExecutionId/attempt、output.commit 与失败恢复落地后再清旧桥 |
 | V3-GAP-08 | 总设计 §4.67–4.71；现行 goal/loop/memory 各域与命令入口 | 伞条。Goal、Loop、btw、Memory 新合同含独立实施清单；memory 域召回桥已由 T08 推进（见[已销项](#已销项) V3-GAP-03），其余各域状态照旧。旧功能可用不等于新增持久事务已接；按各自实施项推进，不批量删除现行功能 |
 
 ## 文档旧口径

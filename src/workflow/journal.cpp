@@ -381,6 +381,70 @@ void RunJournal::WriteManifest(const std::string& final_state, const nlohmann::j
 
 // ---- 盘点与恢复 -------------------------------------------------------------
 
+namespace {
+
+// v3 编排账布局(segments/ 在场)的盘点投影:身份/开工时刻取首段
+// workflow.definition.loaded,终态取末段最后一枚 workflow.run.*。旧
+// manifest 路不受影响;两代同根并存,列出时各自如实(GAP-05)。
+void FillFromV3Account(const std::filesystem::path& run_dir, RunStatus& status) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(run_dir / "segments", ec) || ec) {
+        return;
+    }
+    const fs::path first_segment = run_dir / "segments" / "seg-1" / "workflow.jsonl";
+    std::ifstream first(first_segment, std::ios::binary);
+    if (first) {
+        std::string line;
+        while (std::getline(first, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const nlohmann::json event = nlohmann::json::parse(line, nullptr, false);
+            if (event.is_discarded() || !event.is_object()) continue;
+            const std::string kind = event.value("kind", std::string());
+            if (status.started_at.empty()) {
+                status.started_at = event.value("timestamp", std::string());
+            }
+            if (kind == "workflow.definition.loaded") {
+                status.workflow_id = event.value("workflowId", std::string());
+                status.content_hash = event.value("definitionHash", std::string());
+                break;  // 首段首枚即是,不整卷扫
+            }
+        }
+    }
+    // 终态:段序号升序取末段(workflow-runs 目录里的段命名 seg-<n>)。
+    std::vector<std::string> segments;
+    for (const auto& segment : fs::directory_iterator(run_dir / "segments", ec)) {
+        if (segment.is_directory(ec)) {
+            segments.push_back(lubancode::platform::PathToUtf8(segment.path().filename()));
+        }
+        ec.clear();
+    }
+    std::sort(segments.begin(), segments.end());
+    if (segments.empty()) {
+        return;
+    }
+    std::ifstream last(run_dir / "segments" / segments.back() / "workflow.jsonl", std::ios::binary);
+    if (!last) {
+        return;
+    }
+    std::string line;
+    while (std::getline(last, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const nlohmann::json event = nlohmann::json::parse(line, nullptr, false);
+        if (event.is_discarded() || !event.is_object()) continue;
+        const std::string kind = event.value("kind", std::string());
+        if (kind == "workflow.run.completed") {
+            status.final_state = "succeeded";
+        } else if (kind == "workflow.run.failed") {
+            status.final_state = "failed";
+        } else if (kind == "workflow.run.cancelled") {
+            status.final_state = "cancelled";
+        }
+    }
+}
+
+}  // namespace
+
 std::vector<RunStatus> ListRuns(const std::filesystem::path& runs_root) {
     std::vector<RunStatus> out;
     std::error_code ec;
@@ -414,8 +478,15 @@ std::vector<RunStatus> ListRuns(const std::filesystem::path& runs_root) {
         if (def) {
             try {
                 status.definition = nlohmann::json::parse(def);
+                if (status.workflow_version.empty() && status.definition.is_object()) {
+                    status.workflow_version = status.definition.value("version", std::string());
+                }
             } catch (...) {
             }
+        }
+        // v3 编排账(segments/ 在场):manifest 不在,账面补齐。
+        if (status.workflow_id.empty()) {
+            FillFromV3Account(entry.path(), status);
         }
         out.push_back(std::move(status));
     }

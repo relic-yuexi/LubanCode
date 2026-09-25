@@ -1653,11 +1653,15 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
     options.event_sink = context.event_sink;
     options.thread_id = context.thread_id;
     options.id_authority = context.id_authority;
-    // 编排账(workflow 会话归属统一单):账本在场即接——run 起动开轨迹
-    // Journal,逐 attempt 开 node stream;开不出账 run 停在明确失败态。
+    // 编排账(V3-GAP-05):account_root 在场即在新账下跑(WorkflowRunAccount
+    // 单事实源——旧 RunJournal 与旧 v2 编排桥都不启);trajectory_ledger
+    // 不再当编排事实源,但仍递——llm/agent/skill 节点的独立 v3 session
+    // 从宿主会话 spawn,usage 进 /usage 主账口径。开不出账 run 停在明确
+    // 失败态(fail closed)。
     options.trajectory_ledger = context.trajectory;
     if (context.home_lubancode.has_value()) {
         options.runs_root = *context.home_lubancode / "workflow-runs";
+        options.account_root = options.runs_root;  // 与旧 run 同根:两代并存,resume 各按布局走
     }
     if (context.on_run_start) context.on_run_start();
     lubancode::workflow::WorkflowRuntime runtime(std::move(options));
@@ -1841,6 +1845,12 @@ lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(const Workf
         }
         return binding;
     };
+    // 编排账传播(V3-GAP-05):subflow 的子 runtime 沿父同账同根;会话
+    // 账本递给节点独立场的父 spawn 口。
+    wf_exec.trajectory_ledger = ctx.trajectory;
+    if (ctx.home_lubancode != nullptr && ctx.home_lubancode->has_value()) {
+        wf_exec.account_root = lubancode::tools::Utf8ToPath(**ctx.home_lubancode) / "workflow-runs";
+    }
     return wf_exec;
 }
 

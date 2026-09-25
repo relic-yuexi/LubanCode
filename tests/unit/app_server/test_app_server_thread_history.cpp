@@ -574,7 +574,9 @@ TEST_CASE("thread/read: 来源链场——亮来源链,水位对齐本场段不�
         {
             auto own_writer = PlantWrittenV3Session(sessions, own);
             REQUIRE(own_writer.has_value());
-            AttachSource(*own_writer, sessions, ancestor);
+            // fs::path 不隐转 std::string(MSVC 的 string_type 是宽串,
+            // C2664);显式折 generic_string。
+            AttachSource(*own_writer, sessions.generic_string(), ancestor);
             InstallRound(*own_writer, "turn-000001", "本场新问");
         }
 

@@ -48,6 +48,8 @@ class TrajectoryWorkflowNodeBridge;     // 同上:node attempt 账,执行器经�
 
 namespace lubancode::workflow {
 
+class WorkflowNodeSessions;  // 节点独立 v3 场发号局(实现在 node_sessions.hpp)
+
 // ---------------------------------------------------------------------------
 // 状态机(纯函数,单测钉)
 // ---------------------------------------------------------------------------
@@ -174,6 +176,9 @@ struct RuntimeOptions {
     // 无损 outputs/checkpoints + fail-closed 提交)。单事实源——开了它,
     // 上面的 runs_root 旧 journal 与 trajectory_ledger 旧 v2 桥都不启,
     // 不让两本账分别决定成功。空 = 旧路原样(既有测试/调用方)。
+    // GAP-05:账路开时 trajectory_ledger 不再当编排事实源,但仍是节点
+    // 独立场的父会话提供者(v3_main_writer/session 身份)——llm/agent/
+    // skill 节点的场从它 spawn,usage 才进 /usage 主账口径。
     std::filesystem::path account_root;
     // 故障注入(测试专用;生产恒空):编排账每枚事件提交前问一次,返回
     // 稳定码即注入一次提交失败(验证 fail-closed 与崩溃恢复窗口)。
@@ -246,6 +251,9 @@ private:
         lubancode::runtime::TrajectoryWorkflowRunBridge* trajectory = nullptr;
         // 编排账 v3:非空 = 节点生命周期走 fail-closed 提交合同。
         WorkflowRunAccount* v3_account = nullptr;
+        // 节点独立场(GAP-05):v3 账 + 宿主 v3 会话在场时非空——llm/
+        // agent/skill 节点每次 attempt 经它开自己的 v3 session。
+        WorkflowNodeSessions* node_sessions = nullptr;
         // 悬置候选(nodeId -> 原件记录):保存原件后崩溃的执行,到达时
         // 采纳候选继续校验与提交,不重跑(§十)。
         std::map<std::string, OutputCommitRecord>* dangling = nullptr;
