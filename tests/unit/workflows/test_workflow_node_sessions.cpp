@@ -326,9 +326,6 @@ TEST_CASE("GAP-05 案1:模型节点各开独立场,usage 并进 /usage 主账口
     const auto report = ledger->VerifySession();
     for (const auto& edge : report.child_edges) {
         if (!edge.error_code.empty()) {
-            // GAP-05 windows-msvc 诊断(临时):失配案发把具体 error_code
-            // 打出来,配 node_sessions.cpp/reader.cpp 两侧那份诊断日志一起
-            // 定位,不再靠猜。
             MESSAGE("child_edge error_code=", edge.error_code);
         }
         CHECK(edge.error_code.empty());
