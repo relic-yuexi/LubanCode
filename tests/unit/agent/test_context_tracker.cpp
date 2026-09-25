@@ -657,3 +657,27 @@ TEST_CASE("ResolveRestoredContextWindow: 本次明确覆盖 > 匹配身份会话
         CHECK(out.tokens == 1048576);
     }
 }
+
+TEST_CASE("ContextTracker: compact estimate preserves request accounting until fresh usage") {
+    cli::ContextTracker tracker(100000);
+    tracker.ApplyUsage(api::Usage{10000, 400, 52000, 0});
+    const auto cumulative = tracker.session_input_total();
+    const auto requests = tracker.cache_request_history().size();
+    tracker.ApplyContextEstimate(10581);
+    CHECK(tracker.current_tokens() == 10581);
+    CHECK(tracker.current_estimated());
+    CHECK(tracker.UsagePercent() == 11);
+    CHECK(tracker.last_cache_read_tokens() == 52000);
+    CHECK(tracker.session_input_total() == cumulative);
+    CHECK(tracker.cache_request_history().size() == requests);
+    tracker.ApplyUsage(api::Usage{});
+    CHECK(tracker.current_estimated());
+    CHECK(tracker.current_tokens() == 10581);
+    tracker.ApplyUsage(api::Usage{11000, 100});
+    CHECK_FALSE(tracker.current_estimated());
+    CHECK(tracker.current_tokens() == 11100);
+    tracker.ApplyContextEstimate(8000);
+    tracker.ResetSession();
+    CHECK_FALSE(tracker.current_estimated());
+    CHECK(tracker.current_tokens() == 0);
+}

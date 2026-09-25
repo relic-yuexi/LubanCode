@@ -70,3 +70,16 @@ TEST_CASE("空录制器:REC 段收起,与没传等价") {
 }
 
 }  // namespace
+
+TEST_CASE("compact estimate reaches the idle status panel") {
+    lubancode::cli::ContextTracker tracker(100000);
+    tracker.ApplyUsage(lubancode::api::Usage{53000, 400});
+    tracker.ApplyContextEstimate(10581);
+    lubancode::app::StatusPanelInputs inputs;
+    inputs.context_tracker = &tracker;
+    const auto data = lubancode::app::BuildStatusPanelData(
+        inputs, lubancode::config::ToolCallingMode::Json);
+    CHECK(data.used_tokens == 10581);
+    CHECK(data.context_percent == 11);
+    CHECK(data.context_stale);
+}

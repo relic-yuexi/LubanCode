@@ -206,7 +206,8 @@ std::string BuildCacheNote(const ContextTracker& tracker, bool last_usage_report
     }
     if (tracker.last_cache_read_tokens() > 0) {
         const int percent = tracker.last_cache_hit_percent();
-        return trf("status.cache_note_hit", FormatTokenCount(tracker.last_cache_read_tokens()),
+        return (tracker.current_estimated() ? tr("status.cache_previous") : std::string()) +
+               trf("status.cache_note_hit", FormatTokenCount(tracker.last_cache_read_tokens()),
                    percent >= 0 ? std::to_string(percent) : std::string("?"));
     }
     if (!last_usage_reported) {
@@ -490,7 +491,7 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
                                                  std::size_t history_tokens_est, std::int64_t cache_read_tokens,
                                                  std::size_t window_tokens, std::size_t measured_used_tokens,
                                                  const Theme& theme, int bar_width, int cache_hit_percent,
-                                                 const ContextBreakdownDetail* detail) {
+                                                 const ContextBreakdownDetail* detail, bool current_estimated) {
     // plain 主题全部字段是空串,拿 reset 当探针(真主题 reset 恒非空)。
     const bool plain = theme.reset.empty();
     if (bar_width < 0) {
@@ -508,12 +509,14 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
     // 有实测:总量直接用实测(不带 ~),历史 = max(0, 实测总量 - 系统 - 工具)
     //   反推——这样三分项之和恒等于实测总量,不再各估各的打架。
     // 没实测(实测=0,如刚启动):三项全退回字符估,整体标 ~。
-    const bool have_measured = measured_used_tokens > 0;
+    const bool have_measured = measured_used_tokens > 0 && !current_estimated;
     const std::size_t sys_plus_tools = sys_tokens + tools_tokens;
     const std::size_t history_tokens =
         have_measured ? (measured_used_tokens > sys_plus_tools ? measured_used_tokens - sys_plus_tools : 0)
                       : history_tokens_est;
-    const std::size_t used = have_measured ? measured_used_tokens : sys_plus_tools + history_tokens;
+    // 换链后的完整请求估算优先；旧尺分项只作参考，不再借旧实测反推历史。
+    const std::size_t used = (have_measured || current_estimated)
+                                 ? measured_used_tokens : sys_plus_tools + history_tokens;
 
     const std::string label_sys = tr("cmd.context.bd.system");
     const std::string label_tools = tr("cmd.context.bd.tools");
@@ -610,7 +613,7 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
         if (have_measured) {
             history_row += "  " + tr("cmd.context.bd.history_derived");
         }
-        if (cache_read_tokens > 0) {
+        if (cache_read_tokens > 0 && !current_estimated) {
             // 命中率分母只取输入;没回报(-1)只摆命中量,不伪造 0%。
             history_row += cache_hit_percent >= 0
                                ? "   " + trf("cmd.context.bd.cache", FormatTokenCount(cache_read_tokens),
@@ -654,7 +657,8 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
         lines.push_back(category_row(label_autocompact_buffer, buffer_tokens, /*estimated=*/false));
         lines.push_back(category_row(label_free_space, free_tokens, /*estimated=*/false));
     }
-    lines.push_back("  " + tr(have_measured ? "cmd.context.bd.note.measured" : "cmd.context.bd.note.est"));
+    lines.push_back("  " + tr(current_estimated ? "cmd.context.note.compact_estimate" :
+        (have_measured ? "cmd.context.bd.note.measured" : "cmd.context.bd.note.est")));
     return lines;
 }
 

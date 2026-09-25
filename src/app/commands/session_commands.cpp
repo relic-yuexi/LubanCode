@@ -255,7 +255,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
             context_tracker.window_tokens(), context_tracker.current_tokens(), theme,
-            /*bar_width=*/16, context_tracker.last_cache_hit_percent(), breakdown_detail);
+            /*bar_width=*/16, context_tracker.last_cache_hit_percent(), breakdown_detail,
+            context_tracker.current_estimated());
         // 占用卡片(核心,第一组):系统/工具/历史条形图 + 已用/触发线/剩余。
         // FormatContextBreakdown 自带表头"上下文占用分析(窗口 {0})",拼装
         // 规则在 cli 层(批 5a 领地外),原样逐行落盘。
@@ -320,7 +321,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         {
             std::vector<frame::Field> note_fields;
             note_fields.push_back(
-                SentenceField(tr("cmd.context.note.semantics"), frame::FieldAccent::Muted));
+                SentenceField(tr(context_tracker.current_estimated() ? "cmd.context.note.compact_estimate" :
+                                 "cmd.context.note.semantics"), frame::FieldAccent::Muted));
             if (context_tracker.usage_stale()) {
                 note_fields.push_back(
                     SentenceField(tr("cmd.context.note.stale"), frame::FieldAccent::Muted));
@@ -1245,6 +1247,9 @@ V3CompactBranchOutcome RunV3CompactBranch(const std::string& args, const Compact
             if (swapped.has_value()) {
                 in.agent->ReplaceHistory(std::move(*swapped));
                 outcome.runtime_ready = true;
+                if (in.context_tracker != nullptr && result.post_compact_input_tokens.has_value()) {
+                    in.context_tracker->ApplyContextEstimate(*result.post_compact_input_tokens);
+                }
             } else {
                 // T12-A(V3-GAP-07 P0):applied 已落稳、内存换账失败——两笔
                 // 账分开记。已提交链保留(不回写旧链、不重跑摘要覆盖);

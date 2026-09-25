@@ -1637,6 +1637,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                 if (budget_gate_estimator.empty()) {
                     budget_gate_estimator = "main_request_budget_port";
                 }
+                result.post_compact_input_tokens = budget_gate_input_tokens;
                 const bool fits = budget_gate_input_tokens + budget_gate_reserve_tokens <=
                                   profile.main_window_tokens;
                 add_check("post_compact_budget", fits,

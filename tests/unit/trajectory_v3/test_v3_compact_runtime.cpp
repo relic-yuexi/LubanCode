@@ -2192,6 +2192,8 @@ TEST_CASE("AR-10 门禁吃评估口的数字:边界值一分不差,快照是真�
         REQUIRE(metric.contains("budgetGate"));
         CHECK(metric["budgetGate"].value("estimator", std::string()) == "stub-main-v9");
         CHECK(metric["budgetGate"].value("estimatedInputTokens", std::uint64_t{0}) == 91808);
+        REQUIRE(result.post_compact_input_tokens.has_value());
+        CHECK(*result.post_compact_input_tokens == 91808);
         CHECK(metric["budgetGate"].value("outputReserveTokens", std::uint64_t{0}) == 8192);
         CHECK(metric["budgetGate"].value("windowTokens", std::uint64_t{0}) == 100000);
         CHECK(VerifyV3File(harness.jsonl).ok);

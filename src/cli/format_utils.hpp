@@ -225,12 +225,14 @@ struct ContextBreakdownDetail {
 // (标签见 ContextBreakdownDetail 注释),并在"剩余"之后追加两行独立条形
 // ——"自动压缩缓冲"(窗口 − 自动压缩线,固定预留)与"空闲空间"(自动压缩
 // 线 − 已用,下限钉 0)。旧调用点不传这个参数,输出与从前逐字节一致。
+// current_estimated:传入总量来自换链后的完整请求估算，不能标作实测。
 std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens, std::size_t tools_tokens,
                                                  std::size_t history_tokens_est, std::int64_t cache_read_tokens,
                                                  std::size_t window_tokens, std::size_t measured_used_tokens,
                                                  const Theme& theme, int bar_width = 16,
                                                  int cache_hit_percent = -1,
-                                                 const ContextBreakdownDetail* detail = nullptr);
+                                                 const ContextBreakdownDetail* detail = nullptr,
+                                                 bool current_estimated = false);
 
 // ---- 回合视觉收束(终端回合视觉收束单):耗时人话与 turn footer ----------
 

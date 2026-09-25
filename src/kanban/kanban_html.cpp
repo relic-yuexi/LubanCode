@@ -210,7 +210,8 @@ const COLS = [
 
 function el(tag, cls, text) {
   const node = document.createElement(tag);
-  if (cls) node.className = cls;
+)KANBAN"
+R"KANBAN(  if (cls) node.className = cls;
   if (text !== undefined && text !== null) node.textContent = text;
   return node;
 }
@@ -427,7 +428,8 @@ function openProjectModal(p) {
   if (p.checkouts && p.checkouts.length) {
     modal.append(el("div", "section-label", "登记的 checkout"));
     for (const c of p.checkouts) {
-      const row = el("div", "session-row");
+)KANBAN"
+R"KANBAN(      const row = el("div", "session-row");
       row.append(el("span", "t", c.root), el("span", "d", fmtRel(c.last_seen_at_ms)));
       modal.append(row);
     }

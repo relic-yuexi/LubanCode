@@ -30,7 +30,14 @@ ContextTracker::CacheMissKind ContextTracker::ClassifyMiss(bool usage_reported, 
     return cache_read > 0 ? CacheMissKind::Hit : CacheMissKind::UpstreamMiss;
 }
 
+void ContextTracker::ApplyContextEstimate(std::size_t tokens) {
+    current_tokens_ = tokens;
+    current_estimated_ = true;
+    usage_stale_ = false;
+}
+
 void ContextTracker::Update(const api::Usage& usage) {
+    current_estimated_ = false;
     // 统一口径(api::Usage 文件头):input_tokens 已是"非缓存输入",
     // 完整提示词体积 = TotalInputTokens(input + cache_read + cache_creation),
     // 再加输出。三家 wire 摊成同一副语义后,这一只公式对所有家都对——
@@ -73,6 +80,9 @@ void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn
         }
         usage_stale_ = false;
     } else if (flags.known && flags.usage_reported) {
+        if (current_estimated_) {
+            Update(usage);
+        }
         // provider 明报了 usage 而五项皆零:数字没变,但不是"没报"——
         // 不标旧值(那是给缺测的),照实当一次零实测。
         usage_stale_ = false;
@@ -143,6 +153,7 @@ void ContextTracker::ResetSession() {
     // (归 provider),保留——新场首次 /doctor cache 前它仍是"上一次对
     // 这个端点的观测",不冒充新场实测。
     current_tokens_ = 0;
+    current_estimated_ = false;
     last_cache_read_tokens_ = 0;
     last_input_tokens_ = 0;
     usage_stale_ = false;

@@ -55,7 +55,7 @@ lubancode::cli::StatusPanelData BuildStatusPanelData(const StatusPanelInputs& in
         status_data.cache_note = lubancode::cli::BuildCacheNote(tracker, !tracker.usage_stale());
         // 旧值标记同样出自 tracker:回合内 on_usage 局部发布的快照与这里整份
         // 重建读同一只 ContextTracker,数字与 ~ 标记完全一致。
-        status_data.context_stale = tracker.usage_stale();
+        status_data.context_stale = tracker.usage_stale() || tracker.current_estimated();
     }
     // REC 标记:录制中恒挂状态行第一段(见 StatusPanelData::rec)。轨迹档
     // 活动选段的文案(rec_override)压过老录制器标记;空串回落。

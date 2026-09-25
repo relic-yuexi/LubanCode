@@ -863,3 +863,20 @@ TEST_CASE("BuildCacheNote: 本地前缀稳定而 provider 报零,状态栏明写
     plain.ApplyUsage(api::Usage{2100, 10, 0, 0}, "turn-1", 0);
     CHECK(cli::BuildCacheNote(plain, true) == "缓存 0 命中");
 }
+
+TEST_CASE("context breakdown: compact estimate replaces stale total without claiming measured usage") {
+    cli::SetLanguage("zh");
+    const auto lines = FormatContextBreakdown(2749, 11936, 1300, 52100, 1048576,
+        10581, BuiltinTheme("plain"), 16, 98, nullptr, true);
+    std::string output;
+    for (const auto& line : lines) output += line + "\n";
+    CHECK(output.find("~10.6k") != std::string::npos);
+    CHECK(output.find("38.8k") == std::string::npos);
+    CHECK(output.find("52.1k") == std::string::npos);
+    CHECK(output.find("(实测)") == std::string::npos);
+    CHECK(output.find("压缩后完整请求估算") != std::string::npos);
+    cli::ContextTracker tracker(1048576);
+    tracker.ApplyUsage(api::Usage{1000, 400, 52100, 0});
+    tracker.ApplyContextEstimate(10581);
+    CHECK(cli::BuildCacheNote(tracker, true).find("上次请求") != std::string::npos);
+}
