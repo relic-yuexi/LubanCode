@@ -33,10 +33,13 @@
 #include "platform/paths.hpp"
 #include "trajectory/blob_store.hpp"
 #include "trajectory/canonical_json.hpp"
+#include "trajectory/directory.hpp"  // ReadSessionJson:v3 manifest 兜底(legacy_import 场)
 #include "trajectory/export_projection.hpp"  // 中立投影层(harness exporter 共用)
 #include "trajectory/journal.hpp"
 #include "trajectory/metrics.hpp"
 #include "trajectory/replay.hpp"
+#include "trajectory/v3/reader.hpp"          // ReadV3Ledger:v3 manifest 的 journal_last_hash
+#include "trajectory/v3/session_switch.hpp"  // ReadV3FirstLine:v3 流的格式感知存根用
 
 namespace lubancode::trajectory {
 namespace {
@@ -451,6 +454,71 @@ ExportedEpisode BuildBrokenStreamStub(const RawStreamScan& raw,
     return stub;
 }
 
+// v3 主账/子账(单子 OneShot_V3轨迹Harness导出修复 §五):training-v1 的
+// 四路 routing/verification/replayability 轴深度耦合 v2 turn/run 生命周期
+// 事件(v3 没有这些事件,docs/architecture/trajectory-v3-schema.md §381
+// 行"不沿用 v2 run 生命周期事件"),完整对接是独立工作量,不在本单范围
+// (本单 P0 是 harness-v1,已在 harness_exporter.cpp 做真投影)。这里给一枚
+// 如实的 excluded 存根——不是崩溃、不是静默丢弃、不是假成功,reason 明说
+// "格式已识别但训练导出器暂未接线",指路 harness-v1。
+ExportedEpisode BuildV3UnsupportedStreamStub(const std::filesystem::path& session_dir,
+                                             const std::filesystem::path& stream_path,
+                                             const std::string& config_hash) {
+    ExportedEpisode stub;
+    EpisodeRouting routing;
+    routing.structure = "v3_unsupported_by_training_exporter";
+    routing.privacy = "passed";
+    routing.replayability = "unknown";
+    routing.completeness = "incomplete";
+    routing.verification = "unverified";
+    stub.route = EpisodeRoute::Excluded;
+    stub.reasons.push_back("structure.v3_unsupported_by_training_exporter");
+
+    const auto first = v3::ReadV3FirstLine(stream_path);
+    const std::string session_id = first.has_value() && first->contains("sessionId") &&
+                                           (*first)["sessionId"].is_string()
+                                       ? (*first)["sessionId"].get<std::string>()
+                                       : platform::PathToUtf8(session_dir.filename());
+    const std::string run_id = first.has_value() && first->contains("runId") &&
+                                       (*first)["runId"].is_string()
+                                   ? (*first)["runId"].get<std::string>()
+                                   : stream_path.stem().string();
+    nlohmann::json episode;
+    episode["schema"] = kTrainingEpisodeSchema;
+    episode["schema_version"] = kTrainingEpisodeSchemaVersion;
+    episode["episode_id"] = run_id + ":v3_stream";
+    nlohmann::json source;
+    source["workspace_key"] = std::string();
+    source["session_id"] = session_id;
+    source["run_id"] = run_id;
+    source["run_kind"] = std::string();
+    source["turn_id"] = nullptr;
+    source["stream"] = platform::PathToUtf8(stream_path.filename());
+    source["format"] = "v3";
+    source["exporter_version"] = kTrainingExporterVersion;
+    episode["source"] = std::move(source);
+    episode["messages"] = nlohmann::json::array();
+    episode["steps"] = nlohmann::json::array();
+    episode["outcome"] = nlohmann::json::object();
+    episode["evidence"] = nlohmann::json::array();
+    nlohmann::json quality;
+    quality["structure"] = routing.structure;
+    quality["outcome"] = "unknown";
+    quality["verification"] = routing.verification;
+    quality["privacy"] = routing.privacy;
+    quality["replayability"] = routing.replayability;
+    quality["completeness"] = routing.completeness;
+    quality["training_eligible"] = false;
+    quality["reasons"] = stub.reasons;
+    episode["quality"] = std::move(quality);
+    episode["fingerprint"] = ComputeEpisodeFingerprint(run_id, "v3_stream", "", config_hash);
+    stub.episode = std::move(episode);
+    stub.fingerprint = ComputeEpisodeFingerprint(run_id, "v3_stream", "", config_hash);
+    stub.run_id = run_id;
+    stub.turn_key = "v3_stream";
+    return stub;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -587,7 +655,27 @@ std::vector<ExportedEpisode> BuildSessionTrainingEpisodes(const std::filesystem:
     std::vector<ExportedEpisode> episodes;
     const std::string config_hash = ComputeExporterConfigHash(options);
     const BlobStore blobs(session_dir / "artifacts");
-    for (const auto& stream_path : CollectSessionStreams(session_dir)) {
+    // 格式分派(单子 §五:同查同修,格式感知的发现层,不把 V3 硬送进
+    // FoldStreamReplay 的 V2 折叠——两代事件模型字段不兼容,硬塞只会得到
+    // "碰巧解析成功的垃圾"或"看似合理的 verify_failed"假象)。v3 主账/
+    // 子账给格式感知的 excluded 存根(BuildV3UnsupportedStreamStub);
+    // workflow 编排账恒 v2,走原路不变。
+    const auto discovery = projection::DiscoverSessionStreams(session_dir);
+    if (discovery.error.has_value()) {
+        return episodes;  // 纯引擎不决策错误码,调用方按 discovery.error 报诊断。
+    }
+    // workflow 编排账(恒 v2)集合:按 path 成员判断,不碰 fs::path 的原生
+    // 字符串类型(Windows native() 是 wstring,直接塞 char* 是 MSVC 独有雷)。
+    const std::set<std::filesystem::path> workflow_streams(
+        [&] {
+            const auto list = projection::CollectWorkflowStreams(session_dir);
+            return std::set<std::filesystem::path>(list.begin(), list.end());
+        }());
+    for (const auto& stream_path : discovery.streams) {
+        if (discovery.format == "v3" && workflow_streams.count(stream_path) == 0) {
+            episodes.push_back(BuildV3UnsupportedStreamStub(session_dir, stream_path, config_hash));
+            continue;
+        }
         const RawStreamScan raw = ScanStreamRaw(stream_path);
         const auto fold = FoldStreamReplay(stream_path);
         if (!fold.ok()) {
@@ -635,16 +723,25 @@ TrainingExportReport ExportSessionTrainingV1(const std::filesystem::path& sessio
     std::error_code ec;
     if (!std::filesystem::is_directory(session_dir, ec)) {
         report.error_code = "export.no_session_dir";
-        report.message = "session 目录不存在(会话没开 trajectory 便没有账,不造假)";
+        report.message =
+            "session 目录不存在(会话没开 trajectory 便没有账,不造假): " + platform::PathToUtf8(session_dir);
         return report;
     }
-    const auto streams = CollectSessionStreams(session_dir);
-    if (streams.empty()) {
+    // 格式分派 + 稳定诊断(与 harness_exporter 同一套发现层,§五"同查同修")。
+    const auto discovery = projection::DiscoverSessionStreams(session_dir);
+    if (discovery.error.has_value()) {
+        report.error_code = discovery.error->code;
+        report.message = discovery.error->message + "; session_dir=" + platform::PathToUtf8(session_dir);
+        return report;
+    }
+    if (discovery.streams.empty()) {
         report.error_code = "export.no_streams";
-        report.message = "session 目录里没有 JSONL(没开 trajectory 的会话没有账)";
+        report.message = "session 目录(" + platform::PathToUtf8(session_dir) + ",格式=" +
+                         (discovery.format.empty() ? std::string("unknown") : discovery.format) +
+                         ")里没有可导出的账目——不是没开 trajectory(本版恒开),是没找到可读的主账/子账文件";
         return report;
     }
-    report.streams = streams.size();
+    report.streams = discovery.streams.size();
 
     const auto episodes = BuildSessionTrainingEpisodes(session_dir, options);
     report.episodes = episodes.size();
@@ -680,12 +777,29 @@ TrainingExportReport ExportSessionTrainingV1(const std::filesystem::path& sessio
     manifest["format"] = kTrainingExportFormat;
     nlohmann::json source;
     source["session_id"] = platform::PathToUtf8(session_dir.filename());
-    const auto main_fold = FoldStreamReplay(session_dir / "main.jsonl");
-    if (main_fold.ok()) {
-        source["journal_last_hash"] = main_fold.state.integrity.last_event_hash;
-    }
+    source["format"] = discovery.format;
     std::int64_t last_wall_time = 0;
-    for (const auto& stream_path : streams) {
+    if (discovery.format == "v3") {
+        // v3 主账没有 main.jsonl 可折;last_event_hash 取主账末行,
+        // workspace_key 走 manifest 兜底(v3 信封不带,legacy_import 场才
+        // 有 session.json——与 accounting::ReadSessionUsageV3 同一口径)。
+        if (const auto ledger = v3::ReadV3Ledger(discovery.v3_main_stream); ledger.has_value()) {
+            if (const auto last = ledger->LastEntry(); last.has_value()) {
+                source["journal_last_hash"] = last->is_message
+                                                  ? ledger->messages[last->index].line_hash
+                                                  : ledger->events[last->index].line_hash;
+            }
+        }
+        if (const auto manifest_read = ReadSessionJson(session_dir); manifest_read.has_value()) {
+            source["workspace_key"] = manifest_read->workspace_key;
+        }
+    } else {
+        const auto main_fold = FoldStreamReplay(session_dir / "main.jsonl");
+        if (main_fold.ok()) {
+            source["journal_last_hash"] = main_fold.state.integrity.last_event_hash;
+        }
+    }
+    for (const auto& stream_path : discovery.streams) {
         const RawStreamScan raw = ScanStreamRaw(stream_path);
         last_wall_time = std::max(last_wall_time, raw.last_wall_time_ms);
         if (!source.contains("workspace_key") && !raw.workspace_key.empty()) {
@@ -782,7 +896,11 @@ TrainingExportReport ExportWorkspaceTrainingV1(const std::filesystem::path& work
     }
     std::sort(session_dirs.begin(), session_dirs.end());
     for (const auto& session_dir : session_dirs) {
-        if (CollectSessionStreams(session_dir).empty()) {
+        // 格式感知的空账判定(与单场导出同一套发现层):目录存在但格式
+        // 裁决失败(如 V2/V3 并存)时也算"没账可导",批量扫描不为单个坏
+        // 目录整体中止——个案诊断走单场 ExportSessionTrainingV1。
+        const auto probe = projection::DiscoverSessionStreams(session_dir);
+        if (probe.error.has_value() || probe.streams.empty()) {
             continue;  // 没账的目录不造假
         }
         const auto one = ExportSessionTrainingV1(session_dir, options);

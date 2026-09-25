@@ -1,0 +1,41 @@
+# One-shot V3 轨迹导出修复：Harbor `--output` 报 `export.no_streams`
+
+- 状态：已收官（源码层，2026-09-25）。PR `fix(trajectory): one-shot 导出认 V3 主账,harness 投影真接线——export.no_streams 收口`。§二.2/§二.3/§二.4/§二.5 已落;§二.1(固定现场核安装包)、§三"进程级"与"发布包"两项待真机验,详见 PR body。
+- 级别：P0。范围：V3 session 到 `harness-v1` 的只读导出、诊断与回归；不改 canonical Journal。
+- 版本边界：现场安装包 `v0.26.268-beta.1-linux-x64`（CLI `0.26.268`）；本单源码观察取自当前 `0.26.281` 工作树。实施前核对发布包对应源码与容器现场。
+
+## 一、现场与判断
+
+Harbor 以 `lubancode --yes --output /logs/agent/lubancode.trajectory.jsonl '<任务>' < /dev/null` 运行。41 题中 20 个非零退出均带 `export.no_streams`；`prove-plus-comm` 在最终回答后导出失败、退出 3，verifier 却给 `reward=1.0`。另 21 题触发 900 秒超时，另行排查，不能归为本故障。
+
+当前源码：`src/app/one_shot.cpp` 用 `SessionService` 建场，`RunTurn` 后先 `Close` 再导出；执行状态为 0 而导出失败时返回 3。`src/trajectory/v3/session_switch.cpp` 默认开 V3，`src/trajectory/directory.cpp` 将 V3 主账写在 `<session-id>.jsonl`。但 `src/trajectory/export_projection.hpp::CollectSessionStreams` 只认根下 `main.jsonl` 和几类子账，漏掉 V3 主账；`src/trajectory/harness_exporter.cpp` 因清单为空报 `export.no_streams`。报错中“没开 trajectory”与恒开配置不符。
+
+这是当前源码里确凿的 V3 文件发现缺口，**尚不能据此证明故障安装包每场都已写稳主账**。即便补入文件名，导出器后续仍走 V2 `FoldStreamReplay` 及旧逐行投影，不能宣称 V3 请求、工具和 usage 已导对。
+
+## 二、实施顺序
+
+1. 固定现场：在故障容器或保留的 session 数据中，按 `session_id` 查 `session.json`、`<id>.jsonl`、`main.jsonl`、`operations.jsonl`；记录实际目录、首行 schema、大小、末行和验证结果。核对二进制构建来源、V3 环境变量、状态根和启动 cwd。
+2. 按格式分派：复用 V3 主账探测、reader 与验链；V2 保持旧路。主账缺失、不可读、空首行、坏 schema、V2/V3 并存、坏链各给稳定诊断。扫描错误不得吞成“没有流”；`operations.jsonl` 不得冒充 canonical 主账。
+3. 做 V3 到 `harness-v1` 的真实投影：主 run 与子账按提交事实关联；从 V3 读取消息、请求、工具、usage/cache、环境、终态、artifact。保住脱敏、大小限制、原子写与 SHA-256 收据。未知或残缺事实标 `partial`/`unknown`，不伪装成功、不编 token；若字段语义不兼容，明确版本化。
+4. 修正文案与日志：`export.no_streams` 不再暗示 trajectory 关闭；报实际 session 目录、主账格式及拒绝原因。保留补导命令。执行成功与导出失败须分型；是否改退出码 3 与 Harbor 成败契约另行定夺，不靠吞错掩盖缺轨迹。
+5. 检查共用层：`training_exporter.cpp` 也用 `CollectSessionStreams`，测它对 V3 的发现及投影。必要时建立格式感知的共用发现层，绝不把 V3 硬送入 V2 replay；V2 旧账保持原样。
+
+## 三、验收门
+
+- 单测：真实 V3 Writer 建场，写入请求、含 cache 分列的 usage、工具调用、最终回答并收口；`harness-v1` 导出成功，逐字段与原账对照，验证 SHA、脱敏和重复补导。不得只测手造 `main.jsonl`。
+- 格式矩阵：默认 V3、显式 V2、仅 V3 主账、缺主账、空文件、坏首行、坏链、V2/V3 并存、缺子账、目标写失败；分别断言稳定错误码、无假成功、目标不留半截。补 `training-v1` 对应回归。
+- 进程级：Linux 下 stdin `/dev/null`、`--yes --output`，用受控 fixture 或可复现 provider，验退出码 0、收据、输出文件、主账和 token 对账；导出失败场仍能定位执行结果并补导。
+- 发布包：先用 `v0.26.268-beta.1` 现场数据核诊断，再用修复后的 Linux x64 包在 Harbor 重跑先前失败样本，逐项记录 agent 退出、verifier reward、轨迹文件与用量汇总。900 秒超时另列，不宣称由本修复解决。
+
+## 四、不在本单
+
+不以 `features.trajectory` 开关解释 V3 缺账；不改写原始 Journal；不把 verifier 通过当作轨迹完整；不以强制返回 0 代替修复。
+
+## 五、收官记录(2026-09-25)
+
+- §二.2 格式分派:`export_projection.hpp` 新增 `DiscoverSessionStreams`(复用 `v3::ProbeV3SessionStream`,与 accounting/replay.cpp 同一套探测件),主账缺失/不可读/空首行/坏 schema/V2V3 并存各给 `export.session_format_*` 稳定码;`CollectSessionStreams` 保留但仅作 v2 老路壳。
+- §二.3 真投影:`harness_exporter.cpp` 新增 `BuildSessionHarnessRecordsV3`——吃 `V3Ledger`/`FoldToolActions`/`ExpandResultPreview`/`FoldPressureFacts`,messages/requests/tools/usage/environment/outcome 全项现拼;v3 无 turn/run 生命周期事件,turn 终态与 outcome 分型用 `v3.*`/`budget_exhausted` 等词表显式版本化,不硬塞 v2 `ClassifyHarnessOutcome`。workflow 编排账(恒 v2)与 v3 主账并行处理,走既有 v2 单流引擎不变。
+- §二.4 文案:`export.no_streams`/格式冲突类错误均带 session_dir、格式与补导命令;one_shot.cpp 未改动(报文改进已通过 report.message 透传,退出码 3 的去留仍按现状,未重新定夺)。
+- §二.5 共用层:`training_exporter.cpp` 同接 `DiscoverSessionStreams`;v3 流给 `structure.v3_unsupported_by_training_exporter` 的诚实 excluded 存根(training-v1 的四路 routing 深度耦合 v2 turn/run 事件,完整对接不在本单工作量内,已在 PR body 标注)。
+- §三 单测/格式矩阵:`tests/unit/trajectory/test_harness_exporter_v3.cpp` 新增,真实 `v3::V3Writer` 建场覆盖单轮真投影(SHA/重复补导)、子代理 `parent_run_id` 关联、缺主账/空文件/坏首行/坏 schema/V2V3 并存/坏链/缺子账七类格式矩阵;显式 v2/目标写失败两格由既有 `test_harness_exporter.cpp`(940 行)覆盖,未重复。
+- §二.1(固定现场核 `v0.26.268-beta.1` 容器数据)、§三"进程级"(Harbor 容器内跑)、§三"发布包"(Harbor 重跑失败样本)三项**未做,需真机/容器环境,标待验**。

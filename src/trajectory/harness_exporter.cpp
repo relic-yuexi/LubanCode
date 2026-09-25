@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <map>
 #include <set>
@@ -33,10 +34,14 @@
 #include "privacy/secret_scan.hpp"
 #include "trajectory/blob_store.hpp"
 #include "trajectory/canonical_json.hpp"
+#include "trajectory/directory.hpp"       // ReadSessionJson:v3 场 workspace_key 兜底(v3 信封不带)
+#include "trajectory/event.hpp"           // RunKindName
 #include "trajectory/export_projection.hpp"
 #include "trajectory/journal.hpp"
 #include "trajectory/metrics.hpp"
 #include "trajectory/replay.hpp"
+#include "trajectory/v3/reader.hpp"        // V3Ledger/FoldToolActions/ExpandResultPreview/FoldPressureFacts
+#include "trajectory/v3/session_switch.hpp"  // ProbeV3SessionStream(经 export_projection 的 DiscoverSessionStreams)
 
 namespace lubancode::trajectory {
 namespace {
@@ -139,6 +144,782 @@ nlohmann::json ProjectTextBlock(const std::string& block_type, const nlohmann::j
                               {"head", CutUtf8(redacted, 512)}};
     }
     return nlohmann::json{{"type", block_type}, {"text", redacted}};
+}
+
+// ---------------------------------------------------------------------------
+// V3 引擎(单子 §二.3:V3 → harness-v1 真投影)。
+//
+// v3 无 turn/run 生命周期事件(docs/architecture/trajectory-v3-schema.md
+// §381 行:"不沿用 v2 run 生命周期事件……开场=首行 system+session.started,
+// 封口=session.ended"),不借道 FoldStreamReplay/ScanStreamRaw——两代事件
+// 模型字段不兼容,硬塞只会产出假成功(单子明令"不硬塞 V2 replay")。这里
+// 直接吃 V3Ledger(ReadV3Ledger 已验链)+ FoldToolActions(actionId 折叠),
+// messages/tools/requests/usage/environment/outcome 各自现拼;字段不兼容
+// 处(turn 终态、outcome 分型)用 v3.* 前缀显式版本化,不冒充 v2 同名值。
+// ---------------------------------------------------------------------------
+
+// 折进会话正文的判据(v2 PurposeFoldsIntoConversation 的 v3 对应):只有
+// conversation purpose 才是真对话——compact/起名/抽取/验收/摘要一类宿主
+// 内部回合不进 messages[](与 v2 同一条界线,词表换成 v3 枚举)。
+bool V3PurposeFoldsIntoConversation(v3::MessagePurpose purpose) {
+    return purpose == v3::MessagePurpose::Conversation;
+}
+
+// 环境快照(T11-C 事实 session.environment.captured):取最后一枚(捕获
+// 幂等,一场一次;仍取最后以防迁移/重放场例外)。快照 blob 结构与 v2
+// run.environment.captured 同一台机器(BuildEnvironmentCapturePayload 共
+// 用),字段名一致——provider/wire/model/model_parameters/
+// config_snapshot_redacted。没采集的场如实报 snapshot_available=false,
+// 不拿今天环境补昨天事实。
+nlohmann::json BuildV3Environment(const v3::V3Ledger& ledger, const BlobStore& blobs,
+                                  std::vector<PrivacyFinding>* findings) {
+    nlohmann::json environment;
+    const v3::EventLine* captured = nullptr;
+    for (const auto& event : ledger.events) {
+        if (event.kind == v3::EventKindV3::SessionEnvironmentCaptured) {
+            captured = &event;
+        }
+    }
+    if (captured == nullptr) {
+        environment["snapshot_available"] = false;
+        return environment;
+    }
+    environment["replay_level"] = GetString(captured->payload, "replayLevel");
+    environment["gaps"] = captured->payload.contains("gaps") && captured->payload["gaps"].is_array()
+                              ? captured->payload["gaps"]
+                              : nlohmann::json::array();
+    const auto ref = captured->payload.contains("snapshotRef")
+                         ? BlobRef::FromJson(captured->payload["snapshotRef"])
+                         : std::nullopt;
+    if (!ref.has_value()) {
+        environment["snapshot_available"] = false;
+        return environment;
+    }
+    const auto read = blobs.ReadVerified(*ref);
+    if (!read.has_value()) {
+        environment["snapshot_available"] = false;
+        return environment;
+    }
+    const auto snapshot = nlohmann::json::parse(*read, nullptr, false);
+    if (snapshot.is_discarded() || !snapshot.is_object()) {
+        environment["snapshot_available"] = false;
+        return environment;
+    }
+    environment["lubancode_version"] = GetString(snapshot, "lubancode_version");
+    environment["provider"] = GetString(snapshot, "provider");
+    environment["wire"] = GetString(snapshot, "wire");
+    environment["model"] = GetString(snapshot, "model");
+    environment["model_parameters"] =
+        snapshot.contains("model_parameters") && snapshot["model_parameters"].is_object()
+            ? snapshot["model_parameters"]
+            : nlohmann::json::object();
+    if (snapshot.contains("config_snapshot_redacted")) {
+        environment["config_snapshot_redacted"] =
+            RedactJsonValue(snapshot["config_snapshot_redacted"], "environment", findings);
+    }
+    return environment;
+}
+
+// v3 message.content 两种合法形状(生产写法注记,V3RecordInput/
+// AppendToolMessage 同款:"单块纯文本落 string,读取投影两读法都认";
+// 多块才用数组)——本函数把 string/BlobRef 单块与数组多块统一折成
+// harness 的块数组,不因形状漏读一种(字段不兼容处明确版本化,不是漏)。
+nlohmann::json V3ProjectMessageContent(const nlohmann::json& content, const BlobStore& blobs,
+                                       const HarnessExportOptions& options, const std::string& event_id,
+                                       std::vector<PrivacyFinding>* findings, std::uint64_t inline_cap) {
+    nlohmann::json out = nlohmann::json::array();
+    if (content.is_string() || (content.is_object() && BlobRef::FromJson(content).has_value())) {
+        const nlohmann::json synthetic = nlohmann::json{{"text", content}};
+        out.push_back(ProjectTextBlock("text", synthetic, blobs, options, event_id, findings, inline_cap));
+        return out;
+    }
+    if (!content.is_array()) {
+        return out;  // 异形内容(既非 string/BlobRef 也非数组):不猜,空块
+    }
+    for (const auto& block : content) {
+        if (!block.is_object()) {
+            continue;
+        }
+        const std::string type = GetString(block, "type");
+        if (type == "text") {
+            out.push_back(ProjectTextBlock("text", block, blobs, options, event_id, findings, inline_cap));
+        } else if (type == "thinking") {
+            if (options.include_thinking) {
+                out.push_back(
+                    ProjectTextBlock("thinking", block, blobs, options, event_id, findings, inline_cap));
+            } else {
+                out.push_back(nlohmann::json{{"type", "thinking_ref"},
+                                             {"omitted_reason", "thinking_not_authorized"},
+                                             {"source_event_id", event_id}});
+            }
+        } else {
+            out.push_back(block);
+        }
+    }
+    return out;
+}
+
+// v3 assistant 消息的 tool_calls 块是 OpenAI 形状(§4.15 声明块:
+// {id,type:"function",function:{name,arguments(json 字符串)}}),与 v2
+// harness 输出的 {call_id,name,arguments(对象)} 不同——这里是"字段不兼容
+// 处明确版本化"的一个实例,解析后照样落 call_id/name/arguments 三键
+//(下游读者看到的形状一致,只是来源解析方式不同,arguments 一律已还原
+// 成对象并脱敏)。
+nlohmann::json V3ProjectToolCallBlock(const nlohmann::json& call, const std::string& event_id,
+                                      std::vector<PrivacyFinding>* findings) {
+    nlohmann::json out;
+    out["call_id"] = GetString(call, "id");
+    const auto function = call.find("function");
+    if (function != call.end() && function->is_object()) {
+        out["name"] = GetString(*function, "name");
+        const auto args_it = function->find("arguments");
+        nlohmann::json arguments = nlohmann::json::object();
+        if (args_it != function->end() && args_it->is_string()) {
+            const auto parsed = nlohmann::json::parse(args_it->get<std::string>(), nullptr, false);
+            arguments = parsed.is_discarded() ? nlohmann::json(args_it->get<std::string>())
+                                              : std::move(parsed);
+        } else if (args_it != function->end()) {
+            arguments = *args_it;
+        }
+        out["arguments"] = RedactJsonValue(arguments, event_id, findings);
+    } else {
+        out["name"] = std::string();
+        out["arguments"] = nlohmann::json::object();
+    }
+    return out;
+}
+
+// 该 turn_id 组内最后一枚对话面消息的 completion_status(缺省视为
+// complete,§4.43"completion_status 缺省 complete")。找不到已完成的
+// assistant 回合(整轮还在进行/宿主崩在半路)给 nullopt——turn 判"open"。
+std::optional<v3::CompletionStatus> V3LastConversationCompletion(
+    const v3::V3Ledger& ledger, const std::string& turn_id, bool* found_assistant) {
+    *found_assistant = false;
+    std::optional<v3::CompletionStatus> status;
+    for (const auto& entry : ledger.timeline) {
+        if (!entry.is_message) {
+            continue;
+        }
+        const v3::MessageLine& message = ledger.messages[entry.index];
+        if (!message.turn_id.has_value() || *message.turn_id != turn_id) {
+            continue;
+        }
+        if (message.purpose != v3::MessagePurpose::Conversation) {
+            continue;
+        }
+        if (GetString(message.message, "role") != "assistant") {
+            continue;
+        }
+        *found_assistant = true;
+        status = message.completion_status.value_or(v3::CompletionStatus::Complete);
+    }
+    return status;
+}
+
+// turn 终态 token(§二.3"字段不兼容处明确版本化"):v3 没有 turn.completed/
+// failed/cancelled 事件,不冒充 v2 同名值,一律 v3.turn_* 前缀。
+const char* V3TurnTerminalToken(const std::optional<v3::CompletionStatus>& status, bool found_assistant) {
+    if (!found_assistant) {
+        return "v3.turn_open";  // 尚无模型回合收口(进行中/宿主崩在半路)
+    }
+    switch (status.value_or(v3::CompletionStatus::Complete)) {
+        case v3::CompletionStatus::Complete:
+            return "v3.turn_complete";
+        case v3::CompletionStatus::Interrupted:
+            return "v3.turn_interrupted";
+        case v3::CompletionStatus::Truncated:
+            return "v3.turn_truncated";
+    }
+    return "v3.turn_open";
+}
+
+// outcome 分型(v3 版,§二.3/§四:未知或残缺标 partial/unknown,不伪装
+// 成功;不借 v2 ClassifyHarnessOutcome 的 run.completed/failed/cancelled
+// 词表——v3 没有这些事件,硬套即造假)。判据全部取自账上真实存在的行:
+//   1. 没有 session.ended:整场未封口(崩溃/被杀在半路),partial;
+//   2. 有工具处于 failed/result_missing/selected_no_message/
+//      message_not_admitted(FoldToolActions 折叠出的缺口态):failure;
+//   3. 最后一枚对话面 assistant 回合 completion_status==interrupted:
+//      cancelled;
+//   4. ……==trutruncated 且账上有 context.pressure.recorded verdict=
+//      exceeded_denied(FoldPressureFacts 现成投影):budget_exhausted
+//     (无该证据的截断只降级 partial,不空口咬定预算);
+//   5. 其余(封了口、无工具缺口、末回合 complete):success。
+std::string ClassifyHarnessOutcomeV3(const v3::V3Ledger& ledger,
+                                     const std::vector<v3::ToolActionSnapshot>& tools) {
+    bool session_ended = false;
+    for (const auto& event : ledger.events) {
+        if (event.kind == v3::EventKindV3::SessionEnded) {
+            session_ended = true;
+            break;
+        }
+    }
+    if (!session_ended) {
+        return "partial";
+    }
+    bool tool_trouble = false;
+    for (const auto& tool : tools) {
+        if (tool.folded_status == "failed" || tool.folded_status == "result_missing" ||
+            tool.folded_status == "selected_no_message" ||
+            tool.folded_status == "message_not_admitted") {
+            tool_trouble = true;
+            break;
+        }
+    }
+    // 末回合终态:整份账最后一个带 turn_id 的对话面 assistant 消息。
+    std::string last_turn_id;
+    for (const auto& entry : ledger.timeline) {
+        if (!entry.is_message) {
+            continue;
+        }
+        const v3::MessageLine& message = ledger.messages[entry.index];
+        if (message.turn_id.has_value() && message.purpose == v3::MessagePurpose::Conversation) {
+            last_turn_id = *message.turn_id;
+        }
+    }
+    bool found_assistant = false;
+    std::optional<v3::CompletionStatus> last_status =
+        last_turn_id.empty() ? std::nullopt
+                             : V3LastConversationCompletion(ledger, last_turn_id, &found_assistant);
+    if (found_assistant && last_status == v3::CompletionStatus::Interrupted) {
+        return "cancelled";
+    }
+    if (found_assistant && last_status == v3::CompletionStatus::Truncated) {
+        for (const auto& fact : v3::FoldPressureFacts(ledger)) {
+            if (fact.verdict == "exceeded_denied") {
+                return "budget_exhausted";
+            }
+        }
+        return "partial";  // 截断但没有预算证据:如实降级,不空口咬定原因
+    }
+    if (tool_trouble) {
+        return "failure";
+    }
+    return "success";
+}
+
+// v3 主/子账一行(单子 §二.3 全项:messages/requests/tools/usage+cache/
+// 环境/终态/artifact)。parent_run_id/parent_call_id 由调用方(树遍历)按
+// 真实父子关系递进,workspace_key 走 manifest 兜底(v3 信封不带,纯 v3
+// 场读不到 manifest 时留空——不伪造,与 accounting::ReadSessionUsageV3
+// 同一口径)。
+nlohmann::json BuildV3NodeHarnessRecord(const std::filesystem::path& session_dir,
+                                        const v3::V3Ledger& ledger, bool is_root,
+                                        const std::optional<std::string>& parent_run_id,
+                                        const std::optional<std::string>& parent_call_id,
+                                        const std::map<std::string, std::string>& child_run_id_by_action,
+                                        const BlobStore& blobs, const HarnessExportOptions& options,
+                                        std::optional<int> process_exit_code,
+                                        const std::string& config_hash,
+                                        const std::string& workspace_key) {
+    const std::string exported_at = NowUtcIso8601();
+    std::vector<PrivacyFinding> findings;
+
+    nlohmann::json record;
+    record["schema"] = kHarnessTrajectorySchema;
+    record["schema_version"] = kHarnessTrajectorySchemaVersion;
+    record["exporter_version"] = kHarnessExporterVersion;
+    record["session_id"] = ledger.session_id;
+    record["workspace_key"] = workspace_key;
+    record["run_id"] = ledger.run_id;
+    record["parent_run_id"] =
+        parent_run_id.has_value() ? nlohmann::json(*parent_run_id) : nlohmann::json(nullptr);
+    if (parent_call_id.has_value()) {
+        record["parent_call_id"] = *parent_call_id;
+    }
+    std::string run_kind_name = RunKindName(RunKind::Subagent);
+    if (is_root) {
+        run_kind_name = RunKindName(RunKind::MainSession);
+        for (const auto& event : ledger.events) {
+            if (event.kind == v3::EventKindV3::SessionStarted) {
+                const std::string declared = GetString(event.payload, "runKind");
+                if (!declared.empty()) {
+                    run_kind_name = declared;
+                }
+                break;  // session.started 是第二行,只此一枚
+            }
+        }
+    }
+    record["run_kind"] = run_kind_name;
+    record["environment"] = BuildV3Environment(ledger, blobs, &findings);
+
+    const std::vector<v3::ToolActionSnapshot> tool_snapshots = v3::FoldToolActions(ledger);
+    std::map<std::string, const v3::ToolActionSnapshot*> tools_by_action;
+    for (const auto& tool : tool_snapshots) {
+        tools_by_action[tool.tool_call_id] = &tool;
+    }
+
+    // ---- turns(§二.3:字段不兼容处明确版本化,terminal 用 v3.turn_* 词表)
+    {
+        std::vector<std::string> turn_order;
+        std::set<std::string> seen_turns;
+        for (const auto& entry : ledger.timeline) {
+            if (!entry.is_message) {
+                continue;
+            }
+            const v3::MessageLine& message = ledger.messages[entry.index];
+            if (!message.turn_id.has_value() || message.purpose != v3::MessagePurpose::Conversation) {
+                continue;
+            }
+            if (seen_turns.insert(*message.turn_id).second) {
+                turn_order.push_back(*message.turn_id);
+            }
+        }
+        nlohmann::json turns = nlohmann::json::array();
+        for (const std::string& turn_id : turn_order) {
+            std::string trigger;
+            for (const auto& entry : ledger.timeline) {
+                if (!entry.is_message) {
+                    continue;
+                }
+                const v3::MessageLine& message = ledger.messages[entry.index];
+                if (message.turn_id.has_value() && *message.turn_id == turn_id &&
+                    message.purpose == v3::MessagePurpose::Conversation &&
+                    GetString(message.message, "role") == "user") {
+                    trigger = v3::MessageOriginName(message.origin);
+                    break;
+                }
+            }
+            bool found_assistant = false;
+            const auto status = V3LastConversationCompletion(ledger, turn_id, &found_assistant);
+            turns.push_back(nlohmann::json{{"turn_id", turn_id},
+                                           {"trigger", trigger},
+                                           {"terminal", V3TurnTerminalToken(status, found_assistant)},
+                                           {"claimed_outcome", nullptr},
+                                           {"reason", nullptr}});
+        }
+        record["turns"] = std::move(turns);
+    }
+
+    // ---- messages(seq 序;只留 conversation purpose、role != system) ----
+    // ---- 顺路建 finish_reason 索引(model.response.completed.finishReason,
+    //      按 requestId 配对——v3 把它记在事件 payload,不在 message 上) ----
+    std::map<std::string, std::string> finish_reason_by_request;
+    for (const auto& event : ledger.events) {
+        if (event.kind == v3::EventKindV3::ModelResponseCompleted && event.request_id.has_value()) {
+            const std::string reason = GetString(event.payload, "finishReason");
+            if (!reason.empty()) {
+                finish_reason_by_request[*event.request_id] = reason;
+            }
+        }
+    }
+
+    nlohmann::json messages = nlohmann::json::array();
+    // requests[]:按 requestId 首见序累计(assistant 消息或失败事件皆可
+    // 触发首见)。
+    std::vector<std::string> request_order;
+    std::map<std::string, nlohmann::json> request_rows;
+    const auto ensure_request_row = [&](const std::string& request_id) -> nlohmann::json& {
+        auto it = request_rows.find(request_id);
+        if (it == request_rows.end()) {
+            request_order.push_back(request_id);
+            nlohmann::json row;
+            row["request_id"] = request_id;
+            row["purpose"] = nullptr;
+            row["model"] = std::string();
+            row["provider"] = std::string();
+            row["wire"] = std::string();
+            row["output_state"] = "unknown";
+            row["stop_reason"] = std::string();
+            row["usage"] = nullptr;
+            it = request_rows.emplace(request_id, std::move(row)).first;
+        }
+        return it->second;
+    };
+
+    for (const auto& entry : ledger.timeline) {
+        if (!entry.is_message) {
+            continue;
+        }
+        const v3::MessageLine& message = ledger.messages[entry.index];
+        const std::string role = GetString(message.message, "role");
+        if (message.request_id.has_value()) {
+            nlohmann::json& row = ensure_request_row(*message.request_id);
+            row["output_state"] = "committed";
+            if (message.provider.has_value()) {
+                row["provider"] = *message.provider;
+            }
+            if (message.wire.has_value()) {
+                row["wire"] = *message.wire;
+            }
+            if (message.model.has_value()) {
+                row["model"] = *message.model;
+            }
+            row["purpose"] = v3::MessagePurposeName(message.purpose);
+            if (message.usage.has_value()) {
+                row["usage"] = *message.usage;
+            }
+            const auto fr = finish_reason_by_request.find(*message.request_id);
+            if (fr != finish_reason_by_request.end()) {
+                row["stop_reason"] = fr->second;
+            }
+        }
+        if (!V3PurposeFoldsIntoConversation(message.purpose) || role == "system") {
+            continue;
+        }
+        nlohmann::json content = nlohmann::json::array();
+        const auto content_it = message.message.find("content");
+        if (content_it != message.message.end()) {
+            content = V3ProjectMessageContent(*content_it, blobs, options, message.message_id, &findings,
+                                              std::numeric_limits<std::uint64_t>::max());
+        }
+        nlohmann::json out;
+        out["role"] = role;
+        if (role == "user") {
+            out["origin"] = v3::MessageOriginName(message.origin);
+            if (message.origin != v3::MessageOrigin::Human) {
+                out["injected"] = true;
+            }
+        } else if (role == "assistant") {
+            out["origin"] = "provider_model";
+            if (message.request_id.has_value()) {
+                out["request_id"] = *message.request_id;
+                const auto fr = finish_reason_by_request.find(*message.request_id);
+                out["stop_reason"] = fr != finish_reason_by_request.end() ? fr->second : std::string();
+            }
+            const auto calls_it = message.message.find("tool_calls");
+            if (calls_it != message.message.end() && calls_it->is_array() && !calls_it->empty()) {
+                nlohmann::json tool_calls = nlohmann::json::array();
+                for (const auto& call : *calls_it) {
+                    if (call.is_object()) {
+                        tool_calls.push_back(
+                            V3ProjectToolCallBlock(call, message.message_id, &findings));
+                    }
+                }
+                out["tool_calls"] = std::move(tool_calls);
+            }
+        } else if (role == "tool") {
+            out["call_id"] = message.action_id.value_or(std::string());
+            const auto tool_it = tools_by_action.find(out["call_id"].get<std::string>());
+            if (tool_it != tools_by_action.end() && tool_it->second->tool_name.has_value()) {
+                out["tool_name"] = *tool_it->second->tool_name;
+            }
+            bool is_error = message.message.value("is_error", false);
+            if (!message.message.contains("is_error") && tool_it != tools_by_action.end()) {
+                is_error = tool_it->second->folded_status == "failed";
+            }
+            out["is_error"] = is_error;
+        }
+        out["content"] = std::move(content);
+        messages.push_back(std::move(out));
+    }
+    record["messages"] = std::move(messages);
+
+    // requests[] 兜底:纯失败请求(无 assistant 消息)也要现身,不静默丢。
+    for (const auto& event : ledger.events) {
+        if (!event.request_id.has_value()) {
+            continue;
+        }
+        if (event.kind == v3::EventKindV3::ModelRequestPrepared ||
+            event.kind == v3::EventKindV3::ModelRequestFailed ||
+            event.kind == v3::EventKindV3::ModelResponseFailed) {
+            nlohmann::json& row = ensure_request_row(*event.request_id);
+            if (row["output_state"] != "committed" &&
+                (event.kind == v3::EventKindV3::ModelRequestFailed ||
+                 event.kind == v3::EventKindV3::ModelResponseFailed)) {
+                row["output_state"] = "failed";
+            }
+        }
+    }
+    {
+        nlohmann::json requests = nlohmann::json::array();
+        std::uint64_t usage_input = 0, usage_output = 0, usage_cache_read = 0, usage_cache_creation = 0,
+                      usage_reasoning = 0, usage_reported = 0, failed_outputs = 0;
+        for (const std::string& request_id : request_order) {
+            nlohmann::json row = request_rows[request_id];
+            if (row["output_state"] == "failed") {
+                ++failed_outputs;
+            }
+            if (row["usage"].is_object()) {
+                ++usage_reported;
+                usage_input += GetUint(row["usage"], "input_tokens");
+                usage_output += GetUint(row["usage"], "output_tokens");
+                usage_cache_read += GetUint(row["usage"], "cache_read_tokens");
+                usage_cache_creation += GetUint(row["usage"], "cache_creation_tokens");
+                usage_reasoning += GetUint(row["usage"], "reasoning_tokens");
+            }
+            requests.push_back(std::move(row));
+        }
+        record["requests"] = std::move(requests);
+        nlohmann::json usage_totals;
+        usage_totals["requests_with_reported_usage"] = usage_reported;
+        usage_totals["input_tokens"] = usage_input;
+        usage_totals["output_tokens"] = usage_output;
+        usage_totals["cache_read_tokens"] = usage_cache_read;
+        usage_totals["cache_creation_tokens"] = usage_cache_creation;
+        usage_totals["reasoning_tokens"] = usage_reasoning;
+        record["usage_totals"] = std::move(usage_totals);
+        record["request_retry_summary"] =
+            nlohmann::json{{"requests", request_order.size()}, {"failed_outputs", failed_outputs}};
+    }
+
+    // ---- tools(FoldToolActions 折叠;§二.3 artifact 用 ExpandResultPreview
+    //      现成投影,不另造第二套引用展开) ----
+    {
+        nlohmann::json tools = nlohmann::json::array();
+        for (const auto& tool : tool_snapshots) {
+            nlohmann::json out;
+            out["call_id"] = tool.tool_call_id;
+            out["tool_name"] = tool.tool_name.value_or(std::string());
+            out["arguments"] = tool.declared_args.has_value()
+                                   ? RedactJsonValue(*tool.declared_args, tool.tool_call_id, &findings)
+                                   : nlohmann::json::object();
+            out["outcome"] = tool.folded_status;
+            if (!tool.attempts.empty()) {
+                const auto& last = tool.attempts.back();
+                out["started"] = last.started;
+                if (last.exit_code.has_value()) {
+                    out["exit_code"] = *last.exit_code;
+                }
+                if (last.execution_duration_ms.has_value()) {
+                    out["duration_ms"] = *last.execution_duration_ms;
+                }
+                if (last.effective_args_ref.has_value()) {
+                    out["effective_args_ref"] = *last.effective_args_ref;
+                }
+            } else {
+                out["started"] = false;
+            }
+            const auto child_it = child_run_id_by_action.find(tool.tool_call_id);
+            if (child_it != child_run_id_by_action.end()) {
+                out["child_run_id"] = child_it->second;
+            }
+            // tool 消息正文:message_versions 里挑当前链上那版,没有就取
+            // 最后一版(降档/未接纳也要如实带正文,不能因不在链上就装没有)。
+            const v3::MessageLine* tool_message = nullptr;
+            bool tool_message_on_chain = false;
+            for (const auto& version : tool.message_versions) {
+                if (tool_message_on_chain) {
+                    break;  // 已锁定当前链上那版,不许被后续非链版本顶替
+                }
+                const v3::MessageLine* candidate = ledger.FindMessage(version.message_id);
+                if (candidate == nullptr) {
+                    continue;
+                }
+                tool_message = candidate;  // seq 序推进:没锁定 current 就一路取最后一版
+                tool_message_on_chain = version.on_current_chain;
+            }
+            if (tool_message != nullptr) {
+                nlohmann::json result;
+                nlohmann::json content = nlohmann::json::array();
+                const auto content_it = tool_message->message.find("content");
+                if (content_it != tool_message->message.end()) {
+                    // 生产写法(AppendToolMessage 注记):单块结果落 string,
+                    // 不额外包数组——两种形状都要读出来,不漏读。
+                    content = V3ProjectMessageContent(*content_it, blobs, options, tool_message->message_id,
+                                                      &findings, options.max_inline_tool_result_bytes);
+                }
+                result["is_error"] = tool_message->message.value(
+                    "is_error", tool.folded_status == "failed");
+                result["content"] = std::move(content);
+                const auto preview = v3::ExpandResultPreview(ledger, session_dir, tool_message->message_id);
+                if (!preview.artifacts.empty()) {
+                    nlohmann::json artifacts = nlohmann::json::array();
+                    for (const auto& artifact : preview.artifacts) {
+                        artifacts.push_back(nlohmann::json{{"artifact_id", artifact.artifact_id},
+                                                           {"path", artifact.path},
+                                                           {"exists", artifact.exists},
+                                                           {"hash_ok", artifact.hash_ok},
+                                                           {"bytes", artifact.bytes},
+                                                           {"gap_reason", artifact.gap_reason}});
+                    }
+                    result["artifacts"] = std::move(artifacts);
+                }
+                if (!preview.complete) {
+                    result["preview_incomplete"] = true;
+                }
+                out["result"] = std::move(result);
+            }
+            tools.push_back(std::move(out));
+        }
+        record["tools"] = std::move(tools);
+    }
+
+    // ---- outcome(v3 版分型;§二.3) ----
+    {
+        bool session_ended = false;
+        for (const auto& event : ledger.events) {
+            if (event.kind == v3::EventKindV3::SessionEnded) {
+                session_ended = true;
+                break;
+            }
+        }
+        nlohmann::json outcome;
+        outcome["status"] = ClassifyHarnessOutcomeV3(ledger, tool_snapshots);
+        outcome["session_ended"] = session_ended;
+        outcome["process_exit_code"] =
+            process_exit_code.has_value() ? nlohmann::json(*process_exit_code) : nlohmann::json(nullptr);
+        record["outcome"] = std::move(outcome);
+    }
+
+    // ---- 隐私缘由账 ----
+    {
+        const std::vector<PrivacyFinding> deduped = DedupeFindings(findings);
+        if (!deduped.empty()) {
+            nlohmann::json privacy_findings = nlohmann::json::array();
+            for (const auto& finding : deduped) {
+                privacy_findings.push_back(nlohmann::json{{"code", finding.code},
+                                                          {"source_event_id", finding.source_event_id}});
+            }
+            record["privacy_findings"] = std::move(privacy_findings);
+        }
+    }
+
+    // ---- source:来源锚(v3 版,§二.3) ----
+    {
+        nlohmann::json source;
+        std::error_code ec;
+        const auto relative = std::filesystem::relative(ledger.path, session_dir, ec);
+        std::string stream_id = platform::PathToUtf8(ec ? ledger.path.filename() : relative);
+        std::replace(stream_id.begin(), stream_id.end(), '\\', '/');
+        source["stream"] = stream_id;
+        const auto last = ledger.LastEntry();
+        source["journal_last_hash"] =
+            last.has_value() ? (last->is_message ? ledger.messages[last->index].line_hash
+                                                 : ledger.events[last->index].line_hash)
+                             : std::string();
+        source["folded_seq"] = last.has_value() ? last->seq : ledger.lines;
+        source["format"] = "v3";
+        source["exported_at"] = exported_at;
+        source["exporter_config_hash"] = config_hash;
+        nlohmann::json integrity;
+        integrity["events_folded"] = ledger.lines;
+        integrity["truncated_tail"] = false;  // ReadV3Ledger 对截断尾 fail-closed,能读到即非截断
+        std::uint64_t dangling = 0;
+        for (const auto& tool : tool_snapshots) {
+            if (tool.folded_status == "unknown" || tool.folded_status == "result_missing" ||
+                tool.folded_status == "selected_no_message" ||
+                tool.folded_status == "message_not_admitted") {
+                ++dangling;
+            }
+        }
+        integrity["dangling_tools"] = dangling;
+        source["integrity"] = std::move(integrity);
+        record["source"] = std::move(source);
+    }
+    return record;
+}
+
+// 子账缺失/环/不可读的存根行(fail-closed,不静默丢失——单子 §二.2:
+// "扫描错误不得吞成没有流"同理适用到"子账连不上")。
+nlohmann::json BuildV3UnavailableChildStub(const v3::SubagentSessionNode& node,
+                                           const std::string& config_hash,
+                                           std::optional<int> process_exit_code) {
+    nlohmann::json record;
+    record["schema"] = kHarnessTrajectorySchema;
+    record["schema_version"] = kHarnessTrajectorySchemaVersion;
+    record["exporter_version"] = kHarnessExporterVersion;
+    record["session_id"] = node.session_id;
+    record["run_id"] = node.run_id;
+    record["parent_run_id"] = node.parent_session_id.empty() ? nlohmann::json(nullptr)
+                                                              : nlohmann::json(node.parent_session_id);
+    if (!node.parent_action_id.empty()) {
+        record["parent_call_id"] = node.parent_action_id;
+    }
+    record["run_kind"] = RunKindName(RunKind::Subagent);
+    record["messages"] = nlohmann::json::array();
+    record["requests"] = nlohmann::json::array();
+    record["tools"] = nlohmann::json::array();
+    record["turns"] = nlohmann::json::array();
+    nlohmann::json outcome;
+    outcome["status"] = "unknown";
+    outcome["process_exit_code"] =
+        process_exit_code.has_value() ? nlohmann::json(*process_exit_code) : nlohmann::json(nullptr);
+    record["outcome"] = std::move(outcome);
+    nlohmann::json source;
+    source["stream"] = platform::PathToUtf8(node.jsonl_path.filename());
+    source["format"] = "v3";
+    source["fold_error"] = "v3." + (node.link_status.empty() ? std::string("unreadable") : node.link_status);
+    source["exported_at"] = NowUtcIso8601();
+    source["exporter_config_hash"] = config_hash;
+    record["source"] = std::move(source);
+    return record;
+}
+
+// v3 场引擎:主账 + 递归子账树(v3::WalkSessionTree,与
+// accounting::ReadSessionUsageV3/replay.cpp::VerifyV3SessionDir 同一套
+// 遍历件,不另造第二套父子关系判定)。
+std::vector<nlohmann::json> BuildSessionHarnessRecordsV3(const std::filesystem::path& session_dir,
+                                                          const std::filesystem::path& v3_main_stream,
+                                                          const HarnessExportOptions& options,
+                                                          std::optional<int> process_exit_code) {
+    std::vector<nlohmann::json> records;
+    const std::string config_hash = ComputeHarnessConfigHash(options);
+    const BlobStore blobs(session_dir / "artifacts");
+    std::string workspace_key;
+    if (const auto manifest = ReadSessionJson(session_dir)) {
+        workspace_key = manifest->workspace_key;
+    }
+    const v3::SubagentSessionNode tree = v3::WalkSessionTree(v3_main_stream);
+    if (!tree.ledger.has_value()) {
+        // 根账验不过:单一存根行,fail-closed,绝不出看似成功的兄弟行。
+        nlohmann::json record;
+        record["schema"] = kHarnessTrajectorySchema;
+        record["schema_version"] = kHarnessTrajectorySchemaVersion;
+        record["exporter_version"] = kHarnessExporterVersion;
+        record["session_id"] = tree.session_id.empty() ? platform::PathToUtf8(session_dir.filename())
+                                                       : tree.session_id;
+        record["run_id"] = tree.run_id;
+        record["parent_run_id"] = nullptr;
+        record["run_kind"] = RunKindName(RunKind::MainSession);
+        record["messages"] = nlohmann::json::array();
+        record["requests"] = nlohmann::json::array();
+        record["tools"] = nlohmann::json::array();
+        record["turns"] = nlohmann::json::array();
+        nlohmann::json outcome;
+        outcome["status"] = "unknown";
+        outcome["process_exit_code"] =
+            process_exit_code.has_value() ? nlohmann::json(*process_exit_code) : nlohmann::json(nullptr);
+        record["outcome"] = std::move(outcome);
+        nlohmann::json source;
+        source["stream"] = platform::PathToUtf8(v3_main_stream.filename());
+        source["format"] = "v3";
+        source["fold_error"] = "v3.ledger_unreadable";
+        source["exported_at"] = NowUtcIso8601();
+        source["exporter_config_hash"] = config_hash;
+        record["source"] = std::move(source);
+        records.push_back(std::move(record));
+        return records;
+    }
+
+    std::function<void(const v3::SubagentSessionNode&, bool, std::optional<std::string>,
+                       std::optional<std::string>)>
+        walk = [&](const v3::SubagentSessionNode& node, bool is_root,
+                  std::optional<std::string> parent_run_id, std::optional<std::string> parent_call_id) {
+            std::map<std::string, std::string> child_run_id_by_action;
+            for (const auto& child : node.children) {
+                if (child.link_status == "cycle") {
+                    continue;
+                }
+                if (!child.parent_action_id.empty()) {
+                    child_run_id_by_action[child.parent_action_id] = child.run_id;
+                }
+            }
+            if (node.ledger.has_value()) {
+                records.push_back(BuildV3NodeHarnessRecord(session_dir, *node.ledger, is_root,
+                                                           parent_run_id, parent_call_id,
+                                                           child_run_id_by_action, blobs, options,
+                                                           process_exit_code, config_hash,
+                                                           workspace_key));
+            } else if (!is_root) {
+                records.push_back(BuildV3UnavailableChildStub(node, config_hash, process_exit_code));
+            }
+            const std::optional<std::string> this_run_id =
+                node.ledger.has_value() ? std::optional<std::string>(node.ledger->run_id)
+                                        : (node.run_id.empty() ? std::nullopt
+                                                               : std::optional<std::string>(node.run_id));
+            for (const auto& child : node.children) {
+                if (child.link_status == "cycle") {
+                    continue;  // 环:树内已现身,不重复出行
+                }
+                const std::optional<std::string> call_id =
+                    child.parent_action_id.empty() ? std::nullopt
+                                                    : std::optional<std::string>(child.parent_action_id);
+                walk(child, false, this_run_id, call_id);
+            }
+        };
+    walk(tree, true, std::nullopt, std::nullopt);
+    return records;
 }
 
 // ---------------------------------------------------------------------------
@@ -653,9 +1434,28 @@ std::vector<nlohmann::json> BuildSessionHarnessRecords(const std::filesystem::pa
                                                        const HarnessExportOptions& options,
                                                        std::optional<int> process_exit_code) {
     std::vector<nlohmann::json> records;
+    // 格式分派(单子 §二.2):V3-GAP-01(accounting::ReadSessionUsage)、
+    // VerifyV3SessionDir(replay.cpp)同一套探测件,认 V3 主账
+    // <session-id>.jsonl,不再只认根下 main.jsonl。
+    const auto discovery = projection::DiscoverSessionStreams(session_dir);
+    if (discovery.error.has_value()) {
+        return records;  // 纯引擎不决策错误码;调用方(ExportSessionHarnessV1)按
+                         // discovery.error 给稳定诊断。
+    }
     const std::string config_hash = ComputeHarnessConfigHash(options);
     const BlobStore blobs(session_dir / "artifacts");
-    for (const auto& stream_path : CollectSessionStreams(session_dir)) {
+    if (discovery.format == "v3") {
+        // v3 场:主账 + 递归子账走真投影引擎(§二.3);workflow 编排账恒
+        // v2(§4.31,与 v3 同代并行),走既有单流引擎,schema 不变。
+        records = BuildSessionHarnessRecordsV3(session_dir, discovery.v3_main_stream, options,
+                                               process_exit_code);
+        for (const auto& stream_path : projection::CollectWorkflowStreams(session_dir)) {
+            records.push_back(BuildStreamHarnessRecord(session_dir, stream_path, blobs, options,
+                                                       process_exit_code, config_hash));
+        }
+        return records;
+    }
+    for (const auto& stream_path : discovery.streams) {
         records.push_back(BuildStreamHarnessRecord(session_dir, stream_path, blobs, options,
                                                    process_exit_code, config_hash));
     }
@@ -672,12 +1472,30 @@ HarnessExportReport ExportSessionHarnessV1(const std::filesystem::path& session_
     std::error_code ec;
     if (!std::filesystem::is_directory(session_dir, ec)) {
         report.error_code = "export.no_session_dir";
-        report.message = "session 目录不存在(会话没开 trajectory 便没有账,不造假)";
+        report.message =
+            "session 目录不存在(会话没开 trajectory 便没有账,不造假): " + platform::PathToUtf8(session_dir);
         return report;
     }
-    if (CollectSessionStreams(session_dir).empty()) {
+    // 格式分派 + 稳定诊断(单子 §二.2/§四:主账缺失/不可读/空首行/坏
+    // schema/V2V3 并存/坏链各给稳定诊断,export.no_streams 不再暗示"没开
+    // trajectory"——恒开配置下这句话本身就是假的)。
+    const auto discovery = projection::DiscoverSessionStreams(session_dir);
+    if (discovery.error.has_value()) {
+        report.error_code = discovery.error->code;
+        report.message = discovery.error->message + "; session_dir=" + platform::PathToUtf8(session_dir) +
+                         "; 补导命令: lubancode trajectory export " +
+                         platform::PathToUtf8(session_dir.filename()) +
+                         " --format harness-v1 --output <path>";
+        return report;
+    }
+    if (discovery.streams.empty()) {
         report.error_code = "export.no_streams";
-        report.message = "session 目录里没有 JSONL(没开 trajectory 的会话没有账)";
+        report.message = "session 目录(" + platform::PathToUtf8(session_dir) + ",格式=" +
+                         (discovery.format.empty() ? std::string("unknown") : discovery.format) +
+                         ")里没有可导出的账目——不是没开 trajectory(本版恒开),是没找到可读的主账/子账"
+                         "文件; 补导命令: lubancode trajectory export " +
+                         platform::PathToUtf8(session_dir.filename()) +
+                         " --format harness-v1 --output <path>";
         return report;
     }
 
