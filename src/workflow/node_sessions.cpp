@@ -163,15 +163,51 @@ std::expected<NodeSessionSpawn, runtime::WorkflowSpawnFailure> WorkflowNodeSessi
         return fail_out("reserve_stream", "workflow.node_session.mkdir_failed", ec.message(), false);
     }
 
-    // journalPath:相对父 session 目录(/usage 树走按它定位);跨盘算不出
-    // 相对路径时退绝对路径(同机可读,不假装相对)。
+    // journalPath:相对父 session 目录(/usage 树走按它定位)——契约与读侧
+    // 严格对齐:reader.cpp WalkSessionTreeRecursive 拿父账 jsonl 的
+    // parent_path() 拼 journalPath 找子账;这里的"父 session 目录"
+    // (material_.parent_session_dir,即 ledger->session_dir())就是父账
+    // 自己 jsonl 所在的那个目录,两边基准同一个锚点,不该对不上。
+    //
+    // 但 GAP-05 在 windows-msvc 上真回归过(main run 36082526799):
+    // std::filesystem::relative() 静默算出一个不指向真实文件的偏移量,
+    // ec 不报错、结果非空,读侧拼回去就是空树("/usage 丢节点账")。没能
+    // 在拿不到本机 Windows 环境的条件下把 stdlib 内部机制钉死到具体是
+    // weakly_canonical 对尚未落地路径段的处理特性,还是 relative() 词法
+    // 算法本身的边界情况——不猜诱因,直接堵后果:relative() 的结果必须
+    // 自证,拼回去、词法规整后要能对上真实目标的规整形状,对不上就当
+    // relative() 失败处理,退绝对路径分支(同机可读,不假装相对),不管
+    // relative() 本身是否报了 ec。
     std::string journal_path;
-    if (auto relative = std::filesystem::relative(session_jsonl, material_.parent_session_dir, ec);
-        !ec && !relative.empty()) {
-        journal_path = relative.generic_string();
-    } else {
-        ec.clear();
-        journal_path = std::filesystem::absolute(session_jsonl, ec).generic_string();
+    {
+        std::error_code canon_ec;
+        const auto parent_canonical =
+            std::filesystem::weakly_canonical(material_.parent_session_dir, canon_ec);
+        bool ok = !canon_ec;
+        std::filesystem::path child_canonical;
+        if (ok) {
+            child_canonical = std::filesystem::weakly_canonical(session_jsonl, canon_ec);
+            ok = !canon_ec;
+        }
+        std::filesystem::path relative;
+        if (ok) {
+            relative = std::filesystem::relative(child_canonical, parent_canonical, canon_ec);
+            ok = !canon_ec && !relative.empty();
+        }
+        if (ok) {
+            // 兜底验证:relative 拼回父目录、词法规整后必须真指回同一处
+            //(此刻 session_jsonl 文件本身还没落地——写者未开卷,exists()
+            // 验不出来;两侧目录前缀都已存在且刚被 weakly_canonical 核过,
+            // 词法拼接足以核实这条相对路径是否真的指得回去)。
+            const auto rebuilt = (parent_canonical / relative).lexically_normal();
+            ok = rebuilt == child_canonical.lexically_normal();
+        }
+        if (ok) {
+            journal_path = relative.generic_string();
+        } else {
+            std::error_code abs_ec;
+            journal_path = std::filesystem::absolute(session_jsonl, abs_ec).generic_string();
+        }
     }
     if (journal_path.empty()) {
         return fail_out("reserve_stream", "workflow.node_session.no_journal_path",
