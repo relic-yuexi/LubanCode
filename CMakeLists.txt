@@ -1279,6 +1279,9 @@ add_library(lubancode_core STATIC
   # schema 冻结、目录 resolver、无损 outputs/checkpoints、恢复重放与
   # fail-closed 提交)。
   src/workflow/account.cpp
+  # GAP-05 棒二:节点独立 v3 session(llm/agent/skill 每 attempt 一场,
+  # 父 session 持 spawn 边,usage 进 /usage 主账口径)。
+  src/workflow/node_sessions.cpp
   src/workflow/definition.cpp
   src/workflow/parser.cpp
   src/workflow/catalog.cpp

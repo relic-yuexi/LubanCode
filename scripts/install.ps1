@@ -354,7 +354,7 @@ function New-ManifestFromTree {
     $roleRoot = @{
         'lubancode' = 'exe'; 'lubancode.exe' = 'exe'
         'LICENSE' = 'license'; 'THIRD_PARTY_NOTICES.md' = 'notices'
-        'README.md' = 'readme'; 'README.en.md' = 'readme'
+        'README.md' = 'readme'; 'README.zh-CN.md' = 'readme'
         'install.ps1' = 'installer'; 'uninstall.ps1' = 'installer'
         'install.sh' = 'installer'; 'install_plan.py' = 'installer'
     }
@@ -1017,7 +1017,7 @@ function Build-PackageFilePlan {
     $allowed = @{}
     $current = @{}
     $rootFiles = @('lubancode.exe', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
-        'README.md', 'README.en.md', 'install.ps1', 'uninstall.ps1')
+        'README.md', 'README.zh-CN.md', 'install.ps1', 'uninstall.ps1')
     foreach ($key in $NewMap.Keys) {
         $path = [string]$NewMap[$key].path
         $top = ($path -split '/', 2)[0]

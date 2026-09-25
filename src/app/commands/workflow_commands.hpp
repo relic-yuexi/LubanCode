@@ -182,6 +182,11 @@ struct WorkflowExecutorContext {
     // 子代理系统提示的会话材料(与 agent 工具路同源):从主回合的
     // PromptOptions 折来,宿主保证两路值一致。
     lubancode::workflow::SubagentPromptMaterial subagent_prompt_material;
+    // ---- 编排账传播(V3-GAP-05):subflow 的子 runtime 沿父同账 ----
+    // 非空 = 子 run 也在 v3 编排账下跑(独立 runId,同根;节点独立场
+    // 从同一宿主会话 spawn)。空 = 子 run 不落账(旧装配/headless)。
+    std::filesystem::path account_root;
+    lubancode::runtime::TrajectorySessionLedger* trajectory_ledger = nullptr;
 };
 
 // BuildWorkflowExecutors(拼执行器表)已搬去 app/wirings/workflow_wiring

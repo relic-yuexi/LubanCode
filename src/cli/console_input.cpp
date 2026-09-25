@@ -122,6 +122,24 @@ std::vector<CompletionCandidate> BuildSlashCompletionCandidates() {
     return candidates;
 }
 
+std::vector<SlashSubcommandGroup> BuildSlashSubcommandCompletionCandidates() {
+    // 见 console_input.hpp 的声明注释:多级 Tab 补全单,同 BuildSlashCompletionCandidates
+    // 一个转换套路——AllSlashSubcommandGroups() 现转一份 line_editor 认得的
+    // 类型,不留静态副本(语言切换后下一只编辑器自然拿到新说明)。
+    std::vector<SlashSubcommandGroup> groups;
+    groups.reserve(AllSlashSubcommandGroups().size());
+    for (const auto& source : AllSlashSubcommandGroups()) {
+        SlashSubcommandGroup group;
+        group.command = source.command;
+        group.subcommands.reserve(source.entries.size());
+        for (const auto& entry : source.entries) {
+            group.subcommands.push_back(CompletionCandidate{entry.name, entry.description});
+        }
+        groups.push_back(std::move(group));
+    }
+    return groups;
+}
+
 namespace {
 
 // Composer 合流 P1:输入区的上下留白/最小正文高度常量挪去 bottom_chrome.hpp
@@ -159,7 +177,9 @@ void StripTrailingCrLf(std::string& s) {
 // [共享] composer(主循环)/footer(状态行读确认档)/监听线程(Shift+Tab 切档)/
 // 导出口 CurrentConfirmMode、SetConfirmMode。
 LineEditorCore& SharedEditor() {
-    static LineEditorCore editor = [] { return LineEditorCore(BuildSlashCompletionCandidates()); }();
+    static LineEditorCore editor = [] {
+        return LineEditorCore(BuildSlashCompletionCandidates(), BuildSlashSubcommandCompletionCandidates());
+    }();
     return editor;
 }
 

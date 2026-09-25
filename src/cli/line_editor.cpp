@@ -563,11 +563,21 @@ EditLineWindow ComputeEditLineWindow(const std::u32string& line, std::size_t cur
     return window;
 }
 
-LineEditorCore::LineEditorCore(std::vector<CompletionCandidate> slash_candidates)
-    : slash_candidates_(std::move(slash_candidates)) {}
+LineEditorCore::LineEditorCore(std::vector<CompletionCandidate> slash_candidates,
+                                std::vector<SlashSubcommandGroup> subcommand_candidates)
+    : slash_candidates_(std::move(slash_candidates)),
+      subcommand_candidates_(std::move(subcommand_candidates)) {}
 
 void LineEditorCore::SetSlashCandidates(std::vector<CompletionCandidate> slash_candidates) {
     slash_candidates_ = std::move(slash_candidates);
+    tab_cycle_.reset();
+    menu_selection_.reset();
+}
+
+void LineEditorCore::SetSlashSubcommandCandidates(std::vector<SlashSubcommandGroup> subcommand_candidates) {
+    subcommand_candidates_ = std::move(subcommand_candidates);
+    // tab_cycle_ 可能存着指向旧 subcommand_candidates_ 元素的 group 指针,
+    // 换了底下的 vector 就该失效——清掉,跟 SetSlashCandidates 一个道理。
     tab_cycle_.reset();
     menu_selection_.reset();
 }
@@ -820,20 +830,46 @@ std::vector<std::string> LineEditorCore::MatchingCandidateNames(const std::u32st
     return result;
 }
 
-// 把整行内容换成"候选名 + 词后面原来剩下的那截(suffix)":suffix 非空
-// 说明命令词后面本来就跟着别的内容(比如已经打的参数),原样保留、不吞掉;
-// suffix 是空的话,按"唯一匹配直接补全整名 + 空格"的规矩自己补一个空格。
-// 光标落到整行末尾。
+const SlashSubcommandGroup* LineEditorCore::FindSubcommandGroup(
+    const std::u32string& command_word) const {
+    const std::string lower = ToLowerAscii(Utf32ToUtf8(command_word));
+    for (const auto& group : subcommand_candidates_) {
+        if (group.command == lower) {
+            return &group;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<std::string> LineEditorCore::MatchingSubcommandNames(const SlashSubcommandGroup& group,
+                                                                    const std::u32string& word) const {
+    const std::string word_lower = ToLowerAscii(Utf32ToUtf8(word));
+    std::vector<std::string> result;
+    for (const auto& sub : group.subcommands) {
+        const std::string sub_lower = ToLowerAscii(sub.name);
+        if (sub_lower.size() >= word_lower.size() && sub_lower.compare(0, word_lower.size(), word_lower) == 0) {
+            result.push_back(sub.name);
+        }
+    }
+    return result;
+}
+
+// 把 [prefix, 补全词, suffix] 三段拼回整行:prefix 是补全词前面原样保留
+// 的部分(一级补全是空串;二级补全是"命令词 + 空格",比如 "/provider ");
+// suffix 非空说明补全词后面本来就跟着别的内容(比如已经打的参数),原样
+// 保留、不吞掉;suffix 是空的话,按"唯一匹配直接补全整词 + 空格"的规矩
+// 自己补一个空格。光标落到整行末尾。
 //
-// 之所以不能像第一次按 Tab 那样用 CurrentWord(line_) 现算词的边界:轮转
-// 到第二个候选往后,line_ 已经被换成上一个候选的名字了,"当前词"早就不是
-// 用户最初敲的那截前缀——suffix 得在第一次按 Tab、词边界还没被改写之前就
-// 存进 TabCycleState 里,后面轮转直接复用这份存好的值。
-void LineEditorCore::CompleteToCandidate(const std::string& name, const std::u32string& suffix) {
+// 之所以不能像第一次按 Tab 那样现算词的边界:轮转到第二个候选往后,
+// lines_[0] 已经被换成上一个候选的名字了,"当前词"早就不是用户最初敲的
+// 那截前缀——prefix/suffix 得在第一次按 Tab、词边界还没被改写之前就存进
+// TabCycleState 里,后面轮转直接复用这份存好的值。
+void LineEditorCore::CompleteToCandidate(const std::u32string& prefix, const std::string& name,
+                                          const std::u32string& suffix) {
     // 补全只在"composer 恰好一行"时触发(HandleTab 顶部拦掉了多行),这里
     // 直接操作 lines_[0] 就是操作整个 composer。
     const std::u32string name32 = AsciiToU32(name);
-    lines_[0] = suffix.empty() ? (name32 + U' ') : (name32 + suffix);
+    lines_[0] = prefix + (suffix.empty() ? (name32 + U' ') : (name32 + suffix));
     col_ = lines_[0].size();
 }
 
@@ -846,7 +882,7 @@ void LineEditorCore::HandleTab() {
         // 这次接着轮转到下一个候选。
         if (tab_cycle_->matches.size() > 1) {
             tab_cycle_->index = (tab_cycle_->index + 1) % static_cast<int>(tab_cycle_->matches.size());
-            CompleteToCandidate(tab_cycle_->matches[static_cast<std::size_t>(tab_cycle_->index)],
+            CompleteToCandidate(tab_cycle_->prefix, tab_cycle_->matches[static_cast<std::size_t>(tab_cycle_->index)],
                                  tab_cycle_->suffix);
         }
         return;
@@ -855,31 +891,78 @@ void LineEditorCore::HandleTab() {
     if (lines_[0].empty() || lines_[0].front() != U'/') {
         return;  // 不是 slash 命令,Tab 什么都不做
     }
-    const std::u32string word = CurrentWord(lines_[0]);
-    if (col_ > word.size()) {
-        return;  // 光标已经越过命令词、落在参数区了,不补全
-    }
-    const std::u32string suffix = lines_[0].substr(word.size());  // 词后面剩下的部分,原样保留
 
-    const std::vector<std::string> matches = MatchingCandidateNames(word);
+    const std::u32string& line = lines_[0];
+    const std::size_t first_space = line.find(U' ');
+
+    if (first_space == std::u32string::npos || col_ <= first_space) {
+        // 光标落在第一个词(命令词)里(或整行还没有空格):一级补全,逻辑
+        // 不变——多级补全单只加二级分支,不改这条老路径。
+        const std::u32string word = CurrentWord(line);
+        if (col_ > word.size()) {
+            return;  // 光标已经越过命令词、落在参数区了,不补全
+        }
+        const std::u32string suffix = line.substr(word.size());  // 词后面剩下的部分,原样保留
+
+        const std::vector<std::string> matches = MatchingCandidateNames(word);
+        if (matches.empty()) {
+            return;
+        }
+        if (matches.size() == 1) {
+            CompleteToCandidate(U"", matches[0], suffix);
+            return;
+        }
+
+        const std::u32string lcp = AsciiToU32(LongestCommonPrefix(matches));
+        if (lcp.size() > word.size()) {
+            // 先补到公共前缀,先不进入轮转(index = -1);下次 Tab 再轮转。
+            lines_[0] = lcp + suffix;
+            col_ = lcp.size();
+            tab_cycle_ = TabCycleState{matches, -1, suffix, U"", nullptr};
+        } else {
+            // 已经在公共前缀上了,没法再往前补,直接开始轮转第一个候选。
+            tab_cycle_ = TabCycleState{matches, 0, suffix, U"", nullptr};
+            CompleteToCandidate(U"", matches[0], suffix);
+        }
+        return;
+    }
+
+    // 光标落在第一个空格之后:命令词已经敲完,尝试二级(子命令)补全。
+    // 命令词得在二级词表里登记过,否则维持老规矩——参数区不补全。
+    const std::u32string command_word = line.substr(0, first_space);
+    const SlashSubcommandGroup* group = FindSubcommandGroup(command_word);
+    if (group == nullptr) {
+        return;  // 这个命令没有二级词表(子命令词汇不在 cli 层,或压根没有子命令)
+    }
+
+    const std::size_t second_start = first_space + 1;
+    const std::size_t second_space = line.find(U' ', second_start);
+    const std::u32string second_word = second_space == std::u32string::npos
+                                            ? line.substr(second_start)
+                                            : line.substr(second_start, second_space - second_start);
+    if (col_ > second_start + second_word.size()) {
+        return;  // 光标已经越过子命令词、落进它自己的参数区了,不补全
+    }
+    const std::u32string suffix = line.substr(second_start + second_word.size());
+    const std::u32string prefix = line.substr(0, second_start);
+
+    const std::vector<std::string> matches = MatchingSubcommandNames(*group, second_word);
     if (matches.empty()) {
         return;
     }
     if (matches.size() == 1) {
-        CompleteToCandidate(matches[0], suffix);
+        CompleteToCandidate(prefix, matches[0], suffix);
         return;
     }
 
     const std::u32string lcp = AsciiToU32(LongestCommonPrefix(matches));
-    if (lcp.size() > word.size()) {
-        // 先补到公共前缀,先不进入轮转(index = -1);下次 Tab 再轮转。
-        lines_[0] = lcp + suffix;
-        col_ = lcp.size();
-        tab_cycle_ = TabCycleState{matches, -1, suffix};
+    if (lcp.size() > second_word.size()) {
+        lines_[0] = prefix + lcp + suffix;
+        col_ = prefix.size() + lcp.size();
+        tab_cycle_ = TabCycleState{matches, -1, suffix, prefix, group};
     } else {
-        // 已经在公共前缀上了,没法再往前补,直接开始轮转第一个候选。
-        tab_cycle_ = TabCycleState{matches, 0, suffix};
-        CompleteToCandidate(matches[0], suffix);
+        tab_cycle_ = TabCycleState{matches, 0, suffix, prefix, group};
+        CompleteToCandidate(prefix, matches[0], suffix);
     }
 }
 
@@ -919,37 +1002,68 @@ RenderState LineEditorCore::BuildRenderState(bool submitted, bool cleared, bool 
         // "塌缩成一个",连带选中标记也没地方标。
         std::vector<std::string> matches;
         int selected_index = -1;
+        const SlashSubcommandGroup* hint_group = nullptr;  // 非空 = 描述改查这张二级词表
         if (menu_selection_.has_value()) {
             matches = menu_selection_->matches;
             selected_index = menu_selection_->index;
         } else if (tab_cycle_.has_value()) {
             matches = tab_cycle_->matches;
             selected_index = tab_cycle_->index;
+            hint_group = tab_cycle_->group;
         } else {
             const std::size_t space = lines_[0].find(U' ');
             if (space == std::u32string::npos) {
                 // 还在敲命令词(整行没空格):按前缀现算候选。
                 matches = MatchingCandidateNames(lines_[0]);
             } else {
-                // 命令词已敲完(词后跟着空格):取第一个词做大小写不敏感的
-                // 整词匹配,命中就把该命令的单行提示留在下面。Tab 唯一命中
-                // 会把行补成 "/record ",用户自己敲空格也进参数区——这时候
-                // 把提示整个收走,命令怎么用就没人提醒了(此前只能退格删掉
-                // 空格再看一眼);描述本身带用法("/copy plain 复制纯文本"),
-                // 留一行正合适。多义前缀("/c x")认不出是哪条命令,照旧
-                // 收起。轮转/菜单态各有进入那一刻存好的名单,不走这道门,
-                // 选中标记照常跟随。
-                const std::string word =
-                    ToLowerAscii(Utf32ToUtf8(lines_[0].substr(0, space)));
-                for (const auto& cand : slash_candidates_) {
-                    if (ToLowerAscii(cand.name) == word) {
-                        matches.push_back(cand.name);
-                        break;
+                // 命令词已敲完(词后跟着空格):先看这个命令有没有登记二级
+                // 词表——有就当成"多级 / 的下一级"接着处理(还在敲子命令词
+                // 就按前缀现算候选;子命令词也敲完了就整词匹配、留它自己的
+                // 单行提示,跟一级"命令词敲完"是同一个道理)。没有二级词表
+                // 的命令走老路径:取第一个词做大小写不敏感的整词匹配,命中
+                // 就把该命令的单行提示留在下面。Tab 唯一命中会把行补成
+                // "/record ",用户自己敲空格也进参数区——这时候把提示整个
+                // 收走,命令怎么用就没人提醒了(此前只能退格删掉空格再看
+                // 一眼);描述本身带用法("/copy plain 复制纯文本"),留一行
+                // 正合适。多义前缀("/c x")认不出是哪条命令,照旧收起。
+                // 轮转/菜单态各有进入那一刻存好的名单,不走这道门,选中
+                // 标记照常跟随。
+                const std::u32string command_word = lines_[0].substr(0, space);
+                const SlashSubcommandGroup* group = FindSubcommandGroup(command_word);
+                if (group != nullptr) {
+                    const std::size_t second_start = space + 1;
+                    const std::size_t second_space = lines_[0].find(U' ', second_start);
+                    if (second_space == std::u32string::npos) {
+                        // 还在敲子命令词:按前缀现算二级候选。
+                        const std::u32string word1 = lines_[0].substr(second_start);
+                        matches = MatchingSubcommandNames(*group, word1);
+                        hint_group = group;
+                    } else {
+                        // 子命令词已敲完(后面还有空格/参数):整词匹配,留它
+                        // 自己的单行提示。
+                        const std::string word1_lower = ToLowerAscii(
+                            Utf32ToUtf8(lines_[0].substr(second_start, second_space - second_start)));
+                        for (const auto& sub : group->subcommands) {
+                            if (ToLowerAscii(sub.name) == word1_lower) {
+                                matches.push_back(sub.name);
+                                hint_group = group;
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    const std::string word =
+                        ToLowerAscii(Utf32ToUtf8(command_word));
+                    for (const auto& cand : slash_candidates_) {
+                        if (ToLowerAscii(cand.name) == word) {
+                            matches.push_back(cand.name);
+                            break;
+                        }
                     }
                 }
             }
         }
-        state.hint_lines = BuildHintLines(matches, selected_index);
+        state.hint_lines = BuildHintLines(matches, selected_index, hint_group);
         state.selected_index = selected_index;
     }
 
@@ -957,7 +1071,8 @@ RenderState LineEditorCore::BuildRenderState(bool submitted, bool cleared, bool 
 }
 
 std::vector<std::string> LineEditorCore::BuildHintLines(const std::vector<std::string>& matches,
-                                                          int selected_index) const {
+                                                          int selected_index,
+                                                          const SlashSubcommandGroup* group) const {
     std::vector<std::string> lines;
     if (matches.empty()) {
         return lines;
@@ -974,10 +1089,21 @@ std::vector<std::string> LineEditorCore::BuildHintLines(const std::vector<std::s
         const std::size_t i = begin + offset;
         const std::string& name = matches[i];
         std::string description;
-        for (const auto& cand : slash_candidates_) {
-            if (cand.name == name) {
-                description = cand.description;
-                break;
+        // group 非空(二级补全):候选名(比如 "switch")不在一级候选表里,
+        // 得从这张子命令词表里找描述;group 为空还是老路径查 slash_candidates_。
+        if (group != nullptr) {
+            for (const auto& sub : group->subcommands) {
+                if (sub.name == name) {
+                    description = sub.description;
+                    break;
+                }
+            }
+        } else {
+            for (const auto& cand : slash_candidates_) {
+                if (cand.name == name) {
+                    description = cand.description;
+                    break;
+                }
             }
         }
         const bool selected = selected_index >= 0 && static_cast<std::size_t>(selected_index) == i;

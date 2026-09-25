@@ -14,8 +14,8 @@ namespace {
 // 比对(PS -contains 大小写不敏感,此处 FoldKey 口径)。注意只有
 // lubancode.exe,没有裸名 lubancode——终稿如此,POSIX 侧名表归后续批次。
 constexpr std::string_view kPackageRootFiles[] = {
-    "lubancode.exe", "LICENSE", "THIRD_PARTY_NOTICES.md",
-    "README.md",     "README.en.md", "install.ps1", "uninstall.ps1",
+    "lubancode.exe", "LICENSE",      "THIRD_PARTY_NOTICES.md", "README.md",
+    "README.zh-CN.md", "install.ps1", "uninstall.ps1",
 };
 
 // 受管树表——出处:同上 install.ps1 的 $script:ManagedTrees(L57)。

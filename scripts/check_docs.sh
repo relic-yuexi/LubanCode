@@ -216,7 +216,7 @@ awk '$1 == "ROUTE" { print $2 }' "$CATALOG" | while IFS= read -r route; do
 done
 
 {
-    printf '%s\n' "$REPO_ROOT/README.md" "$REPO_ROOT/README.en.md"
+    printf '%s\n' "$REPO_ROOT/README.md" "$REPO_ROOT/README.zh-CN.md"
     find "$DOCS_ROOT" "$INTERVIEW_ROOT" "$skill_root" -type f -name '*.md' -print
 } | LC_ALL=C sort -u >"$WORK_DIR/link-files"
 while IFS= read -r source_file; do

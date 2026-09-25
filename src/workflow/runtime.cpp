@@ -27,6 +27,7 @@
 #include "runtime/retry_backoff.hpp"
 #include "runtime/trajectory_session.hpp"  // 编排账桥(workflow 会话归属统一单)
 #include "schema/validate.hpp"  // AR-09:入参/产物合同校验的扫描核心与档位
+#include "workflow/node_sessions.hpp"  // 节点独立 v3 场(GAP-05)
 #include "workflow/validator.hpp"
 
 namespace lubancode::workflow {
@@ -88,6 +89,12 @@ nlohmann::json ApplyInputDefaults(const nlohmann::json& values, const nlohmann::
         if (fallback != it->end()) result[it.key()] = *fallback;
     }
     return result;
+}
+
+// 模型节点(设计 §一/§六):实际向模型发消息的节点才开独立 v3 session;
+// tool/template/transform/switch/approval 一类宿主计算节点不伪造会话。
+bool IsModelNodeKind(NodeKind kind) {
+    return kind == NodeKind::Llm || kind == NodeKind::Agent || kind == NodeKind::Skill;
 }
 
 // 节点产物合同校验(§五):声明 output_schema(JSON Schema 子集,与
@@ -545,6 +552,9 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
     // 末次 attempt 的 node 账终态 hash(成功/失败收口都引用它;attempt 循环
     // 外的 CommitOutput 段还要用)。
     std::string node_terminal_hash;
+    // 末次 attempt 的节点场引用(GAP-05:编排账 terminal 事件带它;非模型
+    // 节点/没接会话账时恒空)。
+    NodeSessionRef node_session_ref;
 
     // 输入先解好(重试不换输入:backoff 等待期间 Store 不变),reserve 的
     // 输入快照也提前到执行之前(§五:reserve 携带输入)。
@@ -738,6 +748,36 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
             }
         }
 
+        // 节点独立场 v3(GAP-05):模型节点(llm/agent/skill)本次 attempt 开
+        // 自己的 v3 session——父 session 落 spawn 边、首行 systemMeta 带
+        // nodeExecutionRef,usage 经会话树进 /usage 主账口径。fail closed:
+        // 场开不出,节点不执行。采纳悬置候选不重开(上个进程已执行过)。
+        std::unique_ptr<runtime::TrajectoryWorkflowNodeBridge> node_session;
+        if (ctx.v3_account != nullptr && ctx.node_sessions != nullptr && !adopted_candidate &&
+            IsModelNodeKind(node.kind)) {
+            auto spawned = ctx.node_sessions->Open(identity, node, attempt);
+            if (!spawned.has_value()) {
+                local.state = NodeState::Failed;
+                local.error_code = "node_session_start_failed";
+                local.error_message = "节点场开张失败[" + spawned.error().stage + "]: " +
+                                      spawned.error().error_code;
+                publish();
+                if (!ctx.v3_account->RecordNodeFailed(identity, local.error_code,
+                                                      local.error_message, 0, 0)) {
+                    emit_node_event(kEventNodeCompleted,
+                                    nlohmann::json{{"outcome", "error"},
+                                                   {"code", local.error_code}});
+                    return kOutcomeLedgerBroken;
+                }
+                emit_node_event(kEventNodeCompleted,
+                                nlohmann::json{{"outcome", "error"}, {"code", local.error_code}});
+                return "error";
+            }
+            node_session = std::move(spawned->bridge);
+            node_session_ref = std::move(spawned->ref);
+            request.trajectory = node_session.get();
+        }
+
         // 到这里，输入已解好、执行器也找着了；此刻才算真正交办。终端据
         // 这条回执告诉用户“中书省已经接到”，不拿预备状态冒充已发送。
         // 采纳悬置候选的执行不重发 started——派发事实在上个进程已落账。
@@ -754,6 +794,14 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
             node_terminal_hash = node_trajectory->Finish(result.ok, /*cancelled=*/false,
                                                          result.ok ? std::string()
                                                                    : result.error_code);
+        }
+        // 节点场收口:session.ended 落稳回末行 hash,编排账 terminal 事件
+        // 引用它(与 v2 桥同一只口,对账口径不变)。
+        if (node_session != nullptr) {
+            node_terminal_hash = node_session->Finish(result.ok, /*cancelled=*/false,
+                                                      result.ok ? std::string()
+                                                                : result.error_code);
+            node_session_ref.terminal_hash = node_terminal_hash;
         }
         local.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
         local.tokens_used += result.tokens_used;
@@ -848,7 +896,8 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         if (ctx.v3_account != nullptr) {
             // 失败事实落稳是关键:落不住 = 账断,零派发。
             if (!ctx.v3_account->RecordNodeFailed(identity, result.error_code, result.error_message,
-                                                  result.duration_ms, result.tokens_used)) {
+                                                  result.duration_ms, result.tokens_used,
+                                                  &node_session_ref)) {
                 emit_node_event(kEventNodeCompleted,
                                 nlohmann::json{{"outcome", "error"}, {"code", result.error_code}});
                 return kOutcomeLedgerBroken;
@@ -941,7 +990,8 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
             // 断、整场停明确失败态——恢复重放按 commit 判成功、补内存,不
             // 重跑副作用(§十)。
             if (!ctx.v3_account->RecordNodeCompleted(identity, result.empty ? "empty" : "success",
-                                                     result.duration_ms, result.tokens_used)) {
+                                                     result.duration_ms, result.tokens_used,
+                                                     &node_session_ref)) {
                 emit_node_event(kEventNodeCompleted, event_payload);
                 return kOutcomeLedgerBroken;
             }
@@ -2141,6 +2191,19 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
         trajectory_bridge = std::move(*spawned);
     }
 
+    // 节点独立场(GAP-05):v3 账在跑且宿主有 v3 会话时,llm/agent/skill
+    // 节点每次 attempt 开自己的 v3 session(父 session 持 spawn 边,/
+    // usage 会话树递归可见)。v2 场/无会话账:节点照跑没有独立场,编排
+    // 事实仍全在账上——如实降级,不伪造父场。
+    std::optional<WorkflowNodeSessions> node_sessions;
+    if (v3_account != nullptr && options_.trajectory_ledger != nullptr) {
+        if (auto material = NodeSessionMaterial::FromLedger(options_.trajectory_ledger);
+            material.has_value()) {
+            node_sessions.emplace(std::move(*material), v3_account->paths().run_dir(),
+                                  account.run_id);
+        }
+    }
+
     account.state = RunState::Running;
     EmitRunEvent(account, kEventRunStarted, nlohmann::json{{"state", ToString(account.state)}});
 
@@ -2153,6 +2216,7 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
     ctx.journal = journal.has_value() ? &*journal : nullptr;
     ctx.trajectory = trajectory_bridge.get();
     ctx.v3_account = v3_account;
+    ctx.node_sessions = node_sessions.has_value() ? &*node_sessions : nullptr;
     ctx.dangling = account_ctx != nullptr ? &account_ctx->dangling_by_node : nullptr;
     ctx.dispatch_seq = &dispatch_seq;
     ctx.cancel = cancel_token;

@@ -889,7 +889,8 @@ void WorkflowRunAccount::SaveRejectedCandidate(const NodeExecutionIdentity& iden
 
 bool WorkflowRunAccount::RecordNodeCompleted(const NodeExecutionIdentity& identity,
                                              const std::string& outcome, std::int64_t duration_ms,
-                                             std::int64_t tokens) {
+                                             std::int64_t tokens,
+                                             const NodeSessionRef* session) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     EventDraft draft;
     draft.kind = EventKindV3::WorkflowNodeCompleted;
@@ -899,6 +900,7 @@ bool WorkflowRunAccount::RecordNodeCompleted(const NodeExecutionIdentity& identi
                            {"outcome", outcome}};
     if (duration_ms >= 0) payload["durationMs"] = duration_ms;
     if (tokens != 0) payload["tokens"] = tokens;
+    if (session != nullptr && session->alive()) payload["sessionRef"] = session->ToJson();
     draft.payload = std::move(payload);
     const auto receipt = impl_->Put(std::move(draft), Durability::PowerLoss);
     return receipt.status == WriteReceipt::Status::Committed;
@@ -907,7 +909,7 @@ bool WorkflowRunAccount::RecordNodeCompleted(const NodeExecutionIdentity& identi
 bool WorkflowRunAccount::RecordNodeFailed(const NodeExecutionIdentity& identity,
                                           const std::string& error_code,
                                           const std::string& error_message, std::int64_t duration_ms,
-                                          std::int64_t tokens) {
+                                          std::int64_t tokens, const NodeSessionRef* session) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     EventDraft draft;
     draft.kind = EventKindV3::WorkflowNodeFailed;
@@ -918,6 +920,7 @@ bool WorkflowRunAccount::RecordNodeFailed(const NodeExecutionIdentity& identity,
     if (!error_message.empty()) payload["errorMessage"] = error_message.substr(0, 500);
     if (duration_ms >= 0) payload["durationMs"] = duration_ms;
     if (tokens != 0) payload["tokens"] = tokens;
+    if (session != nullptr && session->alive()) payload["sessionRef"] = session->ToJson();
     draft.payload = std::move(payload);
     const auto receipt = impl_->Put(std::move(draft), Durability::PowerLoss);
     return receipt.status == WriteReceipt::Status::Committed;

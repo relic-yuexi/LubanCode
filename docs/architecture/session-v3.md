@@ -59,7 +59,7 @@ Lua 中间件已接 `PreUser`、`PostUser`、`PreRequest`；请求阶段分改�
 
 Host API 已有文件、状态、上下文追加、日志与工具调用服务。实际权限取清单申请与宿主授权交集；生产默认只开 state/log。调用 MCP 走宿主工具服务并记子执行账。旧 command HookDispatcher 仍在，旧配置不能直接当 Lua 包使用。接线见 `middleware_assembly.cpp`、`middleware_runtime.cpp`、`middleware_v3_sink.cpp` 与 `hook_host_services.cpp`。
 
-终端、one-shot、AppServer 已共用 SessionService 入口。AppServer 现行 1.2 的 `thread/read` 与 `thread/resume` 提供只读历史/恢复视图；`thread/resume` 不启动执行。进程事件 `lastSeq` 不能拿来替代 v3 文件游标，完整 2.0 恢复协议仍是后续工作。
+终端、one-shot、AppServer 已共用 SessionService 入口。AppServer 现行 1.2 的 `thread/read` 与 `thread/resume` 缺省仍是只读历史/恢复视图——游标对齐 v3 账行并带 `sourceSessions` 来源链（各段 seq 不跨文件混排，水位记本场段，祖先段高 seq 不冒充水位）。`thread/resume` 带 `startExecution=true` 时经 SessionService 的 resume-at-launch 真恢复（v3 源续接同 id、v2 源迁移新场；活场明拒），不带则不启动执行。进程事件 `lastSeq` 不能拿来替代 v3 文件游标，完整 2.0 恢复协议仍是后续工作。
 
 ## 尚待接通
 
@@ -67,7 +67,7 @@ Host API 已有文件、状态、上下文追加、日志与工具调用服务�
 | --- | --- |
 | Telemetry | projector 仍解析旧 `EventEnvelope`，服务仍枚举 `main.jsonl`；配置能开不等于能投影 v3 |
 | Memory | 召回桥仍取旧 recorder；新版作用域、CAS、忘记屏障、正式 memory 消息与请求引用合同尚待实施 |
-| Workflow | 现有编排与 journal 可用；独立节点 Session v3、output commit 和完整节点恢复须另行接线 |
+| Workflow | 编排账已接 v3（WorkflowRunAccount 单事实源，生产 `/workflow run` 走账路）；llm/agent/skill 节点开独立 v3 session（GAP-05，2026-09-24），output.commit 与恢复按账判据；WorkflowService 收拢装配、实例级 Store 与持久交互归后续棒 |
 | Goal / Loop / btw | 现有功能按原实现运行；新增持久事务、独立上下文、验收与联合调度合同不能据已有命令认定完成 |
 | 压缩边界 | 中途 compact 的 `parentTurnId` 尚未由命令入口传入；共用 loop 仍有 hard trim，不能声称所有请求裁剪都已记入 v3 链 |
 | 归档/删除 | 归档仍要求 v2 manifest；删除仍查 main.jsonl 的封口与末 hash，完整 v3 生命周期待接 |

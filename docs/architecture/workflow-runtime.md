@@ -1,6 +1,6 @@
 # Workflow 运行时
 
-> **V3-GAP-05：** 本页说明现行 Workflow 运行时。节点独立 Session v3、output.commit 与完整节点恢复仍须按新合同接线，不能把已有 journal 桥当成迁移完成。见 [Session v3](session-v3.md)。
+> **V3-GAP-05（2026-09-24 销项）：** 编排事实源已切 v3 编排账（`WorkflowRunAccount`：segments 事件账 + 无损 outputs/checkpoints + fail-closed 提交，`/workflow run` 生产接线）；llm/agent/skill 节点每次 attempt 开独立 v3 session（`workflow-runs/<runId>/nodes/<execId>/sessions/`，usage 经会话树进 `/usage`）；恢复按账重放——commit 判成功、悬置候选采纳不重跑。旧 RunJournal/journal 桥只剩旧 run 的读取恢复（盘上旧档不破坏）。WorkflowService 收拢装配、实例级 Store、持久交互与 AppServer 图视图归后续棒。见 [Session v3](session-v3.md)。
 
 [架构总览](README.md) · [设计指南](../features/workflows/designing-workflows.md) · [Schema 参考](../reference/workflow-schema.md) · [app-server](../features/app-server/README.md)
 

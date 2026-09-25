@@ -187,10 +187,13 @@ ParamsCheck CheckTraceQueryParams(const nlohmann::json& params, std::string& out
 // thread/resume|thread/read(轨迹 v3 P3 第二棒,只读旧史两法):threadId
 // 必填;lastSeq 可选(0 = 全量,回 seq 大于它的条目——与 trace/query 同
 // 口径);includeHidden 可选(缺省 false:hidden 消息只回 hidden 标志,
-// 正文省略,§4.28"隐藏不等于删除,正文默认不发全")。
+// 正文省略,§4.28"隐藏不等于删除,正文默认不发全")。startExecution 仅
+// thread/resume 认(V3-GAP-04:缺省 false = 只读预览,行为一字不动;true
+// 经 SessionService 走 resume-as-new/续接源场的真恢复执行路);thread/
+// read 带它即拒——读面不许被误当恢复口。
 ParamsCheck CheckThreadHistoryParams(const nlohmann::json& params, std::string_view method,
                                      std::string& out_thread_id, std::uint64_t& out_last_seq,
-                                     bool& out_include_hidden);
+                                     bool& out_include_hidden, bool& out_start_execution);
 
 // turn/interrupt:threadId(字符串)必填;turnId 可选(空 = 打断该 thread
 // 当前在跑的回合)。

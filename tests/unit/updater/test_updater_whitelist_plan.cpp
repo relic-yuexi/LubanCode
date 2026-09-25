@@ -340,7 +340,7 @@ TEST_CASE("包根文件表:七枚逐名命中(install.ps1 终稿 $rootFiles)") {
         Entry("LICENSE", Sha64('2')),
         Entry("THIRD_PARTY_NOTICES.md", Sha64('3')),
         Entry("README.md", Sha64('4')),
-        Entry("README.en.md", Sha64('5')),
+        Entry("README.zh-CN.md", Sha64('5')),
         Entry("install.ps1", Sha64('6')),
         Entry("uninstall.ps1", Sha64('7')),
     });

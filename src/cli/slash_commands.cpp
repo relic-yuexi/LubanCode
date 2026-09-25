@@ -954,6 +954,95 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
     return commands;
 }
 
+namespace {
+
+// 二级词汇表本体:一行一个子命令词。词表逐一核对对应 Parse*Command 函数
+// 得出(不是凭 SlashCommand 枚举旁的注释猜的)——provider 复用已有的
+// ProviderSubcommands() 顺序,其余照各自 Parse*Command 里字面量比较的顺序
+// 誊录。desc_key 走 slash.sub.<command>.<word> 一族(i18n.cpp 里补,中英文
+// 都有,不靠 tr() 的 zh-CN 回退撑门面)。
+struct SlashSubcommandDescriptor {
+    const char* command;   // 一级命令词,带 '/'
+    const char* word;      // 子命令词,不带 '/'
+    const char* desc_key;  // i18n 键
+};
+
+const std::vector<SlashSubcommandDescriptor>& SlashSubcommandDescriptors() {
+    static const std::vector<SlashSubcommandDescriptor> table = {
+        // /provider:词序同 ProviderSubcommands()。
+        {"/provider", "list", "slash.sub.provider.list"},
+        {"/provider", "refresh", "slash.sub.provider.refresh"},
+        {"/provider", "add", "slash.sub.provider.add"},
+        {"/provider", "switch", "slash.sub.provider.switch"},
+        {"/provider", "remove", "slash.sub.provider.remove"},
+        {"/provider", "set", "slash.sub.provider.set"},
+        {"/provider", "edit", "slash.sub.provider.edit"},
+
+        // /instructions:ParseInstructionsCommand 只认 path/reload。
+        {"/instructions", "path", "slash.sub.instructions.path"},
+        {"/instructions", "reload", "slash.sub.instructions.reload"},
+
+        // /goal:ParseGoalCommand 里字面量比较的顺序(objective 是正文,不是
+        // 词,不进补全表)。
+        {"/goal", "status", "slash.sub.goal.status"},
+        {"/goal", "pause", "slash.sub.goal.pause"},
+        {"/goal", "resume", "slash.sub.goal.resume"},
+        {"/goal", "clear", "slash.sub.goal.clear"},
+        {"/goal", "edit", "slash.sub.goal.edit"},
+
+        // /loop:ParseLoopCommand 的六个子命令词。
+        {"/loop", "list", "slash.sub.loop.list"},
+        {"/loop", "status", "slash.sub.loop.status"},
+        {"/loop", "pause", "slash.sub.loop.pause"},
+        {"/loop", "resume", "slash.sub.loop.resume"},
+        {"/loop", "stop", "slash.sub.loop.stop"},
+        {"/loop", "run", "slash.sub.loop.run"},
+
+        // /plan:ParsePlanCommand 的三个子命令词。
+        {"/plan", "status", "slash.sub.plan.status"},
+        {"/plan", "off", "slash.sub.plan.off"},
+        {"/plan", "review", "slash.sub.plan.review"},
+
+        // /record:ParseRecordCommand 的十个子命令词。
+        {"/record", "status", "slash.sub.record.status"},
+        {"/record", "start", "slash.sub.record.start"},
+        {"/record", "note", "slash.sub.record.note"},
+        {"/record", "pause", "slash.sub.record.pause"},
+        {"/record", "resume", "slash.sub.record.resume"},
+        {"/record", "stop", "slash.sub.record.stop"},
+        {"/record", "cancel", "slash.sub.record.cancel"},
+        {"/record", "list", "slash.sub.record.list"},
+        {"/record", "install", "slash.sub.record.install"},
+        {"/record", "discard", "slash.sub.record.discard"},
+    };
+    return table;
+}
+
+}  // namespace
+
+const std::vector<SlashCommandSubcommands>& AllSlashSubcommandGroups() {
+    // AllSlashCommands() 同一套"现折 + 记上次建表用的语言"写法:i18n 说明
+    // 文字按当前语言现查,语言切换后惰性重建。表序即 SlashSubcommandDescriptors()
+    // 的登记序,组内子命令保持登记顺序。
+    static std::vector<SlashCommandSubcommands> groups;
+    static std::string built_for;
+    if (groups.empty() || built_for != CurrentLanguage()) {
+        built_for = CurrentLanguage();
+        groups.clear();
+        for (const SlashSubcommandDescriptor& descriptor : SlashSubcommandDescriptors()) {
+            auto it = std::find_if(groups.begin(), groups.end(), [&](const SlashCommandSubcommands& g) {
+                return g.command == descriptor.command;
+            });
+            if (it == groups.end()) {
+                groups.push_back({descriptor.command, {}});
+                it = groups.end() - 1;
+            }
+            it->entries.push_back({descriptor.word, tr(descriptor.desc_key)});
+        }
+    }
+    return groups;
+}
+
 std::vector<std::string> FormatSlashCommandListLines() {
     // 帮助清单的唯一排版口(P3-2):--help 的斜杠命令节与 /help 的正文都打
     // 这里出的行,与 Tab 补全同一份 AllSlashCommands,名单不许各列各的。
