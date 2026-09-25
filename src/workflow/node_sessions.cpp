@@ -169,24 +169,14 @@ std::expected<NodeSessionSpawn, runtime::WorkflowSpawnFailure> WorkflowNodeSessi
     // (material_.parent_session_dir,即 ledger->session_dir())就是父账
     // 自己 jsonl 所在的那个目录,两边基准同一个锚点,不该对不上。
     //
-    // 但 GAP-05 在 windows-msvc 上真回归过(main run 36082526799):
-    // std::filesystem::relative() 静默算出一个不指向真实文件的偏移量,
-    // ec 不报错、结果非空,读侧拼回去就是空树("/usage 丢节点账")。没能
-    // 在拿不到本机 Windows 环境的条件下把 stdlib 内部机制钉死到具体是
-    // weakly_canonical 对尚未落地路径段的处理特性,还是 relative() 词法
-    // 算法本身的边界情况——不猜诱因,直接堵后果:relative() 的结果必须
-    // 自证,拼回去、词法规整后要能对上真实目标的规整形状,对不上就当
-    // relative() 失败处理,退绝对路径分支(同机可读,不假装相对),不管
-    // relative() 本身是否报了 ec。
-    //
-    // 首版自证只拿 weakly_canonical 过的两侧互相拼验(parent_canonical /
-    // relative == child_canonical),线上 CI 复现仍是同一失配——那份自证
-    // 验的是"canonical 空间内 relative 自洽",不是读侧真正会做的事:读侧
-    // (reader.cpp WalkSessionTreeRecursive)拼的是`jsonl.parent_path()`
-    // 这个**原始未 canonicalize** 的父目录,不是 canonical 过的那份。两者
-    // 若因短文件名别名/挂载点等原因在 canonical 前后不是同一条字符串,
-    // canonical 空间自洽不代表原始空间也自洽——自证必须换成读侧真正落地
-    // 会用的那份原始路径,不然假阳性放过真正会读丢的相对路径。
+    // GAP-05 windows-msvc 真根因(诊断日志钉死,不再是本段的猜测):不在
+    // relative() 本身,在读侧拼回去之后没有折叠"../../../…"——父子两棵
+    // 树离得越深,未折叠前的字符串越长,windows-msvc CI 临时目录前缀本
+    // 就长,量到过未折叠 297 字符、折叠后 192 字符,正好跨过 Win32 传统
+    // MAX_PATH=260 这条线,未开长路径支持时直接判"不存在"。修法在
+    // reader.cpp:child.jsonl_path 拼出来后补一步 lexically_normal()。
+    // 这里的自证保留作为独立防线(relative() 本身若真算错,同一份自证
+    // 依然能兜住,退绝对路径分支),不因根因已经找到就撤掉。
     std::string journal_path;
     {
         std::error_code canon_ec;
@@ -218,16 +208,6 @@ std::expected<NodeSessionSpawn, runtime::WorkflowSpawnFailure> WorkflowNodeSessi
             std::error_code abs_ec;
             journal_path = std::filesystem::absolute(session_jsonl, abs_ec).generic_string();
         }
-        // GAP-05 windows-msvc 诊断(临时,与 reader.cpp 读侧那份配对,定位后
-        // 随修复一并撤):两轮独立修法都没堵住 windows-msvc 上的回归,自证
-        // 在写侧从未报过失配——把写侧四个原始字符串录下来,配读侧那份一起
-        // 比对,而不是继续猜 relative() 的行为。
-        platform::LogSink::Instance().Error(
-            "workflow.node_session.gap05_debug",
-            "parent_session_dir=" + material_.parent_session_dir.string() +
-                " session_jsonl=" + session_jsonl.string() +
-                " verified_ok=" + (ok ? std::string("true") : std::string("false")) +
-                " journal_path=" + journal_path);
     }
     if (journal_path.empty()) {
         return fail_out("reserve_stream", "workflow.node_session.no_journal_path",

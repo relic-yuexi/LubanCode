@@ -9,7 +9,6 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "platform/log_sink.hpp"
 #include "platform/sha256.hpp"
 
 namespace lubancode::trajectory::v3 {
@@ -1170,25 +1169,21 @@ void WalkSessionTreeRecursive(const std::filesystem::path& jsonl, SubagentSessio
         }
         child.session_id = JsonString(*child_ref, "sessionId").value_or("");
         child.run_id = JsonString(*child_ref, "runId").value_or("");
-        const std::string journal_path_raw = JsonString(*child_ref, "journalPath").value_or("");
-        child.jsonl_path = jsonl.parent_path() / journal_path_raw;
-        // GAP-05 windows-msvc 诊断(临时,定位后随修复一并撤):两轮独立
-        // 修法都没堵住这条回归,自证也没能在写侧复现失配——说明问题不在
-        // relative() 本身,换个角度直接把读侧实际用的四个字符串録下来,
-        // 等真机 CI 吐出来再比对,不再靠猜。
-        {
-            std::error_code exists_ec;
-            const bool child_exists = std::filesystem::exists(child.jsonl_path, exists_ec);
-            platform::LogSink::Instance().Error(
-                "workflow.node_session.gap05_debug",
-                "parent_jsonl=" + jsonl.string() +
-                    " parent_jsonl.parent_path=" + jsonl.parent_path().string() +
-                    " journalPath_raw=" + journal_path_raw +
-                    " rebuilt_child_jsonl=" + child.jsonl_path.string() +
-                    " rebuilt.lexically_normal=" + child.jsonl_path.lexically_normal().string() +
-                    " exists=" + (child_exists ? std::string("true") : std::string("false")) +
-                    (exists_ec ? (" exists_ec=" + exists_ec.message()) : std::string()));
-        }
+        // GAP-05 windows-msvc 真根因(诊断日志钉死):journalPath 是
+        // "../../../../…" 形状的相对路径,父子两棵树离得越深、这串前缀
+        // 越长——拼回去之前不收窄,拼接结果(父目录原样 + 未折叠的 ".."
+        // 段)整条字符串的长度会先冲一遍高峰才收敛。CI 的 windows-msvc
+        // 临时目录前缀本就长(GitHub Actions 短文件名 + 多层内容寻址子
+        // 目录),实测量到未折叠前 297 字符、折叠后 192 字符——正好跨过
+        // Win32 传统 MAX_PATH=260 这条线:没开长路径支持的 CreateFileW
+        // 等调用对超限路径直接判不存在,不报"路径太长",报"文件不存在"
+        // (child_missing),伪装成一个位置错误。lexically_normal() 纯词法
+        // 折叠 ".."段,不摸文件系统,折叠后再传给 exists()/ReadV3Ledger()
+        // 就落回 260 字符以内——写侧自证与窄证案二者都先 normalize 过
+        // 才比对,一直没能在这条链路上复现,读侧生产代码这步一直缺着。
+        child.jsonl_path =
+            (jsonl.parent_path() / JsonString(*child_ref, "journalPath").value_or(""))
+                .lexically_normal();
         // 父侧终态:linked 落稳才算关联建立;spawn.failed 是失败终态。
         std::string link_status = "not_linked";
         for (const auto& probe : ledger.events) {
