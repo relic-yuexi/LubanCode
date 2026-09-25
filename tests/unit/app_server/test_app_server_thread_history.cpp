@@ -762,8 +762,10 @@ TEST_CASE("thread/resume: startExecution——v2 冷场迁移新场,新 threadId
         CHECK(result["resumedThreadId"] != thread_id);
         CHECK(result["threadId"] == thread_id);
         CHECK(harness.server->active_thread_count() == before + 1);
-        // 手植源零 v3 投影可读,如实报格式空表不冒充(恢复事实照报)。
-        CHECK(result["sourceFormat"] == "v2");
+        // V3-LEGACY-01 后迁移新场恒 v3:sourceFormat 查的是恢复后新场自己
+        // 的目录(threads_ 挂的是 resumed_thread_id),不是手植的 v2 源
+        // 本身——新场刚建、还没有轮次,items 如实空,不冒充。
+        CHECK(result["sourceFormat"] == "v3");
         CHECK(result["items"].empty());
     }
     std::error_code cleanup_ec;
