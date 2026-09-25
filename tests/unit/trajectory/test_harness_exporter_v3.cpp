@@ -422,9 +422,14 @@ TEST_CASE("v3 子代理子流:两行 record,child 的 parent_run_id 指回 main 
     REQUIRE(bootstrap.child_writer.has_value());
     REQUIRE(spawn.Link(writer, bootstrap.checkpoint).status == v3::WriteReceipt::Status::Committed);
 
-    // 子账自跑一轮简单对话并收口。
+    // 子账自跑一轮简单对话并收口。assistant/Conversation 消息同样须挂真实
+    // requestId(schema3 合同,§4.4),子账自己的对话轮也不例外。
+    const RequestIds child_request = PrepareConversationRequest(
+        *bootstrap.child_writer, "goaleval-turn-1", "step-000001", "end_turn");
     v3::MessageDraft child_reply;
     child_reply.turn_id = "goaleval-turn-1";
+    child_reply.step_id = child_request.step_id;
+    child_reply.request_id = child_request.request_id;
     child_reply.purpose = v3::MessagePurpose::Conversation;
     child_reply.origin = v3::MessageOrigin::SessionRuntime;
     child_reply.provider = "anthropic";
