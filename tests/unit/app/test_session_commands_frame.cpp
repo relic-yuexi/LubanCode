@@ -241,3 +241,19 @@ TEST_CASE("plain 主题:全输出零转义字节、无框字形(T3/--no-color �
     CHECK(Contains(out, "前缀 epoch 2"));
     CHECK(Contains(out, "预算总账"));
 }
+
+TEST_CASE("context command uses compact estimate and retains historical cache accounting") {
+    cli::ContextTracker tracker(1048576);
+    tracker.ApplyUsage(api::Usage{1000, 400, 52100, 0}, "t1", 1);
+    tracker.ApplyContextEstimate(10581);
+    app::ContextSessionFacts facts;
+    facts.v3_session = true;
+    OutputCapture capture;
+    app::HandleContextCommand("", tracker, 2749, 11936, 1300, plain, 2, nullptr,
+        nullptr, nullptr, nullptr, 0, nullptr, nullptr, facts);
+    const auto text = capture.text();
+    CHECK(Contains(text, "~10.6k"));
+    CHECK_FALSE(Contains(text, "53.5k"));
+    CHECK_FALSE(Contains(text, "38.8k"));
+    CHECK(Contains(text, "52.1k"));
+}

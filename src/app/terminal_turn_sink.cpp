@@ -358,7 +358,8 @@ void TerminalTurnSink::ApplyEvent(const runtime::ServerEvent& event, std::uint64
                     ingredients_.context_tracker->UsagePercent(),
                     static_cast<std::int64_t>(ingredients_.context_tracker->current_tokens()),
                     static_cast<std::int64_t>(ingredients_.context_tracker->window_tokens()),
-                    !ingredients_.context_tracker->usage_stale(),
+                    !ingredients_.context_tracker->usage_stale() &&
+                        !ingredients_.context_tracker->current_estimated(),
                     // 缓存注记(缓存诊断单):cached_tokens 有则摆本场命中与
                     // 命中率,没回就写"未报告"——同一个 0 不糊。
                     cli::BuildCacheNote(*ingredients_.context_tracker, reported));

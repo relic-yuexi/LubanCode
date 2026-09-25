@@ -1511,6 +1511,8 @@ const Entry kZhCN[] = {
     {"cmd.context.cache_history_tally", "窗口内分型:{0}"},
     {"cmd.context.bd.measured", "(实测)"},
     {"cmd.context.bd.history_derived", "(=实测总量−系统−工具)"},
+    {"cmd.context.note.compact_estimate", "压缩后完整请求估算，待下次主请求实测；分项沿用字符估算，不与总量相加。缓存数据来自上次请求。"},
+    {"status.cache_previous", "上次请求 · "},
     {"cmd.context.bd.note.measured", "(总量为上一轮实测 token;系统提示/工具为字符估,历史为实测总量反推)"},
     {"cmd.context.bd.note.est", "(尚无实测,启动估算:统一口径,ASCII 4 字符约 1 token、非 ASCII 每字约 1.5 token,实际以模型返回为准)"},
     {"cmd.context.note.semantics",
@@ -2164,6 +2166,8 @@ const Entry kZhCN[] = {
 // en:P0 全量;P1 暂缺(TODO:P1 键渐进补齐,缺键回退 zh-CN,见 README)。
 // ---------------------------------------------------------------------------
 const Entry kEn[] = {
+    {"cmd.context.note.compact_estimate", "Post-compaction full-request estimate; awaiting main-request usage. Component estimates use a separate scale and do not sum to the total. Cache data is from the previous request."},
+    {"status.cache_previous", "Previous request · "},
     {"language.name", "English (en)"},
 
     // ---- help (--help) ----

@@ -103,6 +103,10 @@ public:
     // cache_creation_tokens + output_tokens),不是累加——理由见文件头注释。
     void Update(const api::Usage& usage);
 
+    // 换链后只更新当前占用；实测缓存账和累计用量原样保留。
+    void ApplyContextEstimate(std::size_t tokens);
+    bool current_estimated() const { return current_estimated_; }
+
     // 回合内 on_usage 的统一入口:usage 带回有效实测(四项 token 不全为
     // 零)就按 Update 覆盖占用、清掉旧值标记;四项全零(provider 没在流末
     // 给 usage——现有 Usage 的全零默认值分不出"真实为零"与"字段缺失",
@@ -318,6 +322,7 @@ private:
     void RegisterTurnIfMissing(const std::string& turn_id);
 
     std::size_t current_tokens_ = 0;
+    bool current_estimated_ = false;
     std::size_t window_tokens_;
     // 预算来路与身份(§三):随窗口值一并记账,恢复裁决与显示标注读它。
     ContextWindowSource window_source_ = ContextWindowSource::Default;

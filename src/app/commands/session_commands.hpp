@@ -250,6 +250,7 @@ struct CompactSessionInputs {
     std::string* last_compact_line = nullptr;      // /context 的台账行(写出)
     // 压缩滞回活账(可空 = 单测/无状态场景,不设防)。
     CompactHysteresis* hysteresis = nullptr;
+    lubancode::cli::ContextTracker* context_tracker = nullptr;
     // AR-10(采用门禁核完整主请求):主请求固定事实的取用口——每次压缩
     // 现场取(工具表/叠层可能刚变)。v3 分支把它铸进 RunV3CompactInput
     // ::main_request_budget 的闭包,采用门禁据此核"完整主请求"而不是

@@ -238,6 +238,7 @@ struct V3CompactRunResult {
     std::string reason;
     // 同一口径(bytes/4)的前后上下文数字;applied 时即 applied 事件里的
     // contextTokensBefore/After(显示侧压缩分界线吃这两枚,§4.11)。
+    std::optional<std::uint64_t> post_compact_input_tokens;  // 完整候选请求估算，不含输出预留
     std::uint64_t tokens_before = 0;
     std::uint64_t tokens_after = 0;
     int model_calls = 0;       // no_eligible_history/容量拒绝时为 0(不空调模型)

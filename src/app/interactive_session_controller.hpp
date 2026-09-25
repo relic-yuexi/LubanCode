@@ -289,6 +289,7 @@ private:
         in.session_compact_epoch = &session_compact_epoch;
         in.last_compact_line = &last_compact_line;
         in.hysteresis = &compact_hysteresis_;
+        in.context_tracker = &context_tracker;
         in.build_compact_options = [this]() { return BuildCompactOptions(); };
         in.emit_session_hook =
             [this](lubancode::hooks::HookEvent event, nlohmann::json fields, const std::string& match_value) {
