@@ -89,6 +89,7 @@ plain 主题(`theme.reset` 空串——全仓既有探针,覆盖 `--no-color`、
 | `list_bullet_user` | 列表项目符·user 档(如 user 层记忆) |
 | `list_bullet_project` | 列表项目符·project 档 |
 | `key_hint` | 列表行尾键提示/短注(如 "(global)"、快捷键注) |
+| `row_selected_bg` | 常驻选择面板(SessionPicker 等)光标行整行底色;plain 空串不铺底 |
 
 内置三套板(dark/light/plain)各带缺省值;plain 全空串。主题加载侧只认
 名字,老名字的配置文件直接兼容——不存在盘上主题文件,新增字段的缺省值
