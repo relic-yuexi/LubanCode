@@ -1,14 +1,17 @@
 # 分布式支持路线图：从单机宿主到集群控制面的分期落地计划
 
-- 状态：设计已定稿，待开工（2026-09-24 第二版：从"只做验收复核的排期表"改成"可直接按批开工的实施单"；第一版 P0~P6 由本版 D0~D9 取代，映射见第十六节；同日补中间件与池化模式、配置、日志、生命周期、排期章节）
+- 状态：设计已定稿，待开工（2026-09-24 第二版：从"只做验收复核的排期表"改成"可直接按批开工的实施单"；第一版 P0~P6 由本版 D0~D9 取代，映射见第十六节；同日补中间件与池化模式、配置、日志、生命周期、排期章节；2026-09-25 并入原集群畅想单与多租户隔离单（第二十九、三十章，原单已删），补消息队列全景（第二十七章）与 Sandbox 池子系统（第二十八章））
 - 日期：2026-09-24
 - 级别：P1（方向性工程，D0~D3 不依赖 LubanCore 分离，可与近期 P0 单子并行；D4 起受前置门约束）
 - 范围：新增 `src/cluster/`（protocol / lease / sim / node_bridge / control_plane / store）、`src/channel/transport/tls.*`（补 mTLS 与服务端角色）、`src/app_server/ws_*`（抽服务端 WS 承载给控制面复用）、`src/trajectory/v3/`（上行游标读口）、`src/runtime/session_service.*`（按 Host API 接入）、CMake 新目标 `lubancode_cluster_proto`/`lubancode_cluster_node`/`lubancode_cluster_cp`、新文档目录 `docs/architecture/cluster/`
 - 依赖：
   - `LubanCore与CLI分离_核心库独立成宿主底座设计.todo` 的 **B（本地 SDK）+ C（隔离与并发基线）** 是 D4 起的硬前置（不是"全部验收"——那张单自己的 A 节第四条已写明把集群硬前置改成 B/C 基线，第一版本单写成"全部验收"是错的，本版纠正）。
-  - `多租户隔离_身份授权与隔离Worker落地设计.todo` 的身份合同（§三）是 D6 的硬前置。
+  - 身份合同（第三十章原 §三，原多租户单已并入）的落码是 D6 的第一项工作，不再是外部前置。
+  - `跨平台ExecutionProvider与通用强化沙箱设计.todo` 的 `ExecutionSpec` 与本机 provider 是 D11 的前置（D11a 的 `process` 后端直接用它）。
   - Gateway V0/V1/V2/V4 已落的持久化原语（PowerLoss 提交、ownerEpoch 认领、durable outbox）是直接复用件；Gateway V3（渠道）与集群无依赖，V5（长任务/异步工具执行账）是 D8"未知副作用裁决"的软前置。
-- 关联：`多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`（目标形态、对象模型、Session 状态机以它为准；本单给出它缺的：协议、存储、算法、数字、测试方法和按批落点）、`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`OpenTelemetry接入V3_现状与落地路线.todo`、`跨平台ExecutionProvider与通用强化沙箱设计.todo`、`SessionV3异步工具_任务执行协议配对与结果投递.todo`
+- 已并入（2026-09-25）：原 `多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo` → 第二十九章；原 `多租户隔离_身份授权与隔离Worker落地设计.todo` → 第三十章。**全文凡写"畅想单 §X"指第二十九章"原 §X"小节，"多租户单 §X"指第三十章"原 §X"小节。**
+- 保持独立不并入：`LubanCore与CLI分离_核心库独立成宿主底座设计.todo`（单机 SDK 本身有独立价值，CLI/Web/业务嵌入都依赖它，不应被集群排期绑住；本单只消费它的 B/C/D 批）。
+- 关联：`Agent强化学习Rollout轨迹采集与训练交付设计.todo`（沙箱批量申请的主要用户）、`后台命令PTY会话与可附着终端设计.todo`、`只读工具并行与写入串行_批次屏障与执行链拆分.todo`、`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`OpenTelemetry接入V3_现状与落地路线.todo`、`跨平台ExecutionProvider与通用强化沙箱设计.todo`、`SessionV3异步工具_任务执行协议配对与结果投递.todo`
 - 不在本单：数据驻留（按地域放置，首版单地域）、节点模式下的跨节点热迁移（D9 只做"人工冷迁移"；池化模式的自动接管见 D10）、跨 Region 部署、Control Plane 多活写、任意工具 exactly-once、公网节点入站、把 Redis/消息队列作必选依赖
 
 ---
@@ -256,6 +259,8 @@ Node Bridge（每节点一只守护进程）
                                           │ 文件/MCP/浏览器             │
                                           └──────────────────────────┘
 ```
+
+（Sandbox 池的完整设计——预热、两级排队、批量申请、L0~L3 状态保留、模板、隔离后端——见第二十八章；各类消息队列的定位见第二十七章。）
 
 **为什么把"大脑"和"手"分开**：Agent 回合 90% 以上时间在等模型，CPU 很低，一台 Worker 可以同时推进几百场；而工具执行（编译、测试、浏览器）重、危险、要隔离。分开后：Worker 按模型并发扩，Sandbox 按计算量扩；Sandbox 可以跑在不可信隔离域（gVisor/Firecracker/Windows 容器），Worker 与凭证不进沙箱。这正对应用户说的"一台专门执行、当 sandbox 用"。
 
@@ -837,7 +842,8 @@ tests/manual/cluster/{load,soak,multi_host}/
 
 - [ ] 建 `docs/architecture/cluster/`：README（本单第三节 ADR 摘要 + 拓扑图）、protocol.md（第五节全量 + 错误码全表）、state-machines.md（第四节迁移表）、store.md（第七节 DDL + SPI 合同）、security.md（ADR-06 + 威胁模型：STRIDE 逐项）、testing.md（第十节不变量 + 第十一节告警）、runbook.md（占位，D8 填）。
 - [ ] 写 `schema/cluster/v1/` 全部帧与命令 JSON Schema，含正/反例样本 `schema/cluster/v1/examples/`。
-- [ ] 同步三张关联单：畅想单"硬前置"改指 LubanCore B/C（与 LubanCore 单 A 节第四条一致）；LubanCore 单 C 批加一条"Host API EnqueueTurn 接受外部 requestId 并落账"（本单 6.3 需要）；多租户单 §三加注"集群身份类型由其定义，集群单只消费"。
+- [x] 畅想单与多租户单并入本单（第二十九、三十章，2026-09-25），各处引用已改指本单。
+- [ ] LubanCore 单 C 批加一条"Host API EnqueueTurn 接受外部 requestId 并落账"（本单 6.3 需要）；LubanCore 单 A 节第四条"集群硬前置 = B/C"与本单一致性复核。
 - [ ] 对第十七节十个开放问题逐条确认或翻案（默认裁决已给），结果写回本单。
 
 验收：文档评审通过；`schema/cluster/v1/examples/` 下每个样本用任意 JSON Schema 校验器通过/拒绝符合预期（D1 起由单测自动跑）。
@@ -910,10 +916,12 @@ tests/manual/cluster/{load,soak,multi_host}/
 
 验收：I7 在仿真与集成测试中均成立；10 个并发订阅者 + 1 个每 5 s 断线重连的"坏客户端"跑 1 h，所有订阅者最终事件序列与节点主账逐行一致。
 
-### ── D6 开工门：多租户单 §三身份合同落码 ──
+### ── D6 开工门：D4 验收通过（身份合同落码是 D6 自己的第一项） ──
 
 ### D6：身份、租户与授权
 
+- [ ] 第三十章原 §三身份合同落码（`AuthenticatedSubject`/`ResourceScope`/`ExecutionScope`），原 §四"授权放两处"。
+- [ ] 第三十章原 §八 P0、P1、P3 验收清单全部勾选（并入本批）。
 - [ ] OIDC 登录（Authorization Code + PKCE）；本地账号（argon2id，默认关）；API token。
 - [ ] tenants/users/memberships/session_members 全链路；所有 REST/WSS 入口过 ACL；节点归属 tenant，跨 tenant 命令节点侧二次拒绝（I8）。
 - [ ] join token 绑定 tenant；节点证书 SAN 带 node_id，控制面由证书反查 tenant，不信帧里的 tenant 字段。
@@ -936,7 +944,7 @@ tests/manual/cluster/{load,soak,multi_host}/
 
 ### D8：生产化
 
-- [ ] Worker 子进程化（6.1）：按 tenant 分 Worker、Worker 崩溃隔离（F18）、进程树清理；接 `跨平台ExecutionProvider与通用强化沙箱设计.todo` 的沙箱。
+- [ ] Worker 子进程化（6.1）：按 tenant 分 Worker、Worker 崩溃隔离（F18）、进程树清理；接 `跨平台ExecutionProvider与通用强化沙箱设计.todo` 的沙箱；第三十章原 §八 P2 验收清单全部勾选。
 - [ ] PostgreSQL 后端 + 合同测试复用 + 协调器主备（advisory lock + leader_epoch，F8）。
 - [ ] 命令 detached JWS 签名（ADR-06）。
 - [ ] 证书自动轮换、吊销即时生效、`doctor` 全项。
@@ -973,6 +981,12 @@ tests/manual/cluster/{load,soak,multi_host}/
 - [ ] 真机演练：3 Worker + 2 Sandbox + PG 主从 + 3 broker Kafka；随机 kill Worker/Sandbox/Kafka broker/PG 主，全程 I1~I11 成立，Worker 崩溃后 session 自动接手时间 P99 < 60 s。
 
 验收：同一场 session 在 Worker A 上跑一半被 kill，Worker B 自动接手跑完，账 verify 通过、无工具重复执行、浏览器全程只看到一条连续事件流；Kafka 全部停掉 10 分钟期间 Agent 不受影响，恢复后下游追平且无重复（按 seq 去重后）。
+
+### ── D11 开工门：D4 验收通过（sandboxd 协议）；ExecutionProvider 单 `ExecutionSpec` 已冻结；D11b 起需 D10 的 Store/对象存储 ──
+
+### D11：Sandbox 池子系统（专职执行机、预热、排队、状态保留）
+
+分三段 D11a / D11b / D11c，清单与验收见 §28.13。节点模式也可用 D11a 的 sandboxd + `process`/`container` 后端做本机沙箱池。
 
 ## 十六、第一版批次 → 本版批次映射
 
@@ -1020,13 +1034,13 @@ tests/manual/cluster/{load,soak,multi_host}/
 
 ## 十九、最终验收门
 
-D0~D8 全部勾选，且：
+D0~D8 全部勾选（节点模式 GA 门）；池化模式与 Sandbox 池另以 D10、D11 验收为门。且：
 
 - [ ] `docs/architecture/cluster/` 七篇文档与代码一致（协议 schema 由单测对照，状态机表由穷举单测对照）；
 - [ ] 仿真台：夜间 10 万种子连续 14 天全绿；
 - [ ] 集成测试：第九节 F1~F20 每项至少一个自动化用例（F5/F15/F16 可为半自动），三平台记录；
 - [ ] D7 容量报告 + D8 soak 报告 + D8 HA 切换报告 + 安全评审报告存档于 `docs/architecture/cluster/reports/`；
-- [ ] 三份关联设计单状态字段更新为"已落"或"进行中有明确批次"；
+- [ ] `LubanCore与CLI分离_核心库独立成宿主底座设计.todo` 与 `跨平台ExecutionProvider与通用强化沙箱设计.todo` 状态字段更新为"已落"或"进行中有明确批次"；第二十九、三十章中原单的清单项全部勾选或明确划出；
 - [ ] 配置 schema 与 `config-reference.md` 一致，全部键七属性齐全；日志事件目录与代码中实际 `event` 名一致（CI 扫描比对）；
 - [ ] 泄漏测试（日志、指标、trace、审计、崩溃文件、支持包）零命中；
 - [ ] 第二十二章全部周期任务有"最近一次成功时间"指标且在 soak 期间无漏跑；一次真实备份恢复演练记录在案；
@@ -1390,9 +1404,12 @@ cluster（全局默认） → tenant → project → user → session
 | D7 多节点调度配额容量 | 10 | A+D | W22–W26 | D5 |
 | D8 生产化 | 24 | 全员 | W27–W36 | D7、Gateway V5 |
 | D10 池化模式 | 24 | A+B+C | W37–W46 | D8、LubanCore D、ExecutionProvider |
+| D11a 沙箱执行底座 | 8 | B+D | W31–W36 | D4、ExecutionProvider |
+| D11b 状态保留与规模 | 8 | B+C | W47–W50 | D10、D11a |
+| D11c 强隔离与内存快照 | 6 | C | W51–W53 | D11b |
 | D9 冷迁移（另立单） | 待定 | — | W47 起 | D8 |
 
-合计约 **128 人周**（不含 D9 与外部依赖）；4 人团队约 **46 个日历周**到池化模式 beta。
+合计约 **150 人周**（不含 D9 与外部依赖）；4 人团队约 **46 个日历周**到池化模式 beta，约 **53 个日历周**到 Sandbox 池完整（D11c）。D11a 与 D8 并行时 B、D 两人负荷偏高，若届时无法加人，D11a 顺延到 W37 与 D10 合并推进，M8 顺延约 4 周。
 
 ### 23.3 里程碑（每个都有可演示产物与退出标准）
 
@@ -1405,6 +1422,7 @@ cluster（全局默认） → tenant → project → user → session
 | **M5 多节点（beta）** | W26 | 3 节点调度、配额排队、drain | D7 容量报告达标 |
 | **M6 生产 GA（节点模式）** | W36 | HA 控制面、72 h soak 报告、runbook 演练 | D8 验收；CHANGELOG 发布 |
 | **M7 池化模式 beta** | W46 | Worker 被杀自动接管、Kafka 停机不影响 Agent | D10 验收 |
+| **M8 Sandbox 池完整** | W53 | 预热命中秒级分配、100 成员批量排队跑完、装好依赖的沙箱挂起后换机恢复、强隔离后端 | D11a/b/c 验收 |
 
 ### 23.4 节奏
 
@@ -1473,19 +1491,21 @@ cluster（全局默认） → tenant → project → user → session
 
 | 维度 | 本单落点 | 状态 |
 |---|---|---|
-| 目标形态与边界 | 畅想单 + 第一、三章 | 已设计 |
+| 目标形态与边界 | 第一、三、二十九章 | 已设计 |
 | 部署形态（节点 / 池化） | ADR-12、第十三章 | 已设计 |
 | 线协议与版本兼容 | 第五章、ADR-08 | 已设计 |
 | 状态机 | 第四章 | 已设计 |
 | 单写者 / 租约 / fencing | ADR-05、4.2、ADR-12 | 已设计 |
 | 投递语义与幂等 | ADR-04、9.4 | 已设计 |
 | 存储与事务 | ADR-02、第七章 | 已设计 |
-| 中间件定位 | ADR-11 | 已设计 |
+| 中间件定位与多种消息队列适配 | ADR-11、第二十七章 | 已设计 |
+| Sandbox 执行池（预热、排队、快照保留、隔离后端） | ADR-12、第二十八章 | 已设计 |
+| Skill / Package / MCP 能力治理 | 第二十九章原 §九、§十 | 已设计 |
 | 调度、配额、限流 | ADR-07、20.7、ADR-12 第 6 条 | 已设计 |
 | 故障矩阵与恢复 | 第九章、9.3 | 已设计 |
 | 不变量与测试方法 | 第十章、ADR-10 | 已设计 |
-| 身份、认证、授权 | ADR-06、D6、多租户单 | 已设计 |
-| Secret | 畅想单 §十一、20.1 | 已设计 |
+| 身份、认证、授权 | ADR-06、D6、第三十章 | 已设计 |
+| Secret | 第二十九章原 §十一、20.1、28.6 | 已设计 |
 | 配置体系 | 第二十章 | 已设计 |
 | 日志、审计、指标、trace | 第十一、二十一章 | 已设计 |
 | 数据生命周期、保留、删除 | 第二十二章 | 已设计 |
@@ -1500,3 +1520,790 @@ cluster（全局默认） → tenant → project → user → session
 | 国际化与文档 | 运行日志 `msg` 英文、用户文案走现有语言包；运维文档中英 | D8 |
 | 合规（数据驻留、导出） | 22.3 删除证明；**缺：数据驻留（按地域放置）**——首版单地域，写入"不在本单" | 明确不做 |
 | 排期与风险 | 第二十三章 | 已排 |
+
+## 二十七、消息队列与中间件适配全景（ADR-11 的展开）
+
+ADR-11 定的是**角色**（事实账 / 工作分发 / 事件扇出 / 控制命令），不是某一家产品。Kafka 只是"事件扇出"角色的一个实现。本章把常见中间件逐个放到角色上，定支持档位与适配合同。
+
+### 27.1 三个 SPI，三种语义
+
+| SPI | 语义 | 必须满足 | 可选能力（以能力声明上报） |
+|---|---|---|---|
+| `WorkQueue` | 待执行工作：领取 → 续租 → 确认 / 放回 / 死信 | 单条确认；**可延长的领取期限**（Agent 工作可能跑几十分钟，等审批可能几小时）；超时重投；死信 | 延迟投递（定时触发）、优先级、按 key 保序、批量领取 |
+| `EventBus` | 已提交事件扇出：一写多读、可重放 | 按 key（session_id）保序；消费者各自游标；保留期内可从任意位置重放 | 压缩 topic、事务写入、跨地域复制 |
+| `Wakeup` | 轻量唤醒提示（"有新活了，快来取"） | 无（丢了也没关系，靠轮询兜底） | — |
+
+**铁律不因换中间件而变**：
+1. 事实账永远在 Session Store（或节点 Trajectory），不在任何消息队列里；
+2. 队列投递重复、乱序、丢唤醒都是正常情况：领取工作时在 Store 里**同事务授予 RuntimeLease**，拿不到租约的重复投递直接丢弃；
+3. 事件扇出一律从 Store 的事务 outbox / CDC 出，不允许执行代码"边跑边发"。
+
+### 27.2 候选逐个定位
+
+| 中间件 | 适合当 | 不适合当 | 关键理由 | C++ 客户端 | 运维重量 | 支持档 |
+|---|---|---|---|---|---|---|
+| **PostgreSQL**（`SKIP LOCKED` 任务表；`LISTEN/NOTIFY` 唤醒；可选 pgmq 扩展） | WorkQueue（**默认**）、Wakeup、小规模 EventBus（outbox 表轮询） | 大吞吐 EventBus | 与租约同库同事务，领取即授租，天然原子；零新增组件 | libpq | 已有 | **T1** |
+| **SQLite 任务表** | 单机/开发 WorkQueue | 任何多进程生产部署 | 单写者 | 内置 | 无 | T1（仅单机） |
+| **Kafka 协议族**：Apache Kafka、Redpanda、AutoMQ、WarpStream、Confluent、AWS MSK、Azure Event Hubs（Kafka 端点）、阿里云/腾讯云 Kafka 版 | EventBus（**首选**） | WorkQueue | 分区队头阻塞、rebalance 双消费、`max.poll.interval.ms` 与长任务冲突（ADR-11） | librdkafka | 中~重（Redpanda 较轻） | **T1** |
+| **NATS JetStream** | WorkQueue（**首选替代**）+ EventBus（中等规模） | 超大规模长期留存 | WorkQueue 保留策略、`AckWait` + `InProgress` 可续期（正合长任务）、按 subject 保序、`Nak` 带延迟；单二进制，一件同时兼任队列和总线 | nats.c（官方） | **轻** | **T1** |
+| **Apache RocketMQ**（含阿里云 RocketMQ） | EventBus + WorkQueue | — | 顺序消息、**事务消息**（半消息 + 回查，天然对应 outbox）、延迟消息、重试与死信；国内部署常见 | rocketmq-clients C++（5.x，gRPC） | 中 | T2 |
+| **Apache Pulsar** | EventBus + WorkQueue | — | 流与队列一体：Shared 订阅单条 ack、ack 超时重投、延迟投递、分层存储 | pulsar-client-cpp（官方） | 重（BookKeeper + 元数据存储） | T2 |
+| **RabbitMQ**（quorum queue；Streams） | WorkQueue | 高吞吐可重放 EventBus（Streams 可以但非强项） | 成熟的 ack/重投/死信/优先级；**注意 `consumer_timeout` 默认 30 min**，长任务须调大或改"领取即转存租约、立即 ack"模式 | rabbitmq-c / AMQP-CPP | 中 | T2 |
+| **Redis Streams / Valkey**（消费组、`XAUTOCLAIM`） | 开发、小规模 WorkQueue、Wakeup | 任何"不能丢"的角色 | 异步复制下主从切换可丢已确认写；AOF `everysec` 可丢 1 s；只可配合"Store 授租为准"使用 | hiredis | 轻 | T3 |
+| **云托管**：AWS SQS（可见性超时最长 12 h、FIFO 消息组）/ SNS / Kinesis；Google Pub/Sub（ack 期限可续、ordering key）；**Azure Service Bus**（Message Sessions 天然按 session 保序加锁）；阿里云 MNS | WorkQueue / EventBus（按产品） | — | 免运维；各自语义差异大，走适配器 + 合同测试 | 走 HTTP（cpr，SigV4 等自签） | 无 | T3 |
+| **ActiveMQ Artemis**（JMS） | WorkQueue | — | 企业存量环境 | STOMP/AMQP 客户端 | 中 | T3 |
+| **MQTT**（EMQX、Mosquitto） | **不入集群内部**；仅作端侧设备 / IoT 渠道接入（归 Channel 体系） | 内部任何角色 | 语义面向设备，不是可靠工作队列 | — | — | 不纳入 |
+| **ZeroMQ / nanomsg** | 不纳入 | 全部 | 无代理、无持久化，丢了就没了 | — | — | 不纳入 |
+
+**支持档含义**：
+- **T1**：官方维护，发行包默认编入（可选编译开关，默认 ON 的只有 PG/SQLite），CI 每日跑合同测试，生产推荐。
+- **T2**：官方维护，默认不编入（`-DLUBANCODE_MQ_ROCKETMQ=ON` 等），CI 每周跑合同测试，文档给部署样例。
+- **T3**：适配器接口与合同测试开放，实现可由社区或客户交付；通过合同测试才允许在 `cp.yaml` 里启用，否则启动拒绝。
+
+### 27.3 适配器合同测试（`tests/unit/cluster/mq_conformance/`，与 Store 合同测试同构）
+
+所有 `WorkQueue` 实现必须通过：领取-确认；领取后进程崩溃 → 期限到重投；续期成功与续期过期；同一工作被两个消费者同时拿到时，只有一个能在 Store 拿到租约（另一个安静丢弃）；死信达阈值；延迟投递误差 < 1 s（若声明支持）；1 万条并发领取无丢失。
+
+所有 `EventBus` 实现必须通过：同 key 保序；消费者从任意 offset 重放；relay 崩溃后重发不丢（至少一次）；消费者按 `(session_id, seq)` 去重后结果与 Store 完全一致；broker 全部停机 10 min 后恢复，下游追平。
+
+启动时组合校验：`WorkQueue=redis_streams` 且 `durability.require_crash_recovery=true` → 启动拒绝，除非显式声明 `workqueue.redis.i_understand_ack_loss=true` 并写审计。
+
+### 27.4 按规模推荐组合
+
+| 场景 | 推荐 |
+|---|---|
+| 单机 / ≤ 10 节点 / 起步 | **不装任何消息队列**：SQLite 或 PG 同时承担 Store、WorkQueue、Wakeup；浏览器扇出由控制面直推 |
+| 中等规模、想要运维最轻 | PG（Store）+ **NATS JetStream**（WorkQueue 与 EventBus 一件兼任） |
+| 已有 Kafka 生态 / 事件下游多（审计、计费、训练、BI） | PG（Store + WorkQueue）+ **Kafka 协议族**（EventBus） |
+| 国内云 / 已有 RocketMQ | PG（Store）+ **RocketMQ**（WorkQueue + EventBus；事务消息做 outbox） |
+| 全托管云 | 云 PG + SQS/Pub/Sub/Service Bus 适配器 |
+
+配置键：`workqueue.kind: pg|sqlite|nats|rabbitmq|rocketmq|pulsar|redis_streams|sqs|pubsub|servicebus`、`eventbus.kind: none|kafka|nats|rocketmq|pulsar|pubsub|servicebus`、`wakeup.kind: poll|pg_notify|nats|redis`，各自子键在 §20.7 目录中按 kind 分组登记。
+
+## 二十八、Sandbox 池子系统（专职执行机、预热排队、状态保留）
+
+### 28.1 要解决什么
+
+池化模式里"大脑"（Agent Worker）和"手"（Sandbox）分开（ADR-12）。用户要的不止"有个沙箱"，而是：
+
+1. **专门的执行机**：一批机器只跑沙箱，承接所有 shell、编译、文件读写、MCP、浏览器；
+2. **一次性起很多**：提前预热一池沙箱，也能为批量任务（评测、RL rollout、Workflow 扇出）一次申请几十上百个；
+3. **排队**：沙箱不够时排队，不是直接失败；
+4. **保留里面的东西**：Session 暂停或退出后，沙箱里装的依赖、生成的文件、甚至正在跑的开发服务器，下次能接着用。
+
+与既有单子的关系：`跨平台ExecutionProvider与通用强化沙箱设计.todo` 定义的是**单机上**的执行合同（`ExecutionSpec`、provider 选择、降级即拒）。本章把它扩成**集群级沙箱池**：`RemoteSandboxProvider` 是该单 provider 接口的一种实现，Worker 与节点都通过同一个 `ExecutionSpec` 调用，不另造第二套执行合同。
+
+### 28.2 组件
+
+```text
+                   ┌──────────────── 控制面 ────────────────┐
+                   │ Sandbox Scheduler（协调器内一个模块）    │
+                   │  ├─ 模板目录（Template Registry）        │
+                   │  ├─ 预热池管理（Warm Pool Manager）      │
+                   │  ├─ 获取队列（Acquire Queue，按租户公平） │
+                   │  └─ 快照目录（Snapshot Catalog）         │
+                   └──────┬──────────────────────┬──────────┘
+                          │ mTLS                  │ 元数据
+            ┌─────────────▼─────────────┐   ┌─────▼──────────────┐
+            │ Sandbox Host（每台执行机） │   │ Session Store (PG) │
+            │ lubancode-sandbox-host     │   └────────────────────┘
+            │  ├─ Backend Driver         │   ┌────────────────────┐
+            │  │  process/container/     │──▶│ 对象存储（快照块）  │
+            │  │  gVisor/Kata/microVM/k8s│   └────────────────────┘
+            │  ├─ 本机快照缓存            │
+            │  └─ 出口代理（网络策略）     │
+            │  ┌──────┐ ┌──────┐ ┌──────┐│
+            │  │ SB-1 │ │ SB-2 │ │ SB-n ││  每个沙箱内跑 lubancode-sandboxd
+            │  └──────┘ └──────┘ └──────┘│
+            └──────────────▲─────────────┘
+                           │ 工具 RPC（epoch + toolCallId）
+                   Agent Worker / Node Bridge
+```
+
+- **`lubancode-sandboxd`**（沙箱内守护进程）：执行工具的唯一入口。只经 vsock / Unix socket / 宿主转发的通道通信，**不在沙箱内对外开任何端口**。提供：命令执行（流式 stdout/stderr、超时、资源帽）、文件操作（读、写、列目录、stat、应用补丁、搜索）、PTY 附着（对接 `后台命令PTY会话与可附着终端设计.todo`）、进程列表与终止、快照前后钩子。
+- **Sandbox Host**：每台执行机一个，管理本机 N 个沙箱的创建、销毁、挂卷、快照与恢复，上报容量；与控制面连接方式同 Node Bridge（出站 mTLS）。
+- **Sandbox Scheduler**：控制面协调器里的模块，管模板、预热池、获取队列与快照目录。
+
+### 28.3 大脑与手的工具拆分（Tool Execution 合同）
+
+池化模式下，**Worker 进程所在机器上不挂任何工作区**，所以所有触碰工作区的工具（read_file、write、edit、grep、run_command、MCP stdio、浏览器）都必须拆成两半：
+
+- **Worker 侧**：模型可见的 schema、参数校验、权限与审批、结果投影、写 Trajectory；
+- **sandboxd 侧**：真正的执行。
+
+每次调用携带 `(session_id, epoch, toolCallId, ExecutionSpec)`。sandboxd 的规矩：
+1. 拒收 epoch 小于已见值的调用（副作用级 fencing，ADR-12 第 2 条）；
+2. 同一 `toolCallId` 重复到达 → 返回缓存结果，不重跑（缓存保留 `sandbox.tool_result_cache_ttl`，默认 24 h，随沙箱快照一并保存）；
+3. 执行开始与结束都回报，Worker 据此写 `tool.started` / `tool.finished`。
+
+这一拆分顺带解决了多租户隔离的老难题（§30 原 §二："read_file 在 Agent 进程里直接读盘，只把 Shell 放沙箱不够"）：池化模式里 Agent 进程**根本没有工作区可读**。节点模式下同一套 sandboxd 可以跑在节点本机（本地沙箱池），实现一致。
+
+### 28.4 沙箱生命周期
+
+```text
+Provisioning ──▶ Warm（预热，未分配，租户中立）
+                   │ 分配给某 Session
+                   ▼
+               Assigned ⇄ Busy（有工具在执行）
+                   │ 空闲超 sandbox.idle_suspend_after（默认 10 min）
+                   ▼
+               Suspending ──▶ Suspended（已快照，资源已释放）
+                   ▲                 │ Session 再次需要
+                   │                 ▼
+                   └──────────── Resuming ──▶ Assigned
+Assigned/Suspended ──Session 关闭/释放──▶ Released ──▶ Destroyed
+任意态 ──健康检查失败/逃逸告警──▶ Quarantined（保留现场供取证，不再分配）
+```
+
+| 规则 | 说明 |
+|---|---|
+| **沙箱永不跨 Session 复用** | 释放即销毁；预热池只从模板新建补充。不存在"用过的沙箱洗一洗还回池子"，杜绝跨租户、跨 Session 残留 |
+| 预热沙箱租户中立 | 未分配前不挂任何租户数据、不注入任何 Secret；分配时才挂卷、注入网络策略 |
+| 一个 Session 同时至多一个"主沙箱" | 可附加"辅助沙箱"（如浏览器专用、GPU 专用），各自独立生命周期 |
+| 挂起与恢复对 Worker 透明 | Worker 调用时若沙箱处于 Suspended，Scheduler 自动 Resume，调用进入等待队列 |
+
+### 28.5 两级排队
+
+**第一级：获取队列（Session 要一个沙箱）**
+- 池里有匹配模板的 Warm 沙箱 → 立即分配（目标 P95 < 1 s）；
+- 没有但集群有余量 → 冷启动（目标：容器 P95 < 5 s，microVM P95 < 3 s）；
+- 集群满了 → 进入获取队列：
+  - 优先级：交互式 Session > 定时/自动任务 > 批量任务（评测、rollout）；
+  - 同优先级内按**租户加权公平**（DRR，与 ADR-07 同一套）；
+  - 排队位置和预计等待时间推送给用户（事件 `sandbox.queued{position, eta}`）；
+  - 等待超过 `sandbox.acquire_timeout`（默认 5 min，批量任务 60 min）→ 本轮以 `sandbox_unavailable`（可重试）收口，**不算工具失败，不写未知副作用**。
+- 配额：每租户并发沙箱数、每日沙箱小时数、快照存储量；超配额只排队不抢占。
+
+**第二级：执行队列（同一个沙箱内多个工具调用）**
+- 只读调用可并行（默认并发 8），写调用串行，按批次屏障执行（沿用 `只读工具并行与写入串行_批次屏障与执行链拆分.todo`）；
+- 后台长命令（dev server、watch）走 PTY 会话，不占执行队列；
+- 队列上限 64，超了回 `sandbox_busy`，由 Worker 退避。
+
+**批量申请（"一次性起很多"）**：`SandboxBatch` API
+```text
+POST /api/v1/sandbox-batches
+{ "template": "tpl-python311-node20@sha256:…", "size": 100, "concurrency": 20,
+  "mode": "elastic" | "gang",           // elastic：来一个用一个；gang：凑齐才一起开始
+  "persistence": "L0",                  // 批量默认用完即弃，只导出结果
+  "priority": "batch", "deadline": "2h" }
+```
+- 每个成员绑定一个 Worker 与一个沙箱，成员之间互不共享状态；
+- 成员结果（Trajectory、工作区 diff、产物）汇总到批次视图；
+- 适用于 `Agent强化学习Rollout轨迹采集与训练交付设计.todo`、评测回归平台、Workflow 扇出节点。
+
+**预热策略**：
+- 每个模板配 `min_warm`（常驻预热数）、`max_warm`、`target_utilization`（默认 0.7：已分配/总数超过它就补热）；
+- 支持定时扩容（如工作日 9:00 前把 `min_warm` 调到 50），与 §22.2 周期任务统一调度；
+- 冷启动耗时、预热命中率作为核心指标，预热命中率 < 80% 告警。
+
+### 28.6 状态保留：四个档位
+
+| 档 | 保留什么 | 恢复后是什么样 | 恢复耗时目标 | 存储代价 | 适用 |
+|---|---|---|---|---|---|
+| **L0 用完即弃** | 只导出工作区 diff/补丁与产物 | 无沙箱可恢复 | — | 最小 | 批量评测、rollout |
+| **L1 工作区持久**（**默认**） | 工作区卷（代码、生成文件）+ 可选依赖缓存卷（如 `~/.cache/pip`、`~/.npm`） | 从模板新建沙箱，挂回原卷；系统层装的包没了 | P95 < 10 s | 卷大小 | 大多数编码 Session |
+| **L2 文件系统快照** | 工作区 + **整个根文件系统的改动层**（overlay upper / 块级差量）：`apt install`、全局工具、配置全在 | 与挂起前文件完全一致；进程没了 | P95 < 20 s（2 GiB 差量） | 差量大小，增量去重 | 装了很多环境的长期 Session |
+| **L3 内存快照**（实验性） | L2 + 内存与进程状态（microVM 快照 / CRIU） | 连正在跑的 dev server、REPL、数据库都还在 | P95 < 5 s | 内存大小 | 需要"原样暂停"的场景；仅 microVM 后端 |
+
+快照机制：
+- **何时打**：挂起时（按 Session 策略的档位）；用户或 Agent 显式 `checkpoint`；高风险操作前（策略可开，如"执行 `rm -rf`、数据库迁移前自动快照"）；长活跃期每 30 min 一次增量。
+- **怎么存**：内容寻址分块（默认 4 MiB 块，SHA-256），增量、跨快照去重，存对象存储；快照目录表 `sandbox_snapshots(snapshot_id, session_id, sandbox_id, level, parent_id, template_digest, size_bytes, chunk_manifest_ref, created_at, expires_at, encrypted_key_ref)`；恢复前逐块验哈希，坏块回退父快照。
+- **与 Trajectory 对齐**：每次快照在 Trajectory 写一行 `sandbox.checkpoint{snapshotId, level, atSeq}`。于是得到一个新能力——**从任意 checkpoint 分叉**：新建 Session（resume-as-new）+ 恢复该快照 = 从第 N 步的"对话 + 环境"同时分叉，而不只是对话分叉。
+- **保留期**：随 Session 生命周期（§22.1）；Session 归档时只保留最后一个 L1/L2 快照，L3 快照在 Session 关闭时删除；租户配额限制总快照量。
+- **加密**：快照按租户密钥加密（与 §22.3 crypto-shredding 共用）。
+
+**Secret 与快照（必须守住的边界）**：
+- Secret 只在执行时注入到 tmpfs 或进程环境，**tmpfs 不进快照**；
+- L2 快照前 sandboxd 执行"快照前清洗"钩子：扫描已知凭据路径（`~/.aws`、`~/.docker/config.json`、`.netrc`、git credential store 等）与种子 Secret 指纹，命中则拒绝快照并告警（不静默删文件——删了可能破坏用户环境）；
+- L3 内存快照必然含进程内存里的 Secret：只有 Session 策略显式允许且 Secret 可轮换时才可开启；恢复时若对应 SecretRef 已撤销或版本已变 → 拒绝恢复到 L3，降为 L2 恢复并提示；
+- 快照读取权限 = Session owner + tenant_admin，读取即审计。
+
+### 28.7 模板（沙箱镜像）
+
+- 模板 = 基础镜像 + 工具链 + 预装依赖 + sandboxd 版本，以 digest 标识，登记在模板目录；Session 的 CapabilitySnapshot 钉住模板 digest（§29 原 §12.3）。
+- 来源三种：官方模板（多语言通用）、租户模板（管理员发布）、**项目预构建**（按 Project 的依赖描述文件——`requirements.txt`、`package.json`、`vcpkg.json`、`CMakePresets.json`——在 CI 或定时任务里预装好依赖做成模板，类似 Codespaces prebuild，冷启动时间从分钟级降到秒级）。
+- 模板构建本身在沙箱里执行（不在控制面执行用户代码，§30 原 §一）；构建日志与产物审计。
+- 模板升级只影响新 Session；旧 Session 恢复时模板 digest 已不存在 → `CapabilityDegraded`，让用户选"用新模板恢复（L1）"或"只读打开"。
+
+### 28.8 隔离后端（Backend Driver）
+
+| 后端 | 隔离强度 | 平台 | 支持 L2 | 支持 L3 | 档 | 说明 |
+|---|---|---|---|---|---|---|
+| `process`（ExecutionProvider 单：Linux bubblewrap/Landlock/seccomp；macOS Seatbelt；Windows AppContainer + Job Object） | 低~中 | 三平台 | 否（只 L1） | 否 | T1 | 节点模式本机沙箱；**不接纳陌生人代码** |
+| `container`（containerd/runc，兼容 Docker、Podman） | 中 | Linux | 是（overlay 改动层导出） | 否 | T1 | 池化模式默认 |
+| `gvisor`（runsc） | 中高 | Linux | 是 | 实验（runsc checkpoint） | T2 | 接纳不可信代码的默认推荐 |
+| `kata` | 高 | Linux + KVM | 是 | 否 | T2 | 已有 K8s + Kata 的环境 |
+| `firecracker` microVM | 高 | Linux + KVM | 是（块设备差量） | **是**（原生快照） | T2 | 唯一的 L3 正式后端 |
+| `k8s`（每沙箱一个 Pod，由 Host 或 operator 管理） | 取决于 RuntimeClass | K8s | 取决于底层 | 取决于底层 | T2 | 已有 K8s 集群的部署形态；Sandbox Host 作为 DaemonSet |
+| `windows-hyperv`（Hyper-V 隔离容器） | 高 | Windows Server | 部分 | 否 | T3 | Windows 工具链项目 |
+| `external`（第三方托管沙箱服务，经 HTTP 适配器） | 由对方定 | — | 由对方定 | 由对方定 | T3 | 必须通过同一套 sandboxd 合同测试 |
+
+启动时校验：租户策略声明 `untrusted_code: true` 时，只允许 `gvisor|kata|firecracker|windows-hyperv`；不满足 → `isolation_unavailable`，拒绝启动（承继 ExecutionProvider 单"降级即拒"）。
+
+### 28.9 网络、资源与安全
+
+- **网络**：默认禁止出站；通过每台 Host 上的出口代理按租户策略放行（包仓库镜像、Git 托管、允许的 API 域名）；永远封禁：控制面地址、Host 管理口、云元数据地址（169.254.169.254 等）、同 Host 其他沙箱。DNS 也走代理，防 DNS 外带。
+- **资源规格**：`small`（1 vCPU / 2 GiB / 10 GiB 盘）、`medium`（2/4/20）、`large`（4/8/40）、`gpu`（按卡），PID 上限、打开文件上限、磁盘 IO 限速；超限 → 工具以资源错误收口，不拖垮 Host。
+- **逃逸检测**：Host 监控异常系统调用拒绝率、沙箱外文件访问尝试（审计子系统），命中即 `Quarantined` + 安全告警。
+- **Host 放置**：装箱（bin-packing）留 20% 余量；Host drain 时先挂起其上所有沙箱（L1/L2 快照），再迁到其他 Host 恢复——**沙箱级迁移比 Session 热迁移简单得多**，因为状态已被快照化。
+
+### 28.10 故障
+
+| 故障 | 处理 |
+|---|---|
+| sandboxd 崩溃 | Host 原地拉起；在执行的工具结果未知 → 按副作用类别裁决（§9.3） |
+| 沙箱 OOM / 被杀 | 同上；连续 3 次 → 标记 Session "资源不足"，建议升规格 |
+| Host 崩溃 | 其上沙箱从最近快照在其他 Host 恢复；快照之后的写类工具列入 NeedsReview（Trajectory 里有参数，可一键重放或放弃） |
+| 快照损坏 | 块哈希校验失败 → 回退父快照 → 仍失败则 L1 恢复并告知 |
+| 对象存储不可用 | 挂起改为"保持运行不挂起"（直到资源压力迫使降级到 L1 保留），告警 |
+| 获取队列积压 | 按优先级服务；批量任务可被自动推迟；容量告警触发扩容（手动或对接云自动伸缩） |
+
+### 28.11 指标与告警（加入 §11）
+
+`lubancode_sandbox_pool{template,state}`、`lubancode_sandbox_acquire_wait_seconds{priority}`、`lubancode_sandbox_cold_start_seconds{backend}`、`lubancode_sandbox_warm_hit_ratio{template}`、`lubancode_sandbox_snapshot_seconds{level}` / `_bytes`、`lubancode_sandbox_restore_seconds{level}`、`lubancode_sandbox_exec_queue_depth`、`lubancode_sandbox_quarantined_total`、`lubancode_sandbox_host_capacity{resource,state}`。
+告警：预热命中率 < 80%；获取等待 P95 > 60 s；任何 Quarantined；快照失败率 > 1%；Host 容量 > 85%。
+
+### 28.12 配置键（加入 §20.7）
+
+`sandbox.backend`、`sandbox.templates[]`（每项 `digest, min_warm, max_warm, target_utilization, size_class`）、`sandbox.idle_suspend_after`（10m）、`sandbox.default_persistence`（L1）、`sandbox.max_persistence`（L2；L3 需特性开关）、`sandbox.acquire_timeout`（5m / 批量 60m）、`sandbox.exec_parallel_reads`（8）、`sandbox.exec_queue_max`（64）、`sandbox.tool_result_cache_ttl`（24h）、`sandbox.snapshot.chunk_size`（4MiB）、`sandbox.snapshot.periodic`（30m）、`sandbox.snapshot.before_risky_ops`（false）、`sandbox.network.egress_allowlist`（P 档）、`sandbox.size_classes.*`、`quota.sandbox.{concurrent,hours_per_day,snapshot_gib}`（P 档）、`sandbox.host.headroom`（0.2）。
+
+### 28.13 批次（D11，见 §15 与 §23）
+
+- **D11a 执行底座**：sandboxd 协议与实现（工具拆分 28.3，先覆盖 read/write/edit/grep/run_command）；`process` 与 `container` 后端；Sandbox Host；单 Host 预热池；两级排队；L0/L1。
+  验收：Worker 通过 sandboxd 完成一场真实编码 Session；epoch 围栏与 toolCallId 去重在故障注入下成立；预热命中时获取 P95 < 1 s。
+- **D11b 状态保留与规模**：L2 快照（内容寻址增量、加密、清洗钩子）；挂起/恢复；checkpoint 写入 Trajectory 与"从 checkpoint 分叉"；多 Host 调度与 Host drain；`SandboxBatch`；项目预构建模板。
+  验收：装了依赖的沙箱挂起 → 换 Host 恢复 → 依赖与文件完全一致；100 成员批量、并发 20 跑完无串状态；泄漏测试覆盖快照内容。
+- **D11c 强隔离与内存快照**：gVisor / Firecracker / k8s 后端；L3 快照（特性开关）；逃逸检测与 Quarantine；MCP 与浏览器进沙箱。
+  验收：`untrusted_code` 租户只能落到强隔离后端；L3 恢复后 dev server 仍在监听；安全评审通过。
+
+## 二十九、目标形态、领域模型与能力治理（2026-09-25 并入自原 `多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`，原单已删）
+
+原单（2026-09-02 立）的产品形态与边界并入本章，小节保留原编号，文中"畅想单 §X"即指本章"原 §X"。原单以下各节已被本单取代，不再搬运：§一先下断语（→ 本单第一章）、§三当前真相（→ 第二章）、§四目标形态图（→ ADR-01/ADR-12）、§十三连接心跳游标租约（→ ADR-04/ADR-05、第五章）、§十五分期与开工门（→ 第十五章 D0~D11）、§十六验收证据（→ ADR-10）、§十八开放问题（→ 第十七章默认裁决）。
+
+### 原 §二、与现有单子的分工
+
+| 单子 | 它管什么 | 本单不重复什么 |
+|---|---|---|
+| LubanCore 与 CLI 分离 | 纯库、稳定头、依赖方向、宿主接入 | 不在集群单里顺手搬 core/cli 边界 |
+| 持久 Agent / Gateway | 单机常驻、automation、ingress、outbox、安全恢复 | 不把多节点调度塞回单机 Gateway 首版 |
+| 多前端 / App Server | 中立事件与命令、Web/Tauri 承载 | 不把前端连接当 Session 所有者 |
+| Workspace 统一存储 | workspace/session/memory 身份与唯一真账 | 不另造一套 project/session id |
+| Package / Skill / MCP | 能力发现、信任、挂载、执行与富结果 | 不把集群协议当扩展协议 |
+
+本单只能吃这些合同，不得另写一份相互打架的真值。
+
+（2026-09-25 补：多租户隔离单已并入本单第三十章；LubanCore 与 CLI 分离单仍独立，是本单 D4 起的硬前置。）
+
+### 原 §五、领域对象与所有权
+
+底层不能硬套成一棵“服务器包含 Project，Project 包含 Session”的树。那只适合页面浏览，不适合身份与迁移。
+
+```text
+Tenant
+├─ User / Group / Role
+├─ Node
+├─ Project
+├─ SkillRelease / PackageRelease / McpDefinition
+├─ SecretRef / Policy / Quota
+└─ AuditEvent
+
+Project + Node -> WorkspaceBinding / Checkout
+WorkspaceBinding + SessionSpec -> Session
+Session + User -> SessionMembership
+Session -> CapabilitySnapshot
+Session -> zero or one active RuntimeLease
+```
+
+核心对象：
+
+| 对象 | 真正含义 | 主要写者 |
+|---|---|---|
+| Tenant | 组织或隔离域 | Control Plane |
+| User / Group | 登录主体与成员关系 | Identity service |
+| Node | 一台可调度宿主 | Control Plane 据 Bridge 租约投影 |
+| Project | 稳定项目身份，不从属于某台节点 | Control Plane |
+| WorkspaceBinding | Project 在某节点的一份 checkout/worktree | Node Bridge |
+| Session | 一场可恢复工作 | LubanCore/Trajectory 为执行事实写者 |
+| RuntimeLease | 哪只 Worker 此刻有权写这场 Session | Control Plane 发，Node Bridge 执行 |
+| CapabilitySnapshot | 本场钉住的模型、Skill、MCP、Package、策略与版本 | Session 创建/恢复裁决器 |
+| AuditEvent | 谁在何时发了什么控制命令 | Control Plane；节点附执行回执 |
+
+页面仍可给用户熟悉的三层入口：
+
+```text
+Server
+└─ Project checkout
+   └─ Session
+```
+
+另给 Project 视图：从一个 Project 反看它在哪些节点有 checkout、哪些 Session 在跑。
+
+### 原 §六、LubanCore 宿主合同
+
+Node Bridge 不模拟终端，不拼 slash command，不读 CLI stdout。它只接 LubanCore 稳定 API。
+
+首批宿主接口暂拟：
+
+```text
+CreateSession(SessionSpec) -> SessionId
+ResumeSession(SessionId, ResumePolicy) -> ResumeOutcome
+CloseSession(SessionId, EndReason)
+
+AttachSubscriber(SessionId, cursor) -> EventStream
+DetachSubscriber(SessionId, subscriber_id)
+QuerySnapshot(SessionId) -> SessionSnapshot
+
+EnqueueTurn(SessionId, ActorContext, Input) -> CommandReceipt
+AnswerInteraction(SessionId, ActorContext, InteractionReply)
+InterruptTurn(SessionId, ActorContext, TurnId)
+PauseSession(SessionId, ActorContext)
+
+ListCapabilities(NodeContext) -> CapabilityInventory
+BindCapabilitySnapshot(SessionId, SnapshotId)
+```
+
+合同要求：
+
+1. Core 不 include CLI、App Server、Node Bridge 或 Web 头。
+2. Core 不读 stdin，不写 stdout/stderr 作为业务合同。
+3. Core 不依赖进程级可变 cwd；cwd、workspace、home、policy 全由 SessionSpec 注入。
+4. 一只 Host 可持多只相互隔离的 SessionRuntime。
+5. 全局可共享服务必须只读或线程安全；可变会话状态不得藏进单例。
+6. 事件有稳定 `session_id/turn_id/item_id/seq`，可先落账再投递。
+7. 宿主销毁不等于删除 Session；关闭、归档、删除各走各的状态机。
+
+### 原 §七、多 Session 并发与容量
+
+#### 7.1 并发铁律
+
+- 同一 Session 同时最多一枚 main turn。
+- 新输入先落队列，主泵在安全边界取下一枚。
+- 不同 Session 可以并发，但必须经过节点级调度器。
+- 子代理、Workflow 节点、MCP 调用可并发，仍吃 Session 与 Node 双层预算。
+- 同一工作目录有写冲突时，不因“Session 不同”便放行。
+
+#### 7.2 在线与运行分账
+
+```text
+resident_sessions     已装入索引或可随时恢复
+attached_sessions     正有浏览器/客户端订阅
+running_turns         正在调用模型或执行工具
+waiting_interactions  等人审批/回答
+queued_turns          已接受、尚未开跑
+```
+
+这些数不能混成一个 `active_sessions`。
+
+#### 7.3 节点配额
+
+每只 Node Bridge 上报静态能力与动态水位：
+
+```text
+os / arch / bridge_version / core_version
+cpu / memory / disk reserve
+gpu / toolchain / shell
+installed package and skill digests
+available MCP definitions
+resident_sessions / running_turns
+model_requests / build_jobs / browser_sessions
+queue_depth / last_heartbeat / drain_state
+```
+
+节点策略至少能限制：
+
+- 同时运行的 main turn 数；
+- 模型在飞请求数；
+- 构建/命令进程数；
+- 浏览器与 GUI 会话数；
+- MCP 实例数；
+- 单 Tenant、单 User、单 Project 的并发与每日预算；
+- 磁盘低水位后的新 Session 接纳。
+
+首版用有界 Worker pool，不用“一场 Session 永久占一条线程”。等待模型、审批与 timer 时须释放昂贵执行槽。
+
+#### 7.4 Project 写冲突
+
+- 默认一场可写 Session 配一份独立 worktree。
+- 明确只读任务可共享 checkout。
+- 用户坚持共用目录时，须有 workspace write lease，并在 UI 明示冲突风险。
+- 构建缓存、下载缓存可共享；CMake build tree、编译中间物与可变工具状态默认隔离。
+
+### 原 §八、多用户、权限与协作
+
+#### 8.1 三层授权
+
+| 层 | 例子 |
+|---|---|
+| 组织角色 | tenant admin、node admin、auditor |
+| 资源 ACL | 谁能看某 Node、Project、Session |
+| 执行策略 | 能用哪些工具、MCP、Secret，危险动作是否须审批 |
+
+Session 角色首版可收成四档：
+
+- `viewer`：看事件、产物与状态；
+- `collaborator`：发消息、上传输入、写旁注；
+- `operator`：回答 AskUser、批准工具、暂停、恢复、打断；
+- `owner`：管理成员、策略、归档与删除。
+
+#### 8.2 多人订阅与操作租约
+
+多人可同时观看同一 Session。首版只准一名 active operator 持短租约，处理会改变运行状态的动作。旁人仍可留言；留言先排队，逐条带 `actor_id`，不得冒充操作者直接插进 Agent 历史。
+
+所有命令至少携带：
+
+```text
+tenant_id
+actor_id
+session_id
+request_id
+expected_revision
+policy_version
+issued_at
+```
+
+浏览器声称的角色不算数。Control Plane 按登录态与资源 ACL 重验，Node Bridge 再校验已签命令、租约与目标 Session。
+
+#### 8.3 审批归属
+
+- 审批单带 `session_id/turn_id/interaction_id/tool_execution_id`。
+- 只有当时有权的 operator/owner 可以回答。
+- 过期、换租约、回合已收口的答案一律回 `stale`。
+- `accept_for_session` 只写本场权限账，不上升成 Project 或 Tenant 永久授权。
+- 每次批准、拒绝、超时、撤销都落审计，不能只写聊天正文。
+
+### 原 §九、Skill、Package 与能力快照
+
+#### 9.1 Skill 作用域
+
+```text
+official -> tenant -> user -> project -> session
+```
+
+这只是候选来源，不是无条件“越近越赢”。Tenant 可以锁住合规 Skill，禁止用户用同名内容悄悄覆盖。
+
+Session 启动时生成 `EffectiveSkillSet`：
+
+```text
+canonical_id
+source_scope
+package_id / version
+content_hash
+trust_state
+allowed_resources
+resolved_precedence
+```
+
+恢复时优先取原哈希。原版不在节点上，Session 进入 `CapabilityDegraded`，让有权用户选择安装旧版、显式升级或只读打开。不得偷偷吃最新版。
+
+#### 9.2 激活不等于执行
+
+- 发现 Skill：只把元数据列入目录。
+- 加载 Skill：只读 `SKILL.md` 与受控资源。
+- 执行脚本：必须另过 Tool/ExecutionProvider、权限、Secret、网络与沙箱合同。
+- 远端执行只传受控 workspace snapshot，不顺手带 `.env`、SSH key 与无关文件。
+
+#### 9.3 Package
+
+- Package Release 用不可变 digest 标识。
+- 代码型 Plugin/MCP 挂载前须过信任与兼容检查。
+- Session 钉住 Package snapshot；升级只影响新 Session，或经显式迁移生成新 snapshot。
+- Project 安装、User 安装、Tenant 发布分开记，数据目录与包源码分离。
+
+### 原 §十、MCP 生命周期与隔离
+
+MCP 拆成定义与实例：
+
+```text
+McpDefinition
+  command / args / protocol / tool schema
+  supported os/arch
+  SecretRefs / policy / timeout / limits
+  package digest
+
+McpInstance
+  node_id / worker_id / session_id
+  process generation / pid
+  health / pending calls / last activity
+```
+
+建议生命周期：
+
+| MCP 类型 | 默认隔离 |
+|---|---|
+| 无状态、无凭证、纯计算 | Tenant 级池，可复用 |
+| Project 数据库或索引 | Project + WorkspaceBinding |
+| 带个人账号凭证 | User + Session |
+| 浏览器、桌面、登录态 | Session 独占 |
+| 本地构建、文件系统 | Node + WorkspaceBinding |
+
+硬规矩：
+
+1. 不跨 Tenant 共用带状态 MCP。
+2. MCP annotations、tool hints 与声明权限只作参考，不替宿主授权。
+3. 迟到响应须按 transport generation 与 request id 丢回原账，不投给新实例。
+4. MCP 进程重启不等于原调用可重做；已开始副作用仍按 `indeterminate` 裁决。
+5. stderr、富结果与 artifact 都要过租户边界、大小帽与脱敏。
+
+### 原 §十一、Secret
+
+Control Plane 与配置只流转 `SecretRef`：
+
+```text
+tenant_scope / user_scope / project_scope
+logical_name
+provider
+version
+allowed_consumers
+expires_at
+```
+
+明文由 Node Bridge 或受信宿主在最后一刻解析，只送进目标进程环境或宿主控制的请求头。不得进入模型上下文、Trajectory 正文、工具结果、MCP stderr、Telemetry、浏览器事件或 Web 日志。
+
+“有权使用”不等于“有权查看”。Secret 撤销后仍可打开历史，相关 MCP/工具调用则明确失败；不能拿旧 Session 快照复活已撤销凭证。
+
+### 原 §十二、Session 生命周期与恢复
+
+#### 12.1 生命周期
+
+```text
+Created
+  -> Queued
+  -> Starting
+  -> Running / WaitingInteraction / Idle
+  -> Paused
+  -> Recovering
+  -> CapabilityDegraded / NeedsReview
+  -> Closed
+  -> Archived
+  -> Deleted
+```
+
+`online/offline` 是连接投影，不是 Session 业务状态。
+
+#### 12.2 三种“恢复”分开说
+
+1. **前端重连**：浏览器按 cursor 补事件，不动 Agent Runtime。
+2. **Runtime 重挂**：Worker 尚活，换一条订阅或控制租约继续看。
+3. **崩溃恢复**：旧调用栈已死，从 durable ledger 折叠状态，开新 Runtime 接续。
+
+心跳只能证明某条租约近日有续，不能替代这三种恢复。
+
+#### 12.3 CapabilitySnapshot
+
+每场 Session 至少钉住：
+
+```text
+core / host protocol version
+model / provider / wire
+AgentProfile / PromptProfile
+Skill hashes
+Package digests
+MCP definitions and tool schemas
+policy version / permission mode
+SecretRef versions, not plaintext
+workspace identity / checkout / commit / worktree
+node capability requirements
+```
+
+恢复裁决：
+
+| 情形 | 结果 |
+|---|---|
+| 快照全齐、租约合法 | 原样恢复 |
+| 原节点失联，新节点能力全齐 | 首版仍人工迁移；后期可调度恢复 |
+| Skill/Package/MCP 缺失 | `CapabilityDegraded`，等待选择 |
+| Secret 已撤销 | 历史可读，相关能力禁用 |
+| 工具副作用终态不明 | `NeedsReview`，禁止自动重放 |
+| workspace/commit 对不上 | 停住，展示差异，不偷偷切目录 |
+
+恢复是“从旧场事实开新 Runtime”，不是 reopen 旧 Journal 继续追加。单写者与不可变封口规矩沿用 Trajectory。
+
+### 原 §十四、进程形态与故障半径
+
+远期推荐：
+
+```text
+Node Bridge daemon
+  ├─ Core Worker process 1 -> Session A/B
+  ├─ Core Worker process 2 -> Session C/D
+  ├─ MCP child processes
+  └─ tool/background process trees
+```
+
+MVP 可先在一只 Node Bridge 进程内持多只 SessionRuntime，验证 Core Host API 与调度合同。进入多用户生产前，应重新裁决 Worker 进程隔离：
+
+- 一 Worker 一 Session：隔离强，进程与冷启动开销大；
+- 一 Worker 少量 Session：折中，崩溃只伤一小组；
+- 一 Bridge 全部 Session：最省事，故障半径最大，不宜直接当最终形态。
+
+不管哪种形态，外部命令、MCP、浏览器 sidecar 的进程树都须可监督、可取消、可清理。
+
+### 原 §十七、明确不做
+
+1. 不把 CLI 进程当 Node Bridge。
+2. 不让 Control Plane 直接摸节点文件系统。
+3. 不把主服务器数据库写成第二份 Session 真账。
+4. 不让浏览器连接拥有 Runtime 生命周期。
+5. 不因节点短暂失联便自动重跑工具。
+6. 不跨 Tenant 共享带状态 MCP、浏览器 profile 或用户凭证。
+7. 不把 Skill 内容、Package 发现或 MCP annotations 当授权。
+8. 不把 Secret 明文塞进模型、Trajectory、Telemetry 或调试日志。
+9. 不在 LubanCore 分离时顺手实现集群；两项各有验收门。
+10. 不先承诺跨节点热迁移，再倒推事实账与 fencing。
+
+## 三十、多租户隔离：身份、授权与隔离执行（2026-09-25 并入自原 `多租户隔离_身份授权与隔离Worker落地设计.todo`，原单已删）
+
+原单（2026-09-12 立，基线 HEAD ce37455e）的源码审查与隔离设计并入本章，小节保留原编号，文中"多租户单 §X"即指本章"原 §X"。原 §八 的分期清单保留为验收清单并挂到本单批次：P0/P1/P3 → D6，P2 → D8（Worker 子进程化）与 D11（沙箱执行），P4 → D7/D10。原 §二 源码锚点行号为 ce37455e 时的位置，开工 D6 前须按当时 HEAD 复核。
+
+池化模式补充（2026-09-25）：原 §六"不要只把 Shell 放沙箱，read_file 会在 Agent 进程里直接读盘"——在池化模式下由 §28.3 工具拆分根治：Agent Worker 机器上不挂任何工作区，所有触碰工作区的工具经 sandboxd 执行。节点模式仍按原 §六 执行（整只 Worker 落在隔离边界内）。
+
+### 原 §一、裁决
+
+先做单节点托管闭环：共享控制面，隔离执行面。租户之间不共用承载不可信工具的 Worker 进程；首版每场 Session 起一只 Worker，放进所属租户的隔离环境。
+
+边界还须按权限细分：同租户内若项目互不可见，项目/Session 沙箱也不能挂载全租户目录。租户是最低外边界，具体挂载与凭据按本场授权再收窄。
+
+控制面管登录、成员关系、资源归属、授权、路由、配额和审计。可信节点监督器管 Worker 生命周期与隔离装配。Worker 经 SessionService 驱动 Runtime，管一场执行。CLI 保留本机单用户用法。
+
+不要只把 Shell 放沙箱：read_file 等内置工具会在 Agent 进程里直接读盘。整个 Worker 都要落在受限文件、网络和进程边界内。控制面不得执行用户代码，不挂载租户可执行插件，不向 Worker 暴露管理凭据或宿主控制 socket。
+
+初期不做跨节点迁移，不先建大型资源池。先用两家租户、同名项目、各一场会话，把拒绝越权和故障收口做实。
+
+### 原 §二、当前源码与缺口
+
+| 源码锚点 | 当前行为 | 托管缺口 |
+|---|---|---|
+| `src/app_server/dispatcher.hpp:45` | DispatchContext.principal 为 user/agent，区分操作来源 | 不是用户 ID；没有租户成员身份 |
+| `src/app_server/server.cpp:1791` | 过 WS 入口后 SetPrincipal("user") | 共享 token 不能表达多人身份与资源权限 |
+| `src/app_server/server.hpp:72`、`src/app_server/server.cpp:426` | ThreadRecord 存会话状态，FindThread 按 thread_id 查 map | 缺租户、项目归属与主体授权参数 |
+| `src/app_server/server.cpp:872` | thread/start 接收 cwd，交 SessionLaunchRequest | 客户端路径尚非服务端授权项目映射 |
+| `src/runtime/session_service.hpp:57` | 开场参数已有 cwd、workspace_identity、workspaces_root | 可作为隔离装配接点，尚无可信安全范围 |
+| `src/runtime/session_command_service.hpp:60` | 根目录与 workspace key 限定查询；支持 scope=all | workspace 范围不能代替租户和项目 ACL |
+| `src/app_server/server.cpp:554`、`:650` | 冷会话查询可跨 workspace 索引定位 | 冷读、恢复和历史查询同样须授权 |
+| `src/app_server/server.cpp:1797`、`:1806`、`:1822` | 当前连接存进 connection_；断线打断运行回合；事件发给当前连接 | 不是多主体订阅与持久续看合同 |
+| `src/app_server/ws_transport.cpp:234` | artifact 过服务 token 后按统一目录和内容名读取 | 缺 artifact 到租户/会话的归属授权 |
+| `src/workspace/identity.hpp:1` | 按 Git common dir、marker、config、cwd 裁决 workspace | workspace 表示本地项目身份，不是安全域 |
+| `src/tools/isolation.cpp:60` | 防回写主树；主树之外放行 | 是 worktree 协作闸，不是允许目录白名单 |
+| `src/tools/read_file.cpp:71` | 参数路径直接交 filesystem/ifstream | 单独把命令执行隔开仍会留下宿主读盘入口 |
+| `src/tools/run_command.cpp:503`、`:562` | cwd/worktree 检查后调用平台进程接口 | cwd 与命令文本检查不能构成 OS 租户隔离 |
+| `src/platform/process.hpp:61`、`:327` | 已有 Inherit/Replace 环境模式；ChildProcess 默认 Inherit | 可复用 Replace，须逐个接调用链 |
+| `src/platform/process.hpp:333` | 约束版进程接口允许部分限制失败后降级 | 托管硬约束必须失败即拒绝，不能照常执行 |
+| `src/mcp/transport.cpp:42` | stdio MCP 走 ChildProcess.Start 默认参数路径 | 托管需显式环境、cwd、权限与生命周期 |
+| `src/runtime/secret_resolver.cpp:314` | 已声明 Secret 先查宿主环境，再查插件 .env | 插件声明校验值得保留，宿主环境查找不等于租户授权 |
+| `src/app/session_stack.cpp:127`、`:291` | 装配仍有 current_path 使用 | Core 分离时须换成显式范围，不能靠切进程 cwd 轮流服务多人 |
+
+以上不足针对“扩成多租户”的目标，不把现行本机单用户行为一概算成漏洞。现有隔离、审批、环境替换接口也不能一概抹掉；要分清覆盖面，再补硬边界。
+
+### 原 §三、身份合同
+
+新增中立类型，名称暂拟，代码尚无这些合同：
+
+```text
+AuthenticatedSubject: tenant_id, user_id, actor_kind, credential_id
+ResourceScope: tenant_id, project_id, workspace_key, thread_id
+ExecutionScope: ResourceScope, initiating_subject, policy_revision,
+                execution_id, lease_epoch, allowed_capabilities
+```
+
+- actor_kind 继续表达 user/agent/service，不拿它替 user_id。
+- tenant_id 由认证结果与成员关系核验后确定。客户端可选择租户，不能自行盖章。
+- Project 是控制面登记对象，workspace_key 是本地身份。服务端登记两者映射，不能仅凭仓库 marker、路径或相同 Git remote 授权。
+- 开场时绑定资源归属，后续不能随请求改 tenant。用户退租后保留历史归属，但撤销其访问权。
+- Worker 工作身份与发起用户分开记。自动任务用明确服务授权；不能借“原用户已离线”默许继续使用全部权限。
+- 托管模式缺身份即拒绝。CLI 用显式 LocalTrusted 模式，不能把远程缺身份请求悄悄降成 local。
+- 有效权限受平台、租户、项目、主体与本场约束共同限制；拒绝优先。accept_for_session、YOLO、Skill 指令均不得突破上层限制。
+
+身份认证适配器归宿主。核心执行接口只吃中立身份、范围与策略，不依赖某家登录 SDK，也不读 HTTP 头。
+
+### 原 §四、授权放两处
+
+第一处在控制面资源入口：Authenticate → Authorize(subject, action, resource) → 路由。
+第二处在 Worker 执行入口：核验服务端签发的短期执行授权、范围、到期时间和租约，再查本次能力。
+
+- 用带范围的 GetAuthorizedSession 取代托管入口裸用 FindThread；不能只检查 turn/start。
+- 纳入列表、计数、搜索、历史、trace、workflow、恢复、归档、删除、打断、审批回复、跨会话消息、浏览器和 artifact。
+- 列表在读范围内过滤，再算 total、分页与游标；不能先全库分页再删越权条目。
+- 权限撤销要影响排队任务、活订阅与下次工具调用。长任务按能力支持中断/吊销；已经发生的外部副作用无法撤回，须明确记账。
+- 资源标识带不带 tenant 前缀都不替授权；内容 hash 也不是下载凭据。
+- 幂等键按 tenant + target + operation + client key 划范围，并核对请求摘要。
+
+### 原 §五、存储与凭据
+
+首版复用现有 workspace/session 真账。托管宿主注入租户存储根，例：
+
+```text
+managed-root/tenants/<opaque-tenant-id>/
+  workspaces/<workspace-key>/...
+  artifacts/...
+  plugin-data/...
+  package-data/...
+  browser-profiles/...
+```
+
+这只是可信存储布局示意。Worker 只挂本场获准子集，不能把整棵 managed-root 暴露进去。目录权限、挂载与授权缺一不可。
+
+- 不改 thread/turn/item 发号，不另造 Session 真账。租户、项目归属在可信目录和可校验会话元数据中登记，索引是投影。
+- 同名 workspace、相同 artifact hash、同名插件 Secret 在两租户中都可存在，不互相命中。
+- Memory、摘要、检索索引、缓存、导出、日志、浏览器 profile 同样分范围。只读公共包可复用内容，私有包和可变缓存不能默认混池。
+- 租户拥有多个互斥项目时，不能仅靠租户根限定 SessionCommandService；仍须按项目 ACL 收窄查询与管理。
+- 旧本机数据不猜租户。迁入要有显式认领映射与清单，失败可回滚；不就地改旧 append-only 轨迹来伪造历史身份。
+- SecretResolver 保留不透明引用与打码接口，托管改为范围化凭据提供者。SecretRef 包含 scope、用途和版本，实际调用前查授权。
+- 控制面总凭据不进 Worker 环境。能用服务代理或短期凭据就收窄下发；确须交 MCP 的明文只给对应隔离进程，不能谎称接收方看不见。
+- 日志、模型上下文、轨迹、事件不得存明文；错误体也须过打码。撤销 Secret 后不能从恢复快照复活旧凭据。
+
+### 原 §六、执行环境
+
+- 节点监督器以可信配置创建隔离环境，记录实际能力：文件挂载、网络出口、进程权限、CPU/内存/PID/磁盘限制。
+- 所需硬能力未建成或只能降级，返回 isolation_unavailable，禁止启动不可信工作。不能把 SandboxGrade 的降级仅记在日志里。
+- 整只 Worker、内置文件工具、Shell、MCP、浏览器与后台子进程都在边界内；清理也必须覆盖后代进程。
+- 同租户内默认一 Session 一 Worker、一份可变工具状态。获准共享项目目录是显式协作，不是误共享 HOME、cookie 或 MCP 连接。
+- 同系统账号起两只普通进程不算完成隔离。部署须选并验证具体 OS/容器/虚拟机方案；公开接纳任意代码时优先更强虚拟化边界。
+- 工作目录显式传入；不改宿主 current_path，不改进程环境以切换租户。EnvMode::Replace 只放运行所需变量。
+- 路径测试覆盖绝对路径、..、symlink、Windows junction、共享 Git 元数据与检查后替换；OS 挂载/权限承担硬拒绝，字符串判断只作前置提示。
+- 网络出口按场授权，防访问控制面、节点管理口与云元数据。MCP远端凭据和连接池不能跨授权主体复用。
+
+### 原 §七、事件、调度与失败
+
+- 用主体绑定的连接注册表与订阅表替代托管端单份 connection_。订阅绑定资源范围，每条出口都核验，不靠前端过滤。
+- 托管 Session 由监督器持有。网页断开只撤订阅；显式取消另走授权命令。CLI 的退出规则保留本机语义。
+- 续看沿用事实事件与稳定 seq；游标绑定 tenant/resource，不能借另一租户游标跨账读取。若底层账缺必需事件，补合同，不虚称任意事件都已可回放。
+- 同场 main turn 单飞；跨场按 tenant/user/project/node 配额公平排队。队列限长，模型调用前预留预算，结束后按真实用量结算，释放失败能对账。
+- Worker 崩溃记失败或待恢复，不自动重放未知副作用。execution_id 在派发前持久登记。
+- 单节点首版也要阻止双 Worker 同写一场；后续跨节点使用租约与 fencing epoch，由事实提交/副作用代理检查，不能只在调度器内存中检查。
+- 无法被租约拦截的外部工具请求仍可能在旧 Worker 上完成，必须记录 Unknown 并查询对账；租约本身不保证外部 exactly-once。
+
+### 原 §八、实施顺序与验收门
+
+#### P0：冻结托管合同，接身份与授权
+
+- [ ] 明确 Tenant/Project/Session 归属与 LocalTrusted/Managed 模式。
+- [ ] DispatchContext、SessionLaunchRequest、资源查询口接中立范围类型。
+- [ ] 完整列出协议方法与授权动作，默认拒绝未登记方法。
+- [ ] A/B 租户用同名项目与可知 thread_id，交叉读取、搜索、删除、恢复、取消、审批均失败，且无副作用。
+
+#### P1：根目录注入与凭据分域
+
+- [ ] 清点 workspace、Memory、插件数据、包数据、artifact、profile、临时文件、日志全部根目录。
+- [ ] 补项目 ACL、冷会话查询、分页 total、导出与下载授权。
+- [ ] SecretResolver 接范围化 provider，MCP/工具进程显式 Replace 环境。
+- [ ] 两租户同 Secret 名返回各自结果；所有输出搜不到另一租户标记或凭据。旧数据迁入必须显式认领。
+
+#### P2：隔离 Worker，单节点两租户真机验收
+
+- [ ] 在 Core 宿主分离合同允许的接口上接 Worker；若接口未稳，先补 Core 前置，不能把 CLI 私有状态直接暴露成云 API。
+- [ ] 实现受监督 Worker 的启动、停止、资源帽、最小挂载与出口限制。
+- [ ] 文件工具、Shell、MCP、浏览器、后台孙进程均测越界；沙箱建立失败必须拒绝启动。
+- [ ] A 跑满 CPU、内存、进程数或输出量时，A 受限；B 仍能调度。记录机器配置、负载与响应数据。
+
+#### P3：多人连接与恢复
+
+- [ ] 多用户同时订阅；A 断线不打断 B，也不自动取消托管 A 会话。
+- [ ] 重连只补获准事件；权限撤销立刻收订阅，排队和后续执行重新裁权。
+- [ ] 错租户游标、迟到审批、重复命令、旧 lease 提交、Worker 崩溃逐项验收。
+- [ ] 浏览器 cookie、截图、MCP 状态、日志和历史从活会话到冷恢复都不串域。
+
+#### P4：再谈多节点与复用池
+
+- [ ] 前三阶段过门后再接节点注册、跨节点调度、租约和共享持久存储。
+- [ ] 只有证明无敏感状态、无凭据串用且资源受控的服务，才考虑同范围池化。
+- [ ] 保留更强隔离部署档；不拿节省冷启动作为跨租户混放 Worker 的理由。
