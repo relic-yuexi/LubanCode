@@ -1,0 +1,206 @@
+# Sandbox 池：执行围栏与状态保留实施计划
+
+- 状态：设计待复核，未实施（2026-09-26 从分布式支持路线图拆出）。
+- 总纲：`分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo`；ADR、恢复代际、故障矩阵与不变量以总纲为准。
+- 开工门：D11a 需 D4 与 ExecutionSpec；D11b 需 D10 Store/对象存储及 D11a；D11c 需 D11b。R3/R5 为 D11a 硬验收项。
+- 本单保留原章节编号以维持交叉引用；未注明文件的其他章节号均指总纲。
+- 完成设计不等于通过验收；清单过门后才可勾选。
+
+## 二十八、Sandbox 池子系统（专职执行机、预热排队、状态保留）
+
+### 28.1 要解决什么
+
+池化模式里"大脑"（Agent Worker）和"手"（Sandbox）分开（ADR-12）。用户要的不止"有个沙箱"，而是：
+
+1. **专门的执行机**：一批机器只跑沙箱，承接所有 shell、编译、文件读写、MCP、浏览器；
+2. **一次性起很多**：提前预热一池沙箱，也能为批量任务（评测、RL rollout、Workflow 扇出）一次申请几十上百个；
+3. **排队**：沙箱不够时排队，不是直接失败；
+4. **保留里面的东西**：Session 暂停或退出后，沙箱里装的依赖、生成的文件、甚至正在跑的开发服务器，下次能接着用。
+
+与既有单子的关系：`跨平台ExecutionProvider与通用强化沙箱设计.todo` 定义的是**单机上**的执行合同（`ExecutionSpec`、provider 选择、降级即拒）。本章把它扩成**集群级沙箱池**：`RemoteSandboxProvider` 是该单 provider 接口的一种实现，Worker 与节点都通过同一个 `ExecutionSpec` 调用，不另造第二套执行合同。
+
+### 28.2 组件
+
+```text
+                   ┌──────────────── 控制面 ────────────────┐
+                   │ Sandbox Scheduler（协调器内一个模块）    │
+                   │  ├─ 模板目录（Template Registry）        │
+                   │  ├─ 预热池管理（Warm Pool Manager）      │
+                   │  ├─ 获取队列（Acquire Queue，按租户公平） │
+                   │  └─ 快照目录（Snapshot Catalog）         │
+                   └──────┬──────────────────────┬──────────┘
+                          │ mTLS                  │ 元数据
+            ┌─────────────▼─────────────┐   ┌─────▼──────────────┐
+            │ Sandbox Host（每台执行机） │   │ Session Store (PG) │
+            │ lubancode-sandbox-host     │   └────────────────────┘
+            │  ├─ Backend Driver         │   ┌────────────────────┐
+            │  │  process/container/     │──▶│ 对象存储（快照块）  │
+            │  │  gVisor/Kata/microVM/k8s│   └────────────────────┘
+            │  ├─ 本机快照缓存            │
+            │  └─ 出口代理（网络策略）     │
+            │  ┌──────┐ ┌──────┐ ┌──────┐│
+            │  │ SB-1 │ │ SB-2 │ │ SB-n ││  每个沙箱内跑 lubancode-sandboxd
+            │  └──────┘ └──────┘ └──────┘│
+            └──────────────▲─────────────┘
+                           │ 工具 RPC（epoch + toolCallId）
+                   Agent Worker / Node Bridge
+```
+
+- **`lubancode-sandboxd`**（沙箱内守护进程）：执行工具的唯一入口。只经 vsock / Unix socket / 宿主转发的通道通信，**不在沙箱内对外开任何端口**。提供：命令执行（流式 stdout/stderr、超时、资源帽）、文件操作（读、写、列目录、stat、应用补丁、搜索）、PTY 附着（对接 `后台命令PTY会话与可附着终端设计.todo`）、进程列表与终止、快照前后钩子。
+- **Sandbox Host**：每台执行机一个，管理本机 N 个沙箱的创建、销毁、挂卷、快照与恢复，上报容量；与控制面连接方式同 Node Bridge（出站 mTLS）。
+- **Sandbox Scheduler**：控制面协调器里的模块，管模板、预热池、获取队列与快照目录。
+
+### 28.3 大脑与手的工具拆分（Tool Execution 合同）
+
+池化模式下，**Worker 进程所在机器上不挂任何工作区**，所以所有触碰工作区的工具（read_file、write、edit、grep、run_command、MCP stdio、浏览器）都必须拆成两半：
+
+- **Worker 侧**：模型可见的 schema、参数校验、权限与审批、结果投影、写 Trajectory；
+- **sandboxd 侧**：真正的执行。
+
+每次调用携带 `(recoveryGeneration, session_id, epoch, toolCallId, ExecutionSpec)` 与受信执行授权。sandboxd 的规矩：
+1. 按 ADR-12 第 2 条安装并确认执行围栏，核验当前恢复代际、epoch、授权与有效期。新租约尚未送达执行端，不得开放新写任务；失联与重启时默认拒绝执行。
+2. 持久执行表以 `(tenant, session, toolCallId)` 为唯一键，保存参数摘要、原始代际/epoch 与 `NotStarted/Started/Completed/Unknown` 状态。换 Worker 或换 epoch 不换工具调用身份；同键不同参数拒绝。执行前先持久写 `Started`，终态与结果引用提交后才回完成。`Started` 只表示可能已经执行，不证明副作用尚未发生。
+3. 重投遇 `Completed` 返回原结果；`Started` 查询在跑任务，不另起一份；崩溃后无法确定结果，转 `Unknown`。仅经明确只读/幂等合同证明安全的调用可恢复；写类未知调用进入 `NeedsReview`，需外部查询、对账或显式人工裁决。
+4. `sandbox.tool_result_cache_ttl=24h` 只控制结果热缓存，不控制去重身份。终态摘要与墓碑至少保留至 Session 归档且所有重试、恢复窗口关闭；旧快照不得覆盖更新的执行表。执行表不可用或恢复不完整时拒绝重投。结果已淘汰则返回 `result_unavailable`，不得因此重跑。
+5. 执行开始与结束回报 Worker，由 Worker 投入 Trajectory；回报丢失后用执行表对账。“副作用完成但终态尚未持久化”必须进入未知裁决，不能宣称结果缓存消除了该空隙。
+
+这一拆分顺带解决了多租户隔离的老难题（§30 原 §二："read_file 在 Agent 进程里直接读盘，只把 Shell 放沙箱不够"）：池化模式里 Agent 进程**根本没有工作区可读**。节点模式下同一套 sandboxd 可以跑在节点本机（本地沙箱池），实现一致。
+
+### 28.4 沙箱生命周期
+
+```text
+Provisioning ──▶ Warm（预热，未分配，租户中立）
+                   │ 分配给某 Session
+                   ▼
+               Assigned ⇄ Busy（有工具在执行）
+                   │ 空闲超 sandbox.idle_suspend_after（默认 10 min）
+                   ▼
+               Suspending ──▶ Suspended（已快照，资源已释放）
+                   ▲                 │ Session 再次需要
+                   │                 ▼
+                   └──────────── Resuming ──▶ Assigned
+Assigned/Suspended ──Session 关闭/释放──▶ Released ──▶ Destroyed
+任意态 ──健康检查失败/逃逸告警──▶ Quarantined（保留现场供取证，不再分配）
+```
+
+| 规则 | 说明 |
+|---|---|
+| **沙箱永不跨 Session 复用** | 释放即销毁；预热池只从模板新建补充。不存在"用过的沙箱洗一洗还回池子"，杜绝跨租户、跨 Session 残留 |
+| 预热沙箱租户中立 | 未分配前不挂任何租户数据、不注入任何 Secret；分配时才挂卷、注入网络策略 |
+| 一个 Session 同时至多一个"主沙箱" | 可附加"辅助沙箱"（如浏览器专用、GPU 专用），各自独立生命周期 |
+| 挂起与恢复对 Worker 透明 | Worker 调用时若沙箱处于 Suspended，Scheduler 自动 Resume，调用进入等待队列 |
+
+### 28.5 两级排队
+
+**第一级：获取队列（Session 要一个沙箱）**
+- 池里有匹配模板的 Warm 沙箱 → 立即分配（目标 P95 < 1 s）；
+- 没有但集群有余量 → 冷启动（目标：容器 P95 < 5 s，microVM P95 < 3 s）；
+- 集群满了 → 进入获取队列：
+  - 优先级：交互式 Session > 定时/自动任务 > 批量任务（评测、rollout）；
+  - 同优先级内按**租户加权公平**（DRR，与 ADR-07 同一套）；
+  - 排队位置和预计等待时间推送给用户（事件 `sandbox.queued{position, eta}`）；
+  - 等待超过 `sandbox.acquire_timeout`（默认 5 min，批量任务 60 min）→ 本轮以 `sandbox_unavailable`（可重试）收口，**不算工具失败，不写未知副作用**。
+- 配额：每租户并发沙箱数、每日沙箱小时数、快照存储量；超配额只排队不抢占。
+
+**第二级：执行队列（同一个沙箱内多个工具调用）**
+- 只读调用可并行（默认并发 8），写调用串行，按批次屏障执行（沿用 `只读工具并行与写入串行_批次屏障与执行链拆分.todo`）；
+- 后台长命令（dev server、watch）走 PTY 会话，不占执行队列；
+- 队列上限 64，超了回 `sandbox_busy`，由 Worker 退避。
+
+**批量申请（"一次性起很多"）**：`SandboxBatch` API
+```text
+POST /api/v1/sandbox-batches
+{ "template": "tpl-python311-node20@sha256:…", "size": 100, "concurrency": 20,
+  "mode": "elastic" | "gang",           // elastic：来一个用一个；gang：凑齐才一起开始
+  "persistence": "L0",                  // 批量默认用完即弃，只导出结果
+  "priority": "batch", "deadline": "2h" }
+```
+- 每个成员绑定一个 Worker 与一个沙箱，成员之间互不共享状态；
+- 成员结果（Trajectory、工作区 diff、产物）汇总到批次视图；
+- 适用于 `Agent强化学习Rollout轨迹采集与训练交付设计.todo`、评测回归平台、Workflow 扇出节点。
+
+**预热策略**：
+- 每个模板配 `min_warm`（常驻预热数）、`max_warm`、`target_utilization`（默认 0.7：已分配/总数超过它就补热）；
+- 支持定时扩容（如工作日 9:00 前把 `min_warm` 调到 50），与 §22.2 周期任务统一调度；
+- 冷启动耗时、预热命中率作为核心指标，预热命中率 < 80% 告警。
+
+### 28.6 状态保留：四个档位
+
+| 档 | 保留什么 | 恢复后是什么样 | 恢复耗时目标 | 存储代价 | 适用 |
+|---|---|---|---|---|---|
+| **L0 用完即弃** | 只导出工作区 diff/补丁与产物 | 无沙箱可恢复 | — | 最小 | 批量评测、rollout |
+| **L1 工作区持久**（**默认**） | 工作区卷（代码、生成文件）+ 可选依赖缓存卷（如 `~/.cache/pip`、`~/.npm`） | 从模板新建沙箱，挂回原卷；系统层装的包没了 | P95 < 10 s | 卷大小 | 大多数编码 Session |
+| **L2 文件系统快照** | 工作区 + **整个根文件系统的改动层**（overlay upper / 块级差量）：`apt install`、全局工具、配置全在 | 与挂起前文件完全一致；进程没了 | P95 < 20 s（2 GiB 差量） | 差量大小，增量去重 | 装了很多环境的长期 Session |
+| **L3 内存快照**（实验性） | L2 + 内存与进程状态（microVM 快照 / CRIU） | 连正在跑的 dev server、REPL、数据库都还在 | P95 < 5 s | 内存大小 | 需要"原样暂停"的场景；仅 microVM 后端 |
+
+快照机制：
+- **何时打**：挂起时（按 Session 策略的档位）；用户或 Agent 显式 `checkpoint`；高风险操作前（策略可开，如"执行 `rm -rf`、数据库迁移前自动快照"）；长活跃期每 30 min 一次增量。
+- **怎么存**：内容寻址分块（默认 4 MiB 块，SHA-256），增量、跨快照去重，存对象存储；快照目录表 `sandbox_snapshots(snapshot_id, session_id, sandbox_id, level, parent_id, template_digest, size_bytes, chunk_manifest_ref, created_at, expires_at, encrypted_key_ref)`；恢复前逐块验哈希，坏块回退父快照。
+- **与 Trajectory 对齐**：每次快照在 Trajectory 写一行 `sandbox.checkpoint{snapshotId, level, atSeq}`。于是得到一个新能力——**从任意 checkpoint 分叉**：新建 Session（resume-as-new）+ 恢复该快照 = 从第 N 步的"对话 + 环境"同时分叉，而不只是对话分叉。
+- **保留期**：随 Session 生命周期（§22.1）；Session 归档时只保留最后一个 L1/L2 快照，L3 快照在 Session 关闭时删除；租户配额限制总快照量。
+- **加密**：快照按租户密钥加密（与 §22.3 crypto-shredding 共用）。
+
+**Secret 与快照（必须守住的边界）**：
+- Secret 只在执行时注入到 tmpfs 或进程环境，**tmpfs 不进快照**；
+- L2 快照前 sandboxd 执行"快照前清洗"钩子：扫描已知凭据路径（`~/.aws`、`~/.docker/config.json`、`.netrc`、git credential store 等）与种子 Secret 指纹，命中则拒绝快照并告警（不静默删文件——删了可能破坏用户环境）；
+- L3 内存快照必然含进程内存里的 Secret：只有 Session 策略显式允许且 Secret 可轮换时才可开启；恢复时若对应 SecretRef 已撤销或版本已变 → 拒绝恢复到 L3，降为 L2 恢复并提示；
+- 快照读取权限 = Session owner + tenant_admin，读取即审计。
+
+### 28.7 模板（沙箱镜像）
+
+- 模板 = 基础镜像 + 工具链 + 预装依赖 + sandboxd 版本，以 digest 标识，登记在模板目录；Session 的 CapabilitySnapshot 钉住模板 digest（§29 原 §12.3）。
+- 来源三种：官方模板（多语言通用）、租户模板（管理员发布）、**项目预构建**（按 Project 的依赖描述文件——`requirements.txt`、`package.json`、`vcpkg.json`、`CMakePresets.json`——在 CI 或定时任务里预装好依赖做成模板，类似 Codespaces prebuild，冷启动时间从分钟级降到秒级）。
+- 模板构建本身在沙箱里执行（不在控制面执行用户代码，§30 原 §一）；构建日志与产物审计。
+- 模板升级只影响新 Session；旧 Session 恢复时模板 digest 已不存在 → `CapabilityDegraded`，让用户选"用新模板恢复（L1）"或"只读打开"。
+
+### 28.8 隔离后端（Backend Driver）
+
+| 后端 | 隔离强度 | 平台 | 支持 L2 | 支持 L3 | 档 | 说明 |
+|---|---|---|---|---|---|---|
+| `process`（ExecutionProvider 单：Linux bubblewrap/Landlock/seccomp；macOS Seatbelt；Windows AppContainer + Job Object） | 低~中 | 三平台 | 否（只 L1） | 否 | T1 | 节点模式本机沙箱；**不接纳陌生人代码** |
+| `container`（containerd/runc，兼容 Docker、Podman） | 中 | Linux | 是（overlay 改动层导出） | 否 | T1 | 池化模式默认 |
+| `gvisor`（runsc） | 中高 | Linux | 是 | 实验（runsc checkpoint） | T2 | 接纳不可信代码的默认推荐 |
+| `kata` | 高 | Linux + KVM | 是 | 否 | T2 | 已有 K8s + Kata 的环境 |
+| `firecracker` microVM | 高 | Linux + KVM | 是（块设备差量） | **是**（原生快照） | T2 | 唯一的 L3 正式后端 |
+| `k8s`（每沙箱一个 Pod，由 Host 或 operator 管理） | 取决于 RuntimeClass | K8s | 取决于底层 | 取决于底层 | T2 | 已有 K8s 集群的部署形态；Sandbox Host 作为 DaemonSet |
+| `windows-hyperv`（Hyper-V 隔离容器） | 高 | Windows Server | 部分 | 否 | T3 | Windows 工具链项目 |
+| `external`（第三方托管沙箱服务，经 HTTP 适配器） | 由对方定 | — | 由对方定 | 由对方定 | T3 | 必须通过同一套 sandboxd 合同测试 |
+
+启动时校验：租户策略声明 `untrusted_code: true` 时，只允许 `gvisor|kata|firecracker|windows-hyperv`；不满足 → `isolation_unavailable`，拒绝启动（承继 ExecutionProvider 单"降级即拒"）。
+
+### 28.9 网络、资源与安全
+
+- **网络**：默认禁止出站；通过每台 Host 上的出口代理按租户策略放行（包仓库镜像、Git 托管、允许的 API 域名）；永远封禁：控制面地址、Host 管理口、云元数据地址（169.254.169.254 等）、同 Host 其他沙箱。DNS 也走代理，防 DNS 外带。
+- **资源规格**：`small`（1 vCPU / 2 GiB / 10 GiB 盘）、`medium`（2/4/20）、`large`（4/8/40）、`gpu`（按卡），PID 上限、打开文件上限、磁盘 IO 限速；超限 → 工具以资源错误收口，不拖垮 Host。
+- **逃逸检测**：Host 监控异常系统调用拒绝率、沙箱外文件访问尝试（审计子系统），命中即 `Quarantined` + 安全告警。
+- **Host 放置**：装箱（bin-packing）留 20% 余量；Host drain 时先挂起其上所有沙箱（L1/L2 快照），再迁到其他 Host 恢复——**沙箱级迁移比 Session 热迁移简单得多**，因为状态已被快照化。
+
+### 28.10 故障
+
+| 故障 | 处理 |
+|---|---|
+| sandboxd 崩溃 | Host 原地拉起；在执行的工具结果未知 → 按副作用类别裁决（§9.3） |
+| 沙箱 OOM / 被杀 | 同上；连续 3 次 → 标记 Session "资源不足"，建议升规格 |
+| Host 崩溃 | 其上沙箱从最近快照在其他 Host 恢复；快照之后的写类工具列入 NeedsReview（Trajectory 里有参数，可一键重放或放弃） |
+| 快照损坏 | 块哈希校验失败 → 回退父快照 → 仍失败则 L1 恢复并告知 |
+| 对象存储不可用 | 挂起改为"保持运行不挂起"（直到资源压力迫使降级到 L1 保留），告警 |
+| 获取队列积压 | 按优先级服务；批量任务可被自动推迟；容量告警触发扩容（手动或对接云自动伸缩） |
+
+### 28.11 指标与告警（加入 §11）
+
+`lubancode_sandbox_pool{template,state}`、`lubancode_sandbox_acquire_wait_seconds{priority}`、`lubancode_sandbox_cold_start_seconds{backend}`、`lubancode_sandbox_warm_hit_ratio{template}`、`lubancode_sandbox_snapshot_seconds{level}` / `_bytes`、`lubancode_sandbox_restore_seconds{level}`、`lubancode_sandbox_exec_queue_depth`、`lubancode_sandbox_quarantined_total`、`lubancode_sandbox_host_capacity{resource,state}`。
+告警：预热命中率 < 80%；获取等待 P95 > 60 s；任何 Quarantined；快照失败率 > 1%；Host 容量 > 85%。
+
+### 28.12 配置键（加入 §20.7）
+
+`sandbox.backend`、`sandbox.templates[]`（每项 `digest, min_warm, max_warm, target_utilization, size_class`）、`sandbox.idle_suspend_after`（10m）、`sandbox.default_persistence`（L1）、`sandbox.max_persistence`（L2；L3 需特性开关）、`sandbox.acquire_timeout`（5m / 批量 60m）、`sandbox.exec_parallel_reads`（8）、`sandbox.exec_queue_max`（64）、`sandbox.tool_result_cache_ttl`（24h）、`sandbox.snapshot.chunk_size`（4MiB）、`sandbox.snapshot.periodic`（30m）、`sandbox.snapshot.before_risky_ops`（false）、`sandbox.network.egress_allowlist`（P 档）、`sandbox.size_classes.*`、`quota.sandbox.{concurrent,hours_per_day,snapshot_gib}`（P 档）、`sandbox.host.headroom`（0.2）。
+
+### 28.13 批次（D11，见 §15 与 §23）
+
+- **D11a 执行底座**：sandboxd 协议与实现（工具拆分 28.3，先覆盖 read/write/edit/grep/run_command）；`process` 与 `container` 后端；Sandbox Host；单 Host 预热池；两级排队；L0/L1。
+  验收：Worker 通过 sandboxd 完成一场真实编码 Session；epoch 围栏与 toolCallId 去重在故障注入下成立；预热命中时获取 P95 < 1 s。
+- **D11b 状态保留与规模**：L2 快照（内容寻址增量、加密、清洗钩子）；挂起/恢复；checkpoint 写入 Trajectory 与"从 checkpoint 分叉"；多 Host 调度与 Host drain；`SandboxBatch`；项目预构建模板。
+  验收：装了依赖的沙箱挂起 → 换 Host 恢复 → 依赖与文件完全一致；100 成员批量、并发 20 跑完无串状态；泄漏测试覆盖快照内容。
+- **D11c 强隔离与内存快照**：gVisor / Firecracker / k8s 后端；L3 快照（特性开关）；逃逸检测与 Quarantine；MCP 与浏览器进沙箱。
+  验收：`untrusted_code` 租户只能落到强隔离后端；L3 恢复后 dev server 仍在监听；安全评审通过。
+

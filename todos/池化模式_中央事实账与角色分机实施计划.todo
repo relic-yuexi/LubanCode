@@ -1,0 +1,84 @@
+# 池化模式：中央事实账与角色分机实施计划
+
+- 状态：设计待复核，未实施（2026-09-26 从分布式支持路线图拆出）。
+- 总纲：`分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo`；ADR、恢复代际、故障矩阵与不变量以总纲为准。
+- 开工门：D8 验收通过；LubanCore D 与 ExecutionProvider 远程接口已落。D10 清单见本单；R3/R5 为硬验收项。
+- 本单保留原章节编号以维持交叉引用；未注明文件的其他章节号均指总纲。
+- 完成设计不等于通过验收；清单过门后才可勾选。
+
+## 二十七、消息队列与中间件适配全景（ADR-11 的展开）
+
+ADR-11 定的是**角色**（事实账 / 工作分发 / 事件扇出 / 控制命令），不是某一家产品。Kafka 只是"事件扇出"角色的一个实现。本章把常见中间件逐个放到角色上，定支持档位与适配合同。
+
+### 27.1 三个 SPI，三种语义
+
+| SPI | 语义 | 必须满足 | 可选能力（以能力声明上报） |
+|---|---|---|---|
+| `WorkQueue` | 待执行工作：领取 → 续租 → 确认 / 放回 / 死信 | 单条确认；**可延长的领取期限**（Agent 工作可能跑几十分钟，等审批可能几小时）；超时重投；死信 | 延迟投递（定时触发）、优先级、按 key 保序、批量领取 |
+| `EventBus` | 已提交事件扇出：一写多读、可重放 | 按 key（session_id）保序；消费者各自游标；保留期内可从任意位置重放 | 压缩 topic、事务写入、跨地域复制 |
+| `Wakeup` | 轻量唤醒提示（"有新活了，快来取"） | 无（丢了也没关系，靠轮询兜底） | — |
+
+**铁律不因换中间件而变**：
+1. 事实账永远在 Session Store（或节点 Trajectory），不在任何消息队列里；
+2. 队列投递重复、乱序、丢唤醒都是正常情况：领取工作时在 Store 里**同事务授予 RuntimeLease**，拿不到租约的重复投递直接丢弃；
+3. 事件扇出一律从 Store 的事务 outbox / CDC 出，不允许执行代码"边跑边发"。
+
+### 27.2 候选逐个定位
+
+| 中间件 | 适合当 | 不适合当 | 关键理由 | C++ 客户端 | 运维重量 | 支持档 |
+|---|---|---|---|---|---|---|
+| **PostgreSQL**（`SKIP LOCKED` 任务表；`LISTEN/NOTIFY` 唤醒；可选 pgmq 扩展） | WorkQueue（**默认**）、Wakeup、小规模 EventBus（outbox 表轮询） | 大吞吐 EventBus | 与租约同库同事务，领取即授租，天然原子；零新增组件 | libpq | 已有 | **T1** |
+| **SQLite 任务表** | 单机/开发 WorkQueue | 任何多进程生产部署 | 单写者 | 内置 | 无 | T1（仅单机） |
+| **Kafka 协议族**：Apache Kafka、Redpanda、AutoMQ、WarpStream、Confluent、AWS MSK、Azure Event Hubs（Kafka 端点）、阿里云/腾讯云 Kafka 版 | EventBus（**首选**） | WorkQueue | 分区队头阻塞、rebalance 双消费、`max.poll.interval.ms` 与长任务冲突（ADR-11） | librdkafka | 中~重（Redpanda 较轻） | **T1** |
+| **NATS JetStream** | WorkQueue（**首选替代**）+ EventBus（中等规模） | 超大规模长期留存 | WorkQueue 保留策略、`AckWait` + `InProgress` 可续期（正合长任务）、按 subject 保序、`Nak` 带延迟；单二进制，一件同时兼任队列和总线 | nats.c（官方） | **轻** | **T1** |
+| **Apache RocketMQ**（含阿里云 RocketMQ） | EventBus + WorkQueue | — | 顺序消息、**事务消息**（半消息 + 回查，天然对应 outbox）、延迟消息、重试与死信；国内部署常见 | rocketmq-clients C++（5.x，gRPC） | 中 | T2 |
+| **Apache Pulsar** | EventBus + WorkQueue | — | 流与队列一体：Shared 订阅单条 ack、ack 超时重投、延迟投递、分层存储 | pulsar-client-cpp（官方） | 重（BookKeeper + 元数据存储） | T2 |
+| **RabbitMQ**（quorum queue；Streams） | WorkQueue | 高吞吐可重放 EventBus（Streams 可以但非强项） | 成熟的 ack/重投/死信/优先级；**注意 `consumer_timeout` 默认 30 min**，长任务须调大或改"领取即转存租约、立即 ack"模式 | rabbitmq-c / AMQP-CPP | 中 | T2 |
+| **Redis Streams / Valkey**（消费组、`XAUTOCLAIM`） | 开发、小规模 WorkQueue、Wakeup | 任何"不能丢"的角色 | 异步复制下主从切换可丢已确认写；AOF `everysec` 可丢 1 s；只可配合"Store 授租为准"使用 | hiredis | 轻 | T3 |
+| **云托管**：AWS SQS（可见性超时最长 12 h、FIFO 消息组）/ SNS / Kinesis；Google Pub/Sub（ack 期限可续、ordering key）；**Azure Service Bus**（Message Sessions 天然按 session 保序加锁）；阿里云 MNS | WorkQueue / EventBus（按产品） | — | 免运维；各自语义差异大，走适配器 + 合同测试 | 走 HTTP（cpr，SigV4 等自签） | 无 | T3 |
+| **ActiveMQ Artemis**（JMS） | WorkQueue | — | 企业存量环境 | STOMP/AMQP 客户端 | 中 | T3 |
+| **MQTT**（EMQX、Mosquitto） | **不入集群内部**；仅作端侧设备 / IoT 渠道接入（归 Channel 体系） | 内部任何角色 | 语义面向设备，不是可靠工作队列 | — | — | 不纳入 |
+| **ZeroMQ / nanomsg** | 不纳入 | 全部 | 无代理、无持久化，丢了就没了 | — | — | 不纳入 |
+
+**支持档含义**：
+- **T1**：官方维护，发行包默认编入（可选编译开关，默认 ON 的只有 PG/SQLite），CI 每日跑合同测试，生产推荐。
+- **T2**：官方维护，默认不编入（`-DLUBANCODE_MQ_ROCKETMQ=ON` 等），CI 每周跑合同测试，文档给部署样例。
+- **T3**：适配器接口与合同测试开放，实现可由社区或客户交付；通过合同测试才允许在 `cp.yaml` 里启用，否则启动拒绝。
+
+### 27.3 适配器合同测试（`tests/unit/cluster/mq_conformance/`，与 Store 合同测试同构）
+
+所有 `WorkQueue` 实现必须通过：领取-确认；领取后进程崩溃 → 期限到重投；续期成功与续期过期；同一工作被两个消费者同时拿到时，只有一个能在 Store 拿到租约（另一个安静丢弃）；死信达阈值；延迟投递误差 < 1 s（若声明支持）；1 万条并发领取无丢失。
+
+所有 `EventBus` 实现必须通过：同 key 保序；消费者从任意 offset 重放；relay 崩溃后重发不丢（至少一次）；消费者按 `(session_id, seq)` 去重后结果与 Store 完全一致；broker 全部停机 10 min 后恢复，下游追平。
+
+启动时组合校验：`WorkQueue=redis_streams` 且 `durability.require_crash_recovery=true` → 启动拒绝，除非显式声明 `workqueue.redis.i_understand_ack_loss=true` 并写审计。
+
+### 27.4 按规模推荐组合
+
+| 场景 | 推荐 |
+|---|---|
+| 单机 / ≤ 10 节点 / 起步 | **不装任何消息队列**：SQLite 或 PG 同时承担 Store、WorkQueue、Wakeup；浏览器扇出由控制面直推 |
+| 中等规模、想要运维最轻 | PG（Store）+ **NATS JetStream**（WorkQueue 与 EventBus 一件兼任） |
+| 已有 Kafka 生态 / 事件下游多（审计、计费、训练、BI） | PG（Store + WorkQueue）+ **Kafka 协议族**（EventBus） |
+| 国内云 / 已有 RocketMQ | PG（Store）+ **RocketMQ**（WorkQueue + EventBus；事务消息做 outbox） |
+| 全托管云 | 云 PG + SQS/Pub/Sub/Service Bus 适配器 |
+
+配置键：`workqueue.kind: pg|sqlite|nats|rabbitmq|rocketmq|pulsar|redis_streams|sqs|pubsub|servicebus`、`eventbus.kind: none|kafka|nats|rocketmq|pulsar|pubsub|servicebus`、`wakeup.kind: poll|pg_notify|nats|redis`，各自子键在 §20.7 目录中按 kind 分组登记。
+
+
+## D10 实施与验收
+
+### D10：池化模式（角色分机：Session Store / WorkQueue / Agent Worker / Sandbox / 可选 Kafka）
+
+- [ ] `SessionPersistence` PG 后端接入集群：`session_events` 条件追加（ADR-12 第 1 条）+ 同事务 outbox；与节点模式的 v3 行格式**逐字节相同**（导出的 JSONL 与本地账可互相 verify）。
+- [ ] `ArtifactStore` S3/MinIO 实现：先传后引用，孤儿 GC。
+- [ ] `WorkQueue` PG 实现：`SKIP LOCKED` 领取 + 同事务授予 RuntimeLease；合同测试含"领取后崩溃""重复投递""领取与续租竞争"。
+- [ ] Agent Worker 进程 `lubancode-worker`：无本地持久状态；拿租约 → 读账（带 checkpoint 加速）→ 跑 turn → 条件追加；围栏失败立即停场。
+- [ ] Sandbox Executor `lubancode-sandbox`：工具 RPC（带 epoch + toolCallId 去重）、工作区卷挂载与执行租约、只读批量调用；首版容器隔离，接 ExecutionProvider 单的强化沙箱。
+- [ ] `EventBus` SPI + outbox relay；Kafka 实现（librdkafka，可选编译）；消费者样例：审计落库、计费汇总、浏览器扇出。
+- [ ] 集群级模型限流（令牌桶 + 共享退避）。
+- [ ] 仿真台扩展：Worker/Sandbox/Store/Kafka 故障注入；新增不变量 I10「Sandbox 不执行旧 epoch 调用」、I11「Kafka 中每条事件都能在 Store 找到同 seq 同 hash 的行」。
+- [ ] 真机演练：3 Worker + 2 Sandbox + PG 主从 + 3 broker Kafka；随机 kill Worker/Sandbox/Kafka broker/PG 主，全程 I1~I11 成立，Worker 崩溃后 session 自动接手时间 P99 < 60 s。
+
+验收：同一场 session 在 Worker A 上跑一半被 kill，Worker B 自动接手跑完，账 verify 通过、无工具重复执行、浏览器全程只看到一条连续事件流；Kafka 全部停掉 10 分钟期间 Agent 不受影响，恢复后下游追平且无重复（按 seq 去重后）。
+
