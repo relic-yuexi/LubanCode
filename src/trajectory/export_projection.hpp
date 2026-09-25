@@ -35,6 +35,7 @@
 #include "trajectory/blob_store.hpp"
 #include "trajectory/journal.hpp"
 #include "trajectory/replay.hpp"
+#include "trajectory/v3/session_switch.hpp"
 
 namespace lubancode::trajectory::projection {
 
@@ -482,9 +483,16 @@ inline ResolvedText ResolveTextValue(const nlohmann::json& value, const BlobStor
 
 // ---------------------------------------------------------------------------
 // stream 清单(VerifySessionDir 同一套;相对路径字典序,跨平台确定)
+//
+// One-shot V3 轨迹Harness导出修复单 §二.2:主账缺失/不可读/空首行/坏
+// schema/V2V3 并存/坏链各给稳定诊断,不吞成"没有流"。V2 布局件与 workflow
+// 编排账(恒 v2,§4.31:编排账另管、与 v3 同代并行)各拆一只helper,给
+// DiscoverSessionStreams 按格式分派复用。
 // ---------------------------------------------------------------------------
 
-inline std::vector<std::filesystem::path> CollectSessionStreams(
+// v2 布局件:main.jsonl + 平铺 subagents/*.jsonl + goals/*.jsonl +
+// loops/*.jsonl(与 workflow 分开,后者两代都可能有)。
+inline std::vector<std::filesystem::path> CollectV2LayoutStreams(
     const std::filesystem::path& session_dir) {
     std::vector<std::filesystem::path> paths;
     std::error_code ec;
@@ -505,6 +513,26 @@ inline std::vector<std::filesystem::path> CollectSessionStreams(
     scan_dir(session_dir / "subagents");
     scan_dir(session_dir / "goals");
     scan_dir(session_dir / "loops");
+    return paths;
+}
+
+// workflow 编排账清单(§4.31 注:workflow 编排账另管,恒 v2,与 v3 主账
+// 同代并行——v3 场也可能长出 workflows/ 子树)。
+inline std::vector<std::filesystem::path> CollectWorkflowStreams(
+    const std::filesystem::path& session_dir) {
+    std::vector<std::filesystem::path> paths;
+    std::error_code ec;
+    const auto scan_dir = [&paths](const std::filesystem::path& dir) {
+        std::error_code inner_ec;
+        if (!std::filesystem::exists(dir, inner_ec)) {
+            return;
+        }
+        for (const auto& entry : std::filesystem::directory_iterator(dir, inner_ec)) {
+            if (entry.is_regular_file(inner_ec) && entry.path().extension() == ".jsonl") {
+                paths.push_back(entry.path());
+            }
+        }
+    };
     const auto workflows = session_dir / "workflows";
     if (std::filesystem::exists(workflows, ec)) {
         for (const auto& run : std::filesystem::directory_iterator(workflows, ec)) {
@@ -518,8 +546,129 @@ inline std::vector<std::filesystem::path> CollectSessionStreams(
             scan_dir(run.path() / "nodes");
         }
     }
+    return paths;
+}
+
+// v2 + workflow 合并清单(旧调用点的行为不变;仅供仍按"一律 v2 折叠"处理
+// 的老路径用——新代码请走 DiscoverSessionStreams,按格式分派)。
+inline std::vector<std::filesystem::path> CollectSessionStreams(
+    const std::filesystem::path& session_dir) {
+    std::vector<std::filesystem::path> paths = CollectV2LayoutStreams(session_dir);
+    const auto workflows = CollectWorkflowStreams(session_dir);
+    paths.insert(paths.end(), workflows.begin(), workflows.end());
     std::sort(paths.begin(), paths.end());
     return paths;
+}
+
+// v3 子账递归收集(与 accounting::CollectV3SubagentLedgers 同一算法;
+// trajectory 层自持一份,不反向 include accounting——依赖方向铁律)。
+// 环/重复子目录靠 visited 去重;深度封顶 8,与 v3::WalkSessionTree 同限。
+inline void CollectV3SubagentLedgersRecursive(const std::filesystem::path& session_dir, int depth,
+                                              std::set<std::filesystem::path>& visited,
+                                              std::vector<std::filesystem::path>& out) {
+    if (depth > 8) {
+        return;
+    }
+    std::error_code ec;
+    const std::filesystem::path subagents = session_dir / "subagents";
+    if (!std::filesystem::is_directory(subagents, ec) || ec) {
+        return;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(subagents, ec)) {
+        if (!entry.is_directory(ec)) {
+            continue;
+        }
+        const std::filesystem::path child = entry.path();
+        std::error_code norm_ec;
+        const std::filesystem::path key = std::filesystem::absolute(child, norm_ec).lexically_normal();
+        if (norm_ec || !visited.insert(key).second) {
+            continue;  // 环/重复子目录只钻一次
+        }
+        const std::string id = platform::PathToUtf8(child.filename());
+        if (id.empty()) {
+            continue;
+        }
+        std::error_code file_ec;
+        const std::filesystem::path ledger = child / platform::Utf8ToPath(id + ".jsonl");
+        if (std::filesystem::is_regular_file(ledger, file_ec)) {
+            out.push_back(ledger);
+        }
+        CollectV3SubagentLedgersRecursive(child, depth + 1, visited, out);
+    }
+}
+
+// 格式裁决失败的稳定诊断(单子 §二.2/§二.4:不得吞成"没有流")。
+struct SessionFormatError {
+    std::string code;  // export.session_format_* / export.no_session_dir 前缀
+    std::string message;
+};
+
+struct SessionStreamDiscovery {
+    std::string format;                          // "v2" | "v3" | ""(格式裁决失败)
+    std::filesystem::path v3_main_stream;         // format=="v3" 时的主账路径
+    std::vector<std::filesystem::path> streams;   // 该格式下全部 stream(主账+子账+workflow)
+    std::optional<SessionFormatError> error;      // 有值 = 格式裁决失败,streams 可能为空
+};
+
+// 格式感知的 stream 发现(单子核心修复):先探 v3 主账(复用
+// v3::ProbeV3SessionStream,与 accounting::ReadSessionUsage/replay.cpp 的
+// VerifySessionDir 同一套探测件,不另造第二只判定),按结果分派:
+//   V3Stream        → v3 场:主账 + 递归子账 + workflow 编排账(恒 v2)
+//   V2Layout        → v2 场:原路(main.jsonl + 平铺子账 + workflow)
+//   FormatConflict/NotV3Schema/BadFirstLine/EmptyFirstLine/StreamMissing
+//                   → 格式裁决失败,给稳定错误码,不猜、不落成"没有流"
+//   NotSessionDir   → 目录不存在(调用方通常已先判过,这里兜底同码)
+inline SessionStreamDiscovery DiscoverSessionStreams(const std::filesystem::path& session_dir) {
+    SessionStreamDiscovery result;
+    const auto probe = v3::ProbeV3SessionStream(session_dir);
+    using Status = v3::V3StreamProbe::Status;
+    switch (probe.status) {
+        case Status::V3Stream: {
+            result.format = "v3";
+            result.v3_main_stream = probe.stream;
+            result.streams.push_back(probe.stream);
+            std::set<std::filesystem::path> visited;
+            CollectV3SubagentLedgersRecursive(session_dir, 0, visited, result.streams);
+            const auto workflows = CollectWorkflowStreams(session_dir);
+            result.streams.insert(result.streams.end(), workflows.begin(), workflows.end());
+            std::sort(result.streams.begin(), result.streams.end());
+            return result;
+        }
+        case Status::V2Layout: {
+            result.format = "v2";
+            result.streams = CollectSessionStreams(session_dir);
+            return result;
+        }
+        case Status::FormatConflict:
+            result.error = SessionFormatError{
+                "export.session_format_conflict",
+                "主账格式冲突,main.jsonl 与 <id>.jsonl(疑似 v3)并存,不敢猜: " + probe.detail};
+            return result;
+        case Status::NotV3Schema:
+            result.error = SessionFormatError{
+                "export.session_format_unsupported",
+                "<id>.jsonl 在但不是本版认得的 schema: " + probe.detail};
+            return result;
+        case Status::BadFirstLine:
+            result.error = SessionFormatError{
+                "export.session_format_unreadable",
+                "主账首行不是合法 JSON object: " + probe.detail};
+            return result;
+        case Status::EmptyFirstLine:
+            result.error = SessionFormatError{
+                "export.session_format_unreadable",
+                "主账首行读不出(空文件或打不开): " + probe.detail};
+            return result;
+        case Status::StreamMissing:
+            result.error = SessionFormatError{
+                "export.session_format_missing",
+                "session 目录里没有主账(main.jsonl 与 <id>.jsonl 均不在): " + probe.detail};
+            return result;
+        case Status::NotSessionDir:
+        default:
+            result.error = SessionFormatError{"export.no_session_dir", "session 目录不存在"};
+            return result;
+    }
 }
 
 // ---------------------------------------------------------------------------
