@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "platform/log_sink.hpp"
 #include "platform/sha256.hpp"
 
 namespace lubancode::trajectory::v3 {
@@ -1169,8 +1170,25 @@ void WalkSessionTreeRecursive(const std::filesystem::path& jsonl, SubagentSessio
         }
         child.session_id = JsonString(*child_ref, "sessionId").value_or("");
         child.run_id = JsonString(*child_ref, "runId").value_or("");
-        child.jsonl_path = jsonl.parent_path() /
-                           JsonString(*child_ref, "journalPath").value_or("");
+        const std::string journal_path_raw = JsonString(*child_ref, "journalPath").value_or("");
+        child.jsonl_path = jsonl.parent_path() / journal_path_raw;
+        // GAP-05 windows-msvc 诊断(临时,定位后随修复一并撤):两轮独立
+        // 修法都没堵住这条回归,自证也没能在写侧复现失配——说明问题不在
+        // relative() 本身,换个角度直接把读侧实际用的四个字符串録下来,
+        // 等真机 CI 吐出来再比对,不再靠猜。
+        {
+            std::error_code exists_ec;
+            const bool child_exists = std::filesystem::exists(child.jsonl_path, exists_ec);
+            platform::LogSink::Instance().Error(
+                "workflow.node_session.gap05_debug",
+                "parent_jsonl=" + jsonl.string() +
+                    " parent_jsonl.parent_path=" + jsonl.parent_path().string() +
+                    " journalPath_raw=" + journal_path_raw +
+                    " rebuilt_child_jsonl=" + child.jsonl_path.string() +
+                    " rebuilt.lexically_normal=" + child.jsonl_path.lexically_normal().string() +
+                    " exists=" + (child_exists ? std::string("true") : std::string("false")) +
+                    (exists_ec ? (" exists_ec=" + exists_ec.message()) : std::string()));
+        }
         // 父侧终态:linked 落稳才算关联建立;spawn.failed 是失败终态。
         std::string link_status = "not_linked";
         for (const auto& probe : ledger.events) {
