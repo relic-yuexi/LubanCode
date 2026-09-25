@@ -178,6 +178,15 @@ std::expected<NodeSessionSpawn, runtime::WorkflowSpawnFailure> WorkflowNodeSessi
     // 自证,拼回去、词法规整后要能对上真实目标的规整形状,对不上就当
     // relative() 失败处理,退绝对路径分支(同机可读,不假装相对),不管
     // relative() 本身是否报了 ec。
+    //
+    // 首版自证只拿 weakly_canonical 过的两侧互相拼验(parent_canonical /
+    // relative == child_canonical),线上 CI 复现仍是同一失配——那份自证
+    // 验的是"canonical 空间内 relative 自洽",不是读侧真正会做的事:读侧
+    // (reader.cpp WalkSessionTreeRecursive)拼的是`jsonl.parent_path()`
+    // 这个**原始未 canonicalize** 的父目录,不是 canonical 过的那份。两者
+    // 若因短文件名别名/挂载点等原因在 canonical 前后不是同一条字符串,
+    // canonical 空间自洽不代表原始空间也自洽——自证必须换成读侧真正落地
+    // 会用的那份原始路径,不然假阳性放过真正会读丢的相对路径。
     std::string journal_path;
     {
         std::error_code canon_ec;
@@ -195,12 +204,13 @@ std::expected<NodeSessionSpawn, runtime::WorkflowSpawnFailure> WorkflowNodeSessi
             ok = !canon_ec && !relative.empty();
         }
         if (ok) {
-            // 兜底验证:relative 拼回父目录、词法规整后必须真指回同一处
-            //(此刻 session_jsonl 文件本身还没落地——写者未开卷,exists()
-            // 验不出来;两侧目录前缀都已存在且刚被 weakly_canonical 核过,
-            // 词法拼接足以核实这条相对路径是否真的指得回去)。
-            const auto rebuilt = (parent_canonical / relative).lexically_normal();
-            ok = rebuilt == child_canonical.lexically_normal();
+            // 兜底验证:按读侧的真实拼法——原始(未 canonicalize)的
+            // parent_session_dir 拼上这条 relative、词法规整——必须对得上
+            // 原始(未 canonicalize)的 session_jsonl 本尊。此刻文件本身
+            // 还没有落地(写者未开卷),但两侧目录前缀都已存在,词法拼接
+            // 足以核实这条相对路径按读侧拼法是否真的指得回去。
+            const auto rebuilt = (material_.parent_session_dir / relative).lexically_normal();
+            ok = rebuilt == session_jsonl.lexically_normal();
         }
         if (ok) {
             journal_path = relative.generic_string();
