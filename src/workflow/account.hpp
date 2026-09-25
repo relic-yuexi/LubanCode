@@ -174,6 +174,29 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// 节点场引用(GAP-05 棒二):llm/agent/skill 节点每次 attempt 的独立 v3
+// session 在编排账 terminal 事件里的投影。node_sessions 铸、account 落;
+// 读侧(resume 审计/树走)按 journalPath 与 spawn 边按图索骥。
+// ---------------------------------------------------------------------------
+struct NodeSessionRef {
+    std::string session_id;
+    std::string run_id;         // 本 attempt 的场内 run 身份(attemptId)
+    std::string journal_path;   // 相对父 session 目录(读侧树走按它定位)
+    std::string terminal_hash;  // Finish 收口的末行 hash(空 = 没收稳)
+
+    bool alive() const { return !session_id.empty(); }
+    nlohmann::json ToJson() const {
+        nlohmann::json ref = nlohmann::json::object({{"sessionId", session_id},
+                                                     {"runId", run_id},
+                                                     {"journalPath", journal_path}});
+        if (!terminal_hash.empty()) {
+            ref["terminalHash"] = terminal_hash;
+        }
+        return ref;
+    }
+};
+
+// ---------------------------------------------------------------------------
 // 恢复重放(§十 纠正后的判据)
 // ---------------------------------------------------------------------------
 
@@ -300,12 +323,15 @@ public:
                                const std::string& adopt_output_id = std::string());
 
     // attempt 收口:outcome ∈ success|empty。注意语义(§五):completed 是
-    // 本次执行收口,下游消费资格看 output.committed,不看这里。
+    // 本次执行收口,下游消费资格看 output.committed,不看这里。session
+    // 非空 = 本次 attempt 开过独立节点场,terminal 事件带 sessionRef 与
+    // 场终态 hash(缺省 nullptr:非模型节点/没接会话账的执行)。
     bool RecordNodeCompleted(const NodeExecutionIdentity& identity, const std::string& outcome,
-                             std::int64_t duration_ms, std::int64_t tokens);
+                             std::int64_t duration_ms, std::int64_t tokens,
+                             const NodeSessionRef* session = nullptr);
     bool RecordNodeFailed(const NodeExecutionIdentity& identity, const std::string& error_code,
                           const std::string& error_message, std::int64_t duration_ms,
-                          std::int64_t tokens);
+                          std::int64_t tokens, const NodeSessionRef* session = nullptr);
     bool RecordNodeCancelled(const std::string& node_id, const std::string& node_execution_id,
                              const std::string& reason);
     bool RecordNodeSkipped(const std::string& node_id, const std::string& reason);

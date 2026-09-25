@@ -1,6 +1,6 @@
 # Workflow
 
-> **v3 边界：** 现有 Workflow 命令与节点执行沿本页说明；新版独立节点会话和持久输出提交尚未接全，见 [Session v3](../../architecture/session-v3.md)。
+> **v3 边界：** 编排账与节点会话已接 Session v3——模型节点（llm/agent/skill）每次执行开独立 v3 场，产物经 output.commit 落稳、花费进 `/usage` 主账，中途崩溃恢复不重算已提交节点（2026-09-24）。WorkflowService 收拢装配与持久交互归后续棒，见 [Session v3](../../architecture/session-v3.md)。
 
 [文档首页](../../README.md) · [设计指南](designing-workflows.md) · [Schema 参考](../../reference/workflow-schema.md) · [运行时](../../architecture/workflow-runtime.md)
 

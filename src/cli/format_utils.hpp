@@ -161,6 +161,46 @@ std::string CacheMissKindLabel(ContextTracker::CacheMissKind kind);
 // 只含 hash 截断、长度与分类词,不含正文。单测钉拼装。
 std::string BuildCacheDiagSegment(const ContextTracker::CacheRequestRecord& record);
 
+// /context 精细分类明细(全量对齐截图式占用面板):把"系统提示"/"工具
+// 定义"两个粗桶按来源再拆一层,外加自动压缩缓冲/空闲空间两条独立的条形
+// 行。nullptr(默认)= 不展示明细,FormatContextBreakdown 行为与从前逐
+// 字节一致(9 行旧断言不动);给了就在对应粗桶后追加缩进子行。
+//
+// 口径:*_tokens 字段只管"分",不管"核对"——细分之和理应等于对应粗桶
+// (system_prompt_tokens+skills_tokens ≈ sys_tokens;三类工具 mounted 之和
+// ≈ tools_tokens),调用方(RunContextCommand)负责让账对上,这里只管画,
+// 不做减法兜底(不像 history 那样拿总量反推)。deferred 三项是 tool_search
+// 索引段的分类估算,不进 tools_tokens 那份"总量恒等式"(索引段本就是
+// mounted 之外的另一份开销,道理跟原有 tools_tokens 里"索引段直接加总"
+// 一致)。
+struct ContextBreakdownDetail {
+    // 系统提示细分:正文与技能目录清单分开——技能一多,目录本身就是一笔
+    // 不可忽视的开销,揉在"系统提示"一个数字里看不出来。
+    std::size_t system_prompt_tokens = 0;
+    std::size_t skills_tokens = 0;
+
+    // 工具定义细分,按来源三分(内置/MCP/插件),mounted(进 tools 数组)
+    // 与 deferred(只在索引段露名字)分开算——deferred 三项全零时那一组
+    // 子行整体不画(一个都没有,不摆空行,同 BuildDeferredToolsIndexSegment
+    // 的"一个都没有就不注段"待遇)。
+    std::size_t system_tools_tokens = 0;
+    std::size_t system_tools_deferred_tokens = 0;
+    std::size_t mcp_tools_tokens = 0;
+    std::size_t mcp_tools_deferred_tokens = 0;
+    std::size_t plugin_tools_tokens = 0;
+    std::size_t plugin_tools_deferred_tokens = 0;
+
+    // MCP 工具按 server 分组(mounted 口径;deferred 的不进这份明细,数字
+    // 已在 mcp_tools_deferred_tokens 里)。调用方按 tokens 降序排好,这里
+    // 只管原样打——空表就不画这层子级。
+    struct McpServerEntry {
+        std::string server;
+        std::size_t tool_count = 0;
+        std::size_t tokens = 0;
+    };
+    std::vector<McpServerEntry> mcp_servers;
+};
+
 // /context 裸敲的分类占用分析:系统提示/工具定义/对话历史三类,配一条按
 // "占窗口比例"取整的条形图(默认 16 格,█ 实 ░ 空;plain 主题回退 # 和 -,
 // 拿 theme.reset 是不是空串当探针——plain 全字段空串,真主题 reset 恒非空),
@@ -181,11 +221,16 @@ std::string BuildCacheDiagSegment(const ContextTracker::CacheRequestRecord& reco
 // usage,只摆命中量、不伪造 0%。window_tokens 为 0
 // 不除零,百分比一律 0;占比超 100% 截断(条形打满、百分比钉在 100)。数字
 // 全走 FormatTokenCount。返回逐行文本(行内不带换行符),打印由调用方管。
+// detail(默认 nullptr):给了就在系统提示/工具定义两个粗桶后追加缩进子行
+// (标签见 ContextBreakdownDetail 注释),并在"剩余"之后追加两行独立条形
+// ——"自动压缩缓冲"(窗口 − 自动压缩线,固定预留)与"空闲空间"(自动压缩
+// 线 − 已用,下限钉 0)。旧调用点不传这个参数,输出与从前逐字节一致。
 std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens, std::size_t tools_tokens,
                                                  std::size_t history_tokens_est, std::int64_t cache_read_tokens,
                                                  std::size_t window_tokens, std::size_t measured_used_tokens,
                                                  const Theme& theme, int bar_width = 16,
-                                                 int cache_hit_percent = -1);
+                                                 int cache_hit_percent = -1,
+                                                 const ContextBreakdownDetail* detail = nullptr);
 
 // ---- 回合视觉收束(终端回合视觉收束单):耗时人话与 turn footer ----------
 

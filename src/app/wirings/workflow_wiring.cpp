@@ -235,6 +235,11 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
                 options.broker = exec_ctx.interaction_broker.get();
                 options.thread_id = exec_ctx.thread_id;
                 options.id_authority = exec_ctx.id_authority;
+                // 编排账传播(V3-GAP-05,设计单源码核对表"子流程不因进入
+                // subflow 失去恢复能力"):沿父同账同根(独立 runId),节点
+                // 独立场从同一宿主会话 spawn。
+                options.account_root = exec_ctx.account_root;
+                options.trajectory_ledger = exec_ctx.trajectory_ledger;
                 lubancode::workflow::WorkflowRuntime runtime(std::move(options));
                 return runtime.Run(definition, lubancode::workflow::RunInputs(inputs));
             };

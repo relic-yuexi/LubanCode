@@ -489,7 +489,8 @@ std::string TokenText(std::size_t tokens) { return FormatTokenCount(static_cast<
 std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::size_t tools_tokens_in,
                                                  std::size_t history_tokens_est, std::int64_t cache_read_tokens,
                                                  std::size_t window_tokens, std::size_t measured_used_tokens,
-                                                 const Theme& theme, int bar_width, int cache_hit_percent) {
+                                                 const Theme& theme, int bar_width, int cache_hit_percent,
+                                                 const ContextBreakdownDetail* detail) {
     // plain 主题全部字段是空串,拿 reset 当探针(真主题 reset 恒非空)。
     const bool plain = theme.reset.empty();
     if (bar_width < 0) {
@@ -521,9 +522,29 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
     const std::string label_threshold = tr("cmd.context.bd.threshold");
     const std::string label_remaining = tr("cmd.context.bd.remaining");
 
+    // 精细分类明细(detail 非空才用):系统提示/工具定义两个粗桶的子行标签,
+    // 外加缓冲/空闲两行。label_cols 的宽度账把它们也算进去——不然子行、
+    // 新行跟顶层行对不齐,detail==nullptr 时这些标签压根不查表、不进
+    // label_cols,旧九行输出的列宽一个字符不变。
+    const std::string label_system_prompt_only = detail != nullptr ? tr("cmd.context.bd.system_prompt_only") : "";
+    const std::string label_skills = detail != nullptr ? tr("cmd.context.bd.skills") : "";
+    const std::string label_system_tools = detail != nullptr ? tr("cmd.context.bd.system_tools") : "";
+    const std::string label_system_tools_deferred =
+        detail != nullptr ? tr("cmd.context.bd.system_tools_deferred") : "";
+    const std::string label_mcp_tools = detail != nullptr ? tr("cmd.context.bd.mcp_tools") : "";
+    const std::string label_mcp_tools_deferred = detail != nullptr ? tr("cmd.context.bd.mcp_tools_deferred") : "";
+    const std::string label_plugin_tools = detail != nullptr ? tr("cmd.context.bd.plugin_tools") : "";
+    const std::string label_plugin_tools_deferred =
+        detail != nullptr ? tr("cmd.context.bd.plugin_tools_deferred") : "";
+    const std::string label_autocompact_buffer = detail != nullptr ? tr("cmd.context.bd.autocompact_buffer") : "";
+    const std::string label_free_space = detail != nullptr ? tr("cmd.context.bd.free_space") : "";
+
     std::size_t label_cols = 0;
     for (const auto* label : {&label_sys, &label_tools, &label_history, &label_used, &label_threshold,
-                               &label_remaining}) {
+                               &label_remaining, &label_system_prompt_only, &label_skills, &label_system_tools,
+                               &label_system_tools_deferred, &label_mcp_tools, &label_mcp_tools_deferred,
+                               &label_plugin_tools, &label_plugin_tools_deferred, &label_autocompact_buffer,
+                               &label_free_space}) {
         label_cols = (std::max)(label_cols, DisplayCols(*label));
     }
     label_cols += 2;                    // 标签与数字之间至少两个空格
@@ -538,6 +559,13 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
                BuildBar(tokens, window_tokens, bar_width, plain) + "  " +
                PadLeftCols(std::to_string(PercentOfWindow(tokens, window_tokens)), 3) + "%";
     };
+    // 缩进子行(detail 明细专用):比顶层行多缩两格,数字/条形/百分比列同款
+    // 对齐,一律按统一口径估(带 ~)——细分没有单独的"实测"通道。
+    const auto sub_category_row = [&](const std::string& label, std::size_t tokens) {
+        return "    " + PadRightCols(label, label_cols > 2 ? label_cols - 2 : label_cols) +
+               tok_cell(tokens, /*estimated=*/true) + BuildBar(tokens, window_tokens, bar_width, plain) + "  " +
+               PadLeftCols(std::to_string(PercentOfWindow(tokens, window_tokens)), 3) + "%";
+    };
 
     std::vector<std::string> lines;
     // 占用卡片表头(排版批 6 收口):旧"── 组名 ──(窗口 N)"手拼横线按
@@ -548,7 +576,34 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
                     ")" + theme.reset);
     // 系统提示/工具永远是字符估(可单独算,但口径仍是字符/3),带 ~。
     lines.push_back(category_row(label_sys, sys_tokens, /*estimated=*/true));
+    if (detail != nullptr) {
+        // 系统提示细分:正文与技能目录清单分开。
+        lines.push_back(sub_category_row(label_system_prompt_only, detail->system_prompt_tokens));
+        lines.push_back(sub_category_row(label_skills, detail->skills_tokens));
+    }
     lines.push_back(category_row(label_tools, tools_tokens, /*estimated=*/true));
+    if (detail != nullptr) {
+        // 工具定义细分:按来源三分,mounted 恒画;deferred 三项全零就整组
+        // 不画(没启用延迟挂载/全挂载了,没有"待检索"这回事)。
+        lines.push_back(sub_category_row(label_system_tools, detail->system_tools_tokens));
+        lines.push_back(sub_category_row(label_mcp_tools, detail->mcp_tools_tokens));
+        // MCP 按 server 展开(截图里那个可展开列表的文本等价):比子行再缩两格,
+        // 纯文本一行一个 server,不带条形——server 数常个位数,条形反而挤占
+        // 空间。空表(未连 MCP / 全部延迟未挂载)不画这层。
+        for (const auto& entry : detail->mcp_servers) {
+            lines.push_back("      " + trf("cmd.context.bd.mcp_server_line", entry.server,
+                                           std::to_string(entry.tool_count), TokenText(entry.tokens)));
+        }
+        lines.push_back(sub_category_row(label_plugin_tools, detail->plugin_tools_tokens));
+        const std::size_t deferred_total = detail->system_tools_deferred_tokens +
+                                           detail->mcp_tools_deferred_tokens +
+                                           detail->plugin_tools_deferred_tokens;
+        if (deferred_total > 0) {
+            lines.push_back(sub_category_row(label_system_tools_deferred, detail->system_tools_deferred_tokens));
+            lines.push_back(sub_category_row(label_mcp_tools_deferred, detail->mcp_tools_deferred_tokens));
+            lines.push_back(sub_category_row(label_plugin_tools_deferred, detail->plugin_tools_deferred_tokens));
+        }
+    }
     {
         // 历史:有实测是反推的确定值(不带 ~,行尾注明反推口径),无实测退字符估。
         std::string history_row = category_row(label_history, history_tokens, /*estimated=*/!have_measured);
@@ -589,6 +644,16 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
                     "k)");
     const std::size_t remaining = window_tokens > used ? window_tokens - used : 0;
     lines.push_back("  " + PadRightCols(label_remaining, label_cols) + TokenText(remaining));
+    if (detail != nullptr) {
+        // 自动压缩缓冲 = 窗口 − 触发线(固定预留,压缩提示词+压缩结果那两笔
+        // 加上 80% 参考线切掉的那一截);空闲空间 = 触发线 − 已用,下限钉 0
+        // (已用越过触发线时该压缩的是历史,不是把这行打成负数)。两行的
+        // 条形与百分比同样按窗口取,跟其余分类行同一套尺,能直接比大小。
+        const std::size_t buffer_tokens = window_tokens > threshold_tokens ? window_tokens - threshold_tokens : 0;
+        const std::size_t free_tokens = threshold_tokens > used ? threshold_tokens - used : 0;
+        lines.push_back(category_row(label_autocompact_buffer, buffer_tokens, /*estimated=*/false));
+        lines.push_back(category_row(label_free_space, free_tokens, /*estimated=*/false));
+    }
     lines.push_back("  " + tr(have_measured ? "cmd.context.bd.note.measured" : "cmd.context.bd.note.est"));
     return lines;
 }

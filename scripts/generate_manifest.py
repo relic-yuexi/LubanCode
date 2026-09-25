@@ -35,7 +35,7 @@ ROLE_ROOT_FILES = {
     "LICENSE": "license",
     "THIRD_PARTY_NOTICES.md": "notices",
     "README.md": "readme",
-    "README.en.md": "readme",
+    "README.zh-CN.md": "readme",
     "install.ps1": "installer",
     "uninstall.ps1": "installer",
     "install.sh": "installer",

@@ -251,6 +251,11 @@ std::vector<CompletionCandidate> BuildSlashCompletionCandidates();
 // 命令仍由 AllSlashCommands() 独占，动态项只作附加候选。
 void SetAdditionalSlashCompletionCandidates(std::vector<CompletionCandidate> candidates);
 
+// AllSlashSubcommandGroups() -> LineEditorCore 二级补全候选的唯一转换口
+// (多级 Tab 补全单):同 BuildSlashCompletionCandidates 一个道理,子命令词汇
+// 只有 slash_commands 那一份,不留静态副本。
+std::vector<SlashSubcommandGroup> BuildSlashSubcommandCompletionCandidates();
+
 // UI-D(0.16.0):等输入期间(composer 主提示符)按下 Ctrl+O / Ctrl+E /
 // 空 composer Tab / Shift+Tab / ESC(聚焦查看态返回用)时,终端层把语义
 // 转发给应用层的动作。终端层自己零 transcript 知识:回调打印什么它不管,

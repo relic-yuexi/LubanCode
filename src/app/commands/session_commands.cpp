@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -56,6 +57,7 @@
 #include "hooks/dispatcher.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:P0-2 compact 状态指纹
 #include "tools/path_utils.hpp"
+#include "tools/registry.hpp"  // ToolRegistration/ToolSourceKind:/context 按来源分类用
 #include "tools/tool_search.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
@@ -247,12 +249,13 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            int compact_partition_count,
                            const DeferredToolModeSummary* deferred_tool_summary,
                            const lubancode::agent::TokenCalibrationStatus* token_calibration,
-                           const ContextSessionFacts& session_facts) {
+                           const ContextSessionFacts& session_facts,
+                           const lubancode::cli::ContextBreakdownDetail* breakdown_detail) {
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
             context_tracker.window_tokens(), context_tracker.current_tokens(), theme,
-            /*bar_width=*/16, context_tracker.last_cache_hit_percent());
+            /*bar_width=*/16, context_tracker.last_cache_hit_percent(), breakdown_detail);
         // 占用卡片(核心,第一组):系统/工具/历史条形图 + 已用/触发线/剩余。
         // FormatContextBreakdown 自带表头"上下文占用分析(窗口 {0})",拼装
         // 规则在 cli 层(批 5a 领地外),原样逐行落盘。
@@ -2212,24 +2215,104 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
     const double token_calibration =
         v3_session ? 1.0 : calibrator.Coefficient(loop.provider(), loop.request_profile().model);
     lubancode::agent::TokenCalibrationStatus token_calibration_status;
+    // 精细分类明细(ContextBreakdownDetail,全量对齐截图式占用面板):按
+    // 来源(内置/MCP/插件)拆工具定义,系统提示/技能目录分开算。只在裸敲
+    // 分支填,带参数(切窗口)分支不碰。
+    lubancode::cli::ContextBreakdownDetail breakdown_detail;
     if (args.empty()) {
+        const std::size_t skills_tokens_raw =
+            lubancode::agent::EstimateUtf8Tokens(in.prompt_options->skills_segment);
         sys_tokens = lubancode::agent::ApplyTokenCalibration(
             lubancode::agent::EstimateUtf8Tokens(
                 lubancode::agent::AssembleSystemPrompt(*in.prompt_options)) +
                 lubancode::agent::EstimateUtf8Tokens(*in.model_instructions) +
                 lubancode::agent::EstimateUtf8Tokens(*in.soul),
             token_calibration);
+        // 系统提示细分:技能目录清单(features/skills.md 模块紧随其后的那段
+        // 名字+一句话说明列表)从系统提示总量里减出来单独称重;正文 = 总量
+        // 减技能(下限钉 0),两者之和恒等于 sys_tokens,不另起一本账。
+        breakdown_detail.skills_tokens = lubancode::agent::ApplyTokenCalibration(skills_tokens_raw, token_calibration);
+        breakdown_detail.system_prompt_tokens =
+            sys_tokens > breakdown_detail.skills_tokens ? sys_tokens - breakdown_detail.skills_tokens : 0;
+
+        // 工具定义按来源三分(内置/MCP/插件):registry->RegistrationOf 是
+        // 逐枚追踪单的唯一真源,不猜——MCP 与插件的 standalone 注册路此前
+        // 漏记 source_kind(默认落 builtin),已在 tool_runtime.cpp 补齐,
+        // 这里才拿得到真实分类。MCP 再按 server 分组,给下面的按 server 明细。
+        std::size_t system_tools_raw = 0, mcp_tools_raw = 0, plugin_tools_raw = 0;
+        std::map<std::string, std::pair<std::size_t, std::size_t>> mcp_server_raw;  // server -> {个数, tokens}
         for (const auto& tool : in.registry->All()) {
             if (!(*in.tool_filter)(*tool)) {
                 continue;  // 延迟未挂载:不在 tools 数组里,不算
             }
-            tools_tokens += lubancode::agent::EstimateUtf8Tokens(tool->name()) +
-                            lubancode::agent::EstimateUtf8Tokens(tool->description()) +
-                            lubancode::agent::EstimateUtf8Tokens(tool->input_schema().dump());
+            const std::size_t tool_raw = lubancode::agent::EstimateUtf8Tokens(tool->name()) +
+                                         lubancode::agent::EstimateUtf8Tokens(tool->description()) +
+                                         lubancode::agent::EstimateUtf8Tokens(tool->input_schema().dump());
+            tools_tokens += tool_raw;
+            const lubancode::tools::ToolRegistration* registration = in.registry->RegistrationOf(tool->name());
+            const lubancode::tools::ToolSourceKind kind =
+                registration != nullptr ? registration->source_kind : lubancode::tools::ToolSourceKind::Builtin;
+            if (kind == lubancode::tools::ToolSourceKind::Mcp) {
+                mcp_tools_raw += tool_raw;
+                std::string server = registration != nullptr && !registration->source_instance.empty()
+                                         ? registration->source_instance
+                                         : tr("cmd.context.bd.mcp_server_unknown");
+                auto& slot = mcp_server_raw[server];
+                slot.first += 1;
+                slot.second += tool_raw;
+            } else if (kind == lubancode::tools::ToolSourceKind::PluginLua ||
+                       kind == lubancode::tools::ToolSourceKind::PluginNative) {
+                plugin_tools_raw += tool_raw;
+            } else {
+                system_tools_raw += tool_raw;
+            }
         }
+        breakdown_detail.system_tools_tokens = lubancode::agent::ApplyTokenCalibration(system_tools_raw, token_calibration);
+        breakdown_detail.mcp_tools_tokens = lubancode::agent::ApplyTokenCalibration(mcp_tools_raw, token_calibration);
+        breakdown_detail.plugin_tools_tokens = lubancode::agent::ApplyTokenCalibration(plugin_tools_raw, token_calibration);
+        for (const auto& [server, count_tokens] : mcp_server_raw) {
+            lubancode::cli::ContextBreakdownDetail::McpServerEntry entry;
+            entry.server = server;
+            entry.tool_count = count_tokens.first;
+            entry.tokens = lubancode::agent::ApplyTokenCalibration(count_tokens.second, token_calibration);
+            breakdown_detail.mcp_servers.push_back(std::move(entry));
+        }
+        std::sort(breakdown_detail.mcp_servers.begin(), breakdown_detail.mcp_servers.end(),
+                 [](const auto& a, const auto& b) { return a.tokens > b.tokens; });
+
         if (in.tool_deferral) {
             tools_tokens += lubancode::agent::EstimateUtf8Tokens(
                 lubancode::tools::BuildDeferredToolsIndexSegment(*in.registry, *in.loaded_tools));
+            // deferred 三分桶是独立估算(索引行按 80 字节近似截断,不追求
+            // 与上面那行逐字节对账——这份细分本就不进 tools_tokens 的总量
+            // 恒等式,ContextBreakdownDetail 的注释已说破),按来源三分,
+            // 只服务展示。
+            for (const auto& tool : in.registry->All()) {
+                if (!tool->deferred() || in.loaded_tools->count(tool->name()) != 0) {
+                    continue;
+                }
+                const std::string& desc = tool->description();
+                const std::string capped_desc = desc.size() > 80 ? desc.substr(0, 80) : desc;
+                const std::size_t line_raw =
+                    lubancode::agent::EstimateUtf8Tokens(tool->name()) + lubancode::agent::EstimateUtf8Tokens(capped_desc);
+                const lubancode::tools::ToolRegistration* registration = in.registry->RegistrationOf(tool->name());
+                const lubancode::tools::ToolSourceKind kind =
+                    registration != nullptr ? registration->source_kind : lubancode::tools::ToolSourceKind::Builtin;
+                if (kind == lubancode::tools::ToolSourceKind::Mcp) {
+                    breakdown_detail.mcp_tools_deferred_tokens += line_raw;
+                } else if (kind == lubancode::tools::ToolSourceKind::PluginLua ||
+                           kind == lubancode::tools::ToolSourceKind::PluginNative) {
+                    breakdown_detail.plugin_tools_deferred_tokens += line_raw;
+                } else {
+                    breakdown_detail.system_tools_deferred_tokens += line_raw;
+                }
+            }
+            breakdown_detail.system_tools_deferred_tokens =
+                lubancode::agent::ApplyTokenCalibration(breakdown_detail.system_tools_deferred_tokens, token_calibration);
+            breakdown_detail.mcp_tools_deferred_tokens =
+                lubancode::agent::ApplyTokenCalibration(breakdown_detail.mcp_tools_deferred_tokens, token_calibration);
+            breakdown_detail.plugin_tools_deferred_tokens =
+                lubancode::agent::ApplyTokenCalibration(breakdown_detail.plugin_tools_deferred_tokens, token_calibration);
         }
         tools_tokens = lubancode::agent::ApplyTokenCalibration(tools_tokens, token_calibration);
         // v3 会话:历史估算直接量 request_history——那才是实际发给模型的
@@ -2347,7 +2430,10 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
     HandleContextCommand(args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
                          loop.cache_epoch(), &loop.runtime_profile(), in.usage_ledger, &layers,
                          in.roles_table, in.compact_partition_count, deferred_tool_summary_ptr,
-                         v3_session ? nullptr : &token_calibration_status, session_facts);
+                         v3_session ? nullptr : &token_calibration_status, session_facts,
+                         // 走到这里 args 必空(函数顶部带参分支已 return),
+                         // breakdown_detail 恒已填好。
+                         &breakdown_detail);
     // §三:当前预算超目录已知上限的显式警示(旧档带进来的超限值不静默
     // 截断,明说待纠正;不带目录材料的现场跳过)。挂在明细卡末尾,预算
     // 与上限同屏可比。
