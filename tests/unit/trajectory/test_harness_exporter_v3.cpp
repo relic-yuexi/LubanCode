@@ -77,6 +77,43 @@ v3::V3Writer StartMain(SessionsRoot& root, const std::string& session_id,
     return std::move(*writer);
 }
 
+struct RequestIds {
+    std::string request_id;
+    std::string step_id;
+};
+
+// 一次请求预备 + 收口事件(model.request.prepared -> model.response.
+// completed):assistant/Conversation 消息须挂真实 requestId(schema3 合同,
+// §4.4),不能空手就落一条 assistant 消息——两处子代理夹具都要这一步,
+// 拆出来避免各自遗漏。
+RequestIds PrepareConversationRequest(v3::V3Writer& writer, const std::string& turn_id,
+                                      const std::string& step_id, const char* finish_reason) {
+    RequestIds ids;
+    ids.request_id = writer.NewRequestId();
+    ids.step_id = step_id;
+    std::vector<std::string> input_refs;
+    for (std::size_t i = 1; i < writer.context().chain.size(); ++i) {
+        input_refs.push_back(writer.context().chain[i].message_ref);
+    }
+    REQUIRE(writer
+                .PrepareRequest(ids.request_id, turn_id, ids.step_id, "conversation",
+                                writer.context().system_message_ref, input_refs,
+                                nlohmann::json{{"provider", "anthropic"}, {"wire", "anthropic"},
+                                              {"model", "claude-test"}},
+                                std::nullopt, v3::Durability::PowerLoss)
+                .status == v3::WriteReceipt::Status::Committed);
+    v3::EventDraft done;
+    done.kind = v3::EventKindV3::ModelResponseCompleted;
+    done.status = v3::OpStatus::Done;
+    done.request_id = ids.request_id;
+    done.turn_id = turn_id;
+    done.step_id = ids.step_id;
+    done.payload = nlohmann::json{{"finishReason", finish_reason}};
+    REQUIRE(writer.AppendEvent(std::move(done), v3::Durability::PowerLoss).status ==
+            v3::WriteReceipt::Status::Committed);
+    return ids;
+}
+
 // 一枚完整对话轮:user 输入 -> assistant 声明 tool_call -> 工具执行终态 ->
 // tool 消息 -> assistant 最终文本作答(带 usage)。返回 action_id,供调用
 // 方继续断言/派生子代理。
@@ -351,8 +388,11 @@ TEST_CASE("v3 子代理子流:两行 record,child 的 parent_run_id 指回 main 
     REQUIRE(writer.AdmitMessages({user_receipt.id}).status == v3::WriteReceipt::Status::Committed);
 
     const std::string action_id = writer.NewActionId();
+    const RequestIds call_request = PrepareConversationRequest(writer, turn_id, "step-000001", "tool_use");
     v3::MessageDraft call;
     call.turn_id = turn_id;
+    call.step_id = call_request.step_id;
+    call.request_id = call_request.request_id;
     call.purpose = v3::MessagePurpose::Conversation;
     call.origin = v3::MessageOrigin::SessionRuntime;
     call.provider = "anthropic";
@@ -441,7 +481,7 @@ TEST_CASE("v3 子代理子流:两行 record,child 的 parent_run_id 指回 main 
 // 3. 格式矩阵:各给稳定诊断,不吞成"没有流",不装 clean success
 // ---------------------------------------------------------------------------
 
-TEST_CASE("v3 格式矩阵:主账缺失给 export.session_format_missing") {
+TEST_CASE("v3 格式矩阵:主账缺失(空目录)给既有 export.no_streams,不新立顶层码") {
     SessionsRoot root("fmt-missing");
     const std::string session_id = "20260907-000003-DDDDDD";
     root.Dir(session_id);  // 建目录但不写任何账
@@ -449,7 +489,10 @@ TEST_CASE("v3 格式矩阵:主账缺失给 export.session_format_missing") {
     const auto report =
         ExportSessionHarnessV1(session_dir, session_dir / "out.jsonl", HarnessExportOptions{});
     CHECK_FALSE(report.ok());
-    CHECK(report.error_code == "export.session_format_missing");
+    // 目录在、两种主账都不在:与"没开过 trajectory"同一件事,复用既有
+    // export.no_streams 契约(不擅自新立顶层错误码);格式感知的诊断价值
+    // 体现在文案带了实际目录与"格式=unknown",而不是新码。
+    CHECK(report.error_code == "export.no_streams");
     CHECK(report.message.find(lubancode::platform::PathToUtf8(session_dir)) != std::string::npos);
 }
 
@@ -554,8 +597,11 @@ TEST_CASE("v3 格式矩阵:缺子账给存根行,主账仍如实导出") {
     REQUIRE(writer.AdmitMessages({user_receipt.id}).status == v3::WriteReceipt::Status::Committed);
 
     const std::string action_id = writer.NewActionId();
+    const RequestIds call_request = PrepareConversationRequest(writer, turn_id, "step-000001", "tool_use");
     v3::MessageDraft call;
     call.turn_id = turn_id;
+    call.step_id = call_request.step_id;
+    call.request_id = call_request.request_id;
     call.purpose = v3::MessagePurpose::Conversation;
     call.origin = v3::MessageOrigin::SessionRuntime;
     call.provider = "anthropic";

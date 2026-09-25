@@ -660,9 +660,12 @@ inline SessionStreamDiscovery DiscoverSessionStreams(const std::filesystem::path
                 "主账首行读不出(空文件或打不开): " + probe.detail};
             return result;
         case Status::StreamMissing:
-            result.error = SessionFormatError{
-                "export.session_format_missing",
-                "session 目录里没有主账(main.jsonl 与 <id>.jsonl 均不在): " + probe.detail};
+            // 目录在但两种主账都不在(main.jsonl 与 <id>.jsonl 均缺):这就是
+            // "没开过 trajectory 的空目录",与既有 export.no_streams 契约
+            // 同一件事,不另立新码——format 留空、streams 留空、error 不设,
+            // 落到调用方既有的 discovery.streams.empty() 分支自然报
+            // export.no_streams(§12.3 既定稳定码目录,harness_exporter.hpp
+            // 已文档化,不擅自新增顶层错误码打破契约)。
             return result;
         case Status::NotSessionDir:
         default:
