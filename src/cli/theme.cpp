@@ -53,6 +53,9 @@ Theme DarkTheme() {
     t.list_bullet_user = "\x1b[35m";
     t.list_bullet_project = "\x1b[36m";
     t.key_hint = t.stats;
+    // 选中行底色:深紫底,与 confirm(品红前景)同族,常驻选择面板(如
+    // SessionPicker)光标行铺实底,比纯前景色更醒目、不与列表其余行混色。
+    t.row_selected_bg = "\x1b[48;5;53m";
     return t;
 }
 
@@ -98,6 +101,8 @@ Theme LightTheme() {
     t.list_bullet_user = "\x1b[35m";
     t.list_bullet_project = "\x1b[36m";
     t.key_hint = t.stats;
+    // 选中行底色:浅紫底,深色前景(confirm)在其上仍够对比,与 dark 同尺。
+    t.row_selected_bg = "\x1b[48;5;225m";
     return t;
 }
 

@@ -75,6 +75,11 @@ struct Theme {
     std::string list_bullet_user;     // 列表项目符·user 档
     std::string list_bullet_project;  // 列表项目符·project 档
     std::string key_hint;             // 列表行尾键提示/短注
+
+    // 常驻选择面板(SessionPicker 等)的选中行整行底色:与 confirm 前景
+    // 配对,补光标行的实心底,比单纯改前景更醒目。空 = 不铺底(plain 主题
+    // 降级路径)。
+    std::string row_selected_bg;
 };
 
 // 按名字取内置主题;不认得的名字(不是 dark/light/plain)按 dark 处理,

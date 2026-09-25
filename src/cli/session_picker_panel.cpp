@@ -12,6 +12,7 @@
 #include <mutex>
 
 #include "cli/console_input.hpp"
+#include "cli/format_utils.hpp"  // format::AlignLeft:光标行铺底色要补齐到整行宽
 #include "cli/i18n.hpp"
 #include "cli/line_editor.hpp"
 #include "cli/panel_chrome.hpp"  // PanelRowTone:行级语义档(排版批 6)
@@ -219,13 +220,37 @@ SessionPickerPanelResult RunSessionPickerPanel(const SessionPickerFeed& feed, co
             const std::string& line = frame.lines[static_cast<std::size_t>(r)];
             const std::size_t match = frame.row_match_index[static_cast<std::size_t>(r)];
             if (match != SessionPickerFrame::kNoMatch && match == core.selected()) {
-                TermOut() << theme.confirm << TruncateUtf8ToDisplayWidth(line, width - 1) << theme.reset;
+                // 光标行(排版打磨:选择面板视觉聚焦):整行铺
+                // row_selected_bg 实底 + confirm 前景,比单纯改前景色更
+                // 醒目——与 Claude Code 会话选择器的高亮条同一观感。
+                // row_selected_bg 空串(plain 主题)时退化成旧版纯前景,
+                // 不铺底也不必补齐到整行宽,零转义字节的合同不破。
+                const std::string truncated = TruncateUtf8ToDisplayWidth(line, width - 1);
+                if (theme.row_selected_bg.empty()) {
+                    TermOut() << theme.confirm << truncated << theme.reset;
+                } else {
+                    TermOut() << theme.row_selected_bg << theme.confirm
+                              << format::AlignLeft(truncated, width - 1) << theme.reset;
+                }
             } else if (match == SessionPickerFrame::kNoMatch) {
                 // 结构行按语义档(排版批 6):标题行(两套帧的第 0 行都是
                 // 标题)走 frame_title,搜索/筛选行与底栏这类淡色附注走
-                // row_muted;列表普通行原色。
-                const PanelRowTone tone = r == 0 ? PanelRowTone::Title : PanelRowTone::Muted;
-                const std::string& color = PanelRowToneColor(theme, tone);
+                // row_muted;列表普通行原色。搜索/筛选/排序行(仅主台账
+                // 帧,转录浮层没有这两行)占着当前键盘焦点时改走 confirm
+                // 强调色,不再跟其余淡色附注混在一起——光标停在哪个字段
+                // 一眼看得出,不必只靠 "> " 前缀分辨。
+                const bool search_focused = !core.state().transcript_open && r == 1 &&
+                                            core.state().focus == SessionPickerFocus::Search;
+                const bool filter_sort_focused = !core.state().transcript_open && r == 2 &&
+                                                 core.state().focus != SessionPickerFocus::Search;
+                std::string color;
+                if (r == 0) {
+                    color = PanelRowToneColor(theme, PanelRowTone::Title);
+                } else if (search_focused || filter_sort_focused) {
+                    color = theme.confirm;
+                } else {
+                    color = PanelRowToneColor(theme, PanelRowTone::Muted);
+                }
                 TermOut() << color << TruncateUtf8ToDisplayWidth(line, width - 1)
                           << (color.empty() ? std::string() : theme.reset);
             } else {
