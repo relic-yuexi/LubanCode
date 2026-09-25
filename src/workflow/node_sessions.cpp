@@ -218,6 +218,16 @@ std::expected<NodeSessionSpawn, runtime::WorkflowSpawnFailure> WorkflowNodeSessi
             std::error_code abs_ec;
             journal_path = std::filesystem::absolute(session_jsonl, abs_ec).generic_string();
         }
+        // GAP-05 windows-msvc 诊断(临时,与 reader.cpp 读侧那份配对,定位后
+        // 随修复一并撤):两轮独立修法都没堵住 windows-msvc 上的回归,自证
+        // 在写侧从未报过失配——把写侧四个原始字符串录下来,配读侧那份一起
+        // 比对,而不是继续猜 relative() 的行为。
+        platform::LogSink::Instance().Error(
+            "workflow.node_session.gap05_debug",
+            "parent_session_dir=" + material_.parent_session_dir.string() +
+                " session_jsonl=" + session_jsonl.string() +
+                " verified_ok=" + (ok ? std::string("true") : std::string("false")) +
+                " journal_path=" + journal_path);
     }
     if (journal_path.empty()) {
         return fail_out("reserve_stream", "workflow.node_session.no_journal_path",
