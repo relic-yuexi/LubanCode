@@ -3,7 +3,7 @@
 [当前实现](session-v3.md) · [会话指南](../features/sessions/README.md) · [待清理与缺口](../development/v3-legacy-audit.md)
 
 
-状态：新会话已默认写 v3，写入、读取、历史显示、四角色 adapter、compact 与同场内存换账均有实现。只有 `LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0` 使新场回 v2；旧场按源格式读取，不自动转换。本页冻结字段合同，不把“字段已有”视为每个生产入口均已接通。
+状态：新会话一律写 v3（V3-LEGACY-01 起 v2 新建写口退役，`LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0` 只记迁移告警、不再新建 v2），写入、读取、历史显示、四角色 adapter、compact 与同场内存换账均有实现。旧场按源格式读取，不自动转换。本页冻结字段合同，不把“字段已有”视为每个生产入口均已接通。
 
 设计目标见 对应设计单；源码与测试定当前行为。新增 Goal/Loop/btw/Memory 及完整 AppServer/Workflow 合同仍按各自分期实施。旧接口与消费方差距见清理清单，不沿用早期 P0/P1/P2 状态推断今日实现。
 

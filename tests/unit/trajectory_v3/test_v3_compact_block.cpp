@@ -180,24 +180,10 @@ TEST_CASE("v3 阻断: 幂等保首因,诊断汇可查") {
     CHECK(blocked_notes == 1);
 }
 
-TEST_CASE("v2 场: BlockV3Execution no-op,请求照发(v2 无此门)") {
-    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
-    const auto root = FreshRoot("v2-noop");
-    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
-    REQUIRE(ledger.has_value());
-    REQUIRE(ledger->v3_main_writer() == nullptr);
-    ledger->BlockV3Execution("compact.swap.不该生效");
-    CHECK_FALSE(ledger->V3ExecutionBlocked());
-    auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
-    REQUIRE(bridge != nullptr);
-    bridge->BeginTurn("turn-1", "external_user");
-    bridge->RecordInput(UserMessage("v2 老路不受影响"));
-    CHECK_FALSE(bridge
-                    ->OnRequestPrepared(MakeRequest("v2 system", {UserMessage("v2 老路不受影响")}),
-                                        PreparedContext())
-                    .empty());
-    bridge->EndTurn(/*ok=*/true, /*cancelled=*/false, {});
-}
+// (退役,V3-LEGACY-01)原此处有"v2 场: BlockV3Execution no-op,请求照发
+// (v2 无此门)"案:env=0 建出 v2 活场,验阻断门对非 v3 场 no-op。写口退役
+// 后新建恒 v3,该前提造不出;阻断门只认 v3 场,旧盘 v2 活场的 no-op 行为
+// 随恢复收养路径另立夹具单守。
 
 TEST_CASE("v3 阻断解除: clear 换场后新 books 不携带旧阻断") {
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");

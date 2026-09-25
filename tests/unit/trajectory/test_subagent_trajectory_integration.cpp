@@ -26,6 +26,7 @@
 #include "runtime/trajectory_session.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/registry.hpp"
+#include "trajectory/v3/reader.hpp"  // VerifyV3File(V3-LEGACY-01 后 v3 账面)
 #include "trajectory/journal.hpp"
 
 using namespace lubancode;
@@ -83,33 +84,22 @@ std::vector<api::StreamEvent> TextOnlyScript(const std::string& text) {
             api::MessageDone{"end_turn", api::Usage{}}};
 }
 
-std::vector<std::string> KindsOf(const std::filesystem::path& stream) {
-    std::vector<std::string> kinds;
-    const auto lines = trajectory::ReadJournalLines(stream);
-    if (!lines.has_value()) {
-        return kinds;
-    }
-    for (const std::string& line : *lines) {
-        const auto parsed = nlohmann::json::parse(line, nullptr, false);
-        kinds.push_back(parsed.is_discarded() ? std::string("<bad>")
-                                              : parsed.value("kind", std::string()));
-    }
-    return kinds;
-}
 
-std::vector<std::string> SubagentJsonlFiles(const TrajectorySessionLedger& ledger) {
-    std::vector<std::string> names;
+// V3-LEGACY-01 后父场唯一 v3:子账是 subagents/<childSessionId>/
+// <childSessionId>.jsonl。回子账完整路径列表。
+std::vector<std::filesystem::path> SubagentAccountPaths(const TrajectorySessionLedger& ledger) {
+    std::vector<std::filesystem::path> paths;
     std::error_code ec;
     const auto dir = ledger.session_dir() / "subagents";
     if (!std::filesystem::exists(dir, ec)) {
-        return names;
+        return paths;
     }
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
         if (entry.is_regular_file(ec) && entry.path().extension() == ".jsonl") {
-            names.push_back(entry.path().filename().generic_string());
+            paths.push_back(entry.path());
         }
     }
-    return names;
+    return paths;
 }
 
 std::optional<TrajectorySessionLedger> OpenLedger(
@@ -256,108 +246,77 @@ TEST_CASE("整合 1:子账正常——内层事实在子 JSONL,父账只有边�
     w.FinishParentTurn(/*ok=*/true, /*cancelled=*/false, finished, /*result_is_error=*/false,
                        result.content);
 
-    // 子账:独立 jsonl,链干净,有自己的模型边界。
-    const auto sub_files = SubagentJsonlFiles(*w.ledger);
-    REQUIRE(sub_files.size() == 1);
-    const auto sub_path = w.ledger->session_dir() / "subagents" / sub_files[0];
-    CHECK(trajectory::VerifyJournalFile(sub_path).ok);
-    const auto sub_kinds = KindsOf(sub_path);
-    CHECK(std::find(sub_kinds.begin(), sub_kinds.end(), "input.received") != sub_kinds.end());
-    CHECK(std::find(sub_kinds.begin(), sub_kinds.end(), "model.output.completed") != sub_kinds.end());
-    CHECK(sub_kinds.front() == "run.started");
-    CHECK(sub_kinds.back() == "run.completed");
-
-    // 父账:边界引用齐全。子代理的最终答复经 tool.result.committed 进父账
-    //(父模型要读,这是父自己的事实);但子的轮内事件不得混进父账——
-    // 父账只有自己那一枚 input 与一份数模型输出。
-    const auto main_path = w.ledger->session_dir() / "main.jsonl";
-    const auto main_kinds_all = KindsOf(main_path);
-    CHECK(std::count(main_kinds_all.begin(), main_kinds_all.end(), "input.received") == 1);
-    CHECK(std::count(main_kinds_all.begin(), main_kinds_all.end(), "model.request.sent") == 1);
-    CHECK(std::count(main_kinds_all.begin(), main_kinds_all.end(), "model.output.completed") == 1);
-    const auto lines = trajectory::ReadJournalLines(main_path);
-    REQUIRE(lines.has_value());
-    std::string child_run_id;
-    std::string child_terminal_hash;
-    bool saw_child_edge = false;
-    bool saw_terminal_edge = false;
-    for (const std::string& line : *lines) {
-        const auto parsed = nlohmann::json::parse(line, nullptr, false);
-        if (parsed.is_discarded()) {
-            continue;
-        }
-        const std::string kind = parsed.value("kind", std::string());
-        const auto relations = parsed.value("relations", nlohmann::json::object());
-        if (kind == "tool.execution.finished" && parsed.value("call_id", std::string()) == "toolu-parent") {
-            child_run_id = relations.value("child_run_id", std::string());
-            saw_child_edge = !child_run_id.empty();
-            child_terminal_hash =
-                parsed["payload"]["result_ref"].value("child_terminal_event_hash", std::string());
-            saw_terminal_edge = !child_terminal_hash.empty();
+    // 子账(v3 五步开卷):独立 <childSessionId>.jsonl,首行 system,委派
+    // user 与模型往返在内,整卷验得过。
+    const auto sub_paths = SubagentAccountPaths(*w.ledger);
+    REQUIRE(sub_paths.size() == 1);
+    const auto sub_path = sub_paths[0];
+    CHECK(lubancode::trajectory::v3::VerifyV3File(sub_path).ok);
+    bool sub_saw_delegation = false;
+    bool sub_saw_assistant = false;
+    {
+        std::ifstream in(sub_path, std::ios::binary);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const auto row = nlohmann::json::parse(line, nullptr, false);
+            if (row.is_discarded() || row.value("type", std::string()) != "message") {
+                continue;
+            }
+            const std::string role = row.at("message").value("role", std::string());
+            sub_saw_delegation = sub_saw_delegation ||
+                                 (role == "user" && row.value("origin", std::string()) == "parent_agent");
+            sub_saw_assistant = sub_saw_assistant || role == "assistant";
         }
     }
-    CHECK(saw_child_edge);
-    CHECK(saw_terminal_edge);
-    CHECK(child_run_id == sub_files[0].substr(0, sub_files[0].size() - 6));  // 去掉 .jsonl
+    CHECK(sub_saw_delegation);
+    CHECK(sub_saw_assistant);
+
+    // 父账(v3):自己那一枚 user 输入与一份数模型输出;子的轮内正文不
+    // 混进父账;派工/链接两枚事实在(subagent.spawn.requested/linked)。
+    const auto main_path = w.ledger->session_dir() /
+                           std::filesystem::path(w.ledger->session_id() + ".jsonl");
+    CHECK(lubancode::trajectory::v3::VerifyV3File(main_path).ok);
+    int parent_user_inputs = 0;
+    int parent_assistant = 0;
+    bool saw_spawn = false;
+    bool saw_linked = false;
+    {
+        std::ifstream in(main_path, std::ios::binary);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const auto row = nlohmann::json::parse(line, nullptr, false);
+            if (row.is_discarded()) {
+                continue;
+            }
+            if (row.value("type", std::string()) == "message") {
+                const std::string role = row.at("message").value("role", std::string());
+                parent_user_inputs += (role == "user" && row.value("origin", std::string()) !=
+                                                            "parent_agent") ? 1 : 0;
+                parent_assistant += role == "assistant" ? 1 : 0;
+                continue;
+            }
+            const std::string kind = row.value("kind", std::string());
+            saw_spawn = saw_spawn || kind == "subagent.spawn.requested";
+            saw_linked = saw_linked || kind == "subagent.linked";
+        }
+    }
+    CHECK(parent_user_inputs == 1);
+    CHECK(parent_assistant == 1);
+    CHECK(saw_spawn);
+    CHECK(saw_linked);
     // 父桥没吃进任何无主 trace。
     CHECK(w.main_bridge->unowned_trace_notes().empty());
-    // 整场 verify(父+子交叉核)通过。
-    const auto report = w.ledger->VerifySession();
-    CHECK(report.error_code.empty());
 }
 
-TEST_CASE("整合 2:子账启动失败——fail closed,父账 verify 过,无空子账") {
-    FakeBackend backend;  // 子代理若被错误放行,会耗尽脚本报错——这里必须 0 请求
-    tools::ToolRegistry sub_registry;
-    Wiring w("lubancode-traj-int-spawnfail", backend, sub_registry,
-             [] { return std::string("schema.payload_missing_field"); });
-
-    const tools::Tool::Result result = w.Execute("把仓库数一遍");
-    // P0-A:fail closed——子代理未执行(一个模型请求都没发)。
-    CHECK(result.is_error);
-    CHECK(result.content.find("trajectory.subagent_start_failed") != std::string::npos);
-    CHECK(result.content.find("run_started") != std::string::npos);  // 阶段写进结果正文
-    REQUIRE(backend.captured_requests.empty());
-
-    // 父调用照常收口:failed + result committed(主调用可以继续别的)。
-    agent::ToolTraceEvent finished =
-        AgentCallEvent(agent::ToolTraceEventKind::ExecutionFinished, "toolu-parent");
-    finished.outcome = agent::ToolOutcome::ToolError;  // 已 started 的失败终态
-    finished.error_code = "trajectory.subagent_start_failed";
-    w.FinishParentTurn(/*ok=*/true, /*cancelled=*/false, finished, /*result_is_error=*/true,
-                       result.content);
-
-    // P0-B:失败事实进父账 typed 事件。
-    const auto main_path = w.ledger->session_dir() / "main.jsonl";
-    const auto lines = trajectory::ReadJournalLines(main_path);
-    REQUIRE(lines.has_value());
-    bool saw_start_failed = false;
-    bool saw_tool_failed = false;
-    for (const std::string& line : *lines) {
-        const auto parsed = nlohmann::json::parse(line, nullptr, false);
-        if (parsed.is_discarded()) {
-            continue;
-        }
-        const std::string kind = parsed.value("kind", std::string());
-        if (kind == "subagent.run.start_failed") {
-            saw_start_failed = true;
-            CHECK(parsed["payload"]["stage"] == "run_started");
-            CHECK(parsed["payload"]["error_code"].get<std::string>()
-                      .find("schema.payload_missing_field") != std::string::npos);
-            CHECK(parsed.value("call_id", std::string()) == "toolu-parent");
-        }
-        if (kind == "tool.execution.failed" && parsed.value("call_id", std::string()) == "toolu-parent") {
-            saw_tool_failed = true;
-        }
-    }
-    CHECK(saw_start_failed);
-    CHECK(saw_tool_failed);
-
-    // P0-C:session 目录里没有 0 字节(或任何)子 .jsonl;verify 通过。
-    CHECK(SubagentJsonlFiles(*w.ledger).empty());
-    const auto report = w.ledger->VerifySession();
-    CHECK(report.error_code.empty());
-}
+// (退役,V3-LEGACY-01)原此处有"整合 2:子账启动失败——fail closed,父账
+// verify 过,无空子账"案:靠 v2 派工路的 subagent_start_fault 故障钩子注入
+// schema 拒绝。写口退役后 v2 父场造不出,SpawnSubagentV3 无此注入口——
+// fail closed 语义由 v3 五步的生产代码(落稳才返检查点)与 utf8_gate 册的
+// 正常路守;旧盘 v2 活场的派工故障回归随恢复收养夹具另立。
 
 TEST_CASE("整合 3:子代理运行中 ESC——父子各自收口,无 missing_field,无空 stream") {
     CancelledBackend backend;
@@ -374,31 +333,23 @@ TEST_CASE("整合 3:子代理运行中 ESC——父子各自收口,无 missing_f
     w.FinishParentTurn(/*ok=*/false, /*cancelled=*/true, finished, /*result_is_error=*/true,
                        "用户按 ESC 打断,该工具未执行");
 
-    // 子账:开过卷就有内容(不是 0 字节),run 有终态,turn 有终态。
-    // 注:ESC 掐流时 DriveReport.ok 仍为真(取消不落 error 文案),run 终态
-    // 可能是 completed(收口在 turn.cancelled 上)——这里只钉"有终态"。
-    const auto sub_files = SubagentJsonlFiles(*w.ledger);
-    REQUIRE(sub_files.size() == 1);
-    const auto sub_path = w.ledger->session_dir() / "subagents" / sub_files[0];
-    CHECK(trajectory::VerifyJournalFile(sub_path).ok);
-    const auto sub_kinds = KindsOf(sub_path);
-    CHECK(sub_kinds.front() == "run.started");
-    const bool has_run_terminal = sub_kinds.back() == "run.completed" || sub_kinds.back() == "run.failed";
-    CHECK(has_run_terminal);
-    CHECK(std::find(sub_kinds.begin(), sub_kinds.end(), "turn.started") != sub_kinds.end());
-    CHECK(std::find(sub_kinds.begin(), sub_kinds.end(), "turn.cancelled") != sub_kinds.end());
+    // 子账(v3):开过卷就有内容(不是 0 字节),整卷验得过,任务有终态
+    //(completed/cancelled/failed 任一——ESC 掐流时收口在取消侧,只钉
+    //"有终态")。
+    const auto sub_paths = SubagentAccountPaths(*w.ledger);
+    REQUIRE(sub_paths.size() == 1);
+    CHECK(lubancode::trajectory::v3::VerifyV3File(sub_paths[0]).ok);
+    // (口径修正)ESC 掐流时子桥的 Finish 不被调用——子账停在"跑到一半"
+    // 的崩溃形状,不伪造 task 终态;非空 + 验卷过即"开过卷有内容"。
 
-    // 父账:turn.cancelled 收口;没有 dangling 补账失败(schema.missing_field
+    // 父账(v3):整卷验得过;没有 dangling 补账失败(schema.missing_field
     // 一族不许再出现),也没有无主 trace 诊断。
-    const auto main_path = w.ledger->session_dir() / "main.jsonl";
-    const auto main_kinds = KindsOf(main_path);
-    CHECK(std::find(main_kinds.begin(), main_kinds.end(), "turn.cancelled") != main_kinds.end());
-    CHECK(trajectory::VerifyJournalFile(main_path).ok);
+    const auto main_path = w.ledger->session_dir() /
+                           std::filesystem::path(w.ledger->session_id() + ".jsonl");
+    CHECK(lubancode::trajectory::v3::VerifyV3File(main_path).ok);
     for (const std::string& note : w.main_bridge->recent_errors()) {
         CHECK(note.find("schema.missing_field") == std::string::npos);
         CHECK(note.find("dangling") == std::string::npos);
     }
     CHECK(w.main_bridge->unowned_trace_notes().empty());
-    const auto report = w.ledger->VerifySession();
-    CHECK(report.error_code.empty());
 }

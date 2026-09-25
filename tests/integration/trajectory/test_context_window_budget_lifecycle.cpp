@@ -34,6 +34,8 @@
 #include "cli/context_tracker.hpp"
 #include "platform/paths.hpp"
 #include "runtime/trajectory_session.hpp"
+#include "trajectory/directory.hpp"  # 手植 v2 源夹具(V3-LEGACY-01)
+#include "trajectory/recorder.hpp"   # 手植 v2 源夹具
 #include "trajectory/replay.hpp"
 #include "trajectory/v3/envelope.hpp"
 #include "trajectory/v3/reader.hpp"
@@ -126,6 +128,76 @@ api::Message UserMessage(const std::string& text) {
 }
 
 // 铺一轮真实对话(与 test_v3_t11_title 同款):resume 源场要有内容可续。
+// 手植 v2 源场(V3-LEGACY-01 后 v2 只能盘上旧档):场目录+session.json 走
+// CreateSession,主账由真 recorder 写;带_window 时落一枚旧合同形状的
+// control.context_window.changed(十进制字符串值+身份)。
+class PlantClock : public trajectory::RecorderClock {
+public:
+    std::int64_t WallMs() const override { return 1760000000000LL; }
+    std::int64_t MonotonicNs() const override { return 0LL; }
+};
+
+struct PlantedV2 {
+    std::string id;
+    std::filesystem::path dir;
+    std::filesystem::path main_stream;
+};
+
+PlantedV2 PlantV2Source(const std::filesystem::path& workspaces_root,
+                        const std::string& workspace_key, const std::string& session_id,
+                        bool with_window) {
+    trajectory::SessionManifest manifest;
+    manifest.schema_version = 2;
+    manifest.workspace_key = workspace_key;
+    manifest.session_id = session_id;
+    manifest.main_run_id = "main-plant-1";
+    manifest.run_kind = trajectory::RunKindName(trajectory::RunKind::MainSession);
+    manifest.start_reason = "process_launch";
+    manifest.status = trajectory::SessionStatusName(trajectory::SessionStatus::Closed);
+    manifest.created_at_ms = 1760000000000LL;
+    manifest.lubancode_version = "test";
+    manifest.event_schema_version = 2;
+    auto directory = trajectory::TrajectoryDirectory::CreateSession(workspaces_root, workspace_key,
+                                                                    manifest);
+    REQUIRE(directory.has_value());
+    PlantClock clock;
+    trajectory::EventScope scope;
+    scope.workspace_key = workspace_key;
+    scope.session_id = session_id;
+    scope.run_id = manifest.main_run_id;
+    scope.run_kind = trajectory::RunKind::MainSession;
+    scope.visibility = {trajectory::Visibility::HostOnly};
+    auto recorder = trajectory::TrajectoryRecorder::Start(
+        directory->main_stream_path(), directory->artifacts_root(), scope,
+        trajectory::RecorderOptions{}, &clock);
+    REQUIRE(recorder.has_value());
+    REQUIRE(recorder->WriteRunStarted(nlohmann::json{{"start_reason", "process_launch"}},
+                                      trajectory::Durability::PowerLoss)
+                 .status == trajectory::RecordReceipt::Status::Committed);
+    if (with_window) {
+        trajectory::RecordRequest window;
+        window.kind = trajectory::EventKind::ControlContextWindowChanged;
+        window.scope = recorder->base_scope();
+        window.scope.actor = trajectory::Actor::User;
+        window.scope.origin = trajectory::Origin::ExternalUser;
+        window.scope.visibility = {trajectory::Visibility::HostOnly};
+        window.scope.training_policy = trajectory::TrainingPolicy::Exclude;
+        window.payload = nlohmann::json{{"context_window", "256000"},
+                                        {"old_context_window", "128000"},
+                                        {"provider", "moonshot"},
+                                        {"model", "kimi"},
+                                        {"source", "manual"}};
+        REQUIRE(recorder->Record(std::move(window), trajectory::Durability::PowerLoss).status ==
+                trajectory::RecordReceipt::Status::Committed);
+    }
+    REQUIRE(recorder->FinishRun(trajectory::EventKind::RunCompleted, "exit",
+                                trajectory::Durability::PowerLoss)
+                 .status == trajectory::RecordReceipt::Status::Committed);
+    REQUIRE(recorder->EndSession("exit", std::nullopt, "clean", trajectory::Durability::PowerLoss)
+                 .status == trajectory::RecordReceipt::Status::Committed);
+    return PlantedV2{session_id, directory->session_dir(), directory->main_stream_path()};
+}
+
 void WriteOneTurn(TrajectorySessionLedger& ledger) {
     auto bridge = ledger.NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
     REQUIRE(bridge != nullptr);
@@ -377,22 +449,21 @@ TEST_CASE("v3 /clear: ClearSession 换场,初始快照落新场,旧场不动") {
 // v2 旧档:字符串值可折;无字段旧档回落
 // ---------------------------------------------------------------------------
 
-TEST_CASE("v2 旧档: control.context_window.changed 折叠,无字段回落 no_record") {
-    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
+TEST_CASE("v2 旧档(手植): control.context_window.changed 折叠,无字段回落 no_record") {
     const auto root = FreshRoot("v2");
     std::string source_id;
     fs::path main_stream;
     {
+        // V3-LEGACY-01 后 v2 场造不出:先真开一场把 workspace 房间落成,
+        // 再手植带预算事件的 v2 旧档(真 recorder,旧合同形状原样)。
         auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
         REQUIRE(ledger.has_value());
-        source_id = ledger->session_id();
-        WriteOneTurn(*ledger);
-        main_stream = ledger->session_dir() / "main.jsonl";
+        const PlantedV2 planted = PlantV2Source(root / "workspaces", ledger->workspace_key(),
+                                                "20260924-160000-V2BUD1", /*with_window=*/true);
+        source_id = planted.id;
+        main_stream = planted.main_stream;
         REQUIRE(fs::exists(main_stream));
-        // v2 写路:十进制字符串真值 + 身份。
-        REQUIRE(ledger->RecordContextWindowChanged(256000, 1048576, "moonshot", "kimi", "manual"));
-        // 无字段的旧档对照:只写一轮对话、不写预算事件的另一场在下方
-        // (v2 fold 从事件流取数,无事件即无字段)。
+        REQUIRE(ledger->CloseSession("exit").error_code.empty());
     }
     {
         const auto fold = trajectory::FoldStreamReplay(main_stream);
@@ -402,7 +473,8 @@ TEST_CASE("v2 旧档: control.context_window.changed 折叠,无字段回落 no_r
         CHECK(fold.state.control.context_window_provider == "moonshot");
         CHECK(fold.state.control.context_window_model == "kimi");
     }
-    // 无字段旧档:resume 折叠后 control 无预算,仲裁回落 no_record。
+    // 无字段旧档:resume 折叠后 control 无预算,仲裁回落 no_record
+    //(v3 场续接同款回落——预算只在写过事件的场里有)。
     const auto root2 = FreshRoot("v2-legacy");
     std::string legacy_id;
     {

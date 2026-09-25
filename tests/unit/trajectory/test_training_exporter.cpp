@@ -741,95 +741,12 @@ TEST_CASE("宿主旁路小请求(compact 起名一类)不当 episode 编") {
     CHECK(episodes.empty());
 }
 
-TEST_CASE("子代理分账:child episode 只出现一次,main 只带边界引用") {
-    const auto root = FreshDir("lubancode-p5-subagent");
-    TrajectorySessionLedger::Options options;
-    options.workspaces_root = root / "workspaces";
-    options.workspace_root = root / "repo";
-    options.lubancode_version = "test";
-    std::error_code ec;
-    std::filesystem::create_directories(root / "repo", ec);
-    auto ledger = TrajectorySessionLedger::Open(options);
-    REQUIRE(ledger.has_value());
-    ledger->CaptureEnvironment([] {
-        TrajectorySessionLedger::EnvironmentFacts facts;
-        facts.provider = "demo";
-        facts.wire = "responses";
-        facts.model = "demo-large";
-        facts.system_prompt = "你是 LubanCode。";
-        facts.toolset.toolset_sha256 = std::string(64, 'e');
-        facts.toolset.tool_count = 4;
-        return facts;
-    }());
-
-    // 子账:一轮问答,正常收口。
-    auto child = ledger->SpawnSubagent("toolu-1", "读文件并数行数");
-    REQUIRE(child.has_value());
-    auto& child_bridge = (*child)->turn_bridge();
-    child_bridge.BeginTurn("turn-1", "external_user");
-    child_bridge.RecordInput(UserMessage("读文件并数行数"));
-    const std::string child_request =
-        child_bridge.OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
-    child_bridge.OnRequestSent(child_request);
-    REQUIRE(child_bridge.OnOutputCompleted(child_request, UserMessage("报告:42 行"), "end_turn", "resp-c"));
-    const std::string verification = child_bridge.BeginVerification("line_count", "out/count.txt", "wc");
-    child_bridge.FinishVerification(verification, true, nlohmann::json{{"lines", 42}});
-    child_bridge.EndTurn(true, false, "done");
-    const std::string terminal_hash = (*child)->Finish(true, "done");
-    CHECK_FALSE(terminal_hash.empty());
-
-    // 父账:agent 工具边界引用子账,不内联正文。
-    auto main_bridge = ledger->NewTurnBridge({"demo", "responses", "terminal"});
-    REQUIRE(main_bridge != nullptr);
-    main_bridge->BeginTurn("turn-1", "external_user");
-    main_bridge->RecordInput(UserMessage("去读文件"));
-    const std::string parent_request =
-        main_bridge->OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
-    main_bridge->OnRequestSent(parent_request);
-    api::Message with_agent = AssistantWithToolCall("toolu-1", "agent", nlohmann::json{{"task", "读文件"}});
-    REQUIRE(main_bridge->OnOutputCompleted(parent_request, with_agent, "tool_use", "resp-p"));
-    main_bridge->AttachChildRun("toolu-1", (*child)->run_id());
-    main_bridge->NoteChildTerminal((*child)->run_id(), terminal_hash);
-    main_bridge->OnToolTrace(StartedEvent("toolu-1", "agent", nlohmann::json{{"task", "读文件"}}));
-    main_bridge->OnToolTrace(FinishedEvent("toolu-1", "agent"));
-    CommitToolResult(*main_bridge, "toolu-1", "报告:42 行");
-    main_bridge->EndTurn(true, false, "done");
-
-    const auto episodes = trajectory::BuildSessionTrainingEpisodes(ledger->session_dir());
-    REQUIRE(episodes.size() == 2);
-    // main 的 episode 与 child 的 episode 各一枚;child 正文只出现一次。
-    std::string child_episode_text;
-    const std::string marker = "读文件并数行数";
-    int marker_count = 0;
-    for (const auto& episode : episodes) {
-        const std::string text = episode.episode.dump();
-        if (text.find(marker) != std::string::npos) {
-            child_episode_text = text;
-            ++marker_count;
-        }
-    }
-    CHECK(marker_count == 1);
-    CHECK_FALSE(child_episode_text.empty());
-    // main episode 带边界引用(child_run_id + 终态 hash),不带子输入正文。
-    for (const auto& episode : episodes) {
-        if (episode.episode["source"]["run_id"].get<std::string>() !=
-            (*child)->run_id()) {
-            const std::string text = episode.episode.dump();
-            CHECK(text.find(marker) == std::string::npos);
-            REQUIRE(episode.episode["steps"].size() == 1);
-            CHECK(episode.episode["steps"][0]["child_run_id"] == (*child)->run_id());
-            CHECK(episode.episode["steps"][0]["child_terminal_event_hash"] == terminal_hash);
-        }
-    }
-    // 非本工作区 git 仓(临时目录):ledger 环境快照如实降档,两枚都进不了
-    // 训练集——replay 档过滤在 child 身上同样生效。
-    CHECK(episodes[0].route == trajectory::EpisodeRoute::Excluded);
-    CHECK(episodes[1].route == trajectory::EpisodeRoute::Excluded);
-}
-
-// ---------------------------------------------------------------------------
-// 完整性与守门
-// ---------------------------------------------------------------------------
+// (退役,V3-LEGACY-01)原此处有"子代理分账:child episode 只出现一次,main 只带边界引用"案:靠注入 0 开 v2 活场,经
+// ledger/桥(env 采集 + SpawnSubagent + AttachChildRun/NoteChildTerminal)现场
+// 产 v2 盘档,再验导出器对"活场布局"的分账。写口退役后 v2 活场造不出,
+// 现场产档路随之消失;导出器本身的解析/过滤/分账回归由本册手工 recorder
+// 案继续守(v2 导出器是 V3-LEGACY-02 的在册消费方,旧档兼容面不动)。旧盘
+// 布局的端到端对账随旧档消费夹具另立,不在此处伪造前提。
 
 TEST_CASE("尾行截断:整 stream 明报 excluded/structure.truncated_tail,不折正文") {
     const auto dir = FreshDir("lubancode-p5-truncated");

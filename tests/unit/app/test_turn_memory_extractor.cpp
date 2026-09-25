@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -164,6 +165,27 @@ std::vector<nlohmann::json> EventsOfKind(const fs::path& stream, const std::stri
             continue;
         }
         if (parsed.value("kind", std::string()) == kind) found.push_back(parsed);
+    }
+    return found;
+}
+
+// V3-LEGACY-01 后新建唯一 v3:assessed 事实行落 <id>.jsonl,键名随 v3
+// 合同走 camelCase(memory_extract.cpp RecordAssessedV3Locked)。
+std::vector<nlohmann::json> V3EventsOfKind(const fs::path& session_dir, const std::string& kind) {
+    std::vector<nlohmann::json> found;
+    const fs::path stream = session_dir / fs::path(session_dir.filename().string() + ".jsonl");
+    std::ifstream in(stream, std::ios::binary);
+    REQUIRE(in.is_open());
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty()) continue;
+        const auto parsed = nlohmann::json::parse(line, nullptr, false);
+        if (parsed.is_discarded()) continue;
+        if (parsed.value("type", std::string()) == "event" &&
+            parsed.value("kind", std::string()) == kind) {
+            found.push_back(parsed);
+        }
     }
     return found;
 }
@@ -340,16 +362,17 @@ TEST_CASE("迟到收账:门过的回合悬账,完工后对档落袋——候选�
     CHECK(ledger.funnel().extract_batches == 1);
     CHECK(ledger.funnel().extract_failures == 0);
     // assessed 事件:completed、候选数、usage、墙钟全落。
-    const auto assessed = EventsOfKind(session->session_dir() / "main.jsonl", "memory.extraction.assessed");
+    const auto assessed =
+        V3EventsOfKind(session->session_dir(), "memory.extraction.assessed");
     REQUIRE(assessed.size() == 1);
     const auto& payload = assessed[0].at("payload");
     CHECK(payload.value("decision", std::string()) == "called");
-    CHECK(payload.value("extract_outcome", std::string()) == "completed");
-    CHECK(payload.value("review_candidates", 0) == 1);
-    CHECK(payload.value("usage_reported", false));
-    if (payload.contains("input_tokens")) {  // nlohmann 缺键 UB 铁律:contains 先行
-        CHECK(payload.value("input_tokens", std::int64_t{0}) == 21);
-        CHECK(payload.value("output_tokens", std::int64_t{0}) == 9);
+    CHECK(payload.value("extractOutcome", std::string()) == "completed");
+    CHECK(payload.value("reviewCandidates", 0) == 1);
+    CHECK(payload.value("usageReported", false));
+    if (payload.contains("inputTokens")) {  // nlohmann 缺键 UB 铁律:contains 先行
+        CHECK(payload.value("inputTokens", std::int64_t{0}) == 21);
+        CHECK(payload.value("outputTokens", std::int64_t{0}) == 9);
     }
 }
 

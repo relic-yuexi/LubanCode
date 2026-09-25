@@ -7,9 +7,12 @@
 //      祖先段 seq 更高时,水位不冒充全局 max——防本场新行被增量过滤
 //      误滤漏账);sourceSessions 亮来源链(祖先在前本场在后);
 //   3. hidden 不默认外发(§4.28):标志照回,正文要 includeHidden 才带;
-//   4. 活 thread(v2 账)与冷 v2 场:sourceFormat="v2" + 空 items,不冒充;
+//   4. 冷 v2 场(V3-LEGACY-01 后新建唯一 v3,手植盘上旧档当夹具):
+//      sourceFormat="v2" + 空 items,不冒充;
 //   5. 参数错与档读不到;
-//   6. V3-GAP-04:主账路径两代分派(v3 场 <id>.jsonl,旧场 main.jsonl);
+//   6. V3-GAP-04:主账路径两代分派——thread/start 新建路径已随
+//      V3-LEGACY-01 收拢恒 v3(<id>.jsonl);main.jsonl 只对盘上既有
+//      旧档(手植)成立,见第 4 点;
 //   7. thread/resume startExecution=true:经 SessionService 真恢复(v3 源
 //      续接同 id,v2 源迁移新场);活场拒、read 带参拒、缺省只读零新建、
 //      坏源如实拒(resume_source_rejected)。
@@ -36,11 +39,17 @@
 #include "app_server/protocol.hpp"
 #include "app_server/schema.hpp"
 #include "app_server/server.hpp"
+#include "config/config.hpp"        // PlantV2Session:StateRootDir(与生产同源裁 workspace_key)
 #include "tools/registry.hpp"
+#include "trajectory/directory.hpp"  // PlantV2Session:SessionManifest/CreateSession
+#include "trajectory/event.hpp"      // PlantV2Session:EventScope/RunKind/Visibility
 #include "trajectory/journal.hpp"  // Durability(V3-GAP-04 来源链夹具)
+#include "trajectory/recorder.hpp"   // PlantV2Session:TrajectoryRecorder/RecorderClock
+#include "trajectory/session_manager.hpp"  // PlantV2Session:SessionStatusName
 #include "trajectory/v3/envelope.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "trajectory/v3/writer.hpp"
+#include "workspace/identity.hpp"    // PlantV2Session:ResolveWorkspaceIdentity(与生产同源)
 
 using namespace lubancode;
 
@@ -98,6 +107,64 @@ void PlantV3Session(const std::string& workspaces_dir, const char* fixture,
     std::filesystem::copy_file(Fixture(fixture), dir / U8(session_id + ".jsonl"),
                                std::filesystem::copy_options::overwrite_existing, ec);
     REQUIRE_FALSE(ec);
+}
+
+// 手植 v2 冷场(V3-LEGACY-01 后新建唯一 v3,v2 源只能靠盘上旧档夹具):
+// 与 tests/unit/app/test_session_service.cpp::PlantV2Source 同配方——
+// workspace_key 与生产 app_server 同源裁决(ResolveWorkspaceIdentity 走
+// 与 SessionCreateLedgerPath 相同的 cwd/StateRootDir 两参),真 recorder
+// 写封口干净的 main.jsonl + session.json(run.started → run.completed →
+// session.ended),可作 resume 源。读兼容面不动,这夹具只造档。
+class PlantV2Clock : public trajectory::RecorderClock {
+public:
+    std::int64_t WallMs() const override { return 1760000000000LL; }
+    std::int64_t MonotonicNs() const override { return 0LL; }
+};
+
+void PlantV2Session(const std::string& sessions_dir, const std::string& session_id) {
+    const auto identity_cwd = U8(sessions_dir);
+    const auto identity_home = config::StateRootDir();
+    const auto identity = workspace::ResolveWorkspaceIdentity(
+        identity_cwd,
+        identity_home.has_value() ? U8(*identity_home) : std::filesystem::path());
+    REQUIRE(identity.has_value());
+
+    trajectory::SessionManifest manifest;
+    manifest.schema_version = 2;
+    manifest.workspace_key = identity->workspace_key;
+    manifest.session_id = session_id;
+    manifest.main_run_id = "main-plant-1";
+    manifest.run_kind = trajectory::RunKindName(trajectory::RunKind::MainSession);
+    manifest.start_reason = "process_launch";
+    manifest.status = trajectory::SessionStatusName(trajectory::SessionStatus::Closed);
+    // created_at 钉未来:必须比 harness 暖场(真墙钟)新,冷场排序才落到
+    // 这份手植 v2 源上。
+    manifest.created_at_ms = 1893456000000LL;
+    manifest.lubancode_version = "0.26.238-test";
+    manifest.event_schema_version = 2;
+    const auto directory = trajectory::TrajectoryDirectory::CreateSession(
+        U8(sessions_dir) / "workspaces", identity->workspace_key, manifest);
+    REQUIRE(directory.has_value());
+
+    PlantV2Clock clock;
+    trajectory::EventScope scope;
+    scope.workspace_key = identity->workspace_key;
+    scope.session_id = session_id;
+    scope.run_id = manifest.main_run_id;
+    scope.run_kind = trajectory::RunKind::MainSession;
+    scope.visibility = {trajectory::Visibility::HostOnly};
+    auto recorder = trajectory::TrajectoryRecorder::Start(
+        directory->main_stream_path(), directory->artifacts_root(), scope,
+        trajectory::RecorderOptions{}, &clock);
+    REQUIRE(recorder.has_value());
+    REQUIRE(recorder->WriteRunStarted(nlohmann::json{{"start_reason", "process_launch"}},
+                                      trajectory::Durability::PowerLoss)
+                 .status == trajectory::RecordReceipt::Status::Committed);
+    REQUIRE(recorder->FinishRun(trajectory::EventKind::RunCompleted, "exit",
+                                trajectory::Durability::PowerLoss)
+                 .status == trajectory::RecordReceipt::Status::Committed);
+    REQUIRE(recorder->EndSession("exit", std::nullopt, "clean", trajectory::Durability::PowerLoss)
+                 .status == trajectory::RecordReceipt::Status::Committed);
 }
 
 struct HistoryHarness {
@@ -438,11 +505,11 @@ TEST_CASE("thread/resume: 冷 v3 场——只回当前链 + 压缩标记 + conte
 }
 
 // ---------------------------------------------------------------------------
-// 活/冷 v2 thread:如实报格式,不冒充
+// 活/冷 thread:如实报格式,不冒充(V3-LEGACY-01 后新建唯一 v3)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("thread/read|resume: 活 thread(v2 账)走账本路,如实回 v2") {
-    const std::string dir = MakeTempDir("lubancode-as-thr-hot-v2");
+TEST_CASE("thread/read|resume: 活 thread(v3 账)走账本路,如实回 v3") {
+    const std::string dir = MakeTempDir("lubancode-as-thr-hot-v3");
     {
         HistoryHarness harness(dir);
         const std::string thread_id = harness.StartThread();  // 不停场:活 thread
@@ -450,21 +517,19 @@ TEST_CASE("thread/read|resume: 活 thread(v2 账)走账本路,如实回 v2") {
         for (const char* method : {"thread/read", "thread/resume"}) {
             const nlohmann::json read = harness.Call(method, {{"threadId", thread_id}});
             CHECK(read.contains("result"));
-            CHECK(read["result"]["sourceFormat"] == "v2");
+            CHECK(read["result"]["sourceFormat"] == "v3");
             CHECK(read["result"]["count"] == 0);
             CHECK(read["result"]["items"].empty());
-            if (std::string(method) == "thread/resume") {
-                // v2 场没有上下文摘要可报:不给 contextSummary,不编数。
-                CHECK_FALSE(read["result"].contains("contextSummary"));
-            }
+            // contextSummary 的有无归读面合同(有摘要才报,不编数),不再钉
+            // "v2 场必无"的旧口径。
         }
     }
     std::error_code cleanup_ec;
     std::filesystem::remove_all(U8(dir), cleanup_ec);
 }
 
-TEST_CASE("thread/read: 冷 v2 场(停场后经索引定位)回 v2 空表") {
-    const std::string dir = MakeTempDir("lubancode-as-thr-cold-v2");
+TEST_CASE("thread/read: 冷 v3 场(停场后经索引定位)回 v3 空表") {
+    const std::string dir = MakeTempDir("lubancode-as-thr-cold-v3");
     {
         HistoryHarness harness(dir);
         const std::string thread_id = harness.StartThread();
@@ -472,7 +537,7 @@ TEST_CASE("thread/read: 冷 v2 场(停场后经索引定位)回 v2 空表") {
 
         const nlohmann::json read = harness.Call("thread/read", {{"threadId", thread_id}});
         CHECK(read.contains("result"));
-        CHECK(read["result"]["sourceFormat"] == "v2");
+        CHECK(read["result"]["sourceFormat"] == "v3");
         CHECK(read["result"]["items"].empty());
     }
     std::error_code cleanup_ec;
@@ -518,20 +583,26 @@ TEST_CASE("thread/read|resume: 参数错与档读不到") {
 // V3-GAP-04:主账路径两代分派
 // ---------------------------------------------------------------------------
 
-TEST_CASE("thread/start: 主账路径两代分派——v3 场 <id>.jsonl,旧场 main.jsonl") {
+TEST_CASE("thread/start: 新建写口退役后——env 0/1/缺省一律落 v3 场 <id>.jsonl") {
     const std::string dir = MakeTempDir("lubancode-as-thr-main-path");
     {
         HistoryHarness harness(dir);
-        // 旧场(案内自钉 0——册注册注入的 =0 可能被别案的 EnvGuard 析构
-        // 洗成空串):main.jsonl,与旧行为一字不动。
-        EnvGuard v2_guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
-        const std::string v2_thread = harness.StartThread();
-        const std::string v2_path = harness.server->ThreadMainPathForTest(v2_thread);
-        REQUIRE_FALSE(v2_path.empty());
-        REQUIRE(v2_path.size() >= 10);
-        CHECK(v2_path.compare(v2_path.size() - 10, 10, "main.jsonl") == 0);
+        // V3-LEGACY-01 后 v2 新建写口退役:显式 0 只记一条迁移告警,仍照
+        // 走 v3——main.jsonl 只对盘上既有旧档成立(见"thread/resume:
+        // startExecution——v2 冷场迁移新场"那案的手植夹具),thread/start
+        // 新建路径已无 v2 出口。案内自钉 0(册注册注入的 =0 可能被别案的
+        // EnvGuard 析构洗成空串)。
+        {
+            EnvGuard v2_guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
+            const std::string thread_0 = harness.StartThread();
+            const std::string path_0 = harness.server->ThreadMainPathForTest(thread_0);
+            REQUIRE_FALSE(path_0.empty());
+            const std::string tail_0 = thread_0 + ".jsonl";
+            REQUIRE(path_0.size() >= tail_0.size());
+            CHECK(path_0.compare(path_0.size() - tail_0.size(), tail_0.size(), tail_0) == 0);
+        }
 
-        // v3 场(显式开):<sessionId>.jsonl(504fddb1 定的主账名)。
+        // v3 场(显式开,与缺省同):<sessionId>.jsonl(504fddb1 定的主账名)。
         {
             EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
             const std::string v3_thread = harness.StartThread();
@@ -672,12 +743,14 @@ TEST_CASE("thread/resume: startExecution——v3 冷场经 SessionService 续接
 TEST_CASE("thread/resume: startExecution——v2 冷场迁移新场,新 threadId") {
     const std::string dir = MakeTempDir("lubancode-as-thr-resume-v2exec");
     {
-        // 案内自钉 0:册注册注入的 =0 可能被先前案的 EnvGuard 析构洗成
-        // 空串(空串非 "0" = v3 默认开),v2 源的断言要在真 v2 场上做。
-        EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
         HistoryHarness harness(dir);
-        const std::string thread_id = harness.StartThread();  // v2 场
-        harness.StopThread(thread_id);  // 冷场:索引定位
+        // V3-LEGACY-01 后 v2 场造不出(env 开关只剩迁移告警,新建恒
+        // v3)。先真开一场把 workspace 房落成,再手植一份盘上旧档
+        // 当 v2 冷场——resume 的格式判定按盘面探测(FindV3SessionStream
+        // 找不到 <id>.jsonl 才落 v2),与新建时的写口开关无关。
+        harness.StartThread();
+        const std::string thread_id = "20260925-100000-V2COLD1";
+        PlantV2Session(dir, thread_id);
 
         const std::size_t before = harness.server->active_thread_count();
         const nlohmann::json resumed = harness.Call(
@@ -689,9 +762,10 @@ TEST_CASE("thread/resume: startExecution——v2 冷场迁移新场,新 threadId
         CHECK(result["resumedThreadId"] != thread_id);
         CHECK(result["threadId"] == thread_id);
         CHECK(harness.server->active_thread_count() == before + 1);
-        // 本册环境 v2 开关关着:迁移新场也是 v2,无 v3 投影可读,如实报
-        // 格式空表不冒充(恢复事实照报)。
-        CHECK(result["sourceFormat"] == "v2");
+        // V3-LEGACY-01 后迁移新场恒 v3:sourceFormat 查的是恢复后新场自己
+        // 的目录(threads_ 挂的是 resumed_thread_id),不是手植的 v2 源
+        // 本身——新场刚建、还没有轮次,items 如实空,不冒充。
+        CHECK(result["sourceFormat"] == "v3");
         CHECK(result["items"].empty());
     }
     std::error_code cleanup_ec;

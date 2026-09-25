@@ -290,7 +290,9 @@ TEST_CASE("thread/start -> thread/list -> thread/stop:会话账走 Trajectory Jo
             "workspaces");
         std::error_code walk_ec;
         for (const auto& entry : std::filesystem::recursive_directory_iterator(workspaces, walk_ec)) {
-            if (entry.is_regular_file() && entry.path().filename() == "main.jsonl") {
+            // V3-LEGACY-01 后新建唯一 v3:主账是 sessions/<id>/<id>.jsonl。
+            if (entry.is_regular_file() && entry.path().extension() == ".jsonl" &&
+                entry.path().parent_path().parent_path().filename() == "sessions") {
                 file_found = true;
             }
         }
@@ -408,7 +410,8 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
             "workspaces");
         std::error_code walk_ec;
         for (const auto& entry : std::filesystem::recursive_directory_iterator(workspaces, walk_ec)) {
-            if (!entry.is_regular_file() || entry.path().filename() != "main.jsonl") {
+            if (!entry.is_regular_file() || entry.path().extension() != ".jsonl" ||
+                entry.path().parent_path().parent_path().filename() != "sessions") {
                 continue;
             }
             std::ifstream in(entry.path(), std::ios::binary);

@@ -221,11 +221,9 @@ TEST_CASE("thread/archive -> thread/unarchive:manifest 转态,事件各归各位
     const nlohmann::json archived = harness.Call("thread/archive", {{"threadId", thread_id}});
     CHECK(archived["result"]["threadId"] == thread_id);
     CHECK(archived["result"]["state"] == "archived");
-    {
-        const auto manifest = trajectory::ReadSessionJson(session_dir);
-        REQUIRE(manifest.has_value());
-        CHECK(manifest->status == "archived");
-    }
+    // (口径注,V3-LEGACY-01)v3 场无 session.json 可翻——归档态落 lifecycle
+    // 账,上方回执 state=="archived" 即证;索引投影的归档面由 session_index
+    // 域册守。
     const auto updated = harness.FindEvent("thread/updated");
     REQUIRE(updated.has_value());
     CHECK((*updated)["params"]["threadId"] == thread_id);
@@ -245,14 +243,10 @@ TEST_CASE("thread/archive -> thread/unarchive:manifest 转态,事件各归各位
     }
     CHECK(in_archived);
 
-    // unarchive:manifest 转 closed。
+    // unarchive:回执 state=active 即证(v3 场无 session.json,归档/解归档
+    // 态都在 lifecycle 账上)。
     const nlohmann::json back = harness.Call("thread/unarchive", {{"threadId", thread_id}});
     CHECK(back["result"]["state"] == "active");
-    {
-        const auto manifest = trajectory::ReadSessionJson(session_dir);
-        REQUIRE(manifest.has_value());
-        CHECK(manifest->status == "closed");
-    }
 
     std::error_code cleanup_ec;
     std::filesystem::remove_all(U8(dir), cleanup_ec);

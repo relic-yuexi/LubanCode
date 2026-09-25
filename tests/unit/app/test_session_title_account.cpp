@@ -24,6 +24,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "accounting/purpose.hpp"  // RequestPurpose(主回合起号,V3-LEGACY-01)
+#include "agent/loop.hpp"           // RequestPreparedContext
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "app/session_title_account.hpp"
@@ -87,6 +89,31 @@ struct TitleFixture {
             auto opened = lubancode::runtime::TrajectorySessionLedger::Open(options);
             REQUIRE(opened.has_value());
             ledger.emplace(std::move(*opened));
+            // V3-LEGACY-01 后新建唯一 v3:v3 旁路桥(title_refine 一路)要求
+            // 主回合号在场(trajectory_bypass_bridge.cpp 的 active_main_turn_id
+            // 门)——精修本就发生在"首个主回合收口后的空闲边界",夹具照生产
+            // 时序先跑一轮完整主回合。
+            auto bridge = ledger->NewTurnBridge({"fake", "anthropic", "host"});
+            REQUIRE(bridge != nullptr);
+            bridge->BeginTurn("turn-1", "external_user");
+            lubancode::api::Message input;
+            input.role = lubancode::api::Role::User;
+            input.content.push_back(lubancode::api::TextBlock{"做一个图书管理系统"});
+            bridge->RecordInput(input);
+            lubancode::api::Request request;
+            request.model = "cheap-m";
+            request.system = "SYSTEM-BASE";
+            request.messages.push_back(input);
+            lubancode::agent::RequestPreparedContext ctx;
+            ctx.purpose = lubancode::accounting::RequestPurpose::MainTurn;
+            const std::string request_id = bridge->OnRequestPrepared(request, ctx);
+            REQUIRE_FALSE(request_id.empty());
+            REQUIRE(bridge->OnRequestSent(request_id));
+            lubancode::api::Message answer;
+            answer.role = lubancode::api::Role::Assistant;
+            answer.content.push_back(lubancode::api::TextBlock{"先看看需求。"});
+            REQUIRE(bridge->OnOutputCompleted(request_id, answer, "end_turn", "resp-1"));
+            bridge->EndTurn(true, false, "done");
         }
         account = std::make_unique<SessionTitleAccount>(title, ledger.has_value() ? &*ledger : nullptr);
     }
@@ -176,48 +203,64 @@ bool AwaitReady(lubancode::app::SessionTitleRefiner& refiner, int wait_ms) {
     return refiner.Ready();
 }
 
-// main.jsonl 逐行解析后的数账器:按 kind 计数,并按 request_id 关联出
-// purpose=title_refine 的请求再数它的 usage/output 事件。
+// <id>.jsonl 逐行解析后的数账器(V3-LEGACY-01 后新建唯一 v3,旁路桥走
+// v3 写口):按事件 kind 计数,并按 requestId 关联出 purpose=title_refine
+// 的请求再数它的 usage/output 事件。
 struct LedgerCount {
     std::map<std::string, int> by_kind;
     std::set<std::string> refine_request_ids;
-    int refine_usage = 0;      // title_refine 请求上的 model.usage.recorded
-    int refine_output = 0;     // title_refine 请求上的 output 终态(completed/failed/cancelled)
-    int title_changed = 0;     // control.title.changed
-    int turn_overlap = 0;      // state.turn_overlap(不许出现)
+    int refine_usage = 0;   // title_refine 请求上的 model.usage.appended
+    int refine_output = 0;  // title_refine 请求上的 response 终态(completed/failed/cancelled)
+    int title_changed = 0;  // session.title.applied
+    int turn_overlap = 0;   // state.turn_overlap(v2 概念,v3 不许出现同名)
 
     explicit LedgerCount(const lubancode::runtime::TrajectorySessionLedger& ledger) {
-        std::ifstream file(ledger.session_dir() / "main.jsonl", std::ios::binary);
+        const std::filesystem::path session_dir = ledger.session_dir();
+        std::ifstream file(session_dir / std::filesystem::path(session_dir.filename().string() +
+                                                              ".jsonl"),
+                           std::ios::binary);
         std::string line;
         while (std::getline(file, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
             if (line.empty()) {
                 continue;
             }
-            nlohmann::json envelope = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
-            if (!envelope.is_object() || !envelope.contains("kind")) {
+            nlohmann::json row = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+            if (!row.is_object()) {
                 continue;
             }
-            const std::string kind = envelope.value("kind", "");
+            // v3 合同:成功路的 usage 落 assistant 消息本体(消息行内联),
+            // 只有半截失败/取消才补 model.usage.appended 事件。夹具主回合
+            // 的 assistant usage 恒 null——带 usage 的 assistant 即精修产物。
+            if (row.value("type", std::string()) == "message" &&
+                row.contains("message") && row["message"].value("role", "") == "assistant" &&
+                row.contains("usage") && !row["usage"].is_null()) {
+                refine_usage++;
+            }
+            if (row.value("type", std::string()) != "event" || !row.contains("kind")) {
+                continue;
+            }
+            const std::string kind = row.value("kind", "");
             by_kind[kind]++;
-            if (kind == "control.title.changed") {
+            if (kind == "session.title.applied") {
                 title_changed++;
             }
             if (kind == "state.turn_overlap") {
                 turn_overlap++;
             }
-            const bool has_request = envelope.contains("request_id");
+            const bool has_request = row.contains("requestId");
             if (kind == "model.request.prepared" && has_request &&
-                envelope.value("payload", nlohmann::json::object()).value("purpose", "") ==
+                row.value("payload", nlohmann::json::object()).value("purpose", "") ==
                     "title_refine") {
-                refine_request_ids.insert(envelope.value("request_id", ""));
+                refine_request_ids.insert(row.value("requestId", ""));
             }
-            if ((kind == "model.usage.recorded") && has_request &&
-                refine_request_ids.count(envelope.value("request_id", "")) > 0) {
+            if ((kind == "model.usage.appended") && has_request &&
+                refine_request_ids.count(row.value("requestId", "")) > 0) {
                 refine_usage++;
             }
-            if ((kind == "model.output.completed" || kind == "model.output.failed" ||
-                 kind == "model.output.cancelled") &&
-                has_request && refine_request_ids.count(envelope.value("request_id", "")) > 0) {
+            if ((kind == "model.response.completed" || kind == "model.response.failed" ||
+                 kind == "model.response.cancelled") &&
+                has_request && refine_request_ids.count(row.value("requestId", "")) > 0) {
                 refine_output++;
             }
         }

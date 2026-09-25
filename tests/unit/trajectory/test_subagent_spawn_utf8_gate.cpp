@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -35,6 +36,7 @@
 #include "runtime/trajectory_session.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/registry.hpp"
+#include "trajectory/v3/reader.hpp"  // VerifyV3File(V3-LEGACY-01 后 v3 子账)
 #include "trajectory/journal.hpp"
 
 using namespace lubancode;
@@ -78,33 +80,22 @@ std::vector<api::StreamEvent> TextOnlyScript(const std::string& text) {
             api::MessageDone{"end_turn", api::Usage{}}};
 }
 
-std::vector<std::string> KindsOf(const std::filesystem::path& stream) {
-    std::vector<std::string> kinds;
-    const auto lines = trajectory::ReadJournalLines(stream);
-    if (!lines.has_value()) {
-        return kinds;
-    }
-    for (const std::string& line : *lines) {
-        const auto parsed = nlohmann::json::parse(line, nullptr, false);
-        kinds.push_back(parsed.is_discarded() ? std::string("<bad>")
-                                              : parsed.value("kind", std::string()));
-    }
-    return kinds;
-}
 
-std::vector<std::string> SubagentJsonlFiles(const TrajectorySessionLedger& ledger) {
-    std::vector<std::string> names;
+// V3-LEGACY-01 后父场唯一 v3:子账是 subagents/<childSessionId>/
+// <childSessionId>.jsonl(不再是平铺 <run_id>.jsonl)。回子账完整路径列表。
+std::vector<std::filesystem::path> SubagentAccountPaths(const TrajectorySessionLedger& ledger) {
+    std::vector<std::filesystem::path> paths;
     std::error_code ec;
     const auto dir = ledger.session_dir() / "subagents";
     if (!std::filesystem::exists(dir, ec)) {
-        return names;
+        return paths;
     }
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
         if (entry.is_regular_file(ec) && entry.path().extension() == ".jsonl") {
-            names.push_back(entry.path().filename().generic_string());
+            paths.push_back(entry.path());
         }
     }
-    return names;
+    return paths;
 }
 
 std::optional<TrajectorySessionLedger> OpenLedger(
@@ -263,23 +254,29 @@ struct Wiring {
         main_bridge->EndTurn(ok, false, ok ? "done" : "failed");
     }
 
-    // 子账 run.started 的 task_ref 原文(不存在返回空)。
-    std::string ChildRunStartedTaskRef() const {
-        const auto files = SubagentJsonlFiles(*ledger);
-        if (files.size() != 1) {
+    // 子账委派 user 消息(origin=parent_agent)的正文原文——v3 派工门
+    // 清洗后的 task_label 落这里(不存在返回空)。
+    std::string ChildDelegationText() const {
+        const auto paths = SubagentAccountPaths(*ledger);
+        if (paths.size() != 1) {
             return std::string();
         }
-        const auto lines =
-            trajectory::ReadJournalLines(ledger->session_dir() / "subagents" / files[0]);
-        if (!lines.has_value() || lines->empty()) {
+        std::ifstream in(paths[0], std::ios::binary);
+        if (!in.is_open()) {
             return std::string();
         }
-        for (const std::string& line : *lines) {
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
             const auto parsed = nlohmann::json::parse(line, nullptr, false);
-            if (parsed.is_discarded() || parsed.value("kind", std::string()) != "run.started") {
+            if (parsed.is_discarded() || parsed.value("type", std::string()) != "message") {
                 continue;
             }
-            return parsed["payload"].value("task_ref", std::string());
+            if (parsed.value("origin", std::string()) != "parent_agent") {
+                continue;
+            }
+            return parsed["message"].value("content", std::string());
         }
         return std::string();
     }
@@ -309,21 +306,42 @@ std::string FirstUserTextOf(const api::Request& request) {
 
 // 一只子代理的完整成功路:spawn 过、子账合法、task_ref 是给定值。返回
 // 子账 stream 文件名(失败返回空)。
-std::string RequireHealthyChild(const Wiring& w, const char* tag) {
-    const auto files = SubagentJsonlFiles(*w.ledger);
-    REQUIRE(files.size() == 1);
-    const auto path = w.ledger->session_dir() / "subagents" / files[0];
+std::filesystem::path RequireHealthyChild(const Wiring& w, const char* tag) {
+    const auto paths = SubagentAccountPaths(*w.ledger);
+    REQUIRE(paths.size() == 1);
+    const auto path = paths[0];
     CAPTURE(tag);
-    CHECK(trajectory::VerifyJournalFile(path).ok);
-    const auto kinds = KindsOf(path);
-    REQUIRE_FALSE(kinds.empty());
-    CHECK(kinds.front() == "run.started");
-    CHECK(kinds.back() == "run.completed");
-    const auto report = w.ledger->VerifySession();
-    CHECK(report.error_code.empty());
-    return files[0];
+    CHECK(lubancode::trajectory::v3::VerifyV3File(path).ok);
+    // 首行 system(§4.31 子账开卷),委派 user 与 task.started 在其后。
+    {
+        std::ifstream head(path, std::ios::binary);
+        std::string first_line;
+        std::getline(head, first_line);
+        if (!first_line.empty() && first_line.back() == '\r') first_line.pop_back();
+        const auto first = nlohmann::json::parse(first_line, nullptr, false);
+        REQUIRE_FALSE(first.is_discarded());
+        CHECK(first.value("type", std::string()) == "message");
+        CHECK(first.at("message").value("role", std::string()) == "system");
+    }
+    return path;
 }
 
+}  // namespace
+
+// V3-LEGACY-01:本册只测 v3 派工。ctest 注入的 0 会让每次建场记一条退役
+// 迁移告警(component=trajectory),污染下方零告警断言——进程启动时摘掉
+// 变量(新建本就唯一 v3,摘与不摘行为一致)。
+namespace {
+struct FormatEnvCleaner {
+    FormatEnvCleaner() {
+#ifdef _WIN32
+        _putenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=");
+#else
+        unsetenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+#endif
+    }
+};
+const FormatEnvCleaner g_format_env_cleaner;
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -352,12 +370,14 @@ TEST_CASE("复现景:坏字节 title/prompt——子代理正常起跑,不再死
     REQUIRE(backend.captured_requests.size() == 1);  // 子代理真的上路了
     w.FinishParentTurn(/*ok=*/true, /*result_is_error=*/false, result.content);
 
-    const std::string task_ref = w.ChildRunStartedTaskRef();
-    REQUIRE_FALSE(task_ref.empty());
-    CHECK(platform::IsValidUtf8(task_ref));
-    // 清洗合同:坏字节换 U+FFFD,合法片段(配置文件)原样保留。
-    CHECK(task_ref.find(kFffd) != std::string::npos);
-    CHECK(task_ref.find("配置文件") != std::string::npos);
+    const std::string delegated = w.ChildDelegationText();
+    REQUIRE_FALSE(delegated.empty());
+    CHECK(platform::IsValidUtf8(delegated));
+    // 清洗合同:坏字节换 U+FFFD,合法片段(键贴场景)原样保留。v2 时代
+    // task_ref 里还拼 prompt——v3 派工门只过 label,prompt 的清洗归文本
+    // 管道另守,此处不再断言。
+    CHECK(delegated.find(kFffd) != std::string::npos);
+    CHECK(delegated.find("配置文件") != std::string::npos);
     RequireHealthyChild(w, "repro");
 
     // warning 计数对:入口两枚字符串参数各一行,处数如实;账前兜底幂等,
@@ -421,15 +441,17 @@ TEST_CASE("入口消毒:坏字节三形态——spawn 全成,run.started 合法�
         CHECK_FALSE(result.is_error);
         w.FinishParentTurn(/*ok=*/true, /*result_is_error=*/false, result.content);
 
-        const std::string task_ref = w.ChildRunStartedTaskRef();
+        const std::string task_ref = w.ChildDelegationText();
         REQUIRE_FALSE(task_ref.empty());
         CHECK(platform::IsValidUtf8(task_ref));
         // prompt 干净:task_ref 前缀逐字节保留。
         CHECK(task_ref.rfind("general-purpose: 把仓库数一遍", 0) == 0);
         RequireHealthyChild(w, form.tag);
 
-        // title 那一行 warning 如实落下(处数随形态:孤立 1、截断 1、GBK 8);
-        // 账前兜底对洗过的 task_ref 幂等,零重复告警。
+        // title 那一行 warning 如实落下(处数随形态:孤立 1、截断 1、GBK 8)。
+        // v2 桥的"账前兜底"告警(component=trajectory)随写口退役:SpawnSubagentV3
+        // 的清洗走 platform::SanitizeExternalText,静默不告警——零重复告警
+        // 由下方 Total 复核(agent_tool 只此一枚)。
         REQUIRE(logs.Count(platform::LogLevel::Warn, "agent_tool") == 1);
         CHECK(logs.HasWarnContaining("agent_tool", "title"));
         CHECK(logs.Count(platform::LogLevel::Warn, "trajectory") == 0);
@@ -453,7 +475,7 @@ TEST_CASE("入口消毒:干净参数——零 warning,逐字节不变") {
     // 零告警:干净参数过门零成本,两道门都不出声。
     CHECK(logs.Total() == 0);
     // 逐字节不变:task_ref 与子代理任务书原样到字节。
-    CHECK(w.ChildRunStartedTaskRef() == "general-purpose: " + prompt);
+    CHECK(w.ChildDelegationText() == "general-purpose: " + prompt);
     const std::string user_text = FirstUserTextOf(backend.captured_requests[0]);
     CHECK(user_text.find(prompt) != std::string::npos);
     CHECK(user_text.find(kFffd) == std::string::npos);
@@ -474,30 +496,35 @@ TEST_CASE("账前兜底:坏字节 task_label 直灌 SpawnSubagent——run.start
     label += "并数行数";
     const auto child = ledger->SpawnSubagent("toolu-1", label);
     REQUIRE(child.has_value());  // 修前:canonical_json.invalid_utf8 整场拒掉
-    const auto path = ledger->session_dir() / "subagents" / ((*child)->run_id() + ".jsonl");
-    REQUIRE(std::filesystem::exists(path));
-    CHECK(trajectory::VerifyJournalFile(path).ok);
+    const auto paths = SubagentAccountPaths(*ledger);
+    REQUIRE(paths.size() == 1);
+    CHECK(lubancode::trajectory::v3::VerifyV3File(paths[0]).ok);
 
-    // 落账的 task_ref 是洗过的合法 UTF-8:坏字节换 U+FFFD,合法片段保留。
-    const auto lines = trajectory::ReadJournalLines(path);
-    REQUIRE(lines.has_value());
-    bool saw_started = false;
-    for (const std::string& line : *lines) {
-        const auto parsed = nlohmann::json::parse(line, nullptr, false);
-        if (parsed.is_discarded() || parsed.value("kind", std::string()) != "run.started") {
-            continue;
+    // 落账的委派文本是洗过的合法 UTF-8:坏字节换 U+FFFD,合法片段保留。
+    bool saw_delegated = false;
+    {
+        std::ifstream in(paths[0], std::ios::binary);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const auto parsed = nlohmann::json::parse(line, nullptr, false);
+            if (parsed.is_discarded() || parsed.value("type", std::string()) != "message" ||
+                parsed.value("origin", std::string()) != "parent_agent") {
+                continue;
+            }
+            saw_delegated = true;
+            const std::string delegated = parsed["message"].value("content", std::string());
+            CHECK(platform::IsValidUtf8(delegated));
+            CHECK(delegated.find(kFffd) != std::string::npos);
+            CHECK(delegated.find("并数行数") != std::string::npos);
         }
-        saw_started = true;
-        const std::string task_ref = parsed["payload"].value("task_ref", std::string());
-        CHECK(platform::IsValidUtf8(task_ref));
-        CHECK(task_ref.find(kFffd) != std::string::npos);
-        CHECK(task_ref.find("并数行数") != std::string::npos);
     }
-    CHECK(saw_started);
+    CHECK(saw_delegated);
 
-    // 兜底出手不静默:落一行 warning,处数如实。
-    REQUIRE(logs.Count(platform::LogLevel::Warn, "trajectory") == 1);
-    CHECK(logs.HasWarnContaining("trajectory", "1 处非法 UTF-8"));
+    // (退役口径,V3-LEGACY-01)v2 桥的兜底会落 component=trajectory 的
+    // "1 处非法 UTF-8" 告警;SpawnSubagentV3 的清洗静默——清洗事实由
+    // delegated 文本自身证(FFFD 在、合法片段在),不再断言告警行。
 }
 
 TEST_CASE("账前兜底:幂等——洗过的串再过一遍,零改动零告警") {
@@ -510,18 +537,24 @@ TEST_CASE("账前兜底:幂等——洗过的串再过一遍,零改动零告警"
     const std::string clean = "读文件并数行数";
     const auto child = ledger->SpawnSubagent("toolu-1", clean);
     REQUIRE(child.has_value());
-    const auto path = ledger->session_dir() / "subagents" / ((*child)->run_id() + ".jsonl");
-    const auto lines = trajectory::ReadJournalLines(path);
-    REQUIRE(lines.has_value());
-    bool saw_started = false;
-    for (const std::string& line : *lines) {
-        const auto parsed = nlohmann::json::parse(line, nullptr, false);
-        if (parsed.is_discarded() || parsed.value("kind", std::string()) != "run.started") {
-            continue;
+    const auto paths = SubagentAccountPaths(*ledger);
+    REQUIRE(paths.size() == 1);
+    bool saw_delegated = false;
+    {
+        std::ifstream in(paths[0], std::ios::binary);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const auto parsed = nlohmann::json::parse(line, nullptr, false);
+            if (parsed.is_discarded() || parsed.value("type", std::string()) != "message" ||
+                parsed.value("origin", std::string()) != "parent_agent") {
+                continue;
+            }
+            saw_delegated = true;
+            CHECK(parsed["message"].value("content", std::string()) == clean);
         }
-        saw_started = true;
-        CHECK(parsed["payload"].value("task_ref", std::string()) == clean);
     }
-    CHECK(saw_started);
+    CHECK(saw_delegated);
     CHECK(logs.Total() == 0);  // 干净串零告警,兜底零成本
 }

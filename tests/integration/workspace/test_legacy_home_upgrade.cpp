@@ -106,7 +106,10 @@ TEST_CASE("升级: 旧根零读零写,新根全新开张") {
         options.lubancode_version = "upgrade-test";
         auto ledger = runtime::TrajectorySessionLedger::Open(std::move(options));
         REQUIRE(ledger.has_value());
-        CHECK(fs::exists(ledger->session_dir() / "main.jsonl"));
+        // V3-LEGACY-01:新建唯一 v3——<id>.jsonl 主账在,v2 文件一枚不长。
+        CHECK(fs::exists(ledger->session_dir() /
+                          fs::path(ledger->session_id() + ".jsonl")));
+        CHECK_FALSE(fs::exists(ledger->session_dir() / "main.jsonl"));
 
         memory::Options memory_options;
         memory_options.global_allowed = true;

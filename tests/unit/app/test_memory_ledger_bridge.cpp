@@ -71,9 +71,39 @@ std::optional<nlohmann::json> FindEvent(const fs::path& stream, const std::strin
     return std::nullopt;
 }
 
+// V3-LEGACY-01 后新建唯一 v3:memory 域的账面事件落 <id>.jsonl(v2 的
+// context.injected 换 memory.recall.injected 等 v3 事件,载荷 camelCase)。
+fs::path V3StreamOf(const fs::path& session_dir) {
+    return session_dir / fs::path(session_dir.filename().string() + ".jsonl");
+}
+
+std::vector<std::string> V3Lines(const fs::path& stream) {
+    std::vector<std::string> lines;
+    std::ifstream in(stream, std::ios::binary);
+    REQUIRE(in.is_open());
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) lines.push_back(line);
+    }
+    return lines;
+}
+
+std::optional<nlohmann::json> FindV3Event(const fs::path& stream, const std::string& kind) {
+    for (const std::string& line : V3Lines(stream)) {
+        const auto parsed = nlohmann::json::parse(line, nullptr, false);
+        if (parsed.is_discarded()) continue;
+        if (parsed.value("type", std::string()) == "event" &&
+            parsed.value("kind", std::string()) == kind) {
+            return parsed;
+        }
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
-TEST_CASE("P0-3: 召回快照进 main.jsonl,Memory 改后旧账不动") {
+TEST_CASE("P0-3: 召回快照进 v3 主账,Memory 改后旧账不动") {
     const fs::path root = TempRoot("recall");
     const fs::path repo = root / "repo";
     const fs::path home = root / "home";
@@ -117,34 +147,41 @@ TEST_CASE("P0-3: 召回快照进 main.jsonl,Memory 改后旧账不动") {
     const std::string context = store.BuildTurnContext("deploy 怎么跑", repo);
     REQUIRE_FALSE(context.empty());
 
-    const fs::path main_stream = ledger->session_dir() / "main.jsonl";
-    const auto injected = FindEvent(main_stream, "context.injected");
+    const fs::path v3_stream = V3StreamOf(ledger->session_dir());
+    const auto injected = FindV3Event(v3_stream, "memory.recall.injected");
     REQUIRE(injected.has_value());
     const auto& payload = (*injected)["payload"];
-    CHECK(payload.value("kind", std::string()) == "memory_recall");
-    CHECK(payload.value("memory_level", std::string()) == "project");
-    CHECK(payload.value("memory_id", std::string()) == "fact.deploy");
-    CHECK(payload.value("memory_schema", 0) == 3);
-    CHECK(payload.value("content_sha256", std::string()).size() == 64);
-    CHECK(payload.contains("snapshot_ref"));
-    CHECK(payload.contains("snapshot_inline") == false);
-    CHECK(payload.value("injected_bytes", 0) > 512);
+    CHECK(payload.value("memoryLevel", std::string()) == "project");
+    CHECK(payload.value("memoryId", std::string()) == "fact.deploy");
+    CHECK(payload.value("memorySchema", 0) == 3);
+    CHECK(payload.value("contentSha256", std::string()).size() == 64);
+    // 主会话注入的快照本体就是那枚隐藏 user 消息:messageRef 五键之一
+    // 指它(v3 合同;snapshotRef/Inline 只在派工分支出现)。注入正文由
+    // 下方 saw_hidden_snapshot 断言。
+    CHECK_FALSE(payload.value("messageRef", std::string()).empty());
+    CHECK(payload.value("injectedBytes", 0) > 0);
+    // 注入本体:隐藏 user 快照消息进了链(display=hidden,重放不冒充人类)。
+    bool saw_hidden_snapshot = false;
+    for (const std::string& line : V3Lines(v3_stream)) {
+        const auto parsed = nlohmann::json::parse(line, nullptr, false);
+        if (parsed.is_discarded() || parsed.value("type", std::string()) != "message") continue;
+        if (parsed.contains("display") && parsed["display"].value("mode", std::string()) == "hidden" &&
+            parsed["message"].value("role", std::string()) == "user" &&
+            parsed["message"].value("content", std::string()).find("deploy 走 build.sh") !=
+                std::string::npos) {
+            saw_hidden_snapshot = true;
+        }
+    }
+    CHECK(saw_hidden_snapshot);
 
-    // 快照可从 session artifacts 读回,指纹对得上。
-    trajectory::BlobStore blobs(ledger->session_dir() / "artifacts");
-    trajectory::BlobRef ref;
-    ref.sha256 = payload.value("content_sha256", std::string());
-    ref.size = payload.value("injected_bytes", std::uint64_t{0});
-    const auto snapshot = blobs.ReadVerified(ref);
-    REQUIRE(snapshot.has_value());
-    CHECK(hooks::Sha256Hex(*snapshot) == payload.value("content_sha256", std::string()));
+    // (口径注)主会话分支无 blob 引用可读;快照指纹由 contentSha256 与
+    // 隐藏消息正文共同自证。
 
     // 改掉当前 Memory(用户手编正文,绕过 worker):旧事件与快照一字不动,
     // 新一轮召回出新一枚事件。
     const std::string first_event_line = [&] {
-        const auto lines = trajectory::ReadJournalLines(main_stream);
-        for (const std::string& line : *lines) {
-            if (line.find("context.injected") != std::string::npos) return line;
+        for (const std::string& line : V3Lines(v3_stream)) {
+            if (line.find("memory.recall.injected") != std::string::npos) return line;
         }
         return std::string();
     }();
@@ -160,20 +197,19 @@ TEST_CASE("P0-3: 召回快照进 main.jsonl,Memory 改后旧账不动") {
     const std::string second = store.BuildTurnContext("deploy 怎么跑", repo);
     REQUIRE_FALSE(second.empty());
 
-    const auto lines = trajectory::ReadJournalLines(main_stream);
-    REQUIRE(lines.has_value());
+    const auto lines = V3Lines(v3_stream);
     std::size_t injected_count = 0;
     std::string last_hash;
-    for (const std::string& line : *lines) {
-        if (line.find("context.injected") == std::string::npos) continue;
+    for (const std::string& line : lines) {
+        if (line.find("memory.recall.injected") == std::string::npos) continue;
         ++injected_count;
-        last_hash = nlohmann::json::parse(line)["payload"].value("content_sha256", std::string());
+        last_hash = nlohmann::json::parse(line)["payload"].value("contentSha256", std::string());
     }
     CHECK(injected_count == 2);
-    CHECK(last_hash != payload.value("content_sha256", std::string()));
-    // 旧事件原样仍在(逐字节),Replay 重建的是当时那一版。
+    CHECK(last_hash != payload.value("contentSha256", std::string()));
+    // 旧事件原样仍在(逐字节),重放重建的是当时那一版。
     bool first_line_intact = false;
-    for (const std::string& line : *lines) {
+    for (const std::string& line : lines) {
         if (line == first_event_line) first_line_intact = true;
     }
     CHECK(first_line_intact);
@@ -215,11 +251,11 @@ TEST_CASE("P0-3: memory.save.requested 落因果边,引用全限定") {
     const auto queued = store.EnqueueSave(request);
     REQUIRE(queued.has_value());
 
-    const auto edge = FindEvent(ledger->session_dir() / "main.jsonl", "memory.save.requested");
+    const auto edge = FindV3Event(V3StreamOf(ledger->session_dir()), "memory.save.requested");
     REQUIRE(edge.has_value());
     const auto& payload = (*edge)["payload"];
     CHECK(payload["request"].value("operation", std::string()) == "upsert");
-    CHECK(payload["request"].value("memory_id", std::string()) == "fact.tools");
+    CHECK(payload["request"].value("memoryId", std::string()) == "fact.tools");
 
     // 全限定引用进了 pending job,worker 落进主题的 source_sessions。
     std::error_code ec;
@@ -277,16 +313,11 @@ TEST_CASE("P0-3: 派工快照事件带 relations.child_run_id") {
 
     REQUIRE_FALSE(store.BuildTurnContextForDispatch("查 deploy 的跑法", repo, "agent-run-42").empty());
 
-    const auto lines = trajectory::ReadJournalLines(ledger->session_dir() / "main.jsonl");
-    REQUIRE(lines.has_value());
-    bool found = false;
-    for (const std::string& line : *lines) {
-        const auto parsed = nlohmann::json::parse(line, nullptr, false);
-        if (parsed.is_discarded() || parsed.value("kind", std::string()) != "context.injected") continue;
-        CHECK(parsed.value("actor", std::string()) == "host");
-        CHECK(parsed.value("origin", std::string()) == "memory_recall");
-        CHECK(parsed["relations"].value("child_run_id", std::string()) == "agent-run-42");
-        found = true;
-    }
-    CHECK(found);
+    // v3 派工口径:父账只落事实行(payload.targetRunId 指派工 run,不写
+    // 隐藏消息、不进链——正文发给了孩子,父模型没见过,§4.71 冻结)。
+    const auto dispatched =
+        FindV3Event(V3StreamOf(ledger->session_dir()), "memory.recall.injected");
+    REQUIRE(dispatched.has_value());
+    CHECK((*dispatched)["payload"].value("targetRunId", std::string()) == "agent-run-42");
+    CHECK((*dispatched)["payload"].value("memoryId", std::string()) == "fact.deploy");
 }

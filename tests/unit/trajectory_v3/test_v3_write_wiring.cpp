@@ -1,12 +1,14 @@
-// 轨迹 v3 接线点 1(session_switch.hpp):新会话写侧 v3 开关真接线 +
-// 读写闭环。开关(LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=1)只在建场时读
-// 一次:开 = sessions/<id>/<id>.jsonl(首行 system seq=1 turnId=null +
-// session.started),关 = 现行 v2 main.jsonl 一字不动。两路各有回归钉:
-//   - 开关关:LaunchSession 落 v2 布局(main.jsonl + session.json),回合
-//     流落 v2 事件账,<id>.jsonl 不存在;
-//   - 开关开:建场即首行 system;一轮完整会话流(输入 → 请求/回复 →
-//     工具调用/结果(tool_action + result_store 路径)→ 结束)全落 v3,
-//     验卷过、工具配对完整;resume/--continue 读回(P3 链投影)。
+// 轨迹 v3 接线点 1(session_switch.hpp):新会话写侧退役钉 + 读写闭环。
+// V3-LEGACY-01(2026-09-24)起 v2 新建写口已死:建场唯一 v3——
+// sessions/<id>/<id>.jsonl(首行 system seq=1 turnId=null + session.started)。
+// 旧开关 LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0 不再分流,显式关只经
+// WarnV2NewSessionRetired 记一条迁移告警,照走 v3。回归钉:
+//   - 显式 0:LaunchSession 照落 v3 布局(<id>.jsonl 在,main.jsonl/
+//     session.json 不长),并记迁移告警;回合流全落 v3,验卷过;
+//   - 未设变量:建场静默无告警;场中翻 0 不改本场写侧;
+//   - 一轮完整会话流(输入 → 请求/回复 → 工具调用/结果(tool_action +
+//     result_store 路径)→ 结束)全落 v3,验卷过、工具配对完整;
+//     resume/--continue 读回(P3 链投影)。
 // 验收对表 todos §5.1:启动后不输入、加载 soul、普通 resume、工具组配对
 // 完整、只读 replay(零模型调用零工具重跑)。
 #include <doctest/doctest.h>
@@ -29,6 +31,7 @@
 #include "agent/context_events.hpp"  // Fingerprint64:V3-REAL-06 inputView 指纹离线重算
 #include "api/anthropic/client.hpp"  // BuildRequestJson:P1-B wire 字段对照
 #include "api/types.hpp"
+#include "platform/log_sink.hpp"  // 迁移告警捕获(V3-LEGACY-01)
 #include "platform/paths.hpp"
 #include "runtime/trajectory_session.hpp"
 #include "runtime/v3_compact_runtime.hpp"  // D3:RunV3Compact 驱动 applied
@@ -222,20 +225,39 @@ std::vector<std::string> KindsOf(const std::vector<nlohmann::json>& rows) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// 开关关:现行 v2 路一字不动(回归钉)
+// 显式 0:写口已退役——建场照走 v3,记迁移告警(V3-LEGACY-01 回归钉)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("开关关: 开场与回合流照走 v2,不长 v3 文件") {
+TEST_CASE("显式 0: 建场照走 v3 不长 v2 文件,并记一条迁移告警") {
     EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
+    // 捕获 LogSink 断言迁移告警;退出还原默认落笔。
+    std::vector<platform::LogRecord> logs;
+    platform::LogSink::Instance().SetWriter([&logs](const platform::LogRecord& record) {
+        logs.push_back(record);
+    });
+    struct WriterGuard {
+        ~WriterGuard() { platform::LogSink::Instance().SetWriter(nullptr); }
+    } writer_guard;
+
     const auto root = FreshRoot("off");
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(ledger.has_value());
     const std::filesystem::path session_dir = ledger->session_dir();
-    // v2 布局:main.jsonl + session.json;v3 主账不存在。
-    CHECK(std::filesystem::exists(session_dir / "main.jsonl"));
-    CHECK(std::filesystem::exists(session_dir / "session.json"));
-    CHECK_FALSE(std::filesystem::exists(
-        session_dir / platform::Utf8ToPath(platform::PathToUtf8(session_dir.filename()) + ".jsonl")));
+    // v3 布局(写口退役,显式 0 不再新建 v2):<id>.jsonl 在,v2 两件不长。
+    const std::filesystem::path stream =
+        session_dir / platform::Utf8ToPath(platform::PathToUtf8(session_dir.filename()) + ".jsonl");
+    CHECK(std::filesystem::exists(stream));
+    CHECK_FALSE(std::filesystem::exists(session_dir / "main.jsonl"));
+    CHECK_FALSE(std::filesystem::exists(session_dir / "session.json"));
+    // 迁移告警在案:人话说清"写口已退役,v3 是唯一新建格式"。
+    bool saw_retirement_warn = false;
+    for (const auto& record : logs) {
+        if (record.level == platform::LogLevel::Warn && record.component == "trajectory" &&
+            record.message.find("已退役") != std::string::npos) {
+            saw_retirement_warn = true;
+        }
+    }
+    CHECK(saw_retirement_warn);
 
     auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
     REQUIRE(bridge != nullptr);
@@ -243,15 +265,23 @@ TEST_CASE("开关关: 开场与回合流照走 v2,不长 v3 文件") {
     const auto closed = ledger->CloseSession("exit");
     CHECK(closed.error_code.empty());
 
-    const auto rows = ReadLines(session_dir / "main.jsonl");
-    const auto kinds = KindsOf(rows);
-    CHECK(std::find(kinds.begin(), kinds.end(), "run.started") != kinds.end());
-    CHECK(std::find(kinds.begin(), kinds.end(), "input.received") != kinds.end());
-    CHECK(std::find(kinds.begin(), kinds.end(), "model.request.prepared") != kinds.end());
-    CHECK(std::find(kinds.begin(), kinds.end(), "model.output.completed") != kinds.end());
-    CHECK(std::find(kinds.begin(), kinds.end(), "tool.execution.finished") != kinds.end());
-    CHECK(std::find(kinds.begin(), kinds.end(), "tool.result.committed") != kinds.end());
-    CHECK(std::find(kinds.begin(), kinds.end(), "session.ended") != kinds.end());
+    // 回合流落 v3 账:请求/封口俱全,验卷过。
+    CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
+    const auto rows = ReadLines(stream);
+    REQUIRE(rows.size() >= 2);
+    CHECK(rows[0].at("message").value("role", std::string()) == "system");
+    bool saw_prepared = false;
+    bool saw_ended = false;
+    for (const auto& row : rows) {
+        if (row.value("type", std::string()) != "event") {
+            continue;
+        }
+        const std::string kind = row.value("kind", std::string());
+        saw_prepared = saw_prepared || kind == "model.request.prepared";
+        saw_ended = saw_ended || kind == "session.ended";
+    }
+    CHECK(saw_prepared);
+    CHECK(saw_ended);
 }
 
 // ---------------------------------------------------------------------------
@@ -763,28 +793,58 @@ TEST_CASE("开关开: RecoverWorkspace 认得 v3 场,原样保留不误删") {
 }
 
 // ---------------------------------------------------------------------------
-// 开关只在建场读一次:半程翻转环境变量不改本场格式
+// 迁移告警与场中翻转:开关已死,建场不看环境变量(V3-LEGACY-01)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("开关已翻默认: 环境变量未设时新会话写 v3(守门)") {
-    // ctest 全局注入 0 保 v2 老册;此处显式摘掉变量,钉产品默认语义——
-    // 翻默认(2026-09-11)的本义:未设=开,只有显式 0 才回 v2。
+TEST_CASE("退役告警: 未设变量静默,显式 0 记一条,其他值不打扰") {
+    // 开关函数已删,此案直检告警助手 WarnV2NewSessionRetired——未设或
+    // 非 "0" 不打扰;恰为 "0" 给一条人话告警(每次建场现读,不缓存)。
+    std::vector<platform::LogRecord> logs;
+    platform::LogSink::Instance().SetWriter([&logs](const platform::LogRecord& record) {
+        logs.push_back(record);
+    });
+    struct WriterGuard {
+        ~WriterGuard() { platform::LogSink::Instance().SetWriter(nullptr); }
+    } writer_guard;
+    const auto retirement_warns = [&logs] {
+        return static_cast<std::size_t>(std::count_if(
+            logs.begin(), logs.end(), [](const platform::LogRecord& record) {
+                return record.level == platform::LogLevel::Warn &&
+                       record.component == "trajectory" &&
+                       record.message.find("已退役") != std::string::npos;
+            }));
+    };
 #ifdef _WIN32
     _putenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=");
 #else
     unsetenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
 #endif
-    CHECK(lubancode::trajectory::v3::NewSessionV3WriteEnabled());
+    lubancode::trajectory::v3::WarnV2NewSessionRetired();
+    CHECK(retirement_warns() == 0);
 #ifdef _WIN32
     _putenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0");
 #else
     setenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0", 1);
 #endif
-    CHECK_FALSE(lubancode::trajectory::v3::NewSessionV3WriteEnabled());
+    lubancode::trajectory::v3::WarnV2NewSessionRetired();
+    CHECK(retirement_warns() == 1);
+#ifdef _WIN32
+    _putenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=1");
+#else
+    setenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1", 1);
+#endif
+    lubancode::trajectory::v3::WarnV2NewSessionRetired();
+    CHECK(retirement_warns() == 1);
 }
 
-TEST_CASE("开关读一次: 场开成 v3 后,环境变量翻回 0 不改本场写侧") {
-    EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+TEST_CASE("建场后: 场中环境变量翻 0 不改本场写侧") {
+    // 建场唯一 v3,环境变量只在建场时被看一眼(记告警);场中翻 0 无从
+    // 改起。钉"半程翻转不改本场格式"这层回归。
+#ifdef _WIN32
+    _putenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=");
+#else
+    unsetenv("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS");
+#endif
     const auto root = FreshRoot("open-once");
     auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(ledger.has_value());
@@ -925,16 +985,10 @@ TEST_CASE("D3: compact applied 后 ProjectV3ContextHistory 投影新链,prepared
     CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
 }
 
-TEST_CASE("D3: v2 场 ProjectV3ContextHistory 报错不换") {
-    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
-    const auto root = FreshRoot("d3-v2");
-    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
-    REQUIRE(ledger.has_value());
-    CHECK(ledger->v3_main_writer() == nullptr);
-    const auto projected = ledger->ProjectV3ContextHistory();
-    CHECK_FALSE(projected.has_value());
-    CHECK(projected.error().rfind("compact.swap.not_v3", 0) == 0);
-}
+// (退役,V3-LEGACY-01)原此处有"D3: v2 场 ProjectV3ContextHistory 报错不换"
+// 案:env=0 建出 v2 活场再验 compact.swap.not_v3 拒绝。写口退役后新建恒
+// v3,该前提造不出;not_v3 守卫仍护恢复收养的旧盘 v2 活场(ContinueNewSide
+// 一族),其回归随旧档消费路径另立夹具单守。
 
 // ---------------------------------------------------------------------------
 // P1-B(失败与恢复单 FA-02):错误结果往返不变——回喂语义以 Hook 处理后
@@ -1387,11 +1441,7 @@ TEST_CASE("V3ResultStoreStatsOf:res-* 一 json 一结果,字节收伴生;v2 会�
     CHECK(stats->total_bytes == 100 + 120 + 500 + 30);
     REQUIRE(ledger->CloseSession("exit").error_code.empty());
 
-    // v2 会话:没有结果仓口径,调用方走旧 artifact 统计,不拿 0 冒充。
-    EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
-    const auto v2_root = FreshRoot("v3-real-a02-v2");
-    auto v2_ledger = TrajectorySessionLedger::Open(LedgerOptions(v2_root));
-    REQUIRE(v2_ledger.has_value());
-    CHECK_FALSE(v2_ledger->V3ResultStoreStatsOf().has_value());
-    REQUIRE(v2_ledger->CloseSession("exit").error_code.empty());
+    // (退役,V3-LEGACY-01)原尾段:env=0 再开一场验 v2 无结果仓口径——
+    // 写口退役后新建恒 v3,该对照场造不出;V3ResultStoreStatsOf 的
+    // nullopt 分支由盘上旧 v2 档(手工夹具)路径另守。
 }

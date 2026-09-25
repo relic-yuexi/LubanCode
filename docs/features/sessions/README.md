@@ -15,7 +15,7 @@ LubanCode 留一份只追加的 v3 会话原账，再分别投出完整聊天历
 
 历史显示保留压缩前原文；当前上下文按已提交链选消息。二者不能混用。普通 flush 与断电落稳也分档，不把“写过文件”一概称作断电安全。
 
-旧 v2 场仍认 `main.jsonl` 与 `session.json`，读取按源格式分派。只有显式设 `LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0` 才让新场回到 v2；这是待清理的过渡开关，不是新版使用前提。
+旧 v2 场仍认 `main.jsonl` 与 `session.json`，读取按源格式分派。新场唯一 v3：`LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0` 已退役（V3-LEGACY-01），设了只记一条迁移告警，不再新建 v2。
 
 ## 会话归哪间 workspace
 

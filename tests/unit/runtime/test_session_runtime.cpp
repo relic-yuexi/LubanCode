@@ -75,7 +75,11 @@ TEST_CASE("SessionRuntime:账本恒开,workspace/session 目录在临时根下")
     options.lubancode_version = "test";
     rt::SessionRuntime runtime(std::move(options));
     REQUIRE(runtime.trajectory() != nullptr);
-    CHECK(std::filesystem::exists(runtime.trajectory()->session_dir() / "main.jsonl"));
+    // V3-LEGACY-01 后新建唯一 v3:主账是 <id>.jsonl,v2 文件一枚不长。
+    CHECK(std::filesystem::exists(
+        runtime.trajectory()->session_dir() /
+        std::filesystem::path(runtime.trajectory()->session_id() + ".jsonl")));
+    CHECK_FALSE(std::filesystem::exists(runtime.trajectory()->session_dir() / "main.jsonl"));
     CHECK_FALSE(runtime.trajectory()->session_id().empty());
     CHECK(runtime.trajectory_open_error().empty());
 }

@@ -6,8 +6,8 @@
 //   GAP-05 thread/start 幂等:同键同 cwd 重发回原场身份(duplicate=true,
 //         不建第二场);同键异 cwd operation_conflict;requested 在而
 //         completed 无(崩溃窄窗注入)回 session_create_unknown 不建场。
-//   GAP-06 operation/read:活场终态对账;重启后按 clientOperationId 查回
-//         final 与稳定正文(v3 投影);v2 场正文缺口如实报;账态注入(终
+//   GAP-06 operation/read:活场终态对账(pin 0 也走 v3);重启后按
+//         clientOperationId 查回 final 与稳定正文(v3 投影);账态注入(终
 //         态行被抹)回 unknown 不冒充。
 //   GAP-07 查询零副作用:operation/read 不触发模型、不重发 turn/completed。
 //   故障注入:受理落盘失败(operations.jsonl 目录占位)拒收零执行;
@@ -380,7 +380,8 @@ TEST_CASE("thread/start 幂等·崩溃窄窗:completed 行缺失时重发不建�
 // GAP-06/07:operation/read(活场 + 重启 + 账态注入)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("operation/read 活场:final 对账——终态、引用、usage 如实") {
+TEST_CASE("operation/read 活场(pin 0):final 对账——显式关照走 v3,终态/引用/usage 如实") {
+    // V3-LEGACY-01:写口退役,pin 0 不再开 v2 场——活场即 v3,正文面照给。
     EnvGuard v2pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "0");
     const std::string sessions_dir = MakeTempDir("lubancode_test_op_read_live");
     TestHarness harness(sessions_dir);
@@ -433,9 +434,9 @@ TEST_CASE("operation/read 活场:final 对账——终态、引用、usage 如�
     REQUIRE(read_error.empty());
     CHECK(missing["status"] == "not_found");
 
-    // v2 场正文缺口如实报(活场也是 v2 账)。
-    CHECK(by_key["sourceFormat"] == "v2");
-    CHECK_FALSE(by_key.contains("finalMessages"));
+    // 显式关也走 v3(V3-LEGACY-01):活场 sourceFormat=v3,稳定正文在。
+    CHECK(by_key["sourceFormat"] == "v3");
+    CHECK(by_key.contains("finalMessages"));
 
     std::string stop_error;
     harness.server->HandleThreadStop(thread_id, stop_error);

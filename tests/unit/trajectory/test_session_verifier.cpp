@@ -4,38 +4,36 @@
 //     有终态、child final hash 对上(父侧留空的后台派工由 verifier 实读
 //     子文件回填核对——P0-2 遗留#5)、同一 child 至多接受一次;
 //   - 坏边明报:child 文件缺、hash 不合、无父派发引用。
+//
+// V3-LEGACY-01 起 SessionManager::LaunchSession 只开 v3 场,再开不出 v2
+// 新建活场;本册验的是 v2 盘档读侧(VerifySessionDir,生产保留),夹具
+// 改手植:开房 + v2 session 目录 + 手植 main recorder,事件写法照旧。
 #include <doctest/doctest.h>
 
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "trajectory/directory.hpp"
 #include "trajectory/journal.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/replay.hpp"
-#include "trajectory/session_manager.hpp"
+#include "workspace/identity.hpp"
 
 using namespace lubancode::trajectory;
 
 namespace {
 
-struct FakeClock : SessionManagerClock {
+struct FakeClock : RecorderClock {
     std::int64_t wall = 1759000000000LL;
-    mutable int random_calls = 0;
+    mutable int ticks = 0;
     std::int64_t WallMs() const override { return wall; }
-    std::int64_t MonotonicNs() const override { return 7000LL + random_calls; }
-    std::string Random6() const override {
-        ++random_calls;
-        char buffer[16];
-        std::snprintf(buffer, sizeof(buffer), "V%05d", random_calls);
-        return buffer;
-    }
+    std::int64_t MonotonicNs() const override { return 7000LL + ticks++; }
 };
 
 std::filesystem::path MakeRoot(const char* tag) {
@@ -45,15 +43,6 @@ std::filesystem::path MakeRoot(const char* tag) {
     std::filesystem::remove_all(root, ec);
     std::filesystem::create_directories(root, ec);
     return root;
-}
-
-SessionManagerOptions Opts(const std::filesystem::path& root) {
-    SessionManagerOptions options;
-    options.workspaces_root = root / "workspaces";
-    options.workspace_root = root / "ws";
-    options.launch_cwd = "D:/tmp/ws";
-    options.lubancode_version = "0.26.138-test";
-    return options;
 }
 
 RecordReceipt Put(TrajectoryRecorder& recorder, EventKind kind, EventScope scope,
@@ -142,17 +131,92 @@ void WriteParentDispatch(TrajectoryRecorder& main, const std::string& call_id,
                 .status == RecordReceipt::Status::Committed);
 }
 
+// 手植 v2 场(V3-LEGACY-01 起 LaunchSession 只开 v3,本册的 v2 盘档改
+// 自己铺):开房 → v2 session 目录(schema 2/running)→ main recorder →
+// run.started + 一场 turn 的前半。成员形状对齐旧 ActiveSession 的用法
+//(main/manifest/session_dir()),案内写法照旧。
+struct ParentFixture {
+    FakeClock clock;
+    RecorderOptions recorder_options;  // 父子账同源:event schema major 与 manifest 钉的一致
+    SessionManifest manifest;
+    std::optional<TrajectoryRecorder> main;
+    std::filesystem::path artifacts;
+    std::filesystem::path dir;
+
+    const std::filesystem::path& session_dir() const { return dir; }
+
+    explicit ParentFixture(const char* tag) {
+        const std::filesystem::path root = MakeRoot(tag);
+        const std::filesystem::path workspaces = root / "workspaces";
+        const lubancode::workspace::WorkspaceIdentity identity =
+                lubancode::workspace::MakeFallbackIdentity(root / "ws");
+        auto room = TrajectoryDirectory::CreateWorkspace(workspaces, identity, clock.WallMs());
+        REQUIRE(room.has_value());
+        manifest.schema_version = 2;
+        manifest.workspace_key = identity.workspace_key;
+        manifest.session_id = "20260924-190000-VERI01";
+        manifest.launch_cwd = "D:/tmp/ws";
+        manifest.main_run_id = "main-0001";
+        manifest.run_kind = RunKindName(RunKind::MainSession);
+        manifest.start_reason = "process_launch";
+        manifest.status = "running";
+        manifest.created_at_ms = clock.WallMs();
+        manifest.lubancode_version = "0.26.138-test";
+        manifest.event_schema_version = 2;
+        recorder_options.event_schema_version = manifest.event_schema_version;
+        auto session = TrajectoryDirectory::CreateSession(workspaces, identity.workspace_key, manifest);
+        REQUIRE(session.has_value());
+        dir = session->session_dir();
+        artifacts = session->artifacts_root();
+        // base scope 形状对齐 SessionManager::MainBaseScope(旧 v2 场同款)。
+        EventScope scope;
+        scope.workspace_key = manifest.workspace_key;
+        scope.session_id = manifest.session_id;
+        scope.run_id = manifest.main_run_id;
+        scope.run_kind = RunKind::MainSession;
+        scope.actor = Actor::Host;
+        scope.origin = Origin::ScheduledHost;
+        scope.visibility = {Visibility::HostOnly};
+        auto recorder =
+                TrajectoryRecorder::Start(session->main_stream_path(), artifacts, scope,
+                                          recorder_options, &clock);
+        REQUIRE(recorder.has_value());
+        main.emplace(std::move(*recorder));
+        REQUIRE(main->WriteRunStarted(nlohmann::json{{"start_reason", "process_launch"}},
+                                      Durability::PowerLoss)
+                    .status == RecordReceipt::Status::Committed);
+        // 一场 turn 的前半:turn.started + input。
+        EventScope turn = main->base_scope();
+        turn.turn_id = "turn-0001";
+        turn.actor = Actor::User;
+        turn.origin = Origin::ExternalUser;
+        REQUIRE(Put(*main, EventKind::TurnStarted, turn,
+                    nlohmann::json{{"trigger", "external_user"}})
+                    .status == RecordReceipt::Status::Committed);
+        REQUIRE(Put(*main, EventKind::InputReceived, turn,
+                    nlohmann::json{{"input_id", "input-0001"},
+                                   {"content", nlohmann::json::array({"派个帮手"})},
+                                   {"channel", "terminal"},
+                                   {"sender", nlohmann::json{{"kind", "local_user"}}}})
+                    .status == RecordReceipt::Status::Committed);
+    }
+};
+
 // 开一只子账:run.started(relations.parent_run_id;parent_call_id 非空 =
-// 前台派工)+ 可选 terminal,回终态事件 hash。
-std::string WriteChildStream(ActiveSession& session, const std::string& child_run_id,
+// 前台派工)+ 可选 terminal,回终态事件 hash。子账文件手植
+// subagents/<run_id>.jsonl(V3-LEGACY-01 后不再经 SessionManager 造场)。
+std::string WriteChildStream(ParentFixture& session, const std::string& child_run_id,
                              const std::string& parent_run_id, bool with_terminal,
                              const std::string& parent_call_id = std::string()) {
-    auto stream = session.directory.ReserveSubagentStream(child_run_id);
-    REQUIRE(stream.has_value());
+    const std::filesystem::path stream =
+            session.session_dir() / "subagents" / (child_run_id + ".jsonl");
+    std::error_code ec;
+    std::filesystem::create_directories(stream.parent_path(), ec);
     EventScope scope = session.main->base_scope();
     scope.run_id = child_run_id;
     scope.run_kind = RunKind::Subagent;
-    auto child = TrajectoryRecorder::Start(*stream, session.directory.artifacts_root(), scope);
+    auto child = TrajectoryRecorder::Start(stream, session.artifacts, scope,
+                                           session.recorder_options, &session.clock);
     REQUIRE(child.has_value());
     EventLinks links;
     links.parent_run_id = parent_run_id;
@@ -175,37 +239,11 @@ std::string WriteChildStream(ActiveSession& session, const std::string& child_ru
     return terminal_hash;
 }
 
-struct ParentFixture {
-    FakeClock clock;
-    std::unique_ptr<SessionManager> manager;
-    ActiveSession* active = nullptr;
-
-    explicit ParentFixture(const char* tag) {
-        manager = std::make_unique<SessionManager>(Opts(MakeRoot(tag)), &clock);
-        active = manager->LaunchSession().value_or(nullptr);
-        REQUIRE(active != nullptr);
-        // 一场 turn 的前半:turn.started + input。
-        EventScope turn = active->main->base_scope();
-        turn.turn_id = "turn-0001";
-        turn.actor = Actor::User;
-        turn.origin = Origin::ExternalUser;
-        REQUIRE(Put(*active->main, EventKind::TurnStarted, turn,
-                    nlohmann::json{{"trigger", "external_user"}})
-                    .status == RecordReceipt::Status::Committed);
-        REQUIRE(Put(*active->main, EventKind::InputReceived, turn,
-                    nlohmann::json{{"input_id", "input-0001"},
-                                   {"content", nlohmann::json::array({"派个帮手"})},
-                                   {"channel", "terminal"},
-                                   {"sender", nlohmann::json{{"kind", "local_user"}}}})
-                    .status == RecordReceipt::Status::Committed);
-    }
-};
-
 }  // namespace
 
 TEST_CASE("好账: main + 前台子代理,父子边全对") {
     ParentFixture fixture("good");
-    ActiveSession& session = *fixture.active;
+    ParentFixture& session = fixture;
     const std::string child_hash =
         WriteChildStream(session, "agent-0001", session.manifest.main_run_id, /*with_terminal=*/true,
                          /*parent_call_id=*/"call-0001");
@@ -234,7 +272,7 @@ TEST_CASE("好账: main + 前台子代理,父子边全对") {
 
 TEST_CASE("后台派工: 父侧 hash 留空,verifier 实读子文件回填核对(遗留#5)") {
     ParentFixture fixture("background");
-    ActiveSession& session = *fixture.active;
+    ParentFixture& session = fixture;
     // 子账先收口;父侧只有 started(后台派工,终态由后台回流补,此刻未落)。
     WriteChildStream(session, "agent-bg-1", session.manifest.main_run_id, /*with_terminal=*/true);
     WriteParentDispatch(*session.main, "call-0001", "agent-bg-1", /*child_terminal_hash=*/"",
@@ -254,7 +292,7 @@ TEST_CASE("后台派工: 父侧 hash 留空,verifier 实读子文件回填核对
 
 TEST_CASE("坏边: 父侧记错 child 终态 hash") {
     ParentFixture fixture("wronghash");
-    ActiveSession& session = *fixture.active;
+    ParentFixture& session = fixture;
     const std::string child_hash =
         WriteChildStream(session, "agent-0002", session.manifest.main_run_id, /*with_terminal=*/true,
                          /*parent_call_id=*/"call-0002");
@@ -271,7 +309,7 @@ TEST_CASE("坏边: 父侧记错 child 终态 hash") {
 
 TEST_CASE("坏边: 子文件缺失(父账声明派发却没有 child stream)") {
     ParentFixture fixture("missing");
-    ActiveSession& session = *fixture.active;
+    ParentFixture& session = fixture;
     WriteParentDispatch(*session.main, "call-0003", "agent-ghost",
                         std::string(64, 'e'), /*accept=*/true);
 
@@ -291,7 +329,7 @@ TEST_CASE("坏边: 子文件缺失(父账声明派发却没有 child stream)") {
 
 TEST_CASE("坏边: 前台子账在,父账没有派发引用(edge.no_parent_dispatch)") {
     ParentFixture fixture("nodispatch");
-    ActiveSession& session = *fixture.active;
+    ParentFixture& session = fixture;
     // 前台子账(relations 带 parent_call_id)声明 owner 是 main,但 main
     // 从未写过带 child_run_id 的事件——账缺派发事实,明报。
     WriteChildStream(session, "agent-orphan", session.manifest.main_run_id, /*with_terminal=*/true,
@@ -306,7 +344,7 @@ TEST_CASE("坏边: 前台子账在,父账没有派发引用(edge.no_parent_dispa
 
 TEST_CASE("后台子账(relations 无 parent_call_id)不落父侧派发边,不算坏账") {
     ParentFixture fixture("bgshape");
-    ActiveSession& session = *fixture.active;
+    ParentFixture& session = fixture;
     // 后台形状:子账只有 parent_run_id(父轮收口在先,父账不落边)。
     WriteChildStream(session, "agent-bg-ok", session.manifest.main_run_id,
                      /*with_terminal=*/true);
@@ -328,15 +366,18 @@ namespace {
 
 // 写一只带 turn 坐标的子账:sent 事件逐枚(task_turn_index/turn_limit),
 // 每枚可选收口(completed/failed),末尾 run 终态。request_id 逐枚自增。
-void WriteTurnSequenceChild(ActiveSession& session, const std::string& child_run_id,
+void WriteTurnSequenceChild(ParentFixture& session, const std::string& child_run_id,
                             const std::vector<int>& sent_indexes, int turn_limit,
                             const std::vector<int>& close_indexes, bool with_terminal = true) {
-    auto stream = session.directory.ReserveSubagentStream(child_run_id);
-    REQUIRE(stream.has_value());
+    const std::filesystem::path stream =
+            session.session_dir() / "subagents" / (child_run_id + ".jsonl");
+    std::error_code ec;
+    std::filesystem::create_directories(stream.parent_path(), ec);
     EventScope scope = session.main->base_scope();
     scope.run_id = child_run_id;
     scope.run_kind = RunKind::Subagent;
-    auto child = TrajectoryRecorder::Start(*stream, session.directory.artifacts_root(), scope);
+    auto child = TrajectoryRecorder::Start(stream, session.artifacts, scope,
+                                           session.recorder_options, &session.clock);
     REQUIRE(child.has_value());
     EventLinks links;
     links.parent_run_id = session.manifest.main_run_id;
@@ -413,7 +454,7 @@ void WriteTurnSequenceChild(ActiveSession& session, const std::string& child_run
 
 TEST_CASE("turn 序列:好账——1,2 递增、limit 内、每枚有收口,verify 过") {
     ParentFixture fixture("turngood");
-    ActiveSession& session = *fixture.active;
+    ParentFixture& session = fixture;
     WriteTurnSequenceChild(session, "agent-turn-ok",
                            /*sent_indexes=*/{1, 2}, /*turn_limit=*/2, /*close_indexes=*/{1, 2});
     const auto report = VerifySessionDir(session.session_dir());
@@ -428,7 +469,7 @@ TEST_CASE("turn 序列:好账——1,2 递增、limit 内、每枚有收口,veri
 
 TEST_CASE("turn 序列:越过 turn_limit——turn.index_over_limit") {
     ParentFixture fixture("turnover");
-    ActiveSession& session = *fixture.active;
+    ParentFixture& session = fixture;
     WriteTurnSequenceChild(session, "agent-turn-over",
                            /*sent_indexes=*/{1, 2, 3}, /*turn_limit=*/2, /*close_indexes=*/{1, 2, 3});
     const auto report = VerifySessionDir(session.session_dir());
@@ -447,7 +488,7 @@ TEST_CASE("turn 序列:越过 turn_limit——turn.index_over_limit") {
 TEST_CASE("turn 序列:重号与跳号——turn.index_repeated / turn.index_skipped") {
     {
         ParentFixture fixture("turnrep");
-        ActiveSession& session = *fixture.active;
+        ParentFixture& session = fixture;
         WriteTurnSequenceChild(session, "agent-turn-rep",
                                /*sent_indexes=*/{1, 1}, /*turn_limit=*/0, /*close_indexes=*/{1});
         const auto report = VerifySessionDir(session.session_dir());
@@ -460,7 +501,7 @@ TEST_CASE("turn 序列:重号与跳号——turn.index_repeated / turn.index_ski
     }
     {
         ParentFixture fixture("turnskip");
-        ActiveSession& session = *fixture.active;
+        ParentFixture& session = fixture;
         WriteTurnSequenceChild(session, "agent-turn-skip",
                                /*sent_indexes=*/{1, 3}, /*turn_limit=*/0, /*close_indexes=*/{1, 3});
         const auto report = VerifySessionDir(session.session_dir());
@@ -479,7 +520,7 @@ TEST_CASE("turn 序列:悬空请求——活账不判,终态后的悬空由防�
     // terminal 两枚码是防御手工修复/外部写账的兜底分支,正经 API 造不出这
     // 种账。这里钉住可达的那半边:run 未终态的活账,请求还在飞,不算悬空。
     ParentFixture fixture("turnlive");
-    ActiveSession& session = *fixture.active;
+    ParentFixture& session = fixture;
     WriteTurnSequenceChild(session, "agent-turn-live",
                            /*sent_indexes=*/{1}, /*turn_limit=*/0, /*close_indexes=*/{},
                            /*with_terminal=*/false);
@@ -494,7 +535,7 @@ TEST_CASE("turn 序列:悬空请求——活账不判,终态后的悬空由防�
 
 TEST_CASE("坏链: 子账尾行截断,该 stream 明报不影响别的边") {
     ParentFixture fixture("truncated");
-    ActiveSession& session = *fixture.active;
+    ParentFixture& session = fixture;
     const std::string child_hash =
         WriteChildStream(session, "agent-0004", session.manifest.main_run_id, /*with_terminal=*/true,
                          /*parent_call_id=*/"call-0004");

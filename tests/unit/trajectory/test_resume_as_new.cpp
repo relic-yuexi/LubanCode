@@ -25,7 +25,10 @@
 #include "trajectory/journal.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/replay.hpp"
+#include "trajectory/directory.hpp"  # 手植 v2 源夹具(V3-LEGACY-01)
 #include "trajectory/session_manager.hpp"
+#include "trajectory/v3/reader.hpp"  // VerifyV3File(v2 源 fork 出的新场是 v3)
+#include "workspace/identity.hpp"    # 手植夹具的 workspace key
 
 using namespace lubancode::trajectory;
 
@@ -73,16 +76,6 @@ RecordReceipt Put(TrajectoryRecorder& recorder, EventKind kind, EventScope scope
     return recorder.Record(std::move(request), durability);
 }
 
-std::vector<nlohmann::json> Events(const std::filesystem::path& stream) {
-    const auto lines = ReadJournalLines(stream);
-    REQUIRE(lines.has_value());
-    std::vector<nlohmann::json> events;
-    for (const std::string& line : *lines) {
-        events.push_back(nlohmann::json::parse(line, nullptr, false));
-        REQUIRE_FALSE(events.back().is_discarded());
-    }
-    return events;
-}
 
 std::uintmax_t FileSize(const std::filesystem::path& path) {
     std::error_code ec;
@@ -93,8 +86,7 @@ std::uintmax_t FileSize(const std::filesystem::path& path) {
 
 // 在 active session 里写一场完整 turn(user 输入 → 模型一问一答),子代理
 // 派工边界可选。回写到 main 账后由调用方 Close。
-void WriteFullTurn(ActiveSession& session, const char* user_text) {
-    TrajectoryRecorder& main = *session.main;
+void WriteFullTurn(TrajectoryRecorder& main, const char* user_text) {
     EventScope turn = main.base_scope();
     turn.turn_id = "turn-0001";
     turn.actor = Actor::User;
@@ -137,31 +129,66 @@ void WriteFullTurn(ActiveSession& session, const char* user_text) {
 // 开一场、写满、封口;回 source session 的目录与 id。
 struct SourceSession {
     FakeClock clock;
-    std::unique_ptr<SessionManager> manager;
     std::string id;
     std::filesystem::path dir;
     std::string main_run_id;
     std::filesystem::path root;
+    TrajectoryDirectory directory;
+    std::optional<TrajectoryRecorder> main;
 
     explicit SourceSession(const char* tag, bool with_child = false)
         : root(MakeRoot(tag)) {
-        manager = std::make_unique<SessionManager>(Opts(root), &clock);
-        auto* active = manager->LaunchSession().value_or(nullptr);
-        REQUIRE(active != nullptr);
-        id = active->session_id();
-        dir = active->session_dir();
-        main_run_id = active->manifest.main_run_id;
-        WriteFullTurn(*active, "数一数文件");
+        // V3-LEGACY-01 后新建唯一 v2 场造不出:手植封口干净的 v2 源——
+        // session.json 由 CreateSession 落,主账由真 recorder 写。
+        const SessionManagerOptions options = Opts(root);
+        const auto identity = lubancode::workspace::MakeFallbackIdentity(options.workspace_root);
+        auto room = TrajectoryDirectory::CreateWorkspace(options.workspaces_root, identity,
+                                                         clock.WallMs());
+        REQUIRE(room.has_value());
+        id = "20260924-200000-SRC001";
+        main_run_id = "main-0001";
+        SessionManifest manifest;
+        manifest.schema_version = 2;
+        manifest.workspace_key = identity.workspace_key;
+        manifest.session_id = id;
+        manifest.launch_cwd = options.launch_cwd;
+        manifest.main_run_id = main_run_id;
+        manifest.run_kind = RunKindName(RunKind::MainSession);
+        manifest.start_reason = "process_launch";
+        manifest.status = SessionStatusName(SessionStatus::Closed);
+        manifest.created_at_ms = clock.WallMs();
+        manifest.lubancode_version = options.lubancode_version;
+        manifest.event_schema_version = 2;
+        auto created = TrajectoryDirectory::CreateSession(options.workspaces_root,
+                                                          manifest.workspace_key, manifest);
+        REQUIRE(created.has_value());
+        directory = std::move(*created);
+        dir = directory.session_dir();
+        EventScope scope;
+        scope.workspace_key = manifest.workspace_key;
+        scope.session_id = id;
+        scope.run_id = main_run_id;
+        scope.run_kind = RunKind::MainSession;
+        scope.visibility = {Visibility::HostOnly};
+        auto started = TrajectoryRecorder::Start(directory.main_stream_path(),
+                                                 directory.artifacts_root(), scope,
+                                                 RecorderOptions{}, &clock);
+        REQUIRE(started.has_value());
+        main.emplace(std::move(*started));
+        REQUIRE(main->WriteRunStarted(nlohmann::json{{"start_reason", "process_launch"}},
+                                      Durability::PowerLoss)
+                    .status == RecordReceipt::Status::Committed);
+        WriteFullTurn(*main, "数一数文件");
         if (with_child) {
             // 一只已完成的子代理:父侧派发(started+终态带 hash),子账自
             // 己 run.started/terminal。
-            const auto stream = active->directory.ReserveSubagentStream("agent-0001");
+            const auto stream = directory.ReserveSubagentStream("agent-0001");
             REQUIRE(stream.has_value());
-            EventScope child_scope = active->main->base_scope();
+            EventScope child_scope = main->base_scope();
             child_scope.run_id = "agent-0001";
             child_scope.run_kind = RunKind::Subagent;
             auto child =
-                TrajectoryRecorder::Start(*stream, active->directory.artifacts_root(), child_scope);
+                TrajectoryRecorder::Start(*stream, directory.artifacts_root(), child_scope);
             REQUIRE(child.has_value());
             EventLinks owner;
             owner.parent_run_id = main_run_id;
@@ -176,35 +203,35 @@ struct SourceSession {
             REQUIRE(finished.status == RecordReceipt::Status::Committed);
             REQUIRE(child->Close().has_value());
             // 父侧工具边界:planned/effective/started/finished(child hash)。
-            EventScope turn2 = active->main->base_scope();
+            EventScope turn2 = main->base_scope();
             turn2.turn_id = "turn-0002";
             turn2.actor = Actor::User;
             turn2.origin = Origin::ExternalUser;
-            REQUIRE(Put(*active->main, EventKind::TurnStarted, turn2,
+            REQUIRE(Put(*main, EventKind::TurnStarted, turn2,
                         nlohmann::json{{"trigger", "external_user"}})
                         .status == RecordReceipt::Status::Committed);
-            REQUIRE(Put(*active->main, EventKind::InputReceived, turn2,
+            REQUIRE(Put(*main, EventKind::InputReceived, turn2,
                         nlohmann::json{{"input_id", "input-0002"},
                                        {"content", nlohmann::json::array({"派个帮手"})},
                                        {"channel", "terminal"},
                                        {"sender", nlohmann::json{{"kind", "local_user"}}}})
                         .status == RecordReceipt::Status::Committed);
-            EventScope model2 = active->main->base_scope();
+            EventScope model2 = main->base_scope();
             model2.turn_id = "turn-0002";
             model2.request_id = "req-0002";
             model2.actor = Actor::Model;
             model2.origin = Origin::ProviderModel;
             const auto prepared2 =
-                Put(*active->main, EventKind::ModelRequestPrepared, model2,
+                Put(*main, EventKind::ModelRequestPrepared, model2,
                     nlohmann::json{{"model", "demo-model"},
                                    {"provider", "demo"},
                                    {"wire", "responses"},
                                    {"message_refs", nlohmann::json::array({"evt-00000002"})}});
             REQUIRE(prepared2.status == RecordReceipt::Status::Committed);
-            REQUIRE(Put(*active->main, EventKind::ModelRequestSent, model2,
+            REQUIRE(Put(*main, EventKind::ModelRequestSent, model2,
                         nlohmann::json{{"prepared_event_id", prepared2.event_id}})
                         .status == RecordReceipt::Status::Committed);
-            REQUIRE(Put(*active->main, EventKind::ModelOutputCompleted, model2,
+            REQUIRE(Put(*main, EventKind::ModelOutputCompleted, model2,
                         nlohmann::json{{"output_id", "output-0002"},
                                        {"blocks",
                                         nlohmann::json::array({nlohmann::json{
@@ -213,16 +240,16 @@ struct SourceSession {
                                             {"arguments", nlohmann::json{{"prompt", "干活"}}}}})},
                                        {"stop_reason", "tool_use"}})
                         .status == RecordReceipt::Status::Committed);
-            EventScope tool = active->main->base_scope();
+            EventScope tool = main->base_scope();
             tool.turn_id = "turn-0002";
             tool.request_id = "req-0002";
             tool.call_id = "call-agent-1";
             tool.actor = Actor::Tool;
             tool.origin = Origin::SubagentTool;
-            REQUIRE(Put(*active->main, EventKind::ToolExecutionPlanned, tool,
+            REQUIRE(Put(*main, EventKind::ToolExecutionPlanned, tool,
                         nlohmann::json{{"call_id", "call-agent-1"}, {"tool_name", "agent"}})
                         .status == RecordReceipt::Status::Committed);
-            REQUIRE(Put(*active->main, EventKind::ToolInputEffective, tool,
+            REQUIRE(Put(*main, EventKind::ToolInputEffective, tool,
                         nlohmann::json{{"call_id", "call-agent-1"},
                                        {"tool_name", "agent"},
                                        {"source_kind", "builtin"},
@@ -232,11 +259,11 @@ struct SourceSession {
                         .status == RecordReceipt::Status::Committed);
             EventLinks child_edge;
             child_edge.child_run_id = "agent-0001";
-            REQUIRE(Put(*active->main, EventKind::ToolExecutionStarted, tool,
+            REQUIRE(Put(*main, EventKind::ToolExecutionStarted, tool,
                         nlohmann::json{{"call_id", "call-agent-1"}}, child_edge,
                         Durability::PowerLoss)
                         .status == RecordReceipt::Status::Committed);
-            REQUIRE(Put(*active->main, EventKind::ToolExecutionFinished, tool,
+            REQUIRE(Put(*main, EventKind::ToolExecutionFinished, tool,
                         nlohmann::json{{"outcome", "succeeded"},
                                        {"duration_ms", 9},
                                        {"result_ref",
@@ -247,20 +274,22 @@ struct SourceSession {
                                        {"side_effects", nlohmann::json::array()}},
                         child_edge, Durability::PowerLoss)
                         .status == RecordReceipt::Status::Committed);
-            REQUIRE(Put(*active->main, EventKind::ToolResultCommitted, tool,
+            REQUIRE(Put(*main, EventKind::ToolResultCommitted, tool,
                         nlohmann::json{{"call_id", "call-agent-1"},
                                        {"content", nlohmann::json::array({nlohmann::json{
                                            {"type", "text"}, {"text", "子代理干完了"}}})},
                                        {"is_error", false}})
                         .status == RecordReceipt::Status::Committed);
-            REQUIRE(Put(*active->main, EventKind::TurnCompleted, turn2,
+            REQUIRE(Put(*main, EventKind::TurnCompleted, turn2,
                         nlohmann::json{{"outcome", "succeeded"}})
                         .status == RecordReceipt::Status::Committed);
         }
-        // 封口(exit)。
-        NullClearParticipant participant;
-        const auto closed = manager->Close({"exit"}, &participant);
-        REQUIRE(closed.error_code.empty());
+        // 封口(exit):真 recorder 的 run terminal + session.ended。
+        REQUIRE(main->FinishRun(EventKind::RunCompleted, "exit", Durability::PowerLoss).status ==
+                RecordReceipt::Status::Committed);
+        REQUIRE(main->EndSession("exit", std::nullopt, "clean", Durability::PowerLoss).status ==
+                RecordReceipt::Status::Committed);
+        main.reset();  // 放句柄(Windows 攥文件)
     }
 };
 
@@ -290,32 +319,62 @@ TEST_CASE("七步: 干净 source 的 resume-as-new 全程") {
     CHECK(outcome.new_session_running);
     CHECK(outcome.active_switched);
 
-    // 第 5 步:新 session 与 source 不同;run.started(resume) 是新 main 首条。
+    // 第 5 步:新 session 与 source 不同——V3-LEGACY-01 后 v2 源 fork 的
+    // 新场唯一 v3(首行 system + session.started 立链)。
     CHECK(outcome.new_session_id != source.id);
     CHECK(outcome.new_main_run_id != source.main_run_id);
     ActiveSession* active = manager.active();
     REQUIRE(active != nullptr);
     CHECK(active->session_id() == outcome.new_session_id);
-    const auto events = Events(active->directory.main_stream_path());
-    REQUIRE_FALSE(events.empty());
-    CHECK(events[0].at("kind").get<std::string>() == "run.started");
-    CHECK(events[0].at("payload").at("start_reason").get<std::string>() == "resume");
-    CHECK(events[0].at("payload").at("resumed_from_session_id").get<std::string>() == source.id);
-    CHECK(events[0].at("payload").at("caused_by_event_ref").at("session_id").get<std::string>() ==
-          source.id);
-    CHECK(events[0].at("seq").get<std::uint64_t>() == 1);  // 新命名空间从 1 起号
-    CHECK(events[0].at("run_id").get<std::string>() == outcome.new_main_run_id);
+    REQUIRE(active->is_v3());
+    const std::filesystem::path new_stream =
+        active->session_dir() /
+        std::filesystem::path(outcome.new_session_id + ".jsonl");
+    CHECK(std::filesystem::exists(new_stream));
+    CHECK_FALSE(std::filesystem::exists(active->session_dir() / "main.jsonl"));
+    // 首两行:system 消息 + session.started 事件。
+    {
+        std::ifstream head(new_stream, std::ios::binary);
+        REQUIRE(head.is_open());
+        std::string line;
+        std::getline(head, line);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const auto first = nlohmann::json::parse(line, nullptr, false);
+        REQUIRE_FALSE(first.is_discarded());
+        CHECK(first.value("type", std::string()) == "message");
+        CHECK(first.at("message").value("role", std::string()) == "system");
+        std::getline(head, line);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const auto second = nlohmann::json::parse(line, nullptr, false);
+        REQUIRE_FALSE(second.is_discarded());
+        CHECK(second.value("type", std::string()) == "event");
+        CHECK(second.value("kind", std::string()) == "session.started");
+    }
 
-    // 第 6 步:resume.source.attached 是第二条,payload 四必填 + qualified refs。
-    REQUIRE(events.size() >= 2);
-    CHECK(events[1].at("kind").get<std::string>() == "resume.source.attached");
-    const auto& attached = events[1].at("payload");
-    CHECK(attached.at("source_session_id").get<std::string>() == source.id);
-    CHECK(attached.at("source_terminal_event_hash").get<std::string>() ==
-          outcome.source_main_last_event_hash);
-    CHECK(attached.at("replay_version").get<std::string>() == outcome.replay_version);
-    CHECK(attached.at("imported_state_hash").get<std::string>() == outcome.imported_state_hash);
-    CHECK(attached.at("qualified_event_refs").is_array());
+    // 第 6 步:resume.source.attached 五键指源末行(§4.10,camelCase)。
+    bool saw_attached = false;
+    {
+        std::ifstream in(new_stream, std::ios::binary);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const auto row = nlohmann::json::parse(line, nullptr, false);
+            if (row.is_discarded() || row.value("type", std::string()) != "event" ||
+                row.value("kind", std::string()) != "resume.source.attached") {
+                continue;
+            }
+            saw_attached = true;
+            const auto& attached = row.at("payload");
+            CHECK(attached.at("sourceRef").at("sessionId").get<std::string>() == source.id);
+            CHECK(attached.at("sourceRef").at("hash").get<std::string>() ==
+                  outcome.source_main_last_event_hash);
+            CHECK(attached.at("replayVersion").get<std::string>() == outcome.replay_version);
+            CHECK(attached.at("importedStateHash").get<std::string>() ==
+                  outcome.imported_state_hash);
+        }
+    }
+    CHECK(saw_attached);
 
     // source 只读:两本 Journal 字节数不变(source Journal 永不 reopen append)。
     CHECK(FileSize(source.dir / "main.jsonl") == source_main_bytes);
@@ -338,10 +397,9 @@ TEST_CASE("七步: 干净 source 的 resume-as-new 全程") {
     // 子结果来自父账 tool.result.committed(带子代理的边界文本),非子账正文。
     CHECK(outcome.effective_conversation.back().role == ReplayMessage::Role::Tool);
 
-    // 第 7 步:新场收口后可再验(链与边完好)。
-    const auto verify_new = VerifySessionDir(active->directory.session_dir());
-    CHECK(verify_new.ok);
-    CHECK(verify_new.child_edges.empty());  // 新场还没派过 child
+    // 第 7 步:新场验卷(v3 整卷核链;child_edges 是 v2 验证器概念,随
+    // 写口退役——新场没派过 child 由账面自证)。
+    CHECK(lubancode::trajectory::v3::VerifyV3File(new_stream).ok);
 }
 
 TEST_CASE("七步: 交互路带跨 session command.completed") {
@@ -352,21 +410,8 @@ TEST_CASE("七步: 交互路带跨 session command.completed") {
     auto* current = manager.LaunchSession().value_or(nullptr);
     REQUIRE(current != nullptr);
     const std::string current_id = current->session_id();
-    // requested 落旧场(ResumeInteractive 的活;这里手写同一形状)。
-    RecordRequest requested;
-    requested.kind = EventKind::ControlCommandRequested;
-    requested.scope = current->main->base_scope();
-    requested.scope.actor = Actor::User;
-    requested.scope.origin = Origin::ExternalUser;
-    requested.scope.visibility = {Visibility::HostOnly};
-    requested.scope.training_policy = TrainingPolicy::Exclude;
-    requested.payload["command_id"] = "cmd-resume-0001";
-    requested.payload["command_name"] = "resume";
-    requested.payload["action_name"] = "resume";
-    requested.payload["effect_class"] = "session_boundary";
-    requested.payload["args_ref"] = nlohmann::json{{"source_session_id", source.id}};
-    const auto requested_receipt = current->main->Record(requested, Durability::PowerLoss);
-    REQUIRE(requested_receipt.status == RecordReceipt::Status::Committed);
+    // V3-LEGACY-01 后当前场是 v3:requested 由 ResumeInteractive 的真轨落
+    // 账,这里不再手写 v2 信封形状(生产注释:v3 场写不了 v2 requested)。
     NullClearParticipant participant;
     REQUIRE(manager.Close({"switch_to_resume"}, &participant).error_code.empty());
 
@@ -376,7 +421,6 @@ TEST_CASE("七步: 交互路带跨 session command.completed") {
     request.previous_session_id = current_id;
     request.boundary_command.command_id = "cmd-resume-0001";
     request.boundary_command.requested_session_id = current_id;
-    request.boundary_command.requested_event_id = requested_receipt.event_id;
     request.boundary_command.boundary_operation_id = current_id + ":resume";
     const ResumeOutcome outcome = manager.ResumeAsNew(request);
     CAPTURE(outcome.error_code);
@@ -384,19 +428,34 @@ TEST_CASE("七步: 交互路带跨 session command.completed") {
     REQUIRE(outcome.error_code.empty());
     CHECK(outcome.command_completed_event_id.size() > 0);
 
-    // 新 main:run.started → resume.source.attached → 跨 session completed
-    //(qualified ref 指回旧 requested,同带 boundary_operation_id)。
-    const auto events = Events(manager.active()->directory.main_stream_path());
-    REQUIRE(events.size() >= 3);
-    CHECK(events[2].at("kind").get<std::string>() == "control.command.completed");
-    const auto& completed = events[2].at("payload");
-    CHECK(completed.at("qualified_requested_ref").at("session_id").get<std::string>() == current_id);
-    CHECK(completed.at("qualified_requested_ref").at("event_id").get<std::string>() ==
-          requested_receipt.event_id);
-    CHECK(completed.at("boundary_operation_id").get<std::string>() == current_id + ":resume");
-    // run.started 的 previous_session_id 指向刚封口的当前场,resumed_from 指向 source。
-    CHECK(events[0].at("payload").at("previous_session_id").get<std::string>() == current_id);
-    CHECK(events[0].at("payload").at("resumed_from_session_id").get<std::string>() == source.id);
+    // v2 源 fork 新场唯一 v3:跨 session command.completed(qualifiedRequestedRef
+    // 指回旧场,commandId/boundaryOperationId 贯穿)落在新场账上。
+    ActiveSession* active = manager.active();
+    REQUIRE(active != nullptr);
+    REQUIRE(active->is_v3());
+    const std::filesystem::path new_stream =
+        active->session_dir() / std::filesystem::path(outcome.new_session_id + ".jsonl");
+    bool saw_completed = false;
+    {
+        std::ifstream in(new_stream, std::ios::binary);
+        REQUIRE(in.is_open());
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (line.empty()) continue;
+            const auto row = nlohmann::json::parse(line, nullptr, false);
+            if (row.is_discarded() || row.value("type", std::string()) != "event" ||
+                row.value("kind", std::string()) != "command.completed") {
+                continue;
+            }
+            saw_completed = true;
+            const auto& completed = row.at("payload");
+            CHECK(completed.at("qualifiedRequestedRef").at("sessionId").get<std::string>() ==
+                  current_id);
+            CHECK(completed.at("boundaryOperationId").get<std::string>() == current_id + ":resume");
+        }
+    }
+    CHECK(saw_completed);
 }
 
 TEST_CASE("第 1 步拒路: 活锁在外进程 / corrupt source / 找不到场") {
@@ -457,10 +516,45 @@ TEST_CASE("第 2/4 步: checkpoint 高水位与悬空工具分档") {
     const auto root = MakeRoot("dangling");
     {
         FakeClock clock;
-        SessionManager manager(Opts(root), &clock);
-        auto* active = manager.LaunchSession().value_or(nullptr);
-        REQUIRE(active != nullptr);
-        TrajectoryRecorder& main = *active->main;
+        // V3-LEGACY-01 后 v2 场造不出:手植未封口 v2 悬空档(真 recorder
+        // 写到工具 started,无 terminal/session.ended),崩溃现场原样。
+        const SessionManagerOptions options = Opts(root);
+        const auto identity =
+            lubancode::workspace::MakeFallbackIdentity(options.workspace_root);
+        auto room = TrajectoryDirectory::CreateWorkspace(options.workspaces_root, identity,
+                                                         clock.WallMs());
+        REQUIRE(room.has_value());
+        const std::string planted_id = "20260924-210000-DANGL1";
+        SessionManifest manifest;
+        manifest.schema_version = 2;
+        manifest.workspace_key = identity.workspace_key;
+        manifest.session_id = planted_id;
+        manifest.launch_cwd = options.launch_cwd;
+        manifest.main_run_id = "main-0001";
+        manifest.run_kind = RunKindName(RunKind::MainSession);
+        manifest.start_reason = "process_launch";
+        manifest.status = SessionStatusName(SessionStatus::Running);
+        manifest.created_at_ms = clock.WallMs();
+        manifest.lubancode_version = options.lubancode_version;
+        manifest.event_schema_version = 2;
+        auto created = TrajectoryDirectory::CreateSession(options.workspaces_root,
+                                                          manifest.workspace_key, manifest);
+        REQUIRE(created.has_value());
+        EventScope scope;
+        scope.workspace_key = manifest.workspace_key;
+        scope.session_id = planted_id;
+        scope.run_id = manifest.main_run_id;
+        scope.run_kind = RunKind::MainSession;
+        scope.visibility = {Visibility::HostOnly};
+        auto started_recorder = TrajectoryRecorder::Start(
+            created->main_stream_path(), created->artifacts_root(), scope, RecorderOptions{},
+            &clock);
+        REQUIRE(started_recorder.has_value());
+        auto main_owner = std::move(*started_recorder);
+        TrajectoryRecorder& main = main_owner;
+        REQUIRE(main.WriteRunStarted(nlohmann::json{{"start_reason", "process_launch"}},
+                                     Durability::PowerLoss)
+                    .status == RecordReceipt::Status::Committed);
         EventScope turn = main.base_scope();
         turn.turn_id = "turn-0001";
         turn.actor = Actor::User;
@@ -518,7 +612,7 @@ TEST_CASE("第 2/4 步: checkpoint 高水位与悬空工具分档") {
         REQUIRE(Put(main, EventKind::ToolExecutionStarted, tool,
                     nlohmann::json{{"call_id", "call-0001"}}, {}, Durability::PowerLoss)
                     .status == RecordReceipt::Status::Committed);
-        // 不封口:manager 析构放锁走人(崩溃现场:账完整、run 未终)。
+        // 不封口:recorder 放句柄走人(崩溃现场:账完整、run 未终)。
     }
 
     // 找回 session id(session.json 还在)。账本制:workspaces 下还有
