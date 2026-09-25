@@ -397,7 +397,10 @@ TEST_CASE("Compact: 指令正文来自 compact-handoff 模块,用户目录可覆
     REQUIRE(result.has_value());
     REQUIRE(backend.captured_requests.size() == 1);
     const std::string& system = backend.captured_requests[0].system;
-    CHECK(system.find("This is a history compaction request") != std::string::npos);
+    CHECK(system.find("你只负责压缩对话历史") != std::string::npos);
+    CHECK(system.find("禁止只输出标题、空标签、占位词或格式说明") != std::string::npos);
+    CHECK(system.find("正文结束后立即输出 JSON manifest") != std::string::npos);
+    CHECK(system.find("目标：\n当前有效要求：") == std::string::npos);
     CHECK(system.find("[用户任务]") != std::string::npos);
     CHECK(system.find("[工作状态]") != std::string::npos);
     CHECK(system.find("## 任务目标") == std::string::npos);
