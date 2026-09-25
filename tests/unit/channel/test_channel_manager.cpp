@@ -15,6 +15,7 @@
 #include <map>
 
 #include "channel/manager.hpp"
+#include "channel/frame.hpp"
 #include "fake_channel_sidecar.hpp"
 #include "runtime/idle_wake.hpp"
 
@@ -35,14 +36,26 @@ std::filesystem::path MakeStateRoot(const char* test_name) {
 // fake sidecar 挂上 manager 的 Transport。
 class FakeTransport final : public ChannelBridgeTransport {
 public:
-    explicit FakeTransport(FakeChannelSidecar& sidecar) : sidecar_(sidecar) {}
+    explicit FakeTransport(FakeChannelSidecar& sidecar, bool status_before_start_reply = false)
+        : sidecar_(sidecar), status_before_start_reply_(status_before_start_reply) {}
     void WriteToSidecar(const std::byte* data, std::size_t size) override {
         sidecar_.FeedFromHost(data, size);
     }
-    std::vector<std::byte> DrainFromSidecar() override { return sidecar_.DrainToHost(); }
+    std::vector<std::byte> DrainFromSidecar() override {
+        auto bytes = sidecar_.DrainToHost();
+        if (status_before_start_reply_ && sidecar_.started()) {
+            status_before_start_reply_ = false;
+            const auto status = EncodeFrame(BuildNotificationJson(
+                BridgeMethod::Status, nlohmann::json{{"state", "running"}}));
+            REQUIRE(status.has_value());
+            bytes.insert(bytes.begin(), status->begin(), status->end());
+        }
+        return bytes;
+    }
 
 private:
     FakeChannelSidecar& sidecar_;
+    bool status_before_start_reply_ = false;
 };
 
 // ChannelWakeCoordinator -> 真 IdleWakeCoordinator 的装配适配器
@@ -630,4 +643,25 @@ TEST_CASE("QQ 裸账号默认询问档:注册侧生效,显式策略原样保留"
     REQUIRE(feishu.status == RouteDecision::Status::Admitted);
     CHECK(feishu.tools.Allows("run_command"));
     CHECK(feishu.tools.source.empty());
+}
+
+TEST_CASE("running status before start reply remains Running without duplicate transition") {
+    const auto root = MakeStateRoot("running-before-start-reply");
+    FakeChannelSidecar sidecar;
+    FakeTransport transport(sidecar, true);
+    ChannelManager manager(MakeOptions(root));
+    const auto added = AddAndStart(manager, sidecar, transport);
+    REQUIRE(added.status == ChannelManager::AddAccountResult::Status::Ok);
+    const auto snapshot = manager.Snapshot("qqbot", "main");
+    REQUIRE(snapshot.has_value());
+    CHECK(snapshot->state == ChannelAccountState::Running);
+    CHECK(snapshot->lock_held);
+    int running_transitions = 0;
+    for (const auto& transition : snapshot->recent_transitions) {
+        running_transitions += transition.to == ChannelAccountState::Running ? 1 : 0;
+        CHECK(transition.to != ChannelAccountState::Degraded);
+        CHECK(transition.to != ChannelAccountState::Backoff);
+    }
+    CHECK(running_transitions == 1);
+    CHECK_FALSE(manager.StopAccount("qqbot", "main").has_value());
 }

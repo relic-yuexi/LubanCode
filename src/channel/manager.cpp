@@ -529,6 +529,11 @@ void ChannelManager::HandleMessageLocked(AccountEntry& entry, const IncomingMess
                     }
                     return;
                 case BridgeMethod::Start:
+                    // 网关线程可能先上报 running，再回 start 成功；此时已就绪，
+                    // 不重复迁移，也不把合法的回执顺序误判为连接故障。
+                    if (entry.state == ChannelAccountState::Running) {
+                        return;
+                    }
                     if (const auto error =
                             TransitionLocked(entry, ChannelAccountState::Running, "", "")) {
                         NotifyTransportFailureLocked(entry, std::string(kReasonTransitionFailed),

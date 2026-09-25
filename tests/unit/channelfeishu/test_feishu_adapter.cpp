@@ -591,7 +591,7 @@ TEST_CASE("feishu_adapter: manager 全链——AddAccount/Start 推进到 Runnin
     AdapterHarness harness("manager_flow");
     harness.adapter = std::make_unique<FeishuBotAdapter>(harness.MakeAdapterOptions());
     harness.AttachManager();
-    (void)harness.manager->StartAccount("feishu", "main");
+    REQUIRE_FALSE(harness.manager->StartAccount("feishu", "main").has_value());
     REQUIRE(harness.PumpUntil([&] { return harness.State() == ChannelAccountState::Running; }));
     CHECK(harness.adapter->gateway_thread_running());
 
