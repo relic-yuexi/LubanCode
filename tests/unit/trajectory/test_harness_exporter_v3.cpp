@@ -411,6 +411,11 @@ TEST_CASE("v3 子代理子流:两行 record,child 的 parent_run_id 指回 main 
     const auto call_receipt = writer.AppendMessage(std::move(call), v3::Durability::PowerLoss);
     REQUIRE(call_receipt.status == v3::WriteReceipt::Status::Committed);
     REQUIRE(writer.AdmitMessages({call_receipt.id}).status == v3::WriteReceipt::Status::Committed);
+    // FoldToolActions 只认 tool.* 事件(action_id 键),声明 tool_calls 的
+    // 消息本身不算数——不落一枚 Admit,主账 tools 折叠不出这枚 action,
+    // 断言 child_run_id 回链无处可查。与 InstallToolTurn 同一路数。
+    v3::ToolActionSession::Admit(writer, turn_id, "step-000001", action_id, "queued",
+                                 call_receipt.id, action_id);
 
     const std::string child_id = "20260907-000002-CCCCCC";
     v3::SubagentSpawn spawn = v3::SubagentSpawn::Request(
