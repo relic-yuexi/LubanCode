@@ -1189,6 +1189,8 @@ add_library(lubancode_runtime STATIC
   src/runtime/channel_media_service.cpp
   src/runtime/channel_file_delivery.cpp
   src/runtime/headless_progress.cpp
+  # 远端首批组件：节点本地结果同步策略与稳定预览，尚未接远端服务。
+  src/remote/result_sync.cpp
   # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
   # 归本库;engine 不反向引 runtime 的链接纪律见 turn_runtime.cpp 头注)。
   src/runtime/middleware_assembly.cpp
