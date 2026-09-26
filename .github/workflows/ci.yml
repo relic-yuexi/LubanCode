@@ -39,6 +39,8 @@ jobs:
       memory_worker: ${{ steps.c.outputs.memory_worker }}
       agent_lifetime: ${{ steps.c.outputs.agent_lifetime }}
       workflow_threads: ${{ steps.c.outputs.workflow_threads }}
+      cross_platform: ${{ steps.c.outputs.cross_platform }}
+      remote_tests: ${{ steps.c.outputs.remote_tests }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -47,12 +49,19 @@ jobs:
         id: c
         shell: bash
         run: |
+          # 只认提交里的实现或测试，不把空目录/schema 草稿算成已接线。
+          remote_present=false
+          if [ -n "$(git ls-files 'src/remote/*.cpp' 'src/remote/*.hpp' 'tests/unit/remote/test_*.cpp' 'tests/integration/remote/test_*.cpp')" ]; then
+            remote_present=true
+          fi
           # 手动 dispatch 不看 diff:指定 ref 上的代码就是要验的代码,直接
           # 放双平台(build-test);asan/tsan 诊断腿不沾(单册诊断用不着)。
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             echo 'memory_worker=true' >> "$GITHUB_OUTPUT"
             echo 'agent_lifetime=false' >> "$GITHUB_OUTPUT"
             echo 'workflow_threads=false' >> "$GITHUB_OUTPUT"
+            echo 'cross_platform=false' >> "$GITHUB_OUTPUT"
+            echo 'remote_tests=false' >> "$GITHUB_OUTPUT"
             echo 'code=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -70,14 +79,33 @@ jobs:
             echo "base unreachable, run full" >&2
             echo "code=true" >> "$GITHUB_OUTPUT"
             echo "workflow_threads=true" >> "$GITHUB_OUTPUT"
+            echo 'cross_platform=true' >> "$GITHUB_OUTPUT"
+            echo "remote_tests=$remote_present" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           code=false
           memory_worker=false
           agent_lifetime=false
           workflow_threads=false
+          cross_platform=false
+          remote_tests=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
+            # 远端模式须在子 PR 合入前验三平台，base 可为集成分支。
+            # 公共构建接线仅在 remote 组件已入树时加腿；普通 PR 沿旧策略。
+            # ci.yml 自身改动也跑三平台，验证本门，不冒充已有 remote 测试。
+            case "$f" in
+              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|.github/workflows/ci.yml)
+                cross_platform=true
+                remote_tests=$remote_present
+                code=true ;;
+              CMakeLists.txt|tests/CMakeLists.txt|cmake/*|vcpkg.json)
+                if [ "$remote_present" = true ]; then
+                  cross_platform=true
+                  remote_tests=true
+                  code=true
+                fi ;;
+            esac
             # AR-01(子代理线程寿命)起:子代理派工/装配面改动跑 linux-asan
             # 腿——悬垂访问这类病在常规腿上安静,AddressSanitizer 一眼红;
             # 其余 PR 零新增开销(与 memory_worker 同款按路径点腿)。
@@ -133,6 +161,28 @@ jobs:
           echo "memory_worker=$memory_worker" >> "$GITHUB_OUTPUT"
           echo "agent_lifetime=$agent_lifetime" >> "$GITHUB_OUTPUT"
           echo "workflow_threads=$workflow_threads" >> "$GITHUB_OUTPUT"
+          echo "cross_platform=$cross_platform" >> "$GITHUB_OUTPUT"
+          echo "remote_tests=$remote_tests" >> "$GITHUB_OUTPUT"
+
+      - name: Report selected coverage
+        env:
+          CODE: ${{ steps.c.outputs.code }}
+          CROSS_PLATFORM: ${{ steps.c.outputs.cross_platform }}
+          REMOTE_TESTS: ${{ steps.c.outputs.remote_tests }}
+          WINDOWS_SENSITIVE: ${{ steps.c.outputs.memory_worker }}
+          AGENT_LIFETIME: ${{ steps.c.outputs.agent_lifetime }}
+          WORKFLOW_THREADS: ${{ steps.c.outputs.workflow_threads }}
+        shell: bash
+        run: |
+          {
+            echo '### Selected CI coverage'
+            echo "- code=$CODE; cross_platform=$CROSS_PLATFORM; Windows-sensitive=$WINDOWS_SENSITIVE"
+            echo "- remote test registration required=$REMOTE_TESTS"
+            echo "- agent/runtime ASan=$AGENT_LIFETIME; workflow TSan=$WORKFLOW_THREADS"
+            echo '- cross_platform adds Windows and Linux full tests before merge; macOS remains enabled.'
+            echo '- remote registration false means not selected, not a remote test pass; no schema validation is provided.'
+            echo '- Manual test_filter retains the Windows/macOS diagnostic scope; it is not three-platform acceptance.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # TUI 排版批 8 收口:src/ 禁止八进制 ESC 裸转义(\033)。批 6 已把
       # 全仓硬编码 ANSI 清零、统一 \x1b 十六进制写法,这道门把成果焊死。
@@ -149,7 +199,7 @@ jobs:
   # fromJSON 接。分支快车道(agent/ci 分支)只烧 macos 一腿最快出信号;
   # main 和记忆 worker/Windows 进程/Windows 瞬态文件语义敏感面(gateway
   # 命令文件 IO、助理任务册、telemetry 册)与依赖接线(根 CMakeLists.txt)
-  # 改动跑双平台，其余 PR 只跑 macOS。
+  # 改动跑双平台；remote 三平台门也选 Windows，其余 PR 只跑 macOS。
   lane:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -161,7 +211,7 @@ jobs:
         id: pick
         shell: bash
         run: |
-          if [[ "${{ needs.changes.outputs.memory_worker }}" == "true" || ( "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ) ]]; then
+          if [[ "${{ needs.changes.outputs.memory_worker }}" == "true" || "${{ needs.changes.outputs.cross_platform }}" == "true" || ( "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ) ]]; then
             echo 'legs=[{"name":"windows-msvc","os":"windows-latest"},{"name":"macos-clang","os":"macos-latest"}]' >> "$GITHUB_OUTPUT"
           else
             echo 'legs=[{"name":"macos-clang","os":"macos-latest"}]' >> "$GITHUB_OUTPUT"
@@ -346,6 +396,25 @@ jobs:
           cmake --build build --config Release --target lubancode -j 4
           cmake --build build --config Release --target lubancode_tests -j 4
 
+      # 先查登记，后面的全量 Test 真跑；不重复执行，也不让零册冒绿。
+      - name: Require registered remote tests
+        if: needs.changes.outputs.remote_tests == 'true'
+        shell: bash
+        run: |
+          ctest --test-dir build -C Release --show-only=json-v1 -R '^(unit|integration)\.remote\.' > build/remote-test-list.json
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" - <<'PY'
+          import json
+          with open('build/remote-test-list.json', encoding='utf-8') as stream:
+              tests = json.load(stream)['tests']
+          enabled = [test['name'] for test in tests if not any(
+              prop['name'] == 'DISABLED' and prop['value']
+              for prop in test.get('properties', []))]
+          if not enabled:
+              raise SystemExit('No enabled remote tests registered in CTest')
+          print('Remote tests included in the full Test step: ' + ', '.join(enabled))
+          PY
+
       # T16 勾五:跑测试前把"这一轮跑的到底是什么"记成机器可读的一笔账
       #(版本/HEAD/工作区 diff 指纹/夹具树 hash/构建产物/环境)。产物随
       # 测试证据上传;基线更新时对旧账 --compare 点名变化,不复用旧通过
@@ -425,7 +494,7 @@ jobs:
   # 矩阵(debian11/debian12/ubuntu2404)真跑把关。
   linux-manylinux:
     needs: changes
-    if: needs.changes.outputs.code == 'true' && (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: needs.changes.outputs.code == 'true' && (needs.changes.outputs.cross_platform == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     name: linux-manylinux
     runs-on: ubuntu-latest
     container:
@@ -512,6 +581,23 @@ jobs:
           cmake --build build --target lubancode -j "$(nproc)"
           cmake --build build --target lubancode_tests -j "$(nproc)"
 
+      - name: Require registered remote tests
+        if: needs.changes.outputs.remote_tests == 'true'
+        run: |
+          ctest --test-dir build -C Release --show-only=json-v1 -R '^(unit|integration)\.remote\.' > build/remote-test-list.json
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" - <<'PY'
+          import json
+          with open('build/remote-test-list.json', encoding='utf-8') as stream:
+              tests = json.load(stream)['tests']
+          enabled = [test['name'] for test in tests if not any(
+              prop['name'] == 'DISABLED' and prop['value']
+              for prop in test.get('properties', []))]
+          if not enabled:
+              raise SystemExit('No enabled remote tests registered in CTest')
+          print('Remote tests included in the full Test step: ' + ', '.join(enabled))
+          PY
+
       - name: Test
         id: test
         run: ctest --test-dir build -C Release --parallel "$(nproc)" --output-on-failure --no-tests=error
@@ -539,7 +625,7 @@ jobs:
     name: run-on-debian11
     runs-on: ubuntu-latest
     needs: [changes, linux-manylinux]
-    if: needs.changes.outputs.code == 'true' && (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: needs.changes.outputs.code == 'true'
     container:
       image: debian:11-slim
     steps:
