@@ -4,6 +4,7 @@
 
 - [构建与发行](build-and-release.md)
 - [测试指南](testing.md)
+- [分布式工程协作与远端验收](cluster-collaboration.md)
 - [文档规范](documentation.md)
 - [命名与计数](naming.md)
 - [安全模型](security.md)

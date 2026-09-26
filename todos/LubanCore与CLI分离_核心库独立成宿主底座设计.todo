@@ -1,13 +1,39 @@
 # LubanCore 与 CLI 分离：可嵌入、可换组件的 Agent SDK
 
 - 状态：设计待实现。本次只完善方案，不代表 SDK、数据库适配或集群能力已经落地。
-- 初立：2026-09-01；修订：2026-09-05。
+- 初立：2026-09-01；修订：2026-09-05、2026-09-27（复核当前装配与 SDK 交付顺序）。
 - 级别：P1；近期先交付本地 SDK，生产组件按阶段推进。
 - 用户目标：别人能调用 LubanCore 写自己的程序；CLI、Web、后台服务、任务编排都接同一套运行能力。默认本地可用，需要数据库、常驻调度或多节点时，可以接入相应组件。
 - 范围：宿主 API、组件 SPI、会话隔离、存储合同、调度恢复、并发、生产部署、构建安装与迁移。
 - 关联：`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`持久Agent_Gateway接入SessionV3_常驻助理与可靠自动任务总装计划.todo(旧总装单已删,2026-09-17)`、`分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo`（原集群畅想单已并入其第二十九章）。
 - 本地存储合同以 `docs/development/workspace-storage-v2/P0-0-contracts.md` 为准。原单引用的 `Workspace统一存储_旧Session退场与分级Memory迁移.todo` 当前未找到，不再把它当唯一依据。
 - 本单统管 SDK 边界与分期。Gateway 单落实常驻、自动任务和恢复；集群单落实节点、租约与控制面。开工相应阶段前同步关联单，消除旧前置与旧描述，不维护两套冲突合同。
+
+## 本轮复核与开工口径（2026-09-27）
+
+用户重新提出 LubanCore SDK 的解耦问题。结论：可以解耦，应正面推进 SDK；远端进程协议负责通信，不能替代“别人链接库即可写自己的宿主”这个目标。已有结果同步与 CI 小批继续独立推进，不替 SDK 定内部接口。
+
+当前基线 `893e2b1a`（集成分支代码基线，路线图提交不计）已经有 AgentLoop、SessionService、SessionRuntime、InteractionBroker 和会话账，不需另写 Agent 执行器。真正要收敛的是工具/后端装配、会话全局状态和公开交付面。下面源码观察未经过本地编译；构建和执行验证全部交远端 CI。
+
+### 本轮建议的主线
+
+1. 先冻结最小 C++ 宿主合同与拥有关系，同时迁出不带 UI 的共用装配。首版默认本地文件账、可注入数据根/资源根、模型后端与工具；不等所有数据库适配、常驻调度或完整集群完成。
+2. CLI、one-shot、AppServer 与远端 Worker 逐批接同一工厂和会话 API。宿主仍决定入口、默认策略和展示；共用装配不意味着把 CLI 的默认全工具权限原封不动给远端。
+3. 外部小程序只链接安装后的 `LubanCore::Core` 与公开头，就能跑真实会话流程。先过 B，再过 C 的同进程多会话门；一 Session 一 Worker 可用于部署隔离，但不能拿进程隔离替代 SDK C 批验收。
+
+推荐依赖关系：CLI/AppServer/远端 Worker → SDK → 会话服务与中立装配 → Provider/工具/本地存储等适配。Control 的网页、登录、节点登记、心跳、网络连接和实验 Runner 的 OS 托管都不塞进 Core。完整工具结果由 Core 的可信本地调用方使用；远端 preview/full 是节点出网投影策略，不修改 Core 的模型上下文或本地结果真相。
+
+用户当前约束一并生效：已有项目允许多 Session 共用同目录；GPU 占用/分配不纳管；本地不编译；子 PR 先指向集成分支，不直接合 main。
+
+### 三个可验收的小批（归入 A/B/C，不另造一套总排期）
+
+| 小批 | 改什么 | 退出标准 |
+|---|---|---|
+| SDK-1：中立装配 | 迁出 BuildBackend、基础内置工具注册与拥有型组件装配；诊断由事件返回，不引用 Theme/Spinner/终端输入；默认权限仍由宿主显式提供 | CLI 与 AppServer 共用迁出的实现；MCP/插件失败与释放顺序有测试；全工具覆盖清单逐项记录，未迁完不宣称 B 已完成 |
+| SDK-2：窄门面与可安装产物 | 由中立 SessionFactory 拥有会话材料，归并 AppServer/HeadlessExecutor 的共用回合驱动；在 SessionService 等真实服务上封装受控句柄，公开请求/回执/事件/错误并导出独立无终端目标 | 源码树外项目只用安装产物完成假后端＋真文件工具、审批、取消、恢复、查结果、Shutdown；不 include src，不链接 CLI/AppServer，不拉起子进程 CLI 冒充嵌入 |
+| SDK-3：跨 Session 状态与宿主迁移收口 | 去进程级 cwd/语言等可变会话状态；定订阅/回调/关闭次序；补各宿主一致性 | 同目录两场、不同目录两场均能并发；模型/权限/上下文/取消不串；慢订阅、在途审批、关闭竞态有远端三平台证据；共享文件冲突不冒充已解决 |
+
+SDK-1 期间 API 讨论和状态盘点可并行，公共头未定前不让多个分支各造 Session 类型。第一版不要求实现所有 SPI，但实际配置、路径、凭据与生命周期的依赖必须通过明确入口传入；不能把整个内部对象图换个公开命名就交付。
 
 ## 一、Core 究竟替别人做什么
 
@@ -40,24 +66,24 @@ Core 管执行与状态规则；宿主管入口、连接、进程托管和业务
 
 ## 三、当前事实与断口
 
-以下来自 2026-09-05 源码检视，未在本轮重新跑构建或运行测试。开工前按 HEAD 更新。
+以下按 `893e2b1a` 代码复核，时间为 2026-09-27。只读源码，不把已有注释或 CMake 库名当作 SDK 已交付。
 
-| 已有落点 | 断口 | 迁移方向 |
+| 已有落点 | 当前断口 | 迁移方向 |
 |---|---|---|
-| `CMakeLists.txt` 的 engine/runtime/core/app | core 仍编终端画面件，engine 仍编 cli 叶子与部分 Gateway 件 | 按职责分目标，不能只改目录名 |
-| `src/app/session_stack.*` | 共用装配混着 Spinner、ContextTracker | 抽中立 SessionFactory，终端另包一层 |
-| `src/app/tool_runtime.hpp` | 构造接口还收 CLI Theme | 诊断变结构化事件，展示交宿主 |
-| `src/runtime/session_runtime.*` | 已管账与部分状态，尚不是完整 SDK 门面 | 复用它，补所有权、生命周期与窄 API |
-| `src/runtime/event_sink.hpp` | 生产线程同步调用，裸指针由调用方保活 | 补订阅、队列、异常与解除订阅合同 |
-| `src/runtime/interaction_broker.hpp` | 已有中立审批问询通道 | 统一接入，不另造审批体系 |
-| `src/runtime/session_command_service.*` | 已有会话命令，仍依赖本地轨迹管理 | 保留领域命令，底层改经存储 SPI |
-| `src/runtime/worktree.cpp` | 会修改进程 cwd | 改成会话 cwd，子进程显式收 cwd |
-| `src/cli/i18n.cpp`、配置与路径代码 | 有进程级语言、home、env 与资源定位 | 分清进程默认值和会话快照 |
-| AppServer、ChannelSessionHost | 已有不同宿主消费底层件的先例 | 接共用装配，不据此宣称生产多租户已完成 |
-| `tests/unit/app/test_app_boundary_gate.cpp` | 已有守门，带白名单与目录范围 | 按真实 target 和传递依赖补齐 |
-| workspace/trajectory 存储 | 本地身份、目录、文件账紧密相连 | 保留默认行为，拆逻辑身份与物理落点 |
+| `CMakeLists.txt:1236` 的 lubancode_core | 源文件仍包含 cli 终端逻辑；`:1345` 公开内部 src；`:1609` 只安装主程序，无 LubanCore::Core 安装导出 | 以真实依赖闭包拆目标；旧兼容库不能直接改别名充当 SDK |
+| `src/app/session_stack.hpp:20` 起、`:122` | 装配仍依赖 InteractiveSessionOptions、ToolRuntime、SpinnerBackend 与 ContextTracker | 会话材料与 UI 包装分开，中立工厂不认识终端 |
+| `src/app/backend_stack.cpp:17` 的 BuildBackend | 当前放 app，主要依赖 api/config | 先迁共用后端工厂，宿主只传已解释配置 |
+| `src/app/tool_runtime.cpp:99` 的 BuildBaseToolRegistry、`:470` 的 ToolRuntime | 完整基础工具注册与 MCP/插件装配仍夹 Theme、cout；交互与 one-shot 在用 | 基础注册和拥有型资源迁中立层；诊断通过接口交宿主 |
+| `src/app_server/session_assembly.hpp:66` 的 HeadlessMcpRuntime 与 AssembleSession | 与 CLI 的 MCP owner 同构，因 CLI ToolRuntime 拖 Theme 而重复；当前 headless 部署档工具集合较窄 | 复用显式计划、失败回执与拥有关系，与完整内置工具注册合流；原零工具默认仍保留 |
+| `src/runtime/session_service.hpp:123` 起 | 已有持久接纳、同键去重、派发/终态与恢复；仍是内部服务 | 窄 SDK 调用面包住真实服务，不再另写提交账 |
+| `src/runtime/session_runtime.hpp:19` | 已管身份/账/权限，后端与工具栈仍由宿主装配 | 保留状态实现，交中立会话拥有者统一接线 |
+| `src/runtime/headless_executor.hpp:183`、cpp:420 | 借用 backend/registry，执行段混有自动任务/渠道与 reply selection | 提共用回合驱动，不直接把整只 HeadlessExecutor 改名 SDK |
+| `src/runtime/event_sink.hpp:23`、`:53` | 生产线程同步推送，Fanout 只 Add，裸指针保活由宿主承担 | 公开可取消订阅句柄，定在途回调、异常与关闭合同 |
+| `src/runtime/interaction_broker.hpp:43` | 已有中立审批问询接口 | 沿用，补宿主身份、过期与取消策略，不造第二套审批 |
+| `src/runtime/worktree.cpp:701/751/824/857` 与 cli/i18n.cpp | 仍有进程 cwd 和语言状态 | cwd 与语言归会话；同目录可共享，切目录不改变别场状态 |
+| workspace/trajectory | 项目身份和 Session 账可分开，同 workspace 多 Session 不要求项目独占 | 保留 V3 同 ID 续写、V2 迁移边界；数据根可注入，不先重做全部存储 |
 
-当前有会话落盘、恢复和常驻相关零件，不能写成“启动后什么都没有”；也不能把零件说成已交付可插拔持久 Agent。
+AppServer、ChannelSessionHost 和 CLI 已复用一部分领域服务，说明接缝存在。它们仍有不同装配方式，不能据此称“统一 SDK 已实现”。
 
 ## 四、目标分层
 
@@ -121,7 +147,9 @@ RequestContext 带可信调用身份、租户作用域、request_id、trace_id �
 
 同一 Session 的 main turn 单飞。忙时排队或拒绝由创建策略定死。同场命令、切模型和切目录也经串行状态入口，在回合边界应用快照。
 
-跨 Session 有界并发。限制活跃会话、排队数、模型请求、工具进程、后台任务和租户配额；排队也计容量。闲置会话不永久占工作线程。
+跨 Session 有界并发。限制本系统活跃会话、排队数、模型请求、工具进程与后台任务；排队也计容量。闲置会话不永久占工作线程。GPU 占用、分配与调度不由本系统管理。
+
+同一已有项目可开多场 Session，各场 cwd 可以相同；独立的是会话上下文、权限状态和操作账，不是强制独占目录。仅同一 Session 禁止两只活写者，项目索引用短事务锁；共享文件并发修改的冲突另按工具合同处理。
 
 共享只读数据可进程缓存；凭证、语言、cwd 与可变连接状态按范围隔离。子代理明确快照、预算与取消传播。工具不得读写进程 cwd 来表达会话状态。
 
@@ -307,7 +335,7 @@ API、SPI、远程协议、存储 schema 分别版本化。公开变更给迁移
 - [ ] 工具与 worktree 不改进程 cwd；配置、语言、权限、凭证隔离。
 - [ ] 同场串行、跨场有界并发、背压、预算与截止时间落地。
 - [ ] 生命周期、订阅解除、回调异常、慢消费者和关闭期间审批有合同测试。
-- [ ] 两场会话用不同目录、模型、语言和权限并发；切目录、取消、关闭互不串状态。
+- [ ] 同一已有目录开两场，以及不同目录开两场；分别使用不同模型、语言和权限并发，切目录、取消、关闭互不串状态。共享目录模式不自动复制项目，不加项目运行长锁。
 - [ ] Windows 与至少一种 POSIX 环境验证，测真实工具进程回收，建立并发容量基线。
 
 验收：可称同进程多会话 SDK 基线，不外推多租户安全或集群高可用。
