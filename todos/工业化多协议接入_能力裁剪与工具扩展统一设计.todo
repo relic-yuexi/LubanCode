@@ -27,8 +27,8 @@
 | --- | --- | --- |
 | [AppServer 接入 SessionV3](AppServer接入SessionV3_统一入口与事件恢复设计.todo) | 补生产装配、多协议映射、能力合同 | session/input/operation/events 的业务语义与 2.0 协议主单 |
 | [LubanCore 与 CLI 分离](LubanCore与CLI分离_核心库独立成宿主底座设计.todo) | 抽无终端装配服务，避免 Theme 进入运行核心 | SDK 导出、对象寿命、核心与宿主依赖 |
-| [多租户隔离](多租户隔离_身份授权与隔离Worker落地设计.todo) | 复用可信身份、授权项目映射、Worker 隔离与资源范围 | 租户/项目/会话 ACL、OS 隔离、凭据下发 |
-| [多用户多节点控制面](多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo) | 对齐实例路由、租约、writer epoch | 多节点管理与远期集群，不在此承诺已完成 |
+| [多租户隔离（分布式路线图第三十章）](分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo) | 复用可信身份、授权项目映射、Worker 隔离与资源范围 | 租户/项目/会话 ACL、OS 隔离、凭据下发 |
+| [多用户多节点控制面](分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo) | 对齐实例路由、租约、writer epoch | 多节点管理与远期集群，不在此承诺已完成 |
 | [多渠道接入](多渠道消息接入与常驻ChannelPlugin设计.todo) | IM 入口复用 Manager/Router/Ingress/Delivery | 平台账号、Channel Bridge、回复投递 |
 | [Extension Runtime](轻量可塑ExtensionRuntime与动态扩展API设计.todo) | 对齐工具注册、generation、在途引用与回收 | 通用扩展 ABI/SPI，不再造第二套插件清单 |
 | [System Hook 与 Soul 冻结](System拼装Hook_Soul会话冻结与缓存边界.todo) | 工具快照与提示说明同源，变更说明缓存影响 | 提示部件、Soul 生效时点、请求冻结 |
