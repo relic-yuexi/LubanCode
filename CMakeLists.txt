@@ -1069,6 +1069,9 @@ endif()
 # runtime:事件合同 + 会话/轮次/命令编排。不认终端(守门见
 # test_app_boundary_gate.cpp),链 engine(agent/config/tools 的内核件)。
 add_library(lubancode_runtime STATIC
+  # SDK-1:后端与基础工具共用装配,无宿主/终端依赖。
+  src/runtime/assembly/backend.cpp
+  src/runtime/assembly/builtin_tools.cpp
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
   src/runtime/runtime_contract.cpp
   # 会话管理器单第六步:会话查询/搬删的 runtime 侧命令服务(合同消费方)。
@@ -1359,7 +1362,6 @@ endif()
 # app 编排层由主程序与测试共链。此前这些实现各编一遍，Windows 冷构建
 # 为同一批大 TU 付两回账；收成静态库后只编一次，main 只留平台入口。
 add_library(lubancode_app STATIC
-  src/app/backend_stack.cpp
   src/app/memory_extract.cpp
   src/app/model_router.cpp
   # QQ 机器人接入单 Q1:gateway run 的渠道装配(激活接线/trust 快照/QQ

@@ -22,7 +22,7 @@
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
-#include "app/backend_stack.hpp"
+#include "runtime/assembly/backend.hpp"
 #include "tools/registry.hpp"
 
 namespace {
@@ -118,7 +118,7 @@ public:
 
 }  // namespace
 
-using namespace lubancode::app;
+using namespace lubancode::runtime::assembly;
 
 TEST_CASE("叠层次序:索引段 -> 模型指令段 -> 魂段依次追加,魂压轴") {
     CapturingBackend inner;
