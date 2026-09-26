@@ -117,6 +117,8 @@ private:
 
 // 固定前缀预览：整段核编码/脱敏后截断，不提供滚动窗口或分页口。
 // 二进制 preview 只报类型/大小；full 明报 result_not_text，不顺引用取附件。
+// 捕获不完整的 preview 也只报元数据：原件刀口可能留下半枚秘密，不能
+// 仅凭截断标记就让它出网；full 则明报 result_capture_incomplete。
 // 不能用这个 DTO 裁审批材料；审批有自己的参数绑定与展示合同。
 std::expected<FrozenToolResult, ResultSyncError> ProjectSavedToolResult(
     const NodeResultSyncPolicy& policy, const ResultSyncIdentity& identity,

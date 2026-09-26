@@ -189,6 +189,13 @@ std::expected<FrozenToolResult, ResultSyncError> ProjectSavedToolResult(
          (saved_result.capture_complete && *saved_result.original_bytes != saved_result.text.size()))) {
         return std::unexpected(ResultSyncError::InvalidSource);
     }
+    if (!saved_result.capture_complete) {
+        // 本地捕获本就截断时，尾部可能只剩某枚秘密的前半截，任何按完整
+        // 值识别的扫描都可能失手。preview 不发布这段正文；full 已在前面拒绝。
+        payload["status"] = "capture_incomplete";
+        payload["truncated"] = true;
+        return FrozenToolResult(std::move(payload), policy.mode());
+    }
     const std::string raw_text(saved_result.text);
     if (!platform::IsValidUtf8(raw_text)) {
         return std::unexpected(ResultSyncError::InvalidUtf8);

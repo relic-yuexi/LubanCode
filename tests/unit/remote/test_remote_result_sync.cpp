@@ -223,7 +223,8 @@ TEST_CASE("remote result sync: missing and incomplete captures are never reporte
     auto projected = ProjectSavedToolResult(preview, kIdentity, result, secrets);
     REQUIRE(projected.has_value());
     const auto json = Export(*projected, preview, secrets);
-    CHECK(json["text"] == "captured prefix");
+    CHECK_FALSE(json.contains("text"));
+    CHECK(json["status"] == "capture_incomplete");
     CHECK(json["captureComplete"] == false);
     CHECK(json["truncated"] == true);
     CHECK(json["originalBytes"].is_null());
@@ -236,6 +237,29 @@ TEST_CASE("remote result sync: missing and incomplete captures are never reporte
     const auto inconsistent = ProjectSavedToolResult(preview, kIdentity, result, secrets);
     REQUIRE_FALSE(inconsistent.has_value());
     CHECK(inconsistent.error() == ResultSyncError::InvalidSource);
+}
+
+TEST_CASE("remote result sync: incomplete capture cannot expose a partial credential") {
+    SecretRedactor secrets;
+    RegisterSecret(secrets, "abcdefghijklmnop");
+    const auto preview = Policy();
+    const auto full = Policy({{"tool_result_sync", "full"}});
+    for (const std::string partial : {std::string("abcdefghijklmno"), std::string("sk-abc")}) {
+        // 一例是已知值的前15/16，一例是还没到模式识别长度的令牌前缀。
+        auto saved = Text(partial);
+        saved.capture_complete = false;
+        auto record = ProjectSavedToolResult(preview, kIdentity, saved, secrets);
+        REQUIRE(record.has_value());
+        const auto json = Export(*record, preview, secrets);
+        CHECK_FALSE(json.contains("text"));
+        CHECK(json["status"] == "capture_incomplete");
+        CHECK(json["captureComplete"] == false);
+        CHECK(json["truncated"] == true);
+        CHECK(json.dump().find(partial) == std::string::npos);
+        const auto rejected = ProjectSavedToolResult(full, kIdentity, saved, secrets);
+        REQUIRE_FALSE(rejected.has_value());
+        CHECK(rejected.error() == ResultSyncError::ResultIncomplete);
+    }
 }
 
 TEST_CASE("remote result sync: full is opt-in bounded and still redacted") {
