@@ -60,6 +60,7 @@ DOC architecture/memory/design.md
 DOC architecture/memory/flow.md
 DOC architecture/providers/schema.md
 DOC architecture/query-data-flow.md
+DOC architecture/remote-agent-deployment.md
 DOC architecture/sandbox-platform-design.md
 DOC architecture/session-orchestration.md
 DOC architecture/trajectory-v3-schema.md

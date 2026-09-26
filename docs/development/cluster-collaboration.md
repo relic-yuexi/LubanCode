@@ -144,7 +144,7 @@ gh pr create --draft --base feature/distributed-support-roadmap --head codex/clu
 首批先交启动单与待裁决清单。D0 复核通过后，再拆出三路：协议与纯状态机、
 传输与双向 TLS、存储接口与 SQLite。CI 门禁由独立小批补齐。
 三路碰到身份、租约、错误码或序列合同，共用 D0 文档，不各写一套。
-D4 节点桥接仍受 LubanCore B/C 与 D1—D3.5 验收门约束。
+完整 D4 节点桥接仍受 LubanCore B/C 与 D1—D3.5 验收门约束。首用远端模式可沿公开进程协议另拆小批，见[远端部署草案](../architecture/remote-agent-deployment.md)；不能借首用验收销掉完整集群的前置门。
 
 分期依据见[分布式支持路线图](../../todos/分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo)。
 待裁决项写回这张单或本轮启动单；裁决落定后，再把有效合同移入架构文档与 schema。
