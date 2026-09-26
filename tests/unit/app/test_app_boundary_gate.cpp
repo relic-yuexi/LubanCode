@@ -205,6 +205,22 @@ TEST_CASE("守门:三叶子自身零标准流(i18n/theme/line_editor)") {
     }
 }
 
+TEST_CASE("守门:共用装配不依赖宿主头或终端类型") {
+    const auto files = CollectSources({"src/runtime/assembly"});
+    if (!std::filesystem::exists(SourceRoot() / "src")) return;
+    REQUIRE_FALSE(files.empty());
+    for (const auto& path : files) {
+        const std::string code = StripComments(SlurpFile(path));
+        for (const char* forbidden : {"#include \"app/", "#include \"cli/", "#include \"app_server/",
+                                      "#include <app/", "#include <cli/", "#include <app_server/",
+                                      "Theme", "Spinner", "std::cout", "std::cerr", "std::cin",
+                                      "std::clog", "printf(", "puts(", "std::print"}) {
+            CHECK_MESSAGE(code.find(forbidden) == std::string::npos,
+                          (path.generic_string() + " contains " + forbidden));
+        }
+    }
+}
+
 // 骨架拆解反弹·问题 3 的验收线:src/app/wirings/ 是纯装配根,目录下的
 // 文件不许有 TermOut()/TermErr()/ReadLine()/ReadChoiceMenu() 这类直接终端
 // IO——要说话就产事件/回调,由装配层(interactive_session_assembly)画。
