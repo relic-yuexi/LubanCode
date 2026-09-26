@@ -216,7 +216,7 @@ TEST_CASE("守门:共用装配不依赖宿主头或终端类型") {
                                       "Theme", "Spinner", "std::cout", "std::cerr", "std::cin",
                                       "std::clog", "printf(", "puts(", "std::print"}) {
             CHECK_MESSAGE(code.find(forbidden) == std::string::npos,
-                          path.generic_string() + " contains " + forbidden);
+                          (path.generic_string() + " contains " + forbidden));
         }
     }
 }
