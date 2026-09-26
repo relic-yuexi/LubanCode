@@ -51,9 +51,9 @@ GPU 在这里服务于用户实验。Agent 调模型 API 或调用本机模型�
 
 ### 1.2 围绕场景复核最短接入路线
 
-先核两条路线，再定正式代码批次：
+LubanCore 解耦须正面推进，不能用薄协议路线替代 SDK。共用装配和 C++ 宿主 API 按 [Core 单](LubanCore与CLI分离_核心库独立成宿主底座设计.todo) 的 SDK-1/2/3 拆批；下面两条是部署接入边界，不能各自复制一套执行器：
 
-- 复用现有远端 AppServer/assistant 宿主，在公开协议外加节点连接、路由与界面。若可满足首版，先交薄接入层；须补远程认证、连接断开后的任务寿命、历史补读、会话归属和文件产物访问。
+- 复用现有远端 AppServer/assistant 宿主，在公开协议外加节点连接、路由与界面。可先验证连接、回执和界面；远端运行装配仍向共用 SDK 收敛，并补远程认证、任务寿命、历史补读与会话归属。
 - 完整 Node Bridge 通过公开 Core SDK 托管 Session，仍按总纲 D4 及 Core B/C 门推进。
 
 前者是待评审的增量路线，不代表 D4 前置已撤销。不能为了绕过 SDK 门，让 Node Bridge 直接 include app/CLI 内部类型。现有 assistant 只监听回环，普通 app-server 又有不同的断线语义；单改监听地址或转发端口，不能算首版已实现。
@@ -137,7 +137,7 @@ GPU 在这里服务于用户实验。Agent 调模型 API 或调用本机模型�
 |---|---|---|---|
 | `codex/cluster-d0-kickoff` | 本单、协作流程、CI 入口；记录未决项 | 本单、`docs/development/cluster-collaboration.md`、另行认领的 CI 文件 | 先合；不算 D0 全部冻结 |
 | `codex/cluster-d0-contracts` | 逐项复核第三节，落文档/schema/正反例；范围问题有结论后冻结对应合同 | `docs/architecture/cluster/`、`schema/cluster/`、总纲相关条目 | 地基实现前先合所需合同 |
-| `codex/lubancore-sdk-baseline` | Core A 盘点可立即并行；B/C 改码范围待用户确认，再拆小 PR | 公开 SDK 头、`src/app/session_stack.*`、`src/runtime/session_service.*`、明确认领的运行栈与隔离代码、对应测试 | 可与集群地基并行；D4 前须过 B/C 门 |
+| `codex/lubancore-sdk-baseline` | SDK 主线：按 Core 单 SDK-1/2/3 先抽中立装配、再交可安装 API 与并发基线；具体接口仍须讨论 | 公开 SDK 头、`src/app/session_stack.*`、`src/runtime/session_service.*`、明确认领的运行栈与隔离代码、对应测试 | 可与集群地基并行；D4 前须过 B/C 门 |
 | `codex/cluster-protocol-lease` | D1 首批：信封、编解码、版本、ID、Node/Command/Lease 状态机；等相应 D0 合同 | `src/cluster/protocol/`、`lease/`、`node_fsm/`、`command_fsm/`、对应单测 | 合同之后；先不夹入调度器和宿主 |
 | `codex/cluster-mtls-transport` | D2：客户端证书、服务端 TLS、WS 中立承载；等传输/身份合同 | `src/channel/transport/tls.*`、`src/net/ws_server/`、`src/cluster/transport/`、抽取涉及的既有 WS 文件与传输测试 | 与 D1 并行；共用承载回归通过后合 |
 | `codex/cluster-control-store` | D3：ControlStore、SQLite、事务、命令账、投影与恢复合同测试；等 D1 类型和 D0 存储合同 | `src/cluster/control_plane/store/`、`tests/unit/cluster/store_contract/`、已认领的迁移文件 | D1 后合；不能拿内存实现替代真实库验收 |
@@ -181,7 +181,7 @@ GPU 在这里服务于用户实验。Agent 调模型 API 或调用本机模型�
 | 1（已确认） | 本地连接指挥远端 Agent、查看消息；CPU 服务器做网站类任务，GPU 服务器跑实验 | 按 §1.1 收敛首版；手选节点和增量协议接入仍属实现建议 | 自动调度、迁移和托管多租户需求尚未确认，不能顺手扩大范围 |
 | 2 | 首批只给本人和可信同事用，还是要接互不信任团队？ | 先做可信内部试用，再立多租户对外门 | 决定身份、隔离与生产门是否前移；单管理员示范不等于对外托管 |
 | 3（已确认） | 控制端与执行端均可本机/服务器部署，覆盖 Linux（含 Ubuntu）、macOS、Windows | 分别实现平台进程/托管适配，远端 CI 验三平台；GPU 管理不纳入系统 | 能启动、跨 Agent 重启、跨注销与机器重启恢复须分别验，不把任意环境都能跑当成已验证事实 |
-| 4 | 这轮是否同时推进 LubanCore B/C，SDK 首批供谁使用？ | 同步推进供 Node Bridge 消费的 C++ Host SDK 与外部消费样例，保留 B/C 所需完整合同；暂不扩大到其他语言绑定 | 决定改造范围与投入；若暂缓 Core，只能交地基，D4 继续受门约束 |
+| 4（进入 SDK 讨论） | 明确 LubanCore 可嵌入能力与共用装配，不以远端进程协议替代 SDK | 首版 C++ 宿主 API、本地默认组件与外部消费样例；CLI/AppServer/Worker 共用；具体公开接口待冻结 | SDK-1/2/3 逐批交付，数据库/全量 SPI 不阻塞首个本地 SDK；进程隔离不能顶替同进程多 Session 验收 |
 | 5（已确认） | 已有项目上开多场 Session，共享同一目录 | 项目绑定与 Session 分开；不强制创建 worktree/分支/目录 | 会话账和生命周期独立；共享文件的冲突不靠项目级长期独占来隐藏 |
 | 6（寿命已确认） | 已启动实验跨 Agent 退出/重启继续；Control 可本机部署、随时关闭 | 节点固定会话，独立 Runner 托管实验；Control 失联不按旧租约策略杀工作 | Runner 自身故障、机器断电与未知结果仍按证据裁决；不承诺自动迁移 |
 
