@@ -81,4 +81,3 @@ ADR-11 定的是**角色**（事实账 / 工作分发 / 事件扇出 / 控制命
 - [ ] 真机演练：3 Worker + 2 Sandbox + PG 主从 + 3 broker Kafka；随机 kill Worker/Sandbox/Kafka broker/PG 主，全程 I1~I11 成立，Worker 崩溃后 session 自动接手时间 P99 < 60 s。
 
 验收：同一场 session 在 Worker A 上跑一半被 kill，Worker B 自动接手跑完，账 verify 通过、无工具重复执行、浏览器全程只看到一条连续事件流；Kafka 全部停掉 10 分钟期间 Agent 不受影响，恢复后下游追平且无重复（按 seq 去重后）。
-
