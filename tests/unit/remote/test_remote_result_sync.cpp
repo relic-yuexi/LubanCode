@@ -135,7 +135,7 @@ TEST_CASE("remote result sync: registered and detected secrets are removed befor
         Text("visible: sk-FAKEabcdefghijklmnopqrst more"), secrets);
     REQUIRE(detected.has_value());
     const auto safe = Export(*detected, short_policy, secrets);
-    CHECK(safe["text"] == "visible: [REDACTE");
+    CHECK(safe["text"] == "visible: [REDACT");
     CHECK(safe.dump().find("sk-FAKE") == std::string::npos);
 
     // 扫描器只盖 PEM 头行时，仍不得把后续私钥正文送到远端。
