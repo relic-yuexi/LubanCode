@@ -24,6 +24,7 @@
 #include "runtime/turn_runtime.hpp"
 #include "sdk/adapters.hpp"
 #include "tools/path_utils.hpp"
+#include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
 
 namespace lubancore {
@@ -335,6 +336,11 @@ struct Session::Impl final : rt::InteractionBroker {
         session_dir = service->trajectory()->session_dir();
         if (!options.resume_session_id.empty() && session_id != options.resume_session_id) {
             return std::unexpected(Failure("sdk.resume.identity_changed"));
+        }
+        if (!options.resume_session_id.empty() && options.system_prompt.empty()) {
+            auto saved = lubancode::trajectory::v3::ReadV3Ledger(service->trajectory()->v3_main_writer()->path());
+            if (!saved) return std::unexpected(Failure("sdk.resume.context_unavailable", saved.error()));
+            options.system_prompt = lubancode::trajectory::v3::ProjectModelContext(*saved).system_content;
         }
         lubancode::agent::AgentProfile profile;
         profile.request.model = options.model;

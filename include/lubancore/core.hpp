@@ -115,6 +115,8 @@ struct RuntimeOptions {
 struct SessionOptions {
     std::string cwd; // required absolute existing directory; never process chdir
     std::string model;
+    // On resume, empty preserves the saved effective system prompt. Nonempty is
+    // an explicit replacement recorded through the existing V3 system transition.
     std::string system_prompt;
     // Exactly one of backend and connection must be set. Ownership is per session.
     std::unique_ptr<Backend> backend;
