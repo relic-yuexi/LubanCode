@@ -13,13 +13,13 @@
 // 全部反例(组合重音、ZWJ 序列、肤色、旗帜、keycap、VS15/16、CJK)都
 // 在覆盖面内,由 tests/unit/cli/test_grapheme.cpp 用独立预期值钉死。
 
-#include "cli/grapheme.hpp"
+#include "text/grapheme.hpp"
 
 #include <algorithm>
 #include <iterator>
 #include <utility>
 
-namespace lubancode::cli {
+namespace lubancode::text {
 namespace {
 
 // ---- 表一:UAX#29 Grapheme_Cluster_Break=Extend 全量区间 -------------------
@@ -849,4 +849,4 @@ std::size_t NextGraphemeBoundary(const std::u32string& text, std::size_t pos) {
     return text.size();
 }
 
-}  // namespace lubancode::cli
+}  // namespace lubancode::text

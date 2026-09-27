@@ -1,4 +1,4 @@
-#include "cli/i18n.hpp"
+#include "text/i18n.hpp"
 
 #include <cctype>
 #include <cstdlib>
@@ -16,7 +16,7 @@
 #include <windows.h>
 #endif
 
-namespace lubancode::cli {
+namespace lubancode::text {
 
 namespace {
 
@@ -4214,4 +4214,4 @@ std::string DetectSystemLanguage() {
 #endif
 }
 
-}  // namespace lubancode::cli
+}  // namespace lubancode::text

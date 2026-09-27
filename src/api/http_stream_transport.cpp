@@ -7,7 +7,7 @@
 #include <chrono>
 #include <utility>
 
-#include "cli/i18n.hpp"
+#include "text/i18n.hpp"
 #include "platform/json_safe.hpp"  // DescribeDumpFailure/DumpJsonSanitized:请求体 dump 的窄边界
 #include "platform/log_sink.hpp"
 
@@ -46,17 +46,17 @@ int ExtractStatusCode(std::string_view header_line) {
 std::string ClassifyNetworkError(const cpr::Error& error, bool received_any_bytes, int connect_timeout_ms,
                                  int stream_idle_timeout_secs, bool hard_timeout_hit, int hard_timeout_secs) {
     if (hard_timeout_hit) {
-        return cli::trf("error.network.hard_timeout", hard_timeout_secs);
+        return lubancode::text::trf("error.network.hard_timeout", hard_timeout_secs);
     }
     if (error.code == cpr::ErrorCode::OPERATION_TIMEDOUT) {
         if (received_any_bytes) {
-            return cli::trf("error.network.stream_idle_timeout", stream_idle_timeout_secs);
+            return lubancode::text::trf("error.network.stream_idle_timeout", stream_idle_timeout_secs);
         }
-        return cli::trf("error.network.connect_timeout", connect_timeout_ms / 1000);
+        return lubancode::text::trf("error.network.connect_timeout", connect_timeout_ms / 1000);
     }
     if (error.code == cpr::ErrorCode::COULDNT_CONNECT || error.code == cpr::ErrorCode::COULDNT_RESOLVE_HOST ||
         error.code == cpr::ErrorCode::COULDNT_RESOLVE_PROXY) {
-        return cli::trf("error.network.connect_failed", error.message);
+        return lubancode::text::trf("error.network.connect_failed", error.message);
     }
     return error.message;
 }

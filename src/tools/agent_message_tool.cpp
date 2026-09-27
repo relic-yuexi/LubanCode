@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <optional>
 
-#include "cli/i18n.hpp"
+#include "text/i18n.hpp"
 #include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
 namespace lubancode::tools {
@@ -71,11 +71,11 @@ AgentMessageTool::AgentMessageTool(AgentTool* agent_tool, int caller_task_id)
 
 Tool::Result AgentMessageTool::execute(const nlohmann::json& input) {
     if (coordinator_ == nullptr) {
-        return {lubancode::cli::tr("agent_message.unavailable"), true};
+        return {lubancode::text::tr("agent_message.unavailable"), true};
     }
     const auto task_id_it = input.find("task_id");
     if (task_id_it == input.end() || !task_id_it->is_number_integer()) {
-        return {lubancode::cli::tr("agent_message.task_id_invalid"), true};
+        return {lubancode::text::tr("agent_message.task_id_invalid"), true};
     }
     const int task_id = task_id_it->get<int>();
 
@@ -87,20 +87,20 @@ Tool::Result AgentMessageTool::execute(const nlohmann::json& input) {
     if (caller_task_id_ != 0) {
         const std::optional<AgentTaskSnapshot> target = coordinator_->ledger().Detail(task_id);
         if (target.has_value() && target->parent_task_id != caller_task_id_) {
-            return {StatusJson("not_child", task_id, 0) + "\n" + lubancode::cli::trf("agent_message.not_child", task_id),
+            return {StatusJson("not_child", task_id, 0) + "\n" + lubancode::text::trf("agent_message.not_child", task_id),
                     true};
         }
     }
 
     const auto message_it = input.find("message");
     if (message_it == input.end() || !message_it->is_string()) {
-        return {lubancode::cli::tr("agent_message.invalid"), true};
+        return {lubancode::text::tr("agent_message.invalid"), true};
     }
     std::string message = message_it->get<std::string>();
     {
         const std::size_t first = message.find_first_not_of(" \t\r\n");
         if (first == std::string::npos) {
-            return {lubancode::cli::tr("agent_message.invalid"), true};
+            return {lubancode::text::tr("agent_message.invalid"), true};
         }
         const std::size_t last = message.find_last_not_of(" \t\r\n");
         message = message.substr(first, last - first + 1);
@@ -112,17 +112,17 @@ Tool::Result AgentMessageTool::execute(const nlohmann::json& input) {
             // TaskRecord::inbox 这一本账。
             const std::size_t pending = coordinator_->ledger().PendingMessages(task_id).size();
             return {StatusJson("queued", task_id, pending) + "\n" +
-                        lubancode::cli::trf("agent_message.queued", task_id),
+                        lubancode::text::trf("agent_message.queued", task_id),
                     false};
         }
         case TaskMessageStatus::Finished:
             return {StatusJson("finished", task_id, 0) + "\n" +
-                        lubancode::cli::trf("agent_message.finished", task_id),
+                        lubancode::text::trf("agent_message.finished", task_id),
                     true};
         case TaskMessageStatus::NotFound:
         default:
             return {StatusJson("not_found", task_id, 0) + "\n" +
-                        lubancode::cli::trf("agent_message.not_found", task_id),
+                        lubancode::text::trf("agent_message.not_found", task_id),
                     true};
     }
 }

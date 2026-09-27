@@ -11,7 +11,7 @@
 #include <fstream>
 #include <string>
 
-#include "cli/i18n.hpp"
+#include "text/i18n.hpp"
 #include "cli/setup_wizard.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/transcript.hpp"
@@ -25,8 +25,8 @@ namespace {
 // LoadLanguagePacksFromDir 整体替换成空)。
 struct LangGuard {
     ~LangGuard() {
-        cli::LoadLanguagePacksFromDir("Z:/definitely/not/a/dir/lubancode-i18n-test");
-        cli::SetLanguage("zh-CN");
+        lubancode::text::LoadLanguagePacksFromDir("Z:/definitely/not/a/dir/lubancode-i18n-test");
+        lubancode::text::SetLanguage("zh-CN");
     }
 };
 
@@ -47,42 +47,42 @@ void WriteFileUtf8(const std::filesystem::path& path, const std::string& content
 
 TEST_CASE("tr: 默认语言是 zh-CN,取到的就是中文原文") {
     LangGuard guard;
-    cli::SetLanguage("zh-CN");
-    CHECK(cli::tr("cmd.clear.done") == "已清空对话历史。");
-    CHECK(cli::tr("banner.hint") == "输入问题回车发送,exit 退出,/help 看命令");
+    lubancode::text::SetLanguage("zh-CN");
+    CHECK(lubancode::text::tr("cmd.clear.done") == "已清空对话历史。");
+    CHECK(lubancode::text::tr("banner.hint") == "输入问题回车发送,exit 退出,/help 看命令");
 }
 
 TEST_CASE("tr: en 有键取英文,en 缺键回退 zh-CN,谁都没有回退 key 本身") {
     LangGuard guard;
-    cli::SetLanguage("en");
+    lubancode::text::SetLanguage("en");
     // P0 键:en 表有。
-    CHECK(cli::tr("slash.desc.clear") == "clear the conversation history");
-    CHECK(cli::tr("cmd.clear.done") == "已清空对话历史。");  // P1 缺英文,回退 zh-CN
-    CHECK(cli::tr("error.prefix") == "[error] ");
+    CHECK(lubancode::text::tr("slash.desc.clear") == "clear the conversation history");
+    CHECK(lubancode::text::tr("cmd.clear.done") == "已清空对话历史。");  // P1 缺英文,回退 zh-CN
+    CHECK(lubancode::text::tr("error.prefix") == "[error] ");
     // 完全不存在的键:回退 key 本身。
-    CHECK(cli::tr("no.such.key.at.all") == "no.such.key.at.all");
+    CHECK(lubancode::text::tr("no.such.key.at.all") == "no.such.key.at.all");
 }
 
 TEST_CASE("TrFormat: {0}/{1} 按序替换,JSON 花括号不受牵连,缺实参原样保留") {
     LangGuard guard;
-    cli::SetLanguage("zh-CN");
-    CHECK(cli::trf("cmd.model.switched", "gpt-x") == "已切换到模型: gpt-x(本会话生效)");
-    CHECK(cli::trf("transcript.added_removed", 3, 5) == "新增 3 行,删除 5 行");
+    lubancode::text::SetLanguage("zh-CN");
+    CHECK(lubancode::text::trf("cmd.model.switched", "gpt-x") == "已切换到模型: gpt-x(本会话生效)");
+    CHECK(lubancode::text::trf("transcript.added_removed", 3, 5) == "新增 3 行,删除 5 行");
     // help.config 里有 {"mcpServers": ...} 这类 JSON 示例,TrFormat 只认
     // {数字},别的花括号原样保留。
-    const std::string help = cli::trf("help.config", "dark", 2);
+    const std::string help = lubancode::text::trf("help.config", "dark", 2);
     CHECK(help.find("{\"command\"") != std::string::npos);
     CHECK(help.find("theme=dark") != std::string::npos);
     CHECK(help.find("context_window=2") != std::string::npos);
     // 缺实参:占位符原样保留,好排查。
-    CHECK(cli::trf("transcript.added_removed", 3) == "新增 3 行,删除 {1} 行");
+    CHECK(lubancode::text::trf("transcript.added_removed", 3) == "新增 3 行,删除 {1} 行");
 }
 
 TEST_CASE("自动会话标题提示:标题先填入,再附 cheap 路由,不漏占位符") {
     LangGuard guard;
-    cli::SetLanguage("zh-CN");
+    lubancode::text::SetLanguage("zh-CN");
     const std::string notice =
-        cli::trf("router.task_flash", cli::trf("cmd.title.set", "New Session"), "cheap:glm-5.2");
+        lubancode::text::trf("router.task_flash", lubancode::text::trf("cmd.title.set", "New Session"), "cheap:glm-5.2");
     CHECK(notice == "标题已设为: New Session · cheap:glm-5.2");
     CHECK(notice.find("{0}") == std::string::npos);
     CHECK(notice.find("首条消息落盘后") == std::string::npos);
@@ -90,39 +90,39 @@ TEST_CASE("自动会话标题提示:标题先填入,再附 cheap 路由,不漏�
 
 TEST_CASE("会话标题精炼:失败行带死因与耗时,三道起飞门文案不回归") {
     LangGuard guard;
-    cli::SetLanguage("zh-CN");
+    lubancode::text::SetLanguage("zh-CN");
     // 三道起飞门(no_ledger/no_model/no_provider)一字不动;失败行 {0}=死因、
     // {1}=耗时(2026-09-22 报明单:超时/网络错/空回各报各的)。
-    CHECK(cli::tr("cmd.title.refine.no_ledger") ==
+    CHECK(lubancode::text::tr("cmd.title.refine.no_ledger") ==
           "[会话标题] 精炼没起飞:会话账房没开张,标题停在本地档。");
-    CHECK(cli::tr("cmd.title.refine.no_model") ==
+    CHECK(lubancode::text::tr("cmd.title.refine.no_model") ==
           "[会话标题] 精炼没起飞:标题路由没配上模型,标题停在本地档。");
-    CHECK(cli::trf("cmd.title.refine.no_provider", "old-relay") ==
+    CHECK(lubancode::text::trf("cmd.title.refine.no_provider", "old-relay") ==
           "[会话标题] 精炼没起飞:provider「old-relay」在配置里找不到,标题停在本地档。");
-    CHECK(cli::trf("cmd.title.refine.failed", "采样超过 30 秒,被本地超时预算停止", 30123) ==
+    CHECK(lubancode::text::trf("cmd.title.refine.failed", "采样超过 30 秒,被本地超时预算停止", 30123) ==
           "[会话标题] 精炼失败: 采样超过 30 秒,被本地超时预算停止(耗时 30123ms),标题保留本地档。");
 
-    cli::SetLanguage("en");
-    CHECK(cli::tr("cmd.title.refine.no_ledger") ==
+    lubancode::text::SetLanguage("en");
+    CHECK(lubancode::text::tr("cmd.title.refine.no_ledger") ==
           "[session title] Refinement did not start: the session ledger has no active writer; the "
           "local title stays.");
-    CHECK(cli::tr("cmd.title.refine.no_model") ==
+    CHECK(lubancode::text::tr("cmd.title.refine.no_model") ==
           "[session title] Refinement did not start: no model routed for the title task; the local "
           "title stays.");
-    CHECK(cli::trf("cmd.title.refine.no_provider", "old-relay") ==
+    CHECK(lubancode::text::trf("cmd.title.refine.no_provider", "old-relay") ==
           "[session title] Refinement did not start: provider 'old-relay' is not in the config; "
           "the local title stays.");
-    CHECK(cli::trf("cmd.title.refine.failed", "connection refused", 500) ==
+    CHECK(lubancode::text::trf("cmd.title.refine.failed", "connection refused", 500) ==
           "[session title] Refinement failed: connection refused (took 500ms); the local title "
           "stays.");
 }
 
 TEST_CASE("/model 编号提示写明 Esc 可取消") {
     LangGuard guard;
-    cli::SetLanguage("zh-CN");
-    CHECK(cli::trf("cmd.model.choose", 16) == "选择模型编号 [16]（Esc 取消）: ");
-    CHECK(cli::tr("cmd.model.current") == "  ← 当前");
-    CHECK(cli::tr("cmd.model.cancelled") == "已取消模型切换。");
+    lubancode::text::SetLanguage("zh-CN");
+    CHECK(lubancode::text::trf("cmd.model.choose", 16) == "选择模型编号 [16]（Esc 取消）: ");
+    CHECK(lubancode::text::tr("cmd.model.current") == "  ← 当前");
+    CHECK(lubancode::text::tr("cmd.model.cancelled") == "已取消模型切换。");
 }
 
 TEST_CASE("语言包: ja.json 生效,盖到的键出日文,其余回退 zh-CN,列表出现 ja") {
@@ -130,10 +130,10 @@ TEST_CASE("语言包: ja.json 生效,盖到的键出日文,其余回退 zh-CN,�
     const auto dir = MakeTempLangDir("ja");
     WriteFileUtf8(dir / "ja.json",
                   R"json({"language.name": "日本語 (ja)", "banner.hint": "質問を入力して Enter で送信"})json");
-    const auto warnings = cli::LoadLanguagePacksFromDir(dir.string());
+    const auto warnings = lubancode::text::LoadLanguagePacksFromDir(dir.string());
     CHECK(warnings.empty());
 
-    const auto langs = cli::AvailableLanguages();
+    const auto langs = lubancode::text::AvailableLanguages();
     bool has_ja = false;
     for (const auto& code : langs) {
         if (code == "ja") {
@@ -141,13 +141,13 @@ TEST_CASE("语言包: ja.json 生效,盖到的键出日文,其余回退 zh-CN,�
         }
     }
     CHECK(has_ja);
-    CHECK(cli::HasLanguage("ja"));
-    CHECK(cli::LanguageDisplayName("ja") == "日本語 (ja)");
+    CHECK(lubancode::text::HasLanguage("ja"));
+    CHECK(lubancode::text::LanguageDisplayName("ja") == "日本語 (ja)");
 
-    cli::SetLanguage("ja");
-    CHECK(cli::tr("banner.hint") == "質問を入力して Enter で送信");
+    lubancode::text::SetLanguage("ja");
+    CHECK(lubancode::text::tr("banner.hint") == "質問を入力して Enter で送信");
     // ja 包没有的键:回退 zh-CN。
-    CHECK(cli::tr("cmd.clear.done") == "已清空对话历史。");
+    CHECK(lubancode::text::tr("cmd.clear.done") == "已清空对话历史。");
     std::filesystem::remove_all(dir);
 }
 
@@ -155,16 +155,16 @@ TEST_CASE("语言包: zh-CN.json 覆盖内置同键(用户改措辞的口子)") 
     LangGuard guard;
     const auto dir = MakeTempLangDir("override");
     WriteFileUtf8(dir / "zh-CN.json", R"({"cmd.clear.done": "history 已清"})");
-    const auto warnings = cli::LoadLanguagePacksFromDir(dir.string());
+    const auto warnings = lubancode::text::LoadLanguagePacksFromDir(dir.string());
     CHECK(warnings.empty());
 
-    cli::SetLanguage("zh-CN");
-    CHECK(cli::tr("cmd.clear.done") == "history 已清");
+    lubancode::text::SetLanguage("zh-CN");
+    CHECK(lubancode::text::tr("cmd.clear.done") == "history 已清");
     // 没盖的键照旧内置。
-    CHECK(cli::tr("banner.hint") == "输入问题回车发送,exit 退出,/help 看命令");
+    CHECK(lubancode::text::tr("banner.hint") == "输入问题回车发送,exit 退出,/help 看命令");
     // 可选语言列表不因 zh-CN.json 多出一项(内置已有,去重)。
     std::size_t zh_count = 0;
-    for (const auto& code : cli::AvailableLanguages()) {
+    for (const auto& code : lubancode::text::AvailableLanguages()) {
         if (code == "zh-CN") {
             ++zh_count;
         }
@@ -180,12 +180,12 @@ TEST_CASE("语言包: 坏 JSON / 顶层不是 object / 值不是字符串,警告
     WriteFileUtf8(dir / "de.json", R"(["array", "not", "object"])");
     WriteFileUtf8(dir / "ko.json", R"({"a.key": 42})");
     WriteFileUtf8(dir / "ja.json", R"({"banner.hint": "OK"})");  // 好的这份照常装上
-    const auto warnings = cli::LoadLanguagePacksFromDir(dir.string());
+    const auto warnings = lubancode::text::LoadLanguagePacksFromDir(dir.string());
     CHECK(warnings.size() == 3);
-    CHECK_FALSE(cli::HasLanguage("fr"));
-    CHECK_FALSE(cli::HasLanguage("de"));
-    CHECK_FALSE(cli::HasLanguage("ko"));
-    CHECK(cli::HasLanguage("ja"));
+    CHECK_FALSE(lubancode::text::HasLanguage("fr"));
+    CHECK_FALSE(lubancode::text::HasLanguage("de"));
+    CHECK_FALSE(lubancode::text::HasLanguage("ko"));
+    CHECK(lubancode::text::HasLanguage("ja"));
     std::filesystem::remove_all(dir);
 }
 
@@ -205,27 +205,27 @@ TEST_CASE("语言包: 目录里混着子目录/悬空链接,跳过不崩,好包�
     // 只靠子目录那半边(is_regular_file 的 ec 重载对两者同一条路)。
     std::filesystem::create_symlink(dir / "no_such_target.json", dir / "dangling.json", link_ec);
 
-    const auto warnings = cli::LoadLanguagePacksFromDir(dir.string());
+    const auto warnings = lubancode::text::LoadLanguagePacksFromDir(dir.string());
     CHECK(warnings.empty());  // 脏条目静默跳过,跟"非 .json 不理会"同一待遇
-    CHECK(cli::HasLanguage("ja"));
-    CHECK_FALSE(cli::HasLanguage("sub"));
-    CHECK_FALSE(cli::HasLanguage("dangling"));
+    CHECK(lubancode::text::HasLanguage("ja"));
+    CHECK_FALSE(lubancode::text::HasLanguage("sub"));
+    CHECK_FALSE(lubancode::text::HasLanguage("dangling"));
     std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("MapLocaleToLanguage: zh 前缀→zh-CN,en 前缀→en,认不出→zh-CN") {
-    CHECK(cli::MapLocaleToLanguage("zh-CN") == "zh-CN");
-    CHECK(cli::MapLocaleToLanguage("zh-TW") == "zh-CN");
-    CHECK(cli::MapLocaleToLanguage("zh") == "zh-CN");
-    CHECK(cli::MapLocaleToLanguage("en-US") == "en");
-    CHECK(cli::MapLocaleToLanguage("en_GB.UTF-8") == "en");
-    CHECK(cli::MapLocaleToLanguage("en") == "en");
-    CHECK(cli::MapLocaleToLanguage("ja-JP") == "zh-CN");
-    CHECK(cli::MapLocaleToLanguage("fr") == "zh-CN");
-    CHECK(cli::MapLocaleToLanguage("") == "zh-CN");
+    CHECK(lubancode::text::MapLocaleToLanguage("zh-CN") == "zh-CN");
+    CHECK(lubancode::text::MapLocaleToLanguage("zh-TW") == "zh-CN");
+    CHECK(lubancode::text::MapLocaleToLanguage("zh") == "zh-CN");
+    CHECK(lubancode::text::MapLocaleToLanguage("en-US") == "en");
+    CHECK(lubancode::text::MapLocaleToLanguage("en_GB.UTF-8") == "en");
+    CHECK(lubancode::text::MapLocaleToLanguage("en") == "en");
+    CHECK(lubancode::text::MapLocaleToLanguage("ja-JP") == "zh-CN");
+    CHECK(lubancode::text::MapLocaleToLanguage("fr") == "zh-CN");
+    CHECK(lubancode::text::MapLocaleToLanguage("") == "zh-CN");
     // "eo"(世界语)不是 en:前两个字母相同也不能误判,得看边界。
-    CHECK(cli::MapLocaleToLanguage("eo") == "zh-CN");
-    CHECK(cli::MapLocaleToLanguage("english") == "zh-CN");  // en 后跟字母,不算 en 前缀
+    CHECK(lubancode::text::MapLocaleToLanguage("eo") == "zh-CN");
+    CHECK(lubancode::text::MapLocaleToLanguage("english") == "zh-CN");  // en 后跟字母,不算 en 前缀
 }
 
 TEST_CASE("ParseSlashCommand: /language 与 /lang 别名,参数是语言码") {
@@ -239,16 +239,16 @@ TEST_CASE("ParseSlashCommand: /language 与 /lang 别名,参数是语言码") {
 
 TEST_CASE("AllSlashCommands: /language 在表里,语言切换后描述跟着换") {
     LangGuard guard;
-    cli::SetLanguage("zh-CN");
+    lubancode::text::SetLanguage("zh-CN");
     bool found_zh = false;
     for (const auto& c : cli::AllSlashCommands()) {
         if (c.name == "/language") {
             found_zh = true;
-            CHECK(c.description == cli::tr("slash.desc.language"));
+            CHECK(c.description == lubancode::text::tr("slash.desc.language"));
         }
     }
     CHECK(found_zh);
-    cli::SetLanguage("en");
+    lubancode::text::SetLanguage("en");
     for (const auto& c : cli::AllSlashCommands()) {
         if (c.name == "/clear") {
             CHECK(c.description == "clear the conversation history");
@@ -258,7 +258,7 @@ TEST_CASE("AllSlashCommands: /language 在表里,语言切换后描述跟着换"
 
 TEST_CASE("transcript 摘要词: en 下出英文(彩色主题摘要进表)") {
     LangGuard guard;
-    cli::SetLanguage("en");
+    lubancode::text::SetLanguage("en");
     // read_file 正文排版是"右对齐行号<Tab>正文"(ca5ac71 起按此数真实源码行),
     // 这里得喂同款格式,别拿白文喂。
     CHECK(cli::ReadFileDoneSummary("     1\ta\n     2\tb\n") == "Read 2 lines");
@@ -349,7 +349,7 @@ struct ScriptedWizardIO {
 
 TEST_CASE("向导语言步: 选 en 后,向导后续文案是英文,language 进配置") {
     LangGuard guard;
-    cli::SetLanguage("zh-CN");
+    lubancode::text::SetLanguage("zh-CN");
     ScriptedWizardIO scripted;
     scripted.inputs = {
         "2",                                  // 语言:2) English (en)
@@ -363,7 +363,7 @@ TEST_CASE("向导语言步: 选 en 后,向导后续文案是英文,language 进�
     const auto outcome = cli::RunSetupWizard(io);
     REQUIRE(outcome.has_value());
     CHECK(outcome->config.language == "en");
-    CHECK(cli::CurrentLanguage() == "en");
+    CHECK(lubancode::text::CurrentLanguage() == "en");
     // 语言步之后的 wire 提问已是英文。
     CHECK(scripted.AnyPrintedContains("Wire protocol:"));
     CHECK(scripted.AnyPrintedContains("  language = en"));
@@ -371,7 +371,7 @@ TEST_CASE("向导语言步: 选 en 后,向导后续文案是英文,language 进�
 
 TEST_CASE("向导语言步: 直接回车按默认(当前语言),后续文案维持中文") {
     LangGuard guard;
-    cli::SetLanguage("zh-CN");
+    lubancode::text::SetLanguage("zh-CN");
     ScriptedWizardIO scripted;
     scripted.inputs = {
         "",                                   // 语言:回车 = 默认(zh-CN)
@@ -390,20 +390,20 @@ TEST_CASE("向导语言步: 直接回车按默认(当前语言),后续文案维�
 
 TEST_CASE("图片界面文案中英都有") {
     LangGuard guard;
-    cli::SetLanguage("zh-CN");
-    CHECK(cli::trf("image.attached", "err.png", 12, 34) == "[图片] 已附 err.png (12x34)");
-    CHECK(cli::tr("error.image.too_large").find("5MB") != std::string::npos);
+    lubancode::text::SetLanguage("zh-CN");
+    CHECK(lubancode::text::trf("image.attached", "err.png", 12, 34) == "[图片] 已附 err.png (12x34)");
+    CHECK(lubancode::text::tr("error.image.too_large").find("5MB") != std::string::npos);
 
-    cli::SetLanguage("en");
-    CHECK(cli::trf("image.attached", "err.png", 12, 34) == "[image] attached err.png (12x34)");
-    CHECK(cli::tr("error.image.too_large").find("5MB") != std::string::npos);
+    lubancode::text::SetLanguage("en");
+    CHECK(lubancode::text::trf("image.attached", "err.png", 12, 34) == "[image] attached err.png (12x34)");
+    CHECK(lubancode::text::tr("error.image.too_large").find("5MB") != std::string::npos);
 }
 
 TEST_CASE("/model roles 在补全说明与帮助里中英都有入口") {
     LangGuard guard;
     for (const std::string language : {"zh-CN", "en"}) {
-        cli::SetLanguage(language);
-        CHECK(cli::tr("slash.desc.model").find("/model roles") != std::string::npos);
+        lubancode::text::SetLanguage(language);
+        CHECK(lubancode::text::tr("slash.desc.model").find("/model roles") != std::string::npos);
         // P3-2 起 --help(help.slash)与 /help(slash_help.body)的命令清单不再
         // 手抄进表,由 cli::FormatSlashCommandListLines() 从 AllSlashCommands
         // 现排——入口改在生成行上对账:/model 那行带着 roles 的说法。
@@ -414,7 +414,7 @@ TEST_CASE("/model roles 在补全说明与帮助里中英都有入口") {
             }
         }
         CHECK(model_line_mentions_roles);
-        const std::string header = cli::tr("cmd.model.roles_header");
+        const std::string header = lubancode::text::tr("cmd.model.roles_header");
         const bool names_subagents = header.find("子代理") != std::string::npos ||
                                      header.find("subagent") != std::string::npos ||
                                      header.find("sub-agents") != std::string::npos;

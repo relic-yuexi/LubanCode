@@ -5,7 +5,7 @@
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
 
-#include "cli/i18n.hpp"
+#include "text/i18n.hpp"
 
 namespace lubancode::api {
 
@@ -172,11 +172,11 @@ std::expected<std::vector<ModelInfo>, Error> ListModels(config::Wire wire, const
     if (response.error) {
         std::string message;
         if (response.error.code == cpr::ErrorCode::OPERATION_TIMEDOUT) {
-            message = cli::trf("error.network.request_timeout", request_timeout_secs);
+            message = lubancode::text::trf("error.network.request_timeout", request_timeout_secs);
         } else if (response.error.code == cpr::ErrorCode::COULDNT_CONNECT ||
                    response.error.code == cpr::ErrorCode::COULDNT_RESOLVE_HOST ||
                    response.error.code == cpr::ErrorCode::COULDNT_RESOLVE_PROXY) {
-            message = cli::trf("error.network.connect_failed", response.error.message);
+            message = lubancode::text::trf("error.network.connect_failed", response.error.message);
         } else {
             message = response.error.message;
         }

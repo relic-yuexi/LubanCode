@@ -10,11 +10,11 @@
 #include <string_view>
 #include <vector>
 
-#include "cli/grapheme.hpp"
+#include "text/grapheme.hpp"
 
-using lubancode::cli::ClusterDisplayWidth;
-using lubancode::cli::SplitGraphemes;
-using lubancode::cli::SplitUtf8Graphemes;
+using lubancode::text::ClusterDisplayWidth;
+using lubancode::text::SplitGraphemes;
+using lubancode::text::SplitUtf8Graphemes;
 
 namespace {
 
@@ -167,20 +167,20 @@ TEST_CASE("编辑边界: 👨‍👩‍👧‍👦 中间位置前后各找最�
     const std::u32string text = U32({U'x', 0x1F468, 0x200D, 0x1F469, 0x200D, 0x1F467, 0x200D, 0x1F466, U'y'});
     // 码点下标:x=0,家庭=1..7,y=8。光标落在 4(家庭正中间):
     // Prev 给 1(簇首),Next 给 8(下一簇首)。
-    CHECK(lubancode::cli::PrevGraphemeBoundary(text, 4) == 1);
-    CHECK(lubancode::cli::NextGraphemeBoundary(text, 4) == 8);
+    CHECK(lubancode::text::PrevGraphemeBoundary(text, 4) == 1);
+    CHECK(lubancode::text::NextGraphemeBoundary(text, 4) == 8);
     // 端点:0 的 Prev 还是 0;末尾的 Next 给 size()。
-    CHECK(lubancode::cli::PrevGraphemeBoundary(text, 0) == 0);
-    CHECK(lubancode::cli::NextGraphemeBoundary(text, text.size()) == text.size());
+    CHECK(lubancode::text::PrevGraphemeBoundary(text, 0) == 0);
+    CHECK(lubancode::text::NextGraphemeBoundary(text, text.size()) == text.size());
     // 恰在簇首:Prev 给上一簇首,Next 给下一簇首。
-    CHECK(lubancode::cli::PrevGraphemeBoundary(text, 1) == 0);
-    CHECK(lubancode::cli::NextGraphemeBoundary(text, 1) == 8);
+    CHECK(lubancode::text::PrevGraphemeBoundary(text, 1) == 0);
+    CHECK(lubancode::text::NextGraphemeBoundary(text, 1) == 8);
 }
 
 TEST_CASE("编辑边界: 组合重音的簇中间不落脚") {
     const std::u32string text = U32({U'e', 0x0301, U'b'});
-    CHECK(lubancode::cli::PrevGraphemeBoundary(text, 1) == 0);
-    CHECK(lubancode::cli::NextGraphemeBoundary(text, 1) == 2);
+    CHECK(lubancode::text::PrevGraphemeBoundary(text, 1) == 0);
+    CHECK(lubancode::text::NextGraphemeBoundary(text, 1) == 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -247,15 +247,15 @@ TEST_CASE("ClusterDisplayWidth(string_view): 与指针版同账") {
 }
 
 TEST_CASE("宽度策略表: 附标/ZWJ/VS/肤色单宽为零,孤立指示符一列") {
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x0301) == 0);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x200D) == 0);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0xFE0F) == 0);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0xFE0E) == 0);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1F3FD) == 0);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1F1E8) == 1);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x2764) == 1);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(U'a') == 1);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0) == 0);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x0301) == 0);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x200D) == 0);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0xFE0F) == 0);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0xFE0E) == 0);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x1F3FD) == 0);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x1F1E8) == 1);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x2764) == 1);
+    CHECK(lubancode::text::GraphemeCodepointWidth(U'a') == 1);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0) == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -268,15 +268,15 @@ TEST_CASE("宽表机器生成: 人工表错收的四枚 SpacingMark 不再并入
     // U+0F7F/1112C/1D166/1D16D 在 UAX#29 是 SpacingMark(Mc),不是 Extend;
     // 人工摘录时错收进表一,生成表按 GraphemeBreakProperty 摘出——自立
     // 一簇、占一列(它们是 spacing 记号,零宽才是错账)。
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x0F7F) == 1);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1112C) == 1);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1D166) == 1);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1D16D) == 1);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x0F7F) == 1);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x1112C) == 1);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x1D166) == 1);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x1D16D) == 1);
     CHECK(ClusterCount(U32({0x0F40, 0x0F7F})) == 2);  // 藏文基字+RNAM BCAD 两簇
 }
 
 TEST_CASE("宽表机器生成: ZWNJ 并入前簇(GB9 口径),单宽零") {
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x200C) == 0);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x200C) == 0);
     CHECK(ClusterCount(U32({U'a', 0x200C, U'b'})) == 2);
     CHECK(TotalWidth(U32({U'a', 0x200C, U'b'})) == 2);
 }
@@ -284,22 +284,22 @@ TEST_CASE("宽表机器生成: ZWNJ 并入前簇(GB9 口径),单宽零") {
 TEST_CASE("宽表机器生成: 人工表漏收的附标端点补齐") {
     // 老挝 0ECE(人工表止于 0ECD)、阿拉伯扩展 08CA(人工表起点误作
     // 08D3,漏了 08CA..08D2 与 0898..089F)。
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x0ECE) == 0);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x0ECE) == 0);
     CHECK(ClusterCount(U32({0x0EA1, 0x0ECE})) == 1);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x08CA) == 0);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x0898) == 0);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x08CA) == 0);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x0898) == 0);
 }
 
 TEST_CASE("宽表机器生成: 15.x 新进宽字补齐(无线/重等号/契丹小字/越南读法符/假名扩展B)") {
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1F6DC) == 2);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1F7F0) == 2);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x18D00) == 2);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x16FF0) == 2);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0x1AFF0) == 2);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x1F6DC) == 2);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x1F7F0) == 2);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x18D00) == 2);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x16FF0) == 2);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0x1AFF0) == 2);
 }
 
 TEST_CASE("宽表机器生成: 人工粗段裹进的未赋值码位按默认 N 摘出") {
     // 全角区头 0xFF00、彝文尾 0xA4C7 未赋值,East_Asian_Width 默认 N。
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0xFF00) == 1);
-    CHECK(lubancode::cli::GraphemeCodepointWidth(0xA4C7) == 1);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0xFF00) == 1);
+    CHECK(lubancode::text::GraphemeCodepointWidth(0xA4C7) == 1);
 }

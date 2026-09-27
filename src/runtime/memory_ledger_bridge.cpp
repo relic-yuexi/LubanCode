@@ -1,4 +1,4 @@
-#include "app/memory_ledger_bridge.hpp"
+#include "runtime/memory_ledger_bridge.hpp"
 
 #include <filesystem>
 #include <system_error>
@@ -8,7 +8,7 @@
 #include "trajectory/recorder.hpp"
 #include "trajectory/v3/writer.hpp"
 
-namespace lubancode::app {
+namespace lubancode::runtime {
 
 namespace {
 
@@ -25,7 +25,7 @@ std::string PathUtf8Text(const fs::path& path) {
 
 }  // namespace
 
-MemoryLedgerBridge::MemoryLedgerBridge(runtime::TrajectorySessionLedger& ledger) : ledger_(ledger) {}
+MemoryLedgerBridge::MemoryLedgerBridge(TrajectorySessionLedger& ledger) : ledger_(ledger) {}
 
 // ---------------------------------------------------------------------------
 // v3 场:召回注入——快照消息 -> 链接纳 -> 事实行,三步按序落稳
@@ -314,4 +314,4 @@ std::string MemoryLedgerBridge::RecordSaveRequestedV3(trajectory::v3::V3Writer& 
            "/run_id=" + writer.run_id() + "/event_id=" + receipt.id;
 }
 
-}  // namespace lubancode::app
+}  // namespace lubancode::runtime
