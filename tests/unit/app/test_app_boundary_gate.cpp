@@ -130,7 +130,7 @@ TEST_CASE("守门:engine 与 runtime 源码里搜不到终端件(单子验收原
     const std::vector<std::filesystem::path> gate_files = CollectSources({
         "src/runtime", "src/api", "src/agent", "src/tools", "src/config", "src/memory",
         "src/hooks", "src/mcp", "src/lsp", "src/ptc", "src/sessions", "src/peers",
-        "src/skills",
+        "src/skills", "src/text", "src/sdk",
     });
     REQUIRE_FALSE(gate_files.empty());
 
@@ -206,7 +206,7 @@ TEST_CASE("守门:三叶子自身零标准流(i18n/theme/line_editor)") {
 }
 
 TEST_CASE("守门:共用装配不依赖宿主头或终端类型") {
-    const auto files = CollectSources({"src/runtime/assembly"});
+    const auto files = CollectSources({"src/runtime/assembly", "src/sdk", "src/text"});
     if (!std::filesystem::exists(SourceRoot() / "src")) return;
     REQUIRE_FALSE(files.empty());
     for (const auto& path : files) {

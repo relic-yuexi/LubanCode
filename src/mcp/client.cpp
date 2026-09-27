@@ -56,12 +56,12 @@ Client::~Client() {
 
 TransportStartResult Client::StartProcess(const std::string& command, const std::vector<std::string>& args,
                                            const std::vector<std::pair<std::string, std::string>>& env,
-                                           platform::EnvMode env_mode) {
+                                           platform::EnvMode env_mode, const std::string& cwd_utf8) {
     owned_transport_ = std::make_unique<StdioTransportAdapter>();
     transport_ = owned_transport_.get();
     ++transport_generation_;  // 逐枚追踪单:换一代记一笔(重启/换进程分得清)
     return owned_transport_->Start(command, args, env,
-                                   [this](std::string line) { OnLine(std::move(line)); }, env_mode);
+                                   [this](std::string line) { OnLine(std::move(line)); }, env_mode, cwd_utf8);
 }
 
 void Client::AttachTransportForTest(Transport* transport) {

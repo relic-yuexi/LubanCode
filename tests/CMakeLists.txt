@@ -4,6 +4,9 @@ file(GLOB_RECURSE LUBANCODE_TEST_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/*/test_*.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/integration/*/test_*.cpp")
 list(SORT LUBANCODE_TEST_SOURCES)
+if(NOT LUBANCODE_BUILD_SDK)
+  list(FILTER LUBANCODE_TEST_SOURCES EXCLUDE REGEX "/(unit|integration)/sdk/")
+endif()
 
 # glob 兜底(2026-08-28):examples 域的册在主树 configure 偶发漏收
 # (同 cmake 同 pattern 的独立项目能收,工头 worktree 也能收;增量与全新
@@ -77,6 +80,15 @@ add_executable(lubancode_tests
   ${LUBANCODE_TEST_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
+if(LUBANCODE_BUILD_SDK)
+  target_link_libraries(lubancode_tests PRIVATE lubancore_sdk)
+  if(WIN32)
+    add_custom_command(TARGET lubancode_tests POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_RUNTIME_DLLS:lubancode_tests> $<TARGET_FILE_DIR:lubancode_tests>
+      COMMAND_EXPAND_LISTS)
+  endif()
+endif()
 # QQ 机器人接入单 Q1:mock WS/TLS 服务端夹具直接用 mbedTLS(服务端握手与
 # 自签证书生成),engine 对 mbedtls 是 PRIVATE 链,这里显式补上(include
 # 路径随 target 的 PUBLIC usage 递)。

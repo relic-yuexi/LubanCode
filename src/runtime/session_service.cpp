@@ -279,6 +279,7 @@ SessionRuntime::Options SessionService::BuildRuntimeOptions(const SessionLaunchR
     options.lubancode_version = request.lubancode_version;
     options.approval_mode = request.approval_mode;
     options.trajectory_resume_at_launch = request.resume_at_launch;
+    options.trajectory_require_v3_resume = request.require_v3_resume;
     options.trajectory_resume_source_session_id = request.resume_source_session_id;
     options.trajectory_workspaces_root = request.workspaces_root;
     options.trajectory_launch_cwd = request.launch_cwd;

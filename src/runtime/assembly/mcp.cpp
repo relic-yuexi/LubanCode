@@ -5,7 +5,8 @@ namespace {
 
 std::expected<std::unique_ptr<mcp::Client>, std::string> LaunchStdio(const McpLaunchRequest& request) {
     auto client = std::make_unique<mcp::Client>(request.name);
-    const auto started = client->StartProcess(request.command, request.args, request.env, request.env_mode);
+    const auto started = client->StartProcess(request.command, request.args, request.env, request.env_mode,
+                                             request.cwd_utf8);
     if (!started.success) return std::unexpected(started.error);
     return client;
 }

@@ -161,6 +161,7 @@ public:
         // 可恢复的;没有任何可恢复场时回落普通开张
         // (quiet_if_none 语义,与旧路 --continue 一致)。
         bool resume_at_launch = false;
+        bool require_v3_resume = false;
         std::string resume_source_session_id;
         // 单发轨迹断档单:one_shot 一场置 true——main run 写 run_kind=
         // one_shot(manifest/信封/run.started 三处同源),resume 候选排除。

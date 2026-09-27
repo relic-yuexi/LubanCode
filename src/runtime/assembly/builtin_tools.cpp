@@ -16,17 +16,25 @@
 
 namespace lubancode::runtime::assembly {
 
+std::unique_ptr<tools::Tool> CreateLocalTool(const std::string& name) {
+    if (name == "read_file") return std::make_unique<tools::ReadFileTool>();
+    if (name == "run_command") return std::make_unique<tools::RunCommandTool>();
+    if (name == "write_file") return std::make_unique<tools::WriteFileTool>();
+    if (name == "edit_file") return std::make_unique<tools::EditFileTool>();
+    return nullptr;
+}
+
 tools::ToolRegistry BuildBaseToolRegistry(const std::vector<tools::SkillMeta>& skills,
                                         const config::SearchConfig& search_config,
                                         std::string user_agent) {
     tools::ToolRegistry registry;
-    registry.Register(std::make_unique<tools::ReadFileTool>());
-    registry.Register(std::make_unique<tools::RunCommandTool>());
+    registry.Register(CreateLocalTool("read_file"));
+    registry.Register(CreateLocalTool("run_command"));
     // 三件仍采用当前宿主内后台命令寿命,不是跨宿主重启的实验 Runner。
     registry.Register(std::make_unique<tools::BackgroundOutputTool>());
     registry.Register(std::make_unique<tools::StopBackgroundTool>());
-    registry.Register(std::make_unique<tools::WriteFileTool>());
-    registry.Register(std::make_unique<tools::EditFileTool>());
+    registry.Register(CreateLocalTool("write_file"));
+    registry.Register(CreateLocalTool("edit_file"));
     // 沿用随包 ripgrep 定位;缺资源时保持原错误,不悄悄换后端。
     registry.Register(std::make_unique<tools::SearchTool>(
         std::make_shared<tools::BundledRipgrepRunner>()));
@@ -41,7 +49,7 @@ tools::ToolRegistry BuildBaseToolRegistry(const std::vector<tools::SkillMeta>& s
 tools::ToolRegistry BuildExploreToolRegistry(const config::SearchConfig& search_config,
                                            std::string user_agent) {
     tools::ToolRegistry registry;
-    registry.Register(std::make_unique<tools::ReadFileTool>());
+    registry.Register(CreateLocalTool("read_file"));
     registry.Register(std::make_unique<tools::SearchTool>(
         std::make_shared<tools::BundledRipgrepRunner>()));
     registry.Register(std::make_unique<tools::WebFetchTool>(std::move(user_agent)));

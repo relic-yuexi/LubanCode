@@ -46,8 +46,9 @@ public:
     TransportStartResult Start(const std::string& command, const std::vector<std::string>& args,
                                 const std::vector<std::pair<std::string, std::string>>& env,
                                 std::function<void(std::string)> on_line,
-                                platform::EnvMode env_mode = platform::EnvMode::Inherit) {
-        return impl_.Start(command, args, env, std::move(on_line), env_mode);
+                                platform::EnvMode env_mode = platform::EnvMode::Inherit,
+                                const std::string& cwd_utf8 = {}) {
+        return impl_.Start(command, args, env, std::move(on_line), env_mode, cwd_utf8);
     }
 
     bool WriteLine(const std::string& line) override { return impl_.WriteLine(line); }
@@ -101,7 +102,8 @@ public:
     // 折好的最小集(应用Worker接入单 §7.1:模型凭据不进工具进程)。
     TransportStartResult StartProcess(const std::string& command, const std::vector<std::string>& args,
                                        const std::vector<std::pair<std::string, std::string>>& env,
-                                       platform::EnvMode env_mode = platform::EnvMode::Inherit);
+                                       platform::EnvMode env_mode = platform::EnvMode::Inherit,
+                                       const std::string& cwd_utf8 = {});
 
     // 测试路径:注入一个假的 Transport(调用方保留所有权,Client 只持有裸指针,
     // 生命周期由调用方保证——测试里 FakeTransport 通常和 Client 同栈帧)。

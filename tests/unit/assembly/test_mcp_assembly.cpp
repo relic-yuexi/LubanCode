@@ -38,7 +38,8 @@ TEST_CASE("MCP assembly: one owner performs initialize then discovery without re
 
 TEST_CASE("MCP assembly: launch parameters are explicit and start failure has no partial owner") {
     int launches = 0;
-    const auto request = Request();
+    auto request = Request();
+    request.cwd_utf8 = "explicit-session-cwd";
     const auto result = assembly::StartMcpServer(request, {}, [&](const auto& actual)
         -> std::expected<std::unique_ptr<lubancode::mcp::Client>, std::string> {
         ++launches;
@@ -47,6 +48,7 @@ TEST_CASE("MCP assembly: launch parameters are explicit and start failure has no
         CHECK(actual.args == request.args);
         CHECK(actual.env == request.env);
         CHECK(actual.env_mode == lubancode::platform::EnvMode::Replace);
+        CHECK(actual.cwd_utf8 == request.cwd_utf8);
         return std::unexpected("fixture launch failed");
     });
     REQUIRE_FALSE(result.has_value());

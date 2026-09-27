@@ -14,6 +14,12 @@ set(LUBANCODE_VERSION "${CMAKE_MATCH_1}")
 
 project(lubancode VERSION "${LUBANCODE_VERSION}" LANGUAGES CXX)
 
+option(LUBANCODE_BUILD_SDK "Build the experimental installable LubanCore C++ SDK" OFF)
+if(LUBANCODE_BUILD_SDK)
+  # Static internal/dependency archives also feed the shared SDK on Unix.
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 unset(_lubancode_version_header)
 unset(_lubancode_version_match)
 
@@ -46,7 +52,11 @@ if(MSVC)
   # 顶层项目得跟着定成一样的,不然 lubancode/lubancode_core 用的是默认的
   # 动态运行时(MultiThreaded[Debug]DLL),跟 cpr/curl 的静态运行时对不上,
   # 链接时会报 LNK2038(RuntimeLibrary 不匹配)。
-  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  if(LUBANCODE_BUILD_SDK)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+  else()
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  endif()
 else()
   add_compile_options(-Wall -Wextra -Wno-missing-field-initializers)
 endif()
@@ -605,7 +615,7 @@ add_library(lubancode_engine STATIC
   src/memory/worker_queue.cpp
   src/memory/editor_adapter.cpp
   # 存储 v2 P0-3:memory 落账口在 Trajectory 账上的桥(召回快照+写入因果边)。
-  src/app/memory_ledger_bridge.cpp
+  src/runtime/memory_ledger_bridge.cpp
   src/mcp/transport.cpp
   src/mcp/client.cpp
   src/mcp/rich_result.cpp  # MCP 富结果:tools/call 全块型解析与 artifact 落盘
@@ -680,19 +690,15 @@ add_library(lubancode_engine STATIC
   src/agent/tool_trace.cpp
   src/skills/workflow_recorder.cpp
   src/skills/skill_drafter.cpp
-  # engine 引用的三个 cli 叶子(零标准流、零终端依赖,tools/config 都吃):
-  # i18n(字符串表)、theme(配色值)、line_editor(纯逻辑编辑核,agent_tool
-  # 吃 DisplayWidthUtf8)。它们留在 src/cli/ 目录,但编进 engine——单子守门
-  # 名单(cin/cout/cerr/ReadLine/ChoiceMenu/TranscriptPainter)不含这三个
-  # 文件,守门测试同钉。
-  src/cli/i18n.cpp
-  src/cli/theme.cpp
-  src/cli/line_editor.cpp
+  # SDK-2:字符串表与宽度计算归中立 text 叶子。theme/line_editor 留在
+  # CLI 兼容 core target,engine 不再编译宿主目录里的实现。
+  src/text/i18n.cpp
+  src/text/display_width.cpp
   # Unicode emoji 治理单 P1:扩展字素簇(EGC)分段与终端列宽的唯一共享
   # 实现(内嵌 Unicode 15.1 紧凑区间表,零第三方依赖)。line_editor 的
   # 量宽/截断/折行、core 的 footer ANSI 截断/composer 折行/native 行
   # cells/markdown 折行全吃它——同一段 emoji 不许两处两种几何。
-  src/cli/grapheme.cpp
+  src/text/grapheme.cpp
   # 骨架拆解反弹·问题 6:worktree(git 房务原语)自 cli/ 迁 runtime/ 目录
   # (领域逻辑不归展示层抽屉),target 仍挂 engine——engine 的
   # tools/agent_tool、worktree_tool、subagent_isolation 都吃它,而 runtime
@@ -1238,6 +1244,8 @@ endif()
 # cli/setup_wizard.cpp、cli/slash_commands.cpp 等在 cli/ 目录下但逻辑本身
 # 不碰真实 IO(打印/读一行都是注入函数),与从前同待遇放这层。
 add_library(lubancode_core STATIC
+  src/cli/theme.cpp
+  src/cli/line_editor.cpp
   src/cli/image_input.cpp
   src/cli/setup_wizard.cpp
   src/cli/provider_wizard.cpp
@@ -1575,6 +1583,10 @@ add_library(lubancode_app STATIC
   src/cli/tool_confirm_ui.cpp
   src/cli/ask_user_prompt.cpp)
 target_link_libraries(lubancode_app PUBLIC lubancode_core)
+
+if(LUBANCODE_BUILD_SDK)
+  include(cmake/LubanCore.cmake)
+endif()
 # WS 承载的 socket 层在 Windows 走 Winsock2(POSIX 不加东西)。
 if(WIN32)
   target_link_libraries(lubancode_app PUBLIC ws2_32)

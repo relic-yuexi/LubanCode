@@ -156,6 +156,13 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     impl.workflow_node_start_fault = options.workflow_node_start_fault;
     impl.manager = std::make_unique<trajectory::SessionManager>(std::move(manager_options));
 
+    if (options.require_v3_resume &&
+        (!options.resume_at_launch || options.resume_source_session_id.empty() ||
+         !trajectory::v3::FindV3SessionStream(
+             impl.manager->SessionDirOf(options.resume_source_session_id)).has_value())) {
+        return std::unexpected("resume.v3_source_required: explicit V3 source is unavailable");
+    }
+
     // --continue 启动路(§10.4):直接建 start_reason=resume 的新 session,
     // 不先造空 session。没有可恢复场(或源场验不过)回落普通开张,与旧路
     // --continue 的 quiet_if_none 语义一致;真出错(目录坏了开不出新场)
@@ -187,6 +194,9 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
             resume.source_session_id = source_id;
             resume.interactive = false;  // 启动路没有旧 requested 可指
             const auto resumed = impl.manager->ResumeAsNew(resume);
+            if (options.require_v3_resume && !resumed.error_code.empty()) {
+                return std::unexpected(resumed.error_code + ": " + resumed.message);
+            }
             if (resumed.error_code.empty()) {
                 impl.active = impl.manager->active();
                 impl.main_run_id = impl.active->manifest.main_run_id;
@@ -221,6 +231,9 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
             // /doctor trajectory 查),与旧路 --continue 找不到档不报错同门。
             }
         }
+    }
+    if (options.require_v3_resume) {
+        return std::unexpected("resume.failed: " + impl.launch_resume_soul_error);
     }
     auto active = impl.manager->LaunchSession();
     if (!active.has_value()) {

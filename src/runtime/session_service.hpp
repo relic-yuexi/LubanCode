@@ -74,6 +74,9 @@ struct SessionLaunchRequest {
     // --continue 启动路(§10.4):开 start_reason=resume 的新场;source
     // 空 = 取本 workspace 最近一场可恢复的,没有就回落普通开张。
     bool resume_at_launch = false;
+    // Explicit embedded recovery: refuse absent/bad/non-v3 sources, never create
+    // a replacement session. Existing CLI quiet-continue behavior stays default.
+    bool require_v3_resume = false;
     std::string resume_source_session_id;
 
     // 单发场(单发轨迹断档单):main run 记 run_kind=one_shot,resume

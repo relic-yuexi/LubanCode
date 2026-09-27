@@ -259,6 +259,7 @@ void TrajectoryTurnBridge::BeginTurn(const std::string& turn_id, const std::stri
     calls_.clear();
     request_prepared_.clear();
     last_input_event_id_.clear();
+    last_committed_assistant_message_id_.clear();
     turn_open_ = true;
     if (V3Mode()) {
         // v3 没有 turn.started 一类行:回合身份由各行信封的 turnId 携带
@@ -1592,6 +1593,7 @@ bool TrajectoryTurnBridge::V3OutputCompleted(const std::string& request_id,
         return false;  // §7.4:输出记不住,不执行工具
     }
     req.output_committed = true;
+    last_committed_assistant_message_id_ = req.reserved_message_id;
     // 声明本份输出的 tool call(§6.1 的 v3 版):actionId 由 writer 发号,
     // provider 号原样留档作配对键(FoldToolActions 按 providerToolCallId
     // 映射回 actionId)。这是 v3_turn_->calls 造册的唯一合法入口;同时
