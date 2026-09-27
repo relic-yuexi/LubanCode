@@ -15,6 +15,7 @@
 #include "tools/path_utils.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
+#include "workspace/index.hpp"
 
 namespace {
 using namespace std::chrono_literals;
@@ -36,7 +37,10 @@ struct Fixture {
     fs::path SessionDir(const std::string& id) const {
         auto identity = lubancode::workspace::ResolveWorkspaceIdentity(root / "cwd", root / "data");
         REQUIRE(identity.has_value());
-        return root / "data" / "workspaces" / identity->workspace_key / "sessions" / id;
+        auto workspace_dir = lubancode::workspace::index::ResolveDirByWorkspaceKey(
+            root / "data" / "workspaces", identity->workspace_key);
+        REQUIRE(workspace_dir.has_value());
+        return *workspace_dir / "sessions" / id;
     }
 };
 class AnswerBackend final : public sdk::Backend {

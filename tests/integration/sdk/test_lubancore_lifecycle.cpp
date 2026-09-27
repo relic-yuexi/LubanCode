@@ -16,6 +16,7 @@
 #include "runtime/session_service.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
+#include "workspace/index.hpp"
 
 namespace {
 using namespace std::chrono_literals;
@@ -41,7 +42,10 @@ struct LifecycleFixture {
     fs::path SessionDir(const std::string& id) const {
         auto identity = lubancode::workspace::ResolveWorkspaceIdentity(root / "cwd", root / "data");
         REQUIRE(identity.has_value());
-        return root / "data" / "workspaces" / identity->workspace_key / "sessions" / id;
+        auto workspace_dir = lubancode::workspace::index::ResolveDirByWorkspaceKey(
+            root / "data" / "workspaces", identity->workspace_key);
+        REQUIRE(workspace_dir.has_value());
+        return *workspace_dir / "sessions" / id;
     }
     lubancode::runtime::SessionLaunchRequest RawLaunch() const {
         lubancode::runtime::SessionLaunchRequest launch;
@@ -341,7 +345,7 @@ TEST_CASE("SDK lifecycle: real MCP image persists in the session and reaches the
     options.cwd = platform::PathToUtf8(fixture.root / "cwd");
     options.model = "fixture";
     options.connection = sdk::Connection{sdk::Wire::Anthropic,
-        "http://127.0.0.1:" + std::to_string(server.port()) + "/v1", "FAKE_SDK_FIXTURE"};
+        "http://127.0.0.1:" + std::to_string(server.port()), "FAKE_SDK_FIXTURE"};
     options.approval_mode = sdk::ApprovalMode::Yolo;
     options.max_steps_per_turn = 4;
     sdk::McpServer mcp;
@@ -356,10 +360,21 @@ TEST_CASE("SDK lifecycle: real MCP image persists in the session and reaches the
     auto session = (*runtime)->OpenSession(std::move(options));
     REQUIRE(session.has_value());
     const auto session_id = (*session)->id();
+    auto events = (*session)->Subscribe();
+    REQUIRE(events.has_value());
     const auto submitted = (*session)->Submit("image-key", "inspect fixture image");
     REQUIRE(submitted.has_value());
     const auto result = (*session)->WaitResult(submitted->operation_id, 20s);
     REQUIRE(result.has_value());
+    std::string observed_events;
+    for (;;) {
+        const auto event = (*events)->Next(0ms);
+        if (!event) { observed_events += event.error().code; break; }
+        if (!event->has_value()) break;
+        observed_events += (*event)->kind + ";";
+    }
+    INFO("MCP operation error: " << result->error);
+    INFO("MCP event sequence (kinds only): " << observed_events);
     CHECK(result->state == sdk::OperationState::Succeeded);
     CHECK(result->result_persisted);
     CHECK(result->final_text == "image persisted");
@@ -367,6 +382,8 @@ TEST_CASE("SDK lifecycle: real MCP image persists in the session and reaches the
 
     const auto requests = server.requests();
     REQUIRE(requests.size() == 2);
+    CHECK(requests[0].target == "/v1/messages");
+    CHECK(requests[1].target == "/v1/messages");
     // The base64 must come from rehydrating the stored image, not a path-only
     // or error placeholder passed to the next model request.
     const auto request = Json::parse(requests[1].body);
