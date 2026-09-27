@@ -179,6 +179,7 @@ struct Session::Impl final : rt::InteractionBroker {
     std::set<std::string> cancelled;
     std::vector<std::weak_ptr<EventStream::Impl>> subscriptions;
     std::string active_operation;
+    std::string active_turn_id; // worker-only; allocated by the durable V3 writer
     bool closing = false;
     bool closed = false;
     bool broken = false;
@@ -209,7 +210,11 @@ struct Session::Impl final : rt::InteractionBroker {
     std::shared_ptr<rt::InteractionFuture> AskApproval(const rt::ApprovalRequest& request) override {
         auto future = std::make_shared<ApprovalFuture>(options.approval_timeout);
         Approval approval;
-        approval.request_id = service->runtime()->ids().NextPrefixedId("sdk-approval");
+        // Session-local counters start from one. Scope the opaque request ID by
+        // the session and durable turn so another session (or a stale reply from
+        // before resume) cannot resolve this session's pending approval.
+        approval.request_id = session_id + ":" + active_turn_id + ":" +
+            service->runtime()->ids().NextPrefixedId("sdk-approval");
         approval.operation_id = active_operation; // written only by this worker
         approval.tool_call_id = request.tool_use_id;
         approval.tool_name = request.tool_name;
@@ -463,6 +468,7 @@ struct Session::Impl final : rt::InteractionBroker {
         // Writer seeds this counter from durable V3 facts, including after a
         // process restart. Process-local counters would reuse turn-1 on resume.
         operation.turn_id = service->trajectory()->v3_main_writer()->NewTurnId();
+        active_turn_id = operation.turn_id;
         rt::TurnEventAdapter events(session_id, rt::ProcessIdAuthority());
         bool usage_reported = false;
         events.Attach([&](const rt::ServerEvent& source) {

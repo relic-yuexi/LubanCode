@@ -25,6 +25,7 @@ Windows 将 `bin` 加入 PATH，Linux 使用库搜索路径或应用自身 RPATH
 4. `Submit(key, text)` 先把输入原件与受理事实落稳，再返回回执。回执不等于完成。
 5. 审批事件携完整入参、工具名、调用号与 cwd。宿主调 `ResolveApproval` 答复；
    `PendingApprovals` 可补查尚未答复请求。超时、取消、关闭会唤醒挂起审批。
+   `request_id` 绑定本场会话与持久轮次，须原样交回；外场或恢复前旧请求不能串答。
 6. `ReadOperation` 查快照，`WaitResult` 等终态。`Cancel` 对尚未开始和正在执行的
    操作都生效。`Close` 拒新活，取消并收拢 worker，封账并放掉文件句柄。
 

@@ -88,7 +88,7 @@ struct Tool {
 enum class ApprovalMode { Confirm, AcceptEdits, DontAsk, Yolo };
 enum class ApprovalDecision { Accept, AcceptForSession, Decline, Cancel };
 struct Approval {
-    std::string request_id;
+    std::string request_id; // opaque; scoped to this session and durable turn
     std::string operation_id;
     std::string tool_call_id;
     std::string tool_name;
