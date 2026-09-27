@@ -308,7 +308,8 @@ TEST_CASE("SDK lifecycle: resumed session rejects an approval token from its pre
     REQUIRE((*runtime)->Shutdown().has_value());
 }
 
-TEST_CASE("SDK lifecycle: real MCP image persists in the session and reaches the next model request") {
+namespace {
+void CheckMcpResultBoundary(bool image) {
     LifecycleFixture fixture;
 #ifdef _WIN32
     const char* python = "python";
@@ -324,17 +325,20 @@ TEST_CASE("SDK lifecycle: real MCP image persists in the session and reaches the
     REQUIRE(platform::Utf8ToPath(executable.get<std::string>()).is_absolute());
 
     lubancode::test_support::FakeHttpServer server;
+    const auto arguments = Json{{"kind", image ? "image" : "text"}}.dump();
+    const auto argument_delta = Json{{"type", "content_block_delta"}, {"index", 0},
+        {"delta", {{"type", "input_json_delta"}, {"partial_json", arguments}}}}.dump();
     server.Enqueue(Sse({
         R"({"type":"message_start","message":{"id":"m1","model":"fixture","usage":{"input_tokens":1,"output_tokens":0}}})",
-        R"({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"image-call","name":"mcp__fixture__rich","input":{}}})",
-        R"({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"kind\":\"image\"}"}})",
+        R"({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"rich-call","name":"mcp__fixture__rich","input":{}}})",
+        argument_delta,
         R"({"type":"content_block_stop","index":0})",
         R"({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}})",
         R"({"type":"message_stop"})"}));
     server.Enqueue(Sse({
         R"({"type":"message_start","message":{"id":"m2","model":"fixture","usage":{"input_tokens":1,"output_tokens":0}}})",
         R"({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})",
-        R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"image persisted"}})",
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"text received"}})",
         R"({"type":"content_block_stop","index":0})",
         R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}})",
         R"({"type":"message_stop"})"}));
@@ -362,7 +366,7 @@ TEST_CASE("SDK lifecycle: real MCP image persists in the session and reaches the
     const auto session_id = (*session)->id();
     auto events = (*session)->Subscribe();
     REQUIRE(events.has_value());
-    const auto submitted = (*session)->Submit("image-key", "inspect fixture image");
+    const auto submitted = (*session)->Submit("mcp-key", "inspect fixture result");
     REQUIRE(submitted.has_value());
     const auto result = (*session)->WaitResult(submitted->operation_id, 20s);
     REQUIRE(result.has_value());
@@ -375,44 +379,105 @@ TEST_CASE("SDK lifecycle: real MCP image persists in the session and reaches the
     }
     INFO("MCP operation error: " << result->error);
     INFO("MCP event sequence (kinds only): " << observed_events);
-    CHECK(result->state == sdk::OperationState::Succeeded);
     CHECK(result->result_persisted);
-    CHECK(result->final_text == "image persisted");
+    if (image) {
+        // The current production media-budget contract rejects unestimated
+        // image/audio/blob results after capture. It must not invent a token
+        // price, rerun the tool, or send the next request.
+        CHECK(result->state == sdk::OperationState::Failed);
+        CHECK(result->error.find("tool_batch.unestimated_media_or_reasoning") != std::string::npos);
+        CHECK(result->final_text.empty());
+    } else {
+        CHECK(result->state == sdk::OperationState::Succeeded);
+        CHECK(result->error.empty());
+        CHECK(result->final_text == "text received");
+    }
+    const auto duplicate = (*session)->Submit("mcp-key", "inspect fixture result");
+    REQUIRE(duplicate.has_value());
+    CHECK(duplicate->duplicate);
+    CHECK(duplicate->operation_id == submitted->operation_id);
     REQUIRE((*session)->Close().has_value());
 
     const auto requests = server.requests();
-    REQUIRE(requests.size() == 2);
+    REQUIRE(requests.size() == (image ? 1 : 2));
     CHECK(requests[0].target == "/v1/messages");
-    CHECK(requests[1].target == "/v1/messages");
-    // The base64 must come from rehydrating the stored image, not a path-only
-    // or error placeholder passed to the next model request.
-    const auto request = Json::parse(requests[1].body);
-    bool model_received_image = false;
-    for (const auto& message : request.at("messages")) {
-        for (const auto& block : message.at("content")) {
-            if (block.value("type", "") != "tool_result" || !block.at("content").is_array()) continue;
-            for (const auto& content : block.at("content")) {
-                if (content.value("type", "") != "image") continue;
-                const auto& source = content.at("source");
-                model_received_image = source.value("type", "") == "base64" &&
-                    source.value("media_type", "") == "image/png" &&
-                    source.value("data", "").starts_with("iVBORw0KGgo");
+    if (!image) {
+        CHECK(requests[1].target == "/v1/messages");
+        const auto request = Json::parse(requests[1].body);
+        bool model_received_text = false;
+        for (const auto& message : request.at("messages")) {
+            for (const auto& block : message.at("content")) {
+                if (block.value("type", "") != "tool_result" ||
+                    block.value("tool_use_id", "") != "rich-call") continue;
+                CHECK_FALSE(block.value("is_error", false));
+                REQUIRE(block.at("content").is_string());
+                model_received_text = block.at("content").get<std::string>().find("只有文本") != std::string::npos;
             }
         }
+        CHECK(model_received_text);
     }
-    CHECK(model_received_image);
-    const auto artifacts = fixture.SessionDir(session_id) / "artifacts" / "sha256";
-    REQUIRE(fs::is_directory(artifacts));
-    bool image_found = false;
-    for (const auto& entry : fs::directory_iterator(artifacts)) {
-        if (entry.path().extension() == ".png" && fs::file_size(entry.path()) > 0) image_found = true;
-    }
-    CHECK(image_found);
-    const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(fixture.SessionDir(session_id) / (session_id + ".jsonl"));
+
+    const auto session_dir = fixture.SessionDir(session_id);
+    const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(session_dir / (session_id + ".jsonl"));
     REQUIRE(ledger.has_value());
-    bool recorded_image = false;
-    for (const auto& message : ledger->messages) {
-        if (message.message.dump().find("image_ref") != std::string::npos) recorded_image = true;
+    using Kind = lubancode::trajectory::v3::EventKindV3;
+    std::string action_id;
+    for (const auto& event : ledger->events) {
+        if (event.kind == Kind::ToolExecutionPending &&
+            event.payload.value("provider_tool_call_id", "") == "rich-call") {
+            REQUIRE(action_id.empty());
+            REQUIRE(event.action_id.has_value());
+            action_id = *event.action_id;
+        }
     }
-    CHECK(recorded_image);
+    REQUIRE_FALSE(action_id.empty());
+    int starts = 0, finishes = 0, persisted = 0, image_captures = 0;
+    for (const auto& event : ledger->events) {
+        if (event.kind == Kind::ToolExecutionStarted) {
+            ++starts;
+            CHECK(event.action_id == action_id);
+        }
+        if (event.kind == Kind::ToolExecutionFinished) {
+            ++finishes;
+            CHECK(event.action_id == action_id);
+        }
+        if (event.kind != Kind::ToolResultPersisted) continue;
+        ++persisted;
+        CHECK(event.action_id == action_id);
+        CHECK(event.payload.value("tool_call_id", "") == action_id);
+        if (!image) continue;
+        for (const auto& ref : event.payload.at("result_ref")) {
+            const auto relative_path = ref.value("path", "");
+            if (ref.value("kind", "") != "raw_payload" || relative_path.find("capture-") == std::string::npos) continue;
+            ++image_captures;
+            std::ifstream captured(session_dir / platform::Utf8ToPath(relative_path), std::ios::binary);
+            REQUIRE(captured.is_open());
+            const auto blocks = Json::parse(captured);
+            REQUIRE(blocks.size() == 2);
+            CHECK(blocks[0].value("type", "") == "text");
+            CHECK(blocks[1].value("type", "") == "image");
+            CHECK(blocks[1].value("mime_type", "") == "image/png");
+            const auto& artifact = blocks[1].at("artifact");
+            CHECK(artifact.value("stored", false));
+            auto png = platform::Utf8ToPath(artifact.at("path").get<std::string>());
+            if (png.is_relative()) png = session_dir / png;
+            REQUIRE(fs::is_regular_file(png));
+            CHECK(fs::equivalent(png.parent_path(), session_dir / "artifacts" / "sha256"));
+            CHECK(png.extension() == ".png");
+            CHECK(fs::file_size(png) > 0);
+        }
+    }
+    CHECK(starts == 1);
+    CHECK(finishes == 1);
+    CHECK(persisted >= 1);
+    if (image) CHECK(image_captures == 1);
+}
+} // namespace
+
+TEST_CASE("SDK lifecycle: real MCP text reaches the next model request and completes once") {
+    CheckMcpResultBoundary(false);
+}
+
+TEST_CASE("SDK lifecycle: real MCP image is captured once and rejected by the media budget") {
+    CheckMcpResultBoundary(true);
 }
