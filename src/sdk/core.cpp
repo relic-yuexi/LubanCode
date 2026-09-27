@@ -50,15 +50,37 @@ Result<void> ValidateOperationLedger(const fs::path& session_dir) {
     const auto invalid = [](std::string reason) -> Result<void> {
         return std::unexpected(Failure("sdk.resume.operation_ledger_invalid", std::move(reason)));
     };
+    enum class Stage { Accepted, Dispatched, Final };
+    std::map<std::string, Stage> stages;
+    const auto check_result_coverage = [&]() -> Result<void> {
+        std::error_code result_error;
+        const auto results = session_dir / "sdk-results";
+        const bool exists = fs::exists(results, result_error);
+        if (result_error) return invalid("cannot inspect SDK result directory");
+        if (!exists) return {};
+        fs::directory_iterator entries(results, result_error);
+        if (result_error) return invalid("cannot read SDK result directory");
+        for (; entries != fs::directory_iterator{}; entries.increment(result_error)) {
+            if (result_error) return invalid("cannot read SDK result directory");
+            if (entries->path().extension() != ".json") continue;
+            const auto id = lubancode::tools::PathToUtf8(entries->path().stem());
+            const auto fact = stages.find(id);
+            // Result bytes are written before operation.final, so Dispatched is
+            // valid during crash recovery. Missing acceptance/dispatch is not.
+            if (fact == stages.end() || fact->second == Stage::Accepted) {
+                return invalid("SDK result has no preceding operation dispatch");
+            }
+        }
+        if (result_error) return invalid("cannot read SDK result directory");
+        return {};
+    };
     std::error_code ec;
     const bool exists = fs::exists(path, ec);
     if (ec) return invalid("cannot inspect operation ledger");
-    if (!exists) return {}; // new/empty sessions have a lazily created ledger
+    if (!exists) return check_result_coverage(); // new/empty sessions have a lazy ledger
     if (!fs::is_regular_file(path, ec) || ec) return invalid("operation ledger is not a regular file");
     std::ifstream input(path, std::ios::binary);
     if (!input) return invalid("cannot read operation ledger");
-    enum class Stage { Accepted, Dispatched, Final };
-    std::map<std::string, Stage> stages;
     std::set<std::string> keys;
     const auto is_string = [](const Json& row, const char* key) {
         return row.contains(key) && row.at(key).is_string();
@@ -110,7 +132,7 @@ Result<void> ValidateOperationLedger(const fs::path& session_dir) {
         }
     }
     if (input.bad()) return invalid("failed while reading operation ledger");
-    return {};
+    return check_result_coverage();
 }
 Result<fs::path> AbsoluteDirectory(const std::string& value, bool create) {
     if (value.empty() || value.find('\0') != std::string::npos || !lubancode::platform::IsValidUtf8(value)) return std::unexpected(Failure("sdk.path.invalid", value));
