@@ -120,6 +120,7 @@ elseif(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   set(LUBANCODE_USING_VCPKG ON)
 endif()
 
+include(FetchContent)
 if(LUBANCODE_USING_VCPKG)
   message(STATUS "lubancode: 使用 vcpkg 提供依赖 (VCPKG_ROOT / toolchain 已检测到)")
   find_package(cpr CONFIG REQUIRED)

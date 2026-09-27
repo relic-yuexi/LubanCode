@@ -24,7 +24,7 @@ target_include_directories(lubancore_sdk PUBLIC
 target_link_libraries(lubancore_sdk PRIVATE lubancode_runtime)
 if(UNIX AND NOT APPLE)
   # Static internals must not become a second accidental public ABI.
-  target_link_options(lubancore_sdk PRIVATE "LINKER:--exclude-libs,ALL")
+  target_link_options(lubancore_sdk PRIVATE "LINKER:--exclude-libs,ALL" "LINKER:--no-undefined")
 endif()
 if(APPLE)
   set_target_properties(lubancore_sdk PROPERTIES INSTALL_RPATH "@loader_path")

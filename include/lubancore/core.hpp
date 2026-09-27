@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
@@ -189,6 +190,8 @@ public:
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
     // Cooperative custom tools/backends MUST return after cancellation; Close waits
     // for them and never destroys live borrowed state or pretends a timeout stopped it.
+    // Blocking lifecycle methods are rejected inside any SDK backend/tool callback;
+    // do not destroy owning Runtime/Session handles from these callbacks.
     Result<void> Close();
 private:
     struct Impl;

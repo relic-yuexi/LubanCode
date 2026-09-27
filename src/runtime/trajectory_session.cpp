@@ -6,6 +6,7 @@
 // Impl 定义挪 internal 头 trajectory_session_impl.hpp 跨件共用。
 
 #include "runtime/trajectory_session.hpp"
+#include "trajectory/v3/session_switch.hpp"
 #include "runtime/v3_tool_result_material.hpp"
 
 #include <algorithm>

@@ -2,10 +2,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "lubancore/core.hpp"
 #include "runtime/session_service.hpp"
@@ -47,6 +50,33 @@ public:
 private:
     std::shared_ptr<std::atomic<int>> calls_;
     std::string answer_;
+};
+struct StopGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    int entered = 0;
+    int cancelled = 0;
+    std::atomic<int> peer_timeouts{0};
+};
+class CoordinatedBackend final : public sdk::Backend {
+public:
+    explicit CoordinatedBackend(std::shared_ptr<StopGate> gate) : gate_(std::move(gate)) {}
+    sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest&, sdk::Cancellation cancel) override {
+        {
+            std::lock_guard lock(gate_->mutex);
+            ++gate_->entered;
+            gate_->cv.notify_all();
+        }
+        const auto deadline = std::chrono::steady_clock::now() + 10s;
+        while (!cancel.requested() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(2ms);
+        std::unique_lock lock(gate_->mutex);
+        if (cancel.requested()) ++gate_->cancelled;
+        gate_->cv.notify_all();
+        if (!gate_->cv.wait_for(lock, 3s, [&] { return gate_->cancelled == 2; })) ++gate_->peer_timeouts;
+        return std::unexpected(sdk::Error{"fixture.cancelled", "closed"});
+    }
+private:
+    std::shared_ptr<StopGate> gate_;
 };
 sdk::SessionOptions Options(const Fixture& fixture, std::shared_ptr<std::atomic<int>> calls,
                             std::string answer = "answer") {
@@ -202,4 +232,30 @@ TEST_CASE("SDK: stream overflow is explicit and unsubscribe wakes an in-flight r
     auto closed = next.get();
     REQUIRE_FALSE(closed.has_value());
     CHECK(closed.error().code == "sdk.events.closed");
+}
+
+TEST_CASE("SDK: runtime shutdown signals every session before joining a worker") {
+    Fixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+    auto gate = std::make_shared<StopGate>();
+    auto first_options = Options(fixture, std::make_shared<std::atomic<int>>(0));
+    first_options.backend = std::make_unique<CoordinatedBackend>(gate);
+    auto second_options = Options(fixture, std::make_shared<std::atomic<int>>(0));
+    second_options.backend = std::make_unique<CoordinatedBackend>(gate);
+    auto first = (*runtime)->OpenSession(std::move(first_options));
+    auto second = (*runtime)->OpenSession(std::move(second_options));
+    REQUIRE(first.has_value());
+    REQUIRE(second.has_value());
+    REQUIRE((*first)->Submit("first", "wait").has_value());
+    REQUIRE((*second)->Submit("second", "wait").has_value());
+    {
+        std::unique_lock lock(gate->mutex);
+        REQUIRE(gate->cv.wait_for(lock, 10s, [&] { return gate->entered == 2; }));
+    }
+    REQUIRE((*runtime)->Shutdown().has_value());
+    CHECK(gate->cancelled == 2);
+    CHECK(gate->peer_timeouts.load() == 0);
+    CHECK_FALSE((*first)->Submit("after", "closed").has_value());
+    CHECK_FALSE((*second)->Submit("after", "closed").has_value());
 }

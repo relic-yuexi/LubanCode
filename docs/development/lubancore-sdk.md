@@ -35,7 +35,8 @@ Windows 将 `bin` 加入 PATH，Linux 使用库搜索路径或应用自身 RPATH
 
 自定义 Backend、Tool 须合作检查取消旗。SDK 不强杀这些进程内回调，`Close` 会等其退出，
 不会丢下 detached 线程再释放借用对象。不得在 Backend/Tool 回调里销毁 Runtime 或 Session；
-回调中显式调用自身 `Close`、`WaitResult` 或 `Runtime::Shutdown` 会报 `sdk.lifecycle.reentrant`。
+回调中调用 `Close`、`WaitResult` 或 `Runtime::Shutdown` 会报 `sdk.lifecycle.reentrant`，
+跨会话调用也受这条约束，免得两只 worker 互相等着 join。
 
 ## 工具、权限与并发边界
 

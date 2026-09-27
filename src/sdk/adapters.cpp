@@ -184,7 +184,8 @@ std::unique_ptr<lubancode::tools::Tool> BindLocalTool(std::unique_ptr<lubancode:
 }
 Result<std::unique_ptr<lubancode::tools::Tool>> AdaptTool(Tool tool, std::string cwd) {
     auto schema = Json::parse(tool.input_schema_json, nullptr, false);
-    if (tool.name.empty() || !tool.execute || !schema.is_object() || !schema.contains("type") ||
+    if (tool.name.empty() || tool.name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") != std::string::npos ||
+        !lubancode::platform::IsValidUtf8(tool.description) || !tool.execute || !schema.is_object() || !schema.contains("type") ||
         !schema.at("type").is_string() || schema.at("type").get<std::string>() != "object") {
         return std::unexpected(Error{"sdk.tool.invalid_definition", tool.name});
     }

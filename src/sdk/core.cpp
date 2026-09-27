@@ -33,6 +33,7 @@ namespace rt = lubancode::runtime;
 namespace api = lubancode::api;
 namespace fs = std::filesystem;
 using Json = nlohmann::json;
+thread_local bool in_session_worker = false;
 
 Error Failure(std::string code, std::string message = {}) { return {std::move(code), std::move(message)}; }
 bool Terminal(OperationState state) { return state != OperationState::Accepted && state != OperationState::Running; }
@@ -162,6 +163,7 @@ Result<std::optional<Event>> EventStream::Next(std::chrono::milliseconds timeout
 struct Session::Impl final : rt::InteractionBroker {
     RuntimeOptions roots;
     SessionOptions options;
+    std::shared_ptr<std::atomic<bool>> runtime_stopping;
     std::string session_id;
     fs::path session_dir;
     std::unique_ptr<rt::SessionService> service;
@@ -505,6 +507,10 @@ struct Session::Impl final : rt::InteractionBroker {
     }
 
     void Pump() {
+        struct WorkerScope {
+            WorkerScope() { in_session_worker = true; }
+            ~WorkerScope() { in_session_worker = false; }
+        } worker_scope;
         for (;;) {
             rt::SessionService::PendingPop pop;
             bool skip = false;
@@ -540,17 +546,24 @@ struct Session::Impl final : rt::InteractionBroker {
         cv.notify_all();
     }
 
-    Result<void> Close() {
-        if (worker_id == std::this_thread::get_id()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
-        std::lock_guard close_lock(close_mutex);
+    void RequestClose() {
         {
             std::lock_guard lock(mutex);
-            if (closed) return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
+            if (closed) return;
             closing = true;
             interrupt.store(true);
             cv.notify_all();
         }
         CancelApprovals();
+    }
+    Result<void> Close() {
+        if (in_session_worker) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+        std::lock_guard close_lock(close_mutex);
+        {
+            std::lock_guard lock(mutex);
+            if (closed) return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
+        }
+        RequestClose();
         if (worker.joinable()) worker.join();
         if (service && service->runtime()) {
             const auto outcome = service->Close("sdk_close");
@@ -586,7 +599,7 @@ Result<Receipt> Session::Submit(std::string key, std::string text) {
         return std::unexpected(Failure("sdk.input.invalid_utf8"));
     }
     std::lock_guard lock(impl_->mutex);
-    if (impl_->closing || impl_->closed) return std::unexpected(Failure("sdk.session.closed"));
+    if (impl_->closing || impl_->closed || impl_->runtime_stopping->load()) return std::unexpected(Failure("sdk.session.closed"));
     if (impl_->broken) return std::unexpected(Failure("sdk.storage.broken"));
     auto receipt = impl_->service->SubmitInput({std::move(key), std::move(text), {}});
     if (!receipt.accepted && !receipt.duplicate) return std::unexpected(Failure(receipt.error_code));
@@ -597,7 +610,7 @@ Result<Receipt> Session::Submit(std::string key, std::string text) {
 Result<std::shared_ptr<EventStream>> Session::Subscribe(std::size_t capacity) {
     if (capacity == 0 || capacity > 65536) return std::unexpected(Failure("sdk.events.invalid_capacity"));
     std::lock_guard lock(impl_->mutex);
-    if (impl_->closing || impl_->closed) return std::unexpected(Failure("sdk.session.closed"));
+    if (impl_->closing || impl_->closed || impl_->runtime_stopping->load()) return std::unexpected(Failure("sdk.session.closed"));
     auto state = std::make_shared<EventStream::Impl>(capacity);
     impl_->subscriptions.push_back(state);
     return std::shared_ptr<EventStream>(new EventStream(std::move(state)));
@@ -635,7 +648,7 @@ Result<Operation> Session::ReadOperation(std::string id) const {
 }
 Result<Operation> Session::WaitResult(std::string id, std::chrono::milliseconds timeout) const {
     if (timeout.count() < 0) return std::unexpected(Failure("sdk.timeout.invalid"));
-    if (impl_->worker_id == std::this_thread::get_id()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    if (in_session_worker) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
     std::unique_lock lock(impl_->mutex);
     auto it = impl_->operations.find(id);
     if (it == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
@@ -647,6 +660,7 @@ struct Runtime::Impl {
     RuntimeOptions options;
     std::mutex mutex;
     bool closed = false;
+    std::shared_ptr<std::atomic<bool>> stopping = std::make_shared<std::atomic<bool>>(false);
     std::vector<std::shared_ptr<Session::Impl>> sessions;
 };
 Runtime::Runtime(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -670,6 +684,7 @@ Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
     try {
         auto execution = std::make_shared<Session::Impl>();
         execution->roots = impl_->options;
+        execution->runtime_stopping = impl_->stopping;
         execution->options = std::move(options);
         auto opened = execution->Initialize();
         if (!opened) return std::unexpected(opened.error());
@@ -679,6 +694,9 @@ Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
     } catch (const std::exception& error) { return std::unexpected(Failure("sdk.session.open_failed", error.what())); }
 }
 Result<void> Runtime::Shutdown() {
+    // Also reject cross-session/runtime blocking lifecycle calls from a tool or
+    // backend callback: two workers closing each other must not form a join cycle.
+    if (in_session_worker) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
     std::vector<std::shared_ptr<Session::Impl>> sessions;
     {
         std::lock_guard lock(impl_->mutex);
@@ -686,8 +704,11 @@ Result<void> Runtime::Shutdown() {
             if (session->worker_id == std::this_thread::get_id()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
         }
         impl_->closed = true;
+        impl_->stopping->store(true);
         sessions = impl_->sessions;
     }
+    // Stop admission and signal every worker before waiting for any one worker.
+    for (const auto& session : sessions) session->RequestClose();
     std::optional<Error> error;
     for (const auto& session : sessions) {
         auto result = session->Close();
