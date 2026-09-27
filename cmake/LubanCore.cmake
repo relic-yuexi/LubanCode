@@ -53,12 +53,42 @@ if(MSVC)
 endif()
 
 install(TARGETS lubancore_sdk EXPORT LubanCoreTargets
+  RUNTIME_DEPENDENCY_SET LubanCoreRuntimeDependencies
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT LubanCore
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT LubanCore
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT LubanCore)
 if(WIN32)
-  install(FILES $<TARGET_RUNTIME_DLLS:lubancore_sdk>
-    DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT LubanCore)
+  # Imported targets do not always expose their complete DLL dependency graph:
+  # vcpkg's libcurl target, for example, can omit its indirect z.dll dependency.
+  # Scan the actual PE imports after the build has populated the app-local DLL
+  # directory. Missing non-system dependencies fail installation explicitly.
+  # PE import names are normalized, but resolved paths can preserve case and
+  # either separator. Match the actual Windows root without excluding similarly
+  # named directories elsewhere in the SDK or a dependency installation.
+  set(_lubancore_windows_root "$ENV{SystemRoot}")
+  if(_lubancore_windows_root STREQUAL "")
+    message(FATAL_ERROR "SystemRoot is required to classify Windows SDK runtime dependencies")
+  endif()
+  string(REGEX MATCHALL "." _lubancore_windows_root_chars "${_lubancore_windows_root}")
+  set(_lubancore_windows_root_regex "^")
+  foreach(_char IN LISTS _lubancore_windows_root_chars)
+    if(_char MATCHES "[A-Za-z]")
+      string(TOLOWER "${_char}" _lower)
+      string(TOUPPER "${_char}" _upper)
+      string(APPEND _lubancore_windows_root_regex "[${_lower}${_upper}]")
+    elseif(_char STREQUAL "/" OR _char STREQUAL "\\")
+      string(APPEND _lubancore_windows_root_regex [[[/\\]]])
+    else()
+      string(APPEND _lubancore_windows_root_regex "\\${_char}")
+    endif()
+  endforeach()
+  string(APPEND _lubancore_windows_root_regex [[[/\\]]])
+  install(RUNTIME_DEPENDENCY_SET LubanCoreRuntimeDependencies
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT LubanCore
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT LubanCore
+    DIRECTORIES "$<TARGET_FILE_DIR:lubancore_sdk>"
+    PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-"
+    POST_EXCLUDE_REGEXES "${_lubancore_windows_root_regex}")
 endif()
 install(DIRECTORY include/lubancore DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT LubanCore)
 install(FILES docs/development/lubancore-sdk.md

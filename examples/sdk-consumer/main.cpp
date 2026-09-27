@@ -17,6 +17,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -28,6 +29,10 @@ namespace sdk = lubancore;
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
+void Progress(std::string_view stage) {
+    std::cerr << "[sdk-consumer] " << stage << std::endl;
+}
+
 void Check(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
 }
@@ -35,10 +40,12 @@ void Check(bool condition, const std::string& message) {
 template<class T>
 T Take(sdk::Result<T> result, const std::string& action) {
     if (!result) throw std::runtime_error(action + ": " + result.error().code + " " + result.error().message);
+    Progress("completed: " + action);
     return std::move(*result);
 }
 void Take(sdk::Result<void> result, const std::string& action) {
     if (!result) throw std::runtime_error(action + ": " + result.error().code + " " + result.error().message);
+    Progress("completed: " + action);
 }
 
 std::string Utf8(const fs::path& path) {
@@ -79,6 +86,7 @@ Paths Fresh(const fs::path& base, const std::string& name) {
     return PathsAt(base / (name + "-" + std::to_string(stamp) + "-" + std::to_string(++serial)));
 }
 std::unique_ptr<sdk::Runtime> Runtime(const Paths& paths) {
+    Progress("creating runtime");
     return Take(sdk::Runtime::Create({Utf8(paths.data), Utf8(paths.resources)}), "create runtime");
 }
 
@@ -160,6 +168,7 @@ sdk::Approval ApprovalFor(const std::shared_ptr<sdk::Session>& session,
 }
 
 void FileAndCommand(const fs::path& base) {
+    Progress("begin: FileAndCommand");
     const auto paths = Fresh(base, "files");
     const auto process_cwd = fs::current_path();
     auto runtime = Runtime(paths);
@@ -239,6 +248,7 @@ struct Rendezvous {
 };
 
 void SharedDirectoryIsolation(const fs::path& base) {
+    Progress("begin: SharedDirectoryIsolation");
     const auto paths = Fresh(base, "shared-cwd");
     auto runtime = Runtime(paths);
     auto rendezvous = std::make_shared<Rendezvous>();
@@ -294,6 +304,7 @@ void SharedDirectoryIsolation(const fs::path& base) {
 }
 
 void CloseAndStreams(const fs::path& base) {
+    Progress("begin: CloseAndStreams");
     const auto paths = Fresh(base, "close");
     auto runtime = Runtime(paths);
     auto entered = std::make_shared<std::atomic<bool>>(false);
@@ -333,6 +344,7 @@ void CloseAndStreams(const fs::path& base) {
 }
 
 void ReentryAndOverflow(const fs::path& base) {
+    Progress("begin: ReentryAndOverflow");
     const auto paths = Fresh(base, "reentry");
     auto runtime = Runtime(paths);
     auto holder = std::make_shared<std::weak_ptr<sdk::Session>>();
@@ -370,6 +382,7 @@ std::size_t SessionDirectoryCount(const fs::path& data) {
     return count;
 }
 void InvalidOptions(const fs::path& base) {
+    Progress("begin: InvalidOptions");
     const auto paths = Fresh(base, "invalid");
     auto runtime = Runtime(paths);
     const auto plain = [](const sdk::ModelRequest&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> { return Text("unused"); };
@@ -405,6 +418,7 @@ void InvalidOptions(const fs::path& base) {
 }
 
 void Seed(const fs::path& base) {
+    Progress("begin: Seed");
     const auto paths = Fresh(base, "restart");
     auto runtime = Runtime(paths);
     auto step = std::make_shared<int>(0);
@@ -434,6 +448,7 @@ void Seed(const fs::path& base) {
     Write(base / "restart-active.txt", Utf8(paths.root.filename()));
 }
 void Resume(const fs::path& base) {
+    Progress("begin: Resume");
     const auto leaf = Read(base / "restart-active.txt");
     Check(!leaf.empty() && leaf.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") == std::string::npos,
           "invalid restart fixture directory");
@@ -475,6 +490,7 @@ void Resume(const fs::path& base) {
 }
 
 void RecoverySeed(const fs::path& base) {
+    Progress("begin: RecoverySeed");
     const auto paths = Fresh(base, "recovery");
     auto runtime = Runtime(paths);
     auto entered = std::make_shared<std::atomic<bool>>(false);
@@ -498,10 +514,12 @@ void RecoverySeed(const fs::path& base) {
     Write(base / "recovery-active.txt", Utf8(paths.root.filename()));
     // Intentional process-loss fixture. Do not close Session/Runtime: that would
     // turn the test into clean shutdown and erase the recovery window.
+    Progress("simulating process loss via _Exit");
     std::_Exit(0);
 }
 
 void RecoveryResume(const fs::path& base) {
+    Progress("begin: RecoveryResume");
     const auto leaf = Read(base / "recovery-active.txt");
     Check(!leaf.empty() && leaf.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") == std::string::npos,
           "invalid recovery fixture directory");
@@ -541,6 +559,7 @@ void RecoveryResume(const fs::path& base) {
 } // namespace
 
 int main(int argc, char** argv) {
+    Progress("entered main");
     try {
         Check(argc == 3, "usage: lubancore_consumer smoke|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
         const fs::path base = Path(argv[2]);
@@ -559,7 +578,7 @@ int main(int argc, char** argv) {
         else if (mode == "recovery-seed") RecoverySeed(base);
         else if (mode == "recovery-resume") RecoveryResume(base);
         else throw std::runtime_error("unknown mode: " + mode);
-        std::cout << "installed SDK consumer " << mode << " passed\n";
+        std::cout << "installed SDK consumer " << mode << " passed" << std::endl;
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "installed SDK consumer failed: " << error.what() << '\n';
