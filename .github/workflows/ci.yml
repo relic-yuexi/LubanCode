@@ -417,12 +417,6 @@ jobs:
             cmake -B build -S . $COMMON_FLAGS
           fi
 
-      - name: Build
-        shell: bash
-        run: |
-          cmake --build build --config Release --target lubancode -j 4
-          cmake --build build --config Release --target lubancode_tests -j 4
-
       # SDK 必须从安装前缀被仓库外工程消费，不能用源码树内链接冒充。
       - name: Install and test standalone SDK consumer
         if: needs.changes.outputs.sdk_tests == 'true'
@@ -431,6 +425,12 @@ jobs:
           cmake --build build --config Release --target lubancore_sdk -j 4
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
           "$PY" scripts/ci/check_installed_sdk.py --build-dir build
+
+      - name: Build
+        shell: bash
+        run: |
+          cmake --build build --config Release --target lubancode -j 4
+          cmake --build build --config Release --target lubancode_tests -j 4
 
       # 先查登记，后面的全量 Test 真跑；不重复执行，也不让零册冒绿。
       - name: Require registered component tests
@@ -620,12 +620,6 @@ jobs:
           CC: ${{ env.CC }}
           CXX: ${{ env.CXX }}
 
-      - name: Build
-        run: |
-          set -e
-          cmake --build build --target lubancode -j "$(nproc)"
-          cmake --build build --target lubancode_tests -j "$(nproc)"
-
       # SDK 必须从安装前缀被仓库外工程消费，不能用源码树内链接冒充。
       - name: Install and test standalone SDK consumer
         if: needs.changes.outputs.sdk_tests == 'true'
@@ -634,6 +628,12 @@ jobs:
           cmake --build build --config Release --target lubancore_sdk -j 4
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
           "$PY" scripts/ci/check_installed_sdk.py --build-dir build
+
+      - name: Build
+        run: |
+          set -e
+          cmake --build build --target lubancode -j "$(nproc)"
+          cmake --build build --target lubancode_tests -j "$(nproc)"
 
       - name: Require registered component tests
         if: needs.changes.outputs.remote_tests == 'true' || needs.changes.outputs.assembly_tests == 'true' || needs.changes.outputs.sdk_tests == 'true'
