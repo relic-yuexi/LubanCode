@@ -80,7 +80,6 @@ lubancode::test_support::FakeHttpResponse Sse(std::vector<std::string> frames) {
     lubancode::test_support::FakeHttpResponse response;
     response.headers.emplace_back("Content-Type", "text/event-stream");
     for (const auto& frame : frames) response.body += "data: " + frame + "\n\n";
-    response.body += "data: [DONE]\n\n";
     return response;
 }
 } // namespace
@@ -183,18 +182,26 @@ TEST_CASE("SDK lifecycle: real MCP image persists in the session and reaches the
 
     lubancode::test_support::FakeHttpServer server;
     server.Enqueue(Sse({
-        R"({"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"image-call","type":"function","function":{"name":"mcp__fixture__rich","arguments":"{\"kind\":\"image\"}"}}]},"finish_reason":null}]})",
-        R"({"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]})"}));
+        R"({"type":"message_start","message":{"id":"m1","model":"fixture","usage":{"input_tokens":1,"output_tokens":0}}})",
+        R"({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"image-call","name":"mcp__fixture__rich","input":{}}})",
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"kind\":\"image\"}"}})",
+        R"({"type":"content_block_stop","index":0})",
+        R"({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}})",
+        R"({"type":"message_stop"})"}));
     server.Enqueue(Sse({
-        R"({"id":"c2","choices":[{"index":0,"delta":{"role":"assistant","content":"image persisted"},"finish_reason":null}]})",
-        R"({"id":"c2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})"}));
+        R"({"type":"message_start","message":{"id":"m2","model":"fixture","usage":{"input_tokens":1,"output_tokens":0}}})",
+        R"({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})",
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"image persisted"}})",
+        R"({"type":"content_block_stop","index":0})",
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}})",
+        R"({"type":"message_stop"})"}));
 
     auto runtime = sdk::Runtime::Create(fixture.Roots());
     REQUIRE(runtime.has_value());
     sdk::SessionOptions options;
     options.cwd = platform::PathToUtf8(fixture.root / "cwd");
-    options.model = "gpt-4o";
-    options.connection = sdk::Connection{sdk::Wire::ChatCompletions,
+    options.model = "fixture";
+    options.connection = sdk::Connection{sdk::Wire::Anthropic,
         "http://127.0.0.1:" + std::to_string(server.port()) + "/v1", "FAKE_SDK_FIXTURE"};
     options.approval_mode = sdk::ApprovalMode::Yolo;
     options.max_steps_per_turn = 4;
@@ -223,7 +230,21 @@ TEST_CASE("SDK lifecycle: real MCP image persists in the session and reaches the
     REQUIRE(requests.size() == 2);
     // The base64 must come from rehydrating the stored image, not a path-only
     // or error placeholder passed to the next model request.
-    CHECK(requests[1].body.find("data:image/png;base64,iVBORw0KGgo") != std::string::npos);
+    const auto request = Json::parse(requests[1].body);
+    bool model_received_image = false;
+    for (const auto& message : request.at("messages")) {
+        for (const auto& block : message.at("content")) {
+            if (block.value("type", "") != "tool_result" || !block.at("content").is_array()) continue;
+            for (const auto& content : block.at("content")) {
+                if (content.value("type", "") != "image") continue;
+                const auto& source = content.at("source");
+                model_received_image = source.value("type", "") == "base64" &&
+                    source.value("media_type", "") == "image/png" &&
+                    source.value("data", "").starts_with("iVBORw0KGgo");
+            }
+        }
+    }
+    CHECK(model_received_image);
     const auto artifacts = fixture.SessionDir(session_id) / "artifacts" / "sha256";
     REQUIRE(fs::is_directory(artifacts));
     bool image_found = false;
