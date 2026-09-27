@@ -43,6 +43,18 @@ def main() -> None:
     runner_temp = os.environ.get("RUNNER_TEMP")
     if not runner_temp:
         raise RuntimeError("RUNNER_TEMP is required for this remote CI check")
+    if sys.platform == "win32":
+        # Children inherit this process error mode. Missing runtime DLLs or
+        # crashes must fail CI rather than wait for an invisible system dialog.
+        # Preserve inherited flags; this changes only this check and its children.
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetErrorMode.argtypes = []
+        kernel32.GetErrorMode.restype = ctypes.c_uint
+        kernel32.SetErrorMode.argtypes = [ctypes.c_uint]
+        kernel32.SetErrorMode.restype = ctypes.c_uint
+        # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+        kernel32.SetErrorMode(kernel32.GetErrorMode() | 0x0001 | 0x0002 | 0x8000)
     scratch = Path(tempfile.mkdtemp(prefix="lubancore-consumer-", dir=runner_temp)).resolve()
     if scratch == repo or repo in scratch.parents:
         raise RuntimeError("consumer must be configured outside the producer source tree")
