@@ -50,6 +50,17 @@ def main() -> None:
     prefix = scratch / "installed"
     consumer_source = scratch / "source"
     consumer_build = scratch / "build"
+    evidence = producer_build / "test-evidence" / "sdk-consumer"
+    evidence.mkdir(parents=True, exist_ok=True)
+    (evidence / "consumer-context.json").write_text(json.dumps({
+        "github_sha": os.environ.get("GITHUB_SHA"),
+        "producer_source": str(repo),
+        "producer_build": str(producer_build),
+        "consumer_source": str(consumer_source),
+        "consumer_build": str(consumer_build),
+        "installed_prefix": str(prefix),
+        "required_tests": sorted(REQUIRED_TESTS),
+    }, indent=2) + "\n", encoding="utf-8")
     print(f"SDK consumer evidence directory: {scratch}", flush=True)
 
     env = os.environ.copy()
@@ -95,8 +106,10 @@ def main() -> None:
         raise RuntimeError(f"consumer resolved LubanCore outside the installed prefix: {package_dir}")
     print(f"consumer resolved installed package: {package_dir}", flush=True)
     run(["cmake", "--build", str(consumer_build), "--config", "Release", "--parallel", "4"], env)
-    listing = json.loads(run(["ctest", "--test-dir", str(consumer_build), "-C", "Release",
-                              "--show-only=json-v1"], env, capture=True))
+    test_listing = run(["ctest", "--test-dir", str(consumer_build), "-C", "Release",
+                        "--show-only=json-v1"], env, capture=True)
+    (evidence / "consumer-tests.json").write_text(test_listing, encoding="utf-8")
+    listing = json.loads(test_listing)
     enabled = {test["name"] for test in listing["tests"] if not any(
         prop["name"] == "DISABLED" and prop["value"]
         for prop in test.get("properties", []))}
@@ -104,8 +117,18 @@ def main() -> None:
     if missing:
         raise RuntimeError("installed consumer is missing enabled tests: " + ", ".join(sorted(missing)))
     print("installed consumer tests: " + ", ".join(sorted(enabled)), flush=True)
-    run(["ctest", "--test-dir", str(consumer_build), "-C", "Release",
-         "--output-on-failure", "--no-tests=error"], env)
+    try:
+        run(["ctest", "--test-dir", str(consumer_build), "-C", "Release",
+             "--output-on-failure", "--no-tests=error",
+             "--output-junit", str(evidence / "consumer-results.xml")], env)
+    finally:
+        # The consumer lives outside the checkout; keep its diagnostic logs in
+        # the producer's artifact directory even when one of its tests fails.
+        # Session data stays in scratch and is not part of the CI artifact.
+        for name in ("LastTest.log", "LastTestsFailed.log"):
+            log = consumer_build / "Testing" / "Temporary" / name
+            if log.is_file():
+                shutil.copy2(log, evidence / name)
 
 
 if __name__ == "__main__":
