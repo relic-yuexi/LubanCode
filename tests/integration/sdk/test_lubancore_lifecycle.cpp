@@ -123,6 +123,64 @@ TEST_CASE("SDK lifecycle: unrecoverable accepted input fails resume instead of w
     fs::rename(fixture.root / "data", fixture.root / "closed-data");
 }
 
+TEST_CASE("SDK lifecycle: corrupt operation ledger cannot discard a completed operation identity") {
+    LifecycleFixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+    auto first = (*runtime)->OpenSession(Options(fixture, [](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        return sdk::ModelReply{"durable completed answer"};
+    }));
+    REQUIRE(first.has_value());
+    const auto session_id = (*first)->id();
+    const auto submitted = (*first)->Submit("durable-original-key", "completed input");
+    REQUIRE(submitted.has_value());
+    const auto completed = (*first)->WaitResult(submitted->operation_id, 15s);
+    REQUIRE(completed.has_value());
+    REQUIRE(completed->state == sdk::OperationState::Succeeded);
+    REQUIRE(completed->result_persisted);
+    REQUIRE((*first)->Close().has_value());
+
+    const auto source_dir = fixture.SessionDir(session_id);
+    const auto operations_file = source_dir / "operations.jsonl";
+    std::vector<std::string> lines;
+    {
+        std::ifstream input(operations_file, std::ios::binary);
+        for (std::string line; std::getline(input, line);) lines.push_back(std::move(line));
+    }
+    REQUIRE(lines.size() == 3);
+    REQUIRE(Json::parse(lines[0]).value("kind", "") == "operation.accepted");
+    REQUIRE(Json::parse(lines[1]).value("kind", "") == "operation.dispatched");
+    REQUIRE(Json::parse(lines[2]).value("kind", "") == "operation.final");
+    SUBCASE("malformed accepted line") { lines[0] = "{broken accepted fact"; }
+    SUBCASE("accepted line missing but following facts remain valid JSON") { lines.erase(lines.begin()); }
+    SUBCASE("conflicting second acceptance for the same operation") {
+        auto conflict = Json::parse(lines[0]);
+        conflict["clientOperationId"] = "different-client-key";
+        lines.insert(lines.begin() + 1, conflict.dump());
+    }
+    {
+        std::ofstream output(operations_file, std::ios::binary | std::ios::trunc);
+        for (const auto& line : lines) output << line << '\n';
+        output.close();
+        REQUIRE_FALSE(output.fail());
+    }
+    // Only the operation ledger was changed. A valid V3 stream alone cannot
+    // prove that operation keys and counters remain safe to reuse.
+    REQUIRE(lubancode::trajectory::v3::ReadV3Ledger(source_dir / (session_id + ".jsonl")).has_value());
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    auto options = Options(fixture, [calls](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        ++*calls;
+        return sdk::ModelReply{"must not execute"};
+    });
+    options.resume_session_id = session_id;
+    const auto resumed = (*runtime)->OpenSession(std::move(options));
+    REQUIRE_FALSE(resumed.has_value());
+    CHECK(resumed.error().code == "sdk.resume.operation_ledger_invalid");
+    CHECK(calls->load() == 0);
+    REQUIRE((*runtime)->Shutdown().has_value());
+    fs::rename(fixture.root / "data", fixture.root / "closed-data");
+}
+
 TEST_CASE("SDK lifecycle: custom tool cannot join another session or shut down its runtime") {
     LifecycleFixture fixture;
     auto runtime = sdk::Runtime::Create(fixture.Roots());
