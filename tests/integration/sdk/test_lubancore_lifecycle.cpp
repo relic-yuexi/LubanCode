@@ -379,6 +379,29 @@ void CheckMcpResultBoundary(bool image) {
     }
     INFO("MCP operation error: " << result->error);
     INFO("MCP event sequence (kinds only): " << observed_events);
+    const auto session_dir = fixture.SessionDir(session_id);
+    INFO("MCP session directory: " << platform::PathToUtf8(session_dir));
+    INFO("MCP session path characters: " << session_dir.native().size());
+    INFO("MCP PNG path characters before atomic temporary suffix: " <<
+         (session_dir / "artifacts" / "sha256" / (std::string(64, 'a') + ".png")).native().size());
+    std::string unexpected_tool_result;
+    if (image) {
+        const auto captured_requests = server.requests();
+        if (captured_requests.size() > 1) {
+            const auto request = Json::parse(captured_requests[1].body);
+            for (const auto& message : request.at("messages")) {
+                for (const auto& block : message.at("content")) {
+                    if (block.value("type", "") != "tool_result" ||
+                        block.value("tool_use_id", "") != "rich-call") continue;
+                    // Only this fixture's tool reply is shown, never request
+                    // headers, connection settings or the whole model request.
+                    unexpected_tool_result += "is_error=" + std::string(block.value("is_error", false) ? "true" : "false") +
+                        " content=" + block.at("content").dump().substr(0, 1200);
+                }
+            }
+        }
+    }
+    INFO("Unexpected image follow-up tool reply: " << unexpected_tool_result);
     CHECK(result->result_persisted);
     if (image) {
         // The current production media-budget contract rejects unestimated
@@ -417,7 +440,6 @@ void CheckMcpResultBoundary(bool image) {
         CHECK(model_received_text);
     }
 
-    const auto session_dir = fixture.SessionDir(session_id);
     const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(session_dir / (session_id + ".jsonl"));
     REQUIRE(ledger.has_value());
     using Kind = lubancode::trajectory::v3::EventKindV3;
