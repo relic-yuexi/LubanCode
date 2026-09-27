@@ -54,6 +54,7 @@
 #include "config/config.hpp"
 #include "config/plugin_trust.hpp"  // PluginTrustStore:P5 插件信任账
 #include "mcp/client.hpp"
+#include "runtime/assembly/mcp.hpp"
 #include "runtime/plugin_contract.hpp"     // PluginManifest(P5 装载件)
 #include "runtime/plugin_http.hpp"         // BoundedHttpTransport(P5 注入缝)
 #include "runtime/plugin_lua_manifest.hpp"  // ManifestLuaRuntime:P5 Lua owner
@@ -63,13 +64,8 @@
 
 namespace lubancode::app_server {
 
-// 一枚已起服的 MCP 服务(headless 持有形状;与 app::McpServerRuntime
-// 同构,app_server 不引 app 层的 tool_runtime——那套拖终端 Theme)。
-struct HeadlessMcpRuntime {
-    std::string name;
-    std::unique_ptr<lubancode::mcp::Client> client;  // 拥有者:McpTool 持它的引用
-    std::vector<lubancode::mcp::ToolInfo> tools;
-};
+// 两宿主共用中立 owner；工具表仍须晚于 owner 声明。
+using HeadlessMcpRuntime = runtime::assembly::McpServerRuntime;
 
 // 一场 thread 的运行材料。成员序=寿命序:拥有者(backend、MCP 子进程)
 // 在前,注册表在后——析构反序,注册表里的 McpTool 先亡,Client 引用
@@ -145,6 +141,9 @@ struct SessionAssemblyRequest {
     const HarnessProfile* harness = nullptr;
     // backend 工厂(生产 BuildBackend/测试假件)。空 = 装配失败。
     std::function<std::unique_ptr<lubancode::api::Backend>()> backend_factory;
+    // 可替换传输启动缝；仍须先过部署名单，再走共享 Client 握手/发现。
+    // 空 = 生产 stdio。测试可注入假传输，不通过 registry_factory 绕过策略。
+    runtime::assembly::McpClientLauncher mcp_launcher;
     // 显式注册表(测试注入假工具表);生产留空=按计划装配(只装 allow
     // 点名的 MCP 工具)。给了它就不再碰 MCP(注入路的工具面由测试定)。
     std::function<std::unique_ptr<lubancode::tools::ToolRegistry>()> registry_factory;

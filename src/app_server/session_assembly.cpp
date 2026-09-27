@@ -1,5 +1,5 @@
 // session_assembly.hpp 的实现:app-server 生产装配(G01/G02 修复的
-// 落点)。MCP 起服与注册复用 mcp::Client/McpTool 同一套底层件;与终端
+// 落点)。MCP 起服/握手/发现走 runtime::assembly 的同一份事务;与终端
 // 路(app::StartMcpServers)的差别是显式的:终端宽容(起失败打一行警
 // 告跳过),headless 生产按计划明拒——必需组件(tools.allow 引用)起
 // 失败整场拒,可选组件降级记账。
@@ -400,47 +400,26 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
         const std::set<std::string> referenced = harness->ReferencedMcpServers();
         std::set<std::string> mounted_names;
         for (auto& [name, server_config] : allowed_servers) {
-            auto client = std::make_unique<lubancode::mcp::Client>(name);
             // §7.1:子进程环境按"base 集 + 部署配置注入"折好后 Replace 落锤
             // ——不递 Worker 全环境,模型凭据(LUBAN_API_KEY 一类)与工具
             // 凭据(mcpServers.env)分开传,各进各的进程。
-            const auto start = client->StartProcess(server_config->command, server_config->args,
-                                                    ComposeMcpChildEnv(server_config->env),
-                                                    lubancode::platform::EnvMode::Replace);
-            std::string reason;
-            if (start.success) {
-                const auto initialized = client->Initialize();
-                if (!initialized.has_value()) {
-                    reason = initialized.error();
-                }
-            } else {
-                reason = start.error;
-            }
-            if (!reason.empty()) {
+            auto started = runtime::assembly::StartMcpServer(
+                {name, server_config->command, server_config->args, ComposeMcpChildEnv(server_config->env),
+                 lubancode::platform::EnvMode::Replace}, {}, request.mcp_launcher);
+            if (!started) {
+                const bool discovery_failed = started.error().stage == runtime::assembly::McpStartupStage::Discover;
+                const std::string& reason = started.error().error;
                 if (referenced.count(name) > 0) {
-                    result.error = "装配失败:必需 MCP 服务起服失败,整场拒绝: " + name + "(" + reason + ")";
+                    result.error = std::string(discovery_failed
+                        ? "装配失败:必需 MCP 服务工具清单拉取失败,整场拒绝: "
+                        : "装配失败:必需 MCP 服务起服失败,整场拒绝: ") + name + "(" + reason + ")";
                     return result;  // 候选资源随栈析构清理,不出半成品
                 }
-                assembly->degraded_components.push_back(name + ": " + reason);
+                assembly->degraded_components.push_back(name + ": " + (discovery_failed ? "tools/list " : "") + reason);
                 continue;  // 可选降级:记账继续,不冒充已挂
             }
-            auto tools_result = client->ListTools();
-            if (!tools_result.has_value()) {
-                if (referenced.count(name) > 0) {
-                    result.error =
-                        "装配失败:必需 MCP 服务工具清单拉取失败,整场拒绝: " + name +
-                        "(" + tools_result.error() + ")";
-                    return result;
-                }
-                assembly->degraded_components.push_back(name + ": tools/list " + tools_result.error());
-                continue;
-            }
-            HeadlessMcpRuntime runtime;
-            runtime.name = name;
-            runtime.tools = std::move(*tools_result);
-            runtime.client = std::move(client);
             mounted_names.insert(name);
-            assembly->mcp_servers.push_back(std::move(runtime));
+            assembly->mcp_servers.push_back(std::move(*started));
         }
         // config 里有、档也点名了、但依赖解释步已跳过的(未获准)记降级账。
         for (const std::string& name : harness->mcp_servers) {

@@ -120,6 +120,13 @@ bool JournalWriter::AppendLine(std::string_view line, Durability durability) {
     return true;
 }
 
+bool JournalWriter::Close() {
+    if (file_ != nullptr && std::fclose(std::exchange(file_, nullptr)) != 0) {
+        broken_ = true;
+    }
+    return !broken_;
+}
+
 std::expected<std::string, std::string> JournalWriter::ComputeJournalSha256(
     const std::filesystem::path& path) {
     std::FILE* file = nullptr;

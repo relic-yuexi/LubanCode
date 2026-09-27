@@ -27,6 +27,7 @@
 #include "agent/agent_profile_resolver.hpp"  // AgentProfileResolveEnvironment:阶段 3 解析环境
 #include "cli/theme.hpp"
 #include "runtime/worktree.hpp"
+#include "runtime/assembly/mcp.hpp"
 #include "config/config.hpp"
 #include "config/plugin_trust.hpp"
 #include "lsp/manager.hpp"
@@ -102,14 +103,7 @@ lubancode::tools::ToolRegistry BuildExploreToolRegistry(const lubancode::config:
 // mcp::Client& 引用,这份 runtime 要塞进 vector,vector 扩容/搬移只挪
 // unique_ptr 本身(一个指针),Client 对象的地址不变,McpTool 里存的引用
 // 不会失效。
-struct McpServerRuntime {
-    std::string name;
-    std::unique_ptr<lubancode::mcp::Client> client;
-    std::vector<lubancode::mcp::ToolInfo> tools;
-    // 阶段 5:packaged MCP 的来源账(canonical 名 + 包版本);standalone
-    //(config.json)空。/mcp 显示与注册元数据都从这份取。
-    std::optional<lubancode::tools::ToolOrigin> package_origin;
-};
+using runtime::assembly::McpServerRuntime;
 
 // 按配置逐个起 MCP 服务器:起子进程 + initialize 握手 + tools/list。单个
 // 服务器出岔子(起不来、握手超时、tools/list 失败……)只打一行警告就跳过,
