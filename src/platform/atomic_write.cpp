@@ -135,9 +135,10 @@ constexpr WriteFailureKind kReplaceFailureKind = WriteFailureKind::TransientReje
 constexpr WriteFailureKind kReplaceFailureKind = WriteFailureKind::Permanent;
 #endif
 
-std::expected<AtomicWriteReceipt, AtomicWriteError> AtomicWriteFile(const std::filesystem::path& target,
+std::expected<AtomicWriteReceipt, AtomicWriteError> AtomicWriteFile(const std::filesystem::path& requested_target,
                                                                     std::string_view bytes,
                                                                     WriteDurability durability) {
+    const auto target = FileIoPath(requested_target);
     const auto fail = [](std::string code, std::string message, WriteOutcome outcome, WriteFailureKind kind) {
         return std::expected<AtomicWriteReceipt, AtomicWriteError>(
             std::unexpected(AtomicWriteError{std::move(code), std::move(message), outcome, kind}));
@@ -158,6 +159,7 @@ std::expected<AtomicWriteReceipt, AtomicWriteError> AtomicWriteFile(const std::f
     // 唯一临时名:同目录、进程内不重样、跨进程不撞车。
     std::filesystem::path temp = target;
     temp += "." + std::to_string(CurrentPid()) + "-" + std::to_string(NextTempSequence()) + ".tmp";
+    temp = FileIoPath(temp); // the suffix can cross the limit even if target did not
 
     {
         std::FILE* file = OpenTempFile(temp);

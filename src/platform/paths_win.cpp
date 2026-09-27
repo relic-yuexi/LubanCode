@@ -16,6 +16,44 @@
 
 namespace lubancode::platform {
 
+std::filesystem::path FileIoPath(const std::filesystem::path& path) {
+    const auto& spelling = path.native();
+    if (spelling.empty()) return path;
+    const auto separator = [](wchar_t c) { return c == L'\\' || c == L'/'; };
+    if (spelling.size() >= 4 && separator(spelling[0]) && separator(spelling[1]) &&
+        (spelling[2] == L'?' || spelling[2] == L'.') && separator(spelling[3])) {
+        return path; // explicit namespace paths already select their own semantics
+    }
+    std::error_code ec;
+    auto absolute = std::filesystem::absolute(path, ec);
+    if (ec) return path; // leave the real I/O operation to report its existing error
+    absolute = absolute.lexically_normal();
+    absolute.make_preferred();
+    const auto& native = absolute.native();
+    // Directory creation has a tighter limit than opening a file. Check the
+    // resolved path, since a short relative spelling can still exceed the limit.
+    if (native.size() < MAX_PATH - 12) return path;
+    for (const auto& component : absolute) {
+        const auto& name = component.native();
+        if (!name.empty() && (name.back() == L'.' || name.back() == L' ')) {
+            return path; // extending this would change ordinary Win32 name trimming
+        }
+        auto base = name.substr(0, name.find_first_of(L".:"));
+        while (!base.empty() && base.back() == L' ') base.pop_back();
+        for (auto& ch : base) if (ch >= L'a' && ch <= L'z') ch -= L'a' - L'A';
+        if (base == L"CON" || base == L"PRN" || base == L"AUX" || base == L"NUL" ||
+            base == L"CONIN$" || base == L"CONOUT$") return path;
+        if (base.size() == 4 && (base.starts_with(L"COM") || base.starts_with(L"LPT")) &&
+            ((base[3] >= L'1' && base[3] <= L'9') ||
+             base[3] == L'\u00B9' || base[3] == L'\u00B2' || base[3] == L'\u00B3')) return path;
+    }
+    if (native.starts_with(L"\\\\")) return std::filesystem::path(L"\\\\?\\UNC\\" + native.substr(2));
+    if (native.size() >= 3 && native[1] == L':' && native[2] == L'\\') {
+        return std::filesystem::path(L"\\\\?\\" + native);
+    }
+    return path;
+}
+
 std::optional<std::string> GetEnvVar(const char* name) {
     char* buffer = nullptr;
     std::size_t size = 0;
@@ -126,7 +164,9 @@ std::optional<std::string> OfficialPackagesDir() {
 
 std::expected<void, std::string> ReplaceFileAtomically(const std::filesystem::path& source,
                                                         const std::filesystem::path& destination) {
-    if (MoveFileExW(source.c_str(), destination.c_str(),
+    const auto native_source = FileIoPath(source);
+    const auto native_destination = FileIoPath(destination);
+    if (MoveFileExW(native_source.c_str(), native_destination.c_str(),
                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0) {
         return {};
     }
