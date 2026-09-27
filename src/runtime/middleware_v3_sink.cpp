@@ -159,7 +159,8 @@ void V3MiddlewareEventSink::OnEffectSettled(const InvocationMeta& meta, std::str
     const WriteReceipt receipt =
         applied
             ? book->session.ApplyEffect(*writer_, meta.invocation_id, std::string(effect_type),
-                                        /*applied_value_ref=*/value, Durability::PowerLoss)
+                                        /*applied_value_ref=*/std::optional<nlohmann::json>{std::in_place, value},
+                                        Durability::PowerLoss)
             : book->session.RejectEffect(*writer_, meta.invocation_id, std::string(effect_type),
                                          std::string(reason), Durability::PowerLoss);
     NoteError(applied ? "hook.effects.applied" : "hook.effects.rejected", receipt);

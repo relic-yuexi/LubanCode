@@ -4,10 +4,11 @@ project(lubancore_installed_consumer LANGUAGES CXX)
 # This project must remain buildable after copying just this directory elsewhere.
 # No add_subdirectory of LubanCode and no source/build-tree include directories.
 find_package(LubanCore CONFIG REQUIRED)
+find_package(Threads REQUIRED)
 
 add_executable(lubancore_consumer main.cpp)
 target_compile_features(lubancore_consumer PRIVATE cxx_std_23)
-target_link_libraries(lubancore_consumer PRIVATE LubanCore::Core)
+target_link_libraries(lubancore_consumer PRIVATE LubanCore::Core Threads::Threads)
 if(MSVC)
   target_compile_options(lubancore_consumer PRIVATE /utf-8 /W4)
 endif()
