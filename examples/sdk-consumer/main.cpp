@@ -183,7 +183,18 @@ void FileAndCommand(const fs::path& base) {
                 Check(HasReply(request, "SDK file"), "real read_file result did not reach model history");
                 return Call("run-once", "run_command", R"({"command":"echo sdk-command","timeout_ms":5000})");
             case 3:
-                Check(HasReply(request, "sdk-command"), "real command output did not reach model history");
+                if (!HasReply(request, "sdk-command")) {
+                    std::string details;
+                    for (const auto& message : request.messages) {
+                        for (const auto& reply : message.tool_replies) {
+                            if (reply.call_id == "run-once") {
+                                details += " is_error=" + std::to_string(reply.is_error) + " text=" + reply.text;
+                            }
+                        }
+                    }
+                    throw std::runtime_error("real command output did not reach model history:" +
+                                             (details.empty() ? " missing run-once reply" : details));
+                }
                 return Text("file command complete");
             case 4:
                 Check(HasText(request, "file command complete"), "second turn lost prior assistant history");
