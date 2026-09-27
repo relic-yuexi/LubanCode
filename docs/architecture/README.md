@@ -6,6 +6,8 @@
 
 LubanCode 是一支 C++23 命令行程序。入口收参数，组合根装部件，会话层排活，Agent 推模型 step，工具层办本机差事，协议层翻各家 JSON。这里看全局；会话怎样拆，另见[会话编排](session-orchestration.md)。版本号只认 `src/app/version.hpp`，测试口径看[测试指南](../development/testing.md)。
 
+远端部署正在设计，见[控制端、执行节点与两端存储草案](remote-agent-deployment.md)。这页描述拟议模式，尚未代表已实现能力。
+
 ## 1. 总图
 
 ```mermaid
