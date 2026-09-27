@@ -2,11 +2,15 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "fake_http_server.hpp"
@@ -80,6 +84,55 @@ sdk::SessionOptions Options(const LifecycleFixture& fixture, GenerateFunction ge
     return options;
 }
 
+struct LifetimeGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool released = false;
+    std::atomic<bool> entered{false};
+    std::atomic<bool> cancelled{false};
+    std::atomic<bool> returned{false};
+    std::atomic<bool> destroyed{false};
+    std::atomic<bool> timed_out{false};
+
+    void Release() {
+        std::lock_guard lock(mutex);
+        released = true;
+        cv.notify_all();
+    }
+};
+class LifetimeBackend final : public sdk::Backend {
+public:
+    explicit LifetimeBackend(std::shared_ptr<LifetimeGate> gate) : gate_(std::move(gate)) {}
+    ~LifetimeBackend() override { gate_->destroyed.store(true); }
+    sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest&, sdk::Cancellation cancel) override {
+        gate_->entered.store(true);
+        const auto deadline = std::chrono::steady_clock::now() + 20s;
+        std::unique_lock lock(gate_->mutex);
+        while (!cancel.requested() && !gate_->released && std::chrono::steady_clock::now() < deadline) {
+            gate_->cv.wait_for(lock, 2ms);
+        }
+        gate_->cancelled.store(cancel.requested());
+        // Keep the callback alive after cancellation, so a close that merely
+        // signals its worker cannot pass the lifetime assertions.
+        if (!gate_->cv.wait_until(lock, deadline, [&] { return gate_->released; })) {
+            gate_->timed_out.store(true);
+        }
+        gate_->returned.store(true);
+        return std::unexpected(sdk::Error{"fixture.cancelled", "released cooperative backend"});
+    }
+private:
+    std::shared_ptr<LifetimeGate> gate_;
+};
+struct ReleaseLifetimeGate {
+    std::shared_ptr<LifetimeGate> gate;
+    ~ReleaseLifetimeGate() { gate->Release(); }
+};
+bool WaitForFlag(const std::atomic<bool>& flag) {
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (!flag.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(2ms);
+    return flag.load();
+}
+
 lubancode::test_support::FakeHttpResponse Sse(std::vector<std::string> frames) {
     lubancode::test_support::FakeHttpResponse response;
     response.headers.emplace_back("Content-Type", "text/event-stream");
@@ -87,6 +140,102 @@ lubancode::test_support::FakeHttpResponse Sse(std::vector<std::string> frames) {
     return response;
 }
 } // namespace
+
+TEST_CASE("SDK lifecycle: dropping the last session joins its backend and leaves runtime usable") {
+    LifecycleFixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+    auto gate = std::make_shared<LifetimeGate>();
+    auto options = Options(fixture, [](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        return sdk::ModelReply{};
+    });
+    options.backend = std::make_unique<LifetimeBackend>(gate);
+    auto opened = (*runtime)->OpenSession(std::move(options));
+    REQUIRE(opened.has_value());
+    auto session = std::move(*opened);
+    std::weak_ptr<sdk::Session> handle = session;
+    std::future<void> dropping;
+    // On every REQUIRE failure, release the backend before a future or Session
+    // destructor waits for it. The async task is always joined, never detached.
+    ReleaseLifetimeGate release{gate};
+    REQUIRE(session->Submit("drop-owner", "wait for cancellation").has_value());
+    REQUIRE(WaitForFlag(gate->entered));
+    dropping = std::async(std::launch::async, [last = std::move(session)]() mutable { last.reset(); });
+    REQUIRE(WaitForFlag(gate->cancelled));
+    CHECK(dropping.wait_for(100ms) == std::future_status::timeout);
+    CHECK_FALSE(gate->returned.load());
+    CHECK_FALSE(gate->destroyed.load());
+    gate->Release();
+    REQUIRE(dropping.wait_for(10s) == std::future_status::ready);
+    dropping.get();
+    CHECK(handle.expired());
+    CHECK(gate->returned.load());
+    CHECK(gate->destroyed.load());
+    CHECK_FALSE(gate->timed_out.load());
+
+    auto next = (*runtime)->OpenSession(Options(fixture, [](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        return sdk::ModelReply{std::string(12000, 'r')};
+    }));
+    REQUIRE(next.has_value());
+    const auto id = (*next)->id();
+    const auto receipt = (*next)->Submit("next-owner", "runtime still admits sessions");
+    REQUIRE(receipt.has_value());
+    const auto completed = (*next)->WaitResult(receipt->operation_id, 15s);
+    REQUIRE(completed.has_value());
+    REQUIRE(completed->state == sdk::OperationState::Succeeded);
+    REQUIRE((*next)->Close().has_value());
+    REQUIRE((*runtime)->Shutdown().has_value());
+    const auto saved = (*next)->ReadOperation(receipt->operation_id);
+    REQUIRE(saved.has_value());
+    CHECK((*next)->id() == id);
+    CHECK(saved->state == sdk::OperationState::Succeeded);
+    CHECK(saved->result_persisted);
+    CHECK(saved->final_text == std::string(12000, 'r'));
+}
+
+TEST_CASE("SDK lifecycle: concurrent shutdown calls both wait for the same live backend") {
+    LifecycleFixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+    auto gate = std::make_shared<LifetimeGate>();
+    auto options = Options(fixture, [](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        return sdk::ModelReply{};
+    });
+    options.backend = std::make_unique<LifetimeBackend>(gate);
+    auto session = (*runtime)->OpenSession(std::move(options));
+    REQUIRE(session.has_value());
+    std::future<sdk::Result<void>> first;
+    std::future<sdk::Result<void>> second;
+    ReleaseLifetimeGate release{gate};
+    REQUIRE((*session)->Submit("two-shutdowns", "wait for cancellation").has_value());
+    REQUIRE(WaitForFlag(gate->entered));
+    first = std::async(std::launch::async, [owner = runtime->get()] { return owner->Shutdown(); });
+    REQUIRE(WaitForFlag(gate->cancelled));
+    std::promise<void> started;
+    auto second_started = started.get_future();
+    second = std::async(std::launch::async, [owner = runtime->get(), start = std::move(started)]() mutable {
+        start.set_value();
+        return owner->Shutdown();
+    });
+    REQUIRE(second_started.wait_for(10s) == std::future_status::ready);
+    second_started.get();
+    CHECK(first.wait_for(100ms) == std::future_status::timeout);
+    CHECK(second.wait_for(100ms) == std::future_status::timeout);
+    CHECK_FALSE(gate->returned.load());
+    CHECK_FALSE(gate->destroyed.load());
+    gate->Release();
+    REQUIRE(first.wait_for(10s) == std::future_status::ready);
+    REQUIRE(second.wait_for(10s) == std::future_status::ready);
+    CHECK(first.get().has_value());
+    CHECK(second.get().has_value());
+    CHECK(gate->returned.load());
+    CHECK(gate->destroyed.load());
+    CHECK_FALSE(gate->timed_out.load());
+    REQUIRE((*runtime)->Shutdown().has_value());
+    const auto rejected = (*session)->Submit("after-shutdown", "closed");
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == "sdk.session.closed");
+}
 
 TEST_CASE("SDK lifecycle: unrecoverable accepted input fails resume instead of waiting forever") {
     LifecycleFixture fixture;
