@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
+if(POLICY CMP0207)
+  cmake_policy(SET CMP0207 NEW)
+endif()
 
 foreach(required UPDATER_PROBE_EXE UPDATER_RUNTIME_LIST
                  CMAKE_GET_RUNTIME_DEPENDENCIES_PLATFORM
@@ -18,6 +21,27 @@ file(REAL_PATH "$ENV{SystemRoot}" system_root)
 string(REPLACE "\\" "/" system_root "${system_root}")
 string(TOLOWER "${system_root}" system_root_lower)
 
+# Stop at resolved system DLLs before recursively inspecting their optional OS
+# imports. Keep the later real-path check as well; it serves a different purpose.
+# This spelling matches the SDK install's verified case/separator-safe filter.
+string(REGEX MATCHALL "." system_root_chars "${system_root}")
+set(system_root_regex "^")
+foreach(char IN LISTS system_root_chars)
+  if(char MATCHES "[A-Za-z]")
+    string(TOLOWER "${char}" lower)
+    string(TOUPPER "${char}" upper)
+    string(APPEND system_root_regex "[${lower}${upper}]")
+  elseif(char STREQUAL "/" OR char STREQUAL "\\")
+    string(APPEND system_root_regex [=[[/\\]]=])
+  elseif(char MATCHES "[0-9]" OR char STREQUAL ":" OR char STREQUAL " " OR
+         char STREQUAL "_" OR char STREQUAL "-")
+    string(APPEND system_root_regex "${char}")
+  else()
+    string(APPEND system_root_regex "\\${char}")
+  endif()
+endforeach()
+string(APPEND system_root_regex [=[[/\\]]=])
+
 # Unlike TARGET_RUNTIME_DLLS, the PE scan includes indirect imports such as z.dll.
 # No producer directory is added to the test process's PATH.
 file(GET_RUNTIME_DEPENDENCIES
@@ -26,7 +50,8 @@ file(GET_RUNTIME_DEPENDENCIES
   RESOLVED_DEPENDENCIES_VAR resolved
   UNRESOLVED_DEPENDENCIES_VAR unresolved
   CONFLICTING_DEPENDENCIES_PREFIX conflicts
-  PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-")
+  PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-"
+  POST_EXCLUDE_REGEXES "${system_root_regex}")
 if(unresolved OR conflicts_FILENAMES)
   message(FATAL_ERROR
     "Updater fixture has unresolved or conflicting PE imports: ${unresolved};${conflicts_FILENAMES}")
