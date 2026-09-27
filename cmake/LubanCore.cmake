@@ -88,11 +88,11 @@ if(WIN32)
   endforeach()
   string(APPEND _lubancore_windows_root_regex [=[[/\\]]=])
   install(RUNTIME_DEPENDENCY_SET LubanCoreRuntimeDependencies
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT LubanCore
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT LubanCore
     DIRECTORIES "$<TARGET_FILE_DIR:lubancore_sdk>"
     PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-"
-    POST_EXCLUDE_REGEXES "${_lubancore_windows_root_regex}")
+    POST_EXCLUDE_REGEXES "${_lubancore_windows_root_regex}"
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT LubanCore
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT LubanCore)
 endif()
 install(DIRECTORY include/lubancore DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT LubanCore)
 install(FILES docs/development/lubancore-sdk.md
