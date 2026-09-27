@@ -440,11 +440,11 @@ TEST_CASE("AtomicWriteFile: Windows long logical paths create replace and clean 
     const auto native_parent = ExplicitWindowsPath(parent);
 
     const auto created = AtomicWriteFile(target, "original long-path bytes");
-    REQUIRE_MESSAGE(created.has_value(), created ? "" : created.error().message);
+    REQUIRE_MESSAGE(created.has_value(), (created ? "" : created.error().message));
     REQUIRE(fs::is_regular_file(native_target));
     CHECK(ReadAll(native_target) == "original long-path bytes");
     const auto replaced = AtomicWriteFile(target, "replacement long-path bytes", WriteDurability::ProcessCrashDurability);
-    REQUIRE_MESSAGE(replaced.has_value(), replaced ? "" : replaced.error().message);
+    REQUIRE_MESSAGE(replaced.has_value(), (replaced ? "" : replaced.error().message));
     CHECK(replaced->outcome == WriteOutcome::CommittedDurable);
     CHECK(ReadAll(native_target) == "replacement long-path bytes");
     CHECK(TempLeftovers(native_parent).empty());
