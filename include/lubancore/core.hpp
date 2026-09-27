@@ -97,6 +97,9 @@ struct Approval {
     std::string reason;
 };
 struct McpServer {
+    // Text results may continue the model loop. Image/audio/blob captures are
+    // retained locally, but the current media capacity guard ends the operation
+    // explicitly; the SDK does not supply a media token estimation policy.
     std::string name;
     std::string command;
     std::vector<std::string> arguments;

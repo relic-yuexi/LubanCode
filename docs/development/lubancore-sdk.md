@@ -56,6 +56,11 @@ Windows 将 `bin` 加入 PATH，Linux 使用库搜索路径或应用自身 RPATH
 这批四件本地工具不加载资源文件，也不从 home 自动搜配置。自定义 Backend 注入面仅支持
 文本与工具调用；遇图片、思考或结构化结果会明报不支持。真实连接后端仍沿用原协议实现。
 
+MCP 文本结果可接着送入下一轮模型请求。图片、音频和二进制块先存入本场 artifact 目录，
+再由共用容量闸报 `tool_batch.unestimated_media_or_reasoning`，操作以 `Failed` 收场；
+不会重跑工具，也不会继续发送模型请求。SDK 尚未提供媒体预算策略，不能拿文本字节估算
+替媒体计价。原件仍可从本地会话目录读取。详见[媒体边界](../architecture/context/v3-action-summary.md#媒体边界)。
+
 ## 恢复与结果
 
 `resume_session_id` 非空时，只恢复所指 V3 会话，ID 保持不变。源缺失、损坏、仍持活锁，
