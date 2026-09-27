@@ -203,4 +203,3 @@ POST /api/v1/sandbox-batches
   验收：装了依赖的沙箱挂起 → 换 Host 恢复 → 依赖与文件完全一致；100 成员批量、并发 20 跑完无串状态；泄漏测试覆盖快照内容。
 - **D11c 强隔离与内存快照**：gVisor / Firecracker / k8s 后端；L3 快照（特性开关）；逃逸检测与 Quarantine；MCP 与浏览器进沙箱。
   验收：`untrusted_code` 租户只能落到强隔离后端；L3 恢复后 dev server 仍在监听；安全评审通过。
-
