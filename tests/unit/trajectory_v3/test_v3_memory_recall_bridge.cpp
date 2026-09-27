@@ -598,8 +598,8 @@ TEST_CASE("v3 schema: memory.recall.injected / memory.save.requested 入册且 s
     using lubancode::trajectory::v3::EventKindV3Name;
     using lubancode::trajectory::v3::RequiredStatusForKind;
 
-    CHECK(EventKindV3Name(EventKindV3::MemoryRecallInjected) == "memory.recall.injected");
-    CHECK(EventKindV3Name(EventKindV3::MemorySaveRequested) == "memory.save.requested");
+    CHECK(std::string(EventKindV3Name(EventKindV3::MemoryRecallInjected)) == "memory.recall.injected");
+    CHECK(std::string(EventKindV3Name(EventKindV3::MemorySaveRequested)) == "memory.save.requested");
     CHECK(EventKindV3FromName("memory.recall.injected") == EventKindV3::MemoryRecallInjected);
     CHECK(EventKindV3FromName("memory.save.requested") == EventKindV3::MemorySaveRequested);
     CHECK(RequiredStatusForKind(EventKindV3::MemoryRecallInjected).has_value() == false);
