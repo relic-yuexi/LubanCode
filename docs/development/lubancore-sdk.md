@@ -63,6 +63,8 @@ Windows 将 `bin` 加入 PATH，Linux 使用库搜索路径或应用自身 RPATH
 “已派发、无终态”操作报 `Indeterminate`，不会自动重复外部副作用。
 待执行输入原件丢失、损坏或不符合受理时的摘要，建场报 `sdk.resume.input_unavailable`；
 不会挂着 `Accepted` 等到超时，也不会拿改过的正文重跑。
+操作账有坏行、重复受理或缺少先前受理/派发事实，建场报 `sdk.resume.operation_ledger_invalid`。
+恢复不能套用查询接口的“跳过坏行”规矩，否则会丢幂等键、重用操作号。
 
 操作终态由 `SessionService` 写入原操作账。最终正文另存会话目录下 `sdk-results`，
 其对应终态事实写稳后才发完成事件。工具完整原件仍走现有 V3 结果仓；SDK 不套远端
