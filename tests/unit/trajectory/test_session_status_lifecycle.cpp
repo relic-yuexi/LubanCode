@@ -265,7 +265,8 @@ TEST_CASE("lifecycle: delete 先 intent 后 tombstone 再删目录;未封口不�
 
     NullClearParticipant participant;
     const auto closed = manager.Close(CloseRequest{}, &participant);
-    INFO(closed.error_code + ": " + closed.message);
+    INFO(closed.error_code);
+    INFO(closed.message);
     REQUIRE(closed.error_code.empty());
     REQUIRE(manager.active() != nullptr);
     REQUIRE(manager.active()->is_v3());
@@ -274,11 +275,12 @@ TEST_CASE("lifecycle: delete 先 intent 后 tombstone 再删目录;未封口不�
     v3::EventDraft late;
     late.kind = v3::EventKindV3::SessionEnded;
     late.payload = nlohmann::json{{"reason", "exit"}, {"closeQuality", "clean"}};
-    const auto rejected = manager.active()->v3_main->AppendEvent(std::move(late));
+    const auto rejected =
+        manager.active()->v3_main->AppendEvent(std::move(late), Durability::PowerLoss);
     CHECK(rejected.status == v3::WriteReceipt::Status::Rejected);
     CHECK(rejected.error_code == "v3writer.closed");
     const auto deleted = manager.DeleteSession(id, "user_delete");
-    INFO(deleted.has_value() ? "" : deleted.error());
+    INFO((deleted.has_value() ? "" : deleted.error()));
     REQUIRE(deleted.has_value());
     CHECK_FALSE(std::filesystem::exists(manager.SessionDirOf(id)));
     // tombstone 齐全:末 hash 是旧账最后一枚事件的 hash。
