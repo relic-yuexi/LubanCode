@@ -481,12 +481,23 @@ void CheckMcpResultBoundary(bool image) {
             CHECK(blocks[1].value("mime_type", "") == "image/png");
             const auto& artifact = blocks[1].at("artifact");
             CHECK(artifact.value("stored", false));
-            auto png = platform::Utf8ToPath(artifact.at("path").get<std::string>());
+            const auto recorded_path = artifact.at("path").get<std::string>();
+            CHECK_FALSE(recorded_path.starts_with("\\\\?\\"));
+            CHECK_FALSE(recorded_path.starts_with("//?/"));
+            auto png = platform::Utf8ToPath(recorded_path);
             if (png.is_relative()) png = session_dir / png;
-            REQUIRE(fs::is_regular_file(png));
-            CHECK(fs::equivalent(png.parent_path(), session_dir / "artifacts" / "sha256"));
+            const auto native_png = platform::FileIoPath(png);
+            REQUIRE(fs::is_regular_file(native_png));
+            CHECK(fs::equivalent(platform::FileIoPath(png.parent_path()),
+                                 platform::FileIoPath(session_dir / "artifacts" / "sha256")));
             CHECK(png.extension() == ".png");
-            CHECK(fs::file_size(png) > 0);
+            CHECK(fs::file_size(native_png) == artifact.at("bytes").get<std::uintmax_t>());
+            std::ifstream png_file(native_png, std::ios::binary);
+            REQUIRE(png_file.is_open());
+            std::string magic(8, '\0');
+            png_file.read(magic.data(), 8);
+            REQUIRE(png_file.gcount() == 8);
+            CHECK(magic == std::string("\x89PNG\r\n\x1a\n", 8));
         }
     }
     CHECK(starts == 1);
