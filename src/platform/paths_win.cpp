@@ -24,17 +24,11 @@ std::filesystem::path FileIoPath(const std::filesystem::path& path) {
         (spelling[2] == L'?' || spelling[2] == L'.') && separator(spelling[3])) {
         return path; // explicit namespace paths already select their own semantics
     }
-    std::error_code ec;
-    auto absolute = std::filesystem::absolute(path, ec);
-    if (ec) return path; // leave the real I/O operation to report its existing error
-    absolute = absolute.lexically_normal();
-    absolute.make_preferred();
-    const auto& native = absolute.native();
-    // Directory creation has a tighter limit than opening a file. Check the
-    // resolved path, since a short relative spelling can still exceed the limit.
-    if (native.size() < MAX_PATH - 12) return path;
-    for (const auto& component : absolute) {
+    // Inspect the caller's spelling first: Windows absolute() itself can trim
+    // trailing dots/spaces, hiding names whose semantics must remain unchanged.
+    for (const auto& component : path) {
         const auto& name = component.native();
+        if (name == L"." || name == L"..") continue;
         if (!name.empty() && (name.back() == L'.' || name.back() == L' ')) {
             return path; // extending this would change ordinary Win32 name trimming
         }
@@ -47,6 +41,15 @@ std::filesystem::path FileIoPath(const std::filesystem::path& path) {
             ((base[3] >= L'1' && base[3] <= L'9') ||
              base[3] == L'\u00B9' || base[3] == L'\u00B2' || base[3] == L'\u00B3')) return path;
     }
+    std::error_code ec;
+    auto absolute = std::filesystem::absolute(path, ec);
+    if (ec) return path; // leave the real I/O operation to report its existing error
+    absolute = absolute.lexically_normal();
+    absolute.make_preferred();
+    const auto& native = absolute.native();
+    // Directory creation has a tighter limit than opening a file. Check the
+    // resolved path, since a short relative spelling can still exceed the limit.
+    if (native.size() < MAX_PATH - 12) return path;
     if (native.starts_with(L"\\\\")) return std::filesystem::path(L"\\\\?\\UNC\\" + native.substr(2));
     if (native.size() >= 3 && native[1] == L':' && native[2] == L'\\') {
         return std::filesystem::path(L"\\\\?\\" + native);
