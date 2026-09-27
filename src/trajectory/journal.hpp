@@ -54,6 +54,10 @@ public:
     // 视为 broken,调用方应停止提交并按 §7.4 收口。
     bool AppendLine(std::string_view line, Durability durability);
 
+    // 关掉文件句柄,保留路径/计数供只读查询。可重复调用;关闭或既有写入
+    // 出错时返回 false。关闭后 AppendLine 拒绝,不等对象析构才释放文件。
+    bool Close();
+
     const std::filesystem::path& path() const { return path_; }
     std::uint64_t line_count() const { return line_count_; }
     bool broken() const { return broken_; }

@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "app/version.hpp"
+#include "runtime/assembly/builtin_tools.hpp"
 #include "app/commands/agent_commands.hpp"  // ComputeAgentScanRoots:自定义 Agent 目录三层的根
 #include "cli/i18n.hpp"
 #include "cli/console_input.hpp"  // CurrentConfirmMode:父会话权限档(阶段 3 解析环境)
@@ -24,20 +25,12 @@
 #include "tools/agent_message_tool.hpp"
 #include "tools/agent_watch_tool.hpp"  // 监督器单 P1-0:main 的 agent_watch(整棵树 + diagnostic)
 #include "tools/background_output.hpp"
-#include "tools/edit_file.hpp"
 #include "tools/lua_tool.hpp"
 #include "tools/lsp_tool.hpp"
 #include "tools/path_utils.hpp"
-#include "tools/read_file.hpp"
 #include "tools/run_command.hpp"
-#include "tools/search.hpp"
-#include "tools/search_ripgrep.hpp"  // BundledRipgrepRunner:SearchTool 的 P0-2 装配注入口
-#include "tools/skill_tool.hpp"
 #include "tools/subagent_env_appendix.hpp"  // 派工任务书单 2.1:本机环境附录探测与成文
 #include "tools/tool_search.hpp"
-#include "tools/web_fetch.hpp"
-#include "tools/web_search.hpp"
-#include "tools/write_file.hpp"
 
 namespace lubancode::app {
 
@@ -98,68 +91,34 @@ lubancode::memory::Options MemoryOptionsFromConfig(const lubancode::config::Memo
 
 lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode::tools::SkillMeta>& skills,
                                                      const lubancode::config::SearchConfig& search_config) {
-    lubancode::tools::ToolRegistry registry;
-    registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
-    registry.Register(std::make_unique<lubancode::tools::RunCommandTool>());
-    // 后台命令三件套:run_command 起后台(background_tasks 登记 task_id + watcher
-    // 探活),background_output 查状态/读输出,stop_background 收尾。两个新工具
-    // 是纯进程内单例查询/控制,无外部依赖,直接进基础表(子代理也能用)。
-    registry.Register(std::make_unique<lubancode::tools::BackgroundOutputTool>());
-    registry.Register(std::make_unique<lubancode::tools::StopBackgroundTool>());
-    registry.Register(std::make_unique<lubancode::tools::WriteFileTool>());
-    registry.Register(std::make_unique<lubancode::tools::EditFileTool>());
-    // ripgrep 迁移单 P0-5:search 生产主路(装配与 SearchTool 默认构造同一款
-    // runner,定位只认 exe-dir/libexec,缺件即稳定错,无本地内核 fallback)。
-    registry.Register(std::make_unique<lubancode::tools::SearchTool>(
-        std::make_shared<lubancode::tools::BundledRipgrepRunner>()));
-    registry.Register(std::make_unique<lubancode::tools::SkillTool>(skills));
-    registry.Register(std::make_unique<lubancode::tools::WebFetchTool>("lubancode/" + std::string(kVersion)));
-    if (search_config.Configured()) {
-        registry.Register(std::make_unique<lubancode::tools::WebSearchTool>(search_config));
-    }
-    return registry;
+    return runtime::assembly::BuildBaseToolRegistry(skills, search_config,
+                                                   "lubancode/" + std::string(kVersion));
 }
 
 lubancode::tools::ToolRegistry BuildExploreToolRegistry(const lubancode::config::SearchConfig& search_config) {
-    lubancode::tools::ToolRegistry registry;
-    registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
-    // 同基础表:Explore 表的 search 也注入同一款默认 runner(P0-5 主路)。
-    registry.Register(std::make_unique<lubancode::tools::SearchTool>(
-        std::make_shared<lubancode::tools::BundledRipgrepRunner>()));
-    registry.Register(std::make_unique<lubancode::tools::WebFetchTool>("lubancode/" + std::string(kVersion)));
-    if (search_config.Configured()) {
-        registry.Register(std::make_unique<lubancode::tools::WebSearchTool>(search_config));
-    }
-    return registry;
+    return runtime::assembly::BuildExploreToolRegistry(search_config,
+                                                      "lubancode/" + std::string(kVersion));
 }
 
 std::vector<McpServerRuntime> StartMcpServers(
     const std::map<std::string, lubancode::config::McpServerConfig>& configs, const lubancode::cli::Theme& theme) {
     std::vector<McpServerRuntime> out;
     for (const auto& [name, server_config] : configs) {
-        auto client = std::make_unique<lubancode::mcp::Client>(name);
-        const auto start_result = client->StartProcess(server_config.command, server_config.args, server_config.env);
-        if (!start_result.success) {
-            std::cout << theme.error << trf("mcp.start_failed", name, start_result.error) << theme.reset << "\n";
+        auto started = runtime::assembly::StartMcpServer(
+            {name, server_config.command, server_config.args, server_config.env,
+             lubancode::platform::EnvMode::Inherit});
+        if (!started) {
+            const char* key = "mcp.start_failed";
+            switch (started.error().stage) {
+                case runtime::assembly::McpStartupStage::Start: break;
+                case runtime::assembly::McpStartupStage::Initialize: key = "mcp.init_failed"; break;
+                case runtime::assembly::McpStartupStage::Discover: key = "mcp.list_failed"; break;
+            }
+            std::cout << theme.error << trf(key, name, started.error().error) << theme.reset << "\n";
             continue;
         }
-        const auto init_result = client->Initialize();
-        if (!init_result.has_value()) {
-            std::cout << theme.error << trf("mcp.init_failed", name, init_result.error()) << theme.reset << "\n";
-            continue;
-        }
-        auto tools_result = client->ListTools();
-        if (!tools_result.has_value()) {
-            std::cout << theme.error << trf("mcp.list_failed", name, tools_result.error()) << theme.reset << "\n";
-            continue;
-        }
-
-        McpServerRuntime runtime;
-        runtime.name = name;
-        runtime.tools = std::move(*tools_result);
-        std::cout << trf("mcp.mounted", name, runtime.tools.size()) << "\n";
-        runtime.client = std::move(client);
-        out.push_back(std::move(runtime));
+        std::cout << trf("mcp.mounted", name, started->tools.size()) << "\n";
+        out.push_back(std::move(*started));
     }
     return out;
 }

@@ -1418,6 +1418,12 @@ CloseOutcome SessionManager::CloseV3Locked(const CloseRequest& request,
                     "session.ended 落不了: " + receipt.error_code + " " + receipt.error_message);
     }
     outcome.journal_sha256 = receipt.line_hash;
+    // session.ended 落稳后先关写句柄,再交还独占锁。仅放锁不关柄时,
+    // Windows 仍拒绝删除/改名;管理器存活期间关闭的会话也应能管理。
+    // 保留 v3_main 对象,不让 ActiveSession::is_v3() 与只读查询丢身份。
+    if (const auto closed = session.v3_main->Close(); !closed.has_value()) {
+        return fail("close.step3_failed", closed.error());
+    }
     session.status = SessionStatus::Closed;
     // 封口即放锁(§3.3.2 同一口径:没有活 writer 的场不攥独占锁)。
     session.lock.Release();
