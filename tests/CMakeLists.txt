@@ -216,6 +216,37 @@ add_dependencies(lubancode_tests updater_probe_stub)
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_UPDATER_PROBE_STUB_EXE="$<TARGET_FILE:updater_probe_stub>")
 
+# The real updater fixture must carry the EXE's actual app-local PE closure.
+# Scan after building the EXE; unrelated DLLs beside it do not belong in its ZIP.
+if(WIN32)
+  if(MSVC)
+    get_filename_component(_updater_linker_dir "${CMAKE_LINKER}" DIRECTORY)
+    find_program(_updater_pe_command NAMES dumpbin HINTS "${_updater_linker_dir}" REQUIRED)
+    set(_updater_pe_tool "dumpbin")
+  else()
+    if(NOT CMAKE_OBJDUMP)
+      message(FATAL_ERROR "Windows updater fixture requires a PE dependency inspector")
+    endif()
+    set(_updater_pe_command "${CMAKE_OBJDUMP}")
+    set(_updater_pe_tool "objdump")
+  endif()
+  set(_updater_runtime_list "${CMAKE_CURRENT_BINARY_DIR}/updater-runtime-$<CONFIG>.txt")
+  add_custom_target(updater_fixture_runtime_files
+    COMMAND "${CMAKE_COMMAND}"
+      "-DUPDATER_PROBE_EXE=$<TARGET_FILE:lubancode>"
+      "-DUPDATER_RUNTIME_LIST=${_updater_runtime_list}"
+      "-DCMAKE_GET_RUNTIME_DEPENDENCIES_PLATFORM=windows+pe"
+      "-DCMAKE_GET_RUNTIME_DEPENDENCIES_TOOL=${_updater_pe_tool}"
+      "-DCMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND=${_updater_pe_command}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/support/updater_runtime_files.cmake"
+    DEPENDS lubancode
+    VERBATIM)
+  add_dependencies(lubancode_tests updater_fixture_runtime_files)
+  target_compile_definitions(lubancode_tests PRIVATE
+    LUBANCODE_UPDATER_MAIN_EXE="$<TARGET_FILE:lubancode>"
+    LUBANCODE_UPDATER_RUNTIME_LIST="${_updater_runtime_list}")
+endif()
+
 # 2) 真 rg 分期入位:LUBANCODE_BUNDLED_RG_DIR 指向已过哈希/版本门的 rg
 #    目录(scripts/fetch_ripgrep.sh 的产物,如 build/rg-stage/libexec)。
 #    configure 时校一遍版本(与 third_party/ripgrep/manifest.json 对账),
