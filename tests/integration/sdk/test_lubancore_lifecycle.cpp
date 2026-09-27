@@ -165,6 +165,81 @@ TEST_CASE("SDK lifecycle: custom tool cannot join another session or shut down i
     REQUIRE((*runtime)->Shutdown().has_value());
 }
 
+TEST_CASE("SDK lifecycle: resumed session rejects an approval token from its previous turn") {
+    LifecycleFixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+    auto executions = std::make_shared<std::atomic<int>>(0);
+    const auto make_options = [&] {
+        auto calls = std::make_shared<std::atomic<int>>(0);
+        auto options = Options(fixture, [calls](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+            if (calls->fetch_add(1) == 0) return sdk::ModelReply{"", {{"guarded-call", "guarded", "{}"}}};
+            return sdk::ModelReply{"approved current turn"};
+        });
+        sdk::Tool tool;
+        tool.name = "guarded";
+        tool.execute = [executions](const std::string&, const sdk::ToolContext&) -> sdk::Result<sdk::ToolResult> {
+            ++*executions;
+            return sdk::ToolResult{"executed"};
+        };
+        options.custom_tools.push_back(std::move(tool));
+        return options;
+    };
+    const auto await_approval = [](const std::shared_ptr<sdk::EventStream>& events) {
+        const auto deadline = std::chrono::steady_clock::now() + 10s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto event = events->Next(100ms);
+            REQUIRE(event.has_value());
+            if (event->has_value() && (*event)->approval) return *(*event)->approval;
+        }
+        FAIL("expected approval event did not arrive");
+        return sdk::Approval{};
+    };
+
+    auto first = (*runtime)->OpenSession(make_options());
+    REQUIRE(first.has_value());
+    const auto session_id = (*first)->id();
+    auto first_events = (*first)->Subscribe();
+    REQUIRE(first_events.has_value());
+    const auto first_receipt = (*first)->Submit("old-turn", "await old approval");
+    REQUIRE(first_receipt.has_value());
+    const auto old_approval = await_approval(*first_events);
+    REQUIRE_FALSE(old_approval.request_id.empty());
+    REQUIRE((*first)->Close().has_value());
+    const auto old_result = (*first)->ReadOperation(first_receipt->operation_id);
+    REQUIRE(old_result.has_value());
+    CHECK(old_result->state == sdk::OperationState::Cancelled);
+    CHECK(executions->load() == 0);
+
+    auto resume_options = make_options();
+    resume_options.resume_session_id = session_id;
+    auto resumed = (*runtime)->OpenSession(std::move(resume_options));
+    REQUIRE(resumed.has_value());
+    CHECK((*resumed)->id() == session_id);
+    auto new_events = (*resumed)->Subscribe();
+    REQUIRE(new_events.has_value());
+    const auto new_receipt = (*resumed)->Submit("new-turn", "await current approval");
+    REQUIRE(new_receipt.has_value());
+    const auto current_approval = await_approval(*new_events);
+    CHECK(current_approval.request_id != old_approval.request_id);
+    const auto stale = (*resumed)->ResolveApproval(old_approval.request_id, sdk::ApprovalDecision::Accept);
+    REQUIRE_FALSE(stale.has_value());
+    CHECK(stale.error().code == "stale_request_id");
+    const auto still_pending = (*resumed)->PendingApprovals();
+    REQUIRE(still_pending.size() == 1);
+    CHECK(still_pending.front().request_id == current_approval.request_id);
+    CHECK(executions->load() == 0);
+
+    REQUIRE((*resumed)->ResolveApproval(current_approval.request_id, sdk::ApprovalDecision::Accept).has_value());
+    const auto result = (*resumed)->WaitResult(new_receipt->operation_id, 15s);
+    REQUIRE(result.has_value());
+    CHECK(result->state == sdk::OperationState::Succeeded);
+    CHECK(result->result_persisted);
+    CHECK(result->turn_id != old_result->turn_id);
+    CHECK(executions->load() == 1);
+    REQUIRE((*runtime)->Shutdown().has_value());
+}
+
 TEST_CASE("SDK lifecycle: real MCP image persists in the session and reaches the next model request") {
     LifecycleFixture fixture;
 #ifdef _WIN32
