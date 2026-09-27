@@ -438,6 +438,23 @@ jobs:
           path: build/test-evidence/sdk-consumer/
           if-no-files-found: warn
 
+      - name: Build and test SDK lifecycle regressions
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target lubancore_sdk_tests -j 4
+          mkdir -p build/test-evidence/sdk-focused
+          ctest --test-dir build -C Release -L '^sdk-focused$' --show-only=json-v1 > build/test-evidence/sdk-focused/tests.json
+          ctest --test-dir build -C Release -L '^sdk-focused$' --output-on-failure --no-tests=error --output-junit "$PWD/build/test-evidence/sdk-focused/results.xml"
+
+      - name: Upload SDK lifecycle evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-focused-${{ matrix.name }}
+          path: build/test-evidence/sdk-focused/
+          if-no-files-found: warn
+
       - name: Build
         shell: bash
         run: |
@@ -651,6 +668,23 @@ jobs:
         with:
           name: sdk-consumer-linux-manylinux
           path: build/test-evidence/sdk-consumer/
+          if-no-files-found: warn
+
+      - name: Build and test SDK lifecycle regressions
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target lubancore_sdk_tests -j 4
+          mkdir -p build/test-evidence/sdk-focused
+          ctest --test-dir build -C Release -L '^sdk-focused$' --show-only=json-v1 > build/test-evidence/sdk-focused/tests.json
+          ctest --test-dir build -C Release -L '^sdk-focused$' --output-on-failure --no-tests=error --output-junit "$PWD/build/test-evidence/sdk-focused/results.xml"
+
+      - name: Upload SDK lifecycle evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-focused-linux-manylinux
+          path: build/test-evidence/sdk-focused/
           if-no-files-found: warn
 
       - name: Build
