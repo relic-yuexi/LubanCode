@@ -113,10 +113,11 @@ public:
     void OnLine(const std::string& line);
 
     // 握手:发 initialize 请求,等响应,再发 notifications/initialized 通知。
-    std::expected<void, std::string> Initialize();
+    // cancel 沿用请求等待器的取消通知/宽限合同；缺省空指针保持原行为。
+    std::expected<void, std::string> Initialize(const std::atomic<bool>* cancel = nullptr);
 
-    // 拿工具清单(tools/list)。
-    std::expected<std::vector<ToolInfo>, std::string> ListTools();
+    // 拿工具清单(tools/list)，取消口与握手相同。
+    std::expected<std::vector<ToolInfo>, std::string> ListTools(const std::atomic<bool>* cancel = nullptr);
 
     // 执行一次工具调用(tools/call)。不抛异常,失败统统体现在返回值的
     // is_error 字段里。富结果(text/image/audio/resource_link/resource/

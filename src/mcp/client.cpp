@@ -239,11 +239,11 @@ bool Client::SendNotification(const std::string& method, const nlohmann::json& p
     return transport_->WriteLine(notification.dump());
 }
 
-std::expected<void, std::string> Client::Initialize() {
+std::expected<void, std::string> Client::Initialize(const std::atomic<bool>* cancel) {
     const nlohmann::json params = {{"protocolVersion", kSupportedProtocolVersions[0]},
                                     {"capabilities", nlohmann::json::object()},
                                     {"clientInfo", {{"name", "lubancode"}, {"version", kClientVersion}}}};
-    auto result = SendRequestAndWait("initialize", params, default_timeout_ms_);
+    auto result = SendRequestAndWait("initialize", params, default_timeout_ms_, nullptr, cancel);
     if (!result.has_value()) {
         return std::unexpected(result.error());
     }
@@ -263,8 +263,8 @@ std::expected<void, std::string> Client::Initialize() {
     return {};
 }
 
-std::expected<std::vector<ToolInfo>, std::string> Client::ListTools() {
-    auto result = SendRequestAndWait("tools/list", nlohmann::json::object(), default_timeout_ms_);
+std::expected<std::vector<ToolInfo>, std::string> Client::ListTools(const std::atomic<bool>* cancel) {
+    auto result = SendRequestAndWait("tools/list", nlohmann::json::object(), default_timeout_ms_, nullptr, cancel);
     if (!result.has_value()) {
         return std::unexpected(result.error());
     }

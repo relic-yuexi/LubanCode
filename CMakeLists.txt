@@ -1072,6 +1072,7 @@ add_library(lubancode_runtime STATIC
   # SDK-1:后端与基础工具共用装配,无宿主/终端依赖。
   src/runtime/assembly/backend.cpp
   src/runtime/assembly/builtin_tools.cpp
+  src/runtime/assembly/mcp.cpp
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
   src/runtime/runtime_contract.cpp
   # 会话管理器单第六步:会话查询/搬删的 runtime 侧命令服务(合同消费方)。

@@ -104,29 +104,21 @@ std::vector<McpServerRuntime> StartMcpServers(
     const std::map<std::string, lubancode::config::McpServerConfig>& configs, const lubancode::cli::Theme& theme) {
     std::vector<McpServerRuntime> out;
     for (const auto& [name, server_config] : configs) {
-        auto client = std::make_unique<lubancode::mcp::Client>(name);
-        const auto start_result = client->StartProcess(server_config.command, server_config.args, server_config.env);
-        if (!start_result.success) {
-            std::cout << theme.error << trf("mcp.start_failed", name, start_result.error) << theme.reset << "\n";
+        auto started = runtime::assembly::StartMcpServer(
+            {name, server_config.command, server_config.args, server_config.env,
+             lubancode::platform::EnvMode::Inherit});
+        if (!started) {
+            const char* key = "mcp.start_failed";
+            switch (started.error().stage) {
+                case runtime::assembly::McpStartupStage::Start: break;
+                case runtime::assembly::McpStartupStage::Initialize: key = "mcp.init_failed"; break;
+                case runtime::assembly::McpStartupStage::Discover: key = "mcp.list_failed"; break;
+            }
+            std::cout << theme.error << trf(key, name, started.error().error) << theme.reset << "\n";
             continue;
         }
-        const auto init_result = client->Initialize();
-        if (!init_result.has_value()) {
-            std::cout << theme.error << trf("mcp.init_failed", name, init_result.error()) << theme.reset << "\n";
-            continue;
-        }
-        auto tools_result = client->ListTools();
-        if (!tools_result.has_value()) {
-            std::cout << theme.error << trf("mcp.list_failed", name, tools_result.error()) << theme.reset << "\n";
-            continue;
-        }
-
-        McpServerRuntime runtime;
-        runtime.name = name;
-        runtime.tools = std::move(*tools_result);
-        std::cout << trf("mcp.mounted", name, runtime.tools.size()) << "\n";
-        runtime.client = std::move(client);
-        out.push_back(std::move(runtime));
+        std::cout << trf("mcp.mounted", name, started->tools.size()) << "\n";
+        out.push_back(std::move(*started));
     }
     return out;
 }
