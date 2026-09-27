@@ -151,6 +151,7 @@ TEST_CASE("SDK lifecycle: corrupt operation ledger cannot discard a completed op
     REQUIRE(Json::parse(lines[0]).value("kind", "") == "operation.accepted");
     REQUIRE(Json::parse(lines[1]).value("kind", "") == "operation.dispatched");
     REQUIRE(Json::parse(lines[2]).value("kind", "") == "operation.final");
+    bool rewrite_ledger = true;
     SUBCASE("malformed accepted line") { lines[0] = "{broken accepted fact"; }
     SUBCASE("accepted line missing but following facts remain valid JSON") { lines.erase(lines.begin()); }
     SUBCASE("conflicting second acceptance for the same operation") {
@@ -158,7 +159,12 @@ TEST_CASE("SDK lifecycle: corrupt operation ledger cannot discard a completed op
         conflict["clientOperationId"] = "different-client-key";
         lines.insert(lines.begin() + 1, conflict.dump());
     }
-    {
+    SUBCASE("whole ledger missing while completed result remains") {
+        REQUIRE(fs::remove(operations_file));
+        rewrite_ledger = false;
+    }
+    SUBCASE("whole ledger empty while completed result remains") { lines.clear(); }
+    if (rewrite_ledger) {
         std::ofstream output(operations_file, std::ios::binary | std::ios::trunc);
         for (const auto& line : lines) output << line << '\n';
         output.close();
