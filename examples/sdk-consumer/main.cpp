@@ -392,6 +392,15 @@ void InvalidOptions(const fs::path& base) {
     auto relative = Options(paths, plain);
     relative.cwd = ".";
     Check(!runtime->OpenSession(std::move(relative)), "relative cwd consumed ambient process state");
+    auto valid = Take(runtime->OpenSession(Options(paths, plain)), "open input validation session");
+    const std::string invalid_utf8(1, static_cast<char>(0xff));
+    auto invalid_text = valid->Submit("utf8-key", invalid_utf8);
+    Check(!invalid_text && invalid_text.error().code == "sdk.input.invalid_utf8", "invalid text escaped the Result error boundary");
+    auto invalid_key = valid->Submit(invalid_utf8, "valid text");
+    Check(!invalid_key && invalid_key.error().code == "sdk.input.invalid_utf8", "invalid operation key was accepted");
+    const auto corrected = Take(valid->Submit("utf8-key", "valid text"), "submit corrected input under the same key");
+    Check(!corrected.duplicate, "rejected input polluted durable idempotency");
+    Succeeded(Finished(valid, corrected));
     Take(runtime->Shutdown(), "shutdown invalid-options runtime");
 }
 
