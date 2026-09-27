@@ -126,7 +126,7 @@ edges:
     if (!file.is_open()) return std::nullopt;
     const auto saved = workflow::OutputCommitRecord::FromJson(nlohmann::json::parse(file));
     if (!saved.has_value()) return std::nullopt;
-    return saved->validation;
+    return std::optional<nlohmann::json>{std::in_place, saved->validation};
 }
 
 // 深嵌套夹具(深度帽用):N 层 {"a": ...} 包一个布尔叶。
