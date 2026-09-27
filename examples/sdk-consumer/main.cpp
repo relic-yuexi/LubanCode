@@ -265,8 +265,8 @@ void SharedDirectoryIsolation(const fs::path& base) {
         sdk::Tool tool;
         tool.name = "probe";
         tool.description = "Count one explicitly approved invocation.";
-        tool.execute = [executed, expected = Utf8(fs::weakly_canonical(paths.cwd))](const std::string&, const sdk::ToolContext& context) -> sdk::Result<sdk::ToolResult> {
-            Check(context.cwd == expected, "custom tool received another session cwd");
+        tool.execute = [executed, expected = fs::weakly_canonical(paths.cwd)](const std::string&, const sdk::ToolContext& context) -> sdk::Result<sdk::ToolResult> {
+            Check(fs::equivalent(Path(context.cwd), expected), "custom tool received another session cwd");
             ++*executed;
             return sdk::ToolResult{"counted", false};
         };
@@ -287,7 +287,9 @@ void SharedDirectoryIsolation(const fs::path& base) {
     Take(beta->ResolveApproval(b_approval.request_id, sdk::ApprovalDecision::Decline), "decline beta");
     Succeeded(Finished(alpha, a1));
     Succeeded(Finished(beta, b1));
-    Check(alpha_count->load() == 1 && beta_count->load() == 0, "approval/decline crossed sessions");
+    Check(alpha_count->load() == 1 && beta_count->load() == 0,
+          "approval/decline crossed sessions: alpha=" + std::to_string(alpha_count->load()) +
+              " beta=" + std::to_string(beta_count->load()));
     const auto a2 = Take(alpha->Submit("second-key", "alpha again"), "alpha second");
     const auto b2 = Take(beta->Submit("second-key", "beta again"), "beta second");
     const auto b_pending = ApprovalFor(beta, beta_events, b2.operation_id);
