@@ -120,6 +120,57 @@ TEST_CASE("哈希链承继 v2:衔接、确定性、VerifyV3File 全绿") {
     CHECK(!again.has_value());
 }
 
+TEST_CASE("关柄:保留只读身份,拒绝迟到提交,对象存活时也能改名续接") {
+    Harness harness("close");
+    auto writer = harness.Start();
+    REQUIRE(writer.has_value());
+    const auto before = ReadLines(harness.jsonl);
+    const auto next_seq = writer->next_seq();
+    const std::string last_hash = writer->last_line_hash();
+    const std::string system_id = writer->context().system_message_ref;
+
+    REQUIRE(writer->Close().has_value());
+    REQUIRE(writer->Close().has_value());  // 重复关闭不碰已释放的句柄。
+    CHECK_FALSE(writer->broken());
+    CHECK(writer->path() == harness.jsonl);
+    CHECK(writer->session_id() == "20260910-120000-AAAAAA");
+    CHECK(writer->run_id() == "run-000001");
+    CHECK(writer->context().system_message_ref == system_id);
+    CHECK(writer->HasMessageId(system_id));
+
+    MessageDraft user;
+    user.turn_id = "turn-000001";
+    user.purpose = MessagePurpose::Conversation;
+    user.origin = MessageOrigin::Human;
+    user.message = nlohmann::json{{"role", "user"}, {"content", "迟到输入"}};
+    const auto late_message = writer->AppendMessage(user, Durability::PowerLoss);
+    CHECK(late_message.status == WriteReceipt::Status::Rejected);
+    CHECK(late_message.error_code == "v3writer.closed");
+    EventDraft late;
+    late.kind = EventKindV3::SessionEnded;
+    late.payload = nlohmann::json{{"reason", "exit"}, {"closeQuality", "clean"}};
+    const auto late_event = writer->AppendEvent(std::move(late), Durability::PowerLoss);
+    CHECK(late_event.status == WriteReceipt::Status::Rejected);
+    CHECK(late_event.error_code == "v3writer.closed");
+    CHECK(writer->next_seq() == next_seq);
+    CHECK(writer->last_line_hash() == last_hash);
+    CHECK(writer->context().revision == 1);
+    CHECK(ReadLines(harness.jsonl) == before);
+
+    // Windows 不允许改名仍被写句柄占用的文件;这里故意不析构 writer。
+    const auto moved = harness.dir / "closed.jsonl";
+    std::error_code ec;
+    std::filesystem::rename(harness.jsonl, moved, ec);
+    INFO(ec.message());
+    REQUIRE_FALSE(ec);
+    auto continued = V3Writer::Continue(moved);
+    REQUIRE(continued.has_value());
+    const auto accepted = continued->AppendMessage(std::move(user), Durability::PowerLoss);
+    CHECK(accepted.status == WriteReceipt::Status::Committed);
+    CHECK(accepted.seq == next_seq);
+    CHECK(VerifyV3File(moved).ok);
+}
+
 TEST_CASE("prepared:引用先落稳才许落,空缺引用拒收") {
     Harness harness("prepared");
     auto writer = harness.Start();
