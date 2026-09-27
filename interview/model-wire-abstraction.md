@@ -385,12 +385,12 @@ ToolUseBlock    → assistant.tool_calls，input.dump() 生成 arguments 字符�
 ToolResultBlock → 独立 role=tool 消息，保留 tool_call_id
 ```
 
-选哪套实现，看 [app/backend_stack.cpp](../src/app/backend_stack.cpp) 的 `BuildBackend()`：它按 `config.wire` 创建具体后端。`RebuildableBackend` 保持外层对象稳定，切换时换掉内部后端，再把 `send_stream()` 转发进去。
+选哪套实现，看 [runtime/assembly/backend.cpp](../src/runtime/assembly/backend.cpp) 的 `BuildBackend()`：它按 `config.wire` 创建具体后端。`RebuildableBackend` 保持外层对象稳定，切换时换掉内部后端，再把 `send_stream()` 转发进去。
 
 从调用处追到转换处，按这个顺序看：
 
 ```text
-src/app/backend_stack.cpp       BuildBackend：按配置选后端
+src/runtime/assembly/backend.cpp       BuildBackend：按配置选后端
 src/api/backend.hpp             Backend：定义统一 send_stream 接口
 src/agent/loop.cpp              backend_.send_stream：主循环发起调用
 src/api/<协议>/client.cpp       具体 send_stream：调 builder，再发 HTTP
@@ -409,7 +409,7 @@ src/agent/loop.cpp              取 ToolUseBlock，进入工具执行流程
 | --- | --- | --- |
 | 统一数据 | [api/types.hpp](../src/api/types.hpp) | Role、ContentBlock、Message、Request、StreamEvent |
 | 统一调用合同 | [api/backend.hpp](../src/api/backend.hpp) | Backend、send_stream |
-| 按 wire 选后端 | [app/backend_stack.cpp](../src/app/backend_stack.cpp) | BuildBackend、RebuildableBackend::Rebuild |
+| 按 wire 选后端 | [runtime/assembly/backend.cpp](../src/runtime/assembly/backend.cpp) | BuildBackend、RebuildableBackend::Rebuild |
 | Anthropic 组包 | [api/anthropic/client.cpp](../src/api/anthropic/client.cpp) | ContentBlockToJson、BuildRequestJson |
 | Chat 组包 | [api/chat/request.cpp](../src/api/chat/request.cpp) | BuildRequestJson |
 | Responses 组包 | [api/responses/request.cpp](../src/api/responses/request.cpp) | ContentBlockToItem、BuildRequestJson |
