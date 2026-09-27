@@ -663,6 +663,11 @@ std::size_t SessionService::pending_input_count() const {
     return pending_inputs_.size();
 }
 
+std::vector<SessionService::QueuedInput> SessionService::PendingInputsSnapshot() const {
+    std::lock_guard<std::mutex> lock(commit_mutex_);
+    return {pending_inputs_.begin(), pending_inputs_.end()};
+}
+
 bool SessionService::RecordTurnFinal(const TurnFinalRecord& record) {
     if (runtime_ == nullptr || trajectory() == nullptr) {
         return false;

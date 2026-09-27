@@ -172,6 +172,8 @@ public:
     };
     PendingPop PopPendingInput();
     std::size_t pending_input_count() const;
+    // Read-only recovery reconciliation; does not write dispatched facts or pop.
+    std::vector<QueuedInput> PendingInputsSnapshot() const;
 
     // ---- 回合终态的持久收口(工业化多协议接入单 P1:ResultEnvelope 的
     // 最小持久形状)----

@@ -14,6 +14,7 @@
 #include "agent/agent.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "platform/atomic_write.hpp"
+#include "platform/sha256.hpp"
 #include "platform/text_encoding.hpp"
 #include "runtime/assembly/backend.hpp"
 #include "runtime/assembly/builtin_tools.hpp"
@@ -351,8 +352,7 @@ struct Session::Impl final : rt::InteractionBroker {
         profile.runtime.context_window_tokens = options.context_window_tokens;
         agent = std::make_unique<lubancode::agent::Agent>(*backend, *registry, std::move(profile));
         if (!options.resume_session_id.empty()) agent->RestoreSessionHistory(service->trajectory()->LaunchResumeHistory());
-        LoadOperations();
-        return {};
+        return LoadOperations();
     }
 
     void Start() {
@@ -361,11 +361,13 @@ struct Session::Impl final : rt::InteractionBroker {
         worker_id = worker.get_id();
     }
 
-    void LoadOperations() {
+    Result<void> LoadOperations() {
+        std::map<std::string, std::string> accepted_hashes;
         for (const auto& fact : rt::SessionService::ReadOperationFacts(session_dir)) {
             if (!ValidId(fact.operation_id)) throw std::runtime_error("sdk.operation.invalid_persisted_id");
             auto& operation = operations[fact.operation_id];
             operation.operation_id = fact.operation_id;
+            if (fact.kind == "operation.accepted") accepted_hashes[fact.operation_id] = fact.payload_hash;
             if (fact.kind == "operation.dispatched") {
                 operation.state = OperationState::Indeterminate;
                 operation.error = "sdk.operation.indeterminate: dispatched without a durable final";
@@ -386,6 +388,27 @@ struct Session::Impl final : rt::InteractionBroker {
             }
             if (!operation.result_persisted) operation.error = "sdk.result.unavailable: final operation exists without SDK result artifact";
         }
+        // SessionService tolerates an unreadable input artifact by leaving it
+        // out of its recovery queue. A runnable SDK session must instead fail
+        // explicitly: an Accepted operation without a queued input cannot finish.
+        // Check the original payload hash as well, before any worker can dispatch.
+        std::set<std::string> queued_ids;
+        for (const auto& input : service->PendingInputsSnapshot()) {
+            const auto found = operations.find(input.operation_id);
+            const auto hash = accepted_hashes.find(input.operation_id);
+            if (found == operations.end() || found->second.state != OperationState::Accepted ||
+                hash == accepted_hashes.end() || !queued_ids.insert(input.operation_id).second ||
+                hash->second != lubancode::platform::Sha256Hex(
+                    rt::SessionService::CanonicalInputPayload({{}, input.text, input.images}))) {
+                return std::unexpected(Failure("sdk.resume.input_unavailable", input.operation_id));
+            }
+        }
+        for (const auto& [id, operation] : operations) {
+            if (operation.state == OperationState::Accepted && !queued_ids.contains(id)) {
+                return std::unexpected(Failure("sdk.resume.input_unavailable", id));
+            }
+        }
+        return {};
     }
 
     Operation Complete(Operation operation, const std::vector<std::string>& refs, bool usage_reported, bool ledger_ok = true) {
@@ -457,6 +480,7 @@ struct Session::Impl final : rt::InteractionBroker {
         events.Start(operation.turn_id);
         lubancode::agent::TurnWiring wiring;
         wiring.events = &events;
+        wiring.tool_artifact_dir = lubancode::tools::PathToUtf8(session_dir / "artifacts" / "sha256");
         wiring.on_permission_evaluate = [&](const std::string&, const std::string& name,
             lubancode::tools::ApprovalClass approval_class, const Json& arguments, const rt::ToolHookDecision& pre) {
             std::lock_guard lock(approval_mutex);

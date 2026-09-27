@@ -60,6 +60,8 @@ Windows 将 `bin` 加入 PATH，Linux 使用库搜索路径或应用自身 RPATH
 `resume_session_id` 非空时，只恢复所指 V3 会话，ID 保持不变。源缺失、损坏、仍持活锁，
 或源并非 V3，都报错；不会回落开新场。恢复会重排“已受理、未派发”输入；
 “已派发、无终态”操作报 `Indeterminate`，不会自动重复外部副作用。
+待执行输入原件丢失、损坏或不符合受理时的摘要，建场报 `sdk.resume.input_unavailable`；
+不会挂着 `Accepted` 等到超时，也不会拿改过的正文重跑。
 
 操作终态由 `SessionService` 写入原操作账。最终正文另存会话目录下 `sdk-results`，
 其对应终态事实写稳后才发完成事件。工具完整原件仍走现有 V3 结果仓；SDK 不套远端
