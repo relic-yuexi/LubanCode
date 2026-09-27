@@ -36,6 +36,21 @@ namespace fs = std::filesystem;
 using Json = nlohmann::json;
 thread_local bool in_session_worker = false;
 
+// Keep shutdown diagnostics after a public session handle is dropped without
+// retaining its result text, connection material or execution resources.
+struct CloseErrors {
+    std::mutex mutex;
+    std::optional<Error> first;
+    void Remember(const Error& error) {
+        std::lock_guard lock(mutex);
+        if (!first) first = error;
+    }
+    Result<void> Read() {
+        std::lock_guard lock(mutex);
+        return first ? Result<void>(std::unexpected(*first)) : Result<void>{};
+    }
+};
+
 Error Failure(std::string code, std::string message = {}) { return {std::move(code), std::move(message)}; }
 bool Terminal(OperationState state) { return state != OperationState::Accepted && state != OperationState::Running; }
 bool ValidId(const std::string& value) {
@@ -276,9 +291,9 @@ struct Session::Impl final : rt::InteractionBroker {
     bool closed = false;
     bool broken = false;
     std::optional<Error> close_error;
+    std::shared_ptr<CloseErrors> close_errors;
     std::atomic<bool> interrupt{false};
     std::thread worker;
-    std::thread::id worker_id;
     mutable std::mutex approval_mutex;
     struct Pending { Approval approval; std::shared_ptr<ApprovalFuture> future; };
     std::map<std::string, Pending> pending;
@@ -453,9 +468,8 @@ struct Session::Impl final : rt::InteractionBroker {
     }
 
     void Start() {
-        std::lock_guard lock(mutex); // Pump cannot enter callbacks before ID publication.
+        std::lock_guard lock(mutex); // Publish the owned thread before Pump enters callbacks.
         worker = std::thread([this] { Pump(); });
-        worker_id = worker.get_id();
     }
 
     Result<void> LoadOperations() {
@@ -693,6 +707,7 @@ struct Session::Impl final : rt::InteractionBroker {
             const auto outcome = service->Close("sdk_close");
             if (!outcome.error_code.empty()) close_error = Failure(outcome.error_code, outcome.message);
         }
+        if (close_error && close_errors) close_errors->Remember(*close_error);
         agent.reset();
         registry.reset();
         mcp.clear();
@@ -785,7 +800,8 @@ struct Runtime::Impl {
     std::mutex mutex;
     bool closed = false;
     std::shared_ptr<std::atomic<bool>> stopping = std::make_shared<std::atomic<bool>>(false);
-    std::vector<std::shared_ptr<Session::Impl>> sessions;
+    std::vector<std::weak_ptr<Session::Impl>> sessions;
+    std::shared_ptr<CloseErrors> close_errors = std::make_shared<CloseErrors>();
 };
 Runtime::Runtime(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 Runtime::~Runtime() { (void)Shutdown(); }
@@ -806,12 +822,14 @@ Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
     std::lock_guard lock(impl_->mutex);
     if (impl_->closed) return std::unexpected(Failure("sdk.runtime.closed"));
     try {
+        std::erase_if(impl_->sessions, [](const auto& session) { return session.expired(); });
         auto execution = std::make_shared<Session::Impl>();
         execution->roots = impl_->options;
         execution->runtime_stopping = impl_->stopping;
         execution->options = std::move(options);
         auto opened = execution->Initialize();
         if (!opened) return std::unexpected(opened.error());
+        execution->close_errors = impl_->close_errors;
         impl_->sessions.push_back(execution);
         execution->Start();
         return std::shared_ptr<Session>(new Session(std::move(execution)));
@@ -824,23 +842,18 @@ Result<void> Runtime::Shutdown() {
     std::vector<std::shared_ptr<Session::Impl>> sessions;
     {
         std::lock_guard lock(impl_->mutex);
-        for (const auto& session : impl_->sessions) {
-            if (session->worker_id == std::this_thread::get_id()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
-        }
+        for (const auto& session : impl_->sessions)
+            if (auto live = session.lock()) sessions.push_back(std::move(live));
         impl_->closed = true;
         impl_->stopping->store(true);
-        sessions = impl_->sessions;
     }
     // Stop admission and signal every worker before waiting for any one worker.
     for (const auto& session : sessions) session->RequestClose();
-    std::optional<Error> error;
-    for (const auto& session : sessions) {
-        auto result = session->Close();
-        if (!result && !error) error = result.error();
-    }
-    if (error) return std::unexpected(*error);
+    for (const auto& session : sessions) (void)session->Close();
+    // Keep the registry until every join finishes. A concurrent Shutdown must
+    // take the same live snapshot, rather than return while workers still run.
     { std::lock_guard lock(impl_->mutex); impl_->sessions.clear(); }
-    return {};
+    return impl_->close_errors->Read();
 }
 std::string Version() { return LUBANCORE_VERSION; }
 } // namespace lubancore

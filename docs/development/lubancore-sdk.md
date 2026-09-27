@@ -1,6 +1,6 @@
 # LubanCore C++ SDK（实验版）
 
-本批提供真实会话闭环。`Runtime` 持会话执行资源，`Session` 经现有
+本批提供真实会话闭环。`Runtime` 协调活会话关场，`Session` 句柄持执行资源，经现有
 `SessionService` 接纳输入，再用 `Agent`、轨迹桥和工具表跑回合。
 它不启动 CLI 或 AppServer 子进程。
 
@@ -30,7 +30,9 @@ Windows 将 `bin` 加入 PATH，Linux 使用库搜索路径或应用自身 RPATH
    操作都生效。`Close` 拒新活，取消并收拢 worker，封账并放掉文件句柄。
 
 同键同正文返回原操作；异正文报 `operation_conflict`。`Close`、`Shutdown` 可重复调用。
-关闭后仍可查 ID 和已有操作快照。事件流有界，慢消费者溢出时报 `sdk.events.overflow`，
+仍持有 Session 句柄时，关闭后可查 ID 和已有操作快照。丢掉最后一只句柄会关场，
+等 worker 退出，再释放内存结果与配置；磁盘原件照常保留。Runtime 只留首条关场错误，
+供 `Shutdown` 返回，不强留已丢弃会话。事件流有界，慢消费者溢出时报 `sdk.events.overflow`，
 不会把缺事件说成完整回放；操作结果另从持久账查询。`EventStream::Close` 唤醒并等候
 正在执行的 `Next` 退出。SDK 不替宿主开事件回调线程。
 

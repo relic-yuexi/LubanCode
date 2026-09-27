@@ -177,6 +177,8 @@ private:
 
 class LUBANCORE_API Session {
 public:
+    // Dropping the final public handle closes and joins this session. Closed
+    // handles retain query snapshots; Runtime does not retain discarded handles.
     ~Session();
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
@@ -210,6 +212,8 @@ public:
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
     Result<std::shared_ptr<Session>> OpenSession(SessionOptions);
+    // Closes all live sessions and preserves the first close error, including
+    // errors from sessions whose final public handle has already been dropped.
     Result<void> Shutdown();
 private:
     struct Impl;
