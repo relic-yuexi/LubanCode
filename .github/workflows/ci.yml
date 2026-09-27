@@ -418,13 +418,25 @@ jobs:
           fi
 
       # SDK 必须从安装前缀被仓库外工程消费，不能用源码树内链接冒充。
+      - name: Build SDK library
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: cmake --build build --config Release --target lubancore_sdk -j 4
+
       - name: Install and test standalone SDK consumer
         if: needs.changes.outputs.sdk_tests == 'true'
         shell: bash
         run: |
-          cmake --build build --config Release --target lubancore_sdk -j 4
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
           "$PY" scripts/ci/check_installed_sdk.py --build-dir build
+
+      - name: Upload SDK consumer evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-consumer-${{ matrix.name }}
+          path: build/test-evidence/sdk-consumer/
+          if-no-files-found: warn
 
       - name: Build
         shell: bash
@@ -621,13 +633,25 @@ jobs:
           CXX: ${{ env.CXX }}
 
       # SDK 必须从安装前缀被仓库外工程消费，不能用源码树内链接冒充。
+      - name: Build SDK library
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: cmake --build build --config Release --target lubancore_sdk -j 4
+
       - name: Install and test standalone SDK consumer
         if: needs.changes.outputs.sdk_tests == 'true'
         shell: bash
         run: |
-          cmake --build build --config Release --target lubancore_sdk -j 4
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
           "$PY" scripts/ci/check_installed_sdk.py --build-dir build
+
+      - name: Upload SDK consumer evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-consumer-linux-manylinux
+          path: build/test-evidence/sdk-consumer/
+          if-no-files-found: warn
 
       - name: Build
         run: |
