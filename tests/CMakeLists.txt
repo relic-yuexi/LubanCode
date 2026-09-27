@@ -387,7 +387,7 @@ foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)
   endif()
 endforeach()
 
-# SDK 两册先用小靶子验，免得生命周期问题等全仓测试编完才露出来。
+# SDK 与持久文件写入先用小靶子验，免得问题等全仓测试编完才露出来。
 # 全量二进制与原 CTest 登记照留；这里复用同一份测试源码。
 if(LUBANCODE_BUILD_SDK)
   set(LUBANCORE_FOCUSED_TEST_SOURCES ${LUBANCODE_TEST_SOURCES})
@@ -395,6 +395,8 @@ if(LUBANCODE_BUILD_SDK)
   if(NOT LUBANCORE_FOCUSED_TEST_SOURCES)
     message(FATAL_ERROR "SDK build requires registered integration/sdk tests")
   endif()
+  list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/unit/platform/test_atomic_write.cpp")
   add_executable(lubancore_sdk_tests EXCLUDE_FROM_ALL
     support/main.cpp
     support/fake_http_server.cpp
@@ -424,7 +426,15 @@ if(LUBANCODE_BUILD_SDK)
     add_test(NAME "${sdk_test}"
       COMMAND lubancore_sdk_tests "--source-file=*${sdk_basename}")
     set_tests_properties("${sdk_test}" PROPERTIES LABELS "sdk-focused" TIMEOUT 300)
-    get_test_property("integration.sdk.${sdk_stem}" ENVIRONMENT sdk_test_environment)
+    if(sdk_basename STREQUAL "test_atomic_write.cpp")
+      set(sdk_original_test "unit.platform.atomic_write")
+      # 两个可执行文件复用同册固定临时目录，全量并行时须避免互相清理。
+      set_tests_properties("${sdk_test}" "${sdk_original_test}" PROPERTIES
+        RESOURCE_LOCK "platform-atomic-write")
+    else()
+      set(sdk_original_test "integration.sdk.${sdk_stem}")
+    endif()
+    get_test_property("${sdk_original_test}" ENVIRONMENT sdk_test_environment)
     if(NOT sdk_test_environment STREQUAL "NOTFOUND")
       set_tests_properties("${sdk_test}" PROPERTIES ENVIRONMENT "${sdk_test_environment}")
     endif()
