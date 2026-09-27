@@ -78,7 +78,7 @@ if(WIN32)
       string(TOUPPER "${_char}" _upper)
       string(APPEND _lubancore_windows_root_regex "[${_lower}${_upper}]")
     elseif(_char STREQUAL "/" OR _char STREQUAL "\\")
-      string(APPEND _lubancore_windows_root_regex [[[/\\]]])
+      string(APPEND _lubancore_windows_root_regex [=[[/\\]]=])
     elseif(_char MATCHES "[0-9]" OR _char STREQUAL ":" OR _char STREQUAL " " OR
            _char STREQUAL "_" OR _char STREQUAL "-")
       string(APPEND _lubancore_windows_root_regex "${_char}")
@@ -86,7 +86,7 @@ if(WIN32)
       string(APPEND _lubancore_windows_root_regex "\\${_char}")
     endif()
   endforeach()
-  string(APPEND _lubancore_windows_root_regex [[[/\\]]])
+  string(APPEND _lubancore_windows_root_regex [=[[/\\]]=])
   install(RUNTIME_DEPENDENCY_SET LubanCoreRuntimeDependencies
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT LubanCore
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT LubanCore
