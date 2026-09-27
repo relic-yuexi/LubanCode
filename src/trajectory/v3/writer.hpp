@@ -179,6 +179,10 @@ public:
         const std::filesystem::path& jsonl_path, V3WriterOptions options = V3WriterOptions{},
         const V3Clock* clock = nullptr);
 
+    // 只关写句柄,不代写 session.ended。封口事实须由领域先落稳。
+    // 可重复调用;保留身份、路径与上下文查询,此后提交拒绝。
+    std::expected<void, std::string> Close();
+
     // ---- 底层两类行 ----
 
     WriteReceipt AppendMessage(MessageDraft draft, Durability durability);

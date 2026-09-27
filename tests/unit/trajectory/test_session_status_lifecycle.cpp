@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <utility>
 
 #include "trajectory/directory.hpp"      // 手植 v2 目录夹具(V3-LEGACY-01)
 #include "trajectory/session_index.hpp"  // v3 归档态索引断言
@@ -263,8 +264,22 @@ TEST_CASE("lifecycle: delete 先 intent 后 tombstone 再删目录;未封口不�
     CHECK(manager.DeleteSession(id, "user_delete").error().rfind("session.delete_active", 0) == 0);
 
     NullClearParticipant participant;
-    REQUIRE(manager.Close(CloseRequest{}, &participant).error_code.empty());
-    REQUIRE(manager.DeleteSession(id, "user_delete").has_value());
+    const auto closed = manager.Close(CloseRequest{}, &participant);
+    INFO(closed.error_code + ": " + closed.message);
+    REQUIRE(closed.error_code.empty());
+    REQUIRE(manager.active() != nullptr);
+    REQUIRE(manager.active()->is_v3());
+    CHECK(manager.active()->session_id() == id);
+    CHECK(manager.active()->status == SessionStatus::Closed);
+    v3::EventDraft late;
+    late.kind = v3::EventKindV3::SessionEnded;
+    late.payload = nlohmann::json{{"reason", "exit"}, {"closeQuality", "clean"}};
+    const auto rejected = manager.active()->v3_main->AppendEvent(std::move(late));
+    CHECK(rejected.status == v3::WriteReceipt::Status::Rejected);
+    CHECK(rejected.error_code == "v3writer.closed");
+    const auto deleted = manager.DeleteSession(id, "user_delete");
+    INFO(deleted.has_value() ? "" : deleted.error());
+    REQUIRE(deleted.has_value());
     CHECK_FALSE(std::filesystem::exists(manager.SessionDirOf(id)));
     // tombstone 齐全:末 hash 是旧账最后一枚事件的 hash。
     const auto tombstone = ReadSessionTombstone(manager.workspace_dir() / "tombstones", id);
