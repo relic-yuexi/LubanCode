@@ -78,7 +78,7 @@ TEST_CASE("SDK history: HTTP requests preserve two turns and same-ID resume with
         REQUIRE((*runtime)->Shutdown().has_value());
     }
     CHECK(calls.load() == 1);
-    history::CheckRequests(fixture);
+    history::CheckRequests(fixture, id);
 }
 
 TEST_CASE("SDK resources: live MCP children follow session cwd and survive another session closing") {

@@ -23,8 +23,8 @@ using namespace lubancode;
 namespace history = test_support::session_history;
 using namespace std::chrono_literals;
 
-nlohmann::json Call(app_server::Server& server, const std::string& method,
-                    const nlohmann::json& params) {
+nlohmann::json RawCall(app_server::Server& server, const std::string& method,
+                       const nlohmann::json& params) {
     const nlohmann::json envelope{{"id", 1}, {"method", method}, {"params", params}};
     app_server::EnvelopeError error;
     auto incoming = app_server::ParseIncoming(envelope.dump(), error);
@@ -35,7 +35,12 @@ nlohmann::json Call(app_server::Server& server, const std::string& method,
     };
     const auto outcome = server.dispatcher().HandleRequest(incoming->request, context);
     REQUIRE(outcome.outbound.size() == 1);
-    auto response = nlohmann::json::parse(outcome.outbound[0]);
+    return nlohmann::json::parse(outcome.outbound[0]);
+}
+
+nlohmann::json Call(app_server::Server& server, const std::string& method,
+                    const nlohmann::json& params) {
+    auto response = RawCall(server, method, params);
     INFO(response.dump());
     REQUIRE(response.contains("result"));
     return response["result"];
@@ -187,7 +192,7 @@ TEST_CASE("AppServer history: HTTP requests preserve two turns and same-ID resum
     }
     CHECK(live_backends.load() == 0);
     CHECK(calls.load() == 1);
-    history::CheckRequests(fixture);
+    history::CheckRequests(fixture, id);
 }
 
 TEST_CASE("AppServer resources: admitted MCP follows each thread cwd and optional failure stays explicit") {
@@ -248,6 +253,7 @@ TEST_CASE("AppServer resources: admitted MCP follows each thread cwd and optiona
     const auto input = fixture.Input(3);
     Turn(*server, ids[1], input.c_str());
     server->Shutdown();
+    server.reset();
     fixture.Check();
 }
 
@@ -372,8 +378,23 @@ TEST_CASE("AppServer ownership: pending stop keeps the worker and ledger until a
     CHECK(error == "thread.stop_pending");
     CHECK(server->active_thread_count() == 1);
     CHECK_FALSE(has_session_end());
-    server->HandleThreadResumeExecution(id, fixture.Cwd(), error);
-    CHECK(error == "active_thread");
+    const auto resumed = RawCall(*server, "thread/resume",
+        {{"threadId", id}, {"startExecution", true}});
+    REQUIRE(resumed.contains("error"));
+    CHECK(resumed["error"]["data"].value("code", "") == "active_thread");
+    {
+        // A separate host has no in-memory record to reject. The still-open
+        // durable writer must itself prevent a second owner of this session.
+        app_server::ServerOptions competing_options;
+        competing_options.cwd = fixture.Cwd();
+        competing_options.workspaces_dir = history::Utf8(fixture.root / "data" / "workspaces");
+        app_server::Server competing(std::move(competing_options),
+            [gate] { return std::make_unique<GatedBackend>(gate); }, nullptr);
+        competing.HandleThreadResumeExecution(id, fixture.Cwd(), error);
+        INFO(error);
+        CHECK_FALSE(error.empty());
+        CHECK(competing.active_thread_count() == 0);
+    }
     server->AcceptTurnStart(id, "cannot-reenter", {}, error, "cannot-reenter");
     CHECK(error == "thread.stopping");
     const auto operation = server->HandleOperationRead(id, "held-stop", {}, error);

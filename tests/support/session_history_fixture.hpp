@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,52 @@ struct Fixture {
     ~Fixture() { std::error_code ec; fs::remove_all(root, ec); }
     std::string Cwd() const { return Utf8(root / "project"); }
     std::string Url() const { return "http://127.0.0.1:" + std::to_string(model.port()); }
+
+    std::string RecordedCallId(const std::string& session_id) const {
+        std::vector<json> records;
+        for (const auto& entry : fs::recursive_directory_iterator(root / "data")) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".jsonl") continue;
+            std::ifstream input(entry.path(), std::ios::binary);
+            REQUIRE(input.good());
+            for (std::string line; std::getline(input, line);) {
+                if (line.empty()) continue;
+                const auto record = json::parse(line);
+                if (record.is_object() && record.value("sessionId", "") == session_id) {
+                    records.push_back(record);
+                }
+            }
+        }
+        std::string action_id, assistant_ref;
+        int mappings = 0;
+        for (const auto& record : records) {
+            if (record.value("type", "") != "event" ||
+                record.value("kind", "") != "tool.execution.pending") continue;
+            const auto& payload = record.at("payload");
+            if (payload.value("provider_tool_call_id", "") != kCall) continue;
+            action_id = record.at("actionId").get<std::string>();
+            CHECK_FALSE(action_id.empty());
+            CHECK(payload.value("tool_call_id", "") == action_id);
+            assistant_ref = payload.at("assistantMessageRef").get<std::string>();
+            ++mappings;
+        }
+        REQUIRE(mappings == 1);
+        int declarations = 0;
+        for (const auto& record : records) {
+            if (record.value("type", "") != "message" ||
+                record.value("messageId", "") != assistant_ref) continue;
+            const auto& message = record.at("message");
+            CHECK(message.value("role", "") == "assistant");
+            for (const auto& call : message.at("tool_calls")) {
+                if (call.value("id", "") != kCall) continue;
+                CHECK(call["function"].value("name", "") == kTool);
+                CHECK(json::parse(call["function"].value("arguments", "{}")) ==
+                      json({{"text", kArgument}}));
+                ++declarations;
+            }
+        }
+        REQUIRE(declarations == 1);
+        return action_id;
+    }
 };
 
 inline std::string MessageText(const json& message) {
@@ -89,7 +136,8 @@ inline std::string MessageText(const json& message) {
 // Read the actual HTTP wire, not the host's history view or its final reply.
 // Keep the marked messages, call and result in order; duplicates remain visible.
 inline void CheckRequest(const FakeHttpRequest& request,
-                         const std::vector<std::string>& expected, bool other = false) {
+                         const std::vector<std::string>& expected, bool other = false,
+                         const std::string& expected_call_id = kCall) {
     CHECK(request.method == "POST");
     const auto body = json::parse(request.body);
     CHECK(body.value("model", "") == "history-model");
@@ -118,7 +166,7 @@ inline void CheckRequest(const FakeHttpRequest& request,
             REQUIRE(message["tool_calls"].is_array());
             for (const auto& call : message["tool_calls"]) {
                 CHECK(role == "assistant");
-                CHECK(call.value("id", "") == std::string(kCall));
+                CHECK(call.value("id", "") == expected_call_id);
                 CHECK(call["function"].value("name", "") == std::string(kTool));
                 CHECK(json::parse(call["function"].value("arguments", "{}")) ==
                       json({{"text", kArgument}}));
@@ -126,7 +174,7 @@ inline void CheckRequest(const FakeHttpRequest& request,
             }
         }
         if (role == "tool") {
-            CHECK(message.value("tool_call_id", "") == std::string(kCall));
+            CHECK(message.value("tool_call_id", "") == expected_call_id);
             CHECK(text.find(kToolResult) != std::string::npos);
             observed.emplace_back(kToolResult);
         }
@@ -135,14 +183,18 @@ inline void CheckRequest(const FakeHttpRequest& request,
     CHECK(request.body.find(other ? "HISTORY_A_" : "HISTORY_B_") == std::string::npos);
 }
 
-inline void CheckRequests(const Fixture& fixture) {
+inline void CheckRequests(const Fixture& fixture, const std::string& session_id) {
     const auto requests = fixture.model.requests();
     REQUIRE(requests.size() == 5);
     CheckRequest(requests[0], {kFirst});
     CheckRequest(requests[1], {kFirst, kCall, kToolResult});
     CheckRequest(requests[2], {kFirst, kCall, kToolResult, kFirstAnswer, kSecond});
     CheckRequest(requests[3], {kOther}, true);
+    // Live turns retain provider IDs. V3 resume uses the durable action ID on
+    // both sides of the pair; derive it from the stored provider binding instead
+    // of accepting arbitrary IDs or assuming an action-number allocation order.
+    const auto resumed_call_id = fixture.RecordedCallId(session_id);
     CheckRequest(requests[4], {kFirst, kCall, kToolResult, kFirstAnswer,
-                                kSecond, kSecondAnswer, kThird});
+                                kSecond, kSecondAnswer, kThird}, false, resumed_call_id);
 }
 }  // namespace lubancode::test_support::session_history

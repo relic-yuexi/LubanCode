@@ -111,7 +111,7 @@ jobs:
             # 公共构建接线仅在 remote/SDK 装配已入树时加腿；普通 PR 沿旧策略。
             # ci.yml 自身改动也跑三平台，验证本门，不冒充已有组件测试。
             case "$f" in
-              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/runtime/assembly/*|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|tests/unit/runtime/test_session_resources.cpp|tests/integration/app_server/test_app_server_session_parity.cpp|tests/support/session_history_fixture.hpp|tests/support/mcp_cwd_fixture.hpp|tests/fixtures/session_resources_mcp.py|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|scripts/ci/check_sdk_only_boundary.py|scripts/ci/tests/test_sdk_only_boundary.py|scripts/ci/check_sdk_host_parity.py|scripts/ci/check_sdk_focused.py|.github/workflows/ci.yml)
+              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/runtime/assembly/*|src/app_server/server.*|src/app_server/session_assembly.*|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|tests/unit/runtime/test_session_resources.cpp|tests/integration/app_server/test_app_server_session_parity.cpp|tests/support/session_history_fixture.hpp|tests/support/mcp_cwd_fixture.hpp|tests/fixtures/session_resources_mcp.py|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|scripts/ci/check_sdk_only_boundary.py|scripts/ci/tests/test_sdk_only_boundary.py|scripts/ci/check_sdk_host_parity.py|scripts/ci/check_sdk_focused.py|.github/workflows/ci.yml)
                 cross_platform=true
                 remote_tests=$remote_present
                 assembly_tests=$assembly_present
@@ -130,7 +130,7 @@ jobs:
             # 腿——悬垂访问这类病在常规腿上安静,AddressSanitizer 一眼红;
             # 其余 PR 零新增开销(与 memory_worker 同款按路径点腿)。
             case "$f" in
-              src/tools/*|src/app/tool_runtime.*|tests/unit/agent/*|.github/workflows/ci.yml)
+              src/tools/*|src/app/tool_runtime.*|src/app_server/server.*|src/runtime/assembly/*|tests/unit/agent/*|tests/integration/app_server/test_app_server_session_parity.cpp|.github/workflows/ci.yml)
                 agent_lifetime=true ;;
             esac
             # 根 CMakeLists.txt(精确匹配,子目录 */CMakeLists.txt 不沾)是
@@ -207,7 +207,7 @@ jobs:
             echo '- cross_platform adds Windows and Linux full tests before merge; macOS remains enabled.'
             echo '- Registration false means not selected, not a component test pass; no schema validation is provided.'
             echo '- SDK selection also runs fresh CLI=OFF default ALL builds, ordinary installs and SDK tests on three platforms.'
-            echo '- ASan/TSan keep their existing non-SDK scope.'
+            echo '- ASan covers agent/runtime and AppServer ownership; TSan keeps its workflow scope.'
             echo '- Manual test_filter retains the Windows/macOS diagnostic scope; it is not three-platform acceptance.'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -943,7 +943,7 @@ jobs:
   # ---- AR-01(子代理线程寿命):AddressSanitizer 腿 ----------------------------
   # 悬垂访问/线程寿命这类病在常规腿上安静——后台 worker 晚归读已析构门面,
   # 多数时候只是"碰巧没红"。本腿用 gcc+ASan 全量编测试二进制,只跑
-  # unit.agent/unit.runtime 两域(派工/装配面的主战场),按 changes 门的
+  # unit.agent/unit.runtime 两域与 AppServer 会话寿命册,按 changes 门的
   # agent_lifetime 输出点腿:子代理派工/装配面改动才出场,其余 PR 零开销。
   # 不 FetchContent 静编 OpenSSL(ubuntu runner 自带 libssl-dev 即够),也不
   # 分期随包 rg(这两域的册不依赖它)——省下的时间换 ASan 的插桩开销。
@@ -998,7 +998,7 @@ jobs:
         shell: bash
         run: cmake --build build --config Release --target lubancode_tests -j 4
 
-      - name: Test (agent + runtime, ASan)
+      - name: Test (agent + runtime + AppServer ownership, ASan)
         id: test
         shell: bash
         env:
@@ -1006,9 +1006,21 @@ jobs:
           # (Lua 钩子串),与本腿的悬垂/寿命合同无关,另立单子治理后再开。
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
         run: |
+          ctest --test-dir build -C Release -R '^integration\.app_server\.app_server_session_parity$' \
+            --show-only=json-v1 > build/asan-host-registration.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          tests = json.loads(Path('build/asan-host-registration.json').read_text())['tests']
+          if len(tests) != 1 or tests[0]['name'] != 'integration.app_server.app_server_session_parity':
+              raise SystemExit('ASan AppServer ownership regression is not registered')
+          props = {p['name']: p['value'] for p in tests[0].get('properties', [])}
+          if props.get('DISABLED'):
+              raise SystemExit('ASan AppServer ownership regression is disabled')
+          PY
           # channel_menu_pump 暂除外:该册对调度时序敏感,ASan 放慢后
           # "未配对点击"的拒绝态断言抢跑假红;渠道域不是本腿的合同面。
-          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\." \
+          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\.|^integration\.app_server\.app_server_session_parity$" \
             -E "channel_menu_pump" --parallel 4 --output-on-failure --no-tests=error
 
       - name: Report failed CTest cases
