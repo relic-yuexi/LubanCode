@@ -104,7 +104,11 @@ ssize_t WriteChildPipe(int fd, const void* data, std::size_t size) {
     const bool already_pending = sigismember(&pending, SIGPIPE) == 1;
     const ssize_t count = write(fd, data, size);
     const int write_error = errno;
-    if (count < 0 && write_error == EPIPE && !already_pending &&
+    // Linux pipe_write also sends SIGPIPE when the reader closes after a
+    // prefix was copied, returning that positive short count instead of EPIPE.
+    const bool pipe_may_have_closed = (count < 0 && write_error == EPIPE) ||
+        (count > 0 && static_cast<std::size_t>(count) < size);
+    if (pipe_may_have_closed && !already_pending &&
         sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1) {
         const timespec immediate{0, 0};
         while (sigtimedwait(&blocked, nullptr, &immediate) == -1 && errno == EINTR) {}
