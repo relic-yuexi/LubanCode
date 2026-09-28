@@ -43,6 +43,8 @@ jobs:
       remote_tests: ${{ steps.c.outputs.remote_tests }}
       assembly_tests: ${{ steps.c.outputs.assembly_tests }}
       sdk_tests: ${{ steps.c.outputs.sdk_tests }}
+      worker_tests: ${{ steps.c.outputs.worker_tests }}
+      runner_tests: ${{ steps.c.outputs.runner_tests }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -64,6 +66,14 @@ jobs:
           if [ -n "$(git ls-files 'src/sdk/*.cpp' 'include/lubancore/*.hpp' 'tests/unit/sdk/test_*.cpp' 'tests/integration/sdk/test_*.cpp')" ]; then
             sdk_present=true
           fi
+          worker_present=false
+          if [ -n "$(git ls-files 'src/worker_host/*.cpp' 'src/worker_host/*.hpp' 'tests/integration/worker_host/*.py')" ]; then
+            worker_present=true
+          fi
+          runner_present=false
+          if [ -n "$(git ls-files 'src/job_runner/*.cpp' 'src/job_runner/*.hpp' 'tests/runner/*.py')" ]; then
+            runner_present=true
+          fi
           # 手动 dispatch 不看 diff:指定 ref 上的代码就是要验的代码,直接
           # 放双平台(build-test);asan/tsan 诊断腿不沾(单册诊断用不着)。
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
@@ -73,7 +83,11 @@ jobs:
             echo 'cross_platform=false' >> "$GITHUB_OUTPUT"
             echo 'remote_tests=false' >> "$GITHUB_OUTPUT"
             echo 'assembly_tests=false' >> "$GITHUB_OUTPUT"
-            echo 'sdk_tests=false' >> "$GITHUB_OUTPUT"
+            # Worker diagnostics still build its real SDK dependency. Dispatch
+            # remains a Windows/macOS diagnostic run, not three-platform acceptance.
+            echo "sdk_tests=$worker_present" >> "$GITHUB_OUTPUT"
+            echo "worker_tests=$worker_present" >> "$GITHUB_OUTPUT"
+            echo "runner_tests=$runner_present" >> "$GITHUB_OUTPUT"
             echo 'code=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -95,6 +109,8 @@ jobs:
             echo "remote_tests=$remote_present" >> "$GITHUB_OUTPUT"
             echo "assembly_tests=$assembly_present" >> "$GITHUB_OUTPUT"
             echo "sdk_tests=$sdk_present" >> "$GITHUB_OUTPUT"
+            echo "worker_tests=$worker_present" >> "$GITHUB_OUTPUT"
+            echo "runner_tests=$runner_present" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           code=false
@@ -105,6 +121,8 @@ jobs:
           remote_tests=false
           assembly_tests=false
           sdk_tests=false
+          worker_tests=false
+          runner_tests=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             # Session ownership, extensions and per-turn borrowing span multiple hosts.
@@ -122,18 +140,22 @@ jobs:
             # 公共构建接线仅在 remote/SDK 装配已入树时加腿；普通 PR 沿旧策略。
             # ci.yml 自身改动也跑三平台，验证本门，不冒充已有组件测试。
             case "$f" in
-              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/runtime/assembly/*|src/app_server/server.*|src/app_server/browser_service.*|src/app_server/session_assembly.*|src/app/tool_runtime.*|src/app/tool_assembly_plan.hpp|src/app/cli_tool_assembly.*|tests/unit/runtime/test_tool_runtime.cpp|tests/integration/plugins/test_tool_runtime_deferral.cpp|tests/support/tool_assembly_fixture.hpp|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|tests/unit/runtime/test_session_resources.cpp|tests/integration/app_server/test_app_server_session_parity.cpp|tests/unit/app_server/test_app_server_browser.cpp|tests/support/session_history_fixture.hpp|tests/support/mcp_cwd_fixture.hpp|tests/fixtures/session_resources_mcp.py|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|scripts/ci/check_sdk_only_boundary.py|scripts/ci/tests/test_sdk_only_boundary.py|scripts/ci/tests/test_sdk_extension_gates.py|scripts/ci/check_sdk_host_parity.py|scripts/ci/check_sdk_focused.py|.github/workflows/ci.yml)
+              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/runtime/assembly/*|src/app_server/server.*|src/app_server/browser_service.*|src/app_server/session_assembly.*|src/app/tool_runtime.*|src/app/tool_assembly_plan.hpp|src/app/cli_tool_assembly.*|tests/unit/runtime/test_tool_runtime.cpp|tests/integration/plugins/test_tool_runtime_deferral.cpp|tests/support/tool_assembly_fixture.hpp|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|tests/unit/runtime/test_session_resources.cpp|tests/integration/app_server/test_app_server_session_parity.cpp|tests/unit/app_server/test_app_server_browser.cpp|tests/support/session_history_fixture.hpp|tests/support/mcp_cwd_fixture.hpp|tests/fixtures/session_resources_mcp.py|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|scripts/ci/check_sdk_only_boundary.py|scripts/ci/tests/test_sdk_only_boundary.py|scripts/ci/tests/test_sdk_extension_gates.py|scripts/ci/check_sdk_host_parity.py|scripts/ci/check_sdk_focused.py|src/worker_host/*|tests/integration/worker_host/*|src/job_runner/*|tests/runner/*|scripts/ci/check_installed_process_host.py|.github/workflows/ci.yml)
                 cross_platform=true
                 remote_tests=$remote_present
                 assembly_tests=$assembly_present
                 sdk_tests=$sdk_present
+                worker_tests=$worker_present
+                runner_tests=$runner_present
                 code=true ;;
               CMakeLists.txt|tests/CMakeLists.txt|cmake/*|vcpkg.json)
-                if [ "$remote_present" = true ] || [ "$assembly_present" = true ] || [ "$sdk_present" = true ]; then
+                if [ "$remote_present" = true ] || [ "$assembly_present" = true ] || [ "$sdk_present" = true ] || [ "$worker_present" = true ] || [ "$runner_present" = true ]; then
                   cross_platform=true
                   remote_tests=$remote_present
                   assembly_tests=$assembly_present
                   sdk_tests=$sdk_present
+                  worker_tests=$worker_present
+                  runner_tests=$runner_present
                   code=true
                 fi ;;
             esac
@@ -196,6 +218,8 @@ jobs:
           echo "remote_tests=$remote_tests" >> "$GITHUB_OUTPUT"
           echo "assembly_tests=$assembly_tests" >> "$GITHUB_OUTPUT"
           echo "sdk_tests=$sdk_tests" >> "$GITHUB_OUTPUT"
+          echo "worker_tests=$worker_tests" >> "$GITHUB_OUTPUT"
+          echo "runner_tests=$runner_tests" >> "$GITHUB_OUTPUT"
 
       - name: Report selected coverage
         env:
@@ -204,6 +228,8 @@ jobs:
           REMOTE_TESTS: ${{ steps.c.outputs.remote_tests }}
           ASSEMBLY_TESTS: ${{ steps.c.outputs.assembly_tests }}
           SDK_TESTS: ${{ steps.c.outputs.sdk_tests }}
+          WORKER_TESTS: ${{ steps.c.outputs.worker_tests }}
+          RUNNER_TESTS: ${{ steps.c.outputs.runner_tests }}
           WINDOWS_SENSITIVE: ${{ steps.c.outputs.memory_worker }}
           AGENT_LIFETIME: ${{ steps.c.outputs.agent_lifetime }}
           WORKFLOW_THREADS: ${{ steps.c.outputs.workflow_threads }}
@@ -214,6 +240,8 @@ jobs:
             echo "- code=$CODE; cross_platform=$CROSS_PLATFORM; Windows-sensitive=$WINDOWS_SENSITIVE"
             echo "- test registration required: remote=$REMOTE_TESTS; assembly=$ASSEMBLY_TESTS; sdk=$SDK_TESTS"
             echo "- installed SDK and external consumer on Windows/macOS/Linux=$SDK_TESTS"
+            echo "- relocated Worker executable and real process scenarios=$WORKER_TESTS"
+            echo "- relocated Runner executable and real process scenarios=$RUNNER_TESTS"
             echo "- agent/runtime ASan=$AGENT_LIFETIME; workflow TSan=$WORKFLOW_THREADS"
             echo '- cross_platform adds Windows and Linux full tests before merge; macOS remains enabled.'
             echo '- Registration false means not selected, not a component test pass; no schema validation is provided.'
@@ -522,7 +550,7 @@ jobs:
         shell: bash
         run: |
           set -x
-          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLUBANCODE_USE_CODELOAD=OFF -DLUBANCODE_BUNDLED_RG_DIR=$PWD/rg-stage/libexec -DLUBANCODE_BUILD_SDK=${{ needs.changes.outputs.sdk_tests == 'true' && 'ON' || 'OFF' }}"
+          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLUBANCODE_USE_CODELOAD=OFF -DLUBANCODE_BUNDLED_RG_DIR=$PWD/rg-stage/libexec -DLUBANCODE_BUILD_SDK=${{ needs.changes.outputs.sdk_tests == 'true' && 'ON' || 'OFF' }} -DLUBANCODE_BUILD_WORKER_HOST=${{ needs.changes.outputs.worker_tests == 'true' && 'ON' || 'OFF' }} -DLUBANCODE_BUILD_EXPERIMENT_RUNNER=${{ needs.changes.outputs.runner_tests == 'true' && 'ON' || 'OFF' }}"
           if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ] && cmake -B build -S . $COMMON_FLAGS \
                -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"; then
             echo "configured with vcpkg"
@@ -587,6 +615,37 @@ jobs:
           name: sdk-host-parity-${{ matrix.name }}
           path: build/test-evidence/sdk-host-parity/
           if-no-files-found: error
+      - name: Build and test relocated Worker process
+        if: needs.changes.outputs.worker_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target luban-worker -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host worker
+
+      - name: Upload Worker process evidence
+        if: always() && needs.changes.outputs.worker_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-process-${{ matrix.name }}
+          path: build/test-evidence/worker-process/
+          if-no-files-found: warn
+
+      - name: Build and test relocated Runner process
+        if: needs.changes.outputs.runner_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target luban-runner -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
+
+      - name: Upload Runner process evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-process-${{ matrix.name }}
+          path: build/test-evidence/runner-process/
+          if-no-files-found: warn
 
       - name: Build
         shell: bash
@@ -644,9 +703,13 @@ jobs:
           if [ -n "$FILTER" ]; then
             ctest --test-dir build -C Release -R "$FILTER" --parallel 4 --output-on-failure --no-tests=error
           else
-            # The thin host target already ran above; its original six files
-            # remain registered on lubancode_tests and still run in this suite.
-            ctest --test-dir build -C Release -LE '^sdk-host-parity$' --parallel 4 --output-on-failure --no-tests=error
+            # These process suites have already run against relocated installs.
+            PROCESS_LABELS='sdk-host-parity'
+            if [ '${{ needs.changes.outputs.worker_tests }}' = true ]; then PROCESS_LABELS="$PROCESS_LABELS|worker-process"; fi
+            if [ '${{ needs.changes.outputs.runner_tests }}' = true ]; then PROCESS_LABELS="${PROCESS_LABELS:+$PROCESS_LABELS|}runner-process"; fi
+            PROCESS_FILTER=()
+            if [ -n "$PROCESS_LABELS" ]; then PROCESS_FILTER=(-LE "^($PROCESS_LABELS)$"); fi
+            ctest --test-dir build -C Release "${PROCESS_FILTER[@]}" --parallel 4 --output-on-failure --no-tests=error
           fi
 
       - name: Upload test evidence (T16 baseline)
@@ -773,6 +836,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON \
             -DLUBANCODE_BUILD_SDK=${{ needs.changes.outputs.sdk_tests == 'true' && 'ON' || 'OFF' }} \
+            -DLUBANCODE_BUILD_WORKER_HOST=${{ needs.changes.outputs.worker_tests == 'true' && 'ON' || 'OFF' }} \
+            -DLUBANCODE_BUILD_EXPERIMENT_RUNNER=${{ needs.changes.outputs.runner_tests == 'true' && 'ON' || 'OFF' }} \
             -DLUBANCODE_USE_CODELOAD=OFF \
             -DLUBANCODE_BUNDLED_RG_DIR="$PWD/rg-stage/libexec" \
             -DCMAKE_C_COMPILER="$CC" \
@@ -837,6 +902,35 @@ jobs:
           name: sdk-host-parity-linux-manylinux
           path: build/test-evidence/sdk-host-parity/
           if-no-files-found: error
+      - name: Build and test relocated Worker process
+        if: needs.changes.outputs.worker_tests == 'true'
+        run: |
+          cmake --build build --config Release --target luban-worker -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host worker
+
+      - name: Upload Worker process evidence
+        if: always() && needs.changes.outputs.worker_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-process-linux-manylinux
+          path: build/test-evidence/worker-process/
+          if-no-files-found: warn
+
+      - name: Build and test relocated Runner process
+        if: needs.changes.outputs.runner_tests == 'true'
+        run: |
+          cmake --build build --config Release --target luban-runner -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
+
+      - name: Upload Runner process evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-process-linux-manylinux
+          path: build/test-evidence/runner-process/
+          if-no-files-found: warn
 
       - name: Build
         run: |
@@ -871,7 +965,13 @@ jobs:
 
       - name: Test
         id: test
-        run: ctest --test-dir build -C Release -LE '^sdk-host-parity$' --parallel "$(nproc)" --output-on-failure --no-tests=error
+        run: |
+          PROCESS_LABELS='sdk-host-parity'
+          if [ '${{ needs.changes.outputs.worker_tests }}' = true ]; then PROCESS_LABELS="$PROCESS_LABELS|worker-process"; fi
+          if [ '${{ needs.changes.outputs.runner_tests }}' = true ]; then PROCESS_LABELS="${PROCESS_LABELS:+$PROCESS_LABELS|}runner-process"; fi
+          PROCESS_FILTER=()
+          if [ -n "$PROCESS_LABELS" ]; then PROCESS_FILTER=(-LE "^($PROCESS_LABELS)$"); fi
+          ctest --test-dir build -C Release "${PROCESS_FILTER[@]}" --parallel "$(nproc)" --output-on-failure --no-tests=error
 
       - name: Upload linux binary for run matrix
         uses: actions/upload-artifact@v4
