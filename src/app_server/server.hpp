@@ -83,6 +83,9 @@ struct ThreadRecord {
     std::string thread_id;
     std::string cwd;         // 本场工作目录
     std::atomic<bool> turn_running{false};
+    // A timed-out thread/stop keeps this record and its writers alive. New
+    // operations are refused until a later stop request completes the close.
+    std::atomic<bool> stop_requested{false};
     std::string turn_id;     // 在跑/最近一轮的 id
     // 打断旗:turn/interrupt 置位,回合驱动线程在流式/工具边界收口。
     // 跨线程置位/读取,回合驱动读它传给 AgentLoop::Run 的 cancel 指针。
@@ -98,6 +101,8 @@ struct ThreadRecord {
     // 回合收尾信号(RunTurnToCompletion 末尾置位):interrupt 的硬时限
     // 等这条,等不到(join 前)按"卡死不退"收线处理。
     std::atomic<bool> turn_finished{false};
+    std::mutex turn_completion_mutex;
+    std::condition_variable turn_completion_cv;
     // 最近一轮的 turn/completed params(HandleTurnStart 同步口径取回)。
     nlohmann::json last_completed;
     // clientOperationId -> 受理时的 turnId(应用Worker接入单 P3:同键重发
@@ -166,8 +171,8 @@ struct ServerOptions {
     bool auto_confirm = false;
     // turn/interrupt 的硬时限(毫秒)。打断旗置位后回合驱动最多再等这么
     // 久:AgentLoop 的 cancel 在流式/工具边界生效,工具跑完了才看旗;真
-    // 有卡死不看的(长命令/卡住的外部进程),硬时限一到强制收线,终态照
-    // 发 interrupted,不留挂着回合。0 = 不设硬时限(只靠 cancel 旗)。
+    // 有卡死不看的(长命令/卡住的外部进程),请求到期只回超时,不会冒充
+    // 已停止或销毁在用材料。Server 析构仍须等它退出。0 = 不设时限。
     int interrupt_hard_deadline_ms = 15000;
     // goal/loop 的 feature 门(goal 单合流批):false 时 typed 命令面回
     // goal.disabled/loop.disabled 稳定码(不冒充成功);缺省关(与终端
@@ -294,7 +299,8 @@ public:
     nlohmann::json HandleThreadStart(const nlohmann::json& params, std::string& out_error_code);
     // thread/list 的处理体(查询参数透传 SessionCommandService)。
     nlohmann::json HandleThreadList(const nlohmann::json& params = nlohmann::json::object());
-    // thread/stop 的处理体。
+    // thread/stop 的处理体。超时回 thread.stop_pending,保留活场和账;
+    // 调用方重试此方法收口,期间新操作回 thread.stopping。
     nlohmann::json HandleThreadStop(const std::string& thread_id, std::string& out_error_code);
     // thread/archive|unarchive|delete 的处理体(SessionCommandService 执行)。
     // accepted=false 时 out_error_code/out_error_message 有值(稳定码,
@@ -383,12 +389,14 @@ private:
     // 的薄封,错误码口径见 connection.hpp。
     std::function<std::string(const IncomingResponse&)> MakeInteractionResolver();
     // 事件出水的安全口:快照当下活连接再发(WS 换连接的窗口里,回合工作
-    // 线程/分离出去的僵尸线程不扑空)。没有活连接 = 丢弃(有界队列语义
+    // 线程不扑空)。没有活连接 = 丢弃(有界队列语义
     // 的极端版:没人听的事件不留)。
     void EmitEventSafe(std::string_view method, const nlohmann::json& params);
     // 在跑的回合一律按打断收口(WS 连接收线后调用:浏览器会话不动,只
     // 把回合从旧连接上摘下来)。Shutdown 的回合段就是它。
-    void InterruptRunningTurns();
+    // Connection cleanup may return at its deadline; the Server still owns the
+    // joinable workers. Final shutdown joins every borrower before destruction.
+    void InterruptRunningTurns(bool wait_for_completion = false);
     // 整回合驱动(工作线程体):审批/ask_user 悬停、打断旗、终态分型。
     // queued_input 是经 SessionService 接纳并出队的输入(AppServer 接 v3
     // 第一棒:文本+图片在服务层落过账;空 = 防御路径)。
