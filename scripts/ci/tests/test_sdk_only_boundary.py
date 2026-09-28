@@ -99,6 +99,35 @@ class BoundaryTests(unittest.TestCase):
         self.targets.append({"id": "resources", "name": "lubancode_official_docs", "type": "UTILITY"})
         self.assert_rejected(self.check(), "host/resource target")
 
+    def test_shared_resource_owner_test_is_a_narrow_sdk_allowance(self):
+        shared = "tests/unit/runtime/test_session_resources.cpp"
+        self.source_file(shared, "int resource_owner_test;\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": shared, "compileGroupIndex": 0}],
+                             "compileGroups": [{}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        nearby = "tests/unit/runtime/test_headless_parallel_read.cpp"
+        self.source_file(nearby, "int other_runtime_test;\n")
+        self.targets[-1]["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        self.targets[-1]["sources"][0]["path"] = shared
+        self.targets[-1]["name"] = "runtime_tests"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_shared_resource_owner_test_cannot_pull_in_host_headers(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        shared = "tests/unit/runtime/test_session_resources.cpp"
+        self.source_file(shared, '#include "runtime/assembly/session_resources.hpp"\n')
+        self.source_file("src/runtime/assembly/session_resources.hpp",
+                         '#include "app_server/session_assembly.hpp"\n')
+        self.source_file("src/app_server/session_assembly.hpp", "#pragma once\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": shared, "compileGroupIndex": 0}],
+                             "compileGroups": [{}]})
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
     def test_renamed_host_target_is_caught_by_its_source(self):
         self.source_file("src/cli/renamed.cpp", "int hidden_host;\n")
         self.targets.append({"id": "hidden", "name": "innocent_name", "type": "STATIC_LIBRARY",
