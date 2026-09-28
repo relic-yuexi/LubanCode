@@ -249,7 +249,7 @@ def scenarios(exe, resource, scratch, model):
         require(w.result(s, first["operation_id"])["state"] == "succeeded", "operation failed")
         require(model.count("echo-idempotent") == before + 1, "duplicate operation reached model")
         conflict = w.raw("operation.submit", dict(session_id=s, client_operation_id="turn", text="different"))
-        require("error" in conflict, "changed duplicate payload accepted")
+        require(conflict.get("error", {}).get("sdk_code") == "operation_conflict", "changed duplicate payload did not report operation_conflict")
 
     def approvals(w):
         a = w.open("write-alpha", ("write_file",), "a")
@@ -269,12 +269,17 @@ def scenarios(exe, resource, scratch, model):
         require(not (w.root / "project" / "beta.txt").exists(), "declined tool executed")
 
     def cancel(w):
-        a, b = w.open("slow-cancel", client="a"), w.open("echo-survivor", client="b")
+        a, b = w.open("slow-cancel", client="a"), w.open("slow-survivor", client="b")
         ar, br = w.submit(a), w.submit(b)
-        until(lambda: model.count("slow-cancel"))
+        until(lambda: model.count("slow-cancel") and model.count("slow-survivor"))
         w.call("operation.cancel", session_id=a, operation_id=ar["operation_id"])
         require(w.result(a, ar["operation_id"])["state"] == "cancelled", "target operation was not cancelled")
+        w.call("session.close", session_id=a)
+        require(w.call("operation.get", session_id=b, operation_id=br["operation_id"])["state"] == "running", "cancel/close A stopped the still-running B")
+        model.release("slow-survivor")
         require(w.result(b, br["operation_id"])["state"] == "succeeded", "cancel crossed session boundary")
+        later = w.submit(b, key="survivor-again", text="still open")
+        require(w.result(b, later["operation_id"])["state"] == "succeeded", "closing A also closed B admission")
 
     def detach(w):
         s = w.open("slow-detach")
@@ -298,7 +303,7 @@ def scenarios(exe, resource, scratch, model):
 
     def eof(w):
         s = w.open("slow-eof")
-        w.submit(s)
+        receipt = w.submit(s)
         until(lambda: model.count("slow-eof"))
         w.process.stdin.close()
         require(w.process.wait(timeout=15) == 0, "parent EOF failed to drain worker")
@@ -308,6 +313,9 @@ def scenarios(exe, resource, scratch, model):
         try:
             resumed = next_worker.open("echo-eof-recovered", resume=s)
             require(resumed == s, "EOF recovery changed session identity")
+            saved = next_worker.call("operation.get", session_id=s, operation_id=receipt["operation_id"])
+            require(saved["state"] == "cancelled" and saved["result_persisted"], "EOF did not persist cancellation before exit")
+            require(model.count("slow-eof") == 1 and model.count("echo-eof-recovered") == 0, "EOF recovery replayed the operation")
         finally:
             next_worker.finish()
 
