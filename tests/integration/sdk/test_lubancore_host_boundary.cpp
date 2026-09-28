@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <clocale>
 #include <condition_variable>
@@ -225,7 +226,13 @@ TEST_CASE("SDK host boundary: child pipe failure preserves host SIGPIPE state") 
         REQUIRE(pthread_kill(pthread_self(), SIGPIPE) == 0);
         preexisting = true;
     }
-    CHECK_FALSE(child.Write("broken pipe"));
+    REQUIRE(child.IsAlive());
+    errno = 0;
+    const bool wrote = child.Write("broken pipe");
+    const int pipe_error = errno;
+    CHECK_FALSE(wrote);
+    CHECK(pipe_error == EPIPE);
+    CHECK(child.IsAlive());
     sigset_t pending;
     sigset_t mask;
     REQUIRE(sigpending(&pending) == 0);
