@@ -1405,6 +1405,7 @@ add_library(lubancode_app STATIC
   src/app/turn_memory_extractor.cpp
   src/app/runtime_profile.cpp
   src/app/tool_runtime.cpp
+  src/app/cli_tool_assembly.cpp
   src/app/turn_runner.cpp
   # 骨架拆解批二余款:终端画屏的事件流 sink(Callbacks 老路拔除后,显示
   # 出水全走 TurnEventAdapter,这只在 sink 侧翻画面)。
