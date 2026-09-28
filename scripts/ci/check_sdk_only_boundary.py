@@ -215,9 +215,12 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
     if not sdk_sources or not any(name.startswith("src/sdk/") for name in sdk_sources):
         violations.append("SDK build closure contains no SDK implementation sources")
     if sdk:
-        artifacts = targets[sdk[0]]["artifacts"]
+        # Visual Studio advertises the configured PDB path even for Release
+        # without /DEBUG. Symbols are optional; the DLL and import library are
+        # still required, and the installed consumer must actually load/link.
+        artifacts = [path for path in targets[sdk[0]]["artifacts"] if Path(path).suffix.lower() != ".pdb"]
         if not artifacts:
-            violations.append("SDK target has no build artifact")
+            violations.append("SDK target has no link/load build artifact")
         for entry in artifacts:
             artifact = Path(entry)
             artifact = artifact if artifact.is_absolute() else build / artifact
