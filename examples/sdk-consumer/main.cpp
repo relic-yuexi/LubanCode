@@ -181,7 +181,10 @@ void FileAndCommand(const fs::path& base) {
                 return Call("read-back", "read_file", R"({"path":"message.txt"})");
             case 2:
                 Check(HasReply(request, "SDK file"), "real read_file result did not reach model history");
-                return Call("run-once", "run_command", R"({"command":"echo sdk-command","timeout_ms":5000})");
+                // This checks real command delivery, not PowerShell cold-start
+                // speed. The bounded turn gate below also covers its write/read
+                // and approval work; the consumer CTest timeout remains 120s.
+                return Call("run-once", "run_command", R"({"command":"echo sdk-command","timeout_ms":20000})");
             case 3:
                 if (!HasReply(request, "sdk-command")) {
                     std::string details;
@@ -212,7 +215,7 @@ void FileAndCommand(const fs::path& base) {
     auto conflict = session->Submit("file-key", "changed input");
     Check(!conflict && conflict.error().code == "operation_conflict", "same key with different input was accepted");
     std::set<std::string> approved;
-    const auto deadline = std::chrono::steady_clock::now() + 20s;
+    const auto deadline = std::chrono::steady_clock::now() + 45s;
     while (!Terminal(Take(session->ReadOperation(first.operation_id), "file operation state").state)) {
         Check(std::chrono::steady_clock::now() < deadline, "file/command turn stalled");
         auto event = Take(events->Next(100ms), "file event");
