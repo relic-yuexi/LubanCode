@@ -60,10 +60,12 @@ struct Fixture {
             "-" + std::to_string(++serial));
         fs::create_directories(root / "project");
         fs::create_directories(root / "resources");
-        model.Enqueue(Reply({{"role", "assistant"}, {"tool_calls", json::array({
-            {{"index", 0}, {"id", kCall}, {"type", "function"},
-             {"function", {{"name", kTool}, {"arguments", json({{"text", kArgument}}).dump()}}}})}},
-            "tool_calls"));
+        const json function = {{"name", kTool},
+                               {"arguments", json({{"text", kArgument}}).dump()}};
+        const json tool_call = {{"index", 0}, {"id", kCall}, {"type", "function"},
+                                {"function", function}};
+        model.Enqueue(Reply({{"role", "assistant"},
+                             {"tool_calls", json::array({tool_call})}}, "tool_calls"));
         for (const char* answer : {kFirstAnswer, kSecondAnswer, kOtherAnswer, kThirdAnswer}) {
             model.Enqueue(Reply({{"role", "assistant"}, {"content", answer}}, "stop"));
         }

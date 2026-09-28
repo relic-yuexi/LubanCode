@@ -34,10 +34,11 @@ struct McpCwdFixture {
         python = nlohmann::json::parse(located.output).get<std::string>();
         REQUIRE(platform::Utf8ToPath(python).is_absolute());
         for (int i = 0; i != 4; ++i) {
+            const nlohmann::json function = {{"name", kTool}, {"arguments", "{}"}};
+            const nlohmann::json tool_call = {{"index", 0}, {"id", CallId(i)},
+                                               {"type", "function"}, {"function", function}};
             model.Enqueue(session_history::Reply({{"role", "assistant"},
-                {"tool_calls", nlohmann::json::array({{{"index", 0}, {"id", CallId(i)},
-                    {"type", "function"}, {"function", {{"name", kTool}, {"arguments", "{}"}}}})}},
-                "tool_calls"));
+                {"tool_calls", nlohmann::json::array({tool_call})}}, "tool_calls"));
             model.Enqueue(session_history::Reply(
                 {{"role", "assistant"}, {"content", "cwd-answer"}}, "stop"));
         }
