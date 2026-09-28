@@ -48,7 +48,11 @@ def request(binary, root, runner_id, body):
         input=json.dumps(body) + "\n", text=True, encoding="utf-8", capture_output=True,
         timeout=12, creationflags=NO_WINDOW,
     )
-    reply = json.loads(result.stdout)
+    try:
+        reply = json.loads(result.stdout)
+    except ValueError as error:
+        raise AssertionError(f"request exited {result.returncode}: stdout={result.stdout[:2000]!r}, "
+                             f"stderr={result.stderr[:2000]!r}") from error
     assert result.returncode == (0 if reply.get("ok") else 1), result.stderr
     return reply
 
@@ -454,6 +458,9 @@ def main():
                 status = "passed"
             except Exception:
                 traceback.print_exc()
+                if runner:
+                    for service_log in runner.base.glob("service-*.log"):
+                        print(service_log.read_text(encoding="utf-8", errors="replace")[-4000:], flush=True)
             finally:
                 if runner:
                     runner.close()
