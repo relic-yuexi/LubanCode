@@ -4,6 +4,8 @@
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 
+#include <thread>
+
 namespace lubancode::test_support {
 struct McpCwdFixture {
     std::filesystem::path root;
@@ -51,6 +53,32 @@ struct McpCwdFixture {
     static std::string CallId(int round) { return "cwd-call-" + std::to_string(round); }
     static std::string Input(int round) { return "cwd-input-" + std::to_string(round); }
 
+    unsigned long ChildPid(int round) const {
+        const auto requests = model.requests();
+        REQUIRE(requests.size() >= static_cast<std::size_t>(round * 2 + 2));
+        const auto body = nlohmann::json::parse(requests[round * 2 + 1].body);
+        for (const auto& message : body["messages"]) {
+            if (message.value("role", "") == "tool" &&
+                message.value("tool_call_id", "") == CallId(round)) {
+                return nlohmann::json::parse(session_history::MessageText(message))
+                    .at("pid").get<unsigned long>();
+            }
+        }
+        FAIL("The MCP child did not return its PID");
+        return 0;
+    }
+
+    static void CheckChildExited(unsigned long pid) {
+        // The PID comes from this fixture's immediately preceding tool result.
+        // This is a local cleanup check, not a durable process identity contract.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (platform::IsProcessAlive(pid) && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        INFO("MCP child PID: ", pid);
+        CHECK_FALSE(platform::IsProcessAlive(pid));
+    }
+
     void Check() const {
         CHECK(std::filesystem::equivalent(host_cwd, std::filesystem::current_path()));
         const auto requests = model.requests();
@@ -86,6 +114,7 @@ struct McpCwdFixture {
         CHECK(pids[1] != pids[2]);
         // Closing the first session must not restart or close the second child.
         CHECK(pids[1] == pids[3]);
+        for (int pid : pids) CheckChildExited(static_cast<unsigned long>(pid));
     }
 };
 }  // namespace lubancode::test_support

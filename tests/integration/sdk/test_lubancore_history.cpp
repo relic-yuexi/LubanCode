@@ -112,8 +112,12 @@ TEST_CASE("SDK resources: live MCP children follow session cwd and survive anoth
         const auto input = fixture.Input(round);
         Turn(sessions[round], input.c_str(), "cwd-answer");
     }
+    const auto first_pid = fixture.ChildPid(0);
+    CHECK(lubancode::platform::IsProcessAlive(first_pid));
     REQUIRE(sessions[0]->Close().has_value());
     sessions[0].reset();
+    fixture.CheckChildExited(first_pid);
+    CHECK(lubancode::platform::IsProcessAlive(fixture.ChildPid(1)));
     const auto input = fixture.Input(3);
     Turn(sessions[1], input.c_str(), "cwd-answer");
     REQUIRE((*runtime)->Shutdown().has_value());

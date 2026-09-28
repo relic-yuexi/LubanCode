@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -238,8 +239,12 @@ TEST_CASE("AppServer resources: admitted MCP follows each thread cwd and optiona
         const auto input = fixture.Input(round);
         Turn(*server, ids[round], input.c_str());
     }
+    const auto first_pid = fixture.ChildPid(0);
+    CHECK(platform::IsProcessAlive(first_pid));
     Call(*server, "thread/stop", {{"threadId", ids[0]}});
     CHECK(server->active_thread_count() == 2);
+    fixture.CheckChildExited(first_pid);
+    CHECK(platform::IsProcessAlive(fixture.ChildPid(1)));
     const auto input = fixture.Input(3);
     Turn(*server, ids[1], input.c_str());
     server->Shutdown();
@@ -330,4 +335,148 @@ TEST_CASE("AppServer ownership: a hard deadline cannot admit another turn over a
     Turn(*server, id, "after-worker-exit");
     CHECK(gate->calls.load() == 2);
     server->Shutdown();
+}
+
+TEST_CASE("AppServer ownership: pending stop keeps the worker and ledger until a joined retry") {
+    history::Fixture fixture;
+    auto gate = std::make_shared<BackendGate>();
+    app_server::ServerOptions options;
+    options.cwd = fixture.Cwd();
+    options.workspaces_dir = history::Utf8(fixture.root / "data" / "workspaces");
+    options.interrupt_hard_deadline_ms = 20;
+    auto server = std::make_unique<app_server::Server>(std::move(options),
+        [gate] { return std::make_unique<GatedBackend>(gate); }, nullptr);
+    ReleaseBackendOnExit release{gate, server.get(), {}};
+    Connect(*server);
+    const auto id = Start(*server);
+    release.thread_id = id;
+    std::string error;
+    const auto accepted = server->AcceptTurnStart(id, "held-stop", {}, error, "held-stop");
+    REQUIRE(error.empty());
+    REQUIRE(accepted.contains("operationId"));
+    {
+        std::unique_lock lock(gate->mutex);
+        REQUIRE(gate->cv.wait_for(lock, 5s, [&] { return gate->entered; }));
+    }
+    const auto main_path = server->ThreadMainPathForTest(id);
+    REQUIRE_FALSE(main_path.empty());
+    const auto has_session_end = [&] {
+        std::ifstream input(platform::Utf8ToPath(main_path), std::ios::binary);
+        REQUIRE(input.good());
+        for (std::string line; std::getline(input, line);) {
+            if (line.find("session.ended") != std::string::npos) return true;
+        }
+        return false;
+    };
+    server->HandleThreadStop(id, error);
+    CHECK(error == "thread.stop_pending");
+    CHECK(server->active_thread_count() == 1);
+    CHECK_FALSE(has_session_end());
+    server->HandleThreadResumeExecution(id, fixture.Cwd(), error);
+    CHECK(error == "active_thread");
+    server->AcceptTurnStart(id, "cannot-reenter", {}, error, "cannot-reenter");
+    CHECK(error == "thread.stopping");
+    const auto operation = server->HandleOperationRead(id, "held-stop", {}, error);
+    CHECK(error.empty());
+    CHECK(operation.value("operationId", "") == accepted["operationId"].get<std::string>());
+    CHECK(operation.value("status", "") != "not_found");
+    CHECK(gate->calls.load() == 1);
+    gate->Release();
+    WaitCompleted(*server, id, accepted["turnId"].get<std::string>());
+    const auto stopped = server->HandleThreadStop(id, error);
+    CHECK(error.empty());
+    CHECK(stopped.is_object());
+    CHECK(server->active_thread_count() == 0);
+    CHECK(has_session_end());
+    server->Shutdown();
+}
+
+namespace {
+struct ShutdownGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    int entered = 0;
+    int cancelled = 0;
+    bool released = false;
+    std::atomic<int> destroyed_backends{0};
+    std::atomic<bool> server_destroyed{false};
+    void Release() {
+        std::lock_guard lock(mutex);
+        released = true;
+        cv.notify_all();
+    }
+};
+struct ReleaseShutdownOnExit {
+    std::shared_ptr<ShutdownGate> gate;
+    ~ReleaseShutdownOnExit() { gate->Release(); }
+};
+class ShutdownBackend final : public api::Backend {
+public:
+    explicit ShutdownBackend(std::shared_ptr<ShutdownGate> gate) : gate_(std::move(gate)) {}
+    ~ShutdownBackend() override { ++gate_->destroyed_backends; }
+    std::expected<void, api::Error> send_stream(const api::Request&,
+        const std::function<void(const api::StreamEvent&)>&,
+        const std::atomic<bool>* cancelled) override {
+        std::unique_lock lock(gate_->mutex);
+        ++gate_->entered;
+        gate_->cv.notify_all();
+        const auto deadline = std::chrono::steady_clock::now() + 30s;
+        while (!gate_->released && !(cancelled && cancelled->load()) &&
+               std::chrono::steady_clock::now() < deadline) {
+            gate_->cv.wait_for(lock, 5ms);
+        }
+        if (cancelled && cancelled->load()) {
+            ++gate_->cancelled;
+            gate_->cv.notify_all();
+        }
+        gate_->cv.wait_until(lock, deadline, [&] { return gate_->released; });
+        return std::unexpected(api::Error{api::ErrorKind::Api, "fixture cancelled", 0});
+    }
+private:
+    std::shared_ptr<ShutdownGate> gate_;
+};
+}  // namespace
+
+TEST_CASE("AppServer ownership: destruction signals all workers before joining and retains its owner") {
+    history::Fixture fixture;
+    auto gate = std::make_shared<ShutdownGate>();
+    app_server::ServerOptions options;
+    options.cwd = fixture.Cwd();
+    options.workspaces_dir = history::Utf8(fixture.root / "data" / "workspaces");
+    options.interrupt_hard_deadline_ms = 20;
+    auto server = std::make_unique<app_server::Server>(std::move(options),
+        [gate] { return std::make_unique<ShutdownBackend>(gate); }, nullptr);
+    Connect(*server);
+    // Release before either the destroyer's join or Server destruction on every
+    // assertion path, including a failure before the destroyer was started.
+    std::jthread destroyer;
+    ReleaseShutdownOnExit release{gate};
+    for (int index = 0; index != 2; ++index) {
+        const auto id = Start(*server);
+        std::string error;
+        server->AcceptTurnStart(id, "held-shutdown", {}, error, "held-shutdown");
+        REQUIRE(error.empty());
+    }
+    {
+        std::unique_lock lock(gate->mutex);
+        REQUIRE(gate->cv.wait_for(lock, 5s, [&] { return gate->entered == 2; }));
+    }
+    destroyer = std::jthread([owned = std::move(server), gate]() mutable {
+        owned.reset();
+        gate->server_destroyed.store(true);
+        gate->cv.notify_all();
+    });
+    {
+        std::unique_lock lock(gate->mutex);
+        REQUIRE(gate->cv.wait_for(lock, 5s, [&] { return gate->cancelled == 2; }));
+    }
+    CHECK_FALSE(gate->server_destroyed.load());
+    CHECK(gate->destroyed_backends.load() == 0);
+    gate->Release();
+    {
+        std::unique_lock lock(gate->mutex);
+        REQUIRE(gate->cv.wait_for(lock, 5s, [&] { return gate->server_destroyed.load(); }));
+    }
+    destroyer.join();
+    CHECK(gate->destroyed_backends.load() == 2);
 }
