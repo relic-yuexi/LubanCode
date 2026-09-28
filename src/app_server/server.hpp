@@ -205,12 +205,12 @@ struct ServerOptions {
     // capabilities.workLifetime 与自家方法名)。空 = 基线原样。
     std::function<nlohmann::json(nlohmann::json)> initialize_result_extender;
     // 会话装配工厂(工业化多协议接入单 P1,G01/G02 的修复口):thread/
-    // start 时每场调一次,产出本场运行材料(backend+工具表+MCP+档案)。
+    // start/resume 时每场调一次，显式接收已解析的会话 cwd，产出本场材料。
     // 生产由 cli_app 递(部署档先解析、按计划起组件——session_assembly.
     // hpp);装配失败(缺授权/缺工具/依赖起服失败)thread/start 明拒。
     // 不递 = 旧注入形态(直驱单测):thread 开张不因装配拒,回合驱动里走
     // 同一条 AssembleSession 兜底,材料一场一份。
-    std::function<SessionAssemblyResult()> assembly_factory;
+    std::function<SessionAssemblyResult(const std::string& cwd_utf8)> assembly_factory;
     // 应用Worker接入单 §八(本单切片):启动冻结的连接快照
     // (connection_snapshot.hpp)。RunAppServerMode 进程启动读一次配置、冻
     // 一份进程期内不变(单 Worker 连接冻结);thread/started 回执以

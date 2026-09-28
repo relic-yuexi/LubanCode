@@ -1358,7 +1358,7 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
     //     为——工厂只在回合才被碰),回合驱动里走同一条 AssembleSession
     //     兜底,材料仍是一场一份。
     if (options_.assembly_factory) {
-        SessionAssemblyResult assembled = options_.assembly_factory();
+        SessionAssemblyResult assembled = options_.assembly_factory(record->cwd);
         if (assembled.assembly == nullptr) {
             Diagnose("会话装配失败,thread 不开: " + assembled.error);
             // P2(应用Worker接入单 §7.2):装配自带稳定码(component_unavailable
@@ -1543,7 +1543,7 @@ nlohmann::json Server::HandleThreadResumeExecution(const std::string& source_thr
     // prompt_composition 事实不落——那是 thread/start 部署档组合路的事实,
     // 恢复场没有这个组合动作,不伪造。
     if (options_.assembly_factory) {
-        SessionAssemblyResult assembled = options_.assembly_factory();
+        SessionAssemblyResult assembled = options_.assembly_factory(record->cwd);
         if (assembled.assembly == nullptr) {
             Diagnose("恢复场装配失败: " + assembled.error);
             out_error_code = assembled.error_code.empty() ? "assembly.failed" : assembled.error_code;
@@ -1955,6 +1955,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // 直驱单测在构造器兜的默认装配工厂也走同一口):显式空表,不崩。
         if (record->assembly == nullptr) {
             SessionAssemblyRequest fallback;
+            fallback.cwd_utf8 = record->cwd;
             fallback.backend_factory = backend_factory_;
             fallback.registry_factory = registry_factory_;
             fallback.system_prompt = kAppServerDefaultSystemPrompt;
@@ -1975,8 +1976,8 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                 return;
             }
         }
-        api::Backend& backend = *record->assembly->backend;
-        tools::ToolRegistry& registry = *record->assembly->registry;
+        api::Backend& backend = record->assembly->resources->backend();
+        tools::ToolRegistry& registry = record->assembly->resources->registry();
         // Agent 档案从会话材料取(装配层显式定的 system_prompt 与步数闸);
         // Agent 循环对象本身每轮新建(便宜、无跨轮状态),材料不重建。
         agent::AgentProfile profile = record->assembly->agent_profile;
