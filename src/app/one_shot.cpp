@@ -41,6 +41,7 @@
 #include "app/backend_stack.hpp"
 #include "app/runtime_profile.hpp"
 #include "app/tool_runtime.hpp"
+#include "app/cli_tool_assembly.hpp"
 #include "app/hook_runtime.hpp"
 #include "app/turn_runner.hpp"
 #include "app/commands/session_commands.hpp"
@@ -268,8 +269,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         runtime_options.deferred_mode = resolution.mode;
         runtime_options.native_server_tool_search = resolution.server_tool_search;
     }
-    lubancode::app::ToolRuntime tool_runtime(config, theme, wrapped_backend, skills, skills_segment,
-                                             CurrentDirUtf8(), std::move(runtime_options));
+    lubancode::app::ToolRuntime tool_runtime(
+        config, wrapped_backend, skills, skills_segment,
+        ResolveCliToolAssemblyPlan(CurrentDirUtf8()), std::move(runtime_options),
+        MakeCliToolAssemblyDiagnosticSink(theme, std::cout));
     auto& registry = tool_runtime.main_registry();
     auto& sub_registry = tool_runtime.sub_registry();
     const auto todo_state = tool_runtime.todo_state();
