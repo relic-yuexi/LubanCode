@@ -349,6 +349,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check SDK boundary validator fixtures
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_sdk_only_boundary.py
+
       - name: Pick Linux SDK compiler
         if: runner.os == 'Linux'
         shell: bash
