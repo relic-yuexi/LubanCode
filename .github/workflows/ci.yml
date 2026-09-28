@@ -111,7 +111,7 @@ jobs:
             # 公共构建接线仅在 remote/SDK 装配已入树时加腿；普通 PR 沿旧策略。
             # ci.yml 自身改动也跑三平台，验证本门，不冒充已有组件测试。
             case "$f" in
-              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/runtime/assembly/*|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|scripts/ci/check_sdk_only_boundary.py|scripts/ci/tests/test_sdk_only_boundary.py|.github/workflows/ci.yml)
+              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/runtime/assembly/*|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|tests/unit/runtime/test_session_resources.cpp|tests/integration/app_server/test_app_server_session_parity.cpp|tests/support/session_history_fixture.hpp|tests/support/mcp_cwd_fixture.hpp|tests/fixtures/session_resources_mcp.py|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|scripts/ci/check_sdk_only_boundary.py|scripts/ci/tests/test_sdk_only_boundary.py|scripts/ci/check_sdk_host_parity.py|.github/workflows/ci.yml)
                 cross_platform=true
                 remote_tests=$remote_present
                 assembly_tests=$assembly_present
@@ -431,7 +431,8 @@ jobs:
           from pathlib import Path
           tests = json.loads(Path('build-sdk-only/test-evidence/sdk-focused/tests.json').read_text())['tests']
           required = {'sdk.focused.lubancore_session', 'sdk.focused.lubancore_lifecycle',
-                      'sdk.focused.lubancore_host_boundary', 'sdk.focused.atomic_write'}
+                      'sdk.focused.lubancore_host_boundary', 'sdk.focused.atomic_write',
+                      'sdk.focused.lubancore_history', 'sdk.focused.session_resources'}
           names = set()
           for test in tests:
               props = {p['name']: p['value'] for p in test.get('properties', [])}
@@ -589,6 +590,23 @@ jobs:
           path: build/test-evidence/sdk-focused/
           if-no-files-found: warn
 
+      - name: Build and test SDK host parity
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target lubancore_host_tests -j 4
+          PY=python3
+          command -v python3 >/dev/null 2>&1 || PY=python
+          "$PY" scripts/ci/check_sdk_host_parity.py --build-dir build
+
+      - name: Upload SDK host parity evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-host-parity-${{ matrix.name }}
+          path: build/test-evidence/sdk-host-parity/
+          if-no-files-found: error
+
       - name: Build
         shell: bash
         run: |
@@ -645,7 +663,9 @@ jobs:
           if [ -n "$FILTER" ]; then
             ctest --test-dir build -C Release -R "$FILTER" --parallel 4 --output-on-failure --no-tests=error
           else
-            ctest --test-dir build -C Release --parallel 4 --output-on-failure --no-tests=error
+            # The thin host target already ran above; its original four files
+            # remain registered on lubancode_tests and still run in this suite.
+            ctest --test-dir build -C Release -LE '^sdk-host-parity$' --parallel 4 --output-on-failure --no-tests=error
           fi
 
       - name: Upload test evidence (T16 baseline)
@@ -821,6 +841,23 @@ jobs:
           path: build/test-evidence/sdk-focused/
           if-no-files-found: warn
 
+      - name: Build and test SDK host parity
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target lubancore_host_tests -j 4
+          PY=python3
+          command -v python3 >/dev/null 2>&1 || PY=python
+          "$PY" scripts/ci/check_sdk_host_parity.py --build-dir build
+
+      - name: Upload SDK host parity evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-host-parity-linux-manylinux
+          path: build/test-evidence/sdk-host-parity/
+          if-no-files-found: error
+
       - name: Build
         run: |
           set -e
@@ -854,7 +891,7 @@ jobs:
 
       - name: Test
         id: test
-        run: ctest --test-dir build -C Release --parallel "$(nproc)" --output-on-failure --no-tests=error
+        run: ctest --test-dir build -C Release -LE '^sdk-host-parity$' --parallel "$(nproc)" --output-on-failure --no-tests=error
 
       - name: Upload linux binary for run matrix
         uses: actions/upload-artifact@v4
