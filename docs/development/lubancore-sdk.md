@@ -4,6 +4,17 @@
 `SessionService` 接纳输入，再用 `Agent`、轨迹桥和工具表跑回合。
 它不启动 CLI 或 AppServer 子进程。
 
+## 拆分进度
+
+本页记录已交付的窄 SDK。第一阶段仍须收口独立构建、核心依赖与宿主装配，
+之后再接远端节点和控制端。`LubanCore::Core` 是公开安装目标；仓库内部旧名
+`lubancode_core` 仍带 CLI 实现，两者不能混用。
+
+后端、基础工具与 MCP 已共用 `runtime/assembly`。CLI、one-shot、AppServer
+仍有各自的会话装配；完整工具、插件、Hook 和记忆等能力尚未统一迁入公开 SDK。
+新增宿主可用下文 API，现有 CLI 迁移须保留原功能，不能靠删去功能来完成拆分。
+验收清单见 [SDK 拆分计划](../../todos/LubanCore与CLI分离_核心库独立成宿主底座设计.todo)。
+
 ## 构建与安装
 
 启用 `-DLUBANCODE_BUILD_SDK=ON`，构建 `lubancore_sdk`，安装组件 `LubanCore`。
