@@ -29,10 +29,12 @@ class BoundaryTests(unittest.TestCase):
         self.targets = [
             {"id": "sdk", "name": "lubancore_sdk", "type": "SHARED_LIBRARY",
              "sources": [{"path": "src/sdk/core.cpp", "compileGroupIndex": 0}],
+             "compileGroups": [{}],
              "dependencies": [{"id": "engine"}],
              "artifacts": [{"path": "liblubancore.fake-artifact"}]},
             {"id": "engine", "name": "neutral_engine", "type": "STATIC_LIBRARY",
-             "sources": [{"path": "src/neutral/engine.cpp", "compileGroupIndex": 0}]},
+             "sources": [{"path": "src/neutral/engine.cpp", "compileGroupIndex": 0}],
+             "compileGroups": [{}]},
         ]
         self.flags = {"LUBANCODE_BUILD_CLI": "OFF", "LUBANCODE_BUILD_SDK": "ON", "BUILD_TESTING": "OFF"}
 
@@ -76,12 +78,22 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn("src/neutral/bridge.hpp", report["scannedProjectFiles"])
 
     def test_testing_off_rejects_project_test_sources_even_without_test_target_name(self):
-        self.source_file("tests/new_probe.cpp", "int probe;\n")
-        self.targets.append({"id": "probe", "name": "unexpected", "type": "EXECUTABLE",
-                             "sources": [{"path": "tests/new_probe.cpp", "compileGroupIndex": 0}]})
+        self.source_file("tests/integration/sdk/test_probe.cpp", "int probe;\n")
+        self.targets.append({"id": "probe", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": "tests/integration/sdk/test_probe.cpp", "compileGroupIndex": 0}],
+                             "compileGroups": [{}]})
         self.assert_rejected(self.check(), "testing is OFF")
         self.flags["BUILD_TESTING"] = "ON"
         self.assertEqual(self.check(testing=True)["status"], "passed")
+
+    def test_testing_on_does_not_enable_the_cli_test_graph(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        self.source_file("tests/unit/cli/test_prompt.cpp", "int cli_test;\n")
+        self.targets.append({"id": "tests", "name": "lubancode_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": "tests/unit/cli/test_prompt.cpp"}]})
+        self.assert_rejected(self.check(testing=True), "host/resource target")
+        self.targets[-1]["name"] = "lubancore_sdk_tests"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
 
     def test_unbuilt_resource_target_cannot_hide_behind_exclude_from_all(self):
         self.targets.append({"id": "resources", "name": "lubancode_official_docs", "type": "UTILITY"})
@@ -109,6 +121,18 @@ class BoundaryTests(unittest.TestCase):
             with self.subTest(include=include):
                 self.source_file("include/lubancore/core.hpp", f'#include <{include}>\n')
                 self.assert_rejected(self.check(), "non-public include")
+
+    def test_target_include_directory_and_pch_cannot_hide_host_header(self):
+        self.source_file("tests/support/helper.hpp", '#include "app/hidden.hpp"\n')
+        self.source_file("src/app/hidden.hpp", "#pragma once\n")
+        self.source_file("src/sdk/core.cpp", '#include "helper.hpp"\n')
+        self.targets[0]["compileGroups"] = [{"includes": [{"path": str(self.source / "tests/support")}]}]
+        self.assert_rejected(self.check(), "reverse host include")
+        self.source_file("src/sdk/core.cpp", "int no_regular_includes;\n")
+        self.targets[0]["compileGroups"] = [{"precompileHeaders": [
+            {"header": str(self.source / "tests/support/helper.hpp")},
+        ]}]
+        self.assert_rejected(self.check(), "reverse host include")
 
     def test_comments_and_raw_cpp_literals_are_not_dependencies_or_stdio(self):
         self.source_file("src/sdk/core.cpp", '''// #include "app/no.hpp"
