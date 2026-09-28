@@ -14,7 +14,11 @@ set(LUBANCODE_VERSION "${CMAKE_MATCH_1}")
 
 project(lubancode VERSION "${LUBANCODE_VERSION}" LANGUAGES CXX)
 
+option(LUBANCODE_BUILD_CLI "Build the LubanCode terminal application and host resources" ON)
 option(LUBANCODE_BUILD_SDK "Build the experimental installable LubanCore C++ SDK" OFF)
+if(NOT LUBANCODE_BUILD_CLI AND NOT LUBANCODE_BUILD_SDK)
+  message(FATAL_ERROR "Enable LUBANCODE_BUILD_CLI or LUBANCODE_BUILD_SDK")
+endif()
 if(LUBANCODE_BUILD_SDK)
   # Static internal/dependency archives also feed the shared SDK on Unix.
   set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -83,7 +87,7 @@ set(LUBANCODE_BUNDLED_RG_DIR "" CACHE PATH "已校验的随包 ripgrep 目录(�
 # 归开发者调用面(preset/命令行/这条机器级缓存),不归 Agent worktree 的
 # 环境继承,也不归测试夹具;运行时定位照旧只认 ExecutableDir/libexec,
 # 不搜 PATH、不读环境变量。新开 worktree 由此不再靠手工往 build 树拷 rg。
-if(NOT LUBANCODE_BUNDLED_RG_DIR)
+if(LUBANCODE_BUILD_CLI AND NOT LUBANCODE_BUNDLED_RG_DIR)
   if(WIN32)
     set(_lubancode_user_rg_stage "$ENV{USERPROFILE}/.lubancode/rg-stage/libexec")
     set(_lubancode_user_rg_exe "${_lubancode_user_rg_stage}/rg.exe")
@@ -383,9 +387,7 @@ if(WIN32)
     src/platform/network_proxy_win.cpp
     src/platform/process_win.cpp
     src/platform/dynamic_library_win.cpp
-    src/platform/console_win.cpp
     src/platform/peer_transport_win.cpp
-    src/platform/clipboard_win.cpp
     # 更新器 C++ 化批二第③单:文件占用/重解析点/EXE 归属的平台补件
     # (Windows 腿:CreateFileW 独占写探测 + GetFileAttributesW 专查 reparse)。
     src/platform/file_in_use_win.cpp)
@@ -395,9 +397,7 @@ else()
     src/platform/network_proxy_posix.cpp
     src/platform/process_posix.cpp
     src/platform/dynamic_library_posix.cpp
-    src/platform/console_posix.cpp
     src/platform/peer_transport_posix.cpp
-    src/platform/clipboard_posix.cpp
     src/platform/file_in_use_posix.cpp)
 endif()
 
@@ -429,9 +429,7 @@ if(MSVC)
 endif()
 add_library(lubancode_engine STATIC
   ${_lubancode_platform_sources}
-  src/platform/console_common.cpp
   src/platform/network_proxy.cpp
-  src/platform/terminal_batch.cpp
   src/platform/text_encoding.cpp
   src/platform/json_safe.cpp
   # src 重复职责收口审计 P1:统一原子写(唯一临时名/同目录/close 检查/
@@ -442,10 +440,8 @@ add_library(lubancode_engine STATIC
   src/platform/sha256.cpp
   # 审计 P2:标准 Base64 内核(五处手写收一)。
   src/platform/base64.cpp
-  # QQBot Windows 修复单 §5.1/§5.2:凭据文件的安全创建原语(带安全描述符
-  # 创建/跨进程文件锁)与终端隐藏输入(回显 RAII)。
+  # 凭据文件安全创建与跨进程锁属于通用底层；终端隐藏输入归 CLI 宿主。
   src/platform/secure_file.cpp
-  src/platform/hidden_input.cpp
   # 审计 P2 候选:路径比较键三处合一(共享向量证一致后收编)。
   src/platform/path_compare.cpp
   # 统一 Package 封装单阶段 4:目录内容指纹的共用底座(Plugin 与 Package
@@ -1243,10 +1239,21 @@ if(MSVC)
   target_compile_options(lubancode_runtime PRIVATE /MP)
 endif()
 
-# core:旧名兼容层 = engine + runtime + cli 纯逻辑(不碰键盘/控制台的那半)。
+if(LUBANCODE_BUILD_CLI)
+# Terminal platform implementations belong to the CLI host, not SDK internals.
+if(WIN32)
+  set(_lubancode_terminal_sources src/platform/console_win.cpp src/platform/clipboard_win.cpp)
+else()
+  set(_lubancode_terminal_sources src/platform/console_posix.cpp src/platform/clipboard_posix.cpp)
+endif()
+# core:旧名兼容层 = engine + runtime + CLI 宿主逻辑与终端平台实现。
 # cli/setup_wizard.cpp、cli/slash_commands.cpp 等在 cli/ 目录下但逻辑本身
 # 不碰真实 IO(打印/读一行都是注入函数),与从前同待遇放这层。
 add_library(lubancode_core STATIC
+  ${_lubancode_terminal_sources}
+  src/platform/console_common.cpp
+  src/platform/hidden_input.cpp
+  src/platform/terminal_batch.cpp
   src/cli/theme.cpp
   src/cli/line_editor.cpp
   src/cli/image_input.cpp
@@ -1587,9 +1594,6 @@ add_library(lubancode_app STATIC
   src/cli/ask_user_prompt.cpp)
 target_link_libraries(lubancode_app PUBLIC lubancode_core)
 
-if(LUBANCODE_BUILD_SDK)
-  include(cmake/LubanCore.cmake)
-endif()
 # WS 承载的 socket 层在 Windows 走 Winsock2(POSIX 不加东西)。
 if(WIN32)
   target_link_libraries(lubancode_app PUBLIC ws2_32)
@@ -1676,6 +1680,11 @@ add_custom_target(lubancode_assistant_web ALL
   COMMENT "lubancode: 同步助理主界面网页到程序目录"
   VERBATIM)
 add_dependencies(lubancode_assistant_web lubancode)
+endif() # LUBANCODE_BUILD_CLI
+
+if(LUBANCODE_BUILD_SDK)
+  include(cmake/LubanCore.cmake)
+endif()
 
 # ---------------------------------------------------------------------------
 # 测试:doctest 单头文件,同样走 FetchContent,走 codeload.github.com 镜像
@@ -1691,4 +1700,16 @@ if(LUBANCODE_BUILD_TESTING)
   )
   FetchContent_MakeAvailable(doctest)
   add_subdirectory(tests)
+endif()
+
+if(NOT LUBANCODE_BUILD_CLI)
+  # A normal SDK-only install must not install private dependency development
+  # packages. Directory EXCLUDE_FROM_ALL also excludes nested install rules;
+  # target dependencies still build every archive required by the shared SDK.
+  get_property(_lubancore_subdirectories DIRECTORY PROPERTY SUBDIRECTORIES)
+  foreach(_directory IN LISTS _lubancore_subdirectories)
+    if(NOT _directory STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+      set_property(DIRECTORY "${_directory}" PROPERTY EXCLUDE_FROM_ALL TRUE)
+    endif()
+  endforeach()
 endif()
