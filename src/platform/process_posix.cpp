@@ -33,6 +33,7 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -73,14 +74,45 @@ void AlignOutputToUtf8Boundary(std::string& output, std::size_t max_output_bytes
     }
 }
 
-// 子进程 stdin 关掉/退出后再往管道写会招 SIGPIPE,默认动作是整个进程死。
-// 统一忽略,让 write 返回 EPIPE 错误码走正常失败路径。
-void IgnoreSigpipeOnce() {
-    static const bool done = [] {
-        std::signal(SIGPIPE, SIG_IGN);
-        return true;
-    }();
-    (void)done;
+// A closed child pipe reports EPIPE without changing the host's signal handler.
+// Darwin pipe writes may signal the process, so use its per-FD opt-out. Linux
+// sends the signal to the writing thread: block it around this write, consume
+// only a new signal, then restore the exact previous mask. Existing pending
+// SIGPIPE remains owned by the host. This runs after spawning, so our temporary
+// mask never reaches a new child.
+ssize_t WriteChildPipe(int fd, const void* data, std::size_t size) {
+#ifdef __APPLE__
+    if (fcntl(fd, F_SETNOSIGPIPE, 1) == -1) return -1;
+    return write(fd, data, size);
+#else
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGPIPE);
+    sigset_t previous;
+    const int mask_error = pthread_sigmask(SIG_BLOCK, &blocked, &previous);
+    if (mask_error != 0) {
+        errno = mask_error;
+        return -1;
+    }
+    sigset_t pending;
+    if (sigpending(&pending) != 0) {
+        const int pending_error = errno;
+        (void)pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+        errno = pending_error;
+        return -1;
+    }
+    const bool already_pending = sigismember(&pending, SIGPIPE) == 1;
+    const ssize_t count = write(fd, data, size);
+    const int write_error = errno;
+    if (count < 0 && write_error == EPIPE && !already_pending &&
+        sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1) {
+        const timespec immediate{0, 0};
+        while (sigtimedwait(&blocked, nullptr, &immediate) == -1 && errno == EINTR) {}
+    }
+    (void)pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+    errno = write_error;
+    return count;
+#endif
 }
 
 // 预先拼好子进程环境块:Inherit 模式把当前 environ 里被 extra_env 覆盖的
@@ -446,8 +478,6 @@ struct SpawnedMerged {
 // 起一个"合并输出、stdin 接 /dev/null"的子进程。失败时 result 里带人话。
 bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env, const std::string& cwd_utf8,
                         SpawnedMerged* spawned, ProcessResult* result) {
-    IgnoreSigpipeOnce();
-
     int out_pipe[2] = {-1, -1};
     if (pipe(out_pipe) != 0) {
         result->spawn_failed = true;
@@ -713,8 +743,6 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
         return result;
     }
 
-    IgnoreSigpipeOnce();
-
     int out_pipe[2] = {-1, -1};
     int err_pipe[2] = {-1, -1};
     int in_pipe[2] = {-1, -1};
@@ -814,13 +842,13 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
     }
 
     // stdin 写线程:一次性写完就关写端(子进程读到 EOF)。子进程不读而数据
-    // 超过管道缓冲时,write 阻塞——SIGPIPE 已忽略,子进程死掉后读端关闭,
+    // 超过管道缓冲时,write 阻塞;子进程死掉后读端关闭,
     // write 以 EPIPE 失败收场,写线程退,绝不吊死。
     std::atomic<bool> stdin_done{false};
     std::thread stdin_writer([&] {
         std::size_t written_total = 0;
         while (written_total < stdin_data.size()) {
-            const ssize_t n = write(in_pipe[1], stdin_data.data() + written_total, stdin_data.size() - written_total);
+            const ssize_t n = WriteChildPipe(in_pipe[1], stdin_data.data() + written_total, stdin_data.size() - written_total);
             if (n < 0) {
                 if (errno == EINTR) {
                     continue;
@@ -986,7 +1014,6 @@ BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv,
         result.error = env_error;
         return result;
     }
-    IgnoreSigpipeOnce();
 
     // 独占创建 + 0600:文件名可猜的 O_TRUNC 在共享临时目录里有预置文件/
     // symlink 的攻击面;命令输出可能带 token,别的账号不许读。
@@ -1142,7 +1169,6 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
                                   std::function<void(std::string_view)> on_stderr,
                                   const SpawnConstraints& constraints, const std::string& cwd_utf8,
                                   EnvMode env_mode) {
-    IgnoreSigpipeOnce();
     on_stdout_ = std::move(on_stdout);
     on_stderr_ = std::move(on_stderr);
 
@@ -1337,12 +1363,12 @@ bool ChildProcess::Write(const std::string& data) {
     std::lock_guard<std::mutex> lock(write_mutex_);
     std::size_t offset = 0;
     while (offset < data.size()) {
-        const ssize_t n = write(stdin_fd_, data.data() + offset, data.size() - offset);
+        const ssize_t n = WriteChildPipe(stdin_fd_, data.data() + offset, data.size() - offset);
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
             }
-            return false;  // EPIPE(对端死了)等,SIGPIPE 已忽略
+            return false;  // EPIPE 等;本次 SIGPIPE 已在当前线程收拢
         }
         if (n == 0) {
             return false;
