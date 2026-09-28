@@ -19,7 +19,7 @@ import sys
 
 CLIENT = "client-lubancore-boundary"
 HOST_TARGETS = {
-    "lubancode", "lubancode_core", "lubancode_app",
+    "lubancode", "lubancode_core", "lubancode_app", "lubancode_tests",
     "lubancode_official_skills", "lubancode_official_docs", "lubancode_assistant_web",
 }
 HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/")
@@ -141,13 +141,38 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
             violations.append(f"cache {name} must be {'ON' if expected else 'OFF'}, got {value}")
 
     targets = {}
-    project_sources: set[Path] = set()
+    source_contexts: list[tuple[Path, tuple[Path, ...]]] = []
+
+    def check_project_path(name: str, owner: str) -> None:
+        if host_path(name):
+            violations.append(f"target {owner} includes host source {name}")
+        if name.startswith("tests/"):
+            if not expect_testing:
+                violations.append(f"testing is OFF but target {owner} includes {name}")
+            elif owner != "lubancore_sdk_tests" or not (
+                    name.startswith(("tests/integration/sdk/", "tests/unit/sdk/", "tests/support/")) or
+                    name == "tests/unit/platform/test_atomic_write.cpp"):
+                violations.append(f"non-SDK test compilation: target {owner} includes {name}")
+
     for reference in configurations[0].get("targets", []):
         target = read_reply(reply, reference)
         if target.get("id") != reference.get("id") or target.get("name") != reference.get("name"):
             raise ValueError("target reference does not match its reply")
         if target["id"] in targets:
             raise ValueError("duplicate target id in codemodel")
+        groups = target.get("compileGroups", [])
+        include_groups = [tuple(Path(item["path"]).resolve() for item in group.get("includes", []))
+                          for group in groups]
+        for group, include_dirs in zip(groups, include_groups):
+            for entry in group.get("precompileHeaders", []):
+                header = Path(entry["header"])
+                if not header.is_absolute():
+                    header = source / header
+                header = header.resolve()
+                name = relative(header, source)
+                if name and name.startswith(("src/", "include/", "tests/")):
+                    check_project_path(name, target["name"])
+                    source_contexts.append((header, include_dirs))
         source_facts = []
         for entry in target.get("sources", []):
             # File API source paths are relative to the top-level source tree,
@@ -159,17 +184,17 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
                                  "compiled": "compileGroupIndex" in entry,
                                  "generated": entry.get("isGenerated", False)})
             if name and name.startswith(("src/", "include/", "tests/")):
-                project_sources.add(path)
-                if host_path(name):
-                    violations.append(f"target {target['name']} includes host source {name}")
-                if not expect_testing and name.startswith("tests/"):
-                    violations.append(f"testing is OFF but target {target['name']} includes {name}")
+                check_project_path(name, target["name"])
+                group_index = entry.get("compileGroupIndex")
+                include_dirs = include_groups[group_index] if group_index is not None else ()
+                source_contexts.append((path, include_dirs))
         if target["name"] in HOST_TARGETS:
             violations.append(f"host/resource target is defined: {target['name']}")
         targets[target["id"]] = {
             "name": target["name"], "type": target["type"], "sources": source_facts,
             "dependencies": [entry["id"] for entry in target.get("dependencies", [])],
             "artifacts": [entry["path"] for entry in target.get("artifacts", [])],
+            "includeDirectories": [[str(path) for path in paths] for paths in include_groups],
         }
     sdk = [target_id for target_id, target in targets.items() if target["name"] == "lubancore_sdk"]
     if len(sdk) != 1 or targets[sdk[0]]["type"] != "SHARED_LIBRARY":
@@ -205,15 +230,18 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         violations.append("no public SDK headers found")
     include_edges = []
     scanned: set[Path] = set()
-    pending_files = list(project_sources | set(public_headers))
+    scanned_contexts: set[tuple[Path, tuple[Path, ...]]] = set()
+    pending_files = source_contexts + [(path, ()) for path in public_headers]
     while pending_files:
-        path = pending_files.pop()
-        if path in scanned or path.suffix not in (".h", ".hpp", ".c", ".cc", ".cpp", ".cxx", ".m", ".mm"):
+        path, include_dirs = pending_files.pop()
+        context = (path, include_dirs)
+        if context in scanned_contexts or path.suffix not in (".h", ".hpp", ".c", ".cc", ".cpp", ".cxx", ".m", ".mm"):
             continue
         if not path.is_file():
             violations.append(f"project source/header missing: {path}")
             continue
         scanned.add(path)
+        scanned_contexts.add(context)
         name = relative(path, source)
         if not name:
             continue
@@ -222,18 +250,19 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         for match in includes_in(text):
             include = match.group(1)
             resolved = next((candidate.resolve() for candidate in
-                             (path.parent / include, source / "src" / include, source / "include" / include,
+                             (path.parent / include, *(directory / include for directory in include_dirs),
+                              source / "src" / include, source / "include" / include,
                               source / include) if candidate.is_file()), None)
             destination = relative(resolved, source) if resolved else None
             if public and include not in STANDARD_HEADERS and not (
                     resolved and relative(resolved, public_root) is not None):
                 violations.append(f"public header {name} exposes non-public include {include}")
-            if destination and destination.startswith(("src/", "include/")):
+            if destination and destination.startswith(("src/", "include/", "tests/")):
                 include_edges.append({"from": name, "to": destination})
                 if host_path(destination):
                     violations.append(f"reverse host include: {name} -> {destination}")
                 else:
-                    pending_files.append(resolved)
+                    pending_files.append((resolved, include_dirs))
         # This narrow syntactic guard protects the SDK/assembly entry points.
         # Runtime state preservation and indirect diagnostics need real tests;
         # global cwd or signal operations inside child process code are not
@@ -275,7 +304,7 @@ def main() -> int:
         parser.error("checking requires --expect-testing and --report")
     try:
         report = inspect(args.source_dir, args.build_dir, args.config, args.expect_testing == "on")
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
         report = {"schemaVersion": 1, "githubSha": os.environ.get("GITHUB_SHA"),
                   "status": "failed", "violations": [str(error)]}
     args.report.parent.mkdir(parents=True, exist_ok=True)
