@@ -1,0 +1,71 @@
+# This graph has no CLI executable, resources, fixtures or host test dependency.
+# Combined builds reuse exactly the same source files and per-file CTests.
+if(NOT LUBANCODE_BUILD_SDK)
+  message(FATAL_ERROR "LubanCoreTests requires LUBANCODE_BUILD_SDK=ON")
+endif()
+set(_lubancore_tests_root "${CMAKE_SOURCE_DIR}/tests")
+file(GLOB LUBANCORE_FOCUSED_TEST_SOURCES CONFIGURE_DEPENDS
+  "${_lubancore_tests_root}/integration/sdk/test_*.cpp")
+list(SORT LUBANCORE_FOCUSED_TEST_SOURCES)
+if(NOT LUBANCORE_FOCUSED_TEST_SOURCES)
+  message(FATAL_ERROR "SDK build requires registered integration/sdk tests")
+endif()
+list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
+  "${_lubancore_tests_root}/unit/platform/test_atomic_write.cpp")
+set(_lubancore_tests_exclude)
+if(LUBANCODE_BUILD_CLI)
+  set(_lubancore_tests_exclude EXCLUDE_FROM_ALL)
+endif()
+add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
+  "${_lubancore_tests_root}/support/main.cpp"
+  "${_lubancore_tests_root}/support/fake_http_server.cpp"
+  ${LUBANCORE_FOCUSED_TEST_SOURCES})
+target_link_libraries(lubancore_sdk_tests PRIVATE
+  lubancode_runtime lubancore_sdk doctest::doctest)
+target_include_directories(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}/support")
+target_compile_definitions(lubancore_sdk_tests PRIVATE
+  LUBANCODE_TEST_FIXTURES_DIR="${_lubancore_tests_root}/fixtures")
+target_compile_features(lubancore_sdk_tests PRIVATE cxx_std_23)
+target_precompile_headers(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}/support/pch.hpp")
+set_source_files_properties("${_lubancore_tests_root}/support/main.cpp"
+  PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+# MSVC appends Release/Debug, beside the SDK DLL and its app-local dependencies.
+set_target_properties(lubancore_sdk_tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+if(WIN32)
+  target_link_libraries(lubancore_sdk_tests PRIVATE ws2_32)
+endif()
+if(MSVC)
+  target_compile_options(lubancore_sdk_tests PRIVATE /MP /FS)
+endif()
+if(TARGET lubancode_tests)
+  add_dependencies(lubancode_tests lubancore_sdk_tests)
+endif()
+foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
+  get_filename_component(sdk_basename "${sdk_source}" NAME)
+  if(NOT sdk_basename MATCHES "^test_([A-Za-z0-9_]+)\\.cpp$")
+    message(FATAL_ERROR "Invalid SDK test filename: ${sdk_basename}")
+  endif()
+  set(sdk_stem "${CMAKE_MATCH_1}")
+  set(sdk_test "sdk.focused.${sdk_stem}")
+  add_test(NAME "${sdk_test}"
+    COMMAND lubancore_sdk_tests "--source-file=*${sdk_basename}")
+  set_tests_properties("${sdk_test}" PROPERTIES
+    LABELS "sdk-focused" TIMEOUT 300
+    ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
+  if(sdk_basename STREQUAL "test_atomic_write.cpp")
+    set(sdk_original_test "unit.platform.atomic_write")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "platform-atomic-write")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "platform-atomic-write")
+    endif()
+  else()
+    set(sdk_original_test "integration.sdk.${sdk_stem}")
+  endif()
+  if(TEST "${sdk_original_test}")
+    get_test_property("${sdk_original_test}" ENVIRONMENT sdk_test_environment)
+    if(NOT sdk_test_environment STREQUAL "NOTFOUND")
+      set_tests_properties("${sdk_test}" PROPERTIES ENVIRONMENT "${sdk_test_environment}")
+    endif()
+  endif()
+endforeach()

@@ -1,3 +1,8 @@
+if(NOT LUBANCODE_BUILD_CLI)
+  include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
+  return()
+endif()
+
 # 测试源码按“种类/领域”落位。目录便是清单：添一册 test_*.cpp，
 # CMake 会自动编进总测试二进制，并另登一条可单跑的 CTest。
 file(GLOB_RECURSE LUBANCODE_TEST_SOURCES CONFIGURE_DEPENDS
@@ -418,58 +423,9 @@ foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)
   endif()
 endforeach()
 
-# SDK 与持久文件写入先用小靶子验，免得问题等全仓测试编完才露出来。
-# 全量二进制与原 CTest 登记照留；这里复用同一份测试源码。
+# Reuse the SDK test graph in both combined and SDK-only configurations.
 if(LUBANCODE_BUILD_SDK)
-  set(LUBANCORE_FOCUSED_TEST_SOURCES ${LUBANCODE_TEST_SOURCES})
-  list(FILTER LUBANCORE_FOCUSED_TEST_SOURCES INCLUDE REGEX "/integration/sdk/test_[A-Za-z0-9_]+\\.cpp$")
-  if(NOT LUBANCORE_FOCUSED_TEST_SOURCES)
-    message(FATAL_ERROR "SDK build requires registered integration/sdk tests")
-  endif()
-  list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/unit/platform/test_atomic_write.cpp")
-  add_executable(lubancore_sdk_tests EXCLUDE_FROM_ALL
-    support/main.cpp
-    support/fake_http_server.cpp
-    ${LUBANCORE_FOCUSED_TEST_SOURCES})
-  target_link_libraries(lubancore_sdk_tests PRIVATE
-    lubancode_runtime lubancore_sdk doctest::doctest)
-  target_include_directories(lubancore_sdk_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/support")
-  target_compile_definitions(lubancore_sdk_tests PRIVATE
-    LUBANCODE_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
-  target_compile_features(lubancore_sdk_tests PRIVATE cxx_std_23)
-  target_precompile_headers(lubancore_sdk_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/support/pch.hpp")
-  # MSVC 会再添 Release/Debug，与根目录 SDK DLL 和 applocal 依赖同目录。
-  set_target_properties(lubancore_sdk_tests PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-  if(WIN32)
-    target_link_libraries(lubancore_sdk_tests PRIVATE ws2_32)
-  endif()
-  if(MSVC)
-    target_compile_options(lubancore_sdk_tests PRIVATE /MP /FS)
-  endif()
-  # 单独构建全量目标后跑 CTest，也须具备下面新增登记的可执行文件。
-  add_dependencies(lubancode_tests lubancore_sdk_tests)
-  foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
-    get_filename_component(sdk_basename "${sdk_source}" NAME)
-    string(REGEX REPLACE "^test_(.*)\\.cpp$" "\\1" sdk_stem "${sdk_basename}")
-    set(sdk_test "sdk.focused.${sdk_stem}")
-    add_test(NAME "${sdk_test}"
-      COMMAND lubancore_sdk_tests "--source-file=*${sdk_basename}")
-    set_tests_properties("${sdk_test}" PROPERTIES LABELS "sdk-focused" TIMEOUT 300)
-    if(sdk_basename STREQUAL "test_atomic_write.cpp")
-      set(sdk_original_test "unit.platform.atomic_write")
-      # 两个可执行文件复用同册固定临时目录，全量并行时须避免互相清理。
-      set_tests_properties("${sdk_test}" "${sdk_original_test}" PROPERTIES
-        RESOURCE_LOCK "platform-atomic-write")
-    else()
-      set(sdk_original_test "integration.sdk.${sdk_stem}")
-    endif()
-    get_test_property("${sdk_original_test}" ENVIRONMENT sdk_test_environment)
-    if(NOT sdk_test_environment STREQUAL "NOTFOUND")
-      set_tests_properties("${sdk_test}" PROPERTIES ENVIRONMENT "${sdk_test_environment}")
-    endif()
-  endforeach()
+  include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
 endif()
 
 # 工具文案语言档端到端驱动(不进 ctest,验收手动跑):

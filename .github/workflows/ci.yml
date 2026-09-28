@@ -111,7 +111,7 @@ jobs:
             # 公共构建接线仅在 remote/SDK 装配已入树时加腿；普通 PR 沿旧策略。
             # ci.yml 自身改动也跑三平台，验证本门，不冒充已有组件测试。
             case "$f" in
-              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/runtime/assembly/*|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|.github/workflows/ci.yml)
+              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/runtime/assembly/*|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|scripts/ci/check_sdk_only_boundary.py|scripts/ci/tests/test_sdk_only_boundary.py|.github/workflows/ci.yml)
                 cross_platform=true
                 remote_tests=$remote_present
                 assembly_tests=$assembly_present
@@ -206,7 +206,8 @@ jobs:
             echo "- agent/runtime ASan=$AGENT_LIFETIME; workflow TSan=$WORKFLOW_THREADS"
             echo '- cross_platform adds Windows and Linux full tests before merge; macOS remains enabled.'
             echo '- Registration false means not selected, not a component test pass; no schema validation is provided.'
-            echo '- SDK selection enables its shared build and installed consumer; ASan/TSan keep their existing non-SDK scope.'
+            echo '- SDK selection also runs fresh CLI=OFF default ALL builds, ordinary installs and SDK tests on three platforms.'
+            echo '- ASan/TSan keep their existing non-SDK scope.'
             echo '- Manual test_filter retains the Windows/macOS diagnostic scope; it is not three-platform acceptance.'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -331,6 +332,139 @@ jobs:
       - name: Updater tests (bash + python)
         shell: bash
         run: bash scripts/tests/updater.tests.sh
+
+  sdk-only:
+    needs: changes
+    if: needs.changes.outputs.sdk_tests == 'true'
+    name: sdk-only (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: linux-gcc, os: ubuntu-24.04}
+          - {name: macos-clang, os: macos-latest}
+          - {name: windows-msvc, os: windows-latest}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check SDK boundary validator fixtures
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_sdk_only_boundary.py
+
+      - name: Pick Linux SDK compiler
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "CC=$(command -v gcc)" >> "$GITHUB_ENV"
+          echo "CXX=$(command -v g++)" >> "$GITHUB_ENV"
+
+      - name: Cache SDK-only dependencies
+        uses: actions/cache@v4
+        with:
+          path: build-sdk-only/_deps
+          key: sdk-only-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
+          restore-keys: sdk-only-${{ matrix.name }}-
+
+      - name: Reject a configuration with no product
+        shell: bash
+        run: |
+          if cmake -S . -B build-no-product -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=OFF -DBUILD_TESTING=OFF > no-product.log 2>&1; then
+            cat no-product.log
+            echo 'Both product switches OFF unexpectedly configured'
+            exit 1
+          fi
+          cat no-product.log
+          grep -q 'Enable LUBANCODE_BUILD_CLI or LUBANCODE_BUILD_SDK' no-product.log
+
+      - name: Configure SDK-only with tests disabled
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_sdk_only_boundary.py --prepare --build-dir build-sdk-only
+          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=ON -DBUILD_TESTING=OFF -DLUBANCODE_USE_CODELOAD=OFF"
+          if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ] && cmake -S . -B build-sdk-only $COMMON_FLAGS \
+               -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"; then
+            echo 'SDK-only configured with vcpkg'
+          else
+            rm -rf build-sdk-only/CMakeCache.txt build-sdk-only/CMakeFiles
+            cmake -S . -B build-sdk-only $COMMON_FLAGS
+          fi
+
+      - name: Build SDK-only default ALL without tests
+        shell: bash
+        run: cmake --build build-sdk-only --config Release --parallel 4
+
+      - name: Verify SDK-only target and source boundaries without tests
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_sdk_only_boundary.py --build-dir build-sdk-only --source-dir . \
+            --config Release --expect-testing off --report build-sdk-only/test-evidence/sdk-only/boundary-off.json
+
+      - name: Install all SDK-only artifacts, relocate and execute consumer
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_sdk.py --build-dir build-sdk-only --install-mode full
+
+      - name: Enable SDK-only tests and build default ALL
+        shell: bash
+        run: |
+          cmake -S . -B build-sdk-only -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=ON -DBUILD_TESTING=ON
+          cmake --build build-sdk-only --config Release --parallel 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_sdk_only_boundary.py --build-dir build-sdk-only --source-dir . \
+            --config Release --expect-testing on --report build-sdk-only/test-evidence/sdk-only/boundary-on.json
+
+      - name: Run all registered SDK-only tests
+        shell: bash
+        run: |
+          mkdir -p build-sdk-only/test-evidence/sdk-focused
+          ctest --test-dir build-sdk-only -C Release --show-only=json-v1 > build-sdk-only/test-evidence/sdk-focused/tests.json
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" - <<'PY'
+          import json
+          from pathlib import Path
+          tests = json.loads(Path('build-sdk-only/test-evidence/sdk-focused/tests.json').read_text())['tests']
+          required = {'sdk.focused.lubancore_session', 'sdk.focused.lubancore_lifecycle',
+                      'sdk.focused.lubancore_host_boundary', 'sdk.focused.atomic_write'}
+          names = set()
+          for test in tests:
+              props = {p['name']: p['value'] for p in test.get('properties', [])}
+              if props.get('DISABLED') or 'sdk-focused' not in props.get('LABELS', []):
+                  raise SystemExit('SDK-only registered a disabled or non-SDK test: ' + test['name'])
+              names.add(test['name'])
+          if not required <= names or len(names) != len(tests):
+              raise SystemExit('SDK-only required tests missing or duplicated')
+          PY
+          ctest --test-dir build-sdk-only -C Release --output-on-failure --no-tests=error \
+            --output-junit "$PWD/build-sdk-only/test-evidence/sdk-focused/results.xml"
+          "$PY" - <<'PY'
+          import json
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          registered = {t['name'] for t in json.loads(Path('build-sdk-only/test-evidence/sdk-focused/tests.json').read_text())['tests']}
+          cases = ET.parse('build-sdk-only/test-evidence/sdk-focused/results.xml').getroot().findall('.//testcase')
+          if {case.get('name') for case in cases} != registered or len(cases) != len(registered):
+              raise SystemExit('SDK-only JUnit does not cover its registered tests')
+          if any(case.find(tag) is not None for case in cases for tag in ('skipped', 'failure', 'error')):
+              raise SystemExit('SDK-only JUnit contains skipped or failed tests')
+          PY
+
+      - name: Upload SDK-only build and runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-only-${{ matrix.name }}
+          path: |
+            build-sdk-only/test-evidence/
+            build-sdk-only/Testing/Temporary/LastTest.log
+            build-sdk-only/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: warn
 
   build-test:
     needs: [changes, lane]
