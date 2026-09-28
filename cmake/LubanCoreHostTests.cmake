@@ -7,7 +7,9 @@ set(_lubancore_host_test_entries
   "integration/app_server/test_app_server_session_parity.cpp|integration.app_server.app_server_session_parity"
   "unit/app_server/test_session_assembly.cpp|unit.app_server.session_assembly"
   "unit/app_server/test_plugin_assembly.cpp|unit.app_server.plugin_assembly"
-  "unit/app/test_mcp_host_policy.cpp|unit.app.mcp_host_policy")
+  "unit/app/test_mcp_host_policy.cpp|unit.app.mcp_host_policy"
+  "unit/runtime/test_tool_runtime.cpp|unit.runtime.tool_runtime"
+  "integration/plugins/test_tool_runtime_deferral.cpp|integration.plugins.tool_runtime_deferral")
 set(_lubancore_host_sources)
 foreach(entry IN LISTS _lubancore_host_test_entries)
   string(REPLACE "|" ";" parts "${entry}")

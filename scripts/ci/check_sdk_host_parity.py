@@ -16,6 +16,8 @@ REQUIRED = {
     "sdk.host.session_assembly",
     "sdk.host.plugin_assembly",
     "sdk.host.mcp_host_policy",
+    "sdk.host.tool_runtime",
+    "sdk.host.tool_runtime_deferral",
 }
 
 
@@ -60,7 +62,7 @@ def main():
                         (evidence / "LastTest.log").read_text(encoding="utf-8"))
     if len(counts) != len(REQUIRED) or any(int(count) == 0 for count in counts):
         raise RuntimeError("Host parity source filters did not execute nonempty native test cases")
-    print("Host parity: all four registered test files executed successfully")
+    print(f"Host parity: all {len(REQUIRED)} registered test files executed successfully")
 
 
 if __name__ == "__main__":

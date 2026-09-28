@@ -80,7 +80,7 @@ private:
 TEST_CASE("MCP host policy: CLI keeps startup failure optional") {
     auto config = Config({"missing"});
     config.mcp_servers["missing"].command = "lubancode-sdk-test-command-that-does-not-exist-53a810";
-    CHECK(app::StartMcpServers(config.mcp_servers, cli::Theme{}).empty());
+    CHECK(app::StartMcpServers(config.mcp_servers, tools::PathToUtf8(std::filesystem::temp_directory_path())).empty());
 }
 
 TEST_CASE("MCP host policy: headless never starts servers without an approved deployment name") {
