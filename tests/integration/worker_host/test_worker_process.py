@@ -72,7 +72,7 @@ class Model:
                     messages = body["messages"]
                     tool_reply = messages[-1].get("role") == "tool"
                     if model.startswith("write-") and not tool_reply:
-                        suffix = model.removeprefix("write-")
+                        suffix = model[len("write-"):]
                         delta = {"tool_calls": [{"index": 0, "id": "write-call", "type": "function",
                             "function": {"name": "write_file", "arguments": json.dumps({
                                 "path": suffix + ".txt", "content": suffix})}}]}
@@ -367,7 +367,8 @@ def scenarios(exe, resource, scratch, model):
         require(offset == len(LONG_TEXT.encode()), "assistant byte count differs")
 
     functions = (health, same_cwd, idempotency, approvals, cancel, detach, stale, eof, killed, boundary, full_text)
-    for name, function in zip(SCENARIOS, functions, strict=True):
+    require(len(SCENARIOS) == len(functions), "scenario implementation count differs")
+    for name, function in zip(SCENARIOS, functions):
         yield name, lambda name=name, function=function: run(name, function)
 
 
