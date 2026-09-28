@@ -1987,6 +1987,11 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // recovery, seed it once from the existing V3 resume projection; do not
         // mistake a populated trajectory ledger for model-visible history.
         if (record->session_agent == nullptr) {
+            // An explicit per-session assembly profile wins. Legacy injected
+            // factories have no Config input, so use the host's supplied model.
+            if (record->assembly->agent_profile.request.model.empty()) {
+                record->assembly->agent_profile.request.model = options_.session_model;
+            }
             record->session_agent = std::make_unique<agent::Agent>(backend, registry, record->assembly->agent_profile);
             auto* trajectory = record->session_service != nullptr ? record->session_service->trajectory() : nullptr;
             if (trajectory != nullptr && trajectory->resumed_at_launch()) {

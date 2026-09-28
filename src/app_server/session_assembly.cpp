@@ -627,6 +627,9 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
     // 的缺省 Exclusive,行为与从前一字不差。认不得的串按默认档收口
     //(解析层已过滤,这条只是防御,与 BuildMainRuntimeProfile 同款)。
     if (request.config != nullptr) {
+        // BuildBackend owns protocol/connection policy, not request rewriting.
+        // Carry the already resolved model into the actual Agent request profile.
+        assembly->agent_profile.request.model = request.config->model;
         assembly->agent_profile.runtime.tool_batch_strategy =
             agent::ParseToolBatchStrategy(request.config->agent.tool_execution)
                 .value_or(agent::ToolBatchStrategy::Exclusive);
