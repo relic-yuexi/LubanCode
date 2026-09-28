@@ -19,10 +19,14 @@ import sys
 
 CLIENT = "client-lubancore-boundary"
 HOST_TARGETS = {
-    "lubancode", "lubancode_core", "lubancode_app", "lubancode_tests",
+    "lubancode", "lubancode_core", "lubancode_app", "lubancode_tests", "lubancore_host_tests",
     "lubancode_official_skills", "lubancode_official_docs", "lubancode_assistant_web",
 }
 HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/")
+SHARED_SDK_TEST_SOURCES = {
+    "tests/unit/platform/test_atomic_write.cpp",
+    "tests/unit/runtime/test_session_resources.cpp",
+}
 TERMINAL_PATH = re.compile(r"^src/platform/(?:console|clipboard|hidden_input|terminal_batch)(?:[_.]|$)")
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"\n]+)[>"]', re.MULTILINE)
 # Keep strings intact while removing comments; URL/regex literals are not comments.
@@ -151,7 +155,7 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
                 violations.append(f"testing is OFF but target {owner} includes {name}")
             elif owner != "lubancore_sdk_tests" or not (
                     name.startswith(("tests/integration/sdk/", "tests/unit/sdk/", "tests/support/")) or
-                    name == "tests/unit/platform/test_atomic_write.cpp"):
+                    name in SHARED_SDK_TEST_SOURCES):
                 violations.append(f"non-SDK test compilation: target {owner} includes {name}")
 
     for reference in configurations[0].get("targets", []):
