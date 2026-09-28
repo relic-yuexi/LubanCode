@@ -388,166 +388,172 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
         }
     }
 
-    // ---- 步骤 3:backend ----
-    assembly->backend = request.backend_factory();
-    if (assembly->backend == nullptr) {
-        result.error = "装配失败:backend 工厂交回空件";
-        return result;
-    }
-
-    // ---- 步骤 4:按计划启动 MCP(只起点名的,不起 config 全量)----
+    // Interpret the whole plan before the common factory calls a backend or
+    // launches any MCP process. Host authorization and tool selection stay here.
+    runtime::assembly::SessionResourcesRequest resource_request;
+    resource_request.backend_factory = request.backend_factory;
+    resource_request.mcp_launcher = request.mcp_launcher;
     if (plan_uses_mcp && request.config != nullptr) {
         const std::set<std::string> referenced = harness->ReferencedMcpServers();
-        std::set<std::string> mounted_names;
-        for (auto& [name, server_config] : allowed_servers) {
-            // §7.1:子进程环境按"base 集 + 部署配置注入"折好后 Replace 落锤
-            // ——不递 Worker 全环境,模型凭据(LUBAN_API_KEY 一类)与工具
-            // 凭据(mcpServers.env)分开传,各进各的进程。
-            auto started = runtime::assembly::StartMcpServer(
+        for (const auto& [name, server_config] : allowed_servers) {
+            resource_request.mcp_servers.push_back({
                 {name, server_config->command, server_config->args, ComposeMcpChildEnv(server_config->env),
-                 lubancode::platform::EnvMode::Replace}, {}, request.mcp_launcher);
-            if (!started) {
-                const bool discovery_failed = started.error().stage == runtime::assembly::McpStartupStage::Discover;
-                const std::string& reason = started.error().error;
-                if (referenced.count(name) > 0) {
-                    result.error = std::string(discovery_failed
-                        ? "装配失败:必需 MCP 服务工具清单拉取失败,整场拒绝: "
-                        : "装配失败:必需 MCP 服务起服失败,整场拒绝: ") + name + "(" + reason + ")";
-                    return result;  // 候选资源随栈析构清理,不出半成品
-                }
-                assembly->degraded_components.push_back(name + ": " + (discovery_failed ? "tools/list " : "") + reason);
-                continue;  // 可选降级:记账继续,不冒充已挂
-            }
-            mounted_names.insert(name);
-            assembly->mcp_servers.push_back(std::move(*started));
-        }
-        // config 里有、档也点名了、但依赖解释步已跳过的(未获准)记降级账。
-        for (const std::string& name : harness->mcp_servers) {
-            if (request.config->mcp_servers.count(name) == 0 && mounted_names.count(name) == 0 &&
-                referenced.count(name) == 0) {
-                assembly->degraded_components.push_back(name + ": 上层配置未获准,未启动");
-            }
+                 lubancode::platform::EnvMode::Replace, request.cwd_utf8},
+                {}, referenced.count(name) > 0});
         }
     }
-
-    // ---- 步骤 5:注册表(一次性装齐;只装 allow 点名的工具)----
-    if (injection_path) {
-        assembly->registry = request.registry_factory();
-        if (assembly->registry == nullptr) {
-            result.error = "装配失败:注入的注册表工厂交回空件";
-            return result;
-        }
-    } else if (harness != nullptr && harness->tools.mode == HarnessToolPolicy::Mode::Only &&
-               !harness->tools.allow.empty()) {
-        auto registry = std::make_unique<lubancode::tools::ToolRegistry>();
-        for (HeadlessMcpRuntime& runtime : assembly->mcp_servers) {
-            for (const auto& tool_info : runtime.tools) {
-                const std::string canonical = "mcp:" + runtime.name + ":" + tool_info.name;
-                const bool allowed = std::find(harness->tools.allow.begin(), harness->tools.allow.end(),
-                                               canonical) != harness->tools.allow.end();
-                if (!allowed) {
-                    continue;  // 不装:发现面里就没有(deny 裁过的名单已在解析侧)
-                }
-                registry->Register(std::make_unique<lubancode::mcp::McpTool>(
-                    *runtime.client, runtime.name, tool_info, std::string()));
-            }
-        }
-        // P5:点名 Lua 插件的工具(只装 allow 点名的;装载面≠注册面,与
-        // MCP 同一条规矩——components 点名=装载,tools.allow=出面)。adapter
-        // 走统一工具闸:needs_confirm 恒真、ApprovalClass::External,模型
-        // 调用与内置工具过同一条审批/轨迹面,不旁路。注册先于 skill 工具
-        // ——skill 的依赖声明消费要对照完整工具面(MCP+插件)。
-        if (assembly->manifest_lua != nullptr) {
-            for (const auto& plugin : assembly->manifest_lua->plugins()) {
-                for (const auto& tool : plugin->manifest->tools) {
-                    const std::string wire_name = plugin->ToolWireName(tool.name);
-                    if (std::find(harness->tools.allow.begin(), harness->tools.allow.end(), wire_name) ==
-                        harness->tools.allow.end()) {
-                        continue;  // 不在 allow:装载了也不出面(点名面由档定)
+    resource_request.registry_factory = [&](std::span<const HeadlessMcpRuntime> servers)
+        -> runtime::assembly::SessionRegistryResult {
+        if (injection_path) {
+            return request.registry_factory();
+        } else if (harness != nullptr && harness->tools.mode == HarnessToolPolicy::Mode::Only &&
+                   !harness->tools.allow.empty()) {
+            auto registry = std::make_unique<lubancode::tools::ToolRegistry>();
+            for (const HeadlessMcpRuntime& runtime : servers) {
+                for (const auto& tool_info : runtime.tools) {
+                    const std::string canonical = "mcp:" + runtime.name + ":" + tool_info.name;
+                    const bool allowed = std::find(harness->tools.allow.begin(), harness->tools.allow.end(),
+                                                   canonical) != harness->tools.allow.end();
+                    if (!allowed) {
+                        continue;  // 不装:发现面里就没有(deny 裁过的名单已在解析侧)
                     }
-                    registry->Register(std::make_unique<lubancode::runtime::ManifestLuaToolAdapter>(
-                        plugin.get(), &tool));
+                    registry->Register(std::make_unique<lubancode::mcp::McpTool>(
+                        *runtime.client, runtime.name, tool_info, std::string()));
                 }
             }
-        }
-        // P2:内置 skill 工具(受控单根清单,与扫描件同一份——发现面、
-        // 提示清单段、SkillTool 构造三处同源,不各扫各的)。§六 145:构造
-        // 时递本场冻结工具面(注册表 wire 名)——技能声明的 requires-tools
-        // 缺面时加载回 capability_unavailable,不为满足技能文字自动挂工具。
-        if (skill_exposed) {
-            std::set<std::string> face;
-            for (const auto& tool : registry->All()) {
-                face.insert(tool->name());
-            }
-            face.insert("skill");  // 内置件自身在面
-            registry->Register(std::make_unique<lubancode::tools::SkillTool>(session_skills, face));
-            // 冻结清单补依赖缺口(§六:依赖状态供客户端检查;缺面不拒装
-            // ——按需加载时 capability_unavailable,清单如实交代)。
-            for (auto& entry : assembly->skills_manifest) {
-                if (!entry.loaded) {
-                    continue;
-                }
-                for (const std::string& required : entry.requires_tools) {
-                    if (face.count(required) == 0) {
-                        entry.missing_tools.push_back(required);
+            // P5:点名 Lua 插件的工具(只装 allow 点名的;装载面≠注册面,与
+            // MCP 同一条规矩——components 点名=装载,tools.allow=出面)。adapter
+            // 走统一工具闸:needs_confirm 恒真、ApprovalClass::External,模型
+            // 调用与内置工具过同一条审批/轨迹面,不旁路。注册先于 skill 工具
+            // ——skill 的依赖声明消费要对照完整工具面(MCP+插件)。
+            if (assembly->manifest_lua != nullptr) {
+                for (const auto& plugin : assembly->manifest_lua->plugins()) {
+                    for (const auto& tool : plugin->manifest->tools) {
+                        const std::string wire_name = plugin->ToolWireName(tool.name);
+                        if (std::find(harness->tools.allow.begin(), harness->tools.allow.end(), wire_name) ==
+                            harness->tools.allow.end()) {
+                            continue;  // 不在 allow:装载了也不出面(点名面由档定)
+                        }
+                        registry->Register(std::make_unique<lubancode::runtime::ManifestLuaToolAdapter>(
+                            plugin.get(), &tool));
                     }
                 }
             }
-        }
-        // 复验(步骤 4 的另一半):mode=only 的每枚 allow 名单必须真的装上
-        // ——握手清单里没有就是"缺工具",明拒,不静默降级。"skill" 是内置
-        // 件,上面 skill_exposed 为真即已装。
-        for (const std::string& canonical : harness->tools.allow) {
-            if (canonical == "skill") {
-                continue;  // 内置件:装不装由 features/allow 交集定,装了就在
+            // P2:内置 skill 工具(受控单根清单,与扫描件同一份——发现面、
+            // 提示清单段、SkillTool 构造三处同源,不各扫各的)。§六 145:构造
+            // 时递本场冻结工具面(注册表 wire 名)——技能声明的 requires-tools
+            // 缺面时加载回 capability_unavailable,不为满足技能文字自动挂工具。
+            if (skill_exposed) {
+                std::set<std::string> face;
+                for (const auto& tool : registry->All()) {
+                    face.insert(tool->name());
+                }
+                face.insert("skill");  // 内置件自身在面
+                registry->Register(std::make_unique<lubancode::tools::SkillTool>(session_skills, face));
+                // 冻结清单补依赖缺口(§六:依赖状态供客户端检查;缺面不拒装
+                // ——按需加载时 capability_unavailable,清单如实交代)。
+                for (auto& entry : assembly->skills_manifest) {
+                    if (!entry.loaded) {
+                        continue;
+                    }
+                    for (const std::string& required : entry.requires_tools) {
+                        if (face.count(required) == 0) {
+                            entry.missing_tools.push_back(required);
+                        }
+                    }
+                }
             }
-            if (canonical.rfind("plugin__", 0) == 0) {
-                // P5:插件工具对装载件的 manifest 清单精确对账(解析层的
-                // id 段粗拆在这里补上全名对账)——缺工具明拒,不静默降级。
-                bool mounted = false;
-                if (assembly->manifest_lua != nullptr) {
-                    for (const auto& plugin : assembly->manifest_lua->plugins()) {
-                        for (const auto& tool : plugin->manifest->tools) {
-                            if (plugin->ToolWireName(tool.name) == canonical) {
-                                mounted = true;
+            // 复验(步骤 4 的另一半):mode=only 的每枚 allow 名单必须真的装上
+            // ——握手清单里没有就是"缺工具",明拒,不静默降级。"skill" 是内置
+            // 件,上面 skill_exposed 为真即已装。
+            for (const std::string& canonical : harness->tools.allow) {
+                if (canonical == "skill") {
+                    continue;  // 内置件:装不装由 features/allow 交集定,装了就在
+                }
+                if (canonical.rfind("plugin__", 0) == 0) {
+                    // P5:插件工具对装载件的 manifest 清单精确对账(解析层的
+                    // id 段粗拆在这里补上全名对账)——缺工具明拒,不静默降级。
+                    bool mounted = false;
+                    if (assembly->manifest_lua != nullptr) {
+                        for (const auto& plugin : assembly->manifest_lua->plugins()) {
+                            for (const auto& tool : plugin->manifest->tools) {
+                                if (plugin->ToolWireName(tool.name) == canonical) {
+                                    mounted = true;
+                                    break;
+                                }
+                            }
+                            if (mounted) {
                                 break;
                             }
                         }
-                        if (mounted) {
+                    }
+                    if (!mounted) {
+                        result.error = "装配失败:档点名的插件工具在插件 manifest 清单里不存在,整场拒绝: " +
+                                       canonical;
+                        return std::unexpected(runtime::assembly::SessionResourceFailure{
+                            runtime::assembly::SessionResourceStage::Registry, result.error_code, result.error, {}, {}});
+                    }
+                    continue;
+                }
+                bool mounted = false;
+                for (const HeadlessMcpRuntime& runtime : servers) {
+                    for (const auto& tool_info : runtime.tools) {
+                        if (AllowNameMatches(canonical, runtime.name, tool_info.name)) {
+                            mounted = true;
                             break;
                         }
                     }
-                }
-                if (!mounted) {
-                    result.error = "装配失败:档点名的插件工具在插件 manifest 清单里不存在,整场拒绝: " +
-                                   canonical;
-                    return result;
-                }
-                continue;
-            }
-            bool mounted = false;
-            for (const HeadlessMcpRuntime& runtime : assembly->mcp_servers) {
-                for (const auto& tool_info : runtime.tools) {
-                    if (AllowNameMatches(canonical, runtime.name, tool_info.name)) {
-                        mounted = true;
+                    if (mounted) {
                         break;
                     }
                 }
-                if (mounted) {
-                    break;
+                if (!mounted) {
+                    result.error = "装配失败:档点名的工具在服务握手清单里不存在,整场拒绝: " + canonical;
+                    return std::unexpected(runtime::assembly::SessionResourceFailure{
+                        runtime::assembly::SessionResourceStage::Registry, result.error_code, result.error, {}, {}});
                 }
             }
-            if (!mounted) {
-                result.error = "装配失败:档点名的工具在服务握手清单里不存在,整场拒绝: " + canonical;
-                return result;
+            return registry;
+        } else {
+            // 零工具面(none / only+空 allow / inherit / 无档):显式空表。
+            // 合同 §2.3:不挂 tool_search/tool_invoke、不注提示段——这里
+            // 本来就没装任何东西,空表如实空。
+            return std::make_unique<lubancode::tools::ToolRegistry>();
+        }
+    };
+    auto built = runtime::assembly::BuildSessionResources(std::move(resource_request));
+    if (!built) {
+        const auto& failure = built.error();
+        if (failure.stage == runtime::assembly::SessionResourceStage::Mcp) {
+            const bool discovery_failed = failure.mcp_stage == runtime::assembly::McpStartupStage::Discover;
+            result.error = std::string(discovery_failed
+                ? "装配失败:必需 MCP 服务工具清单拉取失败,整场拒绝: "
+                : "装配失败:必需 MCP 服务起服失败,整场拒绝: ") +
+                failure.component + "(" + failure.message + ")";
+        } else if (failure.code == "assembly.backend_unavailable") {
+            result.error = "装配失败:backend 工厂交回空件";
+        } else if (failure.code == "assembly.registry_unavailable") {
+            result.error = "装配失败:注入的注册表工厂交回空件";
+        } else {
+            result.error = failure.message;
+            result.error_code = failure.stage == runtime::assembly::SessionResourceStage::Registry
+                ? failure.code : std::string();
+        }
+        return result;
+    }
+    assembly->resources = std::move(*built);
+    for (const auto& failure : assembly->resources->degraded()) {
+        const bool discovery_failed = failure.mcp_stage == runtime::assembly::McpStartupStage::Discover;
+        assembly->degraded_components.push_back(failure.component + ": " +
+            (discovery_failed ? "tools/list " : "") + failure.message);
+    }
+    if (plan_uses_mcp && request.config != nullptr) {
+        const std::set<std::string> referenced = harness->ReferencedMcpServers();
+        for (const std::string& name : harness->mcp_servers) {
+            if (request.config->mcp_servers.count(name) == 0 && referenced.count(name) == 0) {
+                assembly->degraded_components.push_back(name + ": 上层配置未获准,未启动");
             }
         }
-        assembly->registry = std::move(registry);
-    } else {
-        // 零工具面(none / only+空 allow / inherit / 无档):显式空表。
-        // 合同 §2.3:不挂 tool_search/tool_invoke、不注提示段——这里
-        // 本来就没装任何东西,空表如实空。
-        assembly->registry = std::make_unique<lubancode::tools::ToolRegistry>();
     }
 
     // ---- 步骤 6:Agent 档案(显式材料,装配不猜)----
@@ -559,8 +565,8 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
         HarnessPromptInput prompt_input;
         prompt_input.plan = request.agent_plan.get();
         prompt_input.skills = &session_skills;
-        prompt_input.face_names.reserve(assembly->registry->All().size());
-        for (const auto& tool : assembly->registry->All()) {
+        prompt_input.face_names.reserve(assembly->resources->registry().All().size());
+        for (const auto& tool : assembly->resources->registry().All()) {
             prompt_input.face_names.push_back(tool->name());
         }
         const HarnessPromptResult composed = ComposeHarnessSystemPrompt(prompt_input);
@@ -621,6 +627,9 @@ SessionAssemblyResult AssembleSession(SessionAssemblyRequest request) {
     // 的缺省 Exclusive,行为与从前一字不差。认不得的串按默认档收口
     //(解析层已过滤,这条只是防御,与 BuildMainRuntimeProfile 同款)。
     if (request.config != nullptr) {
+        // BuildBackend owns protocol/connection policy, not request rewriting.
+        // Carry the already resolved model into the actual Agent request profile.
+        assembly->agent_profile.request.model = request.config->model;
         assembly->agent_profile.runtime.tool_batch_strategy =
             agent::ParseToolBatchStrategy(request.config->agent.tool_execution)
                 .value_or(agent::ToolBatchStrategy::Exclusive);

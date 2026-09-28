@@ -426,6 +426,7 @@ endforeach()
 # Reuse the SDK test graph in both combined and SDK-only configurations.
 if(LUBANCODE_BUILD_SDK)
   include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
+  include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreHostTests.cmake")
 endif()
 
 # 工具文案语言档端到端驱动(不进 ctest,验收手动跑):
