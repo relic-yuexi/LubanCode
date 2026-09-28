@@ -373,6 +373,12 @@ TEST_CASE("ToolAssemblyPlan: agent roots and permission stay late-bound while st
     REQUIRE_FALSE(snapshot->empty());
     auto roots = std::make_shared<lubancode::agent::AgentCatalogScanRoots>();
     roots->user_dir = first_roots;
+    lubancode::agent::PackagedAgentEntry injected;
+    injected.canonical_name = "fake.package:rogue";
+    injected.package_id = "fake.package";
+    injected.definition.name = "rogue";
+    injected.definition.description = "Must not override the package snapshot.";
+    roots->packaged.push_back(injected);
     auto permission = std::make_shared<lubancode::ApprovalMode>(lubancode::ApprovalMode::Default);
     auto plan = fixture.Plan();
     plan.agent_scan_roots = [roots] { return *roots; };
@@ -381,7 +387,8 @@ TEST_CASE("ToolAssemblyPlan: agent roots and permission stay late-bound while st
     NullBackend backend;
     std::unique_ptr<ToolRuntime> runtime;
     ToolRuntime::Options options;
-    options.package_snapshot = [snapshot] { return snapshot; };
+    auto current_snapshot = std::make_shared<std::shared_ptr<const lubancode::package::PackageSnapshot>>(snapshot);
+    options.package_snapshot = [current_snapshot] { return *current_snapshot; };
     {
         lubancode::tools::SkillMeta skill;
         skill.name = "startup-skill";
@@ -411,6 +418,8 @@ TEST_CASE("ToolAssemblyPlan: agent roots and permission stay late-bound while st
     CHECK(schema.find("second-agent") != std::string::npos);
     CHECK(schema.find("first-agent") == std::string::npos);
     CHECK(schema.find("fixture.content:pack-agent") != std::string::npos);
+    CHECK(schema.find("fake.package:rogue") == std::string::npos);
+    CHECK_FALSE(agent->custom_agent_resolver()("fake.package:rogue").has_value());
     const auto packaged = agent->custom_agent_resolver()("fixture.content:pack-agent");
     REQUIRE(packaged.has_value());
     REQUIRE(packaged->preloaded_skills.size() == 1);
@@ -423,6 +432,27 @@ TEST_CASE("ToolAssemblyPlan: agent roots and permission stay late-bound while st
     roots->user_dir = second_roots;
     agent->SetHooks({});
     CHECK(agent->input_schema().dump().find("second-agent") != std::string::npos);
+    {
+        ToolRuntime no_snapshot(config, backend, NoSkills(), "", plan, ToolRuntime::Options{});
+        CHECK(no_snapshot.agent_tool()->input_schema().dump().find("fake.package:rogue") == std::string::npos);
+        CHECK_FALSE(no_snapshot.agent_tool()->custom_agent_resolver()("fake.package:rogue").has_value());
+    }
+    REQUIRE(std::filesystem::remove(package_root / "agents" / "pack-agent.yaml"));
+    WriteAgent(package_root / "agents", "pack-next");
+    std::ofstream(package_skill, std::ios::binary)
+        << "---\nname: startup-skill\ndescription: fixture\n---\nNEXT_PACKAGE_SKILL_BODY\n";
+    *current_snapshot = lubancode::package::BuildPackageSnapshot(mount, 2);
+    REQUIRE_FALSE((*current_snapshot)->empty());
+    agent->SetHooks({});
+    const auto refreshed = agent->input_schema().dump();
+    CHECK(refreshed.find("fixture.content:pack-next") != std::string::npos);
+    CHECK(refreshed.find("fixture.content:pack-agent") == std::string::npos);
+    CHECK_FALSE(agent->custom_agent_resolver()("fixture.content:pack-agent").has_value());
+    const auto replacement = agent->custom_agent_resolver()("fixture.content:pack-next");
+    REQUIRE(replacement.has_value());
+    REQUIRE(replacement->preloaded_skills.size() == 1);
+    CHECK(replacement->preloaded_skills[0].find("NEXT_PACKAGE_SKILL_BODY") != std::string::npos);
+    CHECK(packaged->preloaded_skills[0].find("PINNED_PACKAGE_SKILL_BODY") != std::string::npos);
 }
 
 TEST_CASE("ToolAssemblyPlan: project trust stays with the explicit store even in one shared cwd") {
