@@ -60,6 +60,16 @@ void ValidateAgentScanRoots(const agent::AgentCatalogScanRoots& roots) {
     ValidateAssemblyPath(roots.project_dir, "agent.project_dir");
 }
 
+agent::AgentCatalogScanRoots RootsWithPackageSnapshot(
+    agent::AgentCatalogScanRoots roots, const package::PackageSnapshot* snapshot) {
+    ValidateAgentScanRoots(roots);
+    // Package identity and content belong to the pinned snapshot, not to a
+    // potentially stale packaged field returned by a directory supplier.
+    roots.packaged = snapshot != nullptr ? package::MountAgentEntries(snapshot->mount())
+                                        : std::vector<agent::PackagedAgentEntry>{};
+    return roots;
+}
+
 void EmitDiagnostic(const ToolAssemblyDiagnosticReporter& reporter, std::string code,
                     ToolAssemblyDiagnosticSeverity severity, std::string stage,
                     std::string component, std::vector<std::string> arguments,
@@ -410,9 +420,7 @@ std::optional<lubancode::tools::CustomAgentMaterial> ResolveCustomAgentMaterial(
     const std::vector<lubancode::tools::SkillMeta>& skills,
     const lubancode::package::PackageSnapshot* snapshot, const std::string& name,
     lubancode::agent::AgentCatalogScanRoots roots) {
-    ValidateAgentScanRoots(roots);
-    roots.packaged = snapshot != nullptr ? lubancode::package::MountAgentEntries(snapshot->mount())
-                                        : std::vector<lubancode::agent::PackagedAgentEntry>{};
+    roots = RootsWithPackageSnapshot(std::move(roots), snapshot);
     const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(roots);
     const lubancode::agent::AgentCatalogEntry* entry = catalog.Find(name);
     if (entry == nullptr || !entry->available || !entry->definition.has_value()) {
@@ -619,10 +627,11 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, lubancode::api
         // 列"当前可派的类型"(可用条目:内置+自定义,各带一句 description)。
         // 现扫现列与派发口同款——AgentTool 在回合边界(SetHooks)翻新缓存,
         // 一回合至多扫一遍盘,不是每请求一遍。
-        agent_tool_->SetAgentTypesProvider([roots_supplier]() -> std::vector<lubancode::tools::AgentTypeInfo> {
+        agent_tool_->SetAgentTypesProvider([roots_supplier, snapshot_provider]() -> std::vector<lubancode::tools::AgentTypeInfo> {
             std::vector<lubancode::tools::AgentTypeInfo> types;
-            const auto roots = roots_supplier ? roots_supplier() : agent::AgentCatalogScanRoots{};
-            ValidateAgentScanRoots(roots);
+            const auto snapshot = snapshot_provider ? snapshot_provider() : nullptr;
+            const auto roots = RootsWithPackageSnapshot(
+                roots_supplier ? roots_supplier() : agent::AgentCatalogScanRoots{}, snapshot.get());
             const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(roots);
             for (const lubancode::agent::AgentCatalogEntry* entry : catalog.Available()) {
                 types.push_back(lubancode::tools::AgentTypeInfo{entry->name, entry->definition->description});

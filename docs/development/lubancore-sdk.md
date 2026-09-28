@@ -18,13 +18,15 @@
 
 CLI 完整工具装配现接内部 `ToolAssemblyPlan`。交互模式与 one-shot 都先由
 `ResolveCliToolAssemblyPlan` 折好 cwd、插件目录、信任账、Package 数据根和 PTC
-画像路径，再调用原 `ToolRuntime`。缺席目录不退回主目录；已给路径须为绝对路径，
-校验发生在起 MCP、扫描插件或创建目录之前。MCP 固定使用启动 cwd，之后切换插件
+画像路径，再调用原 `ToolRuntime`。缺席目录不退回主目录；静态路径须为绝对路径，
+校验发生在起 MCP、扫描插件或创建目录之前。动态 Agent 根在每次扫描前校验。
+MCP 固定使用启动 cwd，之后切换插件
 cwd 不会搬动已运行的 MCP 进程。
 
 `ToolRuntime` 保留 main/sub/explore 工具表及原资源拥有关系。backend 须活得比工具久；
 技能清单按值留给解析器；权限、Agent 扫描根、Package 快照等供应商由宿主显式提供。
 CLI 供应商仍按派发时刻读取当前权限与项目，保留切目录和改权限行为。
+Agent 类型清单与按名派发现在同取当前 Package 快照，补上旧清单漏列包内 Agent 的缺口。
 
 装配诊断保存 `code`、来源阶段、组件、参数与主/子表归属。CLI 在原发生点同步翻译、
 上色和显示；子表重复报告只入诊断，不重复打印。展示 sink 只在构造期间调用，不保留。
