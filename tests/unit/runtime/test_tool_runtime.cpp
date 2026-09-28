@@ -348,6 +348,38 @@ TEST_CASE("ToolAssemblyPlan: CLI presentation uses only its explicit destination
     CHECK(runtime.diagnostics()[0].component == "explicit-diagnostic");
 }
 
+TEST_CASE("ToolAssemblyPlan: same-name Lua plugins keep separate state in a shared project") {
+    ToolAssemblyFixture first, second;
+    const auto write_counter = [](const std::filesystem::path& plugins, const char* marker) {
+        std::ofstream(plugins / "counter.lua", std::ios::binary)
+            << "local count = 0\nreturn { name='probe', description='fixture counter', "
+               "input_schema='{" << "\"type\":\"object\"" << "}', "
+               "execute=function(input) count=count+1 return '" << marker << "' .. count end }\n";
+    };
+    write_counter(first.Plugins(), "FIRST:");
+    write_counter(second.Plugins(), "SECOND:");
+    auto first_plan = first.Plan();
+    auto second_plan = second.Plan();
+    second_plan.cwd_utf8 = first_plan.cwd_utf8;
+    auto config = EmptyConfig();
+    NullBackend backend;
+    auto one = std::make_unique<ToolRuntime>(config, backend, NoSkills(), "", first_plan, ToolRuntime::Options{});
+    auto two = std::make_unique<ToolRuntime>(config, backend, NoSkills(), "", second_plan, ToolRuntime::Options{});
+    const auto invoke = [](lubancode::tools::ToolRegistry& registry, const char* expected) {
+        auto* tool = registry.Find("plugin__counter__probe");
+        REQUIRE(tool != nullptr);
+        const auto result = tool->execute(nlohmann::json::object());
+        REQUIRE_FALSE(result.is_error);
+        CHECK(result.content == expected);
+    };
+    invoke(one->main_registry(), "FIRST:1");
+    invoke(one->sub_registry(), "FIRST:2");
+    invoke(two->main_registry(), "SECOND:1");
+    invoke(two->sub_registry(), "SECOND:2");
+    one.reset();
+    invoke(two->main_registry(), "SECOND:3");
+}
+
 TEST_CASE("ToolAssemblyPlan: agent roots and permission stay late-bound while startup skills are owned") {
     ToolAssemblyFixture fixture;
     const auto first_roots = fixture.root / "agents first";
