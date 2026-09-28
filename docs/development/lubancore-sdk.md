@@ -6,8 +6,9 @@
 
 ## 拆分进度
 
-本页记录已交付的窄 SDK。第一阶段仍须收口独立构建、核心依赖与宿主装配，
-之后再接远端节点和控制端。`LubanCore::Core` 是公开安装目标；仓库内部旧名
+本页记录已交付的窄 SDK。SDK-only 默认构建、普通安装与终端依赖拆分已验收；
+第一阶段仍须收口会话资源拥有、SessionFactory 与现有宿主迁移，之后再接远端。
+`LubanCore::Core` 是公开安装目标；仓库内部旧名
 `lubancode_core` 仍带 CLI 实现，两者不能混用。
 
 后端、基础工具与 MCP 已共用 `runtime/assembly`。CLI、one-shot、AppServer
@@ -17,7 +18,28 @@
 
 ## 构建与安装
 
-启用 `-DLUBANCODE_BUILD_SDK=ON`，构建 `lubancore_sdk`，安装组件 `LubanCore`。
+独立 SDK 构建须同时关闭 CLI、启用 SDK。下面先关闭测试，走默认 `ALL` 和普通安装，
+不指定构建目标，也不筛安装组件。`sdk-prefix` 可换成所需安装目录。
+
+```sh
+cmake -S . -B build-sdk -DCMAKE_BUILD_TYPE=Release -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=ON -DBUILD_TESTING=OFF
+cmake --build build-sdk --config Release --parallel 4
+cmake --install build-sdk --config Release --prefix sdk-prefix
+```
+
+这套配置不定义 CLI、`lubancode_core`、`lubancode_app`、终端资源复制或 CLI 测试目标。
+内部仍构建 runtime/engine 与其依赖；渠道、Gateway、updater、Lua 等旧层尚未细拆，
+当前安装包不等于最小依赖包。CLI 默认开启；CLI 与 SDK 同时关闭会明确报错。
+同时构建 CLI 与 SDK 时，可保留 CLI 默认值，按 `--component LubanCore` 单独安装 SDK。
+
+要跑 SDK 专项，打开同一构建目录中的测试开关，再构建默认 `ALL`：
+
+```sh
+cmake -S . -B build-sdk -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=ON -DBUILD_TESTING=ON
+cmake --build build-sdk --config Release --parallel 4
+ctest --test-dir build-sdk -C Release -L sdk-focused --output-on-failure --no-tests=error
+```
+
 消费方只需 `find_package(LubanCore CONFIG REQUIRED)`，链接 `LubanCore::Core`，
 包含 `<lubancore/core.hpp>`。公开头仅用标准库，不要求内部 `src` 或第三方头。
 `LubanCore_RESOURCE_DIR` 指向安装后资源目录。验收程序见 `examples/sdk-consumer`。
@@ -26,6 +48,12 @@
 Windows SDK 构建统一使用动态 CRT（Release `/MD`、Debug `/MDd`），消费方也须相同。
 默认关闭 SDK 时，原 CLI 发布构建仍沿用静态 CRT。运行时须能找到安装目录下共享库；
 Windows 将 `bin` 加入 PATH，Linux 使用库搜索路径或应用自身 RPATH。
+
+集成提交 `22e7ce1f` 已合入 PR #248。其验收头为 `d92c99e9`，见
+[CI 36419112569](https://github.com/relic-yuexi/LubanCode/actions/runs/36419112569)：
+Linux、macOS、Windows 均跑过 testing OFF/ON 默认构建、普通全安装、仓库外搬迁消费
+5/5 与 SDK 专项 4/4；默认 CLI 全量分别为 654/654、657/657、656/656。
+这些证据覆盖当时 SDK-only 与终端拆分，不替后续 SessionFactory 或宿主迁移验收。
 
 ## 调用次序
 
