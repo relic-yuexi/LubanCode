@@ -18,8 +18,9 @@
 
 CLI 完整工具装配现接内部 `ToolAssemblyPlan`。交互模式与 one-shot 都先由
 `ResolveCliToolAssemblyPlan` 折好 cwd、插件目录、信任账、Package 数据根和 PTC
-画像路径，再调用原 `ToolRuntime`。缺席目录不退回主目录；已给路径须为绝对路径，
-校验发生在起 MCP、扫描插件或创建目录之前。MCP 固定使用启动 cwd，之后切换插件
+画像路径，再调用原 `ToolRuntime`。缺席目录不退回主目录；静态路径须为绝对路径，
+校验发生在起 MCP、扫描插件或创建目录之前。动态 Agent 根在每次扫描前校验。
+MCP 固定使用启动 cwd，之后切换插件
 cwd 不会搬动已运行的 MCP 进程。
 
 `ToolRuntime` 保留 main/sub/explore 工具表及原资源拥有关系。backend 须活得比工具久；
