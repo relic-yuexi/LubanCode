@@ -1,0 +1,151 @@
+"""Negative architecture-gate fixtures; no CMake/compiler/native process runs."""
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+SCRIPT = Path(__file__).resolve().parents[1] / "check_sdk_only_boundary.py"
+SPEC = importlib.util.spec_from_file_location("sdk_boundary", SCRIPT)
+boundary = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(boundary)
+
+
+class BoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix="sdk-boundary-data-")
+        self.addCleanup(self.scratch.cleanup)
+        self.source = Path(self.scratch.name) / "source"
+        self.build = Path(self.scratch.name) / "build"
+        self.reply = self.build / ".cmake/api/v1/reply"
+        self.reply.mkdir(parents=True)
+        self.source_file("include/lubancore/core.hpp", "#include <string>\n")
+        self.source_file("src/sdk/core.cpp", '#include "neutral/bridge.hpp"\n')
+        self.source_file("src/neutral/bridge.hpp", "#pragma once\n")
+        self.source_file("src/neutral/engine.cpp", '#include "neutral/bridge.hpp"\n')
+        (self.build / "liblubancore.fake-artifact").write_bytes(b"fixture-only; never executed")
+        self.targets = [
+            {"id": "sdk", "name": "lubancore_sdk", "type": "SHARED_LIBRARY",
+             "sources": [{"path": "src/sdk/core.cpp", "compileGroupIndex": 0}],
+             "dependencies": [{"id": "engine"}],
+             "artifacts": [{"path": "liblubancore.fake-artifact"}]},
+            {"id": "engine", "name": "neutral_engine", "type": "STATIC_LIBRARY",
+             "sources": [{"path": "src/neutral/engine.cpp", "compileGroupIndex": 0}]},
+        ]
+        self.flags = {"LUBANCODE_BUILD_CLI": "OFF", "LUBANCODE_BUILD_SDK": "ON", "BUILD_TESTING": "OFF"}
+
+    def source_file(self, name, contents):
+        path = self.source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+
+    def json_file(self, name, data):
+        (self.reply / name).write_text(json.dumps(data), encoding="utf-8")
+
+    def write_model(self):
+        references = []
+        for index, target in enumerate(self.targets):
+            name = f"target-{index}.json"
+            self.json_file(name, target)
+            references.append({"id": target["id"], "name": target["name"], "jsonFile": name})
+        self.json_file("model.json", {
+            "kind": "codemodel", "version": {"major": 2, "minor": 2},
+            "paths": {"source": str(self.source), "build": str(self.build)},
+            "configurations": [{"name": "Release", "targets": references}],
+        })
+        self.json_file("cache.json", {"kind": "cache", "version": {"major": 2},
+                                      "entries": [{"name": key, "value": value} for key, value in self.flags.items()]})
+        self.json_file("index-0001.json", {"reply": {boundary.CLIENT: {
+            "codemodel-v2": {"jsonFile": "model.json"}, "cache-v2": {"jsonFile": "cache.json"},
+        }}})
+
+    def check(self, testing=False):
+        self.write_model()
+        return boundary.inspect(self.source, self.build, "Release", testing)
+
+    def assert_rejected(self, report, reason):
+        self.assertEqual(report["status"], "failed")
+        self.assertTrue(any(reason in violation for violation in report["violations"]), report["violations"])
+
+    def test_clean_graph_and_recursive_headers_are_recorded(self):
+        report = self.check()
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.assertEqual(set(report["sdkBuildClosure"]), {"sdk", "engine"})
+        self.assertIn("src/neutral/bridge.hpp", report["scannedProjectFiles"])
+
+    def test_testing_off_rejects_project_test_sources_even_without_test_target_name(self):
+        self.source_file("tests/new_probe.cpp", "int probe;\n")
+        self.targets.append({"id": "probe", "name": "unexpected", "type": "EXECUTABLE",
+                             "sources": [{"path": "tests/new_probe.cpp", "compileGroupIndex": 0}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+
+    def test_unbuilt_resource_target_cannot_hide_behind_exclude_from_all(self):
+        self.targets.append({"id": "resources", "name": "lubancode_official_docs", "type": "UTILITY"})
+        self.assert_rejected(self.check(), "host/resource target")
+
+    def test_renamed_host_target_is_caught_by_its_source(self):
+        self.source_file("src/cli/renamed.cpp", "int hidden_host;\n")
+        self.targets.append({"id": "hidden", "name": "innocent_name", "type": "STATIC_LIBRARY",
+                             "sources": [{"path": "src/cli/renamed.cpp"}]})
+        self.assert_rejected(self.check(), "includes host source")
+
+    def test_terminal_platform_source_is_not_a_core_exception(self):
+        self.source_file("src/platform/console_posix.cpp", "int terminal;\n")
+        self.targets[1]["sources"].append({"path": "src/platform/console_posix.cpp", "compileGroupIndex": 0})
+        self.assert_rejected(self.check(), "includes host source")
+
+    def test_transitive_private_header_cannot_include_host(self):
+        self.source_file("src/neutral/bridge.hpp", '#include "another.hpp"\n')
+        self.source_file("src/neutral/another.hpp", '#include "app/hidden.hpp"\n')
+        self.source_file("src/app/hidden.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(), "reverse host include")
+
+    def test_public_header_cannot_expose_internal_or_third_party_headers(self):
+        for include in ("neutral/bridge.hpp", "nlohmann/json.hpp", "windows.h"):
+            with self.subTest(include=include):
+                self.source_file("include/lubancore/core.hpp", f'#include <{include}>\n')
+                self.assert_rejected(self.check(), "non-public include")
+
+    def test_comments_and_raw_cpp_literals_are_not_dependencies_or_stdio(self):
+        self.source_file("src/sdk/core.cpp", '''// #include "app/no.hpp"
+/* std::cout << "not executable"; */
+const char* example = R"fixture(
+#include "app/no.hpp"
+std::cerr << "not executable";
+)fixture";
+#include "neutral/bridge.hpp"
+''')
+        self.assertEqual(self.check()["status"], "passed")
+
+    def test_direct_entrypoint_io_and_global_setters_are_rejected(self):
+        for code, reason in (("std::cerr << value;", "direct host stdio"),
+                             ("std::println(value);", "direct host stdio"),
+                             ("SetLanguage(value);", "process-global setter")):
+            with self.subTest(code=code):
+                self.source_file("src/sdk/core.cpp", code)
+                self.assert_rejected(self.check(), reason)
+
+    def test_wrong_cache_and_empty_sdk_artifact_do_not_pass(self):
+        self.flags["LUBANCODE_BUILD_CLI"] = "ON"
+        self.assert_rejected(self.check(), "cache LUBANCODE_BUILD_CLI")
+        self.flags["LUBANCODE_BUILD_CLI"] = "OFF"
+        (self.build / "liblubancore.fake-artifact").write_bytes(b"")
+        self.assert_rejected(self.check(), "SDK artifact is missing or empty")
+
+    def test_missing_queries_or_wrong_build_reply_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "no File API reply"):
+            boundary.inspect(self.source, self.build, "Release", False)
+        self.write_model()
+        model = json.loads((self.reply / "model.json").read_text())
+        model["paths"]["build"] = str(self.build / "other")
+        self.json_file("model.json", model)
+        with self.assertRaisesRegex(ValueError, "different source/build"):
+            boundary.inspect(self.source, self.build, "Release", False)
+
+
+if __name__ == "__main__":
+    unittest.main()
