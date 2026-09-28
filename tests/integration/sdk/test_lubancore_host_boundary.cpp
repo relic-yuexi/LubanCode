@@ -300,8 +300,11 @@ TEST_CASE("SDK host boundary: child pipe failure preserves host SIGPIPE state") 
 
 TEST_CASE("SDK host boundary: stdin pump and spawn preserve host and child signal policy") {
     HostSignalState host;
+    // Read a prefix before closing: the writer must have copied bytes already,
+    // exercising Linux's positive short-write + SIGPIPE path as well as EPIPE.
     const auto pumped = platform::RunProcessWithStdin(
-        {"/bin/sh", "-c", "exec 0<&-; printf closed"}, std::string(1024 * 1024, 'x'), 5000);
+        {"/bin/sh", "-c", "IFS= read -r first; exec 0<&-; printf closed"},
+        "x\n" + std::string(1024 * 1024, 'x'), 5000);
     CHECK_FALSE(pumped.spawn_failed);
     CHECK_FALSE(pumped.timed_out);
     CHECK(pumped.stdout_bytes == "closed");
