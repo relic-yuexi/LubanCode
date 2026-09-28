@@ -15,6 +15,7 @@ set(LUBANCODE_VERSION "${CMAKE_MATCH_1}")
 project(lubancode VERSION "${LUBANCODE_VERSION}" LANGUAGES CXX)
 
 option(LUBANCODE_BUILD_SDK "Build the experimental installable LubanCore C++ SDK" OFF)
+option(LUBANCODE_BUILD_EXPERIMENT_RUNNER "Build the standalone experiment supervisor" OFF)
 if(LUBANCODE_BUILD_SDK)
   # Static internal/dependency archives also feed the shared SDK on Unix.
   set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -1676,6 +1677,10 @@ add_custom_target(lubancode_assistant_web ALL
   COMMENT "lubancode: 同步助理主界面网页到程序目录"
   VERBATIM)
 add_dependencies(lubancode_assistant_web lubancode)
+
+if(LUBANCODE_BUILD_EXPERIMENT_RUNNER)
+  include(cmake/ExperimentRunner.cmake)
+endif()
 
 # ---------------------------------------------------------------------------
 # 测试:doctest 单头文件,同样走 FetchContent,走 codeload.github.com 镜像
