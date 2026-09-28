@@ -61,6 +61,11 @@ int main(int argc, char**) {
                                              : host.Handle(request);
         }
         auto bytes = response.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
+        if (bytes.size() > limit) {
+            response = {{"id", response.value("id", nlohmann::json(nullptr))},
+                        {"error", {{"code", "worker.response_too_large"}}}};
+            bytes = response.dump() + "\n";
+        }
         if (host.stopping() && response.contains("error")) exit_code = 1;
         if (std::fwrite(bytes.data(), 1, bytes.size(), protocol) != bytes.size() || std::fflush(protocol) != 0) break;
     }

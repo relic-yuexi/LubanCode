@@ -309,7 +309,8 @@ struct Host::Impl {
             return {{"cancellation_requested", true}};
         }
         if (method == "approval.list" || method == "approval.get") {
-            Fields(params, {"session_id", "request_id", "text_offset", "text_limit"});
+            if (method == "approval.list") Fields(params, {"session_id"});
+            else Fields(params, {"session_id", "request_id", "text_offset", "text_limit"});
             auto approvals = Find(params).handle->PendingApprovals();
             auto entries = Json::array();
             const auto selected = method == "approval.get" ? Id(params, "request_id") : std::string{};

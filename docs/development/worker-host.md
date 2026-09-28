@@ -12,7 +12,8 @@
 `bin` 内共享库。构建和原生进程验收交三平台远端 CI，本地不编译。
 
 父 Node 独占 Worker 的 stdin/stdout。stdin 每行一份 UTF-8 JSON，最多 1 MiB，
-必须换行；stdout 每行一份响应，没有启动横幅。每个请求都须有非空 `id`，它只作
+必须换行；stdout 每行一份响应，最多 1 MiB，没有启动横幅。超大响应明确报
+`worker.response_too_large`，不裁成看似完整的结果。每个请求都须有非空 `id`，它只作
 响应关联，不代替业务幂等键。父 Node 串行发送请求并读取响应。原生 SDK stdout/stderr
 诊断关闭，错误只回固定码，防止工具载荷或 provider 错误体混进协议和监督日志。
 保留的协议文件描述符不向子命令继承。
