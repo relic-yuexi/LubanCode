@@ -445,6 +445,22 @@ jobs:
             cmake -B build -S . $COMMON_FLAGS
           fi
 
+      - name: Build and test relocated Runner process
+        if: needs.changes.outputs.runner_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target luban-runner -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
+
+      - name: Upload Runner process evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-process-${{ matrix.name }}
+          path: build/test-evidence/runner-process/
+          if-no-files-found: warn
+
       # SDK 必须从安装前缀被仓库外工程消费，不能用源码树内链接冒充。
       - name: Build SDK library
         if: needs.changes.outputs.sdk_tests == 'true'
@@ -497,22 +513,6 @@ jobs:
         with:
           name: worker-process-${{ matrix.name }}
           path: build/test-evidence/worker-process/
-          if-no-files-found: warn
-
-      - name: Build and test relocated Runner process
-        if: needs.changes.outputs.runner_tests == 'true'
-        shell: bash
-        run: |
-          cmake --build build --config Release --target luban-runner -j 4
-          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
-          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
-
-      - name: Upload Runner process evidence
-        if: always() && needs.changes.outputs.runner_tests == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: runner-process-${{ matrix.name }}
-          path: build/test-evidence/runner-process/
           if-no-files-found: warn
 
       - name: Build
@@ -717,6 +717,21 @@ jobs:
           CC: ${{ env.CC }}
           CXX: ${{ env.CXX }}
 
+      - name: Build and test relocated Runner process
+        if: needs.changes.outputs.runner_tests == 'true'
+        run: |
+          cmake --build build --config Release --target luban-runner -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
+
+      - name: Upload Runner process evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-process-linux-manylinux
+          path: build/test-evidence/runner-process/
+          if-no-files-found: warn
+
       # SDK 必须从安装前缀被仓库外工程消费，不能用源码树内链接冒充。
       - name: Build SDK library
         if: needs.changes.outputs.sdk_tests == 'true'
@@ -768,21 +783,6 @@ jobs:
         with:
           name: worker-process-linux-manylinux
           path: build/test-evidence/worker-process/
-          if-no-files-found: warn
-
-      - name: Build and test relocated Runner process
-        if: needs.changes.outputs.runner_tests == 'true'
-        run: |
-          cmake --build build --config Release --target luban-runner -j 4
-          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
-          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
-
-      - name: Upload Runner process evidence
-        if: always() && needs.changes.outputs.runner_tests == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: runner-process-linux-manylinux
-          path: build/test-evidence/runner-process/
           if-no-files-found: warn
 
       - name: Build
