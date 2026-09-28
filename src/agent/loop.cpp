@@ -30,7 +30,7 @@
 #include "api/assembler.hpp"
 #include "api/model_input_snapshot.hpp"
 #include "hooks/middleware_builtins.hpp"
-#include "cli/i18n.hpp"
+#include "text/i18n.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:trace 的入参/结果摘要锚
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
 #include "platform/wall_clock.hpp"     // trace 与计划动作须共用一枚墙钟
@@ -2372,10 +2372,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     message = api::SummarizeErrorBodyForUser(message);
                 }
                 if (recovery_attempts_used > 1) {
-                    message += cli::trf("error.request.recovery_exhausted", recovery_attempts_used - 1,
+                    message += lubancode::text::trf("error.request.recovery_exhausted", recovery_attempts_used - 1,
                                         FormatRecoveryElapsed(recovery_elapsed));
                 }
-                return std::unexpected(cli::trf("error.request.failed", message));
+                return std::unexpected(lubancode::text::trf("error.request.failed", message));
             }
         }
         if (stream_error) {

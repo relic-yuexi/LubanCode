@@ -1,0 +1,21 @@
+# 安装包消费示例
+
+这份工程只引 `lubancore/core.hpp`，只链接 `LubanCore::Core`。把目录复制到源码树外，给 `CMAKE_PREFIX_PATH` 指向已安装 SDK，便可构建。配置时不查 LubanCode 源码或构建目录。
+
+```sh
+cmake -S /path/to/copied/sdk-consumer -B /path/to/consumer-build -DCMAKE_PREFIX_PATH=/path/to/relocated/sdk-prefix
+cmake --build /path/to/consumer-build --config Release
+ctest --test-dir /path/to/consumer-build -C Release --output-on-failure
+```
+
+当前仓库工作流禁止本地编译；上面三步交远端 CI 执行。验收时先安装 SDK，再移动安装目录、复制这份工程，移除原源码/构建路径对消费方配置的帮助。
+
+模型答复由标准库 fixture 提供。会话、Agent 循环、权限、内置文件工具、前台命令、V3 账和持久操作回执都跑真实 SDK。无需模型账号，不发外网请求。
+
+- `smoke`：真实写文件、读文件和前台命令；运行中及完成后重发去重；下一轮带上旧对话；两场会话共用目录并行执行，审批互不串；拒绝、取消、关闭、事件溢出和回调重入；关完句柄后改名数据目录。
+- `seed` / `resume`：CTest 用 fixture 串起两个独立进程。同一 V3 会话恢复后保留旧结果与去重键，旧工具只执行一次，新回合不复用旧回合号。
+- `recovery-seed` / `recovery-resume`：首进程让一笔输入停在模型调用中，再受理第二笔，随后用 `_Exit` 跳过析构。新进程恢复后，已派发却没终态那笔仍报 `Indeterminate`；只受理未派发那笔自动续跑，执行一次。
+
+示例只承诺这里验过的文本与工具范围。临时 `resources` 目录由测试显式传入；所选工具不消费外部资源。这不能替代 ripgrep、skills 或其他资源包验收。示例也不验证模型供应商联网、MCP 真进程、数据库、远端部署或多用户沙箱。
+
+测试数据放在消费工程构建目录下，每轮用新子目录，不清理调用方已有目录。

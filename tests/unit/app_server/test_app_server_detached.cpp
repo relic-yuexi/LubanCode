@@ -238,7 +238,7 @@ std::optional<nlohmann::json> WaitForMessage(TestWsClient& client,
         while (const std::optional<std::string> message = client.ReadText()) {
             const nlohmann::json parsed = nlohmann::json::parse(*message, nullptr, false);
             if (!parsed.is_discarded() && match(parsed)) {
-                return parsed;
+                return std::optional<nlohmann::json>{std::in_place, parsed};
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));

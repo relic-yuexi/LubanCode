@@ -18,6 +18,8 @@
 
 namespace lubancode::platform {
 
+std::filesystem::path FileIoPath(const std::filesystem::path& path) { return path; }
+
 std::optional<std::string> GetEnvVar(const char* name) {
     const char* value = std::getenv(name);
     if (value == nullptr || value[0] == '\0') {

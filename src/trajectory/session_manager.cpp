@@ -104,7 +104,7 @@ std::optional<nlohmann::json> ReadJsonFile(const std::filesystem::path& path) {
     if (json.is_discarded()) {
         return std::nullopt;
     }
-    return json;
+    return std::optional<nlohmann::json>{std::in_place, json};
 }
 
 // 恢复期允许的"折叠"迁移:session.json 落后或抢跑于 Journal 可证事实时,

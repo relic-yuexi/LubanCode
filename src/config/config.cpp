@@ -14,9 +14,8 @@
 
 #include <nlohmann/json.hpp>
 
-// i18n:cli/i18n 是零依赖的叶子字符串表(只用标准库 + json),config 层引它
-// 不构成反向依赖——它不牵扯 cli 的任何交互逻辑。
-#include "cli/i18n.hpp"
+// 共用词表归 text，不牵扯 CLI 交互逻辑。
+#include "text/i18n.hpp"
 #include "config/runtime_paths.hpp"
 #include "platform/paths.hpp"
 #include "platform/atomic_write.hpp"  // 渠道向导定点更新的原子写(§5.2)
@@ -365,7 +364,7 @@ std::optional<std::string> ProviderAuthConflictWarning(const ProviderConfig& pro
         return std::nullopt;
     }
     // 打码走 MaskApiKey 同款(露前缀认钥匙,其余遮死),两把都露的是打码值。
-    return cli::trf("warn.auth_key_conflict", provider.key_env, MaskApiKey(*resolved.key),
+    return lubancode::text::trf("warn.auth_key_conflict", provider.key_env, MaskApiKey(*resolved.key),
                     MaskApiKey(provider.api_key));
 }
 
@@ -660,17 +659,17 @@ bool ReplaceProvider(std::vector<ProviderConfig>& providers, const std::string& 
 std::string ToString(Source source) {
     switch (source) {
         case Source::LubanEnv:
-            return cli::tr("config.source.luban_env");
+            return lubancode::text::tr("config.source.luban_env");
         case Source::LubancodeEnv:
-            return cli::tr("config.source.lubancode_env");
+            return lubancode::text::tr("config.source.lubancode_env");
         case Source::ProjectConfigFile:
-            return cli::tr("config.source.project_config_file");
+            return lubancode::text::tr("config.source.project_config_file");
         case Source::GlobalConfigFile:
-            return cli::tr("config.source.global_config_file");
+            return lubancode::text::tr("config.source.global_config_file");
         case Source::Default:
-            return cli::tr("config.source.default");
+            return lubancode::text::tr("config.source.default");
     }
-    return cli::tr("config.source.unknown");
+    return lubancode::text::tr("config.source.unknown");
 }
 
 bool EnvironmentOverridesActiveProvider(const Config& config, const ConfigSources& sources,
@@ -3566,9 +3565,9 @@ std::expected<void, std::string> RequireApiKey(const ConfigResult& result) {
             FindProvider(result.config.providers, result.config.active_provider);
         provider != nullptr && provider->auth == ProviderAuthMode::Env) {
         return std::unexpected(
-            cli::trf("error.api_key_missing_provider", provider->name, provider->key_env));
+            lubancode::text::trf("error.api_key_missing_provider", provider->name, provider->key_env));
     }
-    return std::unexpected(cli::tr("error.api_key_missing"));
+    return std::unexpected(lubancode::text::tr("error.api_key_missing"));
 }
 
 std::string MaskApiKey(const std::string& api_key) {
@@ -3617,14 +3616,14 @@ std::expected<void, std::string> RequireConfigured(const ConfigResult& result) {
         }
     }
 
-    std::string message = cli::trf("error.not_configured", joined, joined_env);
+    std::string message = lubancode::text::trf("error.not_configured", joined, joined_env);
     // 钥匙撞车单:api_key 在缺的名单里且激活的是 provider 条目时,追加一行
     // 点名 key_env 指的变量与 inline 状态,别让人对着泛名瞎试。
     if (api_key_missing) {
         if (const ProviderConfig* provider =
                 FindProvider(result.config.providers, result.config.active_provider);
             provider != nullptr && provider->auth == ProviderAuthMode::Env) {
-            message += "\n" + cli::trf("error.not_configured.key_detail", provider->name, provider->key_env);
+            message += "\n" + lubancode::text::trf("error.not_configured.key_detail", provider->name, provider->key_env);
         }
     }
     return std::unexpected(message);

@@ -31,6 +31,7 @@ struct McpLaunchRequest {
     std::vector<std::string> args;
     std::vector<std::pair<std::string, std::string>> env;
     platform::EnvMode env_mode = platform::EnvMode::Inherit;
+    std::string cwd_utf8; // empty preserves existing host behavior
 };
 
 struct McpStartupOptions {

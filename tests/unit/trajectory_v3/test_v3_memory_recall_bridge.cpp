@@ -30,7 +30,7 @@
 
 #include "agent/loop.hpp"  // RequestPreparedContext(回合桥的模型边界口)
 #include "api/types.hpp"
-#include "app/memory_ledger_bridge.hpp"
+#include "runtime/memory_ledger_bridge.hpp"
 #include "hooks/hash.hpp"
 #include "memory/project_memory.hpp"
 #include "runtime/trajectory_session.hpp"
@@ -188,7 +188,7 @@ TEST_CASE("v3 主路: 隐藏快照消息 + 链接纳 + 事实行 + prepared 引�
     REQUIRE(ledger.v3_main_writer() != nullptr);
     REQUIRE(ledger.main() == nullptr);
 
-    app::MemoryLedgerBridge bridge(ledger);
+    runtime::MemoryLedgerBridge bridge(ledger);
     memory_fixture.store->set_accounting(&bridge);
     memory_fixture.store->set_source_session(ledger.session_id());
 
@@ -292,7 +292,7 @@ TEST_CASE("v3 快照不变性: 记忆改版后旧消息行一字不动") {
     auto opened = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(opened.has_value());
     TrajectorySessionLedger& ledger = *opened;
-    app::MemoryLedgerBridge bridge(ledger);
+    runtime::MemoryLedgerBridge bridge(ledger);
     memory_fixture.store->set_accounting(&bridge);
 
     REQUIRE_FALSE(memory_fixture.store
@@ -363,7 +363,7 @@ TEST_CASE("v3 快照提交失败: 本轮零注入,链不长,trace 记 snapshot_f
     auto opened = TrajectorySessionLedger::Open(std::move(ledger_options));
     REQUIRE(opened.has_value());
     TrajectorySessionLedger& ledger = *opened;
-    app::MemoryLedgerBridge bridge(ledger);
+    runtime::MemoryLedgerBridge bridge(ledger);
     memory_fixture.store->set_accounting(&bridge);
 
     armed.store(true);
@@ -400,7 +400,7 @@ TEST_CASE("v3 派工冻结: 父账事实带 targetRunId 与快照,不写隐藏�
     auto opened = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(opened.has_value());
     TrajectorySessionLedger& ledger = *opened;
-    app::MemoryLedgerBridge bridge(ledger);
+    runtime::MemoryLedgerBridge bridge(ledger);
     memory_fixture.store->set_accounting(&bridge);
 
     const std::string frozen = memory_fixture.store->BuildTurnContextForDispatch(
@@ -472,7 +472,7 @@ TEST_CASE("v3 派工冻结大正文: snapshotRef 进 blob,指纹对得上") {
     auto opened = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(opened.has_value());
     TrajectorySessionLedger& ledger = *opened;
-    app::MemoryLedgerBridge bridge(ledger);
+    runtime::MemoryLedgerBridge bridge(ledger);
     memory_fixture.store->set_accounting(&bridge);
 
     REQUIRE_FALSE(memory_fixture.store->BuildTurnContextForDispatch("查 deploy 的跑法",
@@ -514,7 +514,7 @@ TEST_CASE("v3 写入因果边: memory.save.requested 落 v3 事实行,引用全�
     auto opened = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(opened.has_value());
     TrajectorySessionLedger& ledger = *opened;
-    app::MemoryLedgerBridge bridge(ledger);
+    runtime::MemoryLedgerBridge bridge(ledger);
     memory_fixture.store->set_accounting(&bridge);
 
     memory::SaveRequest request;
@@ -568,7 +568,7 @@ TEST_CASE("v3 无回合号召回: writer 号池兜底署名,注入本体不丢")
     auto opened = TrajectorySessionLedger::Open(LedgerOptions(root));
     REQUIRE(opened.has_value());
     TrajectorySessionLedger& ledger = *opened;
-    app::MemoryLedgerBridge bridge(ledger);
+    runtime::MemoryLedgerBridge bridge(ledger);
     memory_fixture.store->set_accounting(&bridge);
 
     const std::string context =
@@ -598,8 +598,8 @@ TEST_CASE("v3 schema: memory.recall.injected / memory.save.requested 入册且 s
     using lubancode::trajectory::v3::EventKindV3Name;
     using lubancode::trajectory::v3::RequiredStatusForKind;
 
-    CHECK(EventKindV3Name(EventKindV3::MemoryRecallInjected) == "memory.recall.injected");
-    CHECK(EventKindV3Name(EventKindV3::MemorySaveRequested) == "memory.save.requested");
+    CHECK(std::string(EventKindV3Name(EventKindV3::MemoryRecallInjected)) == "memory.recall.injected");
+    CHECK(std::string(EventKindV3Name(EventKindV3::MemorySaveRequested)) == "memory.save.requested");
     CHECK(EventKindV3FromName("memory.recall.injected") == EventKindV3::MemoryRecallInjected);
     CHECK(EventKindV3FromName("memory.save.requested") == EventKindV3::MemorySaveRequested);
     CHECK(RequiredStatusForKind(EventKindV3::MemoryRecallInjected).has_value() == false);

@@ -263,7 +263,7 @@ struct BrowserHarness {
         for (const std::string& line : io.written) {
             const nlohmann::json parsed = nlohmann::json::parse(line);
             if (parsed.contains("method") && parsed["method"] == method) {
-                return parsed;
+                return std::optional<nlohmann::json>{std::in_place, parsed};
             }
         }
         return std::nullopt;
@@ -286,7 +286,7 @@ struct BrowserHarness {
         for (const std::string& line : io.written) {
             const nlohmann::json parsed = nlohmann::json::parse(line);
             if (parsed.contains("id") && parsed["id"] == id) {
-                return parsed;
+                return std::optional<nlohmann::json>{std::in_place, parsed};
             }
         }
         return std::nullopt;
@@ -299,7 +299,7 @@ struct BrowserHarness {
             const nlohmann::json parsed = nlohmann::json::parse(line);
             if (parsed.value("method", std::string()) == "browser/action/completed" &&
                 parsed["params"].value("actionId", std::string()) == action_id) {
-                return parsed;
+                return std::optional<nlohmann::json>{std::in_place, parsed};
             }
         }
         return std::nullopt;
@@ -332,7 +332,7 @@ struct BrowserHarness {
                 if (parsed.value("method", std::string()) == "permission/request") {
                     const std::string rid = parsed["params"].value("requestId", std::string());
                     if (std::find(answered.begin(), answered.end(), rid) == answered.end()) {
-                        return parsed;
+                        return std::optional<nlohmann::json>{std::in_place, parsed};
                     }
                 }
             }

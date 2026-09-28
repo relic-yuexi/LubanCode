@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "platform/atomic_write.hpp"
+#include "platform/paths.hpp"
 
 using lubancode::platform::AtomicWriteFile;
 using lubancode::platform::WriteDurability;
@@ -55,7 +56,7 @@ std::set<std::string> TempLeftovers(const std::filesystem::path& dir) {
     std::set<std::string> found;
     std::error_code ec;
     for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        const std::string name = entry.path().filename().string();
+        const std::string name = lubancode::platform::PathToUtf8(entry.path().filename());
         if (name.find(".tmp") != std::string::npos) {
             found.insert(name);
         }
@@ -364,3 +365,126 @@ TEST_CASE("AtomicWriteFile: 替换失败的短拒分类——Windows 记可重�
 #endif
     CHECK(std::filesystem::is_directory(target));
 }
+
+TEST_CASE("FileIoPath: short paths retain their original spelling") {
+    namespace fs = std::filesystem;
+    using lubancode::platform::FileIoPath;
+    const fs::path relative = fs::path("short") / "state.json";
+    REQUIRE(fs::absolute(relative).native().size() < 248);
+    CHECK(FileIoPath(relative).native() == relative.native());
+    CHECK(FileIoPath(fs::path{}).empty());
+#ifndef _WIN32
+    const fs::path long_path = fs::path("/tmp") / std::string(200, 'a') / std::string(100, 'b');
+    CHECK(FileIoPath(long_path).native() == long_path.native());
+#endif
+}
+
+#ifdef _WIN32
+namespace {
+// The disk witness uses an explicit native path, independently of FileIoPath.
+// A helper that points at the wrong file cannot make these content checks pass.
+std::filesystem::path ExplicitWindowsPath(std::filesystem::path path) {
+    path = std::filesystem::absolute(path).lexically_normal();
+    path.make_preferred();
+    const auto native = path.native();
+    return std::filesystem::path(native.starts_with(L"\\\\")
+        ? L"\\\\?\\UNC\\" + native.substr(2) : L"\\\\?\\" + native);
+}
+
+struct LongAtomicRoot {
+    std::filesystem::path path;
+    explicit LongAtomicRoot(const char* name) : path(MakeTempRoot(name)) {}
+    ~LongAtomicRoot() {
+        std::error_code ignored;
+        std::filesystem::remove_all(ExplicitWindowsPath(path), ignored);
+    }
+};
+} // namespace
+
+TEST_CASE("FileIoPath: Windows UNC and explicit namespaces preserve their meaning") {
+    namespace fs = std::filesystem;
+    using lubancode::platform::FileIoPath;
+    const std::wstring tail = std::wstring(100, L'a') + L"\\" + std::wstring(100, L'b') +
+                              L"\\" + std::wstring(60, L'c') + L"\\state.json";
+    const fs::path unc(L"\\\\server\\share\\" + tail);
+    CHECK(FileIoPath(unc).native() == L"\\\\?\\UNC\\server\\share\\" + tail);
+    const fs::path extended(L"\\\\?\\C:\\already\\file.");
+    const fs::path device(L"\\\\.\\NUL");
+    CHECK(FileIoPath(extended).native() == extended.native());
+    CHECK(FileIoPath(device).native() == device.native());
+    for (const auto& path : {fs::path(L"C:\\" + tail + L"."), fs::path(L"C:\\" + tail + L" "),
+                            fs::path(L"C:\\parent.\\" + tail), fs::path(L"C:\\parent \\" + tail)}) {
+        CHECK(FileIoPath(path).native() == path.native());
+    }
+    for (const auto* reserved : {L"NUL.txt", L"CoM1", L"LPT9.log", L"COM¹.txt", L"NUL:stream"}) {
+        const fs::path path = fs::path(L"C:\\" + tail) / reserved;
+        CHECK(FileIoPath(path).native() == path.native());
+    }
+    const fs::path ordinary = fs::path(L"C:\\" + tail) / L"COM10.txt";
+    CHECK(FileIoPath(ordinary).native() == ExplicitWindowsPath(ordinary).native());
+    const fs::path relative = fs::path("relative-long-path") / fs::path(tail);
+    REQUIRE_FALSE(relative.is_absolute());
+    CHECK(FileIoPath(relative).native() == ExplicitWindowsPath(relative).native());
+}
+
+TEST_CASE("AtomicWriteFile: Windows long logical paths create replace and clean up real files") {
+    namespace fs = std::filesystem;
+    LongAtomicRoot root("long-native-io");
+    auto parent = root.path;
+    unsigned level = 0;
+    while (parent.native().size() < 285) parent /= std::string(32, 'd') + std::to_string(++level);
+    const auto target = parent / lubancode::platform::Utf8ToPath("完整结果.txt");
+    REQUIRE(target.native().size() > 260);
+    REQUIRE_FALSE(target.native().starts_with(L"\\\\?\\"));
+    const auto native_target = ExplicitWindowsPath(target);
+    const auto native_parent = ExplicitWindowsPath(parent);
+
+    const auto created = AtomicWriteFile(target, "original long-path bytes");
+    REQUIRE_MESSAGE(created.has_value(), (created ? "" : created.error().message));
+    REQUIRE(fs::is_regular_file(native_target));
+    CHECK(ReadAll(native_target) == "original long-path bytes");
+    const auto replaced = AtomicWriteFile(target, "replacement long-path bytes", WriteDurability::ProcessCrashDurability);
+    REQUIRE_MESSAGE(replaced.has_value(), (replaced ? "" : replaced.error().message));
+    CHECK(replaced->outcome == WriteOutcome::CommittedDurable);
+    CHECK(ReadAll(native_target) == "replacement long-path bytes");
+    CHECK(TempLeftovers(native_parent).empty());
+
+    HookGuard guard;
+    lubancode::platform::SetFileFlushFailureForTest(true);
+    const auto failed = AtomicWriteFile(target, "must not replace", WriteDurability::ProcessCrashDurability);
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error().code == "atomic.tmp_write_failed");
+    CHECK(failed.error().outcome == WriteOutcome::NotCommitted);
+    CHECK(ReadAll(native_target) == "replacement long-path bytes");
+    CHECK(TempLeftovers(native_parent).empty());
+    lubancode::platform::SetFileFlushFailureForTest(false);
+
+    const auto occupied = parent / "occupied";
+    REQUIRE(fs::create_directory(ExplicitWindowsPath(occupied)));
+    const auto rejected = AtomicWriteFile(occupied, "not a directory");
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == "atomic.replace_failed");
+    CHECK(fs::is_directory(ExplicitWindowsPath(occupied)));
+    CHECK(TempLeftovers(native_parent).empty());
+}
+
+TEST_CASE("AtomicWriteFile: Windows temporary suffix can cross MAX_PATH before the target does") {
+    namespace fs = std::filesystem;
+    LongAtomicRoot root("long-temp-only");
+    constexpr std::size_t target_length = 255;
+    REQUIRE(root.path.native().size() + 12 < target_length);
+    const auto filename_length = target_length - root.path.native().size() - 1;
+    REQUIRE(filename_length < 240); // every component, including its temp suffix, stays legal
+    const auto target = root.path / (std::string(filename_length - 4, 'f') + ".txt");
+    REQUIRE(target.native().size() == target_length);
+    REQUIRE(target.native().size() < 260);
+    REQUIRE(target.native().size() + std::string(".1-0.tmp").size() >= 260);
+
+    REQUIRE(AtomicWriteFile(target, "before").has_value());
+    REQUIRE(AtomicWriteFile(target, "after", WriteDurability::ProcessCrashDurability).has_value());
+    // The logical target itself is below MAX_PATH; only the writer's temporary
+    // filename needs the extended form. Read the original spelling directly.
+    CHECK(ReadAll(target) == "after");
+    CHECK(TempLeftovers(root.path).empty());
+}
+#endif

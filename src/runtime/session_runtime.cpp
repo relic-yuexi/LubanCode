@@ -26,6 +26,7 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
     ledger_options.workspace_identity = options_.trajectory_workspace_identity;
     ledger_options.lubancode_version = options_.lubancode_version;
     ledger_options.resume_at_launch = options_.trajectory_resume_at_launch;
+    ledger_options.require_v3_resume = options_.trajectory_require_v3_resume;
     ledger_options.resume_source_session_id = options_.trajectory_resume_source_session_id;
     ledger_options.approval_mode = options_.approval_mode;
     // AppServer 接 v3 第一棒:单发三料位 + v3 首行 system 从服务层递进

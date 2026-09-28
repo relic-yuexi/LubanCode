@@ -216,6 +216,9 @@ public:
     // P0-B/turn_runner 用:当前轮 id(空 = 轮没开),子账开张失败的父侧
     // typed 事件按它带 turn_id。
     const std::string& current_turn_id() const { return turn_id_; }
+    // Canonical V3 message ID, assigned only after the assistant message commits.
+    // UI item IDs are not durable message references.
+    const std::string& last_committed_assistant_message_id() const { return last_committed_assistant_message_id_; }
     // 落账错误的共享汇(账本持有,/doctor trajectory 的"最近 I/O 错误"
     // 从这取;桥按轮把错误推进来)。
     void SetErrorSink(std::vector<std::string>* sink) { error_sink_ = sink; }
@@ -253,6 +256,7 @@ public:
     }
 
 private:
+    std::string last_committed_assistant_message_id_;
     api::Backend* action_summary_backend_ = nullptr;
     ActionSummaryProfile action_summary_profile_;
     int action_summary_calls_remaining_ = 0;

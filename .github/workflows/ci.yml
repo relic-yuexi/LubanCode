@@ -42,6 +42,7 @@ jobs:
       cross_platform: ${{ steps.c.outputs.cross_platform }}
       remote_tests: ${{ steps.c.outputs.remote_tests }}
       assembly_tests: ${{ steps.c.outputs.assembly_tests }}
+      sdk_tests: ${{ steps.c.outputs.sdk_tests }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -59,6 +60,10 @@ jobs:
           if [ -n "$(git ls-files 'src/runtime/assembly/*.cpp' 'src/runtime/assembly/*.hpp' 'tests/unit/assembly/test_*.cpp' 'tests/integration/assembly/test_*.cpp')" ]; then
             assembly_present=true
           fi
+          sdk_present=false
+          if [ -n "$(git ls-files 'src/sdk/*.cpp' 'include/lubancore/*.hpp' 'tests/unit/sdk/test_*.cpp' 'tests/integration/sdk/test_*.cpp')" ]; then
+            sdk_present=true
+          fi
           # 手动 dispatch 不看 diff:指定 ref 上的代码就是要验的代码,直接
           # 放双平台(build-test);asan/tsan 诊断腿不沾(单册诊断用不着)。
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
@@ -68,6 +73,7 @@ jobs:
             echo 'cross_platform=false' >> "$GITHUB_OUTPUT"
             echo 'remote_tests=false' >> "$GITHUB_OUTPUT"
             echo 'assembly_tests=false' >> "$GITHUB_OUTPUT"
+            echo 'sdk_tests=false' >> "$GITHUB_OUTPUT"
             echo 'code=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -88,6 +94,7 @@ jobs:
             echo 'cross_platform=true' >> "$GITHUB_OUTPUT"
             echo "remote_tests=$remote_present" >> "$GITHUB_OUTPUT"
             echo "assembly_tests=$assembly_present" >> "$GITHUB_OUTPUT"
+            echo "sdk_tests=$sdk_present" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           code=false
@@ -97,22 +104,25 @@ jobs:
           cross_platform=false
           remote_tests=false
           assembly_tests=false
+          sdk_tests=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             # 远端模式须在子 PR 合入前验三平台，base 可为集成分支。
             # 公共构建接线仅在 remote/SDK 装配已入树时加腿；普通 PR 沿旧策略。
             # ci.yml 自身改动也跑三平台，验证本门，不冒充已有组件测试。
             case "$f" in
-              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/runtime/assembly/*|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|.github/workflows/ci.yml)
+              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/runtime/assembly/*|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|.github/workflows/ci.yml)
                 cross_platform=true
                 remote_tests=$remote_present
                 assembly_tests=$assembly_present
+                sdk_tests=$sdk_present
                 code=true ;;
               CMakeLists.txt|tests/CMakeLists.txt|cmake/*|vcpkg.json)
-                if [ "$remote_present" = true ] || [ "$assembly_present" = true ]; then
+                if [ "$remote_present" = true ] || [ "$assembly_present" = true ] || [ "$sdk_present" = true ]; then
                   cross_platform=true
                   remote_tests=$remote_present
                   assembly_tests=$assembly_present
+                  sdk_tests=$sdk_present
                   code=true
                 fi ;;
             esac
@@ -174,6 +184,7 @@ jobs:
           echo "cross_platform=$cross_platform" >> "$GITHUB_OUTPUT"
           echo "remote_tests=$remote_tests" >> "$GITHUB_OUTPUT"
           echo "assembly_tests=$assembly_tests" >> "$GITHUB_OUTPUT"
+          echo "sdk_tests=$sdk_tests" >> "$GITHUB_OUTPUT"
 
       - name: Report selected coverage
         env:
@@ -181,6 +192,7 @@ jobs:
           CROSS_PLATFORM: ${{ steps.c.outputs.cross_platform }}
           REMOTE_TESTS: ${{ steps.c.outputs.remote_tests }}
           ASSEMBLY_TESTS: ${{ steps.c.outputs.assembly_tests }}
+          SDK_TESTS: ${{ steps.c.outputs.sdk_tests }}
           WINDOWS_SENSITIVE: ${{ steps.c.outputs.memory_worker }}
           AGENT_LIFETIME: ${{ steps.c.outputs.agent_lifetime }}
           WORKFLOW_THREADS: ${{ steps.c.outputs.workflow_threads }}
@@ -189,10 +201,12 @@ jobs:
           {
             echo '### Selected CI coverage'
             echo "- code=$CODE; cross_platform=$CROSS_PLATFORM; Windows-sensitive=$WINDOWS_SENSITIVE"
-            echo "- test registration required: remote=$REMOTE_TESTS; assembly=$ASSEMBLY_TESTS"
+            echo "- test registration required: remote=$REMOTE_TESTS; assembly=$ASSEMBLY_TESTS; sdk=$SDK_TESTS"
+            echo "- installed SDK and external consumer on Windows/macOS/Linux=$SDK_TESTS"
             echo "- agent/runtime ASan=$AGENT_LIFETIME; workflow TSan=$WORKFLOW_THREADS"
             echo '- cross_platform adds Windows and Linux full tests before merge; macOS remains enabled.'
             echo '- Registration false means not selected, not a component test pass; no schema validation is provided.'
+            echo '- SDK selection enables its shared build and installed consumer; ASan/TSan keep their existing non-SDK scope.'
             echo '- Manual test_filter retains the Windows/macOS diagnostic scope; it is not three-platform acceptance.'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -374,12 +388,13 @@ jobs:
       # 依赖缓存:_deps(FetchContent 源码+已编产物)按依赖清单指纹钉住,清单
       # 不变即秒恢复——win/mac 两腿依赖编译是 Build 34 分钟的大头(实测走
       # FetchContent 后备)。跨 runner 绝对路径恒定,产物可直接复用。
+      # SDK ON 用共享 CRT，和默认静态 CRT 构建分开缓存。
       - name: Cache FetchContent deps
         uses: actions/cache@v4
         with:
           path: build/_deps
-          key: deps-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
-          restore-keys: deps-${{ matrix.name }}-
+          key: deps-${{ matrix.name }}-sdk-${{ needs.changes.outputs.sdk_tests }}-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
+          restore-keys: deps-${{ matrix.name }}-sdk-${{ needs.changes.outputs.sdk_tests }}-
 
       # vcpkg manifest 优先:runner 自带的 vcpkg 在 VCPKG_INSTALLATION_ROOT。
       # configure 失败(vcpkg 缺包/版本冲突等)就清掉构建目录、去掉工具链
@@ -390,7 +405,7 @@ jobs:
         shell: bash
         run: |
           set -x
-          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLUBANCODE_USE_CODELOAD=OFF -DLUBANCODE_BUNDLED_RG_DIR=$PWD/rg-stage/libexec"
+          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLUBANCODE_USE_CODELOAD=OFF -DLUBANCODE_BUNDLED_RG_DIR=$PWD/rg-stage/libexec -DLUBANCODE_BUILD_SDK=${{ needs.changes.outputs.sdk_tests == 'true' && 'ON' || 'OFF' }}"
           if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ] && cmake -B build -S . $COMMON_FLAGS \
                -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"; then
             echo "configured with vcpkg"
@@ -402,6 +417,44 @@ jobs:
             cmake -B build -S . $COMMON_FLAGS
           fi
 
+      # SDK 必须从安装前缀被仓库外工程消费，不能用源码树内链接冒充。
+      - name: Build SDK library
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: cmake --build build --config Release --target lubancore_sdk -j 4
+
+      - name: Install and test standalone SDK consumer
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_sdk.py --build-dir build
+
+      - name: Upload SDK consumer evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-consumer-${{ matrix.name }}
+          path: build/test-evidence/sdk-consumer/
+          if-no-files-found: warn
+
+      - name: Build and test SDK lifecycle regressions
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target lubancore_sdk_tests -j 4
+          mkdir -p build/test-evidence/sdk-focused
+          ctest --test-dir build -C Release -L '^sdk-focused$' --show-only=json-v1 > build/test-evidence/sdk-focused/tests.json
+          ctest --test-dir build -C Release -L '^sdk-focused$' --output-on-failure --no-tests=error --output-junit "$PWD/build/test-evidence/sdk-focused/results.xml"
+
+      - name: Upload SDK lifecycle evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-focused-${{ matrix.name }}
+          path: build/test-evidence/sdk-focused/
+          if-no-files-found: warn
+
       - name: Build
         shell: bash
         run: |
@@ -410,10 +463,11 @@ jobs:
 
       # 先查登记，后面的全量 Test 真跑；不重复执行，也不让零册冒绿。
       - name: Require registered component tests
-        if: needs.changes.outputs.remote_tests == 'true' || needs.changes.outputs.assembly_tests == 'true'
+        if: needs.changes.outputs.remote_tests == 'true' || needs.changes.outputs.assembly_tests == 'true' || needs.changes.outputs.sdk_tests == 'true'
         env:
           REMOTE_TESTS: ${{ needs.changes.outputs.remote_tests }}
           ASSEMBLY_TESTS: ${{ needs.changes.outputs.assembly_tests }}
+          SDK_TESTS: ${{ needs.changes.outputs.sdk_tests }}
         shell: bash
         run: |
           ctest --test-dir build -C Release --show-only=json-v1 > build/component-test-list.json
@@ -425,7 +479,7 @@ jobs:
           enabled = [test['name'] for test in tests if not any(
               prop['name'] == 'DISABLED' and prop['value']
               for prop in test.get('properties', []))]
-          for domain in ('remote', 'assembly'):
+          for domain in ('remote', 'assembly', 'sdk'):
               if os.environ[domain.upper() + '_TESTS'] != 'true':
                   continue
               selected = [name for name in enabled if re.match(r'^(unit|integration)\.' + domain + r'\.', name)]
@@ -550,8 +604,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/_deps
-          key: deps-linux-manylinux-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
-          restore-keys: deps-linux-manylinux-
+          key: deps-linux-manylinux-sdk-${{ needs.changes.outputs.sdk_tests }}-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
+          restore-keys: deps-linux-manylinux-sdk-${{ needs.changes.outputs.sdk_tests }}-
 
       - name: Cache static OpenSSL
         uses: actions/cache@v4
@@ -583,6 +637,7 @@ jobs:
           cmake -B build -S . \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON \
+            -DLUBANCODE_BUILD_SDK=${{ needs.changes.outputs.sdk_tests == 'true' && 'ON' || 'OFF' }} \
             -DLUBANCODE_USE_CODELOAD=OFF \
             -DLUBANCODE_BUNDLED_RG_DIR="$PWD/rg-stage/libexec" \
             -DCMAKE_C_COMPILER="$CC" \
@@ -594,6 +649,44 @@ jobs:
           CC: ${{ env.CC }}
           CXX: ${{ env.CXX }}
 
+      # SDK 必须从安装前缀被仓库外工程消费，不能用源码树内链接冒充。
+      - name: Build SDK library
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: cmake --build build --config Release --target lubancore_sdk -j 4
+
+      - name: Install and test standalone SDK consumer
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_sdk.py --build-dir build
+
+      - name: Upload SDK consumer evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-consumer-linux-manylinux
+          path: build/test-evidence/sdk-consumer/
+          if-no-files-found: warn
+
+      - name: Build and test SDK lifecycle regressions
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target lubancore_sdk_tests -j 4
+          mkdir -p build/test-evidence/sdk-focused
+          ctest --test-dir build -C Release -L '^sdk-focused$' --show-only=json-v1 > build/test-evidence/sdk-focused/tests.json
+          ctest --test-dir build -C Release -L '^sdk-focused$' --output-on-failure --no-tests=error --output-junit "$PWD/build/test-evidence/sdk-focused/results.xml"
+
+      - name: Upload SDK lifecycle evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-focused-linux-manylinux
+          path: build/test-evidence/sdk-focused/
+          if-no-files-found: warn
+
       - name: Build
         run: |
           set -e
@@ -601,10 +694,11 @@ jobs:
           cmake --build build --target lubancode_tests -j "$(nproc)"
 
       - name: Require registered component tests
-        if: needs.changes.outputs.remote_tests == 'true' || needs.changes.outputs.assembly_tests == 'true'
+        if: needs.changes.outputs.remote_tests == 'true' || needs.changes.outputs.assembly_tests == 'true' || needs.changes.outputs.sdk_tests == 'true'
         env:
           REMOTE_TESTS: ${{ needs.changes.outputs.remote_tests }}
           ASSEMBLY_TESTS: ${{ needs.changes.outputs.assembly_tests }}
+          SDK_TESTS: ${{ needs.changes.outputs.sdk_tests }}
         run: |
           ctest --test-dir build -C Release --show-only=json-v1 > build/component-test-list.json
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
@@ -615,7 +709,7 @@ jobs:
           enabled = [test['name'] for test in tests if not any(
               prop['name'] == 'DISABLED' and prop['value']
               for prop in test.get('properties', []))]
-          for domain in ('remote', 'assembly'):
+          for domain in ('remote', 'assembly', 'sdk'):
               if os.environ[domain.upper() + '_TESTS'] != 'true':
                   continue
               selected = [name for name in enabled if re.match(r'^(unit|integration)\.' + domain + r'\.', name)]
