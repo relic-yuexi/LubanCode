@@ -66,7 +66,7 @@ def events(path):
 
 def fixture_job(marker, nonce, duration, child_marker=None):
     if child_marker and child_marker != "-":
-        subprocess.Popen([sys.executable, "-u", THIS, "_job", child_marker, nonce, duration, "-"],
+        subprocess.Popen([sys.executable, "-u", THIS, "_job", child_marker, nonce, "20", "-"],
                          creationflags=NO_WINDOW)
     started = time.monotonic()
     with open(marker, "a", encoding="utf-8") as sink:
@@ -407,7 +407,7 @@ def launch_failure(runner):
 def results_and_logs(runner):
     handle, body = runner.start("finished", duration=0.2)
     final = runner.terminal(handle)
-    assert final["state"] == "succeeded" and final["exit_code"] == 0
+    assert final["state"] == "succeeded" and final["exit_code"] == 0, final
     logs = runner.root / "jobs" / handle["job_id"]
     assert "experiment-complete" in (logs / "stdout.log").read_text(encoding="utf-8")
     assert runner.secret in (logs / "stdout.log").read_text(encoding="utf-8")
@@ -426,6 +426,17 @@ def results_and_logs(runner):
     replay = runner.call(body)
     assert replay["ok"] and replay["job"]["job_id"] == handle["job_id"]
     assert replay["job"]["state"] == "succeeded"
+
+    # Natural leader exit also cleans a still-running contained descendant.
+    entry, _ = runner.start("entry-exit", duration=2, child=True)
+    child = runner.project / "entry-exit-child.jsonl"
+    eventually(lambda: len(events(child)) > 2)
+    result = runner.terminal(entry)
+    assert result["state"] == "succeeded" and result["exit_code"] == 0, result
+    time.sleep(0.2)
+    count = len(events(child))
+    time.sleep(0.25)
+    assert len(events(child)) == count
 
 
 def main():

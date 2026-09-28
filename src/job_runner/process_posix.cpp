@@ -5,9 +5,14 @@
 #include <cerrno>
 #include <csignal>
 #include <fcntl.h>
+#include <iostream>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#include <sys/proc.h>
+#endif
 
 namespace lubancode::job_runner {
 std::string RandomHex() {
@@ -32,6 +37,49 @@ void VerifyPrivateDirectory(const fs::path& path) {
         (info.st_mode & 0077) != 0) throw Error("runner.state_not_private");
 }
 std::string ProcessScope() { return "posix_process_group"; }
+
+namespace {
+#ifdef __APPLE__
+bool OnlyExitedGroupMembers(pid_t leader) {
+    // XNU killpg1 filters SZOMB before counting permitted targets, so an
+    // otherwise empty, zombie-anchored group can return EPERM. Do not confuse
+    // that with permission denied for a live descendant: inspect the complete
+    // KERN_PROC_PGRP result, which includes both live and zombie processes.
+    int query[] = {CTL_KERN, KERN_PROC, KERN_PROC_PGRP, leader};
+    for (int attempt = 0; attempt != 3; ++attempt) {
+        std::size_t bytes = 0;
+        if (sysctl(query, 4, nullptr, &bytes, nullptr, 0) != 0 || bytes == 0 || bytes > 1024 * 1024) return false;
+        std::vector<kinfo_proc> members((bytes + sizeof(kinfo_proc) - 1) / sizeof(kinfo_proc));
+        bytes = members.size() * sizeof(kinfo_proc);
+        if (sysctl(query, 4, members.data(), &bytes, nullptr, 0) != 0) {
+            if (errno == ENOMEM) continue;
+            return false;
+        }
+        if (bytes % sizeof(kinfo_proc) != 0 || bytes > members.size() * sizeof(kinfo_proc)) return false;
+        bool saw_anchor = false;
+        for (std::size_t i = 0; i < bytes / sizeof(kinfo_proc); ++i) {
+            if (members[i].kp_eproc.e_pgid != leader || members[i].kp_proc.p_stat != SZOMB) return false;
+            if (members[i].kp_proc.p_pid == leader) saw_anchor = true;
+        }
+        return saw_anchor;
+    }
+    return false;
+}
+#endif
+void StopOwnedGroup(pid_t leader, bool leader_exited) {
+    if (kill(-leader, SIGKILL) == 0) return;
+    const int failure = errno;
+    if (failure == ESRCH) return;
+#ifdef __APPLE__
+    if (failure == EPERM && leader_exited && OnlyExitedGroupMembers(leader)) return;
+#else
+    (void)leader_exited;
+#endif
+    // Only a fixed operation and errno enter the local supervisor diagnostic.
+    std::cerr << "runner.group_signal_failed errno=" << failure << " leader_exited=" << leader_exited << '\n';
+    throw Error("runner.cancel_failed");
+}
+}
 
 struct Process::Impl {
     pid_t child = 0;
@@ -121,7 +169,7 @@ void Process::Cancel() {
     siginfo_t info {};
     if (!impl_->Check(info)) return;
     // The unreaped child anchors the group ID, including after leader exit.
-    if (kill(-impl_->child, SIGKILL) != 0 && errno != ESRCH) throw Error("runner.cancel_failed");
+    StopOwnedGroup(impl_->child, info.si_pid != 0);
 }
 std::optional<std::int64_t> Process::Poll() {
     if (impl_->exit) return impl_->exit;
@@ -129,7 +177,7 @@ std::optional<std::int64_t> Process::Poll() {
     siginfo_t info {};
     if (!impl_->Check(info) || info.si_pid == 0) return std::nullopt;
     // Do not release/reuse the leader PID until its managed group is signalled.
-    if (kill(-impl_->child, SIGKILL) != 0 && errno != ESRCH) throw Error("runner.cancel_failed");
+    StopOwnedGroup(impl_->child, true);
     int status = 0;
     pid_t waited;
     do { waited = waitpid(impl_->child, &status, 0); } while (waited < 0 && errno == EINTR);

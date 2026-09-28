@@ -62,7 +62,7 @@ public:
                               {"arbitrary_service_restart_survival", false}, {"runner_crash_resume", false},
                               {"machine_restart_resume", false}, {"termination_scope", ProcessScope()},
                               {"terminal_evidence", ProcessScope() == "windows_job_object" ?
-                                  "leader_exit_and_job_empty" : "leader_exit_and_group_signal"},
+                                  "leader_exit_and_job_empty" : "leader_exit_and_group_cleanup"},
                               {"escaped_descendants_contained", ProcessScope() == "windows_job_object"},
                               {"gpu_management", false}, {"log_sync", "metadata_only"}}},
             {"active_jobs", active_.size()}};
