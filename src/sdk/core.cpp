@@ -18,7 +18,7 @@
 #include "platform/text_encoding.hpp"
 #include "runtime/assembly/backend.hpp"
 #include "runtime/assembly/builtin_tools.hpp"
-#include "runtime/assembly/mcp.hpp"
+#include "runtime/assembly/session_resources.hpp"
 #include "runtime/interaction_broker.hpp"
 #include "runtime/session_service.hpp"
 #include "runtime/tool_trace_hub.hpp"
@@ -275,9 +275,7 @@ struct Session::Impl final : rt::InteractionBroker {
     std::string session_id;
     fs::path session_dir;
     std::unique_ptr<rt::SessionService> service;
-    std::unique_ptr<api::Backend> backend;
-    std::vector<rt::assembly::McpServerRuntime> mcp;
-    std::unique_ptr<lubancode::tools::ToolRegistry> registry;
+    std::unique_ptr<rt::assembly::SessionResources> resources;
     std::unique_ptr<lubancode::agent::Agent> agent;
     mutable std::mutex mutex;
     mutable std::condition_variable cv;
@@ -373,18 +371,19 @@ struct Session::Impl final : rt::InteractionBroker {
         if (!options.resume_session_id.empty() && !ValidId(options.resume_session_id)) {
             return std::unexpected(Failure("sdk.resume.invalid_id"));
         }
-        registry = std::make_unique<lubancode::tools::ToolRegistry>();
+        auto prepared_registry = std::make_unique<lubancode::tools::ToolRegistry>();
         for (const auto& name : options.builtin_tools) {
             auto tool = rt::assembly::CreateLocalTool(name);
-            if (!tool || registry->Find(name)) return std::unexpected(Failure("sdk.tool.unsupported_or_duplicate", name));
-            registry->Register(detail::BindLocalTool(std::move(tool), options.cwd));
+            if (!tool || prepared_registry->Find(name)) return std::unexpected(Failure("sdk.tool.unsupported_or_duplicate", name));
+            prepared_registry->Register(detail::BindLocalTool(std::move(tool), options.cwd));
         }
         for (auto& tool : options.custom_tools) {
-            if (registry->Find(tool.name)) return std::unexpected(Failure("sdk.tool.duplicate", tool.name));
+            if (prepared_registry->Find(tool.name)) return std::unexpected(Failure("sdk.tool.duplicate", tool.name));
             auto adapted = detail::AdaptTool(std::move(tool), options.cwd);
             if (!adapted) return std::unexpected(adapted.error());
-            registry->Register(std::move(*adapted));
+            prepared_registry->Register(std::move(*adapted));
         }
+        rt::assembly::SessionResourcesRequest resource_request;
         std::set<std::string> server_names;
         for (const auto& spec : options.mcp_servers) {
             if (!ValidId(spec.name) || !server_names.insert(spec.name).second || spec.command.empty() ||
@@ -392,28 +391,43 @@ struct Session::Impl final : rt::InteractionBroker {
                 spec.tools.empty() || spec.startup_timeout_ms <= 0 || spec.call_timeout_ms <= 0) {
                 return std::unexpected(Failure("sdk.mcp.invalid_spec", spec.name));
             }
-            rt::assembly::McpLaunchRequest launch{spec.name, spec.command, spec.arguments, spec.environment,
-                                                lubancode::platform::EnvMode::Replace, options.cwd};
-            rt::assembly::McpStartupOptions startup{spec.startup_timeout_ms, spec.call_timeout_ms, &interrupt};
-            auto started = rt::assembly::StartMcpServer(launch, startup);
-            if (!started) return std::unexpected(Failure("sdk.mcp.start_failed", started.error().error));
-            mcp.push_back(std::move(*started));
-            auto& owner = mcp.back();
-            for (const auto& name : spec.tools) {
-                auto found = std::find_if(owner.tools.begin(), owner.tools.end(), [&](const auto& info) { return info.name == name; });
-                if (found == owner.tools.end()) return std::unexpected(Failure("sdk.mcp.tool_missing", name));
-                auto tool = std::make_unique<lubancode::mcp::McpTool>(*owner.client, spec.name, *found);
-                if (registry->Find(tool->name())) return std::unexpected(Failure("sdk.tool.duplicate", tool->name()));
-                lubancode::tools::ToolRegistration registration;
-                registration.source_kind = lubancode::tools::ToolSourceKind::Mcp;
-                registration.source_instance = spec.name;
-                registration.tool = std::move(tool);
-                registry->Register(std::move(registration));
-            }
+            resource_request.mcp_servers.push_back({
+                {spec.name, spec.command, spec.arguments, spec.environment,
+                 lubancode::platform::EnvMode::Replace, options.cwd},
+                {spec.startup_timeout_ms, spec.call_timeout_ms, &interrupt}, true});
         }
+        resource_request.registry_factory = [&](std::span<const rt::assembly::McpServerRuntime> servers)
+            -> rt::assembly::SessionRegistryResult {
+            // Move the candidate table into this callback before it borrows a
+            // Client. Failure/exception destroys these tools before factory rollback.
+            auto registry = std::move(prepared_registry);
+            for (std::size_t i = 0; i < servers.size(); ++i) {
+                const auto& owner = servers[i];
+                const auto& spec = options.mcp_servers[i]; // all SDK servers are required
+                for (const auto& name : spec.tools) {
+                    auto found = std::find_if(owner.tools.begin(), owner.tools.end(),
+                        [&](const auto& info) { return info.name == name; });
+                    if (found == owner.tools.end()) {
+                        return std::unexpected(rt::assembly::SessionResourceFailure{
+                            rt::assembly::SessionResourceStage::Registry, "sdk.mcp.tool_missing", name, {}, {}});
+                    }
+                    auto tool = std::make_unique<lubancode::mcp::McpTool>(*owner.client, spec.name, *found);
+                    if (registry->Find(tool->name())) {
+                        return std::unexpected(rt::assembly::SessionResourceFailure{
+                            rt::assembly::SessionResourceStage::Registry, "sdk.tool.duplicate", tool->name(), {}, {}});
+                    }
+                    lubancode::tools::ToolRegistration registration;
+                    registration.source_kind = lubancode::tools::ToolSourceKind::Mcp;
+                    registration.source_instance = spec.name;
+                    registration.tool = std::move(tool);
+                    registry->Register(std::move(registration));
+                }
+            }
+            return registry;
+        };
         std::string wire = "sdk_custom";
-        if (options.backend) backend = detail::AdaptBackend(std::move(options.backend));
-        else {
+        std::optional<lubancode::config::Config> backend_config;
+        if (!options.backend) {
             const auto& source = *options.connection;
             if (source.base_url.empty() || source.connect_timeout_ms <= 0 || source.idle_timeout_seconds <= 0 || source.request_timeout_seconds <= 0) {
                 return std::unexpected(Failure("sdk.connection.invalid"));
@@ -430,8 +444,24 @@ struct Session::Impl final : rt::InteractionBroker {
             config.connect_timeout_ms = source.connect_timeout_ms;
             config.stream_idle_timeout_secs = source.idle_timeout_seconds;
             config.request_hard_timeout_secs = source.request_timeout_seconds;
-            backend = rt::assembly::BuildBackend(config);
+            backend_config = std::move(config);
         }
+        resource_request.backend_factory = [&]() -> std::unique_ptr<api::Backend> {
+            if (options.backend) return detail::AdaptBackend(std::move(options.backend));
+            return rt::assembly::BuildBackend(*backend_config);
+        };
+        auto assembled = rt::assembly::BuildSessionResources(std::move(resource_request));
+        if (!assembled) {
+            const auto& error = assembled.error();
+            if (error.stage == rt::assembly::SessionResourceStage::Mcp)
+                return std::unexpected(Failure("sdk.mcp.start_failed", error.message));
+            if (error.code == "assembly.mcp.invalid_spec")
+                return std::unexpected(Failure("sdk.mcp.invalid_spec", error.component));
+            if (error.stage == rt::assembly::SessionResourceStage::Registry)
+                return std::unexpected(Failure(error.code, error.message));
+            return std::unexpected(Failure("sdk.session.open_failed", error.message));
+        }
+        resources = std::move(*assembled);
         auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
         if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
         rt::SessionLaunchRequest launch;
@@ -462,7 +492,7 @@ struct Session::Impl final : rt::InteractionBroker {
         profile.system_prompt = options.system_prompt;
         profile.runtime.max_steps_per_turn = options.max_steps_per_turn;
         profile.runtime.context_window_tokens = options.context_window_tokens;
-        agent = std::make_unique<lubancode::agent::Agent>(*backend, *registry, std::move(profile));
+        agent = std::make_unique<lubancode::agent::Agent>(resources->backend(), resources->registry(), std::move(profile));
         if (!options.resume_session_id.empty()) agent->RestoreSessionHistory(service->trajectory()->LaunchResumeHistory());
         return LoadOperations();
     }
@@ -709,9 +739,7 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         if (close_error && close_errors) close_errors->Remember(*close_error);
         agent.reset();
-        registry.reset();
-        mcp.clear();
-        backend.reset();
+        resources.reset();
         // SessionService destruction also releases operations.jsonl. Keep query
         // projections, not the live writer, after Close (Windows delete/rename).
         service.reset();

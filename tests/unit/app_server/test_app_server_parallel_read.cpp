@@ -185,8 +185,9 @@ struct ParallelHarness {
         ConcurrencyGate* gate_ptr = &gate;
         config::Config* config_ptr = &config;
         std::vector<std::vector<api::StreamEvent>>* script_ptr = &scripts;
-        options.assembly_factory = [config_ptr, gate_ptr, counters_ptr, script_ptr]() {
+        options.assembly_factory = [config_ptr, gate_ptr, counters_ptr, script_ptr](const std::string& cwd_utf8) {
             app_server::SessionAssemblyRequest request;
+            request.cwd_utf8 = cwd_utf8;
             request.config = config_ptr;
             request.backend_factory = [script_ptr] {
                 return std::make_unique<SharedScriptBackend>(*script_ptr);
