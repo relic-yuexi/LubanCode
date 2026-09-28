@@ -3,9 +3,11 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 #include "api/chat/client.hpp"
@@ -22,6 +24,27 @@ namespace {
 using namespace lubancode;
 namespace history = test_support::session_history;
 using namespace std::chrono_literals;
+
+struct EnvGuard {
+    std::string name;
+    std::optional<std::string> previous;
+    EnvGuard(const char* key, const char* value) : name(key) {
+        if (const auto* original = std::getenv(key)) previous = original;
+#ifdef _WIN32
+        _putenv_s(key, value);
+#else
+        setenv(key, value, 1);
+#endif
+    }
+    ~EnvGuard() {
+#ifdef _WIN32
+        _putenv_s(name.c_str(), previous ? previous->c_str() : "");
+#else
+        if (previous) setenv(name.c_str(), previous->c_str(), 1);
+        else unsetenv(name.c_str());
+#endif
+    }
+};
 
 nlohmann::json RawCall(app_server::Server& server, const std::string& method,
                        const nlohmann::json& params) {
@@ -162,6 +185,7 @@ void Turn(app_server::Server& server, const std::string& id, const char* input) 
 }  // namespace
 
 TEST_CASE("AppServer history: HTTP requests preserve two turns and same-ID resume without shared-cwd leakage") {
+    EnvGuard format("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     history::Fixture fixture;
     std::atomic<int> calls{0};
     std::atomic<int> live_backends{0};
@@ -196,6 +220,7 @@ TEST_CASE("AppServer history: HTTP requests preserve two turns and same-ID resum
 }
 
 TEST_CASE("AppServer resources: admitted MCP follows each thread cwd and optional failure stays explicit") {
+    EnvGuard format("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     test_support::McpCwdFixture fixture;
     config::Config config;
     config.model = "cwd-model";
@@ -314,6 +339,7 @@ private:
 }  // namespace
 
 TEST_CASE("AppServer ownership: a hard deadline cannot admit another turn over a live worker") {
+    EnvGuard format("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     history::Fixture fixture;
     auto gate = std::make_shared<BackendGate>();
     app_server::ServerOptions options;
@@ -344,6 +370,7 @@ TEST_CASE("AppServer ownership: a hard deadline cannot admit another turn over a
 }
 
 TEST_CASE("AppServer ownership: pending stop keeps the worker and ledger until a joined retry") {
+    EnvGuard format("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     history::Fixture fixture;
     auto gate = std::make_shared<BackendGate>();
     app_server::ServerOptions options;
@@ -459,6 +486,7 @@ private:
 }  // namespace
 
 TEST_CASE("AppServer ownership: destruction signals all workers before joining and retains its owner") {
+    EnvGuard format("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     history::Fixture fixture;
     auto gate = std::make_shared<ShutdownGate>();
     app_server::ServerOptions options;
