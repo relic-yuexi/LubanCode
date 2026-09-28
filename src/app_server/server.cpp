@@ -1918,7 +1918,8 @@ nlohmann::json Server::HandleTurnStart(const std::string& thread_id, const std::
     // detach 让它自生自灭,终态事件由它(假如还活着)自己补发。
     Diagnose("回合未在硬时限内收口,分离工作线程: " + thread_id + " " + record->turn_id);
     record->turn_worker.detach();
-    record->turn_running.store(false);
+    // A detached worker still owns the session's Agent. Keep the busy fence
+    // until that worker really exits; a timeout is not execution completion.
     out_error_code = "hard_deadline";
     return nlohmann::json();
 }
@@ -1982,10 +1983,17 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         }
         api::Backend& backend = record->assembly->resources->backend();
         tools::ToolRegistry& registry = record->assembly->resources->registry();
-        // Agent 档案从会话材料取(装配层显式定的 system_prompt 与步数闸);
-        // Agent 循环对象本身每轮新建(便宜、无跨轮状态),材料不重建。
-        agent::AgentProfile profile = record->assembly->agent_profile;
-        agent::Agent loop(backend, registry, std::move(profile));
+        // Keep the actual ContextManager across turns. On process/session
+        // recovery, seed it once from the existing V3 resume projection; do not
+        // mistake a populated trajectory ledger for model-visible history.
+        if (record->session_agent == nullptr) {
+            record->session_agent = std::make_unique<agent::Agent>(backend, registry, record->assembly->agent_profile);
+            auto* trajectory = record->session_service != nullptr ? record->session_service->trajectory() : nullptr;
+            if (trajectory != nullptr && trajectory->resumed_at_launch()) {
+                record->session_agent->RestoreSessionHistory(trajectory->LaunchResumeHistory());
+            }
+        }
+        agent::Agent& loop = *record->session_agent;
 
         // ---- 事件流(骨架拆解批二:整装切到 TurnEventAdapter) ----
         // 旧路在本地手拼 text/thinking 懒起条、open_tools 对账、收口补账,
@@ -2037,6 +2045,21 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             EmitEventSafe(kEventTurnContext,
                                    MakeTurnContextParams(thread_id, turn_id, std::move(context)));
         };
+        std::optional<runtime::ToolTraceHub> trajectory_hub;
+        std::unique_ptr<runtime::TrajectoryTurnBridge> trajectory_bridge;
+        // Construct after the borrowed owners, before the first callback is
+        // installed. Both normal return and exception unwind clear references
+        // before those owners die; AskUser's handler must not retain record.
+        struct TurnBorrowings {
+            agent::Agent& loop;
+            tools::AskUserTool* ask_user = nullptr;
+            runtime::AsyncToolRuntime* async_runtime = nullptr;
+            ~TurnBorrowings() {
+                loop.SetWiring({});
+                if (ask_user != nullptr) ask_user->SetHandler({});
+                if (async_runtime != nullptr) async_runtime->InstallTurnBridge(nullptr);
+            }
+        } borrowed{loop};
         loop.SetWiring(std::move(loop_wiring));
 
         // ---- 审批接线(阶段 2 核心) ----
@@ -2101,6 +2124,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // 版:每题发一枚 user/ask,等前端 answers。
         if (tools::Tool* raw_ask = registry.Find("ask_user"); raw_ask != nullptr) {
             if (auto* ask_tool = dynamic_cast<tools::AskUserTool*>(raw_ask); ask_tool != nullptr) {
+                borrowed.ask_user = ask_tool;
                 ask_tool->SetHandler([this, record, turn_id](const tools::AskUserQuestion& question)
                                          -> std::expected<tools::AskUserResponse, std::string> {
                     runtime::QuestionRequest request;
@@ -2142,8 +2166,6 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // P0-2 轨迹:flag 开的 thread 接同一口——hub(工具栅栏 + 落盘关口)
         // 与轮次边界桥都挂上,与终端 RunTurn 同一形状(§15.5 app-server
         // 走同一 TrajectorySink)。flag 关不建 hub,app-server 行为零变。
-        std::optional<runtime::ToolTraceHub> trajectory_hub;
-        std::unique_ptr<runtime::TrajectoryTurnBridge> trajectory_bridge;
         runtime::TrajectorySessionLedger* trajectory_ledger =
             record->session_service != nullptr ? record->session_service->trajectory() : nullptr;
         if (trajectory_ledger != nullptr) {
@@ -2174,6 +2196,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                     runtime::AsyncToolRuntime* async_runtime =
                         record->session_service->runtime()->async_tool_runtime();
                     if (async_runtime != nullptr) {
+                        borrowed.async_runtime = async_runtime;
                         async_runtime->InstallTurnBridge(trajectory_bridge.get());
                         async_runtime->NoteModelIdentity(options_.session_provider,
                                                         record->assembly->agent_profile.request.model);

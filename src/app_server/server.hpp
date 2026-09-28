@@ -130,6 +130,11 @@ struct ThreadRecord {
     // 重建注册表(冻结合同 §7 RuntimeBundle 最小形状)。thread/start 时
     // 装配,thread 停场随 record 析构(注册表先亡,MCP 子进程后收)。
     std::unique_ptr<SessionAssembly> assembly;
+    // ContextManager lives with this session, like the public SDK's Agent.
+    // Declared after assembly so borrowed backend/registry outlive the Agent.
+    // Only the one active turn worker may touch it; turn callbacks are cleared
+    // before their stack-local owners leave scope.
+    std::unique_ptr<agent::Agent> session_agent;
 
     explicit ThreadRecord(std::string id)
         : thread_id(std::move(id)) {}
