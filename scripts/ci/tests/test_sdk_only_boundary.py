@@ -160,6 +160,14 @@ std::cerr << "not executable";
         (self.build / "liblubancore.fake-artifact").write_bytes(b"")
         self.assert_rejected(self.check(), "SDK artifact is missing or empty")
 
+    def test_optional_release_symbols_do_not_replace_required_binary(self):
+        self.targets[0]["artifacts"].append({"path": "lubancore.pdb"})
+        self.assertEqual(self.check()["status"], "passed")
+        (self.build / "liblubancore.fake-artifact").unlink()
+        self.assert_rejected(self.check(), "SDK artifact is missing or empty")
+        self.targets[0]["artifacts"] = [{"path": "lubancore.pdb"}]
+        self.assert_rejected(self.check(), "no link/load build artifact")
+
     def test_missing_queries_or_wrong_build_reply_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "no File API reply"):
             boundary.inspect(self.source, self.build, "Release", False)
