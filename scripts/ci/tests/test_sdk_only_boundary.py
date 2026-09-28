@@ -95,9 +95,13 @@ class BoundaryTests(unittest.TestCase):
         self.targets[-1]["name"] = "lubancore_sdk_tests"
         self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
 
-    def test_unbuilt_resource_target_cannot_hide_behind_exclude_from_all(self):
-        self.targets.append({"id": "resources", "name": "lubancode_official_docs", "type": "UTILITY"})
-        self.assert_rejected(self.check(), "host/resource target")
+    def test_unbuilt_host_target_cannot_hide_behind_exclude_from_all(self):
+        target = {"id": "host", "type": "UTILITY"}
+        self.targets.append(target)
+        for name in ("lubancode_official_docs", "lubancore_host_tests"):
+            with self.subTest(target=name):
+                target["name"] = name
+                self.assert_rejected(self.check(), "host/resource target")
 
     def test_shared_resource_owner_test_is_a_narrow_sdk_allowance(self):
         shared = "tests/unit/runtime/test_session_resources.cpp"

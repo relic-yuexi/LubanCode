@@ -19,7 +19,7 @@ import sys
 
 CLIENT = "client-lubancore-boundary"
 HOST_TARGETS = {
-    "lubancode", "lubancode_core", "lubancode_app", "lubancode_tests",
+    "lubancode", "lubancode_core", "lubancode_app", "lubancode_tests", "lubancore_host_tests",
     "lubancode_official_skills", "lubancode_official_docs", "lubancode_assistant_web",
 }
 HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/")
