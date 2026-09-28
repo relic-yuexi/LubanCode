@@ -196,6 +196,56 @@ private:
 };
 } // namespace
 
+TEST_CASE("SDK host boundary: in-flight HTTP preserves the host signal handler") {
+    HostFixture fixture;
+    HostSignalState host;
+    lubancode::test_support::FakeHttpServer server;
+    lubancode::test_support::FakeHttpResponse response;
+    response.headers = {{"Content-Type", "text/event-stream"}};
+    response.delay_before_response = 2s;
+    response.body =
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"slow answer\"}}]}\n\n"
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n";
+    server.Enqueue(std::move(response));
+    auto runtime = sdk::Runtime::Create({platform::PathToUtf8(fixture.root / "data"),
+                                         platform::PathToUtf8(fixture.root / "resources")});
+    REQUIRE(runtime.has_value());
+    sdk::SessionOptions options;
+    options.cwd = platform::PathToUtf8(fixture.root / "cwd");
+    options.model = "fixture";
+    sdk::Connection connection;
+    connection.wire = sdk::Wire::ChatCompletions;
+    connection.base_url = "http://127.0.0.1:" + std::to_string(server.port()) + "/v1";
+    connection.api_key = "FAKE_HOST_BOUNDARY_KEY";
+    options.connection = std::move(connection);
+    auto session = (*runtime)->OpenSession(std::move(options));
+    REQUIRE(session.has_value());
+    auto receipt = (*session)->Submit("slow-key", "question");
+    REQUIRE(receipt.has_value());
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (server.requests().empty() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    REQUIRE(server.requests().size() == 1);
+    // Checking only after completion misses libcurl's temporary SIG_IGN switch.
+    // Prove the real request is still in flight for every handler observation.
+    for (int sample = 0; sample < 4; ++sample) {
+        auto active = (*session)->ReadOperation(receipt->operation_id);
+        REQUIRE(active.has_value());
+        REQUIRE(active->state == sdk::OperationState::Running);
+        host.CheckHandler();
+        std::this_thread::sleep_for(5ms);
+    }
+    const auto result = (*session)->WaitResult(receipt->operation_id, 15s);
+    REQUIRE(result.has_value());
+    CHECK(result->state == sdk::OperationState::Succeeded);
+    CHECK(result->final_text == "slow answer");
+    CHECK(result->result_persisted);
+    REQUIRE((*runtime)->Shutdown().has_value());
+    host.CheckHandler();
+}
+
 TEST_CASE("SDK host boundary: child pipe failure preserves host SIGPIPE state") {
     HostSignalState host;
     // Darwin's old process-directed SIGPIPE can arrive on this other unblocked
