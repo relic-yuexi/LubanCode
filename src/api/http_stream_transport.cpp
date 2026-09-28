@@ -7,6 +7,8 @@
 #include <chrono>
 #include <utility>
 
+#include <curl/curl.h>
+
 #include "text/i18n.hpp"
 #include "platform/json_safe.hpp"  // DescribeDumpFailure/DumpJsonSanitized:请求体 dump 的窄边界
 #include "platform/log_sink.hpp"
@@ -174,23 +176,30 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
     // 上限——libcurl 语义是"持续 stream_idle_timeout_secs 秒平均速率低于
     // 1 字节/秒就判超时",拿它当"连续 N 秒一个字节没收到"的等价检测(流式
     // 回答本身可以很长,故意不设总 Timeout)。
-    cpr::Response response = cpr::Post(
-        cpr::Url{call.url},
-        cpr_headers,
-        cpr::Body{call.body},
-        cpr::ConnectTimeout{std::chrono::milliseconds(call.connect_timeout_ms)},
-        #if defined(_MSC_VER)
+    cpr::Session session;
+    // cpr's CPR_CURL_NOSIGNAL build option defaults off and is outside our
+    // control for installed dependencies. Set this on every request handle:
+    // libcurl must not temporarily replace the embedding host's SIGPIPE handler.
+    const auto curl = session.GetCurlHolder();
+    if (!curl || !curl->handle || curl_easy_setopt(curl->handle, CURLOPT_NOSIGNAL, 1L) != CURLE_OK) {
+        return std::unexpected(Error{ErrorKind::Network, "http.signal_policy_unavailable", 0});
+    }
+    session.SetUrl(cpr::Url{call.url});
+    session.SetHeader(cpr_headers);
+    session.SetBody(cpr::Body{call.body});
+    session.SetConnectTimeout(cpr::ConnectTimeout{std::chrono::milliseconds(call.connect_timeout_ms)});
+#if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)  // 新版 cpr 弃用 int 构造改 chrono;vendored 1.11 只有 int 形,值两边通用
 #endif
-        cpr::LowSpeed{1, call.stream_idle_timeout_secs}
+    session.SetLowSpeed(cpr::LowSpeed{1, call.stream_idle_timeout_secs});
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
-        ,
-        header_cb,
-        write_cb,
-        progress_cb);
+    session.SetHeaderCallback(header_cb);
+    session.SetWriteCallback(write_cb);
+    session.SetProgressCallback(progress_cb);
+    cpr::Response response = session.Post();
 
     // 收场分型,顺序有讲究:用户取消 > 帧溢出 > 错误体帽 > 网络错 > HTTP 状态。
     if (cancelled || (cancel != nullptr && cancel->load())) {
