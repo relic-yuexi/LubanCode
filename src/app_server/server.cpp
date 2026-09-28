@@ -1739,6 +1739,10 @@ nlohmann::json Server::HandleThreadStop(const std::string& thread_id, std::strin
             Diagnose("thread 停场时回合未在硬时限内收口,分离工作线程: " + thread_id);
             record->turn_worker.detach();
         }
+    } else if (record->turn_worker.joinable()) {
+        // Normal async completion clears turn_running, but leaves the thread
+        // joinable. Reap it before the record (and its session resources) dies.
+        record->turn_worker.join();
     }
     // P0-2:thread 停场即 session 封口(session.ended + session.json closed;
     // 收不回的执行记 unknown,不冒充 clean)。封不了只记账,不拦停场——
