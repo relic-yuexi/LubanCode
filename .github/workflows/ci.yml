@@ -1037,7 +1037,7 @@ jobs:
           # "未配对点击"的拒绝态断言抢跑假红;渠道域不是本腿的合同面。
           ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\.|^integration\.app_server\.app_server_session_parity$|^unit\.app_server\.app_server_browser$|^integration\.plugins\.tool_runtime_deferral$|^unit\.app\.turn_runner_scoped_bindings$" \
             -E "channel_menu_pump" --parallel 4 --output-on-failure --no-tests=error \
-            --output-junit build/asan-results.xml
+            --output-junit "$PWD/build/asan-results.xml"
           python3 - <<'PY'
           import json
           import re
@@ -1046,6 +1046,10 @@ jobs:
           required = {test['name'] for test in
                       json.loads(Path('build/asan-host-registration.json').read_text())['tests']}
           cases = ET.parse('build/asan-results.xml').getroot().findall('.//testcase')
+          # JUnit system-out may truncate successful output before doctest's
+          # summary. Match each source's complete native log section instead.
+          native_log = Path('build/Testing/Temporary/LastTest.log').read_text(encoding='utf-8')
+          native_sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$', native_log, flags=re.M)
           for name in required:
               matching = [case for case in cases if case.attrib.get('name') == name]
               if len(matching) != 1:
@@ -1054,7 +1058,11 @@ jobs:
               if case.attrib.get('status') != 'run' or any(case.find(kind) is not None for kind in
                                                          ('failure', 'error', 'skipped')):
                   raise SystemExit('ASan required source was skipped or failed: ' + name)
-              counts = re.findall(r'\[doctest\] test cases:\s+(\d+)', case.findtext('system-out', default=''))
+              sections = [native_sections[index + 1] for index in range(1, len(native_sections), 2)
+                          if native_sections[index] == name]
+              if len(sections) != 1:
+                  raise SystemExit('ASan native log does not identify one source: ' + name)
+              counts = re.findall(r'\[doctest\] test cases:\s+(\d+)', sections[0])
               if len(counts) != 1 or int(counts[0]) == 0:
                   raise SystemExit('ASan source filter ran no native test cases: ' + name)
           print(f'ASan: all {len(required)} required lifetime sources executed nonempty native tests')
