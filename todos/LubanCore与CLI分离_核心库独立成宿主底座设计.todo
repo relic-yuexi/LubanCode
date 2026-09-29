@@ -23,7 +23,7 @@
 
 最新已合小批为 #251，验收头 `12686fa1`，经 `7f3cf7cb` 合入，见 [CI 36462878177](https://github.com/relic-yuexi/LubanCode/actions/runs/36462878177)：三平台 tests OFF/ON 默认 ALL、普通全安装、搬迁外部消费各 5/5、SDK 专项各 6/6、宿主兼容各 6/6；默认 CLI 全量 Linux 659/659、macOS 662/662、Windows 661/661。ASan 选择集 99/99，包含工具装配、延迟工具、AppServer 与 Browser 回归；LeakSanitizer 未开启，Playwright 未安装，TSan 按条件跳过。实际合并树与受测树一致；这些证据不外推下一批。
 
-下一小批提 `ScopedTurnBindings`，统一 SDK、AppServer、CLI 与 Headless 的回合临时借用。先保存旧 AgentWiring，再挂本轮轨迹桥、Hub 与异步工具；退出时解除异步借用、摘本轮轨迹和投影，再恢复旧接线。Scope 覆盖整个宿主回合，包括 CLI Stop 续跑；正常、取消、异常与部分绑定失败均须清理。保留长期 inbox、压力与 Soul 回调；审批、profile、恢复与业务终态记录仍由原宿主处理。这批不等同于完整 SessionFactory，也不声称整个 CLI 对象图寿命已统一。
+下一小批提 `ScopedTurnBindings`，统一 SDK、AppServer、CLI 与 Headless 的回合临时借用。先保存旧 AgentWiring 与 TurnWiring，再挂本轮轨迹桥、Hub 与异步工具；退出时恢复原异步桥（通常为空）、轨迹绑定、投影与路由身份，随后不再留下本轮引用。Hub 中已经记录的执行事实不回滚。Scope 覆盖整个宿主回合，包括 CLI Stop 续跑；正常、取消、异常与部分绑定失败均须清理。保留长期 inbox、压力与 Soul 回调；审批、profile、恢复与业务终态记录仍由原宿主处理。这批不等同于完整 SessionFactory，也不声称整个 CLI 对象图寿命已统一。
 
 第一阶段退出前须逐项对账：
 
