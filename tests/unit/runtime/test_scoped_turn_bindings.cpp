@@ -455,6 +455,8 @@ TEST_CASE("ScopedTurnBindings: clearing a preview owner disables its old rewrite
         INFO(outcome.has_value() ? std::string() : outcome.error());
         INFO(nlohmann::json(legacy.recent_errors()).dump());
         REQUIRE(outcome.has_value());
+        CHECK(fixture.probe->calls == 1);
+        CHECK(fixture.backend.requests.size() == 2);
         CHECK(preview.rewrites == 1);
     }
     REQUIRE(wiring.rewrite_tool_results_for_history);
