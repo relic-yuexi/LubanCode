@@ -1132,6 +1132,7 @@ add_library(lubancode_runtime STATIC
   src/runtime/provider_tool_contract.cpp
   src/runtime/result_delivery_planner.cpp
   src/runtime/async_tool_runtime.cpp
+  src/runtime/scoped_turn_bindings.cpp
   # Soul 会话冻结单 P0:SessionSoulSnapshot(会话魂双状态的快照侧)+ 会话
   # 目录的快照 blob 读写。纯数据与纯函数,app/runtime 共用。
   src/runtime/session_soul.cpp

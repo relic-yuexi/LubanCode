@@ -9,7 +9,8 @@ set(_lubancore_host_test_entries
   "unit/app_server/test_plugin_assembly.cpp|unit.app_server.plugin_assembly"
   "unit/app/test_mcp_host_policy.cpp|unit.app.mcp_host_policy"
   "unit/runtime/test_tool_runtime.cpp|unit.runtime.tool_runtime"
-  "integration/plugins/test_tool_runtime_deferral.cpp|integration.plugins.tool_runtime_deferral")
+  "integration/plugins/test_tool_runtime_deferral.cpp|integration.plugins.tool_runtime_deferral"
+  "unit/app/test_turn_runner_scoped_bindings.cpp|unit.app.turn_runner_scoped_bindings")
 set(_lubancore_host_sources)
 foreach(entry IN LISTS _lubancore_host_test_entries)
   string(REPLACE "|" ";" parts "${entry}")

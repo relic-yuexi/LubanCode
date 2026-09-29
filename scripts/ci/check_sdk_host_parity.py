@@ -18,6 +18,7 @@ REQUIRED = {
     "sdk.host.mcp_host_policy",
     "sdk.host.tool_runtime",
     "sdk.host.tool_runtime_deferral",
+    "sdk.host.turn_runner_scoped_bindings",
 }
 
 

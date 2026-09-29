@@ -132,6 +132,36 @@ class BoundaryTests(unittest.TestCase):
                              "compileGroups": [{}]})
         self.assert_rejected(self.check(testing=True), "reverse host include")
 
+    def test_turn_bindings_allowance_excludes_its_cli_host_test(self):
+        shared = "tests/unit/runtime/test_scoped_turn_bindings.cpp"
+        host = "tests/unit/app/test_turn_runner_scoped_bindings.cpp"
+        self.source_file(shared, "int turn_bindings_test;\n")
+        self.source_file(host, "int cli_host_test;\n")
+        target = {"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["sources"][0]["path"] = host
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["sources"][0]["path"] = shared
+        target["name"] = "turn_tests"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_turn_bindings_shared_fixture_cannot_smuggle_cli_headers(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        shared = "tests/unit/runtime/test_scoped_turn_bindings.cpp"
+        self.source_file(shared, '#include "scoped_turn_fixture.hpp"\n')
+        self.source_file("tests/support/scoped_turn_fixture.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": shared, "compileGroupIndex": 0}],
+                             "compileGroups": [{"includes": [
+                                 {"path": str(self.source / "tests/support")},
+                             ]}]})
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
     def test_renamed_host_target_is_caught_by_its_source(self):
         self.source_file("src/cli/renamed.cpp", "int hidden_host;\n")
         self.targets.append({"id": "hidden", "name": "innocent_name", "type": "STATIC_LIBRARY",
