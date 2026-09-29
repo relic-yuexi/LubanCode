@@ -452,7 +452,7 @@ TEST_CASE("ScopedTurnBindings: clearing a preview owner disables its old rewrite
         scope.Bind(wiring, std::move(bindings));
         // A leaked rewrite lambda would dereference the now-null trajectory.
         const auto outcome = fixture.agent->Run(input, wiring);
-        INFO(outcome.has_value() ? std::string() : outcome.error());
+        INFO((outcome.has_value() ? std::string() : outcome.error()));
         INFO(nlohmann::json(legacy.recent_errors()).dump());
         REQUIRE(outcome.has_value());
         CHECK(fixture.probe->calls == 1);
