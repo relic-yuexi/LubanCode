@@ -182,12 +182,16 @@ TEST_CASE("ScopedTurnBindings: actual turns retain inbox pressure and soul hooks
     fixture.AddRound("after-scope");
     pending_inbox = true;
     inbox_text = "INBOX_AFTER_SCOPE";
+    const int pressure_before = pressure_calls;
     const auto after = fixture.agent->Run("after scope", wiring);
     REQUIRE(after.has_value());
     CHECK_FALSE(after->cancelled);
     CHECK(fixture.probe->calls == 3);
     CHECK(inbox_messages == 3);
-    CHECK(pressure_calls > 0);
+    CHECK(pressure_calls > pressure_before);
+    REQUIRE(fixture.backend.requests.size() == 6);
+    CHECK(scope_fixture::ContainsText(fixture.backend.requests[4],
+        "Preserved pressure hook compacted the old history."));
     CHECK(soul_locks == 2);
     CHECK(persistent_ids == 1);
     CHECK(persistent_traces > 0);
