@@ -19,6 +19,7 @@
 #include "runtime/assembly/backend.hpp"
 #include "runtime/assembly/builtin_tools.hpp"
 #include "runtime/assembly/session_resources.hpp"
+#include "runtime/scoped_turn_bindings.hpp"
 #include "runtime/interaction_broker.hpp"
 #include "runtime/session_service.hpp"
 #include "runtime/tool_trace_hub.hpp"
@@ -640,9 +641,9 @@ struct Session::Impl final : rt::InteractionBroker {
         auto bridge = service->trajectory()->NewTurnBridge({"", service->runtime()->wire_name(), "sdk", {}});
         if (!bridge) { operation.state = OperationState::Failed; operation.error = "sdk.trajectory.bridge_unavailable"; Complete(std::move(operation), {}, false); return; }
         rt::ToolTraceHub hub(service->runtime()->ids());
-        hub.AttachTrajectory(bridge.get());
-        hub.Install(*agent, wiring, session_id, operation.turn_id);
-        wiring.boundary_recorder = bridge.get();
+        rt::ScopedTurnBindings turn_bindings(*agent);
+        turn_bindings.Bind(wiring, {.hub = &hub, .trajectory = bridge.get(),
+                                   .thread_id = session_id, .turn_id = operation.turn_id});
         api::Message message;
         message.role = api::Role::User;
         message.content.push_back(api::TextBlock{input.text});
@@ -651,8 +652,7 @@ struct Session::Impl final : rt::InteractionBroker {
         const auto history_before = agent->history().size();
         auto outcome = agent->Run(std::move(message), wiring, &interrupt);
         bridge->EndTurn(outcome.has_value(), outcome && outcome->cancelled, outcome ? "" : outcome.error());
-        hub.DetachTrajectory();
-        agent->SetWiring({}); // drop callbacks borrowing this turn's hub before it dies
+        turn_bindings.Reset();
         operation.state = !outcome ? OperationState::Failed : outcome->cancelled ? OperationState::Cancelled : OperationState::Succeeded;
         if (!outcome) operation.error = outcome.error();
         else if (outcome->hit_step_limit || outcome->hit_time_budget || outcome->hit_token_budget || outcome->hit_turn_limit) {
@@ -696,11 +696,9 @@ struct Session::Impl final : rt::InteractionBroker {
             }
             try { Run(pop.input, skip); }
             catch (const std::exception& error) {
-                agent->SetWiring({});
                 Operation failed{pop.input.operation_id, {}, OperationState::Failed, {}, error.what(), false};
                 Complete(std::move(failed), {}, false);
             } catch (...) {
-                agent->SetWiring({});
                 Operation failed{pop.input.operation_id, {}, OperationState::Failed, {}, "sdk.turn.exception", false};
                 Complete(std::move(failed), {}, false);
             }

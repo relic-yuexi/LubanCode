@@ -19,6 +19,7 @@
 #include "runtime/middleware_runtime.hpp"
 #include "runtime/middleware_v3_sink.hpp"
 #include "runtime/tool_trace_hub.hpp"
+#include "runtime/scoped_turn_bindings.hpp"
 #include "runtime/trajectory_session.hpp"
 #include "trajectory/v3/session_switch.hpp"   // FindV3SessionStream
 #include "tools/path_utils.hpp"
@@ -556,12 +557,10 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         fresh_agent = std::make_unique<agent::Agent>(backend_, registry_, std::move(profile));
     }
     agent::Agent& loop_agent = agent_override != nullptr ? *agent_override : *fresh_agent;
-    // 缓存 Agent 跨轮活着，显示闭包只活本轮；离场恢复旧接线。
-    struct RestoreWiring {
-        agent::Agent& target;
-        agent::AgentWiring previous;
-        ~RestoreWiring() { target.SetWiring(std::move(previous)); }
-    } restore{loop_agent, loop_agent.wiring()};
+    ToolTraceHub trace_hub(ProcessIdAuthority());
+    agent::TurnWiring wiring;
+    // All borrowed owners precede the scope, which precedes temporary callbacks.
+    ScopedTurnBindings turn_bindings(loop_agent);
     if (progress) {
         auto observed_wiring = loop_agent.wiring();
         const auto previous_pressure = observed_wiring.on_context_pressure;
@@ -583,7 +582,6 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         "\n相对提醒使用 create_reminder.delay_seconds，由宿主计算，禁止猜测或试探时间戳。"
         "\n需要读文件、执行命令时调用实际工具，以工具回执为准，不要编造结果。\n");
 
-    agent::TurnWiring wiring;
     wiring.events = &turn_events;
     wiring.boundary_recorder = trajectory_bridge.get();
     wiring.turn_id = turn_id;
@@ -691,9 +689,22 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
             return "PreRequest 钩子拦下本次请求[" + stages.decision + "]: " + stages.reason;
         };
     }
-    ToolTraceHub trace_hub(ProcessIdAuthority());
-    trace_hub.AttachTrajectory(trajectory_bridge.get());
-    trace_hub.Install(loop_agent, wiring, service.runtime()->thread_id(), turn_id);
+    ScopedTurnBindings::Bindings bindings;
+    bindings.hub = &trace_hub;
+    bindings.trajectory = trajectory_bridge.get();
+    bindings.thread_id = service.runtime()->thread_id();
+    bindings.turn_id = turn_id;
+    // 异步工具 P2(one-shot/gateway 宿主接线):会话级异步运行时挂进
+    // SessionService 的 SessionRuntime(零策略 dormant,行为与从前一字不
+    // 差);每轮钉桥 + 闸门/规划进 wiring。
+    if (AttachDefaultAsyncToolRuntime(*service.runtime(), options_.wire_name)) {
+        AsyncToolRuntime* async_runtime = service.runtime()->async_tool_runtime();
+        if (async_runtime != nullptr && trajectory_bridge != nullptr) {
+            bindings.async_runtime = async_runtime;
+            async_runtime->NoteModelIdentity(std::string(), options_.model);
+        }
+    }
+    turn_bindings.Bind(wiring, std::move(bindings));
     if (progress) {
         const auto previous_trace = wiring.on_tool_trace;
         wiring.on_tool_trace = [progress, previous_trace, &trace_hub](const agent::ToolTraceEvent& event) {
@@ -704,19 +715,6 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
                     HeadlessProgressReporter::Preview(event.tool_name));
             }
         };
-    }
-
-    // 异步工具 P2(one-shot/gateway 宿主接线):会话级异步运行时挂进
-    // SessionService 的 SessionRuntime(零策略 dormant,行为与从前一字不
-    // 差);每轮钉桥 + 闸门/规划进 wiring。
-    if (AttachDefaultAsyncToolRuntime(*service.runtime(), options_.wire_name)) {
-        AsyncToolRuntime* async_runtime = service.runtime()->async_tool_runtime();
-        if (async_runtime != nullptr && trajectory_bridge != nullptr) {
-            async_runtime->InstallTurnBridge(trajectory_bridge.get());
-            async_runtime->NoteModelIdentity(std::string(), options_.model);
-            wiring.tool_batch_gate = async_runtime->gate();
-            wiring.delivery_planner = async_runtime->planner();
-        }
     }
 
     const auto outcome = agent::AgentLoop::Run(loop_agent, user_message, wiring, cancel);
@@ -737,6 +735,7 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
         }
         trajectory_bridge->EndTurn(ok, cancelled, reason);
     }
+    turn_bindings.Reset();
     turn_events.Finish(!outcome.has_value() ? Outcome::Failed :
                        outcome->cancelled ? Outcome::Cancelled : Outcome::Succeeded,
                        outcome.has_value() ? std::string() : outcome.error());

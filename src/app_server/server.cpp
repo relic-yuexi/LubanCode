@@ -30,6 +30,7 @@
 #include "runtime/session_command_service.hpp"
 #include "runtime/trajectory_history_view.hpp"  // 轨迹 v3 P3:thread/resume|read 的旧史投影(显示层不碰 reader.hpp)
 #include "runtime/tool_trace_hub.hpp"
+#include "runtime/scoped_turn_bindings.hpp"
 #include "runtime/trajectory_session.hpp"  // P0-2:app-server 同一口接 Trajectory
 #include "trajectory/session_index.hpp"    // P0-2:trace/query 冷回放的索引定位
 #include "runtime/turn_event_adapter.hpp"
@@ -2065,19 +2066,16 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         };
         std::optional<runtime::ToolTraceHub> trajectory_hub;
         std::unique_ptr<runtime::TrajectoryTurnBridge> trajectory_bridge;
+        runtime::ScopedTurnBindings turn_bindings(loop);
         // Construct after the borrowed owners, before the first callback is
         // installed. Both normal return and exception unwind clear references
         // before those owners die; AskUser's handler must not retain record.
-        struct TurnBorrowings {
-            agent::Agent& loop;
+        struct AskUserTurnBinding {
             tools::AskUserTool* ask_user = nullptr;
-            runtime::AsyncToolRuntime* async_runtime = nullptr;
-            ~TurnBorrowings() {
-                loop.SetWiring({});
+            ~AskUserTurnBinding() {
                 if (ask_user != nullptr) ask_user->SetHandler({});
-                if (async_runtime != nullptr) async_runtime->InstallTurnBridge(nullptr);
             }
-        } borrowed{loop};
+        } borrowed;
         loop.SetWiring(std::move(loop_wiring));
 
         // ---- 审批接线(阶段 2 核心) ----
@@ -2199,11 +2197,11 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             trajectory_bridge = trajectory_ledger->NewTurnBridge(std::move(identity));
             if (trajectory_bridge != nullptr) {
                 trajectory_hub.emplace(record->session_service->runtime()->ids());
-                // 桥先挂再 Install:Install 看能力位决定挂不挂整批 rewrite
-                // 钩子(v3 在管预览才挂,v2 走旧口径),见 hub 的注释。
-                trajectory_hub->AttachTrajectory(trajectory_bridge.get());
-                trajectory_hub->Install(loop, wiring, thread_id, turn_id);
-                wiring.boundary_recorder = trajectory_bridge.get();
+                runtime::ScopedTurnBindings::Bindings bindings;
+                bindings.hub = &*trajectory_hub;
+                bindings.trajectory = trajectory_bridge.get();
+                bindings.thread_id = thread_id;
+                bindings.turn_id = turn_id;
                 // 异步工具 P2(AppServer/Detached 面接线):会话级异步运行时
                 // 挂进 SessionService 的 SessionRuntime(零策略 dormant,行为
                 // 与从前一字不差);每轮钉桥 + 闸门/规划进 wiring。Detached 面
@@ -2214,14 +2212,12 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                     runtime::AsyncToolRuntime* async_runtime =
                         record->session_service->runtime()->async_tool_runtime();
                     if (async_runtime != nullptr) {
-                        borrowed.async_runtime = async_runtime;
-                        async_runtime->InstallTurnBridge(trajectory_bridge.get());
+                        bindings.async_runtime = async_runtime;
                         async_runtime->NoteModelIdentity(options_.session_provider,
                                                         record->assembly->agent_profile.request.model);
-                        wiring.tool_batch_gate = async_runtime->gate();
-                        wiring.delivery_planner = async_runtime->planner();
                     }
                 }
+                turn_bindings.Bind(wiring, std::move(bindings));
                 trajectory_bridge->BeginTurn(turn_id, "external_user");
                 trajectory_bridge->RecordInput(user_message);
             }
@@ -2232,10 +2228,8 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         if (trajectory_bridge != nullptr) {
             trajectory_bridge->EndTurn(outcome.has_value(), outcome.has_value() && outcome->cancelled,
                                        outcome.has_value() ? std::string() : outcome.error());
-            if (trajectory_hub.has_value()) {
-                trajectory_hub->DetachTrajectory();
-            }
         }
+        turn_bindings.Reset();
         // 事件流收口:没收尾的条目(正文/思考/没终态的工具)由适配器统一
         // 按 Cancelled 补账——条目不悬空,前端好对账;终态分型随本地账。
         turn_events.Finish(!outcome.has_value() ? runtime::Outcome::Failed

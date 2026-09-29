@@ -447,8 +447,12 @@ std::unique_ptr<AsyncToolRuntime> AsyncToolRuntime::Create(Hooks hooks,
 }
 
 void AsyncToolRuntime::InstallTurnBridge(TrajectoryTurnBridge* bridge) {
+    (void)ExchangeTurnBridge(bridge);
+}
+
+TrajectoryTurnBridge* AsyncToolRuntime::ExchangeTurnBridge(TrajectoryTurnBridge* bridge) {
     std::lock_guard<std::mutex> lock(impl_->book_mutex);
-    impl_->current_bridge = bridge;
+    return std::exchange(impl_->current_bridge, bridge);
 }
 
 void AsyncToolRuntime::NoteModelIdentity(const std::string& provider, const std::string& model) {
