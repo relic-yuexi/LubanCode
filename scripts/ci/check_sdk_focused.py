@@ -17,6 +17,7 @@ REQUIRED = {
     "sdk.focused.lubancore_host_boundary",
     "sdk.focused.lubancore_history",
     "sdk.focused.session_resources",
+    "sdk.focused.scoped_turn_bindings",
     "sdk.focused.atomic_write",
 }
 
@@ -68,7 +69,7 @@ def main():
                             case.findtext("system-out", default=""))
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])
-    print("SDK focused: all six registered test files executed nonempty native test cases")
+    print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
 
 
 if __name__ == "__main__":
