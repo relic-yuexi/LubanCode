@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <condition_variable>
+#include <mutex>
 #include <stdexcept>
 
 #include "runtime/async_tool_runtime.hpp"
@@ -95,6 +97,35 @@ struct ThrowingCapability final : runtime::ToolTrajectorySink {
     runtime::ToolResultsCommitReceipt OnToolResultsCommitted(const std::string&,
                                                             const api::Message&) override { return {}; }
     bool ShouldBlockExecution(const agent::ToolTraceEvent&) override { return false; }
+};
+
+struct ReadGate {
+    std::mutex mutex;
+    std::condition_variable changed;
+    int target = 1;
+    int entered = 0;
+    int timeouts = 0;
+    std::atomic<bool>* cancel_on_first = nullptr;
+};
+
+class ReadProbe final : public tools::Tool {
+public:
+    explicit ReadProbe(std::shared_ptr<ReadGate> gate) : gate_(std::move(gate)) {}
+    std::string name() const override { return "read_file"; }
+    std::string description() const override { return "Read-only identity probe."; }
+    nlohmann::json input_schema() const override { return {{"type", "object"}}; }
+    tools::EffectClass effect_class() const override { return tools::EffectClass::ReadOnlyLocal; }
+    Result execute(const nlohmann::json&) override {
+        std::unique_lock lock(gate_->mutex);
+        ++gate_->entered;
+        gate_->changed.notify_all();
+        if (gate_->target > 1 && !gate_->changed.wait_for(lock, std::chrono::seconds(5),
+                [&] { return gate_->entered >= gate_->target; })) ++gate_->timeouts;
+        if (gate_->cancel_on_first) gate_->cancel_on_first->store(true);
+        return {"read-identity-result", false};
+    }
+private:
+    std::shared_ptr<ReadGate> gate_;
 };
 
 std::string PersistResult(v3::V3Writer& writer) {
@@ -556,4 +587,60 @@ TEST_CASE("ScopedTurnBindings: async default gate and planner queries never reta
     previous.reset();
     CHECK_FALSE(async_runtime->gate()->OnCallItemComplete(call, {"turn-000003", "step-000003", "missing-request"}));
     CHECK(executions == 0);
+}
+
+TEST_CASE("ScopedTurnBindings: raw serial parallel and cancelled traces carry the existing canonical turn") {
+    bool parallel = false, cancel_second = false;
+    SUBCASE("serial execution") {}
+    SUBCASE("parallel read execution") { parallel = true; }
+    SUBCASE("cancel before the second call starts") { cancel_second = true; }
+    scope_fixture::Backend backend;
+    backend.replies.push_back({api::MessageStart{"raw-trace-reply", "scope-model"},
+        api::ToolUseStart{0, "raw-first", "read_file"}, api::ToolUseInputDelta{0, "{}"},
+        api::ContentBlockDone{0}, api::ToolUseStart{1, "raw-second", "read_file"},
+        api::ToolUseInputDelta{1, "{}"}, api::ContentBlockDone{1}, api::MessageDone{"tool_use", api::Usage{}}});
+    if (!cancel_second) backend.replies.push_back(scope_fixture::TextReply("raw-traces-complete"));
+    std::atomic<bool> cancelled{false};
+    auto gate = std::make_shared<ReadGate>();
+    gate->target = parallel ? 2 : 1;
+    gate->cancel_on_first = cancel_second ? &cancelled : nullptr;
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<ReadProbe>(gate));
+    agent::AgentProfile profile;
+    profile.request.model = "scope-model";
+    profile.system_prompt = "Preserve canonical trace identity.";
+    profile.runtime.tool_batch_strategy = parallel ? agent::ToolBatchStrategy::ParallelRead
+                                                   : agent::ToolBatchStrategy::Exclusive;
+    profile.runtime.parallel_read_concurrency = 2;
+    profile.runtime.max_steps_per_turn = 4;
+    agent::Agent agent(backend, registry, std::move(profile));
+    std::vector<agent::ToolTraceEvent> traces;
+    std::mutex traces_mutex;
+    agent::TurnWiring wiring;
+    wiring.turn_id = "caller-supplied-canonical-turn";
+    wiring.on_tool_trace = [&](const agent::ToolTraceEvent& event) {
+        std::lock_guard lock(traces_mutex);
+        traces.push_back(event); // No Hub: UI fallback cannot conceal a missing raw ID.
+    };
+    runtime::ScopedTurnBindings scope(agent);
+    scope.Bind(wiring, {});
+    const auto outcome = agent.Run("read twice", wiring, &cancelled);
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->cancelled == cancel_second);
+    CHECK(gate->entered == (cancel_second ? 1 : 2));
+    CHECK(gate->timeouts == 0);
+    int scheduled = 0, finished = 0, committed = 0, cancelled_before_start = 0;
+    for (const auto& event : traces) {
+        CHECK(event.turn_id == "caller-supplied-canonical-turn");
+        if (event.kind == agent::ToolTraceEventKind::Scheduled) ++scheduled;
+        if (event.kind == agent::ToolTraceEventKind::ExecutionFinished) {
+            ++finished;
+            if (event.outcome == agent::ToolOutcome::CancelledBeforeStart) ++cancelled_before_start;
+        }
+        if (event.kind == agent::ToolTraceEventKind::ResultCommitted) ++committed;
+    }
+    CHECK(scheduled == 2);
+    CHECK(finished == 2);
+    CHECK(committed == 2);
+    CHECK(cancelled_before_start == (cancel_second ? 1 : 0));
 }
