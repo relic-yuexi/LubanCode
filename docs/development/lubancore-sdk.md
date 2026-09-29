@@ -6,8 +6,9 @@
 
 ## 拆分进度
 
-本页记录已交付的窄 SDK。SDK-only 默认构建、普通安装与终端依赖拆分已验收；
-第一阶段仍须收口会话资源拥有、SessionFactory 与现有宿主迁移，之后再接远端。
+本页记录已交付的窄 SDK。SDK-only 默认构建、普通安装、终端依赖拆分、SDK 与
+AppServer 共用资源拥有，以及 CLI 显式工具装配已验收。第一阶段仍须收口回合临时
+接线、完整 SessionFactory 与高级组件公开入口，之后再接远端。
 `LubanCore::Core` 是公开安装目标；仓库内部旧名
 `lubancode_core` 仍带 CLI 实现，两者不能混用。
 
@@ -15,6 +16,15 @@
 仍有各自的会话装配；完整工具、插件、Hook 和记忆等能力尚未统一迁入公开 SDK。
 新增宿主可用下文 API，现有 CLI 迁移须保留原功能，不能靠删去功能来完成拆分。
 验收清单见 [SDK 拆分计划](../../todos/LubanCore与CLI分离_核心库独立成宿主底座设计.todo)。
+
+SDK 与 AppServer 已调用同一只 `SessionResources` 工厂，管理 backend、MCP 连接和
+工具表。各宿主先交明确计划，再创建资源；失败候选按拥有次序释放。工具表先销毁，
+被工具借用的 MCP 连接随后释放，后端最后释放。SDK 的必需组件策略与 AppServer 的
+可选组件降级策略各自保留。AppServer 跨轮持同一 Agent，并在同 ID 恢复时灌入历史。
+
+AppServer 停场超时会回 `thread.stop_pending`，保留会话账，拒收新操作；重试后等
+执行线程退出，再封账并移除记录。封账失败回 `thread.close_failed`。最终 Shutdown
+先取消所有回合、审批和浏览器任务，再等待借用退出；进程内回调仍须合作取消。
 
 CLI 完整工具装配现接内部 `ToolAssemblyPlan`。交互模式与 one-shot 都先由
 `ResolveCliToolAssemblyPlan` 折好 cwd、插件目录、信任账、Package 数据根和 PTC
@@ -73,6 +83,13 @@ Windows 将 `bin` 加入 PATH，Linux 使用库搜索路径或应用自身 RPATH
 Linux、macOS、Windows 均跑过 testing OFF/ON 默认构建、普通全安装、仓库外搬迁消费
 5/5 与 SDK 专项 4/4；默认 CLI 全量分别为 654/654、657/657、656/656。
 这些证据覆盖当时 SDK-only 与终端拆分，不替后续 SessionFactory 或宿主迁移验收。
+
+随后 PR #249 与 #251 分别经 `a7fd7248`、`7f3cf7cb` 合入。#251 验收头为
+`12686fa1`，见 [CI 36462878177](https://github.com/relic-yuexi/LubanCode/actions/runs/36462878177)：
+三平台安装消费各 5/5、SDK 专项各 6/6、宿主兼容各 6/6；默认 CLI 全量 Linux
+659/659、macOS 662/662、Windows 661/661，ASan 选择集 99/99。ASan 包含本批工具
+装配与延迟工具、上批会话寿命和浏览器取消回归；LeakSanitizer 未开启，Playwright
+浏览器验收未执行，TSan 按条件跳过。后续改动须另验新提交。
 
 ## 调用次序
 
