@@ -164,7 +164,9 @@ TEST_CASE("ScopedTurnBindings: actual turns retain inbox pressure and soul hooks
         hub.reset();
         CHECK(fixture.probe->calls == index + 1);
         REQUIRE(fixture.backend.requests.size() == static_cast<std::size_t>((index + 1) * 2));
-        CHECK(scope_fixture::ContainsText(fixture.backend.requests[index * 2], inbox_text));
+        // Inbox is drained between model steps, after this turn's first tool batch.
+        CHECK_FALSE(scope_fixture::ContainsText(fixture.backend.requests[index * 2], inbox_text));
+        CHECK(scope_fixture::ContainsText(fixture.backend.requests[index * 2 + 1], inbox_text));
     }
     CHECK(inbox_messages == 2);
     CHECK(soul_locks == 1);
@@ -423,8 +425,12 @@ TEST_CASE("ScopedTurnBindings: clearing a preview owner disables its old rewrite
     REQUIRE(recorder.has_value());
     REQUIRE(recorder->WriteRunStarted({{"run_kind", "main_session"}}, trajectory::Durability::PowerLoss)
         .status == trajectory::RecordReceipt::Status::Committed);
-    runtime::TrajectoryTurnBridge legacy(*recorder, identity, {"fixture", "responses", "test"});
+    runtime::TrajectoryTurnBridge legacy(*recorder, identity, {"fixture", "responses", "terminal"});
     legacy.BeginTurn("turn-v2", "external_user");
+    api::Message input;
+    input.role = api::Role::User;
+    input.content.push_back(api::TextBlock{"without preview"});
+    if (bind_v2) legacy.RecordInput(input); // The v2 send gate requires accepted input.
     runtime::IdAuthority ids;
     runtime::ToolTraceHub hub(ids);
     PreviewTarget preview;
@@ -445,7 +451,10 @@ TEST_CASE("ScopedTurnBindings: clearing a preview owner disables its old rewrite
         bindings.trajectory = bind_v2 ? &legacy : nullptr;
         scope.Bind(wiring, std::move(bindings));
         // A leaked rewrite lambda would dereference the now-null trajectory.
-        REQUIRE(fixture.agent->Run("without preview", wiring).has_value());
+        const auto outcome = fixture.agent->Run(input, wiring);
+        INFO(outcome.has_value() ? std::string() : outcome.error());
+        INFO(nlohmann::json(legacy.recent_errors()).dump());
+        REQUIRE(outcome.has_value());
         CHECK(preview.rewrites == 1);
     }
     REQUIRE(wiring.rewrite_tool_results_for_history);
