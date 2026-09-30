@@ -530,6 +530,13 @@ void FourSessionIsolation(const fs::path& base) {
     Check(probes[2]->entered.load() && probes[3]->entered.load(), "independent project callbacks did not both start");
     Take(sessions[2]->Close(), "close gamma during its own callback");
     Check(probes[2]->observed_cancel.load() && probes[2]->live_backends.load() == 0, "gamma close did not join its callback");
+    const auto gamma_result = Finished(sessions[2], second[2]);
+    Check(gamma_result.state == sdk::OperationState::Cancelled, "gamma close left a noncancelled operation");
+    const auto gamma_persisted = Take(sessions[2]->ReadOperation(second[2].operation_id), "read closed gamma result");
+    Check(gamma_persisted.state == sdk::OperationState::Cancelled && gamma_persisted.result_persisted,
+          "gamma close did not preserve its terminal result");
+    Check(!sessions[2]->Submit("after-gamma-close", labels[2] + "/round3"), "closed gamma accepted new input");
+    check_events(2, second[2], gamma_result);
     Check(!probes[3]->observed_cancel.load() && probes[3]->live_backends.load() == 1,
           "closing gamma cancelled or destroyed delta");
     Check(Take(sessions[3]->ReadOperation(second[3].operation_id), "delta remains running").state == sdk::OperationState::Running,
