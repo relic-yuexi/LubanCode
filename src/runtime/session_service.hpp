@@ -129,7 +129,7 @@ public:
     // A failed candidate never replaces the installed execution. Only the
     // session's single turn worker may use the resulting Agent.
     void InitializeExecution(std::unique_ptr<assembly::SessionResources> resources,
-                             agent::AgentProfile profile,
+                             agent::AgentProfile&& profile,
                              std::optional<std::vector<api::Message>> restored_history = std::nullopt);
     SessionExecution* execution() { return execution_.get(); }
     const SessionExecution* execution() const { return execution_.get(); }

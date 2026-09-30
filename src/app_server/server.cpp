@@ -2014,18 +2014,9 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                     restored_history = trajectory->LaunchResumeHistory();
                 }
                 record->session_service->InitializeExecution(std::move(record->assembly->resources),
-                    record->assembly->agent_profile, std::move(restored_history));
-                // The assembly profile is only a construction template now;
-                // later turns still read its model metadata. Release its
-                // callback/resolver copies while execution resources are alive,
-                // rather than letting retained inline callables outlive them.
-                // This turn worker holds no session/publication mutex here.
-                auto& profile_template = record->assembly->agent_profile;
-                profile_template.deferred_index_provider = nullptr;
-                profile_template.tool_filter = nullptr;
-                profile_template.tool_execution_policy = nullptr;
-                profile_template.tool_turn_gate = nullptr;
-                profile_template.tool_ref_resolver.reset();
+                    std::move(record->assembly->agent_profile), std::move(restored_history));
+                // The consuming boundary clears template callbacks/resolver on
+                // success or failure, while retaining model metadata for turns.
             } catch (const std::exception& error) {
                 // Initialization can race a stop request. Never publish a new
                 // execution into a stopping session or escape its worker thread.
