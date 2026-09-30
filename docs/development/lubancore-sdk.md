@@ -7,8 +7,8 @@
 ## 拆分进度
 
 本页记录已交付的窄 SDK。SDK-only 默认构建、普通安装、终端依赖拆分、SDK 与
-AppServer 共用资源拥有，以及 CLI 显式工具装配已验收。第一阶段仍须收口回合临时
-接线、完整 SessionFactory 与高级组件公开入口，之后再接远端。
+AppServer 共用资源拥有、CLI 显式工具装配，以及四路回合临时接线已验收。
+下一批统一 SDK 与 AppServer 的会话执行对象，再核多会话隔离；扩展接口与远端随后接。
 `LubanCore::Core` 是公开安装目标；仓库内部旧名
 `lubancode_core` 仍带 CLI 实现，两者不能混用。
 
@@ -25,6 +25,15 @@ SDK 与 AppServer 已调用同一只 `SessionResources` 工厂，管理 backend�
 AppServer 停场超时会回 `thread.stop_pending`，保留会话账，拒收新操作；重试后等
 执行线程退出，再封账并移除记录。封账失败回 `thread.close_failed`。最终 Shutdown
 先取消所有回合、审批和浏览器任务，再等待借用退出；进程内回调仍须合作取消。
+
+SDK、AppServer、CLI 与无界面执行器共用 `ScopedTurnBindings`。每轮保存旧接线，
+挂本轮轨迹、投影与路由号；返回、取消或抛错时恢复旧接线。CLI Stop 续跑仍属同一轮。
+清掉本轮借用时，长期 inbox、压力与 Soul 回调照常保留，已落下的执行事实也照常保留。
+
+第一阶段收工要过这条线：新宿主只调公开 SDK，就能跑完整会话，不必复制内部运行栈。
+眼下公开接口已能嵌入；资源、Agent、恢复历史与销毁次序还须归到同一处。
+隔离验收要在同一项目开两场，在不同项目各开一场，核模型、权限、取消、关闭与活回调。
+共同 cwd 不加项目独占锁；共享文件冲突仍由宿主协调。
 
 CLI 完整工具装配现接内部 `ToolAssemblyPlan`。交互模式与 one-shot 都先由
 `ResolveCliToolAssemblyPlan` 折好 cwd、插件目录、信任账、Package 数据根和 PTC
@@ -90,6 +99,14 @@ Linux、macOS、Windows 均跑过 testing OFF/ON 默认构建、普通全安装�
 659/659、macOS 662/662、Windows 661/661，ASan 选择集 99/99。ASan 包含本批工具
 装配与延迟工具、上批会话寿命和浏览器取消回归；LeakSanitizer 未开启，Playwright
 浏览器验收未执行，TSan 按条件跳过。后续改动须另验新提交。
+
+PR #252 验收头为 `7913fd30`，经 `9aa63142` 合入，见
+[CI 36511121045](https://github.com/relic-yuexi/LubanCode/actions/runs/36511121045)：
+三平台 SDK-only 与组合构建的消费测试各 5/5、SDK 专项各 7/7，宿主兼容各 7/7。
+新临时接线册各跑原生 9 例，真实 CLI Stop 册各跑 1 例。全量 Linux 662/662、
+macOS 665/665、Windows 664/664；ASan 101/101，六册寿命回归均核实际非零用例。
+实际合并内容与受测内容一致；LSan、Playwright 与条件 TSan 限制沿用上文。
+这些证据不替下一批会话执行对象与新增隔离测试验收。
 
 ## 调用次序
 

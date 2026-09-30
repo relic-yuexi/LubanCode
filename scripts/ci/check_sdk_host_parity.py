@@ -59,10 +59,16 @@ def main():
     if any(c.attrib.get("status") != "run" or any(c.find(k) is not None for k in
                ("failure", "error", "skipped")) for c in cases):
         raise RuntimeError("Host parity contains a skipped or failed test")
-    counts = re.findall(r"\[doctest\] test cases:\s+(\d+)",
-                        (evidence / "LastTest.log").read_text(encoding="utf-8"))
-    if len(counts) != len(REQUIRED) or any(int(count) == 0 for count in counts):
-        raise RuntimeError("Host parity source filters did not execute nonempty native test cases")
+    native_sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
+        (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
+    for name in REQUIRED:
+        sections = [native_sections[index + 1] for index in range(1, len(native_sections), 2)
+                    if native_sections[index] == name]
+        if len(sections) != 1:
+            raise RuntimeError("Native log does not identify one host source: " + name)
+        counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
+        if len(counts) != 1 or int(counts[0]) == 0:
+            raise RuntimeError("Host source filter ran no native test cases: " + name)
     print(f"Host parity: all {len(REQUIRED)} registered test files executed successfully")
 
 
