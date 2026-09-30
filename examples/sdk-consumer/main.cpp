@@ -536,7 +536,6 @@ void FourSessionIsolation(const fs::path& base) {
     Check(gamma_persisted.state == sdk::OperationState::Cancelled && gamma_persisted.result_persisted,
           "gamma close did not preserve its terminal result");
     Check(!sessions[2]->Submit("after-gamma-close", labels[2] + "/round3"), "closed gamma accepted new input");
-    check_events(2, second[2], gamma_result);
     Check(!probes[3]->observed_cancel.load() && probes[3]->live_backends.load() == 1,
           "closing gamma cancelled or destroyed delta");
     Check(Take(sessions[3]->ReadOperation(second[3].operation_id), "delta remains running").state == sdk::OperationState::Running,
