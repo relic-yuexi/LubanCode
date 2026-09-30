@@ -343,6 +343,7 @@ struct IsolationProbe {
     std::atomic<bool> released{false};
     std::atomic<bool> observed_cancel{false};
     std::atomic<int> live_backends{0};
+    std::atomic<bool> backend_reentry_rejected{false};
 };
 class IsolationBackend final : public sdk::Backend {
 public:
@@ -654,10 +655,117 @@ struct PublicSmallTool {
 static_assert(sizeof(PublicSmallTool) == sizeof(std::shared_ptr<PublicSmallCapture>));
 static_assert(std::is_nothrow_copy_constructible_v<PublicSmallTool>);
 
+class FailedOpenBackend final : public sdk::Backend {
+public:
+    FailedOpenBackend(std::shared_ptr<IsolationProbe> state, sdk::Runtime& runtime)
+        : state_(std::move(state)), runtime_(runtime) { ++state_->live_backends; }
+    ~FailedOpenBackend() override {
+        struct Watchdog {
+            std::mutex mutex;
+            std::condition_variable cv;
+            bool finished = false;
+        } watchdog;
+        std::jthread watcher([&] {
+            std::unique_lock lock(watchdog.mutex);
+            if (watchdog.cv.wait_for(lock, 3s, [&] { return watchdog.finished; })) return;
+            Progress("failed initialization backend destructor blocked in Runtime::Shutdown");
+            // A broken cleanup guard could wait on this OpenSession's own
+            // mutex. Fail this consumer process rather than leave CI hanging.
+            std::_Exit(1);
+        });
+        const auto rejected = runtime_.Shutdown();
+        state_->backend_reentry_rejected.store(!rejected && rejected.error().code == "sdk.lifecycle.reentrant");
+        --state_->live_backends;
+        {
+            std::lock_guard lock(watchdog.mutex);
+            watchdog.finished = true;
+            watchdog.cv.notify_all();
+        }
+    }
+    sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest& request, sdk::Cancellation) override {
+        ++state_->backend_calls;
+        Check(request.model == "failed-open-borrow", "unexpected model request during failed initialization");
+        return Text("failed-open-backend-alive");
+    }
+private:
+    std::shared_ptr<IsolationProbe> state_;
+    sdk::Runtime& runtime_;
+};
+
+enum class SmallOpenFailure { MissingResume, RequiredMcp, InvalidOptions };
+void FailedOpenSmallCapture(sdk::Runtime& runtime, const Paths& paths, SmallOpenFailure failure) {
+    const std::string phase = failure == SmallOpenFailure::RequiredMcp ? "required MCP startup failure" :
+        failure == SmallOpenFailure::MissingResume ? "missing resume failure" : "invalid options failure";
+    Progress("begin: small callback " + phase);
+    auto state = std::make_shared<IsolationProbe>();
+    auto queries = std::make_shared<PublicCaptureQueries>();
+    auto capture = std::make_shared<PublicSmallCapture>(queries, state, paths.cwd);
+    const std::weak_ptr<PublicSmallCapture> captured = capture;
+    auto backend = std::make_unique<FailedOpenBackend>(state, runtime);
+    // The SDK accepts unique ownership, so retain only a plain public pointer.
+    // Each destructor first checks the independent alive flag before using it.
+    auto* borrowed_backend = backend.get();
+    auto options = Options(paths, {});
+    options.backend = std::move(backend);
+    sdk::Tool tool;
+    tool.name = "failed_open_probe";
+    tool.description = "Keep a small callback alive through failed SDK initialization.";
+    tool.requires_approval = false;
+    tool.execute = PublicSmallTool(capture);
+    options.custom_tools.push_back(std::move(tool));
+    if (failure == SmallOpenFailure::RequiredMcp) {
+        sdk::McpServer server;
+        server.name = "required_missing_fixture";
+        server.command = Utf8(paths.root / "absent-required-mcp.exe");
+        server.tools = {"echo"};
+        server.startup_timeout_ms = 1000;
+        server.call_timeout_ms = 1000;
+        options.mcp_servers.push_back(std::move(server));
+    } else if (failure == SmallOpenFailure::MissingResume) {
+        options.resume_session_id = "missing-small-callback-session";
+    } else {
+        options.context_window_tokens = 0;
+    }
+    tool.execute = {};
+    capture.reset();
+    queries->Start([borrowed_backend, state] {
+        if (state->live_backends.load() != 1) return false;
+        sdk::ModelRequest request;
+        request.model = "failed-open-borrow";
+        const auto result = borrowed_backend->Generate(request, {});
+        return result && result->text == "failed-open-backend-alive" && state->live_backends.load() == 1;
+    });
+    queries->armed.store(true);
+    const auto opened = runtime.OpenSession(std::move(options));
+    const bool released = captured.expired();
+    const auto callable_queries = queries->callable_queries.load();
+    const auto final_queries = queries->final_queries.load();
+    const auto failed_queries = queries->failed_queries.load();
+    queries->armed.store(false);
+    queries->Stop();
+    Check(!opened, phase + " unexpectedly opened a session");
+    const std::string expected_error = failure == SmallOpenFailure::RequiredMcp ? "sdk.mcp.start_failed" :
+        failure == SmallOpenFailure::MissingResume ? "sdk.session.open_failed" : "sdk.session.invalid_options";
+    Check(opened.error().code == expected_error,
+          phase + " failed at another initialization boundary: " + opened.error().code);
+    Check(released, phase + " retained an SDK-owned small callback");
+    Check(callable_queries > 0 && final_queries == 1, phase + " did not release every callback copy");
+    Check(failed_queries == 0, phase + " released its backend before a borrowing callback");
+    Check(state->backend_calls.load() == static_cast<int>(callable_queries + final_queries),
+          phase + " skipped an actual public backend query");
+    Check(state->tool_calls.load() == 0, phase + " executed a tool without a session");
+    Check(state->live_backends.load() == 0, phase + " retained its backend after returning");
+    Check(state->backend_reentry_rejected.load(), phase + " restored the lifecycle guard before destroying its backend");
+    Progress("completed: small callback " + phase);
+}
+
 void SmallToolCaptureLifetime(const fs::path& base) {
     Progress("begin: SmallToolCaptureLifetime");
     const auto paths = Fresh(base, "small-tool-capture");
     auto runtime = Runtime(paths);
+    FailedOpenSmallCapture(*runtime, paths, SmallOpenFailure::MissingResume);
+    FailedOpenSmallCapture(*runtime, paths, SmallOpenFailure::RequiredMcp);
+    FailedOpenSmallCapture(*runtime, paths, SmallOpenFailure::InvalidOptions);
     auto state = std::make_shared<IsolationProbe>();
     auto queries = std::make_shared<PublicCaptureQueries>();
     auto capture = std::make_shared<PublicSmallCapture>(queries, state, paths.cwd);
