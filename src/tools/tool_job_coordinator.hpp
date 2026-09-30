@@ -252,6 +252,17 @@ public:
     ToolJobCoordinator(const ToolJobCoordinator&) = delete;
     ToolJobCoordinator& operator=(const ToolJobCoordinator&) = delete;
 
+    // Stop new dispatch and signal every in-process worker without waiting.
+    // Shutdown joins actual threads, then settles their envelopes while writer
+    // and executor dependencies still live. Call from the owning host, never
+    // from this coordinator's own executor callback. Idempotent.
+    void RequestShutdown();
+    // False means callback reentrancy or unsettled completion facts; no caller
+    // may report a successful close in that case. Real workers are still joined
+    // on the ordinary owning-host path, including settlement write failures.
+    bool Shutdown();
+    bool shutdown_complete() const;
+
     // ---- 四接口(单 §8)----
 
     // search_start 式接单:调用证据 -> 权鉴 -> 注册落稳(落稳前不派发)

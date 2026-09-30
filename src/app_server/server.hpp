@@ -126,20 +126,15 @@ struct ThreadRecord {
     // 与 scheduler 的 enabled 由装配层从 options.features_goal/loop 折。
     std::unique_ptr<runtime::goal::GoalCoordinator> goal_coordinator;
     std::unique_ptr<runtime::loop::LoopScheduler> loop_scheduler;
-    // AppServer 接 v3 第一棒:会话服务入口(开张/输入接纳/域命令/收口
-    // 三端同路)。SessionRuntime 由服务宿主,这里经 runtime()/trajectory()
-    // 取。
-    std::unique_ptr<runtime::SessionService> session_service;
     // 工业化多协议接入单 P1(G01/G02):本场会话级运行材料——backend、
     // 工具表、MCP 子进程与 Agent 档案一场一份,同场多轮复用,不再每轮
     // 重建注册表(冻结合同 §7 RuntimeBundle 最小形状)。thread/start 时
     // 装配,thread 停场随 record 析构(注册表先亡,MCP 子进程后收)。
     std::unique_ptr<SessionAssembly> assembly;
-    // ContextManager lives with this session, like the public SDK's Agent.
-    // Declared after assembly so borrowed backend/registry outlive the Agent.
-    // Only the one active turn worker may touch it; turn callbacks are cleared
-    // before their stack-local owners leave scope.
-    std::unique_ptr<agent::Agent> session_agent;
+    // Common execution owns Agent/resources/history. Declared after assembly:
+    // Lua/plugin material borrowed by registry adapters survives execution
+    // shutdown and destruction. Only the active turn worker uses its Agent.
+    std::unique_ptr<runtime::SessionService> session_service;
 
     explicit ThreadRecord(std::string id)
         : thread_id(std::move(id)) {}

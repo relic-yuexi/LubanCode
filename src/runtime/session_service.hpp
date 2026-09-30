@@ -25,6 +25,7 @@
 // 不写 stdout/stderr——成败用返回值交账,人话由前端印。
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -38,6 +39,7 @@
 #include "api/types.hpp"
 #include "approval_mode.hpp"
 #include "runtime/command.hpp"
+#include "runtime/session_execution.hpp"
 #include "runtime/session_runtime.hpp"
 #include "workspace/identity.hpp"
 
@@ -122,6 +124,22 @@ public:
     const std::string& launch_error() const { return launch_error_; }
     // 这场是不是 v3 写侧(建场时开关二选一的结果;v2 场恒 false)。
     bool v3_format() const;
+
+    // Install once, after the host has interpreted its profile/resource plan.
+    // A failed candidate never replaces the installed execution. Only the
+    // session's single turn worker may use the resulting Agent.
+    void InitializeExecution(std::unique_ptr<assembly::SessionResources> resources,
+                             agent::AgentProfile profile,
+                             std::optional<std::vector<api::Message>> restored_history = std::nullopt);
+    SessionExecution* execution() { return execution_.get(); }
+    const SessionExecution* execution() const { return execution_.get(); }
+
+    // Signal every session before waiting for any session. Hosts first stop
+    // admission and join their turn workers, then call ShutdownExecution/Close.
+    // Shutdown drains in-process async tool workers; it does not release the
+    // execution owner or seal the ledger. Close drains before sealing.
+    void RequestExecutionShutdown();
+    bool ShutdownExecution();
 
     // ---- 输入接纳(§四 input/submit 语义的最小服务面) ----------------------
     struct InputRequest {
@@ -286,6 +304,10 @@ private:
     void SeedOperationLedger();
 
     std::unique_ptr<SessionRuntime> runtime_;
+    // Runtime/ledger outlive execution. Explicit shutdown drains tool jobs
+    // before Agent/resources are destroyed, including exceptional host exits.
+    std::unique_ptr<SessionExecution> execution_;
+    std::atomic<bool> execution_shutdown_requested_{false};
     std::string launch_error_;
     bool v3_format_ = false;
     // resume-at-launch 解析出的直接来源场(空 = 非恢复场)。

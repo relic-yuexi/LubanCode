@@ -6,6 +6,7 @@
 
 #include "runtime/session_runtime.hpp"
 
+#include <exception>
 #include <utility>
 
 #include "config/config.hpp"      // HomeLubancodeDir:身份裁决的全局件止步
@@ -43,10 +44,41 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
     }
 }
 
-SessionRuntime::~SessionRuntime() = default;
+SessionRuntime::~SessionRuntime() {
+    (void)ShutdownAsyncTools();
+    if (async_tool_runtime_ != nullptr && !async_tool_runtime_->quiescent()) std::terminate();
+    // The async owner's callbacks may borrow this runtime. Release their
+    // captures while the publication mutex, permissions and ledger still live.
+    async_tool_runtime_.reset();
+}
 
 void SessionRuntime::AttachAsyncToolRuntime(std::unique_ptr<AsyncToolRuntime> runtime) {
-    async_tool_runtime_ = std::move(runtime);
+    std::unique_ptr<AsyncToolRuntime> previous;
+    {
+        std::lock_guard lock(async_tool_mutex_);
+        if (async_tool_shutdown_requested_ && runtime != nullptr) runtime->RequestShutdown();
+        previous = std::exchange(async_tool_runtime_, std::move(runtime));
+    }
+    // A replacement can own callbacks that need the publication mutex. Drain
+    // and destroy it after releasing that mutex.
+    if (previous != nullptr) (void)previous->Shutdown();
+}
+
+AsyncToolRuntime* SessionRuntime::async_tool_runtime() {
+    std::lock_guard lock(async_tool_mutex_);
+    return async_tool_runtime_.get();
+}
+
+void SessionRuntime::RequestAsyncToolShutdown() {
+    std::lock_guard lock(async_tool_mutex_);
+    async_tool_shutdown_requested_ = true;
+    if (async_tool_runtime_ != nullptr) async_tool_runtime_->RequestShutdown();
+}
+
+bool SessionRuntime::ShutdownAsyncTools() {
+    RequestAsyncToolShutdown();
+    AsyncToolRuntime* runtime = async_tool_runtime();
+    return runtime == nullptr || runtime->Shutdown();
 }
 
 std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::path& new_cwd) {

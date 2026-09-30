@@ -3,6 +3,9 @@
 #include "runtime/async_tool_runtime.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <exception>
 #include <utility>
 
 #include "platform/log_sink.hpp"
@@ -21,6 +24,7 @@ using tools::JobAuthDecision;
 using tools::JobStartRequest;
 using tools::JobStartResult;
 using tools::ToolJobCoordinator;
+thread_local const void* current_async_shutdown = nullptr;
 
 // 已接单/已派发的调用簿:闸门自己的内存账(dedup、幂等、完成通知路由)。
 struct KnownJob {
@@ -56,6 +60,11 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
     bool capability_recorded = false;
     std::mutex book_mutex;  // known_jobs/early 册(批次路径与流式探针同线程,
                             // 恢复/诊断可能异线程,上锁求稳)
+    std::mutex shutdown_mutex;
+    std::condition_variable shutdown_cv;
+    bool shutdown_in_progress = false;
+    std::atomic<bool> shutdown_complete{false};
+    bool shutdown_ok = true;
     std::map<std::string, KnownJob> known_by_call;   // provider call id -> job
     std::map<std::string, KnownJob> known_by_job;    // job id -> job(泵路由)
 
@@ -461,7 +470,54 @@ void AsyncToolRuntime::NoteModelIdentity(const std::string& provider, const std:
     impl_->options.model = model;
 }
 
-AsyncToolRuntime::~AsyncToolRuntime() = default;
+AsyncToolRuntime::~AsyncToolRuntime() {
+    (void)Shutdown();
+    if (!quiescent()) std::terminate();  // Destruction inside an owned callback is invalid.
+}
+
+void AsyncToolRuntime::RequestShutdown() {
+    if (impl_ != nullptr && impl_->coordinator_ != nullptr) impl_->coordinator_->RequestShutdown();
+}
+
+bool AsyncToolRuntime::Shutdown() {
+    if (impl_ == nullptr) return true;
+    if (current_async_shutdown == impl_.get()) return false;
+    const bool settled = impl_->coordinator_ == nullptr || impl_->coordinator_->Shutdown();
+    if (impl_->coordinator_ != nullptr && !impl_->coordinator_->shutdown_complete()) return false;
+    std::unique_lock lock(impl_->shutdown_mutex);
+    impl_->shutdown_cv.wait(lock, [&] { return !impl_->shutdown_in_progress; });
+    if (impl_->shutdown_complete.load()) return impl_->shutdown_ok;
+    impl_->shutdown_in_progress = true;
+    lock.unlock();
+    const void* previous = current_async_shutdown;
+    current_async_shutdown = impl_.get();
+    {
+        // These contain more copies of borrowed callbacks than the coordinator.
+        // Release all copies while the host dependencies and Impl still live.
+        Hooks hooks;
+        std::unique_ptr<ResultDeliveryPlannerImpl> planner;
+        std::function<std::int64_t()> clock;
+        {
+            std::lock_guard book(impl_->book_mutex);
+            hooks = std::exchange(impl_->hooks, Hooks{});
+            planner = std::move(impl_->planner_);
+            clock = std::move(impl_->options.coordinator.clock_ms);
+            impl_->current_bridge = nullptr;
+        }
+    }
+    current_async_shutdown = previous;
+    lock.lock();
+    impl_->shutdown_ok = settled;
+    impl_->shutdown_complete.store(true);
+    impl_->shutdown_in_progress = false;
+    lock.unlock();
+    impl_->shutdown_cv.notify_all();
+    return settled;
+}
+
+bool AsyncToolRuntime::quiescent() const {
+    return impl_ == nullptr || impl_->shutdown_complete.load();
+}
 
 agent::ToolBatchGate* AsyncToolRuntime::gate() { return impl_.get(); }
 

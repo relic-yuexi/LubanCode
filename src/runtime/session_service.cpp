@@ -12,7 +12,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <exception>
 #include <fstream>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
@@ -22,6 +24,7 @@
 #include "platform/atomic_write.hpp"  // 原件原子写(ProcessCrashDurability=fsync 档)
 #include "platform/sha256.hpp"
 #include "runtime/command_service.hpp"
+#include "runtime/async_tool_runtime.hpp"
 #include "runtime/goal_coordinator.hpp"
 #include "runtime/loop_scheduler.hpp"
 #include "tools/path_utils.hpp"  // Utf8ToPath/PathToUtf8
@@ -349,7 +352,52 @@ SessionService::SessionService(SessionLaunchRequest request) {
     SeedOperationLedger();
 }
 
-SessionService::~SessionService() = default;
+SessionService::~SessionService() {
+    (void)ShutdownExecution();
+    if (runtime_ != nullptr && runtime_->async_tool_runtime() != nullptr &&
+        !runtime_->async_tool_runtime()->quiescent()) std::terminate();
+    // Profile/tool capture destructors can still borrow service state. Destroy
+    // the execution now, before any queue, mutex, operation file or ledger.
+    execution_.reset();
+}
+
+void SessionService::InitializeExecution(std::unique_ptr<assembly::SessionResources> resources,
+                                         agent::AgentProfile profile,
+                                         std::optional<std::vector<api::Message>> restored_history) {
+    {
+        std::lock_guard lock(commit_mutex_);
+        if (runtime_ == nullptr) throw std::logic_error("session.execution.session_unavailable");
+        if (execution_ != nullptr) throw std::logic_error("session.execution.already_initialized");
+        if (execution_shutdown_requested_.load()) throw std::logic_error("session.execution.stopping");
+    }
+    // Candidate construction/rollback can destroy user captures that query the
+    // service. Neither construction nor rejected-candidate destruction takes
+    // place under its commit mutex.
+    auto candidate = std::make_unique<SessionExecution>(std::move(resources), std::move(profile),
+                                                       std::move(restored_history));
+    {
+        std::lock_guard lock(commit_mutex_);
+        if (execution_ != nullptr) throw std::logic_error("session.execution.already_initialized");
+        if (execution_shutdown_requested_.load()) throw std::logic_error("session.execution.stopping");
+        execution_ = std::move(candidate);
+    }
+}
+
+void SessionService::RequestExecutionShutdown() {
+    execution_shutdown_requested_.store(true);
+    {
+        std::lock_guard lock(commit_mutex_);
+        // Wait for an initialization already in progress to observe the latch.
+    }
+    // Synchronize with first-turn publication without holding a lock while a
+    // worker exits. The runtime latches shutdown even if no async owner exists.
+    if (runtime_ != nullptr) runtime_->RequestAsyncToolShutdown();
+}
+
+bool SessionService::ShutdownExecution() {
+    RequestExecutionShutdown();
+    return runtime_ == nullptr || runtime_->ShutdownAsyncTools();
+}
 
 TrajectorySessionLedger* SessionService::trajectory() {
     return runtime_ != nullptr ? runtime_->trajectory() : nullptr;
@@ -560,6 +608,10 @@ SessionService::InputReceipt SessionService::SubmitInput(const InputRequest& inp
     }
     const std::string payload_hash = platform::Sha256Hex(CanonicalInputPayload(input));
     std::lock_guard<std::mutex> lock(commit_mutex_);
+    if (execution_shutdown_requested_.load()) {
+        receipt.error_code = "session.stopping";
+        return receipt;
+    }
     // 幂等(§4.2):同键同载荷返回原操作;同键不同载荷 conflict。
     if (!input.client_operation_id.empty()) {
         const auto it = operations_.find(input.client_operation_id);
@@ -813,6 +865,12 @@ ClientReceipt SessionService::ExecuteDomainCommand(const std::string& command_la
 // ---------------------------------------------------------------------------
 
 trajectory::CloseOutcome SessionService::Close(const std::string& reason) {
+    if (!ShutdownExecution()) {
+        trajectory::CloseOutcome outcome;
+        outcome.error_code = "close.async_shutdown_failed";
+        outcome.message = "会话后台工具尚未可靠收口";
+        return outcome;
+    }
     if (runtime_ == nullptr) {
         trajectory::CloseOutcome outcome;
         outcome.error_code = "close.no_active_session";
