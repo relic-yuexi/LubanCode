@@ -45,6 +45,7 @@
 #include "runtime/middleware_v3_sink.hpp"
 #include "runtime/plugin_tool.hpp"
 #include "runtime/tool_trace_hub.hpp"
+#include "runtime/scoped_turn_bindings.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "tools/command_safety.hpp"
 #include "tools/run_command.hpp"
@@ -1069,8 +1070,9 @@ RunTurnResult RunTurn(TurnContext ctx) {
     turn_event_stream.AttachAlongside(
         [&terminal_sink](const lubancode::runtime::ServerEvent& event) { terminal_sink.Emit(event); });
     turn_event_stream.Start(canonical_turn_id);
-    lubancode::agent::TurnWiring wiring = BuildTurnWiring(ctx, display, usage_stats, cancel_flag, turn_event_stream,
-                                                          turn_trajectory.get());
+    lubancode::agent::TurnWiring wiring;
+    lubancode::runtime::ScopedTurnBindings turn_bindings(loop);
+    wiring = BuildTurnWiring(ctx, display, usage_stats, cancel_flag, turn_event_stream, turn_trajectory.get());
     // 四层生命周期单 P1:本轮 canonical Turn 号钉进 wiring——本 Run 与
     // harness 拷贝续跑的每只 Run 都带同一枚,StepUsageRecord.turn_id 跨
     // Run 不裂。Stop 续跑环(TurnHarness)拷的就是这份 wiring,不用另钉。
@@ -1079,35 +1081,32 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 运行时(证据/声明册/回合号查询走它),批次闸门与投递规划进 wiring;
     // 模型身份随轮刷新(能力快照 basis)。没装(旧装配/没开会话)= 全
     // inline,行为一字不差。
+    lubancode::runtime::ScopedTurnBindings::Bindings bindings;
+    bindings.hub = turn_trace_hub;
+    if (turn_trajectory != nullptr) bindings.trajectory = turn_trajectory.get();
+    bindings.thread_id = thread_id_for_trace;
+    bindings.turn_id = canonical_turn_id;
     if (ctx.async_tool_runtime != nullptr && turn_trajectory != nullptr) {
-        ctx.async_tool_runtime->InstallTurnBridge(turn_trajectory.get());
+        bindings.async_runtime = ctx.async_tool_runtime;
         ctx.async_tool_runtime->NoteModelIdentity(ctx.trajectory_provider, ctx.model_id);
-        wiring.tool_batch_gate = ctx.async_tool_runtime->gate();
-        wiring.delivery_planner = ctx.async_tool_runtime->planner();
     }
+    if (turn_trace_hub != nullptr && recorder != nullptr) {
+        bindings.projection = [recorder](const lubancode::agent::ToolTraceEvent& event) {
+            if (event.kind == lubancode::agent::ToolTraceEventKind::Scheduled) {
+                recorder->RecordToolCall(event.tool_name, nlohmann::json::object(), event.execution_id,
+                                         event.tool_use_id);
+            } else if (event.kind == lubancode::agent::ToolTraceEventKind::ExecutionFinished) {
+                recorder->RecordToolResult(event.tool_name,
+                                           event.outcome != lubancode::agent::ToolOutcome::Succeeded,
+                                           event.fallback_message, lubancode::agent::ToString(event.outcome),
+                                           event.error_code, event.execution_id);
+            }
+        };
+    }
+    // No recorder leaves any pre-existing session projection intact. Bind owns
+    // the temporary override and all core borrows for the whole canonical turn.
+    turn_bindings.Bind(wiring, std::move(bindings));
     if (turn_trace_hub != nullptr) {
-        if (recorder != nullptr) {
-            turn_trace_hub->AttachProjection(
-                [recorder](const lubancode::agent::ToolTraceEvent& event) {
-                    if (event.kind == lubancode::agent::ToolTraceEventKind::Scheduled) {
-                        recorder->RecordToolCall(event.tool_name, nlohmann::json::object(), event.execution_id,
-                                                 event.tool_use_id);
-                    } else if (event.kind == lubancode::agent::ToolTraceEventKind::ExecutionFinished) {
-                        recorder->RecordToolResult(event.tool_name,
-                                                   event.outcome != lubancode::agent::ToolOutcome::Succeeded,
-                                                   event.fallback_message, lubancode::agent::ToString(event.outcome),
-                                                   event.error_code, event.execution_id);
-                    }
-                });
-        }
-        // P0-2 轨迹:hub 的持久账从 SessionStore 改接本轮边界桥(§15.2)。
-        // 桥在 Install 之前挂:Install 要看轨迹的能力位(ManagesToolResult
-        // Previews)决定挂不挂整批 rewrite 钩子——v3 在管预览才挂,v2 不挂
-        // 走旧口径。落盘关口本就在调用时才看 trajectory_,先挂后装零差。
-        if (turn_trajectory != nullptr) {
-            turn_trace_hub->AttachTrajectory(turn_trajectory.get());
-        }
-        turn_trace_hub->Install(loop, wiring, thread_id_for_trace, canonical_turn_id);
         // 补偿关系边(单子第四期):undo_file_edit execute 后报"这枚补偿
         // 谁",finished 栅栏随账落 compensates。
         wiring.on_tool_compensates = [&registry](const std::string& /*execution_id*/,
@@ -1357,10 +1356,10 @@ RunTurnResult RunTurn(TurnContext ctx) {
                                      tone == lubancode::cli::TurnFooterTone::Stopped,
                                      tone == lubancode::cli::TurnFooterTone::Failed ? turn_error_text
                                                                                     : std::string());
-            if (turn_trace_hub != nullptr) {
-                turn_trace_hub->DetachTrajectory();
-            }
         }
+        // All Stop continuations have finished before this canonical turn
+        // closes. Restore bindings at the old detach boundary, before display.
+        turn_bindings.Reset();
         turn_event_stream.Finish(tone == lubancode::cli::TurnFooterTone::Worked
                                      ? lubancode::runtime::Outcome::Succeeded
                                  : tone == lubancode::cli::TurnFooterTone::Stopped

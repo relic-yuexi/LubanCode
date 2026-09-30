@@ -932,6 +932,7 @@ void RunParallelReadSegment(ParallelReadSegmentRun& ctx, std::size_t begin, std:
         if (ctx.trace_armed) {
             slot->trace_ctx.execution_id = ctx.scheduled_ids[ctx.scheduled_slot[k]];
             slot->trace_ctx.batch_id = ctx.batch_id;
+            slot->trace_ctx.turn_id = ctx.wiring.turn_id;
             slot->trace_ctx.sequence_in_batch = static_cast<int>(k);
             slot->trace_ctx.provider_request_id = ctx.stream_request_id;
             if (slot->via_proxy) {
@@ -950,6 +951,7 @@ void RunParallelReadSegment(ParallelReadSegmentRun& ctx, std::size_t begin, std:
                 cancelled.kind = ToolTraceEventKind::ExecutionFinished;
                 cancelled.outcome = ToolOutcome::CancelledBeforeStart;
                 cancelled.batch_id = ctx.batch_id;
+                cancelled.turn_id = ctx.wiring.turn_id;
                 cancelled.sequence_in_batch = static_cast<int>(k);
                 cancelled.execution_id = ctx.scheduled_ids[ctx.scheduled_slot[k]];
                 cancelled.tool_use_id = ctx.batch_calls[k].id;
@@ -2599,6 +2601,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 审计按枚及时落,崩溃窗口从"整轮"缩到"当前这枚";wire 语义不变,
         // 五枚结果仍同一条 user message。
         const bool trace_armed = wiring.on_tool_trace != nullptr;
+        // Canonical turn identity comes from the host. Carry it in raw events,
+        // not only the UI projection; an unspecified identity stays unspecified.
         std::string batch_id;
         int sequence_in_batch = 0;
         if (trace_armed) {
@@ -2640,6 +2644,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 ToolTraceEvent scheduled;
                 scheduled.kind = ToolTraceEventKind::Scheduled;
                 scheduled.batch_id = batch_id;
+                scheduled.turn_id = wiring.turn_id;
                 scheduled.sequence_in_batch = sequence_in_batch;
                 scheduled.execution_id = issue_execution_id();
                 scheduled.tool_use_id = call.id;
@@ -2783,6 +2788,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     cancelled.kind = ToolTraceEventKind::ExecutionFinished;
                     cancelled.outcome = ToolOutcome::CancelledBeforeStart;
                     cancelled.batch_id = batch_id;
+                    cancelled.turn_id = wiring.turn_id;
                     cancelled.sequence_in_batch = tool_index;
                     cancelled.execution_id = scheduled_ids[scheduled_slot[i]];
                     cancelled.tool_use_id = call.id;
@@ -2798,6 +2804,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             if (trace_armed) {
                 trace_ctx.execution_id = scheduled_ids[scheduled_slot[i]];
                 trace_ctx.batch_id = batch_id;
+                trace_ctx.turn_id = wiring.turn_id;
                 trace_ctx.sequence_in_batch = tool_index;
                 trace_ctx.provider_request_id = stream_request_id;
             }
@@ -2823,6 +2830,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                 ? refusal.message
                                 : refusal.message.substr(0, platform::Utf8PrefixBoundary(refusal.message, 200));
                         refused.batch_id = batch_id;
+                        refused.turn_id = wiring.turn_id;
                         refused.sequence_in_batch = tool_index;
                         refused.execution_id = scheduled_ids[scheduled_slot[i]];
                         refused.tool_use_id = call.id;
@@ -3089,6 +3097,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 ToolTraceEvent committed;
                 committed.kind = ToolTraceEventKind::ResultCommitted;
                 committed.batch_id = batch_id;
+                committed.turn_id = wiring.turn_id;
                 committed.execution_id = execution_id;
                 committed.timestamp_ms = NowMsEpoch();
                 wiring.on_tool_trace(committed);

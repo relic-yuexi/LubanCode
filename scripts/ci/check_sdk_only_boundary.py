@@ -26,6 +26,7 @@ HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "sr
 SHARED_SDK_TEST_SOURCES = {
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",
+    "tests/unit/runtime/test_scoped_turn_bindings.cpp",
 }
 TERMINAL_PATH = re.compile(r"^src/platform/(?:console|clipboard|hidden_input|terminal_batch)(?:[_.]|$)")
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"\n]+)[>"]', re.MULTILINE)
