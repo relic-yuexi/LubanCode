@@ -18,6 +18,8 @@ void ClearExecutionProfileBorrowers(agent::AgentProfile& profile) noexcept;
 // use this owner. It does not dispatch inputs or install per-turn callbacks.
 class SessionExecution final {
 public:
+    // Consumes the source profile's callbacks/resolver even on failure; value
+    // metadata remains available to the host after this construction attempt.
     SessionExecution(std::unique_ptr<assembly::SessionResources> resources,
                      agent::AgentProfile&& profile,
                      std::optional<std::vector<api::Message>> restored_history = std::nullopt);
