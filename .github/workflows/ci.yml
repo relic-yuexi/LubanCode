@@ -1017,7 +1017,7 @@ jobs:
           # (Lua 钩子串),与本腿的悬垂/寿命合同无关,另立单子治理后再开。
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
         run: |
-          ctest --test-dir build -C Release -R '^(integration\.app_server\.app_server_session_parity|unit\.app_server\.app_server_browser|unit\.runtime\.tool_runtime|integration\.plugins\.tool_runtime_deferral|unit\.runtime\.session_execution|unit\.runtime\.scoped_turn_bindings|unit\.app\.turn_runner_scoped_bindings)$' \
+          ctest --test-dir build -C Release -R '^(integration\.app_server\.app_server_session_parity|unit\.app_server\.app_server_browser|unit\.runtime\.tool_runtime|integration\.plugins\.tool_runtime_deferral|unit\.runtime\.session_execution|unit\.runtime\.scoped_turn_bindings|unit\.tools\.tool_job_coordinator|unit\.app\.turn_runner_scoped_bindings)$' \
             --show-only=json-v1 > build/asan-host-registration.json
           python3 - <<'PY'
           import json
@@ -1025,7 +1025,7 @@ jobs:
           tests = json.loads(Path('build/asan-host-registration.json').read_text())['tests']
           required = {'integration.app_server.app_server_session_parity', 'unit.app_server.app_server_browser',
                       'unit.runtime.tool_runtime', 'integration.plugins.tool_runtime_deferral',
-                      'unit.runtime.session_execution', 'unit.runtime.scoped_turn_bindings',
+                      'unit.runtime.session_execution', 'unit.runtime.scoped_turn_bindings', 'unit.tools.tool_job_coordinator',
                       'unit.app.turn_runner_scoped_bindings'}
           if len(tests) != len(required) or {test['name'] for test in tests} != required:
               raise SystemExit('ASan SDK/host lifetime regressions are not registered')
@@ -1036,7 +1036,7 @@ jobs:
           PY
           # channel_menu_pump 暂除外:该册对调度时序敏感,ASan 放慢后
           # "未配对点击"的拒绝态断言抢跑假红;渠道域不是本腿的合同面。
-          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\.|^integration\.app_server\.app_server_session_parity$|^unit\.app_server\.app_server_browser$|^integration\.plugins\.tool_runtime_deferral$|^unit\.app\.turn_runner_scoped_bindings$" \
+          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\.|^unit\.tools\.tool_job_coordinator$|^integration\.app_server\.app_server_session_parity$|^unit\.app_server\.app_server_browser$|^integration\.plugins\.tool_runtime_deferral$|^unit\.app\.turn_runner_scoped_bindings$" \
             -E "channel_menu_pump" --parallel 4 --output-on-failure --no-tests=error \
             --output-junit "$PWD/build/asan-results.xml"
           python3 - <<'PY'
