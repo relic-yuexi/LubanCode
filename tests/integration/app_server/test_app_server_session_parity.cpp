@@ -4,23 +4,32 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
+#include <utility>
+#include <variant>
+#include <vector>
 
 #include "api/chat/client.hpp"
 #include "app_server/connection.hpp"
 #include "app_server/protocol.hpp"
 #include "app_server/server.hpp"
 #include "app_server/session_assembly.hpp"
+#include "config/plugin_trust.hpp"
 #include "mcp_cwd_fixture.hpp"
+#include "platform/paths.hpp"
+#include "runtime/plugin_lua_manifest.hpp"
+#include "runtime/plugin_tool.hpp"
 #include "session_history_fixture.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
-#include "runtime/plugin_lua_manifest.hpp"
 
 namespace {
 using namespace lubancode;
