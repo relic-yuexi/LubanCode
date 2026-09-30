@@ -275,9 +275,9 @@ struct Session::Impl final : rt::InteractionBroker {
     std::shared_ptr<std::atomic<bool>> runtime_stopping;
     std::string session_id;
     fs::path session_dir;
-    std::unique_ptr<rt::SessionService> service;
-    std::unique_ptr<rt::assembly::SessionResources> resources;
-    std::unique_ptr<lubancode::agent::Agent> agent;
+    // RequestClose may race a different caller finishing Close. A short mutex
+    // snapshot keeps the service alive while cancellation is signalled.
+    std::shared_ptr<rt::SessionService> service;
     mutable std::mutex mutex;
     mutable std::condition_variable cv;
     std::mutex close_mutex;
@@ -288,6 +288,7 @@ struct Session::Impl final : rt::InteractionBroker {
     std::string active_turn_id; // worker-only; allocated by the durable V3 writer
     bool closing = false;
     bool closed = false;
+    std::size_t close_signals_inflight = 0;
     bool broken = false;
     std::optional<Error> close_error;
     std::shared_ptr<CloseErrors> close_errors;
@@ -372,6 +373,25 @@ struct Session::Impl final : rt::InteractionBroker {
         if (!options.resume_session_id.empty() && !ValidId(options.resume_session_id)) {
             return std::unexpected(Failure("sdk.resume.invalid_id"));
         }
+        struct InitCleanupScope {
+            bool previous = in_session_worker;
+            InitCleanupScope() { in_session_worker = true; }
+            ~InitCleanupScope() { in_session_worker = previous; }
+        } cleanup_scope;
+        // Keep the public backend alive across every initialization rollback.
+        // MCP launch can fail before registry_factory consumes prepared_registry;
+        // later identity/ledger/Agent failures can likewise release the candidate
+        // resources before the SDK-owned inline tool callback sources retire.
+        std::shared_ptr<Backend> initialization_backend(std::move(options.backend));
+        struct SourceScope {
+            SessionOptions& options;
+            ~SourceScope() {
+                // Other initialization locals retire first, under the same TLS
+                // lifecycle guard. Clear the actual sources before the backend
+                // anchor declared above, including std::function SBO copies.
+                options.custom_tools.clear();
+            }
+        } source_scope{options};
         auto prepared_registry = std::make_unique<lubancode::tools::ToolRegistry>();
         for (const auto& name : options.builtin_tools) {
             auto tool = rt::assembly::CreateLocalTool(name);
@@ -428,7 +448,7 @@ struct Session::Impl final : rt::InteractionBroker {
         };
         std::string wire = "sdk_custom";
         std::optional<lubancode::config::Config> backend_config;
-        if (!options.backend) {
+        if (!initialization_backend) {
             const auto& source = *options.connection;
             if (source.base_url.empty() || source.connect_timeout_ms <= 0 || source.idle_timeout_seconds <= 0 || source.request_timeout_seconds <= 0) {
                 return std::unexpected(Failure("sdk.connection.invalid"));
@@ -448,7 +468,7 @@ struct Session::Impl final : rt::InteractionBroker {
             backend_config = std::move(config);
         }
         resource_request.backend_factory = [&]() -> std::unique_ptr<api::Backend> {
-            if (options.backend) return detail::AdaptBackend(std::move(options.backend));
+            if (initialization_backend) return detail::AdaptBackend(initialization_backend);
             return rt::assembly::BuildBackend(*backend_config);
         };
         auto assembled = rt::assembly::BuildSessionResources(std::move(resource_request));
@@ -462,7 +482,6 @@ struct Session::Impl final : rt::InteractionBroker {
                 return std::unexpected(Failure(error.code, error.message));
             return std::unexpected(Failure("sdk.session.open_failed", error.message));
         }
-        resources = std::move(*assembled);
         auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
         if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
         rt::SessionLaunchRequest launch;
@@ -476,7 +495,7 @@ struct Session::Impl final : rt::InteractionBroker {
         launch.resume_at_launch = !options.resume_session_id.empty();
         launch.require_v3_resume = launch.resume_at_launch;
         launch.resume_source_session_id = options.resume_session_id;
-        service = std::make_unique<rt::SessionService>(std::move(launch));
+        service = std::make_shared<rt::SessionService>(std::move(launch));
         if (!service->runtime()) return std::unexpected(Failure("sdk.session.open_failed", service->launch_error()));
         session_id = service->trajectory()->session_id();
         session_dir = service->trajectory()->session_dir();
@@ -493,8 +512,9 @@ struct Session::Impl final : rt::InteractionBroker {
         profile.system_prompt = options.system_prompt;
         profile.runtime.max_steps_per_turn = options.max_steps_per_turn;
         profile.runtime.context_window_tokens = options.context_window_tokens;
-        agent = std::make_unique<lubancode::agent::Agent>(resources->backend(), resources->registry(), std::move(profile));
-        if (!options.resume_session_id.empty()) agent->RestoreSessionHistory(service->trajectory()->LaunchResumeHistory());
+        std::optional<std::vector<api::Message>> restored_history;
+        if (!options.resume_session_id.empty()) restored_history = service->trajectory()->LaunchResumeHistory();
+        service->InitializeExecution(std::move(*assembled), std::move(profile), std::move(restored_history));
         return LoadOperations();
     }
 
@@ -625,6 +645,7 @@ struct Session::Impl final : rt::InteractionBroker {
         events.Start(operation.turn_id);
         lubancode::agent::TurnWiring wiring;
         wiring.events = &events;
+        wiring.turn_id = operation.turn_id;
         wiring.tool_artifact_dir = lubancode::tools::PathToUtf8(session_dir / "artifacts" / "sha256");
         wiring.on_permission_evaluate = [&](const std::string&, const std::string& name,
             lubancode::tools::ApprovalClass approval_class, const Json& arguments, const rt::ToolHookDecision& pre) {
@@ -641,7 +662,8 @@ struct Session::Impl final : rt::InteractionBroker {
         auto bridge = service->trajectory()->NewTurnBridge({"", service->runtime()->wire_name(), "sdk", {}});
         if (!bridge) { operation.state = OperationState::Failed; operation.error = "sdk.trajectory.bridge_unavailable"; Complete(std::move(operation), {}, false); return; }
         rt::ToolTraceHub hub(service->runtime()->ids());
-        rt::ScopedTurnBindings turn_bindings(*agent);
+        auto& agent = service->execution()->agent();
+        rt::ScopedTurnBindings turn_bindings(agent);
         turn_bindings.Bind(wiring, {.hub = &hub, .trajectory = bridge.get(),
                                    .thread_id = session_id, .turn_id = operation.turn_id});
         api::Message message;
@@ -649,8 +671,8 @@ struct Session::Impl final : rt::InteractionBroker {
         message.content.push_back(api::TextBlock{input.text});
         bridge->BeginTurn(operation.turn_id, "external_user");
         bridge->RecordInput(message);
-        const auto history_before = agent->history().size();
-        auto outcome = agent->Run(std::move(message), wiring, &interrupt);
+        const auto history_before = agent.history().size();
+        auto outcome = agent.Run(std::move(message), wiring, &interrupt);
         bridge->EndTurn(outcome.has_value(), outcome && outcome->cancelled, outcome ? "" : outcome.error());
         turn_bindings.Reset();
         operation.state = !outcome ? OperationState::Failed : outcome->cancelled ? OperationState::Cancelled : OperationState::Succeeded;
@@ -659,7 +681,7 @@ struct Session::Impl final : rt::InteractionBroker {
             operation.state = OperationState::Failed;
             operation.error = "sdk.turn.limit_reached";
         }
-        const auto& history = agent->history();
+        const auto& history = agent.history();
         if (history.size() > history_before && history.back().role == api::Role::Assistant) {
             for (const auto& block : history.back().content) if (auto* text = std::get_if<api::TextBlock>(&block)) operation.final_text += text->text;
         }
@@ -722,6 +744,29 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         CancelApprovals();
     }
+    void RequestExecutionShutdown() {
+        std::shared_ptr<rt::SessionService> service_to_stop;
+        struct SignalScope {
+            Impl& owner;
+            std::shared_ptr<rt::SessionService>& service;
+            ~SignalScope() {
+                if (service == nullptr) return;
+                service.reset();
+                std::lock_guard lock(owner.mutex);
+                --owner.close_signals_inflight;
+                owner.cv.notify_all();
+            }
+        } signal_scope{*this, service_to_stop};
+        {
+            std::lock_guard lock(mutex);
+            if (closed) return;
+            service_to_stop = service;
+            if (service_to_stop != nullptr) ++close_signals_inflight;
+        }
+        if (service_to_stop != nullptr) {
+            service_to_stop->RequestExecutionShutdown();
+        }
+    }
     Result<void> Close() {
         if (in_session_worker) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
         std::lock_guard close_lock(close_mutex);
@@ -730,24 +775,46 @@ struct Session::Impl final : rt::InteractionBroker {
             if (closed) return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
         }
         RequestClose();
+        RequestExecutionShutdown();
         if (worker.joinable()) worker.join();
         if (service && service->runtime()) {
             const auto outcome = service->Close("sdk_close");
             if (!outcome.error_code.empty()) close_error = Failure(outcome.error_code, outcome.message);
         }
         if (close_error && close_errors) close_errors->Remember(*close_error);
-        agent.reset();
-        resources.reset();
         // SessionService destruction also releases operations.jsonl. Keep query
         // projections, not the live writer, after Close (Windows delete/rename).
-        service.reset();
+        std::shared_ptr<rt::SessionService> closed_service;
         std::vector<std::shared_ptr<EventStream::Impl>> streams;
         {
-            std::lock_guard lock(mutex);
+            std::unique_lock lock(mutex);
             closed = true;
+            // A concurrent signal cannot keep a writer alive after Close
+            // returns. Close admission first, then wait for its snapshot back.
+            cv.wait(lock, [&] { return close_signals_inflight == 0; });
+            closed_service = std::move(service);
             for (auto& weak : subscriptions) if (auto stream = weak.lock()) streams.push_back(std::move(stream));
             subscriptions.clear();
             cv.notify_all();
+        }
+        {
+            // Even a moved std::function can retain an inline callable in the
+            // SDK-owned SessionOptions. Clear those sources before destroying
+            // the Agent/registry/backend they may borrow. Nonblocking queries
+            // may reenter here; blocking lifecycle calls must not wait on this
+            // Close's serialization mutex from a capture destructor.
+            struct CleanupScope {
+                bool previous = in_session_worker;
+                CleanupScope() { in_session_worker = true; }
+                ~CleanupScope() { in_session_worker = previous; }
+            } cleanup_scope;
+            options.custom_tools.clear();
+            // Agent -> registry/MCP/backend -> ledger, outside the API mutex.
+            closed_service.reset();
+            // Preflight/control-block failure may leave the original public
+            // backend in options. Retire it under the same lifecycle guard,
+            // after every tool/Agent, rather than during Impl member teardown.
+            options.backend.reset();
         }
         for (auto& stream : streams) stream->Close();
         return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
@@ -875,6 +942,9 @@ Result<void> Runtime::Shutdown() {
     }
     // Stop admission and signal every worker before waiting for any one worker.
     for (const auto& session : sessions) session->RequestClose();
+    // Approval futures across all sessions must be awake before acquiring any
+    // coordinator's publication/jobs mutex to signal its background workers.
+    for (const auto& session : sessions) session->RequestExecutionShutdown();
     for (const auto& session : sessions) (void)session->Close();
     // Keep the registry until every join finishes. A concurrent Shutdown must
     // take the same live snapshot, rather than return while workers still run.

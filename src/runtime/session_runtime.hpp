@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -122,7 +123,11 @@ public:
     // 没挂(旧装配/单发)各轮照旧全 inline,行为一字不差。不持有轮桥——
     // 每轮 InstallTurnBridge 换。
     void AttachAsyncToolRuntime(std::unique_ptr<class AsyncToolRuntime> runtime);
-    AsyncToolRuntime* async_tool_runtime() { return async_tool_runtime_.get(); }
+    AsyncToolRuntime* async_tool_runtime();
+    void RequestAsyncToolShutdown();
+    // Call after the host's turn workers have exited; no mutex is held while
+    // tool callbacks are joined. Also used before closing the session ledger.
+    bool ShutdownAsyncTools();
 
     // 开一轮的事件适配器:把 loop 的回调翻成 ServerEvent 流,落到 AttachSink
     // 挂的那只 sink(没挂就只发号不落笔)。每轮各开一只,轮间不共用状态。
@@ -183,6 +188,8 @@ private:
 
     // 异步工具 P2:会话级运行时(装配层挂入)。
     std::unique_ptr<class AsyncToolRuntime> async_tool_runtime_;
+    std::mutex async_tool_mutex_;
+    bool async_tool_shutdown_requested_ = false;
 
     std::set<std::string> always_allowed_;
 

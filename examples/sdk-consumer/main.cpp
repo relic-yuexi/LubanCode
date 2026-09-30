@@ -1,9 +1,11 @@
 #include <lubancore/core.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -19,7 +21,9 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 // Deliberately only the installed public header and the C++ standard library.
 // The fixture supplies model replies; Agent, permissions, tools and persistence
@@ -181,10 +185,16 @@ void FileAndCommand(const fs::path& base) {
                 return Call("read-back", "read_file", R"({"path":"message.txt"})");
             case 2:
                 Check(HasReply(request, "SDK file"), "real read_file result did not reach model history");
-                // This checks real command delivery, not PowerShell cold-start
-                // speed. The bounded turn gate below also covers its write/read
-                // and approval work; the consumer CTest timeout remains 120s.
+                // Exercise real process output, approval and history delivery.
+                // The bounded turn gate also covers write/read and approvals;
+                // the consumer CTest timeout remains 120s.
+#ifdef _WIN32
+                // cmd is sufficient for this echo check. The tool regressions
+                // also cover Windows' default PowerShell execution path.
+                return Call("run-once", "run_command", R"({"command":"echo sdk-command","shell":"cmd","timeout_ms":20000})");
+#else
                 return Call("run-once", "run_command", R"({"command":"echo sdk-command","timeout_ms":20000})");
+#endif
             case 3:
                 if (!HasReply(request, "sdk-command")) {
                     std::string details;
@@ -317,6 +327,504 @@ void SharedDirectoryIsolation(const fs::path& base) {
     Check(Take(alpha->ReadOperation(a2.operation_id), "alpha remains complete").state == sdk::OperationState::Succeeded,
           "late cancellation damaged the next operation");
     Take(runtime->Shutdown(), "shutdown shared-cwd runtime");
+}
+
+struct IsolationRendezvous {
+    std::mutex mutex;
+    std::condition_variable cv;
+    unsigned arrived = 0;
+    void Meet() {
+        std::unique_lock lock(mutex);
+        ++arrived;
+        cv.notify_all();
+        Check(cv.wait_for(lock, 10s, [&] { return arrived == 4; }),
+              "four sessions did not execute independently");
+    }
+};
+struct IsolationProbe {
+    std::atomic<int> backend_calls{0};
+    std::atomic<int> tool_calls{0};
+    std::atomic<int> hold_calls{0};
+    std::atomic<bool> entered{false};
+    std::atomic<bool> released{false};
+    std::atomic<bool> observed_cancel{false};
+    std::atomic<int> live_backends{0};
+    std::atomic<bool> backend_reentry_rejected{false};
+};
+class IsolationBackend final : public sdk::Backend {
+public:
+    IsolationBackend(std::shared_ptr<IsolationProbe> state, GenerateFunction generate)
+        : state_(std::move(state)), generate_(std::move(generate)) { ++state_->live_backends; }
+    ~IsolationBackend() override { --state_->live_backends; }
+    sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest& request, sdk::Cancellation cancel) override {
+        ++state_->backend_calls;
+        return generate_(request, cancel);
+    }
+private:
+    std::shared_ptr<IsolationProbe> state_;
+    GenerateFunction generate_;
+};
+
+void FourSessionIsolation(const fs::path& base) {
+    Progress("begin: FourSessionIsolation");
+    const auto paths = Fresh(base, "isolation");
+    const auto host_cwd = fs::current_path();
+    auto runtime = Runtime(paths);
+    const std::array<std::string, 4> labels{
+        "ISOLATION_ALPHA", "ISOLATION_BETA", "ISOLATION_GAMMA", "ISOLATION_DELTA"};
+    const std::array<fs::path, 4> directories{
+        paths.cwd, paths.cwd, paths.root / "project-c", paths.root / "project-d"};
+    for (const auto& directory : directories) fs::create_directories(directory);
+    auto rendezvous = std::make_shared<IsolationRendezvous>();
+    std::array<std::shared_ptr<IsolationProbe>, 4> probes;
+    std::array<std::shared_ptr<sdk::Session>, 4> sessions;
+    std::array<std::shared_ptr<sdk::EventStream>, 4> streams;
+    std::array<sdk::Receipt, 4> first;
+    std::array<sdk::Operation, 4> first_results;
+    std::array<std::string, 4> ids;
+    std::array<std::vector<sdk::Event>, 4> observed;
+    const auto options_for = [&](unsigned index, bool resume) {
+        const auto label = labels[index];
+        const auto state = probes[index];
+        auto options = Options(paths, {});
+        options.cwd = Utf8(directories[index]);
+        options.model = label + "_MODEL";
+        options.system_prompt = label + "_SYSTEM";
+        options.backend = std::make_unique<IsolationBackend>(state,
+            [=](const sdk::ModelRequest& request, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+                Check(request.model == label + "_MODEL", "model crossed session: " + label);
+                Check(request.system.find(label + "_SYSTEM") != std::string::npos,
+                      "effective system prompt crossed session: " + label);
+                for (const auto& foreign : labels) {
+                    if (foreign == label) continue;
+                    Check(request.system.find(foreign) == std::string::npos, "foreign system prompt leaked");
+                    for (const auto& message : request.messages) {
+                        Check(message.text.find(foreign) == std::string::npos, "foreign conversation leaked");
+                        for (const auto& reply : message.tool_replies)
+                            Check(reply.text.find(foreign) == std::string::npos, "foreign tool result leaked");
+                    }
+                }
+                if (!resume && state->backend_calls.load() == 1) rendezvous->Meet();
+                std::string input;
+                for (const auto& message : request.messages)
+                    if (message.role == "user" && !message.text.empty()) input = message.text;
+                if (input == label + "/resumed") {
+                    Check(HasText(request, label + "/round1"), "resume lost the original user input");
+                    Check(HasText(request, label + "/done1"), "resume lost the original assistant answer");
+                    Check(HasReply(request, label + "/tool1"), "resume lost the original tool result");
+                    return Text(label + "/resume-done");
+                }
+                const bool second = input == label + "/round2";
+                Check(second || input == label + "/round1", "wrong user input reached backend");
+                const std::string call_id = label + (second ? "-call2" : "-call1");
+                bool replied = false;
+                for (const auto& message : request.messages)
+                    for (const auto& reply : message.tool_replies)
+                        replied = replied || reply.call_id == call_id;
+                if (!replied) return Call(call_id, second && index >= 2 ? "hold" : "probe",
+                                         second ? R"({"phase":"round2"})" : R"({"phase":"round1"})");
+                if (index != 1 || second)
+                    Check(HasReply(request, label + (second ? "/tool2" : "/tool1")), "own tool result was lost");
+                return Text(label + (second ? "/done2" : "/done1"));
+            });
+        sdk::Tool probe;
+        probe.name = "probe";
+        probe.description = "Record one effect after this session's own approval.";
+        probe.execute = [=](const std::string& input, const sdk::ToolContext& context) -> sdk::Result<sdk::ToolResult> {
+            Check(fs::equivalent(Path(context.cwd), directories[index]), "approved tool used another project");
+            Check(!context.cancellation.requested(), "another session cancelled this approved tool");
+            ++state->tool_calls;
+            return sdk::ToolResult{label + (input.find("round2") == std::string::npos ? "/tool1" : "/tool2"), false};
+        };
+        options.custom_tools.push_back(std::move(probe));
+        sdk::Tool hold;
+        hold.name = "hold";
+        hold.description = "Keep a real SDK tool callback active until release or cancellation.";
+        hold.requires_approval = false;
+        hold.execute = [=](const std::string&, const sdk::ToolContext& context) -> sdk::Result<sdk::ToolResult> {
+            Check(fs::equivalent(Path(context.cwd), directories[index]), "held callback used another project");
+            ++state->hold_calls;
+            state->entered.store(true);
+            const auto deadline = std::chrono::steady_clock::now() + 20s;
+            while (!state->released.load() && !context.cancellation.requested() &&
+                   std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(2ms);
+            state->observed_cancel.store(context.cancellation.requested());
+            Check(state->released.load() || context.cancellation.requested(), "held callback timed out");
+            // These borrowed fields must remain alive all the way to callback exit.
+            Check(fs::equivalent(Path(context.cwd), directories[index]), "Close destroyed the borrowed tool context");
+            return sdk::ToolResult{label + "/tool2", context.cancellation.requested()};
+        };
+        options.custom_tools.push_back(std::move(hold));
+        return options;
+    };
+    const auto approval = [&](unsigned index, const sdk::Receipt& receipt) {
+        const auto deadline = std::chrono::steady_clock::now() + 15s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto event = Take(streams[index]->Next(100ms), "isolation approval event");
+            if (!event) continue;
+            Check(event->session_id == ids[index], "event reached another session subscription");
+            observed[index].push_back(*event);
+            if (!event->approval) continue;
+            Check(event->operation_id == receipt.operation_id && event->approval->operation_id == receipt.operation_id,
+                  "approval reached another operation");
+            Check(fs::equivalent(Path(event->approval->cwd), directories[index]), "approval described another project");
+            Check(event->approval->tool_name == "probe", "unexpected isolation approval");
+            return *event->approval;
+        }
+        throw std::runtime_error("isolation approval did not arrive");
+    };
+    const auto check_events = [&](unsigned index, const sdk::Receipt& receipt, const sdk::Operation& result) {
+        bool complete = false;
+        const auto validate = [&](const sdk::Event& event) {
+            Check(event.session_id == ids[index], "event session identity crossed sessions");
+            if (event.operation_id != receipt.operation_id) return;
+            if (event.kind != "approval_requested")
+                Check(event.turn_id == result.turn_id && !event.turn_id.empty(), "event lost the canonical turn identity");
+            if (event.kind == "operation_completed") complete = true;
+        };
+        for (const auto& event : observed[index]) validate(event);
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (!complete && std::chrono::steady_clock::now() < deadline) {
+            auto event = Take(streams[index]->Next(100ms), "isolation completion event");
+            if (event) { observed[index].push_back(*event); validate(*event); }
+        }
+        Check(complete, "isolation operation did not publish its completion");
+    };
+    std::set<std::string> unique_ids;
+    for (unsigned index = 0; index != 4; ++index) {
+        probes[index] = std::make_shared<IsolationProbe>();
+        sessions[index] = Take(runtime->OpenSession(options_for(index, false)), "open isolation session");
+        ids[index] = sessions[index]->id();
+        unique_ids.insert(ids[index]);
+        streams[index] = Take(sessions[index]->Subscribe(), "subscribe isolated events");
+        first[index] = Take(sessions[index]->Submit("same-client-key", labels[index] + "/round1"), "submit isolated round1");
+    }
+    Check(unique_ids.size() == 4, "session identities collapsed across projects");
+    std::array<sdk::Approval, 4> approvals;
+    for (unsigned index = 0; index != 4; ++index) approvals[index] = approval(index, first[index]);
+    for (unsigned index = 0; index != 4; ++index)
+        Check(!sessions[index]->ResolveApproval(approvals[(index + 1) % 4].request_id, sdk::ApprovalDecision::Accept),
+              "another session resolved an approval");
+    Take(sessions[0]->ResolveApproval(approvals[0].request_id, sdk::ApprovalDecision::AcceptForSession), "allow alpha for session");
+    Take(sessions[1]->ResolveApproval(approvals[1].request_id, sdk::ApprovalDecision::Decline), "decline beta only");
+    Take(sessions[2]->ResolveApproval(approvals[2].request_id, sdk::ApprovalDecision::Accept), "allow gamma once");
+    Take(sessions[3]->Cancel(first[3].operation_id), "cancel delta only");
+    for (unsigned index = 0; index != 4; ++index) {
+        first_results[index] = Finished(sessions[index], first[index]);
+        if (index == 3) Check(first_results[index].state == sdk::OperationState::Cancelled, "delta cancellation was lost");
+        else Succeeded(first_results[index]);
+        check_events(index, first[index], first_results[index]);
+        Check(probes[index]->tool_calls.load() == (index == 0 || index == 2 ? 1 : 0), "approval or cancellation crossed sessions");
+    }
+    std::array<sdk::Receipt, 4> second;
+    for (unsigned index = 0; index != 4; ++index)
+        second[index] = Take(sessions[index]->Submit("same-second-key", labels[index] + "/round2"), "submit isolated round2");
+    const auto beta_pending = approval(1, second[1]);
+    const auto alpha_result = Finished(sessions[0], second[0]);
+    Succeeded(alpha_result);
+    check_events(0, second[0], alpha_result);
+    Check(sessions[0]->PendingApprovals().empty() && probes[0]->tool_calls.load() == 2, "session allowance was lost");
+    Take(sessions[0]->Close(), "close alpha while peers remain active");
+    Check(probes[0]->live_backends.load() == 0, "closed alpha retained its execution backend");
+    Check(probes[1]->live_backends.load() == 1 && sessions[1]->PendingApprovals().size() == 1,
+          "closing alpha destroyed beta or resolved its pending approval");
+    Take(sessions[1]->ResolveApproval(beta_pending.request_id, sdk::ApprovalDecision::Accept), "beta still owns its approval");
+    const auto beta_result = Finished(sessions[1], second[1]);
+    Succeeded(beta_result);
+    check_events(1, second[1], beta_result);
+    Check(probes[1]->tool_calls.load() == 1, "alpha session allowance leaked to beta");
+    const auto entered_deadline = std::chrono::steady_clock::now() + 10s;
+    while ((!probes[2]->entered.load() || !probes[3]->entered.load()) &&
+           std::chrono::steady_clock::now() < entered_deadline) std::this_thread::sleep_for(2ms);
+    Check(probes[2]->entered.load() && probes[3]->entered.load(), "independent project callbacks did not both start");
+    Take(sessions[2]->Close(), "close gamma during its own callback");
+    Check(probes[2]->observed_cancel.load() && probes[2]->live_backends.load() == 0, "gamma close did not join its callback");
+    const auto gamma_result = Finished(sessions[2], second[2]);
+    Check(gamma_result.state == sdk::OperationState::Cancelled, "gamma close left a noncancelled operation");
+    const auto gamma_persisted = Take(sessions[2]->ReadOperation(second[2].operation_id), "read closed gamma result");
+    Check(gamma_persisted.state == sdk::OperationState::Cancelled && gamma_persisted.result_persisted,
+          "gamma close did not preserve its terminal result");
+    Check(!sessions[2]->Submit("after-gamma-close", labels[2] + "/round3"), "closed gamma accepted new input");
+    Check(!probes[3]->observed_cancel.load() && probes[3]->live_backends.load() == 1,
+          "closing gamma cancelled or destroyed delta");
+    Check(Take(sessions[3]->ReadOperation(second[3].operation_id), "delta remains running").state == sdk::OperationState::Running,
+          "gamma close completed delta's operation");
+    probes[3]->released.store(true);
+    const auto delta_result = Finished(sessions[3], second[3]);
+    Succeeded(delta_result);
+    check_events(3, second[3], delta_result);
+    Check(!probes[3]->observed_cancel.load(), "delta saw a foreign cancellation");
+    // Reopen a closed same-project session while its peer still owns live state.
+    auto resumed_options = options_for(0, true);
+    resumed_options.system_prompt.clear(); // preserve the persisted effective prompt
+    resumed_options.resume_session_id = ids[0];
+    auto resumed = Take(runtime->OpenSession(std::move(resumed_options)), "resume alpha alongside live peers");
+    Check(resumed->id() == ids[0], "resume replaced alpha's identity");
+    const auto repeated = Take(resumed->Submit("same-client-key", labels[0] + "/round1"), "retry alpha after resume");
+    Check(repeated.duplicate && repeated.operation_id == first[0].operation_id, "resume lost alpha's durable operation key");
+    const auto after_resume = Take(resumed->Submit("resumed-key", labels[0] + "/resumed"), "new alpha turn after resume");
+    const auto resumed_result = Finished(resumed, after_resume);
+    Succeeded(resumed_result);
+    Check(resumed_result.final_text == labels[0] + "/resume-done" && probes[0]->tool_calls.load() == 2,
+          "resume replayed an old side effect or lost history");
+    Check(fs::current_path() == host_cwd, "four sessions changed the host cwd");
+    Take(runtime->Shutdown(), "shutdown isolated runtime");
+    for (unsigned index = 0; index != 4; ++index)
+        Check(probes[index]->live_backends.load() == 0, "Shutdown retained an isolated backend");
+}
+
+struct PublicCaptureQueries {
+    struct Request {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool completed = false;
+        bool result = false;
+    };
+    std::atomic<bool> armed{false};
+    std::atomic<unsigned> callable_queries{0};
+    std::atomic<unsigned> final_queries{0};
+    std::atomic<unsigned> failed_queries{0};
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<std::shared_ptr<Request>> pending;
+    bool stopped = false;
+    std::function<bool()> query;
+    std::jthread observer;
+    void Start(std::function<bool()> callback) {
+        query = std::move(callback);
+        observer = std::jthread([this] {
+            for (;;) {
+                std::shared_ptr<Request> request;
+                {
+                    std::unique_lock lock(mutex);
+                    cv.wait(lock, [&] { return stopped || !pending.empty(); });
+                    if (pending.empty()) return;
+                    request = std::move(pending.front());
+                    pending.pop_front();
+                }
+                bool result = false;
+                try { result = query(); } catch (...) {}
+                std::lock_guard lock(request->mutex);
+                request->result = result;
+                request->completed = true;
+                request->cv.notify_all();
+            }
+        });
+    }
+    void Observe(bool final) noexcept {
+        if (!armed.load()) return;
+        if (final) ++final_queries;
+        else ++callable_queries;
+        try {
+            auto request = std::make_shared<Request>();
+            {
+                std::lock_guard lock(mutex);
+                if (stopped) { ++failed_queries; return; }
+                pending.push_back(request);
+                cv.notify_all();
+            }
+            std::unique_lock lock(request->mutex);
+            if (!request->cv.wait_for(lock, 3s, [&] { return request->completed; }) || !request->result) ++failed_queries;
+        } catch (...) { ++failed_queries; }
+    }
+    void Stop() {
+        {
+            std::lock_guard lock(mutex);
+            stopped = true;
+            cv.notify_all();
+        }
+        if (observer.joinable()) observer.join();
+    }
+    ~PublicCaptureQueries() { Stop(); }
+};
+struct PublicSmallCapture {
+    std::shared_ptr<PublicCaptureQueries> queries;
+    std::shared_ptr<IsolationProbe> state;
+    fs::path cwd;
+    PublicSmallCapture(std::shared_ptr<PublicCaptureQueries> reader,
+                       std::shared_ptr<IsolationProbe> owner, fs::path directory)
+        : queries(std::move(reader)), state(std::move(owner)), cwd(std::move(directory)) {}
+    ~PublicSmallCapture() { queries->Observe(true); }
+};
+struct PublicSmallTool {
+    std::shared_ptr<PublicSmallCapture> capture;
+    explicit PublicSmallTool(std::shared_ptr<PublicSmallCapture> probe) noexcept : capture(std::move(probe)) {}
+    PublicSmallTool(const PublicSmallTool&) noexcept = default;
+    PublicSmallTool(PublicSmallTool&&) noexcept = default;
+    ~PublicSmallTool() { if (capture) capture->queries->Observe(false); }
+    sdk::Result<sdk::ToolResult> operator()(const std::string&, const sdk::ToolContext& context) const {
+        Check(fs::equivalent(Path(context.cwd), capture->cwd), "small tool capture used another cwd");
+        ++capture->state->tool_calls;
+        return sdk::ToolResult{"small-owned-tool-result", false};
+    }
+};
+static_assert(sizeof(PublicSmallTool) == sizeof(std::shared_ptr<PublicSmallCapture>));
+static_assert(std::is_nothrow_copy_constructible_v<PublicSmallTool>);
+
+class FailedOpenBackend final : public sdk::Backend {
+public:
+    FailedOpenBackend(std::shared_ptr<IsolationProbe> state, sdk::Runtime& runtime)
+        : state_(std::move(state)), runtime_(runtime) { ++state_->live_backends; }
+    ~FailedOpenBackend() override {
+        struct Watchdog {
+            std::mutex mutex;
+            std::condition_variable cv;
+            bool finished = false;
+        } watchdog;
+        std::jthread watcher([&] {
+            std::unique_lock lock(watchdog.mutex);
+            if (watchdog.cv.wait_for(lock, 3s, [&] { return watchdog.finished; })) return;
+            Progress("failed initialization backend destructor blocked in Runtime::Shutdown");
+            // A broken cleanup guard could wait on this OpenSession's own
+            // mutex. Fail this consumer process rather than leave CI hanging.
+            std::_Exit(1);
+        });
+        const auto rejected = runtime_.Shutdown();
+        state_->backend_reentry_rejected.store(!rejected && rejected.error().code == "sdk.lifecycle.reentrant");
+        --state_->live_backends;
+        {
+            std::lock_guard lock(watchdog.mutex);
+            watchdog.finished = true;
+            watchdog.cv.notify_all();
+        }
+    }
+    sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest& request, sdk::Cancellation) override {
+        ++state_->backend_calls;
+        Check(request.model == "failed-open-borrow", "unexpected model request during failed initialization");
+        return Text("failed-open-backend-alive");
+    }
+private:
+    std::shared_ptr<IsolationProbe> state_;
+    sdk::Runtime& runtime_;
+};
+
+enum class SmallOpenFailure { MissingResume, RequiredMcp, InvalidOptions };
+void FailedOpenSmallCapture(sdk::Runtime& runtime, const Paths& paths, SmallOpenFailure failure) {
+    const std::string phase = failure == SmallOpenFailure::RequiredMcp ? "required MCP startup failure" :
+        failure == SmallOpenFailure::MissingResume ? "missing resume failure" : "invalid options failure";
+    Progress("begin: small callback " + phase);
+    auto state = std::make_shared<IsolationProbe>();
+    auto queries = std::make_shared<PublicCaptureQueries>();
+    auto capture = std::make_shared<PublicSmallCapture>(queries, state, paths.cwd);
+    const std::weak_ptr<PublicSmallCapture> captured = capture;
+    auto backend = std::make_unique<FailedOpenBackend>(state, runtime);
+    // The SDK accepts unique ownership, so retain only a plain public pointer.
+    // Each destructor first checks the independent alive flag before using it.
+    auto* borrowed_backend = backend.get();
+    auto options = Options(paths, {});
+    options.backend = std::move(backend);
+    sdk::Tool tool;
+    tool.name = "failed_open_probe";
+    tool.description = "Keep a small callback alive through failed SDK initialization.";
+    tool.requires_approval = false;
+    tool.execute = PublicSmallTool(capture);
+    options.custom_tools.push_back(std::move(tool));
+    if (failure == SmallOpenFailure::RequiredMcp) {
+        sdk::McpServer server;
+        server.name = "required_missing_fixture";
+        server.command = Utf8(paths.root / "absent-required-mcp.exe");
+        server.tools = {"echo"};
+        server.startup_timeout_ms = 1000;
+        server.call_timeout_ms = 1000;
+        options.mcp_servers.push_back(std::move(server));
+    } else if (failure == SmallOpenFailure::MissingResume) {
+        options.resume_session_id = "missing-small-callback-session";
+    } else {
+        options.context_window_tokens = 0;
+    }
+    tool.execute = {};
+    capture.reset();
+    queries->Start([borrowed_backend, state] {
+        if (state->live_backends.load() != 1) return false;
+        sdk::ModelRequest request;
+        request.model = "failed-open-borrow";
+        const auto result = borrowed_backend->Generate(request, {});
+        return result && result->text == "failed-open-backend-alive" && state->live_backends.load() == 1;
+    });
+    queries->armed.store(true);
+    const auto opened = runtime.OpenSession(std::move(options));
+    const bool released = captured.expired();
+    const auto callable_queries = queries->callable_queries.load();
+    const auto final_queries = queries->final_queries.load();
+    const auto failed_queries = queries->failed_queries.load();
+    queries->armed.store(false);
+    queries->Stop();
+    Check(!opened, phase + " unexpectedly opened a session");
+    const std::string expected_error = failure == SmallOpenFailure::RequiredMcp ? "sdk.mcp.start_failed" :
+        failure == SmallOpenFailure::MissingResume ? "sdk.session.open_failed" : "sdk.session.invalid_options";
+    Check(opened.error().code == expected_error,
+          phase + " failed at another initialization boundary: " + opened.error().code);
+    Check(released, phase + " retained an SDK-owned small callback");
+    Check(callable_queries > 0 && final_queries == 1, phase + " did not release every callback copy");
+    Check(failed_queries == 0, phase + " released its backend before a borrowing callback");
+    Check(state->backend_calls.load() == static_cast<int>(callable_queries + final_queries),
+          phase + " skipped an actual public backend query");
+    Check(state->tool_calls.load() == 0, phase + " executed a tool without a session");
+    Check(state->live_backends.load() == 0, phase + " retained its backend after returning");
+    Check(state->backend_reentry_rejected.load(), phase + " restored the lifecycle guard before destroying its backend");
+    Progress("completed: small callback " + phase);
+}
+
+void SmallToolCaptureLifetime(const fs::path& base) {
+    Progress("begin: SmallToolCaptureLifetime");
+    const auto paths = Fresh(base, "small-tool-capture");
+    auto runtime = Runtime(paths);
+    FailedOpenSmallCapture(*runtime, paths, SmallOpenFailure::MissingResume);
+    FailedOpenSmallCapture(*runtime, paths, SmallOpenFailure::RequiredMcp);
+    FailedOpenSmallCapture(*runtime, paths, SmallOpenFailure::InvalidOptions);
+    auto state = std::make_shared<IsolationProbe>();
+    auto queries = std::make_shared<PublicCaptureQueries>();
+    auto capture = std::make_shared<PublicSmallCapture>(queries, state, paths.cwd);
+    const std::weak_ptr<PublicSmallCapture> captured = capture;
+    auto options = Options(paths, {});
+    options.backend = std::make_unique<IsolationBackend>(state,
+        [](const sdk::ModelRequest& request, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+            if (!HasReply(request, "small-owned-tool-result")) return Call("small-call", "small_probe", "{}");
+            return Text("small-capture-complete");
+        });
+    sdk::Tool tool;
+    tool.name = "small_probe";
+    tool.description = "Exercise an owned callback that fits inside std::function's inline buffer.";
+    tool.requires_approval = false;
+    tool.execute = PublicSmallTool(capture);
+    options.custom_tools.push_back(std::move(tool));
+    auto session = Take(runtime->OpenSession(std::move(options)), "open small callback session");
+    // A standard library may retain inline targets in moved-from callables.
+    // Clear caller copies before checking the SDK's ownership promise.
+    options.custom_tools.clear();
+    tool.execute = {};
+    capture.reset();
+    const auto receipt = Take(session->Submit("small-capture-key", "run the small callback"), "submit small callback");
+    Succeeded(Finished(session, receipt));
+    Check(state->tool_calls.load() == 1, "small callback did not run exactly once");
+    const std::weak_ptr<sdk::Session> weak_session = session;
+    queries->Start([weak_session, state, operation_id = receipt.operation_id] {
+        auto owner = weak_session.lock();
+        if (!owner || state->live_backends.load() != 1) return false;
+        // ReadOperation is a nonblocking public query. A bounded observer also
+        // detects accidentally clearing captures under Session's mutex, then
+        // drains its query after that destructor returns and releases the lock.
+        const auto operation = owner->ReadOperation(operation_id);
+        return operation && operation->state == sdk::OperationState::Succeeded && operation->result_persisted &&
+            state->live_backends.load() == 1;
+    });
+    queries->armed.store(true);
+    const auto closed = session->Close();
+    const bool released = captured.expired();
+    const auto callable_queries = queries->callable_queries.load();
+    const auto final_queries = queries->final_queries.load();
+    const auto failed_queries = queries->failed_queries.load();
+    // Disarm before reporting any failure, so retained captures still unwind
+    // safely without querying a session whose backend has already been freed.
+    queries->armed.store(false);
+    queries->Stop();
+    Take(closed, "close small callback session");
+    Check(released, "Close retained the small custom tool callback");
+    Check(callable_queries > 0 && final_queries == 1, "Close did not destroy every owned small callback copy");
+    Check(failed_queries == 0, "small callback destructor could not query its live session before backend release");
+    Check(state->live_backends.load() == 0, "Close retained the small callback backend");
+    Take(runtime->Shutdown(), "shutdown small callback runtime");
+    Progress("completed: SmallToolCaptureLifetime");
 }
 
 void CloseAndStreams(const fs::path& base) {
@@ -577,7 +1085,7 @@ void RecoveryResume(const fs::path& base) {
 int main(int argc, char** argv) {
     Progress("entered main");
     try {
-        Check(argc == 3, "usage: lubancore_consumer smoke|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
+        Check(argc == 3, "usage: lubancore_consumer smoke|isolation|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
         const fs::path base = Path(argv[2]);
         Check(base.is_absolute(), "state directory must be absolute");
         fs::create_directories(base);
@@ -589,7 +1097,11 @@ int main(int argc, char** argv) {
             CloseAndStreams(base);
             ReentryAndOverflow(base);
             InvalidOptions(base);
-        } else if (mode == "seed") Seed(base);
+        } else if (mode == "isolation") {
+            FourSessionIsolation(base);
+            SmallToolCaptureLifetime(base);
+        }
+        else if (mode == "seed") Seed(base);
         else if (mode == "resume") Resume(base);
         else if (mode == "recovery-seed") RecoverySeed(base);
         else if (mode == "recovery-resume") RecoveryResume(base);

@@ -228,6 +228,9 @@ struct JobRecoveryPlan {
         std::uint64_t result_version = 0;
         bool cancel_requested = false;  // 账上取消意图在案(≠已终止,单 §8)
         bool admission_complete = false;  // 接单 tool 消息已在当前链上
+        // An observation is independent of admission-message delivery. Filling
+        // a missing tool message must retain a terminal job, never requeue it.
+        std::string terminal_state;
     };
     std::vector<Item> items;
 };
@@ -251,6 +254,17 @@ public:
     ~ToolJobCoordinator();
     ToolJobCoordinator(const ToolJobCoordinator&) = delete;
     ToolJobCoordinator& operator=(const ToolJobCoordinator&) = delete;
+
+    // Stop new dispatch and signal every in-process worker without waiting.
+    // Shutdown joins actual threads, then settles their envelopes while writer
+    // and executor dependencies still live. Call from the owning host, never
+    // from this coordinator's own executor callback. Idempotent.
+    void RequestShutdown();
+    // False means callback reentrancy or unsettled completion facts; no caller
+    // may report a successful close in that case. Real workers are still joined
+    // on the ordinary owning-host path, including settlement write failures.
+    bool Shutdown();
+    bool shutdown_complete() const;
 
     // ---- 四接口(单 §8)----
 

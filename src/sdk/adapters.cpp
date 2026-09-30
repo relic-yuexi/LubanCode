@@ -14,7 +14,7 @@ using Json = nlohmann::json;
 
 class BackendAdapter final : public api::Backend {
 public:
-    explicit BackendAdapter(std::unique_ptr<lubancore::Backend> backend) : backend_(std::move(backend)) {}
+    explicit BackendAdapter(std::shared_ptr<lubancore::Backend> backend) : backend_(std::move(backend)) {}
     std::expected<void, api::Error> send_stream(
         const api::Request& request, const std::function<void(const api::StreamEvent&)>& emit,
         const std::atomic<bool>* cancel) override {
@@ -96,7 +96,7 @@ public:
         }
     }
 private:
-    std::unique_ptr<lubancore::Backend> backend_;
+    std::shared_ptr<lubancore::Backend> backend_;
 };
 
 class LocalTool final : public tools::Tool {
@@ -176,7 +176,7 @@ private:
 };
 } // namespace
 
-std::unique_ptr<lubancode::api::Backend> AdaptBackend(std::unique_ptr<Backend> backend) {
+std::unique_ptr<lubancode::api::Backend> AdaptBackend(std::shared_ptr<Backend> backend) {
     return std::make_unique<BackendAdapter>(std::move(backend));
 }
 std::unique_ptr<lubancode::tools::Tool> BindLocalTool(std::unique_ptr<lubancode::tools::Tool> tool, std::string cwd) {

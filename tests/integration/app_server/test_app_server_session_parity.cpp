@@ -4,17 +4,28 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
+#include <utility>
+#include <variant>
+#include <vector>
 
 #include "api/chat/client.hpp"
 #include "app_server/connection.hpp"
 #include "app_server/protocol.hpp"
 #include "app_server/server.hpp"
+#include "app_server/session_assembly.hpp"
+#include "config/plugin_trust.hpp"
 #include "mcp_cwd_fixture.hpp"
+#include "platform/paths.hpp"
+#include "runtime/plugin_lua_manifest.hpp"
+#include "runtime/plugin_tool.hpp"
 #include "session_history_fixture.hpp"
 #include "tools/ask_user.hpp"
 #include "tools/registry.hpp"
@@ -280,6 +291,158 @@ TEST_CASE("AppServer resources: admitted MCP follows each thread cwd and optiona
     server->Shutdown();
     server.reset();
     fixture.Check();
+}
+
+namespace {
+struct LuaOwnershipState {
+    runtime::ManifestLuaRuntime* owner = nullptr;
+    std::atomic<int> backend_live{0};
+    std::atomic<int> backend_destroyed{0};
+    std::atomic<int> tool_destroyed{0};
+    std::atomic<bool> backend_saw_lua{false};
+    std::atomic<bool> tool_saw_lua{false};
+};
+class LuaOwnershipTool final : public tools::Tool {
+public:
+    explicit LuaOwnershipTool(std::shared_ptr<LuaOwnershipState> state) : state_(std::move(state)) {}
+    ~LuaOwnershipTool() override {
+        // A real adapter and this probe both borrow the actual Lua owner. The
+        // read deliberately happens during registry destruction, after stop.
+        state_->tool_saw_lua.store(state_->owner && state_->owner->plugins().size() == 1);
+        ++state_->tool_destroyed;
+    }
+    std::string name() const override { return "lua_lifetime_probe"; }
+    std::string description() const override { return "Check the real Lua owner's lifetime."; }
+    nlohmann::json input_schema() const override { return {{"type", "object"}}; }
+    Result execute(const nlohmann::json&) override { return Result::Text("owner alive"); }
+private:
+    std::shared_ptr<LuaOwnershipState> state_;
+};
+class LuaCounterBackend final : public api::Backend {
+public:
+    LuaCounterBackend(std::shared_ptr<LuaOwnershipState> state, std::string model)
+        : state_(std::move(state)), model_(std::move(model)) { ++state_->backend_live; }
+    ~LuaCounterBackend() override {
+        state_->backend_saw_lua.store(state_->owner && state_->owner->plugins().size() == 1);
+        --state_->backend_live;
+        ++state_->backend_destroyed;
+    }
+    std::expected<void, api::Error> send_stream(const api::Request& request,
+        const std::function<void(const api::StreamEvent&)>& emit, const std::atomic<bool>*) override {
+        CHECK(request.model == model_);
+        CHECK(request.system.find(model_ + " system") != std::string::npos);
+        const auto step = ++calls_;
+        const auto round = (step + 1) / 2;
+        emit(api::MessageStart{"lua-counter-message", model_});
+        if (step % 2 == 1) {
+            emit(api::ToolUseStart{0, "lua-counter-call-" + std::to_string(round), "plugin__lifecycle-lua__tick"});
+            emit(api::ToolUseInputDelta{0, "{}"});
+            emit(api::ContentBlockDone{0});
+            emit(api::MessageDone{"tool_use", api::Usage{10, 5, 0, 0, 0}});
+        } else {
+            bool found = false;
+            for (const auto& message : request.messages)
+                for (const auto& block : message.content)
+                    if (const auto* result = std::get_if<api::ToolResultBlock>(&block))
+                        found = found || (!result->is_error && result->content == "tick=" + std::to_string(round));
+            CHECK(found);
+            emit(api::TextDelta{"lua counter complete"});
+            emit(api::ContentBlockDone{0});
+            emit(api::MessageDone{"end_turn", api::Usage{10, 5, 0, 0, 0}});
+        }
+        return {};
+    }
+private:
+    std::shared_ptr<LuaOwnershipState> state_;
+    std::string model_;
+    unsigned calls_ = 0;
+};
+} // namespace
+
+TEST_CASE("AppServer resources: shared-cwd Lua sessions keep their own state and destroy borrowed owners last") {
+    EnvGuard format("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    history::Fixture fixture;
+    const auto plugins_root = fixture.root / "plugins";
+    const auto plugin = plugins_root / "lifecycle-lua";
+    std::filesystem::create_directories(plugin);
+    {
+        std::ofstream manifest(plugin / "plugin.json", std::ios::binary);
+        manifest << R"({"manifest_version":2,"id":"lifecycle-lua","version":"0.1.0","language":"lua",
+            "runtime":{"kind":"embedded-lua","entry":"main.lua"},
+            "tools":[{"name":"tick","entry":"tick","description":"Count within this session's Lua state.",
+                      "input_schema":{"type":"object","properties":{},"additionalProperties":false}}]})";
+        std::ofstream script(plugin / "main.lua", std::ios::binary);
+        script << "local count = 0\nreturn { tick = function(input) count = count + 1; return 'tick=' .. count end }\n";
+    }
+    auto [trust, error] = config::PluginTrustStore::Load(std::optional<std::string>{});
+    REQUIRE_FALSE(error.has_value());
+    const auto manifests = runtime::ScanPluginDirectories(plugins_root).manifests;
+    REQUIRE(manifests.size() == 1);
+    const auto fingerprint = runtime::ComputePluginContentHash(manifests[0]->plugin_dir);
+    REQUIRE(fingerprint.has_value());
+    trust.SetTrusted(platform::PathToUtf8(manifests[0]->plugin_dir), *fingerprint, "session lifetime test");
+    app_server::HarnessProfile harness;
+    harness.name = "lua-lifetime";
+    harness.features_enabled.insert("plugins");
+    harness.plugins = {"lifecycle-lua"};
+    harness.tools.mode = app_server::HarnessToolPolicy::Mode::Only;
+    harness.tools.allow = {"plugin__lifecycle-lua__tick"};
+    std::vector<std::shared_ptr<LuaOwnershipState>> states;
+    app_server::ServerOptions options;
+    options.cwd = fixture.Cwd();
+    options.workspaces_dir = history::Utf8(fixture.root / "data" / "workspaces");
+    options.session_wire = "chat";
+    options.auto_confirm = true;
+    options.max_steps_per_turn = 4;
+    options.assembly_factory = [&](const std::string& cwd) {
+        auto state = std::make_shared<LuaOwnershipState>();
+        states.push_back(state);
+        const auto model = "lua-session-" + std::to_string(states.size());
+        app_server::SessionAssemblyRequest request;
+        request.cwd_utf8 = cwd;
+        request.harness = &harness;
+        request.system_prompt = model + " system";
+        request.max_steps_per_turn = 4;
+        request.plugins_root = plugins_root;
+        request.plugin_trust = &trust;
+        request.plugin_data_root = fixture.root / "plugin-data";
+        request.backend_factory = [state, model] { return std::make_unique<LuaCounterBackend>(state, model); };
+        auto result = app_server::AssembleSession(std::move(request));
+        if (result.assembly) {
+            result.assembly->agent_profile.request.model = model;
+            state->owner = result.assembly->manifest_lua.get();
+            result.assembly->resources->registry().Register(std::make_unique<LuaOwnershipTool>(state));
+        }
+        return result;
+    };
+    auto server = std::make_unique<app_server::Server>(std::move(options), nullptr, nullptr);
+    Connect(*server);
+    const auto first = Start(*server);
+    const auto second = Start(*server);
+    REQUIRE(states.size() == 2);
+    CHECK(first != second);
+    Turn(*server, first, "first lua tick");
+    Turn(*server, second, "second lua tick");
+    Call(*server, "thread/stop", {{"threadId", first}});
+    CHECK(states[0]->backend_live.load() == 0);
+    CHECK(states[0]->backend_destroyed.load() == 1);
+    CHECK(states[0]->tool_destroyed.load() == 1);
+    CHECK(states[0]->tool_saw_lua.load());
+    CHECK(states[0]->backend_saw_lua.load());
+    CHECK(states[1]->backend_live.load() == 1);
+    Turn(*server, second, "second lua tick again"); // tick=2, no reset or foreign state
+    const auto third = Start(*server);
+    REQUIRE(states.size() == 3);
+    Turn(*server, third, "third lua tick"); // a new Lua state starts at tick=1
+    server->Shutdown();
+    server.reset();
+    for (const auto& state : states) {
+        CHECK(state->backend_live.load() == 0);
+        CHECK(state->backend_destroyed.load() == 1);
+        CHECK(state->tool_destroyed.load() == 1);
+        CHECK(state->tool_saw_lua.load());
+        CHECK(state->backend_saw_lua.load());
+    }
 }
 
 namespace {

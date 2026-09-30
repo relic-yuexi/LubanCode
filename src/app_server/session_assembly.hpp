@@ -4,7 +4,8 @@
 //
 // 本层解释 AppServer 的 Harness、Skill、Lua 与提示材料。backend、MCP、
 // 工具表交给 runtime::assembly::SessionResources 统一构造与持有，SDK
-// 也走同一工厂。SessionService/Agent/Turn 的共同装配仍留后续批次。
+// 也走同一工厂。server 首轮把资源交进 SessionService::SessionExecution，
+// Agent 构造与恢复走共同入口，宿主只保留材料与每轮协议接线。
 //
 // 装配序(冻结合同 §7.1 的最小落地;P2 起插三步;P5 再接插件):
 //   0. components.plugins 点名的插件进入真装载(P5,应用Worker接入单
@@ -98,8 +99,9 @@ struct SessionAssembly {
     // 组合次序/各段 hash/来源/最终快照 ID)。agent_plan 组合路才填;
     // server 在 v3 场把它落进会话账(内存件只是搬运,不再自造账)。
     std::optional<nlohmann::json> prompt_composition;
-    // Declared after manifest_lua: registry adapters are destroyed before the
-    // Lua owner. Backend, MCP Clients and the registry share the neutral owner.
+    // Assembly candidate. The Server moves this into SessionExecution on first
+    // turn; ThreadRecord keeps SessionAssembly's Lua owner alive until its
+    // SessionService/execution has drained and been destroyed.
     std::unique_ptr<runtime::assembly::SessionResources> resources;
 };
 

@@ -13,6 +13,7 @@ endif()
 list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/platform/test_atomic_write.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_session_resources.cpp"
+  "${_lubancore_tests_root}/unit/runtime/test_session_execution.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_scoped_turn_bindings.cpp")
 set(_lubancore_tests_exclude)
 if(LUBANCODE_BUILD_CLI)
@@ -62,6 +63,7 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
       set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "platform-atomic-write")
     endif()
   elseif(sdk_basename STREQUAL "test_session_resources.cpp" OR
+         sdk_basename STREQUAL "test_session_execution.cpp" OR
          sdk_basename STREQUAL "test_scoped_turn_bindings.cpp")
     set(sdk_original_test "unit.runtime.${sdk_stem}")
   else()
