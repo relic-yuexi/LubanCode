@@ -373,6 +373,25 @@ struct Session::Impl final : rt::InteractionBroker {
         if (!options.resume_session_id.empty() && !ValidId(options.resume_session_id)) {
             return std::unexpected(Failure("sdk.resume.invalid_id"));
         }
+        struct InitCleanupScope {
+            bool previous = in_session_worker;
+            InitCleanupScope() { in_session_worker = true; }
+            ~InitCleanupScope() { in_session_worker = previous; }
+        } cleanup_scope;
+        // Keep the public backend alive across every initialization rollback.
+        // MCP launch can fail before registry_factory consumes prepared_registry;
+        // later identity/ledger/Agent failures can likewise release the candidate
+        // resources before the SDK-owned inline tool callback sources retire.
+        std::shared_ptr<Backend> initialization_backend(std::move(options.backend));
+        struct SourceScope {
+            SessionOptions& options;
+            ~SourceScope() {
+                // Other initialization locals retire first, under the same TLS
+                // lifecycle guard. Clear the actual sources before the backend
+                // anchor declared above, including std::function SBO copies.
+                options.custom_tools.clear();
+            }
+        } source_scope{options};
         auto prepared_registry = std::make_unique<lubancode::tools::ToolRegistry>();
         for (const auto& name : options.builtin_tools) {
             auto tool = rt::assembly::CreateLocalTool(name);
@@ -429,7 +448,7 @@ struct Session::Impl final : rt::InteractionBroker {
         };
         std::string wire = "sdk_custom";
         std::optional<lubancode::config::Config> backend_config;
-        if (!options.backend) {
+        if (!initialization_backend) {
             const auto& source = *options.connection;
             if (source.base_url.empty() || source.connect_timeout_ms <= 0 || source.idle_timeout_seconds <= 0 || source.request_timeout_seconds <= 0) {
                 return std::unexpected(Failure("sdk.connection.invalid"));
@@ -449,7 +468,7 @@ struct Session::Impl final : rt::InteractionBroker {
             backend_config = std::move(config);
         }
         resource_request.backend_factory = [&]() -> std::unique_ptr<api::Backend> {
-            if (options.backend) return detail::AdaptBackend(std::move(options.backend));
+            if (initialization_backend) return detail::AdaptBackend(initialization_backend);
             return rt::assembly::BuildBackend(*backend_config);
         };
         auto assembled = rt::assembly::BuildSessionResources(std::move(resource_request));
@@ -792,6 +811,10 @@ struct Session::Impl final : rt::InteractionBroker {
             options.custom_tools.clear();
             // Agent -> registry/MCP/backend -> ledger, outside the API mutex.
             closed_service.reset();
+            // Preflight/control-block failure may leave the original public
+            // backend in options. Retire it under the same lifecycle guard,
+            // after every tool/Agent, rather than during Impl member teardown.
+            options.backend.reset();
         }
         for (auto& stream : streams) stream->Close();
         return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
