@@ -1,6 +1,6 @@
 # LubanCore 与 CLI 分离：可嵌入、可换组件的 Agent SDK
 
-- 状态：本地 SDK、独立构建、共用资源、CLI 显式工具装配和四路回合接线已验收。第一阶段继续统一 SDK/AppServer 会话执行对象，再核隔离；扩展接口与远端 Worker 随后接。
+- 状态：本地 SDK、独立构建、共用资源、CLI 显式工具装配和四路回合接线已验收。本批已写 SDK/AppServer 共用会话执行对象与隔离验收，待远端 CI；扩展接口与远端 Worker 随后接。
 - 初立：2026-09-01；修订：2026-09-05、2026-09-27、2026-09-28、2026-09-29、2026-10-01（#252 已合，继续会话执行对象与隔离）。
 - 级别：P1；近期先交付本地 SDK，生产组件按阶段推进。
 - 用户目标：别人能调用 LubanCore 写自己的程序；CLI、Web、后台服务、任务编排都接同一套运行能力。默认本地可用，需要数据库、常驻调度或多节点时，可以接入相应组件。
@@ -20,14 +20,16 @@
 | 公开调用面 | Runtime、Session、提交、事件、审批、取消、结果、关闭与同 ID 恢复；不拉起 CLI 子进程 | 不把这组窄接口称为 CLI 全功能替代品；未开放能力继续逐项列账 |
 | 安装消费 | CLI=OFF、SDK=ON；tests OFF/ON 均过默认 ALL；普通全安装后搬到仓库外消费；不生成 CLI、Web 资源或 CLI 测试 | 资源 root 仍是窄入口；完整材料装配与资源版本尚须逐项接入 |
 | 依赖边界 | 终端控制、剪贴板、隐藏输入、terminal_batch 已迁回 CLI 宿主；真实目标、源文件与递归头边界门已过 | runtime/engine 仍含渠道、Gateway、updater、Lua 等依赖；不能称为最小依赖包 |
-| 共用装配 | SDK/AppServer 共用 SessionResources 工厂；CLI/one-shot 通过显式 ToolAssemblyPlan 装完整三表，诊断由宿主展示；四路临时接线已统一 | SDK/AppServer 的完整会话执行对象待统一；CLI SessionStack 与高级组件公开入口另列后续 |
-| 隔离与寿命 | 窄 SDK 已覆盖同目录多会话、审批/取消隔离、句柄释放、订阅关闭、持久幂等与恢复 | 全宿主配置、语言、worktree 和高级组件仍须逐项迁移；不能将窄 SDK 验收外推到 CLI 全栈 |
+| 共用装配 | SDK/AppServer 共用 SessionResources 工厂；CLI/one-shot 通过显式 ToolAssemblyPlan 装完整三表，诊断由宿主展示；四路临时接线已统一 | 本批共用 SessionExecution 待远端 CI；CLI SessionStack 与高级组件公开入口另列后续 |
+| 隔离与寿命 | 窄 SDK 已覆盖同目录多会话、审批/取消隔离、句柄释放、订阅关闭、持久幂等与恢复 | 本批公开 SDK 四场并行与内部 Async 真关停待远端 CI；全宿主配置、语言、worktree 和高级组件仍须逐项迁移 |
 
 最新已合小批为 #252，验收头 `7913fd30`，经 `9aa63142` 合入，见 [CI 36511121045](https://github.com/relic-yuexi/LubanCode/actions/runs/36511121045)：三平台 SDK-only 与组合构建的搬迁消费各 5/5、SDK 专项各 7/7、宿主兼容各 7/7；新临时接线册各跑原生 9 例，真实 CLI Stop 册各跑 1 例。默认 CLI 全量 Linux 662/662、macOS 665/665、Windows 664/664。ASan 101/101，六册寿命回归均核非零用例；LeakSanitizer 未开启，Playwright 未安装，TSan 按条件跳过。实际合并树与受测树一致；这些证据不外推下一批。
 
 `ScopedTurnBindings` 已统一 SDK、AppServer、CLI 与 Headless 的回合临时借用。Scope 覆盖完整宿主回合，包括 CLI Stop 续跑；正常、取消、异常和部分绑定失败均恢复旧接线，保住长期 inbox、压力与 Soul 回调。Hub 中已有执行事实不回滚。
 
-下一小批提 `SessionExecution`，让 SDK/AppServer 共用资源、Agent 和历史恢复。空恢复历史须与新场分清，候选装配失败不替换旧对象。关闭先拒新活、广播取消，再等实际回调和线程退出；随后封账、销毁 Agent、工具表、MCP 与后端。Lua 宿主须活到借用释放。SDK 公开 `run_command` 仍只开放前台；内部可注入 Async 回调也要验收齐，不能拿任务账面终态当线程退出。
+本批已写 `SessionExecution`，让 SDK/AppServer 共用资源、Agent 和历史恢复。空恢复历史与新场分清，候选装配失败不替换旧对象，构造和销毁不占会话锁。关闭先拒新活、唤醒全部审批、广播取消，再等实际回调和线程退出；随后封账、销毁 Agent、工具表、MCP 与后端。Lua 宿主须活到借用释放。SDK 公开 `run_command` 仍只开放前台；内部注入 Async 回调另验真实借用寿命，不能拿任务账面终态当线程退出。已取消任务恢复只补缺失消息，不重派执行。
+
+安装消费新增 `isolation`，四场分别为同项目两场、不同项目各一场；逐场核模型、历史、工具 cwd、审批、事件身份、取消与关闭。内部新增 `session_execution` 册，另核装配失败、析构次序、活回调、终态与线程退出分离、关停锁序和缺接单消息恢复。新册已列入 SDK-only、组合构建三平台和 ASan 必跑门。当前未本地编译，尚待新头远端证据；下列两项先留未勾。
 
 第一阶段退出前须逐项对账：
 
