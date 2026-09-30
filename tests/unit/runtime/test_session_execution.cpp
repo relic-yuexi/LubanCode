@@ -339,6 +339,21 @@ tools::JobStartRequest DeclaredJob(v3::V3Writer& writer, const std::string& name
     request.policy.resume_policy = "requeue_when_registered";
     return request;
 }
+
+struct ProfileCaptureAudit {
+    std::atomic<bool> armed{false};
+    std::atomic<unsigned> callable_queries{0};
+    std::atomic<unsigned> final_queries{0};
+    std::atomic<unsigned> failed_queries{0};
+    std::weak_ptr<void> captured;
+    std::function<void()> stop_queries;
+};
+std::function<bool(const tools::Tool&)> SmallProfileFilter(runtime::SessionService& service,
+    assembly::SessionResources& resources, const std::shared_ptr<ResourceState>& state,
+    const std::shared_ptr<ProfileCaptureAudit>& audit);
+std::function<std::string()> SmallProfileIndex(runtime::SessionService& service,
+    assembly::SessionResources& resources, const std::shared_ptr<ResourceState>& state,
+    const std::shared_ptr<ProfileCaptureAudit>& audit);
 } // namespace
 
 TEST_CASE("session execution: fresh and explicit empty restore preserve distinct context semantics") {
@@ -409,8 +424,21 @@ TEST_CASE("session execution: rejected initialization preserves the installed li
     REQUIRE(installed != nullptr);
     REQUIRE(installed->agent().Run("before rejected replacement", {}).has_value());
     auto rejected = std::make_shared<ResourceState>();
-    CHECK_THROWS_AS(service.InitializeExecution(Resources(fixture, rejected), Profile("replacement"),
+    auto rejected_resources = Resources(fixture, rejected);
+    auto rejected_profile = Profile("replacement");
+    auto audit = std::make_shared<ProfileCaptureAudit>();
+    rejected_profile.tool_filter = SmallProfileFilter(service, *rejected_resources, rejected, audit);
+    audit->armed.store(true);
+    CHECK_THROWS_AS(service.InitializeExecution(std::move(rejected_resources), std::move(rejected_profile),
         std::vector<api::Message>{User("replacement history must not leak")}), std::logic_error);
+    audit->armed.store(false);
+    audit->stop_queries();
+    CHECK_FALSE(rejected_profile.tool_filter);
+    CHECK(rejected_profile.request.model == "replacement-model");
+    CHECK(audit->captured.expired());
+    CHECK(audit->callable_queries.load() > 0);
+    CHECK(audit->final_queries.load() == 1);
+    CHECK(audit->failed_queries.load() == 0);
     CHECK(service.execution() == installed);
     CHECK_FALSE(rejected->backend_alive.load());
     CHECK(rejected->Destruction() == std::vector<std::string>{"tool", "backend"});
@@ -434,19 +462,33 @@ struct ThrowingProfileCopy {
 };
 } // namespace
 
-TEST_CASE("session execution: throwing profile preparation publishes no partial execution") {
+TEST_CASE("session execution: a throwing Agent profile copy releases captures before resources") {
     Fixture fixture;
     runtime::SessionService service(fixture.Launch());
     auto state = std::make_shared<ResourceState>();
     auto resources = Resources(fixture, state);
     auto profile = Profile("copy-failure");
     auto armed = std::make_shared<std::atomic<bool>>(false);
+    auto audit = std::make_shared<ProfileCaptureAudit>();
+    // This earlier field is copied before tool_filter throws. Its partial Agent
+    // copy and the retained source must both unwind while resources still live.
+    profile.deferred_index_provider = SmallProfileIndex(service, *resources, state, audit);
     profile.tool_filter = ThrowingProfileCopy(armed);
     armed->store(true);
-    CHECK_THROWS_WITH(service.InitializeExecution(std::move(resources), profile, std::nullopt), "profile copy rejected");
+    audit->armed.store(true);
+    CHECK_THROWS_WITH(service.InitializeExecution(std::move(resources), std::move(profile), std::nullopt), "profile copy rejected");
+    audit->armed.store(false);
+    audit->stop_queries();
+    CHECK_FALSE(profile.tool_filter);
+    CHECK_FALSE(profile.deferred_index_provider);
+    CHECK(profile.request.model == "copy-failure-model");
+    CHECK(audit->captured.expired());
+    CHECK(audit->callable_queries.load() >= 2);
+    CHECK(audit->final_queries.load() == 1);
+    CHECK(audit->failed_queries.load() == 0);
     CHECK(service.execution() == nullptr);
-    // Argument evaluation may either move resources before copying the profile
-    // or leave them here. Both paths retain an owner and unwind cleanly.
+    // The actual copy fails inside SessionExecution's Agent construction; the
+    // caller's rvalue profile is empty and no partial execution was published.
     resources.reset();
     CHECK_FALSE(state->backend_alive.load());
     CHECK(state->Destruction() == std::vector<std::string>{"tool", "backend"});
@@ -1008,6 +1050,68 @@ struct ShutdownCaptureQueries {
     }
     ~ShutdownCaptureQueries() { Stop(); }
 };
+
+struct ProfileBorrowProbe {
+    std::shared_ptr<ShutdownCaptureQueries> queries;
+    std::shared_ptr<ProfileCaptureAudit> audit;
+    ProfileBorrowProbe(std::shared_ptr<ShutdownCaptureQueries> reader, std::shared_ptr<ProfileCaptureAudit> checks)
+        : queries(std::move(reader)), audit(std::move(checks)) {}
+    void Observe(bool final) noexcept {
+        if (!audit->armed.load()) return;
+        if (final) ++audit->final_queries;
+        else ++audit->callable_queries;
+        try {
+            if (!queries->Check()) ++audit->failed_queries;
+        } catch (...) { ++audit->failed_queries; }
+    }
+    ~ProfileBorrowProbe() { Observe(true); }
+};
+template<class Result>
+struct SmallProfileCallable {
+    std::shared_ptr<ProfileBorrowProbe> probe;
+    explicit SmallProfileCallable(std::shared_ptr<ProfileBorrowProbe> owner) noexcept : probe(std::move(owner)) {}
+    SmallProfileCallable(const SmallProfileCallable&) noexcept = default;
+    SmallProfileCallable(SmallProfileCallable&&) noexcept = default;
+    ~SmallProfileCallable() { if (probe) probe->Observe(false); }
+    template<class... Args>
+    Result operator()(const Args&...) const {
+        if constexpr (std::is_same_v<Result, bool>) return true;
+        else return "";
+    }
+};
+static_assert(sizeof(SmallProfileCallable<bool>) == sizeof(std::shared_ptr<ProfileBorrowProbe>));
+static_assert(std::is_nothrow_copy_constructible_v<SmallProfileCallable<bool>>);
+
+template<class Result>
+SmallProfileCallable<Result> ProfileCallback(runtime::SessionService& service,
+    assembly::SessionResources& resources, const std::shared_ptr<ResourceState>& state,
+    const std::shared_ptr<ProfileCaptureAudit>& audit) {
+    auto queries = std::make_shared<ShutdownCaptureQueries>();
+    auto* backend = &resources.backend();
+    auto* registry = &resources.registry();
+    queries->Start([&service, backend, registry, state] {
+        if (!state->backend_alive.load() || !state->tool_alive.load()) return false;
+        const bool idle = service.pending_input_count() == 0;
+        api::Request request;
+        request.model = "callback-borrow";
+        return idle && registry->Find("execution_probe") != nullptr &&
+            backend->send_stream(request, [](const auto&) {}, nullptr).has_value();
+    });
+    audit->stop_queries = [queries] { queries->Stop(); };
+    auto probe = std::make_shared<ProfileBorrowProbe>(queries, audit);
+    audit->captured = probe;
+    return SmallProfileCallable<Result>(std::move(probe));
+}
+std::function<bool(const tools::Tool&)> SmallProfileFilter(runtime::SessionService& service,
+    assembly::SessionResources& resources, const std::shared_ptr<ResourceState>& state,
+    const std::shared_ptr<ProfileCaptureAudit>& audit) {
+    return ProfileCallback<bool>(service, resources, state, audit);
+}
+std::function<std::string()> SmallProfileIndex(runtime::SessionService& service,
+    assembly::SessionResources& resources, const std::shared_ptr<ResourceState>& state,
+    const std::shared_ptr<ProfileCaptureAudit>& audit) {
+    return ProfileCallback<std::string>(service, resources, state, audit);
+}
 
 struct SmallShutdownProbe {
     std::shared_ptr<ShutdownCaptureQueries> queries;
