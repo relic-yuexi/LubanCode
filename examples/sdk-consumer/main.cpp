@@ -1,6 +1,7 @@
 #include <lubancore/core.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -20,6 +21,7 @@
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 // Deliberately only the installed public header and the C++ standard library.
 // The fixture supplies model replies; Agent, permissions, tools and persistence
@@ -319,6 +321,243 @@ void SharedDirectoryIsolation(const fs::path& base) {
     Take(runtime->Shutdown(), "shutdown shared-cwd runtime");
 }
 
+struct IsolationRendezvous {
+    std::mutex mutex;
+    std::condition_variable cv;
+    unsigned arrived = 0;
+    void Meet() {
+        std::unique_lock lock(mutex);
+        ++arrived;
+        cv.notify_all();
+        Check(cv.wait_for(lock, 10s, [&] { return arrived == 4; }),
+              "four sessions did not execute independently");
+    }
+};
+struct IsolationProbe {
+    std::atomic<int> backend_calls{0};
+    std::atomic<int> tool_calls{0};
+    std::atomic<int> hold_calls{0};
+    std::atomic<bool> entered{false};
+    std::atomic<bool> released{false};
+    std::atomic<bool> observed_cancel{false};
+    std::atomic<int> live_backends{0};
+};
+class IsolationBackend final : public sdk::Backend {
+public:
+    IsolationBackend(std::shared_ptr<IsolationProbe> state, GenerateFunction generate)
+        : state_(std::move(state)), generate_(std::move(generate)) { ++state_->live_backends; }
+    ~IsolationBackend() override { --state_->live_backends; }
+    sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest& request, sdk::Cancellation cancel) override {
+        ++state_->backend_calls;
+        return generate_(request, cancel);
+    }
+private:
+    std::shared_ptr<IsolationProbe> state_;
+    GenerateFunction generate_;
+};
+
+void FourSessionIsolation(const fs::path& base) {
+    Progress("begin: FourSessionIsolation");
+    const auto paths = Fresh(base, "isolation");
+    const auto host_cwd = fs::current_path();
+    auto runtime = Runtime(paths);
+    const std::array<std::string, 4> labels{
+        "ISOLATION_ALPHA", "ISOLATION_BETA", "ISOLATION_GAMMA", "ISOLATION_DELTA"};
+    const std::array<fs::path, 4> directories{
+        paths.cwd, paths.cwd, paths.root / "project-c", paths.root / "project-d"};
+    for (const auto& directory : directories) fs::create_directories(directory);
+    auto rendezvous = std::make_shared<IsolationRendezvous>();
+    std::array<std::shared_ptr<IsolationProbe>, 4> probes;
+    std::array<std::shared_ptr<sdk::Session>, 4> sessions;
+    std::array<std::shared_ptr<sdk::EventStream>, 4> streams;
+    std::array<sdk::Receipt, 4> first;
+    std::array<sdk::Operation, 4> first_results;
+    std::array<std::string, 4> ids;
+    std::array<std::vector<sdk::Event>, 4> observed;
+    const auto options_for = [&](unsigned index, bool resume) {
+        const auto label = labels[index];
+        const auto state = probes[index];
+        auto options = Options(paths, {});
+        options.cwd = Utf8(directories[index]);
+        options.model = label + "_MODEL";
+        options.system_prompt = label + "_SYSTEM";
+        options.backend = std::make_unique<IsolationBackend>(state,
+            [=](const sdk::ModelRequest& request, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+                Check(request.model == label + "_MODEL", "model crossed session: " + label);
+                Check(request.system.find(label + "_SYSTEM") != std::string::npos,
+                      "effective system prompt crossed session: " + label);
+                for (const auto& foreign : labels) {
+                    if (foreign == label) continue;
+                    Check(request.system.find(foreign) == std::string::npos, "foreign system prompt leaked");
+                    for (const auto& message : request.messages) {
+                        Check(message.text.find(foreign) == std::string::npos, "foreign conversation leaked");
+                        for (const auto& reply : message.tool_replies)
+                            Check(reply.text.find(foreign) == std::string::npos, "foreign tool result leaked");
+                    }
+                }
+                if (!resume && state->backend_calls.load() == 1) rendezvous->Meet();
+                std::string input;
+                for (const auto& message : request.messages)
+                    if (message.role == "user" && !message.text.empty()) input = message.text;
+                if (input == label + "/resumed") {
+                    Check(HasText(request, label + "/round1"), "resume lost the original user input");
+                    Check(HasText(request, label + "/done1"), "resume lost the original assistant answer");
+                    Check(HasReply(request, label + "/tool1"), "resume lost the original tool result");
+                    return Text(label + "/resume-done");
+                }
+                const bool second = input == label + "/round2";
+                Check(second || input == label + "/round1", "wrong user input reached backend");
+                const std::string call_id = label + (second ? "-call2" : "-call1");
+                bool replied = false;
+                for (const auto& message : request.messages)
+                    for (const auto& reply : message.tool_replies)
+                        replied = replied || reply.call_id == call_id;
+                if (!replied) return Call(call_id, second && index >= 2 ? "hold" : "probe",
+                                         second ? R"({"phase":"round2"})" : R"({"phase":"round1"})");
+                if (index != 1 || second)
+                    Check(HasReply(request, label + (second ? "/tool2" : "/tool1")), "own tool result was lost");
+                return Text(label + (second ? "/done2" : "/done1"));
+            });
+        sdk::Tool probe;
+        probe.name = "probe";
+        probe.description = "Record one effect after this session's own approval.";
+        probe.execute = [=](const std::string& input, const sdk::ToolContext& context) -> sdk::Result<sdk::ToolResult> {
+            Check(fs::equivalent(Path(context.cwd), directories[index]), "approved tool used another project");
+            Check(!context.cancellation.requested(), "another session cancelled this approved tool");
+            ++state->tool_calls;
+            return sdk::ToolResult{label + (input.find("round2") == std::string::npos ? "/tool1" : "/tool2"), false};
+        };
+        options.custom_tools.push_back(std::move(probe));
+        sdk::Tool hold;
+        hold.name = "hold";
+        hold.description = "Keep a real SDK tool callback active until release or cancellation.";
+        hold.requires_approval = false;
+        hold.execute = [=](const std::string&, const sdk::ToolContext& context) -> sdk::Result<sdk::ToolResult> {
+            Check(fs::equivalent(Path(context.cwd), directories[index]), "held callback used another project");
+            ++state->hold_calls;
+            state->entered.store(true);
+            const auto deadline = std::chrono::steady_clock::now() + 20s;
+            while (!state->released.load() && !context.cancellation.requested() &&
+                   std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(2ms);
+            state->observed_cancel.store(context.cancellation.requested());
+            Check(state->released.load() || context.cancellation.requested(), "held callback timed out");
+            // These borrowed fields must remain alive all the way to callback exit.
+            Check(fs::equivalent(Path(context.cwd), directories[index]), "Close destroyed the borrowed tool context");
+            return sdk::ToolResult{label + "/tool2", context.cancellation.requested()};
+        };
+        options.custom_tools.push_back(std::move(hold));
+        return options;
+    };
+    const auto approval = [&](unsigned index, const sdk::Receipt& receipt) {
+        const auto deadline = std::chrono::steady_clock::now() + 15s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto event = Take(streams[index]->Next(100ms), "isolation approval event");
+            if (!event) continue;
+            Check(event->session_id == ids[index], "event reached another session subscription");
+            observed[index].push_back(*event);
+            if (!event->approval) continue;
+            Check(event->operation_id == receipt.operation_id && event->approval->operation_id == receipt.operation_id,
+                  "approval reached another operation");
+            Check(fs::equivalent(Path(event->approval->cwd), directories[index]), "approval described another project");
+            Check(event->approval->tool_name == "probe", "unexpected isolation approval");
+            return *event->approval;
+        }
+        throw std::runtime_error("isolation approval did not arrive");
+    };
+    const auto check_events = [&](unsigned index, const sdk::Receipt& receipt, const sdk::Operation& result) {
+        bool complete = false;
+        const auto validate = [&](const sdk::Event& event) {
+            Check(event.session_id == ids[index], "event session identity crossed sessions");
+            if (event.operation_id != receipt.operation_id) return;
+            if (event.kind != "approval_requested")
+                Check(event.turn_id == result.turn_id && !event.turn_id.empty(), "event lost the canonical turn identity");
+            if (event.kind == "operation_completed") complete = true;
+        };
+        for (const auto& event : observed[index]) validate(event);
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (!complete && std::chrono::steady_clock::now() < deadline) {
+            auto event = Take(streams[index]->Next(100ms), "isolation completion event");
+            if (event) { observed[index].push_back(*event); validate(*event); }
+        }
+        Check(complete, "isolation operation did not publish its completion");
+    };
+    std::set<std::string> unique_ids;
+    for (unsigned index = 0; index != 4; ++index) {
+        probes[index] = std::make_shared<IsolationProbe>();
+        sessions[index] = Take(runtime->OpenSession(options_for(index, false)), "open isolation session");
+        ids[index] = sessions[index]->id();
+        unique_ids.insert(ids[index]);
+        streams[index] = Take(sessions[index]->Subscribe(), "subscribe isolated events");
+        first[index] = Take(sessions[index]->Submit("same-client-key", labels[index] + "/round1"), "submit isolated round1");
+    }
+    Check(unique_ids.size() == 4, "session identities collapsed across projects");
+    std::array<sdk::Approval, 4> approvals;
+    for (unsigned index = 0; index != 4; ++index) approvals[index] = approval(index, first[index]);
+    for (unsigned index = 0; index != 4; ++index)
+        Check(!sessions[index]->ResolveApproval(approvals[(index + 1) % 4].request_id, sdk::ApprovalDecision::Accept),
+              "another session resolved an approval");
+    Take(sessions[0]->ResolveApproval(approvals[0].request_id, sdk::ApprovalDecision::AcceptForSession), "allow alpha for session");
+    Take(sessions[1]->ResolveApproval(approvals[1].request_id, sdk::ApprovalDecision::Decline), "decline beta only");
+    Take(sessions[2]->ResolveApproval(approvals[2].request_id, sdk::ApprovalDecision::Accept), "allow gamma once");
+    Take(sessions[3]->Cancel(first[3].operation_id), "cancel delta only");
+    for (unsigned index = 0; index != 4; ++index) {
+        first_results[index] = Finished(sessions[index], first[index]);
+        if (index == 3) Check(first_results[index].state == sdk::OperationState::Cancelled, "delta cancellation was lost");
+        else Succeeded(first_results[index]);
+        check_events(index, first[index], first_results[index]);
+        Check(probes[index]->tool_calls.load() == (index == 0 || index == 2 ? 1 : 0), "approval or cancellation crossed sessions");
+    }
+    std::array<sdk::Receipt, 4> second;
+    for (unsigned index = 0; index != 4; ++index)
+        second[index] = Take(sessions[index]->Submit("same-second-key", labels[index] + "/round2"), "submit isolated round2");
+    const auto beta_pending = approval(1, second[1]);
+    const auto alpha_result = Finished(sessions[0], second[0]);
+    Succeeded(alpha_result);
+    check_events(0, second[0], alpha_result);
+    Check(sessions[0]->PendingApprovals().empty() && probes[0]->tool_calls.load() == 2, "session allowance was lost");
+    Take(sessions[0]->Close(), "close alpha while peers remain active");
+    Check(probes[0]->live_backends.load() == 0, "closed alpha retained its execution backend");
+    Check(probes[1]->live_backends.load() == 1 && sessions[1]->PendingApprovals().size() == 1,
+          "closing alpha destroyed beta or resolved its pending approval");
+    Take(sessions[1]->ResolveApproval(beta_pending.request_id, sdk::ApprovalDecision::Accept), "beta still owns its approval");
+    const auto beta_result = Finished(sessions[1], second[1]);
+    Succeeded(beta_result);
+    check_events(1, second[1], beta_result);
+    Check(probes[1]->tool_calls.load() == 1, "alpha session allowance leaked to beta");
+    const auto entered_deadline = std::chrono::steady_clock::now() + 10s;
+    while ((!probes[2]->entered.load() || !probes[3]->entered.load()) &&
+           std::chrono::steady_clock::now() < entered_deadline) std::this_thread::sleep_for(2ms);
+    Check(probes[2]->entered.load() && probes[3]->entered.load(), "independent project callbacks did not both start");
+    Take(sessions[2]->Close(), "close gamma during its own callback");
+    Check(probes[2]->observed_cancel.load() && probes[2]->live_backends.load() == 0, "gamma close did not join its callback");
+    Check(!probes[3]->observed_cancel.load() && probes[3]->live_backends.load() == 1,
+          "closing gamma cancelled or destroyed delta");
+    Check(Take(sessions[3]->ReadOperation(second[3].operation_id), "delta remains running").state == sdk::OperationState::Running,
+          "gamma close completed delta's operation");
+    probes[3]->released.store(true);
+    const auto delta_result = Finished(sessions[3], second[3]);
+    Succeeded(delta_result);
+    check_events(3, second[3], delta_result);
+    Check(!probes[3]->observed_cancel.load(), "delta saw a foreign cancellation");
+    // Reopen a closed same-project session while its peer still owns live state.
+    auto resumed_options = options_for(0, true);
+    resumed_options.system_prompt.clear(); // preserve the persisted effective prompt
+    resumed_options.resume_session_id = ids[0];
+    auto resumed = Take(runtime->OpenSession(std::move(resumed_options)), "resume alpha alongside live peers");
+    Check(resumed->id() == ids[0], "resume replaced alpha's identity");
+    const auto repeated = Take(resumed->Submit("same-client-key", labels[0] + "/round1"), "retry alpha after resume");
+    Check(repeated.duplicate && repeated.operation_id == first[0].operation_id, "resume lost alpha's durable operation key");
+    const auto after_resume = Take(resumed->Submit("resumed-key", labels[0] + "/resumed"), "new alpha turn after resume");
+    const auto resumed_result = Finished(resumed, after_resume);
+    Succeeded(resumed_result);
+    Check(resumed_result.final_text == labels[0] + "/resume-done" && probes[0]->tool_calls.load() == 2,
+          "resume replayed an old side effect or lost history");
+    Check(fs::current_path() == host_cwd, "four sessions changed the host cwd");
+    Take(runtime->Shutdown(), "shutdown isolated runtime");
+    for (unsigned index = 0; index != 4; ++index)
+        Check(probes[index]->live_backends.load() == 0, "Shutdown retained an isolated backend");
+}
+
 void CloseAndStreams(const fs::path& base) {
     Progress("begin: CloseAndStreams");
     const auto paths = Fresh(base, "close");
@@ -577,7 +816,7 @@ void RecoveryResume(const fs::path& base) {
 int main(int argc, char** argv) {
     Progress("entered main");
     try {
-        Check(argc == 3, "usage: lubancore_consumer smoke|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
+        Check(argc == 3, "usage: lubancore_consumer smoke|isolation|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
         const fs::path base = Path(argv[2]);
         Check(base.is_absolute(), "state directory must be absolute");
         fs::create_directories(base);
@@ -589,7 +828,8 @@ int main(int argc, char** argv) {
             CloseAndStreams(base);
             ReentryAndOverflow(base);
             InvalidOptions(base);
-        } else if (mode == "seed") Seed(base);
+        } else if (mode == "isolation") FourSessionIsolation(base);
+        else if (mode == "seed") Seed(base);
         else if (mode == "resume") Resume(base);
         else if (mode == "recovery-seed") RecoverySeed(base);
         else if (mode == "recovery-resume") RecoveryResume(base);
