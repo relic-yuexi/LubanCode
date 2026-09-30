@@ -362,8 +362,15 @@ SessionService::~SessionService() {
 }
 
 void SessionService::InitializeExecution(std::unique_ptr<assembly::SessionResources> resources,
-                                         agent::AgentProfile profile,
+                                         agent::AgentProfile&& profile,
                                          std::optional<std::vector<api::Message>> restored_history) {
+    // Validation can reject before the candidate consumes resources. Clear the
+    // referenced source first, while this parameter still owns every borrow.
+    // The guard also covers allocation failure before the constructor starts.
+    struct SourceProfileScope {
+        agent::AgentProfile& profile;
+        ~SourceProfileScope() { ClearExecutionProfileBorrowers(profile); }
+    } source_profile_scope{profile};
     {
         std::lock_guard lock(commit_mutex_);
         if (runtime_ == nullptr) throw std::logic_error("session.execution.session_unavailable");
@@ -371,8 +378,8 @@ void SessionService::InitializeExecution(std::unique_ptr<assembly::SessionResour
         if (execution_shutdown_requested_.load()) throw std::logic_error("session.execution.stopping");
     }
     // Candidate construction/rollback can destroy user captures that query the
-    // service. Neither construction nor rejected-candidate destruction takes
-    // place under its commit mutex.
+    // service. Neither construction nor rejected-candidate/source destruction
+    // takes place under its commit mutex.
     auto candidate = std::make_unique<SessionExecution>(std::move(resources), std::move(profile),
                                                        std::move(restored_history));
     {
