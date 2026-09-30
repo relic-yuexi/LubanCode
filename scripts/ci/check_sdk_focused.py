@@ -17,6 +17,7 @@ REQUIRED = {
     "sdk.focused.lubancore_host_boundary",
     "sdk.focused.lubancore_history",
     "sdk.focused.session_resources",
+    "sdk.focused.session_execution",
     "sdk.focused.scoped_turn_bindings",
     "sdk.focused.atomic_write",
 }
@@ -61,12 +62,18 @@ def main():
     cases = ET.parse(results).getroot().findall(".//testcase")
     if len(cases) != len(REQUIRED) or {c.attrib["name"] for c in cases} != REQUIRED:
         raise RuntimeError("JUnit does not cover every SDK test file")
+    # Successful JUnit output can be truncated before the doctest summary.
+    native_sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
+        (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
     for case in cases:
         if case.attrib.get("status") != "run" or any(case.find(k) is not None for k in
                 ("failure", "error", "skipped")):
             raise RuntimeError("SDK test was skipped or failed: " + case.attrib["name"])
-        counts = re.findall(r"\[doctest\] test cases:\s+(\d+)",
-                            case.findtext("system-out", default=""))
+        sections = [native_sections[index + 1] for index in range(1, len(native_sections), 2)
+                    if native_sections[index] == case.attrib["name"]]
+        if len(sections) != 1:
+            raise RuntimeError("Native log does not identify one SDK source: " + case.attrib["name"])
+        counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])
     print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")

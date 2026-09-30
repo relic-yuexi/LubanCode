@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 
 
 REQUIRED_TESTS = {
-    "sdk.consumer.smoke", "sdk.consumer.seed", "sdk.consumer.resume",
+    "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.seed", "sdk.consumer.resume",
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
 
