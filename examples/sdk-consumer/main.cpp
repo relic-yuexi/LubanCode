@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -20,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -564,6 +566,153 @@ void FourSessionIsolation(const fs::path& base) {
         Check(probes[index]->live_backends.load() == 0, "Shutdown retained an isolated backend");
 }
 
+struct PublicCaptureQueries {
+    struct Request {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool completed = false;
+        bool result = false;
+    };
+    std::atomic<bool> armed{false};
+    std::atomic<unsigned> callable_queries{0};
+    std::atomic<unsigned> final_queries{0};
+    std::atomic<unsigned> failed_queries{0};
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<std::shared_ptr<Request>> pending;
+    bool stopped = false;
+    std::function<bool()> query;
+    std::jthread observer;
+    void Start(std::function<bool()> callback) {
+        query = std::move(callback);
+        observer = std::jthread([this] {
+            for (;;) {
+                std::shared_ptr<Request> request;
+                {
+                    std::unique_lock lock(mutex);
+                    cv.wait(lock, [&] { return stopped || !pending.empty(); });
+                    if (pending.empty()) return;
+                    request = std::move(pending.front());
+                    pending.pop_front();
+                }
+                bool result = false;
+                try { result = query(); } catch (...) {}
+                std::lock_guard lock(request->mutex);
+                request->result = result;
+                request->completed = true;
+                request->cv.notify_all();
+            }
+        });
+    }
+    void Observe(bool final) noexcept {
+        if (!armed.load()) return;
+        if (final) ++final_queries;
+        else ++callable_queries;
+        try {
+            auto request = std::make_shared<Request>();
+            {
+                std::lock_guard lock(mutex);
+                if (stopped) { ++failed_queries; return; }
+                pending.push_back(request);
+                cv.notify_all();
+            }
+            std::unique_lock lock(request->mutex);
+            if (!request->cv.wait_for(lock, 3s, [&] { return request->completed; }) || !request->result) ++failed_queries;
+        } catch (...) { ++failed_queries; }
+    }
+    void Stop() {
+        {
+            std::lock_guard lock(mutex);
+            stopped = true;
+            cv.notify_all();
+        }
+        if (observer.joinable()) observer.join();
+    }
+    ~PublicCaptureQueries() { Stop(); }
+};
+struct PublicSmallCapture {
+    std::shared_ptr<PublicCaptureQueries> queries;
+    std::shared_ptr<IsolationProbe> state;
+    fs::path cwd;
+    PublicSmallCapture(std::shared_ptr<PublicCaptureQueries> reader,
+                       std::shared_ptr<IsolationProbe> owner, fs::path directory)
+        : queries(std::move(reader)), state(std::move(owner)), cwd(std::move(directory)) {}
+    ~PublicSmallCapture() { queries->Observe(true); }
+};
+struct PublicSmallTool {
+    std::shared_ptr<PublicSmallCapture> capture;
+    explicit PublicSmallTool(std::shared_ptr<PublicSmallCapture> probe) noexcept : capture(std::move(probe)) {}
+    PublicSmallTool(const PublicSmallTool&) noexcept = default;
+    PublicSmallTool(PublicSmallTool&&) noexcept = default;
+    ~PublicSmallTool() { if (capture) capture->queries->Observe(false); }
+    sdk::Result<sdk::ToolResult> operator()(const std::string&, const sdk::ToolContext& context) const {
+        Check(fs::equivalent(Path(context.cwd), capture->cwd), "small tool capture used another cwd");
+        ++capture->state->tool_calls;
+        return sdk::ToolResult{"small-owned-tool-result", false};
+    }
+};
+static_assert(sizeof(PublicSmallTool) == sizeof(std::shared_ptr<PublicSmallCapture>));
+static_assert(std::is_nothrow_copy_constructible_v<PublicSmallTool>);
+
+void SmallToolCaptureLifetime(const fs::path& base) {
+    Progress("begin: SmallToolCaptureLifetime");
+    const auto paths = Fresh(base, "small-tool-capture");
+    auto runtime = Runtime(paths);
+    auto state = std::make_shared<IsolationProbe>();
+    auto queries = std::make_shared<PublicCaptureQueries>();
+    auto capture = std::make_shared<PublicSmallCapture>(queries, state, paths.cwd);
+    const std::weak_ptr<PublicSmallCapture> captured = capture;
+    auto options = Options(paths, {});
+    options.backend = std::make_unique<IsolationBackend>(state,
+        [](const sdk::ModelRequest& request, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+            if (!HasReply(request, "small-owned-tool-result")) return Call("small-call", "small_probe", "{}");
+            return Text("small-capture-complete");
+        });
+    sdk::Tool tool;
+    tool.name = "small_probe";
+    tool.description = "Exercise an owned callback that fits inside std::function's inline buffer.";
+    tool.requires_approval = false;
+    tool.execute = PublicSmallTool(capture);
+    options.custom_tools.push_back(std::move(tool));
+    auto session = Take(runtime->OpenSession(std::move(options)), "open small callback session");
+    // A standard library may retain inline targets in moved-from callables.
+    // Clear caller copies before checking the SDK's ownership promise.
+    options.custom_tools.clear();
+    tool.execute = {};
+    capture.reset();
+    const auto receipt = Take(session->Submit("small-capture-key", "run the small callback"), "submit small callback");
+    Succeeded(Finished(session, receipt));
+    Check(state->tool_calls.load() == 1, "small callback did not run exactly once");
+    const std::weak_ptr<sdk::Session> weak_session = session;
+    queries->Start([weak_session, state, operation_id = receipt.operation_id] {
+        auto owner = weak_session.lock();
+        if (!owner || state->live_backends.load() != 1) return false;
+        // ReadOperation is a nonblocking public query. A bounded observer also
+        // detects accidentally clearing captures under Session's mutex, then
+        // drains its query after that destructor returns and releases the lock.
+        const auto operation = owner->ReadOperation(operation_id);
+        return operation && operation->state == sdk::OperationState::Succeeded && operation->result_persisted &&
+            state->live_backends.load() == 1;
+    });
+    queries->armed.store(true);
+    const auto closed = session->Close();
+    const bool released = captured.expired();
+    const auto callable_queries = queries->callable_queries.load();
+    const auto final_queries = queries->final_queries.load();
+    const auto failed_queries = queries->failed_queries.load();
+    // Disarm before reporting any failure, so retained captures still unwind
+    // safely without querying a session whose backend has already been freed.
+    queries->armed.store(false);
+    queries->Stop();
+    Take(closed, "close small callback session");
+    Check(released, "Close retained the small custom tool callback");
+    Check(callable_queries > 0 && final_queries == 1, "Close did not destroy every owned small callback copy");
+    Check(failed_queries == 0, "small callback destructor could not query its live session before backend release");
+    Check(state->live_backends.load() == 0, "Close retained the small callback backend");
+    Take(runtime->Shutdown(), "shutdown small callback runtime");
+    Progress("completed: SmallToolCaptureLifetime");
+}
+
 void CloseAndStreams(const fs::path& base) {
     Progress("begin: CloseAndStreams");
     const auto paths = Fresh(base, "close");
@@ -834,7 +983,10 @@ int main(int argc, char** argv) {
             CloseAndStreams(base);
             ReentryAndOverflow(base);
             InvalidOptions(base);
-        } else if (mode == "isolation") FourSessionIsolation(base);
+        } else if (mode == "isolation") {
+            FourSessionIsolation(base);
+            SmallToolCaptureLifetime(base);
+        }
         else if (mode == "seed") Seed(base);
         else if (mode == "resume") Resume(base);
         else if (mode == "recovery-seed") RecoverySeed(base);
