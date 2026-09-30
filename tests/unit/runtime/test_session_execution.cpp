@@ -752,7 +752,16 @@ TEST_CASE("session execution: close cancels queued approval and early-admission 
     REQUIRE(early.ok);
     CHECK(coordinator->GetJob(running.job_id).state == "running");
     CHECK(coordinator->GetJob(queued.job_id).state == "queued");
-    CHECK(coordinator->GetJob(approval.job_id).state == "awaiting_approval");
+    CHECK(approval.status == "awaiting_approval");
+    const auto denied_approval_read = coordinator->GetJob(approval.job_id);
+    CHECK(denied_approval_read.access_denied);
+    CHECK(denied_approval_read.state.empty());
+    const auto before_close = v3::ReadV3Ledger(main_path);
+    REQUIRE(before_close.has_value());
+    const auto before_close_jobs = v3::FoldJobExecutions(*before_close);
+    const auto* awaiting = v3::FindJobExecution(before_close_jobs, approval.job_id);
+    REQUIRE(awaiting != nullptr);
+    CHECK(awaiting->state == "awaiting_approval");
     CHECK(coordinator->GetJob(early.job_id).state == "queued");
     CHECK(executions.load() == 1);
     service->RequestExecutionShutdown();
