@@ -185,10 +185,16 @@ void FileAndCommand(const fs::path& base) {
                 return Call("read-back", "read_file", R"({"path":"message.txt"})");
             case 2:
                 Check(HasReply(request, "SDK file"), "real read_file result did not reach model history");
-                // This checks real command delivery, not PowerShell cold-start
-                // speed. The bounded turn gate below also covers its write/read
-                // and approval work; the consumer CTest timeout remains 120s.
+                // Exercise real process output, approval and history delivery.
+                // The bounded turn gate also covers write/read and approvals;
+                // the consumer CTest timeout remains 120s.
+#ifdef _WIN32
+                // cmd is sufficient for this echo check. The tool regressions
+                // also cover Windows' default PowerShell execution path.
+                return Call("run-once", "run_command", R"({"command":"echo sdk-command","shell":"cmd","timeout_ms":20000})");
+#else
                 return Call("run-once", "run_command", R"({"command":"echo sdk-command","timeout_ms":20000})");
+#endif
             case 3:
                 if (!HasReply(request, "sdk-command")) {
                     std::string details;
