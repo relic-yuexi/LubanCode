@@ -459,20 +459,28 @@ namespace {
 struct RollbackQueriesService {
     runtime::SessionService& service;
     std::atomic<bool>& observed;
-    RollbackQueriesService(runtime::SessionService& owner, std::atomic<bool>& result)
-        : service(owner), observed(result) {}
-    ~RollbackQueriesService() { observed.store(service.pending_input_count() == 0); }
+    std::shared_ptr<std::atomic<bool>> armed;
+    RollbackQueriesService(runtime::SessionService& owner, std::atomic<bool>& result,
+                           std::shared_ptr<std::atomic<bool>> enabled)
+        : service(owner), observed(result), armed(std::move(enabled)) {}
+    bool operator()(const tools::Tool&) const { return true; }
+    ~RollbackQueriesService() {
+        // Query from every callable copy, including constructor parameters.
+        // A moved-from std::function may retain its callable on libc++, so the
+        // final shared capture destructor cannot identify constructor rollback.
+        if (armed->load()) observed.store(service.pending_input_count() == 0);
+    }
 };
 } // namespace
 
 TEST_CASE("session execution: constructor rollback releases profile captures outside the service lock") {
     Fixture fixture;
     std::atomic<bool> rollback_queried{false};
+    auto armed = std::make_shared<std::atomic<bool>>(false);
     runtime::SessionService service(fixture.Launch());
     auto profile = Profile("constructor-failure");
-    auto capture = std::make_shared<RollbackQueriesService>(service, rollback_queried);
-    profile.tool_filter = [capture](const tools::Tool&) { return true; };
-    capture.reset();
+    profile.tool_filter = RollbackQueriesService(service, rollback_queried, armed);
+    armed->store(true);
     CHECK_THROWS_AS(service.InitializeExecution(nullptr, std::move(profile), std::nullopt), std::invalid_argument);
     CHECK(rollback_queried.load());
     CHECK(service.execution() == nullptr);
