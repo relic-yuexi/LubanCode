@@ -778,8 +778,21 @@ struct Session::Impl final : rt::InteractionBroker {
             subscriptions.clear();
             cv.notify_all();
         }
-        // Agent -> registry/MCP/backend -> ledger, outside the public API mutex.
-        closed_service.reset();
+        {
+            // Even a moved std::function can retain an inline callable in the
+            // SDK-owned SessionOptions. Clear those sources before destroying
+            // the Agent/registry/backend they may borrow. Nonblocking queries
+            // may reenter here; blocking lifecycle calls must not wait on this
+            // Close's serialization mutex from a capture destructor.
+            struct CleanupScope {
+                bool previous = in_session_worker;
+                CleanupScope() { in_session_worker = true; }
+                ~CleanupScope() { in_session_worker = previous; }
+            } cleanup_scope;
+            options.custom_tools.clear();
+            // Agent -> registry/MCP/backend -> ledger, outside the API mutex.
+            closed_service.reset();
+        }
         for (auto& stream : streams) stream->Close();
         return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
     }

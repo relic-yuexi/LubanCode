@@ -1164,51 +1164,49 @@ bool ToolJobCoordinator::Shutdown() {
     for (auto& worker : workers) if (worker.thread.joinable()) worker.thread.join();
     bool settled = true;
     {
-        JobAuthorizationGate gate;
-        JobExecutor executor;
-        std::function<std::int64_t()> clock;
-        {
-            std::lock_guard lock(impl_->jobs_mutex);
-            for (const auto& worker : workers) {
-                std::erase_if(impl_->owned_workers, [&](const auto& owned) { return owned.finished == worker.finished; });
-            }
-            // All callbacks have exited. Settlement can fail independently of
-            // lifetime cleanup, and must not turn a close into false success.
-            try {
-                // Persist the cancellation intent now, after every session has
-                // been signalled. Running completions below retain their real
-                // success/error; work never dispatched is known not to execute.
-                for (auto& [id, job] : impl_->jobs) {
-                    (void)id;
-                    if (IsTerminalJobState(job->state)) continue;
-                    job->cancel_requested = true;
-                    job->cancel_flag->store(true);
-                    if (!job->cancel_event_written) {
-                        const auto cancelled = impl_->EmitCancelRequestedLocked(*job, "session_shutdown");
-                        if (ReceiptOk(cancelled)) job->cancel_event_written = true;
-                        else settled = false;
-                    }
-                    if (!job->dispatched) {
-                        const auto observed = impl_->ObserveLocked(*job, "cancelled");
-                        if (ReceiptOk(observed)) job->state = "cancelled";
-                        else settled = false;
-                    }
-                }
-                impl_->PumpLocked();
-                settled = settled && std::all_of(impl_->jobs.begin(), impl_->jobs.end(), [](const auto& item) {
-                    return IsTerminalJobState(item.second->state);
-                });
-            } catch (...) {
-                settled = false;
-            }
-            gate = std::move(impl_->gate);
-            executor = std::move(impl_->executor);
-            clock = std::move(impl_->clock_ms);
-            impl_->writer = nullptr;
+        std::lock_guard lock(impl_->jobs_mutex);
+        for (const auto& worker : workers) {
+            std::erase_if(impl_->owned_workers, [&](const auto& owned) { return owned.finished == worker.finished; });
         }
-        // Release user captures without any join/jobs/publication mutex. A
-        // concurrent Shutdown still waits for this destruction to finish.
+        // All callbacks have exited. Settlement can fail independently of
+        // lifetime cleanup, and must not turn a close into false success.
+        try {
+            // Persist the cancellation intent now, after every session has
+            // been signalled. Running completions below retain their real
+            // success/error; work never dispatched is known not to execute.
+            for (auto& [id, job] : impl_->jobs) {
+                (void)id;
+                if (IsTerminalJobState(job->state)) continue;
+                job->cancel_requested = true;
+                job->cancel_flag->store(true);
+                if (!job->cancel_event_written) {
+                    const auto cancelled = impl_->EmitCancelRequestedLocked(*job, "session_shutdown");
+                    if (ReceiptOk(cancelled)) job->cancel_event_written = true;
+                    else settled = false;
+                }
+                if (!job->dispatched) {
+                    const auto observed = impl_->ObserveLocked(*job, "cancelled");
+                    if (ReceiptOk(observed)) job->state = "cancelled";
+                    else settled = false;
+                }
+            }
+            impl_->PumpLocked();
+            settled = settled && std::all_of(impl_->jobs.begin(), impl_->jobs.end(), [](const auto& item) {
+                return IsTerminalJobState(item.second->state);
+            });
+        } catch (...) {
+            settled = false;
+        }
+        impl_->writer = nullptr;
     }
+    // Closing APIs reject before reading these callbacks, and every worker is
+    // joined. Clear the actual sources outside all lifecycle/jobs locks: a
+    // std::function move may retain an inline callable in its source, and even
+    // swap can destroy temporary callable copies. Capture destructors may query
+    // ordinary APIs here; a concurrent Shutdown still waits for their return.
+    impl_->gate = nullptr;
+    impl_->executor = nullptr;
+    impl_->clock_ms = nullptr;
     shutdown.lock();
     impl_->shutdown_settlement_ok = settled;
     impl_->shutdown_complete = true;
