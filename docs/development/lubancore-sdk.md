@@ -8,13 +8,14 @@
 
 本页记录已交付的窄 SDK。SDK-only 默认构建、普通安装、终端依赖拆分、SDK 与
 AppServer 共用资源拥有、CLI 显式工具装配，以及四路回合临时接线已验收。
-本批让 SDK 与 AppServer 共用会话执行对象，并补多会话隔离验收；尚待本批远端 CI。
-扩展接口与远端随后接。
+SDK 与 AppServer 共用会话执行对象，多会话隔离与寿命验收也已通过。第一阶段收工。
+扩展接口与远端 Worker 随后接。
 `LubanCore::Core` 是公开安装目标；仓库内部旧名
 `lubancode_core` 仍带 CLI 实现，两者不能混用。
 
-后端、基础工具与 MCP 已共用 `runtime/assembly`。CLI、one-shot、AppServer
-仍有各自的会话装配；完整工具、插件、Hook 和记忆等能力尚未统一迁入公开 SDK。
+后端、基础工具与 MCP 已共用 `runtime/assembly`。SDK 与 AppServer 共用执行对象，
+各自保留受理与排队；CLI、one-shot 仍用原会话栈。完整工具、插件、Hook 和记忆等
+能力尚未统一迁入公开 SDK。
 新增宿主可用下文 API，现有 CLI 迁移须保留原功能，不能靠删去功能来完成拆分。
 验收清单见 [SDK 拆分计划](../../todos/LubanCore与CLI分离_核心库独立成宿主底座设计.todo)。
 
@@ -31,13 +32,24 @@ SDK、AppServer、CLI 与无界面执行器共用 `ScopedTurnBindings`。每轮�
 挂本轮轨迹、投影与路由号；返回、取消或抛错时恢复旧接线。CLI Stop 续跑仍属同一轮。
 清掉本轮借用时，长期 inbox、压力与 Soul 回调照常保留，已落下的执行事实也照常保留。
 
-第一阶段收工要过这条线：新宿主只调公开 SDK，就能跑完整会话，不必复制内部运行栈。
-公开接口已能嵌入。本批 `SessionExecution` 归拢资源、Agent、恢复历史与销毁次序，
+第一阶段已过这条线：新宿主只调公开 SDK，就能跑完整会话，不必复制内部运行栈。
+`SessionExecution` 归拢资源、Agent、恢复历史与销毁次序，
 由 `SessionService` 持有，SDK 与 AppServer 共用。显式空历史仍走恢复，装配失败不替换
 旧执行对象；候选构造和析构都放在会话锁外。宿主各自决定受理、排队与恢复策略。
 新增安装消费模式 `isolation` 在同一项目开两场，在不同项目各开一场，核模型、权限、
-取消、关闭与活回调。本批新增内容须另过三平台、SDK-only 与 ASan，不能沿用 #252 证据。
+取消、关闭与活回调。三平台、SDK-only 与 ASan 新提交证据见下文 #253 记录。
 共同 cwd 不加项目独占锁；共享文件冲突仍由宿主协调。
+
+内部 `SessionExecution` 将 `AgentProfile` 复制给 Agent，再清源档案中的回调与 resolver。
+失败也清源回调，模型等值数据留给宿主。关场须清掉每份回调，不能假定
+`std::function` 移动后源就为空。Close 清理不占 Session 查询锁，可重入 `ReadOperation`
+等非阻塞查询；后端、工具表仍须活着。建场仍持 Runtime 初始化锁，析构不得重入
+`OpenSession`；清理中调用 `Close`、`WaitResult`、`Shutdown` 会报 `sdk.lifecycle.reentrant`。
+
+SDK 建场时留住调用方交来的后端，再准备工具与资源。MCP 启动或恢复失败，先收工具
+和回调，再放后端。后端析构也守生命周期重入门；阻塞关场请求明报
+`sdk.lifecycle.reentrant`。后端引用只在初始化栈与本场资源间流转，不跨场共享。
+前置参数无效、MCP 启动失败和恢复目标缺失各有公开消费回归。
 
 关场先拒新活、唤醒全部审批，再广播取消，等主回合与进程内后台回调真正退出。
 任务账面终态不代替线程退出。退出后才封账、释放 Agent、工具表、MCP 与后端；
@@ -116,7 +128,21 @@ PR #252 验收头为 `7913fd30`，经 `9aa63142` 合入，见
 新临时接线册各跑原生 9 例，真实 CLI Stop 册各跑 1 例。全量 Linux 662/662、
 macOS 665/665、Windows 664/664；ASan 101/101，六册寿命回归均核实际非零用例。
 实际合并内容与受测内容一致；LSan、Playwright 与条件 TSan 限制沿用上文。
-这些证据不替下一批会话执行对象与新增隔离测试验收。
+这些证据只覆盖 #252；后续会话执行对象与隔离测试另验。
+
+PR #253 验收头为 `54c164c2`，经 `180fd160` 合入功能分支，见
+[CI 36769261243](https://github.com/relic-yuexi/LubanCode/actions/runs/36769261243)：
+三平台 SDK-only 与组合构建的安装消费各 6/6、SDK 专项各 8/8，宿主兼容各 7/7。
+六组会话执行册均跑原生 11/11 例、366/366 条断言；三平台 AppServer/Lua 册各跑
+6/6 例、513/513 条断言。公开消费实际跑过四场隔离、三条建场失败、后续健康建场、
+小回调退场和同 ID 恢复；完整日志、JUnit 与登记清单均已核对，无 CTest 跳过或漏跑。
+
+默认构建全量 Linux 664/664、macOS 667/667、Windows 666/666；ASan 103/103，
+八册必需寿命回归均跑出非零原生用例。ASan 覆盖内部会话、Agent、工具与宿主寿命，
+不含独立安装消费程序。LSan 未开启，Playwright 未安装，TSan 按条件跳过。
+Ubuntu 24.04、Debian 11、Debian 12 烟测通过。受测合并提交 `41591788` 与实际合并
+`180fd160` 同为树 `02ee0cbc`。本轮只验第一阶段窄 SDK；扩展、后台命令和远端 Worker
+尚未交付，内部 Async 线程创建失败欠账仍见[总欠账单](../../todos/欠账与观察清单.todo)。
 
 ## 调用次序
 
