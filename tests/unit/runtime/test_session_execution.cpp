@@ -24,6 +24,7 @@
 #include "runtime/session_execution.hpp"
 #include "runtime/session_service.hpp"
 #include "runtime/tool_trace_hub.hpp"
+#include "runtime/trajectory_turn_bridge.hpp"
 #include "scripted_mcp_endpoint.hpp"
 #include "tools/path_utils.hpp"
 #include "trajectory/v3/reader.hpp"
@@ -634,6 +635,10 @@ void CheckLiveBackgroundShutdown(bool injected_terminal) {
     CHECK(terminal_observations == 1);
     CHECK(observed_sequence > 0);
     CHECK(ended_sequence > observed_sequence);
+    const auto recovery = tools::ToolJobCoordinator::PlanRecovery(*ledger_after);
+    REQUIRE(recovery.items.size() == 1);
+    CHECK(recovery.items[0].disposition == "already_terminal");
+    CHECK(recovery.items[0].detail == (injected_terminal ? "succeeded" : "cancelled"));
     const auto authorization_calls = state->authorization_calls.load();
     const auto clock_calls = state->clock_calls.load();
     const auto rejected_read = coordinator->GetJob(job_id);
@@ -693,5 +698,222 @@ TEST_CASE("session execution: a stop request rejects input and closes a late att
     const auto fresh_work = service.PendingInputsSnapshot();
     CHECK(fresh_work.empty());
     service.ShutdownExecution();
+    CHECK(service.Close("test_complete").error_code.empty());
+}
+
+TEST_CASE("session execution: close cancels queued approval and early-admission jobs without recovery execution") {
+    Fixture fixture;
+    auto state = std::make_shared<ResourceState>();
+    state->gate = std::make_shared<CallbackGate>();
+    auto service = std::make_unique<runtime::SessionService>(fixture.Launch());
+    service->InitializeExecution(Resources(fixture, state), Profile("close-recovery"), std::nullopt);
+    auto* ledger = service->trajectory();
+    REQUIRE(ledger != nullptr);
+    const auto main_path = ledger->v3_main_writer()->path();
+    auto running_request = DeclaredJob(*ledger->v3_main_writer(), "running_probe");
+    auto queued_request = DeclaredJob(*ledger->v3_main_writer(), "queued_probe");
+    auto approval_request = DeclaredJob(*ledger->v3_main_writer(), "approval_probe");
+    auto early_request = DeclaredJob(*ledger->v3_main_writer(), "early_probe");
+    runtime::AsyncToolRuntime::Hooks hooks;
+    hooks.writer = ledger->v3_main_writer();
+    hooks.writer_mutex = ledger->v3_tool_results_mutex();
+    hooks.auth = [](const std::string& name, const auto&) {
+        return name == "approval_probe" ? tools::JobAuthDecision{false, true, {}}
+                                        : tools::JobAuthDecision{true, false, {}};
+    };
+    std::atomic<unsigned> executions{0};
+    auto& registry = service->execution()->resources().registry();
+    hooks.executor = [&](const tools::JobExecutionContext& context) {
+        ++executions;
+        tools::ToolExecutionContext tool_context;
+        tool_context.cancel = context.cancel;
+        return registry.Find("execution_probe")->execute(context.input, tool_context);
+    };
+    runtime::AsyncToolRuntimeOptions options;
+    options.coordinator.limits.session_running = 1;
+    auto asynchronous = runtime::AsyncToolRuntime::Create(std::move(hooks), std::move(options));
+    REQUIRE(asynchronous != nullptr);
+    auto coordinator = asynchronous->coordinator();
+    service->runtime()->AttachAsyncToolRuntime(std::move(asynchronous));
+    ReleaseGateOnExit release{state->gate};
+    const auto running = coordinator->StartJob(running_request);
+    REQUIRE(running.ok);
+    {
+        std::unique_lock lock(state->gate->mutex);
+        REQUIRE(state->gate->cv.wait_for(lock, 5s, [&] { return state->gate->entered; }));
+    }
+    const auto queued = coordinator->StartJob(queued_request);
+    const auto approval = coordinator->StartJob(approval_request);
+    // This path deliberately leaves the admitted assistant's tool receipt
+    // absent. Its durable registration must not become permission to rerun.
+    const auto early = coordinator->StartJobEarly(early_request);
+    REQUIRE(queued.ok);
+    REQUIRE(approval.ok);
+    REQUIRE(early.ok);
+    CHECK(coordinator->GetJob(running.job_id).state == "running");
+    CHECK(coordinator->GetJob(queued.job_id).state == "queued");
+    CHECK(coordinator->GetJob(approval.job_id).state == "awaiting_approval");
+    CHECK(coordinator->GetJob(early.job_id).state == "queued");
+    CHECK(executions.load() == 1);
+    service->RequestExecutionShutdown();
+    state->gate->Release();
+    REQUIRE(service->Close("recovery_must_not_restart_work").error_code.empty());
+    service.reset();
+    CHECK(executions.load() == 1);
+    const auto closed_ledger = v3::ReadV3Ledger(main_path);
+    REQUIRE(closed_ledger.has_value());
+    const auto actions_before = v3::FoldToolActions(*closed_ledger);
+    const auto* early_before = v3::FindActionSnapshot(actions_before, early.action_id);
+    REQUIRE(early_before != nullptr);
+    CHECK(early_before->message_versions.empty());
+    const auto plan = tools::ToolJobCoordinator::PlanRecovery(*closed_ledger);
+    REQUIRE(plan.items.size() == 4);
+    for (const auto& item : plan.items) {
+        CAPTURE(item.job_id);
+        CHECK(item.cancel_requested);
+        CHECK(item.disposition != "requeue");
+        CHECK(item.disposition != "awaiting_approval");
+        CHECK(item.disposition != "unknown_hold");
+    }
+    auto continued = v3::V3Writer::Continue(main_path);
+    REQUIRE_MESSAGE(continued.has_value(), continued.error_or(""));
+    tools::ToolJobCoordinator recovered(*continued,
+        [](const auto&, const auto&) { return tools::JobAuthDecision{true, false, {}}; },
+        [&](const auto&) { ++executions; return tools::Tool::Result::Text("must not restart"); });
+    CHECK(recovered.AdoptRecovery(plan) == 4);
+    for (const auto& job : {running, queued, approval, early}) {
+        CAPTURE(job.job_id);
+        const auto recovered_state = recovered.GetJob(job.job_id);
+        CHECK(recovered_state.state == "cancelled");
+        CHECK(recovered_state.cancel_requested);
+    }
+    CHECK(recovered.queued_count() == 0);
+    CHECK(recovered.running_count() == 0);
+    CHECK(executions.load() == 1);
+    const auto after_recovery = v3::ReadV3Ledger(main_path);
+    REQUIRE(after_recovery.has_value());
+    unsigned dispatched = 0;
+    for (const auto& event : after_recovery->events)
+        if (event.kind == v3::EventKindV3::ToolJobDispatched) ++dispatched;
+    CHECK(dispatched == 1);
+    const auto actions_after = v3::FoldToolActions(*after_recovery);
+    const auto* early_after = v3::FindActionSnapshot(actions_after, early.action_id);
+    REQUIRE(early_after != nullptr);
+    REQUIRE(early_after->message_versions.size() == 1);
+    CHECK(early_after->message_versions[0].on_current_chain);
+    const auto settled_plan = tools::ToolJobCoordinator::PlanRecovery(*after_recovery);
+    for (const auto& item : settled_plan.items)
+        CHECK(item.disposition == "already_terminal");
+    CHECK(recovered.Shutdown());
+}
+
+namespace {
+struct PublicationGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool auth_entered = false;
+    bool release_auth = false;
+    bool getter_requested = false;
+    bool getter_finished = false;
+    bool getter_finished_before_auth_exit = false;
+    bool shutdown_started = false;
+    bool shutdown_finished = false;
+    void Release() {
+        std::lock_guard lock(mutex);
+        release_auth = true;
+        getter_requested = true;
+        cv.notify_all();
+    }
+};
+struct ReleasePublicationOnExit {
+    PublicationGate& gate;
+    ~ReleasePublicationOnExit() { gate.Release(); }
+};
+} // namespace
+
+TEST_CASE("session execution: async shutdown releases the publication mutex before calling a borrowed authorization gate") {
+    Fixture fixture;
+    auto state = std::make_shared<ResourceState>();
+    runtime::SessionService service(fixture.Launch());
+    service.InitializeExecution(Resources(fixture, state), Profile("publication"), std::nullopt);
+    auto* session_runtime = service.runtime();
+    auto* ledger = service.trajectory();
+    REQUIRE(session_runtime != nullptr);
+    REQUIRE(ledger != nullptr);
+    const auto request = DeclaredJob(*ledger->v3_main_writer(), "authorization_probe");
+    PublicationGate gate;
+    std::atomic<unsigned> authorizations{0};
+    runtime::AsyncToolRuntime::Hooks hooks;
+    hooks.writer = ledger->v3_main_writer();
+    hooks.writer_mutex = ledger->v3_tool_results_mutex();
+    hooks.auth = [&](const auto&, const auto&) {
+        if (++authorizations == 1) {
+            std::unique_lock lock(gate.mutex);
+            gate.auth_entered = true;
+            gate.cv.notify_all();
+            gate.cv.wait_for(lock, 3s, [&] { return gate.release_auth; });
+            gate.getter_requested = true;
+            gate.cv.notify_all();
+            // Delegate the actual getter call while this gate owns jobs_mutex.
+            // The bounded wait releases that mutex even on the broken lock
+            // ordering, so a regression fails without hanging test cleanup.
+            gate.getter_finished_before_auth_exit = gate.cv.wait_for(lock, 3s, [&] { return gate.getter_finished; });
+        }
+        return tools::JobAuthDecision{true, false, {}};
+    };
+    hooks.executor = [](const auto&) { return tools::Tool::Result::Text("authorization probe complete"); };
+    auto asynchronous = runtime::AsyncToolRuntime::Create(std::move(hooks), {});
+    REQUIRE(asynchronous != nullptr);
+    auto* expected_runtime = asynchronous.get();
+    auto coordinator = asynchronous->coordinator();
+    session_runtime->AttachAsyncToolRuntime(std::move(asynchronous));
+    tools::JobStartResult started;
+    std::atomic<bool> getter_matches{false};
+    std::jthread getter;
+    std::jthread starter;
+    std::jthread stopping;
+    ReleasePublicationOnExit release{gate};
+    getter = std::jthread([&] {
+        {
+            std::unique_lock lock(gate.mutex);
+            gate.cv.wait_for(lock, 8s, [&] { return gate.getter_requested; });
+        }
+        getter_matches.store(session_runtime->async_tool_runtime() == expected_runtime);
+        std::lock_guard lock(gate.mutex);
+        gate.getter_finished = true;
+        gate.cv.notify_all();
+    });
+    starter = std::jthread([&] { started = coordinator->StartJob(request); });
+    {
+        std::unique_lock lock(gate.mutex);
+        REQUIRE(gate.cv.wait_for(lock, 5s, [&] { return gate.auth_entered; }));
+    }
+    stopping = std::jthread([&] {
+        {
+            std::lock_guard lock(gate.mutex);
+            gate.shutdown_started = true;
+            gate.cv.notify_all();
+        }
+        session_runtime->RequestAsyncToolShutdown();
+        std::lock_guard lock(gate.mutex);
+        gate.shutdown_finished = true;
+        gate.cv.notify_all();
+    });
+    {
+        std::unique_lock lock(gate.mutex);
+        REQUIRE(gate.cv.wait_for(lock, 5s, [&] { return gate.shutdown_started; }));
+        // Shutdown must contend with this real, still-held authorization gate.
+        CHECK_FALSE(gate.cv.wait_for(lock, 100ms, [&] { return gate.shutdown_finished; }));
+        gate.release_auth = true;
+        gate.cv.notify_all();
+    }
+    starter.join();
+    stopping.join();
+    getter.join();
+    CHECK(started.ok);
+    CHECK(getter_matches.load());
+    CHECK(gate.getter_finished_before_auth_exit);
+    CHECK(gate.shutdown_finished);
+    CHECK(service.ShutdownExecution());
     CHECK(service.Close("test_complete").error_code.empty());
 }
