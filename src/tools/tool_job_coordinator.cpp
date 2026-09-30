@@ -227,13 +227,10 @@ struct ToolJobCoordinator::Impl {
     struct Worker {
         std::thread thread;
         std::shared_ptr<std::atomic<bool>> finished;
-        std::thread::id id;
     };
     std::vector<Worker> workers;
-    // Keep IDs/cancellation until join returns, including the tail where the
-    // lambda's locals are gone but its captured executor is still being freed.
+    // Retain cancellation until join returns, independently of job state.
     struct OwnedWorker {
-        std::thread::id id;
         std::shared_ptr<std::atomic<bool>> cancel;
         std::shared_ptr<std::atomic<bool>> finished;
     };
@@ -250,8 +247,7 @@ struct ToolJobCoordinator::Impl {
         {
             std::lock_guard lock(jobs_mutex);
             for (auto it = workers.begin(); it != workers.end();) {
-                if (it->finished != nullptr && it->finished->load() &&
-                    it->thread.get_id() != std::this_thread::get_id()) {
+                if (it->finished != nullptr && it->finished->load()) {
                     finished.push_back(std::move(*it));
                     it = workers.erase(it);
                 } else {
@@ -703,20 +699,21 @@ struct ToolJobCoordinator::Impl {
         const std::string job_id = job.job_id;
         const std::string epoch = job.owner_epoch;
         const std::shared_ptr<std::atomic<bool>> cancel_flag = job.cancel_flag;
-        const JobExecutor run = executor;
+        auto run = std::make_unique<JobExecutor>(executor);
         const std::int64_t started_at = now;
         auto finished = std::make_shared<std::atomic<bool>>(false);
-        owned_workers.push_back({std::thread::id{}, cancel_flag, finished});
+        owned_workers.push_back({cancel_flag, finished});
         workers.emplace_back();  // Allocate before constructing a live thread.
         workers.back().finished = finished;
         try {
-            workers.back().thread = std::thread([self, job_id, epoch, context, cancel_flag, run, started_at, finished]() {
+            workers.back().thread = std::thread([self, job_id, epoch, context, cancel_flag,
+                                                 run = std::move(run), started_at, finished]() mutable {
                 JobThreadScope worker_scope(current_job_worker, self.get());
                 JobExecutionContext local = context;
                 local.cancel = cancel_flag.get();
                 Tool::Result result;
                 try {
-                    result = run(local);
+                    result = (*run)(local);
                 } catch (const std::exception& error) {
                     result = Tool::Result::Error(error.what());
                     result.error_code = "tool.job.executor_exception";
@@ -753,10 +750,13 @@ struct ToolJobCoordinator::Impl {
                     self->envelopes.push_back(std::move(envelope));
                 }
                 self->state_cv.notify_all();
+                // Destroy the only user-defined capture while the worker TLS
+                // marker still identifies this coordinator. The lambda's tail
+                // then holds only ordinary data/shared runtime state. OS thread
+                // IDs may be reused before join, so they cannot identify callers.
+                run.reset();
                 finished->store(true);
             });
-            workers.back().id = workers.back().thread.get_id();
-            owned_workers.back().id = workers.back().id;
         } catch (const std::exception& error) {
             workers.pop_back();
             owned_workers.pop_back();
@@ -1149,12 +1149,6 @@ bool ToolJobCoordinator::Shutdown() {
     // A callback cannot wait for its own exit. Detect the invalid lifecycle
     // call rather than deadlocking or pretending its borrows have been drained.
     if (current_job_worker == impl_.get() || current_job_shutdown == impl_.get()) return false;
-    {
-        std::lock_guard lock(impl_->jobs_mutex);
-        if (std::any_of(impl_->owned_workers.begin(), impl_->owned_workers.end(), [](const auto& worker) {
-            return worker.id == std::this_thread::get_id();
-        })) return false;
-    }
     RequestShutdown();
     std::unique_lock shutdown(impl_->shutdown_mutex);
     impl_->shutdown_cv.wait(shutdown, [&] { return !impl_->shutdown_in_progress; });
@@ -1607,6 +1601,7 @@ JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger&
             snap->attempts.back().status == "done";
         const bool observed_missing = job.state == "running" && execution_terminal_in_ledger;
         const bool terminal_state = IsTerminalJobState(job.state);
+        if (terminal_state) item.terminal_state = job.state;
         if (job.mode != "job_handle") {
             item.disposition = "unsupported_mode";
             item.detail = "mode=" + job.mode + " 的执行归后续批次(P1 只接 job_handle)";
@@ -1681,6 +1676,12 @@ std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
         // 已落账——补链只补消息,不给在跑/无终态的 attempt 伪造终态
         //(流式提前档的恢复缺口正是这形状:事实在、消息缺、工作在跑)。
         job.admission_facts_complete = job.admission_complete;
+        if (IsTerminalJobState(item.terminal_state)) {
+            job.state = item.terminal_state;
+            job.result_ref = item.result_ref;
+            job.result_version = item.result_version;
+            job.cancel_requested = item.cancel_requested;
+        }
         if (item.disposition == "unsupported_mode") {
             job.state = "unknown";  // 不接管:只登记可见,不可操作
             continue;
@@ -1727,6 +1728,11 @@ std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
                     ok = false;
                     NoteWriteFailure("tool.job.observed(恢复补)", observed);
                 }
+            } else if (ok && IsTerminalJobState(item.terminal_state)) {
+                // Delivery can lag a graceful cancellation or another terminal
+                // observation. Repair the model message, preserve the terminal
+                // state and keep this job out of the dispatch queue.
+                job.state = item.terminal_state;
             } else if (ok) {
                 // 接单链补齐:job 回 queued 重新入队(requeue 语义)。
                 job.state = "queued";

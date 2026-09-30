@@ -228,6 +228,9 @@ struct JobRecoveryPlan {
         std::uint64_t result_version = 0;
         bool cancel_requested = false;  // 账上取消意图在案(≠已终止,单 §8)
         bool admission_complete = false;  // 接单 tool 消息已在当前链上
+        // An observation is independent of admission-message delivery. Filling
+        // a missing tool message must retain a terminal job, never requeue it.
+        std::string terminal_state;
     };
     std::vector<Item> items;
 };
