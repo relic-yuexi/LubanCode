@@ -87,6 +87,9 @@ public:
     ~AsyncToolRuntime();
     AsyncToolRuntime(const AsyncToolRuntime&) = delete;
     AsyncToolRuntime& operator=(const AsyncToolRuntime&) = delete;
+    void RequestShutdown();
+    bool Shutdown();
+    bool quiescent() const;
 
     // 每轮开拍前钉当前轮桥:证据/声明册/回合号的查询口走它(轮桥按轮
     // 新建,运行时按会话活;没钉 = 桥面查询全空,闸门提前档不派发、

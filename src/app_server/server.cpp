@@ -1750,6 +1750,9 @@ nlohmann::json Server::HandleThreadStop(const std::string& thread_id, std::strin
         record = it->second;
     }
     record->stop_requested.store(true);
+    record->interrupt_requested.store(true);
+    record->interactions->CancelPending();
+    if (record->session_service != nullptr) record->session_service->RequestExecutionShutdown();
     if (record->turn_worker.joinable()) {
         // A deadline limits this request, not the lifetime of an in-process
         // backend. Keep the busy record and ledger until the worker exits.
@@ -1995,24 +1998,46 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                 return;
             }
         }
-        api::Backend& backend = record->assembly->resources->backend();
-        tools::ToolRegistry& registry = record->assembly->resources->registry();
         // Keep the actual ContextManager across turns. On process/session
         // recovery, seed it once from the existing V3 resume projection; do not
         // mistake a populated trajectory ledger for model-visible history.
-        if (record->session_agent == nullptr) {
+        if (record->session_service->execution() == nullptr) {
             // An explicit per-session assembly profile wins. Legacy injected
             // factories have no Config input, so use the host's supplied model.
             if (record->assembly->agent_profile.request.model.empty()) {
                 record->assembly->agent_profile.request.model = options_.session_model;
             }
-            record->session_agent = std::make_unique<agent::Agent>(backend, registry, record->assembly->agent_profile);
-            auto* trajectory = record->session_service != nullptr ? record->session_service->trajectory() : nullptr;
-            if (trajectory != nullptr && trajectory->resumed_at_launch()) {
-                record->session_agent->RestoreSessionHistory(trajectory->LaunchResumeHistory());
+            try {
+                std::optional<std::vector<api::Message>> restored_history;
+                auto* trajectory = record->session_service->trajectory();
+                if (trajectory != nullptr && trajectory->resumed_at_launch()) {
+                    restored_history = trajectory->LaunchResumeHistory();
+                }
+                record->session_service->InitializeExecution(std::move(record->assembly->resources),
+                    record->assembly->agent_profile, std::move(restored_history));
+            } catch (const std::exception& error) {
+                // Initialization can race a stop request. Never publish a new
+                // execution into a stopping session or escape its worker thread.
+                const std::string status = record->interrupt_requested.load()
+                    ? std::string(kTurnStatusInterrupted) : std::string(kTurnStatusError);
+                record->stop_requested.store(true);
+                bool persisted = true;
+                if (!operation_id.empty()) {
+                    persisted = record->session_service->RecordTurnFinal(
+                        {operation_id, turn_id, status, {}, false});
+                }
+                completed_params = MakeTurnCompletedParams(thread_id, turn_id, status, error.what(),
+                    nlohmann::json(), 0, {}, false, persisted);
+                record->interactions->CancelPending();
+                EmitEventSafe(kEventTurnCompleted, completed_params);
+                record->last_completed = completed_params;
+                MarkTurnFinished(*record);
+                return;
             }
         }
-        agent::Agent& loop = *record->session_agent;
+        auto& execution = *record->session_service->execution();
+        tools::ToolRegistry& registry = execution.resources().registry();
+        agent::Agent& loop = execution.agent();
 
         // ---- 事件流(骨架拆解批二:整装切到 TurnEventAdapter) ----
         // 旧路在本地手拼 text/thinking 懒起条、open_tools 对账、收口补账,
@@ -2032,6 +2057,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // TurnWiring,协议形状与旧手拼回调逐事件对得上。
         agent::TurnWiring wiring;
         wiring.events = &turn_events;
+        wiring.turn_id = turn_id;
         // token 估算校准(token 估算校准单):app-server 会话与终端主会话
         // 共用进程级校准器,同一只 (provider,model) 桶。
         wiring.token_calibrator = &agent::DefaultTokenCalibrator();
@@ -2857,7 +2883,7 @@ void Server::InterruptRunningTurns(bool wait_for_completion) {
     // Signal every session before waiting for any of them. A cooperative
     // callback in A may be waiting for B to observe cancellation.
     for (const std::shared_ptr<ThreadRecord>& record : records) {
-        if (record->turn_worker.joinable()) {
+        if (wait_for_completion || record->turn_worker.joinable()) {
             record->interrupt_requested.store(true);
             record->interactions->CancelPending();
         }
@@ -2868,13 +2894,21 @@ void Server::InterruptRunningTurns(bool wait_for_completion) {
         browser_->RequestShutdown();
     }
     for (const std::shared_ptr<ThreadRecord>& record : records) {
-        if (!record->turn_worker.joinable()) continue;
-        if (wait_for_completion || WaitForTurnCompletion(*record, options_.interrupt_hard_deadline_ms)) {
+        if (wait_for_completion && record->session_service != nullptr) {
+            record->session_service->RequestExecutionShutdown();
+        }
+    }
+    for (const std::shared_ptr<ThreadRecord>& record : records) {
+        if (record->turn_worker.joinable() &&
+            (wait_for_completion || WaitForTurnCompletion(*record, options_.interrupt_hard_deadline_ms))) {
             // No threads/connection mutex is held here; callbacks may still
             // publish their final events before join returns.
             record->turn_worker.join();
-        } else {
+        } else if (record->turn_worker.joinable()) {
             Diagnose("收线等候超时,工作线程仍由服务持有: " + record->thread_id);
+        }
+        if (wait_for_completion && record->session_service != nullptr) {
+            record->session_service->ShutdownExecution();
         }
     }
 }
