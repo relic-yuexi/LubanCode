@@ -3,7 +3,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -13,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -933,4 +936,228 @@ TEST_CASE("session execution: async shutdown releases the publication mutex befo
     CHECK(gate.shutdown_finished);
     CHECK(service.ShutdownExecution());
     CHECK(service.Close("test_complete").error_code.empty());
+}
+
+namespace {
+struct ShutdownCaptureStats {
+    std::atomic<unsigned> callable_queries{0};
+    std::atomic<unsigned> final_queries{0};
+    std::atomic<unsigned> failed_queries{0};
+};
+
+// The observer makes lock re-entry measurable without leaving a permanently
+// blocked test thread behind if a callable is destroyed under jobs/book_mutex.
+// Its caller waits briefly, returns, and lets the owner release that bad lock;
+// Stop then drains the actual owner queries before any borrowed owner is freed.
+struct ShutdownCaptureQueries {
+    struct Request {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool completed = false;
+        bool result = false;
+    };
+    std::atomic<bool> armed{false};
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<std::shared_ptr<Request>> pending;
+    bool stopped = false;
+    std::function<bool()> query;
+    std::jthread observer;
+
+    void Start(std::function<bool()> callback) {
+        query = std::move(callback);
+        observer = std::jthread([this] {
+            for (;;) {
+                std::shared_ptr<Request> request;
+                {
+                    std::unique_lock lock(mutex);
+                    cv.wait(lock, [&] { return stopped || !pending.empty(); });
+                    if (pending.empty()) return;
+                    request = std::move(pending.front());
+                    pending.pop_front();
+                }
+                bool result = false;
+                try { result = query(); } catch (...) {}
+                std::lock_guard lock(request->mutex);
+                request->result = result;
+                request->completed = true;
+                request->cv.notify_all();
+            }
+        });
+    }
+
+    bool Check() {
+        auto request = std::make_shared<Request>();
+        {
+            std::lock_guard lock(mutex);
+            if (stopped) return false;
+            pending.push_back(request);
+            cv.notify_all();
+        }
+        std::unique_lock lock(request->mutex);
+        return request->cv.wait_for(lock, 3s, [&] { return request->completed; }) && request->result;
+    }
+
+    void Stop() {
+        {
+            std::lock_guard lock(mutex);
+            stopped = true;
+            cv.notify_all();
+        }
+        if (observer.joinable()) observer.join();
+    }
+    ~ShutdownCaptureQueries() { Stop(); }
+};
+
+struct SmallShutdownProbe {
+    std::shared_ptr<ShutdownCaptureQueries> queries;
+    std::shared_ptr<ShutdownCaptureStats> stats;
+    std::mutex executor_mutex;
+    std::condition_variable executor_cv;
+    std::thread::id executor_thread;
+    bool executor_capture_destroyed = false;
+    SmallShutdownProbe(std::shared_ptr<ShutdownCaptureQueries> reader,
+                       std::shared_ptr<ShutdownCaptureStats> observations)
+        : queries(std::move(reader)), stats(std::move(observations)) {}
+    void Query(bool last) noexcept {
+        if (!queries->armed.load()) return;
+        if (last) ++stats->final_queries;
+        else ++stats->callable_queries;
+        try {
+            if (!queries->Check()) ++stats->failed_queries;
+        } catch (...) { ++stats->failed_queries; }
+    }
+    void ExecutorEntered() {
+        std::lock_guard lock(executor_mutex);
+        executor_thread = std::this_thread::get_id();
+    }
+    void ExecutorCaptureDestroyed() {
+        std::lock_guard lock(executor_mutex);
+        if (executor_thread != std::this_thread::get_id()) return;
+        executor_capture_destroyed = true;
+        executor_cv.notify_all();
+    }
+    ~SmallShutdownProbe() { Query(true); }
+};
+
+// One shared_ptr is deliberately the entire callable. Its noexcept copy
+// constructor lets libc++ keep it in std::function's small-object buffer, whose
+// move may copy the callable and leave the source holding its original capture.
+template<class Result>
+struct SmallShutdownCallable {
+    std::shared_ptr<SmallShutdownProbe> probe;
+    explicit SmallShutdownCallable(std::shared_ptr<SmallShutdownProbe> value) noexcept : probe(std::move(value)) {}
+    SmallShutdownCallable(const SmallShutdownCallable&) noexcept = default;
+    SmallShutdownCallable(SmallShutdownCallable&&) noexcept = default;
+    ~SmallShutdownCallable() {
+        if (!probe) return;
+        probe->Query(false);
+        if constexpr (std::is_same_v<Result, tools::Tool::Result>) probe->ExecutorCaptureDestroyed();
+    }
+    template<class... Args>
+    Result operator()(const Args&...) const {
+        if constexpr (std::is_same_v<Result, tools::JobAuthDecision>) return {true, false, {}};
+        else if constexpr (std::is_same_v<Result, tools::Tool::Result>) {
+            probe->ExecutorEntered();
+            return tools::Tool::Result::Text("small capture result");
+        }
+        else if constexpr (std::is_same_v<Result, std::string>) return "turn-000001";
+        else if constexpr (std::is_same_v<Result, std::int64_t>) return 1000;
+        else return std::nullopt;
+    }
+};
+static_assert(sizeof(SmallShutdownCallable<tools::JobAuthDecision>) == sizeof(std::shared_ptr<SmallShutdownProbe>));
+static_assert(std::is_nothrow_copy_constructible_v<SmallShutdownCallable<tools::JobAuthDecision>>);
+} // namespace
+
+TEST_CASE("session execution: shutdown releases every small callback copy outside owner locks") {
+    Fixture fixture;
+    auto state = std::make_shared<ResourceState>();
+    runtime::SessionService service(fixture.Launch());
+    service.InitializeExecution(Resources(fixture, state), Profile("small-capture"), std::nullopt);
+    auto* ledger = service.trajectory();
+    REQUIRE(ledger != nullptr);
+    const auto job_request = DeclaredJob(*ledger->v3_main_writer(), "execution_probe");
+    auto queries = std::make_shared<ShutdownCaptureQueries>();
+    auto stats = std::make_shared<ShutdownCaptureStats>();
+    std::vector<std::shared_ptr<SmallShutdownProbe>> probes;
+    std::vector<std::weak_ptr<SmallShutdownProbe>> captured;
+    for (unsigned index = 0; index < 7; ++index) {
+        probes.push_back(std::make_shared<SmallShutdownProbe>(queries, stats));
+        captured.push_back(probes.back());
+    }
+    runtime::AsyncToolRuntime::Hooks hooks;
+    hooks.writer = ledger->v3_main_writer();
+    hooks.writer_mutex = ledger->v3_tool_results_mutex();
+    hooks.auth = SmallShutdownCallable<tools::JobAuthDecision>(probes[0]);
+    hooks.executor = SmallShutdownCallable<tools::Tool::Result>(probes[1]);
+    hooks.current_turn_id = SmallShutdownCallable<std::string>(probes[2]);
+    hooks.response_evidence = SmallShutdownCallable<std::optional<std::string>>(probes[3]);
+    hooks.reserved_assistant_message_id = SmallShutdownCallable<std::optional<std::string>>(probes[4]);
+    hooks.call_origin_resolver = SmallShutdownCallable<std::optional<tools::JobStartRequest>>(probes[5]);
+    runtime::AsyncToolRuntimeOptions options;
+    options.coordinator.clock_ms = SmallShutdownCallable<std::int64_t>(probes[6]);
+    auto asynchronous = runtime::AsyncToolRuntime::Create(std::move(hooks), std::move(options));
+    REQUIRE(asynchronous != nullptr);
+    // Caller-owned moved-from copies are outside the runtime lifetime promise.
+    // Empty them before arming so this fixture measures only production copies.
+    hooks = {};
+    options = {};
+    probes.clear();
+    auto* async_owner = asynchronous.get();
+    auto coordinator = asynchronous->coordinator();
+    auto* job_owner = coordinator.get();
+    auto executor_probe = captured[1].lock();
+    REQUIRE(executor_probe != nullptr);
+    service.runtime()->AttachAsyncToolRuntime(std::move(asynchronous));
+    const auto started = coordinator->StartJob(job_request);
+    REQUIRE(started.ok);
+    const auto finished = coordinator->WaitJobs({started.job_id}, 5000, true);
+    REQUIRE(finished.satisfied);
+    REQUIRE(finished.statuses.size() == 1);
+    REQUIRE(finished.statuses[0].state == "succeeded");
+    {
+        std::unique_lock lock(executor_probe->executor_mutex);
+        REQUIRE(executor_probe->executor_cv.wait_for(lock, 5s, [&] { return executor_probe->executor_capture_destroyed; }));
+    }
+    // WaitJobs observes the durable result, not the worker capture's lifetime.
+    // Arm only after that real capture has exited, so close owns every query.
+    executor_probe.reset();
+    auto* session_owner = &service;
+    auto* session_runtime = service.runtime();
+    auto* registry = &service.execution()->resources().registry();
+    auto* backend = &service.execution()->resources().backend();
+    queries->Start([session_owner, session_runtime, async_owner, job_owner, registry, backend, state,
+                    job_id = started.job_id] {
+        // These are real lock-taking APIs. GetJob is fail-closed after the stop
+        // latch and must not recurse through the now-retired authorization hook.
+        const auto read = job_owner->GetJob(job_id);
+        const bool closed = read.access_denied && read.access_reason == "job.coordinator.closed";
+        const bool idle = job_owner->running_count() == 0 && job_owner->queued_count() == 0;
+        const bool book_empty = async_owner->early_dispatched_count() == 0;
+        const bool attached = session_runtime->async_tool_runtime() == async_owner;
+        const bool no_input = session_owner->pending_input_count() == 0;
+        if (!state->backend_alive.load() || !state->tool_alive.load()) return false;
+        api::Request request;
+        request.model = "callback-borrow";
+        return closed && idle && book_empty && attached && no_input && registry->Find("execution_probe") != nullptr &&
+            backend->send_stream(request, [](const auto&) {}, nullptr).has_value();
+    });
+    queries->armed.store(true);
+    CHECK(service.ShutdownExecution());
+    for (unsigned index = 0; index < captured.size(); ++index) {
+        CAPTURE(index);
+        CHECK(captured[index].expired());
+    }
+    CHECK(stats->callable_queries.load() >= captured.size());
+    CHECK(stats->final_queries.load() == captured.size());
+    CHECK(stats->failed_queries.load() == 0);
+    CHECK(state->backend_alive.load());
+    CHECK(state->tool_alive.load());
+    CHECK(coordinator->shutdown_complete());
+    CHECK(async_owner->quiescent());
+    // Also clean up deterministically on failed weak-expiry/lock assertions.
+    queries->armed.store(false);
+    queries->Stop();
+    CHECK(service.Close("small_captures_released").error_code.empty());
 }
