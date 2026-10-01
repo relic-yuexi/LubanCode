@@ -164,6 +164,15 @@ bool ValidOptional(const std::optional<std::string>& value) {
     return !value || (!value->empty() && lubancode::platform::IsValidUtf8(*value));
 }
 
+Result<void> CheckResumePlan(const Json& plan, const std::optional<std::string>& expected_plan_json) {
+    if (!expected_plan_json) return {};
+    const Json expected = Json::parse(*expected_plan_json, nullptr, false);
+    if (!expected.is_object() || expected != plan) {
+        return std::unexpected(Error{"sdk.extension.resume_mismatch", "frozen extension declarations differ from the saved session plan"});
+    }
+    return {};
+}
+
 } // namespace
 
 namespace extensions::v1 {
@@ -230,6 +239,9 @@ namespace detail {
 struct ExtensionNextAccess {
     struct Lease {
         std::shared_ptr<ext::Next::State> state;
+        explicit Lease(std::shared_ptr<ext::Next::State> value) : state(std::move(value)) {}
+        Lease(const Lease&) = delete;
+        Lease& operator=(const Lease&) = delete;
         ~Lease() {
             const std::lock_guard lock(state->mutex);
             state->active = false;
@@ -252,7 +264,7 @@ SessionExtensions::SessionExtensions(ext::SessionContext context) : context_(std
 SessionExtensions::~SessionExtensions() {
     CallbackScope callback_scope;
     dispatcher_.reset();
-    instances_.clear();
+    while (!instances_.empty()) instances_.pop_back();
 }
 
 void SessionExtensions::SetOperationScope(std::string operation_id) {
@@ -268,7 +280,8 @@ std::string SessionExtensions::OperationScope() const {
 std::string SessionExtensions::DescribePlan() const { return plan_json_; }
 
 Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Build(
-    std::vector<ext::Registration>& registrations, const ext::SessionContext& context) {
+    std::vector<ext::Registration>& registrations, const ext::SessionContext& context,
+    std::optional<std::string> expected_plan_json) {
     CallbackScope callback_scope;
     struct Sources {
         std::vector<ext::Registration>& registrations;
@@ -282,6 +295,8 @@ Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Build(
         auto module = std::unique_ptr<SessionExtensions>(new SessionExtensions(context));
         if (registrations.empty()) {
             module->plan_json_ = R"({"schemaVersion":1,"registryRevision":0,"points":{},"overridden":[],"extensions":[]})";
+            const auto compatible = CheckResumePlan(Json::parse(module->plan_json_), expected_plan_json);
+            if (!compatible) return std::unexpected(compatible.error());
             return module;
         }
         struct Slot { mw::Stage stage; bool required; };
@@ -327,20 +342,8 @@ Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Build(
         mw::MiddlewarePool pool;
         mw::AddBuiltinRequestSlots(pool);
         Json identities = Json::array();
-        for (const auto& registration : registrations) {
-            Result<std::unique_ptr<ext::Instance>> instance = std::unexpected(Error{"sdk.extension.factory_failed", "factory did not return an instance"});
-            try {
-                instance = registration.factory(context);
-            } catch (const std::exception& error) {
-                return std::unexpected(Error{"sdk.extension.factory_failed", error.what()});
-            } catch (...) {
-                return std::unexpected(Error{"sdk.extension.factory_failed", "factory threw an unknown exception"});
-            }
-            if (!instance || !*instance) {
-                return std::unexpected(Error{"sdk.extension.factory_failed", instance ? "factory returned null" : instance.error().code + ": " + instance.error().message});
-            }
-            auto* instance_ptr = instance->get();
-            module->instances_.push_back(std::move(*instance));
+        for (std::size_t instance_index = 0; instance_index < registrations.size(); ++instance_index) {
+            const auto& registration = registrations[instance_index];
             const auto layer = *ConvertLayer(registration.source_layer);
             Json declarations = Json::array();
             for (const auto& handler : registration.manifest.handlers) {
@@ -375,7 +378,7 @@ Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Build(
                 definition.required = slots.at(definition.Key()).required;
                 definition.observer = handler.observer;
                 auto* module_ptr = module.get();
-                definition.builtin = [module_ptr, instance_ptr, point = handler.point, stage = handler.stage,
+                definition.builtin = [module_ptr, instance_index, point = handler.point, stage = handler.stage,
                                       name = handler.name, observer = handler.observer](
                     const mw::InvocationCtx& native_context, const Json& input, mw::NextCall& native_next)
                     -> std::expected<mw::HandlerReturn, mw::HandlerError> {
@@ -395,8 +398,16 @@ Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Build(
                     callback_context.step_id = native_context.step_id;
                     callback_context.request_id = native_context.request_id;
                     callback_context.cancellation.flag = native_context.cancel;
-                    auto result = instance_ptr->Invoke(callback_context, ext::Input{1, input.dump()}, lease.next());
-                    if (!result) return std::unexpected(mw::HandlerError{result.error().code, result.error().message});
+                    auto result = module_ptr->instances_.at(instance_index)->Invoke(
+                        callback_context, ext::Input{1, input.dump()}, lease.next());
+                    if (!result) {
+                        if (result.error().code.empty() || !lubancode::platform::IsValidUtf8(result.error().code) ||
+                            !lubancode::platform::IsValidUtf8(result.error().message)) {
+                            return std::unexpected(mw::HandlerError{
+                                std::string(mw::err::kResultInvalid), "handler error requires a nonempty UTF-8 code and UTF-8 message"});
+                        }
+                        return std::unexpected(mw::HandlerError{result.error().code, result.error().message});
+                    }
                     auto converted = ConvertReturn(*result, native_context, observer);
                     if (!converted) return std::unexpected(mw::HandlerError{converted.error().code, converted.error().message});
                     return std::move(*converted);
@@ -409,7 +420,29 @@ Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Build(
         Json plan = (*frozen)->DescribePlan();
         plan["schemaVersion"] = 1;
         plan["extensions"] = std::move(identities);
+        const auto compatible = CheckResumePlan(plan, expected_plan_json);
+        if (!compatible) return std::unexpected(compatible.error());
         module->plan_json_ = plan.dump();
+        // Publication validates all conflicts, dependencies, stage ordering and
+        // required/observer rules before a trusted factory can acquire resources.
+        // Native wrappers capture indices; no dispatch becomes reachable until
+        // all unique per-session instances have been installed below.
+        Sources factory_sources{registrations};
+        module->instances_.reserve(registrations.size());
+        for (const auto& registration : registrations) {
+            Result<std::unique_ptr<ext::Instance>> instance = std::unexpected(Error{"sdk.extension.factory_failed", "factory did not return an instance"});
+            try {
+                instance = registration.factory(context);
+            } catch (const std::exception& error) {
+                return std::unexpected(Error{"sdk.extension.factory_failed", error.what()});
+            } catch (...) {
+                return std::unexpected(Error{"sdk.extension.factory_failed", "factory threw an unknown exception"});
+            }
+            if (!instance || !*instance) {
+                return std::unexpected(Error{"sdk.extension.factory_failed", instance ? "factory returned null" : instance.error().code + ": " + instance.error().message});
+            }
+            module->instances_.push_back(std::move(*instance));
+        }
         module->dispatcher_ = std::make_unique<lubancode::hooks::HookDispatcher>();
         module->dispatcher_->SetMiddleware(std::make_shared<mw::MiddlewareDispatcher>(std::move(*frozen)));
         return module;
