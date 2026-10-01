@@ -55,7 +55,19 @@ Worker PR #245、Runner PR #246 暂留 Draft，不作为本阶段完成凭据。
 
 默认构建全量 Linux 666/666、macOS 669/669、Windows 668/668，以完整 CI 控制台汇总为证；不称全量各册原生日志均已归档。ASan 105/105，十册必需寿命来源齐且实跑非零；其中扩展 12/12 例、591/591 条断言，中间件核 24/24 例、212/212 条断言，未见地址错误诊断。ASan 不含独立安装消费程序；LeakSanitizer 未开启，Playwright 未安装，TSan 按条件跳过。本地未编译或运行原生测试。
 
-这批只交可信 C++ 窄扩展。高级 ExtensionRuntime、动态库加载、单项热卸载、请求正文改写、Action 挂点、远端 Worker 与 Node 结果同步仍待后续。内部 Async 线程创建失败欠账保留。远端 full 已另定两层设计：Node 许可，每场 Session 还须显式选择，默认 preview；未获节点许可则明拒。这不是当前 SDK、Worker 或 `remote/result_sync` 已支持的配置，后续接线见[部署与两端存储](../docs/architecture/remote-agent-deployment.md#8-默认-previewnode-许可与-session-选择)。
+这批 #255 只交可信 C++ 窄扩展。高级 ExtensionRuntime、动态库加载、单项热卸载、请求正文改写与 Action 挂点仍待后续。内部 Async 线程创建失败欠账保留。持久工具结果与双层 full 窄接口由 #257 另批推进，Worker #245 接线仍留 Draft，不能沿用 #255 证据。Node 许可、每场显式选择与默认 preview 沿[部署与两端存储](../docs/architecture/remote-agent-deployment.md#8-默认-previewnode-许可与-session-选择)；部署 TOML、网络 Node 和 Control 尚未实现。
+
+## 持久工具结果与冻结投影（2026-10-02，已交付）
+
+[PR #257](https://github.com/relic-yuexi/LubanCode/pull/257) 源头 `366b3212fac1fbbd473d5e2ea9668ab4e607a016`，验收运行 [CI 36890152941](https://github.com/relic-yuexi/LubanCode/actions/runs/36890152941)。实际合入功能分支 `5d247d77432b85b5b99773d99877b71f388fb217`，双亲为原功能分支 `0fc8f63a` 与源码头 `366b3212`；实际树与受测合并 `90197a5ae7bb5a447fdc71d9df5a7cd1bbadee51` 同为 `e0e5fa3fb6baef0ddcd1774e0a120c0033202c96`，逐树 diff 无差异。终态发布前冻结六段引用，恢复先验 V3，再重建索引；公开查询不借活 Agent，关闭后和新轮运行中仍能读旧轮。索引仍整账验卷，原件按身份、字节与摘要核验；本地读取不提供恶意文件系统沙箱。
+
+公开 `results.hpp` 提供只读快照与宿主投影。Session 冻结 mode/version；新场默认 preview，恢复省略时保留，显式失配明拒，旧场缺策略文件只按 preview/v1 接纳。Node 总许可缺省关闭；本场显式 full 也不能越过 Node。生成与存盘恢复核原场、原材料及冻结策略；发出核定型记录与当前策略，不重读原件。多通道合一份正文，先整段脱敏，再截一次 UTF-8 前缀；binary/raw_payload 只出白名单元信息。坏件、缺件、捕获不全和超限不能洗成完整全文。
+
+安装消费新增 results、result_seed 与 result_resume，后两项分进程验证重启后同片恢复、原操作不重跑。六套 SDK-only/组合构建各过 consumer 10/10、focused 11/11，实际各 90 个原生用例；查询各 11 场/293 条断言，投影各 6 场/203 条断言。四公开头、三平台 testing OFF/ON 边界、普通全安装或 component 移位消费均过。登记、JUnit、完整 LastTest、来源命令与 CI 受测头已独立交叉核，CTest 无漏跑或跳过。
+
+三平台 host 各过 7/7、58 个原生用例/1173 条断言，其中真实 AppServer/Lua parity 各 6 场/513 条断言。完整 CI 日志逐项核全量 Linux 670/670、macOS 673/673、Windows 672/672；Ubuntu 24.04、Debian 11/12 同份产物通过启动烟测，只验版本与帮助。ASan 108/108，13 册必需来源实跑非零；查询 11/293、投影 6/203、remote 投影核 13/311、扩展 12/591、中间件 24/212，未见地址错误诊断。ASan 不含独立安装消费，LSan 未开启；Windows 网页烟测 20 项过，缺 Playwright 的浏览器段跳过，TSan 按条件跳过。本地未编译或运行原生测试，不借旧失败或取消头作通过凭据。
+
+Worker #245 只消费公开 SDK，主管本机冻结投影与异步查询已接；其源码 `c4528f61` 对应 [CI 36891497462](https://github.com/relic-yuexi/LubanCode/actions/runs/36891497462)，三平台各过精确 18 场真实移位进程验收，仍留 Draft、尚未合入。当前 run_command 的 stdout/stderr 共管，只存 combined 原件；SDK 真正多通道组件夹具与该命令验收分清。主管冻结记录不等于持久网络 outbox，也未提供 ACK、主动登记、Control 网页或独立 Runner 接线。Runner #246 继续留 Draft。
 
 ## 前轮复核与开工口径（2026-09-27，历史基线）
 
