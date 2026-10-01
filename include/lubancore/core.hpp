@@ -12,28 +12,12 @@
 #include <utility>
 #include <vector>
 
-#if defined(_WIN32)
-#  if defined(LUBANCORE_BUILDING)
-#    define LUBANCORE_API __declspec(dllexport)
-#  else
-#    define LUBANCORE_API __declspec(dllimport)
-#  endif
-#else
-#  define LUBANCORE_API __attribute__((visibility("default")))
-#endif
+#include <lubancore/api.hpp>
+#include <lubancore/extensions.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
 namespace lubancore {
-
-struct Error { std::string code; std::string message; };
-template<class T> using Result = std::expected<T, Error>;
-
-struct Cancellation {
-    // Borrowed only for the duration of Backend::Generate / Tool::execute.
-    const std::atomic<bool>* flag = nullptr;
-    bool requested() const noexcept { return flag && flag->load(); }
-};
 
 struct ToolCall { std::string id; std::string name; std::string input_json; };
 struct ToolReply { std::string call_id; std::string text; bool is_error = false; };
@@ -132,6 +116,8 @@ struct SessionOptions {
     std::vector<std::string> builtin_tools;
     std::vector<Tool> custom_tools;
     std::vector<McpServer> mcp_servers;
+    // Explicit trusted C++ registrations, frozen per session until Close.
+    std::vector<extensions::v1::Registration> extensions;
     ApprovalMode approval_mode = ApprovalMode::Confirm;
     std::chrono::milliseconds approval_timeout{300000};
     int max_steps_per_turn = 0;
@@ -192,6 +178,9 @@ public:
     Result<void> Cancel(std::string operation_id);
     Result<Operation> ReadOperation(std::string operation_id) const;
     Result<Operation> WaitResult(std::string operation_id, std::chrono::milliseconds timeout) const;
+    // Frozen selected/overridden middleware plan, retained as pure JSON after
+    // Close. This does not serialize or restore arbitrary extension state.
+    Result<std::string> DescribeExtensions() const;
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
     // Cooperative custom tools/backends MUST return after cancellation; Close waits
     // for them and never destroys live borrowed state or pretends a timeout stopped it.
