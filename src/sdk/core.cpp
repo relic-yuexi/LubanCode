@@ -29,6 +29,7 @@
 #include "sdk/adapters.hpp"
 #include "sdk/callback_scope.hpp"
 #include "sdk/extensions.hpp"
+#include "sdk/results.hpp"
 #include "tools/path_utils.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
@@ -105,6 +106,7 @@ Result<void> ValidateOperationLedger(const fs::path& session_dir) {
     std::ifstream input(path, std::ios::binary);
     if (!input) return invalid("cannot read operation ledger");
     std::set<std::string> keys;
+    std::set<std::string> bound_turns;
     const auto is_string = [](const Json& row, const char* key) {
         return row.contains(key) && row.at(key).is_string();
     };
@@ -149,6 +151,9 @@ Result<void> ValidateOperationLedger(const fs::path& session_dir) {
             for (const auto& ref : row.at("finalMessageRefs")) {
                 if (!ref.is_string()) return invalid("invalid final message reference");
             }
+            const auto turn = row.at("turnId").get<std::string>();
+            if (!turn.empty() && (!ValidId(turn) || !bound_turns.insert(turn).second))
+                return invalid("invalid turn identity or turn bound to multiple operations");
             found->second = Stage::Final;
         } else {
             return invalid("unknown operation fact kind");
@@ -293,6 +298,10 @@ struct Session::Impl final : rt::InteractionBroker {
     mutable std::condition_variable cv;
     std::mutex close_mutex;
     std::map<std::string, Operation> operations;
+    results::v1::SessionResultPolicy result_policy;
+    // Immutable per-operation identity/ref snapshots. These retain no service,
+    // Agent or original output bytes and remain usable after Close.
+    std::map<std::string, Result<std::shared_ptr<const detail::OperationToolResultIndex>>> tool_results;
     std::set<std::string> cancelled;
     std::vector<std::weak_ptr<EventStream::Impl>> subscriptions;
     std::string active_operation;
@@ -514,6 +523,10 @@ struct Session::Impl final : rt::InteractionBroker {
         if (!options.resume_session_id.empty() && session_id != options.resume_session_id) {
             return std::unexpected(Failure("sdk.resume.identity_changed"));
         }
+        auto frozen_policy = detail::FreezeResultPolicy(session_dir, session_id, options.result_policy,
+            !options.resume_session_id.empty());
+        if (!frozen_policy) return std::unexpected(frozen_policy.error());
+        result_policy = std::move(*frozen_policy);
         if (!options.resume_session_id.empty() && options.system_prompt.empty()) {
             auto saved = lubancode::trajectory::v3::ReadV3Ledger(service->trajectory()->v3_main_writer()->path());
             if (!saved) return std::unexpected(Failure("sdk.resume.context_unavailable", saved.error()));
@@ -618,7 +631,55 @@ struct Session::Impl final : rt::InteractionBroker {
                 return std::unexpected(Failure("sdk.resume.input_unavailable", id));
             }
         }
+        // No worker has started. Read the verified ledger once for all restored
+        // terminal operations; a failed read is retained as a query error.
+        const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(
+            session_dir / (session_id + ".jsonl"));
+        std::map<std::string, std::size_t> turn_owners;
+        for (const auto& [id, operation] : operations) {
+            (void)id;
+            if (Terminal(operation.state) && !operation.turn_id.empty()) ++turn_owners[operation.turn_id];
+        }
+        for (const auto& [id, operation] : operations) {
+            if (!Terminal(operation.state)) continue;
+            if (!operation.turn_id.empty() && turn_owners[operation.turn_id] != 1) {
+                tool_results.insert_or_assign(id, std::unexpected(Failure("sdk.result.index_invalid", "turn belongs to multiple operations")));
+            } else if (!ledger) {
+                tool_results.insert_or_assign(id, std::unexpected(Failure("sdk.result.index_unavailable", "cannot read verified result ledger")));
+            } else {
+                CacheToolResults(operation, true, &*ledger);
+            }
+        }
         return {};
+    }
+
+    void CacheToolResults(const Operation& operation, bool ledger_ok,
+        const lubancode::trajectory::v3::V3Ledger* restored = nullptr) {
+        Result<std::shared_ptr<const detail::OperationToolResultIndex>> indexed =
+            std::unexpected(Failure("sdk.result.index_unavailable", "operation has no verified result index"));
+        if (ledger_ok && operation.turn_id.empty() && operation.state == OperationState::Cancelled) {
+            // Cancelled before dispatching a V3 turn: no tool could have run.
+            indexed = std::make_shared<const detail::OperationToolResultIndex>();
+        } else if (ledger_ok && !operation.turn_id.empty()) {
+            const auto capture = [&](const auto& ledger) {
+                auto value = detail::IndexToolResults(ledger, session_id, operation.operation_id, operation.turn_id);
+                if (!value) indexed = std::unexpected(value.error());
+                else indexed = std::make_shared<const detail::OperationToolResultIndex>(std::move(*value));
+            };
+            if (restored) capture(*restored);
+            else {
+                const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(session_dir / (session_id + ".jsonl"));
+                if (ledger) capture(*ledger);
+            }
+        }
+        std::lock_guard lock(mutex);
+        if (!operation.turn_id.empty()) for (const auto& [id, other] : operations) {
+            if (id != operation.operation_id && other.turn_id == operation.turn_id) {
+                indexed = std::unexpected(Failure("sdk.result.index_invalid", "turn belongs to multiple operations"));
+                break;
+            }
+        }
+        tool_results.insert_or_assign(operation.operation_id, std::move(indexed));
     }
 
     Operation Complete(Operation operation, const std::vector<std::string>& refs, bool usage_reported, bool ledger_ok = true) {
@@ -649,6 +710,10 @@ struct Session::Impl final : rt::InteractionBroker {
             operation.error += " sdk.result.persistence_failed";
             operation.state = OperationState::Indeterminate;
         }
+        // EndTurn and scoped-binding teardown have drained every writer borrower.
+        // Freeze identities before making the terminal operation visible. Readers
+        // use this snapshot, so another turn may append V3 without a read race.
+        CacheToolResults(operation, ledger_ok && recorded);
         {
             std::lock_guard lock(mutex);
             operations[operation.operation_id] = operation;
@@ -1018,6 +1083,46 @@ Result<Operation> Session::WaitResult(std::string id, std::chrono::milliseconds 
     if (it == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
     if (!impl_->cv.wait_for(lock, timeout, [&] { return Terminal(it->second.state); })) return std::unexpected(Failure("sdk.wait.timeout"));
     return it->second;
+}
+Result<std::vector<results::v1::ToolResultSummary>> Session::ListToolResults(std::string id) const {
+    std::shared_ptr<const detail::OperationToolResultIndex> index;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto operation = impl_->operations.find(id);
+        if (operation == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
+        if (!Terminal(operation->second.state)) return std::unexpected(Failure("sdk.result.not_ready"));
+        const auto saved = impl_->tool_results.find(id);
+        if (saved == impl_->tool_results.end()) return std::unexpected(Failure("sdk.result.index_unavailable"));
+        if (!saved->second) return std::unexpected(saved->second.error());
+        index = *saved->second;
+    }
+    std::vector<results::v1::ToolResultSummary> summaries;
+    summaries.reserve(index->entries.size());
+    for (const auto& entry : index->entries) summaries.push_back(entry.summary);
+    return summaries;
+}
+Result<results::v1::SavedSnapshot> Session::ReadToolResult(
+    results::v1::ToolResultIdentity identity, results::v1::ToolResultReadOptions options) const {
+    std::shared_ptr<const detail::OperationToolResultIndex> index;
+    results::v1::SessionResultPolicy policy;
+    fs::path directory;
+    {
+        std::lock_guard lock(impl_->mutex);
+        if (identity.session_id != impl_->session_id) return std::unexpected(Failure("sdk.result.identity_mismatch"));
+        const auto operation = impl_->operations.find(identity.operation_id);
+        if (operation == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
+        if (!Terminal(operation->second.state)) return std::unexpected(Failure("sdk.result.not_ready"));
+        const auto saved = impl_->tool_results.find(identity.operation_id);
+        if (saved == impl_->tool_results.end()) return std::unexpected(Failure("sdk.result.index_unavailable"));
+        if (!saved->second) return std::unexpected(saved->second.error());
+        index = *saved->second;
+        policy = impl_->result_policy;
+        directory = impl_->session_dir;
+    }
+    const auto entry = std::find_if(index->entries.begin(), index->entries.end(),
+        [&](const auto& result) { return result.summary.identity == identity; });
+    if (entry == index->entries.end()) return std::unexpected(Failure("sdk.result.identity_mismatch"));
+    return detail::ReadIndexedToolResult(directory, *entry, policy, options);
 }
 
 struct Runtime::Impl {

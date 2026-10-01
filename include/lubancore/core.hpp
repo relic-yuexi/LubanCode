@@ -14,6 +14,7 @@
 
 #include <lubancore/api.hpp>
 #include <lubancore/extensions.hpp>
+#include <lubancore/results.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
@@ -118,6 +119,11 @@ struct SessionOptions {
     std::vector<McpServer> mcp_servers;
     // Explicit trusted C++ registrations, frozen per session until Close.
     std::vector<extensions::v1::Registration> extensions;
+    // Outbound result projection identity. New sessions default to Preview/v1;
+    // omitted on resume preserves the saved mode/version. An explicit resume
+    // value must match, including legacy Preview/v1. Local queries still read
+    // trusted materials; this option never grants the host's Node permission.
+    std::optional<results::v1::SessionResultOptions> result_policy;
     ApprovalMode approval_mode = ApprovalMode::Confirm;
     std::chrono::milliseconds approval_timeout{300000};
     int max_steps_per_turn = 0;
@@ -178,6 +184,18 @@ public:
     Result<void> Cancel(std::string operation_id);
     Result<Operation> ReadOperation(std::string operation_id) const;
     Result<Operation> WaitResult(std::string operation_id, std::chrono::milliseconds timeout) const;
+    // Completed operations only. The frozen V3 result index survives event
+    // overflow, Close and same-ID resume, and never reruns tools. A failed index
+    // returns an error, not an empty list. Later operations may run concurrently.
+    Result<std::vector<results::v1::ToolResultSummary>> ListToolResults(std::string operation_id) const;
+    // Exact six-part identity from ListToolResults; no user paths or offsets.
+    // Multi-channel captured material, not the model's shortened preview. Text
+    // shares one bounded budget; binary/raw_payload stays metadata-only. Capture
+    // completeness and artifact gaps are separate. TooLarge never returns a
+    // partial prefix as a complete result. Closed handles retain this query.
+    Result<results::v1::SavedSnapshot> ReadToolResult(
+        results::v1::ToolResultIdentity identity,
+        results::v1::ToolResultReadOptions options = {}) const;
     // Frozen selected/overridden middleware plan, retained as pure JSON after
     // Close. This does not serialize or restore arbitrary extension state.
     Result<std::string> DescribeExtensions() const;
