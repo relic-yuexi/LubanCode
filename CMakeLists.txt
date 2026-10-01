@@ -16,6 +16,10 @@ project(lubancode VERSION "${LUBANCODE_VERSION}" LANGUAGES CXX)
 
 option(LUBANCODE_BUILD_CLI "Build the LubanCode terminal application and host resources" ON)
 option(LUBANCODE_BUILD_SDK "Build the experimental installable LubanCore C++ SDK" OFF)
+option(LUBANCODE_BUILD_WORKER_HOST "Build the private supervisor IPC worker host" OFF)
+if(LUBANCODE_BUILD_WORKER_HOST)
+  set(LUBANCODE_BUILD_SDK ON)
+endif()
 if(NOT LUBANCODE_BUILD_CLI AND NOT LUBANCODE_BUILD_SDK)
   message(FATAL_ERROR "Enable LUBANCODE_BUILD_CLI or LUBANCODE_BUILD_SDK")
 endif()
@@ -1690,6 +1694,9 @@ endif() # LUBANCODE_BUILD_CLI
 
 if(LUBANCODE_BUILD_SDK)
   include(cmake/LubanCore.cmake)
+endif()
+if(LUBANCODE_BUILD_WORKER_HOST)
+  include(cmake/WorkerHost.cmake)
 endif()
 
 # ---------------------------------------------------------------------------

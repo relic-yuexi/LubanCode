@@ -80,6 +80,7 @@ DOC development/i18n.md
 DOC development/lubancore-managed-identity.md
 DOC development/lubancore-module-boundaries.md
 DOC development/lubancore-sdk.md
+DOC development/worker-host.md
 DOC development/naming.md
 DOC development/search-ripgrep-migration.md
 DOC development/security.md
