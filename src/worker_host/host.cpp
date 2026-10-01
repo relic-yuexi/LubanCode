@@ -447,7 +447,7 @@ struct Host::Impl {
                         return result;
                     }
                     if (!found) throw support::Failure("worker.result_not_exposed");
-                    auto snapshot = QueryTake(handle->ReadToolResult(*identity, {support::kFrameBytes}));
+                    auto snapshot = QueryTake(handle->ReadToolResult(*identity, {support::kSnapshotTextBytes}));
                     return store->Read(snapshot);
                 });
         }

@@ -38,6 +38,9 @@ namespace lubancode::worker_host::result_support {
 using Json = nlohmann::json;
 namespace result = lubancore::results::v1;
 inline constexpr std::size_t kFrameBytes = 1024 * 1024;
+// Trusted local read budget; the emitted projection and IPC frame have separate
+// limits. Use the same budget on first projection and restoration.
+inline constexpr std::size_t kSnapshotTextBytes = 8 * 1024 * 1024;
 inline constexpr std::size_t kStorageBytes = 4 * 1024 * 1024;
 inline std::filesystem::path Path(std::string_view utf8) { return std::filesystem::u8path(utf8.begin(), utf8.end()); }
 struct Failure : std::runtime_error {

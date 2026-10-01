@@ -134,7 +134,8 @@ Worker 不解析 V3 账或本机工具原件，SDK 查询持久材料，公开 `
 投影正文只放顶层 `text`，stdout/stderr/report 共享一份总预算；combined 存在时作为
 聚合正文，其余通道只回固定元信息。binary、raw_payload 不回正文；缺件、坏件、
 capture 不完整和超大材料均明确标状态或拒绝，不能伪装完整 full。full 正文上限
-1 MiB，最终闭合 JSON 连外层响应也须落在 1 MiB 帧内；转义使帧超限时整份拒绝，
+1 MiB，主管读取本地文本另设 8 MiB 总帽，不拿 IPC 帧帽代替原件读取预算。
+最终闭合 JSON 连外层响应也须落在 1 MiB 帧内；转义使帧超限时整份拒绝，
 不裁 full、不分页。query 不接 `mode`、`offset`、`limit`、`tail`、cwd 或路径。
 
 查询跑在一条宿主自有线程，最多 8 项等待，避免读盘、脱敏占住取消和 health 主路。
