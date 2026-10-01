@@ -25,17 +25,21 @@
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "sdk/adapters.hpp"
+#include "sdk/callback_scope.hpp"
 #include "tools/path_utils.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
 
 namespace lubancore {
+namespace detail {
+thread_local bool in_session_worker = false;
+}
 namespace {
 namespace rt = lubancode::runtime;
 namespace api = lubancode::api;
 namespace fs = std::filesystem;
 using Json = nlohmann::json;
-thread_local bool in_session_worker = false;
+using detail::in_session_worker;
 
 // Keep shutdown diagnostics after a public session handle is dropped without
 // retaining its result text, connection material or execution resources.

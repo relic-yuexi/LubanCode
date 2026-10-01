@@ -48,6 +48,12 @@ class SessionResources;
 using SessionResourcesResult =
     std::expected<std::unique_ptr<SessionResources>, SessionResourceFailure>;
 
+// A host-supplied owner whose callbacks can borrow this resource graph. The
+// execution owner destroys Agent first, then these attachments, then tools.
+struct SessionResourceAttachment {
+    virtual ~SessionResourceAttachment() = default;
+};
+
 // One session's execution dependencies. Publish/move only the unique_ptr: an
 // Agent borrows backend/registry, and McpTool borrows a Client. Stop and destroy
 // every such borrower before releasing this owner. No executor lives here.
@@ -63,6 +69,9 @@ public:
     tools::ToolRegistry& registry() const { return *registry_; }
     std::span<const McpServerRuntime> mcp_servers() const { return mcp_servers_; }
     const std::vector<SessionResourceFailure>& degraded() const { return degraded_; }
+    void Attach(std::unique_ptr<SessionResourceAttachment> attachment) {
+        attachments_.push_back(std::move(attachment));
+    }
 
 private:
     SessionResources() = default;
@@ -74,6 +83,7 @@ private:
     std::vector<McpServerRuntime> mcp_servers_;
     std::unique_ptr<tools::ToolRegistry> registry_;
     std::vector<SessionResourceFailure> degraded_;
+    std::vector<std::unique_ptr<SessionResourceAttachment>> attachments_;
 };
 
 // Validate the complete launch plan before calling a factory or starting a
