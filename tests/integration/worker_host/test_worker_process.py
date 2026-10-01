@@ -447,6 +447,20 @@ def scenarios(exe, resource, scratch, model):
         w.call("session.close", session_id=session)
         require(w.projection(session, operation, identity) == first, "closed handle lost its saved snapshot")
         require("PREVIEW_PRIVATE_TAIL" not in "".join(w.frames), "another channel bypassed the preview budget")
+        # read_file checks its byte bound after appending a complete line. This
+        # single line has no following line to truncate: actual persisted text
+        # exceeds the frame limit while remaining inside the SDK read budget.
+        large_body = "LARGE_PREVIEW_VISIBLE:" + KEY + ":" + "wide" * 300000 + ":LARGE_PRIVATE_TAIL"
+        large, large_operation, large_identity = read_operation(w, "read-result-large-preview", large_body, client="large")
+        large_value = w.projection(large, large_operation, large_identity)
+        require(large_value["status"] == "ready" and large_value["captureComplete"] and large_value["truncated"], "large complete source did not produce a preview")
+        require(1024 * 1024 < large_value["originalBytes"] < 8 * 1024 * 1024, "fixture did not exercise a saved source above the IPC frame cap")
+        require(any(channel["kind"] == "combined" and channel["capturedBytes"] > 1024 * 1024 and
+            channel["captureComplete"] and channel["state"] == "verified" for channel in large_value["channels"]), "large raw material was truncated before persistence")
+        require("LARGE_PREVIEW_VISIBLE" in large_value["text"] and len(large_value["text"].encode()) <= 4096, "large preview did not use the original single slice")
+        require(KEY not in large_value["text"] and "LARGE_PRIVATE_TAIL" not in "".join(w.frames), "large source bypassed redaction or preview")
+        w.call("session.close", session_id=large)
+        require(w.projection(large, large_operation, large_identity) == large_value, "large saved projection changed on restore")
 
     def full_policy(w):
         denied = w.raw("session.open", w.open_params("read-result-denied", ("read_file",), tool_result_sync="full"))
@@ -517,6 +531,22 @@ def scenarios(exe, resource, scratch, model):
         require(record.read_text() == "{broken", "corrupt record was replaced with a fresh preview")
         record.write_bytes(bytes_before)
         require(w.projection(session, operation, identity) == original, "original saved projection did not restore")
+        manifest, = supervisor.rglob("session.json")
+        manifest_before = manifest.read_bytes()
+        full_register = json.loads(manifest_before)
+        # Fill only the supervisor's quota bookkeeping; the overflowing query
+        # below still reads a second actual completed SDK tool execution.
+        for index in range(4095):
+            full_register["records"].append(dict(identity, result_id="res-quota-" + str(index)))
+        manifest.write_text(json.dumps(full_register), encoding="utf-8")
+        second = w.submit(session, "quota-turn", "second actual tool")
+        require(w.result(session, second["operation_id"])["state"] == "succeeded", "quota fixture second tool did not run")
+        second_identity = w.tool_results(session, second["operation_id"])[0]["identity"]
+        count_before = len(list(supervisor.rglob("*.projection.json")))
+        saturated = w.query(session, second["operation_id"], second_identity)
+        require(saturated["state"] == "failed" and saturated["error"]["code"] == "worker.result_record_limit", "full register admitted another projection")
+        require(len(list(supervisor.rglob("*.projection.json"))) == count_before, "rejected projection left an unregistered file")
+        manifest.write_bytes(manifest_before)
         record.unlink()
         missing = w.query(session, operation, identity)
         require(missing["state"] == "failed" and missing["error"]["code"] == "worker.result_record_unavailable", "registered missing record was regenerated")

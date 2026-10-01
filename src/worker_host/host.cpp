@@ -362,7 +362,8 @@ struct Host::Impl {
                 saved::SessionResultPolicy policy{options.resume_session_id, result_options.mode, result_options.version};
                 projector = Take(saved::ResultProjector::Create(node_policy, policy, session.result_secrets));
                 const auto manifest = support::ReadManifest(support::Path(Text(roots, "data_root")), policy.session_id);
-                if (manifest["binding"] != projector->BindingFingerprint()) Reject("worker.result_policy_conflict");
+                if (manifest["binding"].get_ref<const std::string&>() != projector->BindingFingerprint())
+                    Reject("worker.result_policy_conflict");
             }
             session.handle = Take(runtime->OpenSession(std::move(options)));
             const auto id = session.handle->id();

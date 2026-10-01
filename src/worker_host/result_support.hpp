@@ -157,7 +157,8 @@ inline Json ReadManifest(const std::filesystem::path& root, const std::string& s
     auto value = Json::parse(ReadFile(file, kStorageBytes), nullptr, false);
     if (!value.is_object() || value.size() != 6 || !value.contains("schema")
         || value["schema"] != "luban-worker.result-policy.v1" || !value.contains("session_id")
-        || value["session_id"] != session_id || !value.contains("records") || !value["records"].is_array()
+        || !value["session_id"].is_string() || value["session_id"].get_ref<const std::string&>() != session_id
+        || !value.contains("records") || !value["records"].is_array()
         || value["records"].size() > 4096 || !value.contains("session_policy_version")
         || !value["session_policy_version"].is_number_unsigned()
         || value["session_policy_version"].get<std::uint64_t>() == 0
@@ -166,7 +167,8 @@ inline Json ReadManifest(const std::filesystem::path& root, const std::string& s
         || value["binding"].get_ref<const std::string&>().size() != 64) throw Failure("worker.result_policy_invalid");
     std::set<std::string> identities;
     for (const auto& id : value["records"]) {
-        if (!id.is_object() || id.size() != 6 || !id.contains("session_id") || id["session_id"] != session_id)
+        if (!id.is_object() || id.size() != 6 || !id.contains("session_id") || !id["session_id"].is_string()
+            || id["session_id"].get_ref<const std::string&>() != session_id)
             throw Failure("worker.result_policy_invalid");
         for (const char* field : {"session_id", "operation_id", "turn_id", "tool_call_id", "persisted_event_id", "result_id"})
             if (!id.contains(field) || !id[field].is_string() || id[field].get_ref<const std::string&>().empty()
@@ -184,8 +186,10 @@ public:
         FileLock file_lock(directory_);
         if (resume) {
             manifest_ = ReadManifest(root_, policy_.session_id);
-            if (manifest_["mode"] != ModeName(policy_.mode) || manifest_["session_policy_version"] != policy_.version
-                || manifest_["binding"] != projector_->BindingFingerprint()) throw Failure("worker.result_policy_conflict");
+            if (manifest_["mode"].get_ref<const std::string&>() != ModeName(policy_.mode)
+                || manifest_["session_policy_version"].get<std::uint64_t>() != policy_.version
+                || manifest_["binding"].get_ref<const std::string&>() != projector_->BindingFingerprint())
+                throw Failure("worker.result_policy_conflict");
         } else {
             manifest_ = {{"schema", "luban-worker.result-policy.v1"}, {"session_id", policy_.session_id},
                          {"mode", ModeName(policy_.mode)}, {"session_policy_version", policy_.version},
@@ -199,12 +203,17 @@ public:
         std::lock_guard lock(mutex_);
         FileLock file_lock(directory_);
         manifest_ = ReadManifest(root_, policy_.session_id);
-        if (manifest_["mode"] != ModeName(policy_.mode) || manifest_["session_policy_version"] != policy_.version
-            || manifest_["binding"] != projector_->BindingFingerprint()) throw Failure("worker.result_policy_conflict");
+        if (manifest_["mode"].get_ref<const std::string&>() != ModeName(policy_.mode)
+            || manifest_["session_policy_version"].get<std::uint64_t>() != policy_.version
+            || manifest_["binding"].get_ref<const std::string&>() != projector_->BindingFingerprint())
+            throw Failure("worker.result_policy_conflict");
         const auto identity = Identity(snapshot.result().summary.identity);
         const auto file = directory_ / (FileKey(identity.dump()) + ".projection.json");
         const bool registered = std::find(manifest_["records"].begin(), manifest_["records"].end(), identity)
                                 != manifest_["records"].end();
+        // Admission precedes projection and filesystem writes. A full register
+        // must not leave an unbounded series of new, unregistered files behind.
+        if (!registered && manifest_["records"].size() == 4096) throw Failure("worker.result_record_limit");
         std::error_code ec;
         const bool exists = std::filesystem::exists(file, ec);
         if (ec || (registered && !exists)) throw Failure("worker.result_record_unavailable");
@@ -225,7 +234,6 @@ public:
             AtomicWrite(file, *stored);
         }
         if (!registered) {
-            if (manifest_["records"].size() == 4096) throw Failure("worker.result_record_limit");
             auto next = manifest_;
             next["records"].push_back(identity);
             AtomicWrite(directory_ / "session.json", next.dump());
