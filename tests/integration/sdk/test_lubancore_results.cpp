@@ -59,7 +59,8 @@ public:
         std::shared_ptr<fs::path> corrupt = {}) : calls_(std::move(calls)), gate_(std::move(gate)), corrupt_(std::move(corrupt)) {}
     sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest& request, sdk::Cancellation) override {
         ++*calls_;
-        if (!request.messages.empty() && request.messages.back().role == "user") {
+        if (!request.messages.empty() && request.messages.back().role == "user" &&
+            request.messages.back().tool_replies.empty()) {
             if (gate_ && ++turns_ == 2) {
                 gate_->entered.set_value();
                 if (gate_->released.wait_for(15s) != std::future_status::ready)
