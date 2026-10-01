@@ -24,7 +24,7 @@ SCENARIOS = (
     "killed_worker_resume", "wire_payload_boundary", "assistant_full_text",
     "persisted_result_preview", "full_result_policy", "result_restart_frozen",
     "result_record_integrity", "result_query_routing", "result_full_frame_boundary",
-    "result_multichannel_preview",
+    "result_combined_stream_preview",
 )
 
 
@@ -611,27 +611,53 @@ def scenarios(exe, resource, scratch, model):
         finally:
             full_node.finish()
 
-    def multichannel(w):
+    def combined_stream(w):
         command = Worker(exe, resource, w.root / "channels", model,
-            policy={"preview_max_bytes": 12, "version": "channels-v1"})
+            policy={"allow_full_tool_results": True, "preview_max_bytes": 12, "version": "channels-v1"})
         try:
-            session = command.open("command-result", ("run_command",))
-            receipt = command.submit(session)
-            approval = command.pending(session)
-            command.call("approval.resolve", session_id=session, request_id=approval["request_id"], decision="accept")
-            require(command.result(session, receipt["operation_id"])["state"] == "succeeded", "real command tool failed")
-            entries = command.tool_results(session, receipt["operation_id"])
-            value = command.projection(session, receipt["operation_id"], entries[0]["identity"])
-            kinds = {channel["kind"] for channel in value["channels"]}
-            require({"stdout", "stderr"} <= kinds, "actual stdout/stderr metadata was not preserved")
-            require(value["mode"] == "preview" and value["truncated"] and len(value["text"].encode()) <= 12, "each channel received a separate preview allowance")
-            require("CHANNEL_STDERR" not in json.dumps(value), "stderr bypassed the aggregate budget")
-            require(all("text" not in channel and "path" not in channel and "sha256" not in channel for channel in value["channels"]), "channel metadata became a raw material side channel")
+            def execute(client, **options):
+                session = command.open("command-result", ("run_command",), client=client, **options)
+                receipt = command.submit(session)
+                approval = command.pending(session)
+                command.call("approval.resolve", session_id=session, request_id=approval["request_id"], decision="accept")
+                require(command.result(session, receipt["operation_id"])["state"] == "succeeded", "real command tool failed")
+                entries = command.tool_results(session, receipt["operation_id"])
+                require(len(entries) == 1, "one command did not yield one formal selected result")
+                return command.projection(session, receipt["operation_id"], entries[0]["identity"])
+
+            # run_command captures both streams in one pipe and persists a real
+            # combined channel. It does not promise separate stdout/stderr refs.
+            preview = execute("preview-default")
+            full = execute("full-explicit", tool_result_sync="full")
+            markers = all(marker in full.get("text", "") for marker in ("CHANNEL_STDOUT", "CHANNEL_STDERR"))
+            print("EVIDENCE result_combined_stream_preview " + json.dumps({
+                "fullStreamMarkers": markers, "fullMode": full["mode"], "previewMode": preview["mode"],
+                "fullOriginalBytes": full["originalBytes"], "previewOriginalBytes": preview["originalBytes"],
+                "previewTextBytes": len(preview.get("text", "").encode()), "channels": preview["channels"],
+            }), flush=True)
+            require(full["mode"] == "full" and full["status"] == "ready" and full["captureComplete"] and
+                not full["truncated"] and markers, "actual stdout/stderr did not both reach the full combined result")
+            full_bytes = full["text"].encode()
+            require(full["originalBytes"] == len(full_bytes) and len(full_bytes) > 12, "Full combined result was incomplete")
+            require(preview["mode"] == "preview" and preview["status"] == "ready" and preview["captureComplete"] and
+                preview["truncated"] and preview["originalBytes"] == len(full_bytes), "default preview did not retain the complete combined source")
+            require(preview["text"] == full_bytes[:12].decode("utf-8", errors="ignore") and
+                len(preview["text"].encode()) <= 12, "combined preview was not the one bounded UTF-8 prefix")
+            for value in (preview, full):
+                channels = value["channels"]
+                require(len(channels) == 1 and channels[0]["kind"] == "combined", "command invented separate stream artifacts")
+                channel = channels[0]
+                require(channel["state"] == "verified" and channel["contentKind"] == "text" and
+                    channel["captureComplete"] and not channel["outputBytesLowerBound"] and
+                    channel["capturedBytes"] == channel["outputBytes"] == len(full_bytes), "combined channel was not verified and complete")
+                require(all("text" not in item and "path" not in item and "sha256" not in item for item in channels), "channel metadata became a raw material side channel")
+            require("CHANNEL_STDERR" not in json.dumps(preview), "stderr bypassed the aggregate budget")
+            require(KEY not in "".join(command.frames + command.stderr), "combined result leaked a model key")
         finally:
             command.finish()
 
     functions = (health, same_cwd, idempotency, approvals, cancel, detach, stale, eof, killed, boundary, full_text,
-        saved_preview, full_policy, restart_projection, record_integrity, query_routing, frame_boundary, multichannel)
+        saved_preview, full_policy, restart_projection, record_integrity, query_routing, frame_boundary, combined_stream)
     require(len(SCENARIOS) == len(functions), "scenario implementation count differs")
     for name, function in zip(SCENARIOS, functions):
         yield name, lambda name=name, function=function: run(name, function)

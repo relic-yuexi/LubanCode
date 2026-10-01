@@ -132,7 +132,8 @@ Worker 不解析 V3 账或本机工具原件，SDK 查询持久材料，公开 `
 报 `worker.result_storage_busy`，不并发改同份登记表。
 
 投影正文只放顶层 `text`，stdout/stderr/report 共享一份总预算；combined 存在时作为
-聚合正文，其余通道只回固定元信息。binary、raw_payload 不回正文；缺件、坏件、
+聚合正文，其余通道只回固定元信息。当前 `run_command` 把 stdout 与 stderr 收进同一
+根管道，正式结果只存 `combined`，不承诺两份分流原件。binary、raw_payload 不回正文；缺件、坏件、
 capture 不完整和超大材料均明确标状态或拒绝，不能伪装完整 full。full 正文上限
 1 MiB，主管读取本地文本另设 8 MiB 总帽，不拿 IPC 帧帽代替原件读取预算。
 最终闭合 JSON 连外层响应也须落在 1 MiB 帧内；转义使帧超限时整份拒绝，
@@ -149,5 +150,8 @@ capture 不完整和超大材料均明确标状态或拒绝，不能伪装完整
 HTTP 端点，覆盖健康/能力、同目录两场、持久幂等、审批与取消路由、detach/reattach、
 旧连接拒绝、父 EOF 收拢、强杀同 ID 恢复、工具载荷不透传、完整中文/emoji 长文分页；
 另验真实 read_file 的受限 preview、节点与场双门 full、重启复投、主管坏件/缺件拒绝、
-跨场与六段身份拒绝、运行中新轮保留旧结果、full 超帧拒绝及真实 stdout/stderr 总预算。
+跨场与六段身份拒绝、运行中新轮保留旧结果及 full 超帧拒绝。第十八场
+`result_combined_stream_preview` 跑真实命令，分别向 stdout 与 stderr 写标记；节点许可
+full，一场仍用默认 preview，另一场显式选 full。full 须包含两枚标记，preview 须从同份
+完整、已核验 combined 材料取 12 字节预算内完整 UTF-8 前缀，不得从通道元信息旁路吐出 stderr。
 CI 将安装目录搬离源码和构建目录，再跑这份测试；报告逐场登记，缺场或跳过不得算过。

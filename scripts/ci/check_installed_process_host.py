@@ -42,7 +42,7 @@ HOSTS = {
                        "killed_worker_resume", "wire_payload_boundary", "assistant_full_text",
                        "persisted_result_preview", "full_result_policy", "result_restart_frozen",
                        "result_record_integrity", "result_query_routing", "result_full_frame_boundary",
-                       "result_multichannel_preview",
+                       "result_combined_stream_preview",
                    }), "share/lubancore"),
     "runner": Host("runner", "tests/runner", "test_runner_process.py", ("ExperimentRunner",),
                    frozenset({
