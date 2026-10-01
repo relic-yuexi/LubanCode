@@ -544,7 +544,7 @@ struct Session::Impl final : rt::InteractionBroker {
         if (!module) return std::unexpected(module.error());
         auto* module_ptr = module->get();
         extension_plan_json = module_ptr->DescribePlan();
-        assembled->Attach(std::move(*module));
+        (*assembled)->Attach(std::move(*module));
         if (options.resume_session_id.empty()) {
             const auto written = lubancode::platform::AtomicWriteFile(plan_path, extension_plan_json,
                 lubancode::platform::WriteDurability::ProcessCrashDurability);
@@ -798,7 +798,8 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         bridge->EndTurn(outcome.has_value(), outcome && outcome->cancelled, outcome ? "" : outcome.error());
         turn_bindings.Reset();
-        operation.state = !outcome ? OperationState::Failed : outcome->cancelled ? OperationState::Cancelled : OperationState::Succeeded;
+        operation.state = !outcome ? (dispatcher && interrupt.load() ? OperationState::Cancelled : OperationState::Failed) :
+                          outcome->cancelled ? OperationState::Cancelled : OperationState::Succeeded;
         if (!outcome) operation.error = outcome.error();
         else if (outcome->hit_step_limit || outcome->hit_time_budget || outcome->hit_token_budget || outcome->hit_turn_limit) {
             operation.state = OperationState::Failed;

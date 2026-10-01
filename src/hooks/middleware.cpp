@@ -9,6 +9,7 @@
 #include "hooks/middleware.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <initializer_list>
 #include <sstream>
 #include <thread>
@@ -1344,16 +1345,23 @@ DispatchOutcome MiddlewareDispatcher::Dispatch(HookPoint point, const DispatchTr
     // 也追改不了链结果)。
     if (!state.observer_index.empty()) {
         std::vector<InvocationRecord> results(state.observer_index.size());
-        std::vector<std::thread> workers;
+        std::vector<std::exception_ptr> failures(state.observer_index.size());
+        // If starting a later observer fails, RAII still joins every earlier
+        // worker before its borrowed state/results/sink can leave this scope.
+        std::vector<std::jthread> workers;
         workers.reserve(state.observer_index.size());
         for (std::size_t i = 0; i < state.observer_index.size(); ++i) {
-            workers.emplace_back([&state, &results, i] {
-                results[i] = RunObserver(state, state.observer_index[i]);
+            workers.emplace_back([&state, &results, &failures, i] {
+                // Setup and sink bookkeeping can throw outside RunObserver's
+                // handler guard. Never let an exception escape a thread entry.
+                try { results[i] = RunObserver(state, state.observer_index[i]); }
+                catch (...) { failures[i] = std::current_exception(); }
             });
         }
         for (auto& worker : workers) {
             worker.join();
         }
+        for (const auto& failure : failures) if (failure) std::rethrow_exception(failure);
         for (std::size_t i = 0; i < state.observer_index.size(); ++i) {
             state.outcome.records[state.observer_index[i]] = std::move(results[i]);
         }
