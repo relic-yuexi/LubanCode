@@ -1,7 +1,8 @@
 # This host consumes only the SDK's public target and a private JSON codec.
 # It must not link runtime/core/app or include their internal source directories.
 add_executable(luban-worker src/worker_host/main.cpp src/worker_host/host.cpp)
-target_link_libraries(luban-worker PRIVATE LubanCore::Core nlohmann_json::nlohmann_json)
+find_package(Threads REQUIRED)
+target_link_libraries(luban-worker PRIVATE LubanCore::Core nlohmann_json::nlohmann_json Threads::Threads)
 target_compile_features(luban-worker PRIVATE cxx_std_23)
 if(APPLE)
   set_target_properties(luban-worker PROPERTIES INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
