@@ -1318,14 +1318,16 @@ DispatchOutcome MiddlewareDispatcher::Dispatch(HookPoint point, const DispatchTr
     meta.action_id = trigger.action_id;
     meta.request_id = trigger.request_id;
 
-    if (state.chain_index.empty()) {
-        // 无匹配链项:整次记 skipped(汇总;未命中项各自躺在 records 里)。
+    if (state.chain_index.empty() && state.observer_index.empty()) {
+        // Only wholly unmatched dispatches are skipped. Observers execute and
+        // need the same requested book for their started/completed/failed facts.
         if (sink != nullptr) {
             sink->OnSkipped(meta, state.entries.empty() ? "no_handlers" : "no_matched_handlers");
         }
     } else if (sink != nullptr) {
         std::vector<HandlerSnapshot> snapshots;
-        for (const std::size_t i : state.chain_index) {
+        for (std::size_t i = 0; i < state.entries.size(); ++i) {
+            if (!state.entries[i].matched) continue;
             const MiddlewareDefinition& def = *state.entries[i].def;
             HandlerSnapshot snapshot;
             snapshot.hook_id = def.Key();

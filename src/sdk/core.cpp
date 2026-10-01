@@ -796,10 +796,11 @@ struct Session::Impl final : rt::InteractionBroker {
                 }
             }
         }
-        bridge->EndTurn(outcome.has_value(), outcome && outcome->cancelled, outcome ? "" : outcome.error());
+        const bool turn_cancelled = (outcome && outcome->cancelled) || (dispatcher && !outcome && interrupt.load());
+        bridge->EndTurn(outcome.has_value(), turn_cancelled, outcome ? "" : outcome.error());
         turn_bindings.Reset();
-        operation.state = !outcome ? (dispatcher && interrupt.load() ? OperationState::Cancelled : OperationState::Failed) :
-                          outcome->cancelled ? OperationState::Cancelled : OperationState::Succeeded;
+        operation.state = turn_cancelled ? OperationState::Cancelled :
+                          !outcome ? OperationState::Failed : OperationState::Succeeded;
         if (!outcome) operation.error = outcome.error();
         else if (outcome->hit_step_limit || outcome->hit_time_budget || outcome->hit_token_budget || outcome->hit_turn_limit) {
             operation.state = OperationState::Failed;
