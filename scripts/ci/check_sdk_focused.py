@@ -16,6 +16,7 @@ REQUIRED = {
     "sdk.focused.lubancore_lifecycle",
     "sdk.focused.lubancore_host_boundary",
     "sdk.focused.lubancore_history",
+    "sdk.focused.lubancore_extensions",
     "sdk.focused.session_resources",
     "sdk.focused.session_execution",
     "sdk.focused.scoped_turn_bindings",
