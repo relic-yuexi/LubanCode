@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 
 
 REQUIRED_TESTS = {
+    "sdk.consumer.authorization",
     "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.extensions",
     "sdk.consumer.results",
     "sdk.consumer.result_seed", "sdk.consumer.result_resume",
@@ -24,6 +25,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
 REQUIRED_PUBLIC_HEADERS = {
+    "include/lubancore/authorization.hpp",
     "include/lubancore/api.hpp", "include/lubancore/core.hpp", "include/lubancore/extensions.hpp",
     "include/lubancore/results.hpp",
 }

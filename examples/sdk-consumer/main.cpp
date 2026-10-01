@@ -31,6 +31,7 @@
 // Deliberately only installed public headers and the C++ standard library.
 // The fixture supplies model replies; Agent, permissions, tools and persistence
 // all run inside the actual SDK library.
+void CheckSdkAuthorizationConsumer();
 namespace {
 namespace sdk = lubancore;
 namespace ext = lubancore::extensions::v1;
@@ -1543,12 +1544,13 @@ void ResultResume(const fs::path& base) {
 int main(int argc, char** argv) {
     Progress("entered main");
     try {
-        Check(argc == 3, "usage: lubancore_consumer smoke|isolation|extensions|results|result-seed|result-resume|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
+        Check(argc == 3, "usage: lubancore_consumer authorization|smoke|isolation|extensions|results|result-seed|result-resume|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
         const fs::path base = Path(argv[2]);
         Check(base.is_absolute(), "state directory must be absolute");
         fs::create_directories(base);
         const std::string mode = argv[1];
-        if (mode == "smoke") {
+        if (mode == "authorization") CheckSdkAuthorizationConsumer();
+        else if (mode == "smoke") {
             Check(!sdk::Version().empty(), "installed library has no version");
             FileAndCommand(base);
             SharedDirectoryIsolation(base);
