@@ -40,6 +40,9 @@ HOSTS = {
                        "health", "same_cwd_sessions", "operation_idempotency", "approval_routing",
                        "cancel_routing", "detach_reattach", "stale_attachment", "eof_cleanup",
                        "killed_worker_resume", "wire_payload_boundary", "assistant_full_text",
+                       "persisted_result_preview", "full_result_policy", "result_restart_frozen",
+                       "result_record_integrity", "result_query_routing", "result_full_frame_boundary",
+                       "result_multichannel_preview",
                    }), "share/lubancore"),
     "runner": Host("runner", "tests/runner", "test_runner_process.py", ("ExperimentRunner",),
                    frozenset({
@@ -209,6 +212,9 @@ def main() -> None:
     missing = host.required_cases - names
     if missing:
         raise RuntimeError("Required process scenarios were not executed: " + ", ".join(sorted(missing)))
+    unexpected = names - host.required_cases
+    if unexpected:
+        raise RuntimeError("Unexpected process scenarios were reported: " + ", ".join(sorted(unexpected)))
     context["status"] = "passed"
     context["passedScenarios"] = sorted(names)
     write_json(context_path, context)
