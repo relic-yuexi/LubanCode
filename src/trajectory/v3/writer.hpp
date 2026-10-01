@@ -319,6 +319,10 @@ public:
     std::string NewHookDispatchId();   // hookdispatch-<n>,挂点触发身份(§4.22)
     std::string NewTaskId();           // task-<n>,委派任务身份(§4.31)
 
+    // 无返回值关柄入口沿用 Close:正常关闭只标 closed,后续提交拒绝。
+    // 需要核关闭失败的领域路径调用上面的 checked Close。
+    void CloseFile();
+
     // ---- 观测 ----
 
     const std::filesystem::path& path() const;

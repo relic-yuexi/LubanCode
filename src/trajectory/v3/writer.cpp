@@ -1210,6 +1210,8 @@ std::string V3Writer::last_line_hash() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->last_hash;
 }
+void V3Writer::CloseFile() { (void)Close(); }
+
 bool V3Writer::broken() const { return impl_->broken; }
 const ContextView& V3Writer::context() const { return impl_->context; }
 bool V3Writer::HasMessageId(std::string_view message_id) const {
