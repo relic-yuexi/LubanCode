@@ -14,7 +14,7 @@ SDK 与 AppServer 共用会话执行对象，多会话隔离与寿命验收也�
 公开安装头为 `api.hpp`、`core.hpp`、`extensions.hpp`、`results.hpp`。
 持久工具结果查询与双层投影已由 [#257](https://github.com/relic-yuexi/LubanCode/pull/257)
 合入功能分支，本批远端 CI 已过。Worker [#245](https://github.com/relic-yuexi/LubanCode/pull/245)
-已接公开接口，三平台各验真实搬迁进程 18 场，仍留 Draft，尚未合入。
+已接公开接口，三平台各验真实搬迁进程 18 场，已合入功能分支 `a151d8b4`。
 `LubanCore::Core` 是公开安装目标；仓库内部旧名
 `lubancode_core` 仍带 CLI 实现，两者不能混用。
 
@@ -268,7 +268,7 @@ observer 只读，在辅助线程运行，派发等其退出才返回；同一�
 尚未结束、来源损坏或索引不可用均明报，不能把异常洗成空列表。
 索引按终态冻结，每次建立仍读取、验算整份 V3 账。整账读入尚未设字节帽，未实现增量索引。
 可信本地列表保留 `capture-*`、`res-*` 等具体版本，`tool_call_id` 沿用 V3 action ID，
-不是 provider 原调用号。远端宿主须另筛正式版本；Worker 草稿只开放 selected 的 `res-*`。
+不是 provider 原调用号。远端宿主须另筛正式版本；Worker IPC 只开放 selected 的 `res-*`。
 
 `results::v1` 提供只读快照。文本通道各自保留身份、捕获状态和完整性证据；
 缺件、坏 hash、读取失败和超限都有明确状态。原件先校验身份、字节数和摘要，

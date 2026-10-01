@@ -128,7 +128,7 @@ jobs:
             # Session ownership, extensions and per-turn borrowing span multiple hosts.
             # Their SDK, middleware and host regressions need three platforms and ASan.
             case "$f" in
-              include/lubancore/*|src/sdk/*|tests/*/sdk/*|examples/sdk-consumer/*|src/agent/agent.*|src/agent/loop.*|src/hooks/middleware.*|src/hooks/middleware_builtins.*|src/hooks/dispatcher.*|src/runtime/middleware_runtime.*|src/runtime/middleware_v3_sink.*|src/runtime/middleware_session_binding.*|tests/unit/hooks/test_middleware_core.cpp|tests/unit/hooks/test_middleware_builtins.cpp|tests/unit/hooks/test_middleware_runtime_wire.cpp|tests/unit/hooks/test_middleware_v3_events.cpp|tests/unit/hooks/test_middleware_scope_wire.cpp|src/runtime/scoped_turn_bindings.*|src/runtime/session_execution.*|src/runtime/session_service.*|src/runtime/session_runtime.*|src/runtime/tool_trace_hub.*|src/runtime/async_tool_runtime.*|src/tools/tool_job_coordinator.*|src/runtime/headless_executor.*|src/app/turn_runner.*|tests/unit/runtime/test_session_execution.cpp|tests/unit/runtime/test_scoped_turn_bindings.cpp|tests/unit/app/test_turn_runner_scoped_bindings.cpp|tests/support/scoped_turn_fixture.hpp|tests/fixtures/scoped_turn_stop_hook.py)
+              include/lubancore/*|src/sdk/*|tests/*/sdk/*|examples/sdk-consumer/*|src/trajectory/*|tests/unit/trajectory/*|tests/unit/trajectory_v3/*|tests/integration/trajectory/*|src/agent/agent.*|src/agent/loop.*|src/hooks/middleware.*|src/hooks/middleware_builtins.*|src/hooks/dispatcher.*|src/runtime/middleware_runtime.*|src/runtime/middleware_v3_sink.*|src/runtime/middleware_session_binding.*|tests/unit/hooks/test_middleware_core.cpp|tests/unit/hooks/test_middleware_builtins.cpp|tests/unit/hooks/test_middleware_runtime_wire.cpp|tests/unit/hooks/test_middleware_v3_events.cpp|tests/unit/hooks/test_middleware_scope_wire.cpp|src/runtime/scoped_turn_bindings.*|src/runtime/session_execution.*|src/runtime/session_service.*|src/runtime/session_runtime.*|src/runtime/tool_trace_hub.*|src/runtime/async_tool_runtime.*|src/tools/tool_job_coordinator.*|src/runtime/headless_executor.*|src/app/turn_runner.*|tests/unit/runtime/test_session_execution.cpp|tests/unit/runtime/test_scoped_turn_bindings.cpp|tests/unit/app/test_turn_runner_scoped_bindings.cpp|tests/support/scoped_turn_fixture.hpp|tests/fixtures/scoped_turn_stop_hook.py)
                 cross_platform=true
                 remote_tests=$remote_present
                 assembly_tests=$assembly_present
@@ -146,6 +146,10 @@ jobs:
                 assembly_tests=$assembly_present
                 sdk_tests=$sdk_present
                 worker_tests=$worker_present
+                runner_tests=$runner_present
+                code=true ;;
+              scripts/ci/tests/test_runner_only_boundary.py)
+                cross_platform=true
                 runner_tests=$runner_present
                 code=true ;;
               CMakeLists.txt|tests/CMakeLists.txt|cmake/*|vcpkg.json)
@@ -562,22 +566,6 @@ jobs:
             cmake -B build -S . $COMMON_FLAGS
           fi
 
-      - name: Build and test relocated Runner process
-        if: needs.changes.outputs.runner_tests == 'true'
-        shell: bash
-        run: |
-          cmake --build build --config Release --target luban-runner -j 4
-          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
-          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
-
-      - name: Upload Runner process evidence
-        if: always() && needs.changes.outputs.runner_tests == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: runner-process-${{ matrix.name }}
-          path: build/test-evidence/runner-process/
-          if-no-files-found: warn
-
       # SDK 必须从安装前缀被仓库外工程消费，不能用源码树内链接冒充。
       - name: Build SDK library
         if: needs.changes.outputs.sdk_tests == 'true'
@@ -631,6 +619,53 @@ jobs:
           name: sdk-host-parity-${{ matrix.name }}
           path: build/test-evidence/sdk-host-parity/
           if-no-files-found: error
+      - name: Build and test relocated Runner process
+        if: needs.changes.outputs.runner_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target luban-runner -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
+
+      - name: Upload Runner process evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-process-${{ matrix.name }}
+          path: build/test-evidence/runner-process/
+          if-no-files-found: warn
+
+      - name: Build and test standalone Runner ordinary installs
+        if: needs.changes.outputs.runner_tests == 'true'
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_runner_only_boundary.py
+          JSON_SOURCE_FLAG=()
+          if [ -f build/_deps/nlohmann_json-src/CMakeLists.txt ]; then
+            JSON_SOURCE_FLAG=("-DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=$PWD/build/_deps/nlohmann_json-src")
+          fi
+          for TESTING in OFF ON; do
+            DIR="build-runner-only-$TESTING"
+            mkdir -p "$DIR/.cmake/api/v1/query"
+            touch "$DIR/.cmake/api/v1/query/codemodel-v2"
+            cmake -B "$DIR" -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE= \
+              -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=OFF -DLUBANCODE_BUILD_WORKER_HOST=OFF \
+              -DLUBANCODE_BUILD_EXPERIMENT_RUNNER=ON -DBUILD_TESTING="$TESTING" \
+              -DLUBANCODE_USE_CODELOAD=OFF "${JSON_SOURCE_FLAG[@]}"
+            cmake --build "$DIR" --config Release -j 4
+          done
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --host runner --runner-only \
+            --build-dir build-runner-only-ON --without-tests-build-dir build-runner-only-OFF
+
+      - name: Upload standalone Runner evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-only-process-${{ matrix.name }}
+          path: build-runner-only-ON/test-evidence/runner-only-process/
+          if-no-files-found: warn
 
       - name: Build and test relocated Worker process
         if: needs.changes.outputs.worker_tests == 'true'
@@ -851,21 +886,6 @@ jobs:
           CC: ${{ env.CC }}
           CXX: ${{ env.CXX }}
 
-      - name: Build and test relocated Runner process
-        if: needs.changes.outputs.runner_tests == 'true'
-        run: |
-          cmake --build build --config Release --target luban-runner -j 4
-          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
-          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
-
-      - name: Upload Runner process evidence
-        if: always() && needs.changes.outputs.runner_tests == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: runner-process-linux-manylinux
-          path: build/test-evidence/runner-process/
-          if-no-files-found: warn
-
       # SDK 必须从安装前缀被仓库外工程消费，不能用源码树内链接冒充。
       - name: Build SDK library
         if: needs.changes.outputs.sdk_tests == 'true'
@@ -919,6 +939,51 @@ jobs:
           name: sdk-host-parity-linux-manylinux
           path: build/test-evidence/sdk-host-parity/
           if-no-files-found: error
+      - name: Build and test relocated Runner process
+        if: needs.changes.outputs.runner_tests == 'true'
+        run: |
+          cmake --build build --config Release --target luban-runner -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
+
+      - name: Upload Runner process evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-process-linux-manylinux
+          path: build/test-evidence/runner-process/
+          if-no-files-found: warn
+
+      - name: Build and test standalone Runner ordinary installs
+        if: needs.changes.outputs.runner_tests == 'true'
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_runner_only_boundary.py
+          JSON_SOURCE_FLAG=()
+          if [ -f build/_deps/nlohmann_json-src/CMakeLists.txt ]; then
+            JSON_SOURCE_FLAG=("-DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=$PWD/build/_deps/nlohmann_json-src")
+          fi
+          for TESTING in OFF ON; do
+            DIR="build-runner-only-$TESTING"
+            mkdir -p "$DIR/.cmake/api/v1/query"
+            touch "$DIR/.cmake/api/v1/query/codemodel-v2"
+            cmake -B "$DIR" -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE= \
+              -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=OFF -DLUBANCODE_BUILD_WORKER_HOST=OFF \
+              -DLUBANCODE_BUILD_EXPERIMENT_RUNNER=ON -DBUILD_TESTING="$TESTING" \
+              -DLUBANCODE_USE_CODELOAD=OFF "${JSON_SOURCE_FLAG[@]}"
+            cmake --build "$DIR" --config Release -j 4
+          done
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --host runner --runner-only \
+            --build-dir build-runner-only-ON --without-tests-build-dir build-runner-only-OFF
+
+      - name: Upload standalone Runner evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-only-process-linux-manylinux
+          path: build-runner-only-ON/test-evidence/runner-only-process/
+          if-no-files-found: warn
 
       - name: Build and test relocated Worker process
         if: needs.changes.outputs.worker_tests == 'true'
