@@ -932,6 +932,7 @@ void RunParallelReadSegment(ParallelReadSegmentRun& ctx, std::size_t begin, std:
         if (ctx.trace_armed) {
             slot->trace_ctx.execution_id = ctx.scheduled_ids[ctx.scheduled_slot[k]];
             slot->trace_ctx.batch_id = ctx.batch_id;
+            slot->trace_ctx.turn_id = ctx.wiring.turn_id;
             slot->trace_ctx.sequence_in_batch = static_cast<int>(k);
             slot->trace_ctx.provider_request_id = ctx.stream_request_id;
             if (slot->via_proxy) {
@@ -950,6 +951,7 @@ void RunParallelReadSegment(ParallelReadSegmentRun& ctx, std::size_t begin, std:
                 cancelled.kind = ToolTraceEventKind::ExecutionFinished;
                 cancelled.outcome = ToolOutcome::CancelledBeforeStart;
                 cancelled.batch_id = ctx.batch_id;
+                cancelled.turn_id = ctx.wiring.turn_id;
                 cancelled.sequence_in_batch = static_cast<int>(k);
                 cancelled.execution_id = ctx.scheduled_ids[ctx.scheduled_slot[k]];
                 cancelled.tool_use_id = ctx.batch_calls[k].id;
@@ -1163,7 +1165,8 @@ bool CrossesBudgetSoftLine(int steps_used, int max_steps_per_turn, std::int64_t 
 
 std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message user_message,
                                                        const TurnWiring& wiring,
-                                                       const std::atomic<bool>* cancel) {
+                                                       const std::atomic<bool>* cancel,
+                                                       bool input_already_admitted) {
     api::Backend& backend_ = agent.backend_;
     tools::ToolRegistry& registry_ = agent.registry_;
     const std::string& model_ = agent.profile_.request.model;
@@ -1188,7 +1191,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
     const auto BuildToolDefinitions = [&agent]() { return agent.BuildToolDefinitions(); };
     const auto issue_execution_id = [&agent]() { return agent.issue_execution_id(); };
 
-    if (user_message.role != api::Role::User || user_message.content.empty()) {
+    if (input_already_admitted ?
+        (context_.durable_history().empty() || context_.durable_history().back().role != api::Role::User ||
+         context_.durable_history().back().content.empty()) :
+        (user_message.role != api::Role::User || user_message.content.empty())) {
         return std::unexpected("用户消息为空，无法发送。");
     }
     run_active_ = true;
@@ -1206,11 +1212,15 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
     // 名册)只随本轮 user 进请求视图——发过即钉住,不再每回合改 system
     // 制造分叉点。持久 history_ 不收这块,session/export/compact/记忆抽取
     // 都只见用户真输入。
-    api::Message durable_user_message = user_message;
-    if (!active_turn_context_.empty()) {
-        user_message.content.push_back(api::TextBlock{active_turn_context_});
+    if (input_already_admitted) {
+        if (!active_turn_context_.empty()) context_.AppendToLastRequest(api::TextBlock{active_turn_context_});
+    } else {
+        api::Message durable_user_message = user_message;
+        if (!active_turn_context_.empty()) {
+            user_message.content.push_back(api::TextBlock{active_turn_context_});
+        }
+        context_.PushUserTurn(std::move(durable_user_message), std::move(user_message));
     }
-    context_.PushUserTurn(std::move(durable_user_message), std::move(user_message));
 
     // 步数与 stop reason 的活账:每次模型请求(每个 step)各记一笔,收场时随
     // RunOutcome 交出去——上层(子代理)按它分型 budget_exhausted/no_final_text
@@ -2599,6 +2609,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 审计按枚及时落,崩溃窗口从"整轮"缩到"当前这枚";wire 语义不变,
         // 五枚结果仍同一条 user message。
         const bool trace_armed = wiring.on_tool_trace != nullptr;
+        // Canonical turn identity comes from the host. Carry it in raw events,
+        // not only the UI projection; an unspecified identity stays unspecified.
         std::string batch_id;
         int sequence_in_batch = 0;
         if (trace_armed) {
@@ -2640,6 +2652,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 ToolTraceEvent scheduled;
                 scheduled.kind = ToolTraceEventKind::Scheduled;
                 scheduled.batch_id = batch_id;
+                scheduled.turn_id = wiring.turn_id;
                 scheduled.sequence_in_batch = sequence_in_batch;
                 scheduled.execution_id = issue_execution_id();
                 scheduled.tool_use_id = call.id;
@@ -2783,6 +2796,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     cancelled.kind = ToolTraceEventKind::ExecutionFinished;
                     cancelled.outcome = ToolOutcome::CancelledBeforeStart;
                     cancelled.batch_id = batch_id;
+                    cancelled.turn_id = wiring.turn_id;
                     cancelled.sequence_in_batch = tool_index;
                     cancelled.execution_id = scheduled_ids[scheduled_slot[i]];
                     cancelled.tool_use_id = call.id;
@@ -2798,6 +2812,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             if (trace_armed) {
                 trace_ctx.execution_id = scheduled_ids[scheduled_slot[i]];
                 trace_ctx.batch_id = batch_id;
+                trace_ctx.turn_id = wiring.turn_id;
                 trace_ctx.sequence_in_batch = tool_index;
                 trace_ctx.provider_request_id = stream_request_id;
             }
@@ -2823,6 +2838,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                 ? refusal.message
                                 : refusal.message.substr(0, platform::Utf8PrefixBoundary(refusal.message, 200));
                         refused.batch_id = batch_id;
+                        refused.turn_id = wiring.turn_id;
                         refused.sequence_in_batch = tool_index;
                         refused.execution_id = scheduled_ids[scheduled_slot[i]];
                         refused.tool_use_id = call.id;
@@ -3089,6 +3105,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 ToolTraceEvent committed;
                 committed.kind = ToolTraceEventKind::ResultCommitted;
                 committed.batch_id = batch_id;
+                committed.turn_id = wiring.turn_id;
                 committed.execution_id = execution_id;
                 committed.timestamp_ms = NowMsEpoch();
                 wiring.on_tool_trace(committed);

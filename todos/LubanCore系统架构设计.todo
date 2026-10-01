@@ -1,0 +1,191 @@
+# LubanCore 系统架构设计：目标分层与现状对照
+
+- 状态：目标架构草案；第一阶段窄 SDK 已交付，其余层按下表分期。本单不是实现清单，也不替代各专项单的合同。
+- 日期：2026-10-01
+- 级别：P1（方向性总图，防止拆分过程中丢失目的）
+- 核查基线：功能分支 `feature/distributed-support-roadmap` 头 `2c9a46c4`（已合入 #257、#258）；Worker #245、Runner #246 仍为 Draft，未合入。
+- 关联：
+  - [LubanCore 与 CLI 分离](LubanCore与CLI分离_核心库独立成宿主底座设计.todo)：SDK 边界与分期（本单的落地主线）。
+  - [分布式支持路线图](分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo)、[分布式 D0 开工讨论](分布式D0开工讨论与分支拆分.todo)：跨节点方向。
+  - [轻量可塑 ExtensionRuntime](轻量可塑ExtensionRuntime与动态扩展API设计.todo)：高级扩展。
+  - [远端 Agent 部署、登记与两端存储](../docs/architecture/remote-agent-deployment.md)、[LubanCore SDK 页](../docs/development/lubancore-sdk.md)。
+- 口径：下文"已有"只指代码已在功能分支并有 CI 证据；"部分"指有内部实现但未进公开 SDK 或只覆盖本地；"无"指未开工。构建与执行验证全部走远端 CI。
+
+---
+
+## 一、为什么拆（目的）
+
+LubanCode 原是终端 CLI：Agent 运行、会话、工具、UI 缠在一起。目标是把运行核心独立出来，做成**可嵌入、可换组件的 Agent 底座**：
+
+- 别人链接库即可写自己的程序；CLI、Web、后台服务、任务编排都接同一套运行能力。
+- 默认本地可用（文件账、本地模型与工具）；需要数据库、常驻调度或多节点时，再接入相应组件。
+- 兼顾**个人场景**（本地终端、开箱即用）与**工业场景**（服务端、多租户、审计、恢复、多节点）。
+- 借 C++ 的优势：原生嵌入各平台（含手机与端侧）、服务端常驻进程、依赖少、资源占用小；不要求每个宿主各写一份核心。
+
+首版（MVP）只交：嵌入 SDK → 模型 / 工具 / 策略 → 文件 Journal → 崩溃恢复。远期业务（编程研发、企业知识助手、客服、数据分析、运维、业务流程）由宿主与后续扩展承接，不属 MVP。
+
+不变约束：现有 CLI 迁移须保留原功能，不能靠删功能完成拆分；CLI 与 one-shot 仍用原会话栈，直到逐项迁入。
+
+## 二、总体分层
+
+```
+远期业务示例（宿主承载，不属 MVP）
+        │ 宿主承载 / 多端接入
+L1 接入层      C++ SDK · CLI │ HTTP/SSE │ gRPC │ IM/Webhook │ 事件订阅
+        │ 命令/已认证身份          ▲ 事件/输出/交互请求
+L2 应用层      命令入口与会话路由 │ 通用执行资源 │ 配置与依赖装配
+        │ 执行上下文 / 配置快照
+L3 核心层      Agent Runtime（唯一 owner）
+               Session ◇ Turn ◇ Step ◇ Action
+               Context/Compaction │ Journal/Recovery │ 生命周期 Hook/事件合同
+        │
+核心接口 / SPI  ModelProvider · ToolExecutor · JournalStore · BlobStore · EventSink · PolicyProvider
+        ▲ 实现接口 / 依赖反转
+L4 基础设施层  模型与工具适配器 │ 存储与检索适配器 │ 缓存/队列/平台适配器
+        │ 读写事实 / 保存外置结果
+数据与上下文   权威事实源（session.json、main.jsonl、artifacts）→ 重放 → 派生状态与读模型 → 投影 → 模型请求视图
+
+左侧：横切治理（配置作用范围、ExecutionContext、权限与执行门禁、资源控制、可观测与恢复）
+右侧：后续扩展与编排（知识与上下文、任务规划、工作流与多 Agent、工具与交互、Extension Registry）
+```
+
+依赖方向：上层调下层；L4 通过 SPI 反向实现，**不向侵入核心**。核心层不依赖具体 UI、数据库或 Provider。同一 Session：单活动 Turn、单执行 owner；本地锁先做，跨节点实现后置。
+
+## 三、核心概念（L3）
+
+| 概念 | 含义 | 当前代码落点 |
+|---|---|---|
+| Agent Runtime | 唯一 owner，驱动当前 Turn；串行提交、工具调度、恢复协调 | `src/agent/`（`loop`、`agent`、`turn_harness`）、`src/runtime/` |
+| Session | 会话身份、历史、活动 Turn | `SessionService`、`SessionExecution`、`SessionRuntime`（`src/runtime/`、`src/app/`） |
+| Turn | 初始输入到终态，中途可 Steer | `src/app/turn_runner.*`、`ScopedTurnBindings` |
+| Step | 一次模型决策加 0..n 个 Action | `src/agent/loop.*` |
+| Action | 一次工具调用，独立恢复边界 | `src/tools/`、`src/runtime/async_tool_runtime.*` |
+| Context / Compaction | 消息配对、稳定前缀、上下文预算 | `src/agent/context*.cpp`、`compact.*`、`prefix.*` |
+| Journal / Recovery | 完整消息落账、owner 校验、未知态核对 | `src/trajectory/`（V3 账、`journal`、`replay`、`recorder`） |
+| 生命周期 Hook / 事件合同 | Pre 可拦截追加，Post 只读，delta 旁路 | `src/hooks/`、`src/runtime/event*.hpp` |
+
+## 四、逐层现状对照
+
+### L1 接入层
+
+| 方块 | 现状 | 说明 |
+|---|---|---|
+| C++ SDK | **已有（窄）** | `include/lubancore/{api,core,extensions,results}.hpp`，`LubanCore::Core`；Runtime/Session/提交/事件/审批/取消/恢复/关闭；#243–#255、#257 |
+| CLI | **已有** | `src/cli/`，仍走原会话栈 |
+| HTTP/SSE、WebSocket | **部分** | `src/app_server/` 内部承载（WS、本地网页），非公开服务合同 |
+| gRPC Service | **无** | 未开工 |
+| IM / Webhook | **部分** | `src/channel/`（飞书、QQ、企微）、`src/gateway/`；走原栈，未接公开 SDK |
+| 事件订阅（临时 delta + 持久游标） | **部分** | SDK `EventStream`；`src/telemetry/cursor.*`、`src/app_server/outbox.*`；持久 outbox/ACK 未接 SDK |
+
+### L2 应用层
+
+| 方块 | 现状 | 说明 |
+|---|---|---|
+| 命令入口与会话路由 | **部分** | `src/runtime/command_service.*`；SDK Runtime 自带路由；认证映射无 |
+| 通用执行资源（有界线程池） | **部分** | 内部 Async 与 supervisor 存在；公开 SDK 只开放前台命令；线程创建失败清理仍列欠账 |
+| 配置与依赖装配 | **部分** | `src/runtime/assembly/`（backend、builtin_tools、mcp、`session_resources`）；CLI 经 `ToolAssemblyPlan`（#251）；配置合并、凭证解析与 Extension Registry 未统一 |
+
+### L3 核心层
+
+| 方块 | 现状 |
+|---|---|
+| Agent Runtime、Session、Turn、Step、Action | **已有**；SDK 与 AppServer 共用 `SessionExecution`（#253），`ScopedTurnBindings` 四路合流（#252） |
+| Context / Compaction | **已有**（内部）；公开 SDK 暴露 PreRequest 的只读 Estimate/Capacity（#255） |
+| Journal / Recovery | **已有**（本地 V3 账）；同 ID 恢复、持久幂等、持久工具结果重启后同片恢复（#257） |
+| 生命周期 Hook / 事件合同 | **部分**；可信 C++ 中间件 PreUser/PostUser/PreRequest 已进 SDK（#255）；Lua/外部 Hook 不进 SDK |
+
+### 核心接口 / SPI
+
+| 接口 | 现状 |
+|---|---|
+| ModelProvider | **部分**：公开 `Backend` 可由宿主注入；多协议适配在 `src/api/`（Anthropic、Chat、Responses、Gemini）；未形成统一 SPI 文档 |
+| ToolExecutor | **部分**：公开 `Tool` 结构供宿主注册；内置工具未进公开 SDK |
+| JournalStore | **无**：账为本地文件实现，未抽接口；合同见 `docs/development/workspace-storage-v2/P0-0-contracts.md` |
+| BlobStore | **部分**：`src/trajectory/blob_store.*` 内部；公开 `results.hpp` 暴露只读快照与投影 |
+| EventSink | **部分**：`src/runtime/event_sink.hpp` 内部；SDK 事件流 |
+| PolicyProvider | **部分**：SDK `Approval` 与权限模式；统一策略接口无 |
+
+### L4 基础设施层
+
+| 方块 | 现状 |
+|---|---|
+| 模型与工具适配器 | **已有**：云端/本地 HTTP 模型、MCP（`src/mcp/`）、Shell/文件/浏览器、沙箱设计另见 `docs/architecture/sandbox-platform-design.md` |
+| 存储与检索适配器 | **部分**：JSONL 本地文件账；Memory 检索（`src/memory/`）；数据库、对象存储、向量索引**无** |
+| 缓存/队列/平台适配器 | **无**：进程内为主；Redis、Kafka、任务队列未开工 |
+
+### 数据与上下文
+
+| 方块 | 现状 |
+|---|---|
+| 权威事实源 | **已有**：`session.json`、`main.jsonl`、`artifacts`（`docs/architecture/trajectory-v3-schema.md`） |
+| 派生状态与读模型 | **已有**：Session 索引、Checkpoint、导出（`session_index`、`export_projection`）；SDK 持久索引仍整账验卷，无增量索引与字节帽 |
+| 模型请求视图 | **已有**：固定前缀＋历史＋摘要指令；Compact 相关缺陷另有专项单 |
+
+### 横切治理（左栏）
+
+| 方块 | 现状 |
+|---|---|
+| 配置作用范围（全局→租户、用户/项目、Session 快照） | **部分**：全局/项目配置有；租户层与 Session 有效配置快照**无** |
+| ExecutionContext（tenant/actor/project/session） | **无**：身份合同在路线图第三十章，落码属 D6 |
+| 权限与执行门禁 | **部分**：本地权限模式、审批、Plan Mode、Hook；成员关系、ACL、租户约束**无** |
+| 资源控制（Token/时间/并发/配额/子任务预算） | **部分**：`budget_gate`、`turn_budget`；队列与缓存按范围隔离**无** |
+| 可观测与恢复 | **部分**：`src/telemetry/`（OTLP JSON、脱敏、spool、游标）；SDK 未暴露；遥测丢失不改变执行结果 |
+
+### 后续扩展与编排（右栏，不属 MVP）
+
+| 方块 | 现状 |
+|---|---|
+| 知识与上下文（Memory/RAG/Skills/Compaction） | **部分**：CLI 内有 Memory、Skills；RAG 无；均未进公开 SDK |
+| 任务规划（Todo/Plan/Goal） | **部分**：CLI 内有 Todo、Goal（`src/runtime/goal_*`）；未进 SDK |
+| 工作流与多 Agent | **部分**：`src/workflow/`、子 Agent、Loop；未进 SDK；各专项单见 `todos/` |
+| 工具与交互（MCP/远程 HTTP/gRPC/Command/Channel/UI） | **部分**：MCP、Channel 有；gRPC 无 |
+| Extension Registry | **部分**：SDK 可信 C++ 窄扩展（#255）；动态库、单项热卸载、沙箱、Action 挂点**无** |
+
+## 五、分布式这条线（Worker / Runner / Control）
+
+分布式不是总图的全部，只是"跨节点实现后置"的落地分支：
+
+| 部件 | 作用 | 状态 |
+|---|---|---|
+| `luban-worker`（#245） | 只用公开 SDK，在远端进程托管会话；父管道 IPC；持久幂等提交、取消、恢复；异步拉取冻结 preview | Draft，头 `c4528f61` 的 CI 已过（TSan 按条件跳过），未合入 |
+| 独立 Runner（#246） | 独立持有实验进程，Worker 或 Node 退出后实验继续；`job.*` 本地协议 | Draft，base 落后，三平台 11/11 旧头验收，未接 Worker |
+| 网络 Node/Control、登记与心跳、鉴权 | 两端部署、控制面 | **无**，见部署草案 |
+| 持久 outbox/ACK、全文分块/附件下载/历史补传 | 可靠上行 | **无** |
+| 池化模式、Sandbox 池 | 集群模式 | 后续单，各守前置门 |
+
+约束：Node 总许可加每场显式参数才可出 full；默认只出 preview。GPU 占用与调度不纳管；同目录允许多 Session。
+
+## 六、目标场景与形态
+
+| 场景 | 形态 | 依赖层 |
+|---|---|---|
+| 个人本地 | CLI 或嵌入式 SDK，JSONL 本地账 | L1(CLI/SDK)、L3、本地 L4；**现已可用** |
+| 嵌入自有程序（后端服务、桌面应用） | 链接 `LubanCore::Core` | 公开 SDK；**窄接口现已可用**，高级能力逐项迁入 |
+| 手机与端侧 | SDK 嵌入，模型远端或本地 | SDK 依赖闭包仍含渠道、Gateway、updater、Lua 等，**不是最小依赖包**；须另设依赖瘦身批 |
+| 服务端单机 | Worker 托管多场，或 AppServer | Worker 待合入；公开服务接口（HTTP/gRPC）无 |
+| 工业多节点 | Control + Node + 池化 | 身份、ACL、存储适配、租约；**未开工** |
+
+## 七、分期建议（按依赖排序）
+
+1. **收口当前批**：合入 Worker #245；Runner #246 合并最新 base 后重验；更新总 PR #234 描述；合 main 前在最终组合头上重跑完整原生 CI。
+2. **SDK 完整化**：把已有能力逐项迁入公开 SDK（内置工具、Lua/Package、子 Agent、Action、Detached job、Memory/Skills），每项独立验证；CLI 迁移保留原功能。
+3. **SPI 抽象**：把 JournalStore、BlobStore、EventSink、PolicyProvider 抽成明确接口，本地文件账作默认实现；先出接口合同与参考实现，再谈数据库。
+4. **依赖瘦身**：把渠道、Gateway、updater 等从 SDK 依赖闭包拆出，形成最小依赖包，服务手机与端侧。
+5. **身份与治理**：落地 `ExecutionContext`、配置作用范围、ACL（路线图 D6），再接租户、配额与可观测公开接口。
+6. **公开服务接入**：在 AppServer/Worker 基础上交付 HTTP/SSE，再按需 gRPC；持久 outbox/ACK 与事件游标。
+7. **分布式与存储适配**：网络 Node/Control、登记与心跳、鉴权，随后数据库、对象存储、队列适配；池化模式与 Sandbox 池另见后续单。
+8. **扩展与编排**：Extension Registry 升级（动态库、热卸载、沙箱），工作流与多 Agent 进入公开 SDK。
+
+## 八、不做与风险
+
+- 不把窄 SDK 验收外推为 CLI 全功能替代品；未开放能力逐项列账。
+- 不承诺跨工具链 ABI；当前输出共享库，C++23 编译器、标准库、配置须匹配；Windows SDK 构建用动态 CRT。
+- 不提供动态库加载、单项热卸载、插件沙箱、外部副作用回滚。
+- 内部 Async 线程创建失败的清理欠账仍在；SDK 持久索引仍整账验卷。
+- 图中数据库、Redis、Kafka、gRPC、OTel 公开导出均为目标，不得在文档、PR 或发布说明里写成已交付。
+- 后续每批须在新提交上取得自己的 CI 证据，不沿用旧头绿灯。
+
+## 九、维护约定
+
+- 本单只维护总图、层次状态与分期排序；具体合同写在各专项单与 `docs/` 下，本单只放链接，不复制第二份有效合同。
+- 层次状态变化（某方块"无"→"部分"→"已有"）须在对应 PR 合入时同步更新本单与 `docs/development/lubancore-sdk.md`。

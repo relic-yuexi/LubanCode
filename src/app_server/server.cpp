@@ -30,6 +30,7 @@
 #include "runtime/session_command_service.hpp"
 #include "runtime/trajectory_history_view.hpp"  // 轨迹 v3 P3:thread/resume|read 的旧史投影(显示层不碰 reader.hpp)
 #include "runtime/tool_trace_hub.hpp"
+#include "runtime/scoped_turn_bindings.hpp"
 #include "runtime/trajectory_session.hpp"  // P0-2:app-server 同一口接 Trajectory
 #include "trajectory/session_index.hpp"    // P0-2:trace/query 冷回放的索引定位
 #include "runtime/turn_event_adapter.hpp"
@@ -50,6 +51,25 @@ namespace {
 
 void Diagnose(const std::string& text) {
     std::fprintf(stderr, "[app-server] %s\n", text.c_str());
+}
+
+bool WaitForTurnCompletion(ThreadRecord& record, int deadline_ms) {
+    std::unique_lock lock(record.turn_completion_mutex);
+    const auto completed = [&record] { return record.turn_finished.load(); };
+    if (deadline_ms <= 0) {
+        record.turn_completion_cv.wait(lock, completed);
+        return true;
+    }
+    return record.turn_completion_cv.wait_for(lock, std::chrono::milliseconds(deadline_ms), completed);
+}
+
+void MarkTurnFinished(ThreadRecord& record) {
+    {
+        std::lock_guard lock(record.turn_completion_mutex);
+        record.turn_finished.store(true);
+        record.turn_running.store(false);
+    }
+    record.turn_completion_cv.notify_all();
 }
 
 // ---------------------------------------------------------------------------
@@ -1081,6 +1101,10 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
             std::string error_code;
             const nlohmann::json result = HandleThreadStop(thread_id, error_code);
             if (!error_code.empty()) {
+                if (error_code == "thread.stop_pending" || error_code == "thread.close_failed") {
+                    return MakeError(request.id, kErrInternalError, "thread/stop 失败: " + error_code,
+                                     nlohmann::json{{"code", error_code}});
+                }
                 return MakeError(request.id, kErrInvalidParams, "thread/stop 失败: " + error_code);
             }
             context.emit_event(kEventThreadStopped, MakeThreadStoppedParams(thread_id), false);
@@ -1113,6 +1137,10 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
                     return MakeError(request.id, kErrInvalidParams,
                                      "turn/start: 同 clientOperationId 异载荷",
                                      nlohmann::json{{"code", "operation_conflict"}});
+                }
+                if (error_code == "thread.stopping") {
+                    return MakeError(request.id, kErrInvalidParams, "turn/start: thread 正在停场",
+                                     nlohmann::json{{"code", "thread.stopping"}});
                 }
                 return MakeError(request.id, kErrInvalidParams, "turn/start 失败: " + error_code);
             }
@@ -1358,7 +1386,7 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
     //     为——工厂只在回合才被碰),回合驱动里走同一条 AssembleSession
     //     兜底,材料仍是一场一份。
     if (options_.assembly_factory) {
-        SessionAssemblyResult assembled = options_.assembly_factory();
+        SessionAssemblyResult assembled = options_.assembly_factory(record->cwd);
         if (assembled.assembly == nullptr) {
             Diagnose("会话装配失败,thread 不开: " + assembled.error);
             // P2(应用Worker接入单 §7.2):装配自带稳定码(component_unavailable
@@ -1543,7 +1571,7 @@ nlohmann::json Server::HandleThreadResumeExecution(const std::string& source_thr
     // prompt_composition 事实不落——那是 thread/start 部署档组合路的事实,
     // 恢复场没有这个组合动作,不伪造。
     if (options_.assembly_factory) {
-        SessionAssemblyResult assembled = options_.assembly_factory();
+        SessionAssemblyResult assembled = options_.assembly_factory(record->cwd);
         if (assembled.assembly == nullptr) {
             Diagnose("恢复场装配失败: " + assembled.error);
             out_error_code = assembled.error_code.empty() ? "assembly.failed" : assembled.error_code;
@@ -1720,35 +1748,36 @@ nlohmann::json Server::HandleThreadStop(const std::string& thread_id, std::strin
             return nlohmann::json();
         }
         record = it->second;
-        threads_.erase(it);
     }
-    if (record->turn_running.load()) {
-        // 在跑回合按打断收口:置旗、悬起件全清(审批悬停立即醒,按
-        // "thread 关闭"的悬空收口处理),等回合工作线程收尾(硬时限内),
-        // 等不到就分离——store 的柄不能在它还写着时收。
+    record->stop_requested.store(true);
+    record->interrupt_requested.store(true);
+    record->interactions->CancelPending();
+    if (record->session_service != nullptr) record->session_service->RequestExecutionShutdown();
+    if (record->turn_worker.joinable()) {
+        // A deadline limits this request, not the lifetime of an in-process
+        // backend. Keep the busy record and ledger until the worker exits.
         record->interrupt_requested.store(true);
         record->interactions->CancelPending();
-        const auto deadline = std::chrono::steady_clock::now() +
-                              std::chrono::milliseconds(options_.interrupt_hard_deadline_ms);
-        while (!record->turn_finished.load() && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (!WaitForTurnCompletion(*record, options_.interrupt_hard_deadline_ms)) {
+            Diagnose("thread 停场待回合退出,保留会话账: " + thread_id);
+            out_error_code = "thread.stop_pending";
+            return nlohmann::json();
         }
-        if (record->turn_finished.load() && record->turn_worker.joinable()) {
-            record->turn_worker.join();
-        } else if (record->turn_worker.joinable()) {
-            Diagnose("thread 停场时回合未在硬时限内收口,分离工作线程: " + thread_id);
-            record->turn_worker.detach();
-        }
+        record->turn_worker.join();
     }
-    // P0-2:thread 停场即 session 封口(session.ended + session.json closed;
-    // 收不回的执行记 unknown,不冒充 clean)。封不了只记账,不拦停场——
-    // 半开的场由恢复器按 Journal 事实收口。AppServer 接 v3 第一棒:收口
-    // 走 SessionService 同一口。
+    // Only a joined worker permits closing the session's writer. A failed
+    // close remains visible as a stopping record; never emit thread/stopped.
     if (record->session_service != nullptr) {
         const auto closed = record->session_service->Close("thread_stop");
         if (!closed.error_code.empty()) {
             Diagnose("thread 停场时会话封口失败(" + closed.error_code + "): " + thread_id);
+            out_error_code = "thread.close_failed";
+            return nlohmann::json();
         }
+    }
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        threads_.erase(thread_id);
     }
     Diagnose("thread 已停: " + thread_id);
     return MakeThreadStoppedResult();
@@ -1812,6 +1841,12 @@ nlohmann::json Server::AcceptTurnStart(const std::string& thread_id, const std::
         }
     }
 
+    // A retry of an accepted id above is still a query while stopping. Only
+    // new work is refused, before input admission and durable dispatch.
+    if (record->stop_requested.load()) {
+        out_error_code = "thread.stopping";
+        return nlohmann::json();
+    }
     // 同一 thread 同拍两轮:协议明拒(单子验收:规矩写死并有测试)。
     bool expected = false;
     if (!record->turn_running.compare_exchange_strong(expected, true)) {
@@ -1896,25 +1931,13 @@ nlohmann::json Server::HandleTurnStart(const std::string& thread_id, const std::
         out_error_code = "回合工作线程没能立起";
         return nlohmann::json();
     }
-    // interrupt 的硬时限:置旗后 loop.Run 最多在流式/工具边界处收口;真有
-    // 卡死不退的(长命令/卡死的外部进程),等满 interrupt_hard_deadline_ms
-    // 就不再等——回合标记收口失败,join 分离(detach),读线程不被拖死。
-    // 这里是同步口径的等法;协议路径的兜底在连接收线(断管/exit)时由
-    // 析构路径兜。
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(options_.interrupt_hard_deadline_ms);
-    while (!record->turn_finished.load() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    if (record->turn_finished.load()) {
+    // This synchronous wait may time out without cancelling the operation.
+    // The owning Server retains the joinable worker and its busy fence.
+    if (WaitForTurnCompletion(*record, options_.interrupt_hard_deadline_ms)) {
         record->turn_worker.join();
         return record->last_completed;
     }
-    // 硬时限已到回合还没收口:不 join(卡死工作线程不该拖死调用方),
-    // detach 让它自生自灭,终态事件由它(假如还活着)自己补发。
-    Diagnose("回合未在硬时限内收口,分离工作线程: " + thread_id + " " + record->turn_id);
-    record->turn_worker.detach();
-    record->turn_running.store(false);
+    Diagnose("同步等候回合超时,工作线程仍由服务持有: " + thread_id + " " + record->turn_id);
     out_error_code = "hard_deadline";
     return nlohmann::json();
 }
@@ -1955,6 +1978,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // 直驱单测在构造器兜的默认装配工厂也走同一口):显式空表,不崩。
         if (record->assembly == nullptr) {
             SessionAssemblyRequest fallback;
+            fallback.cwd_utf8 = record->cwd;
             fallback.backend_factory = backend_factory_;
             fallback.registry_factory = registry_factory_;
             fallback.system_prompt = kAppServerDefaultSystemPrompt;
@@ -1970,17 +1994,52 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                     /*result_envelope_persisted=*/false);
                 EmitEventSafe(kEventTurnCompleted, completed_params);
                 record->last_completed = completed_params;
-                record->turn_finished.store(true);
-                record->turn_running.store(false);
+                MarkTurnFinished(*record);
                 return;
             }
         }
-        api::Backend& backend = *record->assembly->backend;
-        tools::ToolRegistry& registry = *record->assembly->registry;
-        // Agent 档案从会话材料取(装配层显式定的 system_prompt 与步数闸);
-        // Agent 循环对象本身每轮新建(便宜、无跨轮状态),材料不重建。
-        agent::AgentProfile profile = record->assembly->agent_profile;
-        agent::Agent loop(backend, registry, std::move(profile));
+        // Keep the actual ContextManager across turns. On process/session
+        // recovery, seed it once from the existing V3 resume projection; do not
+        // mistake a populated trajectory ledger for model-visible history.
+        if (record->session_service->execution() == nullptr) {
+            // An explicit per-session assembly profile wins. Legacy injected
+            // factories have no Config input, so use the host's supplied model.
+            if (record->assembly->agent_profile.request.model.empty()) {
+                record->assembly->agent_profile.request.model = options_.session_model;
+            }
+            try {
+                std::optional<std::vector<api::Message>> restored_history;
+                auto* trajectory = record->session_service->trajectory();
+                if (trajectory != nullptr && trajectory->resumed_at_launch()) {
+                    restored_history = trajectory->LaunchResumeHistory();
+                }
+                record->session_service->InitializeExecution(std::move(record->assembly->resources),
+                    std::move(record->assembly->agent_profile), std::move(restored_history));
+                // The consuming boundary clears template callbacks/resolver on
+                // success or failure, while retaining model metadata for turns.
+            } catch (const std::exception& error) {
+                // Initialization can race a stop request. Never publish a new
+                // execution into a stopping session or escape its worker thread.
+                const std::string status = record->interrupt_requested.load()
+                    ? std::string(kTurnStatusInterrupted) : std::string(kTurnStatusError);
+                record->stop_requested.store(true);
+                bool persisted = true;
+                if (!operation_id.empty()) {
+                    persisted = record->session_service->RecordTurnFinal(
+                        {operation_id, turn_id, status, {}, false});
+                }
+                completed_params = MakeTurnCompletedParams(thread_id, turn_id, status, error.what(),
+                    nlohmann::json(), 0, {}, false, persisted);
+                record->interactions->CancelPending();
+                EmitEventSafe(kEventTurnCompleted, completed_params);
+                record->last_completed = completed_params;
+                MarkTurnFinished(*record);
+                return;
+            }
+        }
+        auto& execution = *record->session_service->execution();
+        tools::ToolRegistry& registry = execution.resources().registry();
+        agent::Agent& loop = execution.agent();
 
         // ---- 事件流(骨架拆解批二:整装切到 TurnEventAdapter) ----
         // 旧路在本地手拼 text/thinking 懒起条、open_tools 对账、收口补账,
@@ -2000,6 +2059,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // TurnWiring,协议形状与旧手拼回调逐事件对得上。
         agent::TurnWiring wiring;
         wiring.events = &turn_events;
+        wiring.turn_id = turn_id;
         // token 估算校准(token 估算校准单):app-server 会话与终端主会话
         // 共用进程级校准器,同一只 (provider,model) 桶。
         wiring.token_calibrator = &agent::DefaultTokenCalibrator();
@@ -2032,6 +2092,18 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             EmitEventSafe(kEventTurnContext,
                                    MakeTurnContextParams(thread_id, turn_id, std::move(context)));
         };
+        std::optional<runtime::ToolTraceHub> trajectory_hub;
+        std::unique_ptr<runtime::TrajectoryTurnBridge> trajectory_bridge;
+        runtime::ScopedTurnBindings turn_bindings(loop);
+        // Construct after the borrowed owners, before the first callback is
+        // installed. Both normal return and exception unwind clear references
+        // before those owners die; AskUser's handler must not retain record.
+        struct AskUserTurnBinding {
+            tools::AskUserTool* ask_user = nullptr;
+            ~AskUserTurnBinding() {
+                if (ask_user != nullptr) ask_user->SetHandler({});
+            }
+        } borrowed;
         loop.SetWiring(std::move(loop_wiring));
 
         // ---- 审批接线(阶段 2 核心) ----
@@ -2096,6 +2168,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // 版:每题发一枚 user/ask,等前端 answers。
         if (tools::Tool* raw_ask = registry.Find("ask_user"); raw_ask != nullptr) {
             if (auto* ask_tool = dynamic_cast<tools::AskUserTool*>(raw_ask); ask_tool != nullptr) {
+                borrowed.ask_user = ask_tool;
                 ask_tool->SetHandler([this, record, turn_id](const tools::AskUserQuestion& question)
                                          -> std::expected<tools::AskUserResponse, std::string> {
                     runtime::QuestionRequest request;
@@ -2137,8 +2210,6 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // P0-2 轨迹:flag 开的 thread 接同一口——hub(工具栅栏 + 落盘关口)
         // 与轮次边界桥都挂上,与终端 RunTurn 同一形状(§15.5 app-server
         // 走同一 TrajectorySink)。flag 关不建 hub,app-server 行为零变。
-        std::optional<runtime::ToolTraceHub> trajectory_hub;
-        std::unique_ptr<runtime::TrajectoryTurnBridge> trajectory_bridge;
         runtime::TrajectorySessionLedger* trajectory_ledger =
             record->session_service != nullptr ? record->session_service->trajectory() : nullptr;
         if (trajectory_ledger != nullptr) {
@@ -2154,11 +2225,11 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             trajectory_bridge = trajectory_ledger->NewTurnBridge(std::move(identity));
             if (trajectory_bridge != nullptr) {
                 trajectory_hub.emplace(record->session_service->runtime()->ids());
-                // 桥先挂再 Install:Install 看能力位决定挂不挂整批 rewrite
-                // 钩子(v3 在管预览才挂,v2 走旧口径),见 hub 的注释。
-                trajectory_hub->AttachTrajectory(trajectory_bridge.get());
-                trajectory_hub->Install(loop, wiring, thread_id, turn_id);
-                wiring.boundary_recorder = trajectory_bridge.get();
+                runtime::ScopedTurnBindings::Bindings bindings;
+                bindings.hub = &*trajectory_hub;
+                bindings.trajectory = trajectory_bridge.get();
+                bindings.thread_id = thread_id;
+                bindings.turn_id = turn_id;
                 // 异步工具 P2(AppServer/Detached 面接线):会话级异步运行时
                 // 挂进 SessionService 的 SessionRuntime(零策略 dormant,行为
                 // 与从前一字不差);每轮钉桥 + 闸门/规划进 wiring。Detached 面
@@ -2169,13 +2240,12 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                     runtime::AsyncToolRuntime* async_runtime =
                         record->session_service->runtime()->async_tool_runtime();
                     if (async_runtime != nullptr) {
-                        async_runtime->InstallTurnBridge(trajectory_bridge.get());
+                        bindings.async_runtime = async_runtime;
                         async_runtime->NoteModelIdentity(options_.session_provider,
                                                         record->assembly->agent_profile.request.model);
-                        wiring.tool_batch_gate = async_runtime->gate();
-                        wiring.delivery_planner = async_runtime->planner();
                     }
                 }
+                turn_bindings.Bind(wiring, std::move(bindings));
                 trajectory_bridge->BeginTurn(turn_id, "external_user");
                 trajectory_bridge->RecordInput(user_message);
             }
@@ -2186,10 +2256,8 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         if (trajectory_bridge != nullptr) {
             trajectory_bridge->EndTurn(outcome.has_value(), outcome.has_value() && outcome->cancelled,
                                        outcome.has_value() ? std::string() : outcome.error());
-            if (trajectory_hub.has_value()) {
-                trajectory_hub->DetachTrajectory();
-            }
         }
+        turn_bindings.Reset();
         // 事件流收口:没收尾的条目(正文/思考/没终态的工具)由适配器统一
         // 按 Cancelled 补账——条目不悬空,前端好对账;终态分型随本地账。
         turn_events.Finish(!outcome.has_value() ? runtime::Outcome::Failed
@@ -2253,8 +2321,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
     record->interactions->CancelPending();
     EmitEventSafe(kEventTurnCompleted, completed_params);
     record->last_completed = completed_params;
-    record->turn_finished.store(true);
-    record->turn_running.store(false);
+    MarkTurnFinished(*record);
 }
 
 nlohmann::json Server::HandleTurnInterrupt(const std::string& thread_id, const std::string& turn_id,
@@ -2757,8 +2824,8 @@ Server::WsServeOutcome Server::ServeWsSessionBorrowed(std::unique_ptr<WsTranspor
     connection->Run();
     const bool exit_requested = connection->close_requested();
     // 这条连接收线:按断线合同分两路(W0 冻结)。
-    //   SessionBound(旧语义,缺省):打断还挂在它身上的回合(分离出去的
-    //     僵尸线程经 EmitEventSafe 快照,扑不空),thread 账与浏览器会话
+    //   SessionBound(旧语义,缺省):打断还挂在它身上的回合(超时未退的
+    //     工作线程仍由 Server 持有),thread 账与浏览器会话
     //     不动——重连的外壳凭 cursor(query 类方法)补账,老 threadId 还能
     //     继续用。"停止连接 = 停止工作"。
     //   Detached(助理模式):只撤订阅(下面 connection_.reset() 摘掉事件
@@ -2807,7 +2874,7 @@ void Server::EmitHostEvent(std::string_view method, const nlohmann::json& params
     EmitEventSafe(method, params);
 }
 
-void Server::InterruptRunningTurns() {
+void Server::InterruptRunningTurns(bool wait_for_completion) {
     std::vector<std::shared_ptr<ThreadRecord>> records;
     {
         std::lock_guard<std::mutex> lock(threads_mutex_);
@@ -2815,34 +2882,61 @@ void Server::InterruptRunningTurns() {
             records.push_back(record);
         }
     }
+    // Signal every session before waiting for any of them. A cooperative
+    // callback in A may be waiting for B to observe cancellation.
     for (const std::shared_ptr<ThreadRecord>& record : records) {
-        if (record->turn_worker.joinable()) {
+        if (wait_for_completion || record->turn_worker.joinable()) {
             record->interrupt_requested.store(true);
             record->interactions->CancelPending();
-            const auto deadline = std::chrono::steady_clock::now() +
-                                  std::chrono::milliseconds(options_.interrupt_hard_deadline_ms);
-            while (!record->turn_finished.load() && std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            if (record->turn_finished.load()) {
-                record->turn_worker.join();
-            } else {
-                Diagnose("收线时回合未在硬时限内收口,分离工作线程: " + record->thread_id);
-                record->turn_worker.detach();
-            }
+        }
+    }
+    if (wait_for_completion && browser_ != nullptr) {
+        // Browser actions have their own cancellation flag. Signal that domain
+        // too before waiting on any Agent that may be awaiting its completion.
+        browser_->RequestShutdown();
+    }
+    for (const std::shared_ptr<ThreadRecord>& record : records) {
+        if (wait_for_completion && record->session_service != nullptr) {
+            record->session_service->RequestExecutionShutdown();
+        }
+    }
+    for (const std::shared_ptr<ThreadRecord>& record : records) {
+        if (record->turn_worker.joinable() &&
+            (wait_for_completion || WaitForTurnCompletion(*record, options_.interrupt_hard_deadline_ms))) {
+            // No threads/connection mutex is held here; callbacks may still
+            // publish their final events before join returns.
+            record->turn_worker.join();
+        } else if (record->turn_worker.joinable()) {
+            Diagnose("收线等候超时,工作线程仍由服务持有: " + record->thread_id);
+        }
+        if (wait_for_completion && record->session_service != nullptr) {
+            record->session_service->ShutdownExecution();
         }
     }
 }
 
 void Server::Shutdown() {
-    // 浏览器面先收:取消在飞动作(审批悬着的也醒)、杀 sidecar 进程树
-    // (收尸;profile 锁由 sidecar 退出钩子释放)。
+    // In-process callbacks must cooperate with cancellation. A timeout cannot
+    // free the Server while a worker still borrows this/options/event routing.
+    InterruptRunningTurns(/*wait_for_completion=*/true);
+    // Both turn and browser cancellation were signalled before the joins above.
+    // Now reap browser workers and their sidecar process tree.
     if (browser_ != nullptr) {
         browser_->Shutdown();
     }
-    // 在跑的回合一律按打断收口(与 WS 连接收线同一段),随后会话档句柄
-    // 全收。
-    InterruptRunningTurns();
+    // Finish any earlier thread/stop that returned pending. Live sessions not
+    // explicitly stopped keep the existing shutdown/persistence semantics.
+    std::vector<std::string> pending_stops;
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        for (const auto& [id, record] : threads_) {
+            if (record->stop_requested.load()) pending_stops.push_back(id);
+        }
+    }
+    for (const auto& id : pending_stops) {
+        std::string error_code;
+        (void)HandleThreadStop(id, error_code);
+    }
 }
 
 // 单测直驱用的连接装配:HandleTurnStart 要经 connection_ 发事件,测试里

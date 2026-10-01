@@ -8,8 +8,8 @@
 // 各函数注释里的寿命规矩(谁必须声明在谁之前)由 ToolRuntime 的成员声明
 // 顺序接手,调用方(InteractiveSession/AskOnce)不用再背。
 //
-// 实现在 tool_runtime.cpp(编译边界):具体工具的构造、i18n 输出、目录扫描
-// 的依赖都留在 .cpp 一侧,公开头只露类型与函数声明。
+// 工具构造与目录扫描在 tool_runtime.cpp;宿主发现、翻译和终端输出在
+// cli_tool_assembly.cpp。此头属于内部装配,不属于已安装的 SDK API。
 
 #pragma once
 
@@ -25,7 +25,7 @@
 
 #include "api/backend.hpp"
 #include "agent/agent_profile_resolver.hpp"  // AgentProfileResolveEnvironment:阶段 3 解析环境
-#include "cli/theme.hpp"
+#include "app/tool_assembly_plan.hpp"
 #include "runtime/worktree.hpp"
 #include "runtime/assembly/mcp.hpp"
 #include "config/config.hpp"
@@ -50,13 +50,6 @@
 #include "tools/worktree_tool.hpp"
 
 namespace lubancode::app {
-
-// MountPlugins 的 process 插件出参缺省值(不想收 manifest 的调用方给空
-// 静态容器,行为上只是不回填)。
-namespace detail {
-inline std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>> kEmptyPluginManifests;
-inline std::vector<std::string> kEmptyPluginWarnings;
-}  // namespace detail
 
 lubancode::memory::Options MemoryOptionsFromConfig(const lubancode::config::MemoryConfig& config);
 
@@ -92,6 +85,12 @@ lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode
 std::optional<lubancode::tools::CustomAgentMaterial> ResolveCustomAgentMaterial(
     const std::vector<lubancode::tools::SkillMeta>& skills,
     const lubancode::package::PackageSnapshot* snapshot, const std::string& name);
+// Explicit-root implementation. The three-argument convenience entry is a CLI
+// policy adapter; embedded assembly calls this overload with its supplied roots.
+std::optional<lubancode::tools::CustomAgentMaterial> ResolveCustomAgentMaterial(
+    const std::vector<lubancode::tools::SkillMeta>& skills,
+    const lubancode::package::PackageSnapshot* snapshot, const std::string& name,
+    lubancode::agent::AgentCatalogScanRoots roots);
 
 // Explore 的硬边界落在工具表，不只写在提示词里。只给文件读取、代码
 // 搜索与网页查阅；命令、写入、技能和外挂工具一概不挂。
@@ -106,12 +105,13 @@ lubancode::tools::ToolRegistry BuildExploreToolRegistry(const lubancode::config:
 using runtime::assembly::McpServerRuntime;
 
 // 按配置逐个起 MCP 服务器:起子进程 + initialize 握手 + tools/list。单个
-// 服务器出岔子(起不来、握手超时、tools/list 失败……)只打一行警告就跳过,
+// 服务器出岔子(起不来、握手超时、tools/list 失败……)记录诊断后跳过,
 // 不阻塞整个会话——只有真正跑通全流程的服务器才会进返回的 vector。
 // mcpServers 没配(config.mcp_servers 是空 map)时,这个函数循环零次,
 // 直接返回空 vector,天然满足"只有配了才起"这条要求,不用另外判断。
 std::vector<McpServerRuntime> StartMcpServers(
-    const std::map<std::string, lubancode::config::McpServerConfig>& configs, const lubancode::cli::Theme& theme);
+    const std::map<std::string, lubancode::config::McpServerConfig>& configs,
+    const std::string& cwd_utf8, const ToolAssemblyDiagnosticReporter& report = {});
 
 // 把每个 MCP 服务器握手拿到的工具包成 McpTool,注册进 registry——主循环表、
 // 子代理表都要各调一遍(MCP 工具对子代理同样有用),两份各自独立的
@@ -153,8 +153,8 @@ void PublishPackagedLuaPlugins(const std::vector<lubancode::runtime::ManifestLua
 // M7:扫两类插件(<主目录>/.lubancode/plugins 下的 *.dll 和 *.lua),挂进
 // 目标 registry——主表与子代理表都挂(子代理与 main 同能力,独立任务
 // agent 默认完成后退出,不是低配跑腿);Explore 只读表不挂。每个插件打
-// 一行 "[plugin] 名: N 个工具";坏 DLL / 坏 lua 打警告跳过,不崩。report
-// 为 false 时只给另一张 registry 装独立 wrapper/state,不重复打印与记账。
+// 一条挂载诊断;坏 DLL / 坏 lua 留警告后跳过。report 为 false 时给另
+// 一张表装独立 wrapper/state,保留诊断事实,不重复展示和写 /plugins 清单。
 // plugin_host 由调用方持有,且必须声明在 registry 之前(PluginTool 手中的
 // luban_tool_def* 指向 DLL 静态数据,模块要活得比 registry 久,析构反序那
 // 一套,理由同 mcp_servers);Lua 侧第 4 步起走 EmbeddedLuaRuntime(与
@@ -165,13 +165,12 @@ void PublishPackagedLuaPlugins(const std::vector<lubancode::runtime::ManifestLua
 // mounted/warnings 由调用方持有,交互模式给 /plugins 命令用。
 void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime::EmbeddedLuaRuntime& lua_runtime,
                   lubancode::runtime::ManifestLuaRuntime& manifest_lua_runtime,
-                  lubancode::tools::ToolRegistry& registry, const lubancode::cli::Theme& theme,
-                  std::vector<PluginMountInfo>& mounted, std::vector<std::string>& warnings, bool report = true,
-                  std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests =
-                      detail::kEmptyPluginManifests,
-                  std::vector<std::string>& process_warnings = detail::kEmptyPluginWarnings,
-                  const std::string& project_root_utf8 = std::string(),
-                  const lubancode::config::PluginTrustStore* project_trust = nullptr);
+                  lubancode::tools::ToolRegistry& registry, const ToolAssemblyPlan& plan,
+                  std::vector<PluginMountInfo>& mounted, std::vector<std::string>& warnings, bool report,
+                  std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests,
+                  std::vector<std::string>& process_warnings,
+                  const lubancode::config::PluginTrustStore* project_trust,
+                  const ToolAssemblyDiagnosticReporter& diagnose);
 
 // 一场会话的工具全栈:主循环表、子代理表、(交互模式的)Explore 只读表,
 // 连同它们背后的拥有者——MCP 子进程(mcp_servers_)、插件宿主(plugin_host_)、
@@ -221,9 +220,12 @@ public:
         std::string native_server_tool_search;
     };
 
-    ToolRuntime(const lubancode::config::Config& config, const lubancode::cli::Theme& theme,
-                lubancode::api::Backend& agent_backend, const std::vector<lubancode::tools::SkillMeta>& skills,
-                const std::string& skills_segment, const std::string& cwd_utf8, Options options);
+    // backend is borrowed for the entire tool lifetime; skills are copied by
+    // retained resolvers. Config and presentation sink are construction-only.
+    ToolRuntime(const lubancode::config::Config& config, lubancode::api::Backend& agent_backend,
+                const std::vector<lubancode::tools::SkillMeta>& skills,
+                const std::string& skills_segment, ToolAssemblyPlan plan, Options options,
+                ToolAssemblyDiagnosticSink presentation = {});
 
     ToolRuntime(const ToolRuntime&) = delete;
     ToolRuntime& operator=(const ToolRuntime&) = delete;
@@ -284,6 +286,7 @@ public:
     const std::function<bool(const lubancode::tools::Tool&)>& sub_tool_filter() const { return sub_tool_filter_; }
     const std::vector<PluginMountInfo>& plugin_mounted() const { return plugin_mounted_; }
     const std::vector<std::string>& plugin_warnings() const { return plugin_warnings_; }
+    const std::vector<ToolAssemblyDiagnostic>& diagnostics() const { return diagnostics_; }
     // process 插件(plugin.json)的已解析清单,/plugin inspect/doctor 用。
     const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests() const {
         return process_manifests_;
@@ -324,6 +327,7 @@ public:
     std::string LastCompensatesOf(const std::string& tool_use_id) const;
 
 private:
+    std::vector<ToolAssemblyDiagnostic> diagnostics_;
     // ---- 拥有者:先声明,后析构(用户表先亡,引用不悬垂) ----
     std::vector<McpServerRuntime> mcp_servers_;
     lubancode::tools::PluginHost plugin_host_;

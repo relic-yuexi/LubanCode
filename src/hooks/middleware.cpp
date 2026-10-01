@@ -9,6 +9,7 @@
 #include "hooks/middleware.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <initializer_list>
 #include <sstream>
 #include <thread>
@@ -1317,14 +1318,16 @@ DispatchOutcome MiddlewareDispatcher::Dispatch(HookPoint point, const DispatchTr
     meta.action_id = trigger.action_id;
     meta.request_id = trigger.request_id;
 
-    if (state.chain_index.empty()) {
-        // 无匹配链项:整次记 skipped(汇总;未命中项各自躺在 records 里)。
+    if (state.chain_index.empty() && state.observer_index.empty()) {
+        // Only wholly unmatched dispatches are skipped. Observers execute and
+        // need the same requested book for their started/completed/failed facts.
         if (sink != nullptr) {
             sink->OnSkipped(meta, state.entries.empty() ? "no_handlers" : "no_matched_handlers");
         }
     } else if (sink != nullptr) {
         std::vector<HandlerSnapshot> snapshots;
-        for (const std::size_t i : state.chain_index) {
+        for (std::size_t i = 0; i < state.entries.size(); ++i) {
+            if (!state.entries[i].matched) continue;
             const MiddlewareDefinition& def = *state.entries[i].def;
             HandlerSnapshot snapshot;
             snapshot.hook_id = def.Key();
@@ -1344,16 +1347,23 @@ DispatchOutcome MiddlewareDispatcher::Dispatch(HookPoint point, const DispatchTr
     // 也追改不了链结果)。
     if (!state.observer_index.empty()) {
         std::vector<InvocationRecord> results(state.observer_index.size());
-        std::vector<std::thread> workers;
+        std::vector<std::exception_ptr> failures(state.observer_index.size());
+        // If starting a later observer fails, RAII still joins every earlier
+        // worker before its borrowed state/results/sink can leave this scope.
+        std::vector<std::jthread> workers;
         workers.reserve(state.observer_index.size());
         for (std::size_t i = 0; i < state.observer_index.size(); ++i) {
-            workers.emplace_back([&state, &results, i] {
-                results[i] = RunObserver(state, state.observer_index[i]);
+            workers.emplace_back([&state, &results, &failures, i] {
+                // Setup and sink bookkeeping can throw outside RunObserver's
+                // handler guard. Never let an exception escape a thread entry.
+                try { results[i] = RunObserver(state, state.observer_index[i]); }
+                catch (...) { failures[i] = std::current_exception(); }
             });
         }
         for (auto& worker : workers) {
             worker.join();
         }
+        for (const auto& failure : failures) if (failure) std::rethrow_exception(failure);
         for (std::size_t i = 0; i < state.observer_index.size(); ++i) {
             state.outcome.records[state.observer_index[i]] = std::move(results[i]);
         }

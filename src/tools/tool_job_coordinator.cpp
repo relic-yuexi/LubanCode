@@ -2,9 +2,9 @@
 // 主锁(jobs_mutex)内的泵/派发/接口路径;worker 线程只经信封锁投递完成
 // 信封,不碰 writer。旧租约与终态后的迟到信封拒收(计数,不落账)。
 //
-// worker 线程模型:派发即 detach,线程闭包持 shared_ptr<Impl>(协调器亡后
-// 仍可安全投信封,写到无人消费的队列无害);收场广播取消后有界等待在跑
-// 归零,不 join 挂死(AgentTaskCoordinator::JoinAllBounded 同款兜底口径)。
+// worker threads stay joinable. Impl keeps the mailbox alive; it does not own
+// everything an executor borrows. Shutdown joins callbacks and their captures
+// before the host releases its registry, backend, MCP Clients or Lua state.
 #include "tools/tool_job_coordinator.hpp"
 
 #include <algorithm>
@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
+#include <exception>
 #include <map>
 #include <thread>
 #include <utility>
@@ -22,6 +23,17 @@
 #include "trajectory/v3/result_store.hpp"
 
 namespace lubancode::tools {
+
+namespace {
+thread_local const void* current_job_worker = nullptr;
+thread_local const void* current_job_shutdown = nullptr;
+struct JobThreadScope {
+    const void*& slot;
+    const void* previous;
+    JobThreadScope(const void*& target, const void* value) : slot(target), previous(target) { slot = value; }
+    ~JobThreadScope() { slot = previous; }
+};
+}  // namespace
 
 namespace {
 
@@ -208,6 +220,49 @@ struct ToolJobCoordinator::Impl {
     // 资源键占用:key -> 持有 jobId(单 §7:同键同时至多一个)。
     std::map<std::string, std::string> resource_holders;
     bool closing = false;
+    std::atomic<bool> shutdown_complete{false};
+    bool shutdown_in_progress = false;
+    bool shutdown_settlement_ok = true;
+    std::condition_variable shutdown_cv;
+    struct Worker {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> finished;
+    };
+    std::vector<Worker> workers;
+    // Retain cancellation until join returns, independently of job state.
+    struct OwnedWorker {
+        std::shared_ptr<std::atomic<bool>> cancel;
+        std::shared_ptr<std::atomic<bool>> finished;
+    };
+    std::vector<OwnedWorker> owned_workers;
+    // Reaping and shutdown never hold jobs_mutex while joining. Ordinary APIs
+    // try this mutex, so an executor/capture destructor can query its job while
+    // another caller joins it without blocking on the join itself.
+    std::mutex shutdown_mutex;
+
+    void ReapFinishedWorkers() {
+        std::unique_lock reaper(shutdown_mutex, std::try_to_lock);
+        if (!reaper.owns_lock() || shutdown_in_progress) return;
+        std::vector<Worker> finished;
+        {
+            std::lock_guard lock(jobs_mutex);
+            for (auto it = workers.begin(); it != workers.end();) {
+                if (it->finished != nullptr && it->finished->load()) {
+                    finished.push_back(std::move(*it));
+                    it = workers.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        for (auto& worker : finished) if (worker.thread.joinable()) worker.thread.join();
+        {
+            std::lock_guard lock(jobs_mutex);
+            for (const auto& worker : finished) {
+                std::erase_if(owned_workers, [&](const auto& owned) { return owned.finished == worker.finished; });
+            }
+        }
+    }
 
     std::int64_t NowMs() const {
         if (clock_ms) {
@@ -510,7 +565,7 @@ struct ToolJobCoordinator::Impl {
     }
 
     // 派发(单 §5:注册/接单落稳后才走到这):复查授权与取消 -> 新租约
-    // dispatched -> attempt 2 执行链起跑 -> worker 线程(detach)。
+    // dispatched -> attempt 2 execution -> an owned worker thread.
     enum class DispatchOutcome { Dispatched, KeepQueued, Cancelled, Failed };
     DispatchOutcome DispatchJobLocked(JobRecord& job) {
         // 执行前查取消状态(单 §7:不因入队时获准就永久放行)。
@@ -629,8 +684,8 @@ struct ToolJobCoordinator::Impl {
             job.policy.deadline_ms == 0 ? 0 : static_cast<std::uint64_t>(now + static_cast<std::int64_t>(job.policy.deadline_ms));
         AcquireResourcesLocked(job);
         job.cancel_flag->store(false);
-        // worker:值拷贝材料,终局只投信封(不碰 writer);detach,闭包持
-        // shared_ptr<Impl> 保活,协调器亡后投递仍安全。
+        // Worker only posts an envelope. Its entire thread, including captured
+        // executor destruction, must exit before borrowed dependencies vanish.
         std::shared_ptr<Impl> self = self_lock.lock();
         if (self == nullptr) {
             global->Release();
@@ -644,42 +699,82 @@ struct ToolJobCoordinator::Impl {
         const std::string job_id = job.job_id;
         const std::string epoch = job.owner_epoch;
         const std::shared_ptr<std::atomic<bool>> cancel_flag = job.cancel_flag;
-        const JobExecutor run = executor;
+        auto run = std::make_unique<JobExecutor>(executor);
         const std::int64_t started_at = now;
-        std::thread([self, job_id, epoch, context, cancel_flag, run, started_at]() {
-            JobExecutionContext local = context;
-            local.cancel = cancel_flag.get();
-            Tool::Result result = run(local);
+        auto finished = std::make_shared<std::atomic<bool>>(false);
+        owned_workers.push_back({cancel_flag, finished});
+        workers.emplace_back();  // Allocate before constructing a live thread.
+        workers.back().finished = finished;
+        try {
+            workers.back().thread = std::thread([self, job_id, epoch, context, cancel_flag,
+                                                 run = std::move(run), started_at, finished]() mutable {
+                JobThreadScope worker_scope(current_job_worker, self.get());
+                JobExecutionContext local = context;
+                local.cancel = cancel_flag.get();
+                Tool::Result result;
+                try {
+                    result = (*run)(local);
+                } catch (const std::exception& error) {
+                    result = Tool::Result::Error(error.what());
+                    result.error_code = "tool.job.executor_exception";
+                } catch (...) {
+                    result = Tool::Result::Error("tool job executor threw");
+                    result.error_code = "tool.job.executor_exception";
+                }
+                JobCompletionEnvelope envelope;
+                envelope.job_id = job_id;
+                envelope.owner_epoch = epoch;
+                envelope.result = std::move(result);
+                envelope.succeeded = !envelope.result.is_error;
+                if (envelope.result.is_error) {
+                    envelope.error_code = envelope.result.error_code.empty()
+                                              ? "tool_failed"
+                                              : envelope.result.error_code;
+                }
+                try {
+                    envelope.duration_ms = static_cast<std::uint64_t>(
+                        std::max<std::int64_t>(0, self->NowMs() - started_at));
+                } catch (...) {
+                    // A diagnostic clock cannot terminate the worker or hide its
+                    // business result. Its callback is still covered by the join.
+                }
+                // worker 响应取消:旗子置位且执行以错误收尾,按 cancelled 投递
+                //(单写者收唯一终态;跑完的正常结果仍按 succeeded 收)。
+                if (cancel_flag->load() && envelope.result.is_error) {
+                    envelope.cancelled = true;
+                    envelope.succeeded = false;
+                    envelope.cancel_reason = "worker_saw_cancel";
+                }
+                {
+                    std::lock_guard<std::mutex> lock(self->envelope_mutex);
+                    self->envelopes.push_back(std::move(envelope));
+                }
+                self->state_cv.notify_all();
+                // Destroy the only user-defined capture while the worker TLS
+                // marker still identifies this coordinator. The lambda's tail
+                // then holds only ordinary data/shared runtime state. OS thread
+                // IDs may be reused before join, so they cannot identify callers.
+                run.reset();
+                finished->store(true);
+            });
+        } catch (const std::exception& error) {
+            workers.pop_back();
+            owned_workers.pop_back();
             JobCompletionEnvelope envelope;
             envelope.job_id = job_id;
             envelope.owner_epoch = epoch;
-            envelope.result = std::move(result);
-            envelope.succeeded = !envelope.result.is_error;
-            if (envelope.result.is_error) {
-                envelope.error_code = envelope.result.error_code.empty()
-                                          ? "tool_failed"
-                                          : envelope.result.error_code;
-            }
-            envelope.duration_ms = static_cast<std::uint64_t>(
-                std::max<std::int64_t>(0, self->NowMs() - started_at));
-            // worker 响应取消:旗子置位且执行以错误收尾,按 cancelled 投递
-            //(单写者收唯一终态;跑完的正常结果仍按 succeeded 收)。
-            if (cancel_flag->load() && envelope.result.is_error) {
-                envelope.cancelled = true;
-                envelope.succeeded = false;
-                envelope.cancel_reason = "worker_saw_cancel";
-            }
-            {
-                std::lock_guard<std::mutex> lock(self->envelope_mutex);
-                self->envelopes.push_back(std::move(envelope));
-            }
-            self->state_cv.notify_all();
-        }).detach();
+            envelope.result = Tool::Result::Error(error.what());
+            envelope.error_code = "tool.job.worker_start_failed";
+            envelope.result.error_code = envelope.error_code;
+            DrainEnvelopeLocked(envelope);
+            return DispatchOutcome::Failed;
+        }
         return DispatchOutcome::Dispatched;
     }
 
     // 队列泵:尽力派发队首可派者(配额/资源释放后由终态路径再调)。
     void TryDispatchLocked() {
+        if (closing) return;
         for (std::size_t i = 0; i < queue.size();) {
             auto it = jobs.find(queue[i]);
             if (it == jobs.end() ||
@@ -1023,34 +1118,107 @@ ToolJobCoordinator::ToolJobCoordinator(trajectory::v3::V3Writer& writer,
 }
 
 ToolJobCoordinator::~ToolJobCoordinator() {
+    if (current_job_worker == impl_.get() || current_job_shutdown == impl_.get()) std::terminate();
+    if (!Shutdown() && !shutdown_complete()) std::terminate();
+}
+
+void ToolJobCoordinator::RequestShutdown() {
     if (impl_ == nullptr) {
         return;
     }
     {
         std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
         impl_->closing = true;
-        // 广播取消(单 §9 shutdown:短命线程不承诺跨进程存活):在跑的一律
-        // 置旗;detach 线程持 Impl 强引用,协调器亡后投递仍安全。
+        // Cancellation is an intent, not proof a callback has returned. This
+        // phase never calls an authorization gate, clock or executor.
         for (auto& [id, job] : impl_->jobs) {
             (void)id;
             if (job->state == "running" || job->state == "queued") {
                 job->cancel_flag->store(true);
             }
         }
-    }
-    // 有界等在跑归零(worker 见旗收工,泵顺带收终态);到点放行,不 join
-    // 挂死(detach 线程持 Impl 强引用,投递安全)。
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (std::chrono::steady_clock::now() < deadline) {
-        {
-            std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
-            impl_->PumpLocked();  // 收尾也要收信封,否则终态永不落地
-            if (impl_->RunningCountLocked() == 0) {
-                break;
-            }
+        for (const auto& worker : impl_->owned_workers) {
+            worker.cancel->store(true);
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    impl_->state_cv.notify_all();
+}
+
+bool ToolJobCoordinator::Shutdown() {
+    if (impl_ == nullptr) return true;
+    // A callback cannot wait for its own exit. Detect the invalid lifecycle
+    // call rather than deadlocking or pretending its borrows have been drained.
+    if (current_job_worker == impl_.get() || current_job_shutdown == impl_.get()) return false;
+    RequestShutdown();
+    std::unique_lock shutdown(impl_->shutdown_mutex);
+    impl_->shutdown_cv.wait(shutdown, [&] { return !impl_->shutdown_in_progress; });
+    if (impl_->shutdown_complete) return impl_->shutdown_settlement_ok;
+    impl_->shutdown_in_progress = true;
+    shutdown.unlock();
+    JobThreadScope shutdown_scope(current_job_shutdown, impl_.get());
+    std::vector<Impl::Worker> workers;
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        workers.swap(impl_->workers);
+    }
+    for (auto& worker : workers) if (worker.thread.joinable()) worker.thread.join();
+    bool settled = true;
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        for (const auto& worker : workers) {
+            std::erase_if(impl_->owned_workers, [&](const auto& owned) { return owned.finished == worker.finished; });
+        }
+        // All callbacks have exited. Settlement can fail independently of
+        // lifetime cleanup, and must not turn a close into false success.
+        try {
+            // Persist the cancellation intent now, after every session has
+            // been signalled. Running completions below retain their real
+            // success/error; work never dispatched is known not to execute.
+            for (auto& [id, job] : impl_->jobs) {
+                (void)id;
+                if (IsTerminalJobState(job->state)) continue;
+                job->cancel_requested = true;
+                job->cancel_flag->store(true);
+                if (!job->cancel_event_written) {
+                    const auto cancelled = impl_->EmitCancelRequestedLocked(*job, "session_shutdown");
+                    if (ReceiptOk(cancelled)) job->cancel_event_written = true;
+                    else settled = false;
+                }
+                if (!job->dispatched) {
+                    const auto observed = impl_->ObserveLocked(*job, "cancelled");
+                    if (ReceiptOk(observed)) job->state = "cancelled";
+                    else settled = false;
+                }
+            }
+            impl_->PumpLocked();
+            settled = settled && std::all_of(impl_->jobs.begin(), impl_->jobs.end(), [](const auto& item) {
+                return IsTerminalJobState(item.second->state);
+            });
+        } catch (...) {
+            settled = false;
+        }
+        impl_->writer = nullptr;
+    }
+    // Closing APIs reject before reading these callbacks, and every worker is
+    // joined. Clear the actual sources outside all lifecycle/jobs locks: a
+    // std::function move may retain an inline callable in its source, and even
+    // swap can destroy temporary callable copies. Capture destructors may query
+    // ordinary APIs here; a concurrent Shutdown still waits for their return.
+    impl_->gate = nullptr;
+    impl_->executor = nullptr;
+    impl_->clock_ms = nullptr;
+    shutdown.lock();
+    impl_->shutdown_settlement_ok = settled;
+    impl_->shutdown_complete = true;
+    impl_->shutdown_in_progress = false;
+    shutdown.unlock();
+    impl_->shutdown_cv.notify_all();
+    impl_->state_cv.notify_all();
+    return settled;
+}
+
+bool ToolJobCoordinator::shutdown_complete() const {
+    return impl_ == nullptr || impl_->shutdown_complete.load();
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,16 +1226,20 @@ ToolJobCoordinator::~ToolJobCoordinator() {
 // ---------------------------------------------------------------------------
 
 JobStartResult ToolJobCoordinator::StartJob(const JobStartRequest& request) {
+    impl_->ReapFinishedWorkers();
     return impl_->StartJobCommon(request, /*early=*/false);
 }
 
 JobStartResult ToolJobCoordinator::StartJobEarly(const JobStartRequest& request) {
+    impl_->ReapFinishedWorkers();
     return impl_->StartJobCommon(request, /*early=*/true);
 }
 
 bool ToolJobCoordinator::CompleteAdmission(const std::string& job_id,
                                            std::string* admission_content) {
+    impl_->ReapFinishedWorkers();
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
+    if (impl_->closing) return false;
     auto it = impl_->jobs.find(job_id);
     if (it == impl_->jobs.end()) {
         return false;
@@ -1085,8 +1257,14 @@ bool ToolJobCoordinator::CompleteAdmission(const std::string& job_id,
 }
 
 JobStartResult ToolJobCoordinator::GrantApproval(const std::string& job_id) {
+    impl_->ReapFinishedWorkers();
     JobStartResult result;
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
+    if (impl_->closing) {
+        result.error_code = "job.grant.closing";
+        result.error = "job.coordinator.closed";
+        return result;
+    }
     auto it = impl_->jobs.find(job_id);
     if (it == impl_->jobs.end()) {
         result.error_code = "job.grant.unknown_job";
@@ -1110,9 +1288,15 @@ JobStartResult ToolJobCoordinator::GrantApproval(const std::string& job_id) {
 }
 
 JobStatusView ToolJobCoordinator::GetJob(const std::string& job_id) {
+    impl_->ReapFinishedWorkers();
     JobStatusView view;
     view.job_id = job_id;
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
+    if (impl_->closing) {
+        view.access_denied = true;
+        view.access_reason = "job.coordinator.closed";
+        return view;
+    }
     impl_->PumpLocked();
     auto it = impl_->jobs.find(job_id);
     if (it == impl_->jobs.end()) {
@@ -1141,6 +1325,7 @@ JobStatusView ToolJobCoordinator::GetJob(const std::string& job_id) {
 
 JobWaitResult ToolJobCoordinator::WaitJobs(const std::vector<std::string>& job_ids,
                                            std::uint64_t timeout_ms, bool wait_all) {
+    impl_->ReapFinishedWorkers();
     JobWaitResult result;
     if (job_ids.empty()) {
         result.satisfied = true;
@@ -1150,6 +1335,17 @@ JobWaitResult ToolJobCoordinator::WaitJobs(const std::vector<std::string>& job_i
         std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     std::unique_lock<std::mutex> lock(impl_->jobs_mutex);
     for (;;) {
+        if (impl_->closing) {
+            result.statuses.clear();
+            for (const auto& id : job_ids) {
+                JobStatusView view;
+                view.job_id = id;
+                view.access_denied = true;
+                view.access_reason = "job.coordinator.closed";
+                result.statuses.push_back(std::move(view));
+            }
+            return result;
+        }
         impl_->PumpLocked();
         // 状态快照(游标=本次观测,单 §8:超时回 pending+游标不宣告失败)。
         std::size_t terminal = 0;
@@ -1196,8 +1392,14 @@ JobWaitResult ToolJobCoordinator::WaitJobs(const std::vector<std::string>& job_i
 
 JobCancelResult ToolJobCoordinator::CancelJob(const std::string& job_id,
                                               const std::string& reason) {
+    impl_->ReapFinishedWorkers();
     JobCancelResult result;
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
+    if (impl_->closing) {
+        result.status = "closing";
+        result.error = "job.coordinator.closed";
+        return result;
+    }
     auto it = impl_->jobs.find(job_id);
     if (it == impl_->jobs.end()) {
         result.status = "unknown_job";
@@ -1254,7 +1456,9 @@ JobCancelResult ToolJobCoordinator::CancelJob(const std::string& job_id,
 }
 
 std::size_t ToolJobCoordinator::PumpCompletions() {
+    impl_->ReapFinishedWorkers();
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
+    if (impl_->closing) return 0;
     std::size_t settled = impl_->PumpLocked();
     impl_->state_cv.notify_all();
     return settled;
@@ -1262,6 +1466,11 @@ std::size_t ToolJobCoordinator::PumpCompletions() {
 
 bool ToolJobCoordinator::DebugSubmitEnvelope(const std::string& job_id,
                                              const std::string& owner_epoch, Tool::Result result) {
+    impl_->ReapFinishedWorkers();
+    // Hold the publication gate through posting. Shutdown must never lose an
+    // envelope accepted after its final settlement and callback release.
+    std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
+    if (impl_->closing) return false;
     JobCompletionEnvelope envelope;
     envelope.job_id = job_id;
     envelope.owner_epoch = owner_epoch;
@@ -1277,7 +1486,6 @@ bool ToolJobCoordinator::DebugSubmitEnvelope(const std::string& job_id,
         impl_->envelopes.push_back(std::move(envelope));
     }
     impl_->state_cv.notify_all();
-    std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
     auto existing = impl_->jobs.find(job_id);
     const bool was_terminal =
         existing != impl_->jobs.end() && IsTerminalJobState(existing->second->state);
@@ -1391,6 +1599,7 @@ JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger&
             snap->attempts.back().status == "done";
         const bool observed_missing = job.state == "running" && execution_terminal_in_ledger;
         const bool terminal_state = IsTerminalJobState(job.state);
+        if (terminal_state) item.terminal_state = job.state;
         if (job.mode != "job_handle") {
             item.disposition = "unsupported_mode";
             item.detail = "mode=" + job.mode + " 的执行归后续批次(P1 只接 job_handle)";
@@ -1421,7 +1630,9 @@ JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger&
 }
 
 std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
+    impl_->ReapFinishedWorkers();
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
+    if (impl_->closing) return 0;
     std::size_t adopted = 0;
     for (const auto& item : plan.items) {
         if (impl_->jobs.count(item.job_id) > 0) {
@@ -1463,6 +1674,12 @@ std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
         // 已落账——补链只补消息,不给在跑/无终态的 attempt 伪造终态
         //(流式提前档的恢复缺口正是这形状:事实在、消息缺、工作在跑)。
         job.admission_facts_complete = job.admission_complete;
+        if (IsTerminalJobState(item.terminal_state)) {
+            job.state = item.terminal_state;
+            job.result_ref = item.result_ref;
+            job.result_version = item.result_version;
+            job.cancel_requested = item.cancel_requested;
+        }
         if (item.disposition == "unsupported_mode") {
             job.state = "unknown";  // 不接管:只登记可见,不可操作
             continue;
@@ -1509,6 +1726,11 @@ std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
                     ok = false;
                     NoteWriteFailure("tool.job.observed(恢复补)", observed);
                 }
+            } else if (ok && IsTerminalJobState(item.terminal_state)) {
+                // Delivery can lag a graceful cancellation or another terminal
+                // observation. Repair the model message, preserve the terminal
+                // state and keep this job out of the dispatch queue.
+                job.state = item.terminal_state;
             } else if (ok) {
                 // 接单链补齐:job 回 queued 重新入队(requeue 语义)。
                 job.state = "queued";

@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -10,6 +11,7 @@
 #include "app_server/session_assembly.hpp"
 #include "runtime/assembly/mcp.hpp"
 #include "scripted_mcp_endpoint.hpp"
+#include "tools/path_utils.hpp"
 
 using namespace lubancode;
 
@@ -31,6 +33,7 @@ public:
 app_server::SessionAssemblyRequest Request(const config::Config& config,
                                           const app_server::HarnessProfile* harness) {
     app_server::SessionAssemblyRequest request;
+    request.cwd_utf8 = tools::PathToUtf8(std::filesystem::temp_directory_path());
     request.config = &config;
     request.harness = harness;
     request.backend_factory = [] { return std::make_unique<StubBackend>(); };
@@ -77,7 +80,7 @@ private:
 TEST_CASE("MCP host policy: CLI keeps startup failure optional") {
     auto config = Config({"missing"});
     config.mcp_servers["missing"].command = "lubancode-sdk-test-command-that-does-not-exist-53a810";
-    CHECK(app::StartMcpServers(config.mcp_servers, cli::Theme{}).empty());
+    CHECK(app::StartMcpServers(config.mcp_servers, tools::PathToUtf8(std::filesystem::temp_directory_path())).empty());
 }
 
 TEST_CASE("MCP host policy: headless never starts servers without an approved deployment name") {
@@ -92,8 +95,8 @@ TEST_CASE("MCP host policy: headless never starts servers without an approved de
     SUBCASE("no deployment remains zero tools") {
         auto result = app_server::AssembleSession(request);
         REQUIRE(result.assembly != nullptr);
-        CHECK(result.assembly->registry->All().empty());
-        CHECK(result.assembly->mcp_servers.empty());
+        CHECK(result.assembly->resources->registry().All().empty());
+        CHECK(result.assembly->resources->mcp_servers().empty());
     }
     SUBCASE("required but absent from upper configuration is rejected before launch") {
         request.harness = &profile;
@@ -125,8 +128,8 @@ TEST_CASE("MCP host policy: optional stage failures degrade while required failu
                 CHECK(result.error.find(stage == "tools/list" ? "工具清单拉取失败" : "起服失败") != std::string::npos);
             } else {
                 REQUIRE(result.assembly != nullptr);
-                CHECK(result.assembly->mcp_servers.empty());
-                CHECK(result.assembly->registry->All().empty());
+                CHECK(result.assembly->resources->mcp_servers().empty());
+                CHECK(result.assembly->resources->registry().All().empty());
                 REQUIRE(result.assembly->degraded_components.size() == 1);
                 CHECK(result.assembly->degraded_components.front().find("fixture") != std::string::npos);
             }
@@ -165,11 +168,11 @@ TEST_CASE("MCP host policy: shared discovered tools keep CLI and headless select
     auto result = app_server::AssembleSession(request);
     REQUIRE(result.assembly != nullptr);
     CHECK(launched == std::vector<std::string>{"approved"});
-    REQUIRE(result.assembly->registry->All().size() == 1);
-    const auto* tool = result.assembly->registry->Find("mcp__approved__echo");
+    REQUIRE(result.assembly->resources->registry().All().size() == 1);
+    const auto* tool = result.assembly->resources->registry().Find("mcp__approved__echo");
     REQUIRE(tool != nullptr);
     CHECK_FALSE(tool->deferred());
-    CHECK(result.assembly->registry->Find("mcp__approved__zulu") == nullptr);
+    CHECK(result.assembly->resources->registry().Find("mcp__approved__zulu") == nullptr);
 }
 
 TEST_CASE("MCP host policy: required failure rolls back current and previously started clients") {
@@ -199,13 +202,14 @@ TEST_CASE("MCP host policy: actual SessionAssembly destroys its registry before 
     ScriptedMcpEndpoint endpoint;
     endpoint.destruction_events = &events;
     {
-        app_server::SessionAssembly assembled;
-        auto ready = assembly::StartMcpServer({"fixture", "unused", {}, {}, platform::EnvMode::Replace},
-                                              {}, endpoint.Launcher());
-        REQUIRE(ready.has_value());
-        assembled.mcp_servers.push_back(std::move(*ready));
-        assembled.registry = std::make_unique<tools::ToolRegistry>();
-        assembled.registry->Register(std::make_unique<DestructionProbe>(endpoint, events, client_alive_when_tool_destroyed));
+        const auto config = Config({"fixture"});
+        auto profile = Profile({"fixture"}, {"mcp:fixture:echo"});
+        auto request = Request(config, &profile);
+        request.mcp_launcher = endpoint.Launcher();
+        auto assembled = app_server::AssembleSession(std::move(request));
+        REQUIRE(assembled.assembly != nullptr);
+        assembled.assembly->resources->registry().Register(
+            std::make_unique<DestructionProbe>(endpoint, events, client_alive_when_tool_destroyed));
     }
     CHECK(client_alive_when_tool_destroyed);
     CHECK(events == std::vector<std::string>{"tool", "client"});

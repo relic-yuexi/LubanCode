@@ -18,23 +18,32 @@
 #include "platform/text_encoding.hpp"
 #include "runtime/assembly/backend.hpp"
 #include "runtime/assembly/builtin_tools.hpp"
-#include "runtime/assembly/mcp.hpp"
+#include "runtime/assembly/session_resources.hpp"
+#include "runtime/scoped_turn_bindings.hpp"
 #include "runtime/interaction_broker.hpp"
+#include "runtime/middleware_runtime.hpp"
+#include "runtime/middleware_v3_sink.hpp"
 #include "runtime/session_service.hpp"
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "sdk/adapters.hpp"
+#include "sdk/callback_scope.hpp"
+#include "sdk/extensions.hpp"
+#include "sdk/results.hpp"
 #include "tools/path_utils.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
 
 namespace lubancore {
+namespace detail {
+thread_local bool in_session_worker = false;
+}
 namespace {
 namespace rt = lubancode::runtime;
 namespace api = lubancode::api;
 namespace fs = std::filesystem;
 using Json = nlohmann::json;
-thread_local bool in_session_worker = false;
+using detail::in_session_worker;
 
 // Keep shutdown diagnostics after a public session handle is dropped without
 // retaining its result text, connection material or execution resources.
@@ -97,6 +106,7 @@ Result<void> ValidateOperationLedger(const fs::path& session_dir) {
     std::ifstream input(path, std::ios::binary);
     if (!input) return invalid("cannot read operation ledger");
     std::set<std::string> keys;
+    std::set<std::string> bound_turns;
     const auto is_string = [](const Json& row, const char* key) {
         return row.contains(key) && row.at(key).is_string();
     };
@@ -141,6 +151,9 @@ Result<void> ValidateOperationLedger(const fs::path& session_dir) {
             for (const auto& ref : row.at("finalMessageRefs")) {
                 if (!ref.is_string()) return invalid("invalid final message reference");
             }
+            const auto turn = row.at("turnId").get<std::string>();
+            if (!turn.empty() && (!ValidId(turn) || !bound_turns.insert(turn).second))
+                return invalid("invalid turn identity or turn bound to multiple operations");
             found->second = Stage::Final;
         } else {
             return invalid("unknown operation fact kind");
@@ -274,21 +287,28 @@ struct Session::Impl final : rt::InteractionBroker {
     std::shared_ptr<std::atomic<bool>> runtime_stopping;
     std::string session_id;
     fs::path session_dir;
-    std::unique_ptr<rt::SessionService> service;
-    std::unique_ptr<api::Backend> backend;
-    std::vector<rt::assembly::McpServerRuntime> mcp;
-    std::unique_ptr<lubancode::tools::ToolRegistry> registry;
-    std::unique_ptr<lubancode::agent::Agent> agent;
+    // RequestClose may race a different caller finishing Close. A short mutex
+    // snapshot keeps the service alive while cancellation is signalled.
+    std::shared_ptr<rt::SessionService> service;
+    // Sole ownership lives with SessionResources, after Agent and before tools.
+    // Publish this borrow only after initialization succeeds; queries use cache.
+    detail::SessionExtensions* extensions = nullptr;
+    std::string extension_plan_json;
     mutable std::mutex mutex;
     mutable std::condition_variable cv;
     std::mutex close_mutex;
     std::map<std::string, Operation> operations;
+    results::v1::SessionResultPolicy result_policy;
+    // Immutable per-operation identity/ref snapshots. These retain no service,
+    // Agent or original output bytes and remain usable after Close.
+    std::map<std::string, Result<std::shared_ptr<const detail::OperationToolResultIndex>>> tool_results;
     std::set<std::string> cancelled;
     std::vector<std::weak_ptr<EventStream::Impl>> subscriptions;
     std::string active_operation;
     std::string active_turn_id; // worker-only; allocated by the durable V3 writer
     bool closing = false;
     bool closed = false;
+    std::size_t close_signals_inflight = 0;
     bool broken = false;
     std::optional<Error> close_error;
     std::shared_ptr<CloseErrors> close_errors;
@@ -373,18 +393,39 @@ struct Session::Impl final : rt::InteractionBroker {
         if (!options.resume_session_id.empty() && !ValidId(options.resume_session_id)) {
             return std::unexpected(Failure("sdk.resume.invalid_id"));
         }
-        registry = std::make_unique<lubancode::tools::ToolRegistry>();
+        struct InitCleanupScope {
+            bool previous = in_session_worker;
+            InitCleanupScope() { in_session_worker = true; }
+            ~InitCleanupScope() { in_session_worker = previous; }
+        } cleanup_scope;
+        // Keep the public backend alive across every initialization rollback.
+        // MCP launch can fail before registry_factory consumes prepared_registry;
+        // later identity/ledger/Agent failures can likewise release the candidate
+        // resources before the SDK-owned inline tool callback sources retire.
+        std::shared_ptr<Backend> initialization_backend(std::move(options.backend));
+        struct SourceScope {
+            SessionOptions& options;
+            ~SourceScope() {
+                // Other initialization locals retire first, under the same TLS
+                // lifecycle guard. Clear the actual sources before the backend
+                // anchor declared above, including std::function SBO copies.
+                options.custom_tools.clear();
+                options.extensions.clear();
+            }
+        } source_scope{options};
+        auto prepared_registry = std::make_unique<lubancode::tools::ToolRegistry>();
         for (const auto& name : options.builtin_tools) {
             auto tool = rt::assembly::CreateLocalTool(name);
-            if (!tool || registry->Find(name)) return std::unexpected(Failure("sdk.tool.unsupported_or_duplicate", name));
-            registry->Register(detail::BindLocalTool(std::move(tool), options.cwd));
+            if (!tool || prepared_registry->Find(name)) return std::unexpected(Failure("sdk.tool.unsupported_or_duplicate", name));
+            prepared_registry->Register(detail::BindLocalTool(std::move(tool), options.cwd));
         }
         for (auto& tool : options.custom_tools) {
-            if (registry->Find(tool.name)) return std::unexpected(Failure("sdk.tool.duplicate", tool.name));
+            if (prepared_registry->Find(tool.name)) return std::unexpected(Failure("sdk.tool.duplicate", tool.name));
             auto adapted = detail::AdaptTool(std::move(tool), options.cwd);
             if (!adapted) return std::unexpected(adapted.error());
-            registry->Register(std::move(*adapted));
+            prepared_registry->Register(std::move(*adapted));
         }
+        rt::assembly::SessionResourcesRequest resource_request;
         std::set<std::string> server_names;
         for (const auto& spec : options.mcp_servers) {
             if (!ValidId(spec.name) || !server_names.insert(spec.name).second || spec.command.empty() ||
@@ -392,28 +433,43 @@ struct Session::Impl final : rt::InteractionBroker {
                 spec.tools.empty() || spec.startup_timeout_ms <= 0 || spec.call_timeout_ms <= 0) {
                 return std::unexpected(Failure("sdk.mcp.invalid_spec", spec.name));
             }
-            rt::assembly::McpLaunchRequest launch{spec.name, spec.command, spec.arguments, spec.environment,
-                                                lubancode::platform::EnvMode::Replace, options.cwd};
-            rt::assembly::McpStartupOptions startup{spec.startup_timeout_ms, spec.call_timeout_ms, &interrupt};
-            auto started = rt::assembly::StartMcpServer(launch, startup);
-            if (!started) return std::unexpected(Failure("sdk.mcp.start_failed", started.error().error));
-            mcp.push_back(std::move(*started));
-            auto& owner = mcp.back();
-            for (const auto& name : spec.tools) {
-                auto found = std::find_if(owner.tools.begin(), owner.tools.end(), [&](const auto& info) { return info.name == name; });
-                if (found == owner.tools.end()) return std::unexpected(Failure("sdk.mcp.tool_missing", name));
-                auto tool = std::make_unique<lubancode::mcp::McpTool>(*owner.client, spec.name, *found);
-                if (registry->Find(tool->name())) return std::unexpected(Failure("sdk.tool.duplicate", tool->name()));
-                lubancode::tools::ToolRegistration registration;
-                registration.source_kind = lubancode::tools::ToolSourceKind::Mcp;
-                registration.source_instance = spec.name;
-                registration.tool = std::move(tool);
-                registry->Register(std::move(registration));
-            }
+            resource_request.mcp_servers.push_back({
+                {spec.name, spec.command, spec.arguments, spec.environment,
+                 lubancode::platform::EnvMode::Replace, options.cwd},
+                {spec.startup_timeout_ms, spec.call_timeout_ms, &interrupt}, true});
         }
+        resource_request.registry_factory = [&](std::span<const rt::assembly::McpServerRuntime> servers)
+            -> rt::assembly::SessionRegistryResult {
+            // Move the candidate table into this callback before it borrows a
+            // Client. Failure/exception destroys these tools before factory rollback.
+            auto registry = std::move(prepared_registry);
+            for (std::size_t i = 0; i < servers.size(); ++i) {
+                const auto& owner = servers[i];
+                const auto& spec = options.mcp_servers[i]; // all SDK servers are required
+                for (const auto& name : spec.tools) {
+                    auto found = std::find_if(owner.tools.begin(), owner.tools.end(),
+                        [&](const auto& info) { return info.name == name; });
+                    if (found == owner.tools.end()) {
+                        return std::unexpected(rt::assembly::SessionResourceFailure{
+                            rt::assembly::SessionResourceStage::Registry, "sdk.mcp.tool_missing", name, {}, {}});
+                    }
+                    auto tool = std::make_unique<lubancode::mcp::McpTool>(*owner.client, spec.name, *found);
+                    if (registry->Find(tool->name())) {
+                        return std::unexpected(rt::assembly::SessionResourceFailure{
+                            rt::assembly::SessionResourceStage::Registry, "sdk.tool.duplicate", tool->name(), {}, {}});
+                    }
+                    lubancode::tools::ToolRegistration registration;
+                    registration.source_kind = lubancode::tools::ToolSourceKind::Mcp;
+                    registration.source_instance = spec.name;
+                    registration.tool = std::move(tool);
+                    registry->Register(std::move(registration));
+                }
+            }
+            return registry;
+        };
         std::string wire = "sdk_custom";
-        if (options.backend) backend = detail::AdaptBackend(std::move(options.backend));
-        else {
+        std::optional<lubancode::config::Config> backend_config;
+        if (!initialization_backend) {
             const auto& source = *options.connection;
             if (source.base_url.empty() || source.connect_timeout_ms <= 0 || source.idle_timeout_seconds <= 0 || source.request_timeout_seconds <= 0) {
                 return std::unexpected(Failure("sdk.connection.invalid"));
@@ -430,7 +486,22 @@ struct Session::Impl final : rt::InteractionBroker {
             config.connect_timeout_ms = source.connect_timeout_ms;
             config.stream_idle_timeout_secs = source.idle_timeout_seconds;
             config.request_hard_timeout_secs = source.request_timeout_seconds;
-            backend = rt::assembly::BuildBackend(config);
+            backend_config = std::move(config);
+        }
+        resource_request.backend_factory = [&]() -> std::unique_ptr<api::Backend> {
+            if (initialization_backend) return detail::AdaptBackend(initialization_backend);
+            return rt::assembly::BuildBackend(*backend_config);
+        };
+        auto assembled = rt::assembly::BuildSessionResources(std::move(resource_request));
+        if (!assembled) {
+            const auto& error = assembled.error();
+            if (error.stage == rt::assembly::SessionResourceStage::Mcp)
+                return std::unexpected(Failure("sdk.mcp.start_failed", error.message));
+            if (error.code == "assembly.mcp.invalid_spec")
+                return std::unexpected(Failure("sdk.mcp.invalid_spec", error.component));
+            if (error.stage == rt::assembly::SessionResourceStage::Registry)
+                return std::unexpected(Failure(error.code, error.message));
+            return std::unexpected(Failure("sdk.session.open_failed", error.message));
         }
         auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
         if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
@@ -445,26 +516,65 @@ struct Session::Impl final : rt::InteractionBroker {
         launch.resume_at_launch = !options.resume_session_id.empty();
         launch.require_v3_resume = launch.resume_at_launch;
         launch.resume_source_session_id = options.resume_session_id;
-        service = std::make_unique<rt::SessionService>(std::move(launch));
+        service = std::make_shared<rt::SessionService>(std::move(launch));
         if (!service->runtime()) return std::unexpected(Failure("sdk.session.open_failed", service->launch_error()));
         session_id = service->trajectory()->session_id();
         session_dir = service->trajectory()->session_dir();
         if (!options.resume_session_id.empty() && session_id != options.resume_session_id) {
             return std::unexpected(Failure("sdk.resume.identity_changed"));
         }
+        auto frozen_policy = detail::FreezeResultPolicy(session_dir, session_id, options.result_policy,
+            !options.resume_session_id.empty());
+        if (!frozen_policy) return std::unexpected(frozen_policy.error());
+        result_policy = std::move(*frozen_policy);
         if (!options.resume_session_id.empty() && options.system_prompt.empty()) {
             auto saved = lubancode::trajectory::v3::ReadV3Ledger(service->trajectory()->v3_main_writer()->path());
             if (!saved) return std::unexpected(Failure("sdk.resume.context_unavailable", saved.error()));
             options.system_prompt = lubancode::trajectory::v3::ProjectModelContext(*saved).system_content;
+        }
+        const auto plan_path = session_dir / "sdk-extension-plan.json";
+        std::optional<std::string> expected_plan;
+        if (!options.resume_session_id.empty()) {
+            std::error_code inspect_error;
+            const bool exists = fs::exists(plan_path, inspect_error);
+            if (inspect_error) return std::unexpected(Failure("sdk.extension.resume_mismatch", "cannot inspect saved extension plan"));
+            if (exists) {
+                std::ifstream saved(plan_path, std::ios::binary);
+                if (!saved) return std::unexpected(Failure("sdk.extension.resume_mismatch", "cannot read saved extension plan"));
+                auto json = Json::parse(saved, nullptr, false);
+                if (!json.is_object() || !json.contains("schemaVersion") || json["schemaVersion"] != 1 ||
+                    !json.contains("extensions") || !json["extensions"].is_array()) {
+                    return std::unexpected(Failure("sdk.extension.resume_mismatch", "invalid saved extension plan"));
+                }
+                expected_plan = json.dump();
+            } else if (!options.extensions.empty()) {
+                // Legacy sessions did not declare an extension identity. Never
+                // silently attach new executable callbacks to that old history.
+                return std::unexpected(Failure("sdk.extension.resume_mismatch", "legacy session has no extension plan"));
+            }
+        }
+        auto module = detail::SessionExtensions::Build(options.extensions, {session_id, options.cwd}, expected_plan);
+        if (!module) return std::unexpected(module.error());
+        auto* module_ptr = module->get();
+        extension_plan_json = module_ptr->DescribePlan();
+        (*assembled)->Attach(std::move(*module));
+        if (options.resume_session_id.empty()) {
+            const auto written = lubancode::platform::AtomicWriteFile(plan_path, extension_plan_json,
+                lubancode::platform::WriteDurability::ProcessCrashDurability);
+            if (!written) return std::unexpected(Failure("sdk.extension.plan_write_failed", written.error().message));
         }
         lubancode::agent::AgentProfile profile;
         profile.request.model = options.model;
         profile.system_prompt = options.system_prompt;
         profile.runtime.max_steps_per_turn = options.max_steps_per_turn;
         profile.runtime.context_window_tokens = options.context_window_tokens;
-        agent = std::make_unique<lubancode::agent::Agent>(*backend, *registry, std::move(profile));
-        if (!options.resume_session_id.empty()) agent->RestoreSessionHistory(service->trajectory()->LaunchResumeHistory());
-        return LoadOperations();
+        std::optional<std::vector<api::Message>> restored_history;
+        if (!options.resume_session_id.empty()) restored_history = service->trajectory()->LaunchResumeHistory();
+        service->InitializeExecution(std::move(*assembled), std::move(profile), std::move(restored_history));
+        auto loaded = LoadOperations();
+        if (!loaded) return loaded;
+        extensions = module_ptr;
+        return {};
     }
 
     void Start() {
@@ -521,7 +631,55 @@ struct Session::Impl final : rt::InteractionBroker {
                 return std::unexpected(Failure("sdk.resume.input_unavailable", id));
             }
         }
+        // No worker has started. Read the verified ledger once for all restored
+        // terminal operations; a failed read is retained as a query error.
+        const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(
+            session_dir / (session_id + ".jsonl"));
+        std::map<std::string, std::size_t> turn_owners;
+        for (const auto& [id, operation] : operations) {
+            (void)id;
+            if (Terminal(operation.state) && !operation.turn_id.empty()) ++turn_owners[operation.turn_id];
+        }
+        for (const auto& [id, operation] : operations) {
+            if (!Terminal(operation.state)) continue;
+            if (!operation.turn_id.empty() && turn_owners[operation.turn_id] != 1) {
+                tool_results.insert_or_assign(id, std::unexpected(Failure("sdk.result.index_invalid", "turn belongs to multiple operations")));
+            } else if (!ledger) {
+                tool_results.insert_or_assign(id, std::unexpected(Failure("sdk.result.index_unavailable", "cannot read verified result ledger")));
+            } else {
+                CacheToolResults(operation, true, &*ledger);
+            }
+        }
         return {};
+    }
+
+    void CacheToolResults(const Operation& operation, bool ledger_ok,
+        const lubancode::trajectory::v3::V3Ledger* restored = nullptr) {
+        Result<std::shared_ptr<const detail::OperationToolResultIndex>> indexed =
+            std::unexpected(Failure("sdk.result.index_unavailable", "operation has no verified result index"));
+        if (ledger_ok && operation.turn_id.empty() && operation.state == OperationState::Cancelled) {
+            // Cancelled before dispatching a V3 turn: no tool could have run.
+            indexed = std::make_shared<const detail::OperationToolResultIndex>();
+        } else if (ledger_ok && !operation.turn_id.empty()) {
+            const auto capture = [&](const auto& ledger) {
+                auto value = detail::IndexToolResults(ledger, session_id, operation.operation_id, operation.turn_id);
+                if (!value) indexed = std::unexpected(value.error());
+                else indexed = std::make_shared<const detail::OperationToolResultIndex>(std::move(*value));
+            };
+            if (restored) capture(*restored);
+            else {
+                const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(session_dir / (session_id + ".jsonl"));
+                if (ledger) capture(*ledger);
+            }
+        }
+        std::lock_guard lock(mutex);
+        if (!operation.turn_id.empty()) for (const auto& [id, other] : operations) {
+            if (id != operation.operation_id && other.turn_id == operation.turn_id) {
+                indexed = std::unexpected(Failure("sdk.result.index_invalid", "turn belongs to multiple operations"));
+                break;
+            }
+        }
+        tool_results.insert_or_assign(operation.operation_id, std::move(indexed));
     }
 
     Operation Complete(Operation operation, const std::vector<std::string>& refs, bool usage_reported, bool ledger_ok = true) {
@@ -552,6 +710,10 @@ struct Session::Impl final : rt::InteractionBroker {
             operation.error += " sdk.result.persistence_failed";
             operation.state = OperationState::Indeterminate;
         }
+        // EndTurn and scoped-binding teardown have drained every writer borrower.
+        // Freeze identities before making the terminal operation visible. Readers
+        // use this snapshot, so another turn may append V3 without a read race.
+        CacheToolResults(operation, ledger_ok && recorded);
         {
             std::lock_guard lock(mutex);
             operations[operation.operation_id] = operation;
@@ -591,10 +753,49 @@ struct Session::Impl final : rt::InteractionBroker {
             event.payload_json = source.to_json().dump();
             Emit(std::move(event));
         });
+        auto* dispatcher = extensions ? extensions->dispatcher() : nullptr;
+        auto* writer = service->trajectory()->v3_main_writer();
+        rt::BindMiddlewareSessionWriter(dispatcher, nullptr, writer);
+        if (extensions) extensions->SetOperationScope(input.operation_id);
+        const auto middleware_healthy = [dispatcher] {
+            if (!dispatcher) return true;
+            const auto* sink = dynamic_cast<rt::V3MiddlewareEventSink*>(dispatcher->middleware_sink());
+            return sink && sink->recent_errors().empty();
+        };
+        rt::MiddlewareHookContext hook_context;
+        hook_context.turn_id = operation.turn_id;
+        hook_context.origin = "human";
+        hook_context.purpose = "interactive";
+        hook_context.delivery_mode = "direct";
+        hook_context.cancel = &interrupt;
+        const auto pre = rt::RunPreUserMiddleware(dispatcher, input.text, hook_context);
+        if (pre.blocked || !middleware_healthy()) {
+            operation.state = interrupt.load() ? OperationState::Cancelled : OperationState::Failed;
+            operation.error = pre.blocked ? pre.block_code + ": " + pre.block_reason : "sdk.extension.trajectory_failed";
+            // A reserved identity is not a formal admitted turn. No user or
+            // TurnStarted event has been committed on a PreUser rejection.
+            operation.turn_id.clear();
+            active_turn_id.clear();
+            Complete(std::move(operation), {}, false, middleware_healthy());
+            return;
+        }
         events.Start(operation.turn_id);
         lubancode::agent::TurnWiring wiring;
         wiring.events = &events;
+        wiring.turn_id = operation.turn_id;
         wiring.tool_artifact_dir = lubancode::tools::PathToUtf8(session_dir / "artifacts" / "sha256");
+        if (rt::HasPreRequestMiddleware(dispatcher)) {
+            wiring.on_pre_request_hooks = [&, dispatcher](const std::string& step_id, const std::string& turn_id,
+                const Json& frozen_request, const rt::PreRequestBudget& budget) {
+                auto context = hook_context;
+                context.turn_id = turn_id;
+                context.step_id = step_id;
+                const auto stages = rt::RunPreRequestMiddleware(dispatcher, frozen_request, budget, context);
+                if (!middleware_healthy()) return std::string("sdk.extension.trajectory_failed");
+                if (!stages.dispatched || stages.decision == "allow") return std::string();
+                return "sdk.extension.request_denied[" + stages.decision + "]: " + stages.reason;
+            };
+        }
         wiring.on_permission_evaluate = [&](const std::string&, const std::string& name,
             lubancode::tools::ApprovalClass approval_class, const Json& arguments, const rt::ToolHookDecision& pre) {
             std::lock_guard lock(approval_mutex);
@@ -610,26 +811,67 @@ struct Session::Impl final : rt::InteractionBroker {
         auto bridge = service->trajectory()->NewTurnBridge({"", service->runtime()->wire_name(), "sdk", {}});
         if (!bridge) { operation.state = OperationState::Failed; operation.error = "sdk.trajectory.bridge_unavailable"; Complete(std::move(operation), {}, false); return; }
         rt::ToolTraceHub hub(service->runtime()->ids());
-        hub.AttachTrajectory(bridge.get());
-        hub.Install(*agent, wiring, session_id, operation.turn_id);
-        wiring.boundary_recorder = bridge.get();
+        auto& agent = service->execution()->agent();
+        rt::ScopedTurnBindings turn_bindings(agent);
+        turn_bindings.Bind(wiring, {.hub = &hub, .trajectory = bridge.get(),
+                                   .thread_id = session_id, .turn_id = operation.turn_id});
         api::Message message;
         message.role = api::Role::User;
-        message.content.push_back(api::TextBlock{input.text});
+        message.content.push_back(api::TextBlock{pre.prompt});
         bridge->BeginTurn(operation.turn_id, "external_user");
         bridge->RecordInput(message);
-        const auto history_before = agent->history().size();
-        auto outcome = agent->Run(std::move(message), wiring, &interrupt);
-        bridge->EndTurn(outcome.has_value(), outcome && outcome->cancelled, outcome ? "" : outcome.error());
-        hub.DetachTrajectory();
-        agent->SetWiring({}); // drop callbacks borrowing this turn's hub before it dies
-        operation.state = !outcome ? OperationState::Failed : outcome->cancelled ? OperationState::Cancelled : OperationState::Succeeded;
+        const auto history_before = agent.history().size();
+        std::expected<lubancode::agent::RunOutcome, std::string> outcome =
+            std::unexpected("sdk.extension.input_admission_failed");
+        bool context_healthy = true;
+        if (!dispatcher) {
+            // Zero registrations preserve the established host path byte for byte.
+            outcome = agent.Run(std::move(message), wiring, &interrupt);
+        } else if (bridge->recent_errors().empty()) {
+            try { agent.AppendAdmittedMessage(std::move(message)); }
+            catch (...) { context_healthy = false; }
+            const auto append_context = [&](const std::vector<std::string>& appends, const char* point) {
+                namespace v3 = lubancode::trajectory::v3;
+                for (const auto& text : appends) {
+                    const std::string body = "[" + std::string(point) + " 钩子附加上下文,非用户手敲]\n" + text;
+                    api::Message admitted;
+                    admitted.role = api::Role::User;
+                    admitted.content.push_back(api::TextBlock{body});
+                    v3::MessageDraft draft;
+                    draft.turn_id = operation.turn_id;
+                    draft.origin = v3::MessageOrigin::Hook;
+                    draft.display = v3::DisplayMode::Hidden;
+                    draft.message = Json{{"role", "user"}, {"content", body}};
+                    const auto stored = writer->AppendMessage(std::move(draft), v3::Durability::ProcessCrash);
+                    if (stored.status != v3::WriteReceipt::Status::Committed) return false;
+                    const auto accepted = writer->AdmitMessages({stored.id}, v3::Durability::ProcessCrash);
+                    if (accepted.status != v3::WriteReceipt::Status::Committed) return false;
+                    try { agent.AppendAdmittedMessage(std::move(admitted)); }
+                    catch (...) { return false; }
+                }
+                return true;
+            };
+            if (context_healthy) context_healthy = append_context(pre.additional_context, "PreUser");
+            if (context_healthy) {
+                const auto post = rt::RunPostUserMiddleware(dispatcher, pre.prompt, hook_context);
+                if (post.blocked) outcome = std::unexpected(post.block_code + ": " + post.block_reason);
+                else if (middleware_healthy()) {
+                    context_healthy = append_context(post.context_appends, "PostUser");
+                    if (context_healthy) outcome = agent.RunAdmittedHistory(wiring, &interrupt);
+                }
+            }
+        }
+        const bool turn_cancelled = (outcome && outcome->cancelled) || (dispatcher && !outcome && interrupt.load());
+        bridge->EndTurn(outcome.has_value(), turn_cancelled, outcome ? "" : outcome.error());
+        turn_bindings.Reset();
+        operation.state = turn_cancelled ? OperationState::Cancelled :
+                          !outcome ? OperationState::Failed : OperationState::Succeeded;
         if (!outcome) operation.error = outcome.error();
         else if (outcome->hit_step_limit || outcome->hit_time_budget || outcome->hit_token_budget || outcome->hit_turn_limit) {
             operation.state = OperationState::Failed;
             operation.error = "sdk.turn.limit_reached";
         }
-        const auto& history = agent->history();
+        const auto& history = agent.history();
         if (history.size() > history_before && history.back().role == api::Role::Assistant) {
             for (const auto& block : history.back().content) if (auto* text = std::get_if<api::TextBlock>(&block)) operation.final_text += text->text;
         }
@@ -638,7 +880,8 @@ struct Session::Impl final : rt::InteractionBroker {
             refs.push_back(bridge->last_committed_assistant_message_id());
         }
         // Durable operation final precedes its public completion notification.
-        operation = Complete(operation, refs, usage_reported, bridge->recent_errors().empty());
+        operation = Complete(operation, refs, usage_reported,
+                             bridge->recent_errors().empty() && context_healthy && middleware_healthy());
         events.Finish(operation.state == OperationState::Succeeded ? rt::Outcome::Succeeded :
                       operation.state == OperationState::Cancelled ? rt::Outcome::Cancelled : rt::Outcome::Failed,
                       operation.error);
@@ -666,11 +909,9 @@ struct Session::Impl final : rt::InteractionBroker {
             }
             try { Run(pop.input, skip); }
             catch (const std::exception& error) {
-                agent->SetWiring({});
                 Operation failed{pop.input.operation_id, {}, OperationState::Failed, {}, error.what(), false};
                 Complete(std::move(failed), {}, false);
             } catch (...) {
-                agent->SetWiring({});
                 Operation failed{pop.input.operation_id, {}, OperationState::Failed, {}, "sdk.turn.exception", false};
                 Complete(std::move(failed), {}, false);
             }
@@ -694,6 +935,29 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         CancelApprovals();
     }
+    void RequestExecutionShutdown() {
+        std::shared_ptr<rt::SessionService> service_to_stop;
+        struct SignalScope {
+            Impl& owner;
+            std::shared_ptr<rt::SessionService>& service;
+            ~SignalScope() {
+                if (service == nullptr) return;
+                service.reset();
+                std::lock_guard lock(owner.mutex);
+                --owner.close_signals_inflight;
+                owner.cv.notify_all();
+            }
+        } signal_scope{*this, service_to_stop};
+        {
+            std::lock_guard lock(mutex);
+            if (closed) return;
+            service_to_stop = service;
+            if (service_to_stop != nullptr) ++close_signals_inflight;
+        }
+        if (service_to_stop != nullptr) {
+            service_to_stop->RequestExecutionShutdown();
+        }
+    }
     Result<void> Close() {
         if (in_session_worker) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
         std::lock_guard close_lock(close_mutex);
@@ -702,26 +966,48 @@ struct Session::Impl final : rt::InteractionBroker {
             if (closed) return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
         }
         RequestClose();
+        RequestExecutionShutdown();
         if (worker.joinable()) worker.join();
         if (service && service->runtime()) {
             const auto outcome = service->Close("sdk_close");
             if (!outcome.error_code.empty()) close_error = Failure(outcome.error_code, outcome.message);
         }
         if (close_error && close_errors) close_errors->Remember(*close_error);
-        agent.reset();
-        registry.reset();
-        mcp.clear();
-        backend.reset();
         // SessionService destruction also releases operations.jsonl. Keep query
         // projections, not the live writer, after Close (Windows delete/rename).
-        service.reset();
+        std::shared_ptr<rt::SessionService> closed_service;
         std::vector<std::shared_ptr<EventStream::Impl>> streams;
         {
-            std::lock_guard lock(mutex);
+            std::unique_lock lock(mutex);
             closed = true;
+            // A concurrent signal cannot keep a writer alive after Close
+            // returns. Close admission first, then wait for its snapshot back.
+            cv.wait(lock, [&] { return close_signals_inflight == 0; });
+            closed_service = std::move(service);
+            extensions = nullptr;
             for (auto& weak : subscriptions) if (auto stream = weak.lock()) streams.push_back(std::move(stream));
             subscriptions.clear();
             cv.notify_all();
+        }
+        {
+            // Even a moved std::function can retain an inline callable in the
+            // SDK-owned SessionOptions. Clear those sources before destroying
+            // the Agent/registry/backend they may borrow. Nonblocking queries
+            // may reenter here; blocking lifecycle calls must not wait on this
+            // Close's serialization mutex from a capture destructor.
+            struct CleanupScope {
+                bool previous = in_session_worker;
+                CleanupScope() { in_session_worker = true; }
+                ~CleanupScope() { in_session_worker = previous; }
+            } cleanup_scope;
+            options.custom_tools.clear();
+            options.extensions.clear();
+            // Agent -> registry/MCP/backend -> ledger, outside the API mutex.
+            closed_service.reset();
+            // Preflight/control-block failure may leave the original public
+            // backend in options. Retire it under the same lifecycle guard,
+            // after every tool/Agent, rather than during Impl member teardown.
+            options.backend.reset();
         }
         for (auto& stream : streams) stream->Close();
         return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
@@ -732,6 +1018,10 @@ Session::Session(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
 Session::~Session() { (void)impl_->Close(); }
 std::string Session::id() const { return impl_->session_id; }
 Result<void> Session::Close() { return impl_->Close(); }
+Result<std::string> Session::DescribeExtensions() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->extension_plan_json;
+}
 Result<Receipt> Session::Submit(std::string key, std::string text) {
     if (key.empty()) return std::unexpected(Failure("sdk.operation.key_required"));
     if (!lubancode::platform::IsValidUtf8(key) || !lubancode::platform::IsValidUtf8(text)) {
@@ -794,6 +1084,46 @@ Result<Operation> Session::WaitResult(std::string id, std::chrono::milliseconds 
     if (!impl_->cv.wait_for(lock, timeout, [&] { return Terminal(it->second.state); })) return std::unexpected(Failure("sdk.wait.timeout"));
     return it->second;
 }
+Result<std::vector<results::v1::ToolResultSummary>> Session::ListToolResults(std::string id) const {
+    std::shared_ptr<const detail::OperationToolResultIndex> index;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto operation = impl_->operations.find(id);
+        if (operation == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
+        if (!Terminal(operation->second.state)) return std::unexpected(Failure("sdk.result.not_ready"));
+        const auto saved = impl_->tool_results.find(id);
+        if (saved == impl_->tool_results.end()) return std::unexpected(Failure("sdk.result.index_unavailable"));
+        if (!saved->second) return std::unexpected(saved->second.error());
+        index = *saved->second;
+    }
+    std::vector<results::v1::ToolResultSummary> summaries;
+    summaries.reserve(index->entries.size());
+    for (const auto& entry : index->entries) summaries.push_back(entry.summary);
+    return summaries;
+}
+Result<results::v1::SavedSnapshot> Session::ReadToolResult(
+    results::v1::ToolResultIdentity identity, results::v1::ToolResultReadOptions options) const {
+    std::shared_ptr<const detail::OperationToolResultIndex> index;
+    results::v1::SessionResultPolicy policy;
+    fs::path directory;
+    {
+        std::lock_guard lock(impl_->mutex);
+        if (identity.session_id != impl_->session_id) return std::unexpected(Failure("sdk.result.identity_mismatch"));
+        const auto operation = impl_->operations.find(identity.operation_id);
+        if (operation == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
+        if (!Terminal(operation->second.state)) return std::unexpected(Failure("sdk.result.not_ready"));
+        const auto saved = impl_->tool_results.find(identity.operation_id);
+        if (saved == impl_->tool_results.end()) return std::unexpected(Failure("sdk.result.index_unavailable"));
+        if (!saved->second) return std::unexpected(saved->second.error());
+        index = *saved->second;
+        policy = impl_->result_policy;
+        directory = impl_->session_dir;
+    }
+    const auto entry = std::find_if(index->entries.begin(), index->entries.end(),
+        [&](const auto& result) { return result.summary.identity == identity; });
+    if (entry == index->entries.end()) return std::unexpected(Failure("sdk.result.identity_mismatch"));
+    return detail::ReadIndexedToolResult(directory, *entry, policy, options);
+}
 
 struct Runtime::Impl {
     RuntimeOptions options;
@@ -819,6 +1149,7 @@ Result<std::unique_ptr<Runtime>> Runtime::Create(RuntimeOptions options) {
     } catch (const std::exception& error) { return std::unexpected(Failure("sdk.runtime.create_failed", error.what())); }
 }
 Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
+    if (in_session_worker) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
     std::lock_guard lock(impl_->mutex);
     if (impl_->closed) return std::unexpected(Failure("sdk.runtime.closed"));
     try {
@@ -849,6 +1180,9 @@ Result<void> Runtime::Shutdown() {
     }
     // Stop admission and signal every worker before waiting for any one worker.
     for (const auto& session : sessions) session->RequestClose();
+    // Approval futures across all sessions must be awake before acquiring any
+    // coordinator's publication/jobs mutex to signal its background workers.
+    for (const auto& session : sessions) session->RequestExecutionShutdown();
     for (const auto& session : sessions) (void)session->Close();
     // Keep the registry until every join finishes. A concurrent Shutdown must
     // take the same live snapshot, rather than return while workers still run.

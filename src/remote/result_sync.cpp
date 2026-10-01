@@ -4,6 +4,8 @@
 #include <utility>
 
 #include "platform/text_encoding.hpp"
+#include "platform/sha256.hpp"
+#include <set>
 #include "privacy/secret_scan.hpp"
 #include "runtime/secret_resolver.hpp"
 
@@ -11,7 +13,7 @@ namespace lubancode::remote {
 namespace {
 
 bool ValidIdentity(std::string_view value) {
-    if (value.empty() || value.size() > 128) {
+    if (value.empty() || value.size() > 200) {
         return false;
     }
     return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
@@ -68,13 +70,15 @@ std::string_view ResultSyncErrorCode(ResultSyncError error) {
         case ResultSyncError::PolicyRestricted: return "result_sync_policy_restricted";
         case ResultSyncError::PolicyChanged: return "result_sync_policy_changed";
         case ResultSyncError::RedactionChanged: return "result_sync_redaction_changed";
+        case ResultSyncError::SessionMismatch: return "result_sync_session_mismatch";
+        case ResultSyncError::InvalidFrozenRecord: return "result_sync_invalid_frozen_record";
     }
     return "result_sync_invalid_error";
 }
 
-NodeResultSyncPolicy::NodeResultSyncPolicy(ResultSyncMode mode, std::size_t preview_max_bytes,
+NodeResultSyncPolicy::NodeResultSyncPolicy(bool allow_full, std::size_t preview_max_bytes,
                                          std::string version)
-    : mode_(mode), preview_max_bytes_(preview_max_bytes), version_(std::move(version)) {}
+    : allow_full_(allow_full), preview_max_bytes_(preview_max_bytes), version_(std::move(version)) {}
 
 std::expected<NodeResultSyncPolicy, ResultSyncError> ParseNodeResultSyncPolicy(
     const nlohmann::json& node_config, std::string policy_version) {
@@ -82,24 +86,17 @@ std::expected<NodeResultSyncPolicy, ResultSyncError> ParseNodeResultSyncPolicy(
         return std::unexpected(ResultSyncError::InvalidConfig);
     }
     for (auto it = node_config.begin(); it != node_config.end(); ++it) {
-        if (it.key() != "tool_result_sync" && it.key() != "preview_max_bytes") {
+        if (it.key() != "allow_full_tool_results" && it.key() != "preview_max_bytes") {
             return std::unexpected(ResultSyncError::InvalidConfig);
         }
     }
     if (!ValidIdentity(policy_version)) {
         return std::unexpected(ResultSyncError::InvalidIdentity);
     }
-    ResultSyncMode mode = ResultSyncMode::Preview;
-    if (const auto it = node_config.find("tool_result_sync"); it != node_config.end()) {
-        if (!it->is_string()) {
-            return std::unexpected(ResultSyncError::InvalidMode);
-        }
-        const auto& value = it->get_ref<const std::string&>();
-        if (value == "full") {
-            mode = ResultSyncMode::Full;
-        } else if (value != "preview") {
-            return std::unexpected(ResultSyncError::InvalidMode);
-        }
+    bool allow_full = false;
+    if (const auto it = node_config.find("allow_full_tool_results"); it != node_config.end()) {
+        if (!it->is_boolean()) return std::unexpected(ResultSyncError::InvalidConfig);
+        allow_full = it->get<bool>();
     }
     std::size_t preview_bytes = kDefaultResultPreviewBytes;
     if (const auto it = node_config.find("preview_max_bytes"); it != node_config.end()) {
@@ -108,7 +105,7 @@ std::expected<NodeResultSyncPolicy, ResultSyncError> ParseNodeResultSyncPolicy(
         }
         preview_bytes = it->get<std::size_t>();
     }
-    return NodeResultSyncPolicy(mode, preview_bytes, std::move(policy_version));
+    return NodeResultSyncPolicy(allow_full, preview_bytes, std::move(policy_version));
 }
 
 FrozenToolResult::FrozenToolResult(nlohmann::json payload, ResultSyncMode mode)
@@ -116,13 +113,30 @@ FrozenToolResult::FrozenToolResult(nlohmann::json payload, ResultSyncMode mode)
 
 std::expected<nlohmann::json, ResultSyncError> FrozenToolResult::ForTransmission(
     const NodeResultSyncPolicy& current_policy,
+    const SessionResultSyncPolicy& current_session,
     const runtime::SecretRedactor& current_secrets) const {
-    if (mode_ == ResultSyncMode::Full && current_policy.mode() != ResultSyncMode::Full) {
+    if (mode_ == ResultSyncMode::Full &&
+        (!current_policy.allow_full_tool_results() || current_session.mode != ResultSyncMode::Full)) {
         return std::unexpected(ResultSyncError::FullSyncDisabled);
     }
-    if (payload_["policyVersion"] != current_policy.version()) {
+    if (current_session.session_id != payload_["sessionId"].get_ref<const std::string&>())
+        return std::unexpected(ResultSyncError::SessionMismatch);
+    if (current_session.version == 0 ||
+        (current_session.mode != ResultSyncMode::Preview && current_session.mode != ResultSyncMode::Full))
+        return std::unexpected(ResultSyncError::InvalidConfig);
+    if (payload_["sessionPolicyVersion"] != current_session.version ||
+        mode_ != current_session.mode)
+        return std::unexpected(ResultSyncError::PolicyChanged);
+    if (payload_["policyVersion"].get_ref<const std::string&>() != current_policy.version()) {
         return std::unexpected(ResultSyncError::PolicyChanged);
     }
+    if (payload_["previewMaxBytes"] != current_policy.preview_max_bytes()) {
+        if (current_policy.preview_max_bytes() < payload_["previewMaxBytes"].get<std::size_t>())
+            return std::unexpected(ResultSyncError::PolicyRestricted);
+        return std::unexpected(ResultSyncError::PolicyChanged);
+    }
+    if (payload_["nodeAllowsFull"] != current_policy.allow_full_tool_results())
+        return std::unexpected(ResultSyncError::PolicyChanged);
     if (payload_.contains("text")) {
         const auto& text = payload_["text"].get_ref<const std::string&>();
         if (mode_ == ResultSyncMode::Preview && text.size() > current_policy.preview_max_bytes()) {
@@ -134,19 +148,30 @@ std::expected<nlohmann::json, ResultSyncError> FrozenToolResult::ForTransmission
             return std::unexpected(ResultSyncError::RedactionChanged);
         }
     }
-    for (const char* key : {"sessionId", "toolCallId", "resultId", "policyVersion"}) {
+    for (const char* key : {"sessionId", "toolCallId", "resultId", "operationId", "turnId", "persistedEventId", "policyVersion"}) {
         if (SensitiveIdentity(payload_[key].get_ref<const std::string&>(), current_secrets)) {
             return std::unexpected(ResultSyncError::SensitiveIdentity);
         }
     }
+    if (payload_.dump().size() > kMaxFullResultBytes)
+        return std::unexpected(ResultSyncError::ResultTooLarge);
     return payload_;
 }
 
 std::expected<FrozenToolResult, ResultSyncError> ProjectSavedToolResult(
-    const NodeResultSyncPolicy& policy, const ResultSyncIdentity& identity,
+    const NodeResultSyncPolicy& policy, const SessionResultSyncPolicy& session,
+    const ResultSyncIdentity& identity,
     const SavedToolResult& saved_result, const runtime::SecretRedactor& known_secrets) {
+    if (session.session_id != identity.session_id)
+        return std::unexpected(ResultSyncError::SessionMismatch);
+    if (session.version == 0 ||
+        (session.mode != ResultSyncMode::Preview && session.mode != ResultSyncMode::Full))
+        return std::unexpected(ResultSyncError::InvalidConfig);
+    if (session.mode == ResultSyncMode::Full && !policy.allow_full_tool_results())
+        return std::unexpected(ResultSyncError::FullSyncDisabled);
     for (const std::string* value : {&identity.session_id, &identity.tool_call_id,
-                                    &identity.result_id, &policy.version()}) {
+                                    &identity.result_id, &identity.operation_id, &identity.turn_id,
+                                    &identity.persisted_event_id, &policy.version()}) {
         if (!ValidIdentity(*value)) {
             return std::unexpected(ResultSyncError::InvalidIdentity);
         }
@@ -161,25 +186,29 @@ std::expected<FrozenToolResult, ResultSyncError> ProjectSavedToolResult(
         saved_result.kind != ResultContentKind::Binary) {
         return std::unexpected(ResultSyncError::InvalidSource);
     }
-    if (policy.mode() == ResultSyncMode::Full && !saved_result.capture_complete) {
+    if (session.mode == ResultSyncMode::Full && !saved_result.capture_complete) {
         return std::unexpected(ResultSyncError::ResultIncomplete);
     }
     nlohmann::json payload{
         {"sessionId", identity.session_id}, {"toolCallId", identity.tool_call_id},
         {"resultId", identity.result_id}, {"policyVersion", policy.version()},
-        {"mode", policy.mode() == ResultSyncMode::Full ? "full" : "preview"},
+        {"schemaVersion", 2}, {"operationId", identity.operation_id}, {"turnId", identity.turn_id},
+        {"persistedEventId", identity.persisted_event_id},
+        {"sessionPolicyVersion", session.version}, {"nodeAllowsFull", policy.allow_full_tool_results()},
+        {"previewMaxBytes", policy.preview_max_bytes()},
+        {"mode", session.mode == ResultSyncMode::Full ? "full" : "preview"},
         {"contentKind", saved_result.kind == ResultContentKind::Text ? "text" : "binary"},
         {"captureComplete", saved_result.capture_complete},
         {"originalBytes", saved_result.original_bytes.has_value()
                               ? nlohmann::json(*saved_result.original_bytes) : nlohmann::json(nullptr)},
     };
     if (saved_result.kind == ResultContentKind::Binary) {
-        if (policy.mode() == ResultSyncMode::Full) {
+        if (session.mode == ResultSyncMode::Full) {
             return std::unexpected(ResultSyncError::ResultNotText);
         }
         payload["status"] = "metadata_only";
         payload["truncated"] = true;
-        return FrozenToolResult(std::move(payload), policy.mode());
+        return FrozenToolResult(std::move(payload), session.mode);
     }
     if (saved_result.text.size() > kMaxResultInputBytes) {
         return std::unexpected(ResultSyncError::ResultTooLarge);
@@ -194,7 +223,7 @@ std::expected<FrozenToolResult, ResultSyncError> ProjectSavedToolResult(
         // 值识别的扫描都可能失手。preview 不发布这段正文；full 已在前面拒绝。
         payload["status"] = "capture_incomplete";
         payload["truncated"] = true;
-        return FrozenToolResult(std::move(payload), policy.mode());
+        return FrozenToolResult(std::move(payload), session.mode);
     }
     const std::string raw_text(saved_result.text);
     if (!platform::IsValidUtf8(raw_text)) {
@@ -209,20 +238,82 @@ std::expected<FrozenToolResult, ResultSyncError> ProjectSavedToolResult(
     if (!platform::IsValidUtf8(redacted)) {
         return std::unexpected(ResultSyncError::InvalidUtf8);
     }
-    if (policy.mode() == ResultSyncMode::Full && redacted.size() > kMaxFullResultBytes) {
+    if (session.mode == ResultSyncMode::Full && redacted.size() > kMaxFullResultBytes) {
         return std::unexpected(ResultSyncError::ResultTooLarge);
     }
-    const bool preview_cut = policy.mode() == ResultSyncMode::Preview &&
+    const bool preview_cut = session.mode == ResultSyncMode::Preview &&
                              redacted.size() > policy.preview_max_bytes();
     payload["status"] = "ready";
-    payload["text"] = policy.mode() == ResultSyncMode::Preview
+    payload["text"] = session.mode == ResultSyncMode::Preview
                           ? platform::TruncateUtf8Prefix(redacted, policy.preview_max_bytes()) : redacted;
     payload["truncated"] = preview_cut || !saved_result.capture_complete;
     payload["redacted"] = redacted != raw_text;
     if (saved_result.capture_complete && !saved_result.original_bytes.has_value()) {
         payload["originalBytes"] = raw_text.size();
     }
-    return FrozenToolResult(std::move(payload), policy.mode());
+    return FrozenToolResult(std::move(payload), session.mode);
+}
+
+std::expected<std::string, ResultSyncError> FrozenToolResult::SerializeForStorage() const {
+    nlohmann::json record{{"schema", "lubancore.result-projection.native.v2"},
+                          {"payload", payload_}, {"sha256", platform::Sha256Hex(payload_.dump())}};
+    const auto bytes = record.dump();
+    if (bytes.size() > kMaxFullResultBytes) return std::unexpected(ResultSyncError::ResultTooLarge);
+    return bytes;
+}
+
+std::expected<FrozenToolResult, ResultSyncError> FrozenToolResult::RestoreSavedProjection(
+    std::string_view storage, const NodeResultSyncPolicy& node,
+    const SessionResultSyncPolicy& session, const ResultSyncIdentity& expected_identity,
+    const runtime::SecretRedactor& known_secrets) {
+    if (storage.size() > kMaxFullResultBytes) return std::unexpected(ResultSyncError::ResultTooLarge);
+    const auto bad = [] { return std::unexpected(ResultSyncError::InvalidFrozenRecord); };
+    const auto record = nlohmann::json::parse(storage, nullptr, false);
+    if (!record.is_object() || record.size() != 3 ||
+        !record.contains("schema") || !record["schema"].is_string() ||
+        record["schema"].get_ref<const std::string&>() != "lubancore.result-projection.native.v2" ||
+        !record.contains("payload") || !record.contains("sha256") || !record["sha256"].is_string()) return bad();
+    const auto& p = record["payload"];
+    if (!p.is_object() || platform::Sha256Hex(p.dump()) != record["sha256"].get_ref<const std::string&>()) return bad();
+    std::set<std::string> keys;
+    for (auto it = p.begin(); it != p.end(); ++it) keys.insert(it.key());
+    std::set<std::string> expected{"schemaVersion", "sessionId", "operationId", "turnId", "toolCallId",
+        "persistedEventId", "resultId", "policyVersion", "sessionPolicyVersion", "nodeAllowsFull",
+        "previewMaxBytes", "mode", "contentKind", "captureComplete", "originalBytes", "status", "truncated"};
+    if (p.contains("text")) { expected.insert("text"); expected.insert("redacted"); }
+    if (keys != expected || !p["schemaVersion"].is_number_integer() || p["schemaVersion"] != 2) return bad();
+    for (const char* key : {"sessionId", "operationId", "turnId", "toolCallId", "persistedEventId",
+                            "resultId", "policyVersion"}) {
+        if (!p[key].is_string() || !ValidIdentity(p[key].get_ref<const std::string&>())) return bad();
+    }
+    if (!p["sessionPolicyVersion"].is_number_unsigned() || p["sessionPolicyVersion"] == 0 ||
+        !p["previewMaxBytes"].is_number_unsigned() || p["previewMaxBytes"] < 1 ||
+        p["previewMaxBytes"] > kMaxResultPreviewBytes || !p["nodeAllowsFull"].is_boolean() ||
+        !p["captureComplete"].is_boolean() || !p["truncated"].is_boolean() ||
+        !(p["originalBytes"].is_null() || p["originalBytes"].is_number_unsigned()) ||
+        (p["mode"] != "preview" && p["mode"] != "full") ||
+        (p["contentKind"] != "text" && p["contentKind"] != "binary")) return bad();
+    if (p["sessionId"].get_ref<const std::string&>() != expected_identity.session_id ||
+        p["operationId"].get_ref<const std::string&>() != expected_identity.operation_id ||
+        p["turnId"].get_ref<const std::string&>() != expected_identity.turn_id ||
+        p["toolCallId"].get_ref<const std::string&>() != expected_identity.tool_call_id ||
+        p["persistedEventId"].get_ref<const std::string&>() != expected_identity.persisted_event_id ||
+        p["resultId"].get_ref<const std::string&>() != expected_identity.result_id)
+        return std::unexpected(ResultSyncError::SessionMismatch);
+    if (p.contains("text")) {
+        if (!p["text"].is_string() || !p["redacted"].is_boolean() || p["status"] != "ready" ||
+            p["contentKind"] != "text" || p["captureComplete"] != true) return bad();
+        const auto& text = p["text"].get_ref<const std::string&>();
+        if (!platform::IsValidUtf8(text) || HasBinaryControls(text) || text.size() > kMaxFullResultBytes ||
+            (p["mode"] == "preview" && text.size() > p["previewMaxBytes"].get<std::size_t>()) ||
+            (p["mode"] == "full" && p["truncated"] != false)) return bad();
+    } else if (p["mode"] != "preview" || p["truncated"] != true ||
+        !((p["status"] == "metadata_only" && p["contentKind"] == "binary") ||
+          (p["status"] == "capture_incomplete" && p["contentKind"] == "text" && p["captureComplete"] == false))) return bad();
+    FrozenToolResult frozen(p, p["mode"] == "full" ? ResultSyncMode::Full : ResultSyncMode::Preview);
+    auto checked = frozen.ForTransmission(node, session, known_secrets);
+    if (!checked) return std::unexpected(checked.error());
+    return frozen;
 }
 
 }  // namespace lubancode::remote

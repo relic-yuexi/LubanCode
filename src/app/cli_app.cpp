@@ -681,8 +681,9 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
                 std::make_shared<const lubancode::app_server::HarnessAgentPlan>(std::move(*plan_result.plan));
         }
         options.assembly_factory = [config_ptr, harness, planned_steps, agent_plan, skills_root,
-                                    plugins_root, plugin_data_root, plugin_trust]() {
+                                    plugins_root, plugin_data_root, plugin_trust](const std::string& cwd_utf8) {
             lubancode::app_server::SessionAssemblyRequest request;
+            request.cwd_utf8 = cwd_utf8;
             request.config = config_ptr;
             request.harness = harness ? &*harness : nullptr;
             request.backend_factory = [config_ptr]() {

@@ -2,10 +2,10 @@
 // 最小形状:一场 thread 一份,同场多轮复用;先解析允许组件、再启动,不
 // 留"先启动再过滤"。
 //
-// 这不是 LubanCore 单阶段 B 的中立 RuntimeAssembly 服务(§2.1 owner 账:
-// 那套抽 SessionFactory/Theme 退役归 Core-B)。这里只服务 app-server 的
-// 生产装配缺口(G01/G02):显式选择工具与 Agent 档案、复用同场资源、
-// 缺授权/缺工具/依赖启动失败明拒。
+// 本层解释 AppServer 的 Harness、Skill、Lua 与提示材料。backend、MCP、
+// 工具表交给 runtime::assembly::SessionResources 统一构造与持有，SDK
+// 也走同一工厂。server 首轮把资源交进 SessionService::SessionExecution，
+// Agent 构造与恢复走共同入口，宿主只保留材料与每轮协议接线。
 //
 // 装配序(冻结合同 §7.1 的最小落地;P2 起插三步;P5 再接插件):
 //   0. components.plugins 点名的插件进入真装载(P5,应用Worker接入单
@@ -54,7 +54,7 @@
 #include "config/config.hpp"
 #include "config/plugin_trust.hpp"  // PluginTrustStore:P5 插件信任账
 #include "mcp/client.hpp"
-#include "runtime/assembly/mcp.hpp"
+#include "runtime/assembly/session_resources.hpp"
 #include "runtime/plugin_contract.hpp"     // PluginManifest(P5 装载件)
 #include "runtime/plugin_http.hpp"         // BoundedHttpTransport(P5 注入缝)
 #include "runtime/plugin_lua_manifest.hpp"  // ManifestLuaRuntime:P5 Lua owner
@@ -64,12 +64,11 @@
 
 namespace lubancode::app_server {
 
-// 两宿主共用中立 owner；工具表仍须晚于 owner 声明。
+// MCP 单件类型沿用共同协议层；整场寿命由 SessionResources 管。
 using HeadlessMcpRuntime = runtime::assembly::McpServerRuntime;
 
-// 一场 thread 的运行材料。成员序=寿命序:拥有者(backend、MCP 子进程)
-// 在前,注册表在后——析构反序,注册表里的 McpTool 先亡,Client 引用
-// 不悬垂。
+// 一场 thread 的运行材料。宿主插件 owner 先声明，共同资源后声明；
+// 析构时先撤工具表，再关闭工具所借的 MCP/Lua owner。
 struct SessionAssembly {
     // 冻结技能清单的一条(§六:来源声明与依赖状态供客户端检查)。只在
     // 部署档声明了 components.skills 时填——缺省(P2 约定:材料根全量)
@@ -81,16 +80,14 @@ struct SessionAssembly {
         std::vector<std::string> requires_tools;      // frontmatter 依赖声明
         std::vector<std::string> missing_tools;       // 声明了但本场面上没有的
     };
-    std::unique_ptr<lubancode::api::Backend> backend;
     lubancode::agent::AgentProfile agent_profile;
     // 装配降级账:可选组件(tools.allow 未引用)起失败被跳过的事实。
     // "可选降级必须写结果"(单子 P1):这份账进 thread/started 事件与
     // 诊断,不悄悄咽下。
     std::vector<std::string> degraded_components;
-    std::vector<HeadlessMcpRuntime> mcp_servers;        // 拥有者:先于 registry
     // P5:点名 Lua 插件的挂载 owner(v2 manifest-backed embedded-lua)。
     // 每场装配现造一份——Lua state 不跨会话,随本对象析构关闭。成员序=
-    // 寿命序:在 registry 之前声明(先析构),registry 里的 adapter 持
+    // 寿命序:在 resources 之前声明(后析构),registry 里的 adapter 持
     // ManifestLuaPlugin 裸指针,注册表先撤、owner 后收口,不悬垂。
     std::unique_ptr<lubancode::runtime::ManifestLuaRuntime> manifest_lua;
     // 挂载快照:本场真装上的插件("<id>@<version>" 一件一条)。点名=部署
@@ -102,7 +99,10 @@ struct SessionAssembly {
     // 组合次序/各段 hash/来源/最终快照 ID)。agent_plan 组合路才填;
     // server 在 v3 场把它落进会话账(内存件只是搬运,不再自造账)。
     std::optional<nlohmann::json> prompt_composition;
-    std::unique_ptr<lubancode::tools::ToolRegistry> registry;  // 用户面:后声明
+    // Assembly candidate. The Server moves this into SessionExecution on first
+    // turn; ThreadRecord keeps SessionAssembly's Lua owner alive until its
+    // SessionService/execution has drained and been destroyed.
+    std::unique_ptr<runtime::assembly::SessionResources> resources;
 };
 
 struct SessionAssemblyResult {
@@ -134,6 +134,8 @@ std::vector<std::pair<std::string, std::string>> ComposeMcpChildEnv(
     const std::vector<std::pair<std::string, std::string>>& server_env);
 
 struct SessionAssemblyRequest {
+    // Resolved thread cwd, including resume. Never fall back to process cwd for MCP.
+    std::string cwd_utf8;
     // 生产配置(mcp_servers 的上层获准来源);空 = 测试注入路(无 MCP)。
     const lubancode::config::Config* config = nullptr;
     // 部署档计划(纯数据,已解析);空 = 显式零工具默认档(合同 §2.3:

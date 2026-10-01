@@ -13,12 +13,35 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 
 
 REQUIRED_TESTS = {
-    "sdk.consumer.smoke", "sdk.consumer.seed", "sdk.consumer.resume",
+    "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.extensions",
+    "sdk.consumer.results",
+    "sdk.consumer.result_seed", "sdk.consumer.result_resume",
+    "sdk.consumer.seed", "sdk.consumer.resume",
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
+REQUIRED_PUBLIC_HEADERS = {
+    "include/lubancore/api.hpp", "include/lubancore/core.hpp", "include/lubancore/extensions.hpp",
+    "include/lubancore/results.hpp",
+}
+
+
+def check_public_headers(repo: Path, installed_files: list[str], install_mode: str) -> set[str]:
+    """Validate the public header set for either relocated install mode."""
+    public_headers = {"include/" + path.relative_to(repo / "include").as_posix()
+                      for path in (repo / "include" / "lubancore").rglob("*.hpp")}
+    missing_source = REQUIRED_PUBLIC_HEADERS - public_headers
+    if missing_source:
+        raise RuntimeError("SDK source is missing required public headers: " +
+                           ", ".join(sorted(missing_source)))
+    missing_headers = public_headers - set(installed_files)
+    if missing_headers:
+        raise RuntimeError(f"{install_mode} SDK install is missing public headers: " +
+                           ", ".join(sorted(missing_headers)))
+    return public_headers
 
 
 def run(args: list[str], env: dict[str, str], *, capture: bool = False) -> str:
@@ -37,6 +60,7 @@ def run(args: list[str], env: dict[str, str], *, capture: bool = False) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, required=True)
+    parser.add_argument("--install-mode", choices=("component", "full"), default="component")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     producer_build = args.build_dir.resolve()
@@ -72,18 +96,42 @@ def main() -> None:
         "consumer_build": str(consumer_build),
         "installed_prefix": str(prefix),
         "required_tests": sorted(REQUIRED_TESTS),
+        "install_mode": args.install_mode,
     }, indent=2) + "\n", encoding="utf-8")
     print(f"SDK consumer evidence directory: {scratch}", flush=True)
 
     env = os.environ.copy()
     for name in ("LubanCore_DIR", "LubanCore_ROOT", "CMAKE_PREFIX_PATH", "CMAKE_TOOLCHAIN_FILE"):
         env.pop(name, None)
-    run(["cmake", "--install", str(producer_build), "--config", "Release",
-         "--prefix", str(staging), "--component", "LubanCore"], env)
+    install = ["cmake", "--install", str(producer_build), "--config", "Release", "--prefix", str(staging)]
+    if args.install_mode == "component":
+        install.extend(["--component", "LubanCore"])
+    else:
+        producer_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
+        cache_values = {line.split(":", 1)[0]: line.split("=", 1)[1]
+                        for line in producer_cache.splitlines() if ":" in line and "=" in line and
+                        not line.startswith(("#", "//"))}
+        if (cache_values.get("LUBANCODE_BUILD_CLI", "").upper() not in {"OFF", "FALSE", "NO", "0"} or
+                cache_values.get("LUBANCODE_BUILD_SDK", "").upper() not in {"ON", "TRUE", "YES", "1"}):
+            raise RuntimeError("full SDK install requires CLI=OFF and SDK=ON")
+    run(install, env)
     # Relocate the whole package before consuming it; both paths stay in our CI scratch.
     if staging.resolve().parent != scratch or prefix.resolve().parent != scratch:
         raise RuntimeError("SDK relocation must stay inside the CI scratch directory")
     staging.rename(prefix)
+    installed_files = sorted(path.relative_to(prefix).as_posix() for path in prefix.rglob("*")
+                             if path.is_file() or path.is_symlink())
+    (evidence / "installed-files.json").write_text(json.dumps(installed_files, indent=2) + "\n", encoding="utf-8")
+    public_headers = check_public_headers(repo, installed_files, args.install_mode)
+    if args.install_mode == "full":
+        package_files = re.compile(r"lib(?:64)?/cmake/LubanCore/LubanCore(?:Config(?:Version)?|Targets(?:-[A-Za-z0-9_]+)?)\.cmake")
+        library_files = re.compile(r"lib(?:64)?/(?:liblubancore(?:\.so(?:\.[0-9]+)*|(?:\.[0-9]+)*\.dylib|\.dll\.a)|lubancore\.lib)")
+        for relative in installed_files:
+            allowed = (relative in public_headers or relative == "share/lubancore/lubancore-sdk.md" or
+                       package_files.fullmatch(relative) or library_files.fullmatch(relative) or
+                       (sys.platform == "win32" and re.fullmatch(r"bin/[^/]+\.dll", relative, re.IGNORECASE)))
+            if not allowed:
+                raise RuntimeError("full SDK install contains a host/private-development artifact: " + relative)
     def normalized(value: str) -> str:
         return re.sub(r"/+", "/", value.replace(chr(92), "/")).casefold()
     forbidden = [normalized(str(path)) for path in (repo, producer_build, staging)]
@@ -95,12 +143,23 @@ def main() -> None:
         if any(path in contents for path in forbidden):
             raise RuntimeError(f"installed CMake package leaks a producer or staging path: {config}")
     shutil.copytree(repo / "examples" / "sdk-consumer", consumer_source)
+    # Neither inherited loader variables nor a producer PATH may rescue a
+    # broken installed package. Ordinary system compiler/tool directories stay.
+    blocked = (repo, producer_build, staging)
+    path_entries = []
+    for entry in env.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        resolved = Path(entry).resolve()
+        if not any(resolved == root or root in resolved.parents for root in blocked):
+            path_entries.append(entry)
+    env["PATH"] = os.pathsep.join(path_entries)
+    for name in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"):
+        env.pop(name, None)
     if sys.platform == "win32":
         env["PATH"] = str(prefix / "bin") + os.pathsep + env.get("PATH", "")
     elif sys.platform.startswith("linux"):
         library_dirs = [str(prefix / "lib"), str(prefix / "lib64")]
-        if env.get("LD_LIBRARY_PATH"):
-            library_dirs.append(env["LD_LIBRARY_PATH"])
         env["LD_LIBRARY_PATH"] = os.pathsep.join(library_dirs)
 
     run(["cmake", "-S", str(consumer_source), "-B", str(consumer_build),
@@ -141,6 +200,14 @@ def main() -> None:
             log = consumer_build / "Testing" / "Temporary" / name
             if log.is_file():
                 shutil.copy2(log, evidence / name)
+    results = ET.parse(evidence / "consumer-results.xml").getroot().findall(".//testcase")
+    executed = {case.attrib.get("name") for case in results}
+    if not results or not REQUIRED_TESTS <= executed:
+        raise RuntimeError("consumer JUnit is missing required executed tests")
+    if len(executed) != len(results) or any(case.attrib.get("status") != "run" or case.find("skipped") is not None or
+                                         case.find("failure") is not None or case.find("error") is not None
+                                         for case in results):
+        raise RuntimeError("consumer JUnit contains duplicate, skipped or failed tests")
 
 
 if __name__ == "__main__":
