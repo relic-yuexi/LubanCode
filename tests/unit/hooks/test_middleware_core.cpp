@@ -12,9 +12,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <exception>
+#include <future>
 #include <map>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -963,6 +966,91 @@ TEST_CASE("观察者:并发跑(窗口重叠),效果只收追加型,失败不连�
     // 追加上下文按计划序归并进 outcome。
     REQUIRE(outcome.context_appends.size() == 2);
     CHECK(outcome.context_appends[0].find("a") != std::string::npos);
+}
+
+TEST_CASE("观察者:启动账抛错须等其他真实回调退出再冒泡") {
+    using namespace std::chrono_literals;
+    std::promise<void> live_entered;
+    auto entered = live_entered.get_future().share();
+    std::promise<void> start_failed;
+    auto failed = start_failed.get_future();
+    std::promise<void> release_live;
+    auto released = release_live.get_future().share();
+    std::atomic<bool> live_exited{false};
+    std::atomic<bool> coordination_timed_out{false};
+    std::atomic<int> failed_handler_calls{0};
+
+    class ThrowingStartSink final : public MiddlewareEventSink {
+    public:
+        ThrowingStartSink(std::shared_future<void> entered, std::promise<void>& failed,
+                          std::atomic<bool>& timed_out)
+            : entered_(std::move(entered)), failed_(failed), timed_out_(timed_out) {}
+        void OnInvocationStarted(const InvocationMeta& meta) override {
+            if (meta.hook_id != "PostUser/telemetry.a_sink_failure") return;
+            if (entered_.wait_for(5s) != std::future_status::ready) timed_out_.store(true);
+            failed_.set_value();
+            // RunObserver emits this before its handler try/catch. The thread
+            // boundary must catch it, then Dispatch must drain all other workers.
+            throw std::runtime_error("observer-start-fixture");
+        }
+    private:
+        std::shared_future<void> entered_;
+        std::promise<void>& failed_;
+        std::atomic<bool>& timed_out_;
+    } sink(entered, start_failed, coordination_timed_out);
+
+    MiddlewarePool pool;
+    auto failing = MakeBuiltin(HookPoint::PostUser, "telemetry.a_sink_failure",
+        [&](const InvocationCtx&, const nlohmann::json& input, NextCall&) {
+            failed_handler_calls.fetch_add(1);
+            return HandlerReturn::Value(input);
+        });
+    failing.observer = true;
+    pool.AddDefinition(std::move(failing));
+    auto live = MakeBuiltin(HookPoint::PostUser, "telemetry.b_live",
+        [&](const InvocationCtx&, const nlohmann::json& input, NextCall&) {
+            live_entered.set_value();
+            if (released.wait_for(5s) != std::future_status::ready) coordination_timed_out.store(true);
+            live_exited.store(true);
+            return HandlerReturn::Value(input);
+        });
+    live.observer = true;
+    pool.AddDefinition(std::move(live));
+    const auto registry = pool.Publish();
+    REQUIRE(registry.has_value());
+    MiddlewareDispatcher dispatcher(*registry);
+    DispatchTrigger trigger;
+    trigger.input = nlohmann::json::object();
+    std::promise<std::exception_ptr> finished;
+    auto result = finished.get_future();
+    std::jthread dispatch_thread([&] {
+        try {
+            (void)dispatcher.Dispatch(HookPoint::PostUser, trigger, TerminalFn{}, &sink);
+            finished.set_value(nullptr);
+        } catch (...) {
+            finished.set_value(std::current_exception());
+        }
+    });
+    struct ReleaseOnExit {
+        std::promise<void>& promise;
+        bool sent = false;
+        void Release() {
+            if (!sent) { promise.set_value(); sent = true; }
+        }
+        ~ReleaseOnExit() { Release(); }
+    } release{release_live};
+    REQUIRE(entered.wait_for(5s) == std::future_status::ready);
+    REQUIRE(failed.wait_for(5s) == std::future_status::ready);
+    CHECK_FALSE(live_exited.load());
+    CHECK(result.wait_for(0ms) == std::future_status::timeout);
+    release.Release();
+    REQUIRE(result.wait_for(5s) == std::future_status::ready);
+    const auto error = result.get();
+    REQUIRE(error != nullptr);
+    CHECK_THROWS_WITH_AS(std::rethrow_exception(error), "observer-start-fixture", std::runtime_error);
+    CHECK(live_exited.load());
+    CHECK(failed_handler_calls.load() == 0);
+    CHECK_FALSE(coordination_timed_out.load());
 }
 
 // ---------------------------------------------------------------------------
