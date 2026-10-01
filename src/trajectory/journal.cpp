@@ -71,7 +71,9 @@ JournalWriter& JournalWriter::operator=(JournalWriter&& other) noexcept {
     return *this;
 }
 
-JournalWriter::~JournalWriter() {
+JournalWriter::~JournalWriter() { Close(); }
+
+void JournalWriter::Close() {
     if (file_ != nullptr) {
         std::fclose(file_);
         file_ = nullptr;

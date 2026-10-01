@@ -315,6 +315,10 @@ public:
     std::string NewHookDispatchId();   // hookdispatch-<n>,挂点触发身份(§4.22)
     std::string NewTaskId();           // task-<n>,委派任务身份(§4.31)
 
+    // 关账文件句柄(幂等)。封口后不再写的场调用:Windows 上开着的句柄
+    // 挡住目录删除。此后提交一律拒(v3writer.broken)。
+    void CloseFile();
+
     // ---- 观测 ----
 
     const std::filesystem::path& path() const;
