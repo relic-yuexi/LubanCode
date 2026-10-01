@@ -427,9 +427,10 @@ struct Host::Impl {
                     Reject("worker.result_identity_mismatch");
             }
             auto handle = session.handle;
+            const auto session_id = handle->id();
             auto store = session.result_store;
             auto known_secrets = session.result_secrets;
-            return queries->Start(handle->id(), client_key, params,
+            return queries->Start(session_id, client_key, params,
                 [handle = std::move(handle), store = std::move(store), operation,
                  identity = std::move(identity), known_secrets = std::move(known_secrets)] {
                     const auto summaries = QueryTake(handle->ListToolResults(operation));
