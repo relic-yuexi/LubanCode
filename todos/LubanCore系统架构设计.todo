@@ -135,7 +135,7 @@ L4 基础设施层  模型与工具适配器 │ 存储与检索适配器 │ �
 
 | 方块 | 现状 |
 |---|---|
-| 知识与上下文（Memory/RAG/Skills/Compaction） | **部分**：CLI 内有 Memory、Skills；RAG 无；均未进公开 SDK |
+| 知识与上下文（Memory/RAG/Skills/Compaction） | **部分**：CLI 内有 Memory、Skills；RAG 不进核心，作为用例由使用者经 Tool/MCP 自接（见第九节）；均未进公开 SDK |
 | 任务规划（Todo/Plan/Goal） | **部分**：CLI 内有 Todo、Goal（`src/runtime/goal_*`）；未进 SDK |
 | 工作流与多 Agent | **部分**：`src/workflow/`、子 Agent、Loop；未进 SDK；各专项单见 `todos/` |
 | 工具与交互（MCP/远程 HTTP/gRPC/Command/Channel/UI） | **部分**：MCP、Channel 有；gRPC 无 |
@@ -210,16 +210,37 @@ Journal 承担崩溃恢复，不是普通记录存储。任何实现都必须保
 
 每个适配器须通过同一套一致性测试（顺序、崩溃点恢复、并发 owner 冲突、幂等重放、坏件检测），再谈性能。合同细节以 `docs/development/workspace-storage-v2/P0-0-contracts.md` 为准，本单不复制。
 
-## 九、分期建议（按依赖排序）
+## 九、近期目标与分期（按依赖排序）
+
+### 近期两个落地目标（2026-10-01 确定）
+
+1. **Agentic RAG：作为用例，不进核心。** 检索对象与后端由使用者自选（自有向量库、搜索服务、企业知识库均可），经公开 SDK 的 `Tool` 或 MCP 接入；Agent 自行决定查询次数与是否足够。仓库只在 `examples/` 提供一个参考示例（含证据与来源引用），同时作为"公开 SDK 能否支撑此类应用"的验收。核心不引入向量库依赖，不因此增加依赖闭包。
+2. **多服务器控制：主线，直接按多租户模型做。** 当前只有作者一人使用，但后续必须鉴权与多租户；一人使用即"一个租户、一个管理员"，不设单用户特判分支，避免日后返工。
+
+多租户口径：**一开始就做模型与强制点，后做功能面。**
+
+| 一开始就做（改起来最贵） | 后做（不改结构，只填策略与数据） |
+|---|---|
+| `tenant_id`、`actor_id` 进入每个会话、事件、存储目录与 Worker 请求；存储按租户分目录 | 用户登录、外部身份源（如 OIDC）、角色管理界面 |
+| 默认拒绝的授权检查点：每个操作先问"该 actor 能否对该租户的该会话做此事"；单人时策略为"默认租户管理员全允许" | 配额、限流、计费 |
+| Node 与会话归属于租户；Control 按租户过滤列表与任务 | 多成员与细粒度 ACL 的管理界面 |
+| 配置合并顺序留出租户层（全局 → 租户 → 项目 → 会话快照），单人时租户层为空 | 跨租户的管理员视图 |
+| 隔离测试：租户 A 读不到、写不到、取消不了租户 B 的任何会话、结果与事件 | |
+
+不一次做满的原因：身份合同（路线图第三十章）尚未落码，设计可能边做边调；当前无第二位使用者验证细粒度 ACL；它与 Worker、Node、Control 同时改动，范围过大且难收每批 CI 证据。
+
+### 分期
 
 1. **收口当前批**：合入 Worker #245；Runner #246 合并最新 base 后重验；更新总 PR #234 描述；合 main 前在最终组合头上重跑完整原生 CI。
-2. **SDK 完整化**：把已有能力逐项迁入公开 SDK（内置工具、Lua/Package、子 Agent、Action、Detached job、Memory/Skills），每项独立验证；CLI 迁移保留原功能。
-3. **SPI 抽象**：把 JournalStore、BlobStore、EventSink、PolicyProvider 抽成明确接口，本地文件账作默认实现；先出接口合同、一致性测试与参考实现（第八节），再谈数据库。
-4. **依赖瘦身**：把渠道、Gateway、updater 等从 SDK 依赖闭包拆出，形成最小依赖包，服务手机与端侧。
-5. **身份与治理**：落地 `ExecutionContext`、配置作用范围、ACL（路线图 D6），再接租户、配额与可观测公开接口。
-6. **公开服务接入**：先冻结 Worker 进程协议合同（第七节），再在 AppServer/Worker 基础上交付 HTTP/SSE，按需 gRPC，复用同一份方法与事件合同；持久 outbox/ACK 与事件游标。C ABI 仅在确有嵌入非 C++ 进程的需求时再做。
-7. **分布式与存储适配**：网络 Node/Control、登记与心跳、鉴权，随后数据库、对象存储、队列适配；池化模式与 Sandbox 池另见后续单。
-8. **扩展与编排**：Extension Registry 升级（动态库、热卸载、沙箱），工作流与多 Agent 进入公开 SDK。
+2. **身份与授权骨架**（先于 Node/Control）：落地 `ExecutionContext`（tenant / actor / project / session）、租户分目录、默认拒绝的授权检查点、租户配置层预留与隔离测试，先在 SDK 与 Worker 落地（对应路线图 D6 的第一项）。单人时取默认租户与管理员。
+3. **Worker 进程协议合同**：冻结帧格式、方法、错误码、取消与恢复语义、兼容规则，且所有请求带 `ExecutionContext`（第七节）。
+4. **Node 与 Control 最小版**：Node 配置后主动登记并报 health，绑定租户，开 Worker；Control 仅列节点、下发任务、看状态与 preview，按租户过滤；节点鉴权（共享令牌或 mTLS）；随后持久 outbox/ACK 与事件游标。首用设计以[部署草案](../docs/architecture/remote-agent-deployment.md)为准（会话固定在节点，离线不撤销已受理工作）。
+5. **SDK 完整化**：把已有能力逐项迁入公开 SDK（内置工具、Lua/Package、子 Agent、Action、Detached job、Memory/Skills），每项独立验证、同时做成可选模块；CLI 迁移保留原功能。可与第 2～4 步并行，但先定模块划分表，避免互相踩。
+6. **SPI 抽象**：把 JournalStore、BlobStore、EventSink、PolicyProvider 抽成明确接口，本地文件账作默认实现；先出接口合同、一致性测试与参考实现（第八节），再谈数据库。授权检查点经 PolicyProvider 接入。
+7. **依赖瘦身**：把渠道、Gateway、updater 等从 SDK 依赖闭包拆出，形成最小依赖包，服务手机与端侧。可与第 6 步并行。
+8. **公开服务接入**：在 AppServer/Worker 基础上交付 HTTP/SSE，按需 gRPC，复用第 3 步同一份方法与事件合同。C ABI 仅在确有嵌入非 C++ 进程的需求时再做。
+9. **多租户功能面与存储适配**：登录与外部身份、配额、成员与 ACL 管理、可观测公开接口；数据库、对象存储、队列适配；池化模式与 Sandbox 池另见后续单。待出现第二位使用者再排期。
+10. **扩展与编排**：Extension Registry 升级（动态库、热卸载、沙箱），工作流与多 Agent 进入公开 SDK。
 
 ## 十、不做与风险
 
