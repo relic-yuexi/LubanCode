@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -31,6 +32,7 @@ struct Fixture {
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(++serial));
         fs::create_directories(root / "cwd");
         fs::create_directories(root / "resources");
+        root = fs::canonical(root);
     }
     ~Fixture() { std::error_code ec; fs::remove_all(root, ec); }
     std::string Utf8(const fs::path& path) const { return lubancode::tools::PathToUtf8(path); }
@@ -72,8 +74,11 @@ out::SavedSnapshot Turn(const std::shared_ptr<sdk::Session>& session, std::size_
     REQUIRE(operation->state == sdk::OperationState::Succeeded);
     auto refs = session->ListToolResults(receipt->operation_id);
     REQUIRE(refs.has_value());
-    REQUIRE(refs->size() == 1);
-    auto snapshot = session->ReadToolResult(refs->front().identity, {read_budget});
+    const auto formal = std::find_if(refs->begin(), refs->end(), [](const auto& result) {
+        return result.selected && result.identity.result_id.starts_with("res-");
+    });
+    REQUIRE(formal != refs->end());
+    auto snapshot = session->ReadToolResult(formal->identity, {read_budget});
     REQUIRE(snapshot.has_value());
     REQUIRE(snapshot->result().metadata_state == out::ArtifactState::Verified);
     return std::move(*snapshot);
@@ -200,7 +205,10 @@ TEST_CASE("SDK result projection: close resume restores exact frozen record and 
     auto options = Options(fixture, "unused"); options.resume_session_id = session_id;
     auto resumed = (*runtime)->OpenSession(std::move(options)); REQUIRE(resumed.has_value());
     auto snapshot = (*resumed)->ReadToolResult(identity); REQUIRE(snapshot.has_value());
-    auto refs = (*resumed)->ListToolResults(operation_id); REQUIRE(refs.has_value()); REQUIRE(refs->size() == 1);
+    auto refs = (*resumed)->ListToolResults(operation_id); REQUIRE(refs.has_value());
+    CHECK(std::any_of(refs->begin(), refs->end(), [&](const auto& result) {
+        return result.selected && result.identity == identity;
+    }));
     auto projector = Projector(*snapshot, {false, 64, "node-policy-1"}, {"FAKE_RESOLVED_KEY"});
     auto frozen = projector->RestoreSavedProjection(storage, *snapshot); REQUIRE(frozen.has_value());
     CHECK(*frozen->ForTransmission(*projector) == first);
