@@ -114,9 +114,9 @@ ResultProjector::~ResultProjector() = default;
 
 Result<std::shared_ptr<ResultProjector>> ResultProjector::Create(
     NodeResultPolicy node, SessionResultPolicy session, std::vector<std::string> known_secrets) {
-    struct ClearInputs {
+    struct ClearSecrets {
         std::vector<std::string>& values;
-        ~ClearInputs() { for (auto& value : values) runtime::BestEffortZeroizeString(value); }
+        ~ClearSecrets() { for (auto& value : values) runtime::BestEffortZeroizeString(value); }
     } clear_inputs{known_secrets};
     auto parsed = remote::ParseNodeResultSyncPolicy(
         {{"allow_full_tool_results", node.allow_full_tool_results}, {"preview_max_bytes", node.preview_max_bytes}},
