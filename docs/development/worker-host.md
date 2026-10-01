@@ -152,6 +152,7 @@ HTTP 端点，覆盖健康/能力、同目录两场、持久幂等、审批与�
 另验真实 read_file 的受限 preview、节点与场双门 full、重启复投、主管坏件/缺件拒绝、
 跨场与六段身份拒绝、运行中新轮保留旧结果及 full 超帧拒绝。第十八场
 `result_combined_stream_preview` 跑真实命令，分别向 stdout 与 stderr 写标记；节点许可
-full，一场仍用默认 preview，另一场显式选 full。full 须包含两枚标记，preview 须从同份
-完整、已核验 combined 材料取 12 字节预算内完整 UTF-8 前缀，不得从通道元信息旁路吐出 stderr。
+full，一场仍用默认 preview，另一场显式选 full。两场各存完整、已核验的 combined 原件。
+full 须包含两枚标记，preview 须取 12 字节预算内完整 UTF-8 前缀，与全文前缀逐字核对；
+通道元信息不得旁路吐出 stderr。
 CI 将安装目录搬离源码和构建目录，再跑这份测试；报告逐场登记，缺场或跳过不得算过。
