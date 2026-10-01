@@ -1346,6 +1346,7 @@ ClearOutcome SessionManager::ClearV3Locked(const ClearRequest& request,
         EventRef{old.session_id(), ended_receipt.id, ended_receipt.line_hash};
     outcome.old_journal_sha256 = ended_receipt.line_hash;  // 封账行 hash(§8.3 同口径)
     old.status = SessionStatus::Closed;  // 只住内存(v3 无 session.json 可翻)
+    old.v3_main->CloseFile();            // 已封口不再写;放句柄免挡 Windows 删目录
 
     // ---- 第 5 步:v3 无 session.json,跳——账面 session.ended 即终态。
 
@@ -1421,6 +1422,9 @@ CloseOutcome SessionManager::CloseV3Locked(const CloseRequest& request,
     session.status = SessionStatus::Closed;
     // 封口即放锁(§3.3.2 同一口径:没有活 writer 的场不攥独占锁)。
     session.lock.Release();
+    // 账文件句柄一并放:Windows 上开着的句柄挡住目录删除(DeleteSession、
+    // 清单测试直删目录)。已封口的场不再写。
+    session.v3_main->CloseFile();
     return outcome;
 }
 

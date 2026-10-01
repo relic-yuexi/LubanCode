@@ -54,6 +54,10 @@ public:
     // 视为 broken,调用方应停止提交并按 §7.4 收口。
     bool AppendLine(std::string_view line, Durability durability);
 
+    // 关柄(幂等)。Windows 上打开着的句柄会挡住目录删除;封口后不再写的
+    // 账须先关柄。此后 AppendLine 返回 false。
+    void Close();
+
     const std::filesystem::path& path() const { return path_; }
     std::uint64_t line_count() const { return line_count_; }
     bool broken() const { return broken_; }
