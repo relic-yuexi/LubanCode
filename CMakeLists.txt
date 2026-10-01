@@ -1204,6 +1204,8 @@ add_library(lubancode_runtime STATIC
   # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
   # 归本库;engine 不反向引 runtime 的链接纪律见 turn_runtime.cpp 头注)。
   src/runtime/middleware_assembly.cpp
+  # Host/service drain coordination belongs above the engine's V3 event sink.
+  src/runtime/middleware_session_binding.cpp
   # LuaHook 单 P1-C:hook 宿主能力束(受控文件/插件状态/context 候选/
   # 结构化日志 + 统一工具执行服务/子执行 v3 记账/递归治理;§五/§5.1)。
   # Lua 边界的形状转换在 plugin_lua_host.cpp,这里是宿主执行件。
