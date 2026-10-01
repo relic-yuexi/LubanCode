@@ -137,7 +137,8 @@ struct Registration {
     Manifest manifest;
     SourceLayer source_layer = SourceLayer::Extension;
     std::string source_label;
-    // Each OpenSession calls its factory once, then owns the unique instance.
+    // After complete plan validation, OpenSession calls its factory once, then
+    // owns the unique instance. Invalid plans never invoke a factory.
     // Factories and instances must not borrow another session's owned state.
     // Assembly failure releases all staged instances and actual factory sources.
     std::function<Result<std::unique_ptr<Instance>>(const SessionContext&)> factory;

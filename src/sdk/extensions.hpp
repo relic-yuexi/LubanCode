@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -18,7 +19,8 @@ class SessionExtensions final : public lubancode::runtime::assembly::SessionReso
 public:
     static Result<std::unique_ptr<SessionExtensions>> Build(
         std::vector<extensions::v1::Registration>& registrations,
-        const extensions::v1::SessionContext& context);
+        const extensions::v1::SessionContext& context,
+        std::optional<std::string> expected_plan_json = std::nullopt);
     ~SessionExtensions() override;
     SessionExtensions(const SessionExtensions&) = delete;
     SessionExtensions& operator=(const SessionExtensions&) = delete;
