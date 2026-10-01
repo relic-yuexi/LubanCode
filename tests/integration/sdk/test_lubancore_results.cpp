@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -53,10 +54,16 @@ struct Gate {
     std::shared_future<void> released = release.get_future().share();
     ~Gate() { try { release.set_value(); } catch (...) {} }
 };
+struct LedgerCorruption {
+    fs::path path;
+    std::uintmax_t bytes_before = 0;
+    std::uintmax_t bytes_after = 0;
+    std::atomic<int> calls{0};
+};
 class ToolBackend final : public sdk::Backend {
 public:
     ToolBackend(std::shared_ptr<std::atomic<int>> calls, std::shared_ptr<Gate> gate = {},
-        std::shared_ptr<fs::path> corrupt = {}) : calls_(std::move(calls)), gate_(std::move(gate)), corrupt_(std::move(corrupt)) {}
+        std::shared_ptr<LedgerCorruption> corrupt = {}) : calls_(std::move(calls)), gate_(std::move(gate)), corrupt_(std::move(corrupt)) {}
     sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest& request, sdk::Cancellation) override {
         ++*calls_;
         if (!request.messages.empty() && request.messages.back().role == "user" &&
@@ -68,23 +75,42 @@ public:
             }
             return sdk::ModelReply{"", {{"provider-call", "result_fixture", "{}"}}, std::nullopt};
         }
-        if (corrupt_ && !corrupt_->empty()) {
-            std::ofstream injected(*corrupt_, std::ios::binary | std::ios::app);
+        if (corrupt_ && !corrupt_->path.empty()) {
+            // A new JournalWriter uses wbx and keeps its current offset: an
+            // external append would be overwritten by the next ordinary write.
+            // Damage an already committed byte without moving that offset or
+            // changing file length. Later appends cannot heal the prefix.
+            std::error_code ec;
+            corrupt_->bytes_before = fs::file_size(corrupt_->path, ec);
+            if (ec || corrupt_->bytes_before == 0)
+                return std::unexpected(sdk::Error{"fixture.inject_failed", "journal has no committed prefix"});
+            std::fstream injected(corrupt_->path, std::ios::binary | std::ios::in | std::ios::out);
             if (!injected) return std::unexpected(sdk::Error{"fixture.inject_failed", "cannot corrupt test ledger"});
-            injected << "{\"invalid_external_ledger_line\":true}\n";
+            char original = 0;
+            injected.get(original);
+            if (!injected || original != '{')
+                return std::unexpected(sdk::Error{"fixture.inject_failed", "committed journal prefix is unexpected"});
+            injected.seekp(0);
+            injected.put('!');
             injected.flush();
+            if (!injected.good())
+                return std::unexpected(sdk::Error{"fixture.inject_failed", "cannot flush corrupted prefix"});
+            corrupt_->bytes_after = fs::file_size(corrupt_->path, ec);
+            if (ec || corrupt_->bytes_after != corrupt_->bytes_before)
+                return std::unexpected(sdk::Error{"fixture.inject_failed", "prefix corruption changed journal length"});
+            ++corrupt_->calls;
         }
         return sdk::ModelReply{"tool complete", {}, std::nullopt};
     }
 private:
     std::shared_ptr<std::atomic<int>> calls_;
     std::shared_ptr<Gate> gate_;
-    std::shared_ptr<fs::path> corrupt_;
+    std::shared_ptr<LedgerCorruption> corrupt_;
     int turns_ = 0;
 };
 sdk::SessionOptions Options(const Fixture& fixture, std::shared_ptr<std::atomic<int>> models,
     std::shared_ptr<std::atomic<int>> tools, std::string text,
-    std::shared_ptr<Gate> gate = {}, std::shared_ptr<fs::path> corrupt = {}) {
+    std::shared_ptr<Gate> gate = {}, std::shared_ptr<LedgerCorruption> corrupt = {}) {
     sdk::SessionOptions options;
     options.cwd = fixture.Utf8(fixture.root / "cwd");
     options.model = "result-model";
@@ -382,16 +408,27 @@ TEST_CASE("SDK results: a failed verified-ledger index is an explicit query erro
     Fixture fixture;
     auto models = std::make_shared<std::atomic<int>>(0);
     auto tools = std::make_shared<std::atomic<int>>(0);
-    auto corrupt = std::make_shared<fs::path>();
+    auto corrupt = std::make_shared<LedgerCorruption>();
     auto runtime = sdk::Runtime::Create(fixture.Roots());
     REQUIRE(runtime.has_value());
     auto opened = (*runtime)->OpenSession(Options(fixture, models, tools, "material before ledger corruption", {}, corrupt));
     REQUIRE(opened.has_value());
-    *corrupt = fixture.SessionDir((*opened)->id()) / ((*opened)->id() + ".jsonl");
+    corrupt->path = fixture.SessionDir((*opened)->id()) / ((*opened)->id() + ".jsonl");
     const auto receipt = (*opened)->Submit("corrupt-index", "corrupt-index");
     REQUIRE(receipt.has_value());
     const auto completed = (*opened)->WaitResult(receipt->operation_id, 30s);
     REQUIRE(completed.has_value());
+    CHECK(completed->state == sdk::OperationState::Succeeded);
+    CHECK(completed->result_persisted);
+    REQUIRE(corrupt->calls.load() == 1);
+    CHECK(models->load() == 2);
+    REQUIRE(corrupt->bytes_before > 0);
+    CHECK(corrupt->bytes_after == corrupt->bytes_before);
+    std::ifstream damaged(corrupt->path, std::ios::binary);
+    char prefix = 0;
+    damaged.get(prefix);
+    REQUIRE(damaged.good());
+    REQUIRE(prefix == '!');
     const auto list = (*opened)->ListToolResults(receipt->operation_id);
     REQUIRE_FALSE(list.has_value());
     CHECK(list.error().code == "sdk.result.index_unavailable");
