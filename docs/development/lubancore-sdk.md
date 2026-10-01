@@ -165,7 +165,7 @@ Ubuntu 24.04、Debian 11、Debian 12 烟测通过。受测合并提交 `41591788
 正在执行的 `Next` 退出。SDK 不替宿主开事件回调线程。
 
 自定义 Backend、Tool 须合作检查取消旗。SDK 不强杀这些进程内回调，`Close` 会等其退出，
-不会丢下 detached 线程再释放借用对象。不得在 Backend/Tool 回调里销毁 Runtime 或 Session；
+不会丢下 detached 线程再释放借用对象。不得在 Backend、Tool、工厂或扩展回调里销毁 Runtime 或 Session；
 回调中调用 `Close`、`WaitResult`、`Runtime::OpenSession` 或 `Runtime::Shutdown` 会报 `sdk.lifecycle.reentrant`，
 跨会话调用也受这条约束，免得两只 worker 互相等着 join。
 
