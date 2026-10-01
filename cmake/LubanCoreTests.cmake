@@ -22,6 +22,10 @@ endif()
 add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   "${_lubancore_tests_root}/support/main.cpp"
   "${_lubancore_tests_root}/support/fake_http_server.cpp"
+  # The result-component fixtures call the production reader without exporting
+  # its private symbols from the SDK DLL. Session and installed-host cases call
+  # the SDK's hidden reader through the public Session API.
+  "${CMAKE_SOURCE_DIR}/src/sdk/results.cpp"
   ${LUBANCORE_FOCUSED_TEST_SOURCES})
 target_link_libraries(lubancore_sdk_tests PRIVATE
   lubancode_runtime lubancore_sdk doctest::doctest)

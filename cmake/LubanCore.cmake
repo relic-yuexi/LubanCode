@@ -6,6 +6,8 @@ include(CMakePackageConfigHelpers)
 add_library(lubancore_sdk SHARED
   src/sdk/core.cpp
   src/sdk/extensions.cpp
+  src/sdk/results.cpp
+  src/sdk/result_projection.cpp
   src/sdk/adapters.cpp)
 add_library(LubanCore::Core ALIAS lubancore_sdk)
 set_target_properties(lubancore_sdk PROPERTIES

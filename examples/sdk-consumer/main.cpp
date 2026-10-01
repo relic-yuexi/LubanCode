@@ -1,6 +1,7 @@
 #include <lubancore/core.hpp>
 #include <lubancore/api.hpp>
 #include <lubancore/extensions.hpp>
+#include <lubancore/results.hpp>
 
 #include <algorithm>
 #include <array>
@@ -33,6 +34,7 @@
 namespace {
 namespace sdk = lubancore;
 namespace ext = lubancore::extensions::v1;
+namespace result = lubancore::results::v1;
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
@@ -1370,12 +1372,178 @@ void PublicExtensions(const fs::path& base) {
     ExtensionIsolationAndResume(base);
     ExtensionCaptureRollback(base);
 }
+
+const std::string kResultSecret = "fixture-known-result-key-73ad9";
+std::string ResultBody() {
+    std::string body = "RESULT_HEAD\n" + kResultSecret + "\n";
+    for (int i = 0; i < 4000; ++i) body += "结果片段🙂\n";
+    return body + "RESULT_TAIL";
+}
+sdk::SessionOptions ResultOptions(const Paths& paths, result::Mode mode,
+                                 std::shared_ptr<std::atomic<int>> model_calls,
+                                 std::shared_ptr<std::atomic<int>> tool_calls) {
+    auto options = Options(paths, [model_calls](const sdk::ModelRequest&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        const int call = model_calls->fetch_add(1);
+        if (call == 0) return Call("saved-result-call", "saved_result_fixture", "{}");
+        if (call == 1) return Text("saved result complete");
+        throw std::runtime_error("durable result query unexpectedly called the model");
+    });
+    options.result_policy = result::SessionResultOptions{mode, 7};
+    sdk::Tool tool;
+    tool.name = "saved_result_fixture";
+    tool.description = "Supply a durable UTF-8 tool result.";
+    tool.requires_approval = false;
+    tool.execute = [tool_calls](const std::string&, const sdk::ToolContext&) -> sdk::Result<sdk::ToolResult> {
+        ++*tool_calls;
+        return sdk::ToolResult{ResultBody(), false};
+    };
+    options.custom_tools.push_back(std::move(tool));
+    return options;
+}
+result::NodeResultPolicy ResultNode(bool allow_full = false) {
+    return {allow_full, 128, "consumer-node-v1"};
+}
+result::SavedSnapshot ReadSingleResult(const std::shared_ptr<sdk::Session>& session,
+                                      const sdk::Receipt& receipt) {
+    Succeeded(Finished(session, receipt));
+    const auto summaries = Take(session->ListToolResults(receipt.operation_id), "list saved tool results");
+    const auto selected = std::find_if(summaries.begin(), summaries.end(), [](const auto& summary) {
+        return summary.selected && summary.identity.result_id.starts_with("res-");
+    });
+    Check(selected != summaries.end(), "completed operation did not expose its formally selected result");
+    Check(selected->identity.session_id == session->id() &&
+          selected->identity.operation_id == receipt.operation_id && !selected->identity.turn_id.empty() &&
+          !selected->identity.tool_call_id.empty() && !selected->identity.persisted_event_id.empty(),
+          "saved identity escaped its operation or has an incomplete durable binding");
+    auto snapshot = Take(session->ReadToolResult(selected->identity), "read saved tool result");
+    Check(snapshot.result().metadata_state == result::ArtifactState::Verified, "result metadata was not verified");
+    Check(std::any_of(snapshot.result().channels.begin(), snapshot.result().channels.end(), [](const auto& channel) {
+        return channel.artifact_verified && channel.capture_complete && channel.text && *channel.text == ResultBody();
+    }), "original result did not survive persistence independently of the model preview");
+    return snapshot;
+}
+void PublicResults(const fs::path& base) {
+    Progress("begin: PublicResults");
+    const auto paths = Fresh(base, "public-results");
+    auto runtime = Runtime(paths);
+    auto model_calls = std::make_shared<std::atomic<int>>(0);
+    auto tool_calls = std::make_shared<std::atomic<int>>(0);
+    auto preview = Take(runtime->OpenSession(ResultOptions(paths, result::Mode::Preview, model_calls, tool_calls)),
+                        "open preview result session");
+    const auto receipt = Take(preview->Submit("saved-result-key", "make durable result"), "submit durable result");
+    const auto snapshot = ReadSingleResult(preview, receipt);
+    auto node = ResultNode();
+    auto projector = Take(result::ResultProjector::Create(node, snapshot.policy(), {kResultSecret}), "create preview projector");
+    auto frozen = Take(projector->Project(snapshot), "project verified result");
+    const auto wire = Take(frozen.ForTransmission(*projector), "transmit preview result");
+    Check(wire.find(kResultSecret) == std::string::npos && wire.find("[REDACTED]") != std::string::npos,
+          "known secret reached the preview wire");
+    Check(wire.find("RESULT_HEAD") != std::string::npos && wire.find("RESULT_TAIL") == std::string::npos,
+          "preview was not a single bounded prefix");
+    Check(wire.find(Utf8(paths.data)) == std::string::npos, "projection exposed its local result-store path");
+    const auto storage = Take(frozen.SerializeForStorage(), "serialize frozen preview");
+    auto restored = Take(projector->RestoreSavedProjection(storage, snapshot), "restore frozen preview");
+    Check(Take(restored.ForTransmission(*projector), "retransmit frozen preview") == wire,
+          "restored record selected another preview window");
+    auto changed_storage = storage;
+    const auto head = changed_storage.find("RESULT_HEAD");
+    Check(head != std::string::npos, "storage is missing its frozen prefix");
+    changed_storage[head] = 'X';
+    Check(!projector->RestoreSavedProjection(changed_storage, snapshot), "modified saved projection passed its digest");
+    auto other_identity = snapshot.result().summary.identity;
+    other_identity.operation_id = "another-operation";
+    Check(!preview->ReadToolResult(other_identity), "arbitrary operation read another result");
+    auto elevated = snapshot.policy();
+    elevated.mode = result::Mode::Full;
+    Check(!result::ResultProjector::Create(node, elevated, {kResultSecret}), "session full exceeded the Node permission");
+    node.allow_full_tool_results = true;
+    auto elevation = Take(result::ResultProjector::Create(node, elevated, {kResultSecret}), "create alternate full projector");
+    Check(!elevation->Project(snapshot), "a new projector upgraded an existing preview session");
+    auto changed_node = ResultNode();
+    changed_node.version = "consumer-node-v2";
+    auto changed = Take(result::ResultProjector::Create(changed_node, snapshot.policy(), {kResultSecret}), "create changed Node policy");
+    Check(!frozen.ForTransmission(*changed), "old frozen result ignored a changed Node version");
+    Take(preview->Close(), "close preview result session");
+    const auto closed = Take(preview->ReadToolResult(snapshot.result().summary.identity), "read closed session result");
+    Check(Take(Take(projector->RestoreSavedProjection(storage, closed), "restore after Close").ForTransmission(*projector),
+               "transmit after Close") == wire, "Close invalidated frozen result queries");
+    auto full_model_calls = std::make_shared<std::atomic<int>>(0);
+    auto full_tool_calls = std::make_shared<std::atomic<int>>(0);
+    auto full = Take(runtime->OpenSession(ResultOptions(paths, result::Mode::Full, full_model_calls, full_tool_calls)),
+                     "open full result session in same cwd");
+    const auto full_receipt = Take(full->Submit("saved-result-key", "make durable result"), "submit full result");
+    const auto full_snapshot = ReadSingleResult(full, full_receipt);
+    Check(!full->ReadToolResult(snapshot.result().summary.identity), "same cwd session read its peer result");
+    auto full_projector = Take(result::ResultProjector::Create(node, full_snapshot.policy(), {kResultSecret}), "create permitted full projector");
+    auto full_record = Take(full_projector->Project(full_snapshot), "project full result");
+    const auto full_wire = Take(full_record.ForTransmission(*full_projector), "transmit full result");
+    Check(full_wire.find("RESULT_TAIL") != std::string::npos && full_wire.find(kResultSecret) == std::string::npos,
+          "full mode truncated the result or leaked its known secret");
+    Check(!frozen.ForTransmission(*full_projector), "frozen record crossed into another Session");
+    Take(full->Close(), "close full result session");
+    Take(runtime->Shutdown(), "shutdown public result runtime");
+    Check(model_calls->load() == 2 && tool_calls->load() == 1 &&
+          full_model_calls->load() == 2 && full_tool_calls->load() == 1, "result queries repeated model or tool work");
+    Progress("completed: PublicResults");
+}
+
+void ResultSeed(const fs::path& base) {
+    const auto paths = PathsAt(base);
+    auto runtime = Runtime(paths);
+    auto models = std::make_shared<std::atomic<int>>(0);
+    auto tools = std::make_shared<std::atomic<int>>(0);
+    auto session = Take(runtime->OpenSession(ResultOptions(paths, result::Mode::Preview, models, tools)), "open result seed session");
+    const auto receipt = Take(session->Submit("saved-result-key", "make durable result"), "submit result seed");
+    const auto snapshot = ReadSingleResult(session, receipt);
+    auto projector = Take(result::ResultProjector::Create(ResultNode(), snapshot.policy(), {kResultSecret}), "create result seed projector");
+    const auto frozen = Take(projector->Project(snapshot), "freeze result seed");
+    const auto& id = snapshot.result().summary.identity;
+    Write(base / "result-identity.txt", id.session_id + "\n" + id.operation_id + "\n" + id.turn_id + "\n" +
+          id.tool_call_id + "\n" + id.persisted_event_id + "\n" + id.result_id + "\n");
+    Write(base / "result-frozen.json", Take(frozen.SerializeForStorage(), "store result seed projection"));
+    Write(base / "result-wire.json", Take(frozen.ForTransmission(*projector), "store result seed wire"));
+    Take(session->Close(), "close result seed");
+    Take(runtime->Shutdown(), "shutdown result seed");
+    Check(models->load() == 2 && tools->load() == 1, "seed did not run exactly one real tool");
+}
+void ResultResume(const fs::path& base) {
+    const auto paths = PathsAt(base);
+    auto runtime = Runtime(paths);
+    result::ToolResultIdentity identity;
+    std::ifstream saved(base / "result-identity.txt", std::ios::binary);
+    Check(saved.is_open(), "result seed identity is absent");
+    for (auto* field : {&identity.session_id, &identity.operation_id, &identity.turn_id,
+                       &identity.tool_call_id, &identity.persisted_event_id, &identity.result_id}) {
+        Check(static_cast<bool>(std::getline(saved, *field)) && !field->empty(), "result seed identity is incomplete");
+    }
+    auto models = std::make_shared<std::atomic<int>>(2);
+    auto tools = std::make_shared<std::atomic<int>>(0);
+    auto mismatched = ResultOptions(paths, result::Mode::Full, models, tools);
+    mismatched.resume_session_id = identity.session_id;
+    Check(!runtime->OpenSession(std::move(mismatched)), "resume upgraded the saved preview policy");
+    auto options = ResultOptions(paths, result::Mode::Preview, models, tools);
+    options.result_policy.reset();
+    options.resume_session_id = identity.session_id;
+    auto session = Take(runtime->OpenSession(std::move(options)), "resume result session in another process");
+    auto snapshot = Take(session->ReadToolResult(identity), "read result after process restart");
+    Check(snapshot.policy().mode == result::Mode::Preview && snapshot.policy().version == 7,
+          "omitted resume option did not preserve the frozen policy");
+    auto projector = Take(result::ResultProjector::Create(ResultNode(), snapshot.policy(), {kResultSecret}), "create restart projector");
+    auto frozen = Take(projector->RestoreSavedProjection(Read(base / "result-frozen.json"), snapshot), "restore result after process restart");
+    Check(Take(frozen.ForTransmission(*projector), "transmit restart result") == Read(base / "result-wire.json"),
+          "process restart changed the frozen preview");
+    const auto duplicate = Take(session->Submit("saved-result-key", "make durable result"), "repeat result seed key");
+    Check(duplicate.duplicate && duplicate.operation_id == identity.operation_id, "restart lost the source operation idempotency key");
+    Take(session->Close(), "close restart result session");
+    Take(runtime->Shutdown(), "shutdown restart result runtime");
+    Check(models->load() == 2 && tools->load() == 0, "restart query reran the model or source tool");
+}
 } // namespace
 
 int main(int argc, char** argv) {
     Progress("entered main");
     try {
-        Check(argc == 3, "usage: lubancore_consumer smoke|isolation|extensions|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
+        Check(argc == 3, "usage: lubancore_consumer smoke|isolation|extensions|results|result-seed|result-resume|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
         const fs::path base = Path(argv[2]);
         Check(base.is_absolute(), "state directory must be absolute");
         fs::create_directories(base);
@@ -1392,6 +1560,9 @@ int main(int argc, char** argv) {
             SmallToolCaptureLifetime(base);
         }
         else if (mode == "extensions") PublicExtensions(base);
+        else if (mode == "results") PublicResults(base);
+        else if (mode == "result-seed") ResultSeed(base);
+        else if (mode == "result-resume") ResultResume(base);
         else if (mode == "seed") Seed(base);
         else if (mode == "resume") Resume(base);
         else if (mode == "recovery-seed") RecoverySeed(base);
