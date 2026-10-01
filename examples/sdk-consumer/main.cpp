@@ -1,4 +1,6 @@
 #include <lubancore/core.hpp>
+#include <lubancore/api.hpp>
+#include <lubancore/extensions.hpp>
 
 #include <algorithm>
 #include <array>
@@ -25,11 +27,12 @@
 #include <utility>
 #include <vector>
 
-// Deliberately only the installed public header and the C++ standard library.
+// Deliberately only installed public headers and the C++ standard library.
 // The fixture supplies model replies; Agent, permissions, tools and persistence
 // all run inside the actual SDK library.
 namespace {
 namespace sdk = lubancore;
+namespace ext = lubancore::extensions::v1;
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
@@ -1080,12 +1083,299 @@ void RecoveryResume(const fs::path& base) {
     Check(calls->load() == 1, "recovery executed more than the single accepted input");
     Take(runtime->Shutdown(), "shutdown interrupted recovery runtime");
 }
+using ExtensionInvoke = std::function<sdk::Result<ext::HandlerReturn>(const ext::Context&, const ext::Input&, ext::Next)>;
+class ConsumerExtension final : public ext::Instance {
+public:
+    explicit ConsumerExtension(ExtensionInvoke invoke, std::function<void()> destroy = {})
+        : invoke_(std::move(invoke)), destroy_(std::move(destroy)) {}
+    ~ConsumerExtension() override { if (destroy_) destroy_(); }
+    sdk::Result<ext::HandlerReturn> Invoke(const ext::Context& context, const ext::Input& input, ext::Next next) override {
+        return invoke_(context, input, std::move(next));
+    }
+private:
+    ExtensionInvoke invoke_;
+    std::function<void()> destroy_;
+};
+ext::HandlerDefinition ExtensionDefinition(std::string name, ext::Point point = ext::Point::PreUser,
+                                          ext::Stage stage = ext::Stage::Default) {
+    ext::HandlerDefinition definition;
+    definition.name = std::move(name);
+    definition.point = point;
+    definition.stage = stage;
+    definition.definition_hash = "installed-consumer-v1";
+    return definition;
+}
+ext::Registration ExtensionRegistration(std::string id, std::vector<ext::HandlerDefinition> definitions,
+                                        ExtensionInvoke invoke, std::function<void()> destroy = {}) {
+    ext::Registration registration;
+    registration.manifest.id = std::move(id);
+    registration.manifest.version = "1.0.0";
+    registration.manifest.handlers = std::move(definitions);
+    registration.source_label = "relocated installed host";
+    registration.factory = [invoke = std::move(invoke), destroy = std::move(destroy)](const ext::SessionContext&)
+        -> sdk::Result<std::unique_ptr<ext::Instance>> {
+        return std::make_unique<ConsumerExtension>(invoke, destroy);
+    };
+    return registration;
+}
+sdk::Result<ext::HandlerReturn> ExtensionContinue(ext::Next next, std::optional<std::string> candidate = std::nullopt) {
+    auto result = next.Call(std::move(candidate));
+    if (!result) return std::unexpected(result.error());
+    if (result->kind == ext::DownstreamOutcome::Kind::Denied)
+        return ext::HandlerReturn::Denied(result->code, result->message);
+    if (result->kind == ext::DownstreamOutcome::Kind::Failed)
+        return std::unexpected(sdk::Error{result->code, result->message});
+    return ext::HandlerReturn{};
+}
+sdk::Operation ExtensionRun(const std::shared_ptr<sdk::Session>& session, std::string key, std::string input) {
+    return Finished(session, Take(session->Submit(std::move(key), std::move(input)), "submit extension operation"));
+}
+
+void ExtensionChain(const fs::path& base) {
+    Progress("begin: ExtensionChain");
+    const auto paths = Fresh(base, "extension-chain");
+    auto runtime = Runtime(paths);
+    auto saved = std::make_shared<ext::Next>();
+    auto names = std::make_shared<std::vector<std::string>>();
+    auto issued = std::make_shared<std::vector<ext::Context>>();
+    auto options = Options(paths, [](const sdk::ModelRequest& request, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        Check(HasText(request, "rewritten-public-input"), "public extension rewrite did not reach the real model request");
+        Check(!HasText(request, "original-public-input"), "the original input also entered the model request");
+        Check(HasText(request, "pre-public-context") && HasText(request, "post-public-context"),
+              "extension material was omitted from model history");
+        return Text("public-extension-answer");
+    });
+    auto rewrite = ExtensionDefinition("prompt.rewrite");
+    rewrite.priority = 900;
+    rewrite.before = {"prompt.wrap"};
+    auto wrap = ExtensionDefinition("prompt.wrap");
+    wrap.priority = 1;
+    auto post = ExtensionDefinition("memory.post", ext::Point::PostUser);
+    auto read = ExtensionDefinition("request.read", ext::Point::PreRequest, ext::Stage::Estimate);
+    read.after = {"context.token_estimate"};
+    options.extensions.push_back(ExtensionRegistration("public-chain", {wrap, read, rewrite, post},
+        [=](const ext::Context& context, const ext::Input& input, ext::Next next) -> sdk::Result<ext::HandlerReturn> {
+            Check(input.schema_version == 1, "extension JSON schema version changed");
+            Check(!context.session_id.empty() && !context.operation_id.empty() && context.turn_id &&
+                  !context.dispatch_id.empty() && !context.invocation_id.empty(), "extension lacks issued identities");
+            names->push_back(context.hook_name);
+            issued->push_back(context);
+            if (context.hook_name == "prompt.rewrite") {
+                *saved = next;
+                auto foreign = std::async(std::launch::async, [next] { return next.Call(); }).get();
+                Check(!foreign && foreign.error().code == "hook.next.wrong_thread", "cross-thread Next reached native code");
+                auto result = ExtensionContinue(next, R"({"prompt":"rewritten-public-input"})");
+                auto twice = saved->Call();
+                Check(!twice && twice.error().code == "hook.next.already_consumed", "copied Next invoked downstream twice");
+                return result;
+            }
+            if (context.point == ext::Point::PreRequest) {
+                Check(context.stage == ext::Stage::Estimate && context.step_id && !context.request_id,
+                      "frozen-request hook omitted step identity or invented an unissued request identity");
+                Check(input.json.find("rewritten-public-input") != std::string::npos &&
+                      input.json.find("post-public-context") != std::string::npos, "request hook saw stale body");
+                return ExtensionContinue(next);
+            }
+            Check(input.json == R"({"prompt":"rewritten-public-input"})", "post/rewrite chain saw the wrong input");
+            auto result = ExtensionContinue(next);
+            if (result) result->effects.push_back({ext::EffectType::ContextAppend, context.point == ext::Point::PreUser ?
+                R"({"text":"pre-public-context"})" : R"({"text":"post-public-context"})"});
+            return result;
+        }));
+    auto session = Take(runtime->OpenSession(std::move(options)), "open extension chain session");
+    const auto result = ExtensionRun(session, "public-chain-key", "original-public-input");
+    Succeeded(result);
+    Check(result.final_text == "public-extension-answer", "extension chain lost final response");
+    Check(*names == std::vector<std::string>{"prompt.rewrite", "prompt.wrap", "memory.post", "request.read"},
+          "dependency order or hook stages did not match the frozen plan");
+    for (const auto& context : *issued)
+        Check(context.session_id == session->id() && context.operation_id == result.operation_id &&
+              context.turn_id == result.turn_id, "extension identities crossed operation/session boundaries");
+    auto expired = saved->Call();
+    Check(!expired && expired.error().code == "hook.next.expired", "saved continuation retained its invocation grant");
+    const auto description = Take(session->DescribeExtensions(), "describe extension plan");
+    Check(description.find("public-chain") != std::string::npos, "public plan omitted registered manifest");
+    Take(session->Close(), "close extension chain");
+    Check(Take(session->DescribeExtensions(), "describe closed extension plan") == description,
+          "closed plan differs from frozen running plan");
+    expired = saved->Call();
+    Check(!expired && expired.error().code == "hook.next.expired", "closed session resurrected saved continuation");
+    Take(runtime->Shutdown(), "shutdown extension chain runtime");
+    Progress("completed: ExtensionChain");
+}
+
+void ExtensionIsolationAndResume(const fs::path& base) {
+    Progress("begin: ExtensionIsolationAndResume");
+    const auto paths = Fresh(base, "extension-isolation");
+    auto runtime = Runtime(paths);
+    auto factories = std::make_shared<std::atomic<unsigned>>(0);
+    auto destroyed = std::make_shared<std::atomic<unsigned>>(0);
+    const auto options_for = [&](std::string resume = {}, bool changed = false, bool absent = false) {
+        auto options = Options(paths, [](const sdk::ModelRequest& request, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+            for (auto it = request.messages.rbegin(); it != request.messages.rend(); ++it)
+                if (it->role == "user") return Text(it->text);
+            return std::unexpected(sdk::Error{"fixture.history.empty", "no actual user message"});
+        });
+        options.resume_session_id = std::move(resume);
+        if (absent) return options;
+        auto definition = ExtensionDefinition("session.counter");
+        if (changed) definition.definition_hash = "installed-consumer-v2";
+        auto registration = ExtensionRegistration("public-counter", {definition}, {});
+        registration.factory = [=](const ext::SessionContext& context) -> sdk::Result<std::unique_ptr<ext::Instance>> {
+            Check(Path(context.cwd) == fs::weakly_canonical(paths.cwd), "factory received another project's cwd");
+            ++*factories;
+            auto count = std::make_shared<unsigned>(0);
+            return std::make_unique<ConsumerExtension>(
+                [count, id = context.session_id](const ext::Context& invocation, const ext::Input&, ext::Next next) {
+                    Check(invocation.session_id == id, "per-session instance crossed session identity");
+                    return ExtensionContinue(next, "{\"prompt\":\"" + id + "/" + std::to_string(++*count) + "\"}");
+                }, [destroyed] { ++*destroyed; });
+        };
+        options.extensions.push_back(std::move(registration));
+        return options;
+    };
+    auto alpha = Take(runtime->OpenSession(options_for()), "open extension alpha");
+    auto beta = Take(runtime->OpenSession(options_for()), "open extension beta in same cwd");
+    Check(alpha->id() != beta->id(), "same cwd reused an extension session");
+    auto a = std::async(std::launch::async, [alpha] { return ExtensionRun(alpha, "a1", "alpha input"); });
+    auto b = std::async(std::launch::async, [beta] { return ExtensionRun(beta, "b1", "beta input"); });
+    Check(a.get().final_text == alpha->id() + "/1", "alpha instance state mixed with beta");
+    Check(b.get().final_text == beta->id() + "/1", "beta instance state mixed with alpha");
+    Check(ExtensionRun(alpha, "a2", "alpha second").final_text == alpha->id() + "/2", "instance counter reset within session");
+    const auto id = alpha->id();
+    Take(alpha->Close(), "close extension alpha only");
+    Check(destroyed->load() == 1, "closing alpha retained its instance or released beta");
+    Check(ExtensionRun(beta, "b2", "beta second").final_text == beta->id() + "/2", "alpha close stopped beta");
+    auto changed = runtime->OpenSession(options_for(id, true));
+    Check(!changed && changed.error().code == "sdk.extension.resume_mismatch", "changed resume plan was accepted");
+    auto missing = runtime->OpenSession(options_for(id, false, true));
+    Check(!missing && missing.error().code == "sdk.extension.resume_mismatch", "resume silently omitted an extension");
+    auto resumed = Take(runtime->OpenSession(options_for(id)), "resume matching extension plan");
+    Check(resumed->id() == id, "resume changed session identity");
+    Check(ExtensionRun(resumed, "a3", "alpha resume").final_text == id + "/1",
+          "resume reused old instance state rather than calling the factory");
+    Check(factories->load() == 3, "failed resume instantiated an incompatible plan");
+    Take(resumed->Close(), "close resumed extension");
+    Take(beta->Close(), "close extension beta");
+    Check(destroyed->load() == 3, "Close retained extension instances");
+    Take(runtime->Shutdown(), "shutdown extension isolation runtime");
+    Progress("completed: ExtensionIsolationAndResume");
+}
+
+struct ExtensionCaptureState {
+    sdk::Backend* backend = nullptr;
+    sdk::Runtime* runtime = nullptr;
+    std::atomic<bool> alive{false}, armed{false};
+    std::atomic<unsigned> final_count{0}, probes{0}, guarded_shutdowns{0}, lifetime_errors{0};
+    ext::Next saved;
+};
+struct ExtensionCapture {
+    std::shared_ptr<ExtensionCaptureState> state;
+    ~ExtensionCapture() {
+        if (!state->armed.load()) return;
+        ++state->final_count;
+        if (!state->alive.load()) { ++state->lifetime_errors; return; }
+        sdk::ModelRequest request;
+        request.model = "extension-lifetime-probe";
+        auto result = state->backend->Generate(request, {});
+        if (!result || result->text != "extension-backend-alive") ++state->lifetime_errors;
+        const auto shutdown = state->runtime->Shutdown();
+        if (!shutdown && shutdown.error().code == "sdk.lifecycle.reentrant") ++state->guarded_shutdowns;
+        else ++state->lifetime_errors;
+    }
+};
+class ExtensionCaptureBackend final : public sdk::Backend {
+public:
+    explicit ExtensionCaptureBackend(std::shared_ptr<ExtensionCaptureState> state) : state_(std::move(state)) {
+        state_->alive.store(true);
+    }
+    ~ExtensionCaptureBackend() override { state_->alive.store(false); }
+    sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest& request, sdk::Cancellation) override {
+        if (request.model == "extension-lifetime-probe") { ++state_->probes; return Text("extension-backend-alive"); }
+        return Text("extension-capture-answer");
+    }
+private:
+    std::shared_ptr<ExtensionCaptureState> state_;
+};
+// Shared_ptr-only functors exercise std::function's inline-copy path on libc++.
+struct SmallExtensionFactory {
+    std::shared_ptr<ExtensionCapture> capture;
+    SmallExtensionFactory(const SmallExtensionFactory&) noexcept = default;
+    explicit SmallExtensionFactory(std::shared_ptr<ExtensionCapture> value) : capture(std::move(value)) {}
+    sdk::Result<std::unique_ptr<ext::Instance>> operator()(const ext::SessionContext&) const {
+        return std::make_unique<ConsumerExtension>(
+            [owned = capture](const ext::Context&, const ext::Input&, ext::Next next) {
+                owned->state->saved = next;
+                return ExtensionContinue(next);
+            });
+    }
+};
+static_assert(sizeof(SmallExtensionFactory) == sizeof(std::shared_ptr<ExtensionCapture>));
+static_assert(std::is_nothrow_copy_constructible_v<SmallExtensionFactory>);
+
+void ExtensionCaptureRollback(const fs::path& base) {
+    Progress("begin: ExtensionCaptureRollback");
+    const auto paths = Fresh(base, "extension-captures");
+    auto runtime = Runtime(paths);
+    for (const bool fail : {false, true}) {
+        auto state = std::make_shared<ExtensionCaptureState>();
+        state->runtime = runtime.get();
+        auto options = Options(paths, [](const sdk::ModelRequest&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> { return Text("unused"); });
+        auto backend = std::make_unique<ExtensionCaptureBackend>(state);
+        state->backend = backend.get();
+        options.backend = std::move(backend);
+        auto capture = std::make_shared<ExtensionCapture>();
+        capture->state = state;
+        std::weak_ptr<ExtensionCapture> weak = capture;
+        auto registration = ExtensionRegistration("small-factory", {ExtensionDefinition("small.pass")}, {});
+        registration.factory = SmallExtensionFactory(capture);
+        options.extensions.push_back(std::move(registration));
+        // Clear caller-side inline sources before testing the SDK's ownership.
+        registration.factory = nullptr;
+        capture.reset();
+        if (fail) {
+            auto broken = ExtensionRegistration("broken-factory", {ExtensionDefinition("broken.pass")}, {});
+            broken.factory = [](const ext::SessionContext&) -> sdk::Result<std::unique_ptr<ext::Instance>> {
+                return std::unexpected(sdk::Error{"fixture.factory.failed", "deliberate second-factory failure"});
+            };
+            options.extensions.push_back(std::move(broken));
+            state->armed.store(true);
+        }
+        auto opened = runtime->OpenSession(std::move(options));
+        if (fail) Check(!opened && opened.error().code == "sdk.extension.factory_failed", "factory failure did not fail OpenSession");
+        else {
+            auto session = Take(std::move(opened), "open small factory session");
+            Succeeded(ExtensionRun(session, "small-factory-key", "small factory input"));
+            state->armed.store(true);
+            Take(session->Close(), "close small factory session");
+        }
+        Check(weak.expired(), "SDK retained a source factory capture after Close/rollback");
+        Check(state->final_count.load() == 1 && state->probes.load() == 1 && state->guarded_shutdowns.load() == 1 &&
+              state->lifetime_errors.load() == 0, "capture retired after backend or outside lifecycle guard");
+        Check(!state->alive.load(), "extension cleanup retained its session backend");
+        const auto expired = state->saved.Call();
+        Check(!expired && expired.error().code == "hook.next.expired", "saved Next kept an extension/backend alive");
+    }
+    auto healthy = Take(runtime->OpenSession(Options(paths,
+        [](const sdk::ModelRequest&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> { return Text("after rollback"); })),
+        "open healthy session after failed extension factory");
+    Succeeded(ExtensionRun(healthy, "healthy-after-rollback", "healthy input"));
+    Take(healthy->Close(), "close healthy rollback session");
+    Take(runtime->Shutdown(), "shutdown extension capture runtime");
+    Progress("completed: ExtensionCaptureRollback");
+}
+
+void PublicExtensions(const fs::path& base) {
+    ExtensionChain(base);
+    ExtensionIsolationAndResume(base);
+    ExtensionCaptureRollback(base);
+}
 } // namespace
 
 int main(int argc, char** argv) {
     Progress("entered main");
     try {
-        Check(argc == 3, "usage: lubancore_consumer smoke|isolation|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
+        Check(argc == 3, "usage: lubancore_consumer smoke|isolation|extensions|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
         const fs::path base = Path(argv[2]);
         Check(base.is_absolute(), "state directory must be absolute");
         fs::create_directories(base);
@@ -1101,6 +1391,7 @@ int main(int argc, char** argv) {
             FourSessionIsolation(base);
             SmallToolCaptureLifetime(base);
         }
+        else if (mode == "extensions") PublicExtensions(base);
         else if (mode == "seed") Seed(base);
         else if (mode == "resume") Resume(base);
         else if (mode == "recovery-seed") RecoverySeed(base);

@@ -566,7 +566,8 @@ class AgentLoop {
 public:
     static std::expected<RunOutcome, std::string> Run(Agent& agent, api::Message user_message,
                                                        const TurnWiring& wiring,
-                                                       const std::atomic<bool>* cancel = nullptr);
+                                                       const std::atomic<bool>* cancel = nullptr,
+                                                       bool input_already_admitted = false);
 };
 
 // 执行一枚工具调用的完整链(公开导出;实现在 loop.cpp 顶部,注释在那头):

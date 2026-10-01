@@ -141,8 +141,8 @@ PR #253 验收头为 `54c164c2`，经 `180fd160` 合入功能分支，见
 八册必需寿命回归均跑出非零原生用例。ASan 覆盖内部会话、Agent、工具与宿主寿命，
 不含独立安装消费程序。LSan 未开启，Playwright 未安装，TSan 按条件跳过。
 Ubuntu 24.04、Debian 11、Debian 12 烟测通过。受测合并提交 `41591788` 与实际合并
-`180fd160` 同为树 `02ee0cbc`。本轮只验第一阶段窄 SDK；扩展、后台命令和远端 Worker
-尚未交付，内部 Async 线程创建失败欠账仍见[总欠账单](../../todos/欠账与观察清单.todo)。
+`180fd160` 同为树 `02ee0cbc`。这轮只验第一阶段窄 SDK，未含后续公开 C++ 扩展、
+后台命令与远端 Worker。内部 Async 线程创建失败欠账仍见[总欠账单](../../todos/欠账与观察清单.todo)。
 
 ## 调用次序
 
@@ -165,8 +165,8 @@ Ubuntu 24.04、Debian 11、Debian 12 烟测通过。受测合并提交 `41591788
 正在执行的 `Next` 退出。SDK 不替宿主开事件回调线程。
 
 自定义 Backend、Tool 须合作检查取消旗。SDK 不强杀这些进程内回调，`Close` 会等其退出，
-不会丢下 detached 线程再释放借用对象。不得在 Backend/Tool 回调里销毁 Runtime 或 Session；
-回调中调用 `Close`、`WaitResult` 或 `Runtime::Shutdown` 会报 `sdk.lifecycle.reentrant`，
+不会丢下 detached 线程再释放借用对象。不得在 Backend、Tool、工厂或扩展回调里销毁 Runtime 或 Session；
+回调中调用 `Close`、`WaitResult`、`Runtime::OpenSession` 或 `Runtime::Shutdown` 会报 `sdk.lifecycle.reentrant`，
 跨会话调用也受这条约束，免得两只 worker 互相等着 join。
 
 ## 工具、权限与并发边界
@@ -181,7 +181,7 @@ Ubuntu 24.04、Debian 11、Debian 12 烟测通过。受测合并提交 `41591788
 各自持有，不加项目独占锁。共享文件仍可能互相覆盖，SDK 不声称跨会话文件事务隔离。
 进程级语言文案只读取现有默认状态，SDK 不在建场时改全局语言。
 
-当前不提供全量 CLI 装配：Lua、Package、子 Agent、Hook 配置、动态换模型、目录切换、
+当前不提供全量 CLI 装配：Lua、Package、子 Agent、CLI Hook 配置、动态换模型、目录切换、
 自动记忆、Detached job、GPU 分配均不在这批能力内。`resource_root` 为显式资源入口；
 这批四件本地工具不加载资源文件，也不从 home 自动搜配置。自定义 Backend 注入面仅支持
 文本与工具调用；遇图片、思考或结构化结果会明报不支持。真实连接后端仍沿用原协议实现。
@@ -190,6 +190,45 @@ MCP 文本结果可接着送入下一轮模型请求。图片、音频和二进�
 再由共用容量闸报 `tool_batch.unestimated_media_or_reasoning`，操作以 `Failed` 收场；
 不会重跑工具，也不会继续发送模型请求。SDK 尚未提供媒体预算策略，不能拿文本字节估算
 替媒体计价。原件仍可从本地会话目录读取。详见[媒体边界](../architecture/context/v3-action-summary.md#媒体边界)。
+
+## 公开 C++ 扩展
+
+`<lubancore/extensions.hpp>` 提供 `extensions::v1`。宿主把 `Registration` 放进
+`SessionOptions::extensions`，每项带 `Manifest` 与工厂。建场先校验声明、依赖和冻结计划，
+再调工厂；每场各造一只 `Instance`，不跨会话共用实例。空表沿用原 SDK 执行路。
+安装消费示例的 `extensions` 模式只用公开头，演示真实会话拦截。
+
+首批开放三处：`PreUser`、`PostUser`，以及 `PreRequest` 的只读 `Estimate`、`Capacity`。
+`PreUser` 输入为 `{"prompt":string}`；调用 `Next::Call` 传同形候选才会采用改写。
+不调 `Next` 就短路，正常返回省略输出时，沿用已消费 Next 的结果。`Denied` 与处理失败
+分开记账；下游已经拒绝或失败，上游不能再把它洗成成功。可选项允许 `KeepOriginal`，
+required 槽仍须失败关闭；高层替代项不能撤掉低层 required 约束。
+
+`ContextAppend` 仅收 `{"text":string}`，只准 `PreUser`、`PostUser` 返回。采用后加来源提示，
+另落 `origin=hook`、`display=hidden` 消息，接纳进真实 V3 上下文链。模型历史同序追加，
+恢复也读这份正文。原输入仍存受理原件，正式 Human 消息存采用后正文。`PreUser` 拒绝时
+不接纳用户消息；`PostUser` 拒绝时保留已接纳用户消息，停住后续模型请求。
+
+`Estimate` 看冻结模型输入，返回公开头所列 EST1 测量对象。`Capacity` 返回
+`AdmissionDecision`，形如 `{"decision":"allow","reason":"within budget"}`；还可选
+`recover`、`reject`，SDK 当前会停住这两种结局。内置估算与容量 required 槽照常在场。
+这批不开放请求正文改写、Action 挂点或全部 CLI Hook 装配。
+
+`Context` 携会话、操作、派发与调用身份；turn、step、request 只填已经发出的号。
+取消旗只借到 `Invoke` 返回。Next 副本共用一次许可；跨线程报 `hook.next.wrong_thread`，
+重复消费和调用结束后再用也各报明确错误。保存 Next 不会强留会话、实例或后端。
+observer 只读，在辅助线程运行，派发等其退出才返回；同一实例可能收到并发 observer，
+扩展自行照管共享状态。工厂、Invoke 与扩展析构中，阻塞生命周期入口受同一重入闸约束。
+
+`Close` 先停接、取消并等待实际回调退出，再销毁 Agent、扩展、工具、MCP 与后端。
+关闭后仍可调 `DescribeExtensions` 读冻结计划。首批随整场关闭收回，不提供逐项卸载。
+可信 C++ 插件持进程权限；这里没有动态库加载器、沙箱、强杀回调或自动回滚外部副作用。
+`definition_hash` 由宿主声明，扩展实现或策略变更须更新身份，SDK 不替原生代码计算摘要。
+
+会话目录内 `sdk-extension-plan.json` 存冻结计划。恢复先比声明与计划，再造新实例；
+身份、来源、排序、匹配或策略不符，报 `sdk.extension.resume_mismatch`，不启动工厂。
+旧会话没有此文件时，只准空扩展表恢复。恢复重建实例，不序列化任意 C++ 私有状态。
+公开 ABI 仍属实验接口，须沿安装消费说明使用匹配工具链与 Windows CRT。
 
 ## 恢复与结果
 

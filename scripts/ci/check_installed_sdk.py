@@ -17,9 +17,28 @@ import xml.etree.ElementTree as ET
 
 
 REQUIRED_TESTS = {
-    "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.seed", "sdk.consumer.resume",
+    "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.extensions",
+    "sdk.consumer.seed", "sdk.consumer.resume",
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
+REQUIRED_PUBLIC_HEADERS = {
+    "include/lubancore/api.hpp", "include/lubancore/core.hpp", "include/lubancore/extensions.hpp",
+}
+
+
+def check_public_headers(repo: Path, installed_files: list[str], install_mode: str) -> set[str]:
+    """Validate the public header set for either relocated install mode."""
+    public_headers = {"include/" + path.relative_to(repo / "include").as_posix()
+                      for path in (repo / "include" / "lubancore").rglob("*.hpp")}
+    missing_source = REQUIRED_PUBLIC_HEADERS - public_headers
+    if missing_source:
+        raise RuntimeError("SDK source is missing required public headers: " +
+                           ", ".join(sorted(missing_source)))
+    missing_headers = public_headers - set(installed_files)
+    if missing_headers:
+        raise RuntimeError(f"{install_mode} SDK install is missing public headers: " +
+                           ", ".join(sorted(missing_headers)))
+    return public_headers
 
 
 def run(args: list[str], env: dict[str, str], *, capture: bool = False) -> str:
@@ -100,12 +119,8 @@ def main() -> None:
     installed_files = sorted(path.relative_to(prefix).as_posix() for path in prefix.rglob("*")
                              if path.is_file() or path.is_symlink())
     (evidence / "installed-files.json").write_text(json.dumps(installed_files, indent=2) + "\n", encoding="utf-8")
+    public_headers = check_public_headers(repo, installed_files, args.install_mode)
     if args.install_mode == "full":
-        public_headers = {"include/" + path.relative_to(repo / "include").as_posix()
-                          for path in (repo / "include" / "lubancore").rglob("*.hpp")}
-        missing_headers = public_headers - set(installed_files)
-        if not public_headers or missing_headers:
-            raise RuntimeError("full SDK install is missing public headers: " + ", ".join(sorted(missing_headers)))
         package_files = re.compile(r"lib(?:64)?/cmake/LubanCore/LubanCore(?:Config(?:Version)?|Targets(?:-[A-Za-z0-9_]+)?)\.cmake")
         library_files = re.compile(r"lib(?:64)?/(?:liblubancore(?:\.so(?:\.[0-9]+)*|(?:\.[0-9]+)*\.dylib|\.dll\.a)|lubancore\.lib)")
         for relative in installed_files:
