@@ -24,6 +24,8 @@ C++ 宿主、Policy 实现与原生扩展属于可信代码。协议客户端不
 
 SDK 与 Worker 只接一份中立 `PolicyProvider`。首批收最小裁决与变更通知合同，后续 SPI 扩充同一接口；不并排造 ManagedAuthorizer、Worker ACL 和另一套 PolicyProvider。首批参考实现须支持显式默认管理员、tenant/project 绑定与可撤销授权，不接数据库、登录界面或 OIDC。
 
+接口基础批 [#261](https://github.com/relic-yuexi/LubanCode/pull/261) 尚为 Draft。它只裁动作，核主体、资源、能力和绑定版本；尚未接 Managed 会话。工具名、有效参数和模型目标不在这份裁决输入中。按目录、命令或模型参数设策略，须扩充同一 PolicyProvider，不能借动作级验收报参数策略已交付。
+
 配置按全局 → 租户 → 项目 → Session 收快照。首批只预留租户层，允许为空；下层配置不能抬高上层身份与能力许可，不在这批接配置管理服务。
 
 ## 会话与视图寿命
@@ -41,6 +43,10 @@ Managed 按租户分存储根。根、项目绑定与模式标记由可信宿主
 新场先核身份和项目绑定，再保存可核归属，才启动 SDK-owned 执行、MCP、工具或模型请求。宿主可能已构造公开 Backend，SDK 不承诺阻止宿主构造它。
 
 旧本地入口不得恢复 Managed 场；Managed 不得认领无归属旧账。归属缺失、损坏、tenant/project 冲突或恢复绑定不符均明确拒绝，不读完正文再猜，不悄悄新建。保留原 Session ID、单写者与 append-only 历史。
+
+V3 主账为 `sessions/<id>/<id>.jsonl`，不写 V2 的 `session.json` 或 `main.jsonl`。归属须另用版本化 sidecar，在 SessionLock 下先落稳，再写 V3 首行；恢复与候选筛选须在读正文前预检，拿锁后复核。底层只核冻结预期，不持会话管理锁调用宿主 Policy。
+
+原子写须按提交阶段收口。换名已生效、耐久尚未确认时，拒绝本次开场，保留完整归属供同归属重验；不能删标记再当 LocalTrusted。只有尚未提交、尚未开账、尚未接单，且空残留确属本次尝试，才可清理。
 
 首批只交 API 身份与授权；强隔离未验成前，托管宿主只接可信执行。租户目录不构成 OS 沙箱。Managed 不跨租户共用承载不可信工具的 Worker；Worker 文件、进程、网络隔离另批验收。本合同不承诺拦住可信 C++ 宿主直接读盘或改内存。
 
