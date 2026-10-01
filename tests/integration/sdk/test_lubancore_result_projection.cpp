@@ -101,8 +101,11 @@ Store::ChannelOutput Channel(std::string kind, std::string text) {
     channel.output_bytes = channel.data.size();
     return channel;
 }
-// Real ResultStore files feed the private durable reader; SnapshotAccess is not
-// exposed or copied here. Production uses the same reader through a V3 index.
+// Component fixture: real ResultStore files feed the same production reader,
+// compiled as a private test source. SnapshotAccess is not exported or copied.
+// The supplied index/policy are fixture inputs; these cases do not prove the
+// public completed-operation or V3 indexing gates. The actual SDK session cases
+// above/below and installed consumer cover that separate public path.
 out::SavedSnapshot Durable(const Fixture& fixture, std::vector<Store::ChannelOutput> channels,
                            out::Mode mode = out::Mode::Preview) {
     auto store = Store::Open(fixture.root / "saved");
@@ -224,7 +227,7 @@ TEST_CASE("SDK result projection: close resume restores exact frozen record and 
     REQUIRE((*runtime)->Shutdown().has_value());
 }
 
-TEST_CASE("SDK result projection: persisted channels share one UTF8 prefix and one whole-text redaction") {
+TEST_CASE("SDK result projection: durable reader fixture channels share one UTF8 prefix and one whole-text redaction") {
     Fixture fixture;
     const std::string key = "FAKE_CROSS_CHANNEL_SECRET";
     auto snapshot = Durable(fixture, {Channel("stdout", std::string(4090, 'a') + key.substr(0, 10)),
@@ -247,7 +250,7 @@ TEST_CASE("SDK result projection: persisted channels share one UTF8 prefix and o
     CHECK(lubancode::platform::IsValidUtf8(unicode_wire["text"].get<std::string>()));
 }
 
-TEST_CASE("SDK result projection: binary and incomplete durable material cannot leak through metadata") {
+TEST_CASE("SDK result projection: durable reader fixture binary and incomplete material cannot leak through metadata") {
     Fixture fixture;
     auto image = Channel("image", "DO_NOT_EXPORT_IMAGE_OR_FILE_PATH"); image.media_type = "image/png"; image.encoding = "binary";
     auto raw = Channel("raw_payload", R"({"credential":"DO_NOT_EXPORT_RAW_JSON"})"); raw.media_type = "application/json";
@@ -299,7 +302,7 @@ TEST_CASE("SDK result projection: text read quota input cap and escaped transmis
     REQUIRE((*runtime)->Shutdown().has_value());
 }
 
-TEST_CASE("SDK result projection: closed storage schema remains strict even with recomputed corruption digest") {
+TEST_CASE("SDK result projection: durable reader fixture storage stays strict with recomputed corruption digest") {
     Fixture fixture;
     auto snapshot = Durable(fixture, {Channel("combined", "RESULT_HEAD frozen text")});
     auto projector = Projector(snapshot);
