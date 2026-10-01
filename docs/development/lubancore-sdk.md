@@ -9,7 +9,9 @@
 本页记录已交付的窄 SDK。SDK-only 默认构建、普通安装、终端依赖拆分、SDK 与
 AppServer 共用资源拥有、CLI 显式工具装配，以及四路回合临时接线已验收。
 SDK 与 AppServer 共用会话执行对象，多会话隔离与寿命验收也已通过。第一阶段收工。
-扩展接口与远端 Worker 随后接。
+可信 C++ 扩展已由 [PR #255](https://github.com/relic-yuexi/LubanCode/pull/255) 交付，
+沿用现有中间件核；每场实例、冻结装配、真实上下文接纳和整场卸载均已验收。
+公开安装头为 `api.hpp`、`core.hpp`、`extensions.hpp`。远端 Worker 随后接。
 `LubanCore::Core` 是公开安装目标；仓库内部旧名
 `lubancode_core` 仍带 CLI 实现，两者不能混用。
 
@@ -144,6 +146,27 @@ Ubuntu 24.04、Debian 11、Debian 12 烟测通过。受测合并提交 `41591788
 `180fd160` 同为树 `02ee0cbc`。这轮只验第一阶段窄 SDK，未含后续公开 C++ 扩展、
 后台命令与远端 Worker。内部 Async 线程创建失败欠账仍见[总欠账单](../../todos/欠账与观察清单.todo)。
 
+PR #255 验收头为 `9a965a7f`，经 `57745632` 合入功能分支，见
+[CI 36828070978](https://github.com/relic-yuexi/LubanCode/actions/runs/36828070978) 与
+[文档检查 36828070966](https://github.com/relic-yuexi/LubanCode/actions/runs/36828070966)：
+三平台 SDK-only 与组合构建共六组，安装消费各 7/7、SDK 专项各 9/9。
+SDK-only 走 testing OFF/ON 默认构建和全安装；组合构建另核 LubanCore 组件安装。
+三份公开头均已核齐，外部消费只用安装产物。六组扩展册各跑原生 12/12 例、
+591/591 条断言；会话执行册仍为 11/11 例、366/366 条断言。安装消费真实核过
+拦截链、同目录两场、同身份恢复、小回调退出、工厂失败清理和健康会话续跑。
+
+三平台宿主专项各 7/7，逐来源共 58 例、1173 条断言，含 AppServer/Lua
+6/6 例、513/513 条断言。默认构建全量 Linux 666/666、macOS 669/669、
+Windows 668/668，以完整 CI 控制台汇总为证；SDK、宿主与 ASan 则另核逐来源
+完整日志、JUnit 和登记清单，不把全量汇总说成逐册原生日志证明。
+
+ASan 105/105，十册必需寿命来源齐全且实跑非零用例；扩展册为 12/12 例、
+591/591 条断言，中间件核为 24/24 例、212/212 条断言，未见地址错误诊断。
+ASan 不含独立安装消费程序；LeakSanitizer 未开启，Playwright 未安装，TSan
+按条件跳过。受测合并提交 `89d1adfd` 与实际合并 `57745632` 同为树 `4706b9f1`，
+两者父提交均为 `aaa05496` 与 `9a965a7f`。这轮验可信 C++ 窄扩展，不代表高级
+ExtensionRuntime、后台命令、远端 Worker 或 Node 结果同步已交付。本地未编译或运行原生测试。
+
 ## 调用次序
 
 1. `Runtime::Create` 显式接收绝对路径 `data_root`、`resource_root`。
@@ -192,6 +215,8 @@ MCP 文本结果可接着送入下一轮模型请求。图片、音频和二进�
 替媒体计价。原件仍可从本地会话目录读取。详见[媒体边界](../architecture/context/v3-action-summary.md#媒体边界)。
 
 ## 公开 C++ 扩展
+
+本节记录 #255 已交付的可信 C++ 窄接口，验收与合并记录见上文。
 
 `<lubancore/extensions.hpp>` 提供 `extensions::v1`。宿主把 `Registration` 放进
 `SessionOptions::extensions`，每项带 `Manifest` 与工厂。建场先校验声明、依赖和冻结计划，
