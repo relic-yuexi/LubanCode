@@ -1345,6 +1345,11 @@ ClearOutcome SessionManager::ClearV3Locked(const ClearRequest& request,
     outcome.old_session_ended_ref =
         EventRef{old.session_id(), ended_receipt.id, ended_receipt.line_hash};
     outcome.old_journal_sha256 = ended_receipt.line_hash;  // 封账行 hash(§8.3 同口径)
+    // 封口后先关写句柄,再推进换场。沿用 checked Close,关闭失败不能冒充
+    // 清场成功;保留旧场身份与只读上下文,也不把正常关闭标成 broken。
+    if (const auto closed = old.v3_main->Close(); !closed.has_value()) {
+        return fail("clear.step4_failed", closed.error());
+    }
     old.status = SessionStatus::Closed;  // 只住内存(v3 无 session.json 可翻)
 
     // ---- 第 5 步:v3 无 session.json,跳——账面 session.ended 即终态。
