@@ -1165,7 +1165,8 @@ bool CrossesBudgetSoftLine(int steps_used, int max_steps_per_turn, std::int64_t 
 
 std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message user_message,
                                                        const TurnWiring& wiring,
-                                                       const std::atomic<bool>* cancel) {
+                                                       const std::atomic<bool>* cancel,
+                                                       bool input_already_admitted) {
     api::Backend& backend_ = agent.backend_;
     tools::ToolRegistry& registry_ = agent.registry_;
     const std::string& model_ = agent.profile_.request.model;
@@ -1190,7 +1191,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
     const auto BuildToolDefinitions = [&agent]() { return agent.BuildToolDefinitions(); };
     const auto issue_execution_id = [&agent]() { return agent.issue_execution_id(); };
 
-    if (user_message.role != api::Role::User || user_message.content.empty()) {
+    if (input_already_admitted ?
+        (context_.durable_history().empty() || context_.durable_history().back().role != api::Role::User ||
+         context_.durable_history().back().content.empty()) :
+        (user_message.role != api::Role::User || user_message.content.empty())) {
         return std::unexpected("用户消息为空，无法发送。");
     }
     run_active_ = true;
@@ -1208,11 +1212,15 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
     // 名册)只随本轮 user 进请求视图——发过即钉住,不再每回合改 system
     // 制造分叉点。持久 history_ 不收这块,session/export/compact/记忆抽取
     // 都只见用户真输入。
-    api::Message durable_user_message = user_message;
-    if (!active_turn_context_.empty()) {
-        user_message.content.push_back(api::TextBlock{active_turn_context_});
+    if (input_already_admitted) {
+        if (!active_turn_context_.empty()) context_.AppendToLastRequest(api::TextBlock{active_turn_context_});
+    } else {
+        api::Message durable_user_message = user_message;
+        if (!active_turn_context_.empty()) {
+            user_message.content.push_back(api::TextBlock{active_turn_context_});
+        }
+        context_.PushUserTurn(std::move(durable_user_message), std::move(user_message));
     }
-    context_.PushUserTurn(std::move(durable_user_message), std::move(user_message));
 
     // 步数与 stop reason 的活账:每次模型请求(每个 step)各记一笔,收场时随
     // RunOutcome 交出去——上层(子代理)按它分型 budget_exhausted/no_final_text

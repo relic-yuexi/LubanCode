@@ -21,11 +21,14 @@
 #include "runtime/assembly/session_resources.hpp"
 #include "runtime/scoped_turn_bindings.hpp"
 #include "runtime/interaction_broker.hpp"
+#include "runtime/middleware_runtime.hpp"
+#include "runtime/middleware_v3_sink.hpp"
 #include "runtime/session_service.hpp"
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "sdk/adapters.hpp"
 #include "sdk/callback_scope.hpp"
+#include "sdk/extensions.hpp"
 #include "tools/path_utils.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
@@ -282,6 +285,10 @@ struct Session::Impl final : rt::InteractionBroker {
     // RequestClose may race a different caller finishing Close. A short mutex
     // snapshot keeps the service alive while cancellation is signalled.
     std::shared_ptr<rt::SessionService> service;
+    // Sole ownership lives with SessionResources, after Agent and before tools.
+    // Publish this borrow only after initialization succeeds; queries use cache.
+    detail::SessionExtensions* extensions = nullptr;
+    std::string extension_plan_json;
     mutable std::mutex mutex;
     mutable std::condition_variable cv;
     std::mutex close_mutex;
@@ -394,6 +401,7 @@ struct Session::Impl final : rt::InteractionBroker {
                 // lifecycle guard. Clear the actual sources before the backend
                 // anchor declared above, including std::function SBO copies.
                 options.custom_tools.clear();
+                options.extensions.clear();
             }
         } source_scope{options};
         auto prepared_registry = std::make_unique<lubancode::tools::ToolRegistry>();
@@ -511,6 +519,37 @@ struct Session::Impl final : rt::InteractionBroker {
             if (!saved) return std::unexpected(Failure("sdk.resume.context_unavailable", saved.error()));
             options.system_prompt = lubancode::trajectory::v3::ProjectModelContext(*saved).system_content;
         }
+        const auto plan_path = session_dir / "sdk-extension-plan.json";
+        std::optional<std::string> expected_plan;
+        if (!options.resume_session_id.empty()) {
+            std::error_code inspect_error;
+            const bool exists = fs::exists(plan_path, inspect_error);
+            if (inspect_error) return std::unexpected(Failure("sdk.extension.resume_mismatch", "cannot inspect saved extension plan"));
+            if (exists) {
+                std::ifstream saved(plan_path, std::ios::binary);
+                if (!saved) return std::unexpected(Failure("sdk.extension.resume_mismatch", "cannot read saved extension plan"));
+                auto json = Json::parse(saved, nullptr, false);
+                if (!json.is_object() || !json.contains("schemaVersion") || json["schemaVersion"] != 1 ||
+                    !json.contains("extensions") || !json["extensions"].is_array()) {
+                    return std::unexpected(Failure("sdk.extension.resume_mismatch", "invalid saved extension plan"));
+                }
+                expected_plan = json.dump();
+            } else if (!options.extensions.empty()) {
+                // Legacy sessions did not declare an extension identity. Never
+                // silently attach new executable callbacks to that old history.
+                return std::unexpected(Failure("sdk.extension.resume_mismatch", "legacy session has no extension plan"));
+            }
+        }
+        auto module = detail::SessionExtensions::Build(options.extensions, {session_id, options.cwd}, expected_plan);
+        if (!module) return std::unexpected(module.error());
+        auto* module_ptr = module->get();
+        extension_plan_json = module_ptr->DescribePlan();
+        assembled->Attach(std::move(*module));
+        if (options.resume_session_id.empty()) {
+            const auto written = lubancode::platform::AtomicWriteFile(plan_path, extension_plan_json,
+                lubancode::platform::WriteDurability::ProcessCrashDurability);
+            if (!written) return std::unexpected(Failure("sdk.extension.plan_write_failed", written.error().message));
+        }
         lubancode::agent::AgentProfile profile;
         profile.request.model = options.model;
         profile.system_prompt = options.system_prompt;
@@ -519,7 +558,10 @@ struct Session::Impl final : rt::InteractionBroker {
         std::optional<std::vector<api::Message>> restored_history;
         if (!options.resume_session_id.empty()) restored_history = service->trajectory()->LaunchResumeHistory();
         service->InitializeExecution(std::move(*assembled), std::move(profile), std::move(restored_history));
-        return LoadOperations();
+        auto loaded = LoadOperations();
+        if (!loaded) return loaded;
+        extensions = module_ptr;
+        return {};
     }
 
     void Start() {
@@ -646,11 +688,49 @@ struct Session::Impl final : rt::InteractionBroker {
             event.payload_json = source.to_json().dump();
             Emit(std::move(event));
         });
+        auto* dispatcher = extensions ? extensions->dispatcher() : nullptr;
+        auto* writer = service->trajectory()->v3_main_writer();
+        rt::BindMiddlewareSessionWriter(dispatcher, nullptr, writer);
+        if (extensions) extensions->SetOperationScope(input.operation_id);
+        const auto middleware_healthy = [dispatcher] {
+            if (!dispatcher) return true;
+            const auto* sink = dynamic_cast<rt::V3MiddlewareEventSink*>(dispatcher->middleware_sink());
+            return sink && sink->recent_errors().empty();
+        };
+        rt::MiddlewareHookContext hook_context;
+        hook_context.turn_id = operation.turn_id;
+        hook_context.origin = "human";
+        hook_context.purpose = "interactive";
+        hook_context.delivery_mode = "direct";
+        hook_context.cancel = &interrupt;
+        const auto pre = rt::RunPreUserMiddleware(dispatcher, input.text, hook_context);
+        if (pre.blocked || !middleware_healthy()) {
+            operation.state = interrupt.load() ? OperationState::Cancelled : OperationState::Failed;
+            operation.error = pre.blocked ? pre.block_code + ": " + pre.block_reason : "sdk.extension.trajectory_failed";
+            // A reserved identity is not a formal admitted turn. No user or
+            // TurnStarted event has been committed on a PreUser rejection.
+            operation.turn_id.clear();
+            active_turn_id.clear();
+            Complete(std::move(operation), {}, false, middleware_healthy());
+            return;
+        }
         events.Start(operation.turn_id);
         lubancode::agent::TurnWiring wiring;
         wiring.events = &events;
         wiring.turn_id = operation.turn_id;
         wiring.tool_artifact_dir = lubancode::tools::PathToUtf8(session_dir / "artifacts" / "sha256");
+        if (rt::HasPreRequestMiddleware(dispatcher)) {
+            wiring.on_pre_request_hooks = [&, dispatcher](const std::string& step_id, const std::string& turn_id,
+                const Json& frozen_request, const rt::PreRequestBudget& budget) {
+                auto context = hook_context;
+                context.turn_id = turn_id;
+                context.step_id = step_id;
+                const auto stages = rt::RunPreRequestMiddleware(dispatcher, frozen_request, budget, context);
+                if (!middleware_healthy()) return std::string("sdk.extension.trajectory_failed");
+                if (!stages.dispatched || stages.decision == "allow") return std::string();
+                return "sdk.extension.request_denied[" + stages.decision + "]: " + stages.reason;
+            };
+        }
         wiring.on_permission_evaluate = [&](const std::string&, const std::string& name,
             lubancode::tools::ApprovalClass approval_class, const Json& arguments, const rt::ToolHookDecision& pre) {
             std::lock_guard lock(approval_mutex);
@@ -672,11 +752,50 @@ struct Session::Impl final : rt::InteractionBroker {
                                    .thread_id = session_id, .turn_id = operation.turn_id});
         api::Message message;
         message.role = api::Role::User;
-        message.content.push_back(api::TextBlock{input.text});
+        message.content.push_back(api::TextBlock{pre.prompt});
         bridge->BeginTurn(operation.turn_id, "external_user");
         bridge->RecordInput(message);
         const auto history_before = agent.history().size();
-        auto outcome = agent.Run(std::move(message), wiring, &interrupt);
+        std::expected<lubancode::agent::RunOutcome, std::string> outcome =
+            std::unexpected("sdk.extension.input_admission_failed");
+        bool context_healthy = true;
+        if (!dispatcher) {
+            // Zero registrations preserve the established host path byte for byte.
+            outcome = agent.Run(std::move(message), wiring, &interrupt);
+        } else if (bridge->recent_errors().empty()) {
+            try { agent.AppendAdmittedMessage(std::move(message)); }
+            catch (...) { context_healthy = false; }
+            const auto append_context = [&](const std::vector<std::string>& appends, const char* point) {
+                namespace v3 = lubancode::trajectory::v3;
+                for (const auto& text : appends) {
+                    const std::string body = "[" + std::string(point) + " 钩子附加上下文,非用户手敲]\n" + text;
+                    api::Message admitted;
+                    admitted.role = api::Role::User;
+                    admitted.content.push_back(api::TextBlock{body});
+                    v3::MessageDraft draft;
+                    draft.turn_id = operation.turn_id;
+                    draft.origin = v3::MessageOrigin::Hook;
+                    draft.display = v3::DisplayMode::Hidden;
+                    draft.message = Json{{"role", "user"}, {"content", body}};
+                    const auto stored = writer->AppendMessage(std::move(draft), v3::Durability::ProcessCrash);
+                    if (stored.status != v3::WriteReceipt::Status::Committed) return false;
+                    const auto accepted = writer->AdmitMessages({stored.id}, v3::Durability::ProcessCrash);
+                    if (accepted.status != v3::WriteReceipt::Status::Committed) return false;
+                    try { agent.AppendAdmittedMessage(std::move(admitted)); }
+                    catch (...) { return false; }
+                }
+                return true;
+            };
+            if (context_healthy) context_healthy = append_context(pre.additional_context, "PreUser");
+            if (context_healthy) {
+                const auto post = rt::RunPostUserMiddleware(dispatcher, pre.prompt, hook_context);
+                if (post.blocked) outcome = std::unexpected(post.block_code + ": " + post.block_reason);
+                else if (middleware_healthy()) {
+                    context_healthy = append_context(post.context_appends, "PostUser");
+                    if (context_healthy) outcome = agent.RunAdmittedHistory(wiring, &interrupt);
+                }
+            }
+        }
         bridge->EndTurn(outcome.has_value(), outcome && outcome->cancelled, outcome ? "" : outcome.error());
         turn_bindings.Reset();
         operation.state = !outcome ? OperationState::Failed : outcome->cancelled ? OperationState::Cancelled : OperationState::Succeeded;
@@ -694,7 +813,8 @@ struct Session::Impl final : rt::InteractionBroker {
             refs.push_back(bridge->last_committed_assistant_message_id());
         }
         // Durable operation final precedes its public completion notification.
-        operation = Complete(operation, refs, usage_reported, bridge->recent_errors().empty());
+        operation = Complete(operation, refs, usage_reported,
+                             bridge->recent_errors().empty() && context_healthy && middleware_healthy());
         events.Finish(operation.state == OperationState::Succeeded ? rt::Outcome::Succeeded :
                       operation.state == OperationState::Cancelled ? rt::Outcome::Cancelled : rt::Outcome::Failed,
                       operation.error);
@@ -797,6 +917,7 @@ struct Session::Impl final : rt::InteractionBroker {
             // returns. Close admission first, then wait for its snapshot back.
             cv.wait(lock, [&] { return close_signals_inflight == 0; });
             closed_service = std::move(service);
+            extensions = nullptr;
             for (auto& weak : subscriptions) if (auto stream = weak.lock()) streams.push_back(std::move(stream));
             subscriptions.clear();
             cv.notify_all();
@@ -813,6 +934,7 @@ struct Session::Impl final : rt::InteractionBroker {
                 ~CleanupScope() { in_session_worker = previous; }
             } cleanup_scope;
             options.custom_tools.clear();
+            options.extensions.clear();
             // Agent -> registry/MCP/backend -> ledger, outside the API mutex.
             closed_service.reset();
             // Preflight/control-block failure may leave the original public
@@ -829,6 +951,10 @@ Session::Session(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
 Session::~Session() { (void)impl_->Close(); }
 std::string Session::id() const { return impl_->session_id; }
 Result<void> Session::Close() { return impl_->Close(); }
+Result<std::string> Session::DescribeExtensions() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->extension_plan_json;
+}
 Result<Receipt> Session::Submit(std::string key, std::string text) {
     if (key.empty()) return std::unexpected(Failure("sdk.operation.key_required"));
     if (!lubancode::platform::IsValidUtf8(key) || !lubancode::platform::IsValidUtf8(text)) {
@@ -916,6 +1042,7 @@ Result<std::unique_ptr<Runtime>> Runtime::Create(RuntimeOptions options) {
     } catch (const std::exception& error) { return std::unexpected(Failure("sdk.runtime.create_failed", error.what())); }
 }
 Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
+    if (in_session_worker) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
     std::lock_guard lock(impl_->mutex);
     if (impl_->closed) return std::unexpected(Failure("sdk.runtime.closed"));
     try {
