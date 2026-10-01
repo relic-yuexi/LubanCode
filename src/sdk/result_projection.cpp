@@ -87,7 +87,8 @@ bool ClosedStorage(const Json& value) {
     const std::set<std::string> expected{"schema", "bindingSha256", "sourceSha256", "native", "channels", "sha256"};
     std::set<std::string> keys;
     for (auto it = value.begin(); it != value.end(); ++it) keys.insert(it.key());
-    return keys == expected && value["schema"] == "lubancore.result-projection.sdk.v1" &&
+    return keys == expected && value["schema"].is_string() &&
+           value["schema"].get_ref<const std::string&>() == "lubancore.result-projection.sdk.v1" &&
            value["bindingSha256"].is_string() && value["sourceSha256"].is_string() &&
            value["sha256"].is_string() && value["native"].is_object() && value["channels"].is_array();
 }
@@ -263,12 +264,13 @@ Result<FrozenProjection> ResultProjector::RestoreSavedProjection(
         return std::unexpected(Failure(remote::ResultSyncError::SessionMismatch));
     auto record = Json::parse(storage, nullptr, false);
     if (!ClosedStorage(record)) return std::unexpected(InvalidStorage());
-    const auto expected_digest = record["sha256"];
+    const auto expected_digest = record["sha256"].get<std::string>();
     record.erase("sha256");
     if (platform::Sha256Hex(record.dump()) != expected_digest) return std::unexpected(InvalidStorage());
-    if (record["bindingSha256"] != impl_->binding)
+    if (record["bindingSha256"].get_ref<const std::string&>() != impl_->binding)
         return std::unexpected(Failure(remote::ResultSyncError::PolicyChanged));
-    if (record["sourceSha256"] != SourceFingerprint(snapshot) || record["channels"] != ChannelMetadata(snapshot.result()))
+    if (record["sourceSha256"].get_ref<const std::string&>() != SourceFingerprint(snapshot) ||
+        record["channels"] != ChannelMetadata(snapshot.result()))
         return std::unexpected(InvalidStorage());
     auto native = remote::FrozenToolResult::RestoreSavedProjection(record["native"].dump(), impl_->node,
         NativePolicy(impl_->session), NativeIdentity(snapshot.result().summary.identity), impl_->secrets);

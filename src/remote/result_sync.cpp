@@ -119,7 +119,7 @@ std::expected<nlohmann::json, ResultSyncError> FrozenToolResult::ForTransmission
         (!current_policy.allow_full_tool_results() || current_session.mode != ResultSyncMode::Full)) {
         return std::unexpected(ResultSyncError::FullSyncDisabled);
     }
-    if (current_session.session_id != payload_["sessionId"])
+    if (current_session.session_id != payload_["sessionId"].get_ref<const std::string&>())
         return std::unexpected(ResultSyncError::SessionMismatch);
     if (current_session.version == 0 ||
         (current_session.mode != ResultSyncMode::Preview && current_session.mode != ResultSyncMode::Full))
@@ -127,7 +127,7 @@ std::expected<nlohmann::json, ResultSyncError> FrozenToolResult::ForTransmission
     if (payload_["sessionPolicyVersion"] != current_session.version ||
         mode_ != current_session.mode)
         return std::unexpected(ResultSyncError::PolicyChanged);
-    if (payload_["policyVersion"] != current_policy.version()) {
+    if (payload_["policyVersion"].get_ref<const std::string&>() != current_policy.version()) {
         return std::unexpected(ResultSyncError::PolicyChanged);
     }
     if (payload_["previewMaxBytes"] != current_policy.preview_max_bytes()) {
@@ -270,10 +270,11 @@ std::expected<FrozenToolResult, ResultSyncError> FrozenToolResult::RestoreSavedP
     const auto bad = [] { return std::unexpected(ResultSyncError::InvalidFrozenRecord); };
     const auto record = nlohmann::json::parse(storage, nullptr, false);
     if (!record.is_object() || record.size() != 3 ||
-        record.value("schema", nlohmann::json()) != "lubancore.result-projection.native.v2" ||
+        !record.contains("schema") || !record["schema"].is_string() ||
+        record["schema"].get_ref<const std::string&>() != "lubancore.result-projection.native.v2" ||
         !record.contains("payload") || !record.contains("sha256") || !record["sha256"].is_string()) return bad();
     const auto& p = record["payload"];
-    if (!p.is_object() || platform::Sha256Hex(p.dump()) != record["sha256"]) return bad();
+    if (!p.is_object() || platform::Sha256Hex(p.dump()) != record["sha256"].get_ref<const std::string&>()) return bad();
     std::set<std::string> keys;
     for (auto it = p.begin(); it != p.end(); ++it) keys.insert(it.key());
     std::set<std::string> expected{"schemaVersion", "sessionId", "operationId", "turnId", "toolCallId",
@@ -292,9 +293,12 @@ std::expected<FrozenToolResult, ResultSyncError> FrozenToolResult::RestoreSavedP
         !(p["originalBytes"].is_null() || p["originalBytes"].is_number_unsigned()) ||
         (p["mode"] != "preview" && p["mode"] != "full") ||
         (p["contentKind"] != "text" && p["contentKind"] != "binary")) return bad();
-    if (p["sessionId"] != expected_identity.session_id || p["operationId"] != expected_identity.operation_id ||
-        p["turnId"] != expected_identity.turn_id || p["toolCallId"] != expected_identity.tool_call_id ||
-        p["persistedEventId"] != expected_identity.persisted_event_id || p["resultId"] != expected_identity.result_id)
+    if (p["sessionId"].get_ref<const std::string&>() != expected_identity.session_id ||
+        p["operationId"].get_ref<const std::string&>() != expected_identity.operation_id ||
+        p["turnId"].get_ref<const std::string&>() != expected_identity.turn_id ||
+        p["toolCallId"].get_ref<const std::string&>() != expected_identity.tool_call_id ||
+        p["persistedEventId"].get_ref<const std::string&>() != expected_identity.persisted_event_id ||
+        p["resultId"].get_ref<const std::string&>() != expected_identity.result_id)
         return std::unexpected(ResultSyncError::SessionMismatch);
     if (p.contains("text")) {
         if (!p["text"].is_string() || !p["redacted"].is_boolean() || p["status"] != "ready" ||

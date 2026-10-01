@@ -235,7 +235,7 @@ TEST_CASE("SDK result projection: durable reader fixture channels share one UTF8
     auto projector = Projector(snapshot, {false, 4096, "node-policy-1"}, {key});
     auto frozen = projector->Project(snapshot); REQUIRE(frozen.has_value());
     auto wire = Wire(*frozen, projector);
-    CHECK(wire["text"] == std::string(4090, 'a') + "[REDAC");
+    CHECK(wire["text"].get<std::string>() == std::string(4090, 'a') + "[REDAC");
     CHECK(wire["channels"].size() == 2);
     CHECK(wire.dump().find("FAKE_CROSS") == std::string::npos);
     CHECK(wire.dump().find("HIDDEN_TAIL") == std::string::npos);
@@ -245,7 +245,7 @@ TEST_CASE("SDK result projection: durable reader fixture channels share one UTF8
     auto tiny = Projector(unicode_snapshot, {false, 7, "node-policy-1"});
     auto bounded = tiny->Project(unicode_snapshot); REQUIRE(bounded.has_value());
     const auto unicode_wire = Wire(*bounded, tiny);
-    CHECK(unicode_wire["text"] == unicode.substr(0, 4));
+    CHECK(unicode_wire["text"].get<std::string>() == unicode.substr(0, 4));
     CHECK(unicode_wire["originalBytes"] == unicode.size());
     CHECK(lubancode::platform::IsValidUtf8(unicode_wire["text"].get<std::string>()));
 }

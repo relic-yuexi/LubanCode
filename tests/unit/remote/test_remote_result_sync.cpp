@@ -90,7 +90,7 @@ TEST_CASE("remote result sync: empty short and bounded UTF8 preview") {
         auto projected = ProjectSavedToolResult(policy, Session(), kIdentity, Text(text), secrets);
         REQUIRE(projected.has_value());
         const auto json = Export(*projected, policy, secrets);
-        CHECK(json["text"] == text);
+        CHECK(json["text"].get<std::string>() == text);
         CHECK(json["truncated"] == false);
         CHECK(json["originalBytes"] == text.size());
         CHECK(json["captureComplete"] == true);
@@ -109,7 +109,7 @@ TEST_CASE("remote result sync: empty short and bounded UTF8 preview") {
         auto projected = ProjectSavedToolResult(capped, Session(), kIdentity, Text(unicode), secrets);
         REQUIRE(projected.has_value());
         const auto json = Export(*projected, capped, secrets);
-        CHECK(json["text"] == expected);
+        CHECK(json["text"].get<std::string>() == expected);
         CHECK(json["truncated"] == (limit < unicode.size()));
         CHECK(lubancode::platform::IsValidUtf8(json["text"].get<std::string>()));
         CHECK(json["text"].get<std::string>().size() <= limit);
@@ -278,9 +278,9 @@ TEST_CASE("remote result sync: full is opt-in bounded and still redacted") {
     auto full_result = ProjectSavedToolResult(full, Session(ResultSyncMode::Full), kIdentity, Text(raw), secrets);
     REQUIRE(default_result.has_value());
     REQUIRE(full_result.has_value());
-    CHECK(Export(*default_result, preview, secrets)["text"] == std::string(4096, 'x'));
+    CHECK(Export(*default_result, preview, secrets)["text"].get<std::string>() == std::string(4096, 'x'));
     const auto all = Export(*full_result, full, secrets, Session(ResultSyncMode::Full));
-    CHECK(all["text"] == std::string(4096, 'x') + "[REDACTED]\nend");
+    CHECK(all["text"].get<std::string>() == std::string(4096, 'x') + "[REDACTED]\nend");
     CHECK(all["mode"] == "full");
     CHECK(all["truncated"] == false);
     CHECK(all.dump().find(known) == std::string::npos);
