@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -21,6 +22,7 @@
 
 #include "platform/paths.hpp"
 #include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/writer.hpp"
 #include "workspace/identity.hpp"
 #include "workspace/index.hpp"
 
@@ -168,12 +170,21 @@ TEST_CASE("SDK extensions: real chain adopts rewrite and records appended reques
     auto order = std::make_shared<std::vector<std::string>>();
     auto contexts = std::make_shared<std::vector<ext::Context>>();
     auto seen_request = std::make_shared<sdk::ModelRequest>();
+    auto resumed_prefix = std::make_shared<std::vector<sdk::Message>>();
     auto calls = std::make_shared<std::atomic<unsigned>>(0);
-    auto options = Options(fixture, [=](const sdk::ModelRequest& request, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+    GenerateFunction generate = [=](const sdk::ModelRequest& request, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
         ++*calls;
+        if (!resumed_prefix->empty()) {
+            REQUIRE(request.messages.size() > resumed_prefix->size());
+            for (std::size_t index = 0; index < resumed_prefix->size(); ++index) {
+                CHECK(request.messages[index].role == (*resumed_prefix)[index].role);
+                CHECK(request.messages[index].text == (*resumed_prefix)[index].text);
+            }
+        }
         *seen_request = request;
         return Answer();
-    });
+    };
+    auto options = Options(fixture, generate);
     auto first = Definition("prompt.first");
     first.priority = 900;
     first.before = {"prompt.second"};
@@ -215,6 +226,7 @@ TEST_CASE("SDK extensions: real chain adopts rewrite and records appended reques
             CHECK(input.json.find("post-material") != std::string::npos);
             return Continue(next);
         }));
+    const auto prototype = options.extensions;
     auto opened = (*runtime)->OpenSession(std::move(options));
     REQUIRE(opened.has_value());
     const auto session = *opened;
@@ -236,6 +248,7 @@ TEST_CASE("SDK extensions: real chain adopts rewrite and records appended reques
         CHECK(context.turn_id == operation.turn_id);
     }
     REQUIRE(session->Close().has_value());
+    CHECK(v3::VerifyV3File(fixture.SessionFile(session->id())).ok);
     auto ledger = v3::ReadV3Ledger(fixture.SessionFile(session->id()));
     REQUIRE(ledger.has_value());
     CHECK(FormalUserContains(*ledger, "adopted-input"));
@@ -243,6 +256,7 @@ TEST_CASE("SDK extensions: real chain adopts rewrite and records appended reques
     CHECK(FormalUserContains(*ledger, "pre-material"));
     CHECK(FormalUserContains(*ledger, "post-material"));
     bool rewrite = false, prepared = false;
+    unsigned human_count = 0, hook_count = 0;
     for (const auto& event : ledger->events) {
         if (event.kind == v3::EventKindV3::HookEffectsApplied && event.payload.value("effectType", "") == "input.rewrite")
             rewrite = event.payload.at("appliedValueRef").at("prompt") == "adopted-input";
@@ -256,6 +270,16 @@ TEST_CASE("SDK extensions: real chain adopts rewrite and records appended reques
                 REQUIRE(message != nullptr);
                 CHECK(message->message.at("role") == seen_request->messages[index].role);
                 CHECK(MessageText(message->message) == seen_request->messages[index].text);
+                const auto body = MessageText(message->message);
+                if (body == "adopted-input") {
+                    ++human_count;
+                    CHECK(message->origin == v3::MessageOrigin::Human);
+                    CHECK(message->display.value_or(v3::DisplayMode::Visible) == v3::DisplayMode::Visible);
+                } else if (body.find("pre-material") != std::string::npos || body.find("post-material") != std::string::npos) {
+                    ++hook_count;
+                    CHECK(message->origin == v3::MessageOrigin::Hook);
+                    CHECK(message->display == v3::DisplayMode::Hidden);
+                }
             }
         }
     }
@@ -266,7 +290,20 @@ TEST_CASE("SDK extensions: real chain adopts rewrite and records appended reques
     original_file >> original;
     CHECK(rewrite);
     CHECK(prepared);
+    CHECK(human_count == 1);
+    CHECK(hook_count == 2);
     CHECK(original.at("text") == "original-input");
+    *resumed_prefix = seen_request->messages;
+    resumed_prefix->push_back({"assistant", operation.final_text, {}, {}});
+    auto resume_options = Options(fixture, generate);
+    resume_options.resume_session_id = session->id();
+    resume_options.extensions = prototype;
+    auto resumed = (*runtime)->OpenSession(std::move(resume_options));
+    REQUIRE(resumed.has_value());
+    CHECK(Run(*resumed, "chain-resume-key", "original-resumed-input").state == sdk::OperationState::Succeeded);
+    CHECK(calls->load() == 2);
+    REQUIRE((*resumed)->Close().has_value());
+    CHECK(v3::VerifyV3File(fixture.SessionFile(session->id())).ok);
     REQUIRE((*runtime)->Shutdown().has_value());
 }
 
@@ -277,15 +314,18 @@ TEST_CASE("SDK extensions: admission boundaries keep only the formal user alread
         auto runtime = sdk::Runtime::Create(fixture.Roots());
         REQUIRE(runtime.has_value());
         auto calls = std::make_shared<std::atomic<unsigned>>(0);
-        auto options = Options(fixture, [=](const sdk::ModelRequest&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
-            ++*calls; return Answer();
+        auto seen = std::make_shared<sdk::ModelRequest>();
+        auto guard_calls = std::make_shared<std::atomic<unsigned>>(0);
+        auto options = Options(fixture, [=](const sdk::ModelRequest& request, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+            ++*calls; *seen = request; return Answer();
         });
         auto definition = Definition("guard.reject", point,
             point == ext::Point::PreRequest ? ext::Stage::Capacity : ext::Stage::Default);
         if (point == ext::Point::PreRequest) definition.after = {"context.capacity_check"};
         options.extensions.push_back(Registration("admission", {definition},
-            [](const ext::Context&, const ext::Input&, ext::Next) -> sdk::Result<ext::HandlerReturn> {
-                return ext::HandlerReturn::Denied("fixture.denied", "extension rejected fixture input");
+            [guard_calls](const ext::Context&, const ext::Input&, ext::Next next) -> sdk::Result<ext::HandlerReturn> {
+                if (++*guard_calls == 1) return ext::HandlerReturn::Denied("fixture.denied", "extension rejected fixture input");
+                return Continue(next);
             }));
         auto opened = (*runtime)->OpenSession(std::move(options));
         REQUIRE(opened.has_value());
@@ -293,14 +333,20 @@ TEST_CASE("SDK extensions: admission boundaries keep only the formal user alread
         CHECK(operation.state == sdk::OperationState::Failed);
         CHECK_FALSE(operation.error.empty());
         CHECK(calls->load() == 0);
+        // A later turn must see the same admitted context that resume will replay.
+        CHECK(Run(*opened, "after-denied-key", "after-denied-input").state == sdk::OperationState::Succeeded);
+        CHECK(calls->load() == 1);
+        CHECK(Has(*seen, "denied-formal-user") == (point != ext::Point::PreUser));
+        CHECK(Has(*seen, "after-denied-input"));
         REQUIRE((*opened)->Close().has_value());
+        CHECK(v3::VerifyV3File(fixture.SessionFile((*opened)->id())).ok);
         auto ledger = v3::ReadV3Ledger(fixture.SessionFile((*opened)->id()));
         REQUIRE(ledger.has_value());
         CHECK(FormalUserContains(*ledger, "denied-formal-user") == (point != ext::Point::PreUser));
         bool denied = false, sent = false;
         for (const auto& event : ledger->events) {
             if (event.kind == v3::EventKindV3::HookCompleted && event.payload.value("decision", "") == "deny") denied = true;
-            if (event.kind == v3::EventKindV3::ModelRequestSent) sent = true;
+            if (event.kind == v3::EventKindV3::ModelRequestSent && event.turn_id == operation.turn_id) sent = true;
         }
         CHECK(denied);
         CHECK_FALSE(sent);
@@ -544,65 +590,74 @@ TEST_CASE("SDK extensions: overriding a required request slot cannot bypass EST1
 }
 
 TEST_CASE("SDK extensions: close cancels a real handler and waits for its actual exit before destruction") {
-    Fixture fixture;
-    auto runtime = sdk::Runtime::Create(fixture.Roots());
-    REQUIRE(runtime.has_value());
-    struct Gate {
-        std::mutex mutex;
-        std::condition_variable cv;
-        bool release = false;
-        std::atomic<bool> entered{false}, cancelled{false}, returned{false}, destroyed{false}, timed_out{false};
-    };
-    auto gate = std::make_shared<Gate>();
-    auto alive = std::make_shared<std::atomic<bool>>(false);
-    auto calls = std::make_shared<std::atomic<unsigned>>(0);
-    auto options = Options(fixture, [=](const sdk::ModelRequest&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
-        ++*calls; return Answer();
-    }, alive);
-    options.extensions.push_back(Registration("close-gate", {Definition("handler.hold")},
-        [gate](const ext::Context& context, const ext::Input&, ext::Next) -> sdk::Result<ext::HandlerReturn> {
+    for (const bool observer : {false, true}) {
+        CAPTURE(observer);
+        Fixture fixture;
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+        struct Gate {
+            std::mutex mutex;
+            std::condition_variable cv;
+            bool release = false;
+            std::atomic<bool> entered{false}, cancelled{false}, returned{false}, destroyed{false}, timed_out{false};
+        };
+        auto gate = std::make_shared<Gate>();
+        auto alive = std::make_shared<std::atomic<bool>>(false);
+        auto calls = std::make_shared<std::atomic<unsigned>>(0);
+        auto options = Options(fixture, [=](const sdk::ModelRequest&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+            ++*calls; return Answer();
+        }, alive);
+        auto definition = Definition("handler.hold");
+        definition.observer = observer;
+        options.extensions.push_back(Registration("close-gate", {definition},
+            [gate, raw_runtime = runtime->get()](const ext::Context& context, const ext::Input&, ext::Next) -> sdk::Result<ext::HandlerReturn> {
+                // Observer helpers need the same TLS guard as the session worker.
+                const auto reentry = raw_runtime->OpenSession({});
+                CHECK_FALSE(reentry.has_value());
+                if (!reentry) CHECK(reentry.error().code == "sdk.lifecycle.reentrant");
+                std::unique_lock lock(gate->mutex);
+                gate->entered.store(true);
+                gate->cv.notify_all();
+                const auto deadline = std::chrono::steady_clock::now() + 15s;
+                while (!context.cancellation.requested() && std::chrono::steady_clock::now() < deadline)
+                    gate->cv.wait_for(lock, 2ms);
+                gate->cancelled.store(context.cancellation.requested());
+                gate->cv.notify_all();
+                if (!gate->cv.wait_until(lock, deadline, [&] { return gate->release; })) gate->timed_out.store(true);
+                gate->returned.store(true);
+                return ext::HandlerReturn{};
+            }, [=] { CHECK(gate->returned.load()); CHECK(alive->load()); gate->destroyed.store(true); }));
+        auto opened = (*runtime)->OpenSession(std::move(options));
+        REQUIRE(opened.has_value());
+        auto receipt = (*opened)->Submit("held-key", "held input");
+        REQUIRE(receipt.has_value());
+        {
             std::unique_lock lock(gate->mutex);
-            gate->entered.store(true);
+            REQUIRE(gate->cv.wait_for(lock, 5s, [&] { return gate->entered.load(); }));
+        }
+        auto closing = std::async(std::launch::async, [session = *opened] { return session->Close(); });
+        {
+            std::unique_lock lock(gate->mutex);
+            CHECK(gate->cv.wait_for(lock, 5s, [&] { return gate->cancelled.load(); }));
+            CHECK(closing.wait_for(0ms) == std::future_status::timeout);
+            CHECK_FALSE(gate->destroyed.load());
+            CHECK(alive->load());
+            CHECK(calls->load() == 0);
+            gate->release = true;
             gate->cv.notify_all();
-            const auto deadline = std::chrono::steady_clock::now() + 15s;
-            while (!context.cancellation.requested() && std::chrono::steady_clock::now() < deadline)
-                gate->cv.wait_for(lock, 2ms);
-            gate->cancelled.store(context.cancellation.requested());
-            gate->cv.notify_all();
-            if (!gate->cv.wait_until(lock, deadline, [&] { return gate->release; })) gate->timed_out.store(true);
-            gate->returned.store(true);
-            return ext::HandlerReturn{};
-        }, [=] { CHECK(gate->returned.load()); CHECK(alive->load()); gate->destroyed.store(true); }));
-    auto opened = (*runtime)->OpenSession(std::move(options));
-    REQUIRE(opened.has_value());
-    auto receipt = (*opened)->Submit("held-key", "held input");
-    REQUIRE(receipt.has_value());
-    {
-        std::unique_lock lock(gate->mutex);
-        REQUIRE(gate->cv.wait_for(lock, 5s, [&] { return gate->entered.load(); }));
+        }
+        REQUIRE(closing.wait_for(5s) == std::future_status::ready);
+        REQUIRE(closing.get().has_value());
+        CHECK(gate->returned.load());
+        CHECK(gate->destroyed.load());
+        CHECK_FALSE(gate->timed_out.load());
+        CHECK_FALSE(alive->load());
+        auto result = (*opened)->ReadOperation(receipt->operation_id);
+        REQUIRE(result.has_value());
+        CHECK(result->state == sdk::OperationState::Cancelled);
+        CHECK(result->result_persisted);
+        REQUIRE((*runtime)->Shutdown().has_value());
     }
-    auto closing = std::async(std::launch::async, [session = *opened] { return session->Close(); });
-    {
-        std::unique_lock lock(gate->mutex);
-        CHECK(gate->cv.wait_for(lock, 5s, [&] { return gate->cancelled.load(); }));
-        CHECK(closing.wait_for(0ms) == std::future_status::timeout);
-        CHECK_FALSE(gate->destroyed.load());
-        CHECK(alive->load());
-        CHECK(calls->load() == 0);
-        gate->release = true;
-        gate->cv.notify_all();
-    }
-    REQUIRE(closing.wait_for(5s) == std::future_status::ready);
-    REQUIRE(closing.get().has_value());
-    CHECK(gate->returned.load());
-    CHECK(gate->destroyed.load());
-    CHECK_FALSE(gate->timed_out.load());
-    CHECK_FALSE(alive->load());
-    auto result = (*opened)->ReadOperation(receipt->operation_id);
-    REQUIRE(result.has_value());
-    CHECK(result->state == sdk::OperationState::Cancelled);
-    CHECK(result->result_persisted);
-    REQUIRE((*runtime)->Shutdown().has_value());
 }
 
 TEST_CASE("SDK extensions: same-cwd factories isolate state and compatible resume re-creates the instance") {
@@ -698,12 +753,21 @@ TEST_CASE("SDK extensions: observers have no continuation or write effects and a
     CHECK(invalid_next->load() == 2);
     CHECK(calls->load() == 1);
     REQUIRE((*opened)->Close().has_value());
+    CHECK(v3::VerifyV3File(fixture.SessionFile((*opened)->id())).ok);
     auto ledger = v3::ReadV3Ledger(fixture.SessionFile((*opened)->id()));
     REQUIRE(ledger.has_value());
     unsigned failures = 0;
-    for (const auto& event : ledger->events)
+    std::set<std::string> requested_ids;
+    for (const auto& event : ledger->events) {
         if (event.kind == v3::EventKindV3::HookFailed && event.payload.value("error_code", "") == "hook.result.invalid") ++failures;
+        if (event.kind == v3::EventKindV3::HookDispatchRequested && event.payload.value("hookPoint", "") == "PreUser") {
+            const auto& handlers = event.payload.at("matchedHandlers");
+            REQUIRE(handlers.size() == 2);
+            for (const auto& handler : handlers) requested_ids.insert(handler.at("hookId").get<std::string>());
+        }
+    }
     CHECK(failures == 2);
+    CHECK((requested_ids == std::set<std::string>{"PreUser/audit.first", "PreUser/audit.second"}));
     CHECK_FALSE(FormalUserContains(*ledger, "observer-injected-material"));
     REQUIRE((*runtime)->Shutdown().has_value());
 }
@@ -718,6 +782,7 @@ TEST_CASE("SDK extensions: inline factory captures retire inside the callback gu
         std::shared_ptr<std::atomic<bool>> alive;
         std::atomic<bool> armed{false};
         std::atomic<unsigned> finals{0}, probes{0}, rejected_lifecycle{0}, errors{0};
+        ext::Next saved;
     };
     struct Capture {
         std::shared_ptr<Audit> audit;
@@ -740,7 +805,10 @@ TEST_CASE("SDK extensions: inline factory captures retire inside the callback gu
         Factory(const Factory&) noexcept = default;
         sdk::Result<std::unique_ptr<ext::Instance>> operator()(const ext::SessionContext&) const {
             return std::make_unique<Instance>(
-                [owned = capture](const ext::Context&, const ext::Input&, ext::Next next) { return Continue(next); });
+                [owned = capture](const ext::Context&, const ext::Input&, ext::Next next) {
+                    owned->audit->saved = next;
+                    return Continue(next);
+                });
         }
     };
     static_assert(sizeof(Factory) == sizeof(std::shared_ptr<Capture>));
@@ -787,6 +855,9 @@ TEST_CASE("SDK extensions: inline factory captures retire inside the callback gu
         CHECK(audit->rejected_lifecycle.load() == 1);
         CHECK(audit->errors.load() == 0);
         CHECK_FALSE(audit->alive->load());
+        const auto expired = audit->saved.Call();
+        REQUIRE_FALSE(expired.has_value());
+        CHECK(expired.error().code == "hook.next.expired");
     }
     REQUIRE((*runtime)->Shutdown().has_value());
 }

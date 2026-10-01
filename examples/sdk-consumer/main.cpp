@@ -1267,6 +1267,7 @@ struct ExtensionCaptureState {
     sdk::Runtime* runtime = nullptr;
     std::atomic<bool> alive{false}, armed{false};
     std::atomic<unsigned> final_count{0}, probes{0}, guarded_shutdowns{0}, lifetime_errors{0};
+    ext::Next saved;
 };
 struct ExtensionCapture {
     std::shared_ptr<ExtensionCaptureState> state;
@@ -1303,7 +1304,10 @@ struct SmallExtensionFactory {
     explicit SmallExtensionFactory(std::shared_ptr<ExtensionCapture> value) : capture(std::move(value)) {}
     sdk::Result<std::unique_ptr<ext::Instance>> operator()(const ext::SessionContext&) const {
         return std::make_unique<ConsumerExtension>(
-            [owned = capture](const ext::Context&, const ext::Input&, ext::Next next) { return ExtensionContinue(next); });
+            [owned = capture](const ext::Context&, const ext::Input&, ext::Next next) {
+                owned->state->saved = next;
+                return ExtensionContinue(next);
+            });
     }
 };
 static_assert(sizeof(SmallExtensionFactory) == sizeof(std::shared_ptr<ExtensionCapture>));
@@ -1349,6 +1353,8 @@ void ExtensionCaptureRollback(const fs::path& base) {
         Check(state->final_count.load() == 1 && state->probes.load() == 1 && state->guarded_shutdowns.load() == 1 &&
               state->lifetime_errors.load() == 0, "capture retired after backend or outside lifecycle guard");
         Check(!state->alive.load(), "extension cleanup retained its session backend");
+        const auto expired = state->saved.Call();
+        Check(!expired && expired.error().code == "hook.next.expired", "saved Next kept an extension/backend alive");
     }
     auto healthy = Take(runtime->OpenSession(Options(paths,
         [](const sdk::ModelRequest&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> { return Text("after rollback"); })),
