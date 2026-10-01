@@ -18,11 +18,14 @@ import xml.etree.ElementTree as ET
 
 REQUIRED_TESTS = {
     "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.extensions",
+    "sdk.consumer.results",
+    "sdk.consumer.result_seed", "sdk.consumer.result_resume",
     "sdk.consumer.seed", "sdk.consumer.resume",
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
 REQUIRED_PUBLIC_HEADERS = {
     "include/lubancore/api.hpp", "include/lubancore/core.hpp", "include/lubancore/extensions.hpp",
+    "include/lubancore/results.hpp",
 }
 
 
@@ -201,7 +204,7 @@ def main() -> None:
     executed = {case.attrib.get("name") for case in results}
     if not results or not REQUIRED_TESTS <= executed:
         raise RuntimeError("consumer JUnit is missing required executed tests")
-    if len(executed) != len(results) or any(case.find("skipped") is not None or
+    if len(executed) != len(results) or any(case.attrib.get("status") != "run" or case.find("skipped") is not None or
                                          case.find("failure") is not None or case.find("error") is not None
                                          for case in results):
         raise RuntimeError("consumer JUnit contains duplicate, skipped or failed tests")

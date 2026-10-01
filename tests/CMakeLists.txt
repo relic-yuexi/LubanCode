@@ -425,6 +425,8 @@ endforeach()
 
 # Reuse the SDK test graph in both combined and SDK-only configurations.
 if(LUBANCODE_BUILD_SDK)
+  # Private production-reader fixture; keep detail symbols out of the SDK ABI.
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/results.cpp")
   include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
   include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreHostTests.cmake")
 endif()

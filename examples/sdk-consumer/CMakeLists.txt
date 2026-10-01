@@ -26,6 +26,12 @@ add_test(NAME sdk.consumer.isolation
   COMMAND lubancore_consumer isolation "${CMAKE_CURRENT_BINARY_DIR}/state-isolation")
 add_test(NAME sdk.consumer.extensions
   COMMAND lubancore_consumer extensions "${CMAKE_CURRENT_BINARY_DIR}/state-extensions")
+add_test(NAME sdk.consumer.results
+  COMMAND lubancore_consumer results "${CMAKE_CURRENT_BINARY_DIR}/state-results")
+add_test(NAME sdk.consumer.result_seed
+  COMMAND lubancore_consumer result-seed "${CMAKE_CURRENT_BINARY_DIR}/state-result-restart")
+add_test(NAME sdk.consumer.result_resume
+  COMMAND lubancore_consumer result-resume "${CMAKE_CURRENT_BINARY_DIR}/state-result-restart")
 add_test(NAME sdk.consumer.seed
   COMMAND lubancore_consumer seed "${CMAKE_CURRENT_BINARY_DIR}/state-restart")
 add_test(NAME sdk.consumer.resume
@@ -38,6 +44,8 @@ set_tests_properties(sdk.consumer.seed PROPERTIES FIXTURES_SETUP sdk_restart)
 set_tests_properties(sdk.consumer.resume PROPERTIES FIXTURES_REQUIRED sdk_restart)
 set_tests_properties(sdk.consumer.recovery_seed PROPERTIES FIXTURES_SETUP sdk_recovery)
 set_tests_properties(sdk.consumer.recovery_resume PROPERTIES FIXTURES_REQUIRED sdk_recovery)
-set_tests_properties(sdk.consumer.smoke sdk.consumer.isolation sdk.consumer.extensions sdk.consumer.seed sdk.consumer.resume
-  sdk.consumer.recovery_seed sdk.consumer.recovery_resume
+set_tests_properties(sdk.consumer.result_seed PROPERTIES FIXTURES_SETUP sdk_result_restart)
+set_tests_properties(sdk.consumer.result_resume PROPERTIES FIXTURES_REQUIRED sdk_result_restart)
+set_tests_properties(sdk.consumer.smoke sdk.consumer.isolation sdk.consumer.extensions sdk.consumer.results sdk.consumer.seed sdk.consumer.resume
+  sdk.consumer.recovery_seed sdk.consumer.recovery_resume sdk.consumer.result_seed sdk.consumer.result_resume
   PROPERTIES TIMEOUT 120)
