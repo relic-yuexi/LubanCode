@@ -548,3 +548,63 @@ TEST_CASE("SDK authorization: throwing observers cannot block peers and subscrip
     CHECK_FALSE(gate.timed_out.load());
     (*active_watch)->Unsubscribe();
 }
+
+namespace {
+struct CleanupCaptureState {
+    auth::PolicySubscription* subscription = nullptr;
+    Gate* retirement = nullptr;
+    std::atomic<bool> armed{false};
+    std::atomic<unsigned> calls{0}, destructions{0};
+};
+struct SmallCleanup {
+    std::shared_ptr<CleanupCaptureState> state;
+    explicit SmallCleanup(std::shared_ptr<CleanupCaptureState> value) : state(std::move(value)) {}
+    SmallCleanup(const SmallCleanup&) noexcept = default;
+    SmallCleanup(SmallCleanup&&) noexcept = default;
+    ~SmallCleanup() {
+        if (state && state->armed.load()) {
+            state->subscription->Unsubscribe();
+            ++state->destructions;
+            state->retirement->Hold();
+        }
+    }
+    void operator()() const { ++state->calls; }
+};
+static_assert(sizeof(SmallCleanup) == sizeof(std::shared_ptr<CleanupCaptureState>));
+} // namespace
+
+TEST_CASE("SDK authorization: public cleanup captures retire unlocked before concurrent unsubscribe returns") {
+    Watchdog watchdog;
+    Gate retirement;
+    auto state = std::make_shared<CleanupCaptureState>();
+    state->retirement = &retirement;
+    std::function<void()> cleanup = SmallCleanup(state);
+    auto created = auth::PolicySubscription::Create(std::move(cleanup));
+    cleanup = nullptr; // Clear a retained moved-from small-functor source before arming.
+    REQUIRE(created.has_value());
+    auto subscription = std::move(*created);
+    state->subscription = subscription.get();
+    state->armed.store(true);
+    auto first_close = std::async(std::launch::async, [&] { subscription->Unsubscribe(); });
+    REQUIRE(retirement.WaitEntered()); // Its capture has already reentered this handle.
+    std::promise<void> second_started;
+    auto started = second_started.get_future();
+    auto second_close = std::async(std::launch::async, [&] {
+        second_started.set_value();
+        subscription->Unsubscribe();
+    });
+    REQUIRE(started.wait_for(3s) == std::future_status::ready);
+    CHECK(second_close.wait_for(100ms) == std::future_status::timeout);
+    retirement.Release();
+    REQUIRE(first_close.wait_for(3s) == std::future_status::ready);
+    REQUIRE(second_close.wait_for(3s) == std::future_status::ready);
+    first_close.get();
+    second_close.get();
+    CHECK(state->calls.load() == 1);
+    CHECK(state->destructions.load() == 1);
+    CHECK_FALSE(retirement.timed_out.load());
+    std::weak_ptr<CleanupCaptureState> weak = state;
+    state.reset();
+    CHECK(weak.expired());
+    subscription->Unsubscribe();
+}

@@ -171,7 +171,7 @@ Result<void> ValidateGrant(const AuthenticatedSubject& subject, const ResourceSc
 struct PolicySubscription::Impl {
     std::mutex mutex;
     std::condition_variable cv;
-    std::function<void()> close;
+    std::shared_ptr<std::function<void()>> close;
     bool closing = false, closed = false;
     std::thread::id closing_thread;
 };
@@ -179,13 +179,15 @@ PolicySubscription::PolicySubscription(std::shared_ptr<Impl> impl) : impl_(std::
 Result<std::unique_ptr<PolicySubscription>> PolicySubscription::Create(std::function<void()> unsubscribe) {
     if (!unsubscribe) return std::unexpected(Failure("sdk.authorization.subscription_invalid"));
     auto impl = std::make_shared<Impl>();
-    impl->close.swap(unsubscribe);
+    auto close = std::make_shared<std::function<void()>>();
+    close->swap(unsubscribe); // SBO capture retirement happens without state locks.
+    impl->close = std::move(close);
     return std::unique_ptr<PolicySubscription>(new PolicySubscription(std::move(impl)));
 }
 PolicySubscription::~PolicySubscription() { Unsubscribe(); }
 void PolicySubscription::Unsubscribe() noexcept {
     const auto state = impl_;
-    std::function<void()> close;
+    std::shared_ptr<std::function<void()>> close;
     {
         std::unique_lock lock(state->mutex);
         while (state->closing) {
@@ -195,18 +197,23 @@ void PolicySubscription::Unsubscribe() noexcept {
         if (state->closed) return;
         state->closing = true;
         state->closing_thread = std::this_thread::get_id();
-        close.swap(state->close);
+        close = state->close; // A pointer lease cannot run a functor destructor.
     }
-    try { close(); } catch (...) {} // A trusted provider's cleanup cannot throw from RAII.
+    try { (*close)(); } catch (...) {} // A trusted provider's cleanup cannot throw from RAII.
     if (notification_depth) {
         // Observer::Stop only disarmed this invocation. Preserve the idempotent
         // closer so a later external call can still wait for its real exit.
         std::lock_guard lock(state->mutex);
-        state->close.swap(close);
         state->closing = false;
         state->cv.notify_all();
     } else {
-        close = nullptr;
+        std::shared_ptr<std::function<void()>> retired;
+        {
+            std::lock_guard lock(state->mutex);
+            state->close.swap(retired);
+        }
+        retired.reset();
+        close.reset(); // Public cleanup captures may reenter this subscription.
         std::lock_guard lock(state->mutex);
         state->closed = true;
         state->closing = false;
