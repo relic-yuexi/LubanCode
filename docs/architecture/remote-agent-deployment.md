@@ -2,7 +2,7 @@
 
 [架构首页](README.md) · [开工讨论单](../../todos/分布式D0开工讨论与分支拆分.todo) · [协作与远端验收](../development/cluster-collaboration.md)
 
-状态：2026-10-01 设计草案。用户场景和 Node 许可加 Session 显式 full 已确认，下面是拟议合同；尚未实现远端部署模式，命令名、配置键与消息名尚未冻结。本轮未在本地编译。
+状态：2026-10-02 设计草案。用户场景和 Node 许可加 Session 显式 full 已确认。SDK 持久查询与投影已由 [#257](https://github.com/relic-yuexi/LubanCode/pull/257) 合入功能分支，Worker [#245](https://github.com/relic-yuexi/LubanCode/pull/245) 已验三平台各 18 场进程，仍留 Draft。网络 Control/Node、主动登记和网页尚未交付；下文部署命令、TOML 与网络消息仍是拟议合同。本轮未在本地编译。
 
 ## 1. 已确认的边界
 
@@ -119,7 +119,7 @@ Control 与 Node 各读自己的配置段。地址、端口和路径都可改。
 
 ## 6. 两端分别存什么
 
-用户已确认默认只传 preview；全文须 Node 许可加本场 Session 显式 full 参数。Node 许可不替别场开启全文，本场参数也不能越过 Node。下面给出默认模式的数据归属；审批展示材料另行确认。两层配置尚待实现。
+用户已确认默认只传 preview；全文须 Node 许可加本场 Session 显式 full 参数。Node 许可不替别场开启全文，本场参数也不能越过 Node。SDK 窄接口已接这两层选择，Worker 草稿通过可信父 IPC 配置；网络 Node/TOML 尚未接。下面给出默认模式的数据归属；Control 审批展示另行确认。
 
 | 数据 | Control | 执行节点 |
 | --- | --- | --- |
@@ -158,7 +158,7 @@ outbox 和两端消息库都要有保留上限。磁盘不足时拒绝新工作�
 
 ## 8. 默认 preview，Node 许可与 Session 选择
 
-用户已裁决两层开关：Node 配置只给全文许可，每场 Session 还须显式选择 full。缺省只传 preview，Node 放行也不把所有会话变成 full；点击工具卡不改模式。下面的配置键只作设计示意，当前 SDK、Worker、Node 和已有结果投影组件均不承诺接受这组配置：
+用户已裁决两层开关：Node 配置只给全文许可，每场 Session 还须显式选择 full。缺省只传 preview，Node 放行也不把所有会话变成 full；点击工具卡不改模式。公开 SDK 用 `SessionOptions::result_policy` 冻结本场 mode/version，`ResultProjector` 另收可信宿主的 Node 许可。Worker 草稿用 `worker.initialize.result_policy` 与 `session.open.tool_result_sync` 接线。下面的 TOML 仍只作部署设计示意，当前程序未提供这组网络 Node 配置入口：
 
 ```toml
 [node]
@@ -183,6 +183,8 @@ tool_result_sync = "preview" # 本场默认；显式 full 仍须节点许可
 ### 8.2 Full 怎样获准
 
 Node 允许 full，且建场参数显式为 `tool_result_sync="full"`，才允许同步这场按策略保留的完整工具返回内容；其他场仍走自己的 preview 默认。每次出网都须核这两层授权，再过脱敏、目标会话校验与资源配额，并记录传输状态和失败回执。大结果走有上限的分块传输；不能塞爆单帧，也不能把超限时退化的 preview 标成全文已到。传输超限、原始捕获已截断、原件已清理分别明报。
+
+这段分块传输属于后续网络合同。当前 SDK 投影与 Worker 私有 IPC 将超限 full 整份拒绝，未提供 full 分页或附件下载。可信 SDK 本地读取默认 1 MiB、最多 8 MiB；Worker 读取另用 8 MiB 总帽，最终投影正文及闭合 IPC 帧仍限 1 MiB。preview 先整段脱敏，再截一次 UTF-8 前缀；已定型记录按原片重投。SDK 查询与恢复边界见 [公开 SDK 说明](../development/lubancore-sdk.md#持久工具结果与宿主投影)。网络 outbox、ACK 与 Control 存储尚未接，不能拿主管本机冻结记录代替这些能力。
 
 full 只改变工具返回内容，不自动上传返回中引用的文件、数据集、截图、模型权重、任意路径或无限 stdout/stderr。产物有独立对象与大小边界，不能顺着结果里的引用递归下载。节点原先因捕获上限丢弃的字节也无法靠此开关找回。
 
@@ -252,4 +254,4 @@ Remote-3 与界面流可在公共合同明确后分支并行。SDK 本地嵌入�
 
 首用验收覆盖已有项目的多 Session，以及由用户准备的普通任务和长实验。常规 CI 用短进程与故障注入验证托管、目录绑定和消息归属，不依赖 GPU 硬件或假设备分配。用户选择 GPU 实验时，仅验证命令与输出确实来自所选节点，不把实验成败冒称本系统的 GPU 调度能力。
 
-工具结果模式已确认：默认 preview；Node 只给全文许可，每场 Session 须另传显式 full，越过节点许可便明拒。两层配置键和接线尚未实现。尚待用户继续讨论：审批需要展示到什么程度；同一节点的 Worker 并发默认值，以及共享目录文件冲突提示的范围。GPU 占用和分配不纳入后续实现。网络如何打通由部署者决定，不再把公网地址、SSH 或 VPN 选型列作开发前置。
+工具结果模式已确认：默认 preview；Node 只给全文许可，每场 Session 须另传显式 full，越过节点许可便明拒。SDK 已接窄接口，Worker 草稿已接私有 IPC；部署 TOML、网络鉴权和 Control 存储仍待接线。尚待用户继续讨论：Control 审批展示材料、同一节点的 Worker 并发默认值，以及共享目录文件冲突提示范围。GPU 占用和分配不纳入后续实现。网络如何打通由部署者决定，不再把公网地址、SSH 或 VPN 选型列作开发前置。
