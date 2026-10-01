@@ -113,6 +113,9 @@ public:
     // configuration changes, and do not authenticate a host-owned file.
     Result<FrozenProjection> RestoreSavedProjection(
         std::string_view storage, const SavedSnapshot& snapshot) const;
+    // Local storage only: includes resolved secret-set digest. It is not an
+    // authentication token and must not enter IPC or UI (low-entropy secrets
+    // may be guessed through a dictionary attack on a stored digest).
     std::string BindingFingerprint() const;
 private:
     struct Impl;
