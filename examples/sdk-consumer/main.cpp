@@ -34,6 +34,9 @@ void MemorySeed(const std::filesystem::path& base);
 void MemoryResume(const std::filesystem::path& base);
 void MemorySaveSeed(const std::filesystem::path& base);
 void MemorySaveResume(const std::filesystem::path& base);
+void Subagents(const std::filesystem::path& base);
+void SubagentSeed(const std::filesystem::path& base);
+void SubagentResume(const std::filesystem::path& base);
 }
 
 // Deliberately only installed public headers and the C++ standard library.
@@ -1695,6 +1698,9 @@ int main(int argc, char** argv) {
         else if (mode == "memory-resume") lubancore_consumer::MemoryResume(base);
         else if (mode == "memory-save-seed") lubancore_consumer::MemorySaveSeed(base);
         else if (mode == "memory-save-resume") lubancore_consumer::MemorySaveResume(base);
+        else if (mode == "subagents") lubancore_consumer::Subagents(base);
+        else if (mode == "subagent-seed") lubancore_consumer::SubagentSeed(base);
+        else if (mode == "subagent-resume") lubancore_consumer::SubagentResume(base);
         else if (mode == "builtin-search") lubancore_consumer::BuiltinSearch(base, Path(argv[3]));
         else if (mode == "result-seed") ResultSeed(base);
         else if (mode == "result-resume") ResultResume(base);

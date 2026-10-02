@@ -36,6 +36,14 @@ v3::ChildAdoptionCheck CheckHistory(const Rig& rig, const v3::V3Ledger& source, 
 void RealRun(Rig& rig) {
     const auto run = rig.Run();
     REQUIRE_MESSAGE(run.has_value(), (run ? std::string() : run.error()));
+    std::string capture_errors;
+    for (const auto& receipt : rig.captures) {
+        if (!capture_errors.empty()) capture_errors += "; ";
+        capture_errors += "status=" + std::to_string(static_cast<int>(receipt.status)) +
+            ",error=" + receipt.error_code;
+    }
+    INFO("original_side_effect_error=" << run->side_effect_error);
+    INFO("actual_capture_receipts=" << capture_errors);
     CHECK_FALSE(run->side_effect_indeterminate);
     CHECK(rig.backend.parent_calls >= 2); CHECK(rig.backend.child_calls >= 1);
     rig.CheckChild();

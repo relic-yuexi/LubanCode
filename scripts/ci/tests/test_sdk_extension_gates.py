@@ -24,6 +24,7 @@ class InstalledHeadersTests(unittest.TestCase):
             "include/lubancore/results.hpp",
             "include/lubancore/skills.hpp",
             "include/lubancore/memory.hpp",
+            "include/lubancore/subagents.hpp",
         }
         for relative in self.headers:
             path = self.repo / relative
