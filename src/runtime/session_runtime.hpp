@@ -79,6 +79,7 @@ public:
         // v3 场(开关开时)的首行基础 system;空串合法 = §4.3 三步切换。
         std::string trajectory_v3_system_content;
         trajectory::V3OpeningParticipant trajectory_v3_opening_participant;
+        std::shared_ptr<trajectory::MemoryCapabilityFactory> trajectory_memory_capability_factory;
     };
 
     explicit SessionRuntime(Options options);

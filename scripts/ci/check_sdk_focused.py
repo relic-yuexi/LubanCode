@@ -22,6 +22,7 @@ REQUIRED = {
     "sdk.focused.lubancore_extensions",
     "sdk.focused.lubancore_skills",
     "sdk.focused.lubancore_memory_recall",
+    "sdk.focused.lubancore_memory_cas",
     "sdk.focused.lubancore_memory_save",
     "sdk.focused.lubancore_results",
     "sdk.focused.lubancore_result_projection",
@@ -35,6 +36,15 @@ REQUIRED = {
     "sdk.focused.scoped_turn_bindings",
     "sdk.focused.atomic_write",
 }
+
+
+def check_memory_cas_paths(native_section: str, platform_name: str):
+    if platform_name != "nt":
+        return
+    for path in ("target-extended", "temporary-threshold"):
+        marker = "[memory-cas-path] " + path
+        if native_section.splitlines().count(marker) != 1:
+            raise RuntimeError("Memory CAS actual Windows path did not finish once: " + path)
 
 
 def main():
@@ -90,6 +100,10 @@ def main():
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])
+        if case.attrib["name"] == "sdk.focused.lubancore_memory_cas" and int(counts[0]) != 10:
+            raise RuntimeError("Memory CAS native roster differs from 10 cases")
+        if case.attrib["name"] == "sdk.focused.lubancore_memory_cas":
+            check_memory_cas_paths(sections[0], os.name)
         if case.attrib["name"] == "sdk.focused.lubancore_memory_save" and int(counts[0]) != 12:
             raise RuntimeError("SDK memory-save native roster differs from 12 cases")
         if case.attrib["name"] == "sdk.focused.execution_owner" and int(counts[0]) != 7:

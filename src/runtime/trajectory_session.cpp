@@ -141,6 +141,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     // 接线点 1:v3 建场的首行基础 system(manager 侧 V3Writer::Start 用)。
     manager_options.v3_system_content = options.v3_system_content;
     manager_options.v3_opening_participant = options.v3_opening_participant;
+    manager_options.memory_capability_factory = options.memory_capability_factory;
     // T08:主账写者的提交故障注入(测试专用;生产恒空)。
     manager_options.v3_main_io_fault = options.v3_main_io_fault;
     // 子代理空轨迹单 P0-C:main stream 同样走延迟开卷——正式 .jsonl 由
@@ -359,6 +360,10 @@ trajectory::TrajectoryRecorder* TrajectorySessionLedger::main() {
     return impl_ != nullptr && impl_->active != nullptr && impl_->active->main.has_value()
                ? &*impl_->active->main
                : nullptr;
+}
+
+std::shared_ptr<trajectory::MemoryCapability> TrajectorySessionLedger::memory_capability() const {
+    return impl_ && impl_->active ? impl_->active->memory_capability.share() : nullptr;
 }
 
 std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(

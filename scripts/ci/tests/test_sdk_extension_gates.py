@@ -12,6 +12,36 @@ SPEC = importlib.util.spec_from_file_location("sdk_installed", SCRIPT)
 installed = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(installed)
 
+FOCUSED_SPEC = importlib.util.spec_from_file_location("sdk_focused", SCRIPT.with_name("check_sdk_focused.py"))
+focused = importlib.util.module_from_spec(FOCUSED_SPEC)
+FOCUSED_SPEC.loader.exec_module(focused)
+
+
+class MemoryCasWindowsPathsTests(unittest.TestCase):
+    markers = ("[memory-cas-path] target-extended", "[memory-cas-path] temporary-threshold")
+
+    def test_windows_requires_both_unique_native_markers_and_posix_requires_neither(self):
+        focused.check_memory_cas_paths("\n".join(self.markers) + "\n", "nt")
+        focused.check_memory_cas_paths("", "posix")
+
+    def test_windows_rejects_missing_or_decorated_native_markers(self):
+        for absent in self.markers:
+            with self.subTest(absent=absent):
+                body = "\n".join(marker for marker in self.markers if marker != absent)
+                with self.assertRaisesRegex(RuntimeError, "actual Windows path did not finish once"):
+                    focused.check_memory_cas_paths(body, "nt")
+                with self.assertRaisesRegex(RuntimeError, "actual Windows path did not finish once"):
+                    focused.check_memory_cas_paths(body + "\nother-source: " + absent, "nt")
+        with self.assertRaisesRegex(RuntimeError, "actual Windows path did not finish once"):
+            focused.check_memory_cas_paths("", "nt")
+
+    def test_windows_rejects_each_duplicated_native_marker(self):
+        body = "\n".join(self.markers) + "\n"
+        for duplicate in self.markers:
+            with self.subTest(duplicate=duplicate):
+                with self.assertRaisesRegex(RuntimeError, "actual Windows path did not finish once"):
+                    focused.check_memory_cas_paths(body + duplicate + "\n", "nt")
+
 
 class InstalledHeadersTests(unittest.TestCase):
     def setUp(self):
