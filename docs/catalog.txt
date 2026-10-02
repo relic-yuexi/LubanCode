@@ -83,6 +83,7 @@ DOC development/sdk-skills.md
 DOC development/sdk-memory-recall.md
 DOC development/memory-project-commit.md
 DOC development/memory-worker-contention-diagnostics.md
+DOC development/memory-worker-busy-acceptance.md
 DOC development/sdk-memory-save.md
 DOC development/agent-thread-start-cleanup.md
 DOC development/child-foreground-context.md
