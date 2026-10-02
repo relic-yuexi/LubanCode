@@ -28,6 +28,10 @@
 #include <utility>
 #include <vector>
 
+namespace lubancore_consumer {
+void BuiltinSearch(const std::filesystem::path& base, const std::filesystem::path& resource_root);
+}
+
 // Deliberately only installed public headers and the C++ standard library.
 // The fixture supplies model replies; Agent, permissions, tools and persistence
 // all run inside the actual SDK library.
@@ -1662,11 +1666,12 @@ void ResultResume(const fs::path& base) {
 int main(int argc, char** argv) {
     Progress("entered main");
     try {
-        Check(argc == 3, "usage: lubancore_consumer smoke|isolation|extensions|results|result-seed|result-resume|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
+        Check(argc >= 2, "usage: lubancore_consumer MODE ABSOLUTE_STATE_DIRECTORY [ABSOLUTE_INSTALLED_RESOURCE_ROOT]");
+        const std::string mode = argv[1];
+        Check(argc == (mode == "builtin-search" ? 4 : 3), "builtin-search requires STATE and installed ROOT; other modes require STATE only");
         const fs::path base = Path(argv[2]);
         Check(base.is_absolute(), "state directory must be absolute");
         fs::create_directories(base);
-        const std::string mode = argv[1];
         if (mode == "smoke") {
             Check(!sdk::Version().empty(), "installed library has no version");
             FileAndCommand(base);
@@ -1682,6 +1687,7 @@ int main(int argc, char** argv) {
         else if (mode == "results") PublicResults(base);
         else if (mode == "skills-seed") SkillsSeed(base);
         else if (mode == "skills-resume") SkillsResume(base);
+        else if (mode == "builtin-search") lubancore_consumer::BuiltinSearch(base, Path(argv[3]));
         else if (mode == "result-seed") ResultSeed(base);
         else if (mode == "result-resume") ResultResume(base);
         else if (mode == "seed") Seed(base);

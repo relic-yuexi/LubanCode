@@ -32,6 +32,7 @@
 #include "sdk/results.hpp"
 #include "sdk/skills.hpp"
 #include "tools/path_utils.hpp"
+#include "tools/search_ripgrep.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
 
@@ -422,8 +423,21 @@ struct Session::Impl final : rt::InteractionBroker {
             options.resume_session_id, options.system_prompt);
         if (!skill_module) return std::unexpected(skill_module.error());
         auto prepared_registry = std::make_unique<lubancode::tools::ToolRegistry>();
+        std::shared_ptr<lubancode::tools::BundledRipgrepRunner> search_runner;
         for (const auto& name : options.builtin_tools) {
-            auto tool = rt::assembly::CreateLocalTool(name);
+            if (name == "search" && !search_runner) {
+                auto executable = lubancode::tools::Utf8ToPath(roots.resource_root) / "libexec";
+#ifdef _WIN32
+                executable /= "rg.exe";
+#else
+                executable /= "rg";
+#endif
+                // Nonempty absolute override: SDK search never uses the CLI's
+                // exe/home/PATH discovery. Preparation stays lazy until every
+                // local tool declaration and server spec has been validated.
+                search_runner = std::make_shared<lubancode::tools::BundledRipgrepRunner>(std::move(executable));
+            }
+            auto tool = rt::assembly::CreateLocalTool(name, search_runner);
             if (!tool || prepared_registry->Find(name)) return std::unexpected(Failure("sdk.tool.unsupported_or_duplicate", name));
             prepared_registry->Register(detail::BindLocalTool(std::move(tool), options.cwd));
         }
@@ -509,6 +523,11 @@ struct Session::Impl final : rt::InteractionBroker {
             if (initialization_backend) return detail::AdaptBackend(initialization_backend);
             return rt::assembly::BuildBackend(*backend_config);
         };
+        if (search_runner) {
+            const auto prepared = search_runner->Prepare();
+            if (!prepared) return std::unexpected(Failure(
+                std::string(lubancode::tools::ToString(prepared.error().code)), prepared.error().message));
+        }
         auto assembled = rt::assembly::BuildSessionResources(std::move(resource_request));
         if (!assembled) {
             const auto& error = assembled.error();

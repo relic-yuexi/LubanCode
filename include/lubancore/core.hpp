@@ -99,6 +99,8 @@ struct McpServer {
 struct RuntimeOptions {
     // Required absolute UTF-8 paths. data_root is the owned persistence root;
     // resource_root identifies installed resources (no ambient home lookup).
+    // An admitted search uses only resource_root/libexec/rg (rg.exe on Windows),
+    // prepares it before session startup, and requires the bundled rg version.
     std::string data_root;
     std::string resource_root;
 };
@@ -113,7 +115,8 @@ struct SessionOptions {
     std::optional<Connection> connection;
     // Empty creates a new V3 session. Nonempty strictly resumes that same V3 ID.
     std::string resume_session_id;
-    // Explicit admission. Currently read_file/write_file/edit_file/run_command.
+    // Explicit admission. read_file/write_file/edit_file/run_command/search.
+    // Search defaults to this session's cwd; null/empty paths do the same.
     // run_command is foreground-only; detached jobs and CLI parity are not claimed.
     std::vector<std::string> builtin_tools;
     std::vector<Tool> custom_tools;

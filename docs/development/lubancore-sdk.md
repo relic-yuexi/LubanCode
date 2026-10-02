@@ -83,11 +83,25 @@ Agent 类型清单与按名派发现在同取当前 Package 快照，补上旧�
 
 ## 构建与安装
 
+搜索按场显式启用：`builtin_tools = {"search"}`。它复用 CLI 的 SearchTool，
+保留 grep/glob、输出上限与取消；参数中省去、置空或清空 `path`，都落到本场 cwd。
+相对路径也从本场 cwd 起算。绝对路径仍属可信本地工具，本批不加文件沙箱。
+建场先检查 `<resource_root>/libexec/rg[.exe]`，过版本门后才启动 MCP 和模型。
+SDK 不从 HOME、PATH 或宿主程序旁找替代品。合同见
+[内置搜索接入](lubancore-builtin-search.md)。
+
+要随 SDK 安装搜索后端，先按仓库 manifest 校验资源，再显式交给 CMake。
+下面以 Linux x64 为例；macOS ARM64 用 `macos-arm64`，Windows x64 用 `windows-x64`。
+
+```sh
+bash scripts/fetch_ripgrep.sh --target rg-stage --platform linux-x64 --cache rg-cache
+```
+
 独立 SDK 构建须同时关闭 CLI、启用 SDK。下面先关闭测试，走默认 `ALL` 和普通安装，
 不指定构建目标，也不筛安装组件。`sdk-prefix` 可换成所需安装目录。
 
 ```sh
-cmake -S . -B build-sdk -DCMAKE_BUILD_TYPE=Release -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=ON -DBUILD_TESTING=OFF
+cmake -S . -B build-sdk -DCMAKE_BUILD_TYPE=Release -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=ON -DBUILD_TESTING=OFF -DLUBANCODE_BUNDLED_RG_DIR="$PWD/rg-stage/libexec"
 cmake --build build-sdk --config Release --parallel 4
 cmake --install build-sdk --config Release --prefix sdk-prefix
 ```
@@ -108,6 +122,9 @@ ctest --test-dir build-sdk -C Release -L sdk-focused --output-on-failure --no-te
 消费方只需 `find_package(LubanCore CONFIG REQUIRED)`，链接 `LubanCore::Core`，
 包含 `<lubancore/core.hpp>`。公开头仅用标准库，不要求内部 `src` 或第三方头。
 `LubanCore_RESOURCE_DIR` 指向安装后资源目录。验收程序见 `examples/sdk-consumer`。
+宿主把此目录显式填入 `RuntimeOptions.resource_root`。搬迁整个安装目录后，资源根也跟着
+更新；组件安装与 SDK-only 普通安装都会携带 rg、MIT 许可和固定版本 manifest。
+未交 rg stage 时，SDK 仍可用于其他工具；启用 search 会在建场时报缺件。
 
 当前输出共享库。C++23 编译器、标准库、编译配置须匹配；尚无跨工具链 ABI 承诺。
 Windows SDK 构建统一使用动态 CRT（Release `/MD`、Debug `/MDd`），消费方也须相同。
@@ -203,7 +220,7 @@ ExtensionRuntime、后台命令、远端 Worker 或 Node 结果同步已交付�
 正文和同 ID 恢复拒绝指纹漂移。省略便关闭，不沿个人目录发现，不自动挂依赖工具。
 新开场与恢复门共用会话运行栈，闭场只留值清单；本批尚未收远端原生验收。
 
-工具默认空表。首批可显式启用 `read_file`、`write_file`、`edit_file`、`run_command`，
+工具默认空表。可显式启用 `read_file`、`write_file`、`edit_file`、`run_command`、`search`，
 也可注入自定义工具，或按服务与工具名单挂 MCP。内置实现沿用共用装配，不另写一套工具。
 相对文件路径和命令 cwd 按会话目录解析，不调用进程级 chdir。命令只开放前台执行；
 `run_in_background` 真值会明确拒绝。MCP 使用显式完整环境与会话 cwd，启动失败拒绝建场，

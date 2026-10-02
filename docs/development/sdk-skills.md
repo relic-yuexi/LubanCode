@@ -33,4 +33,3 @@ wire 名，再算 `requires-tools` 缺口。缺依赖回 `capability_unavailable
 保留旧路。验收走远端三平台：安装消费者只用公开 SDK，真跑正文和 live 附件，核
 指纹与链接绕路、超帽、坏声明、缺依赖、四场重叠隔离、关闭与同 ID 恢复。
 本地不 configure、编译、CTest 或运行原生程序。
-

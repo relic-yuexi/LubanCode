@@ -7,10 +7,12 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -154,20 +156,11 @@ nlohmann::json WaitCompleted(app_server::Server& server, const std::string& id,
             if (event.value("method", "") == "turn/completed" &&
                 event["params"].value("threadId", "") == id &&
                 (turn_id.empty() || event["params"].value("turnId", "") == turn_id)) {
-                // The event is currently queued before the worker clears busy.
-                // Observe that public transition without joining the old thread;
-                // thread/stop must still reap its completed, joinable handle.
-                const auto quiet_deadline = std::chrono::steady_clock::now() + 5s;
-                while (std::chrono::steady_clock::now() < quiet_deadline) {
-                    std::string error;
-                    server.HandleTurnInterrupt(id, event["params"]["turnId"].get<std::string>(), error);
-                    if (!error.empty()) {
-                        REQUIRE(error == "stale");
-                        return event["params"];
-                    }
-                    std::this_thread::sleep_for(2ms);
-                }
-                FAIL("Completed turn did not release its busy state");
+                // A visible terminal frame is already idle. Do not poll away
+                // a publication/admission race by repeatedly interrupting it.
+                std::string error;
+                server.HandleTurnInterrupt(id, event["params"]["turnId"].get<std::string>(), error);
+                REQUIRE(error == "stale");
                 return event["params"];
             }
         } else {
@@ -499,7 +492,149 @@ public:
 private:
     std::shared_ptr<BackendGate> gate_;
 };
+
+enum class CompletionPath { Normal, AssemblyFailure, ExecutionFailure };
+
+struct CompletionPublicationGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+    bool timed_out = false;
+    std::vector<nlohmann::json> frames;
+
+    void Observe(std::string_view method, const nlohmann::json& params) {
+        if (method != "turn/completed") return;
+        std::unique_lock lock(mutex);
+        frames.push_back(params);
+        if (entered) return;
+        entered = true;
+        cv.notify_all();
+        if (!cv.wait_for(lock, 30s, [this] { return released; })) timed_out = true;
+    }
+    void Release() {
+        std::lock_guard lock(mutex);
+        released = true;
+        cv.notify_all();
+    }
+};
+
+struct ReleasePublicationOnExit {
+    std::shared_ptr<CompletionPublicationGate> gate;
+    ~ReleasePublicationOnExit() { gate->Release(); }
+};
+
+void CheckCompletionPublication(CompletionPath path) {
+    EnvGuard format("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    history::Fixture fixture;
+    auto backend_gate = std::make_shared<BackendGate>();
+    backend_gate->Release(); // This test pauses publication, not model execution.
+    auto publication = std::make_shared<CompletionPublicationGate>();
+    app_server::ServerOptions options;
+    options.cwd = fixture.Cwd();
+    options.workspaces_dir = history::Utf8(fixture.root / "data" / "workspaces");
+    options.session_model = "completion-model";
+    if (path == CompletionPath::ExecutionFailure) {
+        // The trusted assembly factory supplies no resources. Opening the
+        // thread succeeds; InitializeExecution then reaches its error path.
+        options.assembly_factory = [](const std::string&) {
+            app_server::SessionAssemblyResult result;
+            result.assembly = std::make_unique<app_server::SessionAssembly>();
+            return result;
+        };
+    }
+    app_server::Server::BackendFactory backend;
+    if (path != CompletionPath::AssemblyFailure) {
+        backend = [backend_gate] { return std::make_unique<GatedBackend>(backend_gate); };
+    }
+    // An empty legacy factory opens a thread but fails fallback assembly.
+    auto server = std::make_unique<app_server::Server>(std::move(options), std::move(backend), nullptr);
+    Connect(*server);
+    const auto id = Start(*server);
+    server->connection().SetEventQueuedObserverForTest(
+        [publication](std::string_view method, const nlohmann::json& params) {
+            publication->Observe(method, params);
+        });
+
+    using Completion = std::pair<nlohmann::json, std::string>;
+    std::future<Completion> first;
+    // On every assertion path release before the future joins and before the
+    // Server destroys a worker that still borrows its event routing.
+    ReleasePublicationOnExit release{publication};
+    first = std::async(std::launch::async, [&server, &id] {
+        std::string error;
+        auto result = server->HandleTurnStart(id, "first completion", {}, error);
+        return Completion{std::move(result), std::move(error)};
+    });
+    {
+        std::unique_lock lock(publication->mutex);
+        REQUIRE(publication->cv.wait_for(lock, 30s, [&] { return publication->entered; }));
+    }
+    nlohmann::json visible;
+    int completed_frames = 0;
+    for (const auto& line : server->connection().outbox().PopAll()) {
+        const auto frame = nlohmann::json::parse(line);
+        if (frame.value("method", "") == "turn/completed") {
+            visible = frame["params"];
+            ++completed_frames;
+        }
+    }
+    REQUIRE(completed_frames == 1);
+    REQUIRE(visible.value("threadId", "") == id);
+    const auto first_turn = visible.value("turnId", "");
+    REQUIRE_FALSE(first_turn.empty());
+
+    // The producer is paused after enqueue, before EmitEvent returns. In the
+    // old order busy is still true here, so this assertion fails every time.
+    std::string error;
+    server->HandleTurnInterrupt(id, first_turn, error);
+    CHECK(error == "stale");
+    CHECK(first.wait_for(0s) == std::future_status::timeout);
+    publication->Release();
+    REQUIRE(first.wait_for(5s) == std::future_status::ready);
+    const auto [completed, completion_error] = first.get();
+    REQUIRE(completion_error.empty());
+    visible.erase("seq"); // Connection sequence is additive to the snapshot.
+    CHECK(completed == visible);
+    CHECK(completed.value("status", "") == (path == CompletionPath::Normal ? "success" : "error"));
+    if (path == CompletionPath::AssemblyFailure) {
+        CHECK(completed.value("error", "").find("会话运行材料缺失") != std::string::npos);
+    } else if (path == CompletionPath::ExecutionFailure) {
+        CHECK(completed.value("error", "").find("session.execution.resources_missing") != std::string::npos);
+    }
+
+    const auto second = server->AcceptTurnStart(id, "second completion", {}, error);
+    if (path == CompletionPath::ExecutionFailure) {
+        CHECK(error == "thread.stopping");
+    } else {
+        REQUIRE(error.empty());
+        const auto second_turn = second.value("turnId", "");
+        REQUIRE_FALSE(second_turn.empty());
+        CHECK(second_turn != first_turn);
+        const auto second_completed = WaitCompleted(*server, id, second_turn);
+        CHECK(second_completed.value("turnId", "") == second_turn);
+    }
+    server->Shutdown();
+    {
+        std::lock_guard lock(publication->mutex);
+        CHECK_FALSE(publication->timed_out);
+        CHECK(publication->frames.size() == (path == CompletionPath::ExecutionFailure ? 1 : 2));
+    }
+    CHECK(backend_gate->calls.load() == (path == CompletionPath::Normal ? 2 : 0));
+}
 }  // namespace
+
+TEST_CASE("AppServer completion: visible success is idle before the publisher returns") {
+    CheckCompletionPublication(CompletionPath::Normal);
+}
+
+TEST_CASE("AppServer completion: visible assembly failure is idle before the publisher returns") {
+    CheckCompletionPublication(CompletionPath::AssemblyFailure);
+}
+
+TEST_CASE("AppServer completion: visible execution failure is idle before the publisher returns") {
+    CheckCompletionPublication(CompletionPath::ExecutionFailure);
+}
 
 TEST_CASE("AppServer ownership: a hard deadline cannot admit another turn over a live worker") {
     EnvGuard format("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");

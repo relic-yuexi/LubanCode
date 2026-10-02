@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "check_installed_sdk.py"
 SPEC = importlib.util.spec_from_file_location("sdk_installed", SCRIPT)
@@ -55,6 +56,62 @@ class InstalledHeadersTests(unittest.TestCase):
                         self.assertIn(missing, str(error.exception))
             finally:
                 path.write_text(contents, encoding="utf-8")
+
+
+class InstalledSearchResourcesTests(unittest.TestCase):
+    def setUp(self):
+        self.scratch = tempfile.TemporaryDirectory(prefix="sdk-search-resource-data-")
+        self.addCleanup(self.scratch.cleanup)
+        self.repo = Path(self.scratch.name) / "repo"
+        self.prefix = Path(self.scratch.name) / "relocated"
+        self.stage = Path(self.scratch.name) / "stage"
+        self.stage.mkdir()
+        for binary in ("rg", "rg.exe"):
+            (self.stage / binary).write_bytes(b"data fixture, never executed")
+        self.pairs = {
+            "share/lubancore/libexec/rg": self.stage / "rg",
+            "share/lubancore/libexec/rg.exe": self.stage / "rg.exe",
+            "share/lubancore/licenses/ripgrep/LICENSE-MIT": self.repo / "third_party/ripgrep/LICENSE-MIT",
+            "share/lubancore/ripgrep-manifest.json": self.repo / "third_party/ripgrep/manifest.json",
+        }
+        for relative, original in self.pairs.items():
+            original.parent.mkdir(parents=True, exist_ok=True)
+            if not original.exists():
+                original.write_bytes(b"nonempty repository resource fixture")
+            installed_file = self.prefix / relative
+            installed_file.parent.mkdir(parents=True, exist_ok=True)
+            installed_file.write_bytes(original.read_bytes())
+            installed_file.chmod(0o755)
+
+    def test_relocated_platform_resources_preserve_input_bytes(self):
+        for platform, binary in (("win32", "rg.exe"), ("linux", "rg"), ("darwin", "rg")):
+            with self.subTest(platform=platform):
+                facts = installed.check_search_resources(self.repo, self.prefix, self.stage, platform)
+                self.assertEqual(len(facts), 3)
+                self.assertIn("share/lubancore/libexec/" + binary, facts)
+
+    def test_missing_or_changed_backend_license_or_manifest_fails(self):
+        for relative in self.pairs:
+            platform = "win32" if relative.endswith(".exe") else "linux"
+            path = self.prefix / relative
+            contents = path.read_bytes()
+            with self.subTest(resource=relative):
+                path.unlink()
+                with self.assertRaisesRegex(RuntimeError, "resource is missing"):
+                    installed.check_search_resources(self.repo, self.prefix, self.stage, platform)
+                path.write_bytes(contents + b"changed")
+                path.chmod(0o755)
+                with self.assertRaisesRegex(RuntimeError, "differs from"):
+                    installed.check_search_resources(self.repo, self.prefix, self.stage, platform)
+                path.write_bytes(contents)
+                path.chmod(0o755)
+
+    def test_posix_relocation_cannot_lose_executable_permission(self):
+        # Pure permission-result injection also exercises this negative gate on
+        # Windows; real POSIX installed bytes/mode are checked by remote CI.
+        with patch.object(installed.os, "access", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "lost executable permission"):
+                installed.check_search_resources(self.repo, self.prefix, self.stage, "linux")
 
 
 if __name__ == "__main__":

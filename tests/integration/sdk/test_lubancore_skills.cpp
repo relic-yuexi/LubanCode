@@ -569,4 +569,3 @@ TEST_CASE("SDK Skills: four overlapping sessions isolate shared projects, models
     REQUIRE((*runtime)->Shutdown().has_value());
     for (const auto& owner : alive) CHECK_FALSE(owner->load());
 }
-

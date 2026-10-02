@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 
 REQUIRED = {
     "sdk.focused.lubancore_session",
+    "sdk.focused.lubancore_builtin_search",
     "sdk.focused.lubancore_lifecycle",
     "sdk.focused.lubancore_host_boundary",
     "sdk.focused.lubancore_history",
