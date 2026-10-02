@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -99,14 +100,25 @@ public:
         return api::chat::BuildRequestJson(request, nlohmann::json::object()).dump();
     }
     std::expected<void, api::Error> send_stream(const api::Request& request,
-        const std::function<void(const api::StreamEvent&)>& emit, const std::atomic<bool>*) override {
+        const std::function<void(const api::StreamEvent&)>& emit, const std::atomic<bool>* cancel) override {
         emit(api::MessageStart{"observation-response", request.model});
         if (request.model == "child-model") {
             ++child_calls;
             emit(api::TextDelta{"actual child conclusion"});
+            if (cancel_child) {
+                REQUIRE(cancel != nullptr);
+                cancel_child->store(true, std::memory_order_release);
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                while (!cancel->load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                REQUIRE(cancel->load(std::memory_order_acquire));
+                // The transport observes the real merged cancellation before
+                // settling this partial stream; no successful final frame races
+                // ahead of CancelChain's propagation.
+                return std::unexpected(api::Error{api::ErrorKind::Cancelled, "actual child cancelled", 0});
+            }
             emit(api::ContentBlockDone{0});
             emit(api::MessageDone{"end_turn", api::Usage{}});
-            if (cancel_child) cancel_child->store(true);
         } else if (request.system.starts_with("Summarize already-executed tool evidence.") ||
                    request.model == "summary-model") {
             ++summary_calls;
