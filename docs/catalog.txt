@@ -165,3 +165,4 @@ DOC development/child-parent-observation.md
 DOC development/sdk-subagent-assembly.md
 DOC development/child-history-adoption.md
 DOC development/sdk-action-middleware.md
+DOC development/result-store-windows-io.md
