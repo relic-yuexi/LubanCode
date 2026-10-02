@@ -14,6 +14,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -228,6 +230,48 @@ TEST_CASE("中文检索评测:端到端注入字节 P50/P95 与零命中不塞�
     REQUIRE(identity.has_value());
     memory::ProjectMemory store(*identity, home, options);
 
+    // Materialize every parent before any file. The corpus also names three
+    // directories; use a regular leaf only in this storage fixture, preserving
+    // the corpus and the first test's original ranking inputs.
+    std::set<fs::path> directories;
+    for (const auto& item : fixture.entries) {
+        for (const auto& path : item.paths) {
+            for (auto parent = (repo / fs::path(path)).parent_path(); parent != repo;
+                 parent = parent.parent_path()) {
+                directories.insert(parent);
+            }
+        }
+    }
+    for (const auto& directory : directories) {
+        ec.clear();
+        fs::create_directories(directory, ec);
+        REQUIRE_FALSE(ec);
+        REQUIRE(fs::is_directory(directory));
+    }
+    std::map<std::string, std::string> material_paths;
+    std::set<std::string> directory_paths;
+    for (const auto& item : fixture.entries) {
+        for (const auto& path : item.paths) {
+            auto relative = fs::path(path);
+            if (directories.contains(repo / relative)) {
+                directory_paths.insert(path);
+                relative /= ".fixture-evidence";
+            }
+            const auto target = repo / relative;
+            std::ofstream out(target, std::ios::binary | std::ios::trunc);
+            REQUIRE(out.is_open());
+            out << "fixture source\n";
+            out.flush();
+            REQUIRE(out.good());
+            out.close();
+            REQUIRE_FALSE(out.fail());
+            REQUIRE(fs::is_regular_file(target));
+            material_paths[path] = relative.generic_string();
+        }
+    }
+    const std::set<std::string> expected_directories{"docs", "src/agent", "src/cli"};
+    REQUIRE(directory_paths == expected_directories);
+
     // 100 条全部入库(走真 worker 路径);paths 指到的文件造出来,指纹才有得算。
     for (const auto& item : fixture.entries) {
         memory::SaveRequest request;
@@ -238,20 +282,20 @@ TEST_CASE("中文检索评测:端到端注入字节 P50/P95 与零命中不塞�
         // 正文由标题派生:同标题的重复对派生出同正文,去重路径才有得测。
         request.content = "正文:" + item.title + "。中文评测固定正文,占一段字节数。";
         request.keywords = item.keywords;
-        request.paths = item.paths;
+        for (const auto& path : item.paths) request.paths.push_back(material_paths.at(path));
         request.scope = item.scope;
         request.expires_at = item.expires_at;
-        for (const std::string& path : item.paths) {
-            const fs::path target = repo / fs::path(path);
-            fs::create_directories(target.parent_path(), ec);
-            if (!fs::exists(target, ec)) {
-                std::ofstream out(target, std::ios::binary);
-                out << "fixture source\n";
-            }
-        }
         REQUIRE(store.EnqueueSave(request).has_value());
     }
-    REQUIRE(memory::RunPendingMemoryJobs(home).has_value());
+    const auto completed = memory::RunPendingMemoryJobs(home);
+    REQUIRE(completed.has_value());
+    const auto completions = store.DrainWriteCompletions();
+    REQUIRE(completions.size() == 100);
+    for (const auto& completion : completions) {
+        INFO("job_id=", completion.job_id, " error=", completion.error);
+        REQUIRE(completion.outcome == "committed");
+    }
+    REQUIRE(*completed == 100);
     REQUIRE(store.ListEntries().size() == 100);
 
     // 全部问句各跑一遍,量每问注入字节;零命中问句只记 suffix 总字节。
