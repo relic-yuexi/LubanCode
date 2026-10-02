@@ -155,6 +155,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     impl.workspace_root_text = platform::PathToUtf8(options.workspace_root);
     impl.training_policy = options.training_policy;
     impl.subagent_start_fault = options.subagent_start_fault;
+    impl.subagent_close_fault = options.subagent_close_fault;
     impl.workflow_start_fault = options.workflow_start_fault;
     impl.workflow_node_start_fault = options.workflow_node_start_fault;
     impl.manager = std::make_unique<trajectory::SessionManager>(std::move(manager_options));
@@ -624,7 +625,7 @@ trajectory::ClearOutcome TrajectorySessionLedger::ClearSession(
             impl_->main_run_id = impl_->active->manifest.main_run_id;
         }
         BindV3Books_();
-        impl_->child_terminal_hashes.clear();
+        impl_->child_terminals = std::make_shared<SubagentTerminalRegistry>();
         record_selection_ = nullptr;  // 惰性重建(RecordSelectionController)
         environment_captured_ = false;  // 新 run 须重采环境快照
     }
@@ -738,7 +739,7 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
     // 按账面现行版本重采。
     impl_->v3_books.reset();
     BindV3Books_();
-    impl_->child_terminal_hashes.clear();
+    impl_->child_terminals = std::make_shared<SubagentTerminalRegistry>();
     record_selection_ = nullptr;
     environment_captured_ = false;
     // v3 源:续接场沿用源场生效 system(§4.10 默认,三步切换补账——本场

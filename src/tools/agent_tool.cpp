@@ -1836,11 +1836,24 @@ Tool::Result LaunchBackgroundTask(const AgentDispatchPlan& request, ToolRegistry
     const auto reject_start = [&](const std::string& detail, bool closing = false) -> Tool::Result {
         rejection_started = true;
         std::string text = closing ? "后台子代理未启动: 会话正在收场" : "后台子代理启动失败: " + detail;
+        bool durability_unknown = false;
         auto& child_trajectory = launch ? launch->trajectory : trajectory;
         if (child_trajectory != nullptr) {
             try {
-                (void)child_trajectory->Finish(false, closing ? "session_closing" : "thread_start_failed");
+                const auto terminal = child_trajectory->Finish(
+                    runtime::SubagentExecutionOutcome::StartupRejected,
+                    closing ? "session_closing" : "thread_start_failed");
+                if (!headless && state->live_hooks != nullptr && state->live_hooks->trajectory_child_finished)
+                    state->live_hooks->trajectory_child_finished(terminal);
+                if (!terminal.durable()) {
+                    durability_unknown = terminal.confirmation == runtime::SubagentAppendConfirmation::DurabilityUnconfirmed ||
+                                         terminal.seal != runtime::SubagentSealState::Closed;
+                    text += "\ntrajectory.child_terminal_persistence_failed: 子账未确认收口;副作用不曾回滚,不可自动重跑。";
+                    if (!terminal.append_error_code.empty()) text += " " + terminal.append_error_code;
+                    if (!terminal.close_error_code.empty()) text += " " + terminal.close_error_code;
+                }
             } catch (...) {
+                durability_unknown = true;
                 text += "\n子账收口失败,须检查持久账。";
             }
             child_trajectory.reset();
@@ -1868,6 +1881,7 @@ Tool::Result LaunchBackgroundTask(const AgentDispatchPlan& request, ToolRegistry
         state->coordinator->ledger().FinalizeFromToolResult(task, text, /*cancelled=*/false);
         Tool::Result result{text, true};
         result.error_code = closing ? "agent.session_closing" : "agent.thread_start_failed";
+        if (durability_unknown) result.execution_control = ExecutionControl::StopIndeterminate;
         return result;
     };
     try {
@@ -3476,21 +3490,6 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
         }
     }
 
-    // P0-2 轨迹:子账收口——turn 终态、run 终态、关柄(§8.3);前台任务
-    // 把子账 terminal hash 回填父桥(父侧 agent 调用的执行终态引用它,
-    // §3.5)。后台任务的 hash 留在账本注册表,P0-3 的 session verifier
-    // 跨文件核对。
-    if (trajectory != nullptr) {
-        const bool ok = drive.ok;
-        const bool cancelled = drive.cancelled;
-        trajectory->turn_bridge().EndTurn(ok, cancelled, drive.ok ? std::string() : drive.error);
-        const std::string terminal_hash =
-            trajectory->Finish(ok, ok ? "done" : (cancelled ? "cancelled" : "failed"));
-        if (foreground_hooks != nullptr && foreground_hooks->trajectory_child_finished) {
-            foreground_hooks->trajectory_child_finished(trajectory->run_id(), terminal_hash);
-        }
-    }
-
     // ---- 收场分型(批三:harness 的 ClassifyTurnEnd,一份)----------------
     TaskOutcome task_outcome;
     task_outcome.step_limit = budget.max_steps_per_turn;
@@ -3677,6 +3676,44 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
         task_outcome.partial_result = partial;
         run_result = {"子代理空转收口: " + task_outcome.message + "\n" + ComposeOutcomeText(task_outcome), true};
     }
+    // Use the same actual endgame as the task outcome: Run returning a value
+    // alone does not prove success (cancel, budget and no-final-text are values).
+    // Execution and terminal persistence stay separate facts.
+    std::optional<runtime::SubagentTerminalReceipt> child_terminal;
+    if (trajectory != nullptr) {
+        const bool completed = task_outcome.status == TaskOutcomeStatus::Completed;
+        const bool cancelled = task_outcome.status == TaskOutcomeStatus::Stopped;
+        const auto execution = drive.side_effect_indeterminate ? runtime::SubagentExecutionOutcome::Indeterminate
+            : cancelled ? runtime::SubagentExecutionOutcome::Cancelled
+            : completed ? runtime::SubagentExecutionOutcome::Succeeded
+                        : runtime::SubagentExecutionOutcome::Failed;
+        const std::string reason = drive.side_effect_indeterminate ? "side_effect_indeterminate"
+            : cancelled ? "cancelled" : completed ? "done"
+            : task_outcome.reason == TaskOutcomeReason::NoMeaningfulProgress ? "no_meaningful_progress"
+            : std::string(agent::TurnVerdict::StatusTag(verdict.status));
+        trajectory->turn_bridge().EndTurn(completed, cancelled,
+                                          completed ? std::string() : reason);
+        child_terminal = trajectory->Finish(execution, reason);
+        if (foreground_hooks != nullptr && foreground_hooks->trajectory_child_finished)
+            foreground_hooks->trajectory_child_finished(*child_terminal);
+    }
+    if (child_terminal && !child_terminal->durable()) {
+        // Preserve the genuine outcome in the owned receipt and partial result;
+        // do not claim the selected child has completed a durable handoff.
+        task_outcome.status = TaskOutcomeStatus::Failed;
+        task_outcome.reason = TaskOutcomeReason::ToolError;
+        task_outcome.partial_result = partial;
+        task_outcome.message = "trajectory.child_terminal_persistence_failed: 子账未确认收口;执行结果与副作用仍须留查,不可自动重跑。";
+        if (!child_terminal->append_error_code.empty())
+            task_outcome.message += " " + child_terminal->append_error_code;
+        if (!child_terminal->close_error_code.empty())
+            task_outcome.message += " " + child_terminal->close_error_code;
+        run_result = {task_outcome.message, true};
+        run_result.error_code = "trajectory.child_terminal_persistence_failed";
+        run_result.execution_control = ExecutionControl::StopIndeterminate;
+    }
+    if (drive.side_effect_indeterminate)
+        run_result.execution_control = ExecutionControl::StopIndeterminate;
     if (task != nullptr) {
         std::lock_guard<std::mutex> lock(state->coordinator->ledger().mutex);
         // 看门狗已强制收账(任务线程绝境下晚归):台账保持强制收账那份,

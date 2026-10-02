@@ -8,6 +8,7 @@
 
 #include <string>
 
+#include "runtime/subagent_terminal.hpp"
 #include "runtime/trajectory_turn_bridge.hpp"
 
 namespace lubancode::runtime {
@@ -21,10 +22,21 @@ public:
     virtual ~TrajectorySubagentBridge() = default;
     virtual const std::string& run_id() const = 0;
     virtual TrajectoryTurnBridge& turn_bridge() = 0;
-    // 收口:run terminal + 关柄(§8.3 journal_sha256)。返回子账终态事件
-    // 的 event_hash(父账 finished 边界引用它);账已坏给空串,父账如实
-    // 标注。
-    virtual std::string Finish(bool ok, const std::string& reason) = 0;
+    // Full cached native append + explicit Close evidence; never retry Finish.
+    virtual SubagentTerminalReceipt Finish(SubagentExecutionOutcome execution,
+                                           const std::string& reason) = 0;
+
+    // Internal construction seams share the real bridge in production/tests.
+    // Each turn bridge borrows the writer/books supplied in this same graph.
+    static std::unique_ptr<TrajectorySubagentBridge> OwnV2(
+        std::unique_ptr<trajectory::TrajectoryRecorder> recorder,
+        std::unique_ptr<TrajectoryTurnBridge> bridge,
+        std::shared_ptr<SubagentTerminalRegistry> registry);
+    static std::unique_ptr<TrajectorySubagentBridge> OwnV3(
+        std::unique_ptr<trajectory::v3::V3Writer> writer,
+        std::unique_ptr<V3SessionBooks> books,
+        std::unique_ptr<TrajectoryTurnBridge> bridge,
+        std::shared_ptr<SubagentTerminalRegistry> registry);
 };
 
 // ---------------------------------------------------------------------------

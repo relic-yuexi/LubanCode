@@ -199,6 +199,37 @@ class BoundaryTests(unittest.TestCase):
                              "compileGroups": [{}]})
         self.assert_rejected(self.check(testing=True), "reverse host include")
 
+    def test_child_terminal_allowance_remains_testing_only_and_neutral(self):
+        shared = "tests/unit/runtime/test_subagent_terminal_receipt.cpp"
+        self.source_file(shared, '#include "runtime/subagent_terminal.hpp"\n')
+        self.source_file("src/runtime/subagent_terminal.hpp", "#pragma once\n")
+        self.targets.append({"id": "receipt", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": shared, "compileGroupIndex": 0}],
+                             "compileGroups": [{}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        self.source_file("src/runtime/subagent_terminal.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_child_integration_allowance_cannot_enter_library_or_borrow_host_headers(self):
+        shared = "tests/unit/runtime/test_child_foreground_integration.cpp"
+        self.source_file(shared, '#include "tools/agent_tool.hpp"\n')
+        self.source_file("src/tools/agent_tool.hpp", "#pragma once\n")
+        target = {"id": "integration", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "lubancode_runtime"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        self.source_file("src/tools/agent_tool.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
     def test_execution_owner_allowance_is_testing_only_and_keeps_the_host_boundary(self):
         shared = "tests/unit/runtime/test_execution_owner.cpp"
         self.source_file(shared, '#include "runtime/execution_owner.hpp"\n')

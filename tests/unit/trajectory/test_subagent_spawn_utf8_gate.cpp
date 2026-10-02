@@ -208,8 +208,8 @@ struct Wiring {
             }
             return std::move(*child);
         };
-        hooks.trajectory_child_finished = [this](const std::string& run_id, const std::string& hash) {
-            main_bridge->NoteChildTerminal(run_id, hash);
+        hooks.trajectory_child_finished = [this](const SubagentTerminalReceipt& receipt) {
+            main_bridge->NoteChildTerminal(receipt);
         };
         tool = std::make_unique<tools::AgentTool>(backend, sub_registry, "/work/dir");
         tool->SetHooks(std::move(hooks));

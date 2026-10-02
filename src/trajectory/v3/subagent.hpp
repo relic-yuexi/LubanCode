@@ -19,6 +19,7 @@
 
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -101,7 +102,9 @@ public:
     BootstrapResult BootstrapChild(const V3Writer& parent, std::string_view child_run_id,
                                    std::string_view child_system_content,
                                    std::string_view task_prompt,
-                                   Durability durability = Durability::PowerLoss) const;
+                                   Durability durability = Durability::PowerLoss,
+                                   // Empty in production; follows the real Close.
+                                   std::function<std::optional<std::string>()> close_fault = {}) const;
 
     // 步 3:父账 subagent.linked(引用子账检查点)。
     WriteReceipt Link(V3Writer& parent, const ChildCheckpointRef& checkpoint,

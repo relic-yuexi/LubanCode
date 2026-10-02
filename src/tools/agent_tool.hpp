@@ -257,9 +257,9 @@ struct AgentSubagentHooks {
         const std::string& task_label, const std::string& parent_run_id,
         runtime::SubagentSpawnFailure* failure_out)>
         trajectory_spawn;
-    // 子账收口(run terminal + 关柄)后的回填口:父桥记下子账终态
-    // hash,父侧 agent 调用的执行终态事件引用它(§3.5 边界对账)。
-    std::function<void(const std::string& run_id, const std::string& terminal_hash)>
+    // Owned native append/Close evidence. This callback does not persist a V3
+    // parent terminal observation or prove parent-model adoption.
+    std::function<void(const runtime::SubagentTerminalReceipt&)>
         trajectory_child_finished;
 
     // ESC/Ctrl+C 打断信号(宿主那份 cancel_flag 的地址)——子代理
