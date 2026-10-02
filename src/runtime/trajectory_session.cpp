@@ -624,7 +624,7 @@ trajectory::ClearOutcome TrajectorySessionLedger::ClearSession(
             impl_->main_run_id = impl_->active->manifest.main_run_id;
         }
         BindV3Books_();
-        impl_->child_terminal_hashes.clear();
+        impl_->child_terminals = std::make_shared<SubagentTerminalRegistry>();
         record_selection_ = nullptr;  // 惰性重建(RecordSelectionController)
         environment_captured_ = false;  // 新 run 须重采环境快照
     }
@@ -738,7 +738,7 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
     // 按账面现行版本重采。
     impl_->v3_books.reset();
     BindV3Books_();
-    impl_->child_terminal_hashes.clear();
+    impl_->child_terminals = std::make_shared<SubagentTerminalRegistry>();
     record_selection_ = nullptr;
     environment_captured_ = false;
     // v3 源:续接场沿用源场生效 system(§4.10 默认,三步切换补账——本场

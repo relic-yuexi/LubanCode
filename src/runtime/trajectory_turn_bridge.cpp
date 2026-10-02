@@ -979,12 +979,12 @@ void TrajectoryTurnBridge::OnToolTrace(const agent::ToolTraceEvent& event) {
             if (!book.child_run_id.empty()) {
                 links.child_run_id = book.child_run_id;
                 if (kind == EventKind::ToolExecutionFinished || kind == EventKind::ToolExecutionFailed) {
-                    const auto hash = child_terminal_hashes_.find(book.child_run_id);
+                    const auto child = child_terminals_->Find(book.child_run_id);
                     payload["result_ref"] = nlohmann::json{
                         {"kind", "child_stream"},
                         {"child_run_id", book.child_run_id},
                         {"child_terminal_event_hash",
-                         hash != child_terminal_hashes_.end() ? hash->second : std::string()}};
+                         child && child->durable() ? child->terminal->hash : std::string()}};
                     payload["side_effects"] = nlohmann::json::array();
                 }
             }
@@ -2358,9 +2358,8 @@ void TrajectoryTurnBridge::AttachChildRun(const std::string& call_id, const std:
     it->second.child_run_id = agent_run_id;
 }
 
-void TrajectoryTurnBridge::NoteChildTerminal(const std::string& agent_run_id,
-                                             const std::string& terminal_event_hash) {
-    child_terminal_hashes_[agent_run_id] = terminal_event_hash;
+void TrajectoryTurnBridge::NoteChildTerminal(const SubagentTerminalReceipt& receipt) {
+    child_terminals_->Store(receipt);
 }
 
 

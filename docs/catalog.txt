@@ -146,6 +146,7 @@ DOC development/workspace-storage-v2/P0-0-inventory.md
 DOC development/workspace-storage-v2/scale-baseline.md
 DOC development/workspace-manifest-missing-read.md
 DOC development/sdk-subagents.md
+DOC development/child-terminal-receipt.md
 DOC features/telemetry/collector.md
 
 DOC features/qq-assistant.md
