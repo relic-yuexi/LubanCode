@@ -299,8 +299,10 @@ struct Rig {
                         "capture-000002.combined.txt.tmp"));
                 }
                 if (failure == Failure::BadResultName) {
-                    REQUIRE(std::filesystem::create_directories(directory.root / "artifacts") ||
-                            std::filesystem::is_directory(directory.root / "artifacts"));
+                    const bool artifact_dir_ready =
+                        std::filesystem::create_directories(directory.root / "artifacts") ||
+                        std::filesystem::is_directory(directory.root / "artifacts");
+                    REQUIRE(artifact_dir_ready);
                     Write(directory.root / "artifacts" / "res-999999999999999999999999999999.json", "{}\n");
                 }
                 if (failure == Failure::MissingChild) {
