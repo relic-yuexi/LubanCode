@@ -15,6 +15,7 @@
 #include "platform/text_encoding.hpp"
 #include "runtime/session_service.hpp"
 #include "tools/path_utils.hpp"
+#include "trajectory/cas_store.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/index.hpp"
 
@@ -188,6 +189,10 @@ std::expected<Json, std::string> SessionMemory::Open(const lubancode::trajectory
     if (ec) return std::unexpected("sdk.memory.open_failed: invalid session directory");
     const auto root = fs::canonical(owned_root_, ec);
     if (ec || !Inside(directory, root / "workspaces")) return std::unexpected("sdk.memory.path_escape");
+    if (!context.memory_capability || context.memory_capability->scope() !=
+        lubancode::trajectory::CasScope{identity_.workspace_key, context.session_id})
+        return std::unexpected("sdk.memory.scope_mismatch");
+    memory_capability_ = context.memory_capability;
     session_dir_ = context.session_dir;
     snapshot_.session_id = context.session_id;
     snapshot_.memory_directory = lubancode::tools::PathToUtf8(directory.parent_path().parent_path() / "memory");
@@ -406,9 +411,13 @@ Result<void> SessionMemory::ValidateReport(const memory::v1::RecallReport& repor
                 hash.find_first_not_of("0123456789abcdef") != std::string::npos) return bad();
             const auto relative = "artifacts/sha256/" + hash.substr(0, 2) + "/" + hash;
             if (payload["snapshotRef"] != relative) return bad();
-            auto bytes = ReadOwned(session_dir_ / lubancode::tools::Utf8ToPath(relative), session_dir_, selected.at(id));
-            if (!bytes || !*bytes || (**bytes).size() <= 512) return bad();
-            fragment = std::move(**bytes);
+            if (!memory_capability_) return bad();
+            const lubancode::trajectory::CasReference reference{
+                {report.workspace_key, report.session_id}, hash,
+                static_cast<std::uint64_t>(selected.at(id)), "text/plain"};
+            auto bytes = memory_capability_->Read(reference, selected.at(id));
+            if (!bytes || bytes->size() <= 512) return bad();
+            fragment = std::move(*bytes);
         }
         if (fragment.size() != selected.at(id) ||
             payload.value("injectedBytes", Json()) != selected.at(id) ||

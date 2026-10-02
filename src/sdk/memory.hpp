@@ -44,6 +44,7 @@ private:
     memory::v1::Snapshot snapshot_;
     std::string resume_id_, saved_plan_bytes_;
     bool legacy_ = false;
+    std::shared_ptr<lubancode::trajectory::MemoryCapability> memory_capability_;
 };
 
 } // namespace lubancore::detail
