@@ -101,7 +101,7 @@ endif()
 # 路径随 target 的 PUBLIC usage 递)。
 target_link_libraries(lubancode_tests PRIVATE mbedtls)
 # 更新器 C++ 化批一第③单:miniz 冒烟册(tests/unit/updater)直接用
-# mz_zip_writer/mz_zip_reader 造一枚 zip 再读回——engine 对 miniz 是
+# mz_zip_writer/mz_zip_reader 造一枚 zip 再读回——updater 对 miniz 是
 # PRIVATE 链,这里照 mbedTLS 的先例显式补上。
 target_link_libraries(lubancode_tests PRIVATE miniz)
 # 批二余款:测试共用的回合事件录音器(Callbacks 显示回调退役,观察点
