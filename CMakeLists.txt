@@ -751,6 +751,7 @@ add_library(lubancode_engine STATIC
   src/trajectory/canonical_json.cpp
   src/trajectory/schema.cpp
   src/trajectory/blob_store.cpp
+  src/trajectory/cas_store.cpp
   src/trajectory/journal.cpp
   src/trajectory/recorder.cpp
   src/trajectory/directory.cpp

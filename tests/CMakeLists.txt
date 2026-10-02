@@ -92,6 +92,7 @@ if(LUBANCODE_BUILD_SDK)
   # Scoped pending/reference tests call private implementation symbols. Compile
   # the real source locally rather than exporting a new private SDK DLL ABI.
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/approval.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/memory.cpp")
   if(WIN32)
     add_custom_command(TARGET lubancode_tests POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different

@@ -95,6 +95,21 @@ class BoundaryTests(unittest.TestCase):
         self.targets[-1]["name"] = "lubancore_sdk_tests"
         self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
 
+    def test_real_private_memory_cas_reference_is_only_testing_on(self):
+        reference = "src/sdk/memory.cpp"
+        self.source_file(reference, '#include "sdk/memory.hpp"\n')
+        self.source_file("src/sdk/memory.hpp", '#include "trajectory/cas_store.hpp"\n')
+        self.source_file("src/trajectory/cas_store.hpp", "#pragma once\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        report = self.check(testing=True)
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.assertIn("src/trajectory/cas_store.hpp", report["scannedProjectFiles"])
+        self.targets[-1]["name"] = "arbitrary_host"
+        self.assert_rejected(self.check(testing=True), "unregistered private SDK reference")
+
     def test_real_private_approval_reference_is_only_testing_on(self):
         reference = "src/sdk/approval.cpp"
         self.source_file(reference, '#include "sdk/approval.hpp"\n')

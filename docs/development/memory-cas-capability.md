@@ -72,6 +72,26 @@ Fake 验收走真实 SessionManager opening，检查场锁已持有；不直接�
 不删原 Memory/Blob 断言，具体新 CASE 数在实现完成后登记，不预报原生通过。
 本地只读源码、写源码与跑文档/纯数据门，不 configure、编译、CTest 或执行原生探针。
 
+## 当前实现与证据边界
+
+实现册为 `tests/integration/sdk/test_lubancore_memory_cas.cpp`，固定 10 CASE。
+本基底新增这一册后，SDK focused 登记 22 册、源码计数 201 CASE；
+ASan required 集合新增 CAS，合计 27 来源。这些只是静态登记，远端实跑尚未验。
+若后续私有合流增册，取实际来源并集重算，不能把旧头原件算入新头。
+
+Fake 组件册经真实 SessionService 受理、分派，开真 Turn，采用完整 Memory Context，
+落本场报告。旧 CLI `ProjectMemory::BuildTurnContextForDispatch` 也通过同一能力，
+给真实打开但未执行的 child 冻结片段，再按 Cancelled 真封子账。
+同 ID 恢复在开写前核这些实际材料，fake Read 计数须增长，默认 CAS 路径仍无实体。
+这册没有调用公开 SDK Runtime 的完整执行与 Complete，不冒充 complete result 验收；
+完整 public Session 与 installed consumer 另用默认 File 跑 Submit、模型请求、终态与恢复。
+公开 Core 没加 fake 注册字段；只为内部工厂与将来公开 SPI 留真接线。
+
+File 的 close/publish 故障接点在真实 native close 之后，只模拟边界拒绝或确认缺口；
+不冒称操作系统 fclose 真的失败。发布后实体留存，typed 回执保已提交与未确认。
+坏件、目录、超帽读取都走真实文件；FIFO 与目录 alias 只在 Unix 场验，
+Windows 不凭缺少链接权限偷记已验。旧 BlobStore wrapper 仍保 best-effort 兼容承诺。
+
 ## 余项
 
 Named tool metadata/result、recorder 超限正文、环境/图片、完整 Context 其余落点与导出 reader 未迁。

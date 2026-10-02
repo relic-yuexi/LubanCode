@@ -22,6 +22,7 @@ REQUIRED = {
     "sdk.focused.lubancore_extensions",
     "sdk.focused.lubancore_skills",
     "sdk.focused.lubancore_memory_recall",
+    "sdk.focused.lubancore_memory_cas",
     "sdk.focused.lubancore_memory_save",
     "sdk.focused.lubancore_results",
     "sdk.focused.lubancore_result_projection",
@@ -89,6 +90,8 @@ def main():
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])
+        if case.attrib["name"] == "sdk.focused.lubancore_memory_cas" and int(counts[0]) != 10:
+            raise RuntimeError("Memory CAS native roster differs from 10 cases")
         if case.attrib["name"] == "sdk.focused.lubancore_memory_save" and int(counts[0]) != 12:
             raise RuntimeError("SDK memory-save native roster differs from 12 cases")
         if case.attrib["name"] == "sdk.focused.execution_owner" and int(counts[0]) != 7:

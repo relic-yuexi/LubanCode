@@ -67,6 +67,8 @@ public:
         const std::string& turn_id);
 
 private:
+    std::expected<std::string, std::string> StoreSnapshot(
+        const memory::InjectedMemoryRecord& record);
     // v3 场的两个落点;v2 老路在 cpp 的 RecordXxxV2。
     std::expected<void, std::string> RecordRecallInjectionV3(
         trajectory::v3::V3Writer& writer, const memory::InjectedMemoryRecord& record);

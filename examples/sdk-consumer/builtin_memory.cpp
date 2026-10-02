@@ -66,7 +66,25 @@ std::string Theme(const std::string& marker) {
         "  schema: 3\n  node_type: memory\n  type: preference\n  id: preference.sdk-fixture\n"
         "  confidence: user-stated\n  status: active\n  scope: {level: project, kind: project, value: ''}\n"
         "  keywords: [SDKMEMNEEDLE]\n  evidence: []\n  fingerprints: {}\n---\n\n"
-        "# SDKMEMNEEDLE project preference\n\nSDKMEMNEEDLE project preference: " + marker + "\n";
+        "# SDKMEMNEEDLE project preference\n\nSDKMEMNEEDLE project preference: " + marker +
+        " Stable preference details remain in this project. " + std::string(1600, 'x') + "\n";
+}
+std::pair<fs::path, std::string> CasEntity(const fs::path& session_directory, const std::string& marker) {
+    const auto root = session_directory / "artifacts" / "sha256";
+    Check(fs::is_directory(root), "default File did not publish a CAS bucket");
+    std::pair<fs::path, std::string> selected;
+    unsigned matches = 0;
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+        if (!entry.is_regular_file()) continue;
+        const auto name = entry.path().filename().string();
+        if (name.size() != 64 || name.find_first_not_of("0123456789abcdef") != std::string::npos) continue;
+        const auto bytes = Read(entry.path());
+        if (bytes.find(marker) == std::string::npos) continue;
+        Check(bytes.size() > 512 && Count(bytes, marker) == 1, "CAS fragment is not the actual selected payload");
+        selected = {entry.path(), bytes}; ++matches;
+    }
+    Check(matches == 1, "CAS payload has missing or duplicated content addresses");
+    return selected;
 }
 struct State {
     std::mutex mutex;
@@ -153,6 +171,13 @@ void MemorySeed(const fs::path& base) {
     Write(topic, Theme(kSeed));
     auto [receipt, operation] = Turn(session, "memory-seed");
     const auto report = Report(session, operation, plan);
+    const auto session_directory = Path(plan.memory_directory).parent_path() / "sessions" / session->id();
+    const auto [blob_path, blob_bytes] = CasEntity(session_directory, kSeed);
+    Check(std::any_of(report.entries.begin(), report.entries.end(), [](const auto& entry) {
+        return entry.id == kEntry && entry.selected && entry.bytes > 512;
+    }), "installed SDK used inline payload instead of the CAS slice");
+    Write(base / "memory-cas-name.txt", blob_path.filename().string());
+    Write(base / "memory-cas-bytes.txt", blob_bytes);
     const auto text = RequestText(state, 1);
     Check(Count(text, kSeed) == 1 && Count(text, kLive) == 0 && text.find("preference.sdk-fixture.md") != std::string::npos,
         "provider did not receive exact topic payload/source once");
@@ -187,6 +212,10 @@ void MemoryResume(const fs::path& base) {
     const auto old = Report(session, old_result, plan);
     Check(SavedIdentity(old) == Read(base / "memory-report-identity.txt") && state->calls.load() == 0,
         "restart changed old report or reran model");
+    const auto session_directory = Path(plan.memory_directory).parent_path() / "sessions" / session->id();
+    const auto [old_blob_path, old_blob_bytes] = CasEntity(session_directory, kSeed);
+    Check(old_blob_path.filename().string() == Read(base / "memory-cas-name.txt") &&
+        old_blob_bytes == Read(base / "memory-cas-bytes.txt"), "locked recovery replaced the old CAS entity");
     Check(!session->GetMemoryRecall("op-foreign-fixture"), "foreign operation borrowed shared last report");
     Write(Path(plan.memory_directory) / "preferences" / "preference.sdk-fixture.md", Theme(kLive));
     auto duplicate = Take(session->Submit("memory-seed", kQuery), "repeat old input");
@@ -196,6 +225,9 @@ void MemoryResume(const fs::path& base) {
         "live library rewrote old report");
     auto [receipt, operation] = Turn(session, "memory-live");
     const auto live = Report(session, operation, plan);
+    const auto [live_blob_path, live_blob_bytes] = CasEntity(session_directory, kLive);
+    Check(live_blob_path != old_blob_path && live_blob_bytes != old_blob_bytes && Read(old_blob_path) == old_blob_bytes,
+        "new recall overwrote the old immutable CAS value");
     Check(live.context_message_id != old.context_message_id && live.context_sha256 != old.context_sha256,
         "future recall reused old context identity/hash");
     const auto text = RequestText(state, 0);
