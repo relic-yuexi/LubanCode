@@ -180,7 +180,7 @@ Completed Execute(const std::shared_ptr<sdk::Session>& session, bool parent_firs
             result.tickets.push_back(*event.approval);
         }
         if (event.kind == "operation_completed") {
-            auto completed = session->Wait(queued->operation_id, 5s); Check(completed.has_value(), "Wait failed");
+            auto completed = session->WaitResult(queued->operation_id, 5s); Check(completed.has_value(), "Wait failed");
             result.operation = std::move(*completed); return result;
         }
     }
@@ -287,7 +287,7 @@ void CaptureFault(const fs::path& base) {
     auto recovered_state = std::make_shared<State>(); auto recovered_options = rig.Options(recovered_state, false);
     recovered_options.system_prompt.clear(); recovered_options.resume_session_id = sid;
     auto recovered = rig.Open(std::move(recovered_options));
-    auto unknown = recovered->Wait(result.operation.operation_id, 1s);
+    auto unknown = recovered->WaitResult(result.operation.operation_id, 1s);
     Check(unknown.has_value() && unknown->state == sdk::OperationState::Indeterminate && !unknown->result_persisted &&
         !unknown->error.empty() && original_error.starts_with(unknown->error) &&
         unknown->error.find("sdk.side_effect.indeterminate") != std::string::npos &&
@@ -320,7 +320,7 @@ void ParentStepBudget(const fs::path& base) {
     const auto sid = session->id(); Check(session->Close().has_value(), "known parent limit Close failed"); session.reset();
     auto resumed_state = std::make_shared<State>(); auto resumed_options = rig.Options(resumed_state, false);
     resumed_options.max_steps_per_turn = 1; resumed_options.system_prompt.clear(); resumed_options.resume_session_id = sid;
-    auto resumed = rig.Open(std::move(resumed_options)); auto failed = resumed->Wait(result.operation.operation_id, 1s);
+    auto resumed = rig.Open(std::move(resumed_options)); auto failed = resumed->WaitResult(result.operation.operation_id, 1s);
     Check(failed.has_value() && failed->state == sdk::OperationState::Failed && failed->result_persisted &&
         failed->error == "sdk.turn.limit_reached" && resumed_state->calls == 0 && resumed_state->tools == 0,
         "known parent limit failed recovery or reran its child");
@@ -515,7 +515,7 @@ void SubagentCase(const std::string& name, const fs::path& base) {
             Check(found_close, "fixture did not find actual checked parent Close"); Write(journal, open_journal);
             auto interrupted_options = rig.Options(resumed_state, false); interrupted_options.system_prompt.clear(); interrupted_options.resume_session_id = id;
             auto interrupted = rig.Open(std::move(interrupted_options));
-            auto unknown = interrupted->Wait(result.operation.operation_id, 1s);
+            auto unknown = interrupted->WaitResult(result.operation.operation_id, 1s);
             Check(unknown.has_value() && unknown->state == sdk::OperationState::Indeterminate && !unknown->result_persisted,
                 "no-final crash prefix was rejected or rewritten as completed");
             auto gap = interrupted->GetSubagentReports(result.operation.operation_id);
@@ -587,7 +587,7 @@ void SubagentCase(const std::string& name, const fs::path& base) {
                 completed = (**next).kind == "operation_completed";
             }
             Check(completed && approvals == 1, "child-only grant crossed its Session or did not persist");
-            auto result = sessions[n]->Wait(receipts[n].operation_id, 5s); Check(result.has_value() && result->state == sdk::OperationState::Succeeded &&
+            auto result = sessions[n]->WaitResult(receipts[n].operation_id, 5s); Check(result.has_value() && result->state == sdk::OperationState::Succeeded &&
                 result->final_text == states[n]->marker + " parent final" && states[n]->tools == 2, "cancel/close crossed to another Session");
             Reports(sessions[n], *result);
             {
@@ -601,7 +601,7 @@ void SubagentCase(const std::string& name, const fs::path& base) {
                 Check(!sessions[n]->ResolveApproval(id, sdk::ApprovalDecision::Accept), "late child reply revived a closed Session ticket");
         }
         for (std::size_t n : {std::size_t{0}, std::size_t{1}}) {
-            auto stopped = sessions[n]->Wait(receipts[n].operation_id, 10s);
+            auto stopped = sessions[n]->WaitResult(receipts[n].operation_id, 10s);
             Check(stopped.has_value() && stopped->state == sdk::OperationState::Cancelled && stopped->result_persisted && states[n]->tools == 0,
                 "cancelled/closed child executed its effect");
             CheckStoppedReport(sessions[n], *stopped, Utf8(rig.cwd));
@@ -616,7 +616,7 @@ void SubagentCase(const std::string& name, const fs::path& base) {
             Check(old_reports.has_value() && old_reports->size() == 1, "cancel seed owned report missing");
             auto resumed_state = std::make_shared<State>(); auto options = rig.Options(resumed_state, false);
             options.system_prompt.clear(); options.resume_session_id = sid;
-            auto resumed = rig.Open(std::move(options)); auto known = resumed->Wait(receipts[n].operation_id, 1s);
+            auto resumed = rig.Open(std::move(options)); auto known = resumed->WaitResult(receipts[n].operation_id, 1s);
             Check(known.has_value() && known->state == sdk::OperationState::Cancelled && known->result_persisted &&
                 known->turn_id == stopped->turn_id && resumed_state->calls == 0 && resumed_state->tools == 0,
                 "healthy cancellation did not resume its known terminal or reran a child");
@@ -649,7 +649,7 @@ void SubagentResume(const fs::path& base) {
     Check(saved.good() && !id.empty() && !op.empty() && !turn.empty() && !sha.empty(), "restart seed facts unavailable");
     auto state = std::make_shared<State>(); auto options = rig.Options(state, false);
     options.system_prompt.clear(); options.resume_session_id = id;
-    auto resumed = rig.Open(std::move(options)); auto completed = resumed->Wait(op, 1s);
+    auto resumed = rig.Open(std::move(options)); auto completed = resumed->WaitResult(op, 1s);
     Check(completed.has_value() && completed->result_persisted && completed->turn_id == turn && state->calls == 0 && state->tools == 0,
         "fresh process reran operation or lost accepted identity");
     auto plan = resumed->DescribeSubagents(); Check(plan.has_value() && plan->plan_sha256 == sha, "fresh process changed frozen plan");
