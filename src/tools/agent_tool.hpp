@@ -509,6 +509,9 @@ public:
     void SetDetachedRegistryFactory(std::function<std::unique_ptr<ToolRegistry>()> factory) {
         run_state_->detached_registry_factory = std::move(factory);
     }
+    void SetBackgroundThreadFactoryForTesting(AgentTaskCoordinator::ThreadFactory factory) {
+        coordinator_->SetThreadFactoryForTesting(std::move(factory));
+    }
 
     // 后台能力判定(派工单 §二):当前入口有没有后台子代理后端。main 直派
     // 看会话工厂;嵌套看冻结 env 的工厂(无 UI 嵌套树只有这一条路,有 UI

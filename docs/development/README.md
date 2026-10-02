@@ -4,6 +4,7 @@
 
 - [构建与发行](build-and-release.md)
 - [LubanCore C++ SDK（实验版）](lubancore-sdk.md)
+- [后台子代理线程启动收口](agent-thread-start-cleanup.md)
 - [测试指南](testing.md)
 - [分布式工程协作与远端验收](cluster-collaboration.md)
 - [文档规范](documentation.md)
