@@ -1,6 +1,10 @@
 """Pure-data checks: evidence omissions must not turn a native failure green."""
 import importlib.util
+import io
+import subprocess
+import tempfile
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -62,6 +66,61 @@ class WorkspaceManifestReadGateTests(unittest.TestCase):
         native = native.split("test 2", 1)[0]
         with self.assertRaises(ValueError):
             gate.validate(registration, junit, native, platform)
+
+    def test_wrong_checkout_is_rejected_and_saved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory).resolve()
+            diagnostic = repo / "checkout-error.txt"
+            result = subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n", stderr="")
+            with patch.object(gate.subprocess, "run", return_value=result) as run, patch.object(gate.sys, "stderr", io.StringIO()) as stderr:
+                with self.assertRaisesRegex(ValueError, "actual checkout differs from GITHUB_SHA"):
+                    gate.checkout_head(repo, "b" * 40, diagnostic)
+                self.assertIn("actual=" + "a" * 40, stderr.getvalue())
+            self.assertIn("expected=" + "b" * 40, diagnostic.read_text(encoding="utf-8"))
+            self.assertIn("actual=" + "a" * 40, diagnostic.read_text(encoding="utf-8"))
+            self.assertEqual(run.call_args.args[0], ["git", "-c", "safe.directory=" + repo.as_posix(), "rev-parse", "HEAD"])
+            self.assertEqual(run.call_args.kwargs["cwd"], repo)
+            self.assertTrue(run.call_args.kwargs["check"])
+
+    def test_git_failure_keeps_stderr_and_stays_failed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory).resolve()
+            diagnostic = repo / "checkout-error.txt"
+            detail = "fatal: detected dubious ownership in repository at /fixture/repo\n"
+            error = subprocess.CalledProcessError(128, ["git"], stderr=detail)
+            with patch.object(gate.subprocess, "run", side_effect=error) as run, patch.object(gate.sys, "stderr", io.StringIO()) as stderr:
+                with self.assertRaises(subprocess.CalledProcessError) as rejected:
+                    gate.checkout_head(repo, "b" * 40, diagnostic)
+                self.assertIs(rejected.exception, error)
+                self.assertIn(detail, stderr.getvalue())
+            self.assertEqual(diagnostic.read_text(encoding="utf-8"), detail)
+            self.assertEqual(run.call_args.args[0], ["git", "-c", "safe.directory=" + repo.as_posix(), "rev-parse", "HEAD"])
+            self.assertEqual(run.call_args.kwargs["cwd"], repo)
+
+    def test_stderr_encoding_failure_cannot_hide_git_or_wrong_head_error(self):
+        class BrokenStderr(io.StringIO):
+            def write(self, text):
+                raise UnicodeEncodeError("cp1252", text or "x", 0, 1, "fixture rejects diagnostic")
+        for failed_git in (False, True):
+            with self.subTest(failed_git=failed_git), tempfile.TemporaryDirectory() as directory:
+                repo = Path(directory).resolve()
+                diagnostic = repo / "checkout-error.txt"
+                detail = "fatal: 仓库拒绝\n"
+                error = subprocess.CalledProcessError(128, ["git"], stderr=detail)
+                result = subprocess.CompletedProcess([], 0, stdout="a" * 40 + "\n", stderr="")
+                with patch.object(gate.subprocess, "run", side_effect=error if failed_git else None, return_value=result), patch.object(gate.sys, "stderr", BrokenStderr()):
+                    if failed_git:
+                        with self.assertRaises(subprocess.CalledProcessError) as rejected:
+                            gate.checkout_head(repo, "b" * 40, diagnostic)
+                        self.assertIs(rejected.exception, error)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "actual checkout differs from GITHUB_SHA"):
+                            gate.checkout_head(repo, "b" * 40, diagnostic)
+                saved = diagnostic.read_text(encoding="utf-8")
+                if failed_git:
+                    self.assertEqual(saved, detail)
+                else:
+                    self.assertIn("actual=" + "a" * 40, saved)
 
 
 if __name__ == "__main__":

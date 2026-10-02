@@ -348,7 +348,8 @@ TEST_CASE("SDK memory_save: rehashed report forgeries cannot claim or erase save
         });
         Write(journal, forged);
         const auto readable = v3::ReadV3Ledger(journal);
-        INFO(readable ? std::string() : readable.error());
+        const auto read_error = readable.has_value() ? std::string() : readable.error();
+        INFO(read_error);
         REQUIRE(readable.has_value());
         const auto* forged_selection = readable->FindEvent(selected_id);
         const auto* forged_message = readable->FindMessage(tool_id);

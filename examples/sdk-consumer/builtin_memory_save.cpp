@@ -156,11 +156,32 @@ mem::SaveReport Report(const std::shared_ptr<sdk::Session>& session, const sdk::
             return stage.stage == name && stage.outcome == "durable";
         }) == 1, "save stage not durably confirmed: " + std::string(name));
     auto results = Take(session->ListToolResults(operation.operation_id), "query actual tool result");
-    Check(results.size() == 1 && results[0].identity.session_id == report.session_id &&
-        results[0].identity.operation_id == report.operation_id && results[0].identity.turn_id == report.turn_id &&
-        results[0].identity.tool_call_id == report.action_id && results[0].attempt == report.attempt &&
-        results[0].tool_name == "memory_save" && results[0].selected,
-        "tool result and write report belong to different actions");
+    std::string diagnostics = "\nwrite report session=" + report.session_id + " operation=" + report.operation_id +
+        " turn=" + report.turn_id + " action=" + report.action_id + " attempt=" + std::to_string(report.attempt);
+    for (const auto& row : results) {
+        const auto& id = row.identity;
+        diagnostics += "\nresult session=" + id.session_id + " operation=" + id.operation_id +
+            " turn=" + id.turn_id + " action=" + id.tool_call_id + " attempt=" + std::to_string(row.attempt) +
+            " result=" + id.result_id + " persisted=" + id.persisted_event_id +
+            " tool=" + row.tool_name + " selected=" + (row.selected ? "true" : "false");
+    }
+    // One action retains two selected sources: raw capture before PostTool,
+    // then the formal result adopted by the model. They are distinct records.
+    Check(results.size() == 2, "one save action did not retain both result sources" + diagnostics);
+    for (const auto& row : results)
+        Check(row.identity.session_id == report.session_id && row.identity.operation_id == report.operation_id &&
+            row.identity.turn_id == report.turn_id && row.identity.tool_call_id == report.action_id &&
+            row.attempt == report.attempt && row.tool_name == "memory_save" && row.selected,
+            "tool result and write report belong to different actions" + diagnostics);
+    const auto is_formal = [](const auto& row) { return row.identity.result_id.starts_with("res-"); };
+    const auto is_capture = [](const auto& row) { return row.identity.result_id.starts_with("capture-"); };
+    Check(std::count_if(results.begin(), results.end(), is_formal) == 1 &&
+        std::count_if(results.begin(), results.end(), is_capture) == 1,
+        "save result source versions are missing or duplicated" + diagnostics);
+    Check(results[0].identity.result_id != results[1].identity.result_id &&
+        !results[0].identity.persisted_event_id.empty() && !results[1].identity.persisted_event_id.empty() &&
+        results[0].identity.persisted_event_id != results[1].identity.persisted_event_id,
+        "save source versions reused result or persisted identity" + diagnostics);
     return report;
 }
 } // namespace
