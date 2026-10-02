@@ -508,7 +508,6 @@ add_library(lubancode_engine STATIC
   src/config/command_permission.cpp
   src/config/model_catalog.cpp
   src/config/provider_catalog.cpp
-  src/config/update_checker.cpp
   src/config/prompt_files.cpp
   src/config/project_instructions.cpp
   src/config/skill_store.cpp
@@ -1220,6 +1219,10 @@ if(LUBANCODE_BUILD_CLI)
 # Installation updates belong to the host. Keep this target out of the SDK's
 # engine/runtime dependency graph even in a combined CLI + SDK build.
 add_library(lubancode_updater STATIC
+  # Release discovery and version parsing are CLI update services, not SDK
+  # session services. Keep their sole implementation beside the existing host
+  # updater; engine/runtime must never link back to this target.
+  src/config/update_checker.cpp
   # 更新助手 C++ 化·批一第①单(契约层移植):四方契约(generate_manifest.py/
   # install_plan.py/install.ps1/此处)的 C++ 侧——包内相对路径筛查、大小写
   # 折叠键、归档成员名筛查、用户数据路径判定(paths.cpp)与 manifest.json

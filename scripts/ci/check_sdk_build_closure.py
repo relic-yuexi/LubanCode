@@ -12,12 +12,14 @@ import os
 from pathlib import Path
 
 try:
-    from .check_sdk_only_boundary import CLIENT, prepare, read_reply, relative
+    from .check_sdk_only_boundary import (CLIENT, SDK_HOST_ONLY_SOURCE_FILES,
+                                         SDK_HOST_ONLY_SOURCE_PREFIXES, prepare, read_reply, relative)
 except ImportError:
-    from check_sdk_only_boundary import CLIENT, prepare, read_reply, relative
+    from check_sdk_only_boundary import (CLIENT, SDK_HOST_ONLY_SOURCE_FILES,
+                                        SDK_HOST_ONLY_SOURCE_PREFIXES, prepare, read_reply, relative)
 
 
-FORBIDDEN_TARGETS = {"lubancode_updater", "miniz"}
+FORBIDDEN_TARGETS = {"lubancode_core", "lubancode_updater", "miniz"}
 
 
 def inspect_graph(targets: dict) -> dict:
@@ -36,8 +38,20 @@ def inspect_graph(targets: dict) -> dict:
     sources = sorted({name for key in closure for name in targets[key]["projectSources"]})
     violations = ["SDK depends on host-only target: " + targets[key]["name"]
                   for key in sorted(closure) if targets[key]["name"] in FORBIDDEN_TARGETS]
-    violations.extend("SDK depends on updater source: " + name
-                      for name in sources if name.startswith("src/updater/"))
+    violations.extend("SDK depends on host-only source: " + name
+                      for name in sources if name in SDK_HOST_ONLY_SOURCE_FILES
+                      or name.startswith(SDK_HOST_ONLY_SOURCE_PREFIXES))
+    # A combined build keeps the CLI query implementation, but only its existing
+    # updater may own it. SDK-only defines neither. Inspect all actual targets,
+    # including disconnected hosts, so omission or duplicate compilation cannot
+    # hide behind a clean SDK source union.
+    updater_owners = [key for key, target in targets.items() if target["name"] == "lubancode_updater"]
+    query_owners = [key for key, target in targets.items() for name in target["projectSources"]
+                    if name == "src/config/update_checker.cpp"]
+    if updater_owners or query_owners:
+        if (len(updater_owners) != 1 or query_owners != updater_owners or
+                targets[updater_owners[0]]["type"] != "STATIC_LIBRARY"):
+            violations.append("Release query implementation must belong once to CLI-only lubancode_updater")
     if not any(name.startswith("src/sdk/") for name in sources):
         violations.append("SDK closure contains no SDK implementation sources")
     # Agent loop calls the neutral lease directly. A runtime-owned provider can

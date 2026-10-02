@@ -16,7 +16,8 @@ class OptionalHostClosureTests(unittest.TestCase):
             "engine": {"name": "engine", "type": "STATIC_LIBRARY",
                        "projectSources": ["src/neutral/core.cpp"], "dependencies": []},
             "host": {"name": "lubancode_updater", "type": "STATIC_LIBRARY",
-                     "projectSources": ["src/updater/engine.cpp"], "dependencies": ["engine", "zip"]},
+                     "projectSources": ["src/updater/engine.cpp", "src/config/update_checker.cpp"],
+                     "dependencies": ["engine", "zip"]},
             "zip": {"name": "miniz", "type": "STATIC_LIBRARY",
                     "projectSources": [], "dependencies": []},
         }
@@ -45,6 +46,47 @@ class OptionalHostClosureTests(unittest.TestCase):
         report = closure.inspect_graph(self.targets)
         self.assertEqual(report["status"], "failed")
         self.assertTrue(any("src/updater/paths.cpp" in v for v in report["violations"]))
+
+    def test_residual_release_query_sources_cannot_hide_in_a_neutral_target(self):
+        for path in ("src/config/update_checker.cpp", "src/config/update_checker.hpp"):
+            with self.subTest(path=path):
+                targets = deepcopy(self.targets)
+                targets["engine"]["projectSources"].append(path)
+                report = closure.inspect_graph(targets)
+                self.assertEqual(report["status"], "failed")
+                self.assertTrue(any("host-only source: " + path in v for v in report["violations"]))
+
+    def test_package_may_remain_in_cli_without_entering_the_sdk_closure(self):
+        self.targets["cli"] = {"name": "lubancode_core", "type": "STATIC_LIBRARY",
+                               "projectSources": ["src/package/manifest.cpp"], "dependencies": ["host"]}
+        self.assertEqual(closure.inspect_graph(self.targets)["status"], "passed")
+        self.targets["sdk"]["dependencies"].append("cli")
+        report = closure.inspect_graph(self.targets)
+        self.assertEqual(report["status"], "failed")
+        self.assertTrue(any("lubancode_core" in v for v in report["violations"]))
+        self.assertTrue(any("src/package/manifest.cpp" in v for v in report["violations"]))
+        self.targets["sdk"]["dependencies"].remove("cli")
+        self.targets["engine"]["projectSources"].append("src/package/semver.cpp")
+        self.assertEqual(closure.inspect_graph(self.targets)["status"], "failed")
+
+    def test_cli_release_query_has_one_exact_static_owner(self):
+        for variant in ("missing", "engine", "duplicate", "renamed", "shared"):
+            with self.subTest(variant=variant):
+                targets = deepcopy(self.targets)
+                if variant == "missing":
+                    targets["host"]["projectSources"].remove("src/config/update_checker.cpp")
+                elif variant == "engine":
+                    targets["host"]["projectSources"].remove("src/config/update_checker.cpp")
+                    targets["engine"]["projectSources"].append("src/config/update_checker.cpp")
+                elif variant == "duplicate":
+                    targets["host"]["projectSources"].append("src/config/update_checker.cpp")
+                elif variant == "renamed":
+                    targets["host"]["name"] = "innocent_name"
+                else:
+                    targets["host"]["type"] = "SHARED_LIBRARY"
+                report = closure.inspect_graph(targets)
+                self.assertEqual(report["status"], "failed")
+                self.assertTrue(any("Release query implementation" in v for v in report["violations"]))
 
     def test_unknown_transitive_dependency_fails_closed(self):
         self.targets["engine"]["dependencies"].append("missing")
