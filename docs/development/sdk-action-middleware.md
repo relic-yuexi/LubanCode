@@ -1,6 +1,6 @@
 # SDK main Action 中间件合同
 
-本笔只定接线合同，基私有组合 `eb94b3531921c4e880ed293048cfc50f1befc637`，尚未实现或验收。
+本笔只定接线合同，初稿基私有组合 `eb94b3531921c4e880ed293048cfc50f1befc637`；字段与协议帽补充随后同步组合新头，尚未实现或验收。
 Action 指一枚真实工具调用。仍走现有 Prepare、权限、Started、Execute、Complete，不另造 ActionRun 或执行循环。
 
 ## 首批公开面
@@ -15,18 +15,44 @@ Action 指一枚真实工具调用。仍走现有 Prepare、权限、Started、E
 公开 Context 取真实 main session、已受理 operation、当前 turn 与实际声明 action，四项缺一就拒新口；wire id 另列。
 PreAction 尚未发行执行 attempt，便明确缺席，不发 execution identity；PostAction 才交实际 Started 所发 session/operation/turn/action/attempt 五键。
 孩子无 owned operation，不拿父 operation 配子 action 拼五键。hook invocation/dispatch 身份也不冒充工具 execution 身份。
-字段以标准值拥有；取消旗只借本次调用。具体 C++ 字段名和 JSON 版本在实现前复核，不冻结臆造身份。
+字段以标准值拥有；取消旗只借本次调用。Context 增 owned `action_id/wire_call_id/tool_name/effective_cwd`；执行身份另用五键标准值 `ExecutionIdentity`，`execution` 为 optional，Pre 空、Post 才取真实 Started 值。
 
 PreAction 交工具名、候选参数与真实声明范围。PostAction 交 effective input、清洗后原始文本、明确结果状态与真实执行身份。
-首批不交凭据，不开放后端选择、结果替换、条目过滤或媒体加工；JSON 形状、正文帽和效果预算在实现合同中定值。
+首批不交凭据，不开放后端选择、结果替换、条目过滤或媒体加工；具体 C++ 布局沿标准库公开 ABI，内部 JSON 类型不外泄。
 超帽、坏 UTF-8/NUL、坏形状明确失败，不截一段便假称完整候选。
+
+## 新挂点协议与固定帽
+
+`Input.schema_version=1`。Pre JSON 精确为 `{"arguments":object}`，`Next(candidate)` 和 `output_json` 同形，只换参数，不换工具或身份。
+Post JSON 精确为 `{"arguments":object,"result":{"text":string,"isError":bool,"outcome":string,"errorCode":string}}`；原始文本已清洗、capture 已成功保存。
+Post 不收 output 或 Next candidate；只准 Next() 与追加效果，不准回头改原结果。
+Pre 询问效果沿 `AdmissionDecision`，仅收 `{"decision":"ask","reason":string}`；拒绝沿 Denied，不能用 allow 免审批。
+Post `ResultSupplement` 仅收 `{"text":string}`。插件不声明来源、owner 或 ref；宿主从冻结 manifest、definition 与实际 dispatch 填来源，记录真正采用回执。
+旁观者不能返回 output、effects、Denied 或调用 Next。内部效果矩阵准许不等于宿主已经采用。
+
+|新显式挂点边界|固定 UTF-8 字节帽|
+|---|---:|
+|Pre arguments JSON、Next 候选、output JSON，分别计|1 MiB|
+|Post 原始 text / 整份 JSON|1 MiB / 2 MiB|
+|单枚 supplement / 本次全部 supplement|16 KiB / 32 KiB，总数至多 16 枚|
+|reason / code|4 KiB / 256 B|
+
+解析前核帽，累加先防溢出；字符串拒坏 UTF-8/NUL，精确对象拒多余字段。Denied/handler 错误 code 须非空；正常 result.errorCode 可空。
+这些只管声明新点的场，不提高原模型 wire 总帽，也不改变旧三点、CLI 或零注册默认。合法 supplement 仍可能装不进真实富 wire，照原不可表示规则止损。
+可信 C++ callback 仍协作取消；Lua 的 wall_budget 不充作任意原生回调硬截止。
 
 ## 采用与权限
 
 PreAction 只准拒绝、强制询问、改写候选参数；不开放绕权限或 floor 的 allow。
 新参数重过真实工具 schema，再过配置规则、ModePolicy、有效 floor 和原审批路。
+只有新 Action 回调实际改参，才启原候选/改后 schema 与最终 policy/floor 复核；旧 PreToolUse 改参保原复检，零注册 CLI 只读路径不添新检验。
 拒绝或尚未获准时没有 Started，不预发 attempt，不执行工具。
 既有 PreToolUse 归并和 PermissionRequest 顺序须写成一条实际采用链；新回调不能跳过旧 deny 或强制 Ask。
+
+同一 Prepare 帧先保旧硬闸，再跑新候选链、旧 PreToolUse 与实际改参复核，随后沿共享 EvaluatePermission 和原审批表。
+Deny、forceAsk 跨 Next、output、旧 Allow 与临时授权保持；不能让 PermissionRequest Allow 洗掉强制 Ask。普通 Pass 才沿原自动放行。
+新 Action 强制 Ask 即使遇 needs_confirm=false，也须进入同次原审批表；这项分支只随真实新能力开启。
+当前 SDK main 并未接 PermissionRequest 回调；CLI 只在真 Ask 时发它。不得写成两处早已同路，有实际旧回调才采用其 Deny/普通 Ask-Allow。
 
 `Next` 只推进中间件候选链，不执行工具。工具只在原 Execute 位执行一次。
 沿原单票、同线程、返回后失效约束；保存或跨线程调用不能借旧 callback 继续跑。
@@ -37,6 +63,7 @@ PostAction 位于原始 FinishTrace 与 capture 落稳之后，只追加带来�
 父模型所见正式材料、原始材料与 hook 效果各留真引用；追加真实富文本时沿原材料保全与 wire 预算，不抬原帽。
 结果已发生，Post 的失败不能写成工具未运行或自动撤销；不重跑工具来补 hook。
 普通 handler 失败不凭空升级副作用未知；真正捕获、效果提交或关闭未确认，仍走原未知止损。
+required/Abort 的 Post 失败停止父模型后续，父操作保已知 Failed 与 raw 原件，不改成工具未执行；只有真实保存/sink 未确认才走未知。
 
 required/Abort 与 optional/KeepOriginal 沿原执行核语义。已消费 Next 的回执照留，不再跑下游。
 旁观者不返回效果、不拒绝、不能调 Next；例外必须另立合同，不能从内部效果矩阵推成公开能力。
