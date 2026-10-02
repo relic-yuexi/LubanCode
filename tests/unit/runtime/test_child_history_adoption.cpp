@@ -2,7 +2,9 @@
 
 #include <map>
 #include <sstream>
+#include <variant>
 
+#include "trajectory/canonical_json.hpp"
 #include "trajectory/v3/child_adoption.hpp"
 #include "trajectory/v3/compact.hpp"
 
@@ -97,7 +99,7 @@ struct Restore {
 
 v3::V3Ledger Verified(const fs::path& path) {
     const auto verified = v3::VerifyV3File(path);
-    REQUIRE_MESSAGE(verified.ok, verified.error_code + ":" + verified.message);
+    REQUIRE_MESSAGE(verified.ok, (verified.error_code + ":" + verified.message));
     const auto source = v3::ReadV3Ledger(path);
     REQUIRE_MESSAGE(source.has_value(), (source ? std::string() : source.error()));
     return *source;
@@ -166,7 +168,8 @@ TEST_CASE("child history keeps raw and actual PostToolUse effective material sep
     CHECK(checked.adoption->raw_text_sha256 != platform::Sha256Hex(effective));
     int seen = 0;
     for (const auto& message : rig.backend.parent_requests.back().messages)
-        for (const auto* block : message.ToolResultBlocks()) if (block->content == effective) ++seen;
+        for (const auto& block : message.content)
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block); result && result->content == effective) ++seen;
     CHECK(seen == 1);
     {
         Directory summarized_directory; Rig summarized(summarized_directory);
@@ -225,7 +228,8 @@ TEST_CASE("child history remains valid after native compact removes its old curr
         CHECK(consumed->message.at("content").get<std::string>() == replacement);
         int actual = 0;
         for (const auto& message : reduced.backend.parent_requests.back().messages)
-            for (const auto* result : message.ToolResultBlocks()) if (result->content == replacement) ++actual;
+            for (const auto& block : message.content)
+                if (const auto* result = std::get_if<api::ToolResultBlock>(&block); result && result->content == replacement) ++actual;
         CHECK(actual == 1);
     }
     Directory directory; Rig rig(directory); RealRun(rig);
