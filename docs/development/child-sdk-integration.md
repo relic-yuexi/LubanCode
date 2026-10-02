@@ -14,6 +14,8 @@
 
 另一场把前台本次取消接进子轮，同时让真实 Close 后的边界报告失败。回执仍保 Cancelled、已提交终态五键与 CloseFailed；父工具返回 StopIndeterminate，不冒称完整交接，不重跑工具，重复查询只读缓存。
 
+验这条生产 spawn 路时，内部 ledger Options 只增一枚默认空的 `subagent_close_fault` 测试接点，拷值递进 BootstrapChild 与真实子 writer；回调在真实 Close 放柄后才报错。不造 fake Finish，不影响父 writer，也不冒称操作系统自然报错。公开 SDK 配置不开放这枚测试接点。
+
 ## 远程验收
 
 新组合来源固定两案，进入 SDK focused 与 ASan，实际 case 与路径标记须非零且齐全。原七场终态、五路前台终态标记、十场本次上下文、两场 CLI Stop 与十四场 ToolRuntime 保留。三平台全量、六套安装消费与 focused、Host、Worker、两种 Runner、项目提交与 manifest 册、九份真实依赖图在同一组合头重验。
