@@ -8,6 +8,8 @@
 
 append 分 `committed`、`rejected_before_commit`、`durability_unconfirmed`。枚举不能单独证明耐久；V3 初次 I/O 错仍可能带原生 `Rejected`，须同时保错误与 broken 状态。Close 分 `closed`、`close_failed`、`not_attempted`。已提交终态遇 Close 错，五键仍留着，完整交接仍不成立。
 
+V2 写前提交钩子只回原生 `IoFailed`，不碰 JournalWriter，不能凭这枚回执推断句柄 broken。终态仍未确认、没有五键、禁止再 append；健康句柄须照实关掉，Close 可独立成功。原生册同时核摘要与缓存，不冒称操作系统自然写盘失败。
+
 ## 谁持有，怎样收场
 
 子桥持原生 recorder/writer 与轮桥。第一次 Finish 固定执行结果，只尝试一次 append，再调用真实 Close，缓存整份回执；重复调用返回同值，不重跑模型或工具，不重 append，不重试 Close。V2 Close 须消费原有 JournalWriter::Close 真返回值，不能只凭文件摘要宣称关柄成功。
@@ -23,6 +25,8 @@ append 分 `committed`、`rejected_before_commit`、`durability_unconfirmed`。�
 子执行结果沿共用 `ClassifyTurnEnd` 与真实 TaskOutcome 收口。取消压过普通交账，预算耗尽、空结论都不得记成功；原生终态落稳只证明账已收齐，不证明任务完成。
 
 父 V3 `subagent.linked` 仍只证明开场来源。此笔 registry 没有父账终态观察，也没有恢复采用链；终态回执不能替代 result-store → selected → tool message → context admission → 父请求。
+
+开场 `childCheckpointRef` 使用 `sessionId/runId/seq/lineHash` 四字段，须指到真子卷那段前缀。它没有 event ID，不能冒充终态五键；原生册另核真实终态行五键，保开场与收场两份证据。
 
 新增原生册须验真 V3 spawn/link 与五键、成功/失败整份缓存、真实拒绝与 I/O broken、提交后真实 Close 边界注入失败、前台执行与后台启动拒绝消费、shared registry 寿命及并发值。真父子回合钉 parent/child/task/同批后续工具计数；初轮/续投/Stop 各验未知态停止且不重复送输入；真前台取消与步数耗尽另查执行结果。启动拒绝验已提交且 Close 错、真关闭写者明确拒写、干净落稳三条路。注入钩子只在真实 Close 释放句柄之后报错，不冒称操作系统自然失败。默认空。
 
