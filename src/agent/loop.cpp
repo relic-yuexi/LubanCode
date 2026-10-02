@@ -731,7 +731,10 @@ ToolCallGate PrepareToolCall(ToolCallFrame& frame) {
 // 执行"的闸装在 sink 里),随后副作用闸问话。返回 nullopt = 可派发;有值
 // = 被 trace 闸拦下,已走显示收口(hub 侧已补终态栅栏,这里不发第二枚)。
 std::optional<tools::Tool::Result> MarkExecutionStarted(ToolCallFrame& frame) {
-    if (frame.cancel != nullptr && frame.cancel->load(std::memory_order_acquire)) {
+    // The new locally cancellable approval capability owns this checkpoint.
+    // Legacy direct RunOneTool calls still pass the flag to the tool, as before.
+    if (frame.wiring.on_tool_confirm_scoped && frame.cancel != nullptr &&
+        frame.cancel->load(std::memory_order_acquire)) {
         tools::Tool::Result cancelled{"本次调用已取消，该工具未执行。", true};
         cancelled.outcome = ToString(ToolOutcome::CancelledBeforeStart);
         cancelled.error_code = "runtime.tool.cancelled_before_start";
@@ -742,7 +745,8 @@ std::optional<tools::Tool::Result> MarkExecutionStarted(ToolCallFrame& frame) {
     // The phase callback can cancel this very call. Recheck after it, directly
     // before the durable started boundary; this is still a checkpoint, not an
     // atomic cancellation guarantee against another thread's later write.
-    if (frame.cancel != nullptr && frame.cancel->load(std::memory_order_acquire)) {
+    if (frame.wiring.on_tool_confirm_scoped && frame.cancel != nullptr &&
+        frame.cancel->load(std::memory_order_acquire)) {
         tools::Tool::Result cancelled{"本次调用已取消，该工具未执行。", true};
         cancelled.outcome = ToString(ToolOutcome::CancelledBeforeStart);
         cancelled.error_code = "runtime.tool.cancelled_before_start";
