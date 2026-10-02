@@ -10,7 +10,7 @@
 
 ## 谁执行、谁拥有
 
-每场注册一只 `memory_save`，同步 target 持有本场模块。宿主把真实 session、operation、turn 送入共用 TurnWiring；RunOneTool 从已开账 action 取真实 action ID、attempt，再按值交给工具。模型参数不能改这些身份。提交键绑定这五项，不能只用模型 call ID。取消谓词只借当前调用 atomic 旗；提交门不存指针，不起监控线程。
+每场注册一只 `memory_save`，同步 target 持有本场模块。宿主把真实 session、operation、turn 送入共用 TurnWiring；主执行线程从已开账 action 取真实 action ID、attempt，再按值交给工具。并行工具线程只读这份副本，不回读正在追加的桥。模型参数不能改这些身份。提交键绑定这五项，不能只用模型 call ID。取消谓词只借当前调用 atomic 旗；提交门不存指针，不起监控线程。
 
 SDK target 先解析并验证正式 SaveRequest，再用中立 MemoryLedgerBridge 写 `memory.save.requested`。只有 PowerLoss 提交成功、真实 source ref 非空，才准提交门碰 topic。事件记实际调用身份与 `save_request_sha256`。取得真实引用后，再算含 target/source/session 的 gate `request_sha256`，两项分别核准；失败零 topic mutation。旧桥空字符串和无 writer fallback 不适用这条路。
 
@@ -20,9 +20,11 @@ SDK target 先解析并验证正式 SaveRequest，再用中立 MemoryLedgerBridg
 
 本场报告存 session、operation、turn、action、attempt、请求事件引用、请求摘要、项目身份、记忆 ID、路径、正文摘要、提交阶段、状态和错误。正文留原不可变 snapshot，不经公开 query 回传。调用请求与结果都须耐久确认。已确认相同键只核验并重新 flush 原 result；不再写 topic。冲突、坏件、只有 intent 没 result，均不重放。
 
-`NotStarted` 明报没开始 topic mutation；`Committed` 只在所有应有阶段和 result 耐久确认后成立；`Indeterminate` 明报部分写入或结果未确认。共用工具 Result 增最小显式 execution control，默认 Continue。SDK 未知写入终止同批后续执行和后续模型请求，整回合 `Indeterminate`、`result_persisted=false`，不借旧崩溃 outcome 或 tool-result 仓失败码冒充业务状态。后续自动提交也停住，留宿主核查。
+`NotStarted` 明报没开始 topic mutation；`Committed` 只在所有应有阶段和 result 耐久确认后成立；`Indeterminate` 明报部分写入或结果未确认。共用工具 Result 增最小显式 execution control，默认 Continue。SDK 未知写入终止同批尚未启动的后续执行和后续模型请求，已经启动的并行工具全部等其退出。整回合 `Indeterminate`、`result_persisted=false`，不借旧崩溃 outcome 或 tool-result 仓失败码冒充业务状态。后续自动提交也停住，留宿主核查。
 
 恢复须以已验证 V3 账核实际 requested/action/采用结果，核冻结计划、报告与 gate intent/result/snapshot 的请求 SHA、正文 SHA、阶段和 owner。没有最终报告的合法中断留未知态，不重跑旧 op；完整成功回合缺件、坏件或冒领报告拒恢复。哈希是完整性核对，不当身份认证。公开 query 返回 owned 值，Close 后仍可读。
+
+完整回合还须核正式 tool 消息已进入有效上下文链。消息与选中事件同属本场、本回合和真实 action；次序须为保存回执、选中事件、tool 消息。消息的 `tool_call_id` 指真实 action，不能借其它角色或晚到事件冒领采用事实。
 
 ## 关场与验收
 

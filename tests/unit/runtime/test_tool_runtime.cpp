@@ -201,7 +201,7 @@ void VerifyParallelOwnedInvocation(bool stop) {
     profile.runtime.max_steps_per_turn = 5;
     profile.runtime.tool_batch_strategy = agent::ToolBatchStrategy::ParallelRead;
     profile.runtime.parallel_read_concurrency = 2;
-    agent::Agent agent(backend, registry, std::move(profile));
+    agent::Agent loop(backend, registry, std::move(profile));
     auto* ledger = session.session->trajectory();
     REQUIRE(ledger->v3_main_writer() != nullptr);
     auto bridge = ledger->NewTurnBridge({"fixture", "responses", "owned-invocation", {}});
@@ -209,7 +209,7 @@ void VerifyParallelOwnedInvocation(bool stop) {
     const auto turn = ledger->v3_main_writer()->NewTurnId();
     runtime::ToolTraceHub hub(session.session->ids());
     agent::TurnWiring wiring;
-    runtime::ScopedTurnBindings bindings(agent);
+    runtime::ScopedTurnBindings bindings(loop);
     bindings.Bind(wiring, {.hub = &hub, .trajectory = bridge.get(),
                           .thread_id = ledger->session_id(), .turn_id = turn});
     wiring.tool_invocation_identity = [&](const std::string& provider_call) -> std::optional<tools::ToolInvocationIdentity> {
@@ -225,7 +225,7 @@ void VerifyParallelOwnedInvocation(bool stop) {
     input.role = api::Role::User;
     input.content.push_back(api::TextBlock{"two concurrent reads"});
     bridge->RecordInput(input);
-    const auto outcome = agent.Run(std::move(input), wiring);
+    const auto outcome = loop.Run(std::move(input), wiring);
     REQUIRE(outcome.has_value());
     bridge->EndTurn(!stop, false, stop ? "fixture.indeterminate" : "");
     bindings.Reset(); // The live bridge borrow retires before reading or closing its owner.
@@ -270,7 +270,7 @@ void VerifyParallelOwnedInvocation(bool stop) {
         CHECK(callbacks == 1);
     }
     std::size_t result_count = 0;
-    for (const auto& message : agent.history()) {
+    for (const auto& message : loop.history()) {
         for (const auto& block : message.content) {
             if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
                 CHECK(result->tool_use_id == "provider-call-" + std::to_string(result_count));

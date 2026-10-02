@@ -436,10 +436,13 @@ Result<void> SessionMemoryWrite::ValidateReports(const std::string& operation, c
         if (require_adopted) {
             bool adopted = false;
             for (const auto& message : source.messages) {
-                if (message.action_id != r.action_id || message.turn_id != turn || !message.result_selection_ref) continue;
+                if (message.action_id != r.action_id || message.turn_id != turn || !message.result_selection_ref ||
+                    message.message.value("role", Json()) != "tool" ||
+                    message.message.value("tool_call_id", Json()) != r.action_id) continue;
                 const auto* selected = source.FindEvent(*message.result_selection_ref);
                 if (!selected || selected->kind != v3::EventKindV3::ToolResultSelected || selected->action_id != r.action_id ||
-                    selected->payload.value("attempt", Json()) != r.attempt || selected->seq <= receipt->seq) continue;
+                    selected->turn_id != turn || selected->payload.value("attempt", Json()) != r.attempt ||
+                    selected->seq <= receipt->seq || selected->seq >= message.seq) continue;
                 for (const auto& [revision, chain] : source.revision_chains) {
                     (void)revision;
                     if (std::find(chain.second.begin(), chain.second.end(), message.message_id) != chain.second.end()) adopted = true;

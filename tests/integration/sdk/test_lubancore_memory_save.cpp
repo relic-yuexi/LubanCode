@@ -4,12 +4,14 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -23,6 +25,8 @@
 #include "runtime/memory_ledger_bridge.hpp"
 #include "runtime/session_service.hpp"
 #include "tools/path_utils.hpp"
+#include "trajectory/canonical_json.hpp"
+#include "trajectory/v3/envelope.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
 
@@ -129,6 +133,21 @@ bool WaitRequested(const fs::path& directory, const std::string& session) {
 void Rewrite(const fs::path& path, const std::function<void(Json&)>& change) {
     auto j = Json::parse(Read(path)); j.erase("sha256"); change(j);
     j["sha256"] = lubancode::platform::Sha256Hex(j.dump()); Write(path, j.dump());
+}
+std::string RehashLedger(const std::string& original, const std::function<void(std::vector<Json>&)>& change) {
+    std::istringstream input(original); std::vector<Json> lines; std::string text;
+    while (std::getline(input, text)) { REQUIRE_FALSE(text.empty()); lines.push_back(Json::parse(text)); }
+    REQUIRE_FALSE(lines.empty()); change(lines);
+    std::uint64_t seq = 0; std::string previous(v3::kGenesisHash), output;
+    for (auto& line : lines) {
+        line["seq"] = ++seq; line.erase("prevHash"); line.erase("lineHash");
+        const auto canonical = lubancode::trajectory::CanonicalJsonDump(line); REQUIRE(canonical.has_value());
+        const auto hash = v3::ComputeLineHash(previous, *canonical);
+        line["prevHash"] = previous; line["lineHash"] = hash;
+        const auto full = lubancode::trajectory::CanonicalJsonDump(line); REQUIRE(full.has_value());
+        output += *full + '\n'; previous = hash;
+    }
+    return output;
 }
 } // namespace
 
@@ -254,10 +273,25 @@ TEST_CASE("SDK memory_save: later topic updates preserve old immutable receipts"
 }
 
 TEST_CASE("SDK memory_save: rehashed report forgeries cannot claim or erase save facts") {
-    Fixture f; auto trace = std::make_shared<Trace>(); auto runtime = sdk::Runtime::Create(f.Roots()); REQUIRE(runtime.has_value());
+    Fixture f; auto trace = std::make_shared<Trace>(); trace->inputs = {Input(), Input("OTHER_TURN", "preference.other-turn")};
+    auto runtime = sdk::Runtime::Create(f.Roots()); REQUIRE(runtime.has_value());
     auto session = (*runtime)->OpenSession(Options(f, trace)); REQUIRE(session.has_value());
     const auto receipt = Turn(*session, "saved"); const auto path = Directory(*session) / "sdk-memory-saves" / (receipt.operation_id + ".json");
+    const auto saved = Reports(*session, receipt); REQUIRE(saved.size() == 1);
+    const auto other = Reports(*session, Turn(*session, "other-turn")); REQUIRE(other.size() == 1);
+    REQUIRE(saved.front().turn_id != other.front().turn_id);
+    const auto journal = Directory(*session) / ((*session)->id() + ".jsonl");
     const auto original = Read(path), id = (*session)->id(); REQUIRE((*session)->Close().has_value());
+    const auto original_journal = Read(journal); const auto model_calls = trace->models.load(); REQUIRE(model_calls == 4);
+    const auto actual = v3::ReadV3Ledger(journal); REQUIRE(actual.has_value());
+    const auto tool = std::find_if(actual->messages.begin(), actual->messages.end(), [&](const auto& message) {
+        return message.action_id == saved.front().action_id && message.turn_id == saved.front().turn_id &&
+            message.message.value("role", std::string()) == "tool" && message.result_selection_ref.has_value();
+    });
+    REQUIRE(tool != actual->messages.end());
+    const auto tool_id = tool->message_id, selected_id = *tool->result_selection_ref;
+    const auto* selected = actual->FindEvent(selected_id); REQUIRE(selected);
+    REQUIRE(selected->kind == v3::EventKindV3::ToolResultSelected); REQUIRE(selected->seq < tool->seq);
     for (int variant = 0; variant != 8; ++variant) {
         Write(path, original);
         Rewrite(path, [variant](Json& j) {
@@ -275,13 +309,54 @@ TEST_CASE("SDK memory_save: rehashed report forgeries cannot claim or erase save
         });
         auto options = Options(f, trace, false); options.resume_session_id = id;
         auto rejected = (*runtime)->OpenSession(std::move(options)); REQUIRE_FALSE(rejected.has_value());
-        CHECK(rejected.error().code == "sdk.memory_write.open_failed"); CHECK(trace->models == 2);
+        CHECK(rejected.error().code == "sdk.memory_write.open_failed"); CHECK(trace->models == model_calls);
+        CHECK(Read(journal) == original_journal);
     }
     Write(path, original); fs::remove(path);
     auto missing = Options(f, trace, false); missing.resume_session_id = id;
     CHECK_FALSE((*runtime)->OpenSession(std::move(missing)).has_value());
-    Write(path, original); auto correct = Options(f, trace, false); correct.resume_session_id = id; correct.system_prompt.clear();
-    auto restored = (*runtime)->OpenSession(std::move(correct)); REQUIRE(restored.has_value()); CHECK(Reports(*restored, receipt).size() == 1);
+    CHECK(trace->models == model_calls); CHECK(Read(journal) == original_journal); Write(path, original);
+    // These are valid rehashed V3 files. The reader must accept them before the
+    // SDK's adopted-result gate can prove that it rejects the forged linkage.
+    for (int variant = 0; variant != 3; ++variant) {
+        CAPTURE(variant); Write(journal, original_journal);
+        const auto forged = RehashLedger(original_journal, [&](std::vector<Json>& lines) {
+            auto selection = std::find_if(lines.begin(), lines.end(), [&](const auto& line) {
+                return line.value("eventId", std::string()) == selected_id;
+            });
+            auto message = std::find_if(lines.begin(), lines.end(), [&](const auto& line) {
+                return line.value("messageId", std::string()) == tool_id;
+            });
+            REQUIRE(selection != lines.end()); REQUIRE(message != lines.end());
+            if (variant == 0) (*selection)["turnId"] = other.front().turn_id;
+            if (variant == 1) std::iter_swap(selection, message);
+            if (variant == 2) (*message)["message"]["role"] = "user";
+        });
+        Write(journal, forged);
+        const auto readable = v3::ReadV3Ledger(journal);
+        INFO(readable ? std::string() : readable.error());
+        REQUIRE(readable.has_value());
+        const auto* forged_selection = readable->FindEvent(selected_id);
+        const auto* forged_message = readable->FindMessage(tool_id);
+        REQUIRE(forged_selection); REQUIRE(forged_message);
+        if (variant == 0) CHECK(forged_selection->turn_id == other.front().turn_id);
+        if (variant == 1) CHECK(forged_selection->seq > forged_message->seq);
+        if (variant == 2) CHECK(forged_message->message.at("role").get<std::string>() == "user");
+        REQUIRE(std::any_of(readable->revision_chains.begin(), readable->revision_chains.end(), [&](const auto& revision) {
+            return std::find(revision.second.second.begin(), revision.second.second.end(), tool_id) != revision.second.second.end();
+        }));
+        auto options = Options(f, trace, false); options.resume_session_id = id; options.system_prompt.clear();
+        auto rejected = (*runtime)->OpenSession(std::move(options)); REQUIRE_FALSE(rejected.has_value());
+        CHECK(rejected.error().code == "sdk.memory_write.open_failed"); CHECK(trace->models == model_calls);
+        CHECK(Read(journal) == forged); CHECK(Read(path) == original);
+        Write(journal, original_journal);
+    }
+    REQUIRE(v3::ReadV3Ledger(journal).has_value());
+    auto correct = Options(f, trace, false); correct.resume_session_id = id; correct.system_prompt.clear();
+    auto restored = (*runtime)->OpenSession(std::move(correct)); REQUIRE(restored.has_value());
+    const auto recovered = Reports(*restored, receipt); REQUIRE(recovered.size() == 1);
+    CHECK(recovered.front().receipted_event_id == saved.front().receipted_event_id);
+    CHECK(trace->models == model_calls);
     REQUIRE((*runtime)->Shutdown().has_value());
 }
 
