@@ -4,6 +4,8 @@
 #include <sstream>
 #include <variant>
 
+#include "agent/tool_batch_budget.hpp"
+#include "runtime/v3_tool_result_material.hpp"
 #include "trajectory/canonical_json.hpp"
 #include "trajectory/v3/child_adoption.hpp"
 #include "trajectory/v3/compact.hpp"
@@ -36,6 +38,14 @@ v3::ChildAdoptionCheck CheckHistory(const Rig& rig, const v3::V3Ledger& source, 
 void RealRun(Rig& rig) {
     const auto run = rig.Run();
     REQUIRE_MESSAGE(run.has_value(), (run ? std::string() : run.error()));
+    std::string capture_errors;
+    for (const auto& receipt : rig.captures) {
+        if (!capture_errors.empty()) capture_errors += "; ";
+        capture_errors += "status=" + std::to_string(static_cast<int>(receipt.status)) +
+            ",error=" + receipt.error_code;
+    }
+    INFO("original_side_effect_error=" << run->side_effect_error);
+    INFO("actual_capture_receipts=" << capture_errors);
     CHECK_FALSE(run->side_effect_indeterminate);
     CHECK(rig.backend.parent_calls >= 2); CHECK(rig.backend.child_calls >= 1);
     rig.CheckChild();
@@ -151,6 +161,121 @@ TEST_CASE("child history adoption validates only an actual full chain and return
 }
 
 TEST_CASE("child history keeps raw and actual PostToolUse effective material separate") {
+    // Regression for the real planner -> native-material producer -> result
+    // store -> preview path. The original live Agent/bridge run below retains
+    // its capacity and verifies actual consumption by the next model request.
+    {
+        Directory material_directory;
+        auto store = v3::ResultStore::Open(material_directory.root);
+        REQUIRE_MESSAGE(store.has_value(), (store ? std::string() : store.error()));
+        for (int shape = 0; shape != 5; ++shape) {
+            INFO("native material shape=" << shape);
+            api::ToolResultBlock result;
+            result.tool_use_id = "budget-shape-" + std::to_string(shape);
+            result.content = "short child answer";
+            if (shape == 1) result.blocks = {tools::TextContent{result.content}};
+            if (shape == 2) result.blocks = {tools::TextContent{"distinct native answer"}};
+            if (shape == 3) result.blocks = {tools::TextContent{result.content}, tools::TextContent{"actual feedback"}};
+            if (shape == 4) {
+                tools::ResourceLinkContent link;
+                link.uri = "file:///native-material";
+                link.name = "native material";
+                result.blocks = {std::move(link)};
+            }
+            const bool needs_raw = shape >= 2;
+            api::Message batch;
+            batch.content = {result};
+            const auto full = agent::PlanToolBatchBudget(batch, 65536);
+            REQUIRE(full.error.empty()); REQUIRE(full.preview_bytes.size() == 1);
+            CHECK(full.preview_bytes.front() == (needs_raw ? std::size_t{32768} : result.content.size()));
+            const auto plan = agent::PlanToolBatchBudget(batch, 4096);
+            REQUIRE(plan.error.empty()); REQUIRE(plan.preview_bytes.size() == 1);
+            CHECK(plan.preview_bytes.front() == (needs_raw ? std::size_t{4096} : result.content.size()));
+            CHECK(plan.total_preview_bytes <= 4096);
+            v3::ResultStore::PersistRequest material;
+            material.result_kind = "text";
+            material.tool_call_id = result.tool_use_id;
+            material.outputs.push_back({"combined", "text/plain", result.content, true, {},
+                static_cast<std::uint64_t>(result.content.size()), false});
+            runtime::PreserveNativeToolPayload(result, material);
+            REQUIRE(material.outputs.size() == (needs_raw ? 2 : 1));
+            const auto stored = store->Persist(material);
+            REQUIRE_MESSAGE(stored.ok, stored.error);
+            for (const auto& output : material.outputs) {
+                const auto ref = std::find_if(stored.result_ref.begin(), stored.result_ref.end(), [&](const auto& value) {
+                    return value.at("kind").template get<std::string>() == output.channel;
+                });
+                REQUIRE(ref != stored.result_ref.end());
+                const auto path = material_directory.root / platform::Utf8ToPath(ref->at("path").get<std::string>());
+                CHECK(Read(path) == output.data);
+            }
+            if (!needs_raw) {
+                result.capture_complete = false;
+                batch.content = {result};
+                const auto incomplete = agent::PlanToolBatchBudget(batch, 4096);
+                REQUIRE(incomplete.error.empty()); CHECK(incomplete.preview_bytes.front() == 1024);
+                continue;
+            }
+            CHECK(material.outputs.back().channel == "raw_payload");
+            Json blocks = Json::array();
+            for (const auto& block : result.blocks) blocks.push_back(tools::BlockToJson(block));
+            CHECK(Json::parse(material.outputs.back().data) == blocks);
+            auto request = v3::PreviewFromPersistedMaterials(material, stored, plan.preview_bytes.front(), material_directory.root);
+            const auto preview = v3::BuildToolPreview(request);
+            REQUIRE_FALSE(preview.preview_unrepresentable);
+            CHECK(preview.text.size() <= plan.preview_bytes.front());
+            REQUIRE(request.channels.size() == 2);
+            for (const auto& channel : request.channels) {
+                CHECK(preview.text.find(channel.display_path) != std::string::npos);
+                CHECK(preview.text.find(channel.channel) != std::string::npos);
+            }
+            // The old body-only cap cannot carry the actual persisted sources.
+            request.max_preview_bytes = result.content.size();
+            CHECK(v3::BuildToolPreview(request).preview_unrepresentable);
+            CHECK(agent::PlanToolBatchBudget(batch, 1023).error == "tool_batch.minimum_preview_exceeds_capacity");
+            const auto minimum = agent::PlanToolBatchBudget(batch, 1024);
+            REQUIRE(minimum.error.empty()); CHECK(minimum.total_preview_bytes == 1024);
+            // Renderer-only boundary requests use a deliberately long display
+            // path; they do not claim that such a file exists. The original
+            // payload files above and the index below are really persisted.
+            // A short first full_output item permits genuine index rescue.
+            request.max_preview_bytes = plan.preview_bytes.front();
+            request.channels.back().display_path.assign(8192, 'p');
+            const auto overflow = v3::BuildToolPreview(request);
+            REQUIRE(overflow.listing_overflow);
+            const auto listing = store->PersistListing("long-source-" + std::to_string(shape), overflow.listing_text);
+            REQUIRE_MESSAGE(listing.has_value(), (listing ? std::string() : listing.error()));
+            request.output_index_path = platform::PathToUtf8(
+                (material_directory.root / platform::Utf8ToPath(*listing)).lexically_normal());
+            CHECK(Read(material_directory.root / platform::Utf8ToPath(*listing)) == overflow.listing_text);
+            const auto rescued = v3::BuildToolPreview(request);
+            CHECK_FALSE(rescued.preview_unrepresentable);
+            CHECK(rescued.output_index_path == request.output_index_path);
+            CHECK(rescued.omitted_output_count == 1);
+            CHECK(rescued.text.size() <= plan.preview_bytes.front());
+            // The 1 KiB floor cannot guarantee arbitrary mandatory sources.
+            // Unlike full_output, captured_output must retain this long path.
+            request.max_preview_bytes = minimum.preview_bytes.front();
+            request.channels.back().capture_complete = false;
+            request.channels.back().capture_reason = "renderer-long-source-fixture";
+            CHECK(v3::BuildToolPreview(request).preview_unrepresentable);
+        }
+        auto mixed = api::Message{};
+        api::ToolResultBlock plain, rich;
+        plain.tool_use_id = "plain"; plain.content = "ten-bytes!";
+        plain.blocks = {tools::TextContent{plain.content}};
+        rich.tool_use_id = "rich"; rich.content = "short";
+        rich.blocks = {tools::TextContent{"short"}, tools::TextContent{"feedback"}};
+        mixed.content = {plain, rich};
+        const auto shared = agent::PlanToolBatchBudget(mixed, 4106);
+        REQUIRE(shared.error.empty());
+        CHECK(shared.preview_bytes == std::vector<std::size_t>{10, 4096});
+        CHECK(shared.total_preview_bytes == 4106);
+        plain.content.clear(); plain.blocks = {tools::TextContent{plain.content}};
+        mixed.content = {plain};
+        const auto empty = agent::PlanToolBatchBudget(mixed, 1);
+        REQUIRE(empty.error.empty()); CHECK(empty.total_preview_bytes == 1);
+    }
     Directory directory; Rig rig(directory);
     rig.configure_wiring = [](agent::TurnWiring& wiring) {
         wiring.on_post_tool_use_hook = [](const std::string&, const std::string& name,
