@@ -1970,6 +1970,14 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
     // 本轮操作号留底(P1:终态账行按它对账;空 = 防御路径没经接纳)。
     const std::string operation_id = input.operation_id;
     nlohmann::json completed_params;
+    const auto publish_completion = [this, &record](const nlohmann::json& params) {
+        // Publishing a terminal frame lets the client submit its next turn.
+        // Commit the snapshot and release admission first. AcceptTurnStart
+        // still joins this worker before launching the next one.
+        record->last_completed = params;
+        MarkTurnFinished(*record);
+        EmitEventSafe(kEventTurnCompleted, params);
+    };
     {
         // 工业化多协议接入单 P1(G02):backend/注册表/Agent 档案从本场
         // 会话材料(SessionAssembly)取——thread/start 装配一次,同场多轮
@@ -1992,9 +2000,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                     thread_id, turn_id, kTurnStatusError, "会话运行材料缺失: " + assembled.error,
                     nlohmann::json(), 0, /*final_message_refs=*/{}, /*usage_reported=*/false,
                     /*result_envelope_persisted=*/false);
-                EmitEventSafe(kEventTurnCompleted, completed_params);
-                record->last_completed = completed_params;
-                MarkTurnFinished(*record);
+                publish_completion(completed_params);
                 return;
             }
         }
@@ -2031,9 +2037,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                 completed_params = MakeTurnCompletedParams(thread_id, turn_id, status, error.what(),
                     nlohmann::json(), 0, {}, false, persisted);
                 record->interactions->CancelPending();
-                EmitEventSafe(kEventTurnCompleted, completed_params);
-                record->last_completed = completed_params;
-                MarkTurnFinished(*record);
+                publish_completion(completed_params);
                 return;
             }
         }
@@ -2319,9 +2323,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
     // 回合收口:清掉这一轮残留的悬起请求(理论到不了这——审批都是同步
     // Wait 的;防御:中断路径上 future 撤了 promise 没收的,这里兜底)。
     record->interactions->CancelPending();
-    EmitEventSafe(kEventTurnCompleted, completed_params);
-    record->last_completed = completed_params;
-    MarkTurnFinished(*record);
+    publish_completion(completed_params);
 }
 
 nlohmann::json Server::HandleTurnInterrupt(const std::string& thread_id, const std::string& turn_id,

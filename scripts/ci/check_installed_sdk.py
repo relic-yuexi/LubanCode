@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -18,6 +19,7 @@ import xml.etree.ElementTree as ET
 
 REQUIRED_TESTS = {
     "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.extensions",
+    "sdk.consumer.builtin_search",
     "sdk.consumer.results",
     "sdk.consumer.result_seed", "sdk.consumer.result_resume",
     "sdk.consumer.seed", "sdk.consumer.resume",
@@ -27,6 +29,29 @@ REQUIRED_PUBLIC_HEADERS = {
     "include/lubancore/api.hpp", "include/lubancore/core.hpp", "include/lubancore/extensions.hpp",
     "include/lubancore/results.hpp",
 }
+
+
+def check_search_resources(repo: Path, prefix: Path, staged_dir: Path, platform: str) -> dict:
+    """Check relocation preserves exactly the staged backend and license/manifest."""
+    binary = "rg.exe" if platform == "win32" else "rg"
+    pairs = {
+        f"share/lubancore/libexec/{binary}": staged_dir / binary,
+        "share/lubancore/licenses/ripgrep/LICENSE-MIT": repo / "third_party/ripgrep/LICENSE-MIT",
+        "share/lubancore/ripgrep-manifest.json": repo / "third_party/ripgrep/manifest.json",
+    }
+    hashes = {}
+    for relative, original in pairs.items():
+        installed = prefix / relative
+        if not original.is_file() or not installed.is_file():
+            raise RuntimeError("SDK search resource is missing: " + relative)
+        original_hash = hashlib.sha256(original.read_bytes()).hexdigest()
+        installed_hash = hashlib.sha256(installed.read_bytes()).hexdigest()
+        if not installed.stat().st_size or installed_hash != original_hash:
+            raise RuntimeError("SDK search resource differs from its staged/source input: " + relative)
+        if relative.endswith("/" + binary) and platform != "win32" and not os.access(installed, os.X_OK):
+            raise RuntimeError("SDK search backend lost executable permission: " + relative)
+        hashes[relative] = installed_hash
+    return hashes
 
 
 def check_public_headers(repo: Path, installed_files: list[str], install_mode: str) -> set[str]:
@@ -123,11 +148,22 @@ def main() -> None:
                              if path.is_file() or path.is_symlink())
     (evidence / "installed-files.json").write_text(json.dumps(installed_files, indent=2) + "\n", encoding="utf-8")
     public_headers = check_public_headers(repo, installed_files, args.install_mode)
+    producer_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
+    staged_entries = [line.split("=", 1)[1] for line in producer_cache.splitlines()
+                      if line.startswith("LUBANCODE_BUNDLED_RG_DIR:PATH=")]
+    if len(staged_entries) != 1 or not staged_entries[0]:
+        raise RuntimeError("SDK search consumer requires an explicit bundled-rg stage")
+    resource_hashes = check_search_resources(repo, prefix, Path(staged_entries[0]), sys.platform)
+    (evidence / "search-resources.json").write_text(json.dumps({
+        "githubSha": os.environ.get("GITHUB_SHA"), "resourceRoot": str(prefix / "share/lubancore"),
+        "hashes": resource_hashes,
+        "scope": "Relocated bytes match the CI-staged backend and repository license/manifest; archive verification is performed by fetch_ripgrep.sh.",
+    }, indent=2) + "\n", encoding="utf-8")
     if args.install_mode == "full":
         package_files = re.compile(r"lib(?:64)?/cmake/LubanCore/LubanCore(?:Config(?:Version)?|Targets(?:-[A-Za-z0-9_]+)?)\.cmake")
         library_files = re.compile(r"lib(?:64)?/(?:liblubancore(?:\.so(?:\.[0-9]+)*|(?:\.[0-9]+)*\.dylib|\.dll\.a)|lubancore\.lib)")
         for relative in installed_files:
-            allowed = (relative in public_headers or relative == "share/lubancore/lubancore-sdk.md" or
+            allowed = (relative in public_headers or relative in resource_hashes or relative == "share/lubancore/lubancore-sdk.md" or
                        package_files.fullmatch(relative) or library_files.fullmatch(relative) or
                        (sys.platform == "win32" and re.fullmatch(r"bin/[^/]+\.dll", relative, re.IGNORECASE)))
             if not allowed:
@@ -165,6 +201,7 @@ def main() -> None:
     run(["cmake", "-S", str(consumer_source), "-B", str(consumer_build),
          "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON",
          f"-DCMAKE_PREFIX_PATH={prefix}",
+         f"-DLUBANCORE_CONSUMER_RESOURCE_ROOT={prefix / 'share/lubancore'}",
          "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF",
          "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF"], env)
     cache = (consumer_build / "CMakeCache.txt").read_text(encoding="utf-8")

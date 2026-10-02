@@ -1,9 +1,20 @@
-# This graph has no CLI executable, resources, fixtures or host test dependency.
+# This graph has no CLI executable, CLI resources or host test dependency.
 # Combined builds reuse exactly the same source files and per-file CTests.
 if(NOT LUBANCODE_BUILD_SDK)
   message(FATAL_ERROR "LubanCoreTests requires LUBANCODE_BUILD_SDK=ON")
 endif()
 set(_lubancore_tests_root "${CMAKE_SOURCE_DIR}/tests")
+# This private child-process fixture has only standard/platform dependencies,
+# is never installed, and cannot enter the SDK library's dependency closure.
+add_executable(lubancore_sdk_search_probe
+  "${_lubancore_tests_root}/support/sdk_search_probe.cpp")
+target_compile_features(lubancore_sdk_search_probe PRIVATE cxx_std_23)
+set_target_properties(lubancore_sdk_search_probe PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+if(MSVC)
+  set_property(TARGET lubancore_sdk_search_probe PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
 file(GLOB LUBANCORE_FOCUSED_TEST_SOURCES CONFIGURE_DEPENDS
   "${_lubancore_tests_root}/integration/sdk/test_*.cpp")
 list(SORT LUBANCORE_FOCUSED_TEST_SOURCES)
@@ -31,7 +42,9 @@ target_link_libraries(lubancore_sdk_tests PRIVATE
   lubancode_runtime lubancore_sdk doctest::doctest)
 target_include_directories(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}/support")
 target_compile_definitions(lubancore_sdk_tests PRIVATE
-  LUBANCODE_TEST_FIXTURES_DIR="${_lubancore_tests_root}/fixtures")
+  LUBANCODE_TEST_FIXTURES_DIR="${_lubancore_tests_root}/fixtures"
+  LUBANCORE_TEST_SEARCH_PROBE="$<TARGET_FILE:lubancore_sdk_search_probe>")
+add_dependencies(lubancore_sdk_tests lubancore_sdk_search_probe)
 target_compile_features(lubancore_sdk_tests PRIVATE cxx_std_23)
 target_precompile_headers(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}/support/pch.hpp")
 set_source_files_properties("${_lubancore_tests_root}/support/main.cpp"
@@ -47,6 +60,8 @@ if(MSVC)
 endif()
 if(TARGET lubancode_tests)
   add_dependencies(lubancode_tests lubancore_sdk_tests)
+  target_compile_definitions(lubancode_tests PRIVATE
+    LUBANCORE_TEST_SEARCH_PROBE="$<TARGET_FILE:lubancore_sdk_search_probe>")
 endif()
 foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
   get_filename_component(sdk_basename "${sdk_source}" NAME)

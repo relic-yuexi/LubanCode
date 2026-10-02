@@ -269,6 +269,10 @@ RipgrepVersionProbe DefaultRipgrepVersionProbe() {
             return std::unexpected(SearchBackendErrorInfo{
                 SearchBackendError::SpawnFailed, "rg --version 超时或被取消"});
         }
+        if (run.output_truncated) {
+            return std::unexpected(SearchBackendErrorInfo{
+                SearchBackendError::SpawnFailed, "rg --version 输出超限"});
+        }
         if (run.exit_code != 0) {
             return std::unexpected(SearchBackendErrorInfo{
                 SearchBackendError::SpawnFailed,
