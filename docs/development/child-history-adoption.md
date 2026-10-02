@@ -85,6 +85,23 @@ summary 沿纯 ledger 校原正文、候选、实际请求与来源。极端 out
 
 ## 实现与远端证据门
 
+### 短富结果预算收口
+
+`46c2b994` 远端真实 PostToolUse 册报 `tool.preview.unrepresentable:action-000001`。
+正文很短，合法追加留下多块原件；结果仓另存 `raw_payload`，正式预览须列来源、路径与通道。
+旧批次规划只拿投影正文长度作 desired，整批尚有容量，也可能装不下这段来源头。
+
+本笔先抽共用判断：多块、单非文本块、单文本块不等于投影正文，才需另存原生载荷。
+规划器与 `PreserveNativeToolPayload` 共用它；不删合法反馈、媒体、原件或通道。
+这类结果 desired 请求现成 32768 字节帽，再沿原 water filling 分现有 available。
+desired 只是希望值，分配总额仍不得超过 available；不额外添容量，不改固定 wire/输出预留。
+空块与单 Text 等于投影正文完全沿旧 desired；原不完整捕获最低值与批次最低值也不改。
+最低分配仍沿现成 1024 字节口径。它不是来源头必能装下的保证；长路径或多通道装不下，
+实际 `BuildToolPreview` 仍明确拒绝。正式模型输入继续沿真实 adapter 序列化重测。
+
+补真实 planner → 结果仓 → 预览回归，核短富结果保原件、总额不越帽、纯文本旧路不变，
+低容量与长来源头仍明拒。原历史 8 案、实际后续请求与模型计数断言保留，夹具预算不调大。
+
 共用 `FoldToolActions`、纯 `ProjectResultPreview`、历史 `revision_chains`、
 `CheckPreparedAgainstChain` 与前笔 bounded reader；不另写 schema/hash parser。
 SDK 和普通 reader 不换默认策略；只添私有只读入口和明确值结论。
