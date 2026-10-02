@@ -555,10 +555,15 @@ V3VerifyReport VerifyV3File(const std::filesystem::path& path) {
         report.message = "尾行缺换行(崩溃截断);删尾修复归 §4.60,写入侧不偷偷裁";
         return report;
     }
+    return VerifyV3Lines(*lines);
+}
+
+V3VerifyReport VerifyV3Lines(const std::vector<std::string>& lines) {
+    V3VerifyReport report;
     std::string prev_hash{std::string(kGenesisHash)};
     ContextView view;
-    for (std::size_t i = 0; i < lines->size(); ++i) {
-        nlohmann::json line_json = nlohmann::json::parse((*lines)[i], nullptr, false);
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        nlohmann::json line_json = nlohmann::json::parse(lines[i], nullptr, false);
         if (line_json.is_discarded()) {
             report.error_code = "v3writer.bad_json";
             report.message = "第 " + std::to_string(i + 1) + " 行不是合法 JSON";
@@ -584,9 +589,9 @@ V3VerifyReport VerifyV3File(const std::filesystem::path& path) {
         }
         prev_hash = line_json.at("lineHash").get<std::string>();
     }
-    report.lines = lines->size();
+    report.lines = lines.size();
     report.context = std::move(view);
-    report.ok = !lines->empty();
+    report.ok = !lines.empty();
     if (!report.ok) {
         report.error_code = "v3writer.empty";
         report.message = "空卷";

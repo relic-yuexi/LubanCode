@@ -10,6 +10,7 @@
 #include <unordered_set>
 
 #include "platform/sha256.hpp"
+#include "platform/bounded_read.hpp"
 
 namespace lubancode::trajectory::v3 {
 
@@ -143,21 +144,20 @@ std::optional<V3Ledger::Entry> V3Ledger::LastEntry() const {
     return timeline.back();
 }
 
-std::expected<V3Ledger, std::string> ReadV3Ledger(const std::filesystem::path& jsonl) {
-    V3VerifyReport report = VerifyV3File(jsonl);
+namespace {
+
+std::expected<V3Ledger, std::string> ReadVerifiedV3Lines(
+    const std::filesystem::path& jsonl, const std::vector<std::string>& raw,
+    V3VerifyReport report, bool ledger_only = false) {
     if (!report.ok) {
         return std::unexpected("v3reader.verify_failed: " + report.error_code + " " + report.message);
-    }
-    auto raw = ReadRawLines(jsonl);
-    if (!raw.has_value()) {
-        return std::unexpected("v3reader.open_failed: " + jsonl.string());
     }
     V3Ledger ledger;
     ledger.path = jsonl;
     ledger.lines = report.lines;
     ledger.context = std::move(report.context);
     std::string error_code, error_message;
-    for (const auto& line : *raw) {
+    for (const auto& line : raw) {
         auto json = nlohmann::json::parse(line, nullptr, false);
         if (json.is_discarded()) {
             return std::unexpected("v3reader.bad_json");
@@ -212,11 +212,47 @@ std::expected<V3Ledger, std::string> ReadV3Ledger(const std::filesystem::path& j
         if (!message.result_selection_ref) continue;
         const auto* selected = ledger.FindEvent(*message.result_selection_ref);
         if (selected && selected->payload.contains("summaryEventRef")) {
-            const auto preview = ExpandResultPreview(ledger, {}, message.message_id);
+            const auto preview = ledger_only ? ProjectResultPreview(ledger, message.message_id)
+                                             : ExpandResultPreview(ledger, {}, message.message_id);
             if (!preview.summary_valid) return std::unexpected("v3reader.invalid_action_summary_selection");
         }
     }
     return ledger;
+}
+
+} // namespace
+
+std::expected<V3Ledger, std::string> ReadV3Ledger(const std::filesystem::path& jsonl) {
+    auto report = VerifyV3File(jsonl);
+    if (!report.ok)
+        return std::unexpected("v3reader.verify_failed: " + report.error_code + " " + report.message);
+    auto raw = ReadRawLines(jsonl);
+    if (!raw) return std::unexpected("v3reader.open_failed: " + jsonl.string());
+    return ReadVerifiedV3Lines(jsonl, *raw, std::move(report));
+}
+
+std::expected<V3Ledger, std::string> ReadV3LedgerBounded(
+    const std::filesystem::path& jsonl, std::size_t max_bytes,
+    std::size_t max_lines, std::size_t max_line_bytes) {
+    if (!max_bytes || !max_lines || !max_line_bytes)
+        return std::unexpected("v3reader.invalid_bounds");
+    auto bytes = platform::ReadBoundedRegularFile(jsonl, max_bytes);
+    if (!bytes) return std::unexpected("v3reader." + bytes.error());
+    if (!bytes->empty() && bytes->back() != '\n')
+        return std::unexpected("v3reader.truncated_tail");
+    std::vector<std::string> lines;
+    std::size_t begin = 0;
+    while (begin < bytes->size()) {
+        const auto end = bytes->find('\n', begin);
+        if (end == std::string::npos) return std::unexpected("v3reader.truncated_tail");
+        if (end - begin > max_line_bytes) return std::unexpected("v3reader.line_limit_exceeded");
+        if (end > begin) {
+            if (lines.size() >= max_lines) return std::unexpected("v3reader.record_limit_exceeded");
+            lines.emplace_back(bytes->substr(begin, end - begin));
+        }
+        begin = end + 1;
+    }
+    return ReadVerifiedV3Lines(jsonl, lines, VerifyV3Lines(lines), true);
 }
 
 // ---------------------------------------------------------------------------
@@ -952,9 +988,8 @@ const HookDispatchView* FindHookDispatch(const std::vector<HookDispatchView>& di
 // result_preview 读取投影(§4.18)
 // ---------------------------------------------------------------------------
 
-ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
-                                            const std::filesystem::path& session_dir,
-                                            std::string_view tool_message_id) {
+ResultPreviewProjection ProjectResultPreview(const V3Ledger& ledger,
+                                             std::string_view tool_message_id) {
     ResultPreviewProjection projection;
     projection.tool_message_id = tool_message_id;
     const MessageLine* message = ledger.FindMessage(tool_message_id);
@@ -1026,6 +1061,14 @@ ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
             }
         }
     }
+    projection.complete = projection.complete && projection.summary_valid;
+    return projection;
+}
+
+ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
+                                            const std::filesystem::path& session_dir,
+                                            std::string_view tool_message_id) {
+    auto projection = ProjectResultPreview(ledger, tool_message_id);
     // 逐枚 artifact 实探:存在 + sha256(§4.16"任何对正文的查阅均校验身份
     // 和 hash");缺件标缺口,不冒称完整(§4.10)。
     bool complete = projection.complete && projection.summary_valid;

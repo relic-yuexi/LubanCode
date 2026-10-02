@@ -123,6 +123,8 @@ public:
     const std::string& action_id() const { return action_id_; }
     const std::string& task_id() const { return task_id_; }
     const ChildSessionRef& child() const { return child_; }
+    const ParentActionRef& parent_action() const { return parent_ref_; }
+    const WriteReceipt& requested_receipt() const { return spawn_receipt_; }
 
 private:
     SubagentSpawn(std::string action_id, std::string turn_id, std::string step_id,

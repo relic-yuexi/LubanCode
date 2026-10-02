@@ -230,6 +230,42 @@ class BoundaryTests(unittest.TestCase):
         self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
         self.assert_rejected(self.check(testing=True), "reverse host include")
 
+    def test_child_observation_allowance_remains_testing_only_and_cannot_import_host_state(self):
+        shared = "tests/unit/runtime/test_child_parent_observation.cpp"
+        self.source_file(shared, '#include "runtime/trajectory_turn_bridge.hpp"\n')
+        self.source_file("src/runtime/trajectory_turn_bridge.hpp", "#pragma once\n")
+        target = {"id": "observation", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "lubancode_runtime"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        self.source_file("src/runtime/trajectory_turn_bridge.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_child_adoption_allowance_follows_its_shared_fixture_and_remains_testing_only(self):
+        shared = "tests/unit/runtime/test_child_history_adoption.cpp"
+        self.source_file(shared, '#include "child_observation_fixture.hpp"\n')
+        self.source_file("tests/support/child_observation_fixture.hpp", '#include "runtime/trajectory_turn_bridge.hpp"\n')
+        self.source_file("src/runtime/trajectory_turn_bridge.hpp", "#pragma once\n")
+        target = {"id": "adoption", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}],
+                  "compileGroups": [{"includes": [{"path": str(self.source / "tests/support")}]}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "lubancode_runtime"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        self.source_file("tests/support/child_observation_fixture.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
     def test_execution_owner_allowance_is_testing_only_and_keeps_the_host_boundary(self):
         shared = "tests/unit/runtime/test_execution_owner.cpp"
         self.source_file(shared, '#include "runtime/execution_owner.hpp"\n')

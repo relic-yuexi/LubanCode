@@ -13,6 +13,8 @@ import xml.etree.ElementTree as ET
 
 REQUIRED = {"unit.memory.memory_project_commit", "unit.memory.project_memory"}
 GATE_CASES = 12
+PROJECT_MEMORY_CASES = 47
+BUSY_MARKER = "[memory-worker-busy] memory-worker-busy.bound-and-release"
 
 
 def validate_registration(tests):
@@ -42,6 +44,12 @@ def validate_results(results, native_log):
         if len(matches) != 1 or int(matches[0]) == 0:
             raise RuntimeError("Memory source filter executed no native cases: " + name)
         counts[name] = int(matches[0])
+        if name == "unit.memory.project_memory":
+            if counts[name] != PROJECT_MEMORY_CASES:
+                raise RuntimeError("Project Memory native case count differs from the fixed roster")
+            markers = re.findall(r"^" + re.escape(BUSY_MARKER) + r"\r?$", found[0], flags=re.M)
+            if len(markers) != 1:
+                raise RuntimeError("Project Memory native log does not prove one live-owner Busy path")
     if counts["unit.memory.memory_project_commit"] != GATE_CASES:
         raise RuntimeError("Project commit native case count differs from the fixed roster")
     return counts
@@ -64,6 +72,7 @@ def main():
     (evidence / "context.json").write_text(json.dumps({
         "githubSha": os.environ.get("GITHUB_SHA"), "buildDir": str(build),
         "configuration": args.config, "requiredTests": sorted(REQUIRED), "gateNativeCases": GATE_CASES,
+        "projectMemoryNativeCases": PROJECT_MEMORY_CASES, "requiredBusyMarker": BUSY_MARKER,
     }, indent=2), encoding="utf-8")
     results = evidence / "results.xml"
     try:

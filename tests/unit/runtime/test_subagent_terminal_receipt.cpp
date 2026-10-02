@@ -302,7 +302,7 @@ void CheckActualForegroundEndgame(bool cancel) {
     std::optional<SubagentTerminalReceipt> callback;
     tools::AgentTool dispatch(backend, original_registry, dir.root.string(), "model", 2);
     tools::AgentTool::Hooks hooks;
-    hooks.trajectory_spawn = [&](const std::string&, const std::string&, SubagentSpawnFailure*) {
+    hooks.trajectory_spawn = [&](const std::string&, const std::string&, SubagentSpawnFailure*, SubagentDispatchMode) {
         return V3Child(dir.root / "child.jsonl", registry);
     };
     hooks.trajectory_child_finished = [&](const SubagentTerminalReceipt& receipt) { callback = receipt; };
@@ -631,7 +631,7 @@ TEST_CASE("child terminal: real foreground dispatch consumes a gap without erasi
         // All captured dependencies precede AgentTool; its teardown settles before them.
         tools::AgentTool agent_tool(backend, original_registry, dir.root.string());
         tools::AgentTool::Hooks hooks;
-        hooks.trajectory_spawn = [&](const std::string&, const std::string&, SubagentSpawnFailure*) {
+        hooks.trajectory_spawn = [&](const std::string&, const std::string&, SubagentSpawnFailure*, SubagentDispatchMode) {
             v3::V3WriterOptions options;
             options.inject_close_failure = [&failure]() -> std::optional<std::string> {
                 return failure ? std::optional<std::string>("v3writer.test_close_failed: execution completed")
@@ -679,7 +679,7 @@ TEST_CASE("child terminal: real foreground dispatch consumes a gap without erasi
         auto dispatch = std::make_unique<tools::AgentTool>(parent_backend, parent_tools, dir.root.string());
         auto* dispatch_borrow = dispatch.get();
         tools::AgentTool::Hooks parent_hooks;
-        parent_hooks.trajectory_spawn = [&](const std::string&, const std::string&, SubagentSpawnFailure*) {
+        parent_hooks.trajectory_spawn = [&](const std::string&, const std::string&, SubagentSpawnFailure*, SubagentDispatchMode) {
             v3::V3WriterOptions options;
             options.inject_close_failure = [&failure]() -> std::optional<std::string> {
                 return failure ? std::optional<std::string>("v3writer.test_close_failed: parent-loop boundary")
@@ -757,7 +757,7 @@ TEST_CASE("child terminal: startup rejection consumes real failure and shared re
         return detached;
     });
     tools::AgentTool::Hooks hooks;
-    hooks.trajectory_spawn = [&](const std::string&, const std::string&, SubagentSpawnFailure*) {
+    hooks.trajectory_spawn = [&](const std::string&, const std::string&, SubagentSpawnFailure*, SubagentDispatchMode) {
         v3::V3WriterOptions options;
         options.inject_close_failure = [&]() -> std::optional<std::string> {
             return close_failure ? std::optional<std::string>("v3writer.test_close_failed: startup boundary")

@@ -30,6 +30,8 @@ SHARED_SDK_TEST_SOURCES = {
     "tests/unit/runtime/test_execution_owner.cpp",
     "tests/unit/runtime/test_subagent_terminal_receipt.cpp",
     "tests/unit/runtime/test_child_foreground_integration.cpp",
+    "tests/unit/runtime/test_child_parent_observation.cpp",
+    "tests/unit/runtime/test_child_history_adoption.cpp",
     "tests/unit/runtime/test_scoped_turn_bindings.cpp",
 }
 SEARCH_PROBE_TARGET = "lubancore_sdk_search_probe"

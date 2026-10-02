@@ -84,7 +84,8 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
                              std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory = nullptr,
                              const std::shared_ptr<const SubagentDispatchEnv>& env = nullptr,
                              const std::atomic<bool>* invocation_cancel = nullptr,
-                             std::optional<ToolInvocationIdentity> parent_invocation_cause = std::nullopt);
+                             std::optional<ToolInvocationIdentity> parent_invocation_cause = std::nullopt,
+                             bool main_foreground_scope = false);
 
 namespace {
 
@@ -1632,10 +1633,16 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
         const std::string& label_source = task->snapshot.prompt;
         trajectory = hooks.trajectory_spawn(
             agent_type + ": " + label_source.substr(0, platform::Utf8PrefixBoundary(label_source, 120)),
-            caller.agent_run_id, &spawn_failure);
+            caller.agent_run_id, &spawn_failure, runtime::SubagentDispatchMode::Foreground);
     }
     if (trajectory_spawn_armed && trajectory == nullptr) {
         Tool::Result result{SubagentStartFailedText(spawn_failure), true};
+        if (spawn_failure.cleanup_receipt &&
+            (spawn_failure.cleanup_receipt->confirmation == runtime::SubagentAppendConfirmation::DurabilityUnconfirmed ||
+             spawn_failure.cleanup_receipt->seal != runtime::SubagentSealState::Closed)) {
+            result.execution_control = ExecutionControl::StopIndeterminate;
+            result.error_code = spawn_failure.error_code;
+        }
         if (room.has_value()) {
             // 隔离房照常收尾:早退不漏清理(有活留房附路径,与正常路同款)。
             const auto finish = FinishIsolationRoom(*room, state->git_runner);
@@ -1646,7 +1653,8 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
             task->snapshot.worktree_awaiting_review = finish.awaiting_review;
             state->coordinator->ledger().Touch();
         }
-        result.AppendText(TaskLedger::UndeliveredInboxNote(task));
+        const auto inbox_note = TaskLedger::UndeliveredInboxNote(task);
+        if (!inbox_note.empty()) result.AppendText(inbox_note);
         state->coordinator->ledger().FinalizeFromToolResult(
             task, result.content,
             (invocation_cancel != nullptr && invocation_cancel->load(std::memory_order_acquire)) ||
@@ -1687,7 +1695,7 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
                             /*background_hooks=*/headless_hooks,
                             /*background_permissions=*/headless_permissions,
                             custom, resolved, request.permission_floor, std::move(trajectory), env,
-                            invocation_cancel, std::move(parent_invocation_cause));
+                            invocation_cancel, std::move(parent_invocation_cause), caller.IsMain());
     if (room.has_value()) {
         const auto finish = FinishIsolationRoom(*room, state->git_runner);
         result.AppendText(finish.note);
@@ -1704,7 +1712,8 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
     // 收尾入账:未送达的介入消息逐条列原文记进结果文本,不无声遗失;面板
     // x 停掉(task->cancel)与父轮 ESC 打断(hooks.cancel)都算取消;嵌套路
     // 没有父轮 ESC,只看自己的取消链。
-    result.AppendText(TaskLedger::UndeliveredInboxNote(task));
+    const auto inbox_note = TaskLedger::UndeliveredInboxNote(task);
+    if (!inbox_note.empty()) result.AppendText(inbox_note);
     // §5.3 弃用提示:手写 JSON 给了旧预算键,随结果带回(空串 = 没用旧键,
     // AppendText 对空串零输出)。
     if (!request.budget_deprecation_note.empty()) {
@@ -1949,7 +1958,7 @@ Tool::Result LaunchBackgroundTask(const AgentDispatchPlan& request, ToolRegistry
             // 与前台路同一把边界尺(UTF-8 清洗门单):截断不劈多字节序列。
             trajectory = state->trajectory_spawn(
                 agent_type + ": " + prompt.substr(0, platform::Utf8PrefixBoundary(prompt, 120)),
-                caller.agent_run_id, &spawn_failure);
+                caller.agent_run_id, &spawn_failure, runtime::SubagentDispatchMode::Background);
         }
         if (trajectory_spawn_armed && trajectory == nullptr) {
             const std::string failure_text = SubagentStartFailedText(spawn_failure);
@@ -2104,7 +2113,8 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
                                 std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory,
                                 const std::shared_ptr<const SubagentDispatchEnv>& env,
                                 const std::atomic<bool>* invocation_cancel,
-                                std::optional<ToolInvocationIdentity> parent_invocation_cause) {
+                                std::optional<ToolInvocationIdentity> parent_invocation_cause,
+                                bool main_foreground_scope) {
     // 派工治理(P0-2 起):admission(并发槽/深度/父子门)在注册事务
     // (TryRegisterChild)里判过——深度沿台账 lineage,不再用全局原子猜;
     // 活跃数即台账活态计数,任务终态即退槽。这里不再占槽。
@@ -3109,6 +3119,92 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
         cancel_chain.Add(foreground_hooks->cancel);
     }
     const std::atomic<bool>* cancel = cancel_chain.Start();
+
+    // Only this actually-resolved foreground route can use a live scoped host.
+    // Nothing below is copied to background lambdas or the frozen child env.
+    const bool scoped_approval_requested = foreground_hooks != nullptr &&
+        foreground_hooks->on_child_tool_confirm_scoped != nullptr;
+    std::optional<runtime::ChildApprovalScope> approval_scope;
+    if (scoped_approval_requested && main_foreground_scope && trajectory != nullptr && task != nullptr &&
+        parent_invocation_cause.has_value() && foreground_hooks->on_child_tool_granted &&
+        foreground_hooks->on_child_approval_scope_closed &&
+        foreground_hooks->on_child_permission_evaluate) {
+        const auto parent = trajectory->approval_parent();
+        const auto& cause = *parent_invocation_cause;
+        const auto* writer = trajectory->turn_bridge().v3_writer();
+        if (parent && writer && !cause.operation_id.empty() && cause.attempt > 0 &&
+            parent->session_id == cause.session_id && parent->turn_id == cause.turn_id &&
+            parent->action_id == cause.action_id && !parent->declared_message_id.empty() &&
+            !parent->run_id.empty() && writer->run_id() == trajectory->run_id() &&
+            !writer->session_id().empty() && !task->snapshot.effective_cwd.empty()) {
+            approval_scope = runtime::ChildApprovalScope{cause.session_id, parent->run_id, cause.operation_id,
+                parent->session_id, parent->run_id, writer->session_id(), writer->run_id(),
+                task->snapshot.effective_cwd,
+                permission_floor ? ApprovalModeMachineName(*permission_floor) : "inherit"};
+        }
+    }
+    struct ChildApprovalRetirement {
+        std::optional<runtime::ChildApprovalScope> scope;
+        std::function<void(const runtime::ChildApprovalScope&)> close;
+        ~ChildApprovalRetirement() {
+            if (scope && close) close(*scope); // Contract: idempotent, no throw; outside any host/ledger lock.
+        }
+    } child_approval_retirement{approval_scope,
+        approval_scope ? foreground_hooks->on_child_approval_scope_closed :
+                         std::function<void(const runtime::ChildApprovalScope&)>{}};
+    std::string scoped_denial = "前台子轮审批未获准，该工具未执行。";
+    if (scoped_approval_requested) {
+        const auto evaluate = foreground_hooks->on_child_permission_evaluate;
+        const auto granted = foreground_hooks->on_child_tool_granted;
+        const auto permission_request = foreground_hooks->on_permission_request;
+        turn_wiring.on_permission_evaluate = [evaluate, granted, permission_request, approval_scope,
+            &scoped_denial](const std::string& call, const std::string& name, ApprovalClass kind,
+                           const nlohmann::json& input, const runtime::ToolHookDecision& pre) {
+            runtime::PermissionVerdict verdict;
+            if (!approval_scope) {
+                scoped_denial = "前台子轮审批缺少真实 main 归属或所需能力，该工具未执行。";
+                return verdict; // Force the explicit, invalid capability to refuse; no parent Yolo bypass.
+            }
+            verdict = evaluate(*approval_scope, pre, kind, name, input);
+            if (verdict.action == runtime::PermissionVerdict::Action::Ask) {
+                const auto decision = permission_request ? permission_request(call, name, input) :
+                    runtime::ToolHookDecision{};
+                const bool force_ask = pre.decision == runtime::ToolHookDecision::Decision::Ask ||
+                    decision.decision == runtime::ToolHookDecision::Decision::Ask;
+                if (decision.decision == runtime::ToolHookDecision::Decision::Deny) {
+                    verdict.action = runtime::PermissionVerdict::Action::Deny;
+                    scoped_denial = decision.reason.empty() ? "PermissionRequest 拒绝了子轮工具。" : decision.reason;
+                } else if (!verdict.deny_hit && !force_ask &&
+                           (decision.decision == runtime::ToolHookDecision::Decision::Allow ||
+                            (decision.decision == runtime::ToolHookDecision::Decision::None &&
+                             granted(*approval_scope, name)))) {
+                    verdict.action = runtime::PermissionVerdict::Action::Allow;
+                }
+            }
+            return verdict;
+        };
+        turn_wiring.on_tool_denial_text = [&scoped_denial](const std::string&, const std::string&) { return scoped_denial; };
+        turn_wiring.on_tool_confirm_scoped = [approval_scope, ask = foreground_hooks->on_child_tool_confirm_scoped,
+            actual = trajectory.get(), owner_task = task != nullptr ? task->snapshot.id : 0]
+            (const runtime::ApprovalRequest& request) -> runtime::ApprovalLease {
+            if (!approval_scope || actual == nullptr) return {};
+            auto& bridge = actual->turn_bridge();
+            std::optional<runtime::TrajectoryTurnBridge::V3CallOrigin> origin;
+            std::string turn;
+            {
+                const auto mutex = bridge.v3_shared_mutex();
+                if (!mutex) return {};
+                std::lock_guard lock(*mutex);
+                origin = bridge.V3DeclaredCallOrigin(request.tool_use_id);
+                turn = bridge.current_turn_id();
+            }
+            if (!origin || origin->turn_id != turn || origin->action_id.empty() ||
+                origin->message_id.empty()) return {};
+            runtime::ChildApprovalRequest child{*approval_scope, turn, origin->action_id,
+                origin->message_id, owner_task, request};
+            return ask(child); // Own the facts; publish and Wait never hold the child ledger lock.
+        };
+    }
 
     // 墙钟与监督登记(监督器单 P0-2 迁移):从前每任务起一根看门狗线程,
     // 100 只并发就是 100 根轮询线——现在统一登记进会话级监督器,同一根线

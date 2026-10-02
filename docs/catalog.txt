@@ -1,5 +1,6 @@
 # 官方文档。每行一页；路径从 docs/ 起算。
 DOC README.md
+DOC development/child-approval-observation.md
 
 # 上手与排错
 DOC getting-started/quickstart.md
@@ -82,10 +83,12 @@ DOC development/sdk-skills.md
 DOC development/sdk-memory-recall.md
 DOC development/memory-project-commit.md
 DOC development/memory-worker-contention-diagnostics.md
+DOC development/memory-worker-busy-acceptance.md
 DOC development/sdk-memory-save.md
 DOC development/agent-thread-start-cleanup.md
 DOC development/child-foreground-context.md
 DOC development/scoped-approval-lease.md
+DOC development/child-async-approval.md
 DOC development/sdk-updater-boundary.md
 DOC development/lubancore-builtin-search.md
 DOC development/worker-host.md
@@ -156,3 +159,5 @@ DOC features/qq-assistant.md
 DOC development/experiment-runner.md
 DOC development/runner-probe-evidence.md
 DOC development/child-sdk-integration.md
+DOC development/child-parent-observation.md
+DOC development/child-history-adoption.md

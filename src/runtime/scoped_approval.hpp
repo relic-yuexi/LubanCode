@@ -3,10 +3,28 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <string>
 
 #include "runtime/interaction.hpp"
 
 namespace lubancode::runtime {
+
+// A trusted foreground host supplies copied facts. The host operation owns the
+// ticket, not a child execution. Ticket turn/action must not be grant keys.
+struct ChildApprovalScope {
+    std::string host_session_id, host_run_id, host_operation_id;
+    std::string parent_session_id, parent_run_id;
+    std::string child_session_id, child_run_id;
+    std::string effective_cwd, permission_floor;
+    bool operator==(const ChildApprovalScope&) const = default;
+};
+
+struct ChildApprovalRequest {
+    ChildApprovalScope scope;
+    std::string child_turn_id, child_declared_action_id, child_declared_message_id;
+    int owner_task_id = 0;
+    ApprovalRequest request;
+};
 
 // This is an explicit capability. An ordinary blocking InteractionFuture must
 // never be treated as locally cancellable. The cancel borrow ends at return;

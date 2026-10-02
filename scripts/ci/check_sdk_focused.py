@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 REQUIRED = {
     "sdk.focused.lubancore_session",
     "sdk.focused.lubancore_scoped_approval",
+    "sdk.focused.lubancore_child_approval",
     "sdk.focused.lubancore_builtin_search",
     "sdk.focused.lubancore_lifecycle",
     "sdk.focused.lubancore_host_boundary",
@@ -29,6 +30,8 @@ REQUIRED = {
     "sdk.focused.execution_owner",
     "sdk.focused.subagent_terminal_receipt",
     "sdk.focused.child_foreground_integration",
+    "sdk.focused.child_parent_observation",
+    "sdk.focused.child_history_adoption",
     "sdk.focused.scoped_turn_bindings",
     "sdk.focused.atomic_write",
 }
@@ -107,6 +110,27 @@ def main():
                     raise RuntimeError("Child integration actual path did not finish once: " + path)
         if case.attrib["name"] == "sdk.focused.lubancore_scoped_approval" and int(counts[0]) != 14:
             raise RuntimeError("Scoped approval native roster differs from 14 cases")
+        if case.attrib["name"] == "sdk.focused.lubancore_child_approval" and int(counts[0]) != 14:
+            raise RuntimeError("Actual child approval native roster differs from 14 cases")
+        if case.attrib["name"] == "sdk.focused.child_parent_observation":
+            if int(counts[0]) != 8:
+                raise RuntimeError("Child parent observation roster differs from 8 cases")
+            for path in ("adopted", "observation-unknown", "summary-halted", "summary-healthy",
+                         "capture-unknown", "rewrite-unknown", "commit-unknown", "rewrite-exception",
+                         "mid-batch-summary-halted", "cancel-close-failed", "source-gap", "ledger-summary"):
+                marker = "[child-observation-path] " + path
+                if sections[0].splitlines().count(marker) != 1:
+                    raise RuntimeError("Child observation actual path did not finish once: " + path)
+            if os.name != "nt" and sections[0].splitlines().count("[child-observation-path] source-owner-alias") != 1:
+                raise RuntimeError("Child observation actual Unix owner alias path did not finish once")
+        if case.attrib["name"] == "sdk.focused.child_history_adoption":
+            if int(counts[0]) != 8:
+                raise RuntimeError("Child history adoption roster differs from 8 cases")
+            for path in ("complete", "post-hook", "historical-chain", "observation-gap",
+                         "source-gap", "artifact-gap", "adoption-gap", "scope-reuse"):
+                marker = "[child-adoption-path] " + path
+                if sections[0].splitlines().count(marker) != 1:
+                    raise RuntimeError("Child adoption actual path did not finish once: " + path)
     print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
 
 
