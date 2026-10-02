@@ -40,8 +40,10 @@ AgentRunIdentity IdentityOfSnapshot(const AgentTaskSnapshot& snapshot) {
 
 AgentDispatchHandle::AgentDispatchHandle(std::weak_ptr<AgentTaskCoordinator> coordinator,
                                          AgentRunIdentity identity,
-                                         std::shared_ptr<const SubagentDispatchEnv> env)
-    : coordinator_(std::move(coordinator)), identity_(std::move(identity)), env_(std::move(env)) {}
+                                         std::shared_ptr<const SubagentDispatchEnv> env,
+                                         std::optional<ToolInvocationIdentity> parent_invocation_cause)
+    : coordinator_(std::move(coordinator)), identity_(std::move(identity)), env_(std::move(env)),
+      parent_invocation_cause_(std::move(parent_invocation_cause)) {}
 
 Tool* AgentDispatchHandle::facade_tool() const {
     std::shared_ptr<AgentTaskCoordinator> coordinator = coordinator_.lock();
@@ -49,6 +51,10 @@ Tool* AgentDispatchHandle::facade_tool() const {
 }
 
 Tool::Result AgentDispatchHandle::Dispatch(const nlohmann::json& input) {
+    return Dispatch(input, ToolExecutionContext{});
+}
+
+Tool::Result AgentDispatchHandle::Dispatch(const nlohmann::json& input, const ToolExecutionContext& context) {
     std::shared_ptr<AgentTaskCoordinator> coordinator = coordinator_.lock();
     if (coordinator == nullptr) {
         // 协调器(随引擎)已退场:后台任务的尾巴派工稳定收口,不悬垂调用。
@@ -65,6 +71,16 @@ Tool::Result AgentDispatchHandle::Dispatch(const nlohmann::json& input) {
     }
     request.env = env_;
     request.fail_account = this;
+    request.foreground_cancel = context.cancel;
+    const auto& invocation = context.invocation;
+    // Do not merge partially populated identities with an ancestor. Preserve one
+    // complete value as supplied; strict tools still reject missing ownership.
+    if (!invocation.session_id.empty() || !invocation.operation_id.empty() ||
+        !invocation.turn_id.empty() || !invocation.action_id.empty() || invocation.attempt != 0) {
+        request.parent_invocation_cause = invocation;
+    } else {
+        request.parent_invocation_cause = parent_invocation_cause_;
+    }
     return coordinator->Dispatch(request);
 }
 
