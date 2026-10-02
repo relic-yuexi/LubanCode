@@ -244,7 +244,7 @@ TEST_CASE("memory CAS File never overwrites an existing corrupt content address"
 #endif
 }
 
-TEST_CASE("memory CAS native close rejection precedes publication and confirmation failure retains the entity") {
+TEST_CASE("memory CAS closed temporary entity is rejected before publication and unconfirmed publication retains bytes") {
     Directory directory;
     const traj::CasScope scope{"project-a", "session-a"};
     for (const auto boundary : {traj::FileCasBoundary::AfterNativeClose, traj::FileCasBoundary::AfterPublish}) {

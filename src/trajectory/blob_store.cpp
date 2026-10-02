@@ -251,7 +251,7 @@ CasWriteReceipt BlobStore::StoreDetailed(const CasWriteRequest& request, const F
     const bool closed = std::fclose(file) == 0;
     if (!wrote || !closed) return fail(CasCommitState::NotCommitted, "cas.tmp_write_or_close_failed");
     if (fault) if (auto injected = fault(FileCasBoundary::AfterNativeClose))
-        return fail(CasCommitState::NotCommitted, "cas.test_close_failed", *injected);
+        return fail(CasCommitState::NotCommitted, "cas.test_before_publish_rejected", *injected);
     if (!IsSafeContainedPath(target, root_)) return fail(CasCommitState::NotCommitted, "cas.path_escape");
     // No replace-existing publication. If another valid writer won, verify its
     // entire entity; an existing corrupt object is never silently repaired.

@@ -60,7 +60,7 @@ MemoryLedgerBridge 与 `src/sdk/memory.hpp/.cpp` 接真写、校读、报告与�
 ## 远端验收门
 
 1. 默认 File：同 SHA 真复用、预置坏件拒绝、不可覆盖发布、短件/超帽/坏 SHA/非普通件。
-2. 分阶段真实故障：write/close 前拒，发布后耐久未确认保实体；新 Memory 引用仍为零。
+2. 分阶段失败：临时件检查失败拒发布；成功 close 后的发布前/后边界注入各留真状态，新 Memory 引用仍为零。
 3. CLI accounting 与 SDK Submit 真召回大于 512 bytes 片段，核模型实际正文与 V3 refs。
 4. 内部 fake 不向默认 artifacts 路径写件；真 Memory participant、桥、报告与持锁恢复仍走能力。
 5. 同项目两场与不同项目两场各持能力；同串 op/ref 不串结果，取消/Close/失败开场收写权。
