@@ -6,6 +6,7 @@
 - [LubanCore C++ SDK（实验版）](lubancore-sdk.md)
 - [SDK 显式 Skills 合同](sdk-skills.md)
 - [SDK 项目 Memory 只读召回合同](sdk-memory-recall.md)
+- [后台子代理线程启动收口](agent-thread-start-cleanup.md)
 - [测试指南](testing.md)
 - [分布式工程协作与远端验收](cluster-collaboration.md)
 - [文档规范](documentation.md)

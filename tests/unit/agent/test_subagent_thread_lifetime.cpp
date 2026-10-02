@@ -20,13 +20,18 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <string>
+#include <stdexcept>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -37,6 +42,7 @@
 #include "cli/i18n.hpp"
 #include "platform/process.hpp"
 #include "runtime/worktree.hpp"
+#include "runtime/trajectory_subagent_bridge.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
@@ -183,6 +189,287 @@ struct GitRepo {
 };
 
 }  // namespace
+
+namespace {
+
+struct StartGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+    void Release() {
+        { std::lock_guard lock(mutex); released = true; }
+        cv.notify_all();
+    }
+    bool AwaitEntered() {
+        std::unique_lock lock(mutex);
+        return cv.wait_for(lock, std::chrono::seconds(5), [&] { return entered; });
+    }
+    void EnterAndWait() {
+        std::unique_lock lock(mutex);
+        entered = true;
+        cv.notify_all();
+        if (!cv.wait_for(lock, std::chrono::seconds(5), [&] { return released; }))
+            throw std::runtime_error("startup gate timed out");
+    }
+};
+
+struct ReleaseStartGate {
+    std::shared_ptr<StartGate> gate;
+    ~ReleaseStartGate() { gate->Release(); }
+};
+
+class StartupWatchdog {
+public:
+    StartupWatchdog() : thread_([this] {
+        std::unique_lock lock(mutex_);
+        if (!cv_.wait_for(lock, std::chrono::seconds(15), [&] { return done_; })) std::abort();
+    }) {}
+    ~StartupWatchdog() {
+        { std::lock_guard lock(mutex_); done_ = true; }
+        cv_.notify_all();
+        thread_.join();
+    }
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool done_ = false;
+    std::thread thread_;
+};
+
+struct FailedBridgeState {
+    int finishes = 0;
+    bool ok = true;
+    std::string reason;
+};
+
+class StartupBridge : public runtime::TrajectorySubagentBridge {
+public:
+    explicit StartupBridge(std::shared_ptr<FailedBridgeState> state)
+        : state_(std::move(state)), turn_(nullptr, nullptr, {}, {}) {}
+    const std::string& run_id() const override { return id_; }
+    runtime::TrajectoryTurnBridge& turn_bridge() override { return turn_; }
+    std::string Finish(bool ok, const std::string& reason) override {
+        ++state_->finishes;
+        state_->ok = ok;
+        state_->reason = reason;
+        return "startup-failed-terminal";
+    }
+private:
+    std::shared_ptr<FailedBridgeState> state_;
+    std::string id_ = "startup-child";
+    runtime::TrajectoryTurnBridge turn_;
+};
+
+void AttachFailedStartupBridge(tools::AgentTool& tool, const std::shared_ptr<FailedBridgeState>& state) {
+    tools::AgentTool::Hooks hooks;
+    hooks.trajectory_spawn = [state](const std::string&, const std::string&, runtime::SubagentSpawnFailure*) {
+        return std::make_unique<StartupBridge>(state);
+    };
+    tool.SetHooks(std::move(hooks));
+}
+
+void SetImmediateBackend(tools::AgentTool& tool) {
+    auto backend = std::make_shared<HangBackend::Shared>();
+    backend->release = true;
+    backend->scripts = {TextScript("started after failure")};
+    tool.SetDetachedBackendFactory([backend] {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::make_unique<HangBackend>(backend);
+        detached.request_profile.model = "startup-test-model";
+        return detached;
+    });
+}
+
+}  // namespace
+
+TEST_CASE("线程启动事务: factory失败收唯一失败账与子账,退槽后可再派") {
+    NullBackend backend;
+    tools::ToolRegistry registry;
+    tools::AgentTool tool(backend, registry, "/work/dir");
+    tool.SetDispatchGovernance(1, 5);
+    SetImmediateBackend(tool);
+    auto bridge = std::make_shared<FailedBridgeState>();
+    AttachFailedStartupBridge(tool, bridge);
+    SUBCASE("native thread creation rejection") {
+        tool.SetBackgroundThreadFactoryForTesting([](tools::AgentTaskCoordinator::ThreadBody) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+    }
+    SUBCASE("allocation failure in startup factory") {
+        tool.SetBackgroundThreadFactoryForTesting([](tools::AgentTaskCoordinator::ThreadBody) -> std::thread {
+            throw std::bad_alloc();
+        });
+    }
+    SUBCASE("invalid empty factory result") {
+        tool.SetBackgroundThreadFactoryForTesting([](tools::AgentTaskCoordinator::ThreadBody) { return std::thread{}; });
+    }
+    const auto failure = tool.execute({{"title", "failed-start"}, {"prompt", "never run"}, {"run_in_background", true}});
+    REQUIRE(failure.is_error);
+    CHECK(failure.error_code == "agent.thread_start_failed");
+    CHECK(failure.content.find("已启动。") == std::string::npos);
+    const auto failed = tool.coordinator()->ledger().Snapshots();
+    REQUIRE(failed.size() == 1);
+    CHECK(failed[0].state == tools::AgentTaskState::Failed);
+    CHECK(failed[0].outcome.status == tools::TaskOutcomeStatus::Failed);
+    CHECK(failed[0].outcome.reason == tools::TaskOutcomeReason::InitializationFailed);
+    CHECK_FALSE(tool.coordinator()->ledger().HasRunningTasks());
+    CHECK(bridge->finishes == 1);
+    CHECK_FALSE(bridge->ok);
+    CHECK(bridge->reason == "thread_start_failed");
+    tool.SetHooks({});
+    tool.SetBackgroundThreadFactoryForTesting({});
+    const auto success = tool.execute({{"title", "retry-slot"}, {"prompt", "run"}, {"run_in_background", true}});
+    REQUIRE_FALSE(success.is_error);
+    REQUIRE(WaitUntil([&] { return !tool.coordinator()->ledger().HasRunningTasks(); }, std::chrono::seconds(5)));
+    const auto all = tool.coordinator()->ledger().Snapshots();
+    REQUIRE(all.size() == 2);
+    CHECK(all[0].state == tools::AgentTaskState::Failed);
+    CHECK(all[1].state == tools::AgentTaskState::Done);
+    CHECK(bridge->finishes == 1);
+}
+
+TEST_CASE("线程启动事务: 创建失败收干净隔离房与子账") {
+    GitRepo repo;
+    NullBackend backend;
+    tools::ToolRegistry registry;
+    tools::AgentTool tool(backend, registry, PathToUtf8(repo.root));
+    SetImmediateBackend(tool);
+    auto bridge = std::make_shared<FailedBridgeState>();
+    AttachFailedStartupBridge(tool, bridge);
+    tool.SetBackgroundThreadFactoryForTesting([](tools::AgentTaskCoordinator::ThreadBody) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    const auto failed = tool.execute({{"title", "isolated-failure"}, {"prompt", "never run"},
+        {"isolation", "worktree"}, {"run_in_background", true}});
+    REQUIRE(failed.is_error);
+    CHECK(failed.error_code == "agent.thread_start_failed");
+    const auto tasks = tool.coordinator()->ledger().Snapshots();
+    REQUIRE(tasks.size() == 1);
+    CHECK(tasks[0].state == tools::AgentTaskState::Failed);
+    CHECK(tasks[0].worktree_removed);
+    CHECK_FALSE(tasks[0].worktree_awaiting_review);
+    CHECK_FALSE(tasks[0].isolation_branch.empty());
+    CHECK(bridge->finishes == 1);
+    CHECK_FALSE(bridge->ok);
+    std::error_code error;
+    const auto rooms = repo.root / ".lubancode" / "worktrees";
+    if (std::filesystem::exists(rooms)) {
+        for (const auto& entry : std::filesystem::directory_iterator(rooms, error))
+            CHECK_FALSE(PathToUtf8(entry.path().filename()).starts_with("agent-"));
+        CHECK_FALSE(error);
+    }
+}
+
+TEST_CASE("线程启动事务: closing先落不调factory也不造线程") {
+    tools::AgentTaskCoordinator coordinator;
+    int factory_calls = 0;
+    coordinator.SetThreadFactoryForTesting([&](tools::AgentTaskCoordinator::ThreadBody body) {
+        ++factory_calls;
+        return std::thread(std::move(body));
+    });
+    coordinator.RequestClose();
+    auto receipt = std::make_shared<std::atomic<bool>>(false);
+    CHECK_FALSE(coordinator.StartThread(1, [receipt] { receipt->store(true); }, receipt));
+    CHECK(factory_calls == 0);
+    CHECK_FALSE(receipt->load());
+    coordinator.JoinAllBounded();
+}
+
+TEST_CASE("线程启动事务: 准备中closing拒启仍收台账与已有子账") {
+    NullBackend backend;
+    tools::ToolRegistry registry;
+    tools::AgentTool tool(backend, registry, "/work/dir");
+    const auto coordinator = tool.coordinator();
+    tool.SetDetachedBackendFactory([coordinator] {
+        coordinator->RequestClose();
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::make_unique<NullBackend>();
+        return detached;
+    });
+    auto bridge = std::make_shared<FailedBridgeState>();
+    AttachFailedStartupBridge(tool, bridge);
+    int factory_calls = 0;
+    tool.SetBackgroundThreadFactoryForTesting([&](tools::AgentTaskCoordinator::ThreadBody body) {
+        ++factory_calls;
+        return std::thread(std::move(body));
+    });
+    const auto rejected = tool.execute({{"title", "closing-start"}, {"prompt", "never run"}, {"run_in_background", true}});
+    REQUIRE(rejected.is_error);
+    CHECK(rejected.error_code == "agent.session_closing");
+    CHECK(factory_calls == 0);
+    const auto tasks = coordinator->ledger().Snapshots();
+    REQUIRE(tasks.size() == 1);
+    CHECK(tasks[0].state == tools::AgentTaskState::Cancelled);
+    CHECK(tasks[0].outcome.reason == tools::TaskOutcomeReason::SessionClosing);
+    CHECK_FALSE(coordinator->ledger().HasRunningTasks());
+    CHECK(bridge->finishes == 1);
+    CHECK_FALSE(bridge->ok);
+    CHECK(bridge->reason == "session_closing");
+}
+
+TEST_CASE("线程启动事务: 关闭接住已准入但尚未交接线程") {
+    StartupWatchdog watchdog;
+    auto coordinator = std::make_shared<tools::AgentTaskCoordinator>();
+    auto gate = std::make_shared<StartGate>();
+    auto receipt = std::make_shared<std::atomic<bool>>(false);
+    coordinator->SetThreadFactoryForTesting([gate](tools::AgentTaskCoordinator::ThreadBody body) {
+        gate->EnterAndWait();
+        return std::thread(std::move(body));
+    });
+    std::future<bool> start;
+    std::future<void> close;
+    ReleaseStartGate release{gate};
+    start = std::async(std::launch::async, [coordinator, receipt] {
+        return coordinator->StartThread(1, [receipt] { receipt->store(true); }, receipt);
+    });
+    REQUIRE(gate->AwaitEntered());
+    coordinator->RequestClose();
+    close = std::async(std::launch::async, [coordinator] { coordinator->JoinAllBounded(); });
+    CHECK(close.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+    gate->Release();
+    REQUIRE(start.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    CHECK(start.get());
+    REQUIRE(close.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    close.get();
+    CHECK(receipt->load());
+    CHECK_FALSE(coordinator->StartThread(2, [] {}, std::make_shared<std::atomic<bool>>(false)));
+}
+
+TEST_CASE("线程启动事务: 退出capture重入关闭不被Reap锁住") {
+    StartupWatchdog watchdog;
+    auto coordinator = std::make_shared<tools::AgentTaskCoordinator>();
+    auto gate = std::make_shared<StartGate>();
+    auto receipt = std::make_shared<std::atomic<bool>>(false);
+    struct Cleanup {
+        std::shared_ptr<tools::AgentTaskCoordinator> coordinator;
+        std::shared_ptr<StartGate> gate;
+        ~Cleanup() {
+            gate->EnterAndWait();
+            coordinator->RequestClose();
+        }
+    };
+    std::future<void> reap;
+    std::future<void> close;
+    auto cleanup = std::make_shared<Cleanup>();
+    cleanup->coordinator = coordinator;
+    cleanup->gate = gate;
+    ReleaseStartGate release{gate};
+    REQUIRE(coordinator->StartThread(1, [cleanup, receipt] { receipt->store(true); }, receipt));
+    cleanup.reset();
+    REQUIRE(gate->AwaitEntered());
+    reap = std::async(std::launch::async, [coordinator] { coordinator->ReapExitedThreads(); });
+    REQUIRE(WaitUntil([&] { return coordinator->HasReapingThreadForTesting(); }, std::chrono::seconds(5)));
+    coordinator->RequestClose();
+    close = std::async(std::launch::async, [coordinator] { coordinator->JoinAllBounded(); });
+    CHECK(close.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+    gate->Release();
+    REQUIRE(reap.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    reap.get();
+    REQUIRE(close.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+    close.get();
+    CHECK(coordinator->closing());
+}
 
 // ---- 验收 1:关闭超时后晚归 worker 无悬垂访问 ------------------------------
 TEST_CASE("线程寿命: 门面析构有界返回,晚归 worker 靠冻结 run_state 跑完落账") {

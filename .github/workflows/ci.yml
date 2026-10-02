@@ -128,7 +128,7 @@ jobs:
             # Session ownership, extensions and per-turn borrowing span multiple hosts.
             # Their SDK, middleware and host regressions need three platforms and ASan.
             case "$f" in
-              include/lubancore/*|src/sdk/*|tests/*/sdk/*|examples/sdk-consumer/*|src/trajectory/*|tests/unit/trajectory/*|tests/unit/trajectory_v3/*|tests/integration/trajectory/*|src/agent/agent.*|src/agent/loop.*|src/hooks/middleware.*|src/hooks/middleware_builtins.*|src/hooks/dispatcher.*|src/runtime/middleware_runtime.*|src/runtime/middleware_v3_sink.*|src/runtime/middleware_session_binding.*|tests/unit/hooks/test_middleware_core.cpp|tests/unit/hooks/test_middleware_builtins.cpp|tests/unit/hooks/test_middleware_runtime_wire.cpp|tests/unit/hooks/test_middleware_v3_events.cpp|tests/unit/hooks/test_middleware_scope_wire.cpp|src/runtime/scoped_turn_bindings.*|src/runtime/session_execution.*|src/runtime/session_service.*|src/runtime/session_runtime.*|src/runtime/tool_trace_hub.*|src/runtime/async_tool_runtime.*|src/tools/tool_job_coordinator.*|src/runtime/headless_executor.*|src/app/turn_runner.*|tests/unit/runtime/test_session_execution.cpp|tests/unit/runtime/test_scoped_turn_bindings.cpp|tests/unit/app/test_turn_runner_scoped_bindings.cpp|tests/support/scoped_turn_fixture.hpp|tests/fixtures/scoped_turn_stop_hook.py)
+              include/lubancore/*|src/sdk/*|tests/*/sdk/*|examples/sdk-consumer/*|src/trajectory/*|tests/unit/trajectory/*|tests/unit/trajectory_v3/*|tests/integration/trajectory/*|src/agent/agent.*|src/agent/loop.*|src/hooks/middleware.*|src/hooks/middleware_builtins.*|src/hooks/dispatcher.*|src/runtime/middleware_runtime.*|src/runtime/middleware_v3_sink.*|src/runtime/middleware_session_binding.*|tests/unit/hooks/test_middleware_core.cpp|tests/unit/hooks/test_middleware_builtins.cpp|tests/unit/hooks/test_middleware_runtime_wire.cpp|tests/unit/hooks/test_middleware_v3_events.cpp|tests/unit/hooks/test_middleware_scope_wire.cpp|src/runtime/scoped_turn_bindings.*|src/runtime/session_execution.*|src/runtime/session_service.*|src/runtime/session_runtime.*|src/runtime/tool_trace_hub.*|src/runtime/async_tool_runtime.*|src/tools/tool_job_coordinator.*|src/tools/agent_tool.*|src/tools/agent_task_coordinator.*|tests/unit/agent/test_subagent_thread_lifetime.cpp|src/runtime/headless_executor.*|src/app/turn_runner.*|tests/unit/runtime/test_session_execution.cpp|tests/unit/runtime/test_scoped_turn_bindings.cpp|tests/unit/app/test_turn_runner_scoped_bindings.cpp|tests/support/scoped_turn_fixture.hpp|tests/fixtures/scoped_turn_stop_hook.py)
                 cross_platform=true
                 remote_tests=$remote_present
                 assembly_tests=$assembly_present
@@ -140,7 +140,7 @@ jobs:
             # 公共构建接线仅在 remote/SDK 装配已入树时加腿；普通 PR 沿旧策略。
             # ci.yml 自身改动也跑三平台，验证本门，不冒充已有组件测试。
             case "$f" in
-              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/runtime/assembly/*|src/app_server/server.*|src/app_server/browser_service.*|src/app_server/session_assembly.*|src/app/tool_runtime.*|src/app/tool_assembly_plan.hpp|src/app/cli_tool_assembly.*|tests/unit/runtime/test_tool_runtime.cpp|tests/integration/plugins/test_tool_runtime_deferral.cpp|tests/support/tool_assembly_fixture.hpp|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|tests/unit/runtime/test_session_resources.cpp|tests/integration/app_server/test_app_server_session_parity.cpp|tests/unit/app_server/test_app_server_browser.cpp|tests/support/session_history_fixture.hpp|tests/support/mcp_cwd_fixture.hpp|tests/fixtures/session_resources_mcp.py|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|scripts/ci/check_sdk_only_boundary.py|scripts/ci/tests/test_sdk_only_boundary.py|scripts/ci/tests/test_sdk_extension_gates.py|scripts/ci/check_sdk_host_parity.py|scripts/ci/check_sdk_focused.py|src/worker_host/*|tests/integration/worker_host/*|src/job_runner/*|tests/runner/*|scripts/ci/check_installed_process_host.py|.github/workflows/ci.yml)
+              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/tools/agent_tool.*|src/tools/agent_task_coordinator.*|tests/unit/agent/test_subagent_thread_lifetime.cpp|src/runtime/assembly/*|src/app_server/server.*|src/app_server/browser_service.*|src/app_server/session_assembly.*|src/app/tool_runtime.*|src/app/tool_assembly_plan.hpp|src/app/cli_tool_assembly.*|tests/unit/runtime/test_tool_runtime.cpp|tests/integration/plugins/test_tool_runtime_deferral.cpp|tests/support/tool_assembly_fixture.hpp|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|tests/unit/runtime/test_session_resources.cpp|tests/integration/app_server/test_app_server_session_parity.cpp|tests/unit/app_server/test_app_server_browser.cpp|tests/support/session_history_fixture.hpp|tests/support/mcp_cwd_fixture.hpp|tests/fixtures/session_resources_mcp.py|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|scripts/ci/check_sdk_only_boundary.py|scripts/ci/tests/test_sdk_only_boundary.py|scripts/ci/tests/test_sdk_extension_gates.py|scripts/ci/check_sdk_host_parity.py|scripts/ci/check_sdk_focused.py|src/worker_host/*|tests/integration/worker_host/*|src/job_runner/*|tests/runner/*|scripts/ci/check_installed_process_host.py|.github/workflows/ci.yml)
                 cross_platform=true
                 remote_tests=$remote_present
                 assembly_tests=$assembly_present
@@ -1211,7 +1211,7 @@ jobs:
           # (Lua 钩子串),与本腿的悬垂/寿命合同无关,另立单子治理后再开。
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
         run: |
-          ctest --test-dir build -C Release -R '^(integration\.app_server\.app_server_session_parity|unit\.app_server\.app_server_browser|unit\.runtime\.tool_runtime|integration\.plugins\.tool_runtime_deferral|unit\.runtime\.session_execution|unit\.runtime\.scoped_turn_bindings|unit\.tools\.tool_job_coordinator|unit\.app\.turn_runner_scoped_bindings|integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection|lubancore_skills|lubancore_memory_recall|lubancore_builtin_search)|unit\.remote\.remote_result_sync|unit\.hooks\.middleware_core)$' \
+          ctest --test-dir build -C Release -R '^(integration\.app_server\.app_server_session_parity|unit\.app_server\.app_server_browser|unit\.runtime\.tool_runtime|integration\.plugins\.tool_runtime_deferral|unit\.runtime\.session_execution|unit\.runtime\.scoped_turn_bindings|unit\.tools\.tool_job_coordinator|unit\.app\.turn_runner_scoped_bindings|unit\.agent\.subagent_thread_lifetime|integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection|lubancore_skills|lubancore_memory_recall|lubancore_builtin_search)|unit\.remote\.remote_result_sync|unit\.hooks\.middleware_core)$' \
             --show-only=json-v1 > build/asan-host-registration.json
           python3 - <<'PY'
           import json
@@ -1221,6 +1221,7 @@ jobs:
                       'unit.runtime.tool_runtime', 'integration.plugins.tool_runtime_deferral',
                       'unit.runtime.session_execution', 'unit.runtime.scoped_turn_bindings', 'unit.tools.tool_job_coordinator',
                       'unit.app.turn_runner_scoped_bindings', 'integration.sdk.lubancore_extensions',
+                      'unit.agent.subagent_thread_lifetime',
                       'integration.sdk.lubancore_results', 'integration.sdk.lubancore_result_projection', 'integration.sdk.lubancore_skills',
                       'integration.sdk.lubancore_memory_recall',
                       'integration.sdk.lubancore_builtin_search',
@@ -1265,6 +1266,8 @@ jobs:
               counts = re.findall(r'\[doctest\] test cases:\s+(\d+)', sections[0])
               if len(counts) != 1 or int(counts[0]) == 0:
                   raise SystemExit('ASan source filter ran no native test cases: ' + name)
+              if name == 'unit.agent.subagent_thread_lifetime' and int(counts[0]) != 10:
+                  raise SystemExit('ASan startup and existing lifetime cases did not all execute')
           print(f'ASan: all {len(required)} required lifetime sources executed nonempty native tests')
           PY
 
