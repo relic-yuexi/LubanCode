@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <expected>
 #include <filesystem>
 #include <functional>
@@ -72,6 +73,11 @@ struct V3Ledger {
 
 // 验卷不过(坏行/断链/截断尾)→ unexpected,错误码前缀 v3writer.*。
 std::expected<V3Ledger, std::string> ReadV3Ledger(const std::filesystem::path& jsonl);
+// Opened-regular byte bound; newline/line/count checks precede JSON parsing.
+// Verification and projection consume the same owned lines without reopening.
+std::expected<V3Ledger, std::string> ReadV3LedgerBounded(
+    const std::filesystem::path& jsonl, std::size_t max_bytes,
+    std::size_t max_lines, std::size_t max_line_bytes);
 
 // ---------------------------------------------------------------------------
 // 压缩标记与 system 切换视图(时间线专用)
@@ -347,6 +353,11 @@ struct ResultPreviewProjection {
 ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
                                             const std::filesystem::path& session_dir,
                                             std::string_view tool_message_id);
+// Ledger-only selection/summary provenance; never probes an artifact path.
+// Its complete flag covers only this line projection, not external blob health;
+// artifacts stays empty. Use ExpandResultPreview to verify blob completeness.
+ResultPreviewProjection ProjectResultPreview(const V3Ledger& ledger,
+                                             std::string_view tool_message_id);
 
 // ---------------------------------------------------------------------------
 // 跨会话五键引用(§3.1/§4.2)

@@ -22,6 +22,7 @@ public:
     virtual ~TrajectorySubagentBridge() = default;
     virtual const std::string& run_id() const = 0;
     virtual TrajectoryTurnBridge& turn_bridge() = 0;
+    virtual std::optional<SubagentSpawnProvenance> ParentSpawn() const { return std::nullopt; }
     // Full cached native append + explicit Close evidence; never retry Finish.
     virtual SubagentTerminalReceipt Finish(SubagentExecutionOutcome execution,
                                            const std::string& reason) = 0;
@@ -36,7 +37,8 @@ public:
         std::unique_ptr<trajectory::v3::V3Writer> writer,
         std::unique_ptr<V3SessionBooks> books,
         std::unique_ptr<TrajectoryTurnBridge> bridge,
-        std::shared_ptr<SubagentTerminalRegistry> registry);
+        std::shared_ptr<SubagentTerminalRegistry> registry,
+        std::optional<SubagentSpawnProvenance> provenance = std::nullopt);
 };
 
 // ---------------------------------------------------------------------------
@@ -54,6 +56,8 @@ struct SubagentSpawnFailure {
     std::string detail;
     std::string reserved_run_id;  // 已铸出的子 run id(失败前铸了就带上)
     bool retryable = false;      // I/O 类失败可重试;schema/状态机类不可
+    // Only a real, already opened child can supply this cleanup receipt.
+    std::optional<SubagentTerminalReceipt> cleanup_receipt;
 };
 
 }  // namespace lubancode::runtime

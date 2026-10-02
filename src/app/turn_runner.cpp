@@ -639,7 +639,8 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
             // 里顺手做错。
             hooks.trajectory_spawn = [ledger, hub, main_bridge](
                                          const std::string& task_label, const std::string& parent_run_id,
-                                         lubancode::runtime::SubagentSpawnFailure* failure_out)
+                                         lubancode::runtime::SubagentSpawnFailure* failure_out,
+                                         lubancode::runtime::SubagentDispatchMode mode)
                                         -> std::unique_ptr<lubancode::runtime::TrajectorySubagentBridge> {
                 const std::string parent_call_id = hub->current_agent_call_id();
                 auto child = ledger->SpawnSubagent(parent_call_id, task_label, parent_run_id);
@@ -656,8 +657,26 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
                     }
                     return nullptr;
                 }
-                if (parent_run_id.empty() && !parent_call_id.empty()) {
-                    main_bridge->AttachChildRun(parent_call_id, (*child)->run_id());
+                if (parent_run_id.empty() && mode == lubancode::runtime::SubagentDispatchMode::Foreground &&
+                    main_bridge->ManagesToolResultPreviews()) {
+                    auto attached = main_bridge->AttachChildRun(parent_call_id, (*child)->run_id(), (*child)->ParentSpawn());
+                    if (!attached) {
+                        lubancode::runtime::SubagentSpawnFailure failure;
+                        failure.stage = "attach_parent";
+                        failure.error_code = attached.error();
+                        failure.detail = "父轮绑定未确认，孩子没有开跑";
+                        failure.reserved_run_id = (*child)->run_id();
+                        failure.cleanup_receipt = (*child)->Finish(
+                            lubancode::runtime::SubagentExecutionOutcome::StartupRejected, attached.error());
+                        ledger->NoteSubagentStartFailed(failure, parent_run_id, parent_call_id,
+                                                        main_bridge->current_turn_id());
+                        if (failure_out) *failure_out = std::move(failure);
+                        return nullptr;
+                    }
+                } else if (parent_run_id.empty() && !parent_call_id.empty() && !main_bridge->ManagesToolResultPreviews()) {
+                    // V2 keeps its existing boundary; background/nested V3 are
+                    // explicitly outside this foreground observation capability.
+                    (void)main_bridge->AttachChildRun(parent_call_id, (*child)->run_id());
                 }
                 return std::move(*child);
             };

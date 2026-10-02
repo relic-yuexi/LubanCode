@@ -1632,10 +1632,16 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
         const std::string& label_source = task->snapshot.prompt;
         trajectory = hooks.trajectory_spawn(
             agent_type + ": " + label_source.substr(0, platform::Utf8PrefixBoundary(label_source, 120)),
-            caller.agent_run_id, &spawn_failure);
+            caller.agent_run_id, &spawn_failure, runtime::SubagentDispatchMode::Foreground);
     }
     if (trajectory_spawn_armed && trajectory == nullptr) {
         Tool::Result result{SubagentStartFailedText(spawn_failure), true};
+        if (spawn_failure.cleanup_receipt &&
+            (spawn_failure.cleanup_receipt->confirmation == runtime::SubagentAppendConfirmation::DurabilityUnconfirmed ||
+             spawn_failure.cleanup_receipt->seal != runtime::SubagentSealState::Closed)) {
+            result.execution_control = ExecutionControl::StopIndeterminate;
+            result.error_code = spawn_failure.error_code;
+        }
         if (room.has_value()) {
             // 隔离房照常收尾:早退不漏清理(有活留房附路径,与正常路同款)。
             const auto finish = FinishIsolationRoom(*room, state->git_runner);
@@ -1646,7 +1652,8 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
             task->snapshot.worktree_awaiting_review = finish.awaiting_review;
             state->coordinator->ledger().Touch();
         }
-        result.AppendText(TaskLedger::UndeliveredInboxNote(task));
+        const auto inbox_note = TaskLedger::UndeliveredInboxNote(task);
+        if (!inbox_note.empty()) result.AppendText(inbox_note);
         state->coordinator->ledger().FinalizeFromToolResult(
             task, result.content,
             (invocation_cancel != nullptr && invocation_cancel->load(std::memory_order_acquire)) ||
@@ -1704,7 +1711,8 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
     // 收尾入账:未送达的介入消息逐条列原文记进结果文本,不无声遗失;面板
     // x 停掉(task->cancel)与父轮 ESC 打断(hooks.cancel)都算取消;嵌套路
     // 没有父轮 ESC,只看自己的取消链。
-    result.AppendText(TaskLedger::UndeliveredInboxNote(task));
+    const auto inbox_note = TaskLedger::UndeliveredInboxNote(task);
+    if (!inbox_note.empty()) result.AppendText(inbox_note);
     // §5.3 弃用提示:手写 JSON 给了旧预算键,随结果带回(空串 = 没用旧键,
     // AppendText 对空串零输出)。
     if (!request.budget_deprecation_note.empty()) {
@@ -1949,7 +1957,7 @@ Tool::Result LaunchBackgroundTask(const AgentDispatchPlan& request, ToolRegistry
             // 与前台路同一把边界尺(UTF-8 清洗门单):截断不劈多字节序列。
             trajectory = state->trajectory_spawn(
                 agent_type + ": " + prompt.substr(0, platform::Utf8PrefixBoundary(prompt, 120)),
-                caller.agent_run_id, &spawn_failure);
+                caller.agent_run_id, &spawn_failure, runtime::SubagentDispatchMode::Background);
         }
         if (trajectory_spawn_armed && trajectory == nullptr) {
             const std::string failure_text = SubagentStartFailedText(spawn_failure);

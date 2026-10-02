@@ -156,3 +156,4 @@ DOC features/qq-assistant.md
 DOC development/experiment-runner.md
 DOC development/runner-probe-evidence.md
 DOC development/child-sdk-integration.md
+DOC development/child-parent-observation.md
