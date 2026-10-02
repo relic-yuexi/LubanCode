@@ -24,7 +24,7 @@ SDK target 先解析并验证正式 SaveRequest，再用中立 MemoryLedgerBridg
 
 恢复须以已验证 V3 账核实际 requested/action/采用结果，核冻结计划、报告与 gate intent/result/snapshot 的请求 SHA、正文 SHA、阶段和 owner。没有最终报告的合法中断留未知态，不重跑旧 op；完整成功回合缺件、坏件或冒领报告拒恢复。哈希是完整性核对，不当身份认证。公开 query 返回 owned 值，Close 后仍可读。
 
-完整回合还须核正式 tool 消息已进入有效上下文链。消息与选中事件同属本场、本回合和真实 action；次序须为保存回执、选中事件、tool 消息。消息的 `tool_call_id` 指真实 action，不能借其它角色或晚到事件冒领采用事实。
+工具开写、请求、保存回执、选中事件与 tool 消息逐枚核场身份和实际 run，不能只认首行 owner。完整回合还须核正式 tool 消息已进入有效上下文链。消息与选中事件同属本回合和真实 action；次序须为保存回执、选中事件、tool 消息。消息的 `tool_call_id` 指真实 action，不能借其它角色或晚到事件冒领采用事实。同 ID 恢复沿原场账 run，不凭进程重启重发身份。
 
 ## 关场与验收
 

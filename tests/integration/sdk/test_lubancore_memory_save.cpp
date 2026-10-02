@@ -292,6 +292,10 @@ TEST_CASE("SDK memory_save: rehashed report forgeries cannot claim or erase save
     const auto tool_id = tool->message_id, selected_id = *tool->result_selection_ref;
     const auto* selected = actual->FindEvent(selected_id); REQUIRE(selected);
     REQUIRE(selected->kind == v3::EventKindV3::ToolResultSelected); REQUIRE(selected->seq < tool->seq);
+    const auto started = std::find_if(actual->events.begin(), actual->events.end(), [&](const auto& event) {
+        return event.kind == v3::EventKindV3::ToolExecutionStarted && event.action_id == saved.front().action_id;
+    });
+    REQUIRE(started != actual->events.end());
     for (int variant = 0; variant != 8; ++variant) {
         Write(path, original);
         Rewrite(path, [variant](Json& j) {
@@ -318,7 +322,7 @@ TEST_CASE("SDK memory_save: rehashed report forgeries cannot claim or erase save
     CHECK(trace->models == model_calls); CHECK(Read(journal) == original_journal); Write(path, original);
     // These are valid rehashed V3 files. The reader must accept them before the
     // SDK's adopted-result gate can prove that it rejects the forged linkage.
-    for (int variant = 0; variant != 3; ++variant) {
+    for (int variant = 0; variant != 13; ++variant) {
         CAPTURE(variant); Write(journal, original_journal);
         const auto forged = RehashLedger(original_journal, [&](std::vector<Json>& lines) {
             auto selection = std::find_if(lines.begin(), lines.end(), [&](const auto& line) {
@@ -331,6 +335,16 @@ TEST_CASE("SDK memory_save: rehashed report forgeries cannot claim or erase save
             if (variant == 0) (*selection)["turnId"] = other.front().turn_id;
             if (variant == 1) std::iter_swap(selection, message);
             if (variant == 2) (*message)["message"]["role"] = "user";
+            if (variant >= 3) {
+                const auto slot = (variant - 3) % 5;
+                const std::array<std::string, 5> ids{selected_id, tool_id, started->event_id,
+                    saved.front().requested_event_id, saved.front().receipted_event_id};
+                auto owner = std::find_if(lines.begin(), lines.end(), [&](const auto& line) {
+                    return line.value(slot == 1 ? "messageId" : "eventId", std::string()) == ids[slot];
+                });
+                REQUIRE(owner != lines.end());
+                (*owner)[variant < 8 ? "sessionId" : "runId"] = "foreign-owner";
+            }
         });
         Write(journal, forged);
         const auto readable = v3::ReadV3Ledger(journal);
@@ -342,6 +356,17 @@ TEST_CASE("SDK memory_save: rehashed report forgeries cannot claim or erase save
         if (variant == 0) CHECK(forged_selection->turn_id == other.front().turn_id);
         if (variant == 1) CHECK(forged_selection->seq > forged_message->seq);
         if (variant == 2) CHECK(forged_message->message.at("role").get<std::string>() == "user");
+        if (variant >= 3) {
+            const auto slot = (variant - 3) % 5;
+            if (slot == 1) {
+                CHECK((variant < 8 ? forged_message->session_id : forged_message->run_id) == "foreign-owner");
+            } else {
+                const std::array<std::string, 5> ids{selected_id, tool_id, started->event_id,
+                    saved.front().requested_event_id, saved.front().receipted_event_id};
+                const auto* forged_owner = readable->FindEvent(ids[slot]); REQUIRE(forged_owner);
+                CHECK((variant < 8 ? forged_owner->session_id : forged_owner->run_id) == "foreign-owner");
+            }
+        }
         REQUIRE(std::any_of(readable->revision_chains.begin(), readable->revision_chains.end(), [&](const auto& revision) {
             return std::find(revision.second.second.begin(), revision.second.second.end(), tool_id) != revision.second.second.end();
         }));

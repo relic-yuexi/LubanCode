@@ -383,8 +383,14 @@ Result<void> SessionMemoryWrite::ValidateReports(const std::string& operation, c
             }
         }
         if (!started) return bad("no actual save action");
+        // Continue preserves the file's original run, including same-ID SDK
+        // recovery. Keep duplicate-start detection above independent of owner
+        // validation so a foreign envelope cannot hide a second actual start.
+        if (started->session_id != source.session_id || started->run_id != source.run_id)
+            return bad("start owner");
         const auto* receipt = source.FindEvent(r.receipted_event_id);
         if (!receipt || receipt->kind != v3::EventKindV3::MemoryWriteReceipted || receipt->turn_id != turn ||
+            receipt->session_id != source.session_id || receipt->run_id != started->run_id ||
             receipt->action_id != r.action_id || receipt->seq <= started->seq ||
             receipt->payload.value("sdkMemoryWrite", Json()) != 1 || receipt->payload.value("operationId", Json()) != operation ||
             receipt->payload.value("attempt", Json()) != r.attempt || !receipt_ids.insert(receipt->event_id).second) return bad("receipt source");
@@ -396,6 +402,7 @@ Result<void> SessionMemoryWrite::ValidateReports(const std::string& operation, c
         } else {
             const auto* requested = source.FindEvent(r.requested_event_id);
             if (!requested || requested->kind != v3::EventKindV3::MemorySaveRequested || requested->turn_id != turn ||
+                requested->session_id != source.session_id || requested->run_id != started->run_id ||
                 requested->action_id != r.action_id || requested->seq <= started->seq || requested->seq >= receipt->seq ||
                 requested->payload.value("operationId", Json()) != operation || requested->payload.value("attempt", Json()) != r.attempt ||
                 requested->payload.value("sdkMemoryWrite", Json()) != 1 || requested->payload.value("commitKey", Json()) != r.commit_key ||
@@ -436,11 +443,13 @@ Result<void> SessionMemoryWrite::ValidateReports(const std::string& operation, c
         if (require_adopted) {
             bool adopted = false;
             for (const auto& message : source.messages) {
-                if (message.action_id != r.action_id || message.turn_id != turn || !message.result_selection_ref ||
+                if (message.session_id != source.session_id || message.run_id != started->run_id ||
+                    message.action_id != r.action_id || message.turn_id != turn || !message.result_selection_ref ||
                     message.message.value("role", Json()) != "tool" ||
                     message.message.value("tool_call_id", Json()) != r.action_id) continue;
                 const auto* selected = source.FindEvent(*message.result_selection_ref);
                 if (!selected || selected->kind != v3::EventKindV3::ToolResultSelected || selected->action_id != r.action_id ||
+                    selected->session_id != source.session_id || selected->run_id != started->run_id ||
                     selected->turn_id != turn || selected->payload.value("attempt", Json()) != r.attempt ||
                     selected->seq <= receipt->seq || selected->seq >= message.seq) continue;
                 for (const auto& [revision, chain] : source.revision_chains) {
