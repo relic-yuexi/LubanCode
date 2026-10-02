@@ -8,6 +8,7 @@
 - [SDK 项目 Memory 只读召回合同](sdk-memory-recall.md)
 - [项目 Memory 提交与回执合同](memory-project-commit.md)
 - [SDK 项目 Memory 正式保存合同](sdk-memory-save.md)
+- [SDK 存储、事件与策略 SPI 合同](sdk-storage-spi.md)：场束与独占租约、CAS/named 映射、有界事件流、策略归属及逐口交付门。
 - [后台子代理线程启动收口](agent-thread-start-cleanup.md)
 - [SDK 依赖瘦身：更新器归宿主](sdk-updater-boundary.md)
 - [测试指南](testing.md)
