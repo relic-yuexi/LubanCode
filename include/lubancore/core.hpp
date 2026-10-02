@@ -140,6 +140,7 @@ struct SessionOptions {
     int max_steps_per_turn = 0;
     std::size_t context_window_tokens = 128000;
 };
+// operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };
 enum class OperationState { Accepted, Running, Succeeded, Failed, Cancelled, Indeterminate };
 struct Operation {
@@ -212,6 +213,7 @@ public:
     Result<std::string> DescribeExtensions() const;
     Result<skills::v1::Snapshot> DescribeSkills() const;
     Result<memory::v1::Snapshot> DescribeMemory() const;
+    // Searches this Session only, even when another Session uses the same ID string.
     Result<memory::v1::RecallReport> GetMemoryRecall(const std::string& operation_id) const;
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
     // Cooperative custom tools/backends MUST return after cancellation; Close waits

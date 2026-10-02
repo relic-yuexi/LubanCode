@@ -13,6 +13,8 @@ Memory 根取 Runtime 的 data_root 和共有工作区门牌，不沿 HOME 发�
 每条新的人类 operation 只召回一次。查询取准入后实际输入，归属用本场 operation、
 turn 和 session。自动事件、恢复史与重复受理不重跑检索。缺库或零命中可交空报告；
 坏库、坏路径、读失败和超帽须明报，不能冒充零命中。
+operation_id 只在本场唯一，跨场可以同名。wire 须按 `(session_id, operation_id)`
+寻址；`GetMemoryRecall` 始终查这只 Session 的映射，同名不算跨场读取。
 
 默认 section 与正文预算为 8192 字节、3 条；参数上限为 65536 字节、32 条，完整上下文另限 128 KiB。
 读取另收固定帽：catalog 4 MiB，主题各 16 KiB，
@@ -29,6 +31,9 @@ catalog 只定条目名单，筛选、证据与排序均认实际 topic；严格
 护栏都须能从 V3 采用链重建，同轮不重复注入。逐条召回事实保留实际片段指纹，并引用
 完整段消息。片段最多 512 字节便内联，较大者沿共有 BlobStore 落内容寻址仓，采用前
 核真实 blob 字节与指纹。SDK 调中立账桥，不另搭运行栈。库后来变化只影响未来召回。
+已有 blob 损坏而本次快照准备失败时，不再调用模型，本次不采用 ContextRuntime 输入，
+也不落召回事实；旧采用史保留。报告如实记 failed 与 snapshot_failed，引用留空。
+账健康门已失败，操作须留 Indeterminate/result_persisted=false，不能冒称持久 Failed。
 
 本场计划与摘要归会话目录，绑定沿共有开场门聚合，保留 Skills 绑定。同 ID 恢复时，
 省略 Memory 参数沿存档；显式值须匹配。已有报告归 `sdk-memory-recalls`，按 operation

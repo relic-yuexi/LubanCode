@@ -35,7 +35,9 @@ struct Entry {
     std::string reason;
     std::size_t bytes = 0;
 };
-// Owned per-operation metadata. It contains no query or recalled source text.
+// Owned per-operation metadata. operation_id is scoped to session_id; wire
+// callers must address the (session_id, operation_id) pair. It contains no query
+// or recalled source text.
 // context_message_id identifies the complete, once-admitted V3 input snapshot.
 struct RecallReport {
     bool enabled = false;

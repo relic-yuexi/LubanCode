@@ -224,6 +224,8 @@ ExtensionRuntime、后台命令、远端 Worker 或 Node 结果同步已交付�
 宿主给 `SessionOptions::memory` 显式参数，再调 `DescribeMemory()` 查计划、
 `GetMemoryRecall(operation_id)` 查本场逐轮报告。同 ID 恢复省略参数便沿存档；
 正文、来源与护栏归入共有 V3 采用链。首笔不写 Memory、不起后台提取，原生验收仍待远端 CI。
+operation_id 只在 Session 内唯一，wire 按 `(session_id, operation_id)` 寻址。
+损坏 blob 拦住本次快照时，模型不再运行，未收稳完成账则留 Indeterminate，不能报持久失败。
 
 工具默认空表。可显式启用 `read_file`、`write_file`、`edit_file`、`run_command`、`search`，
 也可注入自定义工具，或按服务与工具名单挂 MCP。内置实现沿用共用装配，不另写一套工具。

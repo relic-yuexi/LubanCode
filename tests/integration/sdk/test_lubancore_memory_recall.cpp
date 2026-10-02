@@ -141,6 +141,19 @@ sdk::memory::v1::RecallReport Report(const std::shared_ptr<sdk::Session>& sessio
     CHECK(report->operation_id == receipt.operation_id);
     return *report;
 }
+bool SameReport(const sdk::memory::v1::RecallReport& actual, const sdk::memory::v1::RecallReport& expected) {
+    return actual.enabled == expected.enabled && actual.session_id == expected.session_id &&
+        actual.operation_id == expected.operation_id && actual.turn_id == expected.turn_id &&
+        actual.workspace_key == expected.workspace_key && actual.plan_sha256 == expected.plan_sha256 &&
+        actual.state == expected.state && actual.error == expected.error &&
+        actual.context_message_id == expected.context_message_id && actual.context_sha256 == expected.context_sha256 &&
+        actual.bytes == expected.bytes && actual.entries.size() == expected.entries.size() &&
+        std::equal(actual.entries.begin(), actual.entries.end(), expected.entries.begin(), [](const auto& a, const auto& b) {
+            return a.id == b.id && a.score == b.score && a.selected == b.selected && a.stale == b.stale &&
+                a.expired == b.expired && a.scope_blocked == b.scope_blocked && a.budget_dropped == b.budget_dropped &&
+                a.below_threshold == b.below_threshold && a.weak == b.weak && a.reason == b.reason && a.bytes == b.bytes;
+        });
+}
 void RewriteReport(const fs::path& path, const std::function<void(Json&)>& change) {
     auto envelope = Json::parse(Read(path));
     change(envelope["payload"]);
@@ -365,7 +378,7 @@ TEST_CASE("SDK Memory: same-ID resume preserves plans reports and immutable prio
 }
 
 TEST_CASE("SDK Memory: complete finals cannot claim missing forged downgraded or foreign reports") {
-    for (int variant = 0; variant < 7; ++variant) {
+    for (int variant = 0; variant < 9; ++variant) {
         Fixture fixture; Capture capture;
         auto runtime = sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime.has_value());
         auto session = (*runtime)->OpenSession(Options(fixture, capture.Function())); REQUIRE(session.has_value());
@@ -383,6 +396,8 @@ TEST_CASE("SDK Memory: complete finals cannot claim missing forged downgraded or
                 for (auto& entry : report["entries"]) entry["selected"] = false;
             }
             if (variant == 6) report["entries"][0]["reason"] = std::string(1, '\0');
+            if (variant == 7) report["sessionId"] = "other-session";
+            if (variant == 8) report["turnId"] = "other-turn";
         });
         auto options = Options(fixture, capture.Function()); options.resume_session_id = id; options.memory.reset(); options.system_prompt.clear();
         auto resumed = (*runtime)->OpenSession(std::move(options)); REQUIRE_FALSE(resumed.has_value());
@@ -402,12 +417,35 @@ TEST_CASE("SDK Memory: stale evidence blocks payload and corrupt fragment blobs 
     Seed(Memory(*session), "LARGE_FRAGMENT_MARKER " + std::string(800, 'x'));
     const auto receipt = Turn(*session, "blob"); const auto report = Report(*session, receipt);
     auto ledger = v3::ReadV3Ledger(Directory(*session) / ((*session)->id() + ".jsonl")); REQUIRE(ledger.has_value());
+    const auto* admitted = ledger->FindMessage(report.context_message_id); REQUIRE(admitted != nullptr);
+    const auto admitted_text = admitted->message.at("content").get<std::string>();
     std::string relative;
     for (const auto& event : ledger->events) if (event.kind == v3::EventKindV3::MemoryRecallInjected && event.turn_id == report.turn_id)
         relative = event.payload.at("snapshotRef").get<std::string>();
     REQUIRE_FALSE(relative.empty()); Write(Directory(*session) / lubancode::tools::Utf8ToPath(relative), "corrupt");
-    const auto bad = Report(*session, Turn(*session, "existing-bad-blob", kNeedle, sdk::OperationState::Failed));
-    CHECK(bad.state == "failed"); CHECK(bad.context_message_id.empty()); CHECK(capture.Calls() == 2);
+    const auto calls_before_failure = capture.Calls();
+    const auto bad_receipt = Turn(*session, "existing-bad-blob", kNeedle, sdk::OperationState::Indeterminate);
+    const auto bad = Report(*session, bad_receipt);
+    CHECK(bad.state == "failed"); CHECK(bad.error.starts_with("memory.recall.snapshot_failed:"));
+    CHECK(bad.context_message_id.empty()); CHECK(capture.Calls() == calls_before_failure); CHECK(calls_before_failure == 2);
+    auto operation = (*session)->ReadOperation(bad_receipt.operation_id); REQUIRE(operation.has_value());
+    REQUIRE_FALSE(operation->turn_id.empty()); CHECK(bad.turn_id == operation->turn_id);
+    CHECK(operation->state == sdk::OperationState::Indeterminate); CHECK_FALSE(operation->result_persisted);
+    auto after = v3::ReadV3Ledger(Directory(*session) / ((*session)->id() + ".jsonl")); REQUIRE(after.has_value());
+    CHECK(std::none_of(after->messages.begin(), after->messages.end(), [&](const auto& message) {
+        return message.turn_id == operation->turn_id && message.origin == v3::MessageOrigin::ContextRuntime;
+    }));
+    CHECK(std::none_of(after->events.begin(), after->events.end(), [&](const auto& event) {
+        return event.turn_id == operation->turn_id &&
+            (event.kind == v3::EventKindV3::MemoryRecallInjected || event.kind == v3::EventKindV3::ModelRequestPrepared);
+    }));
+    const auto* kept = after->FindMessage(report.context_message_id); REQUIRE(kept != nullptr);
+    CHECK(kept->message.at("content").get<std::string>() == admitted_text);
+    CHECK(lubancode::platform::Sha256Hex(admitted_text) == report.context_sha256);
+    CHECK(std::count_if(after->events.begin(), after->events.end(), [&](const auto& event) {
+        return event.turn_id == report.turn_id && event.kind == v3::EventKindV3::MemoryRecallInjected;
+    }) == 1);
+    CHECK(SameReport(Report(*session, receipt), report));
     REQUIRE((*runtime)->Shutdown().has_value());
 }
 
@@ -470,7 +508,10 @@ TEST_CASE("SDK Memory: four overlapping sessions isolate recall cancellation and
     for (int i = 0; i < 4; ++i) {
         auto operation = sessions[i]->WaitResult(receipts[i].operation_id, 30s); REQUIRE(operation.has_value());
         CHECK(operation->result_persisted); CHECK(operation->state == (i < 2 ? sdk::OperationState::Cancelled : sdk::OperationState::Succeeded));
-        CHECK(Report(sessions[i], receipts[i]).state == "admitted");
+        const auto own_report = Report(sessions[i], receipts[i]);
+        CHECK(own_report.state == "admitted");
+        const auto own_plan = Snapshot(sessions[i]);
+        CHECK(own_report.workspace_key == own_plan.workspace_key); CHECK(own_report.plan_sha256 == own_plan.plan_sha256);
         const auto request = captures[i].At(0);
         const auto body = Body(request);
         const std::string own_marker = i < 2 ? "SAME_PROJECT_MARKER" : "PROJECT_" + std::to_string(i) + "_MARKER";
@@ -480,7 +521,15 @@ TEST_CASE("SDK Memory: four overlapping sessions isolate recall cancellation and
         CHECK(request.model == "memory-model-" + std::to_string(i));
         for (int other = 0; other < 4; ++other)
             CHECK((request.system.find("MEMORY_USER_" + std::to_string(other)) != std::string::npos) == (other == i));
-        CHECK_FALSE(sessions[i]->GetMemoryRecall(receipts[(i + 1) % 4].operation_id).has_value());
+        // operation_id is local to each Session. Another Session may use the
+        // same string, which must still resolve to this Session's owned value.
+        const auto& other_id = receipts[(i + 1) % 4].operation_id;
+        const auto from_other_string = sessions[i]->GetMemoryRecall(other_id);
+        if (other_id == receipts[i].operation_id) {
+            REQUIRE(from_other_string.has_value());
+            CHECK(from_other_string->session_id == sessions[i]->id());
+            CHECK(SameReport(*from_other_string, own_report));
+        } else CHECK_FALSE(from_other_string.has_value());
         CHECK(sessions[i]->PendingApprovals().empty());
     }
     auto ledger = v3::ReadV3Ledger(Directory(sessions[3]) / (sessions[3]->id() + ".jsonl")); REQUIRE(ledger.has_value());
@@ -489,6 +538,18 @@ TEST_CASE("SDK Memory: four overlapping sessions isolate recall cancellation and
     CHECK(captures[3].At(0).system.find("fixture-paint") != std::string::npos);
     const auto request = captures[3].At(0);
     CHECK(std::none_of(request.tools.begin(), request.tools.end(), [](const auto& tool) { return tool.name == "memory_save"; }));
+    const auto second = Turn(sessions[2], "second-operation");
+    CHECK(second.operation_id != receipts[2].operation_id);
+    const auto second_report = Report(sessions[2], second);
+    CHECK(second_report.state == "admitted");
+    CHECK(second_report.workspace_key == Snapshot(sessions[2]).workspace_key);
+    CHECK(second_report.plan_sha256 == Snapshot(sessions[2]).plan_sha256);
+    CHECK(captures[2].Calls() == 2);
+    for (const int i : {0, 1, 3}) {
+        CHECK_FALSE(sessions[i]->ReadOperation(second.operation_id).has_value());
+        CHECK_FALSE(sessions[i]->GetMemoryRecall(second.operation_id).has_value());
+        CHECK(captures[i].Calls() == 1);
+    }
     CHECK(fs::current_path() == process_cwd);
     REQUIRE((*runtime)->Shutdown().has_value());
 }
