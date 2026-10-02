@@ -399,9 +399,12 @@ TEST_CASE("SDK Memory: complete finals cannot claim missing forged downgraded or
             if (variant == 7) report["sessionId"] = "other-session";
             if (variant == 8) report["turnId"] = "other-turn";
         });
+        const auto journal = file.parent_path().parent_path() / (id + ".jsonl");
+        const auto original_journal = Read(journal);
         auto options = Options(fixture, capture.Function()); options.resume_session_id = id; options.memory.reset(); options.system_prompt.clear();
         auto resumed = (*runtime)->OpenSession(std::move(options)); REQUIRE_FALSE(resumed.has_value());
-        CHECK(resumed.error().code.starts_with("sdk.memory.")); CHECK(capture.Calls() == 1);
+        CHECK(resumed.error().code == "sdk.memory.open_failed"); CHECK(capture.Calls() == 1);
+        CHECK(Read(journal) == original_journal);
         REQUIRE((*runtime)->Shutdown().has_value());
     }
 }

@@ -61,6 +61,14 @@ ProjectCommitReceipt CommitProjectUpsertWithCancellation(const ProjectCommitCont
 // confirms the existing result under the same lock and cannot start an upsert.
 ProjectCommitReceipt ConfirmProjectCommitReceipt(const std::filesystem::path& lifecycle_root,
                                                 const std::string& operation_id);
+// Existing immutable materials only: checks owner/request/stages/snapshot under
+// the project lock, but never creates memory/lifecycle/operation directories,
+// writes a receipt or a topic. The ordinary lock directory is created/released.
+// Result outcome is omitted: this read cannot confirm an earlier result flush.
+ProjectCommitReceipt InspectProjectCommitReceipt(const ProjectCommitContext& context,
+                                                 const SaveRequest& request);
+std::string ProjectCommitRequestSha256(const ProjectCommitContext& context,
+                                      const SaveRequest& request);
 
 // Deterministic phase failure tests may replace one write, preserving platform
 // outcomes. Production calls the overload above; no global injection state.

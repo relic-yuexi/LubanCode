@@ -20,6 +20,7 @@ REQUIRED = {
     "sdk.focused.lubancore_extensions",
     "sdk.focused.lubancore_skills",
     "sdk.focused.lubancore_memory_recall",
+    "sdk.focused.lubancore_memory_save",
     "sdk.focused.lubancore_results",
     "sdk.focused.lubancore_result_projection",
     "sdk.focused.session_resources",
@@ -82,6 +83,8 @@ def main():
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])
+        if case.attrib["name"] == "sdk.focused.lubancore_memory_save" and int(counts[0]) != 12:
+            raise RuntimeError("SDK memory-save native roster differs from 12 cases")
     print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
 
 

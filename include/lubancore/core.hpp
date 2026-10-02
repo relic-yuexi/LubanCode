@@ -128,6 +128,8 @@ struct SessionOptions {
     // Explicit trusted project recall. Empty defaults off; on resume it preserves
     // the saved Memory plan. An explicit resume value must match that plan.
     std::optional<memory::v1::RecallOptions> memory;
+    // Omitted is off for a new Session, or inherits the frozen resume plan.
+    std::optional<memory::v1::WriteOptions> memory_write;
     // Explicit trusted C++ registrations, frozen per session until Close.
     std::vector<extensions::v1::Registration> extensions;
     // Outbound result projection identity. New sessions default to Preview/v1;
@@ -215,6 +217,9 @@ public:
     Result<memory::v1::Snapshot> DescribeMemory() const;
     // Searches this Session only, even when another Session uses the same ID string.
     Result<memory::v1::RecallReport> GetMemoryRecall(const std::string& operation_id) const;
+    Result<memory::v1::WriteSnapshot> DescribeMemoryWrite() const;
+    // Pure owned values after operation completion, including after Close.
+    Result<std::vector<memory::v1::SaveReport>> GetMemorySaves(const std::string& operation_id) const;
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
     // Cooperative custom tools/backends MUST return after cancellation; Close waits
     // for them and never destroys live borrowed state or pretends a timeout stopped it.

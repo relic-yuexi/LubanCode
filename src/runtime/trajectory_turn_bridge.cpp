@@ -2279,6 +2279,16 @@ std::optional<TrajectoryTurnBridge::V3CallOrigin> TrajectoryTurnBridge::V3Declar
     return origin;
 }
 
+std::optional<std::pair<std::string, std::uint64_t>> TrajectoryTurnBridge::V3ExecutingCallIdentity(
+    const std::string& provider_call_id) const {
+    if (!V3Mode() || !v3_turn_ || !v3_books_) return std::nullopt;
+    std::lock_guard lock(*v3_books_->tool_results_mutex);
+    const auto it = v3_turn_->calls.find(provider_call_id);
+    if (it == v3_turn_->calls.end() || !it->second.started || it->second.terminal ||
+        !it->second.action) return std::nullopt;
+    return std::pair{it->second.action_id, it->second.action->attempt()};
+}
+
 std::optional<std::string> TrajectoryTurnBridge::V3ReservedAssistantMessageId(
     const std::string& request_id) const {
     if (!V3Mode() || v3_turn_ == nullptr) {

@@ -31,6 +31,7 @@
 
 #include "memory/project_memory.hpp"
 #include "runtime/trajectory_session.hpp"
+#include "tools/tool.hpp"
 
 namespace lubancode::runtime {
 
@@ -46,6 +47,12 @@ public:
         const memory::InjectedMemoryRecord& record) override;
     std::string RecordSaveRequested(const memory::SaveLedgerNote& note) override;
     std::string current_session_id() const override;
+    struct SaveRequestReceipt { std::string event_id, source_event_ref; };
+    std::expected<SaveRequestReceipt, std::string> RecordSaveRequestedStrict(
+        const tools::ToolInvocationIdentity& invocation, const nlohmann::json& normalized_request,
+        const std::string& save_request_sha256, const std::string& commit_key);
+    std::expected<std::string, std::string> RecordSaveReceiptStrict(
+        const tools::ToolInvocationIdentity& invocation, const nlohmann::json& receipt);
 
     struct ContextAdmission {
         api::Message message;

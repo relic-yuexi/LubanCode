@@ -235,6 +235,9 @@ struct ToolCallFrame {
     EffectClass effect_class = EffectClass::InProcessUnknown;
     // 最终参数(PreToolUse 改写并过 schema 复检后的 effective input)。
     nlohmann::json effective_input;
+    // Host callbacks stay on the main thread. Resolve after durable started,
+    // then send only this owned snapshot to an execution worker.
+    tools::ToolInvocationIdentity invocation;
 };
 
 // 每条收尾路共用的分发口:先清洗,再 on_tool_done,清洗版随返回值交给
@@ -732,6 +735,10 @@ std::optional<tools::Tool::Result> MarkExecutionStarted(ToolCallFrame& frame) {
         // 走展示与返回,不再发第二枚。
         return DispatchDone(frame, std::move(blocked_by_trace));
     }
+    if (frame.wiring.tool_invocation_identity) {
+        auto identity = frame.wiring.tool_invocation_identity(frame.call.id);
+        if (identity) frame.invocation = std::move(*identity);
+    }
     return std::nullopt;
 }
 
@@ -742,8 +749,9 @@ std::optional<tools::Tool::Result> MarkExecutionStarted(ToolCallFrame& frame) {
 // 件)置位即收,不再等到超时。不碰 session/history/终端 UI——完成件由
 // 阶段四在主线程收口。
 tools::Tool::Result ExecuteApprovedTool(const ToolCallFrame& frame) {
-    return frame.tool->execute(frame.effective_input,
-                               tools::ToolExecutionContext{frame.cancel, frame.wiring.tool_artifact_dir});
+    tools::ToolExecutionContext context{frame.cancel, frame.wiring.tool_artifact_dir};
+    context.invocation = frame.invocation;
+    return frame.tool->execute(frame.effective_input, context);
 }
 
 // 阶段四(主线程):接完成信封收口。
@@ -771,6 +779,7 @@ tools::Tool::Result CompleteToolCall(ToolCallFrame& frame, tools::Tool::Result r
             tools::Tool::Result failed{"Tool capture persistence failed: " + receipt.error_code, true};
             failed.outcome = ToString(ToolOutcome::ResultStoreFailed);
             failed.error_code = receipt.error_code;
+            failed.execution_control = result.execution_control;
             return DispatchDone(frame, std::move(failed));
         }
     }
@@ -894,6 +903,8 @@ struct ParallelReadSegmentRun {
     std::vector<std::optional<api::ToolResultBlock>>& ordered_results;
     const std::atomic<bool>* cancel = nullptr;
     bool& interrupted;
+    bool& side_effect_indeterminate;
+    std::string& side_effect_error;
     // 门禁材料:直呼与代理两路各自的过滤谓词与拒文(P1 拆链后的同一套)。
     const std::function<bool(const tools::Tool&)>& tool_filter;
     const std::string& filter_denial;
@@ -1033,6 +1044,10 @@ void RunParallelReadSegment(ParallelReadSegmentRun& ctx, std::size_t begin, std:
             return CompleteToolCall(*slot->frame, std::move(raw));
         }();
         ctx.ordered_results[slot->index] = MakeToolResultBlock(ctx.batch_calls[slot->index].id, result);
+        if (result.execution_control == tools::ExecutionControl::StopIndeterminate) {
+            ctx.side_effect_indeterminate = true;
+            ctx.side_effect_error = result.error_code + ": " + result.content;
+        }
         if (ctx.cancel != nullptr && ctx.cancel->load()) {
             ctx.interrupted = true;
         }
@@ -2693,6 +2708,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
         bool interrupted = false;
+        bool side_effect_indeterminate = false;
+        std::string side_effect_error;
         // 结果按声明序入账(声明序即配对序):接单块占其位,native 欠账
         // 留空(ToolBatchPairingMatches 认 async_call 位)。
         std::vector<std::optional<api::ToolResultBlock>> ordered_results(batch_calls.size());
@@ -2787,14 +2804,15 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         const auto run_exclusive_call_at = [&](std::size_t i) {
             const int tool_index = static_cast<int>(i);
             const api::ToolUseBlock& call = batch_calls[i];
-            if (interrupted || (cancel != nullptr && cancel->load())) {
-                interrupted = true;
+            if (side_effect_indeterminate || interrupted || (cancel != nullptr && cancel->load())) {
+                if (!side_effect_indeterminate) interrupted = true;
                 // 未轮到便被 ESC 收掉:记 cancelled_before_start 终态栅栏
                 // (单子生命周期规矩),不冒充执行过。
                 if (trace_armed) {
                     ToolTraceEvent cancelled;
                     cancelled.kind = ToolTraceEventKind::ExecutionFinished;
-                    cancelled.outcome = ToolOutcome::CancelledBeforeStart;
+                    cancelled.outcome = side_effect_indeterminate ? ToolOutcome::ToolError : ToolOutcome::CancelledBeforeStart;
+                    if (side_effect_indeterminate) cancelled.error_code = "tool.not_started_after_indeterminate";
                     cancelled.batch_id = batch_id;
                     cancelled.turn_id = wiring.turn_id;
                     cancelled.sequence_in_batch = tool_index;
@@ -2805,7 +2823,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     wiring.on_tool_trace(cancelled);
                 }
                 ordered_results[i] =
-                    api::ToolResultBlock{call.id, "用户按 ESC 打断,该工具未执行", true};
+                    api::ToolResultBlock{call.id, side_effect_indeterminate
+                        ? "Previous side effect is unconfirmed; this tool was not executed."
+                        : "用户按 ESC 打断,该工具未执行", true};
                 return;
             }
             ToolTraceContext trace_ctx;
@@ -2872,6 +2892,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 // 配对的是 wire 那枚 tool_invoke 的 id;断言式兜底与富结果
                 // 投影同下(见 MakeToolResultBlock)。
                 ordered_results[i] = MakeToolResultBlock(call.id, result);
+                if (result.execution_control == tools::ExecutionControl::StopIndeterminate) {
+                    side_effect_indeterminate = true;
+                    side_effect_error = result.error_code + ": " + result.content;
+                }
                 if (cancel != nullptr && cancel->load()) {
                     interrupted = true;
                 }
@@ -2888,6 +2912,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             //(文本结果 blocks 为空,行为与从前一字不差);投影里图片/音频
             // 是 artifact 短句,四家 wire 吃它作文本降级。
             ordered_results[i] = MakeToolResultBlock(call.id, result);
+            if (result.execution_control == tools::ExecutionControl::StopIndeterminate) {
+                side_effect_indeterminate = true;
+                side_effect_error = result.error_code + ": " + result.content;
+            }
             if (cancel != nullptr && cancel->load()) {
                 interrupted = true;
             }
@@ -2897,7 +2925,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 ++i;  // 第一遍已接单/留欠账
                 continue;
             }
-            if (parallel_reads_armed && parallel_probes[i].eligible) {
+            if (!side_effect_indeterminate && parallel_reads_armed && parallel_probes[i].eligible) {
                 // 连续读段:[i, segment_end) 全员可并行;段后头一枚必是独占
                 // 节点或批次尾(§一调度合同:读段全收口才跑独占节点)。
                 std::size_t segment_end = i;
@@ -2918,6 +2946,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     ordered_results,
                     cancel,
                     interrupted,
+                    side_effect_indeterminate,
+                    side_effect_error,
                     tool_filter_,
                     tool_filter_denial_,
                     tool_execution_policy_,
@@ -3133,6 +3163,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         if (!batch_capacity_error.empty()) {
             return std::unexpected("新工具结果整批预算未通过；结果已交持久化，不重跑、不发超限请求: " +
                                    batch_capacity_error);
+        }
+        if (side_effect_indeterminate) {
+            RunOutcome stopped{false, false, false, last_stop_reason, steps_used};
+            stopped.side_effect_indeterminate = true;
+            stopped.side_effect_error = std::move(side_effect_error);
+            return stopped;
         }
         if (interrupted) {
             return RunOutcome{true, false, false, last_stop_reason, steps_used};
