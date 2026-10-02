@@ -35,7 +35,21 @@ REQUIRED = {
     "sdk.focused.child_history_adoption",
     "sdk.focused.scoped_turn_bindings",
     "sdk.focused.atomic_write",
+    "sdk.focused.v3_result_store",
 }
+
+
+def check_result_store_native(native_section: str, platform_name: str):
+    counts = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", native_section)
+    if len(counts) != 1 or tuple(map(int, counts[0])) != (17, 17, 0):
+        raise RuntimeError("Result-store native roster differs from 17 successful cases")
+    if platform_name != "nt":
+        return
+    for name, target, temporary in (("target-extended", 340, 344), ("temporary-threshold", 247, 251)):
+        marker = "[result-store-path] " + name
+        lengths = f"[result-store-path-length] {name} target={target} temporary={temporary}"
+        if native_section.splitlines().count(marker) != 1 or native_section.splitlines().count(lengths) != 1:
+            raise RuntimeError("Result-store actual Windows path did not finish once: " + name)
 
 
 def main():
@@ -91,6 +105,8 @@ def main():
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])
+        if case.attrib["name"] == "sdk.focused.v3_result_store":
+            check_result_store_native(sections[0], os.name)
         if case.attrib["name"] == "sdk.focused.lubancore_memory_save" and int(counts[0]) != 12:
             raise RuntimeError("SDK memory-save native roster differs from 12 cases")
         if case.attrib["name"] == "sdk.focused.execution_owner" and int(counts[0]) != 7:
