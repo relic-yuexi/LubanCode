@@ -95,6 +95,21 @@ TEST_CASE("child parent observation reaches the next real prepared request throu
     for (const auto& message : source.messages)
         if (message.action_id == observed->action_id && message.message.value("role", std::string()) == "tool") tool = &message;
     REQUIRE(selected != nullptr); REQUIRE(tool != nullptr);
+    const auto& source_refs = selected->payload.at("sourceResultEventRefs");
+    REQUIRE(source_refs.size() == 2);
+    const auto* raw = source.FindEvent(source_refs.front().get<std::string>());
+    REQUIRE(raw != nullptr);
+    const auto& raw_refs = raw->payload.at("result_ref");
+    REQUIRE(raw_refs.size() == 2); // Actual metadata and combined bytes, without a fabricated empty channel.
+    const auto metadata = std::find_if(raw_refs.begin(), raw_refs.end(), [](const auto& ref) {
+        return ref.value("kind", std::string()) == "result_metadata";
+    });
+    REQUIRE(metadata != raw_refs.end());
+    const auto stored = nlohmann::json::parse(Read(directory.root /
+        platform::Utf8ToPath(metadata->at("path").get<std::string>())));
+    REQUIRE(stored.at("outputs").size() == 1);
+    CHECK(stored.at("outputs").front().at("channel").get<std::string>() == "combined");
+    CHECK(stored.at("content").get<std::string>() == rig.raw_child_text);
     CHECK(observed->seq < selected->seq); CHECK(selected->seq < tool->seq);
     REQUIRE(tool->result_selection_ref.has_value()); CHECK(*tool->result_selection_ref == selected->event_id);
     for (const auto& parent_ref : selected->payload.at("sourceResultEventRefs")) {
