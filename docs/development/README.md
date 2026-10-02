@@ -10,6 +10,7 @@
 - [Memory worker 争锁与更新失败诊断](memory-worker-contention-diagnostics.md)
 - [SDK 项目 Memory 正式保存合同](sdk-memory-save.md)
 - [SDK 子 Agent 首批合同](sdk-subagents.md)
+- [SDK 前台子 Agent 公开装配合同](sdk-subagent-assembly.md)
 - [子代理终态回执合同](child-terminal-receipt.md)
 - [Runner 就绪探针与失败原件](runner-probe-evidence.md)
 - [后台子代理线程启动收口](agent-thread-start-cleanup.md)
