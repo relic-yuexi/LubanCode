@@ -19,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "app_server/dispatcher.hpp"
@@ -48,6 +49,15 @@ public:
     // 出站口:事件往这里发(服务层与测试用)。must_keep 分型见
     // outbox.hpp 的 EventMustKeep——这里按 method 自动分型,调用方不用记。
     void EmitEvent(std::string_view method, const nlohmann::json& params);
+
+    // Test scheduling seam: configure before any publisher starts. Called
+    // after a frame enters the outbox, outside all connection/outbox locks.
+    // The observer must not throw and may borrow params only during the call.
+    // Production leaves this empty; the writer thread is not this callback.
+    void SetEventQueuedObserverForTest(
+        std::function<void(std::string_view, const nlohmann::json&)> observer) {
+        event_queued_observer_for_test_ = std::move(observer);
+    }
 
     // 反向请求响应的落点(阶段 2):装配层给,HandleResponse 的配对走
     // 它。返回值约定见 DispatchContext::resolve_interaction。
@@ -84,6 +94,7 @@ private:
     BoundedOutbox outbox_;
     LineFramer framer_;
     std::function<std::string(const IncomingResponse&)> resolve_interaction_;
+    std::function<void(std::string_view, const nlohmann::json&)> event_queued_observer_for_test_;
     std::string principal_ = "user"; // 见 SetPrincipal:内核按连接盖的身份章
     std::atomic<bool> closed_{false};
     std::atomic<bool> close_requested_{false};

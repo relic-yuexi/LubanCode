@@ -95,6 +95,48 @@ class BoundaryTests(unittest.TestCase):
         self.targets[-1]["name"] = "lubancore_sdk_tests"
         self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
 
+    def add_search_probe(self):
+        self.source_file(boundary.SEARCH_PROBE_SOURCE, "int main() { return 0; }\n")
+        probe = {"id": "probe", "name": boundary.SEARCH_PROBE_TARGET, "type": "EXECUTABLE",
+                 "sources": [{"path": boundary.SEARCH_PROBE_SOURCE, "compileGroupIndex": 0}],
+                 "compileGroups": [{}]}
+        self.targets.append(probe)
+        return probe
+
+    def test_search_probe_is_only_a_testing_on_isolated_executable(self):
+        probe = self.add_search_probe()
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        probe["type"] = "STATIC_LIBRARY"
+        self.assert_rejected(self.check(testing=True), "executable target")
+
+    def test_search_probe_cannot_broaden_its_source_allowance(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_search_probe()
+        other = "tests/support/unrelated_probe.cpp"
+        self.source_file(other, "int other;\n")
+        probe["sources"].append({"path": other, "compileGroupIndex": 0})
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_search_probe_cannot_link_runtime_or_enter_sdk_closure(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_search_probe()
+        probe["dependencies"] = [{"id": "engine"}]
+        self.assert_rejected(self.check(testing=True), "must not depend")
+        probe.pop("dependencies")
+        self.targets[0]["dependencies"].append({"id": "probe"})
+        self.assert_rejected(self.check(testing=True), "SDK library depends")
+
+    def test_search_probe_allows_only_the_cmake_regeneration_utility(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_search_probe()
+        self.targets.append({"id": "zero", "name": "ZERO_CHECK", "type": "UTILITY"})
+        probe["dependencies"] = [{"id": "zero"}]
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        self.targets[-1]["name"] = "other_utility"
+        self.assert_rejected(self.check(testing=True), "must not depend")
+
     def test_unbuilt_host_target_cannot_hide_behind_exclude_from_all(self):
         target = {"id": "host", "type": "UTILITY"}
         self.targets.append(target)

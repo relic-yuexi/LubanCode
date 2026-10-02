@@ -19,16 +19,18 @@ import sys
 
 CLIENT = "client-lubancore-boundary"
 HOST_TARGETS = {
-    "lubancode", "lubancode_core", "lubancode_app", "lubancode_tests", "lubancore_host_tests",
+    "lubancode", "lubancode_core", "lubancode_updater", "miniz", "lubancode_app", "lubancode_tests", "lubancore_host_tests",
     "lubancode_official_skills", "lubancode_official_docs", "lubancode_assistant_web",
 }
-HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/")
+HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/", "src/updater/")
 SHARED_SDK_TEST_SOURCES = {
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",
     "tests/unit/runtime/test_session_execution.cpp",
     "tests/unit/runtime/test_scoped_turn_bindings.cpp",
 }
+SEARCH_PROBE_TARGET = "lubancore_sdk_search_probe"
+SEARCH_PROBE_SOURCE = "tests/support/sdk_search_probe.cpp"
 TERMINAL_PATH = re.compile(r"^src/platform/(?:console|clipboard|hidden_input|terminal_batch)(?:[_.]|$)")
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"\n]+)[>"]', re.MULTILINE)
 # Keep strings intact while removing comments; URL/regex literals are not comments.
@@ -155,9 +157,10 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         if name.startswith("tests/"):
             if not expect_testing:
                 violations.append(f"testing is OFF but target {owner} includes {name}")
-            elif owner != "lubancore_sdk_tests" or not (
-                    name.startswith(("tests/integration/sdk/", "tests/unit/sdk/", "tests/support/")) or
-                    name in SHARED_SDK_TEST_SOURCES):
+            elif not ((owner == SEARCH_PROBE_TARGET and name == SEARCH_PROBE_SOURCE) or
+                      (owner == "lubancore_sdk_tests" and name != SEARCH_PROBE_SOURCE and (
+                          name.startswith(("tests/integration/sdk/", "tests/unit/sdk/", "tests/support/")) or
+                          name in SHARED_SDK_TEST_SOURCES))):
                 violations.append(f"non-SDK test compilation: target {owner} includes {name}")
 
     for reference in configurations[0].get("targets", []):
@@ -202,6 +205,20 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
             "artifacts": [entry["path"] for entry in target.get("artifacts", [])],
             "includeDirectories": [[str(path) for path in paths] for paths in include_groups],
         }
+        if target["name"] == SEARCH_PROBE_TARGET:
+            if not expect_testing or target["type"] != "EXECUTABLE":
+                violations.append("search probe requires testing ON and an executable target")
+            compiled = {entry["projectPath"] for entry in source_facts if entry["compiled"]}
+            if compiled != {SEARCH_PROBE_SOURCE}:
+                violations.append("search probe must compile only its isolated fixture")
+    for target in targets.values():
+        if target["name"] == SEARCH_PROBE_TARGET:
+            for dependency in target["dependencies"]:
+                # Visual Studio can add CMake's regeneration utility. It is not
+                # a linked SDK/runtime dependency and contains no probe code.
+                linked = targets.get(dependency, {})
+                if linked.get("name") != "ZERO_CHECK" or linked.get("type") != "UTILITY":
+                    violations.append("search probe must not depend on a project library or host target")
     sdk = [target_id for target_id, target in targets.items() if target["name"] == "lubancore_sdk"]
     if len(sdk) != 1 or targets[sdk[0]]["type"] != "SHARED_LIBRARY":
         violations.append("expected exactly one shared lubancore_sdk target")
@@ -215,6 +232,8 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
             raise ValueError(f"unknown build dependency {target_id}")
         sdk_closure.add(target_id)
         pending.extend(targets[target_id]["dependencies"])
+    if any(targets[target_id]["name"] == SEARCH_PROBE_TARGET for target_id in sdk_closure):
+        violations.append("SDK library depends on the private search probe")
     sdk_sources = sorted({entry["projectPath"] for target_id in sdk_closure
                           for entry in targets[target_id]["sources"]
                           if entry["projectPath"] and entry["projectPath"].startswith("src/")})

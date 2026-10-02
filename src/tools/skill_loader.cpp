@@ -1,15 +1,20 @@
 #include "tools/skill_loader.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <fstream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string_view>
 
 #include <yaml-cpp/yaml.h>
 
 #include "platform/sha256.hpp"
+#include "platform/paths.hpp"
+#include "platform/text_encoding.hpp"
 #include "tools/path_utils.hpp"
 #include "platform/log_sink.hpp"
 
@@ -97,6 +102,53 @@ std::optional<ParsedSkillFile> ParseLooseFrontmatter(const std::string& frontmat
     return result;
 }
 
+struct SkillMarkdownParts {
+    bool has_frontmatter = false;
+    std::string frontmatter;
+    std::string body;
+};
+
+std::optional<SkillMarkdownParts> SplitSkillMarkdown(const std::string& content) {
+    if (content.rfind("---", 0) != 0) return SkillMarkdownParts{false, {}, content};
+    const auto first_end = content.find('\n');
+    if (TrimTrailingCr(first_end == std::string::npos ? content : content.substr(0, first_end)) != "---")
+        return SkillMarkdownParts{false, {}, content};
+    const auto begin = first_end == std::string::npos ? content.size() : first_end + 1;
+    for (auto pos = begin; pos <= content.size();) {
+        const auto end = content.find('\n', pos);
+        if (TrimTrailingCr(content.substr(pos, end == std::string::npos ? end : end - pos)) == "---") {
+            return SkillMarkdownParts{true, content.substr(begin, pos - begin),
+                end == std::string::npos ? std::string() : content.substr(end + 1)};
+        }
+        if (end == std::string::npos) break;
+        pos = end + 1;
+    }
+    return std::nullopt;
+}
+
+bool ValidSkillText(const std::string& text) {
+    return text.find('\0') == std::string::npos && platform::IsValidUtf8(text);
+}
+
+bool StrictYamlString(const YAML::Node& node) {
+    if (!node.IsScalar()) return false;
+    const auto tag = node.Tag();
+    if (tag == "!" || tag == "tag:yaml.org,2002:str") return true;
+    if (tag != "?") return false;
+    // Quoted and explicitly tagged strings stay strings. Do not silently
+    // coerce plain bool/numeric values into tool names or descriptions.
+    bool boolean = false;
+    double number = 0;
+    std::int64_t integer = 0;
+    return !YAML::convert<bool>::decode(node, boolean) &&
+           !YAML::convert<double>::decode(node, number) &&
+           !YAML::convert<std::int64_t>::decode(node, integer);
+}
+
+SkillFileError SkillError(std::string code, std::string message) {
+    return {std::move(code), std::move(message)};
+}
+
 void WarnCollision(const SkillMeta& previous, const SkillMeta& replacement) {
     platform::LogSink::Instance().Warn(
         "skills", "同名技能 " + replacement.name + " 冲突，采用 " + replacement.dir_path + "，遮住 " +
@@ -134,50 +186,11 @@ std::size_t Utf8CharacterCount(const std::string& text) {
 
 std::optional<ParsedSkillFile> ParseSkillMarkdown(const std::string& content) {
     ParsedSkillFile result;
-
-    // 内容压根不是以 "---" 起头的一行,视为"没有 frontmatter",body 就是
-    // 整篇原文,不算错。
-    if (content.rfind("---", 0) != 0) {
-        result.body = content;
-        return result;
-    }
-
-    const std::size_t first_line_end = content.find('\n');
-    const std::string first_line =
-        TrimTrailingCr((first_line_end == std::string::npos) ? content : content.substr(0, first_line_end));
-    if (first_line != "---") {
-        // 第一行长得像 "---xxx" 但不是单独一个 "---",不算 frontmatter 定界符。
-        result.body = content;
-        return result;
-    }
-
-    std::size_t pos = (first_line_end == std::string::npos) ? content.size() : first_line_end + 1;
-    const std::size_t frontmatter_begin = pos;
-    std::size_t close_begin = std::string::npos;
-    std::size_t close_line_end = std::string::npos;
-
-    while (pos <= content.size()) {
-        const std::size_t line_end = content.find('\n', pos);
-        const std::string raw_line = (line_end == std::string::npos) ? content.substr(pos) : content.substr(pos, line_end - pos);
-        if (TrimTrailingCr(raw_line) == "---") {
-            close_begin = pos;
-            close_line_end = line_end;
-            break;
-        }
-        if (line_end == std::string::npos) {
-            break;
-        }
-        pos = line_end + 1;
-    }
-
-    if (close_begin == std::string::npos) {
-        // 起了 --- 头,却找不到闭合的 ---:frontmatter 损坏,调用方该跳过
-        // 整个技能。
-        return std::nullopt;
-    }
-
-    const std::string frontmatter = content.substr(frontmatter_begin, close_begin - frontmatter_begin);
-    result.body = (close_line_end == std::string::npos) ? std::string() : content.substr(close_line_end + 1);
+    const auto parts = SplitSkillMarkdown(content);
+    if (!parts) return std::nullopt;
+    result.body = parts->body;
+    if (!parts->has_frontmatter) return result;
+    const auto& frontmatter = parts->frontmatter;
 
     try {
         const YAML::Node root = YAML::Load(frontmatter);
@@ -215,6 +228,256 @@ std::optional<ParsedSkillFile> ParseSkillMarkdown(const std::string& content) {
         // 接入指南特意建议宽容这类旧件。只回退顶层 name/description，
         // 不拿这条小路冒充完整 YAML 解析器。
         return ParseLooseFrontmatter(frontmatter, std::move(result.body));
+    }
+}
+
+std::expected<ParsedSkillFile, SkillFileError> ParseSkillMarkdownStrict(const std::string& content) {
+    if (content.size() > StrictSkillLimits::file_bytes)
+        return std::unexpected(SkillError("skill.file.limit", "SKILL.md exceeds the whole-file byte limit"));
+    if (!ValidSkillText(content))
+        return std::unexpected(SkillError("skill.text.invalid", "SKILL.md must be UTF-8 without NUL"));
+    const auto parts = SplitSkillMarkdown(content);
+    if (!parts || !parts->has_frontmatter)
+        return std::unexpected(SkillError("skill.frontmatter.invalid", "SKILL.md requires closed frontmatter"));
+    if (parts->frontmatter.size() > StrictSkillLimits::frontmatter_bytes)
+        return std::unexpected(SkillError("skill.frontmatter.limit", "Skill frontmatter exceeds 16 KiB"));
+    try {
+        const auto root = YAML::Load(parts->frontmatter);
+        if (!root.IsMap())
+            return std::unexpected(SkillError("skill.frontmatter.invalid", "Skill frontmatter must be a map"));
+        std::set<std::string> keys;
+        for (const auto entry : root) {
+            if (!entry.first.IsScalar())
+                return std::unexpected(SkillError("skill.frontmatter.invalid", "Skill frontmatter keys must be scalars"));
+            const auto key = entry.first.as<std::string>();
+            if (!keys.insert(key).second)
+                return std::unexpected(SkillError("skill.frontmatter.duplicate", "Duplicate skill frontmatter key: " + key));
+        }
+        if (!StrictYamlString(root["name"]) || !StrictYamlString(root["description"]))
+            return std::unexpected(SkillError("skill.metadata.invalid", "Skill name and description must be strings"));
+        ParsedSkillFile result;
+        result.name = root["name"].as<std::string>();
+        result.description = Trim(root["description"].as<std::string>());
+        result.body = parts->body;
+        if (!IsValidAgentSkillName(*result.name) || !ValidSkillText(*result.description) ||
+            result.description->empty() || Utf8CharacterCount(*result.description) > 1024)
+            return std::unexpected(SkillError("skill.metadata.invalid", "Invalid skill name or description"));
+        const auto dependencies = root["requires-tools"];
+        if (dependencies) {
+            if (!dependencies.IsSequence() || dependencies.size() > 64)
+                return std::unexpected(SkillError("skill.dependencies.invalid", "requires-tools must contain at most 64 strings"));
+            std::vector<std::string> names;
+            std::set<std::string> seen;
+            for (const auto item : dependencies) {
+                if (!StrictYamlString(item))
+                    return std::unexpected(SkillError("skill.dependencies.invalid", "requires-tools entries must be strings"));
+                auto name = item.as<std::string>();
+                if (name.empty() || name.size() > 512 || !ValidSkillText(name) || Trim(name) != name ||
+                    !seen.insert(name).second)
+                    return std::unexpected(SkillError("skill.dependencies.invalid", "Invalid or duplicate requires-tools entry"));
+                names.push_back(std::move(name));
+            }
+            result.requires_tools = std::move(names);
+        }
+        return result;
+    } catch (const YAML::Exception&) {
+        return std::unexpected(SkillError("skill.frontmatter.invalid", "Invalid skill YAML; strict mode has no fallback"));
+    }
+}
+
+std::expected<std::string, SkillFileError> ReadSkillFileBounded(const std::filesystem::path& path,
+                                                             std::size_t max_bytes,
+                                                             std::size_t* actual_bytes_read) {
+    if (actual_bytes_read) *actual_bytes_read = 0;
+    if (max_bytes > StrictSkillLimits::file_bytes)
+        return std::unexpected(SkillError("skill.file.limit", "Invalid skill read budget"));
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(platform::FileIoPath(path), ec) || ec)
+        return std::unexpected(SkillError("skill.file.invalid", "Skill source is not a readable regular file"));
+    std::ifstream file(platform::FileIoPath(path), std::ios::binary);
+    if (!file) return std::unexpected(SkillError("skill.file.read_failed", "Cannot open skill source"));
+    std::string content;
+    std::array<char, 8192> buffer{};
+    while (content.size() <= max_bytes) {
+        const auto count = std::min(buffer.size(), max_bytes + 1 - content.size());
+        file.read(buffer.data(), static_cast<std::streamsize>(count));
+        content.append(buffer.data(), static_cast<std::size_t>(file.gcount()));
+        if (actual_bytes_read) *actual_bytes_read = content.size();
+        if (content.size() > max_bytes)
+            return std::unexpected(SkillError("skill.file.limit", "Skill source exceeds the actual-byte read limit"));
+        if (file.bad() || (file.fail() && !file.eof()))
+            return std::unexpected(SkillError("skill.file.read_failed", "Cannot finish reading skill source"));
+        if (file.eof()) break;
+    }
+    if (!ValidSkillText(content))
+        return std::unexpected(SkillError("skill.text.invalid", "Skill source must be UTF-8 without NUL"));
+    return content;
+}
+
+bool StrictSkillPathWithin(const std::filesystem::path& child, const std::filesystem::path& root) {
+    if (!child.is_absolute() || !root.is_absolute()) return false;
+    const auto normalized_child = child.lexically_normal();
+    const auto normalized_root = root.lexically_normal();
+    auto item = normalized_child.begin();
+    for (const auto& component : normalized_root) {
+        if (item == normalized_child.end() || *item != component) return false;
+        ++item;
+    }
+    return true;
+}
+
+std::expected<StrictSkillPaths, SkillFileError> ResolveStrictSkillPaths(
+    const SkillMeta& meta, const StrictSkillReadPolicy& policy) {
+    try {
+        if (!policy.source_root_path.is_absolute() || !policy.canonical_root_path.is_absolute() ||
+            !ValidSkillText(PathToUtf8(policy.source_root_path)) || !ValidSkillText(PathToUtf8(policy.canonical_root_path)) ||
+            !ValidSkillText(meta.source_dir_path) || !ValidSkillText(meta.dir_path) || !ValidSkillText(meta.skill_path) ||
+            meta.source_dir_path.empty() || meta.skill_path.empty() || meta.content_hash.size() != 64 ||
+            !IsValidAgentSkillName(meta.name))
+            return std::unexpected(SkillError("skill.source.invalid", "Incomplete frozen skill mapping"));
+        const auto source_directory = Utf8ToPath(meta.source_dir_path);
+        if (!source_directory.is_absolute() ||
+            source_directory.parent_path().lexically_normal() != policy.source_root_path.lexically_normal() ||
+            PathToUtf8(source_directory.filename()) != meta.name)
+            return std::unexpected(SkillError("skill.source.invalid", "Skill directory is not a declared root child"));
+        std::error_code ec;
+        const auto root = std::filesystem::canonical(policy.source_root_path, ec);
+        if (ec || root != policy.canonical_root_path || !std::filesystem::is_directory(root, ec) || ec)
+            return std::unexpected(SkillError("skill.source.changed", "Declared skill root changed or disappeared"));
+        const auto directory = std::filesystem::canonical(source_directory, ec);
+        if (ec || directory != Utf8ToPath(meta.dir_path) || directory == root ||
+            !StrictSkillPathWithin(directory, root) || !std::filesystem::is_directory(directory, ec) || ec)
+            return std::unexpected(SkillError("skill.source.changed", "Declared skill directory changed or escaped its root"));
+        const auto body = std::filesystem::canonical(directory / "SKILL.md", ec);
+        if (ec || body != Utf8ToPath(meta.skill_path) || !StrictSkillPathWithin(body, root) ||
+            !std::filesystem::is_regular_file(body, ec) || ec)
+            return std::unexpected(SkillError("skill.source.changed", "SKILL.md mapping changed or escaped its root"));
+        return StrictSkillPaths{directory, body};
+    } catch (const std::exception&) {
+        return std::unexpected(SkillError("skill.source.invalid", "Cannot resolve the frozen skill mapping"));
+    }
+}
+
+std::expected<StrictSkillScanResult, SkillFileError> ScanSkillsDirStrict(
+    const std::filesystem::path& root, const std::vector<std::string>& exact_names,
+    const std::string& source_note) {
+    try {
+        if (!root.is_absolute() || !ValidSkillText(PathToUtf8(root)) || exact_names.empty() ||
+            exact_names.size() > StrictSkillLimits::selected_names || source_note.empty() ||
+            !ValidSkillText(source_note) || source_note.size() > StrictSkillLimits::prompt_bytes)
+            return std::unexpected(SkillError("skill.source.invalid", "Skills require an absolute root, exact names, and explicit source note"));
+        std::set<std::string> selected;
+        for (const auto& name : exact_names) {
+            if (!IsValidAgentSkillName(name) || !selected.insert(name).second)
+                return std::unexpected(SkillError("skill.selection.invalid", "Invalid or duplicate selected skill name"));
+        }
+        std::error_code ec;
+        const auto canonical_root = std::filesystem::canonical(root, ec);
+        if (ec || !ValidSkillText(PathToUtf8(canonical_root)) || !std::filesystem::is_directory(canonical_root, ec) || ec)
+            return std::unexpected(SkillError("skill.scan.failed", "Cannot resolve the explicit skill root"));
+        StrictSkillScanResult result;
+        result.read_policy = {root, canonical_root};
+        std::vector<std::filesystem::path> entries;
+        std::filesystem::directory_iterator iterator(root, ec), end;
+        if (ec) return std::unexpected(SkillError("skill.scan.failed", "Cannot enumerate the skill root"));
+        while (iterator != end) {
+            if (entries.size() >= StrictSkillLimits::root_entries)
+                return std::unexpected(SkillError("skill.scan.limit", "Skill root exceeds 4096 entries"));
+            entries.push_back(iterator->path());
+            iterator.increment(ec);
+            if (ec) return std::unexpected(SkillError("skill.scan.failed", "Skill root enumeration failed"));
+        }
+        std::sort(entries.begin(), entries.end());
+        std::map<std::filesystem::path, std::string> directories;
+        std::size_t candidates = 0, bytes_read = 0;
+        for (const auto& entry : entries) {
+            const auto name = PathToUtf8(entry.filename());
+            const bool required = selected.count(name) != 0;
+            const auto reject = [&](SkillFileError error) -> std::optional<SkillFileError> {
+                if (required) return error;
+                result.diagnostics.push_back(error.code + ": unselected skill candidate rejected");
+                return std::nullopt;
+            };
+            if (!ValidSkillText(name) || !std::filesystem::is_directory(entry, ec) || ec) {
+                if (required) return std::unexpected(SkillError("skill.source.invalid", "Selected skill is not a readable directory: " + name));
+                ec.clear();
+                continue;
+            }
+            const auto md_status = std::filesystem::symlink_status(entry / "SKILL.md", ec);
+            if (ec || md_status.type() == std::filesystem::file_type::not_found) {
+                if (required) return std::unexpected(SkillError("skill.missing", "Selected SKILL.md is missing: " + name));
+                ec.clear();
+                continue;
+            }
+            if (++candidates > StrictSkillLimits::candidates)
+                return std::unexpected(SkillError("skill.scan.limit", "Skill root exceeds 128 SKILL.md candidates"));
+            const auto directory = std::filesystem::canonical(entry, ec);
+            if (ec || directory == canonical_root || !StrictSkillPathWithin(directory, canonical_root) ||
+                !ValidSkillText(PathToUtf8(directory))) {
+                auto failure = reject(SkillError("skill.source.invalid", "Skill directory escapes the explicit root: " + name));
+                if (failure) return std::unexpected(std::move(*failure));
+                continue;
+            }
+            // canonical spelling alone may differ on case-insensitive volumes.
+            // Check real directory identity as well, without folding POSIX names.
+            for (const auto& [known_directory, known_name] : directories) {
+                (void)known_name;
+                const bool alias = std::filesystem::equivalent(directory, known_directory, ec);
+                if (ec)
+                    return std::unexpected(SkillError("skill.scan.failed", "Cannot compare skill directory identities"));
+                if (alias)
+                    return std::unexpected(SkillError("skill.source.duplicate", "Multiple candidates map to the same skill directory"));
+            }
+            directories.emplace(directory, name);
+            const auto body = std::filesystem::canonical(directory / "SKILL.md", ec);
+            if (ec || !StrictSkillPathWithin(body, canonical_root) || !ValidSkillText(PathToUtf8(body))) {
+                auto failure = reject(SkillError("skill.source.invalid", "SKILL.md escapes the explicit root: " + name));
+                if (failure) return std::unexpected(std::move(*failure));
+                continue;
+            }
+            const auto remaining = StrictSkillLimits::scan_bytes - bytes_read;
+            std::size_t actual_bytes = 0;
+            auto content = ReadSkillFileBounded(body, std::min(StrictSkillLimits::file_bytes, remaining), &actual_bytes);
+            bytes_read += actual_bytes; // Invalid/unselected text still consumes the root budget.
+            if (bytes_read > StrictSkillLimits::scan_bytes)
+                return std::unexpected(SkillError("skill.scan.limit", "Skill scan exceeds the total actual-byte budget"));
+            if (!content) {
+                // All byte-budget breaches are root-level failures, including
+                // unselected candidates. Format/type failures may be diagnosed.
+                if (content.error().code == "skill.file.limit")
+                    return std::unexpected(SkillError("skill.scan.limit", "Skill scan exceeds a file or total byte budget"));
+                auto failure = reject(content.error());
+                if (failure) return std::unexpected(std::move(*failure));
+                continue;
+            }
+            auto parsed = ParseSkillMarkdownStrict(*content);
+            if (!parsed || *parsed->name != name) {
+                if (!parsed && parsed.error().code == "skill.frontmatter.limit") return std::unexpected(parsed.error());
+                auto failure = reject(parsed ? SkillError("skill.metadata.invalid", "Skill name does not match its directory: " + name) : parsed.error());
+                if (failure) return std::unexpected(std::move(*failure));
+                continue;
+            }
+            if (!required) continue;
+            SkillMeta meta;
+            meta.name = *parsed->name;
+            meta.description = *parsed->description;
+            meta.dir_path = PathToUtf8(directory);
+            meta.source_level = "explicit";
+            meta.content_hash = platform::Sha256Hex(*content);
+            meta.requires_tools = parsed->requires_tools.value_or(std::vector<std::string>{});
+            meta.source_dir_path = PathToUtf8(entry);
+            meta.skill_path = PathToUtf8(body);
+            result.skills.push_back(std::move(meta));
+        }
+        if (result.skills.size() != selected.size())
+            return std::unexpected(SkillError("skill.missing", "An explicitly selected skill was not found"));
+        std::sort(result.skills.begin(), result.skills.end(), [](const auto& a, const auto& b) { return a.name < b.name; });
+        result.prompt_segment = BuildSkillsPromptSegment(result.skills, source_note);
+        if (result.prompt_segment.size() > StrictSkillLimits::prompt_bytes)
+            return std::unexpected(SkillError("skill.prompt.limit", "Skill prompt exceeds 64 KiB"));
+        return result;
+    } catch (const std::exception&) {
+        return std::unexpected(SkillError("skill.scan.failed", "Cannot complete the explicit skill scan"));
     }
 }
 

@@ -289,6 +289,7 @@ SessionRuntime::Options SessionService::BuildRuntimeOptions(const SessionLaunchR
     options.trajectory_one_shot = request.one_shot;
     options.trajectory_training_policy = request.training_policy;
     options.trajectory_v3_system_content = request.v3_system_content;
+    options.trajectory_v3_opening_participant = request.v3_opening_participant;
     // 身份:显式递的整份吃;否则按 cwd 四级裁决(commondir→marker→
     // config→cwd),home 递进去做全局件止步——与三端被收编前的原装配
     // 逐句对应(终端/one-shot:current_path;app-server:前端指定 cwd)。

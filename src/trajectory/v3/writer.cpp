@@ -93,6 +93,9 @@ struct V3Writer::Impl {
     std::uint64_t id_counters[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     ContextView context;
     std::unordered_set<std::string> message_ids;
+    // Values belong to committed system messages. Only the effective root may
+    // supply bindings to a later switch; an unadopted system cannot replace it.
+    std::unordered_map<std::string, nlohmann::json> system_host_bindings;
     bool broken = false;
     bool closed = false;
     V3WriterOptions options;
@@ -263,6 +266,11 @@ struct V3Writer::Impl {
         receipt.line_hash = line_hash;
         if (json.at("type").get<std::string>() == "message") {
             message_ids.insert(json.at("messageId").get<std::string>());
+            if (json.at("message").value("role", std::string()) == "system" &&
+                json.contains("systemMeta") && json["systemMeta"].contains("hostBindings")) {
+                system_host_bindings[json.at("messageId").get<std::string>()] =
+                    json["systemMeta"]["hostBindings"];
+            }
         } else {
             // 事件落稳后统一重放内存视图(链/版本),便利 API 不各自手工维护。
             std::string ec, msg;
@@ -661,6 +669,11 @@ std::expected<V3Writer, std::string> V3Writer::Continue(const std::filesystem::p
         last_hash = line.at("lineHash").get<std::string>();
         if (line.at("type").get<std::string>() == "message") {
             impl->message_ids.insert(line.at("messageId").get<std::string>());
+            if (line.at("message").value("role", std::string()) == "system" &&
+                line.contains("systemMeta") && line["systemMeta"].contains("hostBindings")) {
+                impl->system_host_bindings[line.at("messageId").get<std::string>()] =
+                    line["systemMeta"]["hostBindings"];
+            }
         }
     }
     impl->last_hash = last_hash;
@@ -853,6 +866,7 @@ V3Writer::SwitchSystemResult V3Writer::SwitchSystem(std::string_view new_system_
                                                     MessageOrigin origin, Durability durability) {
     // 调用方已持锁由各步内部自理;三步各自独立提交,失败即停。
     SwitchSystemResult result;
+    std::optional<nlohmann::json> inherited_bindings;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         if (impl_->broken) {
@@ -868,6 +882,11 @@ V3Writer::SwitchSystemResult V3Writer::SwitchSystem(std::string_view new_system_
             return result;
         }
         nlohmann::json payload = change_payload;
+        if (const auto binding = impl_->system_host_bindings.find(impl_->context.system_message_ref);
+            binding != impl_->system_host_bindings.end()) {
+            inherited_bindings = binding->second;
+            payload["hostBindings"] = *inherited_bindings;
+        }
         payload["oldSystemMessageRef"] = impl_->context.system_message_ref;
         if (!payload.contains("systemChanged")) {
             payload["systemChanged"] = true;
@@ -889,8 +908,9 @@ V3Writer::SwitchSystemResult V3Writer::SwitchSystem(std::string_view new_system_
         system_draft.system_meta = nlohmann::json::object(
             {{"cause", change_payload.value("cause", std::string("settings_changed"))},
              {"changeEventRef", result.change_event.id},
-             {"settingsVersion", change_payload.value("settingsVersion", 0)},
+             {"settingsVersion", change_payload.value("settingsVersion", nlohmann::json(0))},
              {"systemChanged", change_payload.value("systemChanged", true)}});
+        if (inherited_bindings) (*system_draft.system_meta)["hostBindings"] = *inherited_bindings;
         system_draft.message = nlohmann::json::object(
             {{"role", "system"}, {"content", std::string(new_system_content)}});
         result.system_message = impl_->CommitMessage(std::move(system_draft), durability);
@@ -917,6 +937,7 @@ V3Writer::SwitchSystemResult V3Writer::SwitchSystem(std::string_view new_system_
              {"afterRevision", before + 1},
              {"rootMessageRef", result.system_message.id},
              {"contextChain", ChainToJson(new_chain)}});
+        if (inherited_bindings) apply.payload["hostBindings"] = *inherited_bindings;
         result.apply_event = impl_->CommitEvent(std::move(apply), durability);
         // 落稳后 CommitEvent 统一重放视图:链根已换新 system、revision 前移。
     }

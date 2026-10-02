@@ -30,7 +30,10 @@
 #include "sdk/callback_scope.hpp"
 #include "sdk/extensions.hpp"
 #include "sdk/results.hpp"
+#include "sdk/skills.hpp"
+#include "sdk/memory.hpp"
 #include "tools/path_utils.hpp"
+#include "tools/search_ripgrep.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
 
@@ -294,6 +297,10 @@ struct Session::Impl final : rt::InteractionBroker {
     // Publish this borrow only after initialization succeeds; queries use cache.
     detail::SessionExtensions* extensions = nullptr;
     std::string extension_plan_json;
+    skills::v1::Snapshot skills_snapshot;
+    std::shared_ptr<detail::SessionMemory> memory_module;
+    memory::v1::Snapshot memory_snapshot;
+    std::map<std::string, Result<memory::v1::RecallReport>> memory_reports;
     mutable std::mutex mutex;
     mutable std::condition_variable cv;
     std::mutex close_mutex;
@@ -413,9 +420,32 @@ struct Session::Impl final : rt::InteractionBroker {
                 options.extensions.clear();
             }
         } source_scope{options};
+        auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
+        if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
+        auto skill_module = detail::SessionSkills::Prepare(options.skills,
+            lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key,
+            options.resume_session_id, options.system_prompt);
+        if (!skill_module) return std::unexpected(skill_module.error());
+        auto memory_candidate = detail::SessionMemory::Prepare(options.memory,
+            lubancode::tools::Utf8ToPath(roots.data_root), *identity, options.resume_session_id, *cwd);
+        if (!memory_candidate) return std::unexpected(memory_candidate.error());
+        memory_module = std::move(*memory_candidate);
         auto prepared_registry = std::make_unique<lubancode::tools::ToolRegistry>();
+        std::shared_ptr<lubancode::tools::BundledRipgrepRunner> search_runner;
         for (const auto& name : options.builtin_tools) {
-            auto tool = rt::assembly::CreateLocalTool(name);
+            if (name == "search" && !search_runner) {
+                auto executable = lubancode::tools::Utf8ToPath(roots.resource_root) / "libexec";
+#ifdef _WIN32
+                executable /= "rg.exe";
+#else
+                executable /= "rg";
+#endif
+                // Nonempty absolute override: SDK search never uses the CLI's
+                // exe/home/PATH discovery. Preparation stays lazy until every
+                // local tool declaration and server spec has been validated.
+                search_runner = std::make_shared<lubancode::tools::BundledRipgrepRunner>(std::move(executable));
+            }
+            auto tool = rt::assembly::CreateLocalTool(name, search_runner);
             if (!tool || prepared_registry->Find(name)) return std::unexpected(Failure("sdk.tool.unsupported_or_duplicate", name));
             prepared_registry->Register(detail::BindLocalTool(std::move(tool), options.cwd));
         }
@@ -425,6 +455,8 @@ struct Session::Impl final : rt::InteractionBroker {
             if (!adapted) return std::unexpected(adapted.error());
             prepared_registry->Register(std::move(*adapted));
         }
+        if ((*skill_module)->enabled() && prepared_registry->Find("skill"))
+            return std::unexpected(Failure("sdk.tool.duplicate", "skill"));
         rt::assembly::SessionResourcesRequest resource_request;
         std::set<std::string> server_names;
         for (const auto& spec : options.mcp_servers) {
@@ -465,6 +497,13 @@ struct Session::Impl final : rt::InteractionBroker {
                     registry->Register(std::move(registration));
                 }
             }
+            std::set<std::string> tool_face;
+            for (const auto& tool : registry->All()) tool_face.insert(tool->name());
+            auto frozen = (*skill_module)->BindToolSurface(std::move(tool_face));
+            if (!frozen) return std::unexpected(rt::assembly::SessionResourceFailure{
+                rt::assembly::SessionResourceStage::Registry, frozen.error().code,
+                frozen.error().message, "skills", {}});
+            if ((*skill_module)->enabled()) registry->Register((*skill_module)->BuildTool());
             return registry;
         };
         std::string wire = "sdk_custom";
@@ -492,6 +531,11 @@ struct Session::Impl final : rt::InteractionBroker {
             if (initialization_backend) return detail::AdaptBackend(initialization_backend);
             return rt::assembly::BuildBackend(*backend_config);
         };
+        if (search_runner) {
+            const auto prepared = search_runner->Prepare();
+            if (!prepared) return std::unexpected(Failure(
+                std::string(lubancode::tools::ToString(prepared.error().code)), prepared.error().message));
+        }
         auto assembled = rt::assembly::BuildSessionResources(std::move(resource_request));
         if (!assembled) {
             const auto& error = assembled.error();
@@ -503,8 +547,6 @@ struct Session::Impl final : rt::InteractionBroker {
                 return std::unexpected(Failure(error.code, error.message));
             return std::unexpected(Failure("sdk.session.open_failed", error.message));
         }
-        auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
-        if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
         rt::SessionLaunchRequest launch;
         launch.cwd_utf8 = options.cwd;
         launch.workspace_identity = std::move(*identity);
@@ -512,14 +554,33 @@ struct Session::Impl final : rt::InteractionBroker {
         launch.wire_name = wire;
         launch.approval_mode = Mode(options.approval_mode);
         launch.workspaces_root = lubancode::tools::Utf8ToPath(roots.data_root) / "workspaces";
-        launch.v3_system_content = options.system_prompt;
+        launch.v3_system_content = (*skill_module)->EffectiveSystem();
+        auto skills_opening = (*skill_module)->OpeningParticipant();
+        auto memory_opening = memory_module->OpeningParticipant();
+        launch.v3_opening_participant = [skills_opening = std::move(skills_opening), memory_opening = std::move(memory_opening)]
+            (const lubancode::trajectory::V3OpeningContext& context) -> std::expected<Json, std::string> {
+                auto skills = skills_opening(context);
+                if (!skills) return std::unexpected(skills.error());
+                auto memory = memory_opening(context);
+                if (!memory) return std::unexpected(memory.error());
+                if (memory->contains("hostBindings")) {
+                    if (!skills->contains("hostBindings")) (*skills)["hostBindings"] = Json::object();
+                    for (auto it = (*memory)["hostBindings"].begin(); it != (*memory)["hostBindings"].end(); ++it)
+                        (*skills)["hostBindings"][it.key()] = it.value();
+                }
+                return std::move(*skills);
+            };
         launch.resume_at_launch = !options.resume_session_id.empty();
         launch.require_v3_resume = launch.resume_at_launch;
         launch.resume_source_session_id = options.resume_session_id;
         service = std::make_shared<rt::SessionService>(std::move(launch));
-        if (!service->runtime()) return std::unexpected(Failure("sdk.session.open_failed", service->launch_error()));
+        if (!service->runtime()) return std::unexpected(Failure(
+            service->launch_error().find("sdk.skill.") != std::string::npos ? "sdk.skill.open_failed" :
+            service->launch_error().find("sdk.memory.") != std::string::npos ? "sdk.memory.open_failed" : "sdk.session.open_failed",
+            service->launch_error()));
         session_id = service->trajectory()->session_id();
         session_dir = service->trajectory()->session_dir();
+        memory_snapshot = memory_module->Describe();
         if (!options.resume_session_id.empty() && session_id != options.resume_session_id) {
             return std::unexpected(Failure("sdk.resume.identity_changed"));
         }
@@ -527,6 +588,7 @@ struct Session::Impl final : rt::InteractionBroker {
             !options.resume_session_id.empty());
         if (!frozen_policy) return std::unexpected(frozen_policy.error());
         result_policy = std::move(*frozen_policy);
+        options.system_prompt = (*skill_module)->EffectiveSystem();
         if (!options.resume_session_id.empty() && options.system_prompt.empty()) {
             auto saved = lubancode::trajectory::v3::ReadV3Ledger(service->trajectory()->v3_main_writer()->path());
             if (!saved) return std::unexpected(Failure("sdk.resume.context_unavailable", saved.error()));
@@ -574,6 +636,7 @@ struct Session::Impl final : rt::InteractionBroker {
         auto loaded = LoadOperations();
         if (!loaded) return loaded;
         extensions = module_ptr;
+        skills_snapshot = (*skill_module)->Describe();
         return {};
     }
 
@@ -586,6 +649,7 @@ struct Session::Impl final : rt::InteractionBroker {
         const auto valid = ValidateOperationLedger(session_dir);
         if (!valid) return valid;
         std::map<std::string, std::string> accepted_hashes;
+        std::set<std::string> final_ids;
         for (const auto& fact : rt::SessionService::ReadOperationFacts(session_dir)) {
             if (!ValidId(fact.operation_id)) throw std::runtime_error("sdk.operation.invalid_persisted_id");
             auto& operation = operations[fact.operation_id];
@@ -596,6 +660,7 @@ struct Session::Impl final : rt::InteractionBroker {
                 operation.error = "sdk.operation.indeterminate: dispatched without a durable final";
             }
             if (fact.kind != "operation.final") continue;
+            final_ids.insert(fact.operation_id);
             operation.turn_id = fact.turn_id;
             operation.state = fact.execution_status == "success" ? OperationState::Succeeded :
                 fact.execution_status == "error" ? OperationState::Failed :
@@ -609,7 +674,10 @@ struct Session::Impl final : rt::InteractionBroker {
                     operation.result_persisted = json.value("complete", false) && operation.state != OperationState::Indeterminate;
                 }
             }
-            if (!operation.result_persisted) operation.error = "sdk.result.unavailable: final operation exists without SDK result artifact";
+            if (!operation.result_persisted) {
+                operation.error = "sdk.result.unavailable: final operation exists without SDK result artifact";
+                if (memory_snapshot.enabled) operation.state = OperationState::Indeterminate;
+            }
         }
         // SessionService tolerates an unreadable input artifact by leaving it
         // out of its recovery queue. A runnable SDK session must instead fail
@@ -627,6 +695,18 @@ struct Session::Impl final : rt::InteractionBroker {
             }
         }
         for (const auto& [id, operation] : operations) {
+            if (Terminal(operation.state)) {
+                if (memory_snapshot.enabled) {
+                    auto report = memory_module->ReadReport(id);
+                    if (report && final_ids.contains(id) && report->turn_id != operation.turn_id)
+                        report = std::unexpected(Failure("sdk.memory.report_invalid", "operation turn differs"));
+                    if (!report && operation.result_persisted) return std::unexpected(report.error());
+                    // A crash after dispatch may leave a valid adopted report
+                    // without a final. Preserve Indeterminate and its owned
+                    // metadata; a missing report is an explicit query gap.
+                    memory_reports.insert_or_assign(id, std::move(report));
+                } else memory_reports.insert_or_assign(id, memory_module->EmptyReport(id, operation.turn_id));
+            }
             if (operation.state == OperationState::Accepted && !queued_ids.contains(id)) {
                 return std::unexpected(Failure("sdk.resume.input_unavailable", id));
             }
@@ -635,6 +715,17 @@ struct Session::Impl final : rt::InteractionBroker {
         // terminal operations; a failed read is retained as a query error.
         const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(
             session_dir / (session_id + ".jsonl"));
+        if (memory_snapshot.enabled) {
+            if (!ledger) return std::unexpected(Failure("sdk.memory.report_invalid", "verified input is unavailable"));
+            for (auto& [id, report] : memory_reports) {
+                if (!report) continue;
+                auto valid_report = memory_module->ValidateReport(*report, *ledger);
+                if (!valid_report) {
+                    if (operations.at(id).result_persisted) return std::unexpected(valid_report.error());
+                    report = std::unexpected(valid_report.error());
+                }
+            }
+        }
         std::map<std::string, std::size_t> turn_owners;
         for (const auto& [id, operation] : operations) {
             (void)id;
@@ -682,16 +773,61 @@ struct Session::Impl final : rt::InteractionBroker {
         tool_results.insert_or_assign(operation.operation_id, std::move(indexed));
     }
 
+    bool SaveMemoryReport(memory::v1::RecallReport report) {
+        const auto id = report.operation_id;
+        auto saved = memory_module->PersistReport(report);
+        std::lock_guard lock(mutex);
+        if (!saved) memory_reports.insert_or_assign(id, std::unexpected(saved.error()));
+        else memory_reports.insert_or_assign(id, std::move(report));
+        return saved.has_value();
+    }
+    bool EnsureMemoryReport(const Operation& operation) {
+        {
+            std::lock_guard lock(mutex);
+            const auto found = memory_reports.find(operation.operation_id);
+            if (found != memory_reports.end()) return found->second.has_value();
+        }
+        auto report = memory_module->EmptyReport(operation.operation_id, operation.turn_id);
+        if (report.enabled) report.state = "not_attempted";
+        return SaveMemoryReport(std::move(report));
+    }
     Operation Complete(Operation operation, const std::vector<std::string>& refs, bool usage_reported, bool ledger_ok = true) {
         if (!ledger_ok) {
             operation.state = OperationState::Indeterminate;
             operation.error += " sdk.trajectory.persistence_failed";
         }
+        // A durable final may only claim completeness after its owned Memory
+        // report and the actual adopted input have both been checked.
+        bool memory_saved = EnsureMemoryReport(operation);
+        std::optional<lubancode::trajectory::v3::V3Ledger> verified_memory;
+        if (memory_snapshot.enabled && memory_saved) {
+            auto source = lubancode::trajectory::v3::ReadV3Ledger(session_dir / (session_id + ".jsonl"));
+            auto report = memory_module->ReadReport(operation.operation_id);
+            auto valid = source && report ? memory_module->ValidateReport(*report, *source) :
+                Result<void>(std::unexpected(Failure("sdk.memory.report_invalid", "owned report or verified input is unavailable")));
+            if (valid && report->turn_id != operation.turn_id)
+                valid = std::unexpected(Failure("sdk.memory.report_invalid", "operation turn differs"));
+            if (valid && operation.state == OperationState::Succeeded && report->state != "no_match" && report->state != "admitted")
+                valid = std::unexpected(Failure("sdk.memory.report_invalid", "successful operation has no complete recall result"));
+            if (valid) {
+                verified_memory = std::move(*source);
+                std::lock_guard lock(mutex);
+                memory_reports.insert_or_assign(operation.operation_id, std::move(*report));
+            } else {
+                memory_saved = false;
+                std::lock_guard lock(mutex);
+                memory_reports.insert_or_assign(operation.operation_id, std::unexpected(valid.error()));
+            }
+        }
+        if (!memory_saved) {
+            operation.state = OperationState::Indeterminate;
+            operation.error += " sdk.memory.report_persistence_failed";
+        }
         const auto directory = session_dir / "sdk-results";
         std::error_code ec;
         fs::create_directories(directory, ec);
         const Json result{{"operationId", operation.operation_id}, {"turnId", operation.turn_id},
-                          {"finalText", operation.final_text}, {"error", operation.error}, {"complete", ledger_ok}};
+                          {"finalText", operation.final_text}, {"error", operation.error}, {"complete", ledger_ok && memory_saved}};
         const auto written = lubancode::platform::AtomicWriteFile(directory / (operation.operation_id + ".json"), result.dump(),
             lubancode::platform::WriteDurability::ProcessCrashDurability);
         if (!written) {
@@ -705,7 +841,7 @@ struct Session::Impl final : rt::InteractionBroker {
         final.final_message_refs = refs;
         final.usage_reported = usage_reported;
         const bool recorded = service->RecordTurnFinal(final);
-        operation.result_persisted = written.has_value() && recorded && ledger_ok;
+        operation.result_persisted = written.has_value() && recorded && ledger_ok && memory_saved;
         if (!operation.result_persisted) {
             operation.error += " sdk.result.persistence_failed";
             operation.state = OperationState::Indeterminate;
@@ -713,7 +849,7 @@ struct Session::Impl final : rt::InteractionBroker {
         // EndTurn and scoped-binding teardown have drained every writer borrower.
         // Freeze identities before making the terminal operation visible. Readers
         // use this snapshot, so another turn may append V3 without a read race.
-        CacheToolResults(operation, ledger_ok && recorded);
+        CacheToolResults(operation, ledger_ok && recorded, verified_memory ? &*verified_memory : nullptr);
         {
             std::lock_guard lock(mutex);
             operations[operation.operation_id] = operation;
@@ -824,9 +960,23 @@ struct Session::Impl final : rt::InteractionBroker {
         std::expected<lubancode::agent::RunOutcome, std::string> outcome =
             std::unexpected("sdk.extension.input_admission_failed");
         bool context_healthy = true;
-        if (!dispatcher) {
+        auto recall = memory_module->BuildRecall(pre.prompt, input.operation_id, operation.turn_id);
+        if (!recall) {
+            // RecordInput already adopted the human message. Retain that same
+            // message in the Agent even though this request cannot call a model.
+            try { agent.AppendAdmittedMessage(std::move(message)); }
+            catch (...) { service->trajectory()->BlockV3Execution("memory.recall.in_memory_admission_failed"); }
+            auto failed = memory_module->EmptyReport(input.operation_id, operation.turn_id);
+            failed.state = "failed";
+            failed.error = recall.error().code + ": " + recall.error().message;
+            const auto saved = SaveMemoryReport(std::move(failed));
+            outcome = std::unexpected(saved ? recall.error().code + ": " + recall.error().message
+                                            : "sdk.memory.report_write_failed");
+        } else if (!dispatcher && recall->context.empty()) {
             // Zero registrations preserve the established host path byte for byte.
-            outcome = agent.Run(std::move(message), wiring, &interrupt);
+            const auto saved = SaveMemoryReport(std::move(recall->report));
+            if (saved) outcome = agent.Run(std::move(message), wiring, &interrupt);
+            else outcome = std::unexpected("sdk.memory.report_write_failed");
         } else if (bridge->recent_errors().empty()) {
             try { agent.AppendAdmittedMessage(std::move(message)); }
             catch (...) { context_healthy = false; }
@@ -851,6 +1001,40 @@ struct Session::Impl final : rt::InteractionBroker {
                 }
                 return true;
             };
+            if (context_healthy && !recall->context.empty()) {
+                rt::MemoryLedgerBridge memory_bridge(*service->trajectory());
+                auto admitted = memory_bridge.AdmitRecallContext(recall->context, recall->records, operation.turn_id);
+                if (!admitted) {
+                    recall->report.state = "failed";
+                    recall->report.error = admitted.error();
+                    context_healthy = false;
+                    outcome = std::unexpected(admitted.error());
+                } else {
+                    recall->report.state = admitted->error.empty() ? "admitted" : "failed";
+                    recall->report.context_message_id = admitted->message_id;
+                    if (!admitted->error.empty()) {
+                        recall->report.error = admitted->error;
+                        context_healthy = false;
+                        outcome = std::unexpected(admitted->error);
+                    }
+                    try { if (context_healthy) agent.AppendAdmittedMessage(std::move(admitted->message)); }
+                    catch (...) {
+                        service->trajectory()->BlockV3Execution("memory.recall.in_memory_admission_failed");
+                        recall->report.state = "failed";
+                        recall->report.error = "memory.recall.in_memory_admission_failed";
+                        context_healthy = false;
+                    }
+                }
+            }
+            if (!context_healthy && recall->report.context_message_id.empty() && recall->report.state != "failed") {
+                recall->report.state = "failed";
+                recall->report.error = "sdk.memory.input_admission_failed";
+            }
+            if (!SaveMemoryReport(std::move(recall->report))) {
+                service->trajectory()->BlockV3Execution("memory.recall.report_write_failed");
+                context_healthy = false;
+                outcome = std::unexpected("sdk.memory.report_write_failed");
+            }
             if (context_healthy) context_healthy = append_context(pre.additional_context, "PreUser");
             if (context_healthy) {
                 const auto post = rt::RunPostUserMiddleware(dispatcher, pre.prompt, hook_context);
@@ -861,7 +1045,7 @@ struct Session::Impl final : rt::InteractionBroker {
                 }
             }
         }
-        const bool turn_cancelled = (outcome && outcome->cancelled) || (dispatcher && !outcome && interrupt.load());
+        const bool turn_cancelled = (outcome && outcome->cancelled) || (!outcome && interrupt.load());
         bridge->EndTurn(outcome.has_value(), turn_cancelled, outcome ? "" : outcome.error());
         turn_bindings.Reset();
         operation.state = turn_cancelled ? OperationState::Cancelled :
@@ -1008,6 +1192,7 @@ struct Session::Impl final : rt::InteractionBroker {
             // backend in options. Retire it under the same lifecycle guard,
             // after every tool/Agent, rather than during Impl member teardown.
             options.backend.reset();
+            memory_module.reset();
         }
         for (auto& stream : streams) stream->Close();
         return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
@@ -1021,6 +1206,23 @@ Result<void> Session::Close() { return impl_->Close(); }
 Result<std::string> Session::DescribeExtensions() const {
     std::lock_guard lock(impl_->mutex);
     return impl_->extension_plan_json;
+}
+Result<skills::v1::Snapshot> Session::DescribeSkills() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->skills_snapshot;
+}
+Result<memory::v1::Snapshot> Session::DescribeMemory() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->memory_snapshot;
+}
+Result<memory::v1::RecallReport> Session::GetMemoryRecall(const std::string& operation_id) const {
+    std::lock_guard lock(impl_->mutex);
+    const auto operation = impl_->operations.find(operation_id);
+    if (operation == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
+    if (!Terminal(operation->second.state)) return std::unexpected(Failure("sdk.memory.report_not_ready"));
+    const auto found = impl_->memory_reports.find(operation_id);
+    if (found == impl_->memory_reports.end()) return std::unexpected(Failure("sdk.memory.report_not_ready"));
+    return found->second;
 }
 Result<Receipt> Session::Submit(std::string key, std::string text) {
     if (key.empty()) return std::unexpected(Failure("sdk.operation.key_required"));

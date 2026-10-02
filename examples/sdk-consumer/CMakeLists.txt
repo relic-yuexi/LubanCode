@@ -6,7 +6,7 @@ project(lubancore_installed_consumer LANGUAGES CXX)
 find_package(LubanCore CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-add_executable(lubancore_consumer main.cpp)
+add_executable(lubancore_consumer main.cpp builtin_search.cpp builtin_memory.cpp)
 target_compile_features(lubancore_consumer PRIVATE cxx_std_23)
 target_link_libraries(lubancore_consumer PRIVATE LubanCore::Core Threads::Threads)
 if(MSVC)
@@ -20,6 +20,12 @@ if(WIN32)
 endif()
 
 enable_testing()
+set(LUBANCORE_CONSUMER_RESOURCE_ROOT "" CACHE PATH "Explicit relocated installed SDK resource root for real search acceptance")
+if(NOT IS_ABSOLUTE "${LUBANCORE_CONSUMER_RESOURCE_ROOT}")
+  message(FATAL_ERROR "Set LUBANCORE_CONSUMER_RESOURCE_ROOT to the absolute relocated share/lubancore directory")
+endif()
+add_test(NAME sdk.consumer.builtin_search
+  COMMAND lubancore_consumer builtin-search "${CMAKE_CURRENT_BINARY_DIR}/state-builtin-search" "${LUBANCORE_CONSUMER_RESOURCE_ROOT}")
 add_test(NAME sdk.consumer.smoke
   COMMAND lubancore_consumer smoke "${CMAKE_CURRENT_BINARY_DIR}/state-smoke")
 add_test(NAME sdk.consumer.isolation
@@ -28,6 +34,14 @@ add_test(NAME sdk.consumer.extensions
   COMMAND lubancore_consumer extensions "${CMAKE_CURRENT_BINARY_DIR}/state-extensions")
 add_test(NAME sdk.consumer.results
   COMMAND lubancore_consumer results "${CMAKE_CURRENT_BINARY_DIR}/state-results")
+add_test(NAME sdk.consumer.skills_seed
+  COMMAND lubancore_consumer skills-seed "${CMAKE_CURRENT_BINARY_DIR}/state-skills")
+add_test(NAME sdk.consumer.skills_resume
+  COMMAND lubancore_consumer skills-resume "${CMAKE_CURRENT_BINARY_DIR}/state-skills")
+add_test(NAME sdk.consumer.memory_seed
+  COMMAND lubancore_consumer memory-seed "${CMAKE_CURRENT_BINARY_DIR}/state-memory")
+add_test(NAME sdk.consumer.memory_resume
+  COMMAND lubancore_consumer memory-resume "${CMAKE_CURRENT_BINARY_DIR}/state-memory")
 add_test(NAME sdk.consumer.result_seed
   COMMAND lubancore_consumer result-seed "${CMAKE_CURRENT_BINARY_DIR}/state-result-restart")
 add_test(NAME sdk.consumer.result_resume
@@ -46,6 +60,10 @@ set_tests_properties(sdk.consumer.recovery_seed PROPERTIES FIXTURES_SETUP sdk_re
 set_tests_properties(sdk.consumer.recovery_resume PROPERTIES FIXTURES_REQUIRED sdk_recovery)
 set_tests_properties(sdk.consumer.result_seed PROPERTIES FIXTURES_SETUP sdk_result_restart)
 set_tests_properties(sdk.consumer.result_resume PROPERTIES FIXTURES_REQUIRED sdk_result_restart)
-set_tests_properties(sdk.consumer.smoke sdk.consumer.isolation sdk.consumer.extensions sdk.consumer.results sdk.consumer.seed sdk.consumer.resume
+set_tests_properties(sdk.consumer.skills_seed PROPERTIES FIXTURES_SETUP sdk_skills_restart)
+set_tests_properties(sdk.consumer.skills_resume PROPERTIES FIXTURES_REQUIRED sdk_skills_restart)
+set_tests_properties(sdk.consumer.memory_seed PROPERTIES FIXTURES_SETUP sdk_memory_restart)
+set_tests_properties(sdk.consumer.memory_resume PROPERTIES FIXTURES_REQUIRED sdk_memory_restart)
+set_tests_properties(sdk.consumer.builtin_search sdk.consumer.smoke sdk.consumer.isolation sdk.consumer.extensions sdk.consumer.results sdk.consumer.seed sdk.consumer.resume
   sdk.consumer.recovery_seed sdk.consumer.recovery_resume sdk.consumer.result_seed sdk.consumer.result_resume
-  PROPERTIES TIMEOUT 120)
+  sdk.consumer.skills_seed sdk.consumer.skills_resume sdk.consumer.memory_seed sdk.consumer.memory_resume PROPERTIES TIMEOUT 120)

@@ -14,6 +14,7 @@
 #include <clocale>
 #include <cstdlib>
 #include <ctime>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -139,6 +140,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.recorder.event_schema_version = options.event_schema_version;
     // 接线点 1:v3 建场的首行基础 system(manager 侧 V3Writer::Start 用)。
     manager_options.v3_system_content = options.v3_system_content;
+    manager_options.v3_opening_participant = options.v3_opening_participant;
     // T08:主账写者的提交故障注入(测试专用;生产恒空)。
     manager_options.v3_main_io_fault = options.v3_main_io_fault;
     // 子代理空轨迹单 P0-C:main stream 同样走延迟开卷——正式 .jsonl 由
@@ -223,7 +225,49 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
                 // v3 源:续接场沿用源场生效 system(§4.10 默认;v2 源的
                 // 迁移新场保持基础版,三步切换由后续按需走)。
                 if (resumed.source_is_v3) {
-                    ledger.AdoptSourceSystemV3_(resumed.source_v3_stream);
+                    if (options.v3_opening_participant) {
+                        // In-place embedded recovery already owns this effective
+                        // root. Do not manufacture a switch back to its own text.
+                        auto saved = v3::ReadV3Ledger(resumed.source_v3_stream);
+                        if (!saved) return std::unexpected("resume.system_adoption_failed: " + saved.error());
+                        const auto context = v3::ProjectModelContext(*saved);
+                        const auto* root = saved->FindMessage(context.system_message_id);
+                        if (!root || !root->system_meta || root->message.value("role", std::string()) != "system" ||
+                            !root->message.contains("content") || !root->message["content"].is_string()) {
+                            return std::unexpected("resume.system_adoption_failed: effective system metadata missing");
+                        }
+                        std::uint64_t settings_version = 1;  // legacy roots did not require this key
+                        if (root->system_meta->contains("settingsVersion")) {
+                            const auto& version = root->system_meta->at("settingsVersion");
+                            if ((!version.is_number_unsigned() && !version.is_number_integer()) ||
+                                (version.is_number_integer() && !version.is_number_unsigned() && version.get<std::int64_t>() < 1) ||
+                                (version.is_number_unsigned() && version.get<std::uint64_t>() == 0)) {
+                                return std::unexpected("resume.system_adoption_failed: invalid settingsVersion");
+                            }
+                            settings_version = version.get<std::uint64_t>();
+                        }
+                        auto& books = *ledger.impl_->v3_books;
+                        books.system_content = context.system_content;
+                        books.settings_version = settings_version;
+                        if (!options.v3_system_content.empty() && options.v3_system_content != books.system_content) {
+                            if (books.settings_version == std::numeric_limits<std::uint64_t>::max()) {
+                                return std::unexpected("resume.system_adoption_failed: settingsVersion exhausted");
+                            }
+                            nlohmann::json change{{"cause", "system_prompt_changed"},
+                                {"settingsVersion", books.settings_version + 1}, {"systemChanged", true}};
+                            const auto switched = books.writer->SwitchSystem(options.v3_system_content,
+                                std::move(change), v3::MessageOrigin::SessionRuntime, trajectory::Durability::PowerLoss);
+                            if (switched.change_event.status != v3::WriteReceipt::Status::Committed ||
+                                switched.system_message.status != v3::WriteReceipt::Status::Committed ||
+                                switched.apply_event.status != v3::WriteReceipt::Status::Committed) {
+                                return std::unexpected("resume.system_adoption_failed: system transition not committed");
+                            }
+                            books.system_content = options.v3_system_content;
+                            ++books.settings_version;
+                        }
+                    } else {
+                        ledger.AdoptSourceSystemV3_(resumed.source_v3_stream);
+                    }
                 }
                 HardenLedgerDirectories(ledger.impl_->active->directory, &ledger.io_errors_);
                 return ledger;

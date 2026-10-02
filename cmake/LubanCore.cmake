@@ -5,6 +5,8 @@ include(CMakePackageConfigHelpers)
 
 add_library(lubancore_sdk SHARED
   src/sdk/core.cpp
+  src/sdk/skills.cpp
+  src/sdk/memory.cpp
   src/sdk/extensions.cpp
   src/sdk/results.cpp
   src/sdk/result_projection.cpp
@@ -100,6 +102,27 @@ endif()
 install(DIRECTORY include/lubancore DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT LubanCore)
 install(FILES docs/development/lubancore-sdk.md
   DESTINATION ${CMAKE_INSTALL_DATADIR}/lubancore COMPONENT LubanCore)
+# Search consumes an explicitly staged, manifest-pinned backend. SDK-only does
+# not discover HOME/PATH resources or download anything during configuration.
+# Without a stage the SDK remains usable for its other tools; selecting search
+# then fails its exact resource-root preflight.
+if(NOT LUBANCODE_BUNDLED_RG_DIR STREQUAL "")
+  if(WIN32)
+    set(_lubancore_rg_name rg.exe)
+  else()
+    set(_lubancore_rg_name rg)
+  endif()
+  set(_lubancore_rg "${LUBANCODE_BUNDLED_RG_DIR}/${_lubancore_rg_name}")
+  if(NOT EXISTS "${_lubancore_rg}" OR IS_DIRECTORY "${_lubancore_rg}")
+    message(FATAL_ERROR "SDK search resource is missing: ${_lubancore_rg}")
+  endif()
+  install(PROGRAMS "${_lubancore_rg}"
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/lubancore/libexec COMPONENT LubanCore)
+  install(FILES third_party/ripgrep/LICENSE-MIT
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/lubancore/licenses/ripgrep COMPONENT LubanCore)
+  install(FILES third_party/ripgrep/manifest.json RENAME ripgrep-manifest.json
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/lubancore COMPONENT LubanCore)
+endif()
 install(EXPORT LubanCoreTargets NAMESPACE LubanCore::
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/LubanCore COMPONENT LubanCore)
 configure_package_config_file(cmake/LubanCoreConfig.cmake.in

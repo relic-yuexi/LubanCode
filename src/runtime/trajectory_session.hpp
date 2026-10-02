@@ -174,6 +174,7 @@ public:
         // 宿主还不知道最终 system,第一次模型请求带上真 system 时走 §4.3
         // 三步切换(旧 system -> change 事件 -> 新 system)。
         std::string v3_system_content;
+        trajectory::V3OpeningParticipant v3_opening_participant;
         // 故障注入(测试专用;生产恒空 = 零行为):子账首枚 run.started
         // 提交前问一次,返回稳定码即按该码注入一次失败(子代理空轨迹单
         // 5.1 的 fault injection)。只作用于子账,不影响 main。

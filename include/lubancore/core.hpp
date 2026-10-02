@@ -15,6 +15,8 @@
 #include <lubancore/api.hpp>
 #include <lubancore/extensions.hpp>
 #include <lubancore/results.hpp>
+#include <lubancore/skills.hpp>
+#include <lubancore/memory.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
@@ -98,6 +100,8 @@ struct McpServer {
 struct RuntimeOptions {
     // Required absolute UTF-8 paths. data_root is the owned persistence root;
     // resource_root identifies installed resources (no ambient home lookup).
+    // An admitted search uses only resource_root/libexec/rg (rg.exe on Windows),
+    // prepares it before session startup, and requires the bundled rg version.
     std::string data_root;
     std::string resource_root;
 };
@@ -112,11 +116,18 @@ struct SessionOptions {
     std::optional<Connection> connection;
     // Empty creates a new V3 session. Nonempty strictly resumes that same V3 ID.
     std::string resume_session_id;
-    // Explicit admission. Currently read_file/write_file/edit_file/run_command.
+    // Explicit admission. read_file/write_file/edit_file/run_command/search.
+    // Search defaults to this session's cwd; null/empty paths do the same.
     // run_command is foreground-only; detached jobs and CLI parity are not claimed.
     std::vector<std::string> builtin_tools;
     std::vector<Tool> custom_tools;
     std::vector<McpServer> mcp_servers;
+    // Explicit local selection, frozen per session. SKILL.md drift is rejected;
+    // ordinary attachments are read live on demand. Never discovers HOME/cwd.
+    std::optional<skills::v1::Selection> skills;
+    // Explicit trusted project recall. Empty defaults off; on resume it preserves
+    // the saved Memory plan. An explicit resume value must match that plan.
+    std::optional<memory::v1::RecallOptions> memory;
     // Explicit trusted C++ registrations, frozen per session until Close.
     std::vector<extensions::v1::Registration> extensions;
     // Outbound result projection identity. New sessions default to Preview/v1;
@@ -129,6 +140,7 @@ struct SessionOptions {
     int max_steps_per_turn = 0;
     std::size_t context_window_tokens = 128000;
 };
+// operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };
 enum class OperationState { Accepted, Running, Succeeded, Failed, Cancelled, Indeterminate };
 struct Operation {
@@ -199,6 +211,10 @@ public:
     // Frozen selected/overridden middleware plan, retained as pure JSON after
     // Close. This does not serialize or restore arbitrary extension state.
     Result<std::string> DescribeExtensions() const;
+    Result<skills::v1::Snapshot> DescribeSkills() const;
+    Result<memory::v1::Snapshot> DescribeMemory() const;
+    // Searches this Session only, even when another Session uses the same ID string.
+    Result<memory::v1::RecallReport> GetMemoryRecall(const std::string& operation_id) const;
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
     // Cooperative custom tools/backends MUST return after cancellation; Close waits
     // for them and never destroys live borrowed state or pretends a timeout stopped it.
