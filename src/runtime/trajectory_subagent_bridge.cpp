@@ -8,6 +8,7 @@
 
 #include <cstdio>
 #include <ctime>
+#include <exception>
 #include <utility>
 
 #include "platform/log_sink.hpp"
@@ -41,94 +42,197 @@ using trajectory::Visibility;
 
 namespace {
 
-// 子代理桥的具体实现:持独立 recorder,Finish 落 run 终态并关柄。
-class SubagentBridgeImpl : public TrajectorySubagentBridge {
+// Preserve the native status even when a broken V3 writer returned Rejected.
+void ObserveAppend(SubagentTerminalReceipt& out, trajectory::RecordReceipt native, bool broken) {
+    out.broken_after_append = broken;
+    out.append_error_code = native.error_code;
+    out.append_error_message = native.error_message;
+    if (native.status == trajectory::RecordReceipt::Status::Committed) {
+        out.confirmation = SubagentAppendConfirmation::Committed;
+        out.terminal = SubagentTerminalRef{out.session_id, out.run_id, native.event_id, native.seq,
+                                          native.event_hash};
+    } else {
+        out.confirmation = broken || native.status == trajectory::RecordReceipt::Status::IoFailed
+            ? SubagentAppendConfirmation::DurabilityUnconfirmed
+            : SubagentAppendConfirmation::RejectedBeforeCommit;
+    }
+    out.append = std::move(native);
+}
+
+void ObserveAppend(SubagentTerminalReceipt& out, v3::WriteReceipt native, bool broken) {
+    out.broken_after_append = broken;
+    out.append_error_code = native.error_code;
+    out.append_error_message = native.error_message;
+    if (native.status == v3::WriteReceipt::Status::Committed) {
+        out.confirmation = SubagentAppendConfirmation::Committed;
+        out.terminal = SubagentTerminalRef{out.session_id, out.run_id, native.id, native.seq,
+                                          native.line_hash};
+    } else {
+        out.confirmation = broken || native.status == v3::WriteReceipt::Status::IoFailed
+            ? SubagentAppendConfirmation::DurabilityUnconfirmed
+            : SubagentAppendConfirmation::RejectedBeforeCommit;
+    }
+    out.append = std::move(native);
+}
+
+std::string ErrorCode(const std::string& error) {
+    const auto end = error.find(':');
+    const auto code = error.substr(0, end);
+    if (code.starts_with("io.") || code.starts_with("v3writer.")) return code;
+    return "trajectory.child_seal_failed";
+}
+
+// The bridge owns native writers; registry ownership alone does not extend
+// borrowed parent callbacks/error sinks. Finish is one serialized attempt.
+class SubagentBridgeImpl final : public TrajectorySubagentBridge {
 public:
     SubagentBridgeImpl(std::unique_ptr<trajectory::TrajectoryRecorder> recorder,
-                       std::unique_ptr<TrajectoryTurnBridge> bridge, std::string run_id,
-                       std::map<std::string, std::string>* terminal_hashes)
-        : recorder_(std::move(recorder)), bridge_(std::move(bridge)), run_id_(std::move(run_id)),
-          terminal_hashes_(terminal_hashes) {}
-
+                       std::unique_ptr<TrajectoryTurnBridge> bridge,
+                       std::shared_ptr<SubagentTerminalRegistry> registry)
+        : recorder_(std::move(recorder)), bridge_(std::move(bridge)),
+          run_id_(recorder_->base_scope().run_id), registry_(std::move(registry)) {}
     const std::string& run_id() const override { return run_id_; }
     TrajectoryTurnBridge& turn_bridge() override { return *bridge_; }
-
-    std::string Finish(bool ok, const std::string& reason) override {
-        if (finished_) {
-            return terminal_hash_;
+    SubagentTerminalReceipt Finish(SubagentExecutionOutcome execution,
+                                   const std::string& reason) override {
+        std::lock_guard lock(finish_mutex_);
+        if (finished_) return *finished_;
+        finished_.emplace();
+        auto& out = *finished_;
+        out.format = SubagentJournalFormat::V2;
+        out.session_id = recorder_->base_scope().session_id;
+        out.run_id = run_id_;
+        out.execution = execution;
+        out.reason = reason;
+        const auto kind = execution == SubagentExecutionOutcome::Succeeded
+            ? trajectory::EventKind::RunCompleted
+            : execution == SubagentExecutionOutcome::Cancelled
+                ? trajectory::EventKind::RunCancelled : trajectory::EventKind::RunFailed;
+        out.terminal_kind = std::string(trajectory::EventKindName(kind));
+        try {
+            const auto native = recorder_->FinishRun(kind, reason, trajectory::Durability::PowerLoss);
+            ObserveAppend(out, native, recorder_->broken());
+        } catch (const std::exception& error) {
+            out.append_error_code = "trajectory.child_terminal_exception";
+            out.append_error_message = error.what();
+            out.broken_after_append = recorder_->broken();
+        } catch (...) {
+            out.append_error_code = "trajectory.child_terminal_exception";
+            out.broken_after_append = recorder_->broken();
         }
-        finished_ = true;
-        const auto receipt = recorder_->FinishRun(
-            ok ? trajectory::EventKind::RunCompleted : trajectory::EventKind::RunFailed, reason,
-            trajectory::Durability::PowerLoss);
-        if (receipt.status == trajectory::RecordReceipt::Status::Committed) {
-            terminal_hash_ = receipt.event_hash;
-        } else {
-            terminal_hash_.clear();
+        try {
+            const auto closed = recorder_->Close();
+            out.seal = closed ? SubagentSealState::Closed : SubagentSealState::CloseFailed;
+            if (closed) out.journal_sha256 = *closed;
+            else {
+                out.close_error_code = ErrorCode(closed.error());
+                out.close_error_message = closed.error();
+            }
+        } catch (const std::exception& error) {
+            out.seal = SubagentSealState::CloseFailed;
+            out.close_error_code = "trajectory.child_close_exception";
+            out.close_error_message = error.what();
+        } catch (...) {
+            out.seal = SubagentSealState::CloseFailed;
+            out.close_error_code = "trajectory.child_close_exception";
         }
-        if (terminal_hashes_ != nullptr) {
-            (*terminal_hashes_)[run_id_] = terminal_hash_;
-        }
-        (void)recorder_->Close();
-        return terminal_hash_;
+        out.broken_after_close = recorder_->broken();
+        if (registry_) registry_->Store(out);
+        return out;
     }
-
 private:
     std::unique_ptr<trajectory::TrajectoryRecorder> recorder_;
     std::unique_ptr<TrajectoryTurnBridge> bridge_;
     std::string run_id_;
-    std::map<std::string, std::string>* terminal_hashes_;
-    std::string terminal_hash_;
-    bool finished_ = false;
+    std::shared_ptr<SubagentTerminalRegistry> registry_;
+    std::mutex finish_mutex_;
+    std::optional<SubagentTerminalReceipt> finished_;
 };
 
-// 接线点 1 的 v3 子代理桥:持子账 V3Writer(sessions/<parent>/subagents/
-// <childSessionId>/<childSessionId>.jsonl),Finish 落 session.ended 并回
-// 末行 hash(父侧对账用,与 v2 桥同一只口)。子轮桥是 v3 模式桥,绑子
-// 账自己的共享账(system 继承父场当前版,结果仓开在子目录)。
-class SubagentBridgeV3Impl : public TrajectorySubagentBridge {
+class SubagentBridgeV3Impl final : public TrajectorySubagentBridge {
 public:
     SubagentBridgeV3Impl(std::unique_ptr<v3::V3Writer> writer,
                          std::unique_ptr<V3SessionBooks> books,
-                         std::unique_ptr<TrajectoryTurnBridge> bridge, std::string run_id,
-                         std::map<std::string, std::string>* terminal_hashes)
+                         std::unique_ptr<TrajectoryTurnBridge> bridge,
+                         std::shared_ptr<SubagentTerminalRegistry> registry)
         : writer_(std::move(writer)), books_(std::move(books)), bridge_(std::move(bridge)),
-          run_id_(std::move(run_id)), terminal_hashes_(terminal_hashes) {}
-
+          run_id_(writer_->run_id()), registry_(std::move(registry)) {}
     const std::string& run_id() const override { return run_id_; }
     TrajectoryTurnBridge& turn_bridge() override { return *bridge_; }
-
-    std::string Finish(bool ok, const std::string& reason) override {
-        if (finished_) {
-            return terminal_hash_;
+    SubagentTerminalReceipt Finish(SubagentExecutionOutcome execution,
+                                   const std::string& reason) override {
+        std::lock_guard lock(finish_mutex_);
+        if (finished_) return *finished_;
+        finished_.emplace();
+        auto& out = *finished_;
+        out.format = SubagentJournalFormat::V3;
+        out.session_id = writer_->session_id();
+        out.run_id = run_id_;
+        out.terminal_kind = "session.ended";
+        out.execution = execution;
+        out.reason = reason;
+        try {
+            const bool ok = execution == SubagentExecutionOutcome::Succeeded;
+            v3::EventDraft ended;
+            ended.kind = v3::EventKindV3::SessionEnded;
+            ended.payload = nlohmann::json{
+                {"reason", reason.empty() ? (ok ? "completed" : "failed") : reason},
+                {"closeQuality", ok ? "clean" : "incomplete"}};
+            const auto native = writer_->AppendEvent(std::move(ended), trajectory::Durability::PowerLoss);
+            ObserveAppend(out, native, writer_->broken());
+        } catch (const std::exception& error) {
+            out.append_error_code = "trajectory.child_terminal_exception";
+            out.append_error_message = error.what();
+            out.broken_after_append = writer_->broken();
+        } catch (...) {
+            out.append_error_code = "trajectory.child_terminal_exception";
+            out.broken_after_append = writer_->broken();
         }
-        finished_ = true;
-        v3::EventDraft ended;
-        ended.kind = v3::EventKindV3::SessionEnded;
-        ended.payload = nlohmann::json{
-            {"reason", reason.empty() ? (ok ? "completed" : "failed") : reason},
-            {"closeQuality", ok ? "clean" : "incomplete"}};
-        const auto receipt = writer_->AppendEvent(std::move(ended), trajectory::Durability::PowerLoss);
-        terminal_hash_ = receipt.status == v3::WriteReceipt::Status::Committed
-                             ? receipt.line_hash
-                             : std::string();
-        if (terminal_hashes_ != nullptr) {
-            (*terminal_hashes_)[run_id_] = terminal_hash_;
+        try {
+            const auto closed = writer_->Close();
+            out.seal = closed ? SubagentSealState::Closed : SubagentSealState::CloseFailed;
+            if (!closed) {
+                out.close_error_code = ErrorCode(closed.error());
+                out.close_error_message = closed.error();
+            }
+        } catch (const std::exception& error) {
+            out.seal = SubagentSealState::CloseFailed;
+            out.close_error_code = "trajectory.child_close_exception";
+            out.close_error_message = error.what();
+        } catch (...) {
+            out.seal = SubagentSealState::CloseFailed;
+            out.close_error_code = "trajectory.child_close_exception";
         }
-        return terminal_hash_;
+        out.broken_after_close = writer_->broken();
+        if (registry_) registry_->Store(out);
+        return out;
     }
-
 private:
     std::unique_ptr<v3::V3Writer> writer_;
     std::unique_ptr<V3SessionBooks> books_;
     std::unique_ptr<TrajectoryTurnBridge> bridge_;
     std::string run_id_;
-    std::map<std::string, std::string>* terminal_hashes_;
-    std::string terminal_hash_;
-    bool finished_ = false;
+    std::shared_ptr<SubagentTerminalRegistry> registry_;
+    std::mutex finish_mutex_;
+    std::optional<SubagentTerminalReceipt> finished_;
 };
 
 }  // namespace
+
+std::unique_ptr<TrajectorySubagentBridge> TrajectorySubagentBridge::OwnV2(
+    std::unique_ptr<trajectory::TrajectoryRecorder> recorder,
+    std::unique_ptr<TrajectoryTurnBridge> bridge,
+    std::shared_ptr<SubagentTerminalRegistry> registry) {
+    return std::make_unique<SubagentBridgeImpl>(std::move(recorder), std::move(bridge), std::move(registry));
+}
+
+std::unique_ptr<TrajectorySubagentBridge> TrajectorySubagentBridge::OwnV3(
+    std::unique_ptr<v3::V3Writer> writer, std::unique_ptr<V3SessionBooks> books,
+    std::unique_ptr<TrajectoryTurnBridge> bridge,
+    std::shared_ptr<SubagentTerminalRegistry> registry) {
+    return std::make_unique<SubagentBridgeV3Impl>(std::move(writer), std::move(books),
+                                               std::move(bridge), std::move(registry));
+}
 
 // 子代理五步用的子会话 id:YYYYMMDD-HHMMSS-XXXXXX 形状(单段名可过目录
 // 门),尾缀 S+计数防同秒撞号。
@@ -246,9 +350,9 @@ TrajectorySessionLedger::SpawnSubagentV3(const std::string& parent_call_id,
     if (impl_->telemetry_wake != nullptr) {
         child_bridge->SetCommitWake(impl_->telemetry_wake, child_ref.journal_path);
     }
-    return std::unique_ptr<TrajectorySubagentBridge>(new SubagentBridgeV3Impl(
+    return TrajectorySubagentBridge::OwnV3(
         std::move(child_writer_owner), std::move(child_books), std::move(child_bridge),
-        agent_run_id, &impl_->child_terminal_hashes));
+        impl_->child_terminals);
 }
 
 std::expected<std::unique_ptr<TrajectorySubagentBridge>, SubagentSpawnFailure>
@@ -381,8 +485,8 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
         bridge->SetCommitWake(impl_->telemetry_wake,
                               "subagents/" + std::filesystem::path(*stream).filename().generic_string());
     }
-    return std::unique_ptr<TrajectorySubagentBridge>(new SubagentBridgeImpl(
-        std::move(recorder_owner), std::move(bridge), agent_run_id, &impl_->child_terminal_hashes));
+    return TrajectorySubagentBridge::OwnV2(
+        std::move(recorder_owner), std::move(bridge), impl_->child_terminals);
 }
 
 void TrajectorySessionLedger::NoteSubagentStartFailed(const SubagentSpawnFailure& failure,
@@ -449,12 +553,16 @@ void TrajectorySessionLedger::NoteSubagentStartFailed(const SubagentSpawnFailure
     NotifyCommitted_();
 }
 
+std::optional<SubagentTerminalReceipt> TrajectorySessionLedger::ChildTerminalReceipt(
+    const std::string& agent_run_id) const {
+    return impl_->child_terminals->Find(agent_run_id);
+}
+
 std::optional<std::string> TrajectorySessionLedger::ChildTerminalHash(const std::string& agent_run_id) const {
-    const auto it = impl_->child_terminal_hashes.find(agent_run_id);
-    if (it == impl_->child_terminal_hashes.end()) {
-        return std::nullopt;
-    }
-    return it->second;
+    const auto receipt = ChildTerminalReceipt(agent_run_id);
+    if (!receipt) return std::nullopt;
+    // Legacy projection only: an incomplete finalization has no durable handoff.
+    return receipt->durable() ? receipt->terminal->hash : std::string();
 }
 
 }  // namespace lubancode::runtime

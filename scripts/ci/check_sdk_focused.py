@@ -26,6 +26,7 @@ REQUIRED = {
     "sdk.focused.session_resources",
     "sdk.focused.session_execution",
     "sdk.focused.execution_owner",
+    "sdk.focused.subagent_terminal_receipt",
     "sdk.focused.scoped_turn_bindings",
     "sdk.focused.atomic_write",
 }
@@ -88,6 +89,13 @@ def main():
             raise RuntimeError("SDK memory-save native roster differs from 12 cases")
         if case.attrib["name"] == "sdk.focused.execution_owner" and int(counts[0]) != 7:
             raise RuntimeError("Shared execution-owner native roster differs from 7 cases")
+        if case.attrib["name"] == "sdk.focused.subagent_terminal_receipt" and int(counts[0]) != 7:
+            raise RuntimeError("Child terminal receipt native roster differs from 7 cases")
+        if case.attrib["name"] == "sdk.focused.subagent_terminal_receipt":
+            for path in ("cancel", "budget", "success", "close-failed", "child-unknown"):
+                marker = "[child-terminal-path] foreground." + path
+                if sections[0].splitlines().count(marker) != 1:
+                    raise RuntimeError("Child terminal actual foreground path did not finish once: " + path)
     print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
 
 

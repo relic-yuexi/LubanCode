@@ -260,6 +260,8 @@ public:
 
     // 父账边界:子代理 finished 时补的边界引用(child run id + 子账终态
     // hash),由主桥的 OnToolTrace 落——这里只给查口。
+    std::optional<SubagentTerminalReceipt> ChildTerminalReceipt(const std::string& agent_run_id) const;
+    // Legacy hash projection; empty means no confirmed complete handoff.
     std::optional<std::string> ChildTerminalHash(const std::string& agent_run_id) const;
 
     // 正常封口(/exit 与 EOF):turn 收齐后 run terminal + session.ended +

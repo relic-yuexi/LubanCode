@@ -9,6 +9,7 @@
 - [项目 Memory 提交与回执合同](memory-project-commit.md)
 - [SDK 项目 Memory 正式保存合同](sdk-memory-save.md)
 - [SDK 子 Agent 首批合同](sdk-subagents.md)
+- [子代理终态回执合同](child-terminal-receipt.md)
 - [Runner 就绪探针与失败原件](runner-probe-evidence.md)
 - [后台子代理线程启动收口](agent-thread-start-cleanup.md)
 - [SDK 依赖瘦身：更新器归宿主](sdk-updater-boundary.md)
