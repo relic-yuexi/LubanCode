@@ -21,6 +21,7 @@
 - [可取消审批与逐票 lease 合同](scoped-approval-lease.md)
 - [前台子轮异步审批接线合同](child-async-approval.md)
 - [SDK 依赖瘦身：更新器归宿主](sdk-updater-boundary.md)
+- [SDK 依赖瘦身：Release 查询归 CLI](sdk-release-query-boundary.md)
 - [测试指南](testing.md)
 - [分布式工程协作与远端验收](cluster-collaboration.md)
 - [文档规范](documentation.md)
