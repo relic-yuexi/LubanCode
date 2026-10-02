@@ -82,6 +82,7 @@ DOC development/sdk-skills.md
 DOC development/sdk-memory-recall.md
 DOC development/memory-project-commit.md
 DOC development/sdk-memory-save.md
+DOC development/sdk-storage-spi.md
 DOC development/agent-thread-start-cleanup.md
 DOC development/sdk-updater-boundary.md
 DOC development/lubancore-builtin-search.md
