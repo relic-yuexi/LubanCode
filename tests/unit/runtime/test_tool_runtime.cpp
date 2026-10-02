@@ -240,7 +240,8 @@ void VerifyParallelOwnedInvocation(bool stop) {
     CHECK(gate->completed == 2); // Both already-started workers exited before the turn returned.
     CHECK(gate->timeouts == 0); // A serial implementation cannot satisfy the two-entry barrier.
     const auto source = trajectory::v3::ReadV3Ledger(ledger->v3_main_writer()->path());
-    REQUIRE_MESSAGE(source.has_value(), source ? "" : source.error());
+    const auto source_error = source.has_value() ? std::string() : source.error();
+    REQUIRE_MESSAGE(source.has_value(), source_error);
     std::set<std::string> action_ids;
     for (const auto& observation : gate->execution) {
         CHECK(observation.thread != main_thread);
