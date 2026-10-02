@@ -53,6 +53,10 @@ struct Rig {
         root = fs::temp_directory_path() / ("lubancode-project-commit-" + name + "-" +
                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
                std::to_string(++sequence));
+        fs::create_directories(root);
+        // The gate resolves real paths; use that same directory spelling for
+        // precise injection targets (macOS /var may point through /private/var).
+        root = fs::canonical(root);
         context.project_root = root / "repo";
         context.memory_directory = root / "home" / "workspaces" / "project-key" / "memory";
         context.lifecycle_root = context.memory_directory.parent_path() / "lifecycle";
@@ -262,11 +266,16 @@ TEST_CASE("project commit: intent-only and post-topic crash windows forbid repla
 
 TEST_CASE("project commit: file-flush failure preserves NotCommitted topic stage") {
     Rig rig("file-flush");
+    int matched = 0;
     const auto failed = memory::commit_testing::CommitProjectUpsert(rig.context, rig.request,
         [&](const auto& path, auto bytes, auto durability) {
-            if (path == rig.Topic()) { FlushGuard guard(false); return platform::AtomicWriteFile(path, bytes, durability); }
+            if (path == rig.Topic()) {
+                ++matched;
+                FlushGuard guard(false); return platform::AtomicWriteFile(path, bytes, durability);
+            }
             return platform::AtomicWriteFile(path, bytes, durability);
         });
+    CHECK(matched == 1);
     CHECK(failed.state == State::NotStarted);
     CHECK(Has(failed, Stage::Topic, Outcome::NotCommitted));
     CHECK(Has(failed, Stage::Result, Outcome::CommittedDurable));
@@ -279,11 +288,16 @@ TEST_CASE("project commit: file-flush failure preserves NotCommitted topic stage
 
 TEST_CASE("project commit: topic directory-flush failure remains visible and indeterminate") {
     Rig rig("topic-flush");
+    int matched = 0;
     const auto failed = memory::commit_testing::CommitProjectUpsert(rig.context, rig.request,
         [&](const auto& path, auto bytes, auto durability) {
-            if (path == rig.Topic()) { FlushGuard guard(true); return platform::AtomicWriteFile(path, bytes, durability); }
+            if (path == rig.Topic()) {
+                ++matched;
+                FlushGuard guard(true); return platform::AtomicWriteFile(path, bytes, durability);
+            }
             return platform::AtomicWriteFile(path, bytes, durability);
         });
+    CHECK(matched == 1);
     CHECK(failed.state == State::Indeterminate);
     CHECK(Has(failed, Stage::Topic, Outcome::CommittedDurabilityUnconfirmed));
     REQUIRE(fs::is_regular_file(rig.Topic()));
