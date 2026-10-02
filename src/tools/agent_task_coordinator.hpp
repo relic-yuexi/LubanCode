@@ -126,6 +126,10 @@ struct AgentDispatchRequest {
     AgentRunIdentity caller;   // 派工者身份(经 TLS 校准,见下)
     std::shared_ptr<const SubagentDispatchEnv> env;  // null = main 直派,引擎读自家活账
     AgentDispatchHandle* fail_account = nullptr;     // 连败账随调用方的 handle 走
+    // Foreground-only call borrow. Never copy into a detached worker/env.
+    const std::atomic<bool>* foreground_cancel = nullptr;
+    // Whole owned ancestor invocation: causal evidence, never child identity.
+    std::optional<ToolInvocationIdentity> parent_invocation_cause;
 };
 
 // ---- 当前派工身份的线程局部账 -------------------------------------------
@@ -250,7 +254,8 @@ class AgentDispatchHandle {
 public:
     AgentDispatchHandle() = default;
     AgentDispatchHandle(std::weak_ptr<AgentTaskCoordinator> coordinator, AgentRunIdentity identity,
-                        std::shared_ptr<const SubagentDispatchEnv> env);
+                        std::shared_ptr<const SubagentDispatchEnv> env,
+                        std::optional<ToolInvocationIdentity> parent_invocation_cause = std::nullopt);
 
     const AgentRunIdentity& identity() const { return identity_; }
     // 冻结派工环境(只读):薄壳按当前入口修 schema 的后台可见性用(派工单
@@ -258,6 +263,7 @@ public:
     const std::shared_ptr<const SubagentDispatchEnv>& env() const { return env_; }
     // 派工入口:身份先经 TLS 校准(见 CurrentDispatchIdentity),再进协调器。
     Tool::Result Dispatch(const nlohmann::json& input);
+    Tool::Result Dispatch(const nlohmann::json& input, const ToolExecutionContext& context);
     // 薄壳的 schema/description 只读转发口(协调器亡 = null,壳退静态文案)。
     Tool* facade_tool() const;
 
@@ -272,6 +278,7 @@ private:
     std::weak_ptr<AgentTaskCoordinator> coordinator_;
     AgentRunIdentity identity_;
     std::shared_ptr<const SubagentDispatchEnv> env_;
+    std::optional<ToolInvocationIdentity> parent_invocation_cause_;
     std::string param_fail_cause_;
     int param_fail_streak_ = 0;
 };
