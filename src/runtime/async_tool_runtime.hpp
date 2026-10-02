@@ -30,6 +30,8 @@
 
 namespace lubancode::runtime {
 
+class TrajectoryTurnBridge;
+
 // 白名单里一枚工具的宿主策略(单 §4 执行策略 + 派发点两档)。
 struct AsyncToolPolicy {
     tools::JobExecutionPolicy execution;
@@ -85,11 +87,17 @@ public:
     ~AsyncToolRuntime();
     AsyncToolRuntime(const AsyncToolRuntime&) = delete;
     AsyncToolRuntime& operator=(const AsyncToolRuntime&) = delete;
+    void RequestShutdown();
+    bool Shutdown();
+    bool quiescent() const;
 
     // 每轮开拍前钉当前轮桥:证据/声明册/回合号的查询口走它(轮桥按轮
     // 新建,运行时按会话活;没钉 = 桥面查询全空,闸门提前档不派发、
     // acknowledged 落 uncertain——如实,不冒充)。
     void InstallTurnBridge(class TrajectoryTurnBridge* bridge);
+    // Scoped binding uses the same mutex as all bridge queries. Restore the
+    // returned pointer before destroying the temporary bridge; nested use is LIFO.
+    TrajectoryTurnBridge* ExchangeTurnBridge(TrajectoryTurnBridge* bridge);
     // 每轮开拍前刷新模型身份(能力快照的 basis;会话中途切模型照实换,
     // 快照只在首次裁决落一次,切换后的能力重验归 P3 探针面)。
     void NoteModelIdentity(const std::string& provider, const std::string& model);

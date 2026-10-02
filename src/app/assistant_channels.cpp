@@ -57,7 +57,7 @@ std::optional<nlohmann::json> ReadConnectionSnapshot(
     if (parsed.is_discarded()) {
         return std::nullopt;
     }
-    return parsed;
+    return std::optional<nlohmann::json>{std::in_place, parsed};
 }
 
 // 对号串(命令/回执文件名;单段 [A-Za-z0-9-],与 CLI 同式)。

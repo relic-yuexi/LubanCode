@@ -295,6 +295,13 @@ public:
     std::expected<RunOutcome, std::string> Run(api::Message user_message, const TurnWiring& wiring,
                                                 const std::atomic<bool>* cancel = nullptr);
 
+    // Internal host seam: append only after the durable context admission has
+    // committed, then run that same history without admitting the user twice.
+    // The host serializes these calls with Run; this does not reset cache epochs.
+    void AppendAdmittedMessage(api::Message message) { context_.PushMessage(std::move(message)); }
+    std::expected<RunOutcome, std::string> RunAdmittedHistory(const TurnWiring& wiring,
+                                                const std::atomic<bool>* cancel = nullptr);
+
     const std::vector<api::Message>& history() const { return context_.durable_history(); }
     // M6.6:/compact 用。跟 history() 是同一份数据,单独起个大写名字是给
     // 老调用方对账用(名字沿用,签名不动)。

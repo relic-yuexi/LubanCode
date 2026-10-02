@@ -26,8 +26,8 @@
 #include "agent/prompts.hpp"
 #include "agent/token_calibrator.hpp"  // DefaultTokenCalibrator:子代理共用的校准器实例
 #include "agent/turn_harness.hpp"
-#include "cli/i18n.hpp"  // trf:墙钟/预算文案(参数校验的错误文案发给模型看,不走 i18n)
-#include "cli/line_editor.hpp"  // DisplayWidthUtf8:标题宽度(纯逻辑编辑核的零流符号)
+#include "text/i18n.hpp"  // trf:墙钟/预算文案(参数校验的错误文案发给模型看,不走 i18n)
+#include "text/display_width.hpp"  // 标题列宽，不依赖终端编辑器
 #include "config/command_permission.hpp"  // 后台任务命令的 permissions 前缀裁定(问题 7 拆出)
 #include "config/config.hpp"  // StateRootDir:子代理诊断日志落状态根
 #include "platform/log_sink.hpp"  // §5.3 旧预算键的弃用日志
@@ -1127,7 +1127,7 @@ Tool::Result ExecuteAgentDispatchOnRunState(const AgentDispatchRequest& dispatch
         title.find('\t') != std::string::npos) {
         return reject("title 格式不合要求", title_bad_hint);
     }
-    if (lubancode::cli::DisplayWidthUtf8(title) > kMaxTitleDisplayWidth) {
+    if (lubancode::text::DisplayWidthUtf8(title) > kMaxTitleDisplayWidth) {
         return reject("title 格式不合要求", title_bad_hint);
     }
 
@@ -3490,7 +3490,7 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
             // 原因与实际用时,检查点/部分结果照常带回。
             task_outcome.status = TaskOutcomeStatus::Failed;
             task_outcome.reason = TaskOutcomeReason::WallClockTimeout;
-            task_outcome.message = lubancode::cli::trf("agent_outcome.wall_clock", state->wall_clock_timeout_secs);
+            task_outcome.message = lubancode::text::trf("agent_outcome.wall_clock", state->wall_clock_timeout_secs);
             task_outcome.partial_result = partial;
             run_result = {"子代理执行失败: " + task_outcome.message + "\n" + ComposeOutcomeText(task_outcome), true};
             break;
@@ -3604,7 +3604,7 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
         if (task->force_finalized) {
             AgentTaskEvent late_event;
             late_event.kind = AgentTaskEventKind::Failure;
-            late_event.text = lubancode::cli::tr("agent_outcome.wall_clock_late");
+            late_event.text = lubancode::text::tr("agent_outcome.wall_clock_late");
             state->coordinator->ledger().AppendEventLocked(task, std::move(late_event));
             return run_result;
         }

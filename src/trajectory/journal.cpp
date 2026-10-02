@@ -71,14 +71,7 @@ JournalWriter& JournalWriter::operator=(JournalWriter&& other) noexcept {
     return *this;
 }
 
-JournalWriter::~JournalWriter() { Close(); }
-
-void JournalWriter::Close() {
-    if (file_ != nullptr) {
-        std::fclose(file_);
-        file_ = nullptr;
-    }
-}
+JournalWriter::~JournalWriter() { (void)Close(); }
 
 std::expected<JournalWriter, std::string> JournalWriter::Open(const std::filesystem::path& path,
                                                               OpenMode mode) {
@@ -120,6 +113,13 @@ bool JournalWriter::AppendLine(std::string_view line, Durability durability) {
     }
     ++line_count_;
     return true;
+}
+
+bool JournalWriter::Close() {
+    if (file_ != nullptr && std::fclose(std::exchange(file_, nullptr)) != 0) {
+        broken_ = true;
+    }
+    return !broken_;
 }
 
 std::expected<std::string, std::string> JournalWriter::ComputeJournalSha256(

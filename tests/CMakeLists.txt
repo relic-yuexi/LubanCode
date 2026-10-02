@@ -1,9 +1,19 @@
+if(NOT LUBANCODE_BUILD_CLI)
+  if(LUBANCODE_BUILD_SDK)
+    include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
+  endif()
+  return()
+endif()
+
 # 测试源码按“种类/领域”落位。目录便是清单：添一册 test_*.cpp，
 # CMake 会自动编进总测试二进制，并另登一条可单跑的 CTest。
 file(GLOB_RECURSE LUBANCODE_TEST_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/*/test_*.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/integration/*/test_*.cpp")
 list(SORT LUBANCODE_TEST_SOURCES)
+if(NOT LUBANCODE_BUILD_SDK)
+  list(FILTER LUBANCODE_TEST_SOURCES EXCLUDE REGEX "/(unit|integration)/sdk/")
+endif()
 
 # glob 兜底(2026-08-28):examples 域的册在主树 configure 偶发漏收
 # (同 cmake 同 pattern 的独立项目能收,工头 worktree 也能收;增量与全新
@@ -77,6 +87,15 @@ add_executable(lubancode_tests
   ${LUBANCODE_TEST_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
+if(LUBANCODE_BUILD_SDK)
+  target_link_libraries(lubancode_tests PRIVATE lubancore_sdk)
+  if(WIN32)
+    add_custom_command(TARGET lubancode_tests POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_RUNTIME_DLLS:lubancode_tests> $<TARGET_FILE_DIR:lubancode_tests>
+      COMMAND_EXPAND_LISTS)
+  endif()
+endif()
 # QQ 机器人接入单 Q1:mock WS/TLS 服务端夹具直接用 mbedTLS(服务端握手与
 # 自签证书生成),engine 对 mbedtls 是 PRIVATE 链,这里显式补上(include
 # 路径随 target 的 PUBLIC usage 递)。
@@ -215,6 +234,37 @@ target_compile_features(updater_probe_stub PRIVATE cxx_std_23)
 add_dependencies(lubancode_tests updater_probe_stub)
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_UPDATER_PROBE_STUB_EXE="$<TARGET_FILE:updater_probe_stub>")
+
+# The real updater fixture must carry the EXE's actual app-local PE closure.
+# Scan after building the EXE; unrelated DLLs beside it do not belong in its ZIP.
+if(WIN32)
+  if(MSVC)
+    get_filename_component(_updater_linker_dir "${CMAKE_LINKER}" DIRECTORY)
+    find_program(_updater_pe_command NAMES dumpbin HINTS "${_updater_linker_dir}" REQUIRED)
+    set(_updater_pe_tool "dumpbin")
+  else()
+    if(NOT CMAKE_OBJDUMP)
+      message(FATAL_ERROR "Windows updater fixture requires a PE dependency inspector")
+    endif()
+    set(_updater_pe_command "${CMAKE_OBJDUMP}")
+    set(_updater_pe_tool "objdump")
+  endif()
+  set(_updater_runtime_list "${CMAKE_CURRENT_BINARY_DIR}/updater-runtime-$<CONFIG>.txt")
+  add_custom_target(updater_fixture_runtime_files
+    COMMAND "${CMAKE_COMMAND}"
+      "-DUPDATER_PROBE_EXE=$<TARGET_FILE:lubancode>"
+      "-DUPDATER_RUNTIME_LIST=${_updater_runtime_list}"
+      "-DCMAKE_GET_RUNTIME_DEPENDENCIES_PLATFORM=windows+pe"
+      "-DCMAKE_GET_RUNTIME_DEPENDENCIES_TOOL=${_updater_pe_tool}"
+      "-DCMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND=${_updater_pe_command}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/support/updater_runtime_files.cmake"
+    DEPENDS lubancode
+    VERBATIM)
+  add_dependencies(lubancode_tests updater_fixture_runtime_files)
+  target_compile_definitions(lubancode_tests PRIVATE
+    LUBANCODE_UPDATER_MAIN_EXE="$<TARGET_FILE:lubancode>"
+    LUBANCODE_UPDATER_RUNTIME_LIST="${_updater_runtime_list}")
+endif()
 
 # 2) 真 rg 分期入位:LUBANCODE_BUNDLED_RG_DIR 指向已过哈希/版本门的 rg
 #    目录(scripts/fetch_ripgrep.sh 的产物,如 build/rg-stage/libexec)。
@@ -374,6 +424,14 @@ foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)
       TIMEOUT "${test_timeout}")
   endif()
 endforeach()
+
+# Reuse the SDK test graph in both combined and SDK-only configurations.
+if(LUBANCODE_BUILD_SDK)
+  # Private production-reader fixture; keep detail symbols out of the SDK ABI.
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/results.cpp")
+  include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
+  include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreHostTests.cmake")
+endif()
 
 # 工具文案语言档端到端驱动(不进 ctest,验收手动跑):
 #   tool_text_lang_driver <zh-CN|en>

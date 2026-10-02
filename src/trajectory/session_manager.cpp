@@ -104,7 +104,7 @@ std::optional<nlohmann::json> ReadJsonFile(const std::filesystem::path& path) {
     if (json.is_discarded()) {
         return std::nullopt;
     }
-    return json;
+    return std::optional<nlohmann::json>{std::in_place, json};
 }
 
 // 恢复期允许的"折叠"迁移:session.json 落后或抢跑于 Journal 可证事实时,
@@ -1345,8 +1345,12 @@ ClearOutcome SessionManager::ClearV3Locked(const ClearRequest& request,
     outcome.old_session_ended_ref =
         EventRef{old.session_id(), ended_receipt.id, ended_receipt.line_hash};
     outcome.old_journal_sha256 = ended_receipt.line_hash;  // 封账行 hash(§8.3 同口径)
+    // 封口后先关写句柄,再推进换场。沿用 checked Close,关闭失败不能冒充
+    // 清场成功;保留旧场身份与只读上下文,也不把正常关闭标成 broken。
+    if (const auto closed = old.v3_main->Close(); !closed.has_value()) {
+        return fail("clear.step4_failed", closed.error());
+    }
     old.status = SessionStatus::Closed;  // 只住内存(v3 无 session.json 可翻)
-    old.v3_main->CloseFile();            // 已封口不再写;放句柄免挡 Windows 删目录
 
     // ---- 第 5 步:v3 无 session.json,跳——账面 session.ended 即终态。
 
@@ -1419,12 +1423,15 @@ CloseOutcome SessionManager::CloseV3Locked(const CloseRequest& request,
                     "session.ended 落不了: " + receipt.error_code + " " + receipt.error_message);
     }
     outcome.journal_sha256 = receipt.line_hash;
+    // session.ended 落稳后先关写句柄,再交还独占锁。仅放锁不关柄时,
+    // Windows 仍拒绝删除/改名;管理器存活期间关闭的会话也应能管理。
+    // 保留 v3_main 对象,不让 ActiveSession::is_v3() 与只读查询丢身份。
+    if (const auto closed = session.v3_main->Close(); !closed.has_value()) {
+        return fail("close.step3_failed", closed.error());
+    }
     session.status = SessionStatus::Closed;
     // 封口即放锁(§3.3.2 同一口径:没有活 writer 的场不攥独占锁)。
     session.lock.Release();
-    // 账文件句柄一并放:Windows 上开着的句柄挡住目录删除(DeleteSession、
-    // 清单测试直删目录)。已封口的场不再写。
-    session.v3_main->CloseFile();
     return outcome;
 }
 

@@ -165,13 +165,13 @@ std::string LandToolArtifact(const std::string& artifact_dir, const std::string&
     const std::string filename = sha + "." + extension;
     const std::filesystem::path dir = platform::Utf8ToPath(artifact_dir);
     std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
+    std::filesystem::create_directories(platform::FileIoPath(dir), ec);
     if (ec) {
         return std::string();
     }
     const std::filesystem::path file = dir / platform::Utf8ToPath(filename);
     // 内容寻址:同字节已落过不再写(幂等,重复块的天然去重)。
-    if (std::filesystem::exists(file) || AtomicWriteBytes(file, bytes)) {
+    if (std::filesystem::exists(platform::FileIoPath(file)) || AtomicWriteBytes(file, bytes)) {
         return artifact_dir + "/" + filename;
     }
     return std::string();

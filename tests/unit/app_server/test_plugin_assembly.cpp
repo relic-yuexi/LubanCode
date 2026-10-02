@@ -263,7 +263,7 @@ config::PluginTrustStore MakeEmptyStore() {
 tools::Tool::Result CallTool(const SessionAssemblyResult& assembled, const std::string& name,
                              const nlohmann::json& input) {
     REQUIRE(assembled.assembly != nullptr);
-    tools::Tool* tool = assembled.assembly->registry->Find(name);
+    tools::Tool* tool = assembled.assembly->resources->registry().Find(name);
     REQUIRE(tool != nullptr);
     return tool->execute(input);
 }
@@ -647,7 +647,7 @@ TEST_CASE("P5 取消链:装配路下 context.cancel 贯通 instruction hook,当�
     // 旗先置位(确定性,与 test_plugin_lua_host 的机制层用例同口径),
     // hook 在第一个步长就看见,长循环跑不完,结果零产出。
     std::atomic<bool> cancel{true};
-    tools::Tool* tool = result.assembly->registry->Find("plugin__demo-lua__search");
+    tools::Tool* tool = result.assembly->resources->registry().Find("plugin__demo-lua__search");
     REQUIRE(tool != nullptr);
     const auto call = tool->execute(nlohmann::json::object(),
                                     tools::ToolExecutionContext{&cancel, std::string()});
@@ -891,8 +891,9 @@ TEST_CASE("P5 v3 执行账:装配路插件工具的成功与失败各归 tool.ex
     options.auto_confirm = true;  // 插件工具 needs_confirm 恒真:显式全放
     options.connection_snapshot = frozen;
     options.session_provider = "demo-provider";
-    options.assembly_factory = [&harness, &plugins_root, &trust, &scripts]() {
+    options.assembly_factory = [&harness, &plugins_root, &trust, &scripts](const std::string& cwd_utf8) {
         SessionAssemblyRequest request;
+        request.cwd_utf8 = cwd_utf8;
         request.backend_factory = [&scripts]() {
             return std::make_unique<ScriptBackend>(scripts);
         };

@@ -5,7 +5,7 @@
 - 当前基线：权限/Hooks/信任门/超时杀树已落；PTC 有资源墙；普通工具与 process Plugin 没有通用强化沙箱
 - 范围：统一拦截链、熔断、fallback、重试/恢复、故障注入与审计；消费 ExecutionProvider 的执行回执
 - 权威分工：`跨平台ExecutionProvider与通用强化沙箱设计.todo` 独占 ExecutionProvider、IsolationGrade、三平台沙箱与资源墙合同；本单不得另写第二份
-- 关联：`跨平台ExecutionProvider与通用强化沙箱设计.todo`、`轻量可塑ExtensionRuntime与动态扩展API设计.todo`、`端云协同可观测架构与Telemetry插件设计.todo`、`多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`
+- 关联：`跨平台ExecutionProvider与通用强化沙箱设计.todo`、`轻量可塑ExtensionRuntime与动态扩展API设计.todo`、`端云协同可观测架构与Telemetry插件设计.todo`、`分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo`（原集群畅想单已并入其第二十九章）
 - 不在本单：把 confirm/auto/yolo 改名为沙箱、自动运行陌生仓库代码、云端越权下发命令、替第三方插件证明无恶意
 
 ## 一、目标

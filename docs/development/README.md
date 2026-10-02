@@ -3,7 +3,9 @@
 [文档首页](../README.md) · [架构说明](../architecture/README.md) · [参考手册](../reference/README.md)
 
 - [构建与发行](build-and-release.md)
+- [LubanCore C++ SDK（实验版）](lubancore-sdk.md)
 - [测试指南](testing.md)
+- [分布式工程协作与远端验收](cluster-collaboration.md)
 - [文档规范](documentation.md)
 - [命名与计数](naming.md)
 - [安全模型](security.md)

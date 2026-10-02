@@ -90,7 +90,8 @@ public:
     TransportStartResult Start(const std::string& command, const std::vector<std::string>& args,
                                 const std::vector<std::pair<std::string, std::string>>& env,
                                 std::function<void(std::string)> on_line,
-                                platform::EnvMode env_mode = platform::EnvMode::Inherit);
+                                platform::EnvMode env_mode = platform::EnvMode::Inherit,
+                                const std::string& cwd_utf8 = {});
 
     // 整条消息(不带换行)+ \n 一次性写出去,内部加锁防止多个请求线程交错。
     // 进程已经退出/没起成功都返回 false。

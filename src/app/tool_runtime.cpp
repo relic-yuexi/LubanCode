@@ -1,20 +1,18 @@
 // tool_runtime.hpp 的实现:工具表装配、MCP 起服注册、插件挂载与
-// ToolRuntime 构造的全套函数体,具体工具与 i18n 的依赖都在这只
-// translation unit 里,不往公开头漏。
+// ToolRuntime 构造的全套函数体。宿主发现、翻译和终端输出另归
+// cli_tool_assembly;此处只消费显式材料并记录诊断。
 
 #include "app/tool_runtime.hpp"
 
 #include "tools/undo_file_edit.hpp"
 
 #include <algorithm>
-#include <cstdlib>
-#include <iostream>
+#include <stdexcept>
 #include <utility>
 
 #include "app/version.hpp"
-#include "app/commands/agent_commands.hpp"  // ComputeAgentScanRoots:自定义 Agent 目录三层的根
-#include "cli/i18n.hpp"
-#include "cli/console_input.hpp"  // CurrentConfirmMode:父会话权限档(阶段 3 解析环境)
+#include "runtime/assembly/builtin_tools.hpp"
+#include "platform/text_encoding.hpp"
 #include "memory/memory_tool.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "ptc/profile.hpp"
@@ -24,35 +22,63 @@
 #include "tools/agent_message_tool.hpp"
 #include "tools/agent_watch_tool.hpp"  // 监督器单 P1-0:main 的 agent_watch(整棵树 + diagnostic)
 #include "tools/background_output.hpp"
-#include "tools/edit_file.hpp"
 #include "tools/lua_tool.hpp"
 #include "tools/lsp_tool.hpp"
 #include "tools/path_utils.hpp"
-#include "tools/read_file.hpp"
 #include "tools/run_command.hpp"
-#include "tools/search.hpp"
-#include "tools/search_ripgrep.hpp"  // BundledRipgrepRunner:SearchTool 的 P0-2 装配注入口
-#include "tools/skill_tool.hpp"
-#include "tools/subagent_env_appendix.hpp"  // 派工任务书单 2.1:本机环境附录探测与成文
 #include "tools/tool_search.hpp"
-#include "tools/web_fetch.hpp"
-#include "tools/web_search.hpp"
-#include "tools/write_file.hpp"
 
 namespace lubancode::app {
 
 namespace {
 
-// 沙箱豁免开关:POSIX 只有 rlimit(资源上限,无文件系统/网络隔离),按
-// 规格"没有可靠 sandbox 的平台默认禁 PTC"执行;开发者/测试要用环境
-// 变量 LUBANCODE_PTC_ALLOW_NO_SANDBOX 显式豁免,风险自担。
-bool PosixSandboxExempted() {
-#ifndef _WIN32
-    const char* raw = std::getenv("LUBANCODE_PTC_ALLOW_NO_SANDBOX");
-    return raw != nullptr && raw[0] != '\0';
-#else
-    return true;  // Windows 有 Job Object + 受限 token,天然豁免
-#endif
+void ValidateToolAssemblyCwd(const std::string& cwd_utf8) {
+    if (cwd_utf8.empty() || !platform::IsValidUtf8(cwd_utf8) ||
+        !tools::Utf8ToPath(cwd_utf8).is_absolute()) {
+        throw std::invalid_argument("tool_assembly.invalid_cwd: an absolute UTF-8 cwd is required");
+    }
+}
+
+void ValidateAssemblyPath(const std::optional<std::filesystem::path>& path, const char* name) {
+    if (path && (path->empty() || !path->is_absolute() ||
+                 !platform::IsValidUtf8(tools::PathToUtf8(*path)))) {
+        throw std::invalid_argument(std::string("tool_assembly.invalid_path: ") + name);
+    }
+}
+
+void ValidateToolAssemblyPlan(const ToolAssemblyPlan& plan) {
+    ValidateToolAssemblyCwd(plan.cwd_utf8);
+    ValidateAssemblyPath(plan.user_plugins_dir, "user_plugins_dir");
+    ValidateAssemblyPath(plan.plugin_trust_path, "plugin_trust_path");
+    ValidateAssemblyPath(plan.package_data_root, "package_data_root");
+    ValidateAssemblyPath(plan.ptc_profile_store_path, "ptc_profile_store_path");
+}
+
+void ValidateAgentScanRoots(const agent::AgentCatalogScanRoots& roots) {
+    ValidateAssemblyPath(roots.builtin_dir, "agent.builtin_dir");
+    ValidateAssemblyPath(roots.user_dir, "agent.user_dir");
+    ValidateAssemblyPath(roots.project_dir, "agent.project_dir");
+}
+
+agent::AgentCatalogScanRoots RootsWithPackageSnapshot(
+    agent::AgentCatalogScanRoots roots, const package::PackageSnapshot* snapshot) {
+    ValidateAgentScanRoots(roots);
+    // Package identity and content belong to the pinned snapshot, not to a
+    // potentially stale packaged field returned by a directory supplier.
+    roots.packaged = snapshot != nullptr ? package::MountAgentEntries(snapshot->mount())
+                                        : std::vector<agent::PackagedAgentEntry>{};
+    return roots;
+}
+
+void EmitDiagnostic(const ToolAssemblyDiagnosticReporter& reporter, std::string code,
+                    ToolAssemblyDiagnosticSeverity severity, std::string stage,
+                    std::string component, std::vector<std::string> arguments,
+                    bool announce = true,
+                    ToolAssemblyDiagnosticScope scope = ToolAssemblyDiagnosticScope::Shared) {
+    if (reporter) {
+        reporter({std::move(code), severity, std::move(stage), std::move(component),
+                  std::move(arguments), scope}, announce);
+    }
 }
 
 }  // namespace
@@ -75,10 +101,6 @@ std::size_t DeferredDeclarationTokens(const lubancode::tools::ToolRegistry& regi
     return total;
 }
 
-// i18n:装配函数里到处用 tr/trf,拉进来省得每处全限定。
-using lubancode::cli::tr;
-using lubancode::cli::trf;
-
 lubancode::memory::Options MemoryOptionsFromConfig(const lubancode::config::MemoryConfig& config) {
     lubancode::memory::Options options;
     // config.memory.enabled 只能由用户全局配置打开(config merge 层守过),
@@ -98,68 +120,38 @@ lubancode::memory::Options MemoryOptionsFromConfig(const lubancode::config::Memo
 
 lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode::tools::SkillMeta>& skills,
                                                      const lubancode::config::SearchConfig& search_config) {
-    lubancode::tools::ToolRegistry registry;
-    registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
-    registry.Register(std::make_unique<lubancode::tools::RunCommandTool>());
-    // 后台命令三件套:run_command 起后台(background_tasks 登记 task_id + watcher
-    // 探活),background_output 查状态/读输出,stop_background 收尾。两个新工具
-    // 是纯进程内单例查询/控制,无外部依赖,直接进基础表(子代理也能用)。
-    registry.Register(std::make_unique<lubancode::tools::BackgroundOutputTool>());
-    registry.Register(std::make_unique<lubancode::tools::StopBackgroundTool>());
-    registry.Register(std::make_unique<lubancode::tools::WriteFileTool>());
-    registry.Register(std::make_unique<lubancode::tools::EditFileTool>());
-    // ripgrep 迁移单 P0-5:search 生产主路(装配与 SearchTool 默认构造同一款
-    // runner,定位只认 exe-dir/libexec,缺件即稳定错,无本地内核 fallback)。
-    registry.Register(std::make_unique<lubancode::tools::SearchTool>(
-        std::make_shared<lubancode::tools::BundledRipgrepRunner>()));
-    registry.Register(std::make_unique<lubancode::tools::SkillTool>(skills));
-    registry.Register(std::make_unique<lubancode::tools::WebFetchTool>("lubancode/" + std::string(kVersion)));
-    if (search_config.Configured()) {
-        registry.Register(std::make_unique<lubancode::tools::WebSearchTool>(search_config));
-    }
-    return registry;
+    return runtime::assembly::BuildBaseToolRegistry(skills, search_config,
+                                                   "lubancode/" + std::string(kVersion));
 }
 
 lubancode::tools::ToolRegistry BuildExploreToolRegistry(const lubancode::config::SearchConfig& search_config) {
-    lubancode::tools::ToolRegistry registry;
-    registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
-    // 同基础表:Explore 表的 search 也注入同一款默认 runner(P0-5 主路)。
-    registry.Register(std::make_unique<lubancode::tools::SearchTool>(
-        std::make_shared<lubancode::tools::BundledRipgrepRunner>()));
-    registry.Register(std::make_unique<lubancode::tools::WebFetchTool>("lubancode/" + std::string(kVersion)));
-    if (search_config.Configured()) {
-        registry.Register(std::make_unique<lubancode::tools::WebSearchTool>(search_config));
-    }
-    return registry;
+    return runtime::assembly::BuildExploreToolRegistry(search_config,
+                                                      "lubancode/" + std::string(kVersion));
 }
 
 std::vector<McpServerRuntime> StartMcpServers(
-    const std::map<std::string, lubancode::config::McpServerConfig>& configs, const lubancode::cli::Theme& theme) {
+    const std::map<std::string, lubancode::config::McpServerConfig>& configs,
+    const std::string& cwd_utf8, const ToolAssemblyDiagnosticReporter& report) {
+    ValidateToolAssemblyCwd(cwd_utf8);
     std::vector<McpServerRuntime> out;
     for (const auto& [name, server_config] : configs) {
-        auto client = std::make_unique<lubancode::mcp::Client>(name);
-        const auto start_result = client->StartProcess(server_config.command, server_config.args, server_config.env);
-        if (!start_result.success) {
-            std::cout << theme.error << trf("mcp.start_failed", name, start_result.error) << theme.reset << "\n";
+        auto started = runtime::assembly::StartMcpServer(
+            {name, server_config.command, server_config.args, server_config.env,
+             lubancode::platform::EnvMode::Inherit, cwd_utf8});
+        if (!started) {
+            const char* key = "mcp.start_failed";
+            switch (started.error().stage) {
+                case runtime::assembly::McpStartupStage::Start: break;
+                case runtime::assembly::McpStartupStage::Initialize: key = "mcp.init_failed"; break;
+                case runtime::assembly::McpStartupStage::Discover: key = "mcp.list_failed"; break;
+            }
+            EmitDiagnostic(report, key, ToolAssemblyDiagnosticSeverity::Warning,
+                           "mcp", name, {name, started.error().error});
             continue;
         }
-        const auto init_result = client->Initialize();
-        if (!init_result.has_value()) {
-            std::cout << theme.error << trf("mcp.init_failed", name, init_result.error()) << theme.reset << "\n";
-            continue;
-        }
-        auto tools_result = client->ListTools();
-        if (!tools_result.has_value()) {
-            std::cout << theme.error << trf("mcp.list_failed", name, tools_result.error()) << theme.reset << "\n";
-            continue;
-        }
-
-        McpServerRuntime runtime;
-        runtime.name = name;
-        runtime.tools = std::move(*tools_result);
-        std::cout << trf("mcp.mounted", name, runtime.tools.size()) << "\n";
-        runtime.client = std::move(client);
-        out.push_back(std::move(runtime));
+        EmitDiagnostic(report, "mcp.mounted", ToolAssemblyDiagnosticSeverity::Info,
+                       "mcp", name, {name, std::to_string(started->tools.size())});
+        out.push_back(std::move(*started));
     }
     return out;
 }
@@ -267,33 +259,36 @@ void PublishPackagedLuaPlugins(const std::vector<lubancode::runtime::ManifestLua
 
 void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime::EmbeddedLuaRuntime& lua_runtime,
                   lubancode::runtime::ManifestLuaRuntime& manifest_lua_runtime,
-                  lubancode::tools::ToolRegistry& registry, const lubancode::cli::Theme& theme,
+                  lubancode::tools::ToolRegistry& registry, const ToolAssemblyPlan& plan,
                   std::vector<PluginMountInfo>& mounted, std::vector<std::string>& warnings, bool report,
                   std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests,
-                  std::vector<std::string>& process_warnings, const std::string& project_root_utf8,
-                  const lubancode::config::PluginTrustStore* project_trust) {
-    const auto home_dir = lubancode::config::HomeLubancodeDir();
-    if (!home_dir.has_value()) {
-        return;  // 找不到主目录,也就没有插件目录可扫
+                  std::vector<std::string>& process_warnings,
+                  const lubancode::config::PluginTrustStore* project_trust,
+                  const ToolAssemblyDiagnosticReporter& diagnose) {
+    ValidateToolAssemblyPlan(plan);
+    if (!plan.user_plugins_dir.has_value()) {
+        return;  // Preserve the CLI's absent-home policy: no standalone scan.
     }
-    const std::filesystem::path plugins_dir =
-        std::filesystem::path(
-            std::u8string(reinterpret_cast<const char8_t*>(home_dir->data()), home_dir->size())) /
-        "plugins";
+    const std::filesystem::path& plugins_dir = *plan.user_plugins_dir;
+    const auto scope = report ? ToolAssemblyDiagnosticScope::Main : ToolAssemblyDiagnosticScope::Sub;
+    const auto warning = [&](const std::string& stage, const std::string& message) {
+        EmitDiagnostic(diagnose, "plugin.warning", ToolAssemblyDiagnosticSeverity::Warning,
+                       stage, tools::PathToUtf8(plugins_dir), {message}, report, scope);
+    };
+    const auto mounted_line = [&](const std::string& stage, const std::string& name, std::size_t count) {
+        EmitDiagnostic(diagnose, "plugin.mounted_line", ToolAssemblyDiagnosticSeverity::Info,
+                       stage, name, {name, std::to_string(count)}, report, scope);
+    };
 
     // C ABI DLL 插件
     std::vector<std::string> new_warnings = plugin_host.LoadDirectory(plugins_dir);
     auto wrapped_plugins = plugin_host.WrapTools(new_warnings);
-    if (report) {
-        for (auto& warning : new_warnings) {
-            std::cout << theme.error << warning << theme.reset << "\n";
-            warnings.push_back(std::move(warning));
-        }
+    for (auto& message : new_warnings) {
+        warning("plugin.native", message);
+        if (report) warnings.push_back(std::move(message));
     }
     for (auto& wrapped : wrapped_plugins) {
-        if (report) {
-            std::cout << trf("plugin.mounted_line", wrapped.stem, wrapped.tools.size()) << "\n";
-        }
+        mounted_line("plugin.native", wrapped.stem, wrapped.tools.size());
         for (auto& tool : wrapped.tools) {
             if (report) {
                 mounted.push_back({tool->name(), "DLL"});
@@ -312,15 +307,13 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
     // mutex 串行、文件名稳定排序;新:profile 分级、指令预算、内存帽、
     // 取消链)。第二遍调用(main/sub 各一遍)只造轻 adapter,不重扫。
     std::vector<std::string> lua_warnings = lua_runtime.LoadDirectory(plugins_dir);
-    if (report) {
-        for (auto& warning : lua_warnings) {
-            std::cout << theme.error << warning << theme.reset << "\n";
-            warnings.push_back(std::move(warning));
-        }
-        for (const auto& record : lua_runtime.records()) {
-            std::cout << trf("plugin.mounted_line", record.id, 1) << "\n";
-            mounted.push_back({record.tool_name, "lua"});
-        }
+    for (auto& message : lua_warnings) {
+        warning("plugin.lua", message);
+        if (report) warnings.push_back(std::move(message));
+    }
+    for (const auto& record : lua_runtime.records()) {
+        mounted_line("plugin.lua", record.id, 1);
+        if (report) mounted.push_back({record.tool_name, "lua"});
     }
     for (auto& adapter : lua_runtime.MakeAdapters()) {
         // 旧门按 builtin 记账——独立 .lua 单文件插件走新门带上真实来源。
@@ -340,7 +333,7 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
         const auto scan = lubancode::runtime::ScanPluginDirectories(plugins_dir);
         process_manifests = scan.manifests;
         process_warnings.insert(process_warnings.end(), scan.warnings.begin(), scan.warnings.end());
-        const std::filesystem::path project_dir = lubancode::tools::Utf8ToPath(project_root_utf8);
+        const std::filesystem::path project_dir = lubancode::tools::Utf8ToPath(plan.cwd_utf8);
         const auto project_scan = lubancode::runtime::ScanProjectPluginDirectories(project_dir, project_trust);
         // 主目录与项目级重名:项目级让位(先到先得,主目录是用户亲手放的)。
         std::set<std::string> home_ids;
@@ -364,18 +357,16 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
     {
         const std::vector<std::string> lua_manifest_warnings =
             manifest_lua_runtime.LoadFromManifests(process_manifests);
-        if (report) {
-            for (const std::string& warning : lua_manifest_warnings) {
-                std::cout << theme.error << warning << theme.reset << "\n";
-                warnings.push_back(warning);
+        for (const std::string& message : lua_manifest_warnings) {
+            warning("plugin.manifest_lua", message);
+            if (report) warnings.push_back(message);
+        }
+        for (const auto& plugin : manifest_lua_runtime.plugins()) {
+            if (!plugin->package_id.empty()) {
+                continue;  // Package reports these mounts in its own stage.
             }
-            for (const auto& plugin : manifest_lua_runtime.plugins()) {
-                if (!plugin->package_id.empty()) {
-                    continue;  // packaged 件的挂载行走 Package 事务那边,不在此打
-                }
-                std::cout << trf("plugin.mounted_line", plugin->manifest->id,
-                                 plugin->manifest->tools.size())
-                          << "\n";
+            mounted_line("plugin.manifest_lua", plugin->manifest->id, plugin->manifest->tools.size());
+            if (report) {
                 for (const auto& tool : plugin->manifest->tools) {
                     mounted.push_back({plugin->ToolWireName(tool.name), "embedded-lua"});
                 }
@@ -391,16 +382,16 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
         registration.tool = std::move(adapter);
         registry.Register(std::move(registration));
     }
-    if (report) {
-        for (const auto& warning : process_warnings) {
-            std::cout << theme.error << warning << theme.reset << "\n";
-            warnings.push_back(warning);
+    for (const auto& message : process_warnings) {
+        warning("plugin.process", message);
+        if (report) warnings.push_back(message);
+    }
+    for (const auto& manifest : process_manifests) {
+        if (manifest->kind == lubancode::runtime::RuntimeKind::EmbeddedLua) {
+            continue;  // v2 mounts were reported by manifest_lua_runtime.
         }
-        for (const auto& manifest : process_manifests) {
-            if (manifest->kind == lubancode::runtime::RuntimeKind::EmbeddedLua) {
-                continue;  // v2 件的账在 manifest_lua_runtime 那边记过了
-            }
-            std::cout << trf("plugin.mounted_line", manifest->id, manifest->tools.size()) << "\n";
+        mounted_line("plugin.process", manifest->id, manifest->tools.size());
+        if (report) {
             for (const auto& tool : manifest->tools) {
                 mounted.push_back(
                     {tool.full_name, std::string(lubancode::runtime::RuntimeKindName(manifest->kind))});
@@ -427,11 +418,10 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
 // standalone 件从盘上现读。快照为空 = 从前的无包行为。
 std::optional<lubancode::tools::CustomAgentMaterial> ResolveCustomAgentMaterial(
     const std::vector<lubancode::tools::SkillMeta>& skills,
-    const lubancode::package::PackageSnapshot* snapshot, const std::string& name) {
-    const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(
-        ComputeAgentScanRoots(snapshot != nullptr
-                                  ? lubancode::package::MountAgentEntries(snapshot->mount())
-                                  : std::vector<lubancode::agent::PackagedAgentEntry>{}));
+    const lubancode::package::PackageSnapshot* snapshot, const std::string& name,
+    lubancode::agent::AgentCatalogScanRoots roots) {
+    roots = RootsWithPackageSnapshot(std::move(roots), snapshot);
+    const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(roots);
     const lubancode::agent::AgentCatalogEntry* entry = catalog.Find(name);
     if (entry == nullptr || !entry->available || !entry->definition.has_value()) {
         return std::nullopt;
@@ -467,12 +457,20 @@ std::optional<lubancode::tools::CustomAgentMaterial> ResolveCustomAgentMaterial(
     return material;
 }
 
-ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancode::cli::Theme& theme,
-                         lubancode::api::Backend& agent_backend, const std::vector<lubancode::tools::SkillMeta>& skills,
-                         const std::string& skills_segment, const std::string& cwd_utf8, Options options) {
+ToolRuntime::ToolRuntime(const lubancode::config::Config& config, lubancode::api::Backend& agent_backend,
+                         const std::vector<lubancode::tools::SkillMeta>& skills,
+                         const std::string& skills_segment, ToolAssemblyPlan plan, Options options,
+                         ToolAssemblyDiagnosticSink presentation) {
+    ValidateToolAssemblyPlan(plan); // No process or file mutation precedes validation.
+    const std::string& cwd_utf8 = plan.cwd_utf8;
+    const ToolAssemblyDiagnosticReporter diagnose =
+        [this, &presentation](ToolAssemblyDiagnostic diagnostic, bool announce) {
+            diagnostics_.push_back(std::move(diagnostic));
+            if (announce && presentation) presentation(diagnostics_.back());
+        };
     // M8:起服务器打出 "[mcp] xxx: N 个工具已挂载" 行,紧跟着调用方
     // 刚打完的横幅;单个服务器出岔子只打警告跳过,不阻塞会话。
-    mcp_servers_ = StartMcpServers(config.mcp_servers, theme);
+    mcp_servers_ = StartMcpServers(config.mcp_servers, cwd_utf8, diagnose);
     // 统一 Package 封装单阶段 5:packaged Plugin/MCP 走挂载事务(整包成
     // 整包败)。暂存在事务里完成——plugin 探针进程过协议、MCP 起服握手列
     // 工具;全件起得来才把 MCP client 并进 mcp_servers_(发布),坏一件
@@ -483,20 +481,17 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     if (options.package_snapshot != nullptr) {
         lubancode::package::PackageCodeMountOptions code_options;
         code_options.cwd_utf8 = cwd_utf8;
-        if (const auto state_root = lubancode::config::StateRootDir();
-            state_root.has_value()) {
-            // 包数据是运行状态,落状态根(应用Worker接入单 §4.2)。
-            const std::filesystem::path data_root =
-                lubancode::tools::Utf8ToPath(*state_root) / "package-data";
+        if (plan.package_data_root.has_value()) {
             std::error_code ec;
-            std::filesystem::create_directories(data_root, ec);  // 拿不到/建不动都照旧
-            code_options.package_data_root = data_root;
+            std::filesystem::create_directories(*plan.package_data_root, ec);
+            code_options.package_data_root = *plan.package_data_root;
         }
         // 挂载事务吃启动这一折的快照(阶段 6):code 组件只在会话启动跑,
         // reload 不热插也不热卸——须新会话。现行快照经供应商口取,装配
         // 次序上 reload 尚不存在,取到的必是启动折。
         const std::shared_ptr<const lubancode::package::PackageSnapshot> startup_snapshot =
             options.package_snapshot();
+        if (!startup_snapshot) throw std::invalid_argument("tool_assembly.package_snapshot_missing");
         package_code_ = lubancode::package::MountPackageCode(startup_snapshot->mount(), code_options);
         for (auto& staged : package_code_.mcp_servers) {
             McpServerRuntime runtime;
@@ -504,9 +499,10 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
             runtime.tools = std::move(staged.tools);
             runtime.package_origin = lubancode::tools::ToolOrigin{
                 staged.package_id, staged.package_version, staged.canonical_id};
-            std::cout << trf("package.code.mounted_mcp", staged.canonical_id, runtime.tools.size(),
-                             staged.package_id + " " + staged.package_version)
-                      << "\n";
+            EmitDiagnostic(diagnose, "package.code.mounted_mcp", ToolAssemblyDiagnosticSeverity::Info,
+                           "package", staged.canonical_id,
+                           {staged.canonical_id, std::to_string(runtime.tools.size()),
+                            staged.package_id + " " + staged.package_version});
             runtime.client = std::move(staged.client);
             mcp_servers_.push_back(std::move(runtime));
         }
@@ -517,17 +513,20 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
                 // 发布段造 wire adapter——回滚路的 state 根本到不了这里。
                 packaged_lua_plugins_.push_back(manifest_lua_runtime_.Adopt(std::move(staged.lua)));
             }
-            std::cout << trf(is_lua ? "package.code.mounted_plugin_lua" : "package.code.mounted_plugin",
-                             staged.canonical_id, staged.manifest->tools.size(),
-                             staged.package_id + " " + staged.package_version)
-                      << "\n";
+            EmitDiagnostic(diagnose, is_lua ? "package.code.mounted_plugin_lua" : "package.code.mounted_plugin",
+                           ToolAssemblyDiagnosticSeverity::Info, "package", staged.canonical_id,
+                           {staged.canonical_id, std::to_string(staged.manifest->tools.size()),
+                            staged.package_id + " " + staged.package_version});
         }
         for (const auto& note : package_code_.notes) {
-            std::cout << theme.stats << "[package] " << note << theme.reset << "\n";
+            EmitDiagnostic(diagnose, "package.note", ToolAssemblyDiagnosticSeverity::Notice,
+                           "package", {}, {note});
         }
         for (const auto& diagnostic : package_code_.diagnostics) {
             const std::string line = diagnostic.Format();
-            std::cout << theme.error << line << theme.reset << "\n";
+            EmitDiagnostic(diagnose, "package.mount_failed", ToolAssemblyDiagnosticSeverity::Warning,
+                           "package", diagnostic.component_id.empty() ? diagnostic.package_id : diagnostic.component_id,
+                           {line});
             plugin_warnings_.push_back(std::move(line));
         }
         package_code_.mcp_servers.clear();  // client 已移交,清掉防双重持有
@@ -599,10 +598,11 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         resolve_env_static_.role_cheap = route_of(config.model_roles.cheap, config.cheap_model);
         resolve_env_static_.role_lao = route_of(config.model_roles.lao, config.lao_model);
         resolve_env_static_.supported_efforts = config.provider_think_levels;
-        agent_tool_->SetResolveEnvironment([this]() {
+        const auto parent_permission = plan.parent_permission;
+        agent_tool_->SetResolveEnvironment([this, parent_permission]() {
             lubancode::agent::AgentProfileResolveEnvironment env = resolve_env_static_;
             // 父会话档过具名桥进公共值域(收口审计单 P1:散落 switch 收口)。
-            env.parent_permission = lubancode::cli::ToApprovalMode(lubancode::cli::CurrentConfirmMode());
+            if (parent_permission) env.parent_permission = parent_permission();
             return env;
         });
         // 自定义 Agent 解析口(真机实测 P2-1/P2-2;阶段 4 起是 agent_type 的
@@ -615,21 +615,24 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         // 换档后的下一次装配即见新账,在跑引用各自钉着旧折照旧跑完。
         const std::function<std::shared_ptr<const lubancode::package::PackageSnapshot>()>
             snapshot_provider = options.package_snapshot;
+        const auto roots_supplier = plan.agent_scan_roots;
         agent_tool_->SetCustomAgentResolver(
-            [skills, snapshot_provider](const std::string& name) -> std::optional<lubancode::tools::CustomAgentMaterial> {
-                if (snapshot_provider == nullptr) {
-                    return ResolveCustomAgentMaterial(skills, nullptr, name);
-                }
-                return ResolveCustomAgentMaterial(skills, snapshot_provider().get(), name);
+            [skills, snapshot_provider, roots_supplier](const std::string& name)
+                -> std::optional<lubancode::tools::CustomAgentMaterial> {
+                auto roots = roots_supplier ? roots_supplier() : agent::AgentCatalogScanRoots{};
+                const auto snapshot = snapshot_provider ? snapshot_provider() : nullptr;
+                return ResolveCustomAgentMaterial(skills, snapshot.get(), name, std::move(roots));
             });
         // agent 类型清单源(阶段 4·动态 schema):schema 的 agent_type 说明
         // 列"当前可派的类型"(可用条目:内置+自定义,各带一句 description)。
         // 现扫现列与派发口同款——AgentTool 在回合边界(SetHooks)翻新缓存,
         // 一回合至多扫一遍盘,不是每请求一遍。
-        agent_tool_->SetAgentTypesProvider([]() -> std::vector<lubancode::tools::AgentTypeInfo> {
+        agent_tool_->SetAgentTypesProvider([roots_supplier, snapshot_provider]() -> std::vector<lubancode::tools::AgentTypeInfo> {
             std::vector<lubancode::tools::AgentTypeInfo> types;
-            const lubancode::agent::AgentCatalog catalog =
-                lubancode::agent::LoadAgentCatalog(ComputeAgentScanRoots());
+            const auto snapshot = snapshot_provider ? snapshot_provider() : nullptr;
+            const auto roots = RootsWithPackageSnapshot(
+                roots_supplier ? roots_supplier() : agent::AgentCatalogScanRoots{}, snapshot.get());
+            const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(roots);
             for (const lubancode::agent::AgentCatalogEntry* entry : catalog.Available()) {
                 types.push_back(lubancode::tools::AgentTypeInfo{entry->name, entry->definition->description});
             }
@@ -647,19 +650,7 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         // CMake preset、build 树在不在、_deps 齐不齐——成文缓存,会话内复
         // 用;之后每笔派工的 prompt 尾部自动附上,子代理不再自己摸环境。
         // 仓库外/非 CMake 工程探测不出就空附录,静默不注入,不挡会话起。
-        agent_tool_->SetEnvAppendixProbe([cwd_utf8]() {
-            try {
-                const std::optional<std::filesystem::path> repo_root =
-                    lubancode::cli::FindRepositoryRoot(lubancode::tools::Utf8ToPath(cwd_utf8));
-                if (!repo_root.has_value()) {
-                    return std::string();
-                }
-                return lubancode::tools::ComposeSubagentEnvAppendix(
-                    lubancode::tools::DetectSubagentEnvFacts(*repo_root));
-            } catch (...) {
-                return std::string();  // 探测炸了当没探到,不挡派工
-            }
-        });
+        agent_tool_->SetEnvAppendixProbe(std::move(plan.env_appendix_probe));
         // 启动即探测并缓存(规格"启动时探测一次,会话内复用")。
         (void)agent_tool_->CachedEnvAppendix();
 
@@ -737,21 +728,30 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     // 一并存下(信任流 UI 的 /plugin trust|untrust 要按同一份路径口径重扫
     // 才算得出对得上的账本键)。
     project_root_utf8_ = cwd_utf8;
-    if (const auto path = lubancode::config::PluginTrustStore::DefaultStorePath(); path.has_value()) {
-        auto [store, load_error] = lubancode::config::PluginTrustStore::Load(path);
-        if (load_error.has_value()) {
-            plugin_warnings_.push_back(*load_error);
+    if (plan.plugin_trust_path.has_value()) {
+        std::error_code ec;
+        std::filesystem::create_directories(plan.plugin_trust_path->parent_path(), ec);
+        if (!ec) {
+            auto [store, load_error] = lubancode::config::PluginTrustStore::Load(
+                tools::PathToUtf8(*plan.plugin_trust_path));
+            if (load_error.has_value()) {
+                plugin_warnings_.push_back(*load_error);
+                // Previously retained only for /plugin diagnostics; record the
+                // structured fact without adding a new startup terminal line.
+                EmitDiagnostic(diagnose, "plugin.trust_load_failed", ToolAssemblyDiagnosticSeverity::Warning,
+                               "plugin.trust", tools::PathToUtf8(*plan.plugin_trust_path), {*load_error}, false);
+            }
+            project_plugin_trust_ = std::move(store);
         }
-        project_plugin_trust_ = std::move(store);
     }
-    MountPlugins(plugin_host_, lua_runtime_, manifest_lua_runtime_, main_registry_, theme, plugin_mounted_,
+    MountPlugins(plugin_host_, lua_runtime_, manifest_lua_runtime_, main_registry_, plan, plugin_mounted_,
                  plugin_warnings_,
-                 /*report=*/true, process_manifests_, process_plugin_warnings_, cwd_utf8,
-                 project_plugin_trust_.has_value() ? &*project_plugin_trust_ : nullptr);
-    MountPlugins(plugin_host_, lua_runtime_, manifest_lua_runtime_, sub_registry_, theme, plugin_mounted_,
+                 /*report=*/true, process_manifests_, process_plugin_warnings_,
+                 project_plugin_trust_.has_value() ? &*project_plugin_trust_ : nullptr, diagnose);
+    MountPlugins(plugin_host_, lua_runtime_, manifest_lua_runtime_, sub_registry_, plan, plugin_mounted_,
                  plugin_warnings_,
-                 /*report=*/false, process_manifests_, process_plugin_warnings_, cwd_utf8,
-                 project_plugin_trust_.has_value() ? &*project_plugin_trust_ : nullptr);
+                 /*report=*/false, process_manifests_, process_plugin_warnings_,
+                 project_plugin_trust_.has_value() ? &*project_plugin_trust_ : nullptr, diagnose);
     // 阶段 5 发布段 plugin 半边:事务暂存的 plugin 造 adapter(wire 覆盖名
     // + 来源账)注册进两表;MCP 半边早在 mcp_servers_ 定型时一并进了
     // RegisterMcpTools。放在 SetCwd 循环前,packaged adapter 同吃项目根。
@@ -914,7 +914,7 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
 #ifdef _WIN32
         hard.sandbox_reliable = true;  // Job Object + 受限 token
 #else
-        hard.sandbox_reliable = PosixSandboxExempted();  // rlimit 不算可靠沙箱
+        hard.sandbox_reliable = plan.ptc_sandbox_exempt;  // rlimit 不算可靠沙箱
 #endif
         // 构造 PtcTool(顺带探测 Python)。条件齐才注册进主表。
         auto tool = std::make_unique<lubancode::ptc::PtcTool>(main_registry_, main_tool_filter_,
@@ -945,7 +945,8 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
 
         // 画像指纹:provider + endpoint + model + wire + python + harness。
         // 存档里 harness 版本对不上 = 画像过期,按 unknown 算。
-        const std::string store_path = lubancode::ptc::DefaultProfileStorePath();
+        const std::string store_path = plan.ptc_profile_store_path
+            ? tools::PathToUtf8(*plan.ptc_profile_store_path) : std::string();
         lubancode::ptc::PtcStatus profile_status = lubancode::ptc::PtcStatus::Unknown;
         if (!store_path.empty()) {
             const std::string fingerprint = lubancode::ptc::BuildPtcFingerprint(
@@ -970,7 +971,8 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
             } else {
                 const auto failures = hard.FailureTexts();
                 ptc_resolution_ = "ptc→json(" + (failures.empty() ? std::string("条件不齐") : failures.front()) + ")";
-                std::cout << theme.error << trf("ptc.fallback_line", ptc_resolution_) << theme.reset << "\n";
+                EmitDiagnostic(diagnose, "ptc.fallback_line", ToolAssemblyDiagnosticSeverity::Warning,
+                               "ptc", "programmatic_tool_calling", {ptc_resolution_});
             }
         } else {
             // auto:门槛判定(首版无 verified 画像,恒 json)。
@@ -987,8 +989,8 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
             } else {
                 ptc_resolution_ = "auto→json";
                 if (!python_ok && !config.ptc.python.empty()) {
-                    std::cout << theme.error << trf("ptc.probe_failed", tool->unavailability_reason())
-                              << theme.reset << "\n";
+                    EmitDiagnostic(diagnose, "ptc.probe_failed", ToolAssemblyDiagnosticSeverity::Warning,
+                                   "ptc", "programmatic_tool_calling", {tool->unavailability_reason()});
                 }
             }
         }

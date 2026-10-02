@@ -179,6 +179,10 @@ public:
         const std::filesystem::path& jsonl_path, V3WriterOptions options = V3WriterOptions{},
         const V3Clock* clock = nullptr);
 
+    // 只关写句柄,不代写 session.ended。封口事实须由领域先落稳。
+    // 可重复调用;保留身份、路径与上下文查询,此后提交拒绝。
+    std::expected<void, std::string> Close();
+
     // ---- 底层两类行 ----
 
     WriteReceipt AppendMessage(MessageDraft draft, Durability durability);
@@ -315,8 +319,8 @@ public:
     std::string NewHookDispatchId();   // hookdispatch-<n>,挂点触发身份(§4.22)
     std::string NewTaskId();           // task-<n>,委派任务身份(§4.31)
 
-    // 关账文件句柄(幂等)。封口后不再写的场调用:Windows 上开着的句柄
-    // 挡住目录删除。此后提交一律拒(v3writer.broken)。
+    // 无返回值关柄入口沿用 Close:正常关闭只标 closed,后续提交拒绝。
+    // 需要核关闭失败的领域路径调用上面的 checked Close。
     void CloseFile();
 
     // ---- 观测 ----

@@ -12,7 +12,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <exception>
 #include <fstream>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
@@ -22,6 +24,7 @@
 #include "platform/atomic_write.hpp"  // 原件原子写(ProcessCrashDurability=fsync 档)
 #include "platform/sha256.hpp"
 #include "runtime/command_service.hpp"
+#include "runtime/async_tool_runtime.hpp"
 #include "runtime/goal_coordinator.hpp"
 #include "runtime/loop_scheduler.hpp"
 #include "tools/path_utils.hpp"  // Utf8ToPath/PathToUtf8
@@ -279,6 +282,7 @@ SessionRuntime::Options SessionService::BuildRuntimeOptions(const SessionLaunchR
     options.lubancode_version = request.lubancode_version;
     options.approval_mode = request.approval_mode;
     options.trajectory_resume_at_launch = request.resume_at_launch;
+    options.trajectory_require_v3_resume = request.require_v3_resume;
     options.trajectory_resume_source_session_id = request.resume_source_session_id;
     options.trajectory_workspaces_root = request.workspaces_root;
     options.trajectory_launch_cwd = request.launch_cwd;
@@ -348,7 +352,59 @@ SessionService::SessionService(SessionLaunchRequest request) {
     SeedOperationLedger();
 }
 
-SessionService::~SessionService() = default;
+SessionService::~SessionService() {
+    (void)ShutdownExecution();
+    if (runtime_ != nullptr && runtime_->async_tool_runtime() != nullptr &&
+        !runtime_->async_tool_runtime()->quiescent()) std::terminate();
+    // Profile/tool capture destructors can still borrow service state. Destroy
+    // the execution now, before any queue, mutex, operation file or ledger.
+    execution_.reset();
+}
+
+void SessionService::InitializeExecution(std::unique_ptr<assembly::SessionResources> resources,
+                                         agent::AgentProfile&& profile,
+                                         std::optional<std::vector<api::Message>> restored_history) {
+    // Validation can reject before the candidate consumes resources. Clear the
+    // referenced source first, while this parameter still owns every borrow.
+    // The guard also covers allocation failure before the constructor starts.
+    struct SourceProfileScope {
+        agent::AgentProfile& profile;
+        ~SourceProfileScope() { ClearExecutionProfileBorrowers(profile); }
+    } source_profile_scope{profile};
+    {
+        std::lock_guard lock(commit_mutex_);
+        if (runtime_ == nullptr) throw std::logic_error("session.execution.session_unavailable");
+        if (execution_ != nullptr) throw std::logic_error("session.execution.already_initialized");
+        if (execution_shutdown_requested_.load()) throw std::logic_error("session.execution.stopping");
+    }
+    // Candidate construction/rollback can destroy user captures that query the
+    // service. Neither construction nor rejected-candidate/source destruction
+    // takes place under its commit mutex.
+    auto candidate = std::make_unique<SessionExecution>(std::move(resources), std::move(profile),
+                                                       std::move(restored_history));
+    {
+        std::lock_guard lock(commit_mutex_);
+        if (execution_ != nullptr) throw std::logic_error("session.execution.already_initialized");
+        if (execution_shutdown_requested_.load()) throw std::logic_error("session.execution.stopping");
+        execution_ = std::move(candidate);
+    }
+}
+
+void SessionService::RequestExecutionShutdown() {
+    execution_shutdown_requested_.store(true);
+    {
+        std::lock_guard lock(commit_mutex_);
+        // Wait for an initialization already in progress to observe the latch.
+    }
+    // Synchronize with first-turn publication without holding a lock while a
+    // worker exits. The runtime latches shutdown even if no async owner exists.
+    if (runtime_ != nullptr) runtime_->RequestAsyncToolShutdown();
+}
+
+bool SessionService::ShutdownExecution() {
+    RequestExecutionShutdown();
+    return runtime_ == nullptr || runtime_->ShutdownAsyncTools();
+}
 
 TrajectorySessionLedger* SessionService::trajectory() {
     return runtime_ != nullptr ? runtime_->trajectory() : nullptr;
@@ -559,6 +615,10 @@ SessionService::InputReceipt SessionService::SubmitInput(const InputRequest& inp
     }
     const std::string payload_hash = platform::Sha256Hex(CanonicalInputPayload(input));
     std::lock_guard<std::mutex> lock(commit_mutex_);
+    if (execution_shutdown_requested_.load()) {
+        receipt.error_code = "session.stopping";
+        return receipt;
+    }
     // 幂等(§4.2):同键同载荷返回原操作;同键不同载荷 conflict。
     if (!input.client_operation_id.empty()) {
         const auto it = operations_.find(input.client_operation_id);
@@ -660,6 +720,11 @@ SessionService::PendingPop SessionService::PopPendingInput() {
 std::size_t SessionService::pending_input_count() const {
     std::lock_guard<std::mutex> lock(commit_mutex_);
     return pending_inputs_.size();
+}
+
+std::vector<SessionService::QueuedInput> SessionService::PendingInputsSnapshot() const {
+    std::lock_guard<std::mutex> lock(commit_mutex_);
+    return {pending_inputs_.begin(), pending_inputs_.end()};
 }
 
 bool SessionService::RecordTurnFinal(const TurnFinalRecord& record) {
@@ -807,6 +872,12 @@ ClientReceipt SessionService::ExecuteDomainCommand(const std::string& command_la
 // ---------------------------------------------------------------------------
 
 trajectory::CloseOutcome SessionService::Close(const std::string& reason) {
+    if (!ShutdownExecution()) {
+        trajectory::CloseOutcome outcome;
+        outcome.error_code = "close.async_shutdown_failed";
+        outcome.message = "会话后台工具尚未可靠收口";
+        return outcome;
+    }
     if (runtime_ == nullptr) {
         trajectory::CloseOutcome outcome;
         outcome.error_code = "close.no_active_session";

@@ -46,7 +46,7 @@ std::optional<nlohmann::json> ReadV3FirstLine(const std::filesystem::path& strea
     if (json.is_discarded() || !json.is_object()) {
         return std::nullopt;
     }
-    return json;
+    return std::optional<nlohmann::json>{std::in_place, json};
 }
 
 V3StreamProbe ProbeV3SessionStream(const std::filesystem::path& session_dir) {

@@ -14,6 +14,21 @@ set(LUBANCODE_VERSION "${CMAKE_MATCH_1}")
 
 project(lubancode VERSION "${LUBANCODE_VERSION}" LANGUAGES CXX)
 
+option(LUBANCODE_BUILD_CLI "Build the LubanCode terminal application and host resources" ON)
+option(LUBANCODE_BUILD_SDK "Build the experimental installable LubanCore C++ SDK" OFF)
+option(LUBANCODE_BUILD_EXPERIMENT_RUNNER "Build the standalone experiment supervisor" OFF)
+option(LUBANCODE_BUILD_WORKER_HOST "Build the private supervisor IPC worker host" OFF)
+if(LUBANCODE_BUILD_WORKER_HOST)
+  set(LUBANCODE_BUILD_SDK ON)
+endif()
+if(NOT LUBANCODE_BUILD_CLI AND NOT LUBANCODE_BUILD_SDK AND NOT LUBANCODE_BUILD_EXPERIMENT_RUNNER)
+  message(FATAL_ERROR "Enable LUBANCODE_BUILD_CLI or LUBANCODE_BUILD_SDK or LUBANCODE_BUILD_EXPERIMENT_RUNNER")
+endif()
+if(LUBANCODE_BUILD_SDK)
+  # Static internal/dependency archives also feed the shared SDK on Unix.
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 unset(_lubancode_version_header)
 unset(_lubancode_version_match)
 
@@ -46,7 +61,11 @@ if(MSVC)
   # 顶层项目得跟着定成一样的,不然 lubancode/lubancode_core 用的是默认的
   # 动态运行时(MultiThreaded[Debug]DLL),跟 cpr/curl 的静态运行时对不上,
   # 链接时会报 LNK2038(RuntimeLibrary 不匹配)。
-  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  if(LUBANCODE_BUILD_SDK)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+  else()
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  endif()
 else()
   add_compile_options(-Wall -Wextra -Wno-missing-field-initializers)
 endif()
@@ -73,7 +92,7 @@ set(LUBANCODE_BUNDLED_RG_DIR "" CACHE PATH "已校验的随包 ripgrep 目录(�
 # 归开发者调用面(preset/命令行/这条机器级缓存),不归 Agent worktree 的
 # 环境继承,也不归测试夹具;运行时定位照旧只认 ExecutableDir/libexec,
 # 不搜 PATH、不读环境变量。新开 worktree 由此不再靠手工往 build 树拷 rg。
-if(NOT LUBANCODE_BUNDLED_RG_DIR)
+if(LUBANCODE_BUILD_CLI AND NOT LUBANCODE_BUNDLED_RG_DIR)
   if(WIN32)
     set(_lubancode_user_rg_stage "$ENV{USERPROFILE}/.lubancode/rg-stage/libexec")
     set(_lubancode_user_rg_exe "${_lubancode_user_rg_stage}/rg.exe")
@@ -108,6 +127,23 @@ elseif(DEFINED ENV{VCPKG_ROOT} AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
       CACHE STRING "Vcpkg toolchain file")
   set(LUBANCODE_USING_VCPKG ON)
+endif()
+
+include(FetchContent)
+if(LUBANCODE_BUILD_EXPERIMENT_RUNNER AND NOT LUBANCODE_BUILD_CLI AND NOT LUBANCODE_BUILD_SDK)
+  # Standalone Runner owns processes and JSON only; do not configure the Core
+  # dependency graph or its native suites when CLI and SDK are both disabled.
+  if(LUBANCODE_USING_VCPKG)
+    find_package(nlohmann_json CONFIG REQUIRED)
+  else()
+    set(JSON_BuildTests OFF CACHE INTERNAL "" FORCE)
+    set(JSON_Install OFF CACHE INTERNAL "" FORCE)
+    _lubancode_tarball(_lubancode_json_url "nlohmann/json" "v3.11.3")
+    FetchContent_Declare(nlohmann_json URL ${_lubancode_json_url})
+    FetchContent_MakeAvailable(nlohmann_json)
+  endif()
+  include(cmake/ExperimentRunner.cmake)
+  return()
 endif()
 
 if(LUBANCODE_USING_VCPKG)
@@ -372,9 +408,7 @@ if(WIN32)
     src/platform/network_proxy_win.cpp
     src/platform/process_win.cpp
     src/platform/dynamic_library_win.cpp
-    src/platform/console_win.cpp
     src/platform/peer_transport_win.cpp
-    src/platform/clipboard_win.cpp
     # 更新器 C++ 化批二第③单:文件占用/重解析点/EXE 归属的平台补件
     # (Windows 腿:CreateFileW 独占写探测 + GetFileAttributesW 专查 reparse)。
     src/platform/file_in_use_win.cpp)
@@ -384,9 +418,7 @@ else()
     src/platform/network_proxy_posix.cpp
     src/platform/process_posix.cpp
     src/platform/dynamic_library_posix.cpp
-    src/platform/console_posix.cpp
     src/platform/peer_transport_posix.cpp
-    src/platform/clipboard_posix.cpp
     src/platform/file_in_use_posix.cpp)
 endif()
 
@@ -418,9 +450,7 @@ if(MSVC)
 endif()
 add_library(lubancode_engine STATIC
   ${_lubancode_platform_sources}
-  src/platform/console_common.cpp
   src/platform/network_proxy.cpp
-  src/platform/terminal_batch.cpp
   src/platform/text_encoding.cpp
   src/platform/json_safe.cpp
   # src 重复职责收口审计 P1:统一原子写(唯一临时名/同目录/close 检查/
@@ -431,10 +461,8 @@ add_library(lubancode_engine STATIC
   src/platform/sha256.cpp
   # 审计 P2:标准 Base64 内核(五处手写收一)。
   src/platform/base64.cpp
-  # QQBot Windows 修复单 §5.1/§5.2:凭据文件的安全创建原语(带安全描述符
-  # 创建/跨进程文件锁)与终端隐藏输入(回显 RAII)。
+  # 凭据文件安全创建与跨进程锁属于通用底层；终端隐藏输入归 CLI 宿主。
   src/platform/secure_file.cpp
-  src/platform/hidden_input.cpp
   # 审计 P2 候选:路径比较键三处合一(共享向量证一致后收编)。
   src/platform/path_compare.cpp
   # 统一 Package 封装单阶段 4:目录内容指纹的共用底座(Plugin 与 Package
@@ -605,7 +633,7 @@ add_library(lubancode_engine STATIC
   src/memory/worker_queue.cpp
   src/memory/editor_adapter.cpp
   # 存储 v2 P0-3:memory 落账口在 Trajectory 账上的桥(召回快照+写入因果边)。
-  src/app/memory_ledger_bridge.cpp
+  src/runtime/memory_ledger_bridge.cpp
   src/mcp/transport.cpp
   src/mcp/client.cpp
   src/mcp/rich_result.cpp  # MCP 富结果:tools/call 全块型解析与 artifact 落盘
@@ -680,19 +708,15 @@ add_library(lubancode_engine STATIC
   src/agent/tool_trace.cpp
   src/skills/workflow_recorder.cpp
   src/skills/skill_drafter.cpp
-  # engine 引用的三个 cli 叶子(零标准流、零终端依赖,tools/config 都吃):
-  # i18n(字符串表)、theme(配色值)、line_editor(纯逻辑编辑核,agent_tool
-  # 吃 DisplayWidthUtf8)。它们留在 src/cli/ 目录,但编进 engine——单子守门
-  # 名单(cin/cout/cerr/ReadLine/ChoiceMenu/TranscriptPainter)不含这三个
-  # 文件,守门测试同钉。
-  src/cli/i18n.cpp
-  src/cli/theme.cpp
-  src/cli/line_editor.cpp
+  # SDK-2:字符串表与宽度计算归中立 text 叶子。theme/line_editor 留在
+  # CLI 兼容 core target,engine 不再编译宿主目录里的实现。
+  src/text/i18n.cpp
+  src/text/display_width.cpp
   # Unicode emoji 治理单 P1:扩展字素簇(EGC)分段与终端列宽的唯一共享
   # 实现(内嵌 Unicode 15.1 紧凑区间表,零第三方依赖)。line_editor 的
   # 量宽/截断/折行、core 的 footer ANSI 截断/composer 折行/native 行
   # cells/markdown 折行全吃它——同一段 emoji 不许两处两种几何。
-  src/cli/grapheme.cpp
+  src/text/grapheme.cpp
   # 骨架拆解反弹·问题 6:worktree(git 房务原语)自 cli/ 迁 runtime/ 目录
   # (领域逻辑不归展示层抽屉),target 仍挂 engine——engine 的
   # tools/agent_tool、worktree_tool、subagent_isolation 都吃它,而 runtime
@@ -1069,6 +1093,12 @@ endif()
 # runtime:事件合同 + 会话/轮次/命令编排。不认终端(守门见
 # test_app_boundary_gate.cpp),链 engine(agent/config/tools 的内核件)。
 add_library(lubancode_runtime STATIC
+  # SDK-1:后端与基础工具共用装配,无宿主/终端依赖。
+  src/runtime/assembly/backend.cpp
+  src/runtime/assembly/builtin_tools.cpp
+  src/runtime/assembly/mcp.cpp
+  src/runtime/assembly/session_resources.cpp
+  src/runtime/session_execution.cpp
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
   src/runtime/runtime_contract.cpp
   # 会话管理器单第六步:会话查询/搬删的 runtime 侧命令服务(合同消费方)。
@@ -1124,6 +1154,7 @@ add_library(lubancode_runtime STATIC
   src/runtime/provider_tool_contract.cpp
   src/runtime/result_delivery_planner.cpp
   src/runtime/async_tool_runtime.cpp
+  src/runtime/scoped_turn_bindings.cpp
   # Soul 会话冻结单 P0:SessionSoulSnapshot(会话魂双状态的快照侧)+ 会话
   # 目录的快照 blob 读写。纯数据与纯函数,app/runtime 共用。
   src/runtime/session_soul.cpp
@@ -1189,9 +1220,13 @@ add_library(lubancode_runtime STATIC
   src/runtime/channel_media_service.cpp
   src/runtime/channel_file_delivery.cpp
   src/runtime/headless_progress.cpp
+  # 远端首批组件：节点本地结果同步策略与稳定预览，尚未接远端服务。
+  src/remote/result_sync.cpp
   # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
   # 归本库;engine 不反向引 runtime 的链接纪律见 turn_runtime.cpp 头注)。
   src/runtime/middleware_assembly.cpp
+  # Host/service drain coordination belongs above the engine's V3 event sink.
+  src/runtime/middleware_session_binding.cpp
   # LuaHook 单 P1-C:hook 宿主能力束(受控文件/插件状态/context 候选/
   # 结构化日志 + 统一工具执行服务/子执行 v3 记账/递归治理;§五/§5.1)。
   # Lua 边界的形状转换在 plugin_lua_host.cpp,这里是宿主执行件。
@@ -1230,10 +1265,23 @@ if(MSVC)
   target_compile_options(lubancode_runtime PRIVATE /MP)
 endif()
 
-# core:旧名兼容层 = engine + runtime + cli 纯逻辑(不碰键盘/控制台的那半)。
+if(LUBANCODE_BUILD_CLI)
+# Terminal platform implementations belong to the CLI host, not SDK internals.
+if(WIN32)
+  set(_lubancode_terminal_sources src/platform/console_win.cpp src/platform/clipboard_win.cpp)
+else()
+  set(_lubancode_terminal_sources src/platform/console_posix.cpp src/platform/clipboard_posix.cpp)
+endif()
+# core:旧名兼容层 = engine + runtime + CLI 宿主逻辑与终端平台实现。
 # cli/setup_wizard.cpp、cli/slash_commands.cpp 等在 cli/ 目录下但逻辑本身
 # 不碰真实 IO(打印/读一行都是注入函数),与从前同待遇放这层。
 add_library(lubancode_core STATIC
+  ${_lubancode_terminal_sources}
+  src/platform/console_common.cpp
+  src/platform/hidden_input.cpp
+  src/platform/terminal_batch.cpp
+  src/cli/theme.cpp
+  src/cli/line_editor.cpp
   src/cli/image_input.cpp
   src/cli/setup_wizard.cpp
   src/cli/provider_wizard.cpp
@@ -1359,7 +1407,6 @@ endif()
 # app 编排层由主程序与测试共链。此前这些实现各编一遍，Windows 冷构建
 # 为同一批大 TU 付两回账；收成静态库后只编一次，main 只留平台入口。
 add_library(lubancode_app STATIC
-  src/app/backend_stack.cpp
   src/app/memory_extract.cpp
   src/app/model_router.cpp
   # QQ 机器人接入单 Q1:gateway run 的渠道装配(激活接线/trust 快照/QQ
@@ -1383,6 +1430,7 @@ add_library(lubancode_app STATIC
   src/app/turn_memory_extractor.cpp
   src/app/runtime_profile.cpp
   src/app/tool_runtime.cpp
+  src/app/cli_tool_assembly.cpp
   src/app/turn_runner.cpp
   # 骨架拆解批二余款:终端画屏的事件流 sink(Callbacks 老路拔除后,显示
   # 出水全走 TurnEventAdapter,这只在 sink 侧翻画面)。
@@ -1572,6 +1620,7 @@ add_library(lubancode_app STATIC
   src/cli/tool_confirm_ui.cpp
   src/cli/ask_user_prompt.cpp)
 target_link_libraries(lubancode_app PUBLIC lubancode_core)
+
 # WS 承载的 socket 层在 Windows 走 Winsock2(POSIX 不加东西)。
 if(WIN32)
   target_link_libraries(lubancode_app PUBLIC ws2_32)
@@ -1658,6 +1707,18 @@ add_custom_target(lubancode_assistant_web ALL
   COMMENT "lubancode: 同步助理主界面网页到程序目录"
   VERBATIM)
 add_dependencies(lubancode_assistant_web lubancode)
+endif() # LUBANCODE_BUILD_CLI
+
+if(LUBANCODE_BUILD_SDK)
+  include(cmake/LubanCore.cmake)
+endif()
+if(LUBANCODE_BUILD_WORKER_HOST)
+  include(cmake/WorkerHost.cmake)
+endif()
+
+if(LUBANCODE_BUILD_EXPERIMENT_RUNNER)
+  include(cmake/ExperimentRunner.cmake)
+endif()
 
 # ---------------------------------------------------------------------------
 # 测试:doctest 单头文件,同样走 FetchContent,走 codeload.github.com 镜像
@@ -1673,4 +1734,16 @@ if(LUBANCODE_BUILD_TESTING)
   )
   FetchContent_MakeAvailable(doctest)
   add_subdirectory(tests)
+endif()
+
+if(NOT LUBANCODE_BUILD_CLI)
+  # A normal SDK-only install must not install private dependency development
+  # packages. Directory EXCLUDE_FROM_ALL also excludes nested install rules;
+  # target dependencies still build every archive required by the shared SDK.
+  get_property(_lubancore_subdirectories DIRECTORY PROPERTY SUBDIRECTORIES)
+  foreach(_directory IN LISTS _lubancore_subdirectories)
+    if(NOT _directory STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+      set_property(DIRECTORY "${_directory}" PROPERTY EXCLUDE_FROM_ALL TRUE)
+    endif()
+  endforeach()
 endif()

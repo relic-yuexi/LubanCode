@@ -39,6 +39,12 @@ jobs:
       memory_worker: ${{ steps.c.outputs.memory_worker }}
       agent_lifetime: ${{ steps.c.outputs.agent_lifetime }}
       workflow_threads: ${{ steps.c.outputs.workflow_threads }}
+      cross_platform: ${{ steps.c.outputs.cross_platform }}
+      remote_tests: ${{ steps.c.outputs.remote_tests }}
+      assembly_tests: ${{ steps.c.outputs.assembly_tests }}
+      sdk_tests: ${{ steps.c.outputs.sdk_tests }}
+      worker_tests: ${{ steps.c.outputs.worker_tests }}
+      runner_tests: ${{ steps.c.outputs.runner_tests }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -47,12 +53,41 @@ jobs:
         id: c
         shell: bash
         run: |
+          # 只认提交里的实现或测试，不把空目录/schema 草稿算成已接线。
+          remote_present=false
+          if [ -n "$(git ls-files 'src/remote/*.cpp' 'src/remote/*.hpp' 'tests/unit/remote/test_*.cpp' 'tests/integration/remote/test_*.cpp')" ]; then
+            remote_present=true
+          fi
+          assembly_present=false
+          if [ -n "$(git ls-files 'src/runtime/assembly/*.cpp' 'src/runtime/assembly/*.hpp' 'tests/unit/assembly/test_*.cpp' 'tests/integration/assembly/test_*.cpp')" ]; then
+            assembly_present=true
+          fi
+          sdk_present=false
+          if [ -n "$(git ls-files 'src/sdk/*.cpp' 'include/lubancore/*.hpp' 'tests/unit/sdk/test_*.cpp' 'tests/integration/sdk/test_*.cpp')" ]; then
+            sdk_present=true
+          fi
+          worker_present=false
+          if [ -n "$(git ls-files 'src/worker_host/*.cpp' 'src/worker_host/*.hpp' 'tests/integration/worker_host/*.py')" ]; then
+            worker_present=true
+          fi
+          runner_present=false
+          if [ -n "$(git ls-files 'src/job_runner/*.cpp' 'src/job_runner/*.hpp' 'tests/runner/*.py')" ]; then
+            runner_present=true
+          fi
           # 手动 dispatch 不看 diff:指定 ref 上的代码就是要验的代码,直接
           # 放双平台(build-test);asan/tsan 诊断腿不沾(单册诊断用不着)。
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             echo 'memory_worker=true' >> "$GITHUB_OUTPUT"
             echo 'agent_lifetime=false' >> "$GITHUB_OUTPUT"
             echo 'workflow_threads=false' >> "$GITHUB_OUTPUT"
+            echo 'cross_platform=false' >> "$GITHUB_OUTPUT"
+            echo 'remote_tests=false' >> "$GITHUB_OUTPUT"
+            echo 'assembly_tests=false' >> "$GITHUB_OUTPUT"
+            # Worker diagnostics still build its real SDK dependency. Dispatch
+            # remains a Windows/macOS diagnostic run, not three-platform acceptance.
+            echo "sdk_tests=$worker_present" >> "$GITHUB_OUTPUT"
+            echo "worker_tests=$worker_present" >> "$GITHUB_OUTPUT"
+            echo "runner_tests=$runner_present" >> "$GITHUB_OUTPUT"
             echo 'code=true' >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -70,19 +105,69 @@ jobs:
             echo "base unreachable, run full" >&2
             echo "code=true" >> "$GITHUB_OUTPUT"
             echo "workflow_threads=true" >> "$GITHUB_OUTPUT"
+            echo 'cross_platform=true' >> "$GITHUB_OUTPUT"
+            echo "remote_tests=$remote_present" >> "$GITHUB_OUTPUT"
+            echo "assembly_tests=$assembly_present" >> "$GITHUB_OUTPUT"
+            echo "sdk_tests=$sdk_present" >> "$GITHUB_OUTPUT"
+            echo "worker_tests=$worker_present" >> "$GITHUB_OUTPUT"
+            echo "runner_tests=$runner_present" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           code=false
           memory_worker=false
           agent_lifetime=false
           workflow_threads=false
+          cross_platform=false
+          remote_tests=false
+          assembly_tests=false
+          sdk_tests=false
+          worker_tests=false
+          runner_tests=false
           while IFS= read -r f; do
             [ -z "$f" ] && continue
+            # Session ownership, extensions and per-turn borrowing span multiple hosts.
+            # Their SDK, middleware and host regressions need three platforms and ASan.
+            case "$f" in
+              include/lubancore/*|src/sdk/*|tests/*/sdk/*|examples/sdk-consumer/*|src/trajectory/*|tests/unit/trajectory/*|tests/unit/trajectory_v3/*|tests/integration/trajectory/*|src/agent/agent.*|src/agent/loop.*|src/hooks/middleware.*|src/hooks/middleware_builtins.*|src/hooks/dispatcher.*|src/runtime/middleware_runtime.*|src/runtime/middleware_v3_sink.*|src/runtime/middleware_session_binding.*|tests/unit/hooks/test_middleware_core.cpp|tests/unit/hooks/test_middleware_builtins.cpp|tests/unit/hooks/test_middleware_runtime_wire.cpp|tests/unit/hooks/test_middleware_v3_events.cpp|tests/unit/hooks/test_middleware_scope_wire.cpp|src/runtime/scoped_turn_bindings.*|src/runtime/session_execution.*|src/runtime/session_service.*|src/runtime/session_runtime.*|src/runtime/tool_trace_hub.*|src/runtime/async_tool_runtime.*|src/tools/tool_job_coordinator.*|src/runtime/headless_executor.*|src/app/turn_runner.*|tests/unit/runtime/test_session_execution.cpp|tests/unit/runtime/test_scoped_turn_bindings.cpp|tests/unit/app/test_turn_runner_scoped_bindings.cpp|tests/support/scoped_turn_fixture.hpp|tests/fixtures/scoped_turn_stop_hook.py)
+                cross_platform=true
+                remote_tests=$remote_present
+                assembly_tests=$assembly_present
+                sdk_tests=$sdk_present
+                agent_lifetime=true
+                code=true ;;
+            esac
+            # 远端模式须在子 PR 合入前验三平台，base 可为集成分支。
+            # 公共构建接线仅在 remote/SDK 装配已入树时加腿；普通 PR 沿旧策略。
+            # ci.yml 自身改动也跑三平台，验证本门，不冒充已有组件测试。
+            case "$f" in
+              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/runtime/assembly/*|src/app_server/server.*|src/app_server/browser_service.*|src/app_server/session_assembly.*|src/app/tool_runtime.*|src/app/tool_assembly_plan.hpp|src/app/cli_tool_assembly.*|tests/unit/runtime/test_tool_runtime.cpp|tests/integration/plugins/test_tool_runtime_deferral.cpp|tests/support/tool_assembly_fixture.hpp|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|tests/unit/runtime/test_session_resources.cpp|tests/integration/app_server/test_app_server_session_parity.cpp|tests/unit/app_server/test_app_server_browser.cpp|tests/support/session_history_fixture.hpp|tests/support/mcp_cwd_fixture.hpp|tests/fixtures/session_resources_mcp.py|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|scripts/ci/check_sdk_only_boundary.py|scripts/ci/tests/test_sdk_only_boundary.py|scripts/ci/tests/test_sdk_extension_gates.py|scripts/ci/check_sdk_host_parity.py|scripts/ci/check_sdk_focused.py|src/worker_host/*|tests/integration/worker_host/*|src/job_runner/*|tests/runner/*|scripts/ci/check_installed_process_host.py|.github/workflows/ci.yml)
+                cross_platform=true
+                remote_tests=$remote_present
+                assembly_tests=$assembly_present
+                sdk_tests=$sdk_present
+                worker_tests=$worker_present
+                runner_tests=$runner_present
+                code=true ;;
+              scripts/ci/tests/test_runner_only_boundary.py)
+                cross_platform=true
+                runner_tests=$runner_present
+                code=true ;;
+              CMakeLists.txt|tests/CMakeLists.txt|cmake/*|vcpkg.json)
+                if [ "$remote_present" = true ] || [ "$assembly_present" = true ] || [ "$sdk_present" = true ] || [ "$worker_present" = true ] || [ "$runner_present" = true ]; then
+                  cross_platform=true
+                  remote_tests=$remote_present
+                  assembly_tests=$assembly_present
+                  sdk_tests=$sdk_present
+                  worker_tests=$worker_present
+                  runner_tests=$runner_present
+                  code=true
+                fi ;;
+            esac
             # AR-01(子代理线程寿命)起:子代理派工/装配面改动跑 linux-asan
             # 腿——悬垂访问这类病在常规腿上安静,AddressSanitizer 一眼红;
             # 其余 PR 零新增开销(与 memory_worker 同款按路径点腿)。
             case "$f" in
-              src/tools/*|src/app/tool_runtime.*|tests/unit/agent/*|.github/workflows/ci.yml)
+              src/tools/*|src/app/tool_runtime.*|src/app/tool_assembly_plan.hpp|src/app/cli_tool_assembly.*|tests/unit/runtime/test_tool_runtime.cpp|tests/integration/plugins/test_tool_runtime_deferral.cpp|tests/support/tool_assembly_fixture.hpp|src/app_server/server.*|src/app_server/browser_service.*|src/runtime/assembly/*|tests/unit/agent/*|tests/integration/app_server/test_app_server_session_parity.cpp|tests/unit/app_server/test_app_server_browser.cpp|.github/workflows/ci.yml)
                 agent_lifetime=true ;;
             esac
             # 根 CMakeLists.txt(精确匹配,子目录 */CMakeLists.txt 不沾)是
@@ -133,6 +218,41 @@ jobs:
           echo "memory_worker=$memory_worker" >> "$GITHUB_OUTPUT"
           echo "agent_lifetime=$agent_lifetime" >> "$GITHUB_OUTPUT"
           echo "workflow_threads=$workflow_threads" >> "$GITHUB_OUTPUT"
+          echo "cross_platform=$cross_platform" >> "$GITHUB_OUTPUT"
+          echo "remote_tests=$remote_tests" >> "$GITHUB_OUTPUT"
+          echo "assembly_tests=$assembly_tests" >> "$GITHUB_OUTPUT"
+          echo "sdk_tests=$sdk_tests" >> "$GITHUB_OUTPUT"
+          echo "worker_tests=$worker_tests" >> "$GITHUB_OUTPUT"
+          echo "runner_tests=$runner_tests" >> "$GITHUB_OUTPUT"
+
+      - name: Report selected coverage
+        env:
+          CODE: ${{ steps.c.outputs.code }}
+          CROSS_PLATFORM: ${{ steps.c.outputs.cross_platform }}
+          REMOTE_TESTS: ${{ steps.c.outputs.remote_tests }}
+          ASSEMBLY_TESTS: ${{ steps.c.outputs.assembly_tests }}
+          SDK_TESTS: ${{ steps.c.outputs.sdk_tests }}
+          WORKER_TESTS: ${{ steps.c.outputs.worker_tests }}
+          RUNNER_TESTS: ${{ steps.c.outputs.runner_tests }}
+          WINDOWS_SENSITIVE: ${{ steps.c.outputs.memory_worker }}
+          AGENT_LIFETIME: ${{ steps.c.outputs.agent_lifetime }}
+          WORKFLOW_THREADS: ${{ steps.c.outputs.workflow_threads }}
+        shell: bash
+        run: |
+          {
+            echo '### Selected CI coverage'
+            echo "- code=$CODE; cross_platform=$CROSS_PLATFORM; Windows-sensitive=$WINDOWS_SENSITIVE"
+            echo "- test registration required: remote=$REMOTE_TESTS; assembly=$ASSEMBLY_TESTS; sdk=$SDK_TESTS"
+            echo "- installed SDK and external consumer on Windows/macOS/Linux=$SDK_TESTS"
+            echo "- relocated Worker executable and real process scenarios=$WORKER_TESTS"
+            echo "- relocated Runner executable and real process scenarios=$RUNNER_TESTS"
+            echo "- agent/runtime ASan=$AGENT_LIFETIME; workflow TSan=$WORKFLOW_THREADS"
+            echo '- cross_platform adds Windows and Linux full tests before merge; macOS remains enabled.'
+            echo '- Registration false means not selected, not a component test pass; no schema validation is provided.'
+            echo '- SDK selection also runs fresh CLI=OFF default ALL builds, ordinary installs and SDK tests on three platforms.'
+            echo '- ASan covers agent/runtime and AppServer ownership; TSan keeps its workflow scope.'
+            echo '- Manual test_filter retains the Windows/macOS diagnostic scope; it is not three-platform acceptance.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # TUI 排版批 8 收口:src/ 禁止八进制 ESC 裸转义(\033)。批 6 已把
       # 全仓硬编码 ANSI 清零、统一 \x1b 十六进制写法,这道门把成果焊死。
@@ -149,7 +269,7 @@ jobs:
   # fromJSON 接。分支快车道(agent/ci 分支)只烧 macos 一腿最快出信号;
   # main 和记忆 worker/Windows 进程/Windows 瞬态文件语义敏感面(gateway
   # 命令文件 IO、助理任务册、telemetry 册)与依赖接线(根 CMakeLists.txt)
-  # 改动跑双平台，其余 PR 只跑 macOS。
+  # 改动跑双平台；remote 三平台门也选 Windows，其余 PR 只跑 macOS。
   lane:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -161,7 +281,7 @@ jobs:
         id: pick
         shell: bash
         run: |
-          if [[ "${{ needs.changes.outputs.memory_worker }}" == "true" || ( "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ) ]]; then
+          if [[ "${{ needs.changes.outputs.memory_worker }}" == "true" || "${{ needs.changes.outputs.cross_platform }}" == "true" || ( "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ) ]]; then
             echo 'legs=[{"name":"windows-msvc","os":"windows-latest"},{"name":"macos-clang","os":"macos-latest"}]' >> "$GITHUB_OUTPUT"
           else
             echo 'legs=[{"name":"macos-clang","os":"macos-latest"}]' >> "$GITHUB_OUTPUT"
@@ -256,6 +376,111 @@ jobs:
         shell: bash
         run: bash scripts/tests/updater.tests.sh
 
+  sdk-only:
+    needs: changes
+    if: needs.changes.outputs.sdk_tests == 'true'
+    name: sdk-only (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: linux-gcc, os: ubuntu-24.04}
+          - {name: macos-clang, os: macos-latest}
+          - {name: windows-msvc, os: windows-latest}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check SDK validator data fixtures
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_sdk_only_boundary.py
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_sdk_extension_gates.py
+
+      - name: Pick Linux SDK compiler
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "CC=$(command -v gcc)" >> "$GITHUB_ENV"
+          echo "CXX=$(command -v g++)" >> "$GITHUB_ENV"
+
+      - name: Cache SDK-only dependencies
+        uses: actions/cache@v4
+        with:
+          path: build-sdk-only/_deps
+          key: sdk-only-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
+          restore-keys: sdk-only-${{ matrix.name }}-
+
+      - name: Reject a configuration with no product
+        shell: bash
+        run: |
+          if cmake -S . -B build-no-product -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=OFF -DBUILD_TESTING=OFF > no-product.log 2>&1; then
+            cat no-product.log
+            echo 'Both product switches OFF unexpectedly configured'
+            exit 1
+          fi
+          cat no-product.log
+          grep -q 'Enable LUBANCODE_BUILD_CLI or LUBANCODE_BUILD_SDK' no-product.log
+
+      - name: Configure SDK-only with tests disabled
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_sdk_only_boundary.py --prepare --build-dir build-sdk-only
+          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=ON -DBUILD_TESTING=OFF -DLUBANCODE_USE_CODELOAD=OFF"
+          if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ] && cmake -S . -B build-sdk-only $COMMON_FLAGS \
+               -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"; then
+            echo 'SDK-only configured with vcpkg'
+          else
+            rm -rf build-sdk-only/CMakeCache.txt build-sdk-only/CMakeFiles
+            cmake -S . -B build-sdk-only $COMMON_FLAGS
+          fi
+
+      - name: Build SDK-only default ALL without tests
+        shell: bash
+        run: cmake --build build-sdk-only --config Release --parallel 4
+
+      - name: Verify SDK-only target and source boundaries without tests
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_sdk_only_boundary.py --build-dir build-sdk-only --source-dir . \
+            --config Release --expect-testing off --report build-sdk-only/test-evidence/sdk-only/boundary-off.json
+
+      - name: Install all SDK-only artifacts, relocate and execute consumer
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_sdk.py --build-dir build-sdk-only --install-mode full
+
+      - name: Enable SDK-only tests and build default ALL
+        shell: bash
+        run: |
+          cmake -S . -B build-sdk-only -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=ON -DBUILD_TESTING=ON
+          cmake --build build-sdk-only --config Release --parallel 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_sdk_only_boundary.py --build-dir build-sdk-only --source-dir . \
+            --config Release --expect-testing on --report build-sdk-only/test-evidence/sdk-only/boundary-on.json
+
+      - name: Run all registered SDK-only tests
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_sdk_focused.py --build-dir build-sdk-only --sdk-only
+
+      - name: Upload SDK-only build and runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-only-${{ matrix.name }}
+          path: |
+            build-sdk-only/test-evidence/
+            build-sdk-only/Testing/Temporary/LastTest.log
+            build-sdk-only/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: warn
+
   build-test:
     needs: [changes, lane]
     if: needs.changes.outputs.code == 'true'
@@ -312,12 +537,13 @@ jobs:
       # 依赖缓存:_deps(FetchContent 源码+已编产物)按依赖清单指纹钉住,清单
       # 不变即秒恢复——win/mac 两腿依赖编译是 Build 34 分钟的大头(实测走
       # FetchContent 后备)。跨 runner 绝对路径恒定,产物可直接复用。
+      # SDK ON 用共享 CRT，和默认静态 CRT 构建分开缓存。
       - name: Cache FetchContent deps
         uses: actions/cache@v4
         with:
           path: build/_deps
-          key: deps-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
-          restore-keys: deps-${{ matrix.name }}-
+          key: deps-${{ matrix.name }}-sdk-${{ needs.changes.outputs.sdk_tests }}-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
+          restore-keys: deps-${{ matrix.name }}-sdk-${{ needs.changes.outputs.sdk_tests }}-
 
       # vcpkg manifest 优先:runner 自带的 vcpkg 在 VCPKG_INSTALLATION_ROOT。
       # configure 失败(vcpkg 缺包/版本冲突等)就清掉构建目录、去掉工具链
@@ -328,7 +554,7 @@ jobs:
         shell: bash
         run: |
           set -x
-          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLUBANCODE_USE_CODELOAD=OFF -DLUBANCODE_BUNDLED_RG_DIR=$PWD/rg-stage/libexec"
+          COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLUBANCODE_USE_CODELOAD=OFF -DLUBANCODE_BUNDLED_RG_DIR=$PWD/rg-stage/libexec -DLUBANCODE_BUILD_SDK=${{ needs.changes.outputs.sdk_tests == 'true' && 'ON' || 'OFF' }} -DLUBANCODE_BUILD_WORKER_HOST=${{ needs.changes.outputs.worker_tests == 'true' && 'ON' || 'OFF' }} -DLUBANCODE_BUILD_EXPERIMENT_RUNNER=${{ needs.changes.outputs.runner_tests == 'true' && 'ON' || 'OFF' }}"
           if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ] && cmake -B build -S . $COMMON_FLAGS \
                -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"; then
             echo "configured with vcpkg"
@@ -340,11 +566,155 @@ jobs:
             cmake -B build -S . $COMMON_FLAGS
           fi
 
+      # SDK 必须从安装前缀被仓库外工程消费，不能用源码树内链接冒充。
+      - name: Build SDK library
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: cmake --build build --config Release --target lubancore_sdk -j 4
+
+      - name: Install and test standalone SDK consumer
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_sdk.py --build-dir build
+
+      - name: Upload SDK consumer evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-consumer-${{ matrix.name }}
+          path: build/test-evidence/sdk-consumer/
+          if-no-files-found: warn
+
+      - name: Build and test SDK lifecycle regressions
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target lubancore_sdk_tests -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_sdk_focused.py --build-dir build
+
+      - name: Upload SDK lifecycle evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-focused-${{ matrix.name }}
+          path: build/test-evidence/sdk-focused/
+          if-no-files-found: warn
+
+      - name: Build and test SDK host parity
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target lubancore_host_tests -j 4
+          PY=python3
+          command -v python3 >/dev/null 2>&1 || PY=python
+          "$PY" scripts/ci/check_sdk_host_parity.py --build-dir build
+
+      - name: Upload SDK host parity evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-host-parity-${{ matrix.name }}
+          path: build/test-evidence/sdk-host-parity/
+          if-no-files-found: error
+      - name: Build and test relocated Runner process
+        if: needs.changes.outputs.runner_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target luban-runner -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
+
+      - name: Upload Runner process evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-process-${{ matrix.name }}
+          path: build/test-evidence/runner-process/
+          if-no-files-found: warn
+
+      - name: Build and test standalone Runner ordinary installs
+        if: needs.changes.outputs.runner_tests == 'true'
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_runner_only_boundary.py
+          JSON_SOURCE_FLAG=()
+          if [ -f build/_deps/nlohmann_json-src/CMakeLists.txt ]; then
+            JSON_SOURCE_FLAG=("-DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=$PWD/build/_deps/nlohmann_json-src")
+          fi
+          for TESTING in OFF ON; do
+            DIR="build-runner-only-$TESTING"
+            mkdir -p "$DIR/.cmake/api/v1/query"
+            touch "$DIR/.cmake/api/v1/query/codemodel-v2"
+            cmake -B "$DIR" -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE= \
+              -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=OFF -DLUBANCODE_BUILD_WORKER_HOST=OFF \
+              -DLUBANCODE_BUILD_EXPERIMENT_RUNNER=ON -DBUILD_TESTING="$TESTING" \
+              -DLUBANCODE_USE_CODELOAD=OFF "${JSON_SOURCE_FLAG[@]}"
+            cmake --build "$DIR" --config Release -j 4
+          done
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --host runner --runner-only \
+            --build-dir build-runner-only-ON --without-tests-build-dir build-runner-only-OFF
+
+      - name: Upload standalone Runner evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-only-process-${{ matrix.name }}
+          path: build-runner-only-ON/test-evidence/runner-only-process/
+          if-no-files-found: warn
+
+      - name: Build and test relocated Worker process
+        if: needs.changes.outputs.worker_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target luban-worker -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host worker
+
+      - name: Upload Worker process evidence
+        if: always() && needs.changes.outputs.worker_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-process-${{ matrix.name }}
+          path: build/test-evidence/worker-process/
+          if-no-files-found: warn
+
       - name: Build
         shell: bash
         run: |
           cmake --build build --config Release --target lubancode -j 4
           cmake --build build --config Release --target lubancode_tests -j 4
+
+      # 先查登记，后面的全量 Test 真跑；不重复执行，也不让零册冒绿。
+      - name: Require registered component tests
+        if: needs.changes.outputs.remote_tests == 'true' || needs.changes.outputs.assembly_tests == 'true' || needs.changes.outputs.sdk_tests == 'true'
+        env:
+          REMOTE_TESTS: ${{ needs.changes.outputs.remote_tests }}
+          ASSEMBLY_TESTS: ${{ needs.changes.outputs.assembly_tests }}
+          SDK_TESTS: ${{ needs.changes.outputs.sdk_tests }}
+        shell: bash
+        run: |
+          ctest --test-dir build -C Release --show-only=json-v1 > build/component-test-list.json
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" - <<'PY'
+          import json, os, re
+          with open('build/component-test-list.json', encoding='utf-8') as stream:
+              tests = json.load(stream)['tests']
+          enabled = [test['name'] for test in tests if not any(
+              prop['name'] == 'DISABLED' and prop['value']
+              for prop in test.get('properties', []))]
+          for domain in ('remote', 'assembly', 'sdk'):
+              if os.environ[domain.upper() + '_TESTS'] != 'true':
+                  continue
+              selected = [name for name in enabled if re.match(r'^(unit|integration)\.' + domain + r'\.', name)]
+              if not selected:
+                  raise SystemExit('No enabled ' + domain + ' tests registered in CTest')
+              print(domain + ' tests included in the full Test step: ' + ', '.join(selected))
+          PY
 
       # T16 勾五:跑测试前把"这一轮跑的到底是什么"记成机器可读的一笔账
       #(版本/HEAD/工作区 diff 指纹/夹具树 hash/构建产物/环境)。产物随
@@ -369,7 +739,14 @@ jobs:
           if [ -n "$FILTER" ]; then
             ctest --test-dir build -C Release -R "$FILTER" --parallel 4 --output-on-failure --no-tests=error
           else
-            ctest --test-dir build -C Release --parallel 4 --output-on-failure --no-tests=error
+            # These process suites have already run against relocated installs.
+            # Host parity also ran above; its original sources remain in the full suite.
+            PROCESS_LABELS='sdk-host-parity'
+            if [ '${{ needs.changes.outputs.worker_tests }}' = true ]; then PROCESS_LABELS="$PROCESS_LABELS|worker-process"; fi
+            if [ '${{ needs.changes.outputs.runner_tests }}' = true ]; then PROCESS_LABELS="${PROCESS_LABELS:+$PROCESS_LABELS|}runner-process"; fi
+            PROCESS_FILTER=()
+            if [ -n "$PROCESS_LABELS" ]; then PROCESS_FILTER=(-LE "^($PROCESS_LABELS)$"); fi
+            ctest --test-dir build -C Release "${PROCESS_FILTER[@]}" --parallel 4 --output-on-failure --no-tests=error
           fi
 
       - name: Upload test evidence (T16 baseline)
@@ -425,7 +802,7 @@ jobs:
   # 矩阵(debian11/debian12/ubuntu2404)真跑把关。
   linux-manylinux:
     needs: changes
-    if: needs.changes.outputs.code == 'true' && (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: needs.changes.outputs.code == 'true' && (needs.changes.outputs.cross_platform == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     name: linux-manylinux
     runs-on: ubuntu-latest
     container:
@@ -462,8 +839,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/_deps
-          key: deps-linux-manylinux-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
-          restore-keys: deps-linux-manylinux-
+          key: deps-linux-manylinux-sdk-${{ needs.changes.outputs.sdk_tests }}-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
+          restore-keys: deps-linux-manylinux-sdk-${{ needs.changes.outputs.sdk_tests }}-
 
       - name: Cache static OpenSSL
         uses: actions/cache@v4
@@ -495,6 +872,9 @@ jobs:
           cmake -B build -S . \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON \
+            -DLUBANCODE_BUILD_SDK=${{ needs.changes.outputs.sdk_tests == 'true' && 'ON' || 'OFF' }} \
+            -DLUBANCODE_BUILD_WORKER_HOST=${{ needs.changes.outputs.worker_tests == 'true' && 'ON' || 'OFF' }} \
+            -DLUBANCODE_BUILD_EXPERIMENT_RUNNER=${{ needs.changes.outputs.runner_tests == 'true' && 'ON' || 'OFF' }} \
             -DLUBANCODE_USE_CODELOAD=OFF \
             -DLUBANCODE_BUNDLED_RG_DIR="$PWD/rg-stage/libexec" \
             -DCMAKE_C_COMPILER="$CC" \
@@ -506,15 +886,160 @@ jobs:
           CC: ${{ env.CC }}
           CXX: ${{ env.CXX }}
 
+      # SDK 必须从安装前缀被仓库外工程消费，不能用源码树内链接冒充。
+      - name: Build SDK library
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: cmake --build build --config Release --target lubancore_sdk -j 4
+
+      - name: Install and test standalone SDK consumer
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_sdk.py --build-dir build
+
+      - name: Upload SDK consumer evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-consumer-linux-manylinux
+          path: build/test-evidence/sdk-consumer/
+          if-no-files-found: warn
+
+      - name: Build and test SDK lifecycle regressions
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target lubancore_sdk_tests -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_sdk_focused.py --build-dir build
+
+      - name: Upload SDK lifecycle evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-focused-linux-manylinux
+          path: build/test-evidence/sdk-focused/
+          if-no-files-found: warn
+
+      - name: Build and test SDK host parity
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target lubancore_host_tests -j 4
+          PY=python3
+          command -v python3 >/dev/null 2>&1 || PY=python
+          "$PY" scripts/ci/check_sdk_host_parity.py --build-dir build
+
+      - name: Upload SDK host parity evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-host-parity-linux-manylinux
+          path: build/test-evidence/sdk-host-parity/
+          if-no-files-found: error
+      - name: Build and test relocated Runner process
+        if: needs.changes.outputs.runner_tests == 'true'
+        run: |
+          cmake --build build --config Release --target luban-runner -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
+
+      - name: Upload Runner process evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-process-linux-manylinux
+          path: build/test-evidence/runner-process/
+          if-no-files-found: warn
+
+      - name: Build and test standalone Runner ordinary installs
+        if: needs.changes.outputs.runner_tests == 'true'
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_runner_only_boundary.py
+          JSON_SOURCE_FLAG=()
+          if [ -f build/_deps/nlohmann_json-src/CMakeLists.txt ]; then
+            JSON_SOURCE_FLAG=("-DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=$PWD/build/_deps/nlohmann_json-src")
+          fi
+          for TESTING in OFF ON; do
+            DIR="build-runner-only-$TESTING"
+            mkdir -p "$DIR/.cmake/api/v1/query"
+            touch "$DIR/.cmake/api/v1/query/codemodel-v2"
+            cmake -B "$DIR" -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE= \
+              -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=OFF -DLUBANCODE_BUILD_WORKER_HOST=OFF \
+              -DLUBANCODE_BUILD_EXPERIMENT_RUNNER=ON -DBUILD_TESTING="$TESTING" \
+              -DLUBANCODE_USE_CODELOAD=OFF "${JSON_SOURCE_FLAG[@]}"
+            cmake --build "$DIR" --config Release -j 4
+          done
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --host runner --runner-only \
+            --build-dir build-runner-only-ON --without-tests-build-dir build-runner-only-OFF
+
+      - name: Upload standalone Runner evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-only-process-linux-manylinux
+          path: build-runner-only-ON/test-evidence/runner-only-process/
+          if-no-files-found: warn
+
+      - name: Build and test relocated Worker process
+        if: needs.changes.outputs.worker_tests == 'true'
+        run: |
+          cmake --build build --config Release --target luban-worker -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host worker
+
+      - name: Upload Worker process evidence
+        if: always() && needs.changes.outputs.worker_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-process-linux-manylinux
+          path: build/test-evidence/worker-process/
+          if-no-files-found: warn
+
       - name: Build
         run: |
           set -e
           cmake --build build --target lubancode -j "$(nproc)"
           cmake --build build --target lubancode_tests -j "$(nproc)"
 
+      - name: Require registered component tests
+        if: needs.changes.outputs.remote_tests == 'true' || needs.changes.outputs.assembly_tests == 'true' || needs.changes.outputs.sdk_tests == 'true'
+        env:
+          REMOTE_TESTS: ${{ needs.changes.outputs.remote_tests }}
+          ASSEMBLY_TESTS: ${{ needs.changes.outputs.assembly_tests }}
+          SDK_TESTS: ${{ needs.changes.outputs.sdk_tests }}
+        run: |
+          ctest --test-dir build -C Release --show-only=json-v1 > build/component-test-list.json
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" - <<'PY'
+          import json, os, re
+          with open('build/component-test-list.json', encoding='utf-8') as stream:
+              tests = json.load(stream)['tests']
+          enabled = [test['name'] for test in tests if not any(
+              prop['name'] == 'DISABLED' and prop['value']
+              for prop in test.get('properties', []))]
+          for domain in ('remote', 'assembly', 'sdk'):
+              if os.environ[domain.upper() + '_TESTS'] != 'true':
+                  continue
+              selected = [name for name in enabled if re.match(r'^(unit|integration)\.' + domain + r'\.', name)]
+              if not selected:
+                  raise SystemExit('No enabled ' + domain + ' tests registered in CTest')
+              print(domain + ' tests included in the full Test step: ' + ', '.join(selected))
+          PY
+
       - name: Test
         id: test
-        run: ctest --test-dir build -C Release --parallel "$(nproc)" --output-on-failure --no-tests=error
+        run: |
+          PROCESS_LABELS='sdk-host-parity'
+          if [ '${{ needs.changes.outputs.worker_tests }}' = true ]; then PROCESS_LABELS="$PROCESS_LABELS|worker-process"; fi
+          if [ '${{ needs.changes.outputs.runner_tests }}' = true ]; then PROCESS_LABELS="${PROCESS_LABELS:+$PROCESS_LABELS|}runner-process"; fi
+          PROCESS_FILTER=()
+          if [ -n "$PROCESS_LABELS" ]; then PROCESS_FILTER=(-LE "^($PROCESS_LABELS)$"); fi
+          ctest --test-dir build -C Release "${PROCESS_FILTER[@]}" --parallel "$(nproc)" --output-on-failure --no-tests=error
 
       - name: Upload linux binary for run matrix
         uses: actions/upload-artifact@v4
@@ -539,7 +1064,7 @@ jobs:
     name: run-on-debian11
     runs-on: ubuntu-latest
     needs: [changes, linux-manylinux]
-    if: needs.changes.outputs.code == 'true' && (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: needs.changes.outputs.code == 'true'
     container:
       image: debian:11-slim
     steps:
@@ -598,7 +1123,7 @@ jobs:
   # ---- AR-01(子代理线程寿命):AddressSanitizer 腿 ----------------------------
   # 悬垂访问/线程寿命这类病在常规腿上安静——后台 worker 晚归读已析构门面,
   # 多数时候只是"碰巧没红"。本腿用 gcc+ASan 全量编测试二进制,只跑
-  # unit.agent/unit.runtime 两域(派工/装配面的主战场),按 changes 门的
+  # unit.agent/unit.runtime 两域与 AppServer 会话寿命册,按 changes 门的
   # agent_lifetime 输出点腿:子代理派工/装配面改动才出场,其余 PR 零开销。
   # 不 FetchContent 静编 OpenSSL(ubuntu runner 自带 libssl-dev 即够),也不
   # 分期随包 rg(这两域的册不依赖它)——省下的时间换 ASan 的插桩开销。
@@ -640,6 +1165,7 @@ jobs:
           cmake -B build -S . \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON \
+            -DLUBANCODE_BUILD_SDK=ON \
             -DLUBANCODE_USE_CODELOAD=OFF \
             -DCMAKE_C_COMPILER="$CC" \
             -DCMAKE_CXX_COMPILER="$CXX" \
@@ -653,7 +1179,7 @@ jobs:
         shell: bash
         run: cmake --build build --config Release --target lubancode_tests -j 4
 
-      - name: Test (agent + runtime, ASan)
+      - name: Test (agent + runtime + SDK results/extensions + host lifetime, ASan)
         id: test
         shell: bash
         env:
@@ -661,10 +1187,71 @@ jobs:
           # (Lua 钩子串),与本腿的悬垂/寿命合同无关,另立单子治理后再开。
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
         run: |
+          ctest --test-dir build -C Release -R '^(integration\.app_server\.app_server_session_parity|unit\.app_server\.app_server_browser|unit\.runtime\.tool_runtime|integration\.plugins\.tool_runtime_deferral|unit\.runtime\.session_execution|unit\.runtime\.scoped_turn_bindings|unit\.tools\.tool_job_coordinator|unit\.app\.turn_runner_scoped_bindings|integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection)|unit\.remote\.remote_result_sync|unit\.hooks\.middleware_core)$' \
+            --show-only=json-v1 > build/asan-host-registration.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          tests = json.loads(Path('build/asan-host-registration.json').read_text())['tests']
+          required = {'integration.app_server.app_server_session_parity', 'unit.app_server.app_server_browser',
+                      'unit.runtime.tool_runtime', 'integration.plugins.tool_runtime_deferral',
+                      'unit.runtime.session_execution', 'unit.runtime.scoped_turn_bindings', 'unit.tools.tool_job_coordinator',
+                      'unit.app.turn_runner_scoped_bindings', 'integration.sdk.lubancore_extensions',
+                      'integration.sdk.lubancore_results', 'integration.sdk.lubancore_result_projection',
+                      'unit.remote.remote_result_sync',
+                      'unit.hooks.middleware_core'}
+          if len(tests) != len(required) or {test['name'] for test in tests} != required:
+              raise SystemExit('ASan SDK/host lifetime regressions are not registered')
+          for test in tests:
+              props = {p['name']: p['value'] for p in test.get('properties', [])}
+              if props.get('DISABLED'):
+                  raise SystemExit('ASan SDK/host lifetime regression is disabled')
+          PY
           # channel_menu_pump 暂除外:该册对调度时序敏感,ASan 放慢后
           # "未配对点击"的拒绝态断言抢跑假红;渠道域不是本腿的合同面。
-          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\." \
-            -E "channel_menu_pump" --parallel 4 --output-on-failure --no-tests=error
+          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\.|^unit\.tools\.tool_job_coordinator$|^integration\.app_server\.app_server_session_parity$|^unit\.app_server\.app_server_browser$|^integration\.plugins\.tool_runtime_deferral$|^unit\.app\.turn_runner_scoped_bindings$|^integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection)$|^unit\.remote\.remote_result_sync$|^unit\.hooks\.middleware_core$" \
+            -E "channel_menu_pump" --parallel 4 --output-on-failure --no-tests=error \
+            --output-junit "$PWD/build/asan-results.xml"
+          python3 - <<'PY'
+          import json
+          import re
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          required = {test['name'] for test in
+                      json.loads(Path('build/asan-host-registration.json').read_text())['tests']}
+          cases = ET.parse('build/asan-results.xml').getroot().findall('.//testcase')
+          # JUnit system-out may truncate successful output before doctest's
+          # summary. Match each source's complete native log section instead.
+          native_log = Path('build/Testing/Temporary/LastTest.log').read_text(encoding='utf-8')
+          native_sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$', native_log, flags=re.M)
+          for name in required:
+              matching = [case for case in cases if case.attrib.get('name') == name]
+              if len(matching) != 1:
+                  raise SystemExit('ASan required source did not run exactly once: ' + name)
+              case = matching[0]
+              if case.attrib.get('status') != 'run' or any(case.find(kind) is not None for kind in
+                                                         ('failure', 'error', 'skipped')):
+                  raise SystemExit('ASan required source was skipped or failed: ' + name)
+              sections = [native_sections[index + 1] for index in range(1, len(native_sections), 2)
+                          if native_sections[index] == name]
+              if len(sections) != 1:
+                  raise SystemExit('ASan native log does not identify one source: ' + name)
+              counts = re.findall(r'\[doctest\] test cases:\s+(\d+)', sections[0])
+              if len(counts) != 1 or int(counts[0]) == 0:
+                  raise SystemExit('ASan source filter ran no native test cases: ' + name)
+          print(f'ASan: all {len(required)} required lifetime sources executed nonempty native tests')
+          PY
+
+      - name: Upload ASan lifetime evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: asan-lifetime-evidence
+          path: |
+            build/asan-host-registration.json
+            build/asan-results.xml
+            build/Testing/Temporary/LastTest.log
+          if-no-files-found: warn
 
       - name: Report failed CTest cases
         if: ${{ failure() && steps.test.outcome == 'failure' }}

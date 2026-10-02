@@ -94,6 +94,7 @@ struct V3Writer::Impl {
     ContextView context;
     std::unordered_set<std::string> message_ids;
     bool broken = false;
+    bool closed = false;
     V3WriterOptions options;
     const V3Clock* clock = nullptr;
     V3Clock owned_clock;  // 无注入时的默认钟
@@ -221,6 +222,12 @@ struct V3Writer::Impl {
     // 落一行(哈希填好、canonical dump、追加、状态前移)。
     WriteReceipt AppendLineLocked(nlohmann::json json, std::string id, Durability durability) {
         WriteReceipt receipt;
+        if (closed) {
+            receipt.status = WriteReceipt::Status::Rejected;
+            receipt.error_code = "v3writer.closed";
+            receipt.error_message = "写句柄已关闭,停止提交";
+            return receipt;
+        }
         json.erase("prevHash");
         json.erase("lineHash");
         auto canonical = CanonicalJsonDump(json);
@@ -274,6 +281,17 @@ V3Writer::V3Writer(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 V3Writer::V3Writer(V3Writer&&) noexcept = default;
 V3Writer& V3Writer::operator=(V3Writer&&) noexcept = default;
 V3Writer::~V3Writer() = default;
+
+std::expected<void, std::string> V3Writer::Close() {
+    if (impl_ == nullptr) return {};
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->closed = true;
+    if (!impl_->journal.Close()) {
+        impl_->broken = true;
+        return std::unexpected("v3writer.close_failed: 日志写句柄关闭失败或已有写入错误");
+    }
+    return {};
+}
 
 // ---------------------------------------------------------------------------
 // Start
@@ -1192,11 +1210,7 @@ std::string V3Writer::last_line_hash() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->last_hash;
 }
-void V3Writer::CloseFile() {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    impl_->journal.Close();
-    impl_->broken = true;
-}
+void V3Writer::CloseFile() { (void)Close(); }
 
 bool V3Writer::broken() const { return impl_->broken; }
 const ContextView& V3Writer::context() const { return impl_->context; }

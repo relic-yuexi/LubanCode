@@ -1,8 +1,6 @@
-// backend_stack.hpp 的实现(骨架拆解批四:五层请求改写后端退役,这里
-// 只剩按 wire 造 client 与稳定壳 RebuildableBackend;请求策略的现拼挪去
-// Agent 拼请求那一步,见 agent/agent.hpp)。
+// 共用后端装配:按配置造 client,稳定引用壳只负责替换与能力转发。
 
-#include "app/backend_stack.hpp"
+#include "runtime/assembly/backend.hpp"
 
 #include <utility>
 
@@ -12,7 +10,7 @@
 #include "api/responses/client.hpp"
 #include "config/provider_catalog.hpp"
 
-namespace lubancode::app {
+namespace lubancode::runtime::assembly {
 
 std::unique_ptr<lubancode::api::Backend> BuildBackend(const lubancode::config::Config& config) {
     // M11:连接超时 / 流式空闲读超时用 Config 里实际生效的值(四级合并结果,
@@ -130,4 +128,4 @@ void RebuildableBackend::ForceMaxOutputTokensOverride(lubancode::api::Request& r
     inner->ForceMaxOutputTokensOverride(request, tokens);
 }
 
-}  // namespace lubancode::app
+}  // namespace lubancode::runtime::assembly
