@@ -24,12 +24,13 @@ requested/effective 分开冻结；Unknown 同名工具不能混入，交集为�
 时长统一用整数秒；零、负数、浮点、缺项及转换到内部计数/时钟会溢出的值均拒开。
 准入先核预算，再碰 task、子账或线程；超父场已设同维执行上限便拒，不能先起跑后裁。
 父上限 0 只表示那项未设，不拿它当子无限许可；孩子仍须有显式正值。审批 timeout 与网络 timeout 不冒充执行时长帽。
-模型省略预算沿宿主冻结值，显式值只准收窄；不能借 0、坏形状或溢出提升上限。同 ID 恢复沿冻结原值，显式变化拒开。
+调用省略预算沿宿主冻结值，显式值只准收窄；不能借 0、坏形状或溢出提升上限。同 ID 恢复沿冻结原值，显式变化拒开。
 
 开启后保留 `agent` 工具名；与宿主自定义或 MCP 注册冲突便拒开。关闭时保持既有 SDK 工具面。
 不复制父 Memory 召回、写入模块或逐 operation 回调；子提示不继承父场临时 Memory 召回片段。
 孩子无真实 owned operation，invocation 继续缺席；父 operation 只作票归属与 cause，不能拼子五键。
-首批子名单拒 `memory_save`，也不交父模块引用；宿主自定义工具仍按其公开执行合同负责自己的外部副作用。
+首批子名单拒 `memory_save`，也不交父模块引用；另拒 `todo_write` 保留名，免得旧私有 todo 构造替换宿主工具。
+宿主自定义工具仍按其公开执行合同负责自己的外部副作用；这笔不改 CLI 工具构造。
 
 ## 票据、报告与归属
 
@@ -47,6 +48,9 @@ SID 与 run 都可跨父场同串；查询须回本 Session owner 和本 operati
 拟增本 operation 子报告查询与冻结计划查询，只返回标准库 owned 值，Close 后可查。
 报告分开记真实子执行状态、子 append/Close 确认、父终态观察、正式工具结果选择与父上下文采用；不能合成一枚“完成”抹平缺口。
 保留父真实 action/attempt、spawn/link 引用、孩子实际卷身份与终态摘要；task ID 和模型 call ID 只供配对，不作全局 owner。
+执行已知与父模型已消费分开记。健康取消或父执行帽失败可在 Tool 消息已选择、接纳后收场，下一份父请求尚未发出。
+只准保留 Inspector 真报的 `prepared_consumption_pending`：操作仍为 Cancelled 或明确执行帽 Failed，报告为 owned Incomplete，不能冒称 Validated。
+成功操作仍须完整采用链；其它缺口、坏归属或坏 hash 不放行。观察、捕获或子 Close 未确认仍走 StopIndeterminate。
 正文仅返既有策略下 preview；子完整账与工具原件留执行端。远端 Full 仍须 Node 许可和本场参数双开。
 查询只读冻结值，不重放模型、工具，不补账，不以 TaskLedger 活态或宽松树遍历代替耐久报告。
 
@@ -76,10 +80,15 @@ attachment 若需在封账前收线程，须在 shutdown 阶段完成，不能�
 严格父采用门须核真实 spawn/link → 子终态回执 → 父观察 → result store → formal selected → Tool 消息 → context admission → 实际父请求。
 逐枚核本场、真实父 action/attempt、子卷身份、事件次序、正文与摘要，防跨场、跨 turn、重哈希冒领和观察降格。
 raw capture 与正式结果各核其角色，不借二者都 selected 冒称双重采用。只观察到孩子终态仍不足以宣称父已采用。
-完整 final 缺报告或采用链便拒恢复；合法中断可保 Indeterminate 与明确缺口，禁止自动重派或重跑副作用。
+除上述唯一未消费窗口，完整 final 缺报告或采用链便拒恢复；合法中断可保 Indeterminate 与明确缺口，禁止自动重派或重跑副作用。
+已知取消与执行帽失败沿上述唯一未消费窗口恢复原终态；不发新模型、不重跑孩子，不从旧账捏 live 回执。
+恢复先在构造前核已知 final，再在现有 opening 锁下复核；坏子卷或已采用材料缺件须先拒，不能等旧场写过新行才报错。
+已知 final 逐项配对本场 SDK result，单件上限 64 MiB；再核真实 V3 turn 与最终消息归属，不借空报告躲过错 turn。
+通用副作用未知沿 `sdk.side_effect.indeterminate` 留原错；实际 Memory 写未知保留原专码，不把普通工具失败抬成未知。
 
 安装消费者只用公共头，真实 Submit 派子任务；验默认关、显式开、准入前拒越界、票归属、当前孩子 grant 与父 grant 不继承。
-同项目两场、异项目各一场，故意复用父/子 SID/run 与模型 call ID，核请求、工具、报告、取消和关闭不串场。
+同项目两场、异项目各一场，复用去重键与模型 call ID，核真实 cwd、请求、工具、报告、取消和关闭不串场。
+SID/run 同号跨父归属仍由既有真实子票册守住；公开夹具不假定跨项目发号全局唯一，也不捏造 SDK 孩子身份。
 再验缺/零/负/溢出预算、超父帽准入前拒绝、真实步数/时长到帽、完整恢复、坏/半计划、错采用/自重哈希、无 final 中断与 checked Close。
 装配/派工失败须保真实失败账；故障 cleanup 先放闸再等线程。
 三平台 fresh 全量、六套 SDK focused/真实安装、Host、Worker、两 Runner、必需 ASan 和九份实际依赖图认同一组合头。

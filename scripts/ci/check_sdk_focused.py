@@ -15,6 +15,7 @@ REQUIRED = {
     "sdk.focused.lubancore_session",
     "sdk.focused.lubancore_scoped_approval",
     "sdk.focused.lubancore_child_approval",
+    "sdk.focused.lubancore_subagents",
     "sdk.focused.lubancore_builtin_search",
     "sdk.focused.lubancore_lifecycle",
     "sdk.focused.lubancore_host_boundary",
@@ -112,6 +113,8 @@ def main():
             raise RuntimeError("Scoped approval native roster differs from 14 cases")
         if case.attrib["name"] == "sdk.focused.lubancore_child_approval" and int(counts[0]) != 14:
             raise RuntimeError("Actual child approval native roster differs from 14 cases")
+        if case.attrib["name"] == "sdk.focused.lubancore_subagents" and int(counts[0]) != 12:
+            raise RuntimeError("Public SDK child assembly native roster differs from 12 cases")
         if case.attrib["name"] == "sdk.focused.child_parent_observation":
             if int(counts[0]) != 8:
                 raise RuntimeError("Child parent observation roster differs from 8 cases")
