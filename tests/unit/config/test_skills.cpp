@@ -1148,10 +1148,30 @@ TEST_CASE("StrictSkills: ordinary body and symlink hardlink aliases cannot bypas
 #ifdef _WIN32
             CHECK(selected.execute({{"name", "alpha"}, {"path", "references/sKiLl.Md"}}).error_code == "skill.path.body_alias");
 #else
-            WriteStrictSkillFile(fixture.root / "alpha" / "references" / "skill.md", "LIVE-LOWERCASE");
-            const auto lowercase = selected.execute({{"name", "alpha"}, {"path", "references/skill.md"}});
+            // A POSIX host can use a case-insensitive volume. Put this genuine
+            // live attachment in a directory without a sibling SKILL.md.
+            WriteStrictSkillFile(fixture.root / "alpha" / "references" / "lowercase" / "skill.md", "LIVE-LOWERCASE");
+            const auto lowercase = selected.execute({{"name", "alpha"}, {"path", "references/lowercase/skill.md"}});
             CHECK_FALSE(lowercase.is_error);
-            CHECK(lowercase.content == "技能材料 alpha/references/skill.md:\nLIVE-LOWERCASE");
+            CHECK(lowercase.content == "技能材料 alpha/references/lowercase/skill.md:\nLIVE-LOWERCASE");
+
+            // Keep real case-alias coverage too. On a case-insensitive volume
+            // the lower spelling names the reserved body and must be refused.
+            const auto upper_path = fixture.root / "alpha" / "references" / "SKILL.md";
+            const auto lower_path = fixture.root / "alpha" / "references" / "skill.md";
+            WriteStrictSkillFile(lower_path, "LIVE-CASE-FIXTURE");
+            std::error_code case_error;
+            const bool same_file = std::filesystem::equivalent(upper_path, lower_path, case_error);
+            REQUIRE_MESSAGE(!case_error, "Skills case identity check failed: ", case_error.message());
+            const auto case_reply = selected.execute({{"name", "alpha"}, {"path", "references/skill.md"}});
+            if (same_file) {
+                CHECK(case_reply.is_error);
+                CHECK(case_reply.error_code == "skill.path.body_alias");
+                CHECK(case_reply.content.find("LIVE-CASE-FIXTURE") == std::string::npos);
+            } else {
+                CHECK_FALSE(case_reply.is_error);
+                CHECK(case_reply.content == "技能材料 alpha/references/skill.md:\nLIVE-CASE-FIXTURE");
+            }
 #endif
         }
     }
