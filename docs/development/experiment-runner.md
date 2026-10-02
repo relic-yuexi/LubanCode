@@ -60,6 +60,8 @@ Runner 不查询 GPU、不分配设备、不记录显存，也不自动注入 `C
 
 状态包括 `starting/running/succeeded/failed/cancelled/indeterminate`。启动意图先落盘，创建的进程先暂停，启动身份落盘后才放行用户代码。这个窗口丢了 Runner，没有退出证据就保持 `indeterminate`；相同幂等键不会重跑，取消也回 `runner.job_indeterminate`。操作者核对输出和外部进程后，须用明确的新操作键启动恢复工作。
 
+任务账与启动 endpoint 采用同一份有界写入规则。只在原子写返回 `TransientReject` 且 `NotCommitted` 时重试；每次计划等待至多 20ms，重试预算 1 秒，总尝试至多 51 次。平台标作 `Permanent`，或已换名但耐久未确认时，立刻报 `runner.store_failed`，不删正式文件，不伪造回滚。这份预算限制重试等待与后续尝试，不承诺线程唤醒或操作系统单次 I/O 必在 1 秒内返回。首次短拒与最终失败另写本机 stderr 诊断，保留固定文件名、原子写错误码、提交阶段、次数和底层错误；不写账本正文、凭据或环境值。
+
 ## 日志与出网
 
 stdout/stderr 直接写入节点 `jobs/<job_id>/stdout.log` 与 `stderr.log`，不经 Worker 管道。任务账保存规格、摘要、启动身份、状态和退出结果；目录损坏或缺账时拒绝当成空目录继续接单。
@@ -73,5 +75,7 @@ stdout/stderr 直接写入节点 `jobs/<job_id>/stdout.log` 与 `stderr.log`，�
 `runner.process.lifecycle` 使用安装、搬迁后的真 `luban-runner`，运行 `tests/runner/test_runner_process.py`。固定 11 项进程检查，零测试、漏项或跳过均失败。
 
 Windows 将 Node/Worker 夹具放进带 `KILL_ON_JOB_CLOSE` 的 Job；POSIX 将夹具放进独立进程组。Runner 由另一父域先行启动。检查真实杀 Worker/Node 后实验继续、另一客户端重连、同 cwd 多 Session、取消组内子进程、丢失回执后同键不重跑、错误 Session/nonce 拒绝、日志与环境引用边界。成功及启动失败的终态都须经重启复验。Runner 崩溃另造有效的未收尾账快照，把持久 PID 换成仍活哨兵，验证恢复不收养、不误杀；`starting` 窄窗用持久快照重放，不冒称完成了所有崩溃指令点的穷举。
+
+Windows 另在原有崩溃与身份检查中，分别持住不共享删除权限的真实 jobs 与 endpoint 句柄。先观察原子替换确实受拒，再释放句柄，核新启动、持久 `indeterminate` 和同键不重跑；另一路持 endpoint 到预算耗尽，核固定失败码、有限次数、旧文件字节未动，释放后仍能启动。失败时保留夹具任务账、endpoint 与服务日志，不复制含凭据的身份文件。顶层仍报原有 11 场，Windows 子场另报实跑标记。
 
 这份验收不代表任意服务管理器重启、跨注销、断电后续跑或 GPU 调度已支持。真实进程验证只在远端 CI 执行。
