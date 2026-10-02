@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "platform/bounded_read.hpp"
+#include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "platform/text_encoding.hpp"
 #include "trajectory/v3/subagent.hpp"
@@ -26,7 +27,7 @@ struct Invalid : std::runtime_error { using std::runtime_error::runtime_error; }
 struct Incomplete : std::runtime_error { using std::runtime_error::runtime_error; };
 void Require(bool good, const char* code) { if (!good) throw Invalid(code); }
 bool SafeText(std::string_view text, std::size_t cap = 1024) {
-    return !text.empty() && text.size() <= cap && text.find('\0') == text.npos && platform::IsValidUtf8(text);
+    return !text.empty() && text.size() <= cap && text.find('\0') == text.npos && platform::IsValidUtf8(std::string(text));
 }
 std::string Text(const Json& value) {
     Require(value.is_string(), "invalid_type");
@@ -54,8 +55,8 @@ fs::path Canonical(const fs::path& path) {
 }
 fs::path Relative(std::string_view text, std::string_view first) {
     Require(SafeText(text) && text.find_first_of("\\:") == text.npos, "invalid_relative_path");
-    const auto path = platform::Utf8ToPath(text);
-    Require(!path.is_absolute() && !path.has_root_path() && path.begin() != path.end() && *path.begin() == platform::Utf8ToPath(first), "invalid_relative_path");
+    const auto path = platform::Utf8ToPath(std::string(text));
+    Require(!path.is_absolute() && !path.has_root_path() && path.begin() != path.end() && *path.begin() == platform::Utf8ToPath(std::string(first)), "invalid_relative_path");
     for (const auto& part : path) Require(part != "." && part != "..", "invalid_relative_path");
     return path;
 }
