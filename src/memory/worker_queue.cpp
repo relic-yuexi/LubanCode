@@ -113,13 +113,8 @@ std::expected<void, std::string> WriteMemorySaveResult(const fs::path& lifecycle
 // 回执读取(收执侧/重试侧共用):committed = outcome 有 committed_at 且无
 // stable_error_code;failed = outcome 带 stable_error_code。status 恒为
 // completed(指这枚回执落齐了,不是指业务成功)。
-struct MemorySaveReceipt {
-    bool exists = false;
-    bool committed = false;
-    std::string error;
-    std::string memory_id;
-    std::string workspace_key;
-};
+}  // namespace
+
 MemorySaveReceipt ReadMemorySaveReceipt(const fs::path& lifecycle_root, const std::string& operation_id) {
     MemorySaveReceipt receipt;
     const fs::path result_path = lifecycle_root / Utf8Path(operation_id) / "result.json";
@@ -154,6 +149,8 @@ MemorySaveReceipt ReadMemorySaveReceipt(const fs::path& lifecycle_root, const st
     }
     return receipt;
 }
+
+namespace {
 
 // ---- /memory jobs 的台账小工具 ----
 
