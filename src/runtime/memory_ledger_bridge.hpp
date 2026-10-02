@@ -47,6 +47,18 @@ public:
     std::string RecordSaveRequested(const memory::SaveLedgerNote& note) override;
     std::string current_session_id() const override;
 
+    struct ContextAdmission {
+        api::Message message;
+        std::string message_id;
+        std::string error; // partial adoption: the input is real, but fact closure failed
+    };
+    // Neutral host seam. Adopt the complete formatted recall once, including
+    // provenance and guards, then return that exact input for RunAdmittedHistory.
+    // Per-topic facts retain their fragment snapshots without adopting them again.
+    std::expected<ContextAdmission, std::string> AdmitRecallContext(
+        const std::string& text, const std::vector<memory::InjectedMemoryRecord>& records,
+        const std::string& turn_id);
+
 private:
     // v3 场的两个落点;v2 老路在 cpp 的 RecordXxxV2。
     std::expected<void, std::string> RecordRecallInjectionV3(

@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "memory/project_memory.hpp"
+#include "memory/topic_store.hpp"
 
 namespace lubancode::memory::recall {
 
@@ -45,6 +46,8 @@ std::string BuildTurnContext(const Options& options, const ProjectIdentity& iden
                              MemoryAccounting* accounting, const std::string& query,
                              const std::filesystem::path& cwd, QueryOrigin origin,
                              bool force_retrieval, const std::string& target_run_id,
-                             const std::string& turn_id);
+                             const std::string& turn_id,
+                             const store::ProjectRecallSnapshot* read_view = nullptr,
+                             RecallTrace* owned_trace = nullptr);
 
 }  // namespace lubancode::memory::recall

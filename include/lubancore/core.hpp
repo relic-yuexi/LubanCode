@@ -16,6 +16,7 @@
 #include <lubancore/extensions.hpp>
 #include <lubancore/results.hpp>
 #include <lubancore/skills.hpp>
+#include <lubancore/memory.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
@@ -124,6 +125,9 @@ struct SessionOptions {
     // Explicit local selection, frozen per session. SKILL.md drift is rejected;
     // ordinary attachments are read live on demand. Never discovers HOME/cwd.
     std::optional<skills::v1::Selection> skills;
+    // Explicit trusted project recall. Empty defaults off; on resume it preserves
+    // the saved Memory plan. An explicit resume value must match that plan.
+    std::optional<memory::v1::RecallOptions> memory;
     // Explicit trusted C++ registrations, frozen per session until Close.
     std::vector<extensions::v1::Registration> extensions;
     // Outbound result projection identity. New sessions default to Preview/v1;
@@ -207,6 +211,8 @@ public:
     // Close. This does not serialize or restore arbitrary extension state.
     Result<std::string> DescribeExtensions() const;
     Result<skills::v1::Snapshot> DescribeSkills() const;
+    Result<memory::v1::Snapshot> DescribeMemory() const;
+    Result<memory::v1::RecallReport> GetMemoryRecall(const std::string& operation_id) const;
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
     // Cooperative custom tools/backends MUST return after cancellation; Close waits
     // for them and never destroys live borrowed state or pretends a timeout stopped it.
