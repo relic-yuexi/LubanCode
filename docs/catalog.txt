@@ -85,6 +85,7 @@ DOC development/sdk-memory-save.md
 DOC development/agent-thread-start-cleanup.md
 DOC development/child-foreground-context.md
 DOC development/scoped-approval-lease.md
+DOC development/child-async-approval.md
 DOC development/sdk-updater-boundary.md
 DOC development/lubancore-builtin-search.md
 DOC development/worker-host.md
