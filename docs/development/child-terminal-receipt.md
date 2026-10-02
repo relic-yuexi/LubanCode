@@ -31,3 +31,8 @@ V2 写前提交钩子只回原生 `IoFailed`，不碰 JournalWriter，不能凭�
 新增原生册须验真 V3 spawn/link 与五键、成功/失败整份缓存、真实拒绝与 I/O broken、提交后真实 Close 边界注入失败、前台执行与后台启动拒绝消费、shared registry 寿命及并发值。真父子回合钉 parent/child/task/同批后续工具计数；初轮/续投/Stop 各验未知态停止且不重复送输入；真前台取消与步数耗尽另查执行结果。启动拒绝验已提交且 Close 错、真关闭写者明确拒写、干净落稳三条路。注入钩子只在真实 Close 释放句柄之后报错，不冒称操作系统自然失败。默认空。
 
 新册固定七案，进入三平台 SDK focused 与 ASan 来源登记、原件/JUnit及精确非零计数门。实际前台取消、预算、成功、Close 失败、孩子未知五条路各在断言后打印完成标记，两门须在完整原生日志见到各一枚，不能只凭总数盖过漏跑子例。CLI 轮借用册精确两案，含真 Stop 未知收尾；旧 CLI 派工与寿命册保留。本地只查源码、文档与纯数据，原生交远端 CI。
+
+`554e40ad` 鲜全量 macOS 编译发现三份既有 V3 册还传 bool、取字符串 hash。
+本轮将 default smoke、write wiring、verify/doctor tree 三处消费者迁到真实 typed 回执，
+同时核成功执行、Committed、Closed、durable 与原子卷终态五键；旧完整验卷和父子边断言保留。
+不添 bool 兼容 shim，不改生产与门。SDK focused 通过不能抵全量编译，仍须本头鲜 CI 收齐。
