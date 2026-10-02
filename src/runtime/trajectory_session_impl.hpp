@@ -39,12 +39,14 @@ struct TrajectorySessionLedger::Impl {
     std::string main_run_id;
     std::string lubancode_version;
     std::string workspace_root_text;  // UTF-8,环境快照与 git 状态取材用
-    // 子代理账:run_id -> 终态 hash(Finish 时填,父账边界引用用)。
-    std::map<std::string, std::string> child_terminal_hashes;
+    // Child terminal values: shared owner never lends a raw Impl map.
+    std::shared_ptr<SubagentTerminalRegistry> child_terminals =
+        std::make_shared<SubagentTerminalRegistry>();
     std::uint64_t subagent_counter = 0;
     // 测试故障注入(生产恒空;子代理空轨迹单 5.1):子账首枚 run.started
     // 提交前问一次。
     std::function<std::optional<std::string>()> subagent_start_fault;
+    std::function<std::optional<std::string>()> subagent_close_fault;
     // workflow 编排单同款:编排账/node 账首枚 run.started 提交前问一次。
     std::function<std::optional<std::string>()> workflow_start_fault;
     std::function<std::optional<std::string>()> workflow_node_start_fault;

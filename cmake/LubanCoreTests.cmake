@@ -26,6 +26,8 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/runtime/test_session_resources.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_session_execution.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_execution_owner.cpp"
+  "${_lubancore_tests_root}/unit/runtime/test_subagent_terminal_receipt.cpp"
+  "${_lubancore_tests_root}/unit/runtime/test_child_foreground_integration.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_scoped_turn_bindings.cpp")
 set(_lubancore_tests_exclude)
 if(LUBANCODE_BUILD_CLI)
@@ -38,6 +40,9 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   # its private symbols from the SDK DLL. Session and installed-host cases call
   # the SDK's hidden reader through the public Session API.
   "${CMAKE_SOURCE_DIR}/src/sdk/results.cpp"
+  # The private pending implementation is compiled into the reference fixture;
+  # its symbols stay hidden in the SDK DLL. Public Session cases use the DLL.
+  "${CMAKE_SOURCE_DIR}/src/sdk/approval.cpp"
   ${LUBANCORE_FOCUSED_TEST_SOURCES})
 target_link_libraries(lubancore_sdk_tests PRIVATE
   lubancode_runtime lubancore_sdk doctest::doctest)
@@ -85,6 +90,8 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
   elseif(sdk_basename STREQUAL "test_session_resources.cpp" OR
          sdk_basename STREQUAL "test_session_execution.cpp" OR
          sdk_basename STREQUAL "test_execution_owner.cpp" OR
+         sdk_basename STREQUAL "test_subagent_terminal_receipt.cpp" OR
+         sdk_basename STREQUAL "test_child_foreground_integration.cpp" OR
          sdk_basename STREQUAL "test_scoped_turn_bindings.cpp")
     set(sdk_original_test "unit.runtime.${sdk_stem}")
   else()

@@ -257,9 +257,9 @@ struct AgentSubagentHooks {
         const std::string& task_label, const std::string& parent_run_id,
         runtime::SubagentSpawnFailure* failure_out)>
         trajectory_spawn;
-    // 子账收口(run terminal + 关柄)后的回填口:父桥记下子账终态
-    // hash,父侧 agent 调用的执行终态事件引用它(§3.5 边界对账)。
-    std::function<void(const std::string& run_id, const std::string& terminal_hash)>
+    // Owned native append/Close evidence. This callback does not persist a V3
+    // parent terminal observation or prove parent-model adoption.
+    std::function<void(const runtime::SubagentTerminalReceipt&)>
         trajectory_child_finished;
 
     // ESC/Ctrl+C 打断信号(宿主那份 cancel_flag 的地址)——子代理
@@ -745,10 +745,9 @@ public:
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return false; }  // 子代理内部的危险工具各自有确认关
     Result execute(const nlohmann::json& input) override;
-    // 子代理自带 CancelChain(面板 x/父轮 ESC/墙钟在 RunTask 里并根),外层
-    // 递进来的取消旗不另开旁路——using 把基类的 context 口带进重载集,
-    // AgentDispatchTool 等转发壳递 (input, context) 时走基类默认适配。
-    using Tool::execute;
+    // This call's flag joins the foreground CancelChain. The pointer is not
+    // retained by this shared facade, a child handle, or a detached worker.
+    Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override;
 
 private:
     // P0-3 的 typed 派工入口:execute()/AgentDispatchHandle 都汇到这。caller

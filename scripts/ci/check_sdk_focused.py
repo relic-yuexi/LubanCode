@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 
 REQUIRED = {
     "sdk.focused.lubancore_session",
+    "sdk.focused.lubancore_scoped_approval",
     "sdk.focused.lubancore_builtin_search",
     "sdk.focused.lubancore_lifecycle",
     "sdk.focused.lubancore_host_boundary",
@@ -26,6 +27,8 @@ REQUIRED = {
     "sdk.focused.session_resources",
     "sdk.focused.session_execution",
     "sdk.focused.execution_owner",
+    "sdk.focused.subagent_terminal_receipt",
+    "sdk.focused.child_foreground_integration",
     "sdk.focused.scoped_turn_bindings",
     "sdk.focused.atomic_write",
 }
@@ -88,6 +91,22 @@ def main():
             raise RuntimeError("SDK memory-save native roster differs from 12 cases")
         if case.attrib["name"] == "sdk.focused.execution_owner" and int(counts[0]) != 7:
             raise RuntimeError("Shared execution-owner native roster differs from 7 cases")
+        if case.attrib["name"] == "sdk.focused.subagent_terminal_receipt" and int(counts[0]) != 7:
+            raise RuntimeError("Child terminal receipt native roster differs from 7 cases")
+        if case.attrib["name"] == "sdk.focused.subagent_terminal_receipt":
+            for path in ("cancel", "budget", "success", "close-failed", "child-unknown"):
+                marker = "[child-terminal-path] foreground." + path
+                if sections[0].splitlines().count(marker) != 1:
+                    raise RuntimeError("Child terminal actual foreground path did not finish once: " + path)
+        if case.attrib["name"] == "sdk.focused.child_foreground_integration":
+            if int(counts[0]) != 2:
+                raise RuntimeError("Child foreground integration roster differs from 2 cases")
+            for path in ("isolation", "cancel-close-failed"):
+                marker = "[child-integration-path] " + path
+                if sections[0].splitlines().count(marker) != 1:
+                    raise RuntimeError("Child integration actual path did not finish once: " + path)
+        if case.attrib["name"] == "sdk.focused.lubancore_scoped_approval" and int(counts[0]) != 14:
+            raise RuntimeError("Scoped approval native roster differs from 14 cases")
     print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
 
 

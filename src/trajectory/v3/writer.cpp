@@ -298,6 +298,12 @@ std::expected<void, std::string> V3Writer::Close() {
         impl_->broken = true;
         return std::unexpected("v3writer.close_failed: 日志写句柄关闭失败或已有写入错误");
     }
+    if (impl_->options.inject_close_failure) {
+        if (const auto injected = impl_->options.inject_close_failure()) {
+            impl_->broken = true;
+            return std::unexpected(*injected);
+        }
+    }
     return {};
 }
 
