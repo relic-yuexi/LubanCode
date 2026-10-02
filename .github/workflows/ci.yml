@@ -140,7 +140,7 @@ jobs:
             # 公共构建接线仅在 remote/SDK 装配已入树时加腿；普通 PR 沿旧策略。
             # ci.yml 自身改动也跑三平台，验证本门，不冒充已有组件测试。
             case "$f" in
-              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/tools/agent_tool.*|src/tools/agent_task_coordinator.*|tests/unit/agent/test_subagent_thread_lifetime.cpp|src/runtime/assembly/*|src/app_server/server.*|src/app_server/browser_service.*|src/app_server/session_assembly.*|src/app/tool_runtime.*|src/app/tool_assembly_plan.hpp|src/app/cli_tool_assembly.*|tests/unit/runtime/test_tool_runtime.cpp|tests/integration/plugins/test_tool_runtime_deferral.cpp|tests/support/tool_assembly_fixture.hpp|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|tests/unit/runtime/test_session_resources.cpp|tests/integration/app_server/test_app_server_session_parity.cpp|tests/unit/app_server/test_app_server_browser.cpp|tests/support/session_history_fixture.hpp|tests/support/mcp_cwd_fixture.hpp|tests/fixtures/session_resources_mcp.py|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|scripts/ci/check_sdk_only_boundary.py|scripts/ci/tests/test_sdk_only_boundary.py|scripts/ci/tests/test_sdk_extension_gates.py|scripts/ci/check_sdk_host_parity.py|scripts/ci/check_sdk_focused.py|src/worker_host/*|tests/integration/worker_host/*|src/job_runner/*|tests/runner/*|scripts/ci/check_installed_process_host.py|.github/workflows/ci.yml)
+              src/remote/*|tests/unit/remote/*|tests/integration/remote/*|tests/fixtures/remote/*|src/tools/agent_tool.*|src/tools/agent_task_coordinator.*|tests/unit/agent/test_subagent_thread_lifetime.cpp|src/runtime/assembly/*|src/app_server/server.*|src/app_server/browser_service.*|src/app_server/session_assembly.*|src/app/tool_runtime.*|src/app/tool_assembly_plan.hpp|src/app/cli_tool_assembly.*|tests/unit/runtime/test_tool_runtime.cpp|tests/integration/plugins/test_tool_runtime_deferral.cpp|tests/support/tool_assembly_fixture.hpp|tests/unit/assembly/*|tests/integration/assembly/*|include/lubancore/*|src/sdk/*|src/text/*|tests/*/sdk/*|tests/unit/runtime/test_session_resources.cpp|tests/integration/app_server/test_app_server_session_parity.cpp|tests/unit/app_server/test_app_server_browser.cpp|tests/support/session_history_fixture.hpp|tests/support/mcp_cwd_fixture.hpp|tests/fixtures/session_resources_mcp.py|examples/sdk-consumer/*|scripts/ci/check_installed_sdk.py|scripts/ci/check_sdk_only_boundary.py|scripts/ci/check_sdk_build_closure.py|scripts/ci/tests/test_sdk_build_closure.py|scripts/ci/tests/test_sdk_only_boundary.py|scripts/ci/tests/test_sdk_extension_gates.py|scripts/ci/check_sdk_host_parity.py|scripts/ci/check_sdk_focused.py|src/worker_host/*|tests/integration/worker_host/*|src/job_runner/*|tests/runner/*|scripts/ci/check_installed_process_host.py|.github/workflows/ci.yml)
                 cross_platform=true
                 remote_tests=$remote_present
                 assembly_tests=$assembly_present
@@ -410,6 +410,7 @@ jobs:
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
           "$PY" -m unittest discover -s scripts/ci/tests -p test_sdk_only_boundary.py
           "$PY" -m unittest discover -s scripts/ci/tests -p test_sdk_extension_gates.py
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_sdk_build_closure.py
 
       - name: Pick Linux SDK compiler
         if: runner.os == 'Linux'
@@ -461,6 +462,8 @@ jobs:
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
           "$PY" scripts/ci/check_sdk_only_boundary.py --build-dir build-sdk-only --source-dir . \
             --config Release --expect-testing off --report build-sdk-only/test-evidence/sdk-only/boundary-off.json
+          "$PY" scripts/ci/check_sdk_build_closure.py --build-dir build-sdk-only --source-dir . \
+            --config Release --report build-sdk-only/test-evidence/sdk-only/build-closure-off.json
 
       - name: Install all SDK-only artifacts, relocate and execute consumer
         shell: bash
@@ -476,6 +479,8 @@ jobs:
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
           "$PY" scripts/ci/check_sdk_only_boundary.py --build-dir build-sdk-only --source-dir . \
             --config Release --expect-testing on --report build-sdk-only/test-evidence/sdk-only/boundary-on.json
+          "$PY" scripts/ci/check_sdk_build_closure.py --build-dir build-sdk-only --source-dir . \
+            --config Release --report build-sdk-only/test-evidence/sdk-only/build-closure-on.json
 
       - name: Run all registered SDK-only tests
         shell: bash
@@ -569,6 +574,10 @@ jobs:
         shell: bash
         run: |
           set -x
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          if [ '${{ needs.changes.outputs.sdk_tests }}' = 'true' ]; then
+            "$PY" scripts/ci/check_sdk_build_closure.py --prepare --build-dir build
+          fi
           COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DLUBANCODE_USE_CODELOAD=OFF -DLUBANCODE_BUNDLED_RG_DIR=$PWD/rg-stage/libexec -DLUBANCODE_BUILD_SDK=${{ needs.changes.outputs.sdk_tests == 'true' && 'ON' || 'OFF' }} -DLUBANCODE_BUILD_WORKER_HOST=${{ needs.changes.outputs.worker_tests == 'true' && 'ON' || 'OFF' }} -DLUBANCODE_BUILD_EXPERIMENT_RUNNER=${{ needs.changes.outputs.runner_tests == 'true' && 'ON' || 'OFF' }}"
           if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ] && cmake -B build -S . $COMMON_FLAGS \
                -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"; then
@@ -585,7 +594,11 @@ jobs:
       - name: Build SDK library
         if: needs.changes.outputs.sdk_tests == 'true'
         shell: bash
-        run: cmake --build build --config Release --target lubancore_sdk -j 4
+        run: |
+          cmake --build build --config Release --target lubancore_sdk -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_sdk_build_closure.py --build-dir build --source-dir . \
+            --config Release --report build/test-evidence/sdk-consumer/build-closure.json
 
       - name: Install and test standalone SDK consumer
         if: needs.changes.outputs.sdk_tests == 'true'
@@ -886,6 +899,9 @@ jobs:
       - name: Configure
         run: |
           set -e
+          if [ '${{ needs.changes.outputs.sdk_tests }}' = 'true' ]; then
+            python3 scripts/ci/check_sdk_build_closure.py --prepare --build-dir build
+          fi
           cmake -B build -S . \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON \
@@ -907,7 +923,11 @@ jobs:
       - name: Build SDK library
         if: needs.changes.outputs.sdk_tests == 'true'
         shell: bash
-        run: cmake --build build --config Release --target lubancore_sdk -j 4
+        run: |
+          cmake --build build --config Release --target lubancore_sdk -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/check_sdk_build_closure.py --build-dir build --source-dir . \
+            --config Release --report build/test-evidence/sdk-consumer/build-closure.json
 
       - name: Install and test standalone SDK consumer
         if: needs.changes.outputs.sdk_tests == 'true'
