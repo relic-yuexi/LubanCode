@@ -56,7 +56,7 @@ namespace lubancode::tools {
 // (每任务装配)全吃 AgentRunState——带 env 的嵌套派工吃冻结份,门面析构后
 // 照跑不悬垂;main 直派由门面活态包装喂自家 run_state_。
 Tool::Result ExecuteAgentDispatchOnRunState(const AgentDispatchRequest& request,
-                                            const std::shared_ptr<const AgentRunState>& state,
+                                           const std::shared_ptr<const AgentRunState>& state,
                                             AgentDispatchHandle* fail_account);
 Tool::Result LaunchBackgroundTask(const AgentDispatchPlan& request, ToolRegistry& task_registry,
                                   const AgentRunIdentity& caller,
@@ -65,7 +65,9 @@ Tool::Result LaunchBackgroundTask(const AgentDispatchPlan& request, ToolRegistry
 Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistry& task_registry,
                                    const AgentRunIdentity& caller,
                                    const std::shared_ptr<const SubagentDispatchEnv>& env,
-                                   const std::shared_ptr<const AgentRunState>& state);
+                                   const std::shared_ptr<const AgentRunState>& state,
+                                   const std::atomic<bool>* invocation_cancel,
+                                   std::optional<ToolInvocationIdentity> parent_invocation_cause);
 Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, api::Backend& backend,
                              ToolRegistry& task_registry, const std::string& prompt,
                              const std::string& agent_type, const SubagentBudget& budget,
@@ -80,7 +82,9 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
                              const agent::ResolvedAgentProfile* resolved = nullptr,
                              std::optional<lubancode::ApprovalMode> permission_floor = std::nullopt,
                              std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory = nullptr,
-                             const std::shared_ptr<const SubagentDispatchEnv>& env = nullptr);
+                             const std::shared_ptr<const SubagentDispatchEnv>& env = nullptr,
+                             const std::atomic<bool>* invocation_cancel = nullptr,
+                             std::optional<ToolInvocationIdentity> parent_invocation_cause = std::nullopt);
 
 namespace {
 
@@ -1062,8 +1066,12 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     return main_handle_.Dispatch(input);
 }
 
+Tool::Result AgentTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
+    return main_handle_.Dispatch(input, context);
+}
+
 Tool::Result ExecuteAgentDispatchOnRunState(const AgentDispatchRequest& dispatch,
-                                            const std::shared_ptr<const AgentRunState>& state,
+                                           const std::shared_ptr<const AgentRunState>& state,
                                             AgentDispatchHandle* fail_account_in) {
     const nlohmann::json& input = dispatch.input;
     const std::shared_ptr<const SubagentDispatchEnv>& env = dispatch.env;
@@ -1484,7 +1492,8 @@ Tool::Result ExecuteAgentDispatchOnRunState(const AgentDispatchRequest& dispatch
     if (request.background) {
         return LaunchBackgroundTask(request, *task_registry, caller, env, state);
     }
-    return ExecuteForegroundTask(request, *task_registry, caller, env, state);
+    return ExecuteForegroundTask(request, *task_registry, caller, env, state,
+                                 dispatch.foreground_cancel, dispatch.parent_invocation_cause);
 }
 
 // 子代理空轨迹单 P0-A:子账开张失败的 fail-closed 文案。只带阶段与稳定
@@ -1514,7 +1523,15 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
 Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistry& task_registry,
                                    const AgentRunIdentity& caller,
                                    const std::shared_ptr<const SubagentDispatchEnv>& env,
-                                   const std::shared_ptr<const AgentRunState>& state) {
+                                   const std::shared_ptr<const AgentRunState>& state,
+                                   const std::atomic<bool>* invocation_cancel,
+                                   std::optional<ToolInvocationIdentity> parent_invocation_cause) {
+    if (invocation_cancel != nullptr && invocation_cancel->load(std::memory_order_acquire)) {
+        Tool::Result cancelled{"前台子代理调用已取消，本次未启动。", true};
+        cancelled.outcome = "cancelled";
+        cancelled.error_code = "agent.foreground_cancelled";
+        return cancelled;
+    }
     const std::string& agent_type = request.agent_type;
     const SubagentBudget& budget = request.budget;
     const CustomAgentMaterial* custom = request.custom.has_value() ? &*request.custom : nullptr;
@@ -1632,8 +1649,9 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
         result.AppendText(TaskLedger::UndeliveredInboxNote(task));
         state->coordinator->ledger().FinalizeFromToolResult(
             task, result.content,
-            foreground_hooks != nullptr && foreground_hooks->cancel != nullptr &&
-                foreground_hooks->cancel->load(std::memory_order_acquire));
+            (invocation_cancel != nullptr && invocation_cancel->load(std::memory_order_acquire)) ||
+                (foreground_hooks != nullptr && foreground_hooks->cancel != nullptr &&
+                 foreground_hooks->cancel->load(std::memory_order_acquire)));
         return result;
     }
     if (trajectory != nullptr) {
@@ -1668,7 +1686,8 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
                             scope_storage.has_value() ? &*scope_storage : nullptr,
                             /*background_hooks=*/headless_hooks,
                             /*background_permissions=*/headless_permissions,
-                            custom, resolved, request.permission_floor, std::move(trajectory), env);
+                            custom, resolved, request.permission_floor, std::move(trajectory), env,
+                            invocation_cancel, std::move(parent_invocation_cause));
     if (room.has_value()) {
         const auto finish = FinishIsolationRoom(*room, state->git_runner);
         result.AppendText(finish.note);
@@ -1694,6 +1713,7 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
     state->coordinator->ledger().FinalizeFromToolResult(
         task, result.content,
         task->cancel.load(std::memory_order_acquire) ||
+            (invocation_cancel != nullptr && invocation_cancel->load(std::memory_order_acquire)) ||
             (foreground_hooks != nullptr && foreground_hooks->cancel != nullptr &&
              foreground_hooks->cancel->load(std::memory_order_acquire)));
     return result;
@@ -2068,7 +2088,9 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
                                 const agent::ResolvedAgentProfile* resolved,
                                 std::optional<lubancode::ApprovalMode> permission_floor,
                                 std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory,
-                                const std::shared_ptr<const SubagentDispatchEnv>& env) {
+                                const std::shared_ptr<const SubagentDispatchEnv>& env,
+                                const std::atomic<bool>* invocation_cancel,
+                                std::optional<ToolInvocationIdentity> parent_invocation_cause) {
     // 派工治理(P0-2 起):admission(并发槽/深度/父子门)在注册事务
     // (TryRegisterChild)里判过——深度沿台账 lineage,不再用全局原子猜;
     // 活跃数即台账活态计数,任务终态即退槽。这里不再占槽。
@@ -2138,7 +2160,7 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
         const int child_depth = task->snapshot.depth + 1;
         if (custom_allows && child_depth <= state->coordinator->governance().max_depth) {
             scoped_registry.registry->Register(std::make_unique<AgentDispatchTool>(AgentDispatchHandle(
-                state->coordinator, IdentityOfSnapshot(task->snapshot), child_env)));
+                state->coordinator, IdentityOfSnapshot(task->snapshot), child_env, parent_invocation_cause)));
             // scoped agent_message(P1-1 §一):与 agent 同一道资格门——这只
             // 任务能派孩子才有孩子可传话,窄实例只认自己的 task_id 为
             // caller,execute() 里逐条核对目标的 parent_task_id(单子 §9.3
@@ -3062,6 +3084,7 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
     // 后台任务只有 task->cancel(开了墙钟再加 wall_stop)。CancelChain 单
     // 信号直通(与旧透传一字不差),多信号起合并线程。
     agent::CancelChain cancel_chain;
+    cancel_chain.Add(invocation_cancel);
     if (task != nullptr) {
         cancel_chain.Add(&task->cancel);
         if (state->wall_clock_timeout_secs > 0) {
@@ -3725,13 +3748,9 @@ nlohmann::json AgentDispatchTool::input_schema() const {
     return schema;
 }
 tools::Tool::Result AgentDispatchTool::execute(const nlohmann::json& input) { return handle_.Dispatch(input); }
-// 取消旗透传:壳不许洗 context(AgentTool 侧另有自己的 CancelChain,外层
-// 旗照旧经 Hooks.cancel 汇进去,这里只是不让链路在壳上断)。
+// The typed request owns causal strings and borrows this flag until return.
 tools::Tool::Result AgentDispatchTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
-    // 取消链在子代理侧自成一体(CancelChain 并根),外层旗不另开旁路;
-    // 与旧转发壳同款语义:调用直通。
-    (void)context;
-    return handle_.Dispatch(input);
+    return handle_.Dispatch(input, context);
 }
 
 }  // namespace lubancode::tools
