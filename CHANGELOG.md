@@ -8,7 +8,7 @@
 - **会话 V3 收口。**新会话统一写 V3；会话读写、工作流轨迹与子代理路径修复随本次合入发布。
 - **上下文明细与文档。**`/context` 按技能、内置工具、MCP 与插件拆分占用，补充压缩缓冲和空闲空间；默认 README 改为英文，中文入口移至 `README.zh-CN.md`。
 
-预发布已知情况：基线提交 `0c5166de` 的 Windows CI 有两组测试未通过：`unit.trajectory.session_status_lifecycle` 与 `unit.trajectory_v3.v3_session_resume_bridge`，涉及会话删除及恢复；尚未确认根因。
+- **Windows 会话删除修复。**会话封口（close/clear）后释放 v3 账文件句柄，修复 Windows 上因句柄未放而无法删除会话目录、`/resume` 清单混入残留场的问题。
 
 ## [v0.26.281] - 2026-09-23
 

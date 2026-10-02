@@ -82,11 +82,15 @@ def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
-def check_registration(host: Host, build: Path, repo: Path, env: dict[str, str], evidence: Path) -> None:
-    listing = run(["ctest", "--test-dir", str(build), "-C", "Release", "-L",
-                   f"^{host.label}$", "--show-only=json-v1"], env, cwd=repo,
+def check_registration(host: Host, build: Path, repo: Path, env: dict[str, str], evidence: Path,
+                       *, only_host: bool = False) -> None:
+    selection = [] if only_host else ["-L", f"^{host.label}$"]
+    listing = run(["ctest", "--test-dir", str(build), "-C", "Release", *selection,
+                   "--show-only=json-v1"], env, cwd=repo,
                   log=evidence / "registered-tests.json")
     tests = json.loads(listing).get("tests", [])
+    if only_host and [test.get("name") for test in tests] != [host.test_name]:
+        raise RuntimeError("Runner-only must register its single real process test and no Core suites")
     matches = [test for test in tests if test.get("name") == host.test_name]
     if len(matches) != 1:
         raise RuntimeError(f"expected exactly one registered {host.test_name} test")
@@ -102,6 +106,79 @@ def check_registration(host: Host, build: Path, repo: Path, env: dict[str, str],
     expected_script = repo / host.source_dir / host.script
     if not any(Path(argument).resolve() == expected_script for argument in test.get("command", [])):
         raise RuntimeError(f"{host.test_name} does not run its real process test script")
+
+
+def check_runner_only_graph(build: Path, repo: Path, testing: bool, evidence: Path) -> None:
+    """Read remote CMake data, never configure or execute a producer here."""
+    cache = {}
+    for line in (build / "CMakeCache.txt").read_text(encoding="utf-8").splitlines():
+        if not line or line.startswith(("//", "#")) or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        cache[key.split(":", 1)[0]] = value
+    expected = {"LUBANCODE_BUILD_CLI": "OFF", "LUBANCODE_BUILD_SDK": "OFF",
+                "LUBANCODE_BUILD_WORKER_HOST": "OFF", "LUBANCODE_BUILD_EXPERIMENT_RUNNER": "ON",
+                "BUILD_TESTING": "ON" if testing else "OFF"}
+    if any(cache.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("Runner-only has the wrong CLI/SDK/Worker/Runner/testing flags")
+    reply = build / ".cmake" / "api" / "v1" / "reply"
+    indexes = sorted(reply.glob("index-*.json"))
+    if not indexes:
+        raise RuntimeError("Runner-only is missing its CMake File API evidence")
+    index = json.loads(indexes[-1].read_text(encoding="utf-8"))
+    descriptor = index.get("reply", {}).get("codemodel-v2", {})
+    if not isinstance(descriptor.get("jsonFile"), str):
+        raise RuntimeError("Runner-only is missing its codemodel reply")
+    model = json.loads((reply / descriptor["jsonFile"]).read_text(encoding="utf-8"))
+    configurations = model.get("configurations", [])
+    if not configurations:
+        raise RuntimeError("Runner-only has no real build configuration")
+    allowed_targets = {"luban-runner", "luban_job_runner_client"}
+    platform_sources = {"atomic_write.cpp", "secure_file.cpp", "sha256.cpp",
+                        "paths_posix.cpp", "paths_win.cpp"}
+    records = []
+    for configuration in configurations:
+        compiled = {}
+        for reference in configuration.get("targets", []):
+            target = json.loads((reply / reference["jsonFile"]).read_text(encoding="utf-8"))
+            if target.get("type") in ("UTILITY", "INTERFACE_LIBRARY"):
+                continue
+            compiled[target["name"]] = target
+        if set(compiled) != allowed_targets:
+            raise RuntimeError("Runner-only builds a Core, SDK, test or unexpected compiled target")
+        sources = set()
+        for name, target in compiled.items():
+            expected_type = "EXECUTABLE" if name == "luban-runner" else "STATIC_LIBRARY"
+            if target.get("type") != expected_type:
+                raise RuntimeError("Runner-only has the wrong executable/client target type")
+            if not target.get("artifacts"):
+                raise RuntimeError("Runner-only compiled target has no artifact")
+            for source in target.get("sources", []):
+                if "compileGroupIndex" not in source:
+                    continue
+                path = Path(source["path"])
+                path = (repo / path).resolve() if not path.is_absolute() else path.resolve()
+                try:
+                    relative = path.relative_to(repo).as_posix()
+                except ValueError as error:
+                    raise RuntimeError("Runner-only compiles a source outside its private implementation") from error
+                if not (relative.startswith("src/job_runner/") or
+                        (relative.startswith("src/platform/") and path.name in platform_sources)):
+                    raise RuntimeError("Runner-only compiles a Core/SDK/native-test source")
+                sources.add(relative)
+        if not sources:
+            raise RuntimeError("Runner-only has no native implementation sources")
+        records.append({"name": configuration.get("name"), "targets": sorted(compiled),
+                        "sources": sorted(sources)})
+    write_json(evidence, {"schemaVersion": 1, "githubSha": os.environ.get("GITHUB_SHA"),
+                          "flags": expected, "configurations": records, "status": "passed"})
+
+
+def check_runner_only_install(prefix: Path) -> None:
+    executable = "bin/luban-runner" + (".exe" if sys.platform == "win32" else "")
+    files = {path.relative_to(prefix).as_posix() for path in prefix.rglob("*") if path.is_file()}
+    if files != {executable}:
+        raise RuntimeError("Runner-only ordinary installation is missing its binary or installs Core/SDK/test files")
 
 
 def isolated_environment(repo: Path, build: Path, staging: Path, prefix: Path) -> dict[str, str]:
@@ -140,8 +217,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, required=True)
     parser.add_argument("--host", choices=sorted(HOSTS), required=True)
+    parser.add_argument("--runner-only", action="store_true")
+    parser.add_argument("--without-tests-build-dir", type=Path)
     args = parser.parse_args()
     host = HOSTS[args.host]
+    if args.runner_only != (args.without_tests_build_dir is not None) or (args.runner_only and host.name != "runner"):
+        raise RuntimeError("Runner-only requires its testing-OFF build and the Runner host")
     repo = Path(__file__).resolve().parents[2]
     build = args.build_dir.resolve()
     runner_temp = os.environ.get("RUNNER_TEMP")
@@ -150,7 +231,7 @@ def main() -> None:
     scratch = Path(tempfile.mkdtemp(prefix=f"{host.name}-ci-", dir=runner_temp)).resolve()
     if scratch == repo or repo in scratch.parents:
         raise RuntimeError("Host relocation must take place outside the producer checkout")
-    evidence = build / "test-evidence" / host.label
+    evidence = build / "test-evidence" / ("runner-only-process" if args.runner_only else host.label)
     evidence.mkdir(parents=True, exist_ok=True)
     staging = scratch / "staging"
     prefix = scratch / "installed"
@@ -167,6 +248,8 @@ def main() -> None:
         "executable": str(binary),
         "resourceRoot": str(resources) if resources else None,
         "host": host.name,
+        "configuration": "runner-only" if args.runner_only else "combined",
+        "installation": "ordinary" if args.runner_only else "component",
         "requiredScenarios": sorted(host.required_cases),
         "status": "pending",
     }
@@ -174,14 +257,31 @@ def main() -> None:
     write_json(context_path, context)
     suppress_windows_dialogs()
     env = os.environ.copy()
-    check_registration(host, build, repo, env, evidence)
-    for component in host.components:
-        run(["cmake", "--install", str(build), "--config", "Release", "--prefix",
-             str(staging), "--component", component], env, cwd=repo,
-            log=evidence / f"install-{component}.log")
+    check_registration(host, build, repo, env, evidence, only_host=args.runner_only)
+    if args.runner_only:
+        without_tests = args.without_tests_build_dir.resolve()
+        check_runner_only_graph(build, repo, True, evidence / "boundary-testing-on.json")
+        check_runner_only_graph(without_tests, repo, False, evidence / "boundary-testing-off.json")
+        listing = run(["ctest", "--test-dir", str(without_tests), "-C", "Release", "--show-only=json-v1"],
+                      env, cwd=repo, log=evidence / "registered-tests-off.json")
+        if json.loads(listing).get("tests") != []:
+            raise RuntimeError("Runner-only testing-OFF build registers native tests")
+        without_tests_prefix = scratch / "without-tests-installed"
+        run(["cmake", "--install", str(without_tests), "--config", "Release", "--prefix", str(without_tests_prefix)],
+            env, cwd=repo, log=evidence / "install-testing-off.log")
+        check_runner_only_install(without_tests_prefix)
+        run(["cmake", "--install", str(build), "--config", "Release", "--prefix", str(staging)],
+            env, cwd=repo, log=evidence / "install-ordinary.log")
+    else:
+        for component in host.components:
+            run(["cmake", "--install", str(build), "--config", "Release", "--prefix",
+                 str(staging), "--component", component], env, cwd=repo,
+                log=evidence / f"install-{component}.log")
     if staging.resolve().parent != scratch or prefix.resolve().parent != scratch:
         raise RuntimeError("Host relocation must stay inside its CI scratch directory")
     staging.rename(prefix)
+    if args.runner_only:
+        check_runner_only_install(prefix)
     if not binary.is_file() or (resources is not None and not resources.is_dir()):
         raise RuntimeError("Host installation is missing its executable or resource root")
     context["executableSha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()

@@ -1,6 +1,6 @@
 # LubanCore 可选模块划分草案
 
-状态：开工切面，尚未冻结新 target/API 名。顺序按 [架构分期](../../todos/LubanCore系统架构设计.todo)：身份与 Worker 协议先行，SDK 能力按小 PR 并行；各组共用 [Managed 身份合同](lubancore-managed-identity.md)，不自造主体、资源根或授权表。
+状态：开工切面，尚未冻结新 target/API 名。顺序按 [架构分期](../../todos/LubanCore系统架构设计.todo)：先完整化 SDK，再接 SPI 与依赖瘦身，后接身份治理、公开服务、分布式与扩展。SDK 能力按短合同、小 PR、三平台 CI 逐项迁入。后续托管组共用 [Managed 身份合同](lubancore-managed-identity.md)，不自造主体、资源根或授权表。
 
 当前公开 SDK 已接 read_file、write_file、edit_file、前台 run_command。`LubanCore::Core` 仍私有链接 runtime/engine，构建依赖包含 Lua、渠道、Gateway、updater 等。公开头只用标准 C++，不等于构建依赖已经瘦身；源码列表也不能证明所有对象都进入最终动态库。
 

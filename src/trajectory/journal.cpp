@@ -71,12 +71,7 @@ JournalWriter& JournalWriter::operator=(JournalWriter&& other) noexcept {
     return *this;
 }
 
-JournalWriter::~JournalWriter() {
-    if (file_ != nullptr) {
-        std::fclose(file_);
-        file_ = nullptr;
-    }
-}
+JournalWriter::~JournalWriter() { (void)Close(); }
 
 std::expected<JournalWriter, std::string> JournalWriter::Open(const std::filesystem::path& path,
                                                               OpenMode mode) {
