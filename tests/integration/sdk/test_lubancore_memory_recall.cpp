@@ -196,11 +196,11 @@ TEST_CASE("SDK Memory: real recall adopts the complete input once and verifies f
     int facts = 0, prepared = 0;
     for (const auto& event : ledger->events) {
         if (event.kind == v3::EventKindV3::MemoryRecallInjected) {
-            ++facts; CHECK(event.payload.at("contextMessageRef") == report.context_message_id);
+            ++facts; CHECK(event.payload.at("contextMessageRef").get<std::string>() == report.context_message_id);
             REQUIRE(event.payload.contains("snapshotRef")); CHECK_FALSE(event.payload.contains("snapshotInline"));
             const auto fragment = Read(Directory(*session) / lubancode::tools::Utf8ToPath(event.payload.at("snapshotRef").get<std::string>()));
-            CHECK(fragment.size() == event.payload.at("injectedBytes"));
-            CHECK(lubancode::platform::Sha256Hex(fragment) == event.payload.at("contentSha256"));
+            CHECK(fragment.size() == event.payload.at("injectedBytes").get<std::size_t>());
+            CHECK(lubancode::platform::Sha256Hex(fragment) == event.payload.at("contentSha256").get<std::string>());
         }
         if (event.kind == v3::EventKindV3::ModelRequestPrepared) {
             ++prepared; CHECK(v3::CheckPreparedAgainstChain(*ledger, event.event_id).empty());
