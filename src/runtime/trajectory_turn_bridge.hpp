@@ -12,6 +12,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -241,6 +242,10 @@ public:
         std::string step_id;
     };
     std::optional<V3CallOrigin> V3DeclaredCallOrigin(const std::string& provider_call_id) const;
+    // Only a started active action yields this identity; it is borrowed from no
+    // mutable last-call slot and copied for the current Tool::execute invocation.
+    std::optional<std::pair<std::string, std::uint64_t>> V3ExecutingCallIdentity(
+        const std::string& provider_call_id) const;
     // request_id -> 流式预留的 assistant messageId(提前档调用证据锚;
     // 流没起账/请求簿没有 → nullopt)。
     std::optional<std::string> V3ReservedAssistantMessageId(const std::string& request_id) const;

@@ -23,6 +23,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.results",
     "sdk.consumer.skills_seed", "sdk.consumer.skills_resume",
     "sdk.consumer.memory_seed", "sdk.consumer.memory_resume",
+    "sdk.consumer.memory_save_seed", "sdk.consumer.memory_save_resume",
     "sdk.consumer.result_seed", "sdk.consumer.result_resume",
     "sdk.consumer.seed", "sdk.consumer.resume",
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",

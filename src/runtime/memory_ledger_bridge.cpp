@@ -352,6 +352,47 @@ std::string MemoryLedgerBridge::RecordSaveRequested(const memory::SaveLedgerNote
            "/run_id=" + recorder->base_scope().run_id + "/event_id=" + receipt.event_id;
 }
 
+std::expected<MemoryLedgerBridge::SaveRequestReceipt, std::string> MemoryLedgerBridge::RecordSaveRequestedStrict(
+    const tools::ToolInvocationIdentity& identity, const nlohmann::json& request,
+    const std::string& request_sha256, const std::string& commit_key) {
+    auto* writer = ledger_.v3_main_writer();
+    if (!writer || identity.session_id != writer->session_id() || identity.operation_id.empty() ||
+        identity.turn_id.empty() || identity.action_id.empty() || identity.attempt == 0 ||
+        request_sha256 != platform::Sha256Hex(request.dump()) || commit_key.empty())
+        return std::unexpected("sdk.memory_write.invocation_invalid");
+    trajectory::v3::EventDraft draft;
+    draft.kind = trajectory::v3::EventKindV3::MemorySaveRequested;
+    draft.turn_id = identity.turn_id;
+    draft.action_id = identity.action_id;
+    draft.payload = {{"sdkMemoryWrite", 1}, {"operationId", identity.operation_id},
+        {"attempt", identity.attempt}, {"commitKey", commit_key},
+        {"saveRequestSha256", request_sha256}, {"normalizedRequest", request},
+        {"originator", "model_tool"}, {"sourceSession", identity.session_id}};
+    const auto saved = writer->AppendEvent(std::move(draft), trajectory::Durability::PowerLoss);
+    if (saved.status != trajectory::v3::WriteReceipt::Status::Committed || saved.id.empty())
+        return std::unexpected("sdk.memory_write.requested_failed: " + saved.error_code);
+    return SaveRequestReceipt{saved.id, "workspace_key=" + ledger_.workspace_key() +
+        "/session_id=" + writer->session_id() + "/run_id=" + writer->run_id() + "/event_id=" + saved.id};
+}
+
+std::expected<std::string, std::string> MemoryLedgerBridge::RecordSaveReceiptStrict(
+    const tools::ToolInvocationIdentity& identity, const nlohmann::json& receipt) {
+    auto* writer = ledger_.v3_main_writer();
+    if (!writer || identity.session_id != writer->session_id() || identity.turn_id.empty() ||
+        identity.action_id.empty() || identity.operation_id.empty() || identity.attempt == 0)
+        return std::unexpected("sdk.memory_write.invocation_invalid");
+    trajectory::v3::EventDraft draft;
+    draft.kind = trajectory::v3::EventKindV3::MemoryWriteReceipted;
+    draft.turn_id = identity.turn_id;
+    draft.action_id = identity.action_id;
+    draft.payload = {{"sdkMemoryWrite", 1}, {"operationId", identity.operation_id},
+        {"attempt", identity.attempt}, {"receipt", receipt}};
+    const auto saved = writer->AppendEvent(std::move(draft), trajectory::Durability::PowerLoss);
+    if (saved.status != trajectory::v3::WriteReceipt::Status::Committed || saved.id.empty())
+        return std::unexpected("sdk.memory_write.receipted_failed: " + saved.error_code);
+    return saved.id;
+}
+
 std::string MemoryLedgerBridge::RecordSaveRequestedV3(trajectory::v3::V3Writer& writer,
                                                       const memory::SaveLedgerNote& note) {
     // requested 只是因果边:这笔写最终排没排上队看 memory.write.receipted

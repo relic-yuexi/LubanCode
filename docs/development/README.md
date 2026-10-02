@@ -7,6 +7,7 @@
 - [SDK 显式 Skills 合同](sdk-skills.md)
 - [SDK 项目 Memory 只读召回合同](sdk-memory-recall.md)
 - [项目 Memory 提交与回执合同](memory-project-commit.md)
+- [SDK 项目 Memory 正式保存合同](sdk-memory-save.md)
 - [后台子代理线程启动收口](agent-thread-start-cleanup.md)
 - [SDK 依赖瘦身：更新器归宿主](sdk-updater-boundary.md)
 - [测试指南](testing.md)

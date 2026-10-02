@@ -339,6 +339,10 @@ struct TurnWiring {
     // 的图片/音频/blob 字节先落这里,history 只留 ArtifactRef。空 = 本轮
     // 没开落盘地(单测/单发路),富二进制块按稳定错误收口,文本不受影响。
     std::string tool_artifact_dir;
+    // Asked after execution_started, using the real provider pairing key. The
+    // host resolves its own active action/attempt and returns owned identity.
+    std::function<std::optional<tools::ToolInvocationIdentity>(const std::string&)>
+        tool_invocation_identity;
 
     // ---- Plan 模式(只读研究硬闸单):ModePolicy 硬闸 ------------------------
     // RunOneTool 在 deferred/tool_search 可见性之后、PreToolUse Hook 之前
@@ -532,6 +536,8 @@ struct RunOutcome {
     // 结果。与 hit_step_limit(单次 Run 的输入轮局部保险)分家:前者管整项
     // 任务,后者兼容窗内保留旧义。
     bool hit_turn_limit = false;
+    bool side_effect_indeterminate = false;
+    std::string side_effect_error;
 };
 
 // 步数将尽提醒:剩三步时在当步末条消息尾部附一句"收口"提示——停止

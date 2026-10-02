@@ -54,4 +54,51 @@ struct RecallReport {
     std::vector<Entry> entries;
 };
 
+// Explicit trusted local project writes. Enabling this does not enable recall,
+// user memory, automatic extraction or a remote Worker permission.
+struct WriteOptions {
+    bool enabled = true;
+    bool operator==(const WriteOptions&) const = default;
+};
+struct WriteSnapshot {
+    bool enabled = false;
+    std::string session_id;
+    std::string workspace_key;
+    std::string memory_directory;
+    std::string plan_sha256;
+};
+struct SaveStage {
+    std::string stage;   // intent | snapshot | topic | cleanup | catalog | index | result
+    std::string outcome; // not_committed | visible | unconfirmed | durable
+    bool operator==(const SaveStage&) const = default;
+};
+// Owned metadata for one actual tool action. operation_id is Session scoped.
+// request_sha256 includes the gate target/source; save_request_sha256 identifies
+// the normalized SaveRequest before its requested-event reference exists.
+// It contains no submitted body. selected/tool-result success is not a receipt.
+struct SaveReport {
+    std::string session_id;
+    std::string operation_id;
+    std::string turn_id;
+    std::string action_id;
+    std::size_t attempt = 0;
+    std::string workspace_key;
+    std::string plan_sha256;
+    std::string commit_key;
+    std::string requested_event_id;
+    std::string receipted_event_id;
+    std::string source_event_ref;
+    std::string save_request_sha256;
+    std::string request_sha256;
+    std::string state; // not_started | committed | indeterminate
+    std::string memory_id;
+    std::string memory_path;
+    std::string content_sha256;
+    std::string committed_at;
+    std::vector<SaveStage> stages;
+    bool duplicate = false;
+    std::string error_code;
+    std::string error;
+};
+
 } // namespace lubancore::memory::v1

@@ -167,7 +167,7 @@ std::expected<Json, std::string> Fingerprints(const SaveRequest& request, const 
 
 ProjectCommitReceipt Run(const ProjectCommitContext& context, const SaveRequest& request,
                          const commit_testing::WriteFile& write, const ProjectCommitCancellation& cancelled,
-                         bool existing_only = false) {
+                         bool existing_only = false, bool inspect_only = false) {
     ProjectCommitReceipt receipt;
     receipt.operation_id = context.operation_id;
     receipt.workspace_key = context.workspace_key;
@@ -210,7 +210,12 @@ ProjectCommitReceipt Run(const ProjectCommitContext& context, const SaveRequest&
         if (!SafeText(identity.dump(), 64 * 1024)) { fail("memory.commit.invalid_text"); return receipt; }
         receipt.request_sha256 = hooks::Sha256Hex(identity.dump());
         for (const auto& directory : {memory, memory / ".state", lifecycle}) {
-            if (auto valid = Directory(directory, workspace); !valid) { fail(valid.error()); return receipt; }
+            if (inspect_only) {
+                const auto status = fs::symlink_status(directory, ec);
+                if (ec || !fs::is_directory(status)) { fail("memory.commit.receipt_missing"); return receipt; }
+                const auto real = fs::canonical(directory, ec);
+                if (ec || !IsWithin(real, workspace)) { fail("memory.commit.path_escape"); return receipt; }
+            } else if (auto valid = Directory(directory, workspace); !valid) { fail(valid.error()); return receipt; }
         }
         OwnerLock lock;
         for (int attempt = 0; attempt != 20; ++attempt) {
@@ -223,7 +228,12 @@ ProjectCommitReceipt Run(const ProjectCommitContext& context, const SaveRequest&
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
         const auto operation_dir = lifecycle / Utf8Path(context.operation_id);
-        if (auto valid = Directory(operation_dir, workspace); !valid) { fail(valid.error()); return receipt; }
+        if (inspect_only) {
+            const auto status = fs::symlink_status(operation_dir, ec);
+            if (ec || !fs::is_directory(status)) { fail("memory.commit.receipt_missing"); return receipt; }
+            const auto real = fs::canonical(operation_dir, ec);
+            if (ec || !IsWithin(real, workspace)) { fail("memory.commit.path_escape"); return receipt; }
+        } else if (auto valid = Directory(operation_dir, workspace); !valid) { fail(valid.error()); return receipt; }
         const auto intent_path = operation_dir / "intent.json", result_path = operation_dir / "result.json";
         const auto snapshot_path = operation_dir / "topic.snapshot.md";
         const auto saved_intent = ReadOptional(intent_path, kRecordBytes);
@@ -342,6 +352,11 @@ ProjectCommitReceipt Run(const ProjectCommitContext& context, const SaveRequest&
             // A visible result from a previous uncertain directory flush must
             // confirm durability now. This reflushes only the same receipt bytes,
             // never repeats a topic mutation or replaces the original outcome.
+            if (inspect_only) {
+                receipt.state = state == "committed" ? State::Committed : state == "not_started" ? State::NotStarted : State::Indeterminate;
+                receipt.duplicate = true;
+                return receipt;
+            }
             const auto confirmed = write(result_path, **saved_result, kDurability);
             receipt.stages.push_back({Stage::Result, confirmed ? confirmed->outcome : confirmed.error().outcome});
             if (!confirmed || confirmed->outcome != Outcome::CommittedDurable) {
@@ -507,6 +522,12 @@ ProjectCommitReceipt ConfirmProjectCommitReceipt(const fs::path& lifecycle_root,
     } catch (const std::exception&) {
         return invalid;
     }
+}
+ProjectCommitReceipt InspectProjectCommitReceipt(const ProjectCommitContext& context, const SaveRequest& request) {
+    return Run(context, request, platform::AtomicWriteFile, {}, true, true);
+}
+std::string ProjectCommitRequestSha256(const ProjectCommitContext& context, const SaveRequest& request) {
+    return hooks::Sha256Hex(SaveIdentity(context, request).dump());
 }
 namespace commit_testing {
 ProjectCommitReceipt CommitProjectUpsert(const ProjectCommitContext& context, const SaveRequest& request,

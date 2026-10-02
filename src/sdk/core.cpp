@@ -32,6 +32,7 @@
 #include "sdk/results.hpp"
 #include "sdk/skills.hpp"
 #include "sdk/memory.hpp"
+#include "sdk/memory_write.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/search_ripgrep.hpp"
 #include "trajectory/v3/reader.hpp"
@@ -301,6 +302,10 @@ struct Session::Impl final : rt::InteractionBroker {
     std::shared_ptr<detail::SessionMemory> memory_module;
     memory::v1::Snapshot memory_snapshot;
     std::map<std::string, Result<memory::v1::RecallReport>> memory_reports;
+    std::shared_ptr<detail::SessionMemoryWrite> memory_write_module;
+    memory::v1::WriteSnapshot memory_write_snapshot;
+    std::map<std::string, Result<std::vector<memory::v1::SaveReport>>> memory_saves;
+    bool memory_write_indeterminate = false; // protected by mutex after publication
     mutable std::mutex mutex;
     mutable std::condition_variable cv;
     std::mutex close_mutex;
@@ -430,6 +435,10 @@ struct Session::Impl final : rt::InteractionBroker {
             lubancode::tools::Utf8ToPath(roots.data_root), *identity, options.resume_session_id, *cwd);
         if (!memory_candidate) return std::unexpected(memory_candidate.error());
         memory_module = std::move(*memory_candidate);
+        auto write_candidate = detail::SessionMemoryWrite::Prepare(options.memory_write,
+            lubancode::tools::Utf8ToPath(roots.data_root), *identity, options.resume_session_id);
+        if (!write_candidate) return std::unexpected(write_candidate.error());
+        memory_write_module = std::move(*write_candidate);
         auto prepared_registry = std::make_unique<lubancode::tools::ToolRegistry>();
         std::shared_ptr<lubancode::tools::BundledRipgrepRunner> search_runner;
         for (const auto& name : options.builtin_tools) {
@@ -457,6 +466,8 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         if ((*skill_module)->enabled() && prepared_registry->Find("skill"))
             return std::unexpected(Failure("sdk.tool.duplicate", "skill"));
+        if (memory_write_module->Describe().enabled && prepared_registry->Find("memory_save"))
+            return std::unexpected(Failure("sdk.tool.duplicate", "memory_save"));
         rt::assembly::SessionResourcesRequest resource_request;
         std::set<std::string> server_names;
         for (const auto& spec : options.mcp_servers) {
@@ -499,6 +510,15 @@ struct Session::Impl final : rt::InteractionBroker {
             }
             std::set<std::string> tool_face;
             for (const auto& tool : registry->All()) tool_face.insert(tool->name());
+            // The actual target is attached after exclusive ledger opening.
+            // Include its reserved name in the frozen Skills tool surface.
+            if (memory_write_module->Describe().enabled) {
+                if (registry->Find("memory_save"))
+                    return std::unexpected(rt::assembly::SessionResourceFailure{
+                        rt::assembly::SessionResourceStage::Registry, "sdk.tool.duplicate",
+                        "memory_save", "memory", {}});
+                tool_face.insert("memory_save");
+            }
             auto frozen = (*skill_module)->BindToolSurface(std::move(tool_face));
             if (!frozen) return std::unexpected(rt::assembly::SessionResourceFailure{
                 rt::assembly::SessionResourceStage::Registry, frozen.error().code,
@@ -557,15 +577,19 @@ struct Session::Impl final : rt::InteractionBroker {
         launch.v3_system_content = (*skill_module)->EffectiveSystem();
         auto skills_opening = (*skill_module)->OpeningParticipant();
         auto memory_opening = memory_module->OpeningParticipant();
-        launch.v3_opening_participant = [skills_opening = std::move(skills_opening), memory_opening = std::move(memory_opening)]
+        auto write_opening = memory_write_module->OpeningParticipant();
+        launch.v3_opening_participant = [skills_opening = std::move(skills_opening), memory_opening = std::move(memory_opening),
+                                       write_opening = std::move(write_opening)]
             (const lubancode::trajectory::V3OpeningContext& context) -> std::expected<Json, std::string> {
                 auto skills = skills_opening(context);
                 if (!skills) return std::unexpected(skills.error());
                 auto memory = memory_opening(context);
                 if (!memory) return std::unexpected(memory.error());
-                if (memory->contains("hostBindings")) {
+                auto writes = write_opening(context);
+                if (!writes) return std::unexpected(writes.error());
+                for (const auto* part : {&*memory, &*writes}) if (part->contains("hostBindings")) {
                     if (!skills->contains("hostBindings")) (*skills)["hostBindings"] = Json::object();
-                    for (auto it = (*memory)["hostBindings"].begin(); it != (*memory)["hostBindings"].end(); ++it)
+                    for (auto it = (*part)["hostBindings"].begin(); it != (*part)["hostBindings"].end(); ++it)
                         (*skills)["hostBindings"][it.key()] = it.value();
                 }
                 return std::move(*skills);
@@ -576,11 +600,13 @@ struct Session::Impl final : rt::InteractionBroker {
         service = std::make_shared<rt::SessionService>(std::move(launch));
         if (!service->runtime()) return std::unexpected(Failure(
             service->launch_error().find("sdk.skill.") != std::string::npos ? "sdk.skill.open_failed" :
-            service->launch_error().find("sdk.memory.") != std::string::npos ? "sdk.memory.open_failed" : "sdk.session.open_failed",
+            service->launch_error().find("sdk.memory.") != std::string::npos ? "sdk.memory.open_failed" :
+            service->launch_error().find("sdk.memory_write.") != std::string::npos ? "sdk.memory_write.open_failed" : "sdk.session.open_failed",
             service->launch_error()));
         session_id = service->trajectory()->session_id();
         session_dir = service->trajectory()->session_dir();
         memory_snapshot = memory_module->Describe();
+        memory_write_snapshot = memory_write_module->Describe();
         if (!options.resume_session_id.empty() && session_id != options.resume_session_id) {
             return std::unexpected(Failure("sdk.resume.identity_changed"));
         }
@@ -588,6 +614,8 @@ struct Session::Impl final : rt::InteractionBroker {
             !options.resume_session_id.empty());
         if (!frozen_policy) return std::unexpected(frozen_policy.error());
         result_policy = std::move(*frozen_policy);
+        if (memory_write_snapshot.enabled)
+            (*assembled)->registry().Register(memory_write_module->BuildTool(*service->trajectory()));
         options.system_prompt = (*skill_module)->EffectiveSystem();
         if (!options.resume_session_id.empty() && options.system_prompt.empty()) {
             auto saved = lubancode::trajectory::v3::ReadV3Ledger(service->trajectory()->v3_main_writer()->path());
@@ -676,7 +704,7 @@ struct Session::Impl final : rt::InteractionBroker {
             }
             if (!operation.result_persisted) {
                 operation.error = "sdk.result.unavailable: final operation exists without SDK result artifact";
-                if (memory_snapshot.enabled) operation.state = OperationState::Indeterminate;
+                if (memory_snapshot.enabled || memory_write_snapshot.enabled) operation.state = OperationState::Indeterminate;
             }
         }
         // SessionService tolerates an unreadable input artifact by leaving it
@@ -726,6 +754,30 @@ struct Session::Impl final : rt::InteractionBroker {
                 }
             }
         }
+        if (memory_write_snapshot.enabled && !ledger)
+            return std::unexpected(Failure("sdk.memory_write.report_invalid", "verified input is unavailable"));
+        for (auto& [id, operation] : operations) {
+            if (!Terminal(operation.state)) continue;
+            auto reports = memory_write_module->ReadReports(id);
+            // A dispatched turn interrupted before operation.final still has
+            // its real identity in the owned, V3-checked per-action reports.
+            if (reports && !final_ids.contains(id) && operation.turn_id.empty() && !reports->empty())
+                operation.turn_id = reports->front().turn_id;
+            if (reports && memory_write_snapshot.enabled) {
+                auto valid = memory_write_module->ValidateReports(id, operation.turn_id, *reports, *ledger,
+                    operation.result_persisted);
+                if (!valid) reports = std::unexpected(valid.error());
+            }
+            const bool uncertain = reports && std::any_of(reports->begin(), reports->end(),
+                [](const auto& item) { return item.state == "indeterminate"; });
+            if (operation.result_persisted && (!reports || uncertain))
+                return std::unexpected(reports ? Failure("sdk.memory_write.report_invalid",
+                    "complete operation claims an indeterminate project write") : reports.error());
+            if (memory_write_snapshot.enabled && (uncertain || operation.state == OperationState::Indeterminate))
+                memory_write_indeterminate = true;
+            memory_saves.insert_or_assign(id, std::move(reports));
+        }
+        memory_write_indeterminate = memory_write_indeterminate || memory_write_module->HasIndeterminate();
         std::map<std::string, std::size_t> turn_owners;
         for (const auto& [id, operation] : operations) {
             (void)id;
@@ -823,11 +875,41 @@ struct Session::Impl final : rt::InteractionBroker {
             operation.state = OperationState::Indeterminate;
             operation.error += " sdk.memory.report_persistence_failed";
         }
+        auto finalized_writes = memory_write_module->FinalizeOperation(operation.operation_id, operation.turn_id);
+        Result<std::vector<memory::v1::SaveReport>> writes = finalized_writes
+            ? memory_write_module->ReadReports(operation.operation_id)
+            : Result<std::vector<memory::v1::SaveReport>>(std::unexpected(finalized_writes.error()));
+        if (writes && memory_write_snapshot.enabled) {
+            if (!verified_memory) {
+                auto source = lubancode::trajectory::v3::ReadV3Ledger(session_dir / (session_id + ".jsonl"));
+                if (source) verified_memory = std::move(*source);
+            }
+            auto valid = verified_memory ? memory_write_module->ValidateReports(
+                operation.operation_id, operation.turn_id, *writes, *verified_memory,
+                ledger_ok && operation.state != OperationState::Indeterminate && !memory_write_module->HasIndeterminate()) :
+                Result<void>(std::unexpected(Failure("sdk.memory_write.report_invalid", "verified input is unavailable")));
+            if (!valid) writes = std::unexpected(valid.error());
+        }
+        const bool writes_saved = writes.has_value();
+        const bool write_uncertain = memory_write_module->HasIndeterminate() ||
+            (writes && std::any_of(writes->begin(), writes->end(),
+                [](const auto& item) { return item.state == "indeterminate"; }));
+        if (!writes_saved || write_uncertain) {
+            operation.state = OperationState::Indeterminate;
+            operation.error += !writes_saved ? " sdk.memory_write.report_persistence_failed" : " sdk.memory_write.indeterminate";
+        }
+        {
+            std::lock_guard lock(mutex);
+            memory_saves.insert_or_assign(operation.operation_id, std::move(writes));
+            memory_write_indeterminate = memory_write_indeterminate || write_uncertain ||
+                (memory_write_snapshot.enabled && !writes_saved);
+        }
+        const bool complete = ledger_ok && memory_saved && writes_saved && operation.state != OperationState::Indeterminate;
         const auto directory = session_dir / "sdk-results";
         std::error_code ec;
         fs::create_directories(directory, ec);
         const Json result{{"operationId", operation.operation_id}, {"turnId", operation.turn_id},
-                          {"finalText", operation.final_text}, {"error", operation.error}, {"complete", ledger_ok && memory_saved}};
+                          {"finalText", operation.final_text}, {"error", operation.error}, {"complete", complete}};
         const auto written = lubancode::platform::AtomicWriteFile(directory / (operation.operation_id + ".json"), result.dump(),
             lubancode::platform::WriteDurability::ProcessCrashDurability);
         if (!written) {
@@ -841,7 +923,7 @@ struct Session::Impl final : rt::InteractionBroker {
         final.final_message_refs = refs;
         final.usage_reported = usage_reported;
         const bool recorded = service->RecordTurnFinal(final);
-        operation.result_persisted = written.has_value() && recorded && ledger_ok && memory_saved;
+        operation.result_persisted = written.has_value() && recorded && complete;
         if (!operation.result_persisted) {
             operation.error += " sdk.result.persistence_failed";
             operation.state = OperationState::Indeterminate;
@@ -951,6 +1033,15 @@ struct Session::Impl final : rt::InteractionBroker {
         rt::ScopedTurnBindings turn_bindings(agent);
         turn_bindings.Bind(wiring, {.hub = &hub, .trajectory = bridge.get(),
                                    .thread_id = session_id, .turn_id = operation.turn_id});
+        // Installed after the scoped snapshot, so Reset revokes this live
+        // bridge borrow before the bridge or any writer can close.
+        wiring.tool_invocation_identity = [owner = session_id, op = input.operation_id,
+            turn = operation.turn_id, actual = bridge.get()](const std::string& provider_call_id)
+            -> std::optional<lubancode::tools::ToolInvocationIdentity> {
+            const auto identity = actual->V3ExecutingCallIdentity(provider_call_id);
+            if (!identity) return std::nullopt;
+            return lubancode::tools::ToolInvocationIdentity{owner, op, turn, identity->first, identity->second};
+        };
         api::Message message;
         message.role = api::Role::User;
         message.content.push_back(api::TextBlock{pre.prompt});
@@ -1046,11 +1137,15 @@ struct Session::Impl final : rt::InteractionBroker {
             }
         }
         const bool turn_cancelled = (outcome && outcome->cancelled) || (!outcome && interrupt.load());
-        bridge->EndTurn(outcome.has_value(), turn_cancelled, outcome ? "" : outcome.error());
+        const bool write_uncertain = memory_write_module->HasIndeterminate() ||
+            (outcome && outcome->side_effect_indeterminate);
+        bridge->EndTurn(outcome.has_value() && !write_uncertain, turn_cancelled && !write_uncertain,
+            write_uncertain ? "sdk.memory_write.indeterminate" : outcome ? "" : outcome.error());
         turn_bindings.Reset();
-        operation.state = turn_cancelled ? OperationState::Cancelled :
+        operation.state = write_uncertain ? OperationState::Indeterminate : turn_cancelled ? OperationState::Cancelled :
                           !outcome ? OperationState::Failed : OperationState::Succeeded;
-        if (!outcome) operation.error = outcome.error();
+        if (write_uncertain) operation.error = "sdk.memory_write.indeterminate";
+        else if (!outcome) operation.error = outcome.error();
         else if (outcome->hit_step_limit || outcome->hit_time_budget || outcome->hit_token_budget || outcome->hit_turn_limit) {
             operation.state = OperationState::Failed;
             operation.error = "sdk.turn.limit_reached";
@@ -1081,30 +1176,34 @@ struct Session::Impl final : rt::InteractionBroker {
             bool skip = false;
             {
                 std::unique_lock lock(mutex);
-                cv.wait(lock, [&] { return closing || broken || service->pending_input_count() > 0; });
-                if (broken || (closing && service->pending_input_count() == 0)) break;
+                cv.wait(lock, [&] { return closing || broken || memory_write_indeterminate || service->pending_input_count() > 0; });
+                if (broken || memory_write_indeterminate || (closing && service->pending_input_count() == 0)) break;
                 pop = service->PopPendingInput();
                 if (pop.status == rt::SessionService::PendingPop::Status::WriteFailed) { broken = true; cv.notify_all(); break; }
                 if (pop.status != rt::SessionService::PendingPop::Status::Ok) continue;
                 active_operation = pop.input.operation_id;
+                active_turn_id.clear();
                 skip = closing || cancelled.contains(active_operation);
                 interrupt.store(skip);
                 operations[active_operation].state = OperationState::Running;
             }
             try { Run(pop.input, skip); }
             catch (const std::exception& error) {
-                Operation failed{pop.input.operation_id, {}, OperationState::Failed, {}, error.what(), false};
+                Operation failed{pop.input.operation_id, active_turn_id, OperationState::Failed, {}, error.what(), false};
                 Complete(std::move(failed), {}, false);
             } catch (...) {
-                Operation failed{pop.input.operation_id, {}, OperationState::Failed, {}, "sdk.turn.exception", false};
+                Operation failed{pop.input.operation_id, active_turn_id, OperationState::Failed, {}, "sdk.turn.exception", false};
                 Complete(std::move(failed), {}, false);
             }
             CancelApprovals();
         }
         std::lock_guard lock(mutex);
-        if (broken) for (auto& [id, operation] : operations) {
+        if (broken || memory_write_indeterminate) for (auto& [id, operation] : operations) {
             (void)id;
-            if (!Terminal(operation.state)) { operation.state = OperationState::Indeterminate; operation.error = "sdk.storage.broken"; }
+            if (!Terminal(operation.state)) {
+                operation.state = OperationState::Indeterminate;
+                operation.error = memory_write_indeterminate ? "sdk.memory_write.indeterminate" : "sdk.storage.broken";
+            }
         }
         cv.notify_all();
     }
@@ -1193,6 +1292,7 @@ struct Session::Impl final : rt::InteractionBroker {
             // after every tool/Agent, rather than during Impl member teardown.
             options.backend.reset();
             memory_module.reset();
+            memory_write_module.reset();
         }
         for (auto& stream : streams) stream->Close();
         return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
@@ -1224,6 +1324,19 @@ Result<memory::v1::RecallReport> Session::GetMemoryRecall(const std::string& ope
     if (found == impl_->memory_reports.end()) return std::unexpected(Failure("sdk.memory.report_not_ready"));
     return found->second;
 }
+Result<memory::v1::WriteSnapshot> Session::DescribeMemoryWrite() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->memory_write_snapshot;
+}
+Result<std::vector<memory::v1::SaveReport>> Session::GetMemorySaves(const std::string& operation_id) const {
+    std::lock_guard lock(impl_->mutex);
+    const auto operation = impl_->operations.find(operation_id);
+    if (operation == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
+    if (!Terminal(operation->second.state)) return std::unexpected(Failure("sdk.memory_write.report_not_ready"));
+    const auto found = impl_->memory_saves.find(operation_id);
+    if (found == impl_->memory_saves.end()) return std::unexpected(Failure("sdk.memory_write.report_not_ready"));
+    return found->second;
+}
 Result<Receipt> Session::Submit(std::string key, std::string text) {
     if (key.empty()) return std::unexpected(Failure("sdk.operation.key_required"));
     if (!lubancode::platform::IsValidUtf8(key) || !lubancode::platform::IsValidUtf8(text)) {
@@ -1231,6 +1344,8 @@ Result<Receipt> Session::Submit(std::string key, std::string text) {
     }
     std::lock_guard lock(impl_->mutex);
     if (impl_->closing || impl_->closed || impl_->runtime_stopping->load()) return std::unexpected(Failure("sdk.session.closed"));
+    if (impl_->memory_write_indeterminate) return std::unexpected(Failure("sdk.memory_write.indeterminate",
+        "A previous project write needs explicit inspection; this Session cannot continue automatically"));
     if (impl_->broken) return std::unexpected(Failure("sdk.storage.broken"));
     auto receipt = impl_->service->SubmitInput({std::move(key), std::move(text), {}});
     if (!receipt.accepted && !receipt.duplicate) return std::unexpected(Failure(receipt.error_code));
