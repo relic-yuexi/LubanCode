@@ -16,6 +16,10 @@
 
 另一场把前台本次取消接进子轮，同时让真实 Close 后的边界报告失败。回执仍保 Cancelled、已提交终态五键与 CloseFailed；父工具返回 StopIndeterminate，不冒称完整交接，不重跑工具，重复查询只读缓存。
 
+下一次私有组合纳入逐票 lease 首笔底座：显式 scoped future、栈上撤票、父宿主归属及 SDK 原 pending 表。底座尚未接真实子票；scoped `AcceptForSession` 暂拒，票仍可答。普通 SDK 四态与本场允许照旧。用户已定孩子许可只管当前子会话，真实接线与子 grant 另笔交付，不能拿底座验收冒认已可用。
+
+底座固定十四案另入 focused 与 ASan；组合原两案和两标记照留。新增门须取并集，focused 十九处、ASan 必需来源二十四处。三份旧 V3 全量消费者迁用真实 typed 终态回执；争锁诊断只留原错和时间，不改原断言与锁预算。本头重跑鲜 CI，各私有笔原绿、原红分开存。
+
 验这条 V3 生产 spawn 路时，内部 ledger Options 只增一枚默认空的 `subagent_close_fault` 测试接点，拷值递进 BootstrapChild 与真实子 writer；回调在真实 Close 放柄后才报错。不造 fake Finish，不影响父 writer，也不冒称操作系统自然报错。公开 SDK 配置不开放这枚测试接点。
 
 ## 远程验收
