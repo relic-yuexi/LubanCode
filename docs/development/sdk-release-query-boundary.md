@@ -13,3 +13,5 @@ SDK-only 边界同时拒查询 cpp/hpp 和 `src/package/`；递归 include 也�
 纯数据反例覆盖直接/间接依赖、伪装目标名下的查询/Package、源码重归 engine、遗漏或重复 CLI 查询拥有者、SDK-only 隐藏宿主源码与反向头引用。它们只造 JSON/文本，不跑 CMake、编译器或原生程序。
 
 远端取本笔新头与真实受测 merge/tree：三平台 SDK-only testing OFF/ON 默认 ALL、三平台组合构建及九份真实闭包；移位安装消费和既有 SDK/Worker/Runner 门照跑。完整 CLI 保留 `unit.config.update_checker` 原十案、设置命令和更新命令，updater 原册不删。构建图证明源码归属，CLI 原生回归证明旧调用仍能链接、执行；不借旧绿，也不称所有依赖已瘦完。
+
+十案补一扇 CLI 专用收证门。三平台组合构建后，单独登记并执行原 `unit.config.update_checker`；命令须指向真实 `lubancode_tests`，只带精确 `--source-file=*test_update_checker.cpp`。登记缺件、重件、禁用、无界超时、换册或另加过滤均拒。JUnit 须一册实际运行，无失败、跳过；原始 LastTest 须十案全过，断言非零。保存本头、原源码摘要、登记、JUnit、LastTest 与摘要，各平台独立上传。原全量 Test 不减，SDK focused 不添 CLI 册，SDK-only 闭包不变；纯数据反例不调用 CTest。`66defc37` 首轮原件另存，补门新头只认自身远端实跑。
