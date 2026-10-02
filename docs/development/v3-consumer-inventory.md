@@ -74,6 +74,12 @@ memory 桥/lifecycle/compact/T11 + 默认冒烟)。撤 0 = ctest 不再注入该
 
 ### 显式格式册(explicit-v3/legacy-only 对照,未撤注入)
 
+子结果严格历史采用另开[短合同](child-history-adoption.md)。本笔准备私有只读校准，
+父来源、子 bounded 原件、named raw artifact、local selected、历史 admission 与真实 prepared
+全链齐才回 Validated；Close 只认父 producer 存档声明，不从子卷猜出完整 typed 回执。
+尚未实现或远端验收，新 native 来源/案数与 focused/ASan 数目等实现定稿后登记。
+现有普通 SDK/reader 与前笔 explicit-v3 门照留，不把部分校准标完整采用。
+
 父 V3 子终态观察首笔先定 [短合同](child-parent-observation.md)。新增
 `unit.runtime.child_parent_observation` 与共源 `sdk.focused.child_parent_observation`
 归 explicit-v3，固定八案、十二共用完成标记，Unix 另核目录别名标记。
