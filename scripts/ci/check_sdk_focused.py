@@ -18,6 +18,7 @@ REQUIRED = {
     "sdk.focused.lubancore_host_boundary",
     "sdk.focused.lubancore_history",
     "sdk.focused.lubancore_extensions",
+    "sdk.focused.lubancore_skills",
     "sdk.focused.lubancore_results",
     "sdk.focused.lubancore_result_projection",
     "sdk.focused.session_resources",

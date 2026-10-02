@@ -34,6 +34,10 @@ add_test(NAME sdk.consumer.extensions
   COMMAND lubancore_consumer extensions "${CMAKE_CURRENT_BINARY_DIR}/state-extensions")
 add_test(NAME sdk.consumer.results
   COMMAND lubancore_consumer results "${CMAKE_CURRENT_BINARY_DIR}/state-results")
+add_test(NAME sdk.consumer.skills_seed
+  COMMAND lubancore_consumer skills-seed "${CMAKE_CURRENT_BINARY_DIR}/state-skills")
+add_test(NAME sdk.consumer.skills_resume
+  COMMAND lubancore_consumer skills-resume "${CMAKE_CURRENT_BINARY_DIR}/state-skills")
 add_test(NAME sdk.consumer.result_seed
   COMMAND lubancore_consumer result-seed "${CMAKE_CURRENT_BINARY_DIR}/state-result-restart")
 add_test(NAME sdk.consumer.result_resume
@@ -52,6 +56,8 @@ set_tests_properties(sdk.consumer.recovery_seed PROPERTIES FIXTURES_SETUP sdk_re
 set_tests_properties(sdk.consumer.recovery_resume PROPERTIES FIXTURES_REQUIRED sdk_recovery)
 set_tests_properties(sdk.consumer.result_seed PROPERTIES FIXTURES_SETUP sdk_result_restart)
 set_tests_properties(sdk.consumer.result_resume PROPERTIES FIXTURES_REQUIRED sdk_result_restart)
+set_tests_properties(sdk.consumer.skills_seed PROPERTIES FIXTURES_SETUP sdk_skills_restart)
+set_tests_properties(sdk.consumer.skills_resume PROPERTIES FIXTURES_REQUIRED sdk_skills_restart)
 set_tests_properties(sdk.consumer.builtin_search sdk.consumer.smoke sdk.consumer.isolation sdk.consumer.extensions sdk.consumer.results sdk.consumer.seed sdk.consumer.resume
   sdk.consumer.recovery_seed sdk.consumer.recovery_resume sdk.consumer.result_seed sdk.consumer.result_resume
-  PROPERTIES TIMEOUT 120)
+  sdk.consumer.skills_seed sdk.consumer.skills_resume PROPERTIES TIMEOUT 120)
