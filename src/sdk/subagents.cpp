@@ -571,7 +571,7 @@ tools::Tool::Result SessionSubagents::Execute(const Json& input, const tools::To
     if (input.contains("isolation") && input["isolation"] != "none") return refuse("worktree isolation is not admitted");
     const auto snapshot = plan_->Describe();
     const auto found = std::find_if(snapshot.profiles.begin(), snapshot.profiles.end(),
-        [&](const auto& p) { return p.requested.type == input["agent_type"]; });
+        [&](const auto& p) { return p.requested.type == input["agent_type"].get<std::string>(); });
     if (found == snapshot.profiles.end()) return refuse("type is outside the frozen host plan");
     Json admitted = input;
     for (const auto& [key, cap] : std::array<std::pair<const char*, std::int64_t>, 2>{{
