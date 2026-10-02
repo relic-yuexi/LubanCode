@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -46,6 +47,38 @@ def validate(registration, junit, native, platform):
     return proof
 
 
+def record_diagnostic(diagnostic, detail):
+    diagnostic.write_text(detail, encoding="utf-8")
+    try:
+        print(detail, file=sys.stderr)
+    except (UnicodeError, OSError):
+        # Keep the saved UTF-8 original and the Git/checkout error even when a
+        # console stream cannot encode the diagnostic or fails while writing.
+        try:
+            print(detail.encode("ascii", "backslashreplace").decode("ascii"), file=sys.stderr)
+        except (UnicodeError, OSError):
+            pass
+
+
+def checkout_head(repo, expected, diagnostic):
+    repo = repo.resolve()
+    command = ["git", "-c", "safe.directory=" + repo.as_posix(), "rev-parse", "HEAD"]
+    try:
+        completed = subprocess.run(command, cwd=repo, check=True, text=True,
+                                   encoding="utf-8", errors="replace", capture_output=True)
+    except (subprocess.CalledProcessError, OSError) as error:
+        detail = error.stderr if isinstance(error, subprocess.CalledProcessError) else str(error)
+        detail = detail or "git checkout calibration failed without stderr"
+        record_diagnostic(diagnostic, detail)
+        raise
+    actual = completed.stdout.strip()
+    if actual != expected:
+        detail = f"actual checkout differs from GITHUB_SHA: expected={expected} actual={actual}"
+        record_diagnostic(diagnostic, detail + "\n")
+        raise ValueError("actual checkout differs from GITHUB_SHA")
+    return actual
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("evidence", type=Path)
@@ -55,9 +88,8 @@ def main():
     result = validate(json.loads((root / "registration.json").read_text(encoding="utf-8")),
                       ET.parse(root / "results.xml").getroot(),
                       (root / "native.log").read_text(encoding="utf-8"), args.platform)
-    actual_head = subprocess.run(["git", "rev-parse", "HEAD"], check=True, text=True, capture_output=True).stdout.strip()
-    if actual_head != os.environ["GITHUB_SHA"]:
-        raise ValueError("actual checkout differs from GITHUB_SHA")
+    actual_head = checkout_head(Path(__file__).resolve().parents[2], os.environ["GITHUB_SHA"],
+                                root / "checkout-error.txt")
     summary = {"githubSha": actual_head, "platform": args.platform, "ctests": 2, "sources": result}
     (root / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))
