@@ -277,7 +277,7 @@ Result<std::vector<Report>> SessionMemoryWrite::DecodeReports(const std::string&
         std::vector<Report> reports;
         for (const auto& j : value.at("reports")) {
             auto r = ParseReport(j);
-            if (r.turn_id != value.at("turnId")) return std::unexpected(Fail("sdk.memory_write.report_invalid"));
+            if (r.turn_id != value.at("turnId").get<std::string>()) return std::unexpected(Fail("sdk.memory_write.report_invalid"));
             reports.push_back(std::move(r));
         }
         return reports;
@@ -378,7 +378,8 @@ Result<void> SessionMemoryWrite::ValidateReports(const std::string& operation, c
             if (event.kind == v3::EventKindV3::ToolExecutionStarted && event.action_id == r.action_id &&
                 event.turn_id == turn && event.payload.value("attempt", Json()) == r.attempt &&
                 event.payload.value("toolName", Json()) == "memory_save") {
-                if (started) return bad("duplicate start"); started = &event;
+                if (started) return bad("duplicate start");
+                started = &event;
             }
         }
         if (!started) return bad("no actual save action");

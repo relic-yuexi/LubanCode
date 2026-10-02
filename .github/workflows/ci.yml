@@ -1323,6 +1323,8 @@ jobs:
                   raise SystemExit('ASan project commit native roster differs from 12 cases')
               if name == 'integration.sdk.lubancore_memory_save' and int(counts[0]) != 12:
                   raise SystemExit('ASan SDK memory-save native roster differs from 12 cases')
+              if name == 'unit.runtime.tool_runtime' and int(counts[0]) != 14:
+                  raise SystemExit('ASan tool runtime native roster differs from 14 cases')
               if name == 'unit.agent.subagent_thread_lifetime' and int(counts[0]) != 10:
                   raise SystemExit('ASan startup and existing lifetime cases did not all execute')
           print(f'ASan: all {len(required)} required lifetime sources executed nonempty native tests')
