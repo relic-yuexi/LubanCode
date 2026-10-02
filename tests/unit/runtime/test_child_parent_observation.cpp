@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -97,14 +98,25 @@ public:
         return api::chat::BuildRequestJson(request, nlohmann::json::object()).dump();
     }
     std::expected<void, api::Error> send_stream(const api::Request& request,
-        const std::function<void(const api::StreamEvent&)>& emit, const std::atomic<bool>*) override {
+        const std::function<void(const api::StreamEvent&)>& emit, const std::atomic<bool>* cancel) override {
         emit(api::MessageStart{"observation-response", request.model});
         if (request.model == "child-model") {
             ++child_calls;
             emit(api::TextDelta{"actual child conclusion"});
+            if (cancel_child) {
+                REQUIRE(cancel != nullptr);
+                cancel_child->store(true, std::memory_order_release);
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                while (!cancel->load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                REQUIRE(cancel->load(std::memory_order_acquire));
+                // The transport observes the real merged cancellation before
+                // settling this partial stream; no successful final frame races
+                // ahead of CancelChain's propagation.
+                return std::unexpected(api::Error{api::ErrorKind::Cancelled, "actual child cancelled", 0});
+            }
             emit(api::ContentBlockDone{0});
             emit(api::MessageDone{"end_turn", api::Usage{}});
-            if (cancel_child) cancel_child->store(true);
         } else if (request.system.starts_with("Summarize already-executed tool evidence.") ||
                    request.model == "summary-model") {
             ++summary_calls;
@@ -467,6 +479,7 @@ void CheckLedgerOnlySummary(const Directory& directory) {
 TEST_CASE("child parent observation reaches the next real prepared request through local results") {
     Directory directory; Rig rig(directory);
     const auto result = rig.Run();
+    INFO("parent result: ", (result ? result->side_effect_error : result.error()));
     REQUIRE_MESSAGE(result.has_value(), (result ? std::string() : result.error()));
     CHECK_FALSE(result->side_effect_indeterminate);
     CHECK(rig.backend.parent_calls == 2); CHECK(rig.backend.child_calls == 1);
@@ -540,6 +553,7 @@ TEST_CASE("child unknown stops summary calls while healthy large-sibling summari
         if (path == 1) rig.failure = Failure::CaptureTempDirectory;
     }
     const auto result = rig.Run();
+    INFO("parent result: ", (result ? result->side_effect_error : result.error()));
     if (path < 2) {
         rig.CheckStopped(result);
         if (path == 0) {
@@ -567,7 +581,9 @@ TEST_CASE("child unknown stops summary calls while healthy large-sibling summari
 
 TEST_CASE("child success and actual capture directory failure preserve the committed observation") {
     Directory directory; Rig rig(directory); rig.failure = Failure::CaptureFile;
-    const auto result = rig.Run(); rig.CheckStopped(result);
+    const auto result = rig.Run();
+    INFO("parent result: ", (result ? result->side_effect_error : result.error()));
+    rig.CheckStopped(result);
     CHECK(result->side_effect_error.find("tool.capture.store_unavailable") != std::string::npos);
     CHECK(Count(rig.Source(), v3::EventKindV3::SubagentObserved) == 1);
     std::cout << "[child-observation-path] capture-unknown\n";
@@ -587,6 +603,7 @@ TEST_CASE("child unknown cannot disappear at real rewrite or batch commit failur
         rig.parent->SetContextWindowTokens(32768);
     }
     const auto result = rig.Run();
+    INFO("parent result: ", (result ? result->side_effect_error : result.error()));
     if (path < 2) {
         rig.CheckStopped(result);
         CHECK(result->side_effect_error.find("tool.capture.store_unavailable") != std::string::npos);
@@ -625,6 +642,7 @@ TEST_CASE("child unknown cannot disappear at real rewrite or batch commit failur
 TEST_CASE("cancelled child and actual Close boundary failure never form a positive parent observation") {
     Directory directory; Rig rig(directory); rig.close_failure = true; rig.backend.cancel_child = &rig.cancel;
     const auto result = rig.Run();
+    INFO("parent result: ", (result ? result->side_effect_error : result.error()));
     REQUIRE(result.has_value()); CHECK(result->side_effect_indeterminate);
     CHECK(rig.backend.parent_calls == 1); CHECK(rig.backend.child_calls == 1);
     CHECK(rig.after->calls == 0); REQUIRE(rig.terminals.size() == 1);
@@ -641,7 +659,9 @@ TEST_CASE("parent Attach rejection closes the real spawned child before any chil
     SUBCASE("checked child Close") { close_failed = false; }
     SUBCASE("real Close then injected failure") { close_failed = true; }
     Directory directory; Rig rig(directory); rig.reject_attach = true; rig.close_failure = close_failed;
-    const auto result = rig.Run(); REQUIRE(result.has_value());
+    const auto result = rig.Run();
+    INFO("parent result: ", (result ? result->side_effect_error : result.error()));
+    REQUIRE(result.has_value());
     CHECK(result->side_effect_indeterminate == close_failed);
     CHECK(rig.backend.child_calls == 0); CHECK(rig.backend.parent_calls == (close_failed ? 1 : 2));
     REQUIRE(rig.rejected.has_value()); REQUIRE(rig.rejected->cleanup_receipt.has_value());
@@ -657,14 +677,18 @@ TEST_CASE("parent Attach rejection closes the real spawned child before any chil
 
 TEST_CASE("provider local ID reuse binds each new response and turn to its current action") {
     Directory directory; Rig rig(directory); rig.backend.parent_dispatches = 2;
-    const auto first = rig.Run(); REQUIRE(first.has_value()); CHECK_FALSE(first->side_effect_indeterminate);
+    const auto first = rig.Run();
+    INFO("first parent result: ", (first ? first->side_effect_error : first.error()));
+    REQUIRE(first.has_value()); CHECK_FALSE(first->side_effect_indeterminate);
     CHECK(rig.backend.child_calls == 2); CHECK(rig.backend.parent_calls == 3);
     REQUIRE(rig.child_sources.size() == 2);
     CHECK(rig.child_sources[0].parent_action.action_id != rig.child_sources[1].parent_action.action_id);
     CHECK(rig.child_sources[0].parent_action.declared_message_ref != rig.child_sources[1].parent_action.declared_message_ref);
     CHECK(Count(rig.Source(), v3::EventKindV3::SubagentObserved) == 2); rig.CheckChild(0); rig.CheckChild(1);
     rig.backend.parent_calls = 0; rig.backend.parent_dispatches = 1;
-    const auto second = rig.Run(); REQUIRE(second.has_value()); CHECK_FALSE(second->side_effect_indeterminate);
+    const auto second = rig.Run();
+    INFO("second parent result: ", (second ? second->side_effect_error : second.error()));
+    REQUIRE(second.has_value()); CHECK_FALSE(second->side_effect_indeterminate);
     REQUIRE(rig.child_sources.size() == 3);
     CHECK(rig.child_sources[2].parent_action.turn_id != rig.child_sources[0].parent_action.turn_id);
     CHECK(rig.child_sources[2].parent_action.action_id != rig.child_sources[0].parent_action.action_id);
@@ -684,13 +708,16 @@ TEST_CASE("child source absence and bounded same bytes verification reject hones
         Directory directory; CheckLedgerOnlySummary(directory);
     } else if (path == 2) {
         Directory directory; Rig rig(directory); rig.failure = Failure::ChildRootAlias;
-        const auto result = rig.Run(); rig.CheckStopped(result);
+        const auto result = rig.Run();
+        INFO("parent result: ", (result ? result->side_effect_error : result.error()));
+        rig.CheckStopped(result);
         CHECK(result->side_effect_error.find("subagent.observation.child_path_outside_parent") != std::string::npos);
         CHECK(Count(rig.Source(), v3::EventKindV3::SubagentObserved) == 0);
         std::cout << "[child-observation-path] source-owner-alias\n";
     } else {
     Directory directory; Rig rig(directory); rig.failure = Failure::MissingChild;
     const auto result = rig.Run();
+    INFO("parent result: ", (result ? result->side_effect_error : result.error()));
     REQUIRE(result.has_value()); CHECK(result->side_effect_indeterminate);
     CHECK(rig.backend.parent_calls == 1); CHECK(rig.backend.child_calls == 1);
     CHECK(rig.after->calls == 0); CHECK(Count(rig.Source(), v3::EventKindV3::SubagentObserved) == 0);
