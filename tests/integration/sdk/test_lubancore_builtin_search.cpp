@@ -221,21 +221,61 @@ std::pair<sdk::results::v1::ToolResultIdentity, std::string> Saved(
     const std::shared_ptr<sdk::Session>& session, const std::string& operation) {
     const auto summaries = session->ListToolResults(operation);
     REQUIRE(summaries.has_value());
-    const auto selected = std::find_if(summaries->begin(), summaries->end(), [](const auto& item) { return item.selected && item.tool_name == "search"; });
-    REQUIRE(selected != summaries->end());
-    CHECK(std::count_if(summaries->begin(), summaries->end(), [](const auto& item) { return item.selected && item.tool_name == "search"; }) == 1);
-    const auto snapshot = session->ReadToolResult(selected->identity);
-    REQUIRE(snapshot.has_value());
-    CHECK(snapshot->result().metadata_state == sdk::results::v1::ArtifactState::Verified);
-    std::string body;
-    for (const auto& channel : snapshot->result().channels) if (channel.text) {
-        CHECK(channel.artifact_verified);
-        CHECK(channel.state == sdk::results::v1::ArtifactState::Verified);
-        CHECK(channel.capture_complete);
-        body += *channel.text;
+    std::string diagnostics = "durable search query session=" + session->id() + " operation=" + operation + "\n";
+    for (const auto& item : *summaries) {
+        const auto& id = item.identity;
+        diagnostics += "session_id=" + id.session_id + " operation_id=" + id.operation_id +
+            " turn_id=" + id.turn_id + " tool_call_id=" + id.tool_call_id +
+            " persisted_event_id=" + id.persisted_event_id + " result_id=" + id.result_id +
+            " attempt=" + std::to_string(item.attempt) + " selected=" + (item.selected ? "true" : "false") +
+            " tool_name=" + item.tool_name + "\n";
     }
-    REQUIRE_FALSE(body.empty());
-    return {selected->identity, std::move(body)};
+    INFO(diagnostics);
+    const auto is_selected_search = [](const auto& item) { return item.selected && item.tool_name == "search"; };
+    const auto is_formal = [&](const auto& item) { return is_selected_search(item) && item.identity.result_id.starts_with("res-"); };
+    const auto is_capture = [&](const auto& item) { return is_selected_search(item) && item.identity.result_id.starts_with("capture-"); };
+    // selected marks every persisted source in the selection chain: this fixture
+    // has one pre-hook capture and one formal, post-hook/pre-preview result.
+    REQUIRE(std::count_if(summaries->begin(), summaries->end(), is_selected_search) == 2);
+    REQUIRE(std::count_if(summaries->begin(), summaries->end(), is_formal) == 1);
+    REQUIRE(std::count_if(summaries->begin(), summaries->end(), is_capture) == 1);
+    const auto formal = std::find_if(summaries->begin(), summaries->end(), is_formal);
+    const auto capture = std::find_if(summaries->begin(), summaries->end(), is_capture);
+    REQUIRE(formal != summaries->end());
+    REQUIRE(capture != summaries->end());
+    REQUIRE(formal->identity.session_id == session->id());
+    REQUIRE(capture->identity.session_id == formal->identity.session_id);
+    REQUIRE(formal->identity.operation_id == operation);
+    REQUIRE(capture->identity.operation_id == formal->identity.operation_id);
+    REQUIRE_FALSE(formal->identity.turn_id.empty());
+    REQUIRE(capture->identity.turn_id == formal->identity.turn_id);
+    REQUIRE_FALSE(formal->identity.tool_call_id.empty());
+    REQUIRE(capture->identity.tool_call_id == formal->identity.tool_call_id);
+    REQUIRE(formal->attempt > 0);
+    REQUIRE(capture->attempt == formal->attempt);
+    REQUIRE_FALSE(formal->identity.persisted_event_id.empty());
+    REQUIRE_FALSE(capture->identity.persisted_event_id.empty());
+    REQUIRE(capture->identity.persisted_event_id != formal->identity.persisted_event_id);
+    REQUIRE(capture->identity.result_id != formal->identity.result_id);
+    const auto read_body = [&](const auto& item) {
+        const auto snapshot = session->ReadToolResult(item.identity);
+        REQUIRE(snapshot.has_value());
+        CHECK(snapshot->result().summary.identity == item.identity);
+        CHECK(snapshot->result().metadata_state == sdk::results::v1::ArtifactState::Verified);
+        std::string body;
+        for (const auto& channel : snapshot->result().channels) if (channel.text) {
+            CHECK(channel.artifact_verified);
+            CHECK(channel.state == sdk::results::v1::ArtifactState::Verified);
+            CHECK(channel.capture_complete);
+            body += *channel.text;
+        }
+        REQUIRE_FALSE(body.empty());
+        return body;
+    };
+    auto body = read_body(*formal);
+    // No PostTool hook is registered, so the two immutable source bodies match.
+    CHECK(read_body(*capture) == body);
+    return {formal->identity, std::move(body)};
 }
 void AddMcpMarker(sdk::SessionOptions& options, const fs::path& marker) {
     sdk::McpServer server;

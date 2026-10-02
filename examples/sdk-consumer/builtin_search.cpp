@@ -145,19 +145,53 @@ std::pair<sdk::Receipt, sdk::ToolReply> Turn(const std::shared_ptr<sdk::Session>
 std::pair<sdk::results::v1::ToolResultIdentity, std::string> Saved(
     const std::shared_ptr<sdk::Session>& session, const std::string& operation) {
     const auto list = Take(session->ListToolResults(operation), "list durable search results");
-    const auto selected = std::find_if(list.begin(), list.end(), [](const auto& item) { return item.selected && item.tool_name == "search"; });
-    Check(selected != list.end(), "selected search result absent from public query");
-    Check(std::count_if(list.begin(), list.end(), [](const auto& item) { return item.selected && item.tool_name == "search"; }) == 1, "duplicate selected result");
-    const auto snapshot = Take(session->ReadToolResult(selected->identity), "read durable search body");
-    Check(snapshot.result().metadata_state == sdk::results::v1::ArtifactState::Verified, "search metadata was not verified");
-    std::string body;
-    for (const auto& channel : snapshot.result().channels) if (channel.text) {
-        Check(channel.artifact_verified && channel.capture_complete && channel.state == sdk::results::v1::ArtifactState::Verified,
-              "search text artifact was incomplete or unverified");
-        body += *channel.text;
+    std::string diagnostics = "\ndurable search query session=" + session->id() + " operation=" + operation + "\n";
+    for (const auto& item : list) {
+        const auto& id = item.identity;
+        diagnostics += "session_id=" + id.session_id + " operation_id=" + id.operation_id +
+            " turn_id=" + id.turn_id + " tool_call_id=" + id.tool_call_id +
+            " persisted_event_id=" + id.persisted_event_id + " result_id=" + id.result_id +
+            " attempt=" + std::to_string(item.attempt) + " selected=" + (item.selected ? "true" : "false") +
+            " tool_name=" + item.tool_name + "\n";
     }
-    Check(!body.empty(), "persistent search text absent");
-    return {selected->identity, std::move(body)};
+    const auto is_selected_search = [](const auto& item) { return item.selected && item.tool_name == "search"; };
+    const auto is_formal = [&](const auto& item) { return is_selected_search(item) && item.identity.result_id.starts_with("res-"); };
+    const auto is_capture = [&](const auto& item) { return is_selected_search(item) && item.identity.result_id.starts_with("capture-"); };
+    // The public list retains both selected sources; the formal res-* version
+    // is distinct from the raw capture-* saved before PostTool hooks.
+    Check(std::count_if(list.begin(), list.end(), is_selected_search) == 2, "expected exactly two selected search sources" + diagnostics);
+    Check(std::count_if(list.begin(), list.end(), is_formal) == 1, "expected exactly one formal search result" + diagnostics);
+    Check(std::count_if(list.begin(), list.end(), is_capture) == 1, "expected exactly one raw search capture" + diagnostics);
+    const auto formal = std::find_if(list.begin(), list.end(), is_formal);
+    const auto capture = std::find_if(list.begin(), list.end(), is_capture);
+    Check(formal != list.end() && capture != list.end(), "search source version absent from public query" + diagnostics);
+    Check(formal->identity.session_id == session->id() && capture->identity.session_id == formal->identity.session_id &&
+          formal->identity.operation_id == operation && capture->identity.operation_id == formal->identity.operation_id,
+          "search sources escaped session or operation scope" + diagnostics);
+    Check(!formal->identity.turn_id.empty() && capture->identity.turn_id == formal->identity.turn_id &&
+          !formal->identity.tool_call_id.empty() && capture->identity.tool_call_id == formal->identity.tool_call_id &&
+          formal->attempt > 0 && capture->attempt == formal->attempt,
+          "search sources disagree on turn, action or attempt" + diagnostics);
+    Check(!formal->identity.persisted_event_id.empty() && !capture->identity.persisted_event_id.empty() &&
+          capture->identity.persisted_event_id != formal->identity.persisted_event_id &&
+          capture->identity.result_id != formal->identity.result_id,
+          "search source versions reused persisted or result identity" + diagnostics);
+    const auto read_body = [&](const auto& item) {
+        const auto snapshot = Take(session->ReadToolResult(item.identity), "read durable search body" + diagnostics);
+        Check(snapshot.result().summary.identity == item.identity, "search snapshot changed source identity" + diagnostics);
+        Check(snapshot.result().metadata_state == sdk::results::v1::ArtifactState::Verified, "search metadata was not verified" + diagnostics);
+        std::string body;
+        for (const auto& channel : snapshot.result().channels) if (channel.text) {
+            Check(channel.artifact_verified && channel.capture_complete && channel.state == sdk::results::v1::ArtifactState::Verified,
+                  "search text artifact was incomplete or unverified" + diagnostics);
+            body += *channel.text;
+        }
+        Check(!body.empty(), "persistent search text absent" + diagnostics);
+        return body;
+    };
+    auto body = read_body(*formal);
+    Check(read_body(*capture) == body, "raw and formal search bodies differ without PostTool hooks" + diagnostics);
+    return {formal->identity, std::move(body)};
 }
 } // namespace
 
