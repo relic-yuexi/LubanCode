@@ -21,7 +21,7 @@ bool Text(std::string_view value) {
 bool Scope(const CasScope& value) {
     return Text(value.workspace_key) && Text(value.session_id);
 }
-bool Durability(CasDurability value) {
+bool ValidCasDurability(CasDurability value) {
     return value == CasDurability::Buffered || value == CasDurability::ProcessCrash || value == CasDurability::PowerLoss;
 }
 CasWriteReceipt Failed(CasCommitState state, CasReference reference,
@@ -55,8 +55,8 @@ private:
 } // namespace
 
 bool CasWriteReceipt::Confirms(CasDurability required) const noexcept {
-    return Durability(required) && state == CasCommitState::Committed && confirmed_durability &&
-           Durability(*confirmed_durability) &&
+    return ValidCasDurability(required) && state == CasCommitState::Committed && confirmed_durability &&
+           ValidCasDurability(*confirmed_durability) &&
            static_cast<int>(*confirmed_durability) >= static_cast<int>(required) && error.code.empty();
 }
 
@@ -70,14 +70,14 @@ CasWriteReceipt MemoryCapability::Store(std::string_view bytes, std::string medi
     std::lock_guard lock(mutex_);
     if (writes_closed_)
         return Failed(CasCommitState::NotCommitted, reference, "cas.owner_closed");
-    if (!store_ || !Scope(scope_) || !Text(reference.media_type) || !Hash(reference.sha256) || !Durability(required))
+    if (!store_ || !Scope(scope_) || !Text(reference.media_type) || !Hash(reference.sha256) || !ValidCasDurability(required))
         return Failed(CasCommitState::NotCommitted, reference, "cas.invalid_request");
     try {
         auto receipt = store_->Store({reference, bytes, required});
         if (receipt.reference != reference ||
             (receipt.state != CasCommitState::NotCommitted && receipt.state != CasCommitState::Committed &&
              receipt.state != CasCommitState::Indeterminate) ||
-            (receipt.confirmed_durability && !Durability(*receipt.confirmed_durability)))
+            (receipt.confirmed_durability && !ValidCasDurability(*receipt.confirmed_durability)))
             return Failed(CasCommitState::Indeterminate, reference, "cas.receipt_mismatch");
         if (receipt.state == CasCommitState::NotCommitted && receipt.confirmed_durability)
             return Failed(CasCommitState::Indeterminate, reference, "cas.receipt_mismatch");
