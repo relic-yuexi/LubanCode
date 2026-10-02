@@ -7,6 +7,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
@@ -15,11 +16,20 @@
 #include <vector>
 #ifndef _WIN32
 #include <sys/stat.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 #include <lubancore/core.hpp>
 #include <lubancore/memory.hpp>
 #include "memory/frontmatter.hpp"
+#include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "runtime/memory_ledger_bridge.hpp"
 #include "runtime/session_service.hpp"
@@ -60,7 +70,7 @@ struct Directory {
         fs::create_directories(root / "cwd"); fs::create_directories(root / "resources");
         root = fs::canonical(root);
     }
-    ~Directory() { std::error_code ignored; fs::remove_all(root, ignored); }
+    ~Directory() { std::error_code ignored; fs::remove_all(lubancode::platform::FileIoPath(root), ignored); }
 };
 std::string Body(const std::string& marker) {
     std::string text = std::string(kNeedle) + " " + marker + "\n";
@@ -217,6 +227,90 @@ TEST_CASE("memory CAS File confirms ProcessCrash, deduplicates, and bounds verif
     CHECK_FALSE(cap->Read(first.reference, first.reference.bytes).has_value());
     auto foreign = first.reference; foreign.scope.session_id = "session-b";
     CHECK_FALSE(cap->Read(foreign, foreign.bytes).has_value());
+#ifdef _WIN32
+    const auto exercise_native_length = [](std::size_t target_length, bool suffix_only) {
+        Directory boundary_directory;
+        const auto body = Body("WINDOWS_NATIVE_PATH_MARKER");
+        const auto hash = lubancode::platform::Sha256Hex(body);
+        auto parent = boundary_directory.root;
+        const auto initial = traj::BlobStore(parent / "artifacts").PathFor(hash);
+        REQUIRE(initial.native().size() + 1 < target_length);
+        auto extra = target_length - initial.native().size();
+        // Several short components avoid adding a component-length limit to
+        // this total-path boundary fixture.
+        while (extra != 0) {
+            auto count = (std::min)(std::size_t{120}, extra - 1);
+            if (extra - count - 1 == 1) --count;
+            REQUIRE(count != 0);
+            parent /= std::wstring(count, L'p');
+            extra -= count + 1;
+        }
+        const auto root = parent / "artifacts";
+        const auto target = traj::BlobStore(root).PathFor(hash);
+        REQUIRE(target.native().size() == target_length);
+        const auto native_target = lubancode::platform::FileIoPath(target);
+        const auto prefix = hash + ".tmp-" + std::to_string(GetCurrentProcessId()) + "-";
+        std::vector<fs::path> observed_temporaries;
+        std::string observation_error;
+        std::vector<std::string> observed_bytes;
+        auto store = traj::MakeFileCasStore({"project-long", "session-long"}, root,
+            [&](traj::FileCasBoundary boundary) -> std::optional<std::string> {
+                if (boundary != traj::FileCasBoundary::AfterNativeClose) return std::nullopt;
+                std::error_code error;
+                const auto native_parent = lubancode::platform::FileIoPath(target.parent_path());
+                for (fs::directory_iterator it(native_parent, error), end; !error && it != end; it.increment(error)) {
+                    const auto name = Utf8(it->path().filename());
+                    if (!name.starts_with(prefix)) continue;
+                    const auto logical = target.parent_path() / it->path().filename();
+                    observed_temporaries.push_back(logical);
+                    std::ifstream input(lubancode::platform::FileIoPath(logical), std::ios::binary);
+                    if (!input.is_open()) { observation_error = "actual temporary read failed"; continue; }
+                    observed_bytes.emplace_back(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+                    if (input.bad()) observation_error = "actual temporary read failed";
+                }
+                if (error) observation_error = error.message();
+                return std::nullopt; // Observe the real closed temporary, never inject a write/close result.
+            });
+        traj::MemoryCapability capability({"project-long", "session-long"}, std::move(store));
+        const auto written = capability.Store(body, "text/plain");
+        INFO(written.error.code << ": " << written.error.message);
+        REQUIRE(written.Confirms(traj::CasDurability::ProcessCrash));
+        REQUIRE(observation_error.empty()); REQUIRE(observed_temporaries.size() == 1);
+        REQUIRE(observed_bytes.size() == 1); CHECK(observed_bytes.front() == body);
+        const auto temporary_name = Utf8(observed_temporaries.front().filename());
+        const auto counter = temporary_name.substr(prefix.size());
+        REQUIRE_FALSE(counter.empty()); CHECK(counter.find_first_not_of("0123456789") == std::string::npos);
+        CHECK(counter != "0");
+        CHECK(observed_temporaries.front().native().size() >= MAX_PATH - 12);
+        CHECK(lubancode::platform::FileIoPath(observed_temporaries.front()).native().starts_with(L"\\\\?\\"));
+        if (suffix_only) {
+            CHECK(target.native().size() < MAX_PATH - 12);
+            CHECK(native_target == target);
+        } else {
+            CHECK(target.native().size() > MAX_PATH);
+            CHECK(native_target.native().starts_with(L"\\\\?\\"));
+            CHECK(root.native().size() >= MAX_PATH - 12);
+        }
+        CHECK(written.reference.sha256 == hash);
+        CHECK(traj::MemoryCapability::LogicalReference(hash) == "artifacts/sha256/" + hash.substr(0, 2) + "/" + hash);
+        REQUIRE(fs::is_regular_file(native_target));
+        const auto stamp = fs::last_write_time(native_target);
+        const auto read = capability.Read(written.reference, body.size());
+        REQUIRE_MESSAGE(read.has_value(), (read ? std::string() : read.error().code)); CHECK(*read == body);
+        const auto reused = capability.Store(body, "text/plain");
+        REQUIRE(reused.Confirms(traj::CasDurability::ProcessCrash)); CHECK(reused.reference == written.reference);
+        CHECK(fs::last_write_time(native_target) == stamp); CHECK(observed_temporaries.size() == 1);
+        CHECK_FALSE(fs::exists(lubancode::platform::FileIoPath(observed_temporaries.front())));
+        CHECK_FALSE(capability.Read(written.reference, body.size() - 1).has_value());
+        std::cout << "[memory-cas-path] " << (suffix_only ? "temporary-threshold" : "target-extended") << '\n';
+    };
+    SUBCASE("actual target requires extended native I/O") {
+        exercise_native_length(MAX_PATH + 116, false);
+    }
+    SUBCASE("only actual PID-counter temporary crosses the native threshold") {
+        exercise_native_length(MAX_PATH - 13, true);
+    }
+#endif
 }
 
 TEST_CASE("memory CAS File never overwrites an existing corrupt content address") {

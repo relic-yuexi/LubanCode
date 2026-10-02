@@ -109,9 +109,12 @@ Journal lease/fence/stable snapshot、数据库、对象存储与整场替换注
 这笔只补默认 File 原生路径口。沿现 `platform::FileIoPath`，普通短路径保持原样；
 延展路径只供 native I/O，workspace、containment 与账上逻辑 ref 保原形式。
 临时后缀拼完再规范，读取也过同一原生路径口。目录创建、判型、清理和发布
-核实际路径；不放宽 regular/reparse、完整大小/SHA、不可覆盖与 typed 耐久回执。
+核实际路径；reparse 原生属性查询也沿这条路径口，裁决不变。
+不放宽 regular/reparse、完整大小/SHA、不可覆盖与 typed 耐久回执。
 
 现 10 CASE 内补 Windows 子例：实际目标跨延展阈值；另核目标长度小于
 `MAX_PATH - 12`，实际临时名加 PID/counter 后跨过同一阈值。
 测试真 Store、读回、同 SHA 复用，故障接点只记录实际临时名，不能假称 flush/close 失败。
+两条完成标记为 `[memory-cas-path] target-extended` 与
+`[memory-cas-path] temporary-threshold`；Windows 原册须实际输出，再对照原生断言。
 册数不涨，原断言不减。先交合同，再改代码；本地不跑原生，fresh CI 尚未验。

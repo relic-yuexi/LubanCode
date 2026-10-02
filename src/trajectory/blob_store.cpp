@@ -53,8 +53,9 @@ bool FlushFileDurable(std::FILE* file, Durability durability) {
 // close succeed. The old wrapper retains its documented best-effort boundary.
 bool FlushDirectoryChecked(const std::filesystem::path& dir) {
 #ifdef _WIN32
+    const auto native_dir = platform::FileIoPath(dir);
     const HANDLE handle =
-        CreateFileW(dir.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        CreateFileW(native_dir.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                     OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         return false;
@@ -153,7 +154,7 @@ std::expected<std::string, CasError> BlobStore::ReadBoundedVerified(
         return std::unexpected(CasError{"cas.invalid_read", {}});
     const auto path = PathFor(ref.sha256);
     if (!IsSafeContainedPath(path, root_)) return std::unexpected(CasError{"cas.path_escape", {}});
-    auto bytes = platform::ReadBoundedRegularFile(path, cap);
+    auto bytes = platform::ReadBoundedRegularFile(platform::FileIoPath(path), cap);
     if (!bytes) return std::unexpected(CasError{"cas." + bytes.error(), {}});
     if (bytes->size() != ref.bytes || hooks::Sha256Hex(*bytes) != ref.sha256)
         return std::unexpected(CasError{"cas.read_mismatch", {}});
@@ -171,16 +172,17 @@ CasWriteReceipt BlobStore::StoreDetailed(const CasWriteRequest& request, const F
         return fail(CasCommitState::NotCommitted, "cas.invalid_request");
     const auto target = PathFor(ref.sha256);
     if (!IsSafeContainedPath(target, root_)) return fail(CasCommitState::NotCommitted, "cas.path_escape");
+    const auto native_target = platform::FileIoPath(target);
     std::error_code error;
     std::vector<std::filesystem::path> new_directories;
     for (auto current = target.parent_path(); current != root_.parent_path() && !current.empty(); current = current.parent_path()) {
-        const auto status = std::filesystem::symlink_status(current, error);
+        const auto status = std::filesystem::symlink_status(platform::FileIoPath(current), error);
         if (error && error != std::errc::no_such_file_or_directory)
             return fail(CasCommitState::NotCommitted, "cas.directory_failed", error.message());
         if (status.type() == std::filesystem::file_type::not_found) new_directories.push_back(current);
         error.clear();
     }
-    std::filesystem::create_directories(target.parent_path(), error);
+    std::filesystem::create_directories(platform::FileIoPath(target.parent_path()), error);
     if (error) return fail(CasCommitState::NotCommitted, "cas.directory_failed", error.message());
     if (!IsSafeContainedPath(target, root_)) return fail(CasCommitState::NotCommitted, "cas.path_escape");
 
@@ -206,7 +208,7 @@ CasWriteReceipt BlobStore::StoreDetailed(const CasWriteRequest& request, const F
             return fail(CasCommitState::NotCommitted, "cas.existing_corrupt", bytes ? std::string() : bytes.error().code);
         if (request.required == CasDurability::PowerLoss) {
 #ifdef _WIN32
-            std::FILE* file = _wfsopen(target.c_str(), L"r+b", _SH_DENYNO);
+            std::FILE* file = _wfsopen(native_target.c_str(), L"r+b", _SH_DENYNO);
 #else
             std::FILE* file = std::fopen(target.c_str(), "r+b");
 #endif
@@ -218,7 +220,7 @@ CasWriteReceipt BlobStore::StoreDetailed(const CasWriteRequest& request, const F
         }
         return confirm();
     };
-    const auto target_status = std::filesystem::symlink_status(target, error);
+    const auto target_status = std::filesystem::symlink_status(native_target, error);
     if (error && error != std::errc::no_such_file_or_directory)
         return fail(CasCommitState::NotCommitted, "cas.target_failed", error.message());
     if (target_status.type() != std::filesystem::file_type::not_found) return reuse();
@@ -230,13 +232,16 @@ CasWriteReceipt BlobStore::StoreDetailed(const CasWriteRequest& request, const F
     const auto pid = ::getpid();
 #endif
     temporary += ".tmp-" + std::to_string(pid) + "-" + std::to_string(NextTmpCounter());
+    // Keep logical containment/reference paths above. The actual suffix can
+    // cross the native threshold even when the target itself remains short.
+    const auto native_temporary = platform::FileIoPath(temporary);
     struct RemoveTemporary {
         std::filesystem::path path;
         bool owned = false;
         ~RemoveTemporary() { if (owned) { std::error_code ignored; std::filesystem::remove(path, ignored); } }
-    } remove{temporary};
+    } remove{native_temporary};
 #ifdef _WIN32
-    std::FILE* file = _wfsopen(temporary.c_str(), L"wbx", _SH_DENYNO);
+    std::FILE* file = _wfsopen(native_temporary.c_str(), L"wbx", _SH_DENYNO);
     remove.owned = file != nullptr;
 #else
     const int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -256,7 +261,7 @@ CasWriteReceipt BlobStore::StoreDetailed(const CasWriteRequest& request, const F
     // No replace-existing publication. If another valid writer won, verify its
     // entire entity; an existing corrupt object is never silently repaired.
 #ifdef _WIN32
-    const bool published = MoveFileExW(temporary.c_str(), target.c_str(), 0) != FALSE;
+    const bool published = MoveFileExW(native_temporary.c_str(), native_target.c_str(), 0) != FALSE;
     const auto publish_error = published ? ERROR_SUCCESS : GetLastError();
     const bool already_exists = publish_error == ERROR_ALREADY_EXISTS || publish_error == ERROR_FILE_EXISTS;
 #else
@@ -268,7 +273,7 @@ CasWriteReceipt BlobStore::StoreDetailed(const CasWriteRequest& request, const F
         if (already_exists) return reuse();
         return fail(CasCommitState::NotCommitted, "cas.publish_failed", std::to_string(publish_error));
     }
-    std::filesystem::remove(temporary, error); // A cleanup fault may leave an orphan; it never unpublishes target.
+    std::filesystem::remove(native_temporary, error); // A cleanup fault may leave an orphan; it never unpublishes target.
     if (fault) if (auto injected = fault(FileCasBoundary::AfterPublish))
         return CasWriteReceipt{CasCommitState::Committed, ref, CasDurability::ProcessCrash,
             {"cas.test_publish_confirmation_failed", *injected}};
