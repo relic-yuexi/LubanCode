@@ -152,6 +152,10 @@ jobs:
                 cross_platform=true
                 runner_tests=$runner_present
                 code=true ;;
+              src/config/update_checker.*|tests/unit/config/test_update_checker.cpp|scripts/ci/check_release_query.py|scripts/ci/tests/test_release_query_gate.py)
+                cross_platform=true
+                sdk_tests=$sdk_present
+                code=true ;;
               CMakeLists.txt|tests/CMakeLists.txt|cmake/*|vcpkg.json)
                 if [ "$remote_present" = true ] || [ "$assembly_present" = true ] || [ "$sdk_present" = true ] || [ "$worker_present" = true ] || [ "$runner_present" = true ]; then
                   cross_platform=true
@@ -717,6 +721,22 @@ jobs:
         run: |
           cmake --build build --config Release --target lubancode -j 4
           cmake --build build --config Release --target lubancode_tests -j 4
+
+      - name: Run original CLI Release query source
+        if: needs.changes.outputs.sdk_tests == 'true'
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_release_query_gate.py
+          "$PY" scripts/ci/check_release_query.py --build-dir build
+
+      - name: Upload CLI Release query evidence
+        if: always() && needs.changes.outputs.sdk_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-query-${{ matrix.name }}
+          path: build/test-evidence/release-query/
+          if-no-files-found: error
 
       # 先查登记，后面的全量 Test 真跑；不重复执行，也不让零册冒绿。
       - name: Run project memory commit and CLI memory regressions
