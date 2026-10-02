@@ -344,10 +344,9 @@ TEST_CASE("child integration: same project foreground sessions isolate actual co
     b.CheckStored(runtime::SubagentExecutionOutcome::Succeeded, runtime::SubagentSealState::Closed);
     CHECK(a.completed->durable());
     CHECK(b.completed->durable());
-    CHECK(a.completed->run_id != b.completed->run_id);
-    // Child session names use a parent-local counter and may coincide in the
-    // same second. The actual parent path, native run and five-key receipt own
-    // the journal; a child name alone is not a global isolation identity.
+    // Both child session and run names are parent-scoped. V3 main runs can
+    // repeat across sessions; neither string alone identifies a global owner.
+    // The actual parent directory, native journal and complete receipt do.
     const auto journal_a = a.ledger->session_dir() / "subagents" / a.completed->session_id /
                            (a.completed->session_id + ".jsonl");
     const auto journal_b = b.ledger->session_dir() / "subagents" / b.completed->session_id /
@@ -355,10 +354,33 @@ TEST_CASE("child integration: same project foreground sessions isolate actual co
     CHECK(journal_a != journal_b);
     CHECK(std::filesystem::is_regular_file(journal_a));
     CHECK(std::filesystem::is_regular_file(journal_b));
-    CHECK_FALSE(a.registry->Find(b.completed->run_id).has_value());
-    CHECK_FALSE(b.registry->Find(a.completed->run_id).has_value());
-    CHECK_FALSE(a.ledger->ChildTerminalReceipt(b.completed->run_id).has_value());
-    CHECK_FALSE(b.ledger->ChildTerminalReceipt(a.completed->run_id).has_value());
+    CHECK(a.completed->terminal->hash != b.completed->terminal->hash);
+    if (a.completed->run_id == b.completed->run_id) {
+        // A lookup by the same local name must still return this owner's
+        // cancelled/succeeded receipt, never the peer's value or journal.
+        const auto registered_a = a.registry->Find(b.completed->run_id);
+        const auto registered_b = b.registry->Find(a.completed->run_id);
+        const auto saved_a = a.ledger->ChildTerminalReceipt(b.completed->run_id);
+        const auto saved_b = b.ledger->ChildTerminalReceipt(a.completed->run_id);
+        REQUIRE(registered_a.has_value());
+        REQUIRE(registered_b.has_value());
+        REQUIRE(saved_a.has_value());
+        REQUIRE(saved_b.has_value());
+        Same(*a.completed, *registered_a);
+        Same(*b.completed, *registered_b);
+        Same(*a.completed, *saved_a);
+        Same(*b.completed, *saved_b);
+    } else {
+        CHECK_FALSE(a.registry->Find(b.completed->run_id).has_value());
+        CHECK_FALSE(b.registry->Find(a.completed->run_id).has_value());
+        CHECK_FALSE(a.ledger->ChildTerminalReceipt(b.completed->run_id).has_value());
+        CHECK_FALSE(b.ledger->ChildTerminalReceipt(a.completed->run_id).has_value());
+    }
+    const std::string absent_run = "child-integration-never-allocated";
+    CHECK_FALSE(a.registry->Find(absent_run).has_value());
+    CHECK_FALSE(b.registry->Find(absent_run).has_value());
+    CHECK_FALSE(a.ledger->ChildTerminalReceipt(absent_run).has_value());
+    CHECK_FALSE(b.ledger->ChildTerminalReceipt(absent_run).has_value());
     const auto tasks_a = a.tool->TaskSnapshots();
     const auto tasks_b = b.tool->TaskSnapshots();
     REQUIRE(tasks_a.size() == 1);
