@@ -33,3 +33,4 @@ bash scripts/check_docs.sh
 git diff --check
 ```
 - [前台子执行组合验收](child-sdk-integration.md)
+- [前台子审批与父观察组合](child-approval-observation.md)
