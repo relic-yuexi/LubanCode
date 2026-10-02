@@ -49,6 +49,8 @@ SID 与 run 都可跨父场同串，不限同秒；票 turn/action 不入 grant 
 grant 只免本子会话后续同工具询问；每次仍跑原规则与有效 floor，不越过硬拒绝或工具准入。
 grant 不继承给兄弟、后代或恢复 run。单票答完先退 lease，grant 留到本孩子最终退场。
 子调用退出、Close/本次取消才收本 scope；迟答不能复活。
+参考表也给全程配置 Allow、从未出票的孩子留 closed 标记；闭场后新登记同 scope 一样拒。
+先核真实 scope 与宿主归属。标记分配失败只封本 host 后续 child admission，普通审批不动；撤场或换新受理 owner 才复位。
 普通 SDK `AcceptForSession`、普通超时与允许账继续照旧。
 
 ## 借用、取消与退场
