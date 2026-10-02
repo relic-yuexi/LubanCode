@@ -80,6 +80,7 @@ DOC development/i18n.md
 DOC development/lubancore-sdk.md
 DOC development/sdk-skills.md
 DOC development/sdk-memory-recall.md
+DOC development/memory-project-commit.md
 DOC development/lubancore-builtin-search.md
 DOC development/worker-host.md
 DOC development/naming.md

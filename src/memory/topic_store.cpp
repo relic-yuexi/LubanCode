@@ -465,7 +465,8 @@ std::string Slug(std::string value) {
 namespace store {
 
 std::expected<ProjectRecallSnapshot, std::string> ReadProjectRecallSnapshot(
-    const fs::path& memory_dir, const fs::path& project_root) {
+    const fs::path& memory_dir, const fs::path& project_root, bool scan_all_topics,
+    bool verify_fingerprints) {
     constexpr std::size_t kCatalogBytes = 4 * 1024 * 1024;
     constexpr std::size_t kTopicBytes = 16 * 1024;
     constexpr std::size_t kTopicTotal = 24 * 1024 * 1024;
@@ -535,9 +536,10 @@ std::expected<ProjectRecallSnapshot, std::string> ReadProjectRecallSnapshot(
                     !text_ok(item["file"].get<std::string>())) return failure("memory.read.invalid_catalog");
                 auto parsed = ParseStoredEntry(item, item["file"].get<std::string>());
                 if (!parsed || parsed->public_entry.scope.level != "project") return failure("memory.read.invalid_catalog");
-                result.entries.push_back(std::move(*parsed));
+                if (!scan_all_topics) result.entries.push_back(std::move(*parsed));
             }
-        } else {
+        }
+        if (!use_catalog || scan_all_topics) {
             for (const auto* folder : {"facts", "preferences", "feedback"}) {
                 const auto path = memory_dir / folder;
                 ec.clear();
@@ -602,6 +604,7 @@ std::expected<ProjectRecallSnapshot, std::string> ReadProjectRecallSnapshot(
             for (auto it = stored.fingerprints.begin(); it != stored.fingerprints.end(); ++it) {
                 if (!IsSafeRelativePath(it.key()) || !text_ok(it.key()) || !it.value().is_string() || !text_ok(it.value().get<std::string>()))
                     return failure("memory.read.invalid_fingerprints");
+                if (!verify_fingerprints) continue;
                 const auto path = project_root / Utf8Path(it.key());
                 ec.clear();
                 const auto status = fs::symlink_status(path, ec);
@@ -791,9 +794,33 @@ bool LayerHasEntry(const fs::path& memory_dir, const std::string& id) {
     return false;
 }
 
-std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::json& job,
-                                                             const fs::path& memory_dir,
-                                                             const fs::path& project_root) {
+std::expected<SaveRequest, std::string> ParseUpsertJob(const nlohmann::json& job, bool strict) {
+    if (!job.is_object()) return std::unexpected("memory.commit.invalid_job");
+    if (strict) {
+        for (const auto* key : {"kind", "id", "title", "summary", "content", "source_session",
+                                "confidence", "expires_at", "occurred_at"})
+            if (job.contains(key) && !job[key].is_string())
+                return std::unexpected("memory.commit.invalid_job");
+        for (const auto* key : {"keywords", "paths"}) {
+            if (!job.contains(key)) continue;
+            if (!job[key].is_array()) return std::unexpected("memory.commit.invalid_job");
+            for (const auto& item : job[key])
+                if (!item.is_string()) return std::unexpected("memory.commit.invalid_job");
+        }
+        if (job.contains("scope")) {
+            if (!job["scope"].is_object()) return std::unexpected("memory.commit.invalid_job");
+            for (const auto* key : {"level", "kind", "value"})
+                if (job["scope"].contains(key) && !job["scope"][key].is_string())
+                    return std::unexpected("memory.commit.invalid_job");
+        }
+        if (job.contains("evidence")) {
+            if (!job["evidence"].is_array()) return std::unexpected("memory.commit.invalid_job");
+            for (const auto& item : job["evidence"])
+                if (!item.is_object() || !item.contains("path") || !item["path"].is_string() ||
+                    (item.contains("symbol") && !item["symbol"].is_string()))
+                    return std::unexpected("memory.commit.invalid_job");
+        }
+    }
     SaveRequest request;
     auto kind = ParseMemoryKind(job.value("kind", std::string()));
     if (!kind.has_value()) return std::unexpected(kind.error());
@@ -830,12 +857,16 @@ std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::jso
         return std::unexpected(valid.error());
     }
 
-    std::vector<StoredEntry> entries = ScanTopics(memory_dir);
+    return request;
+}
+
+PreparedUpsert PrepareUpsert(const SaveRequest& request, const std::vector<StoredEntry>& entries,
+                            nlohmann::json fingerprints, std::string committed_at) {
     std::string id = request.id;
     if (id.empty()) id = MemoryKindName(request.kind) + "." + Slug(request.title);
 
-    StoredEntry* existing = nullptr;
-    for (auto& entry : entries) {
+    const StoredEntry* existing = nullptr;
+    for (const auto& entry : entries) {
         if (entry.public_entry.id == id) {
             existing = &entry;
             break;
@@ -853,7 +884,7 @@ std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::jso
     updated.public_entry.keywords = request.keywords;
     updated.public_entry.paths = request.paths;
     updated.public_entry.status = "active";
-    updated.public_entry.updated_at = NowIsoUtc();
+    updated.public_entry.updated_at = std::move(committed_at);
     // 保存即一次核验:盖 last_verified_at。schema 3 新字段一并落定:name 从
     // id 切出来,created_at 保住旧值(老主题用其 updated_at 补)。
     updated.public_entry.last_verified_at = updated.public_entry.updated_at;
@@ -886,8 +917,43 @@ std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::jso
     updated.public_entry.schema = 3;
     updated.public_entry.name = NameFromId(id, MemoryKindName(request.kind));
     updated.public_entry.file = CanonicalTopicFile(request.kind, updated.public_entry.name);
+    updated.fingerprints = std::move(fingerprints);
+    const auto body = ApplyTimeAnchor(request.content, updated.public_entry.occurred_at);
+    const auto text = BuildTopicText(updated, body);
+    // The derived catalog must see the same schema-3 normalization as a later
+    // ScanTopics (notably paths merged into evidence). Legacy rebuild and the
+    // new gate therefore index the same typed entry and body.
+    if (auto parsed = frontmatter::Parse(text); parsed) {
+        const auto file = updated.public_entry.file;
+        updated.public_entry = std::move(parsed->entry);
+        updated.public_entry.file = file;
+        updated.public_entry.content = std::move(parsed->body);
+    } else {
+        updated.public_entry.content = body;
+    }
+    return PreparedUpsert{std::move(updated), previous_file, text};
+}
+
+PreparedIndex PrepareMemoryIndex(const std::vector<StoredEntry>& entries,
+                                bool user_layer, const std::string& generated_at) {
+    nlohmann::json catalog{{"schema", 1}, {"generated_at", generated_at}, {"entries", nlohmann::json::array()}};
+    for (const auto& entry : entries) {
+        auto item = EntryMetadata(entry);
+        item["file"] = entry.public_entry.file;
+        catalog["entries"].push_back(std::move(item));
+    }
+    return {catalog.dump(2) + "\n", BuildIndex(entries, user_layer ? "user" : "project")};
+}
+
+std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::json& job,
+                                                             const fs::path& memory_dir,
+                                                             const fs::path& project_root) {
+    auto parsed = ParseUpsertJob(job);
+    if (!parsed) return std::unexpected(parsed.error());
+    const auto& request = *parsed;
+    auto entries = ScanTopics(memory_dir);
     // 指纹盖住证据路径 ∪ paths(schema 3 里两者本就该是一份)。
-    updated.fingerprints = nlohmann::json::object();
+    auto fingerprints = nlohmann::json::object();
     std::vector<std::string> fingerprint_paths = request.paths;
     for (const MemoryEvidence& proof : request.evidence) {
         if (std::find(fingerprint_paths.begin(), fingerprint_paths.end(), proof.path) ==
@@ -897,13 +963,14 @@ std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::jso
     }
     for (const std::string& relative : fingerprint_paths) {
         const std::string hash = FileFingerprint(project_root / Utf8Path(relative));
-        if (!hash.empty()) updated.fingerprints[relative] = hash;
+        if (!hash.empty()) fingerprints[relative] = hash;
     }
 
+    const auto prepared = PrepareUpsert(request, entries, std::move(fingerprints), NowIsoUtc());
+    const auto& updated = prepared.entry;
+    const auto& previous_file = prepared.previous_file;
     const fs::path topic = memory_dir / Utf8Path(updated.public_entry.file);
-    auto written = AtomicWrite(topic,
-                               BuildTopicText(updated, ApplyTimeAnchor(request.content,
-                                                                       updated.public_entry.occurred_at)));
+    auto written = AtomicWrite(topic, prepared.topic_text);
     if (!written.has_value()) return std::unexpected(written.error());
     // 旧文件名不同(老格式或换名)才清;同一把项目锁里先写新再删旧,中途
     // 失败旧文件仍在,新文件不半截落地。
@@ -1215,16 +1282,15 @@ std::expected<void, std::string> RebuildMemoryIndex(const fs::path& memory_dir, 
     std::vector<std::string> warnings;
     const char* layer = user_layer ? "user" : "project";
     const auto entries = store::ScanTopics(memory_dir, &warnings, layer);
-    nlohmann::json catalog{{"schema", 1}, {"generated_at", NowIsoUtc()}, {"entries", nlohmann::json::array()}};
-    for (const auto& entry : entries) {
-        nlohmann::json item = EntryMetadata(entry);
-        item["file"] = entry.public_entry.file;
-        catalog["entries"].push_back(std::move(item));
+    auto prepared = store::PrepareMemoryIndex(entries, user_layer, NowIsoUtc());
+    if (!warnings.empty()) {
+        auto catalog = nlohmann::json::parse(prepared.catalog);
+        catalog["warnings"] = warnings;
+        prepared.catalog = catalog.dump(2) + "\n";
     }
-    if (!warnings.empty()) catalog["warnings"] = warnings;
-    auto catalog_write = AtomicWrite(memory_dir / ".state" / "catalog.json", catalog.dump(2) + "\n");
+    auto catalog_write = AtomicWrite(memory_dir / ".state" / "catalog.json", prepared.catalog);
     if (!catalog_write.has_value()) return catalog_write;
-    return AtomicWrite(memory_dir / "index.md", BuildIndex(entries, layer));
+    return AtomicWrite(memory_dir / "index.md", prepared.index);
 }
 
 }  // namespace lubancode::memory
