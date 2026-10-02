@@ -60,6 +60,9 @@ raw persisted 后才有有效版本。selected 只引本父 local persisted 字�
 selected 与 tool message 归同一 action/attempt/turn，次序严格；
 tool role 与本场 action 号对齐；V3 `message.tool_call_id` 存 local action，
 provider 原号沿声明与现行 wire 映射校准。采用现行 summary/preview 规则。
+普通有效正文沿同一中立 `PreviewFromPersistedMaterials`、`BuildToolPreview` 重建；
+summary 沿纯 ledger 校原正文、候选、实际请求与来源。极端 output_index 当前
+未存六键身份，明回 `Incomplete`，不能凭路径猜摘要后标完整。
 后续真实 prepared 必须在采用之后，system/revision/输入链通过共用
 `CheckPreparedAgainstChain`；须确实含这一支 tool message 或合法派生版本。
 有 message 没 admission，或 admission 后没有下一真实请求，都不算模型已消费。
@@ -92,7 +95,12 @@ SDK 和普通 reader 不换默认策略；只添私有只读入口和明确值�
 selected 晚于 message、错 role/call-id、未采用、错 prepared revision 各验明拒。
 改账反例须先经过 common reader/Verify；不能把 reader 先拒伪卷算成新校准验收。
 每次调用前后核模型/工具计数和所有原件字节不变，合法未完成窗不重放。
-新原生来源与实际案数完成后再登记精确 focused/ASan 门，旧来源与标记全部保留。
+实际来源 `tests/unit/runtime/test_child_history_adoption.cpp` 固定 8 案，
+focused 必需来源共 21 册、ASan 共 26 册。两门逐来源登记、JUnit 与完整
+LastTest 实跑非零，并核 8 枚 `[child-adoption-path]` 标记各一次。
+旧父观察 8 案、12 枚通用标记和 Unix 别名标记全部保留。
+`tests/support/child_observation_fixture.hpp` 只归实际内部测试；SDK-only 纯数据
+边界册核其测试豁免、错误宿主目标和经夹具偷带 App 头。
 公开 SDK 安装消费者不宣称已经有 child API；本笔真实验收走中立实际运行栈。
 
 本地只查源码、文档、AST 和纯数据；configure、编译、CTest 与原生探针均走远端 CI。

@@ -150,3 +150,11 @@ subagent_child)由 python 生成器产出、`scripts/validate_trajectory_v3.py`
 | T16 撤 0 分账(T16 批) | `tests/CMakeLists.txt` 的 `LUBANCODE_TESTS_V3_DEFAULT_BOOKS` 清单 + 注册循环分账;`scripts/tests/ctest_format_registry.py`(分账表 + CI 门);`scripts/tests/report_baseline.py`(勾五基线记账,CI 步骤消费);default_smoke 增子代理/CLI compact 管理入口两案、app_server operation_idempotency 增未设变量冒烟案 | 见 §二"撤 0 分账"表 |
 | T00 夹具/清册 | 本文档 + `unit.trajectory_v3.test_v3_shared_fixtures` | — |
 | T14(Insights 接入 v3,B2) | `src/insights/v3_facts.*`(领域读模型)、integrity_gate/prompt_auditor/friction_classifier/session_analyzer 的 v3 半场、summary format/limitations、EvidenceItem.seq、redaction allowlist | `unit.insights.insights_v3_pipeline`(gate 分型/partial/摩擦 v3/prompt v3 规则/分析去重/字节稳定/schema 往返) |
+
+### 严格子结果历史校准实际来源
+
+- 生产：`src/trajectory/v3/child_adoption.hpp/.cpp`，私有只读四态；普通 SDK/Reader 不换默认路径。
+- 共用纯预览：`src/trajectory/v3/result_store.hpp/.cpp`；runtime 旧名称引用同一函数。
+- 原生：`tests/unit/runtime/test_child_history_adoption.cpp` 固定 8 案；真实 AgentTool/loop、两份账、PostHook、降档/compact 和逐件原文。
+- 同夹具：`tests/support/child_observation_fixture.hpp`；原父观察 8 案与 12+Unix 标记不减。
+- SDK-only/组合 focused 共 21 册；ASan 必需来源共 26 册。登记、完整 LastTest、JUnit、8 枚采用标记均须本头远端实证；本地未运行原生。
