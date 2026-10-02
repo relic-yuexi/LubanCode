@@ -34,6 +34,7 @@
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
 #include "runtime/async_tool_runtime.hpp"  // 异步工具 P2:任务域批次闸门/投递规划(子代理宿主)
+#include "runtime/execution_owner.hpp"
 #include "runtime/id_authority.hpp"    // ProcessIdAuthority:后台任务 bgtask 前缀号(同一发号口)
 #include "runtime/turn_runtime.hpp"    // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗
 #include "tools/agent_message_tool.hpp"  // scoped agent_message(P1-1:子代理只投自己直接孩子)
@@ -2205,14 +2206,14 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
     if (resolved == nullptr && state->context_window_tokens > 0) {
         task_profile.context_window_tokens = state->context_window_tokens;
     }
-    // 活度账 + 诊断日志的包装后端:子代理的每次模型请求都从这里过。必须
-    // 在 sub_agent 之前声明(它引用的寿命盖过 loop);上下文压缩那一路
-    //(CompactTurnPartitioned)仍用原 backend,不混进任务的阶段账。
-    std::optional<SubagentTraceBackend> traced_storage;
+    // 包装与转发表先备齐，随后才复制会借资源的 profile。若准备/复制抛错，
+    // profile 先撤借用，资源后退场；此处不改变原 caller 拥有权。
+    runtime::ChildExecutionResources child_resources{
+        backend, task_registry, nullptr, std::move(scoped_registry.registry)};
     if (task != nullptr) {
-        traced_storage.emplace(backend, state->coordinator->ledger(), task);
+        child_resources.backend_wrapper =
+            std::make_unique<SubagentTraceBackend>(backend, state->coordinator->ledger(), task);
     }
-    api::Backend& loop_backend = traced_storage.has_value() ? *traced_storage : backend;
     agent::AgentProfile task_agent_profile = resolved != nullptr ? resolved->profile : state->agent_profile;
     task_agent_profile.runtime = std::move(task_profile);
     task_agent_profile.system_prompt = system_prompt;
@@ -2288,7 +2289,11 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
     if (resolved != nullptr && !resolved->soul) {
         task_agent_profile.soul.clear();
     }
-    agent::Agent sub_agent(loop_backend, effective_registry, std::move(task_agent_profile));
+    // 只消费孩子自己的包装与转发表。effective_registry/child_env 指向的
+    // 表原址不变，底层 backend、工具原件及 MCP 仍借 caller；协调器不替
+    // caller 拥有这些资源。Agent 的构造/失败清理/先销毁与主场共用。
+    runtime::ExecutionOwner child_execution(std::move(child_resources), std::move(task_agent_profile));
+    agent::Agent& sub_agent = child_execution.agent();
     // 子代理的项目记忆召回(存储 v2 P0-3 §6.2):派工当刻检索一次,整段
     // 冻结下发——子代理不自动扫整库;child_run_id 进快照事件的
     // relations.child_run_id,父账说得清发给了哪只孩子。provider 没设
@@ -2397,8 +2402,6 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
             return message;
         };
     }
-    sub_agent.SetWiring(std::move(sub_wiring));
-
     // 统一台账回调:进 TaskRecord 的任务(前台后台都是),工具次数/usage/
     // 实时输出全写快照;前台任务再把确认/打印/usage/pre/post 钩子原样转发
     // 给父级。后台(foreground_hooks 为空)没有可停下来问话的终端,需确认
@@ -3333,7 +3336,10 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
         trajectory->turn_bridge().BeginTurn("turn-1", "external_user");
         trajectory->turn_bridge().RecordInput(initial_input);
     }
-    agent::DriveReport drive = agent::DriveTurn(sub_agent, turn_wiring, std::move(initial_input), drive_options);
+    // 最后装回合借用，先于桥/事件/预算/取消链退场撤线。整段 Drive 与
+    // Stop 续跑共用这一 scope；异常也先清 Agent 回调，再清 TurnWiring。
+    runtime::ExecutionTurnScope child_turn(child_execution, std::move(sub_wiring), std::move(turn_wiring));
+    agent::DriveReport drive = agent::DriveTurn(sub_agent, child_turn.wiring(), std::move(initial_input), drive_options);
     // 取消链收口(合流前的次序:join 在 Stop 续跑环之前;合并旗 Stop 时
     // 置真,续跑轮拿到即收——与旧行为一致)。
     cancel_chain.Stop();
@@ -3439,7 +3445,7 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
         }
         // 续跑轮的步数/预算/打断账由 RunStopContinuation 直接并进 drive
         //(harness 只并增量,主账不重算)。
-        agent::RunStopContinuation(sub_agent, turn_wiring, stop_options, drive);
+        agent::RunStopContinuation(sub_agent, child_turn.wiring(), stop_options, drive);
         if (task != nullptr) {
             std::lock_guard<std::mutex> lock(state->coordinator->ledger().mutex);
             task->snapshot.steps_used = drive.steps_used;

@@ -27,6 +27,7 @@ SHARED_SDK_TEST_SOURCES = {
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",
     "tests/unit/runtime/test_session_execution.cpp",
+    "tests/unit/runtime/test_execution_owner.cpp",
     "tests/unit/runtime/test_scoped_turn_bindings.cpp",
 }
 SEARCH_PROBE_TARGET = "lubancore_sdk_search_probe"
