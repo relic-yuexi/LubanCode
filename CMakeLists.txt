@@ -1045,6 +1045,7 @@ add_library(lubancode_runtime STATIC
   src/runtime/assembly/session_resources.cpp
   src/runtime/execution_owner.cpp
   src/runtime/session_execution.cpp
+  src/runtime/scoped_approval.cpp
   # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
   src/runtime/runtime_contract.cpp
   # 会话管理器单第六步:会话查询/搬删的 runtime 侧命令服务(合同消费方)。

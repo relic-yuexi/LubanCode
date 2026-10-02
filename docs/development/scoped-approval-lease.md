@@ -2,7 +2,7 @@
 
 [开发手册](README.md) · [前台调用上下文](child-foreground-context.md) · [SDK 子 Agent 合同](sdk-subagents.md)
 
-这页先定 E2 首笔合同，源码尚未落地。基线为 E1 `24622d5f`。
+这页定 E2 首笔合同。候选代码已写，原生验收尚待远端。基线为 E1 `24622d5f`。
 首笔只补中立等待能力、逐票收票和 SDK 宿主参考实现。
 子轮 hook、真实声明身份、规则 floor 与执行前取消检查留到第二笔。
 公开 SubAgent SDK、后台异步审批、跨进程票据不在本笔。
@@ -81,4 +81,4 @@ publisher、撤票回调和最后一份用户 capture 都在锁外退场。
 本地只跑静态、纯数据与文档检查，不 configure、编译、CTest 或执行原生夹具。
 
 现有依据：`src/runtime/interaction.hpp`、`src/sdk/core.cpp` 的 `ApprovalFuture`/pending，
-以及 `src/agent/loop.cpp` 审批先于执行的次序。实现未落地前，这页只记合同。
+以及 `src/agent/loop.cpp` 审批先于执行的次序。首笔通过也不代表子轮异步审批已经接通。

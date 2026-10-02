@@ -27,6 +27,7 @@
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "sdk/adapters.hpp"
+#include "sdk/approval.hpp"
 #include "sdk/callback_scope.hpp"
 #include "sdk/extensions.hpp"
 #include "sdk/results.hpp"
@@ -204,31 +205,6 @@ std::string Status(OperationState state) {
     }
 }
 
-class ApprovalFuture final : public rt::InteractionFuture {
-public:
-    explicit ApprovalFuture(std::chrono::milliseconds timeout) : timeout_(timeout) {}
-    std::optional<rt::ApprovalResponse> WaitApproval() override {
-        std::unique_lock lock(mutex_);
-        if (!cv_.wait_for(lock, timeout_, [&] { return done_; })) done_ = true;
-        return response_;
-    }
-    std::optional<rt::QuestionResponse> WaitQuestion() override { return std::nullopt; }
-    bool Resolve(std::optional<rt::ApprovalResponse> response) {
-        std::lock_guard lock(mutex_);
-        if (done_) return false;
-        response_ = std::move(response);
-        done_ = true;
-        cv_.notify_all();
-        return true;
-    }
-    bool pending() const { std::lock_guard lock(mutex_); return !done_; }
-private:
-    mutable std::mutex mutex_;
-    std::condition_variable cv_;
-    std::chrono::milliseconds timeout_;
-    bool done_ = false;
-    std::optional<rt::ApprovalResponse> response_;
-};
 } // namespace
 
 struct EventStream::Impl {
@@ -326,10 +302,7 @@ struct Session::Impl final : rt::InteractionBroker {
     std::shared_ptr<CloseErrors> close_errors;
     std::atomic<bool> interrupt{false};
     std::thread worker;
-    mutable std::mutex approval_mutex;
-    struct Pending { Approval approval; std::shared_ptr<ApprovalFuture> future; };
-    std::map<std::string, Pending> pending;
-    std::set<std::string> allowed;
+    detail::SessionApprovals approvals;
 
     ~Impl() { (void)Close(); }
 
@@ -347,7 +320,6 @@ struct Session::Impl final : rt::InteractionBroker {
     }
 
     std::shared_ptr<rt::InteractionFuture> AskApproval(const rt::ApprovalRequest& request) override {
-        auto future = std::make_shared<ApprovalFuture>(options.approval_timeout);
         Approval approval;
         // Session-local counters start from one. Scope the opaque request ID by
         // the session and durable turn so another session (or a stale reply from
@@ -360,11 +332,12 @@ struct Session::Impl final : rt::InteractionBroker {
         approval.input_json = request.input.dump();
         approval.cwd = options.cwd;
         approval.reason = request.reason;
-        {
-            std::lock_guard lock(approval_mutex);
-            if (interrupt.load()) { future->Resolve(std::nullopt); return future; }
-            pending.emplace(approval.request_id, Pending{approval, future});
-        }
+        bool registered = false;
+        auto future = approvals.Register(approval, options.approval_timeout, &interrupt, &registered);
+        // Keep the old interrupt check under the shared pending lock. A ticket
+        // cancelled concurrently can still publish an obsolete event, just as
+        // before; resolution remains stale and cannot revive that ticket.
+        if (!registered) return future;
         Event event;
         event.kind = "approval_requested";
         event.operation_id = approval.operation_id;
@@ -373,24 +346,14 @@ struct Session::Impl final : rt::InteractionBroker {
         return future;
     }
     std::shared_ptr<rt::InteractionFuture> AskQuestion(const rt::QuestionRequest&) override {
-        auto future = std::make_shared<ApprovalFuture>(std::chrono::milliseconds(0));
-        future->Resolve(std::nullopt);
-        return future; // ask_user is not admitted by this SDK version
+        return detail::SessionApprovals::CancelledFuture(); // ask_user is not admitted by this SDK version
     }
     bool ResolveApproval(const rt::InteractionRequestId& id, const rt::ApprovalResponse& response) override {
-        std::lock_guard lock(approval_mutex);
-        auto it = pending.find(id.value);
-        if (it == pending.end()) return false;
-        const bool resolved = it->second.future->Resolve(response);
-        if (resolved && response.decision == rt::InteractionDecision::AcceptForSession) allowed.insert(it->second.approval.tool_name);
-        pending.erase(it);
-        return resolved;
+        return approvals.Resolve(id.value, response);
     }
     bool AnswerQuestion(const rt::InteractionRequestId&, const rt::QuestionResponse&) override { return false; }
     void CancelApprovals() {
-        std::lock_guard lock(approval_mutex);
-        for (auto& [id, entry] : pending) { (void)id; entry.future->Resolve(std::nullopt); }
-        pending.clear();
+        approvals.CancelAll();
     }
 
     Result<void> Initialize() {
@@ -1016,7 +979,7 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         wiring.on_permission_evaluate = [&](const std::string&, const std::string& name,
             lubancode::tools::ApprovalClass approval_class, const Json& arguments, const rt::ToolHookDecision& pre) {
-            std::lock_guard lock(approval_mutex);
+            auto allowed = approvals.AllowedTools();
             rt::PermissionContext context;
             context.mode = Mode(options.approval_mode);
             context.always_allowed = &allowed;
@@ -1182,6 +1145,7 @@ struct Session::Impl final : rt::InteractionBroker {
                 if (pop.status == rt::SessionService::PendingPop::Status::WriteFailed) { broken = true; cv.notify_all(); break; }
                 if (pop.status != rt::SessionService::PendingPop::Status::Ok) continue;
                 active_operation = pop.input.operation_id;
+                approvals.SetOperationOwner(session_id, active_operation);
                 active_turn_id.clear();
                 skip = closing || cancelled.contains(active_operation);
                 interrupt.store(skip);
@@ -1216,7 +1180,7 @@ struct Session::Impl final : rt::InteractionBroker {
             interrupt.store(true);
             cv.notify_all();
         }
-        CancelApprovals();
+        approvals.Close();
     }
     void RequestExecutionShutdown() {
         std::shared_ptr<rt::SessionService> service_to_stop;
@@ -1362,10 +1326,7 @@ Result<std::shared_ptr<EventStream>> Session::Subscribe(std::size_t capacity) {
     return std::shared_ptr<EventStream>(new EventStream(std::move(state)));
 }
 std::vector<Approval> Session::PendingApprovals() const {
-    std::lock_guard lock(impl_->approval_mutex);
-    std::vector<Approval> result;
-    for (const auto& [id, entry] : impl_->pending) { (void)id; if (entry.future->pending()) result.push_back(entry.approval); }
-    return result;
+    return impl_->approvals.Pending();
 }
 Result<void> Session::ResolveApproval(std::string id, ApprovalDecision decision, std::string reason) {
     if (!impl_->ResolveApproval({std::move(id)}, {Decision(decision), std::move(reason)})) return std::unexpected(Failure("stale_request_id"));
