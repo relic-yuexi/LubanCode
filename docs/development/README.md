@@ -41,3 +41,4 @@ git diff --check
 - [前台子审批与父观察组合](child-approval-observation.md)
 - [公开子 Agent、Memory CAS 与忙锁验收组合](sdk-child-cas-integration.md)
 - [SDK 前台子 Agent 装配](sdk-subagent-assembly.md)
+- [结果仓 Windows 原生路径入口](result-store-windows-io.md)
