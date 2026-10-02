@@ -32,6 +32,10 @@ SHARED_SDK_TEST_SOURCES = {
 }
 SEARCH_PROBE_TARGET = "lubancore_sdk_search_probe"
 SEARCH_PROBE_SOURCE = "tests/support/sdk_search_probe.cpp"
+# Real private implementations compiled into the SDK reference-test executable,
+# rather than exposed as additional DLL ABI. No other SDK implementation gets
+# this testing-only exception.
+PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp"}
 TERMINAL_PATH = re.compile(r"^src/platform/(?:console|clipboard|hidden_input|terminal_batch)(?:[_.]|$)")
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"\n]+)[>"]', re.MULTILINE)
 # Keep strings intact while removing comments; URL/regex literals are not comments.
@@ -155,6 +159,11 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
     def check_project_path(name: str, owner: str) -> None:
         if host_path(name):
             violations.append(f"target {owner} includes host source {name}")
+        if owner == "lubancore_sdk_tests" and name.startswith("src/sdk/") and name.endswith(".cpp"):
+            if not expect_testing:
+                violations.append(f"testing is OFF but private SDK reference is compiled: {name}")
+            elif name not in PRIVATE_SDK_TEST_IMPLEMENTATIONS:
+                violations.append(f"unregistered private SDK reference implementation: {name}")
         if name.startswith("tests/"):
             if not expect_testing:
                 violations.append(f"testing is OFF but target {owner} includes {name}")

@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 
 REQUIRED = {
     "sdk.focused.lubancore_session",
+    "sdk.focused.lubancore_scoped_approval",
     "sdk.focused.lubancore_builtin_search",
     "sdk.focused.lubancore_lifecycle",
     "sdk.focused.lubancore_host_boundary",
@@ -88,6 +89,8 @@ def main():
             raise RuntimeError("SDK memory-save native roster differs from 12 cases")
         if case.attrib["name"] == "sdk.focused.execution_owner" and int(counts[0]) != 7:
             raise RuntimeError("Shared execution-owner native roster differs from 7 cases")
+        if case.attrib["name"] == "sdk.focused.lubancore_scoped_approval" and int(counts[0]) != 14:
+            raise RuntimeError("Scoped approval native roster differs from 14 cases")
     print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
 
 

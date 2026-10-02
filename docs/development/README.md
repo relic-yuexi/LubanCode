@@ -12,6 +12,7 @@
 - [Runner 就绪探针与失败原件](runner-probe-evidence.md)
 - [后台子代理线程启动收口](agent-thread-start-cleanup.md)
 - [前台子 Agent 本次调用上下文](child-foreground-context.md)
+- [可取消审批与逐票 lease 合同](scoped-approval-lease.md)
 - [SDK 依赖瘦身：更新器归宿主](sdk-updater-boundary.md)
 - [测试指南](testing.md)
 - [分布式工程协作与远端验收](cluster-collaboration.md)
