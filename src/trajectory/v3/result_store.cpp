@@ -7,6 +7,7 @@
 #include <set>
 
 #include "hooks/hash.hpp"
+#include "platform/paths.hpp"
 
 namespace lubancode::trajectory::v3 {
 
@@ -350,6 +351,32 @@ PreviewResult BuildToolPreview(const PreviewRequest& request) {
 // ---------------------------------------------------------------------------
 // 结果仓
 // ---------------------------------------------------------------------------
+
+PreviewRequest PreviewFromPersistedMaterials(const ResultStore::PersistRequest& material,
+    const ResultStore::PersistedResult& persisted, std::uint64_t budget,
+    const std::filesystem::path& session_dir) {
+    PreviewRequest request;
+    request.max_preview_bytes = budget;
+    for (const auto& output : material.outputs) {
+        PreviewChannel channel;
+        channel.channel = output.channel;
+        channel.text = output.data;
+        channel.capture_complete = output.capture_complete;
+        channel.capture_reason = output.capture_reason;
+        channel.output_bytes = output.output_bytes;
+        channel.output_bytes_lower_bound = output.output_bytes_lower_bound;
+        for (const auto& ref : persisted.result_ref) {
+            if (ref.value("kind", std::string()) == output.channel) {
+                const std::string relative = ref.value("path", std::string());
+                channel.display_path = relative.empty() ? std::string() : platform::PathToUtf8(
+                    (session_dir / platform::Utf8ToPath(relative)).lexically_normal());
+                break;
+            }
+        }
+        request.channels.push_back(std::move(channel));
+    }
+    return request;
+}
 
 namespace {
 

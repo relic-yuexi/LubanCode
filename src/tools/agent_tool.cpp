@@ -1653,7 +1653,8 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
             task->snapshot.worktree_awaiting_review = finish.awaiting_review;
             state->coordinator->ledger().Touch();
         }
-        result.AppendText(TaskLedger::UndeliveredInboxNote(task));
+        const auto inbox_note = TaskLedger::UndeliveredInboxNote(task);
+        if (!inbox_note.empty()) result.AppendText(inbox_note);
         state->coordinator->ledger().FinalizeFromToolResult(
             task, result.content,
             (invocation_cancel != nullptr && invocation_cancel->load(std::memory_order_acquire)) ||
@@ -1711,7 +1712,8 @@ Tool::Result ExecuteForegroundTask(const AgentDispatchPlan& request, ToolRegistr
     // 收尾入账:未送达的介入消息逐条列原文记进结果文本,不无声遗失;面板
     // x 停掉(task->cancel)与父轮 ESC 打断(hooks.cancel)都算取消;嵌套路
     // 没有父轮 ESC,只看自己的取消链。
-    result.AppendText(TaskLedger::UndeliveredInboxNote(task));
+    const auto inbox_note = TaskLedger::UndeliveredInboxNote(task);
+    if (!inbox_note.empty()) result.AppendText(inbox_note);
     // §5.3 弃用提示:手写 JSON 给了旧预算键,随结果带回(空串 = 没用旧键,
     // AppendText 对空串零输出)。
     if (!request.budget_deprecation_note.empty()) {
