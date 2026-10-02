@@ -182,3 +182,12 @@ owned Continue 都归内部。新增两来源固定 8+4 共 12 册，核 finite 
 CLI unset 真长卷不误拒、SDK 调高预算再开场、MAX 附近算术不回空件、真实同柄拒偷建，
 以及报告半完场、四场隔离。consumer 保基线 20；focused 实际 24→26，ASan required 29→31。
 最终从本树登记与实际来源核数，不凭旧头绿灯算验收。
+
+SDK 同 ID V3 锁前预检也沿有限主账 owned 读取与 Verify，不先走旧整卷无界读取。
+这份预检只核格式、资格与原 tail fence；它不能充当恢复采用事实。
+真正采用仍在 Acquire 后重做 Capture，祖先与 AsNew 保原路。
+预算按每份 snapshot 计，不称全生命周期累计 IO、RSS 或耗时上限。
+超帽先拒，opening participant 尚未调用，Continue 尚未打开，原账字节保留；
+宿主调高预算再 Resume，应能从真实旧账恢复。CLI nullopt 仍留原预检读取策略。
+主账保原 V3 Reader 跳过空物理行语义，计行帽仍计实际物理行；
+operations 严格读面继续拒空行与缺末换行，不沿宽容 live reader 跳坏行。
