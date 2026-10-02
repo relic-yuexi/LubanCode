@@ -3,13 +3,17 @@
 // 降档与不可表示;artifact 不可变落档与 result_ref 形状。
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "hooks/hash.hpp"
+#include "platform/paths.hpp"
 #include "trajectory/v3/result_store.hpp"
 #include "trajectory/v3/schema3.hpp"
 
@@ -73,6 +77,80 @@ ResultStore::ChannelOutput Out(std::string channel, std::string data,
     output.output_bytes = output_bytes;
     return output;
 }
+
+#ifdef _WIN32
+void CheckWindowsNativeStore(const char* marker, std::size_t target_chars) {
+    namespace fs = std::filesystem;
+    namespace platform = lubancode::platform;
+    StoreHarness harness(marker);
+    const std::string file_name = "res-000001.stdout.txt";
+    fs::path session = fs::absolute(harness.dir);
+    const auto suffix_chars = (fs::path("artifacts") / file_name).native().size() + 1;
+    REQUIRE(target_chars > suffix_chars + session.native().size() + 1);
+    const auto session_chars = target_chars - suffix_chars;
+    while (session.native().size() < session_chars) {
+        const auto remaining = session_chars - session.native().size();
+        REQUIRE(remaining >= 2);
+        auto length = std::min<std::size_t>(80, remaining - 1);
+        if (remaining - length - 1 == 1) --length;
+        session /= std::string(length, 'x');
+    }
+    std::error_code ec;
+    fs::create_directories(platform::FileIoPath(session), ec);
+    REQUIRE(ec.value() == 0);
+    const auto target = session / "artifacts" / file_name;
+    auto temp = target; temp += ".tmp";
+    REQUIRE(target.native().size() == target_chars);
+    REQUIRE(temp.native().size() == target_chars + 4);
+    if (target_chars == 247) {
+        CHECK(platform::FileIoPath(target) == target);
+        CHECK(platform::FileIoPath(temp) != temp);
+    } else {
+        CHECK(target.native().size() > 260);
+        CHECK(platform::FileIoPath(target) != target);
+    }
+    auto store = ResultStore::Open(session);
+    REQUIRE(store.has_value());
+    ResultStore::PersistRequest request;
+    request.result_kind = "process";
+    request.tool_call_id = "action-000001";
+    request.attempt = 1;
+    request.execution_event_ref = "evt-000004";
+    request.outputs.push_back(Out("stdout", "actual native channel", 21));
+    const auto first = store->Persist(request);
+    REQUIRE(first.ok);
+    REQUIRE(first.result_ref.size() == 2);
+    CHECK(first.result_id == "res-000001");
+    for (const auto& ref : first.result_ref) {
+        const auto relative = ref.at("path").get<std::string>();
+        REQUIRE(relative.starts_with("artifacts/"));
+        CHECK(relative.find("\\\\?\\") == std::string::npos);
+        const auto bytes = ReadFile(platform::FileIoPath(session / relative));
+        CHECK(bytes.size() == ref.at("bytes").get<std::uint64_t>());
+        CHECK(lubancode::hooks::Sha256Hex(bytes) == ref.at("sha256").get<std::string>());
+    }
+    CHECK(ReadFile(platform::FileIoPath(target)) == "actual native channel");
+    const auto metadata = nlohmann::json::parse(ReadFile(platform::FileIoPath(session / "artifacts" / "res-000001.json")));
+    CHECK(metadata.at("result_id").get<std::string>() == "res-000001");
+    CHECK(metadata.at("tool_call_id").get<std::string>() == "action-000001");
+    const auto listing = store->PersistListing("res-000001.index.txt", "immutable actual listing");
+    REQUIRE(listing.has_value());
+    CHECK(*listing == "artifacts/res-000001.index.txt");
+    const auto repeated = store->PersistListing("res-000001.index.txt", "overwrite must fail");
+    CHECK_FALSE(repeated.has_value());
+    CHECK(ReadFile(platform::FileIoPath(session / *listing)) == "immutable actual listing");
+    auto reopened = ResultStore::Open(session);
+    REQUIRE(reopened.has_value());
+    const auto second = reopened->Persist(request);
+    REQUIRE(second.ok);
+    CHECK(second.result_id == "res-000002");
+    CHECK(ReadFile(platform::FileIoPath(target)) == "actual native channel");
+    CHECK_FALSE(fs::exists(platform::FileIoPath(temp)));
+    std::cout << "[result-store-path-length] " << marker << " target=" << target.native().size()
+              << " temporary=" << temp.native().size() << '\n';
+    std::cout << "[result-store-path] " << marker << '\n';
+}
+#endif
 
 }  // namespace
 
@@ -343,6 +421,14 @@ TEST_CASE("结果仓:metadata 与通道各就位,result_ref 六键数组") {
     auto second = store->Persist(request);
     REQUIRE(second.ok);
     CHECK(second.result_id == "res-000002");
+#ifdef _WIN32
+    SUBCASE("actual native target exceeds ordinary Win32 path limit") {
+        CheckWindowsNativeStore("target-extended", 340);
+    }
+    SUBCASE("temporary suffix independently crosses FileIoPath threshold") {
+        CheckWindowsNativeStore("temporary-threshold", 247);
+    }
+#endif
 }
 
 TEST_CASE("空通道且收全:不造空文件,描述记 bytes=0") {
