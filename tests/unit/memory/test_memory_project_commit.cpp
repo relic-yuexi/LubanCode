@@ -127,6 +127,10 @@ TEST_CASE("project commit: typed create confirms every file and preserves CLI ou
     CHECK(catalog.at("entries")[0].at("paths").get<std::vector<std::string>>() == view->entries[0].public_entry.paths);
     CHECK(catalog.at("entries")[0].at("evidence")[0].at("path").get<std::string>() == "build.txt");
     CHECK(Read(rig.context.memory_directory / "index.md").find("facts/build.md") != std::string::npos);
+    const auto cli_receipt = memory::ReadMemorySaveReceipt(rig.context.lifecycle_root,
+                                                         rig.context.operation_id);
+    CHECK(cli_receipt.committed);
+    CHECK(cli_receipt.error.empty());
 }
 
 TEST_CASE("project commit: update keeps creation history and confirms old-name removal") {

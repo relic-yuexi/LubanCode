@@ -25,6 +25,7 @@ namespace {
 namespace fs = std::filesystem;
 
 std::string ProjectCommitError(const ProjectCommitReceipt& receipt) {
+    if (receipt.state == ProjectCommitState::Committed) return {};
     if (receipt.state == ProjectCommitState::Indeterminate) {
         return "memory.commit.indeterminate: 部分写入/结果未确认，不能自动重试; " +
                receipt.error_code + ": " + receipt.error;
