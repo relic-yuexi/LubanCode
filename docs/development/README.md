@@ -37,3 +37,4 @@ git diff --check
 ```
 - [前台子执行组合验收](child-sdk-integration.md)
 - [前台子审批与父观察组合](child-approval-observation.md)
+- [公开子 Agent、Memory CAS 与忙锁验收组合](sdk-child-cas-integration.md)

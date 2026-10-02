@@ -1,6 +1,7 @@
 # 官方文档。每行一页；路径从 docs/ 起算。
 DOC README.md
 DOC development/child-approval-observation.md
+DOC development/sdk-child-cas-integration.md
 
 # 上手与排错
 DOC getting-started/quickstart.md
