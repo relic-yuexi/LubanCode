@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -183,7 +184,7 @@ public:
 
     // 会话收场(单子 §6.2):进 Closing 后任何 handle 再派工都回稳定
     // session_closing,不新起线程。取消/收柄由 JoinAllBounded 办。
-    void RequestClose() { closing_.store(true, std::memory_order_release); }
+    void RequestClose();
     bool closing() const { return closing_.load(std::memory_order_acquire); }
 
     // handle 的派工口(closing 在这判,admission 在台账注册事务里判)。
@@ -195,8 +196,17 @@ public:
     // Failed/Cancelled 只是账面收口,证明不了 OS 线程已经 return;拿业务
     // 终态去 join 还在跑的线程,join 会无期限押死孵化路(监督器强收后正是
     // 这个形状)。
-    void TrackThread(int task_id, std::thread thread,
+    using ThreadBody = std::function<void()>;
+    using ThreadFactory = std::function<std::thread(ThreadBody)>;
+    // Reserve an owner before creating any live thread. false means closing won
+    // admission; allocation/factory failures propagate with no live thread lost.
+    bool StartThread(int task_id, ThreadBody body,
                      std::shared_ptr<std::atomic<bool>> exit_receipt);
+    // Internal deterministic seam, not a public SDK feature. A factory returns
+    // one joinable thread or throws before creating it; it must not synchronously
+    // close this coordinator from inside the startup callback.
+    void SetThreadFactoryForTesting(ThreadFactory factory);
+    bool HasReapingThreadForTesting();
     void ReapExitedThreads();
 
     // 退出兜底:广播取消 -> 逐线程按退出回执有界等 -> 回执在手就 join,
@@ -224,8 +234,12 @@ private:
         int task_id = 0;
         std::thread thread;
         std::shared_ptr<std::atomic<bool>> exit_receipt;  // worker 最后一笔置位
+        bool starting = true;  // protected by threads_mutex_
+        bool reaping = false;  // Close still owns/waits for a lock-free join
     };
-    std::vector<TaskThreadEntry> threads_;
+    std::vector<std::shared_ptr<TaskThreadEntry>> threads_;
+    std::condition_variable threads_ready_;
+    std::shared_ptr<const ThreadFactory> thread_factory_;
 };
 
 // 绑定 caller identity 的窄句柄(单子 §6.1/§6.4):工具表里挂的是它,不是

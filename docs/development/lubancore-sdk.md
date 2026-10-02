@@ -18,6 +18,10 @@ SDK 与 AppServer 共用会话执行对象，多会话隔离与寿命验收也�
 `LubanCore::Core` 是公开安装目标；仓库内部旧名
 `lubancode_core` 仍带 CLI 实现，两者不能混用。
 
+依赖瘦身首笔把 updater 与 miniz 归到 CLI 宿主目标；SDK-only 不定义它们，
+组合构建也核 SDK 实际传递闭包。本笔仍待远端三平台验收，合同见
+[更新器归宿主](sdk-updater-boundary.md)。渠道、Gateway、Lua 尚未拆完。
+
 后端、基础工具与 MCP 已共用 `runtime/assembly`。SDK 与 AppServer 共用执行对象，
 各自保留受理与排队；CLI、one-shot 仍用原会话栈。完整工具、插件、Hook 和记忆等
 能力尚未统一迁入公开 SDK。
