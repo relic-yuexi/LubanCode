@@ -25,6 +25,7 @@ PreAction 交工具名、候选参数与真实声明范围。PostAction 交 effe
 
 `Input.schema_version=1`。Pre JSON 精确为 `{"arguments":object}`，`Next(candidate)` 和 `output_json` 同形，只换参数，不换工具或身份。
 Post JSON 精确为 `{"arguments":object,"result":{"text":string,"isError":bool,"outcome":string,"errorCode":string}}`；原始文本已清洗、capture 已成功保存。
+outcome/errorCode 取当次真实 ExecutionFinished 的既有字面值，保同一枚 owned 完成事实；不在 SDK wrapper 重算状态，也不凭 isError 推副作用未知。原生 Result 未自报或自报坏词时，原 FinishTrace 的投影规则照留。
 Post 不收 output 或 Next candidate；只准 Next() 与追加效果，不准回头改原结果。
 Pre 询问效果沿 `AdmissionDecision`，仅收 `{"decision":"ask","reason":string}`；拒绝沿 Denied，不能用 allow 免审批。
 Post `ResultSupplement` 仅收 `{"text":string}`。插件不声明来源、owner 或 ref；宿主从冻结 manifest、definition 与实际 dispatch 填来源，记录真正采用回执。
