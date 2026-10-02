@@ -382,6 +382,8 @@ jobs:
     name: sdk-only (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
+    env:
+      LUBANCORE_TEST_RESOURCE_ROOT: ${{ github.workspace }}/rg-stage
     strategy:
       fail-fast: false
       matrix:
@@ -391,6 +393,16 @@ jobs:
           - {name: windows-msvc, os: windows-latest}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Fetch SDK search backend (manifest-pinned)
+        shell: bash
+        run: |
+          case "${{ matrix.name }}" in
+            linux-gcc) platform=linux-x64 ;;
+            macos-clang) platform=macos-arm64 ;;
+            windows-msvc) platform=windows-x64 ;;
+          esac
+          bash scripts/fetch_ripgrep.sh --target rg-stage --platform "$platform" --cache rg-cache
 
       - name: Check SDK validator data fixtures
         shell: bash
@@ -431,11 +443,12 @@ jobs:
           "$PY" scripts/ci/check_sdk_only_boundary.py --prepare --build-dir build-sdk-only
           COMMON_FLAGS="-DCMAKE_BUILD_TYPE=Release -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=ON -DBUILD_TESTING=OFF -DLUBANCODE_USE_CODELOAD=OFF"
           if [ -n "${VCPKG_INSTALLATION_ROOT:-}" ] && cmake -S . -B build-sdk-only $COMMON_FLAGS \
+               -DLUBANCODE_BUNDLED_RG_DIR="$PWD/rg-stage/libexec" \
                -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"; then
             echo 'SDK-only configured with vcpkg'
           else
             rm -rf build-sdk-only/CMakeCache.txt build-sdk-only/CMakeFiles
-            cmake -S . -B build-sdk-only $COMMON_FLAGS
+            cmake -S . -B build-sdk-only $COMMON_FLAGS -DLUBANCODE_BUNDLED_RG_DIR="$PWD/rg-stage/libexec"
           fi
 
       - name: Build SDK-only default ALL without tests
@@ -486,6 +499,8 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    env:
+      LUBANCORE_TEST_RESOURCE_ROOT: ${{ github.workspace }}/rg-stage
     strategy:
       fail-fast: false
       matrix:
@@ -805,6 +820,8 @@ jobs:
     if: needs.changes.outputs.code == 'true' && (needs.changes.outputs.cross_platform == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     name: linux-manylinux
     runs-on: ubuntu-latest
+    env:
+      LUBANCORE_TEST_RESOURCE_ROOT: ${{ github.workspace }}/rg-stage
     container:
       image: quay.io/pypa/manylinux_2_28:latest
     defaults:
@@ -1133,8 +1150,14 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.agent_lifetime == 'true'
     timeout-minutes: 90
+    env:
+      LUBANCORE_TEST_RESOURCE_ROOT: ${{ github.workspace }}/rg-stage
     steps:
       - uses: actions/checkout@v7
+
+      - name: Fetch SDK search backend (manifest-pinned)
+        shell: bash
+        run: bash scripts/fetch_ripgrep.sh --target rg-stage --platform linux-x64 --cache rg-cache
 
       # 用 g++ 不用 clang:Ubuntu 24.04 自带的 clang 18 编 <expected> 报"no
       # template named 'expected'"(PCH/std 组合的已知坑);g++ 与 linux-
@@ -1166,6 +1189,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=ON \
             -DLUBANCODE_BUILD_SDK=ON \
+            -DLUBANCODE_BUNDLED_RG_DIR="$PWD/rg-stage/libexec" \
             -DLUBANCODE_USE_CODELOAD=OFF \
             -DCMAKE_C_COMPILER="$CC" \
             -DCMAKE_CXX_COMPILER="$CXX" \
@@ -1187,7 +1211,7 @@ jobs:
           # (Lua 钩子串),与本腿的悬垂/寿命合同无关,另立单子治理后再开。
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
         run: |
-          ctest --test-dir build -C Release -R '^(integration\.app_server\.app_server_session_parity|unit\.app_server\.app_server_browser|unit\.runtime\.tool_runtime|integration\.plugins\.tool_runtime_deferral|unit\.runtime\.session_execution|unit\.runtime\.scoped_turn_bindings|unit\.tools\.tool_job_coordinator|unit\.app\.turn_runner_scoped_bindings|unit\.agent\.subagent_thread_lifetime|integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection)|unit\.remote\.remote_result_sync|unit\.hooks\.middleware_core)$' \
+          ctest --test-dir build -C Release -R '^(integration\.app_server\.app_server_session_parity|unit\.app_server\.app_server_browser|unit\.runtime\.tool_runtime|integration\.plugins\.tool_runtime_deferral|unit\.runtime\.session_execution|unit\.runtime\.scoped_turn_bindings|unit\.tools\.tool_job_coordinator|unit\.app\.turn_runner_scoped_bindings|unit\.agent\.subagent_thread_lifetime|integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection|lubancore_builtin_search)|unit\.remote\.remote_result_sync|unit\.hooks\.middleware_core)$' \
             --show-only=json-v1 > build/asan-host-registration.json
           python3 - <<'PY'
           import json
@@ -1199,6 +1223,7 @@ jobs:
                       'unit.app.turn_runner_scoped_bindings', 'integration.sdk.lubancore_extensions',
                       'unit.agent.subagent_thread_lifetime',
                       'integration.sdk.lubancore_results', 'integration.sdk.lubancore_result_projection',
+                      'integration.sdk.lubancore_builtin_search',
                       'unit.remote.remote_result_sync',
                       'unit.hooks.middleware_core'}
           if len(tests) != len(required) or {test['name'] for test in tests} != required:
@@ -1210,7 +1235,7 @@ jobs:
           PY
           # channel_menu_pump 暂除外:该册对调度时序敏感,ASan 放慢后
           # "未配对点击"的拒绝态断言抢跑假红;渠道域不是本腿的合同面。
-          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\.|^unit\.tools\.tool_job_coordinator$|^integration\.app_server\.app_server_session_parity$|^unit\.app_server\.app_server_browser$|^integration\.plugins\.tool_runtime_deferral$|^unit\.app\.turn_runner_scoped_bindings$|^integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection)$|^unit\.remote\.remote_result_sync$|^unit\.hooks\.middleware_core$" \
+          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\.|^unit\.tools\.tool_job_coordinator$|^integration\.app_server\.app_server_session_parity$|^unit\.app_server\.app_server_browser$|^integration\.plugins\.tool_runtime_deferral$|^unit\.app\.turn_runner_scoped_bindings$|^integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection|lubancore_builtin_search)$|^unit\.remote\.remote_result_sync$|^unit\.hooks\.middleware_core$" \
             -E "channel_menu_pump" --parallel 4 --output-on-failure --no-tests=error \
             --output-junit "$PWD/build/asan-results.xml"
           python3 - <<'PY'

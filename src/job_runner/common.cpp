@@ -4,8 +4,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <set>
+#include <thread>
 #include "platform/atomic_write.hpp"
 #include "platform/paths.hpp"
 #include "platform/secure_file.hpp"
@@ -49,8 +51,42 @@ Json ReadJson(const fs::path& path, std::size_t limit) {
     return parsed;
 }
 void SaveJson(const fs::path& path, const Json& value) {
-    const auto written = platform::AtomicWriteFile(path, value.dump(), platform::WriteDurability::ProcessCrashDurability);
-    if (!written) throw Error("runner.store_failed");
+    const auto bytes = value.dump();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    constexpr unsigned max_attempts = 51;
+    const auto diagnose = [&path](const char* event, const platform::AtomicWriteError& error, unsigned attempt) {
+        const char* outcome = "NotCommitted";
+        switch (error.outcome) {
+        case platform::WriteOutcome::NotCommitted: break;
+        case platform::WriteOutcome::CommittedDurabilityNotRequested: outcome = "CommittedDurabilityNotRequested"; break;
+        case platform::WriteOutcome::CommittedDurabilityUnconfirmed: outcome = "CommittedDurabilityUnconfirmed"; break;
+        case platform::WriteOutcome::CommittedDurable: outcome = "CommittedDurable"; break;
+        }
+        // Never include the serialized book, credentials, or arbitrary filenames.
+        const auto name = path.filename();
+        const char* file = name == "jobs.json" ? "jobs.json" : name == "endpoint.json" ? "endpoint.json" : "other";
+        std::cerr << Json{{"event", event}, {"file", file}, {"atomic_code", error.code},
+            {"failure_kind", error.failure_kind == platform::WriteFailureKind::TransientReject ? "TransientReject" : "Permanent"},
+            {"outcome", outcome}, {"attempt", attempt}, {"message", error.message}}.dump() << std::endl;
+    };
+    for (unsigned attempt = 1; ; ++attempt) {
+        const auto written = platform::AtomicWriteFile(path, bytes, platform::WriteDurability::ProcessCrashDurability);
+        if (written) return;
+        const auto& error = written.error();
+        const auto now = std::chrono::steady_clock::now();
+        const bool retryable = error.failure_kind == platform::WriteFailureKind::TransientReject &&
+                               error.outcome == platform::WriteOutcome::NotCommitted;
+        if (!retryable || attempt >= max_attempts || now >= deadline) {
+            diagnose("runner.store_failed", error, attempt);
+            throw Error("runner.store_failed");
+        }
+        if (attempt == 1) diagnose("runner.store_retry", error, attempt);
+        std::this_thread::sleep_until(std::min(deadline, now + std::chrono::milliseconds(20)));
+        if (std::chrono::steady_clock::now() >= deadline) {
+            diagnose("runner.store_failed", error, attempt);
+            throw Error("runner.store_failed");
+        }
+    }
 }
 void PublishJson(const fs::path& dir, const std::string& name, const Json& value) {
     const auto temporary = dir / (name + ".tmp-" + RandomHex());
