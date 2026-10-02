@@ -653,6 +653,7 @@ jobs:
         run: |
           cmake --build build --config Release --target luban-runner -j 4
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_runner_fixture_io.py
           "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
 
       - name: Upload Runner process evidence
@@ -1016,6 +1017,7 @@ jobs:
         run: |
           cmake --build build --config Release --target luban-runner -j 4
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_runner_fixture_io.py
           "$PY" scripts/ci/check_installed_process_host.py --build-dir build --host runner
 
       - name: Upload Runner process evidence
