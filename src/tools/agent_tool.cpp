@@ -1801,205 +1801,256 @@ Tool::Result LaunchBackgroundTask(const AgentDispatchPlan& request, ToolRegistry
         return {admission_error, true};
     }
 
-    const int id = task->snapshot.id;
-    const std::string prompt = task->snapshot.prompt;
-    // 病十(批三):四段开关从皮(AgentProfile)来,子代理默认与主代理同段。
-    // 自定义 Agent(P2-2)另换人格段并预装技能;阶段 2 起选 Prompt Profile
-    // 与能力推导,阶段 3 起三笔决议从 ResolvedAgentProfile 来(见
-    // BuildSubagentPromptOptions)。
-    agent::PromptOptions prompt_options = BuildSubagentPromptOptions(
-        task->snapshot.effective_cwd, agent_type, state->prompts_dir, state->project_prompts_dir,
-        state->project_instructions, state->skills_segment, state->agent_profile, custom, resolved,
-        state->package_profile_roots);
-    std::string system_prompt = agent::AssembleSystemPrompt(prompt_options);
-    if (custom != nullptr) {
-        system_prompt += AppendPreloadedSkills(custom->definition.skills_preload, custom->preloaded_skills);
-    }
-    system_prompt += "\n\n这是后台任务。调用文件与搜索工具时以运行环境段里的工作目录为准;"
-                     "不要依赖进程当前目录,它可能随主会话切换。";
-    system_prompt = agent::WithModelInstructions(system_prompt, detached->model_instructions);
-    if (resolved == nullptr || resolved->soul) {
-        system_prompt = agent::WithSoul(system_prompt, detached->soul);
-    }
-    // 后台注册表:工厂没给(旧调用方/单测)就把调用方的表逐枚转发包一份,
-    // 避免任务线程直用调用方的活表。scoped agent 工具在 RunTask 里按这只
-    // 任务的 identity/环境替换挂上(缺口 A 的修复落点)。
-    if (detached_registry == nullptr) {
-        detached_registry = std::make_unique<ToolRegistry>();
-        for (const auto& tool : task_registry.All()) {
-            detached_registry->Register(std::make_unique<ForwardingTool>(*tool));
-        }
-    }
-    ToolRegistry* registry = detached_registry.get();
-    // hooks 会话:派工线程里造好(拷一份只读策略快照,含信任/禁用账)再带
-    // 进线程——后台线程不碰 dispatcher 账本与定义表,记录只投递,主会话
-    // 安全点归并(hooks/detached.hpp 的线程规矩)。嵌套路用冻结的
-    // dispatcher 指针,不读会话活 hooks。
-    lubancode::hooks::HookDispatcher* hook_dispatcher =
-        env != nullptr && env->hook_dispatcher != nullptr ? env->hook_dispatcher : state->hook_dispatcher;
-    std::shared_ptr<lubancode::hooks::DetachedHookSession> background_hooks;
-    if (hook_dispatcher != nullptr && !hook_dispatcher->Empty()) {
-        background_hooks =
-            std::make_shared<lubancode::hooks::DetachedHookSession>(hook_dispatcher, hook_dispatcher->context());
-    }
-    // 放行账快照(修"后台审批不查放行账"):无 UI 的嵌套树原样继承祖先的
-    // 冻结账(单子不变量 7:只能吃派出时已有的放行账);main 线程上的派工
-    // 在派工线程定格源。源没配 = 空账,后台照旧全拒。
-    std::shared_ptr<const BackgroundPermissionLedger> background_permissions;
-    if (headless && env->background_permissions != nullptr) {
-        background_permissions = env->background_permissions;
-    } else if (state->background_permission_source) {
-        background_permissions =
-            std::make_shared<BackgroundPermissionLedger>(state->background_permission_source());
-    }
-    // P0-2/P1-2 轨迹:main 直派的后台派工在派工线程申请子账(spawn 钩子
-    // 引用的父桥此刻活着);子账随线程走,收口在 RunTask 里办。嵌套路
-    // (parent 是某只子代理,不论它自己前台/后台)现在也申请——parent_run_id
-    // 传 caller.agent_run_id,不冒充 main(单子 §12.3 第一条)。caller 空
-    // (main 直派,或父任务自己没开轨迹账)时按空串落回本场 main_run_id。
-    // 子代理空轨迹单 P0-A:钩子接了而申请失败 = fail closed,后台同样不
-    // 放无账子代理上路——注册的任务当场按失败收账,错误码带回给模型。
+    // Keep startup resources accessible until the coordinator owns a live
+    // thread. A failed factory destroys its callable, not these owners.
+    struct LaunchResources {
+        std::unique_ptr<ToolRegistry> registry;
+        std::optional<lubancode::cli::AgentWorktree> room;
+        std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory;
+    };
+    std::shared_ptr<LaunchResources> launch;
     std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory;
-    runtime::SubagentSpawnFailure spawn_failure;
-    const bool trajectory_spawn_armed = state->trajectory_spawn != nullptr;
-    if (trajectory_spawn_armed) {
-        // 与前台路同一把边界尺(UTF-8 清洗门单):截断不劈多字节序列。
-        trajectory = state->trajectory_spawn(
-            agent_type + ": " + prompt.substr(0, platform::Utf8PrefixBoundary(prompt, 120)),
-            caller.agent_run_id, &spawn_failure);
-    }
-    if (trajectory_spawn_armed && trajectory == nullptr) {
-        const std::string failure_text = SubagentStartFailedText(spawn_failure);
-        state->coordinator->ledger().FinalizeFromToolResult(task, failure_text, /*cancelled=*/false);
-        return {failure_text, true};
-    }
-    if (trajectory != nullptr) {
-        // 回填自己的 run id(P1-2,与前台路同一规矩):写在起线程之前——
-        // std::thread 构造自带 happens-before,线程内 RunTask 读到的是这次
-        // 写入之后的值,不需要额外同步。
-        std::lock_guard<std::mutex> lock(state->coordinator->ledger().mutex);
-        task->snapshot.agent_run_id = trajectory->run_id();
-        state->coordinator->ledger().Touch();
-    }
-    // 孩子的派工环境:后台任务开跑即冻结——嵌套任务原样继承祖先环境的材料
-    // (backend 工厂/放行账/dispatcher/解析账),main 直派按会话当下活账
-    // 填(此刻在 main 线程,读活账安全);detached_shared 指向本任务自己的
-    // 材料,它的前台孩子与它共用(它阻塞等孩子,无并发)。由 RunTask 挂到
-    // 它的 scoped agent。
-    auto child_env = std::make_shared<SubagentDispatchEnv>();
-    if (nested) {
-        *child_env = *env;
-        child_env->backend_factory = backend_source;
-        child_env->registry_factory = registry_source;
-    } else {
-        child_env->registry_factory = state->detached_registry_factory;
-        child_env->background_permissions = background_permissions;
-        child_env->hook_dispatcher = state->hook_dispatcher;
-        if (state->resolve_environment) {
-            child_env->resolve_environment = state->resolve_environment();
-        }
-        child_env->backend_factory = backend_source;
-    }
-    child_env->detached_shared = detached;
-    child_env->base_registry = nullptr;   // RunTask 里按这只任务自己的生效表填
-    child_env->parent_in_isolation = room.has_value() || (env != nullptr && env->parent_in_isolation);
-    child_env->effective_cwd = task->snapshot.effective_cwd;
-    child_env->headless = true;
-    // 隔离基线附言(派工单 §三):room 马上 move 进任务线程,给启动回执的
-    // 那份先拷出来。
-    const std::string isolation_caller_note = room.has_value() ? room->caller_note : std::string();
-    // AR-01:整份冻结 run_state(活态借用摘空)是 worker 的全部家当——
-    // 门面析构后它照跑:coordinator 被它钉活,台账/收尾写账不悬垂。
-    auto frozen = std::make_shared<AgentRunState>(*state);
-    frozen->live_hooks = nullptr;
-    frozen->main_backend = nullptr;
-    child_env->run_state = frozen;
-    // 线程退出回执:worker 闭包最后一笔置位;协调器只凭它收柄(见
-    // ReapExitedThreads/JoinAllBounded),业务终态从此只用于展示。
-    auto exit_receipt = std::make_shared<std::atomic<bool>>(false);
-    state->coordinator->TrackThread(
-        id, std::thread([frozen, task, registry, prompt, agent_type, budget,
-                                custom_copy = request.custom, resolved_copy = request.resolved,
-                                permission_floor = request.permission_floor,
-                                detached, system_prompt = std::move(system_prompt),
-                                detached_registry = std::move(detached_registry),
-                                room = std::move(room), background_hooks,
-                                background_permissions, trajectory = std::move(trajectory),
-                                child_env, exit_receipt]() mutable {
-            (void)detached_registry;  // 让独立工具表活到线程收尾
-            // isolation=worktree:线程里包表、压隔离范围,收工清理。包装表按
-            // 引用持源表工具,声明在源表之后,析构反序先亡,引用不悬垂。
-            std::unique_ptr<ToolRegistry> isolated_registry;
-            std::optional<ScopedIsolation> scope_guard;
-            std::optional<IsolationScope> scope_storage;
-            if (room.has_value()) {
-                scope_storage =
-                    IsolationScope{room->name, PathToUtf8(room->room_path), PathToUtf8(room->repo_root)};
-                isolated_registry = BuildIsolatedRegistry(*registry, *scope_storage);
-                scope_guard.emplace(*scope_storage);
-            }
-            ToolRegistry& effective_registry = isolated_registry != nullptr ? *isolated_registry : *registry;
-            DetachedRequestBackend backend(*detached);
-            Tool::Result result;
+    bool rejection_started = false;
+    bool handed_off = false;
+    const auto reject_start = [&](const std::string& detail, bool closing = false) -> Tool::Result {
+        rejection_started = true;
+        std::string text = closing ? "后台子代理未启动: 会话正在收场" : "后台子代理启动失败: " + detail;
+        auto& child_trajectory = launch ? launch->trajectory : trajectory;
+        if (child_trajectory != nullptr) {
             try {
-                result = RunSubagentTask(frozen, backend, effective_registry, prompt, agent_type, budget,
-                                         nullptr, task, detached.get(), &system_prompt,
-                                         scope_storage.has_value() ? &*scope_storage : nullptr, background_hooks,
-                                         background_permissions, custom_copy.has_value() ? &*custom_copy : nullptr,
-                                         resolved_copy.has_value() ? &*resolved_copy : nullptr, permission_floor,
-                                         std::move(trajectory), child_env);
-            } catch (const std::exception& error) {
-                result = {"子代理执行失败: " + std::string(error.what()), true};
+                (void)child_trajectory->Finish(false, closing ? "session_closing" : "thread_start_failed");
             } catch (...) {
-                result = {"子代理执行失败: 未知错误", true};
+                text += "\n子账收口失败,须检查持久账。";
             }
-            if (room.has_value()) {
-                const auto finish = FinishIsolationRoom(*room, frozen->git_runner);
-                result.AppendText(finish.note);
-                result.AppendText(room->caller_note);
-                {
-                    std::lock_guard<std::mutex> lock(frozen->coordinator->ledger().mutex);
-                    task->snapshot.worktree_removed = finish.removed;
-                    task->snapshot.worktree_awaiting_review = finish.awaiting_review;
-                    frozen->coordinator->ledger().Touch();
+            child_trajectory.reset();
+        }
+        auto& child_room = launch ? launch->room : room;
+        if (child_room.has_value()) {
+            try {
+                const auto finish = FinishIsolationRoom(*child_room, state->git_runner);
+                text += finish.note;
+                text += child_room->caller_note;
+                std::lock_guard<std::mutex> lock(state->coordinator->ledger().mutex);
+                task->snapshot.worktree_removed = finish.removed;
+                task->snapshot.worktree_awaiting_review = finish.awaiting_review;
+                state->coordinator->ledger().Touch();
+            } catch (...) {
+                text += "\n隔离房收尾失败,须保留待查。";
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(state->coordinator->ledger().mutex);
+            task->snapshot.outcome.status = closing ? TaskOutcomeStatus::Stopped : TaskOutcomeStatus::Failed;
+            task->snapshot.outcome.reason = closing ? TaskOutcomeReason::SessionClosing : TaskOutcomeReason::InitializationFailed;
+            task->snapshot.outcome.message = text;
+        }
+        state->coordinator->ledger().FinalizeFromToolResult(task, text, /*cancelled=*/false);
+        Tool::Result result{text, true};
+        result.error_code = closing ? "agent.session_closing" : "agent.thread_start_failed";
+        return result;
+    };
+    try {
+        const int id = task->snapshot.id;
+        const std::string prompt = task->snapshot.prompt;
+        // 病十(批三):四段开关从皮(AgentProfile)来,子代理默认与主代理同段。
+        // 自定义 Agent(P2-2)另换人格段并预装技能;阶段 2 起选 Prompt Profile
+        // 与能力推导,阶段 3 起三笔决议从 ResolvedAgentProfile 来(见
+        // BuildSubagentPromptOptions)。
+        agent::PromptOptions prompt_options = BuildSubagentPromptOptions(
+            task->snapshot.effective_cwd, agent_type, state->prompts_dir, state->project_prompts_dir,
+            state->project_instructions, state->skills_segment, state->agent_profile, custom, resolved,
+            state->package_profile_roots);
+        std::string system_prompt = agent::AssembleSystemPrompt(prompt_options);
+        if (custom != nullptr) {
+            system_prompt += AppendPreloadedSkills(custom->definition.skills_preload, custom->preloaded_skills);
+        }
+        system_prompt += "\n\n这是后台任务。调用文件与搜索工具时以运行环境段里的工作目录为准;"
+                         "不要依赖进程当前目录,它可能随主会话切换。";
+        system_prompt = agent::WithModelInstructions(system_prompt, detached->model_instructions);
+        if (resolved == nullptr || resolved->soul) {
+            system_prompt = agent::WithSoul(system_prompt, detached->soul);
+        }
+        // 后台注册表:工厂没给(旧调用方/单测)就把调用方的表逐枚转发包一份,
+        // 避免任务线程直用调用方的活表。scoped agent 工具在 RunTask 里按这只
+        // 任务的 identity/环境替换挂上(缺口 A 的修复落点)。
+        if (detached_registry == nullptr) {
+            detached_registry = std::make_unique<ToolRegistry>();
+            for (const auto& tool : task_registry.All()) {
+                detached_registry->Register(std::make_unique<ForwardingTool>(*tool));
+            }
+        }
+        ToolRegistry* registry = detached_registry.get();
+        // hooks 会话:派工线程里造好(拷一份只读策略快照,含信任/禁用账)再带
+        // 进线程——后台线程不碰 dispatcher 账本与定义表,记录只投递,主会话
+        // 安全点归并(hooks/detached.hpp 的线程规矩)。嵌套路用冻结的
+        // dispatcher 指针,不读会话活 hooks。
+        lubancode::hooks::HookDispatcher* hook_dispatcher =
+            env != nullptr && env->hook_dispatcher != nullptr ? env->hook_dispatcher : state->hook_dispatcher;
+        std::shared_ptr<lubancode::hooks::DetachedHookSession> background_hooks;
+        if (hook_dispatcher != nullptr && !hook_dispatcher->Empty()) {
+            background_hooks =
+                std::make_shared<lubancode::hooks::DetachedHookSession>(hook_dispatcher, hook_dispatcher->context());
+        }
+        // 放行账快照(修"后台审批不查放行账"):无 UI 的嵌套树原样继承祖先的
+        // 冻结账(单子不变量 7:只能吃派出时已有的放行账);main 线程上的派工
+        // 在派工线程定格源。源没配 = 空账,后台照旧全拒。
+        std::shared_ptr<const BackgroundPermissionLedger> background_permissions;
+        if (headless && env->background_permissions != nullptr) {
+            background_permissions = env->background_permissions;
+        } else if (state->background_permission_source) {
+            background_permissions =
+                std::make_shared<BackgroundPermissionLedger>(state->background_permission_source());
+        }
+        // P0-2/P1-2 轨迹:main 直派的后台派工在派工线程申请子账(spawn 钩子
+        // 引用的父桥此刻活着);子账随线程走,收口在 RunTask 里办。嵌套路
+        // (parent 是某只子代理,不论它自己前台/后台)现在也申请——parent_run_id
+        // 传 caller.agent_run_id,不冒充 main(单子 §12.3 第一条)。caller 空
+        // (main 直派,或父任务自己没开轨迹账)时按空串落回本场 main_run_id。
+        // 子代理空轨迹单 P0-A:钩子接了而申请失败 = fail closed,后台同样不
+        // 放无账子代理上路——注册的任务当场按失败收账,错误码带回给模型。
+        runtime::SubagentSpawnFailure spawn_failure;
+        const bool trajectory_spawn_armed = state->trajectory_spawn != nullptr;
+        if (trajectory_spawn_armed) {
+            // 与前台路同一把边界尺(UTF-8 清洗门单):截断不劈多字节序列。
+            trajectory = state->trajectory_spawn(
+                agent_type + ": " + prompt.substr(0, platform::Utf8PrefixBoundary(prompt, 120)),
+                caller.agent_run_id, &spawn_failure);
+        }
+        if (trajectory_spawn_armed && trajectory == nullptr) {
+            const std::string failure_text = SubagentStartFailedText(spawn_failure);
+            return reject_start(failure_text);
+        }
+        if (trajectory != nullptr) {
+            // 回填自己的 run id(P1-2,与前台路同一规矩):写在起线程之前——
+            // std::thread 构造自带 happens-before,线程内 RunTask 读到的是这次
+            // 写入之后的值,不需要额外同步。
+            std::lock_guard<std::mutex> lock(state->coordinator->ledger().mutex);
+            task->snapshot.agent_run_id = trajectory->run_id();
+            state->coordinator->ledger().Touch();
+        }
+        // 孩子的派工环境:后台任务开跑即冻结——嵌套任务原样继承祖先环境的材料
+        // (backend 工厂/放行账/dispatcher/解析账),main 直派按会话当下活账
+        // 填(此刻在 main 线程,读活账安全);detached_shared 指向本任务自己的
+        // 材料,它的前台孩子与它共用(它阻塞等孩子,无并发)。由 RunTask 挂到
+        // 它的 scoped agent。
+        auto child_env = std::make_shared<SubagentDispatchEnv>();
+        if (nested) {
+            *child_env = *env;
+            child_env->backend_factory = backend_source;
+            child_env->registry_factory = registry_source;
+        } else {
+            child_env->registry_factory = state->detached_registry_factory;
+            child_env->background_permissions = background_permissions;
+            child_env->hook_dispatcher = state->hook_dispatcher;
+            if (state->resolve_environment) {
+                child_env->resolve_environment = state->resolve_environment();
+            }
+            child_env->backend_factory = backend_source;
+        }
+        child_env->detached_shared = detached;
+        child_env->base_registry = nullptr;   // RunTask 里按这只任务自己的生效表填
+        child_env->parent_in_isolation = room.has_value() || (env != nullptr && env->parent_in_isolation);
+        child_env->effective_cwd = task->snapshot.effective_cwd;
+        child_env->headless = true;
+        // 隔离基线附言(派工单 §三):room 马上 move 进任务线程,给启动回执的
+        // 那份先拷出来。
+        const std::string isolation_caller_note = room.has_value() ? room->caller_note : std::string();
+        // AR-01:整份冻结 run_state(活态借用摘空)是 worker 的全部家当——
+        // 门面析构后它照跑:coordinator 被它钉活,台账/收尾写账不悬垂。
+        auto frozen = std::make_shared<AgentRunState>(*state);
+        frozen->live_hooks = nullptr;
+        frozen->main_backend = nullptr;
+        child_env->run_state = frozen;
+        // Build the caller's receipt before a live worker can own these resources.
+        // Allocation failure after handoff must never run startup rollback.
+        std::string acceptance = "后台子代理 #" + std::to_string(id) + " (" + agent_type +
+                                 ") 已启动。主会话可以继续;完成结果会在后续回合送达。"
+                                 "要提前收掉它,用 stop_background 给 task_id=\"" +
+                                 std::to_string(id) + "\"(此编号与面板显示一致);background_output 可查进度。";
+        if (!isolation_caller_note.empty()) acceptance += isolation_caller_note;
+        if (!request.budget_deprecation_note.empty()) acceptance += "\n" + request.budget_deprecation_note;
+        Tool::Result accepted{std::move(acceptance), false};
+        // 线程退出回执:worker 闭包最后一笔置位;协调器只凭它收柄(见
+        // ReapExitedThreads/JoinAllBounded),业务终态从此只用于展示。
+        auto exit_receipt = std::make_shared<std::atomic<bool>>(false);
+        launch = std::make_shared<LaunchResources>();
+        launch->registry = std::move(detached_registry);
+        launch->room = std::move(room);
+        launch->trajectory = std::move(trajectory);
+        const bool started = state->coordinator->StartThread(
+            id, [frozen, task, registry, prompt, agent_type, budget,
+                                    custom_copy = request.custom, resolved_copy = request.resolved,
+                                    permission_floor = request.permission_floor,
+                                    detached, system_prompt = std::move(system_prompt),
+                                    launch, background_hooks, background_permissions,
+                                    child_env, exit_receipt]() mutable {
+                auto& room = launch->room;
+                // isolation=worktree:线程里包表、压隔离范围,收工清理。包装表按
+                // 引用持源表工具,声明在源表之后,析构反序先亡,引用不悬垂。
+                std::unique_ptr<ToolRegistry> isolated_registry;
+                std::optional<ScopedIsolation> scope_guard;
+                std::optional<IsolationScope> scope_storage;
+                if (room.has_value()) {
+                    scope_storage =
+                        IsolationScope{room->name, PathToUtf8(room->room_path), PathToUtf8(room->repo_root)};
+                    isolated_registry = BuildIsolatedRegistry(*registry, *scope_storage);
+                    scope_guard.emplace(*scope_storage);
                 }
-            }
-            // 收尾前点一遍没送达的介入消息:任务都要结束了,排着的信没有下一个
-            // 轮次边界可等——逐条列原文记进结果文本,不无声遗失。
-            result.AppendText(TaskLedger::UndeliveredInboxNote(task));
-            // 结果归父(P0-4 + 回流锁缝单):嵌套后台任务的完成进直接父
-            // mailbox。终态翻页与投递在 FinalizeFromToolResult 的同一个持锁段
-            // 里完成(deliver_to_parent)——notify 落地时父邮箱已喂饱,不再有
-            // "终态先于投递、父提前封账"的缝;main 根任务照旧由主回合
-            // DrainCompletionNotices 取,投递口对它天然空转。锁内投递失败只有
-            // 稳态原因(父真死/封账/去处不符),这里不再补第二把锁的显式
-            // 投递——退信(RestoreDrainedInbox)把 delivered 翻回 false 的微秒
-            // 窗里重投会造成父见两遍。
-            frozen->coordinator->ledger().FinalizeFromToolResult(task, result.content,
-                                                                 task->cancel.load(std::memory_order_acquire),
-                                                                 /*deliver_to_parent=*/true);
-            // 退出回执(AR-01):最后一笔。置位即本 OS 线程已收完一切账、
-            // 正要 return——收柄口(Reap/JoinAllBounded)只认它。
-            exit_receipt->store(true, std::memory_order_release);
-        }),
-        exit_receipt);
-
-    // §5.3 弃用提示:手写 JSON 给了旧预算键,随启动回执带回(空 = 没用)。
-    // 隔离基线附言(派工单 §三)一并随回执亮明:后台任务的房在派工线程建
-    // 好,调用方当场该知道基线与未提交改动的边界。
-    // 停控两本账收口(Bug B):回执里的编号与面板显示同源,并把停法写明——
-    // 模型拿什么看见,就拿什么能停(真机三连"找不到"烧掉 30M+ tokens)。
-    std::string acceptance = "后台子代理 #" + std::to_string(id) + " (" + agent_type +
-                             ") 已启动。主会话可以继续;完成结果会在后续回合送达。"
-                             "要提前收掉它,用 stop_background 给 task_id=\"" +
-                             std::to_string(id) + "\"(此编号与面板显示一致);background_output 可查进度。";
-    if (!isolation_caller_note.empty()) {
-        acceptance += isolation_caller_note;
+                ToolRegistry& effective_registry = isolated_registry != nullptr ? *isolated_registry : *registry;
+                DetachedRequestBackend backend(*detached);
+                Tool::Result result;
+                try {
+                    result = RunSubagentTask(frozen, backend, effective_registry, prompt, agent_type, budget,
+                                             nullptr, task, detached.get(), &system_prompt,
+                                             scope_storage.has_value() ? &*scope_storage : nullptr, background_hooks,
+                                             background_permissions, custom_copy.has_value() ? &*custom_copy : nullptr,
+                                             resolved_copy.has_value() ? &*resolved_copy : nullptr, permission_floor,
+                                             std::move(launch->trajectory), child_env);
+                } catch (const std::exception& error) {
+                    result = {"子代理执行失败: " + std::string(error.what()), true};
+                } catch (...) {
+                    result = {"子代理执行失败: 未知错误", true};
+                }
+                if (room.has_value()) {
+                    const auto finish = FinishIsolationRoom(*room, frozen->git_runner);
+                    result.AppendText(finish.note);
+                    result.AppendText(room->caller_note);
+                    {
+                        std::lock_guard<std::mutex> lock(frozen->coordinator->ledger().mutex);
+                        task->snapshot.worktree_removed = finish.removed;
+                        task->snapshot.worktree_awaiting_review = finish.awaiting_review;
+                        frozen->coordinator->ledger().Touch();
+                    }
+                }
+                // 收尾前点一遍没送达的介入消息:任务都要结束了,排着的信没有下一个
+                // 轮次边界可等——逐条列原文记进结果文本,不无声遗失。
+                result.AppendText(TaskLedger::UndeliveredInboxNote(task));
+                // 结果归父(P0-4 + 回流锁缝单):嵌套后台任务的完成进直接父
+                // mailbox。终态翻页与投递在 FinalizeFromToolResult 的同一个持锁段
+                // 里完成(deliver_to_parent)——notify 落地时父邮箱已喂饱,不再有
+                // "终态先于投递、父提前封账"的缝;main 根任务照旧由主回合
+                // DrainCompletionNotices 取,投递口对它天然空转。锁内投递失败只有
+                // 稳态原因(父真死/封账/去处不符),这里不再补第二把锁的显式
+                // 投递——退信(RestoreDrainedInbox)把 delivered 翻回 false 的微秒
+                // 窗里重投会造成父见两遍。
+                frozen->coordinator->ledger().FinalizeFromToolResult(task, result.content,
+                                                                     task->cancel.load(std::memory_order_acquire),
+                                                                     /*deliver_to_parent=*/true);
+                // 退出回执(AR-01):最后一笔。置位即本 OS 线程已收完一切账、
+                // 正要 return——收柄口(Reap/JoinAllBounded)只认它。
+                exit_receipt->store(true, std::memory_order_release);
+            },
+            exit_receipt);
+        if (!started) return reject_start("session_closing", true);
+        handed_off = true;
+        return accepted;
+    } catch (const std::exception& error) {
+        if (rejection_started || handed_off) throw;
+        return reject_start(error.what());
+    } catch (...) {
+        if (rejection_started || handed_off) throw;
+        return reject_start("未知启动错误");
     }
-    if (!request.budget_deprecation_note.empty()) {
-        acceptance += "\n" + request.budget_deprecation_note;
-    }
-    return {acceptance, false};
 }
 
 Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, api::Backend& backend,
