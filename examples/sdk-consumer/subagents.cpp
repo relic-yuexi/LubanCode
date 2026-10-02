@@ -10,6 +10,8 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <iomanip>
+#include <iostream>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -46,15 +48,28 @@ bool Has(const sdk::ModelRequest& r, const std::string& name) {
 }
 struct Gate {
     std::mutex mutex; std::condition_variable cv; unsigned entered = 0; bool released = false;
+    std::array<bool, 4> cancelled_owners{};
     void Release() { std::lock_guard lock(mutex); released = true; cv.notify_all(); }
-    bool Enter(sdk::Cancellation c) {
+    bool Enter(sdk::Cancellation c, unsigned owner) {
         std::unique_lock lock(mutex); ++entered; cv.notify_all();
         while (!released && !c.requested()) cv.wait_for(lock, 5ms);
-        return !c.requested();
+        const bool cancelled = c.requested();
+        if (cancelled) {
+            Check(owner < cancelled_owners.size(), "cancel acknowledgement has no real fixture owner");
+            cancelled_owners[owner] = true; cv.notify_all();
+        }
+        return !cancelled;
     }
     void Wait(unsigned count) {
         std::unique_lock lock(mutex);
         Check(cv.wait_for(lock, 20s, [&] { return entered >= count; }), "four children did not overlap");
+    }
+    void WaitCancelled(unsigned first, unsigned second) {
+        std::unique_lock lock(mutex);
+        Check(first < cancelled_owners.size() && second < cancelled_owners.size(),
+            "cancel wait has no real fixture owners");
+        Check(cv.wait_for(lock, 20s, [&] { return cancelled_owners[first] && cancelled_owners[second]; }),
+            "both held children did not observe their actual cancellations");
     }
 };
 struct ReleaseGate { std::shared_ptr<Gate> gate; ~ReleaseGate() { if (gate) gate->Release(); } };
@@ -65,7 +80,7 @@ struct State {
     std::string marker = "SDKCHILD_OWN";
     std::string argument = R"({"title":"explicit child","prompt":"SDKCHILD_OWN task","agent_type":"general-purpose"})";
     bool parent_grant_first = false, read_file = false, stop_at_first = false, wall_wait = false, child_final_first = false;
-    std::shared_ptr<Gate> gate;
+    std::shared_ptr<Gate> gate; unsigned gate_owner = 0;
     std::function<void()> before_child_final;
     sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest& request, sdk::Cancellation cancel) {
         const auto current = ++active;
@@ -84,6 +99,11 @@ struct State {
                 return sdk::ModelReply{"", {{"same-call", "agent", argument}}, sdk::Usage{1, 1}};
             for (const auto& m : request.messages) for (const auto& reply : m.tool_replies)
                 if (reply.call_id == "same-call") {
+                    if (!(reply.text.find("sdk.subagent.dispatch_rejected") != std::string::npos ||
+                        reply.text.find(marker) != std::string::npos || stop_at_first || wall_wait))
+                        std::cerr << "[sdk-child-diagnostic] point=parent-received-child-preview wire="
+                            << std::quoted(reply.call_id) << " error=" << reply.is_error
+                            << " text=" << std::quoted(reply.text) << '\n';
                     Check(reply.text.find("sdk.subagent.dispatch_rejected") != std::string::npos ||
                         reply.text.find(marker) != std::string::npos || stop_at_first || wall_wait,
                         "parent did not receive its child result or explicit refusal");
@@ -93,7 +113,7 @@ struct State {
         Check(request.model == "child-model", "child request ignored its frozen model binding");
         Check(!Has(request, "agent") && !Has(request, "memory_save"), "child inherited recursive dispatch or parent Memory write");
         const auto offset = parent_grant_first ? 2 : 1;
-        if (n == offset && gate && !gate->Enter(cancel))
+        if (n == offset && gate && !gate->Enter(cancel, gate_owner))
             return std::unexpected(sdk::Error{"fixture.cancelled", "own invocation cancelled"});
         if (child_final_first) return sdk::ModelReply{marker + " child final", {}, sdk::Usage{1, 1}};
         if (wall_wait) {
@@ -220,8 +240,57 @@ fs::path ChildStream(const fs::path& parent, const std::string& child_id) {
         if (file.path().filename() == Path(child_id + ".jsonl")) found.push_back(file.path());
     Check(found.size() == 1, "actual child has no uniquely owned stream"); return found.front();
 }
+void DiagnoseChildFailure(const char* point, const std::shared_ptr<sdk::Session>& session,
+                          const sdk::Operation& operation, State* state = nullptr) {
+    std::cerr << "[sdk-child-diagnostic] point=" << point
+        << " session=" << std::quoted(session->id())
+        << " operation=" << std::quoted(operation.operation_id)
+        << " turn=" << std::quoted(operation.turn_id)
+        << " state=" << static_cast<int>(operation.state)
+        << " persisted=" << operation.result_persisted
+        << " error=" << std::quoted(operation.error) << '\n';
+    if (state) {
+        unsigned parent_requests = 0, child_requests = 0;
+        {
+            std::lock_guard lock(state->mutex);
+            for (const auto& request : state->requests)
+                Has(request, "agent") ? ++parent_requests : ++child_requests;
+        }
+        std::cerr << "[sdk-child-diagnostic] calls=" << state->calls.load()
+            << " tools=" << state->tools.load() << " parent_requests=" << parent_requests
+            << " child_requests=" << child_requests << " max_active=" << state->max_active.load() << '\n';
+    }
+    const auto reports = session->GetSubagentReports(operation.operation_id);
+    if (!reports) {
+        std::cerr << "[sdk-child-diagnostic] report=error code=" << std::quoted(reports.error().code)
+            << " error=" << std::quoted(reports.error().message) << '\n';
+        return;
+    }
+    std::cerr << "[sdk-child-diagnostic] reports=" << reports->size() << '\n';
+    for (const auto& report : *reports) {
+        std::cerr << "[sdk-child-diagnostic] report_operation=" << std::quoted(report.operation_id)
+            << " parent_turn=" << std::quoted(report.parent_turn_id)
+            << " action=" << std::quoted(report.parent_action_id) << " attempt=" << report.parent_attempt
+            << " adoption_state=" << static_cast<int>(report.adoption_state)
+            << " issue=" << std::quoted(report.issue) << " adopted=" << report.adoption.has_value()
+            << " live=" << report.live_receipt.has_value() << '\n';
+        if (!report.live_receipt) continue;
+        const auto& live = *report.live_receipt;
+        std::cerr << "[sdk-child-diagnostic] child_session=" << std::quoted(live.child_session_id)
+            << " child_run=" << std::quoted(live.child_run_id)
+            << " execution=" << std::quoted(live.execution_state)
+            << " append=" << std::quoted(live.append_confirmation) << " seal=" << std::quoted(live.seal_state)
+            << " terminal_kind=" << std::quoted(live.terminal_kind)
+            << " terminal=" << std::quoted(live.terminal_event_id) << " seq=" << live.terminal_seq
+            << " hash=" << std::quoted(live.terminal_hash)
+            << " broken_after_append=" << live.broken_after_append
+            << " broken_after_close=" << live.broken_after_close
+            << " append_error=" << std::quoted(live.append_error_code)
+            << " close_error=" << std::quoted(live.close_error_code) << '\n';
+    }
+}
 void CheckStoppedReport(const std::shared_ptr<sdk::Session>& session, const sdk::Operation& operation,
-                        const std::string& expected_cwd, bool live = true) {
+                        const std::string& expected_cwd, bool live = true, State* state = nullptr) {
     auto plan = session->DescribeSubagents();
     Check(plan.has_value() && plan->session_id == session->id() && plan->cwd == expected_cwd,
         "cancel/Close lost its own frozen Session/cwd");
@@ -233,16 +302,27 @@ void CheckStoppedReport(const std::shared_ptr<sdk::Session>& session, const sdk:
         report.adoption_state == child::AdoptionState::Incomplete && !report.adoption &&
         report.issue == "subagent.adoption.prepared_consumption_pending",
         "stopped child report belongs to another operation or lost its actual receipt");
+    if (live && !(report.live_receipt->execution_state == "cancelled" &&
+        !report.live_receipt->child_session_id.empty() && !report.live_receipt->child_run_id.empty() &&
+        report.live_receipt->append_confirmation == "committed" && report.live_receipt->seal_state == "closed"))
+        DiagnoseChildFailure("cancelled-child-finish-close", session, operation, state);
     if (live) Check(report.live_receipt->execution_state == "cancelled" &&
         !report.live_receipt->child_session_id.empty() && !report.live_receipt->child_run_id.empty() &&
         report.live_receipt->append_confirmation == "committed" && report.live_receipt->seal_state == "closed",
         "known cancelled child lost its checked Finish/Close");
 }
 struct ArtifactFault {
-    fs::path path, backup; bool active = false;
+    fs::path path, backup; bool active = false, obstacle_written = false;
+    std::string setup_error;
     void Block() {
         Check(!active && !fs::exists(backup), "artifact fault was not uniquely armed");
-        fs::rename(path, backup); active = true; Write(path, "not an artifact directory");
+        try {
+            fs::rename(path, backup); active = true; Write(path, "not an artifact directory");
+            obstacle_written = true;
+        } catch (const std::exception& error) {
+            setup_error = error.what();
+            throw;
+        }
     }
     void Restore() {
         if (!active) return;
@@ -264,6 +344,23 @@ void CaptureFault(const fs::path& base) {
     RestoreArtifacts restore{fault}; // Restore before Session destructor/Close on failure.
     state->before_child_final = [fault] { fault->Block(); };
     const auto result = Execute(session);
+    if (!(result.operation.state == sdk::OperationState::Indeterminate && !result.operation.result_persisted)) {
+        DiagnoseChildFailure("parent-capture-fault", session, result.operation, state.get());
+        std::error_code path_error, backup_error, regular_error;
+        const bool path_exists = fs::exists(fault->path, path_error);
+        const bool backup_exists = fs::exists(fault->backup, backup_error);
+        const bool path_regular = fs::is_regular_file(fault->path, regular_error);
+        std::cerr << "[sdk-child-diagnostic] fault_active=" << fault->active
+            << " obstacle_written=" << fault->obstacle_written
+            << " logical_path=artifacts native_length=" << fault->path.native().size()
+            << " exists=" << path_exists << " exists_error=" << path_error.value()
+            << " exists_message=" << std::quoted(path_error.message())
+            << " regular=" << path_regular << " regular_error=" << regular_error.value()
+            << " logical_backup=fixture-saved-artifacts native_length=" << fault->backup.native().size()
+            << " backup_exists=" << backup_exists << " backup_error=" << backup_error.value()
+            << " backup_message=" << std::quoted(backup_error.message())
+            << " setup_error=" << std::quoted(fault->setup_error) << '\n';
+    }
     Check(result.operation.state == sdk::OperationState::Indeterminate && !result.operation.result_persisted,
         "real parent result capture failure claimed completion");
     Check(result.operation.error.find("sdk.side_effect.indeterminate") != std::string::npos &&
@@ -562,13 +659,15 @@ void SubagentCase(const std::string& name, const fs::path& base) {
         ReleaseGate release{gate};
         for (std::size_t n = 0; n < 4; ++n) {
             states[n] = std::make_shared<State>(); states[n]->marker = "SDKCHILD_OWN_" + std::to_string(n); states[n]->gate = gate;
+            states[n]->gate_owner = static_cast<unsigned>(n);
             states[n]->argument = "{\"title\":\"t\",\"prompt\":\"" + states[n]->marker + " task\",\"agent_type\":\"general-purpose\"}";
             const auto cwd = n < 2 ? rig.cwd : rig.base / (n == 2 ? "project-b" : "project-c");
             sessions[n] = rig.Open(rig.Options(states[n], true, cwd)); auto event = sessions[n]->Subscribe(); Check(event.has_value(), "isolation subscribe failed"); streams[n] = *event;
             auto receipt = sessions[n]->Submit("same-key", states[n]->marker + " request"); Check(receipt.has_value(), "isolation submit failed"); receipts[n] = *receipt;
         }
         gate->Wait(4); Check(sessions[0]->Cancel(receipts[0].operation_id).has_value(), "local cancel failed");
-        Check(sessions[1]->Close().has_value(), "closing one held child did not join"); gate->Release();
+        Check(sessions[1]->Close().has_value(), "closing one held child did not join");
+        gate->WaitCancelled(0, 1); gate->Release();
         for (std::size_t n : {std::size_t{2}, std::size_t{3}}) {
             unsigned approvals = 0; bool completed = false;
             std::vector<std::string> resolved;
@@ -604,13 +703,13 @@ void SubagentCase(const std::string& name, const fs::path& base) {
             auto stopped = sessions[n]->WaitResult(receipts[n].operation_id, 10s);
             Check(stopped.has_value() && stopped->state == sdk::OperationState::Cancelled && stopped->result_persisted && states[n]->tools == 0,
                 "cancelled/closed child executed its effect");
-            CheckStoppedReport(sessions[n], *stopped, Utf8(rig.cwd));
+            CheckStoppedReport(sessions[n], *stopped, Utf8(rig.cwd), true, states[n].get());
             for (unsigned count = 0; count != 128; ++count) {
                 auto event = streams[n]->Next(0ms); if (!event || !*event) break;
                 Check(!(**event).approval, "cancelled/closed child issued a fresh ticket after the held model");
             }
             Check(sessions[n]->Close().has_value(), "stopped Session Close failed");
-            CheckStoppedReport(sessions[n], *stopped, Utf8(rig.cwd));
+            CheckStoppedReport(sessions[n], *stopped, Utf8(rig.cwd), true, states[n].get());
             const auto sid = sessions[n]->id();
             const auto old_reports = sessions[n]->GetSubagentReports(receipts[n].operation_id);
             Check(old_reports.has_value() && old_reports->size() == 1, "cancel seed owned report missing");
@@ -620,7 +719,7 @@ void SubagentCase(const std::string& name, const fs::path& base) {
             Check(known.has_value() && known->state == sdk::OperationState::Cancelled && known->result_persisted &&
                 known->turn_id == stopped->turn_id && resumed_state->calls == 0 && resumed_state->tools == 0,
                 "healthy cancellation did not resume its known terminal or reran a child");
-            CheckStoppedReport(resumed, *known, Utf8(rig.cwd), false);
+            CheckStoppedReport(resumed, *known, Utf8(rig.cwd), false, resumed_state.get());
             const auto fresh_reports = resumed->GetSubagentReports(receipts[n].operation_id);
             Check(fresh_reports.has_value() && fresh_reports->front().parent_action_id == old_reports->front().parent_action_id &&
                 fresh_reports->front().parent_attempt == old_reports->front().parent_attempt, "cancel resume changed owned child action");
