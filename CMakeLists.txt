@@ -632,6 +632,7 @@ add_library(lubancode_engine STATIC
   src/memory/owner_lock.cpp
   src/memory/recall_engine.cpp
   src/memory/topic_store.cpp
+  src/memory/project_commit.cpp
   src/memory/candidate_store.cpp
   src/memory/worker_queue.cpp
   src/memory/editor_adapter.cpp

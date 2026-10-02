@@ -80,6 +80,7 @@ DOC development/i18n.md
 DOC development/lubancore-sdk.md
 DOC development/sdk-skills.md
 DOC development/sdk-memory-recall.md
+DOC development/memory-project-commit.md
 DOC development/agent-thread-start-cleanup.md
 DOC development/sdk-updater-boundary.md
 DOC development/lubancore-builtin-search.md
@@ -142,7 +143,9 @@ DOC architecture/gateway/runbook.md
 DOC development/workspace-storage-v2/P0-0-contracts.md
 DOC development/workspace-storage-v2/P0-0-inventory.md
 DOC development/workspace-storage-v2/scale-baseline.md
+DOC development/workspace-manifest-missing-read.md
 DOC features/telemetry/collector.md
 
 DOC features/qq-assistant.md
 DOC development/experiment-runner.md
+DOC development/runner-probe-evidence.md
