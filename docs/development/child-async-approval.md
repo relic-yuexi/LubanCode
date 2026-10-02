@@ -37,7 +37,9 @@ std::function<runtime::ApprovalLease(const ChildApprovalRequest&)>
 新 scoped 口优先于旧 async/sync；缺 owner、真桥、有效 lease 或局部取消能力，明确拒绝。
 一旦选中新口，失败不回落到普通 future 或同步确认。没接新口，原 CLI 同步、routed、floored 路不变。
 规则预裁定、角色工具面、deny_commands 与 ModePolicy 仍先行；父 Yolo 不能绕过子 floor。
-有 floor 却缺有效 floored 裁定口，新路径拒绝，不能先让父 Allow 再补确认。
+新能力另需内部 child-scoped 纯裁定口，入参带 owned scope、pre/class/name/input；有效 floor 取 scope。
+宿主调同一 `EvaluatePermission`，只合配置规则、ModePolicy 与 floor，不递父 `AllowedTools` 或临时 grant。
+旧三态不能分辨父 Allow 来源，新路径不借旧 eval/floored；缺子裁定口便拒。旧 CLI 无新能力仍照原接法。
 新请求携 task 页归属，宿主锁外发布并按 owned request ID 回答；不把 blocking Wait 塞进旧 presenter。
 
 用户已定 `AcceptForSession` 只限当前子会话。新票回答时在原 pending 锁内裁胜负，再写独立子 grant。
@@ -58,7 +60,7 @@ shared Hooks、后台 lambda、冻结 env 和 pending 都不保存借旗或这�
 Wait 返回后再查本次旗；真正 MarkExecutionStarted 前再查一次。取消时不发 started、不执行工具。
 这只约定检查点，不承诺阻塞 mutex、宿主 publisher 或外部 I/O 能即时打断。
 
-每票成功或拒绝先撤本票；正常、超时、Close 与异常退子调用时再撤子 grant、scoped TurnWiring，最后退取消链/子桥。
+每票成功或拒绝先撤本票；退子调用时先清 scoped TurnWiring，再撤子 grant，最后退取消链/子桥。
 回调只短借宿主；未来状态和票据不强持 Session。publisher、撤票与 capture 退场仍在所有锁外。
 本笔复用共用执行 owner；终态 Finish/registry 例外修复沿独立小笔，不在这里复制收尾栈。
 孩子工具执行 invocation 仍缺席；缺真实 owned operation 的 `memory_save` 继续拒绝。
