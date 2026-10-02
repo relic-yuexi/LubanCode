@@ -100,3 +100,8 @@ SID/run 同号跨父归属仍由既有真实子票册守住；公开夹具不假
 源 `c2cfd3ce` 的真实 Windows 捕获故障与 macOS 四场取消断言红了；原日志未记实际 Operation 或 live Finish/Close 值，不能倒填根因。
 下一头只在这两处原断言失败前打印已有公开 owned 值：状态、原错、持久标记、报告采用缺口、实际子回执、请求与工具计数。
 不改生产、原断言、预算、故障场景或固定十二册。诊断只凭当前场值，不读未来结果、私有 Writer 或凭据；旧原件独立封存，新头独立取三平台证据。
+
+诊断源 `d674d3e0` 的 [macOS 组合腿](https://github.com/relic-yuexi/LubanCode/actions/runs/37072767233/job/111056228058) 已记实值：父 `Cancelled/result_persisted=true`、原错为空，子 `succeeded/committed/closed`，append/Close 无错，工具执行为零。
+完整原日志 SHA256 `fa5719b41636d5dec7147687c4a3ad62c16a5476a06c831a6ee8be50ca762f74`，3287–3292 行；不再猜成 Finish/Close 丢确认。
+这套四场夹具须先在共闸未释放时，逐 owner 确认孩子 0、1 的真实 Backend 已亲眼读到本次取消旗，再放孩子 2、3；父 Cancel 成功或别场 Close 完成都不能顶替它。
+候选只收夹具确认闸，保原 20 秒等待帽、四场重叠、Cancelled/持久标记/工具零次/回执断言与失败 RAII 放闸；生产 CancelChain 轮询不改。Windows 捕获故障仍待该诊断头实值，不抢先修产品。
