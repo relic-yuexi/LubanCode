@@ -48,15 +48,27 @@ bool Has(const sdk::ModelRequest& r, const std::string& name) {
 }
 struct Gate {
     std::mutex mutex; std::condition_variable cv; unsigned entered = 0; bool released = false;
+    std::array<bool, 4> cancelled_owners{};
     void Release() { std::lock_guard lock(mutex); released = true; cv.notify_all(); }
-    bool Enter(sdk::Cancellation c) {
+    bool Enter(sdk::Cancellation c, unsigned owner) {
         std::unique_lock lock(mutex); ++entered; cv.notify_all();
         while (!released && !c.requested()) cv.wait_for(lock, 5ms);
-        return !c.requested();
+        const bool cancelled = c.requested();
+        if (cancelled) {
+            Check(owner < cancelled_owners.size(), "cancel acknowledgement has no real fixture owner");
+            cancelled_owners[owner] = true; cv.notify_all();
+        }
+        return !cancelled;
     }
     void Wait(unsigned count) {
         std::unique_lock lock(mutex);
         Check(cv.wait_for(lock, 20s, [&] { return entered >= count; }), "four children did not overlap");
+    }
+    void WaitCancelled(unsigned owner) {
+        std::unique_lock lock(mutex);
+        Check(owner < cancelled_owners.size(), "cancel wait has no real fixture owner");
+        Check(cv.wait_for(lock, 20s, [&] { return cancelled_owners[owner]; }),
+            "own held child did not observe its actual cancellation");
     }
 };
 struct ReleaseGate { std::shared_ptr<Gate> gate; ~ReleaseGate() { if (gate) gate->Release(); } };
@@ -67,7 +79,7 @@ struct State {
     std::string marker = "SDKCHILD_OWN";
     std::string argument = R"({"title":"explicit child","prompt":"SDKCHILD_OWN task","agent_type":"general-purpose"})";
     bool parent_grant_first = false, read_file = false, stop_at_first = false, wall_wait = false, child_final_first = false;
-    std::shared_ptr<Gate> gate;
+    std::shared_ptr<Gate> gate; unsigned gate_owner = 0;
     std::function<void()> before_child_final;
     sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest& request, sdk::Cancellation cancel) {
         const auto current = ++active;
@@ -95,7 +107,7 @@ struct State {
         Check(request.model == "child-model", "child request ignored its frozen model binding");
         Check(!Has(request, "agent") && !Has(request, "memory_save"), "child inherited recursive dispatch or parent Memory write");
         const auto offset = parent_grant_first ? 2 : 1;
-        if (n == offset && gate && !gate->Enter(cancel))
+        if (n == offset && gate && !gate->Enter(cancel, gate_owner))
             return std::unexpected(sdk::Error{"fixture.cancelled", "own invocation cancelled"});
         if (child_final_first) return sdk::ModelReply{marker + " child final", {}, sdk::Usage{1, 1}};
         if (wall_wait) {
@@ -641,13 +653,15 @@ void SubagentCase(const std::string& name, const fs::path& base) {
         ReleaseGate release{gate};
         for (std::size_t n = 0; n < 4; ++n) {
             states[n] = std::make_shared<State>(); states[n]->marker = "SDKCHILD_OWN_" + std::to_string(n); states[n]->gate = gate;
+            states[n]->gate_owner = static_cast<unsigned>(n);
             states[n]->argument = "{\"title\":\"t\",\"prompt\":\"" + states[n]->marker + " task\",\"agent_type\":\"general-purpose\"}";
             const auto cwd = n < 2 ? rig.cwd : rig.base / (n == 2 ? "project-b" : "project-c");
             sessions[n] = rig.Open(rig.Options(states[n], true, cwd)); auto event = sessions[n]->Subscribe(); Check(event.has_value(), "isolation subscribe failed"); streams[n] = *event;
             auto receipt = sessions[n]->Submit("same-key", states[n]->marker + " request"); Check(receipt.has_value(), "isolation submit failed"); receipts[n] = *receipt;
         }
         gate->Wait(4); Check(sessions[0]->Cancel(receipts[0].operation_id).has_value(), "local cancel failed");
-        Check(sessions[1]->Close().has_value(), "closing one held child did not join"); gate->Release();
+        Check(sessions[1]->Close().has_value(), "closing one held child did not join");
+        gate->WaitCancelled(0); gate->WaitCancelled(1); gate->Release();
         for (std::size_t n : {std::size_t{2}, std::size_t{3}}) {
             unsigned approvals = 0; bool completed = false;
             std::vector<std::string> resolved;
