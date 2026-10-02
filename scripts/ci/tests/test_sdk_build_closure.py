@@ -63,6 +63,33 @@ class OptionalHostClosureTests(unittest.TestCase):
         self.targets["engine"]["dependencies"].append("sdk")
         self.assertEqual(closure.inspect_graph(self.targets)["status"], "passed")
 
+    def test_loop_lease_provider_must_share_the_engine_static_target(self):
+        targets = deepcopy(self.targets)
+        targets["engine"]["name"] = "lubancode_engine"
+        targets["engine"]["projectSources"].extend(
+            ["src/agent/loop.cpp", "src/runtime/scoped_approval.cpp"])
+        targets["runtime"] = {"name": "lubancode_runtime", "type": "STATIC_LIBRARY",
+                              "projectSources": ["src/runtime/session_runtime.cpp"],
+                              "dependencies": ["engine"]}
+        targets["sdk"]["dependencies"] = ["runtime"]
+        self.assertEqual(closure.inspect_graph(targets)["status"], "passed")
+        # The old graph has the same complete source union, but the provider is
+        # in the upstream archive and the Host static link cannot resolve it.
+        targets["engine"]["projectSources"].remove("src/runtime/scoped_approval.cpp")
+        targets["runtime"]["projectSources"].append("src/runtime/scoped_approval.cpp")
+        report = closure.inspect_graph(targets)
+        self.assertEqual(report["status"], "failed")
+        self.assertTrue(any("lease implementation" in v for v in report["violations"]))
+
+    def test_loop_lease_missing_or_duplicate_provider_is_rejected(self):
+        self.targets["engine"]["name"] = "lubancode_engine"
+        self.targets["engine"]["projectSources"].append("src/agent/loop.cpp")
+        self.assertEqual(closure.inspect_graph(self.targets)["status"], "failed")
+        self.targets["engine"]["projectSources"].append("src/runtime/scoped_approval.cpp")
+        self.assertEqual(closure.inspect_graph(self.targets)["status"], "passed")
+        self.targets["engine"]["projectSources"].append("src/runtime/scoped_approval.cpp")
+        self.assertEqual(closure.inspect_graph(self.targets)["status"], "failed")
+
 
 class FileApiClosureTests(unittest.TestCase):
     def setUp(self):

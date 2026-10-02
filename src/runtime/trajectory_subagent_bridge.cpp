@@ -154,11 +154,13 @@ public:
     SubagentBridgeV3Impl(std::unique_ptr<v3::V3Writer> writer,
                          std::unique_ptr<V3SessionBooks> books,
                          std::unique_ptr<TrajectoryTurnBridge> bridge,
-                         std::shared_ptr<SubagentTerminalRegistry> registry)
+                         std::shared_ptr<SubagentTerminalRegistry> registry,
+                         std::optional<ChildApprovalParent> approval_parent)
         : writer_(std::move(writer)), books_(std::move(books)), bridge_(std::move(bridge)),
-          run_id_(writer_->run_id()), registry_(std::move(registry)) {}
+          run_id_(writer_->run_id()), registry_(std::move(registry)), approval_parent_(std::move(approval_parent)) {}
     const std::string& run_id() const override { return run_id_; }
     TrajectoryTurnBridge& turn_bridge() override { return *bridge_; }
+    std::optional<ChildApprovalParent> approval_parent() const override { return approval_parent_; }
     SubagentTerminalReceipt Finish(SubagentExecutionOutcome execution,
                                    const std::string& reason) override {
         std::lock_guard lock(finish_mutex_);
@@ -213,6 +215,7 @@ private:
     std::unique_ptr<TrajectoryTurnBridge> bridge_;
     std::string run_id_;
     std::shared_ptr<SubagentTerminalRegistry> registry_;
+    std::optional<ChildApprovalParent> approval_parent_;
     std::mutex finish_mutex_;
     std::optional<SubagentTerminalReceipt> finished_;
 };
@@ -229,9 +232,10 @@ std::unique_ptr<TrajectorySubagentBridge> TrajectorySubagentBridge::OwnV2(
 std::unique_ptr<TrajectorySubagentBridge> TrajectorySubagentBridge::OwnV3(
     std::unique_ptr<v3::V3Writer> writer, std::unique_ptr<V3SessionBooks> books,
     std::unique_ptr<TrajectoryTurnBridge> bridge,
-    std::shared_ptr<SubagentTerminalRegistry> registry) {
+    std::shared_ptr<SubagentTerminalRegistry> registry,
+    std::optional<ChildApprovalParent> approval_parent) {
     return std::make_unique<SubagentBridgeV3Impl>(std::move(writer), std::move(books),
-                                               std::move(bridge), std::move(registry));
+                                               std::move(bridge), std::move(registry), std::move(approval_parent));
 }
 
 // 子代理五步用的子会话 id:YYYYMMDD-HHMMSS-XXXXXX 形状(单段名可过目录
@@ -351,9 +355,12 @@ TrajectorySessionLedger::SpawnSubagentV3(const std::string& parent_call_id,
     if (impl_->telemetry_wake != nullptr) {
         child_bridge->SetCommitWake(impl_->telemetry_wake, child_ref.journal_path);
     }
+    std::optional<ChildApprovalParent> approval_parent;
+    if (declared) approval_parent = ChildApprovalParent{parent_ref.session_id, parent_ref.run_id,
+        parent_ref.turn_id, parent_ref.action_id, parent_ref.declared_message_ref};
     return TrajectorySubagentBridge::OwnV3(
         std::move(child_writer_owner), std::move(child_books), std::move(child_bridge),
-        impl_->child_terminals);
+        impl_->child_terminals, std::move(approval_parent));
 }
 
 std::expected<std::unique_ptr<TrajectorySubagentBridge>, SubagentSpawnFailure>

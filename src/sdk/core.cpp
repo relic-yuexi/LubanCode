@@ -1145,7 +1145,8 @@ struct Session::Impl final : rt::InteractionBroker {
                 if (pop.status == rt::SessionService::PendingPop::Status::WriteFailed) { broken = true; cv.notify_all(); break; }
                 if (pop.status != rt::SessionService::PendingPop::Status::Ok) continue;
                 active_operation = pop.input.operation_id;
-                approvals.SetOperationOwner(session_id, active_operation);
+                const auto* writer = service->trajectory()->v3_main_writer();
+                approvals.SetOperationOwner(session_id, active_operation, writer ? writer->run_id() : std::string());
                 active_turn_id.clear();
                 skip = closing || cancelled.contains(active_operation);
                 interrupt.store(skip);
