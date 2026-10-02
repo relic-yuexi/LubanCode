@@ -2,14 +2,14 @@
 
 [开发手册](README.md) · [执行组合](child-sdk-integration.md)
 
-状态：先落合同，再组合两笔内部接缝。公开 SDK 子 Agent 入口与严格历史采用另交。
+状态：先落合同，再组合内部接缝。公开 SDK 子 Agent 入口另交；本笔追加严格历史采用合同后，再并入只读校准模块。
 本地只静读、查文档、跑纯数据门；不 configure、编译、CTest 或运行原生夹具。
 
 ## 本笔接什么
 
-以执行组合 `4413b315` 为基线，接真实子会话审批 #281 与父终态观察 #283。
+以执行组合 `4413b315` 为基线，接真实子会话审批 #281、父终态观察 #283 与严格历史采用 #285。
 保留共用 ExecutionOwner、当次取消、typed 终态、逐票 lease 与普通 CLI 路径。
-两笔各自 CI 不能代组合 CI；本组合独立开私有分支，不写共享功能分支或 main。
+各笔 CI 不能代组合 CI；本组合独立开私有分支，不写共享功能分支或 main。
 
 父 producer 只生成一份真实 SubagentSpawnProvenance。审批所需直接父 SID/run、
 声明 turn/action/message 从这份 owned 值取，不再另存一份可能漂移的母来源。
@@ -40,7 +40,12 @@ owned 父观察与终态报告不延长 Writer、hub 或工具宿主原始借用
 父观察先核真实终态与同份有界子卷，再存 observation 和原始 capture。
 正式结果仍由本场 ResultStore、selected、Tool 消息和上下文准入原路收口。
 未知观察或捕获阻止后续模型与摘要调用；raw/effective 两份材料不可混称一份。
-这笔不新增恢复采用结论；下笔只读严格校准另核历史 admission 和实际 prepared。
+追加只读严格校准，沿 #285 合同逐枚核历史 admission 和实际 prepared。
+校准只收已验父卷，读同份有界子卷与本地结果；不调模型、工具，不开写柄，不补账。
+只有 Validated 可带 owned 历史采用值；Incomplete、Rejected 与 NotApplicable 分开。
+历史 producer claims 与 live Finish/checked Close 分列，子终态不能冒充真实 Close 回执。
+多场同 SID/run、重哈希冒领、坏原件、反馈改写、上下文 reduction/compact 原册均留。
+原观察与子票生产接线不改；公开宿主只消费此模块，不另复制一套采用推断。
 
 ## 验收
 
@@ -50,7 +55,7 @@ owned 父观察与终态报告不延长 Writer、hub 或工具宿主原始借用
 组合头保原 14 场真实子审批、8 场父观察、14 场 scoped 底座、7 场 typed 终态、
 2 场执行组合与 10 场前台上下文。父观察 12 条共用路径标记照留，Unix 真目录
 alias 拒绝另核专属标记，Windows 不冒记未获权限的 symlink 路。
-focused 真实来源并集应为 21，ASan 必需来源并集应为 26；从本头脚本与登记
+追加原 8 场严格历史采用验收。focused 真实来源并集应为 22，ASan 必需来源并集应为 27；从本头脚本与登记
 重算，不抄旧摘要。安装 consumer、Host、Worker、两种 Runner、九份真实
 依赖图、三平台全量、必需 ASan 都认同一源码与同树受测 merge。
 
