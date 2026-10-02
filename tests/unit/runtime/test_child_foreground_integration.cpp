@@ -202,7 +202,7 @@ struct Rig {
             platform::PathToUtf8(cwd), "model-" + backend.suffix, 4);
         tools::AgentTool::Hooks hooks;
         hooks.trajectory_spawn = [this](const std::string& label, const std::string& parent_run,
-                                       runtime::SubagentSpawnFailure* failure) {
+                                       runtime::SubagentSpawnFailure* failure, runtime::SubagentDispatchMode) {
             auto spawned = ledger->SpawnSubagent(parent_cause.action_id, label, parent_run);
             if (!spawned) {
                 if (failure) *failure = spawned.error();
