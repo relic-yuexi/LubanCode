@@ -2,9 +2,10 @@
 
 [开发手册](README.md) · [逐票 lease](scoped-approval-lease.md) · [前台调用上下文](child-foreground-context.md) · [SDK 子 Agent 合同](sdk-subagents.md)
 
-状态：E2 第二笔实现前合同，基于首笔 `66609733`。首笔 CI 尚在跑。
+状态：E2 第二笔实现候选，基于首笔 `66609733`。首笔远端全绿，已转 Ready；本笔每次新源独立取远端原件验收。
 本笔接真实前台子轮、逐票等待及当前子会话允许；仍不开放公共 SubAgent SDK。
 后台异步询问、持久 grant、跨进程票据和 Managed 治理另做。
+中立 lease 实现归 engine，供 Agent loop 直接消费；runtime 仍单向依赖 engine，不加反向库边或 whole-archive。
 
 ## 接口与事实来源
 

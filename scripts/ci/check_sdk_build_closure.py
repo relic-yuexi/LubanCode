@@ -40,6 +40,20 @@ def inspect_graph(targets: dict) -> dict:
                       for name in sources if name.startswith("src/updater/"))
     if not any(name.startswith("src/sdk/") for name in sources):
         violations.append("SDK closure contains no SDK implementation sources")
+    # Agent loop calls the neutral lease directly. A runtime-owned provider can
+    # appear in the SDK's transitive graph and still fail a single-pass static
+    # host link: runtime is scanned before its engine dependency. Require the
+    # implementation in the consuming engine instead of adding a reverse edge.
+    loop_owners = [key for key in closure
+                   if "src/agent/loop.cpp" in targets[key]["projectSources"]]
+    if loop_owners:
+        lease_owners = [key for key in closure
+                        for name in targets[key]["projectSources"]
+                        if name == "src/runtime/scoped_approval.cpp"]
+        if (len(loop_owners) != 1 or targets[loop_owners[0]]["name"] != "lubancode_engine" or
+                targets[loop_owners[0]]["type"] != "STATIC_LIBRARY" or
+                lease_owners != loop_owners):
+            violations.append("Agent loop lease implementation must belong once to lubancode_engine")
     return {"sdkBuildClosure": sorted(closure), "sdkProjectSources": sources,
             "status": "failed" if violations else "passed", "violations": violations}
 
