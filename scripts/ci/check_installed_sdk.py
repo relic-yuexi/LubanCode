@@ -22,6 +22,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.builtin_search",
     "sdk.consumer.results",
     "sdk.consumer.skills_seed", "sdk.consumer.skills_resume",
+    "sdk.consumer.memory_seed", "sdk.consumer.memory_resume",
     "sdk.consumer.result_seed", "sdk.consumer.result_resume",
     "sdk.consumer.seed", "sdk.consumer.resume",
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
@@ -30,6 +31,7 @@ REQUIRED_PUBLIC_HEADERS = {
     "include/lubancore/api.hpp", "include/lubancore/core.hpp", "include/lubancore/extensions.hpp",
     "include/lubancore/results.hpp",
     "include/lubancore/skills.hpp",
+    "include/lubancore/memory.hpp",
 }
 
 

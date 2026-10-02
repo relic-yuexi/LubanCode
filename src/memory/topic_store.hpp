@@ -8,6 +8,8 @@
 #include <expected>
 #include <filesystem>
 #include <optional>
+#include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -23,6 +25,17 @@ struct StoredEntry {
     MemoryEntry public_entry;
     nlohmann::json fingerprints = nlohmann::json::object();
 };
+
+// SDK read-only branch: one bounded, owned read view. No worker, queue, trace
+// file or catalog repair is started. CLI LoadCatalog keeps its permissive path.
+struct ProjectRecallSnapshot {
+    std::vector<StoredEntry> entries;
+    std::map<std::string, std::string> topics;
+    std::set<std::string> stale_ids;
+};
+std::expected<ProjectRecallSnapshot, std::string> ReadProjectRecallSnapshot(
+    const std::filesystem::path& memory_dir,
+    const std::filesystem::path& project_root);
 
 // 扫描某层主题目录(facts/preferences/feedback;用户层无 facts)。同 id
 // 撞车的两份都停成 conflict;读不动的记进 warnings。

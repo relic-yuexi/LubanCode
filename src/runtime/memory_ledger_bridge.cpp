@@ -4,6 +4,8 @@
 #include <system_error>
 
 #include "platform/log_sink.hpp"
+#include "platform/bounded_read.hpp"
+#include "platform/sha256.hpp"
 #include "trajectory/blob_store.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/v3/writer.hpp"
@@ -26,6 +28,71 @@ std::string PathUtf8Text(const fs::path& path) {
 }  // namespace
 
 MemoryLedgerBridge::MemoryLedgerBridge(TrajectorySessionLedger& ledger) : ledger_(ledger) {}
+
+std::expected<MemoryLedgerBridge::ContextAdmission, std::string> MemoryLedgerBridge::AdmitRecallContext(
+    const std::string& text, const std::vector<memory::InjectedMemoryRecord>& records,
+    const std::string& turn_id) {
+    namespace v3 = trajectory::v3;
+    auto* writer = ledger_.v3_main_writer();
+    if (!writer || text.empty() || turn_id.empty())
+        return std::unexpected("memory.recall.invalid_context");
+    std::vector<nlohmann::json> payloads;
+    for (const auto& record : records) {
+        if (record.content.empty() || record.turn_id != turn_id || record.memory_level != "project" ||
+            record.injected_bytes != record.content.size() || text.find(record.content) == std::string::npos ||
+            platform::Sha256Hex(record.content) != record.content_sha256)
+            return std::unexpected("memory.recall.invalid_snapshot");
+        nlohmann::json payload{
+            {"memoryId", record.memory_id}, {"memoryLevel", record.memory_level},
+            {"memorySchema", static_cast<std::uint64_t>(record.memory_schema)},
+            {"memoryUpdatedAt", record.memory_updated_at}, {"contentSha256", record.content_sha256},
+            {"sourceEvidenceRefs", record.source_evidence_refs},
+            {"injectedBytes", static_cast<std::uint64_t>(record.injected_bytes)}};
+        if (record.content.size() > kSnapshotInlineLimit) {
+            trajectory::BlobStore blobs(ledger_.session_dir() / "artifacts");
+            auto blob = blobs.Store(record.content, "text/plain", trajectory::Durability::ProcessCrash);
+            if (!blob || blob->sha256 != record.content_sha256)
+                return std::unexpected("memory.recall.snapshot_failed: fragment blob did not persist");
+            auto actual = platform::ReadBoundedRegularFile(blobs.PathFor(blob->sha256), record.content.size());
+            if (!actual || *actual != record.content || platform::Sha256Hex(*actual) != record.content_sha256)
+                return std::unexpected("memory.recall.snapshot_failed: fragment blob differs");
+            std::error_code ec;
+            const auto relative = fs::relative(blobs.PathFor(blob->sha256), ledger_.session_dir(), ec);
+            if (ec) return std::unexpected("memory.recall.snapshot_failed: fragment path failed");
+            payload["snapshotRef"] = PathUtf8Text(relative);
+        } else payload["snapshotInline"] = record.content;
+        payloads.push_back(std::move(payload));
+    }
+    v3::MessageDraft draft;
+    draft.turn_id = turn_id;
+    draft.origin = v3::MessageOrigin::ContextRuntime;
+    draft.display = v3::DisplayMode::Hidden;
+    draft.message = nlohmann::json{{"role", "user"}, {"content", text}};
+    const auto stored = writer->AppendMessage(std::move(draft), trajectory::Durability::ProcessCrash);
+    if (stored.status != v3::WriteReceipt::Status::Committed)
+        return std::unexpected("memory.recall.snapshot_failed: " + stored.error_code);
+    const auto admitted = writer->AdmitMessages({stored.id}, trajectory::Durability::ProcessCrash);
+    if (admitted.status != v3::WriteReceipt::Status::Committed)
+        return std::unexpected("memory.recall.admission_failed: " + admitted.error_code);
+    ContextAdmission result;
+    result.message.role = api::Role::User;
+    result.message.content.push_back(api::TextBlock{text});
+    result.message_id = stored.id;
+    for (auto& payload : payloads) {
+        v3::EventDraft event;
+        event.kind = v3::EventKindV3::MemoryRecallInjected;
+        event.turn_id = turn_id;
+        payload["contextMessageRef"] = stored.id;
+        event.payload = std::move(payload);
+        const auto receipt = writer->AppendEvent(std::move(event), trajectory::Durability::ProcessCrash);
+        if (receipt.status != v3::WriteReceipt::Status::Committed) {
+            ledger_.BlockV3Execution("memory.recall.fact_failed");
+            result.error = "memory.recall.fact_failed: " + receipt.error_code;
+            return result;
+        }
+    }
+    return result;
+}
 
 // ---------------------------------------------------------------------------
 // v3 场:召回注入——快照消息 -> 链接纳 -> 事实行,三步按序落稳

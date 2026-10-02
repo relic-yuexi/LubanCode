@@ -6,6 +6,7 @@ include(CMakePackageConfigHelpers)
 add_library(lubancore_sdk SHARED
   src/sdk/core.cpp
   src/sdk/skills.cpp
+  src/sdk/memory.cpp
   src/sdk/extensions.cpp
   src/sdk/results.cpp
   src/sdk/result_projection.cpp

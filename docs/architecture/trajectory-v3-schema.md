@@ -105,6 +105,13 @@
 | T11 五域遗漏事实(Session v3 旧设计清理单 V3-GAP-06) | `session.environment.captured`(本场 run 环境取材事实:snapshotRef 指脱敏快照 blob + replayLevel + gaps[] + configRedacted;捕获时间即信封 timestamp,没采集的场按缺件读,不拿今天环境补昨天事实)、`approval.mode.applied`(审批档位事实:mode/source/policyVersion/oldMode;source ∈ launch/user_toggle/resume_recomputed——档位变更与单次审批分家,恢复有效档 = 源场档与当前策略较严者,账不裁决)、`tool.verification.recorded`(验证事实:verificationId/kind/passed/producer,关联工具走信封 actionId,产物 artifactRefs/subjectVersion 按需)、`tool.verification.invalidated`(失效观察:verificationId/reason,append-only 不改旧 recorded 行)、`tool.observation.late`(迟到响应观察:cause + 可选 jsonrpcRequestId/server;不改已提交终态)、`recovery.note.recorded`(恢复注记:note;未知副作用/恢复结论缘由的 append-only 观察)、`context.pressure.recorded`(发送前容量压力与预算裁决:phase=preflight,verdict ∈ reserve_clamped/exceeded_denied/max_tokens_degraded,四项数字账与 v2 同名事件同口径 + remainingTokens;禁携带累计用量——usage 唯一 owner 在 assistant message)——全部不带 status |
 
 
+SDK 项目召回另把完整格式段（正文、来源与护栏）存为一条隐藏 `context_runtime` user 消息，
+沿 `AdmitMessages` 接纳。每条 `memory.recall.injected` 以 `contextMessageRef` 引用这条完整消息；
+`contentSha256`、`injectedBytes` 仍描述该条真实正文片段。片段不再单独入模型链：至多 512 字节
+用 `snapshotInline`，其余存共有内容寻址 blob，以 `snapshotRef` 引用。恢复逐轮报告须核实际
+消息、采用链、片段与 blob 字节，摘要自哈希不能证明采用。详见 [SDK Memory 召回合同](../development/sdk-memory-recall.md)。
+这批正在接入，原生证据尚待远端 CI；CLI 原来的 `messageRef` 与派工记录口照常。
+
 ### 2.2 kind → status 固定映射(§4.14)
 
 `kind` 与 `status` 映射由 schema 固定,不出现 `finished + running` 这类组合:
