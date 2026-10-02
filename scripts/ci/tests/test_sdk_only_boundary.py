@@ -95,6 +95,31 @@ class BoundaryTests(unittest.TestCase):
         self.targets[-1]["name"] = "lubancore_sdk_tests"
         self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
 
+    def test_real_private_approval_reference_is_only_testing_on(self):
+        reference = "src/sdk/approval.cpp"
+        self.source_file(reference, '#include "sdk/approval.hpp"\n')
+        self.source_file("src/sdk/approval.hpp", '#include "runtime/scoped_approval.hpp"\n')
+        self.source_file("src/runtime/scoped_approval.hpp", "#pragma once\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        report = self.check(testing=True)
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.assertIn("src/runtime/scoped_approval.hpp", report["scannedProjectFiles"])
+        self.targets[-1]["sources"][0]["path"] = "src/sdk/core.cpp"
+        self.assert_rejected(self.check(testing=True), "unregistered private SDK reference")
+
+    def test_private_approval_reference_cannot_hide_a_host_include(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        reference = "src/sdk/approval.cpp"
+        self.source_file(reference, '#include "sdk/approval.hpp"\n')
+        self.source_file("src/sdk/approval.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
     def add_search_probe(self):
         self.source_file(boundary.SEARCH_PROBE_SOURCE, "int main() { return 0; }\n")
         probe = {"id": "probe", "name": boundary.SEARCH_PROBE_TARGET, "type": "EXECUTABLE",

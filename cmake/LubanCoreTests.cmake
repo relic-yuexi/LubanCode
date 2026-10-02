@@ -40,6 +40,9 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   # its private symbols from the SDK DLL. Session and installed-host cases call
   # the SDK's hidden reader through the public Session API.
   "${CMAKE_SOURCE_DIR}/src/sdk/results.cpp"
+  # The private pending implementation is compiled into the reference fixture;
+  # its symbols stay hidden in the SDK DLL. Public Session cases use the DLL.
+  "${CMAKE_SOURCE_DIR}/src/sdk/approval.cpp"
   ${LUBANCORE_FOCUSED_TEST_SOURCES})
 target_link_libraries(lubancore_sdk_tests PRIVATE
   lubancode_runtime lubancore_sdk doctest::doctest)

@@ -89,6 +89,9 @@ add_executable(lubancode_tests
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 if(LUBANCODE_BUILD_SDK)
   target_link_libraries(lubancode_tests PRIVATE lubancore_sdk)
+  # Scoped pending/reference tests call private implementation symbols. Compile
+  # the real source locally rather than exporting a new private SDK DLL ABI.
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/approval.cpp")
   if(WIN32)
     add_custom_command(TARGET lubancode_tests POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different

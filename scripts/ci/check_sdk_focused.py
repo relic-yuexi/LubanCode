@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 
 REQUIRED = {
     "sdk.focused.lubancore_session",
+    "sdk.focused.lubancore_scoped_approval",
     "sdk.focused.lubancore_builtin_search",
     "sdk.focused.lubancore_lifecycle",
     "sdk.focused.lubancore_host_boundary",
@@ -104,6 +105,8 @@ def main():
                 marker = "[child-integration-path] " + path
                 if sections[0].splitlines().count(marker) != 1:
                     raise RuntimeError("Child integration actual path did not finish once: " + path)
+        if case.attrib["name"] == "sdk.focused.lubancore_scoped_approval" and int(counts[0]) != 14:
+            raise RuntimeError("Scoped approval native roster differs from 14 cases")
     print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
 
 
