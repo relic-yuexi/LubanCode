@@ -39,6 +39,15 @@ REQUIRED = {
 }
 
 
+def check_memory_cas_paths(native_section: str, platform_name: str):
+    if platform_name != "nt":
+        return
+    for path in ("target-extended", "temporary-threshold"):
+        marker = "[memory-cas-path] " + path
+        if native_section.splitlines().count(marker) != 1:
+            raise RuntimeError("Memory CAS actual Windows path did not finish once: " + path)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -94,6 +103,8 @@ def main():
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])
         if case.attrib["name"] == "sdk.focused.lubancore_memory_cas" and int(counts[0]) != 10:
             raise RuntimeError("Memory CAS native roster differs from 10 cases")
+        if case.attrib["name"] == "sdk.focused.lubancore_memory_cas":
+            check_memory_cas_paths(sections[0], os.name)
         if case.attrib["name"] == "sdk.focused.lubancore_memory_save" and int(counts[0]) != 12:
             raise RuntimeError("SDK memory-save native roster differs from 12 cases")
         if case.attrib["name"] == "sdk.focused.execution_owner" and int(counts[0]) != 7:
