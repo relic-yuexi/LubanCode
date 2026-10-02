@@ -12,9 +12,11 @@
 
 同项目目录同时开两场，各持 Backend、任务账、取消旗与 registry。第一场本次旗取消，第二场照常收场；真子账须分别记 Cancelled 与 Succeeded，不能串旗、串身份、串回执。失败退场先放测试闸，再等线程。
 
+子场名字仍用父场局部计数，同秒两场可同名。本笔按各父目录、真实 run 与完整五键核归属，不宣称子 session 字符串全局唯一。公开 SDK 发布子会话身份前，另补这一门。
+
 另一场把前台本次取消接进子轮，同时让真实 Close 后的边界报告失败。回执仍保 Cancelled、已提交终态五键与 CloseFailed；父工具返回 StopIndeterminate，不冒称完整交接，不重跑工具，重复查询只读缓存。
 
-验这条生产 spawn 路时，内部 ledger Options 只增一枚默认空的 `subagent_close_fault` 测试接点，拷值递进 BootstrapChild 与真实子 writer；回调在真实 Close 放柄后才报错。不造 fake Finish，不影响父 writer，也不冒称操作系统自然报错。公开 SDK 配置不开放这枚测试接点。
+验这条 V3 生产 spawn 路时，内部 ledger Options 只增一枚默认空的 `subagent_close_fault` 测试接点，拷值递进 BootstrapChild 与真实子 writer；回调在真实 Close 放柄后才报错。不造 fake Finish，不影响父 writer，也不冒称操作系统自然报错。公开 SDK 配置不开放这枚测试接点。
 
 ## 远程验收
 

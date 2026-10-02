@@ -27,6 +27,7 @@ REQUIRED = {
     "sdk.focused.session_execution",
     "sdk.focused.execution_owner",
     "sdk.focused.subagent_terminal_receipt",
+    "sdk.focused.child_foreground_integration",
     "sdk.focused.scoped_turn_bindings",
     "sdk.focused.atomic_write",
 }
@@ -96,6 +97,13 @@ def main():
                 marker = "[child-terminal-path] foreground." + path
                 if sections[0].splitlines().count(marker) != 1:
                     raise RuntimeError("Child terminal actual foreground path did not finish once: " + path)
+        if case.attrib["name"] == "sdk.focused.child_foreground_integration":
+            if int(counts[0]) != 2:
+                raise RuntimeError("Child foreground integration roster differs from 2 cases")
+            for path in ("isolation", "cancel-close-failed"):
+                marker = "[child-integration-path] " + path
+                if sections[0].splitlines().count(marker) != 1:
+                    raise RuntimeError("Child integration actual path did not finish once: " + path)
     print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
 
 

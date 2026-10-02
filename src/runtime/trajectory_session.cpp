@@ -155,6 +155,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     impl.workspace_root_text = platform::PathToUtf8(options.workspace_root);
     impl.training_policy = options.training_policy;
     impl.subagent_start_fault = options.subagent_start_fault;
+    impl.subagent_close_fault = options.subagent_close_fault;
     impl.workflow_start_fault = options.workflow_start_fault;
     impl.workflow_node_start_fault = options.workflow_node_start_fault;
     impl.manager = std::make_unique<trajectory::SessionManager>(std::move(manager_options));

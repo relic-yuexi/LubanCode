@@ -46,6 +46,7 @@ struct TrajectorySessionLedger::Impl {
     // 测试故障注入(生产恒空;子代理空轨迹单 5.1):子账首枚 run.started
     // 提交前问一次。
     std::function<std::optional<std::string>()> subagent_start_fault;
+    std::function<std::optional<std::string>()> subagent_close_fault;
     // workflow 编排单同款:编排账/node 账首枚 run.started 提交前问一次。
     std::function<std::optional<std::string>()> workflow_start_fault;
     std::function<std::optional<std::string>()> workflow_node_start_fault;

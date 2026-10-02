@@ -27,6 +27,7 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/runtime/test_session_execution.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_execution_owner.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_subagent_terminal_receipt.cpp"
+  "${_lubancore_tests_root}/unit/runtime/test_child_foreground_integration.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_scoped_turn_bindings.cpp")
 set(_lubancore_tests_exclude)
 if(LUBANCODE_BUILD_CLI)
@@ -87,6 +88,7 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
          sdk_basename STREQUAL "test_session_execution.cpp" OR
          sdk_basename STREQUAL "test_execution_owner.cpp" OR
          sdk_basename STREQUAL "test_subagent_terminal_receipt.cpp" OR
+         sdk_basename STREQUAL "test_child_foreground_integration.cpp" OR
          sdk_basename STREQUAL "test_scoped_turn_bindings.cpp")
     set(sdk_original_test "unit.runtime.${sdk_stem}")
   else()

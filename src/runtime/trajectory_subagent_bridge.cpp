@@ -311,7 +311,8 @@ TrajectorySessionLedger::SpawnSubagentV3(const std::string& parent_call_id,
     // task.started)。落稳才返检查点;此前不执行任何副作用。
     const std::string child_system = impl_->v3_books->system_content;
     auto bootstrapped = spawn.BootstrapChild(parent, agent_run_id, child_system, clean_label,
-                                             trajectory::Durability::PowerLoss);
+                                             trajectory::Durability::PowerLoss,
+                                             impl_->subagent_close_fault);
     if (!bootstrapped.error.empty()) {
         (void)spawn.Fail(parent, "child_init", bootstrapped.error, trajectory::Durability::PowerLoss);
         return fail_out("recorder_start", "trajectory.subagent_v3_bootstrap", bootstrapped.error,
