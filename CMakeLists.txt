@@ -305,18 +305,20 @@ unset(_lubancode_mbed_target)
 
 # ---------------------------------------------------------------------------
 # miniz 3.0.2(更新器 C++ 化批一第③单):zip 读写底座,批二解包层用它拆
-# 更新整包。与 yaml-cpp/lua/mbedTLS 同待遇:不管走没走 vcpkg 都
-# FetchContent 源码自建,两条构建路认同一份源码,vcpkg.json 不动。tag
+# 更新整包。仅 CLI 宿主需要它;SDK-only 不下载或定义此目标。
+# 宿主两条构建路认同一份 FetchContent 源码,vcpkg.json 不动。tag
 # 3.0.2 对应上游 amd_92ec3a8。默认形态(非 amalgamated)只编 miniz.c/
 # miniz_zip.c/miniz_tinfl.c/miniz_tdef.c——正是 zip reader/writer 与
 # tinfl 要的源;示例/模糊测试在子项目形态默认关,这里再显式钉一遍,
 # 防上游默认翻转。cmake_minimum_required 还停在 3.0,靠上面给 yaml-cpp
 # 设的 CMAKE_POLICY_VERSION_MINIMUM 3.5 过门。
 # ---------------------------------------------------------------------------
+# Keep the pre-existing static-dependency policy on both product paths.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+if(LUBANCODE_BUILD_CLI)
 _lubancode_tarball(_lubancode_miniz_url "richgel999/miniz" "3.0.2")
 # vcpkg 路顶层没钉全局静态(那条 set 只在非 vcpkg 分支里),这里补钉:
 # 两条构建路 miniz 一律静态,exe 不带 miniz.dll。
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
 set(INSTALL_PROJECT OFF CACHE BOOL "" FORCE)
@@ -330,6 +332,7 @@ if(MSVC)
   target_compile_options(miniz PRIVATE /w)
 else()
   target_compile_options(miniz PRIVATE -w)
+endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -1006,61 +1009,6 @@ add_library(lubancode_engine STATIC
   # 重试/退避/partial success 分型、§8.4 consent 与回环/公网分界、
   # §15.4 凭证 seam(装配层适配 runtime::SecretResolver)。
   src/telemetry/exporter.cpp
-  # 更新助手 C++ 化·批一第①单(契约层移植):四方契约(generate_manifest.py/
-  # install_plan.py/install.ps1/此处)的 C++ 侧——包内相对路径筛查、大小写
-  # 折叠键、归档成员名筛查、用户数据路径判定(paths.cpp)与 manifest.json
-  # schema 1 的读/验/折 + CanonicalJsonDump(manifest.cpp)。纯库,零平台/
-  # 网络依赖,后续批次(下载/解包/事务)在此底座上叠。
-  src/updater/paths.cpp
-  src/updater/manifest.cpp
-  # 更新助手 C++ 化·批一第②单(白名单覆盖决策表):新包 manifest × 盘面
-  # 实况 → 覆盖动作清单。行为权威是 install.ps1 终稿(PR #140)的
-  # Build-PackageFilePlan——包根文件表+受管树白名单,同名先备份再换新,
-  # 包外一概不动,目录/reparse 挡路即 conflict 阻断(退出码 3)。纯函数
-  # 零 IO,批三 apply 落地层吃这张表。
-  src/updater/whitelist_plan.cpp
-  # 更新助手 C++ 化·批二第①单(解包层):zip(mz_zip_reader 逐文件流式
-  # 回调口)与 tar.gz(tinfl 流式解 gzip + 自写 tar 头遍历,ustar/GNU 长
-  # 名/pax 覆写/base-256 尺寸都认)双格式安全解包——成员名全过
-  # NormalizeMemberName(批一①契约),链接/设备/管道成员整包拒,解压总
-  # 量帽 declared×6,POSIX 执行位。语义对齐 scripts/updater.py 的
-  # unpack_archive;流式纪律见 archive.hpp 头注。
-  src/updater/archive_zip.cpp
-  src/updater/archive_tar.cpp
-  # 更新助手 C++ 化·批二第②单(大文件断点续传下载器):Range 续传 +
-  # 流式分块收体 + 整文件 Sha256Stream 对账 + 重试退避/硬顶/取消旗。语义
-  # 真源 scripts/updater.py download_with_resume;HTTP 栈 cpr(样板
-  # provider_catalog 的 Session/代理 与 http_stream_transport 的流式回调/
-  # 取消旗/LowSpeed 骨架)。批三引擎层(事务/进度行)在这上面叠。
-  src/updater/download.cpp
-  # 更新助手 C++ 化·批二第③单:安装布局层(versions/staging/backups/
-  # updates 相对布局、三态探测、current.json 指针与 install-state.json
-  # schema 2 读写)+ 八相事务账(updates/<txn>.json schema 1,字段名与
-  # python 版逐字相同,黄金文件对拍)+ 安装根独占锁(updates/.lock,
-  # create-new 原子占位,照 GatewayLock 范式)。纯库,依赖 platform/
-  # trajectory 身份核;批三引擎层在此底座上叠。
-  src/updater/layout.cpp
-  src/updater/txn.cpp
-  src/updater/lock.cpp
-  # 更新助手 C++ 化·批三第①单(引擎主链):无副作用探针(probe——隔离
-  # 数据根跑 <exe> --version,首行认 "lubancode <版本>" 协议)+ 五动词
-  # 事务引擎(engine——锁/续跑/磁盘预检/下载或本地包/解包/验包/预检缝/
-  # 激活/健康检查/提交/回滚/gc/status,编排照 scripts/updater.py 的
-  # cmd_update L1185-1287)。CLI 装配与所有权预检(install_scan+
-  # whitelist_plan)是批三③的活,引擎只留 PrecheckFn 缝。
-  src/updater/probe.cpp
-  src/updater/engine.cpp
-  # 更新助手 C++ 化·批三第②单(扫描/apply/交接):盘面扫描层
-  # (install_scan——受管树全递归+根件入账、FoldKey 键、reparse 专探、
-  # 惰性 sha256 流式补、孤儿 reparse 点名阻断)、白名单 apply 落地层
-  # (install_apply——Replace 先备份再落盘、目录按需建、占位/父链体检、
-  # 拷贝+fsync、install-state 走 layout 写路回填)与平铺交接层
-  # (flat_handover——完整备份两步落位、旧根 EXE rename 让位不强杀、
-  # 回滚摘 current.json)。行为权威 install.ps1 终稿(PR #140)与
-  # scripts/install_plan.py / scripts/updater.py,批三③引擎层在此叠。
-  src/updater/install_scan.cpp
-  src/updater/install_apply.cpp
-  src/updater/flat_handover.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -1079,10 +1027,6 @@ target_link_libraries(lubancode_engine PRIVATE mbedtls)
 # yaml-cpp 走 PUBLIC:engine 的头(memory/front matter)把 yaml 头递给
 # 消费方,拆 target 后 core/workflow 那层也直接吃,PRIVATE 会断 include 路径。
 target_link_libraries(lubancode_engine PUBLIC yaml-cpp::yaml-cpp)
-# miniz(更新器批一③):zip 读写底座,批二解包层才真用上;本单只把链接
-# 关系立起来让引擎目标编译通过。PRIVATE——更新器将属 engine 内部件,
-# 头不外递,消费方零感知(同 mbedtls 的挂法)。
-target_link_libraries(lubancode_engine PRIVATE miniz)
 target_compile_features(lubancode_engine PUBLIC cxx_std_23)
 target_precompile_headers(lubancode_engine PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
@@ -1266,6 +1210,72 @@ if(MSVC)
 endif()
 
 if(LUBANCODE_BUILD_CLI)
+# Installation updates belong to the host. Keep this target out of the SDK's
+# engine/runtime dependency graph even in a combined CLI + SDK build.
+add_library(lubancode_updater STATIC
+  # 更新助手 C++ 化·批一第①单(契约层移植):四方契约(generate_manifest.py/
+  # install_plan.py/install.ps1/此处)的 C++ 侧——包内相对路径筛查、大小写
+  # 折叠键、归档成员名筛查、用户数据路径判定(paths.cpp)与 manifest.json
+  # schema 1 的读/验/折 + CanonicalJsonDump(manifest.cpp)。纯库,零平台/
+  # 网络依赖,后续批次(下载/解包/事务)在此底座上叠。
+  src/updater/paths.cpp
+  src/updater/manifest.cpp
+  # 更新助手 C++ 化·批一第②单(白名单覆盖决策表):新包 manifest × 盘面
+  # 实况 → 覆盖动作清单。行为权威是 install.ps1 终稿(PR #140)的
+  # Build-PackageFilePlan——包根文件表+受管树白名单,同名先备份再换新,
+  # 包外一概不动,目录/reparse 挡路即 conflict 阻断(退出码 3)。纯函数
+  # 零 IO,批三 apply 落地层吃这张表。
+  src/updater/whitelist_plan.cpp
+  # 更新助手 C++ 化·批二第①单(解包层):zip(mz_zip_reader 逐文件流式
+  # 回调口)与 tar.gz(tinfl 流式解 gzip + 自写 tar 头遍历,ustar/GNU 长
+  # 名/pax 覆写/base-256 尺寸都认)双格式安全解包——成员名全过
+  # NormalizeMemberName(批一①契约),链接/设备/管道成员整包拒,解压总
+  # 量帽 declared×6,POSIX 执行位。语义对齐 scripts/updater.py 的
+  # unpack_archive;流式纪律见 archive.hpp 头注。
+  src/updater/archive_zip.cpp
+  src/updater/archive_tar.cpp
+  # 更新助手 C++ 化·批二第②单(大文件断点续传下载器):Range 续传 +
+  # 流式分块收体 + 整文件 Sha256Stream 对账 + 重试退避/硬顶/取消旗。语义
+  # 真源 scripts/updater.py download_with_resume;HTTP 栈 cpr(样板
+  # provider_catalog 的 Session/代理 与 http_stream_transport 的流式回调/
+  # 取消旗/LowSpeed 骨架)。批三引擎层(事务/进度行)在这上面叠。
+  src/updater/download.cpp
+  # 更新助手 C++ 化·批二第③单:安装布局层(versions/staging/backups/
+  # updates 相对布局、三态探测、current.json 指针与 install-state.json
+  # schema 2 读写)+ 八相事务账(updates/<txn>.json schema 1,字段名与
+  # python 版逐字相同,黄金文件对拍)+ 安装根独占锁(updates/.lock,
+  # create-new 原子占位,照 GatewayLock 范式)。纯库,依赖 platform/
+  # trajectory 身份核;批三引擎层在此底座上叠。
+  src/updater/layout.cpp
+  src/updater/txn.cpp
+  src/updater/lock.cpp
+  # 更新助手 C++ 化·批三第①单(引擎主链):无副作用探针(probe——隔离
+  # 数据根跑 <exe> --version,首行认 "lubancode <版本>" 协议)+ 五动词
+  # 事务引擎(engine——锁/续跑/磁盘预检/下载或本地包/解包/验包/预检缝/
+  # 激活/健康检查/提交/回滚/gc/status,编排照 scripts/updater.py 的
+  # cmd_update L1185-1287)。CLI 装配与所有权预检(install_scan+
+  # whitelist_plan)是批三③的活,引擎只留 PrecheckFn 缝。
+  src/updater/probe.cpp
+  src/updater/engine.cpp
+  # 更新助手 C++ 化·批三第②单(扫描/apply/交接):盘面扫描层
+  # (install_scan——受管树全递归+根件入账、FoldKey 键、reparse 专探、
+  # 惰性 sha256 流式补、孤儿 reparse 点名阻断)、白名单 apply 落地层
+  # (install_apply——Replace 先备份再落盘、目录按需建、占位/父链体检、
+  # 拷贝+fsync、install-state 走 layout 写路回填)与平铺交接层
+  # (flat_handover——完整备份两步落位、旧根 EXE rename 让位不强杀、
+  # 回滚摘 current.json)。行为权威 install.ps1 终稿(PR #140)与
+  # scripts/install_plan.py / scripts/updater.py,批三③引擎层在此叠。
+  src/updater/install_scan.cpp
+  src/updater/install_apply.cpp
+  src/updater/flat_handover.cpp
+)
+target_link_libraries(lubancode_updater PRIVATE lubancode_engine miniz)
+target_compile_features(lubancode_updater PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_updater PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
+if(MSVC)
+  target_compile_options(lubancode_updater PRIVATE /MP)
+endif()
 # Terminal platform implementations belong to the CLI host, not SDK internals.
 if(WIN32)
   set(_lubancode_terminal_sources src/platform/console_win.cpp src/platform/clipboard_win.cpp)
@@ -1396,7 +1406,7 @@ target_include_directories(lubancode_core PUBLIC
   ${CMAKE_BINARY_DIR}/generated)        # 0.19.x:embedded_prompts.hpp(提示词嵌入)
 # core = engine + runtime + cli 纯逻辑:引擎与运行时的传递依赖从这两层
 # PUBLIC 递过来(cpr/json/lua/yaml 在 engine 上,这里不再重复挂)。
-target_link_libraries(lubancode_core PUBLIC lubancode_runtime)
+target_link_libraries(lubancode_core PUBLIC lubancode_runtime lubancode_updater)
 target_compile_features(lubancode_core PUBLIC cxx_std_23)
 target_precompile_headers(lubancode_core PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")

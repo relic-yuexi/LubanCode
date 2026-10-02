@@ -19,10 +19,10 @@ import sys
 
 CLIENT = "client-lubancore-boundary"
 HOST_TARGETS = {
-    "lubancode", "lubancode_core", "lubancode_app", "lubancode_tests", "lubancore_host_tests",
+    "lubancode", "lubancode_core", "lubancode_updater", "miniz", "lubancode_app", "lubancode_tests", "lubancore_host_tests",
     "lubancode_official_skills", "lubancode_official_docs", "lubancode_assistant_web",
 }
-HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/")
+HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/", "src/updater/")
 SHARED_SDK_TEST_SOURCES = {
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",
