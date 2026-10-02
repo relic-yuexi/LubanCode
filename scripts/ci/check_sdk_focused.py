@@ -30,6 +30,7 @@ REQUIRED = {
     "sdk.focused.subagent_terminal_receipt",
     "sdk.focused.child_foreground_integration",
     "sdk.focused.child_parent_observation",
+    "sdk.focused.child_history_adoption",
     "sdk.focused.scoped_turn_bindings",
     "sdk.focused.atomic_write",
 }
@@ -119,6 +120,14 @@ def main():
                     raise RuntimeError("Child observation actual path did not finish once: " + path)
             if os.name != "nt" and sections[0].splitlines().count("[child-observation-path] source-owner-alias") != 1:
                 raise RuntimeError("Child observation actual Unix owner alias path did not finish once")
+        if case.attrib["name"] == "sdk.focused.child_history_adoption":
+            if int(counts[0]) != 8:
+                raise RuntimeError("Child history adoption roster differs from 8 cases")
+            for path in ("complete", "post-hook", "historical-chain", "observation-gap",
+                         "source-gap", "artifact-gap", "adoption-gap", "scope-reuse"):
+                marker = "[child-adoption-path] " + path
+                if sections[0].splitlines().count(marker) != 1:
+                    raise RuntimeError("Child adoption actual path did not finish once: " + path)
     print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
 
 

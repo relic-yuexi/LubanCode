@@ -127,6 +127,14 @@ private:
     std::uint64_t next_result_number_ = 1;
 };
 
+// Pure material-to-preview projection shared by the live producer and strict
+// history readers. Named references remain relative; model display paths use
+// this explicit session directory. This function never opens an artifact.
+PreviewRequest PreviewFromPersistedMaterials(
+    const ResultStore::PersistRequest& material,
+    const ResultStore::PersistedResult& persisted,
+    std::uint64_t budget, const std::filesystem::path& session_dir);
+
 // 六键 artifactRef 组装(§3.1)。
 nlohmann::json MakeArtifactRef(std::string artifact_id, std::string kind, std::string path,
                                std::string sha256, std::uint64_t bytes, std::string media_type);

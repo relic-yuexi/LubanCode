@@ -811,6 +811,7 @@ add_library(lubancode_engine STATIC
   # 带来源链的 resume(历史索引/模型输入/执行状态三恢复)。
   # session_switch:新会话写 v3 的最小开关(默认关,接线点清单见头注)。
   src/trajectory/v3/reader.cpp
+  src/trajectory/v3/child_adoption.cpp
   src/trajectory/v3/session_switch.cpp
   # Token 账本与使用洞察单 A0(合同与夹具):accounting 是 usage 投影与
   # 计价的纯领域层;insights 是摘要/finding/报告合同与脱敏。都不 include
