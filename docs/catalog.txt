@@ -144,6 +144,7 @@ DOC architecture/gateway/runbook.md
 DOC development/workspace-storage-v2/P0-0-contracts.md
 DOC development/workspace-storage-v2/P0-0-inventory.md
 DOC development/workspace-storage-v2/scale-baseline.md
+DOC development/workspace-manifest-missing-read.md
 DOC features/telemetry/collector.md
 
 DOC features/qq-assistant.md

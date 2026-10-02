@@ -127,9 +127,11 @@ std::optional<WorkspaceManifest> WorkspaceManifest::FromJson(const nlohmann::jso
 ManifestRead ReadWorkspaceManifest(const fs::path& workspace_dir) {
     ManifestRead read;
     const fs::path path = workspace_dir / "workspace.json";
-    // 探测/打开的瞬态失败有界重试(依据见 kTransientRead* 注释)。确定性
-    // 答案不重试、判据不动:查无此物(ec 清)立即 Missing;读出的内容
-    // parse 坏立即 Corrupt——撕裂 JSON 重读恒坏,该红就红。旧账:打不开
+    // 探测/打开的瞬态失败有界重试(依据见 kTransientRead* 注释)。
+    // 判据不动:POSIX 查无此物(ec 清)立即 Missing;Windows 并发替换时
+    // 也观察到过无错误的缺档(run 36997253363),故复用同一档有界重试,
+    // 末轮仍缺才回 Missing/空诊断。这个观测不单独证明系统调用根因。
+    // 读出的内容 parse 坏立即 Corrupt。旧账:打不开
     // 曾折成空串喂 parse,判成 Corrupt(schema.missing_field),并发开房
     // 路零宽限直接落空,上列三案同根于此窗。
     std::string text;
@@ -139,17 +141,23 @@ ManifestRead ReadWorkspaceManifest(const fs::path& workspace_dir) {
         std::error_code ec;
         if (const bool present = fs::exists(path, ec); !ec) {
             if (!present) {
-                read.status = ManifestRead::Status::Missing;  // 真没有:立即定案
+#ifdef _WIN32
+                // 与探测/打开失败共用十次退避,不另套缺档重试循环。
+                // 清掉之前的瞬态诊断:最终确认为缺档仍沿 Missing 合同。
+                transient_code.clear();
+#else
+                read.status = ManifestRead::Status::Missing;
                 return read;
-            }
-            if (std::ifstream file(path, std::ios::binary); file.is_open()) {
+#endif
+            } else if (std::ifstream file(path, std::ios::binary); file.is_open()) {
                 std::stringstream buffer;
                 buffer << file.rdbuf();
                 text = buffer.str();
                 have_text = true;
                 break;
+            } else {
+                transient_code = "read.open_failed";
             }
-            transient_code = "read.open_failed";
         } else {
             transient_code = "read.probe_failed";
         }
@@ -159,6 +167,10 @@ ManifestRead ReadWorkspaceManifest(const fs::path& workspace_dir) {
         std::this_thread::sleep_for(kTransientReadBackoff);
     }
     if (!have_text) {
+        if (transient_code.empty()) {
+            read.status = ManifestRead::Status::Missing;
+            return read;
+        }
         // 重试耗尽:status 判据沿旧账(探测败按缺、打开败按坏),error_code
         // 把"读不成"与"内容坏"分开——诊断不再冒充 schema 病。
         if (transient_code == "read.open_failed") {
