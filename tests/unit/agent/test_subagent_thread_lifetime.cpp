@@ -249,11 +249,17 @@ public:
         : state_(std::move(state)), turn_(nullptr, nullptr, {}, {}) {}
     const std::string& run_id() const override { return id_; }
     runtime::TrajectoryTurnBridge& turn_bridge() override { return turn_; }
-    std::string Finish(bool ok, const std::string& reason) override {
+    runtime::SubagentTerminalReceipt Finish(runtime::SubagentExecutionOutcome execution,
+                                             const std::string& reason) override {
         ++state_->finishes;
-        state_->ok = ok;
+        state_->ok = execution == runtime::SubagentExecutionOutcome::Succeeded;
         state_->reason = reason;
-        return "startup-failed-terminal";
+        runtime::SubagentTerminalReceipt receipt;
+        receipt.run_id = id_;
+        receipt.execution = execution;
+        receipt.reason = reason;
+        receipt.append_error_code = "startup.test_unconfirmed";
+        return receipt;
     }
 private:
     std::shared_ptr<FailedBridgeState> state_;
@@ -308,6 +314,7 @@ TEST_CASE("线程启动事务: factory失败收唯一失败账与子账,退槽�
     REQUIRE(failure.is_error);
     CHECK(failure.error_code == "agent.thread_start_failed");
     CHECK(failure.content.find("已启动。") == std::string::npos);
+    CHECK(failure.content.find("trajectory.child_terminal_persistence_failed") != std::string::npos);
     const auto failed = tool.coordinator()->ledger().Snapshots();
     REQUIRE(failed.size() == 1);
     CHECK(failed[0].state == tools::AgentTaskState::Failed);

@@ -66,6 +66,8 @@ struct V3WriterOptions {
     // 注入提交失败(测试专用;生产恒空):返回稳定码则该枚提交按 IoFailed
     // 收(writer 句柄随后 broken)。锁内调用,须廉价无副作用。
     std::function<std::optional<std::string>()> inject_io_failure;
+    // Test-only checked Close failure after the real journal handle is closed.
+    std::function<std::optional<std::string>()> inject_close_failure;
 };
 
 // 链节点(schema 文档 §2.4)。
