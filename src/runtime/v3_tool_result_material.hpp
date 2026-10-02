@@ -12,11 +12,7 @@ namespace lubancode::runtime {
 // BlockToJson retains artifact references and excludes transient wire base64.
 inline void PreserveNativeToolPayload(const api::ToolResultBlock& result,
                                       trajectory::v3::ResultStore::PersistRequest& persist) {
-    if (result.blocks.empty()) return;
-    if (result.blocks.size() == 1) {
-        const auto* text = std::get_if<tools::TextContent>(&result.blocks.front());
-        if (text != nullptr && text->text == result.content) return;
-    }
+    if (!tools::HasNativePayloadBeyondProjection(result.content, result.blocks)) return;
 
     nlohmann::json blocks = nlohmann::json::array();
     for (const auto& block : result.blocks) blocks.push_back(tools::BlockToJson(block));
