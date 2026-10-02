@@ -25,6 +25,7 @@ REQUIRED = {
     "sdk.focused.lubancore_result_projection",
     "sdk.focused.session_resources",
     "sdk.focused.session_execution",
+    "sdk.focused.execution_owner",
     "sdk.focused.scoped_turn_bindings",
     "sdk.focused.atomic_write",
 }
@@ -85,6 +86,8 @@ def main():
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])
         if case.attrib["name"] == "sdk.focused.lubancore_memory_save" and int(counts[0]) != 12:
             raise RuntimeError("SDK memory-save native roster differs from 12 cases")
+        if case.attrib["name"] == "sdk.focused.execution_owner" and int(counts[0]) != 7:
+            raise RuntimeError("Shared execution-owner native roster differs from 7 cases")
     print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
 
 
