@@ -760,6 +760,25 @@ jobs:
               print(domain + ' tests included in the full Test step: ' + ', '.join(selected))
           PY
 
+      - name: Test workspace manifest read regressions
+        shell: bash
+        run: |
+          mkdir -p build/workspace-manifest-read
+          READ_FILTER='^(unit\.workspace\.workspace_manifest|integration\.workspace\.identity_cross_platform)$'
+          ctest --test-dir build -C Release -R "$READ_FILTER" --show-only=json-v1 > build/workspace-manifest-read/registration.json
+          ctest --test-dir build -C Release -R "$READ_FILTER" -V --no-tests=error --output-junit "$PWD/build/workspace-manifest-read/results.xml" 2>&1 | tee build/workspace-manifest-read/native.log
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" scripts/ci/tests/test_workspace_manifest_read_gate.py
+          "$PY" scripts/ci/check_workspace_manifest_reads.py build/workspace-manifest-read --platform '${{ matrix.name }}'
+
+      - name: Upload workspace manifest read evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-manifest-read-${{ matrix.name }}
+          path: build/workspace-manifest-read/
+          if-no-files-found: error
+
       # T16 勾五:跑测试前把"这一轮跑的到底是什么"记成机器可读的一笔账
       #(版本/HEAD/工作区 diff 指纹/夹具树 hash/构建产物/环境)。产物随
       # 测试证据上传;基线更新时对旧账 --compare 点名变化,不复用旧通过
@@ -1100,6 +1119,24 @@ jobs:
               print(domain + ' tests included in the full Test step: ' + ', '.join(selected))
           PY
 
+      - name: Test workspace manifest read regressions
+        shell: bash
+        run: |
+          mkdir -p build/workspace-manifest-read
+          READ_FILTER='^(unit\.workspace\.workspace_manifest|integration\.workspace\.identity_cross_platform)$'
+          ctest --test-dir build -C Release -R "$READ_FILTER" --show-only=json-v1 > build/workspace-manifest-read/registration.json
+          ctest --test-dir build -C Release -R "$READ_FILTER" -V --no-tests=error --output-junit "$PWD/build/workspace-manifest-read/results.xml" 2>&1 | tee build/workspace-manifest-read/native.log
+          python3 scripts/ci/tests/test_workspace_manifest_read_gate.py
+          python3 scripts/ci/check_workspace_manifest_reads.py build/workspace-manifest-read --platform linux-manylinux
+
+      - name: Upload workspace manifest read evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-manifest-read-linux-manylinux
+          path: build/workspace-manifest-read/
+          if-no-files-found: error
+
       - name: Test
         id: test
         run: |
@@ -1323,6 +1360,8 @@ jobs:
                   raise SystemExit('ASan project commit native roster differs from 12 cases')
               if name == 'integration.sdk.lubancore_memory_save' and int(counts[0]) != 12:
                   raise SystemExit('ASan SDK memory-save native roster differs from 12 cases')
+              if name == 'unit.runtime.tool_runtime' and int(counts[0]) != 14:
+                  raise SystemExit('ASan tool runtime native roster differs from 14 cases')
               if name == 'unit.agent.subagent_thread_lifetime' and int(counts[0]) != 10:
                   raise SystemExit('ASan startup and existing lifetime cases did not all execute')
           print(f'ASan: all {len(required)} required lifetime sources executed nonempty native tests')

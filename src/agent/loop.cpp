@@ -235,6 +235,9 @@ struct ToolCallFrame {
     EffectClass effect_class = EffectClass::InProcessUnknown;
     // 最终参数(PreToolUse 改写并过 schema 复检后的 effective input)。
     nlohmann::json effective_input;
+    // Host callbacks stay on the main thread. Resolve after durable started,
+    // then send only this owned snapshot to an execution worker.
+    tools::ToolInvocationIdentity invocation;
 };
 
 // 每条收尾路共用的分发口:先清洗,再 on_tool_done,清洗版随返回值交给
@@ -732,6 +735,10 @@ std::optional<tools::Tool::Result> MarkExecutionStarted(ToolCallFrame& frame) {
         // 走展示与返回,不再发第二枚。
         return DispatchDone(frame, std::move(blocked_by_trace));
     }
+    if (frame.wiring.tool_invocation_identity) {
+        auto identity = frame.wiring.tool_invocation_identity(frame.call.id);
+        if (identity) frame.invocation = std::move(*identity);
+    }
     return std::nullopt;
 }
 
@@ -743,10 +750,7 @@ std::optional<tools::Tool::Result> MarkExecutionStarted(ToolCallFrame& frame) {
 // 阶段四在主线程收口。
 tools::Tool::Result ExecuteApprovedTool(const ToolCallFrame& frame) {
     tools::ToolExecutionContext context{frame.cancel, frame.wiring.tool_artifact_dir};
-    if (frame.wiring.tool_invocation_identity) {
-        const auto identity = frame.wiring.tool_invocation_identity(frame.call.id);
-        if (identity) context.invocation = *identity;
-    }
+    context.invocation = frame.invocation;
     return frame.tool->execute(frame.effective_input, context);
 }
 
@@ -899,6 +903,8 @@ struct ParallelReadSegmentRun {
     std::vector<std::optional<api::ToolResultBlock>>& ordered_results;
     const std::atomic<bool>* cancel = nullptr;
     bool& interrupted;
+    bool& side_effect_indeterminate;
+    std::string& side_effect_error;
     // 门禁材料:直呼与代理两路各自的过滤谓词与拒文(P1 拆链后的同一套)。
     const std::function<bool(const tools::Tool&)>& tool_filter;
     const std::string& filter_denial;
@@ -1038,6 +1044,10 @@ void RunParallelReadSegment(ParallelReadSegmentRun& ctx, std::size_t begin, std:
             return CompleteToolCall(*slot->frame, std::move(raw));
         }();
         ctx.ordered_results[slot->index] = MakeToolResultBlock(ctx.batch_calls[slot->index].id, result);
+        if (result.execution_control == tools::ExecutionControl::StopIndeterminate) {
+            ctx.side_effect_indeterminate = true;
+            ctx.side_effect_error = result.error_code + ": " + result.content;
+        }
         if (ctx.cancel != nullptr && ctx.cancel->load()) {
             ctx.interrupted = true;
         }
@@ -2936,6 +2946,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     ordered_results,
                     cancel,
                     interrupted,
+                    side_effect_indeterminate,
+                    side_effect_error,
                     tool_filter_,
                     tool_filter_denial_,
                     tool_execution_policy_,
