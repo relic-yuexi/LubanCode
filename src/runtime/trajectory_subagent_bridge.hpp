@@ -30,6 +30,7 @@ public:
     // Only an actual committed V3 declaration yields this immutable snapshot.
     // The provider-ID fallback and V2 bridges provide no strict authority.
     virtual std::optional<ChildApprovalParent> approval_parent() const { return std::nullopt; }
+    virtual std::optional<SubagentSpawnProvenance> ParentSpawn() const { return std::nullopt; }
     // Full cached native append + explicit Close evidence; never retry Finish.
     virtual SubagentTerminalReceipt Finish(SubagentExecutionOutcome execution,
                                            const std::string& reason) = 0;
@@ -45,7 +46,7 @@ public:
         std::unique_ptr<V3SessionBooks> books,
         std::unique_ptr<TrajectoryTurnBridge> bridge,
         std::shared_ptr<SubagentTerminalRegistry> registry,
-        std::optional<ChildApprovalParent> approval_parent = std::nullopt);
+        std::optional<SubagentSpawnProvenance> provenance = std::nullopt);
 };
 
 // ---------------------------------------------------------------------------
@@ -63,6 +64,8 @@ struct SubagentSpawnFailure {
     std::string detail;
     std::string reserved_run_id;  // 已铸出的子 run id(失败前铸了就带上)
     bool retryable = false;      // I/O 类失败可重试;schema/状态机类不可
+    // Only a real, already opened child can supply this cleanup receipt.
+    std::optional<SubagentTerminalReceipt> cleanup_receipt;
 };
 
 }  // namespace lubancode::runtime

@@ -361,6 +361,9 @@ struct V3VerifyReport {
 // 逐行验:严格解析、语义校验、seq 从 1 连续、prevHash/lineHash 衔接;
 // 四类提交事件重放链状态。失败给首错。
 V3VerifyReport VerifyV3File(const std::filesystem::path& path);
+// Same verification/replay over an owned, already split input. The caller
+// checks complete newlines and bounds before constructing these lines.
+V3VerifyReport VerifyV3Lines(const std::vector<std::string>& lines);
 
 // 重放一枚提交事件到视图(Continue/VerifyV3File/读取侧 P2 共用同一份
 // 链重放,单一事实来源)。返回错误码或空串。

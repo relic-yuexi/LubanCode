@@ -155,12 +155,32 @@ public:
                          std::unique_ptr<V3SessionBooks> books,
                          std::unique_ptr<TrajectoryTurnBridge> bridge,
                          std::shared_ptr<SubagentTerminalRegistry> registry,
-                         std::optional<ChildApprovalParent> approval_parent)
+                         std::optional<SubagentSpawnProvenance> provenance)
         : writer_(std::move(writer)), books_(std::move(books)), bridge_(std::move(bridge)),
-          run_id_(writer_->run_id()), registry_(std::move(registry)), approval_parent_(std::move(approval_parent)) {}
+          run_id_(writer_->run_id()), registry_(std::move(registry)), provenance_(std::move(provenance)) {}
     const std::string& run_id() const override { return run_id_; }
     TrajectoryTurnBridge& turn_bridge() override { return *bridge_; }
-    std::optional<ChildApprovalParent> approval_parent() const override { return approval_parent_; }
+    std::optional<SubagentSpawnProvenance> ParentSpawn() const override { return provenance_; }
+    std::optional<ChildApprovalParent> approval_parent() const override {
+        // One immutable producer snapshot supplies both observation and scope.
+        // V2, legacy provider-ID fallback and an unconfirmed spawn have no
+        // strict parent declaration, even if their diagnostic strings exist.
+        if (!provenance_) return std::nullopt;
+        const auto& source = *provenance_;
+        const auto& parent = source.parent_action;
+        const auto& native = source.native_spawn;
+        if (native.status != v3::WriteReceipt::Status::Committed || native.seq == 0 ||
+            native.id.empty() || native.line_hash.empty() ||
+            source.spawn.session_id != parent.session_id || source.spawn.run_id != parent.run_id ||
+            source.spawn.event_id != native.id || source.spawn.seq != native.seq ||
+            source.spawn.hash != native.line_hash ||
+            source.child.session_id != writer_->session_id() || source.child.run_id != run_id_ ||
+            parent.session_id.empty() || parent.run_id.empty() || parent.turn_id.empty() ||
+            parent.step_id.empty() || parent.action_id.empty() || parent.declared_message_ref.empty())
+            return std::nullopt;
+        return ChildApprovalParent{parent.session_id, parent.run_id, parent.turn_id,
+                                   parent.action_id, parent.declared_message_ref};
+    }
     SubagentTerminalReceipt Finish(SubagentExecutionOutcome execution,
                                    const std::string& reason) override {
         std::lock_guard lock(finish_mutex_);
@@ -215,9 +235,9 @@ private:
     std::unique_ptr<TrajectoryTurnBridge> bridge_;
     std::string run_id_;
     std::shared_ptr<SubagentTerminalRegistry> registry_;
-    std::optional<ChildApprovalParent> approval_parent_;
     std::mutex finish_mutex_;
     std::optional<SubagentTerminalReceipt> finished_;
+    std::optional<SubagentSpawnProvenance> provenance_;
 };
 
 }  // namespace
@@ -233,9 +253,9 @@ std::unique_ptr<TrajectorySubagentBridge> TrajectorySubagentBridge::OwnV3(
     std::unique_ptr<v3::V3Writer> writer, std::unique_ptr<V3SessionBooks> books,
     std::unique_ptr<TrajectoryTurnBridge> bridge,
     std::shared_ptr<SubagentTerminalRegistry> registry,
-    std::optional<ChildApprovalParent> approval_parent) {
+    std::optional<SubagentSpawnProvenance> provenance) {
     return std::make_unique<SubagentBridgeV3Impl>(std::move(writer), std::move(books),
-                                               std::move(bridge), std::move(registry), std::move(approval_parent));
+                                               std::move(bridge), std::move(registry), std::move(provenance));
 }
 
 // 子代理五步用的子会话 id:YYYYMMDD-HHMMSS-XXXXXX 形状(单段名可过目录
@@ -355,12 +375,18 @@ TrajectorySessionLedger::SpawnSubagentV3(const std::string& parent_call_id,
     if (impl_->telemetry_wake != nullptr) {
         child_bridge->SetCommitWake(impl_->telemetry_wake, child_ref.journal_path);
     }
-    std::optional<ChildApprovalParent> approval_parent;
-    if (declared) approval_parent = ChildApprovalParent{parent_ref.session_id, parent_ref.run_id,
-        parent_ref.turn_id, parent_ref.action_id, parent_ref.declared_message_ref};
+    SubagentSpawnProvenance provenance;
+    provenance.parent_action = spawn.parent_action();
+    provenance.child = spawn.child();
+    provenance.task_id = spawn.task_id();
+    const auto& requested = spawn.requested_receipt();
+    provenance.native_spawn = requested;
+    provenance.spawn = {parent.session_id(), parent.run_id(), requested.id, requested.seq,
+                        requested.line_hash};
+    provenance.parent_journal = parent.path();
     return TrajectorySubagentBridge::OwnV3(
         std::move(child_writer_owner), std::move(child_books), std::move(child_bridge),
-        impl_->child_terminals, std::move(approval_parent));
+        impl_->child_terminals, std::move(provenance));
 }
 
 std::expected<std::unique_ptr<TrajectorySubagentBridge>, SubagentSpawnFailure>

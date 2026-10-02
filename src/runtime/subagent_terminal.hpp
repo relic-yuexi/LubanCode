@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -10,6 +11,7 @@
 
 #include "trajectory/recorder.hpp"
 #include "trajectory/v3/writer.hpp"
+#include "trajectory/v3/subagent.hpp"
 
 namespace lubancode::runtime {
 
@@ -17,6 +19,8 @@ enum class SubagentExecutionOutcome { Succeeded, Failed, Cancelled, StartupRejec
 enum class SubagentJournalFormat { V2, V3 };
 enum class SubagentAppendConfirmation { Committed, RejectedBeforeCommit, DurabilityUnconfirmed };
 enum class SubagentSealState { NotAttempted, Closed, CloseFailed };
+// This value comes from the dispatch decision, including auto/profile/defaults.
+enum class SubagentDispatchMode { Foreground, Background };
 
 struct SubagentTerminalRef {
     std::string session_id;
@@ -24,6 +28,17 @@ struct SubagentTerminalRef {
     std::string event_id;
     std::uint64_t seq = 0;
     std::string hash;
+};
+
+// Immutable source values only: no writer, task, bridge or parent book borrow.
+struct SubagentSpawnProvenance {
+    trajectory::v3::ParentActionRef parent_action;
+    trajectory::v3::ChildSessionRef child;
+    std::string task_id;
+    SubagentTerminalRef spawn;
+    trajectory::v3::WriteReceipt native_spawn;
+    std::uint64_t attempt = 1;
+    std::filesystem::path parent_journal;
 };
 
 // Owned evidence only. A child receipt is not a persisted parent observation

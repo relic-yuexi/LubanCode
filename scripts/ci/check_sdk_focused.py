@@ -30,6 +30,7 @@ REQUIRED = {
     "sdk.focused.execution_owner",
     "sdk.focused.subagent_terminal_receipt",
     "sdk.focused.child_foreground_integration",
+    "sdk.focused.child_parent_observation",
     "sdk.focused.scoped_turn_bindings",
     "sdk.focused.atomic_write",
 }
@@ -110,6 +111,17 @@ def main():
             raise RuntimeError("Scoped approval native roster differs from 14 cases")
         if case.attrib["name"] == "sdk.focused.lubancore_child_approval" and int(counts[0]) != 14:
             raise RuntimeError("Actual child approval native roster differs from 14 cases")
+        if case.attrib["name"] == "sdk.focused.child_parent_observation":
+            if int(counts[0]) != 8:
+                raise RuntimeError("Child parent observation roster differs from 8 cases")
+            for path in ("adopted", "observation-unknown", "summary-halted", "summary-healthy",
+                         "capture-unknown", "rewrite-unknown", "commit-unknown", "rewrite-exception",
+                         "mid-batch-summary-halted", "cancel-close-failed", "source-gap", "ledger-summary"):
+                marker = "[child-observation-path] " + path
+                if sections[0].splitlines().count(marker) != 1:
+                    raise RuntimeError("Child observation actual path did not finish once: " + path)
+            if os.name != "nt" and sections[0].splitlines().count("[child-observation-path] source-owner-alias") != 1:
+                raise RuntimeError("Child observation actual Unix owner alias path did not finish once")
     print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
 
 

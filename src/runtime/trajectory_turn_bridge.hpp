@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <expected>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -188,7 +189,9 @@ public:
     // ---- 子代理边界(§3.5:父子文件只传边界引用与 terminal hash) ----
     // agent 工具派工时挂子 run 引用:该 call 的 started/终态事件带
     // relations.child_run_id。
-    void AttachChildRun(const std::string& call_id, const std::string& agent_run_id);
+    std::expected<void, std::string> AttachChildRun(
+        const std::string& call_id, const std::string& agent_run_id,
+        std::optional<SubagentSpawnProvenance> provenance = std::nullopt);
     // 子账收口后报终态 hash:该 call 的执行终态 payload 带
     // child_run_id 与 child_terminal_event_hash(双向对账的父侧)。
     void NoteChildTerminal(const SubagentTerminalReceipt& receipt);

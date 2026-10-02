@@ -269,7 +269,7 @@ private:
 
 void AttachFailedStartupBridge(tools::AgentTool& tool, const std::shared_ptr<FailedBridgeState>& state) {
     tools::AgentTool::Hooks hooks;
-    hooks.trajectory_spawn = [state](const std::string&, const std::string&, runtime::SubagentSpawnFailure*) {
+    hooks.trajectory_spawn = [state](const std::string&, const std::string&, runtime::SubagentSpawnFailure*, runtime::SubagentDispatchMode) {
         return std::make_unique<StartupBridge>(state);
     };
     tool.SetHooks(std::move(hooks));

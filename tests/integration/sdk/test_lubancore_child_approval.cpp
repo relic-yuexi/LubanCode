@@ -250,7 +250,7 @@ struct Rig {
         registry.Register(std::make_unique<Guarded>(executions));
         tool = std::make_unique<tools::AgentTool>(backend, registry, tools::PathToUtf8(paths.cwd));
         hooks.trajectory_spawn = [this, fixed_child](const std::string& label, const std::string& parent_run,
-                                                    rt::SubagentSpawnFailure*) {
+                                                    rt::SubagentSpawnFailure*, rt::SubagentDispatchMode) {
             auto* ledger = service->trajectory();
             if (!fixed_child) {
                 auto child = ledger->SpawnSubagent("parent-agent-call", label, parent_run);
@@ -283,9 +283,16 @@ struct Rig {
             scope.session_id = sid; scope.run_id = run;
             auto bridge = std::make_unique<rt::TrajectoryTurnBridge>(owned_writer.get(), books.get(),
                 std::move(scope), rt::TrajectoryTurnBridge::Identity{"subagent", "subagent", "subagent"});
+            rt::SubagentSpawnProvenance source;
+            source.parent_action = spawn.parent_action();
+            source.child = spawn.child();
+            source.task_id = spawn.task_id();
+            source.native_spawn = spawn.requested_receipt();
+            source.spawn = {writer->session_id(), writer->run_id(), source.native_spawn.id,
+                source.native_spawn.seq, source.native_spawn.line_hash};
+            source.parent_journal = writer->path();
             return rt::TrajectorySubagentBridge::OwnV3(std::move(owned_writer), std::move(books),
-                std::move(bridge), parent->child_terminal_registry(),
-                rt::ChildApprovalParent{ref.session_id, ref.run_id, ref.turn_id, ref.action_id, ref.declared_message_ref});
+                std::move(bridge), parent->child_terminal_registry(), std::move(source));
         };
         hooks.trajectory_child_finished = [this](const rt::SubagentTerminalReceipt& receipt) {
             CHECK(receipt.durable());

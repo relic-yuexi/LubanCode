@@ -268,7 +268,7 @@ struct AgentSubagentHooks {
     // 派出它的那只子代理,不是 main(单子 §12.3 第一条)。
     std::function<std::unique_ptr<runtime::TrajectorySubagentBridge>(
         const std::string& task_label, const std::string& parent_run_id,
-        runtime::SubagentSpawnFailure* failure_out)>
+        runtime::SubagentSpawnFailure* failure_out, runtime::SubagentDispatchMode mode)>
         trajectory_spawn;
     // Owned native append/Close evidence. This callback does not persist a V3
     // parent terminal observation or prove parent-model adoption.
@@ -345,7 +345,7 @@ struct AgentRunState {
     // 轨迹 spawn 钩子与进程级 dispatcher:后台/嵌套派工要用,定格成值。
     std::function<std::unique_ptr<runtime::TrajectorySubagentBridge>(
         const std::string& task_label, const std::string& parent_run_id,
-        runtime::SubagentSpawnFailure* failure_out)>
+        runtime::SubagentSpawnFailure* failure_out, runtime::SubagentDispatchMode mode)>
         trajectory_spawn;
     lubancode::hooks::HookDispatcher* hook_dispatcher = nullptr;
 

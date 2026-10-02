@@ -74,6 +74,13 @@ memory 桥/lifecycle/compact/T11 + 默认冒烟)。撤 0 = ctest 不再注入该
 
 ### 显式格式册(explicit-v3/legacy-only 对照,未撤注入)
 
+父 V3 子终态观察首笔先定 [短合同](child-parent-observation.md)。新增
+`unit.runtime.child_parent_observation` 与共源 `sdk.focused.child_parent_observation`
+归 explicit-v3，固定八案、十二共用完成标记，Unix 另核目录别名标记。
+SDK focused 二十来源与 ASan 二十五必需来源均登记本册；子 JSONL 验证固定 64 MiB、
+131072 条/每行 4 MiB，只查本父实际子卷，不扩成恢复采用保证。
+既有子终态、前台上下文与组合两案的来源/路径门照留。
+
 `unit.trajectory_v3.v3_write_wiring`(多数案 guard1,末案 unset 钉
 "未设=开"、显式 0 回 v2)、`v3_clear_switch`/`v3_resume_chain`/
 `v3_export_copy_projection`/`v3_stream_wiring`/`v3_verify_doctor_tree`
