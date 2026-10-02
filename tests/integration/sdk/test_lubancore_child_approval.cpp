@@ -245,7 +245,7 @@ struct Rig {
         const auto identity = parent->V3ExecutingCallIdentity("parent-agent-call");
         REQUIRE(identity.has_value());
         cause = {ledger->session_id(), input.input.operation_id, "parent-turn", identity->first,
-                 static_cast<int>(identity->second)};
+                 identity->second};
         host.SetOperationOwner(cause.session_id, cause.operation_id, ledger->v3_main_writer()->run_id());
         registry.Register(std::make_unique<Guarded>(executions));
         tool = std::make_unique<tools::AgentTool>(backend, registry, tools::PathToUtf8(paths.cwd));
