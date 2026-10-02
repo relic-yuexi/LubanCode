@@ -110,8 +110,15 @@ Result<std::shared_ptr<SessionSkills>> SessionSkills::Prepare(
     if (!result->resume_id_.empty()) {
         const auto workspace_dir = lubancode::workspace::index::ResolveDirByWorkspaceKey(
             result->owned_root_ / "workspaces", workspace_key);
-        if (!workspace_dir) return std::unexpected(Fail("sdk.skill.plan_invalid", "owned workspace is unavailable"));
+        if (!workspace_dir) return std::unexpected(Fail("sdk.session.open_failed", "resume session is unavailable"));
         result->expected_resume_dir_ = *workspace_dir / "sessions" / result->resume_id_;
+        std::error_code ec;
+        const auto session_status = fs::symlink_status(result->expected_resume_dir_, ec);
+        if (ec == std::errc::no_such_file_or_directory ||
+            (!ec && session_status.type() == fs::file_type::not_found))
+            return std::unexpected(Fail("sdk.session.open_failed", "resume session is unavailable"));
+        // Existing linked/unreadable directories and one-sided plans still pass
+        // through strict validation; absence must keep the established SDK code.
         auto bytes = ReadPlan(result->owned_root_, result->expected_resume_dir_);
         if (!bytes) return std::unexpected(bytes.error());
         if (*bytes) {
