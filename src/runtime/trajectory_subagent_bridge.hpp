@@ -7,11 +7,16 @@
 #pragma once
 
 #include <string>
+#include <optional>
 
 #include "runtime/subagent_terminal.hpp"
 #include "runtime/trajectory_turn_bridge.hpp"
 
 namespace lubancode::runtime {
+
+struct ChildApprovalParent {
+    std::string session_id, run_id, turn_id, action_id, declared_message_id;
+};
 
 // ---------------------------------------------------------------------------
 // 子代理轨迹桥:AgentTool 派工时申请,子 loop 的边界与工具事件落子账
@@ -22,6 +27,9 @@ public:
     virtual ~TrajectorySubagentBridge() = default;
     virtual const std::string& run_id() const = 0;
     virtual TrajectoryTurnBridge& turn_bridge() = 0;
+    // Only an actual committed V3 declaration yields this immutable snapshot.
+    // The provider-ID fallback and V2 bridges provide no strict authority.
+    virtual std::optional<ChildApprovalParent> approval_parent() const { return std::nullopt; }
     // Full cached native append + explicit Close evidence; never retry Finish.
     virtual SubagentTerminalReceipt Finish(SubagentExecutionOutcome execution,
                                            const std::string& reason) = 0;
@@ -36,7 +44,8 @@ public:
         std::unique_ptr<trajectory::v3::V3Writer> writer,
         std::unique_ptr<V3SessionBooks> books,
         std::unique_ptr<TrajectoryTurnBridge> bridge,
-        std::shared_ptr<SubagentTerminalRegistry> registry);
+        std::shared_ptr<SubagentTerminalRegistry> registry,
+        std::optional<ChildApprovalParent> approval_parent = std::nullopt);
 };
 
 // ---------------------------------------------------------------------------

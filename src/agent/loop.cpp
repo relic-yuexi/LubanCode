@@ -651,12 +651,35 @@ ToolCallGate PrepareToolCall(ToolCallFrame& frame) {
         // async 缺位回落到旧同步回调(子代理转发、单测、后台"没人可问"
         // 的短路都还在旧路上,不许变慢、不许多线程化)。
         bool allowed = true;
-        if (wiring.on_tool_confirm_async) {
+        if (wiring.on_tool_confirm_scoped || wiring.on_tool_confirm_async) {
+            runtime::ApprovalLease lease;
+            std::shared_ptr<runtime::ScopedApprovalFuture> scoped;
+            if (wiring.on_tool_confirm_scoped) {
+                try {
+                    lease = wiring.on_tool_confirm_scoped(
+                        runtime::ApprovalRequest{call.id, call.name, frame.effective_input, std::string()});
+                    if (lease) scoped = lease.Future();
+                } catch (...) {
+                    // Host admission/publishing failure is a normal refusal.
+                    // Any already-created lease has retired its own ticket.
+                }
+            }
             const std::shared_ptr<runtime::InteractionFuture> future =
-                wiring.on_tool_confirm_async(
+                wiring.on_tool_confirm_scoped ? scoped : wiring.on_tool_confirm_async(
                     runtime::ApprovalRequest{call.id, call.name, frame.effective_input, std::string()});
-            const std::optional<runtime::ApprovalResponse> response =
-                future != nullptr ? future->WaitApproval() : std::nullopt;
+            std::optional<runtime::ApprovalResponse> response;
+            if (scoped) {
+                try { response = scoped->WaitApproval(frame.cancel); }
+                catch (...) { /* An explicit capability failure refuses this call. */ }
+            } else if (future) response = future->WaitApproval();
+            lease.Retire(); // A ticket ends here; child grants belong to the child scope.
+            if (frame.cancel != nullptr && frame.cancel->load(std::memory_order_acquire)) {
+                tools::Tool::Result cancelled{"本次调用已取消，该工具未执行。", true};
+                cancelled.outcome = ToString(ToolOutcome::CancelledBeforeStart);
+                cancelled.error_code = "runtime.tool.cancelled_before_start";
+                FinishTrace(frame, cancelled);
+                return {false, DispatchDone(frame, std::move(cancelled))};
+            }
             if (!response.has_value()) {
                 // 悬空收口(cancel):等价拒绝,拒绝文案照"没人可答"写,
                 // 不冒充用户拒绝。
@@ -708,7 +731,24 @@ ToolCallGate PrepareToolCall(ToolCallFrame& frame) {
 // 执行"的闸装在 sink 里),随后副作用闸问话。返回 nullopt = 可派发;有值
 // = 被 trace 闸拦下,已走显示收口(hub 侧已补终态栅栏,这里不发第二枚)。
 std::optional<tools::Tool::Result> MarkExecutionStarted(ToolCallFrame& frame) {
+    if (frame.cancel != nullptr && frame.cancel->load(std::memory_order_acquire)) {
+        tools::Tool::Result cancelled{"本次调用已取消，该工具未执行。", true};
+        cancelled.outcome = ToString(ToolOutcome::CancelledBeforeStart);
+        cancelled.error_code = "runtime.tool.cancelled_before_start";
+        FinishTrace(frame, cancelled);
+        return DispatchDone(frame, std::move(cancelled));
+    }
     NotifyPhase(frame, runtime::ToolPhase::Running);
+    // The phase callback can cancel this very call. Recheck after it, directly
+    // before the durable started boundary; this is still a checkpoint, not an
+    // atomic cancellation guarantee against another thread's later write.
+    if (frame.cancel != nullptr && frame.cancel->load(std::memory_order_acquire)) {
+        tools::Tool::Result cancelled{"本次调用已取消，该工具未执行。", true};
+        cancelled.outcome = ToString(ToolOutcome::CancelledBeforeStart);
+        cancelled.error_code = "runtime.tool.cancelled_before_start";
+        FinishTrace(frame, cancelled);
+        return DispatchDone(frame, std::move(cancelled));
+    }
     {
         ToolTraceEvent started;
         started.kind = ToolTraceEventKind::ExecutionStarted;

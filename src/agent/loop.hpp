@@ -36,6 +36,7 @@
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 #include "runtime/interaction.hpp"
+#include "runtime/scoped_approval.hpp"
 #include "runtime/middleware_runtime.hpp"  // PreRequestBudget(V3-REAL-07:冻结预算快照,Hook/记账同源)
 #include "runtime/turn_runtime.hpp"
 #include "runtime/turn_event_adapter.hpp"
@@ -223,6 +224,11 @@ struct TurnWiring {
     // 口不会被调。
     std::function<std::shared_ptr<runtime::InteractionFuture>(const runtime::ApprovalRequest& request)>
         on_tool_confirm_async;
+
+    // Explicit per-ticket cancellation capability. Once selected, a missing
+    // lease/future refuses the call; it never falls back to blocking old hooks.
+    std::function<runtime::ApprovalLease(const runtime::ApprovalRequest& request)>
+        on_tool_confirm_scoped;
 
     // 同步审批回落路:与 async 同一个触发点,当场问、当场答。子代理/PTC
     // 转发与单测走这条(任务线程不吃 future);两头都设时 async 优先。
