@@ -157,7 +157,7 @@ std::expected<std::string, CasError> BlobStore::ReadBoundedVerified(
     if (!bytes) return std::unexpected(CasError{"cas." + bytes.error(), {}});
     if (bytes->size() != ref.bytes || hooks::Sha256Hex(*bytes) != ref.sha256)
         return std::unexpected(CasError{"cas.read_mismatch", {}});
-    return bytes;
+    return std::move(*bytes);
 }
 
 CasWriteReceipt BlobStore::StoreDetailed(const CasWriteRequest& request, const FileCasFault& fault) {
