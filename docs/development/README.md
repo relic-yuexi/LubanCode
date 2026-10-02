@@ -12,6 +12,7 @@
 - [SDK 子 Agent 首批合同](sdk-subagents.md)
 - [子代理终态回执合同](child-terminal-receipt.md)
 - [父 V3 子终态观察与未知止损](child-parent-observation.md)
+- [子结果严格历史采用合同](child-history-adoption.md)
 - [Runner 就绪探针与失败原件](runner-probe-evidence.md)
 - [后台子代理线程启动收口](agent-thread-start-cleanup.md)
 - [前台子 Agent 本次调用上下文](child-foreground-context.md)

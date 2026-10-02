@@ -159,3 +159,4 @@ DOC development/experiment-runner.md
 DOC development/runner-probe-evidence.md
 DOC development/child-sdk-integration.md
 DOC development/child-parent-observation.md
+DOC development/child-history-adoption.md
