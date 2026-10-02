@@ -64,11 +64,12 @@ struct Gate {
         std::unique_lock lock(mutex);
         Check(cv.wait_for(lock, 20s, [&] { return entered >= count; }), "four children did not overlap");
     }
-    void WaitCancelled(unsigned owner) {
+    void WaitCancelled(unsigned first, unsigned second) {
         std::unique_lock lock(mutex);
-        Check(owner < cancelled_owners.size(), "cancel wait has no real fixture owner");
-        Check(cv.wait_for(lock, 20s, [&] { return cancelled_owners[owner]; }),
-            "own held child did not observe its actual cancellation");
+        Check(first < cancelled_owners.size() && second < cancelled_owners.size(),
+            "cancel wait has no real fixture owners");
+        Check(cv.wait_for(lock, 20s, [&] { return cancelled_owners[first] && cancelled_owners[second]; }),
+            "both held children did not observe their actual cancellations");
     }
 };
 struct ReleaseGate { std::shared_ptr<Gate> gate; ~ReleaseGate() { if (gate) gate->Release(); } };
@@ -98,6 +99,11 @@ struct State {
                 return sdk::ModelReply{"", {{"same-call", "agent", argument}}, sdk::Usage{1, 1}};
             for (const auto& m : request.messages) for (const auto& reply : m.tool_replies)
                 if (reply.call_id == "same-call") {
+                    if (!(reply.text.find("sdk.subagent.dispatch_rejected") != std::string::npos ||
+                        reply.text.find(marker) != std::string::npos || stop_at_first || wall_wait))
+                        std::cerr << "[sdk-child-diagnostic] point=parent-received-child-preview wire="
+                            << std::quoted(reply.call_id) << " error=" << reply.is_error
+                            << " text=" << std::quoted(reply.text) << '\n';
                     Check(reply.text.find("sdk.subagent.dispatch_rejected") != std::string::npos ||
                         reply.text.find(marker) != std::string::npos || stop_at_first || wall_wait,
                         "parent did not receive its child result or explicit refusal");
@@ -661,7 +667,7 @@ void SubagentCase(const std::string& name, const fs::path& base) {
         }
         gate->Wait(4); Check(sessions[0]->Cancel(receipts[0].operation_id).has_value(), "local cancel failed");
         Check(sessions[1]->Close().has_value(), "closing one held child did not join");
-        gate->WaitCancelled(0); gate->WaitCancelled(1); gate->Release();
+        gate->WaitCancelled(0, 1); gate->Release();
         for (std::size_t n : {std::size_t{2}, std::size_t{3}}) {
             unsigned approvals = 0; bool completed = false;
             std::vector<std::string> resolved;
