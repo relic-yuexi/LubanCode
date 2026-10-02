@@ -1,5 +1,7 @@
 if(NOT LUBANCODE_BUILD_CLI)
-  include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
+  if(LUBANCODE_BUILD_SDK)
+    include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
+  endif()
   return()
 endif()
 
