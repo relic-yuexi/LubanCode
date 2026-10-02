@@ -24,6 +24,7 @@
 #include "agent/turn_harness.hpp"
 #include "runtime/trajectory_session.hpp"
 #include "tools/agent_tool.hpp"
+#include "trajectory/journal.hpp"
 #include "trajectory/v3/reader.hpp"
 
 using namespace lubancode;
@@ -424,8 +425,19 @@ TEST_CASE("child terminal: real spawn terminal resolves five keys and linked rem
     });
     REQUIRE(linked != parent.end());
     const auto& initial = linked->at("payload").at("childCheckpointRef");
-    CHECK(initial.at("seq").get<std::uint64_t>() < receipt.terminal->seq);
-    CHECK(initial.at("hash").get<std::string>() != receipt.terminal->hash);
+    const auto initial_seq = initial.at("seq").get<std::uint64_t>();
+    CHECK(initial.at("sessionId").get<std::string>() == receipt.session_id);
+    CHECK(initial.at("runId").get<std::string>() == receipt.run_id);
+    CHECK(initial_seq < receipt.terminal->seq);
+    CHECK(initial.at("lineHash").get<std::string>() != receipt.terminal->hash);
+    const auto prefix = std::find_if(rows.begin(), rows.end(), [initial_seq](const auto& row) {
+        return row.at("seq").template get<std::uint64_t>() == initial_seq;
+    });
+    REQUIRE(prefix != rows.end());
+    CHECK(prefix->at("sessionId").get<std::string>() == receipt.session_id);
+    CHECK(prefix->at("runId").get<std::string>() == receipt.run_id);
+    CHECK(prefix->at("lineHash").get<std::string>() == initial.at("lineHash").get<std::string>());
+    CHECK(prefix->at("kind").get<std::string>() == "task.started");
     CHECK(Count(parent, "subagent.observed") == 0);  // Not implemented by this gate.
     const auto saved = ledger->ChildTerminalReceipt(receipt.run_id);
     REQUIRE(saved.has_value());
@@ -503,7 +515,7 @@ TEST_CASE("child terminal: native rejection has no terminal reference and cannot
     }
 }
 
-TEST_CASE("child terminal: actual IO failure retains native status broken and an unconfirmed append") {
+TEST_CASE("child terminal: native IO failures retain actual writer health and an unconfirmed append") {
     Directory dir("io");
     auto registry = std::make_shared<SubagentTerminalRegistry>();
     SUBCASE("first V3 IO failure has native Rejected plus broken") {
@@ -524,7 +536,7 @@ TEST_CASE("child terminal: actual IO failure retains native status broken and an
         Same(first, child->Finish(SubagentExecutionOutcome::Succeeded, "retry"));
         CHECK(Count(Rows(dir.root / "child.jsonl"), "session.ended") == 0);
     }
-    SUBCASE("V2 actual IO submit failure remains IoFailed including Close") {
+    SUBCASE("V2 pre-write IoFailed injection leaves the writer healthy and Close independent") {
         trajectory::RecorderOptions options;
         options.inject_submit_reject = [](trajectory::EventKind kind) -> std::optional<std::string> {
             if (kind == trajectory::EventKind::RunCompleted) return "io.test_terminal";
@@ -534,13 +546,26 @@ TEST_CASE("child terminal: actual IO failure retains native status broken and an
         const auto first = child->Finish(SubagentExecutionOutcome::Succeeded, "done");
         CHECK(std::get<trajectory::RecordReceipt>(first.append).status == trajectory::RecordReceipt::Status::IoFailed);
         CHECK(first.append_error_code == "io.test_terminal");
-        CHECK(first.broken_after_append);
+        // This real Recorder hook returns an IoFailed receipt before JournalWriter
+        // runs. It cannot prove a damaged FILE*: confirmation and Close are separate.
+        CHECK_FALSE(first.broken_after_append);
         CHECK(first.confirmation == SubagentAppendConfirmation::DurabilityUnconfirmed);
         CHECK_FALSE(first.terminal.has_value());
-        CHECK(first.seal == SubagentSealState::CloseFailed);
-        CHECK(first.close_error_code == "io.close_failed");
+        CHECK_FALSE(first.durable());
+        CHECK(first.seal == SubagentSealState::Closed);
+        CHECK_FALSE(first.broken_after_close);
+        CHECK(first.close_error_code.empty());
+        CHECK(first.close_error_message.empty());
+        CHECK(first.journal_sha256.size() == 64);
+        CHECK(trajectory::VerifyJournalFile(dir.root / "child.jsonl").ok);
+        const auto prefix_rows = Rows(dir.root / "child.jsonl");
         Same(first, child->Finish(SubagentExecutionOutcome::Succeeded, "retry"));
-        CHECK(Count(Rows(dir.root / "child.jsonl"), "run.completed") == 0);
+        const auto after_retry = Rows(dir.root / "child.jsonl");
+        CHECK(after_retry.size() == prefix_rows.size());
+        CHECK(Count(after_retry, "run.completed") == 0);
+        const auto digest = trajectory::JournalWriter::ComputeJournalSha256(dir.root / "child.jsonl");
+        REQUIRE(digest.has_value());
+        CHECK(first.journal_sha256 == *digest);
     }
     CheckSharedHarnessUnknownRounds();
 }
