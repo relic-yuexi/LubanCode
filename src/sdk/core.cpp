@@ -30,6 +30,7 @@
 #include "sdk/callback_scope.hpp"
 #include "sdk/extensions.hpp"
 #include "sdk/results.hpp"
+#include "sdk/skills.hpp"
 #include "tools/path_utils.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
@@ -294,6 +295,7 @@ struct Session::Impl final : rt::InteractionBroker {
     // Publish this borrow only after initialization succeeds; queries use cache.
     detail::SessionExtensions* extensions = nullptr;
     std::string extension_plan_json;
+    skills::v1::Snapshot skills_snapshot;
     mutable std::mutex mutex;
     mutable std::condition_variable cv;
     std::mutex close_mutex;
@@ -413,6 +415,12 @@ struct Session::Impl final : rt::InteractionBroker {
                 options.extensions.clear();
             }
         } source_scope{options};
+        auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
+        if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
+        auto skill_module = detail::SessionSkills::Prepare(options.skills,
+            lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key,
+            options.resume_session_id, options.system_prompt);
+        if (!skill_module) return std::unexpected(skill_module.error());
         auto prepared_registry = std::make_unique<lubancode::tools::ToolRegistry>();
         for (const auto& name : options.builtin_tools) {
             auto tool = rt::assembly::CreateLocalTool(name);
@@ -425,6 +433,8 @@ struct Session::Impl final : rt::InteractionBroker {
             if (!adapted) return std::unexpected(adapted.error());
             prepared_registry->Register(std::move(*adapted));
         }
+        if ((*skill_module)->enabled() && prepared_registry->Find("skill"))
+            return std::unexpected(Failure("sdk.tool.duplicate", "skill"));
         rt::assembly::SessionResourcesRequest resource_request;
         std::set<std::string> server_names;
         for (const auto& spec : options.mcp_servers) {
@@ -465,6 +475,13 @@ struct Session::Impl final : rt::InteractionBroker {
                     registry->Register(std::move(registration));
                 }
             }
+            std::set<std::string> tool_face;
+            for (const auto& tool : registry->All()) tool_face.insert(tool->name());
+            auto frozen = (*skill_module)->BindToolSurface(std::move(tool_face));
+            if (!frozen) return std::unexpected(rt::assembly::SessionResourceFailure{
+                rt::assembly::SessionResourceStage::Registry, frozen.error().code,
+                frozen.error().message, "skills", {}});
+            if ((*skill_module)->enabled()) registry->Register((*skill_module)->BuildTool());
             return registry;
         };
         std::string wire = "sdk_custom";
@@ -503,8 +520,6 @@ struct Session::Impl final : rt::InteractionBroker {
                 return std::unexpected(Failure(error.code, error.message));
             return std::unexpected(Failure("sdk.session.open_failed", error.message));
         }
-        auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
-        if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
         rt::SessionLaunchRequest launch;
         launch.cwd_utf8 = options.cwd;
         launch.workspace_identity = std::move(*identity);
@@ -512,12 +527,15 @@ struct Session::Impl final : rt::InteractionBroker {
         launch.wire_name = wire;
         launch.approval_mode = Mode(options.approval_mode);
         launch.workspaces_root = lubancode::tools::Utf8ToPath(roots.data_root) / "workspaces";
-        launch.v3_system_content = options.system_prompt;
+        launch.v3_system_content = (*skill_module)->EffectiveSystem();
+        launch.v3_opening_participant = (*skill_module)->OpeningParticipant();
         launch.resume_at_launch = !options.resume_session_id.empty();
         launch.require_v3_resume = launch.resume_at_launch;
         launch.resume_source_session_id = options.resume_session_id;
         service = std::make_shared<rt::SessionService>(std::move(launch));
-        if (!service->runtime()) return std::unexpected(Failure("sdk.session.open_failed", service->launch_error()));
+        if (!service->runtime()) return std::unexpected(Failure(
+            service->launch_error().find("sdk.skill.") != std::string::npos ? "sdk.skill.open_failed" : "sdk.session.open_failed",
+            service->launch_error()));
         session_id = service->trajectory()->session_id();
         session_dir = service->trajectory()->session_dir();
         if (!options.resume_session_id.empty() && session_id != options.resume_session_id) {
@@ -527,6 +545,7 @@ struct Session::Impl final : rt::InteractionBroker {
             !options.resume_session_id.empty());
         if (!frozen_policy) return std::unexpected(frozen_policy.error());
         result_policy = std::move(*frozen_policy);
+        options.system_prompt = (*skill_module)->EffectiveSystem();
         if (!options.resume_session_id.empty() && options.system_prompt.empty()) {
             auto saved = lubancode::trajectory::v3::ReadV3Ledger(service->trajectory()->v3_main_writer()->path());
             if (!saved) return std::unexpected(Failure("sdk.resume.context_unavailable", saved.error()));
@@ -574,6 +593,7 @@ struct Session::Impl final : rt::InteractionBroker {
         auto loaded = LoadOperations();
         if (!loaded) return loaded;
         extensions = module_ptr;
+        skills_snapshot = (*skill_module)->Describe();
         return {};
     }
 
@@ -1021,6 +1041,10 @@ Result<void> Session::Close() { return impl_->Close(); }
 Result<std::string> Session::DescribeExtensions() const {
     std::lock_guard lock(impl_->mutex);
     return impl_->extension_plan_json;
+}
+Result<skills::v1::Snapshot> Session::DescribeSkills() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->skills_snapshot;
 }
 Result<Receipt> Session::Submit(std::string key, std::string text) {
     if (key.empty()) return std::unexpected(Failure("sdk.operation.key_required"));

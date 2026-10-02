@@ -226,6 +226,8 @@ public:
     // 三步全过内存才换根;第 2 步后崩溃,恢复仍用旧根(变更未完成)。
     // settings_version/soul 等缘由进 change 元数据;system_changed=false
     // 表示设置变了但正文未变,仍走三步留档,不制造假版本差异(链重接)。
+    // Opaque hostBindings are inherited from the effective system root only;
+    // cause/settingsVersion and other change metadata are never inherited.
     struct SwitchSystemResult {
         WriteReceipt change_event;
         WriteReceipt system_message;

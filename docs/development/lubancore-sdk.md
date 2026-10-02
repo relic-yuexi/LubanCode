@@ -197,6 +197,12 @@ ExtensionRuntime、后台命令、远端 Worker 或 Node 结果同步已交付�
 
 ## 工具、权限与并发边界
 
+显式 Skills 正在本批接入，验收见 [SDK Skills 合同](sdk-skills.md)。宿主传
+`SessionOptions::skills = skills::v1::Selection{absolute_root, {"skill-name"}}`，再调
+`DescribeSkills()` 查本场冻结选名、指纹、依赖缺口和提示段。附件按需读当前文件；
+正文和同 ID 恢复拒绝指纹漂移。省略便关闭，不沿个人目录发现，不自动挂依赖工具。
+新开场与恢复门共用会话运行栈，闭场只留值清单；本批尚未收远端原生验收。
+
 工具默认空表。首批可显式启用 `read_file`、`write_file`、`edit_file`、`run_command`，
 也可注入自定义工具，或按服务与工具名单挂 MCP。内置实现沿用共用装配，不另写一套工具。
 相对文件路径和命令 cwd 按会话目录解析，不调用进程级 chdir。命令只开放前台执行；

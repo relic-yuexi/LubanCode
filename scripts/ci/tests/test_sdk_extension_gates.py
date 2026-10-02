@@ -21,6 +21,7 @@ class InstalledHeadersTests(unittest.TestCase):
             "include/lubancore/api.hpp", "include/lubancore/core.hpp",
             "include/lubancore/extensions.hpp", "include/lubancore/detail/types.hpp",
             "include/lubancore/results.hpp",
+            "include/lubancore/skills.hpp",
         }
         for relative in self.headers:
             path = self.repo / relative
@@ -42,7 +43,7 @@ class InstalledHeadersTests(unittest.TestCase):
                     self.assertIn(missing, str(error.exception))
 
     def test_missing_extension_or_result_source_cannot_shrink_the_required_install_contract(self):
-        for missing in ("include/lubancore/extensions.hpp", "include/lubancore/results.hpp"):
+        for missing in ("include/lubancore/extensions.hpp", "include/lubancore/results.hpp", "include/lubancore/skills.hpp"):
             path = self.repo / missing
             contents = path.read_text(encoding="utf-8")
             path.unlink()

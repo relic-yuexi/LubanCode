@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <exception>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -26,6 +27,25 @@
 
 namespace lubancode::trajectory {
 namespace {
+
+std::expected<nlohmann::json, std::string> InvokeOpeningParticipant(
+    const V3OpeningParticipant& participant, const V3OpeningContext& context) {
+    try {
+        auto extra = participant(context);
+        if (!extra) return std::unexpected(extra.error());
+        if (!extra->is_object()) return std::unexpected("opening.metadata_not_object");
+        for (auto it = extra->begin(); it != extra->end(); ++it) {
+            if (it.key() != "hostBindings" || !it.value().is_object()) {
+                return std::unexpected("opening.reserved_metadata");
+            }
+        }
+        return extra;
+    } catch (const std::exception&) {
+        return std::unexpected("opening.participant_exception");
+    } catch (...) {
+        return std::unexpected("opening.participant_exception");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 小工具
@@ -807,6 +827,12 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     // 完整拼装结果;settingsVersion 从 1 起,后续切换逐次 +1。开张失败按
     // P0-C 同款纪律清 0 字节残留(先放句柄,再按所有权凭据删目标名空文件)。
     nlohmann::json system_extra = nlohmann::json::object({{"settingsVersion", 1}});
+    if (options_.v3_opening_participant) {
+        auto opening = InvokeOpeningParticipant(options_.v3_opening_participant,
+            {directory->session_dir(), manifest.session_id, nullptr});
+        if (!opening) return std::unexpected("session.opening_failed: " + opening.error());
+        system_extra.update(*opening);
+    }
     v3::V3WriterOptions writer_options;
     // 会话级事实随 session.started 落账(R2):列表投影的 cwd/run_kind
     // 以此为权威来源,v2 manifest 不再是唯一出处。
@@ -2554,6 +2580,44 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     auto lock_file = SessionLock::Acquire(source_dir, clock_->LockOwner());
     if (!lock_file.has_value()) {
         return fail("resume.step5_failed", "源场独占锁拿不下: " + lock_file.error());
+    }
+    if (options_.v3_opening_participant) {
+        // The earlier fold was outside the session file lock. A still-valid but
+        // newer ledger must not be paired with its stale history or host plan.
+        auto source = v3::ReadV3Ledger(outcome.source_v3_stream);
+        if (!source) return fail("resume.source_corrupt", source.error());
+        const auto tail = source->LastEntry();
+        const auto tail_hash = tail ? (tail->is_message
+            ? source->messages[tail->index].line_hash
+            : source->events[tail->index].line_hash) : std::string();
+        if (source->session_id != source_id || source->run_id != source_run_id || !tail ||
+            source->lines != outcome.source_event_count || tail->seq != outcome.source_event_count ||
+            tail_hash != outcome.source_main_last_event_hash) {
+            return fail("resume.source_changed", "source changed after the opening history fold");
+        }
+        const auto* root = source->FindMessage(source->context.system_message_ref);
+        if (!root || !root->system_meta || root->message.value("role", std::string()) != "system" ||
+            !root->message.contains("content") || !root->message["content"].is_string()) {
+            return fail("resume.opening_failed", "opening.effective_system_missing");
+        }
+        if (root->system_meta->contains("settingsVersion")) {
+            const auto& version = root->system_meta->at("settingsVersion");
+            if ((!version.is_number_unsigned() && !version.is_number_integer()) ||
+                (version.is_number_integer() && !version.is_number_unsigned() && version.get<std::int64_t>() < 1) ||
+                (version.is_number_unsigned() && version.get<std::uint64_t>() == 0)) {
+                return fail("resume.opening_failed", "opening.invalid_settings_version");
+            }
+        }
+        auto opening = InvokeOpeningParticipant(options_.v3_opening_participant,
+            {source_dir, source_id, &*source});
+        if (!opening) return fail("resume.opening_failed", opening.error());
+        const auto saved_bindings = root->system_meta && root->system_meta->contains("hostBindings")
+            ? root->system_meta->at("hostBindings") : nlohmann::json::object();
+        const auto expected_bindings = opening->contains("hostBindings")
+            ? opening->at("hostBindings") : nlohmann::json::object();
+        if (saved_bindings != expected_bindings) {
+            return fail("resume.opening_failed", "opening.host_bindings_mismatch");
+        }
     }
     v3::V3WriterOptions writer_options;
     // launch_cwd/run_kind 是 Start 时写 session.started 用的,续卷不写;

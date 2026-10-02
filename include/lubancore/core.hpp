@@ -15,6 +15,7 @@
 #include <lubancore/api.hpp>
 #include <lubancore/extensions.hpp>
 #include <lubancore/results.hpp>
+#include <lubancore/skills.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
@@ -117,6 +118,9 @@ struct SessionOptions {
     std::vector<std::string> builtin_tools;
     std::vector<Tool> custom_tools;
     std::vector<McpServer> mcp_servers;
+    // Explicit local selection, frozen per session. SKILL.md drift is rejected;
+    // ordinary attachments are read live on demand. Never discovers HOME/cwd.
+    std::optional<skills::v1::Selection> skills;
     // Explicit trusted C++ registrations, frozen per session until Close.
     std::vector<extensions::v1::Registration> extensions;
     // Outbound result projection identity. New sessions default to Preview/v1;
@@ -199,6 +203,7 @@ public:
     // Frozen selected/overridden middleware plan, retained as pure JSON after
     // Close. This does not serialize or restore arbitrary extension state.
     Result<std::string> DescribeExtensions() const;
+    Result<skills::v1::Snapshot> DescribeSkills() const;
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
     // Cooperative custom tools/backends MUST return after cancellation; Close waits
     // for them and never destroys live borrowed state or pretends a timeout stopped it.

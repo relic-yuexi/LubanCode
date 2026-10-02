@@ -19,6 +19,8 @@
 
 #include "tools/skill_loader.hpp"
 #include "tools/skill_tool.hpp"
+#include "tools/path_utils.hpp"
+#include "platform/sha256.hpp"
 
 using namespace lubancode;
 
@@ -814,4 +816,450 @@ TEST_CASE("EnumerateSkillLayers: 主目录与官方缺位,只剩项目两处也�
     REQUIRE(entries.size() == 2);
     CHECK(FindEntry(entries, "proj-native", "proj", ".lubancode").meta.source_level == "项目级");
     CHECK(FindEntry(entries, "proj-agent", "proj", ".agents").meta.source_level == "agents 共享");
+}
+
+namespace {
+constexpr const char* kStrictSkillSource = "技能仅来自宿主显式目录；未列名不加载。";
+
+void WriteStrictSkillFile(const std::filesystem::path& path, const std::string& bytes) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream file(path, std::ios::binary);
+    REQUIRE(file.is_open());
+    file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    file.close();
+    REQUIRE(file.good());
+}
+
+struct StrictSkillsFixture {
+    TempSkillsRoot temporary;
+    std::filesystem::path root = std::filesystem::path(temporary.Path()) / "explicit";
+    StrictSkillsFixture() { std::filesystem::create_directories(root); }
+    void Write(const std::string& name, const std::string& content) const {
+        WriteStrictSkillFile(root / name / "SKILL.md", content);
+    }
+    auto Scan(const std::vector<std::string>& names) const {
+        return tools::ScanSkillsDirStrict(root, names, kStrictSkillSource);
+    }
+};
+
+void RequireSkillSymlink(const std::filesystem::path& target, const std::filesystem::path& link,
+                         bool directory = false) {
+    std::error_code ec;
+    if (directory) std::filesystem::create_directory_symlink(target, link, ec);
+    else std::filesystem::create_symlink(target, link, ec);
+    REQUIRE_MESSAGE(!ec, "Strict Skills link coverage unavailable: ", ec.message());
+}
+}
+
+TEST_CASE("StrictSkills: pure parsing preserves exact body and string types") {
+    const auto parsed = tools::ParseSkillMarkdownStrict(
+        "---\r\nname: alpha\r\ndescription: '处理当前材料'\r\nrequires-tools: [run_command, mcp__srv__echo]\r\n---\r\nBODY\r\n");
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->name == "alpha");
+    CHECK(parsed->description == "处理当前材料");
+    CHECK(parsed->body == "BODY\r\n");
+    REQUIRE(parsed->requires_tools.has_value());
+    const std::vector<std::string> expected_tools{"run_command", "mcp__srv__echo"};
+    CHECK(*parsed->requires_tools == expected_tools);
+    const auto quoted = tools::ParseSkillMarkdownStrict("---\nname: '123'\ndescription: 'true'\n---\nBODY");
+    REQUIRE(quoted.has_value());
+    CHECK(quoted->name == "123");
+    CHECK(quoted->description == "true");
+}
+
+TEST_CASE("StrictSkills: invalid YAML dependencies and duplicate keys never take legacy fallback") {
+    const std::vector<std::string> fronts = {
+        "name: alpha\ndescription: Use when: old format\n",
+        "name: alpha\ndescription: valid\nrequires-tools: run_command\n",
+        "name: alpha\ndescription: valid\nrequires-tools: [[run_command]]\n",
+        "name: alpha\ndescription: valid\nrequires-tools: [true]\n",
+        "name: alpha\ndescription: valid\nrequires-tools: [17]\n",
+        "name: alpha\ndescription: valid\nrequires-tools: [null]\n",
+        "name: alpha\ndescription: valid\nrequires-tools: ['']\n",
+        "name: alpha\ndescription: valid\nrequires-tools: [run_command, run_command]\n",
+        "name: alpha\nname: beta\ndescription: valid\n",
+        "name: alpha\ndescription: first\ndescription: second\n",
+        "name: alpha\ndescription: valid\nrequires-tools: broken\nrequires-tools: []\n",
+        "name: alpha\ndescription: false\n",
+    };
+    for (const auto& front : fronts) {
+        INFO(front);
+        CHECK_FALSE(tools::ParseSkillMarkdownStrict("---\n" + front + "---\nBODY").has_value());
+    }
+    CHECK(tools::ParseSkillMarkdown("---\nname: alpha\ndescription: Use when: old format\n---\nBODY").has_value());
+    CHECK(tools::ParseSkillMarkdown("---\nname: alpha\ndescription: valid\nrequires-tools: broken\n---\nBODY").has_value());
+}
+
+TEST_CASE("StrictSkills: parser validates Unicode NUL description and frontmatter budgets") {
+    std::string description;
+    for (int i = 0; i < 1024; ++i) description += "字";
+    REQUIRE(tools::ParseSkillMarkdownStrict(SkillContent("alpha", description, "BODY")).has_value());
+    CHECK_FALSE(tools::ParseSkillMarkdownStrict(SkillContent("alpha", description + "字", "BODY")).has_value());
+    CHECK_FALSE(tools::ParseSkillMarkdownStrict(SkillContent("alpha", "valid", std::string("A\0B", 3))).has_value());
+    CHECK_FALSE(tools::ParseSkillMarkdownStrict(SkillContent("alpha", "valid", std::string(1, '\xff'))).has_value());
+    CHECK_FALSE(tools::ParseSkillMarkdownStrict("---\nname: alpha\ndescription: \"A\\0B\"\n---\nBODY").has_value());
+    const auto front_limit = tools::ParseSkillMarkdownStrict(
+        "---\nname: alpha\ndescription: valid\n#" + std::string(tools::StrictSkillLimits::frontmatter_bytes, 'F') + "\n---\nBODY");
+    REQUIRE_FALSE(front_limit.has_value());
+    CHECK(front_limit.error().code == "skill.frontmatter.limit");
+    const auto file_limit = tools::ParseSkillMarkdownStrict(std::string(tools::StrictSkillLimits::file_bytes + 1, 'B'));
+    REQUIRE_FALSE(file_limit.has_value());
+    CHECK(file_limit.error().code == "skill.file.limit");
+    auto dependencies = std::string("---\nname: alpha\ndescription: valid\nrequires-tools:\n");
+    for (int i = 0; i < 65; ++i) dependencies += "  - tool" + std::to_string(i) + "\n";
+    CHECK_FALSE(tools::ParseSkillMarkdownStrict(dependencies + "---\nBODY").has_value());
+    CHECK_FALSE(tools::ParseSkillMarkdownStrict(
+        "---\nname: alpha\ndescription: valid\nrequires-tools: ['" + std::string(513, 'T') + "']\n---\nBODY").has_value());
+}
+
+TEST_CASE("StrictSkills: exact explicit scan owns same-byte hashes sorted selection and source prompt") {
+    StrictSkillsFixture fixture;
+    fixture.root /= tools::Utf8ToPath("技能源-🚀");
+    std::filesystem::create_directories(fixture.root);
+    const auto alpha = SkillContent("alpha", "ALPHA", "A-BODY\n");
+    fixture.Write("alpha", alpha);
+    fixture.Write("beta", SkillContent("beta", "BETA", "B-BODY\n"));
+    fixture.Write("decoy", SkillContent("decoy", "DECOY", "D-BODY\n"));
+    WriteStrictSkillFile(fixture.root.parent_path() / ".agents" / "skills" / "ambient" / "SKILL.md",
+                         SkillContent("ambient", "AMBIENT", "WRONG\n"));
+    const auto scan = fixture.Scan({"beta", "alpha"});
+    REQUIRE(scan.has_value());
+    REQUIRE(scan->skills.size() == 2);
+    CHECK(scan->skills[0].name == "alpha");
+    CHECK(scan->skills[1].name == "beta");
+    CHECK(scan->skills[0].content_hash == platform::Sha256Hex(alpha));
+    CHECK(scan->skills[0].dir_path == tools::PathToUtf8(std::filesystem::canonical(fixture.root / "alpha")));
+    CHECK(scan->skills[0].skill_path == tools::PathToUtf8(std::filesystem::canonical(fixture.root / "alpha" / "SKILL.md")));
+    CHECK(scan->skills[0].source_dir_path == tools::PathToUtf8(fixture.root / "alpha"));
+    CHECK(scan->read_policy.canonical_root_path == std::filesystem::canonical(fixture.root));
+    CHECK(scan->prompt_segment == std::string(kStrictSkillSource) + "\n可用技能(用 skill 工具按名加载):\n- alpha: ALPHA\n- beta: BETA");
+    CHECK(scan->diagnostics.empty());
+    CHECK(scan->prompt_segment.find("DECOY") == std::string::npos);
+    CHECK(scan->prompt_segment.find("AMBIENT") == std::string::npos);
+}
+
+TEST_CASE("StrictSkills: missing roots empty duplicate selections and implicit sources fail closed") {
+    StrictSkillsFixture fixture;
+    fixture.Write("alpha", SkillContent("alpha", "valid", "BODY"));
+    CHECK_FALSE(fixture.Scan({}).has_value());
+    CHECK_FALSE(fixture.Scan({"alpha", "alpha"}).has_value());
+    CHECK_FALSE(fixture.Scan({"Alpha"}).has_value());
+    CHECK_FALSE(fixture.Scan({"missing"}).has_value());
+    CHECK_FALSE(tools::ScanSkillsDirStrict("relative", {"alpha"}, kStrictSkillSource).has_value());
+    CHECK_FALSE(tools::ScanSkillsDirStrict(fixture.root / "missing", {"alpha"}, kStrictSkillSource).has_value());
+    CHECK_FALSE(tools::ScanSkillsDirStrict(fixture.root / "alpha" / "SKILL.md", {"alpha"}, kStrictSkillSource).has_value());
+    CHECK_FALSE(tools::ScanSkillsDirStrict(fixture.root, {"alpha"}, "").has_value());
+    std::vector<std::string> names(129, "alpha");
+    CHECK_FALSE(fixture.Scan(names).has_value());
+}
+
+TEST_CASE("StrictSkills: selected invalid metadata refuses while unselected bad metadata is diagnosed") {
+    StrictSkillsFixture fixture;
+    fixture.Write("alpha", SkillContent("alpha", "valid", "BODY"));
+    fixture.Write("broken", "---\nname: broken\ndescription: Use when: legacy\n---\nBODY");
+    const auto allowed = fixture.Scan({"alpha"});
+    REQUIRE(allowed.has_value());
+    REQUIRE(allowed->skills.size() == 1);
+    CHECK_FALSE(allowed->diagnostics.empty());
+    CHECK_FALSE(fixture.Scan({"broken"}).has_value());
+    fixture.Write("alpha", SkillContent("another-name", "valid", "BODY"));
+    const auto mismatch = fixture.Scan({"alpha"});
+    REQUIRE_FALSE(mismatch.has_value());
+    CHECK(mismatch.error().code == "skill.metadata.invalid");
+}
+
+TEST_CASE("StrictSkills: actual reads stop at cap plus one and charge invalid text") {
+    StrictSkillsFixture fixture;
+    const auto path = fixture.root / "ordinary.txt";
+    WriteStrictSkillFile(path, std::string(1024, 'A'));
+    std::size_t read = 0;
+    const auto limited = tools::ReadSkillFileBounded(path, 32, &read);
+    REQUIRE_FALSE(limited.has_value());
+    CHECK(limited.error().code == "skill.file.limit");
+    CHECK(read == 33);
+    const auto complete = tools::ReadSkillFileBounded(path, 1024, &read);
+    REQUIRE(complete.has_value());
+    CHECK(complete->size() == 1024);
+    CHECK(read == 1024);
+    WriteStrictSkillFile(path, std::string("A\0B", 3));
+    const auto nul = tools::ReadSkillFileBounded(path, 32, &read);
+    REQUIRE_FALSE(nul.has_value());
+    CHECK(nul.error().code == "skill.text.invalid");
+    CHECK(read == 3);
+    CHECK_FALSE(tools::ReadSkillFileBounded(fixture.root).has_value());
+}
+
+TEST_CASE("StrictSkills: scan total charges unselected invalid UTF8 and candidate limits include unselected") {
+    SUBCASE("invalid text consumes the total scan budget") {
+        StrictSkillsFixture fixture;
+        std::string invalid(tools::StrictSkillLimits::file_bytes, 'B');
+        invalid[0] = '\xff';
+        for (int i = 0; i < 17; ++i) fixture.Write("bad" + std::to_string(i), invalid);
+        fixture.Write("valid", SkillContent("valid", "valid", "BODY"));
+        const auto scan = fixture.Scan({"valid"});
+        REQUIRE_FALSE(scan.has_value());
+        CHECK(scan.error().code == "skill.scan.limit");
+    }
+    SUBCASE("unselected candidates consume the candidate budget") {
+        StrictSkillsFixture fixture;
+        fixture.Write("alpha", SkillContent("alpha", "valid", "BODY"));
+        for (int i = 0; i < 127; ++i) fixture.Write("unused" + std::to_string(i), "bad metadata");
+        REQUIRE(fixture.Scan({"alpha"}).has_value());
+        fixture.Write("extra", "bad metadata");
+        const auto scan = fixture.Scan({"alpha"});
+        REQUIRE_FALSE(scan.has_value());
+        CHECK(scan.error().code == "skill.scan.limit");
+    }
+}
+
+TEST_CASE("StrictSkills: every root entry counts including noncandidate files") {
+    StrictSkillsFixture fixture;
+    fixture.Write("alpha", SkillContent("alpha", "valid", "BODY"));
+    for (int i = 0; i < 4095; ++i) WriteStrictSkillFile(fixture.root / ("empty" + std::to_string(i)), "");
+    REQUIRE(fixture.Scan({"alpha"}).has_value());
+    WriteStrictSkillFile(fixture.root / "one-too-many", "");
+    const auto scan = fixture.Scan({"alpha"});
+    REQUIRE_FALSE(scan.has_value());
+    CHECK(scan.error().code == "skill.scan.limit");
+}
+
+TEST_CASE("StrictSkills: whole-file boundary and final serialized prompt limits are independent") {
+    SUBCASE("whole file includes frontmatter") {
+        StrictSkillsFixture fixture;
+        auto bytes = SkillContent("alpha", "valid", "BODY");
+        bytes.append(tools::StrictSkillLimits::file_bytes - bytes.size(), 'P');
+        fixture.Write("alpha", bytes);
+        REQUIRE(fixture.Scan({"alpha"}).has_value());
+        fixture.Write("alpha", bytes + "P");
+        const auto over = fixture.Scan({"alpha"});
+        REQUIRE_FALSE(over.has_value());
+        CHECK(over.error().code == "skill.scan.limit");
+    }
+    SUBCASE("valid individual metadata can exceed aggregate prompt cap") {
+        StrictSkillsFixture fixture;
+        std::vector<std::string> names;
+        for (int i = 0; i < 65; ++i) {
+            const auto name = "skill" + std::to_string(i);
+            names.push_back(name);
+            fixture.Write(name, SkillContent(name, std::string(1024, 'D'), "BODY"));
+        }
+        const auto scan = fixture.Scan(names);
+        REQUIRE_FALSE(scan.has_value());
+        CHECK(scan.error().code == "skill.prompt.limit");
+    }
+}
+
+TEST_CASE("StrictSkills: body drift fails while ordinary attachment updates remain live") {
+    StrictSkillsFixture fixture;
+    fixture.Write("alpha", SkillContent("alpha", "valid", "FROZEN-BODY"));
+    WriteStrictSkillFile(fixture.root / "alpha" / "references" / "note.md", "NOTE-ONE");
+    const auto scan = fixture.Scan({"alpha"});
+    REQUIRE(scan.has_value());
+    tools::SkillTool tool(scan->skills, std::set<std::string>{"skill"}, scan->read_policy);
+    CHECK(tool.execute({{"name", "alpha"}}).content.find("FROZEN-BODY") != std::string::npos);
+    const auto note_one = tool.execute({{"name", "alpha"}, {"path", "references/note.md"}});
+    CHECK(note_one.content == "技能材料 alpha/references/note.md:\nNOTE-ONE");
+    WriteStrictSkillFile(fixture.root / "alpha" / "references" / "note.md", "NOTE-TWO");
+    fixture.Write("alpha", SkillContent("alpha", "valid", "NEW-BODY"));
+    const auto changed = tool.execute({{"name", "alpha"}});
+    CHECK(changed.is_error);
+    CHECK(changed.error_code == "skill.drifted");
+    CHECK(changed.content.find("NEW-BODY") == std::string::npos);
+    const auto note_two = tool.execute({{"name", "alpha"}, {"path", "references/note.md"}});
+    CHECK_FALSE(note_two.is_error);
+    CHECK(note_two.content == "技能材料 alpha/references/note.md:\nNOTE-TWO");
+    CHECK_THROWS(tool.SetSkills({}));
+}
+
+TEST_CASE("StrictSkills: explicit path rejects null empty tail segments invalid text and oversized material") {
+    StrictSkillsFixture fixture;
+    fixture.Write("alpha", SkillContent("alpha", "valid", "BODY"));
+    WriteStrictSkillFile(fixture.root / "alpha" / "note.md", "NOTE");
+    const auto scan = fixture.Scan({"alpha"});
+    REQUIRE(scan.has_value());
+    tools::SkillTool tool(scan->skills, std::set<std::string>{"skill"}, scan->read_policy);
+    const std::vector<nlohmann::json> paths = {nullptr, 17, "", "note.md/", "note.md\\", "note.md//",
+        ".", "../note.md", "/note.md", "C:note.md", "\\\\server\\share", "http://example.com",
+        std::string("a\0b", 3), std::string(1, '\xff')};
+    for (const auto& path : paths) {
+        const auto reply = tool.execute({{"name", "alpha"}, {"path", path}});
+        CHECK(reply.is_error);
+        CHECK(reply.error_code == "skill.path.invalid");
+    }
+    WriteStrictSkillFile(fixture.root / "alpha" / "note.md", std::string("A\0B", 3));
+    CHECK(tool.execute({{"name", "alpha"}, {"path", "note.md"}}).error_code == "skill.text.invalid");
+    WriteStrictSkillFile(fixture.root / "alpha" / "note.md", std::string(tools::StrictSkillLimits::file_bytes + 1, 'N'));
+    CHECK(tool.execute({{"name", "alpha"}, {"path", "note.md"}}).error_code == "skill.file.limit");
+    std::filesystem::create_directory(fixture.root / "alpha" / "folder");
+    CHECK(tool.execute({{"name", "alpha"}, {"path", "folder"}}).is_error);
+}
+
+TEST_CASE("StrictSkills: ordinary body and symlink hardlink aliases cannot bypass fingerprint via path") {
+    StrictSkillsFixture fixture;
+    fixture.Write("alpha", SkillContent("alpha", "valid", "BODY"));
+    const auto body = fixture.root / "alpha" / "SKILL.md";
+    RequireSkillSymlink(body, fixture.root / "alpha" / "body-link.md");
+    std::error_code ec;
+    std::filesystem::create_hard_link(body, fixture.root / "alpha" / "body-hard.md", ec);
+    REQUIRE_MESSAGE(!ec, "Strict Skills hard-link coverage unavailable: ", ec.message());
+    const auto scan = fixture.Scan({"alpha"});
+    REQUIRE(scan.has_value());
+    tools::SkillTool tool(scan->skills, std::set<std::string>{"skill"}, scan->read_policy);
+    fixture.Write("alpha", SkillContent("alpha", "valid", "NEW-BODY"));
+    for (const auto* path : {"SKILL.md", "body-link.md", "body-hard.md"}) {
+        const auto reply = tool.execute({{"name", "alpha"}, {"path", path}});
+        CHECK(reply.is_error);
+        CHECK(reply.error_code == "skill.path.body_alias");
+        CHECK(reply.content.find("NEW-BODY") == std::string::npos);
+    }
+    const auto outside = fixture.root / "outside.md";
+    WriteStrictSkillFile(outside, "OUTSIDE");
+    RequireSkillSymlink(outside, fixture.root / "alpha" / "escape.md");
+    CHECK(tool.execute({{"name", "alpha"}, {"path", "escape.md"}}).error_code == "skill.path.outside");
+
+    SUBCASE("an alpha attachment cannot hard-link the selected beta body") {
+        fixture.Write("beta", SkillContent("beta", "valid", "BETA-BODY"));
+        std::filesystem::create_directories(fixture.root / "alpha" / "references");
+        std::filesystem::create_hard_link(fixture.root / "beta" / "SKILL.md",
+            fixture.root / "alpha" / "references" / "beta.txt", ec);
+        REQUIRE_MESSAGE(!ec, "Cross-skill hard-link coverage unavailable: ", ec.message());
+        const auto both = fixture.Scan({"alpha", "beta"});
+        REQUIRE(both.has_value());
+        tools::SkillTool selected(both->skills, std::set<std::string>{"skill"}, both->read_policy);
+        fixture.Write("beta", SkillContent("beta", "valid", "CHANGED-BETA-BODY"));
+        CHECK(selected.execute({{"name", "beta"}}).error_code == "skill.drifted");
+        const auto reply = selected.execute({{"name", "alpha"}, {"path", "references/beta.txt"}});
+        CHECK(reply.is_error);
+        CHECK(reply.error_code == "skill.path.body_alias");
+        CHECK(reply.content.find("CHANGED-BETA-BODY") == std::string::npos);
+    }
+    SUBCASE("nested SKILL.md is reserved even without another selected body identity") {
+        fixture.Write("beta", SkillContent("beta", "valid", "BETA-BODY"));
+        WriteStrictSkillFile(fixture.root / "alpha" / "references" / "SKILL.md", "NESTED-BODY");
+        for (bool select_beta : {false, true}) {
+            const auto selected_names = select_beta ? std::vector<std::string>{"alpha", "beta"} :
+                std::vector<std::string>{"alpha"};
+            const auto names = fixture.Scan(selected_names);
+            REQUIRE(names.has_value());
+            tools::SkillTool selected(names->skills, std::set<std::string>{"skill"}, names->read_policy);
+            const auto nested = selected.execute({{"name", "alpha"}, {"path", "references/SKILL.md"}});
+            CHECK(nested.error_code == "skill.path.body_alias");
+            CHECK(nested.content.find("NESTED-BODY") == std::string::npos);
+#ifdef _WIN32
+            CHECK(selected.execute({{"name", "alpha"}, {"path", "references/sKiLl.Md"}}).error_code == "skill.path.body_alias");
+#else
+            WriteStrictSkillFile(fixture.root / "alpha" / "references" / "skill.md", "LIVE-LOWERCASE");
+            const auto lowercase = selected.execute({{"name", "alpha"}, {"path", "references/skill.md"}});
+            CHECK_FALSE(lowercase.is_error);
+            CHECK(lowercase.content == "技能材料 alpha/references/skill.md:\nLIVE-LOWERCASE");
+#endif
+        }
+    }
+    SUBCASE("missing selected body makes attachment identity verification fail closed") {
+        fixture.Write("beta", SkillContent("beta", "valid", "BETA-BODY"));
+        WriteStrictSkillFile(fixture.root / "alpha" / "ordinary.txt", "LIVE-MATERIAL");
+        const auto both = fixture.Scan({"alpha", "beta"});
+        REQUIRE(both.has_value());
+        tools::SkillTool selected(both->skills, std::set<std::string>{"skill"}, both->read_policy);
+        REQUIRE_FALSE(selected.execute({{"name", "alpha"}, {"path", "ordinary.txt"}}).is_error);
+        REQUIRE(std::filesystem::remove(fixture.root / "beta" / "SKILL.md"));
+        const auto missing = selected.execute({{"name", "alpha"}, {"path", "ordinary.txt"}});
+        CHECK(missing.is_error);
+        CHECK(missing.error_code == "skill.source.changed");
+        CHECK(missing.content.find("LIVE-MATERIAL") == std::string::npos);
+    }
+}
+
+TEST_CASE("StrictSkills: directory aliases refuse ambiguous scans and frozen retargeting") {
+    SUBCASE("two candidates cannot map to one real directory") {
+        StrictSkillsFixture fixture;
+        fixture.Write("alpha", SkillContent("alpha", "valid", "BODY"));
+        RequireSkillSymlink(fixture.root / "alpha", fixture.root / "alias", true);
+        const auto scan = fixture.Scan({"alpha"});
+        REQUIRE_FALSE(scan.has_value());
+        CHECK(scan.error().code == "skill.source.duplicate");
+    }
+    SUBCASE("same bytes in a new target do not revive the frozen directory mapping") {
+        StrictSkillsFixture fixture;
+        const auto first = fixture.root / "storage" / "first";
+        const auto second = fixture.root / "storage" / "second";
+        WriteStrictSkillFile(first / "SKILL.md", SkillContent("alpha", "valid", "BODY"));
+        WriteStrictSkillFile(second / "SKILL.md", SkillContent("alpha", "valid", "BODY"));
+        WriteStrictSkillFile(first / "note.md", "FIRST");
+        WriteStrictSkillFile(second / "note.md", "SECOND");
+        RequireSkillSymlink(first, fixture.root / "alpha", true);
+        const auto scan = fixture.Scan({"alpha"});
+        REQUIRE(scan.has_value());
+        tools::SkillTool tool(scan->skills, std::set<std::string>{"skill"}, scan->read_policy);
+        REQUIRE_FALSE(tool.execute({{"name", "alpha"}}).is_error);
+        std::filesystem::remove(fixture.root / "alpha");
+        RequireSkillSymlink(second, fixture.root / "alpha", true);
+        CHECK(tool.execute({{"name", "alpha"}}).error_code == "skill.source.changed");
+        CHECK(tool.execute({{"name", "alpha"}, {"path", "note.md"}}).error_code == "skill.source.changed");
+    }
+    SUBCASE("declared root mapping cannot be retargeted") {
+        StrictSkillsFixture first, second;
+        first.Write("alpha", SkillContent("alpha", "valid", "SAME-BODY"));
+        second.Write("alpha", SkillContent("alpha", "valid", "SAME-BODY"));
+        const auto declared = first.root.parent_path() / "declared";
+        RequireSkillSymlink(first.root, declared, true);
+        const auto scan = tools::ScanSkillsDirStrict(declared, {"alpha"}, kStrictSkillSource);
+        REQUIRE(scan.has_value());
+        tools::SkillTool tool(scan->skills, std::set<std::string>{"skill"}, scan->read_policy);
+        REQUIRE_FALSE(tool.execute({{"name", "alpha"}}).is_error);
+        std::filesystem::remove(declared);
+        RequireSkillSymlink(second.root, declared, true);
+        CHECK(tool.execute({{"name", "alpha"}}).error_code == "skill.source.changed");
+    }
+    SUBCASE("canonical body mapping stays frozen even for equal bytes inside the root") {
+        StrictSkillsFixture fixture;
+        std::filesystem::create_directory(fixture.root / "alpha");
+        WriteStrictSkillFile(fixture.root / "first.md", SkillContent("alpha", "valid", "SAME-BODY"));
+        WriteStrictSkillFile(fixture.root / "second.md", SkillContent("alpha", "valid", "SAME-BODY"));
+        const auto declared = fixture.root / "alpha" / "SKILL.md";
+        RequireSkillSymlink(fixture.root / "first.md", declared);
+        const auto scan = fixture.Scan({"alpha"});
+        REQUIRE(scan.has_value());
+        tools::SkillTool tool(scan->skills, std::set<std::string>{"skill"}, scan->read_policy);
+        REQUIRE_FALSE(tool.execute({{"name", "alpha"}}).is_error);
+        std::filesystem::remove(declared);
+        RequireSkillSymlink(fixture.root / "second.md", declared);
+        CHECK(tool.execute({{"name", "alpha"}}).error_code == "skill.source.changed");
+    }
+    SUBCASE("selected directory or body links cannot escape the explicit root") {
+        StrictSkillsFixture first, second;
+        second.Write("alpha", SkillContent("alpha", "valid", "OUTSIDE-BODY"));
+        RequireSkillSymlink(second.root / "alpha", first.root / "alpha", true);
+        CHECK_FALSE(first.Scan({"alpha"}).has_value());
+        std::filesystem::remove(first.root / "alpha");
+        std::filesystem::create_directory(first.root / "alpha");
+        RequireSkillSymlink(second.root / "alpha" / "SKILL.md", first.root / "alpha" / "SKILL.md");
+        CHECK_FALSE(first.Scan({"alpha"}).has_value());
+    }
+}
+
+TEST_CASE("StrictSkills: dependencies and value owners remain per object while CLI path keeps compatibility") {
+    StrictSkillsFixture first, second;
+    first.Write("alpha", SkillContentWithRequires("alpha", "requires-tools: [run_command]\n", "FIRST"));
+    second.Write("alpha", SkillContent("alpha", "valid", "SECOND"));
+    const auto a = first.Scan({"alpha"}), b = second.Scan({"alpha"});
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    tools::SkillTool denied(a->skills, std::set<std::string>{"skill"}, a->read_policy);
+    tools::SkillTool allowed(a->skills, std::set<std::string>{"skill", "run_command"}, a->read_policy);
+    tools::SkillTool other(b->skills, std::set<std::string>{"skill"}, b->read_policy);
+    CHECK(denied.execute({{"name", "alpha"}}).error_code == "capability_unavailable");
+    CHECK(allowed.execute({{"name", "alpha"}}).content.find("FIRST") != std::string::npos);
+    CHECK(other.execute({{"name", "alpha"}}).content.find("SECOND") != std::string::npos);
+    CHECK(other.execute({{"name", "alpha"}}).content.find("FIRST") == std::string::npos);
+    tools::SkillTool mismatched(a->skills, std::set<std::string>{"skill", "run_command"}, b->read_policy);
+    CHECK(mismatched.execute({{"name", "alpha"}}).error_code == "skill.source.invalid");
+    first.Write("alpha", SkillContent("alpha", "valid", "CLI-CURRENT"));
+    tools::SkillTool legacy(tools::ScanSkillsDir(first.root, "legacy"));
+    CHECK_FALSE(legacy.execute({{"name", "alpha"}, {"path", nullptr}}).is_error);
+    first.Write("alpha", SkillContent("alpha", "valid", "CLI-UPDATED"));
+    const auto legacy_path = legacy.execute({{"name", "alpha"}, {"path", "SKILL.md"}});
+    CHECK_FALSE(legacy_path.is_error);
+    CHECK(legacy_path.content.find("CLI-UPDATED") != std::string::npos);
+    CHECK(legacy.execute({{"name", "alpha"}}).error_code == "skill.drifted");
 }
