@@ -23,3 +23,5 @@
 校准后仍持原真实句柄，先另调 `CreateFileW(target, DELETE, ...)`，硬核 `ERROR_SHARING_VIOLATION(32)`；再调真实 `AtomicWriteFile`。两次 syscall 各记各码。原子替换只许 Windows 实际 `ERROR_ACCESS_DENIED(5)` 或 `ERROR_SHARING_VIOLATION(32)`，诊断正文须逐字合现有格式；code、TransientReject、NotCommitted、旧 target 字节、无临时残件仍逐项核。先见这些事实才放原句柄，再核第二次真实提交 Durable。不得把前一调用的 32 冒作换名回码。
 
 这笔只改本案，不改平台生产分类、重试范围或时限。原十九案前缀、六案总数、Windows 二十五/POSIX 二十二、focused 二十五、ASan 三十一与消费者二十照留。新码同时留进成功原始输出，远端新头重新验，旧红原件继续封存。
+
+`5ad0a09e` 首轮只选 Mac 与 Windows；Linux、SDK-only 和 ASan 按路径跳过，不能当作三平台验收。原子写来源也管 SDK 冻结计划合同，不能只测 CLI 矩阵。后续只把 `tests/unit/platform/test_atomic_write.cpp` 加入现有 SDK/cross-platform/assembly/agent-lifetime 分类；CPP 夹具与生产均不再改。新头重新跑三平台、六套 SDK 与 ASan，focused 二十五、ASan 三十一、安装消费者二十照留；首轮 skip 原件另册保存。
