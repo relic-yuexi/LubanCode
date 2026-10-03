@@ -21,6 +21,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.packages",
     "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.extensions",
     "sdk.consumer.actions",
+    "sdk.consumer.event_sink",
     "sdk.consumer.builtin_search",
     "sdk.consumer.results",
     "sdk.consumer.skills_seed", "sdk.consumer.skills_resume",
@@ -40,6 +41,7 @@ REQUIRED_PUBLIC_HEADERS = {
     "include/lubancore/memory.hpp",
     "include/lubancore/subagents.hpp",
     "include/lubancore/lua.hpp",
+    "include/lubancore/events.hpp",
 }
 
 
@@ -257,7 +259,7 @@ def main() -> None:
                                          case.find("failure") is not None or case.find("error") is not None
                                          for case in results):
         raise RuntimeError("consumer JUnit contains duplicate, skipped or failed tests")
-    from check_sdk_focused import check_action_paths
+    from check_sdk_focused import check_action_paths, check_event_sink_consumer
     sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
                         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
     action_sections = [sections[index + 1] for index in range(1, len(sections), 2)
@@ -265,6 +267,12 @@ def main() -> None:
     if len(action_sections) != 1:
         raise RuntimeError("consumer native log does not identify one Action test")
     check_action_paths(action_sections[0], native=False)
+    event_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                      if sections[index] == "sdk.consumer.event_sink"]
+    event_tests = [test for test in listing["tests"] if test["name"] == "sdk.consumer.event_sink"]
+    if len(event_sections) != 1 or len(event_tests) != 1:
+        raise RuntimeError("consumer native log and registration must identify one EventSink test")
+    check_event_sink_consumer(event_sections[0], event_tests[0].get("command"))
 
 
 if __name__ == "__main__":

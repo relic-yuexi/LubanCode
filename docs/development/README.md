@@ -75,3 +75,4 @@ git diff --check
 - [Owned Job 四场探针正文就绪](owned-job-probe-readiness.md)
 - [SDK MemorySave 四场报告诊断](sdk-memory-save-diagnostic.md)
 - [SDK Job 当前前置组合](sdk-job-current-integration.md)
+- [SDK 订阅事件队列 SPI](sdk-event-sink-spi.md)

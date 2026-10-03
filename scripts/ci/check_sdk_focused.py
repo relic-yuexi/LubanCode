@@ -35,6 +35,7 @@ REQUIRED = {
     "sdk.focused.lubancore_lua",
     "sdk.focused.lua_protected",
     "sdk.focused.lubancore_actions",
+    "sdk.focused.lubancore_event_sink",
     "sdk.focused.lubancore_builtin_search",
     "sdk.focused.lubancore_lifecycle",
     "sdk.focused.lubancore_host_boundary",
@@ -596,6 +597,55 @@ def check_job_post_live_native(section, command):
             raise RuntimeError("Job live Post actual path did not finish once: " + path)
 
 
+EVENT_SINK_PATHS = ("default", "actual", "overflow", "error", "drain", "isolation")
+
+
+def check_event_sink_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_lubancore_event_sink.cpp"):
+        raise RuntimeError("EventSink registration must run the single absolute native source")
+
+
+def check_event_sink_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("EventSink native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("EventSink executable is not the actual native fixture")
+    check_event_sink_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (6, 6, 0):
+        raise RuntimeError("EventSink native roster differs from six successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("EventSink native assertions did not actually pass")
+    for path in EVENT_SINK_PATHS:
+        if section.splitlines().count("[sdk-event-sink-path] " + path) != 1:
+            raise RuntimeError("EventSink actual path did not finish once: " + path)
+
+
+def check_event_sink_consumer(section, command):
+    if (not isinstance(command, list) or len(command) != 3 or
+            not all(isinstance(value, str) and value for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in ("lubancore_consumer", "lubancore_consumer.exe") or
+            command[1] != "event-sink"):
+        raise RuntimeError("EventSink consumer must run its actual relocated command")
+    check_native_command(section, command)
+    if (section.splitlines().count("[sdk-event-sink-consumer] actual-owned-queue") != 1 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("EventSink relocated consumer did not finish its actual owned queue")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -643,6 +693,8 @@ def main():
             check_job_post_registration(test.get("command", []))
         if test["name"] == "sdk.focused.tool_job_post_live_invocation":
             check_job_post_live_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_event_sink":
+            check_event_sink_registration(test.get("command", []))
         if test["name"] == "sdk.focused.run_command_execution_limits":
             check_command_limits_registration(test.get("command", []))
         if test["name"] == "sdk.focused.atomic_write":
@@ -718,6 +770,9 @@ def main():
         if case.attrib["name"] == "sdk.focused.tool_job_post_live_invocation":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_job_post_live_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_event_sink":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_event_sink_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.run_command_execution_limits":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_command_limits_native(sections[0], registered["command"])

@@ -979,6 +979,7 @@ class InstalledHeadersTests(unittest.TestCase):
             "include/lubancore/memory.hpp",
             "include/lubancore/subagents.hpp",
             "include/lubancore/lua.hpp",
+            "include/lubancore/events.hpp",
         }
         for relative in self.headers:
             path = self.repo / relative
