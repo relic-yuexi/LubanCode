@@ -185,4 +185,6 @@ DOC development/child-history-stage-diagnostic.md
 DOC development/sdk-job-admission.md
 DOC development/job-owned-registration.md
 DOC development/job-owned-adoption.md
+DOC development/sdk-job-result-boundary.md
+DOC development/sdk-job-operation-binding.md
 DOC development/sdk-command-execution-limits.md

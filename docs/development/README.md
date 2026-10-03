@@ -62,4 +62,6 @@ git diff --check
 - [SDK Job 共用准入与严格交单](sdk-job-admission.md)
 - [Job owned 暂存注册](job-owned-registration.md)
 - [Owned Job 接管与执行](job-owned-adoption.md)
+- [SDK 普通 Operation 与 Job 结果边界](sdk-job-result-boundary.md)
+- [SDK Job Operation 与宿主收件合同](sdk-job-operation-binding.md)
 - [SDK Job 前置：命令执行限额](sdk-command-execution-limits.md)
