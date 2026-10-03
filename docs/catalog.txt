@@ -182,3 +182,4 @@ DOC development/result-store-fixture-owner.md
 DOC development/runner-release-diagnostic.md
 DOC development/child-history-stage-diagnostic.md
 DOC development/sdk-command-execution-limits.md
+DOC development/sdk-memory-save-diagnostic.md
