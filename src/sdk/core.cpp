@@ -35,6 +35,7 @@
 #include "sdk/subagents.hpp"
 #include "sdk/memory.hpp"
 #include "sdk/memory_write.hpp"
+#include "sdk/lua.hpp"
 #include "sdk/operation_ledger.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/search_ripgrep.hpp"
@@ -192,6 +193,7 @@ struct Session::Impl final : rt::InteractionBroker {
     std::map<std::string, Result<memory::v1::RecallReport>> memory_reports;
     std::shared_ptr<detail::SessionMemoryWrite> memory_write_module;
     memory::v1::WriteSnapshot memory_write_snapshot;
+    lua::v1::Snapshot lua_snapshot;
     std::map<std::string, Result<std::vector<memory::v1::SaveReport>>> memory_saves;
     bool memory_write_indeterminate = false; // protected by mutex after publication
     mutable std::mutex mutex;
@@ -319,6 +321,10 @@ struct Session::Impl final : rt::InteractionBroker {
             lubancode::tools::Utf8ToPath(roots.data_root), *identity, options.resume_session_id);
         if (!write_candidate) return std::unexpected(write_candidate.error());
         memory_write_module = std::move(*write_candidate);
+        auto lua_module = detail::SessionLua::Prepare(options.lua,
+            lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key,
+            options.resume_session_id);
+        if (!lua_module) return std::unexpected(lua_module.error());
         auto prepared_registry = std::make_unique<lubancode::tools::ToolRegistry>();
         std::shared_ptr<lubancode::tools::BundledRipgrepRunner> search_runner;
         for (const auto& name : options.builtin_tools) {
@@ -348,6 +354,25 @@ struct Session::Impl final : rt::InteractionBroker {
             return std::unexpected(Failure("sdk.tool.duplicate", "skill"));
         if (memory_write_module->Describe().enabled && prepared_registry->Find("memory_save"))
             return std::unexpected(Failure("sdk.tool.duplicate", "memory_save"));
+        for (const auto& name : (*lua_module)->Names()) {
+            if (prepared_registry->Find(name))
+                return std::unexpected(Failure("sdk.tool.duplicate", name));
+        }
+        auto lua_tools = (*lua_module)->TakeTools();
+        if (!lua_tools) return std::unexpected(lua_tools.error());
+        const auto lua_declaration = (*lua_module)->Describe();
+        for (auto& tool : *lua_tools) {
+            const auto entry = std::find_if(lua_declaration.entries.begin(), lua_declaration.entries.end(),
+                [&](const auto& item) { return item.tool_name == tool->name(); });
+            if (entry == lua_declaration.entries.end())
+                return std::unexpected(Failure("sdk.lua.plan_invalid", "tool is absent from its declaration"));
+            lubancode::tools::ToolRegistration registration;
+            registration.source_kind = lubancode::tools::ToolSourceKind::PluginLua;
+            registration.source_instance = entry->path;
+            registration.version_or_digest = entry->content_sha256;
+            registration.tool = std::move(tool);
+            prepared_registry->Register(std::move(registration));
+        }
         rt::assembly::SessionResourcesRequest resource_request;
         std::set<std::string> server_names;
         for (const auto& spec : options.mcp_servers) {
@@ -469,8 +494,10 @@ struct Session::Impl final : rt::InteractionBroker {
         auto memory_opening = memory_module->OpeningParticipant();
         auto write_opening = memory_write_module->OpeningParticipant();
         auto child_opening = (*child_plan)->OpeningParticipant();
+        auto lua_opening = (*lua_module)->OpeningParticipant();
         launch.v3_opening_participant = [skills_opening = std::move(skills_opening), memory_opening = std::move(memory_opening),
-                                       write_opening = std::move(write_opening), child_opening = std::move(child_opening)]
+                                       write_opening = std::move(write_opening), child_opening = std::move(child_opening),
+                                       lua_opening = std::move(lua_opening)]
             (const lubancode::trajectory::V3OpeningContext& context) -> std::expected<Json, std::string> {
                 auto skills = skills_opening(context);
                 if (!skills) return std::unexpected(skills.error());
@@ -480,7 +507,9 @@ struct Session::Impl final : rt::InteractionBroker {
                 if (!writes) return std::unexpected(writes.error());
                 auto children = child_opening(context);
                 if (!children) return std::unexpected(children.error());
-                for (const auto* part : {&*memory, &*writes, &*children}) if (part->contains("hostBindings")) {
+                auto scripts = lua_opening(context);
+                if (!scripts) return std::unexpected(scripts.error());
+                for (const auto* part : {&*memory, &*writes, &*children, &*scripts}) if (part->contains("hostBindings")) {
                     if (!skills->contains("hostBindings")) (*skills)["hostBindings"] = Json::object();
                     for (auto it = (*part)["hostBindings"].begin(); it != (*part)["hostBindings"].end(); ++it)
                         (*skills)["hostBindings"][it.key()] = it.value();
@@ -495,12 +524,14 @@ struct Session::Impl final : rt::InteractionBroker {
             service->launch_error().find("sdk.skill.") != std::string::npos ? "sdk.skill.open_failed" :
             service->launch_error().find("sdk.memory.") != std::string::npos ? "sdk.memory.open_failed" :
             service->launch_error().find("sdk.memory_write.") != std::string::npos ? "sdk.memory_write.open_failed" :
-            service->launch_error().find("sdk.subagent.") != std::string::npos ? "sdk.subagent.open_failed" : "sdk.session.open_failed",
+            service->launch_error().find("sdk.subagent.") != std::string::npos ? "sdk.subagent.open_failed" :
+            service->launch_error().find("sdk.lua.") != std::string::npos ? "sdk.lua.open_failed" : "sdk.session.open_failed",
             service->launch_error()));
         session_id = service->trajectory()->session_id();
         session_dir = service->trajectory()->session_dir();
         memory_snapshot = memory_module->Describe();
         memory_write_snapshot = memory_write_module->Describe();
+        lua_snapshot = (*lua_module)->Describe();
         if (!options.resume_session_id.empty() && session_id != options.resume_session_id) {
             return std::unexpected(Failure("sdk.resume.identity_changed"));
         }
@@ -1398,6 +1429,10 @@ Result<memory::v1::RecallReport> Session::GetMemoryRecall(const std::string& ope
 Result<memory::v1::WriteSnapshot> Session::DescribeMemoryWrite() const {
     std::lock_guard lock(impl_->mutex);
     return impl_->memory_write_snapshot;
+}
+Result<lua::v1::Snapshot> Session::DescribeLua() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->lua_snapshot;
 }
 Result<std::vector<memory::v1::SaveReport>> Session::GetMemorySaves(const std::string& operation_id) const {
     std::lock_guard lock(impl_->mutex);

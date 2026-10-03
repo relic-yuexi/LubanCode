@@ -6,7 +6,7 @@ project(lubancore_installed_consumer LANGUAGES CXX)
 find_package(LubanCore CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-add_executable(lubancore_consumer main.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp)
+add_executable(lubancore_consumer main.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp lua.cpp)
 target_compile_features(lubancore_consumer PRIVATE cxx_std_23)
 target_link_libraries(lubancore_consumer PRIVATE LubanCore::Core Threads::Threads)
 if(MSVC)
@@ -20,6 +20,15 @@ if(WIN32)
 endif()
 
 enable_testing()
+add_test(NAME sdk.consumer.lua
+  COMMAND lubancore_consumer lua "${CMAKE_CURRENT_BINARY_DIR}/state-lua")
+add_test(NAME sdk.consumer.lua_seed
+  COMMAND lubancore_consumer lua-seed "${CMAKE_CURRENT_BINARY_DIR}/state-lua-restart")
+add_test(NAME sdk.consumer.lua_resume
+  COMMAND lubancore_consumer lua-resume "${CMAKE_CURRENT_BINARY_DIR}/state-lua-restart")
+set_tests_properties(sdk.consumer.lua_seed PROPERTIES FIXTURES_SETUP sdk_lua_restart)
+set_tests_properties(sdk.consumer.lua_resume PROPERTIES FIXTURES_REQUIRED sdk_lua_restart)
+set_tests_properties(sdk.consumer.lua sdk.consumer.lua_seed sdk.consumer.lua_resume PROPERTIES TIMEOUT 120)
 set(LUBANCORE_CONSUMER_RESOURCE_ROOT "" CACHE PATH "Explicit relocated installed SDK resource root for real search acceptance")
 if(NOT IS_ABSOLUTE "${LUBANCORE_CONSUMER_RESOURCE_ROOT}")
   message(FATAL_ERROR "Set LUBANCORE_CONSUMER_RESOURCE_ROOT to the absolute relocated share/lubancore directory")

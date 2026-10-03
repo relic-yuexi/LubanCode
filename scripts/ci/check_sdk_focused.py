@@ -17,6 +17,8 @@ REQUIRED = {
     "sdk.focused.lubancore_scoped_approval",
     "sdk.focused.lubancore_child_approval",
     "sdk.focused.lubancore_subagents",
+    "sdk.focused.lubancore_lua",
+    "sdk.focused.lua_protected",
     "sdk.focused.lubancore_builtin_search",
     "sdk.focused.lubancore_lifecycle",
     "sdk.focused.lubancore_host_boundary",
@@ -39,6 +41,33 @@ REQUIRED = {
     "sdk.focused.atomic_write",
     "sdk.focused.v3_result_store",
 }
+
+LUA_PATHS = ("off-and-visible", "four-sessions", "approval", "cancel-and-close",
+             "invalid-budget", "bad-declarations", "resume-fresh-vm", "resume-drift", "owned-opening")
+
+def check_lua_native(section, *, protected=False, executable="lubancore_sdk_tests"):
+    source = "test_lua_protected.cpp" if protected else "test_lubancore_lua.cpp"
+    expected = 6 if protected else len(LUA_PATHS)
+    commands = re.findall(r"^Command: ([^\r\n]+)\r?$", section, flags=re.M)
+    if len(commands) != 1:
+        raise RuntimeError("Lua native source command is missing or duplicated")
+    command = shlex.split(commands[0].replace("\\", "/"))
+    if (len(command) != 2 or command[0].rsplit("/", 1)[-1] not in (executable, executable + ".exe")
+            or command[1] != "--source-file=*" + source):
+        raise RuntimeError("Lua native command selects a different source or binary")
+    cases = re.findall(r"\[doctest\] test cases:\s+(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if cases != [(str(expected), str(expected), "0")]:
+        raise RuntimeError("Lua native roster was empty, skipped or failed")
+    assertions = re.findall(r"\[doctest\] assertions:\s+(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(assertions) != 1:
+        raise RuntimeError("Lua native assertion summary is missing or duplicated")
+    total, passed, failed = map(int, assertions[0])
+    if not total or total != passed or failed or section.count("Test Passed.") != 1:
+        raise RuntimeError("Lua native assertions did not pass")
+    if not protected:
+        for path in LUA_PATHS:
+            if section.splitlines().count("[sdk-lua-path] " + path) != 1:
+                raise RuntimeError("Lua actual Session path did not finish once: " + path)
 
 
 def check_result_store_native(native_section: str, platform_name: str):
@@ -155,6 +184,8 @@ def main():
             check_result_store_native(sections[0], os.name)
         if case.attrib["name"] == "sdk.focused.atomic_write":
             check_plan_retry_native(sections[0], os.name)
+        if case.attrib["name"] in ("sdk.focused.lubancore_lua", "sdk.focused.lua_protected"):
+            check_lua_native(sections[0], protected=case.attrib["name"] == "sdk.focused.lua_protected")
         if case.attrib["name"] == "sdk.focused.lubancore_memory_cas" and int(counts[0]) != 10:
             raise RuntimeError("Memory CAS native roster differs from 10 cases")
         if case.attrib["name"] == "sdk.focused.lubancore_memory_cas":

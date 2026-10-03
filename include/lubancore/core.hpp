@@ -18,6 +18,7 @@
 #include <lubancore/skills.hpp>
 #include <lubancore/subagents.hpp>
 #include <lubancore/memory.hpp>
+#include <lubancore/lua.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
@@ -148,6 +149,9 @@ struct SessionOptions {
     std::chrono::milliseconds approval_timeout{300000};
     int max_steps_per_turn = 0;
     std::size_t context_window_tokens = 128000;
+    // Explicit trusted standalone scripts; off on new Sessions, inherited from
+    // a matching frozen plan on resume. All three execution budgets are required.
+    std::optional<lua::v1::Selection> lua;
 };
 // operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };
@@ -228,6 +232,8 @@ public:
     // Searches this Session only, even when another Session uses the same ID string.
     Result<memory::v1::RecallReport> GetMemoryRecall(const std::string& operation_id) const;
     Result<memory::v1::WriteSnapshot> DescribeMemoryWrite() const;
+    // Owned declaration only. Close keeps this value; resume creates fresh VMs.
+    Result<lua::v1::Snapshot> DescribeLua() const;
     // Pure owned values after operation completion, including after Close.
     Result<std::vector<memory::v1::SaveReport>> GetMemorySaves(const std::string& operation_id) const;
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
