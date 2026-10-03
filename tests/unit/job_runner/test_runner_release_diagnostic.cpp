@@ -58,12 +58,13 @@ TEST_CASE("Runner Release retains a real native result without changing its laun
     OwnedDirectory directory;
     const auto cwd = lubancode::platform::PathToUtf8(directory.path);
 #ifdef _WIN32
-    wchar_t system[MAX_PATH + 1]{};
-    const UINT length = GetSystemDirectoryW(system, MAX_PATH + 1);
+    constexpr DWORD capacity = 32768;
+    wchar_t module[capacity]{};
+    const DWORD length = GetModuleFileNameW(nullptr, module, capacity);
     REQUIRE(length > 0);
-    REQUIRE(length < MAX_PATH + 1);
-    const auto executable = lubancode::platform::PathToUtf8(fs::path(system) / "cmd.exe");
-    nlohmann::json spec = {{"argv", {executable, "/c", "exit", "0"}}, {"cwd", cwd}};
+    REQUIRE(length < capacity);
+    const auto executable = lubancode::platform::PathToUtf8(fs::path(module));
+    nlohmann::json spec = {{"argv", {executable, "--help"}}, {"cwd", cwd}};
     auto process = Process::Create(spec, directory.path, {});
     REQUIRE(process->pid() > 0);
     REQUIRE_NOTHROW(process->Release());
