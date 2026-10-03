@@ -17,7 +17,7 @@ Core 留 `src/channel/types.cpp`、`channel_config.cpp` 及其纯数据头。`co
 
 宿主 11 件为 `turn_ingress`、`channel_session_host`、`agent_channel_engine`、`headless_executor`、`automation_pump`、`channel_work_pump`、`channel_interaction_broker`、`channel_automation`、`channel_media_service`、`channel_file_delivery`、`headless_progress`。只改这些 cpp 归属，原函数、头、正文与调用保留。`TurnSource` / `TurnIngress` 还供终端，头与类型不迁；渠道转换 cpp 随宿主。Headless 执行器仍供旧 Gateway、渠道与 App 自动任务，不把它另立成第二套 SDK 运行栈。
 
-mbedTLS 的 FetchContent、目标创建与链接一起随真实宿主条件走。SDK-only 不下载、创建或编译 mbedTLS；combined CLI 默认保持完整宿主。`ws2_32` 还供中立 `net/http_transport`，本笔不删；Lua、Provider HTTP/cpr、Memory YAML 也不拆。Package 已 CLI-only，其 ChannelManifest 借用经宿主链取得，不能为它把渠道实现绑回 SDK。平台链接、include、标准与原编译定义须由新唯一拥有者承接；不复制源码、不造静库环。
+mbedTLS 的 FetchContent、目标创建与链接一起随真实宿主条件走。SDK-only 不下载、创建或编译 mbedTLS；combined CLI 默认保持完整宿主。`crypt32` 只供渠道 TLS，随实现留在 `lubancode_channel_host`；`ws2_32` 还供中立 `net/http_transport`，engine 照留，`advapi32`、`windowscodecs` 也不动。Lua、Provider HTTP/cpr、Memory YAML 不拆。Package 已 CLI-only，其 ChannelManifest 借用经宿主链取得，不能为它把渠道实现绑回 SDK。平台链接、include、标准与原编译定义须由新唯一拥有者承接；不复制源码、不造静库环。
 
 资源仍由旧宿主装配、持有并关闭。本笔不改账号锁、工作泵、审批、取消、线程、会话和 writer 次序，不承诺已清理后台借用。若静核发现 Config 或中立 hooks 必须反向调用宿主，先收窄、另立接口合同；不得顺手改全局接口来凑图。
 

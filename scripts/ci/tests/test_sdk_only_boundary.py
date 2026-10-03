@@ -424,6 +424,71 @@ std::cerr << "not executable";
         with self.assertRaisesRegex(ValueError, "different source/build"):
             boundary.inspect(self.source, self.build, "Release", False)
 
+    def test_neutral_channel_config_and_types_keep_their_recursive_headers(self):
+        self.source_file("src/channel/types.hpp", "#include <string>\n")
+        self.source_file("src/channel/types.cpp", '#include "channel/types.hpp"\n')
+        self.source_file("src/channel/channel_config.hpp", '#include "channel/types.hpp"\n')
+        self.source_file("src/channel/channel_config.cpp", '#include "channel/channel_config.hpp"\n')
+        self.source_file("src/config/config.hpp", '#include "channel/channel_config.hpp"\n')
+        self.source_file("src/neutral/bridge.hpp", '#include "config/config.hpp"\n')
+        self.targets[1]["sources"].extend(
+            [{"path": name, "compileGroupIndex": 0} for name in
+             ("src/channel/types.cpp", "src/channel/channel_config.cpp")])
+        report = self.check()
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.assertTrue(boundary.SDK_NEUTRAL_CHANNEL_FILES <= set(report["scannedProjectFiles"]))
+
+    def test_disconnected_channel_hosts_or_tls_targets_do_not_belong_in_sdk_only(self):
+        for name in sorted(boundary.CHANNEL_HOST_TARGETS | boundary.MBEDTLS_TARGETS):
+            with self.subTest(name=name):
+                self.targets.append({"id": "disconnected", "name": name,
+                                     "type": "STATIC_LIBRARY", "sources": []})
+                self.assert_rejected(self.check(), "host/resource target")
+                self.targets.pop()
+
+    def test_all_frozen_host_sources_are_rejected_even_under_neutral_target_name(self):
+        for source in sorted(boundary.CHANNEL_HOST_SOURCES | boundary.CHANNEL_RUNTIME_SOURCES):
+            with self.subTest(source=source):
+                self.source_file(source, "int host_fixture_only;\n")
+                self.targets[1]["sources"].append({"path": source, "compileGroupIndex": 0})
+                try:
+                    self.assert_rejected(self.check(), "target neutral_engine includes host source " + source)
+                finally:
+                    self.targets[1]["sources"].pop()
+
+    def test_new_host_sources_and_neutral_lookalikes_are_not_allowlisted(self):
+        for source in ("src/channel/new_transport.cpp", "src/gateway/new_host.cpp",
+                       "src/channel/types_extra.cpp", "src/channel/channel_config_extra.cpp"):
+            with self.subTest(source=source):
+                self.source_file(source, "int host_fixture_only;\n")
+                self.targets[1]["sources"].append({"path": source, "compileGroupIndex": 0})
+                try:
+                    self.assert_rejected(self.check(), "target neutral_engine includes host source " + source)
+                finally:
+                    self.targets[1]["sources"].pop()
+
+    def test_neutral_config_exception_cannot_forward_to_transport_or_gateway_header(self):
+        self.source_file("src/config/config.hpp", '#include "channel/channel_config.hpp"\n')
+        self.source_file("src/neutral/bridge.hpp", '#include "config/config.hpp"\n')
+        for header in ("channel/channel_router.hpp", "channel/transport/tls.hpp", "gateway/profile.hpp"):
+            with self.subTest(header=header):
+                self.source_file("src/" + header, "#pragma once\n")
+                self.source_file("src/channel/channel_config.hpp", '#include "' + header + '"\n')
+                self.assert_rejected(self.check(), "reverse host include")
+
+    def test_runtime_host_headers_cannot_leak_through_sdk_or_precompiled_header(self):
+        for source in sorted(boundary.CHANNEL_RUNTIME_SOURCES):
+            header = source.removesuffix(".cpp") + ".hpp"
+            self.source_file(header, "#pragma once\n")
+            include = header.removeprefix("src/")
+            for kind in ("direct", "pch"):
+                with self.subTest(header=header, kind=kind):
+                    self.source_file("src/sdk/core.cpp", '#include "' + include + '"\n' if kind == "direct" else "int fixture;\n")
+                    self.targets[0]["compileGroups"] = [{}] if kind == "direct" else [
+                        {"precompileHeaders": [{"header": str(self.source / header)}]}]
+                    reason = "reverse host include" if kind == "direct" else "target lubancore_sdk includes host source " + header
+                    self.assert_rejected(self.check(), reason)
+
 
 if __name__ == "__main__":
     unittest.main()

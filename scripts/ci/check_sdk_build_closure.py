@@ -12,14 +12,86 @@ import os
 from pathlib import Path
 
 try:
-    from .check_sdk_only_boundary import (CLIENT, SDK_HOST_ONLY_SOURCE_FILES,
-                                         SDK_HOST_ONLY_SOURCE_PREFIXES, prepare, read_reply, relative)
+    from .check_sdk_only_boundary import (CLIENT, CHANNEL_HOST_SOURCES, CHANNEL_RUNTIME_SOURCES,
+                                         CHANNEL_HOST_TARGETS, MBEDTLS_TARGETS,
+                                         prepare, read_reply, relative, sdk_host_only_source)
 except ImportError:
-    from check_sdk_only_boundary import (CLIENT, SDK_HOST_ONLY_SOURCE_FILES,
-                                        SDK_HOST_ONLY_SOURCE_PREFIXES, prepare, read_reply, relative)
+    from check_sdk_only_boundary import (CLIENT, CHANNEL_HOST_SOURCES, CHANNEL_RUNTIME_SOURCES,
+                                        CHANNEL_HOST_TARGETS, MBEDTLS_TARGETS,
+                                        prepare, read_reply, relative, sdk_host_only_source)
 
 
-FORBIDDEN_TARGETS = {"lubancode_core", "lubancode_updater", "miniz"}
+FORBIDDEN_TARGETS = {"lubancode_core", "lubancode_updater", "miniz",
+                     *CHANNEL_HOST_TARGETS, *MBEDTLS_TARGETS}
+
+
+def channel_ownership_violations(targets: dict) -> list[str]:
+    expected = {"lubancode_channel_host": CHANNEL_HOST_SOURCES,
+                "lubancode_channel_runtime": CHANNEL_RUNTIME_SOURCES}
+    all_sources = CHANNEL_HOST_SOURCES | CHANNEL_RUNTIME_SOURCES
+    relevant = any(target["name"] in (*CHANNEL_HOST_TARGETS, "lubancode_core")
+                   or any(source in all_sources for source in target["projectSources"])
+                   for target in targets.values())
+    engine_names = [key for key, target in targets.items() if target["name"] == "lubancode_engine"]
+    if not relevant and not engine_names:
+        return []
+
+    violations, owners = [], {}
+    for name, sources in (expected.items() if relevant else ()):
+        matching = [key for key, target in targets.items() if target["name"] == name]
+        if len(matching) != 1 or targets[matching[0]]["type"] != "STATIC_LIBRARY":
+            violations.append("Channel/Gateway host target must exist once as a static library: " + name)
+            continue
+        owners[name] = matching[0]
+        if sorted(targets[matching[0]]["projectSources"]) != sorted(sources):
+            violations.append("Channel/Gateway host source roster differs: " + name)
+        for source in sources:
+            actual = [key for key, target in targets.items() for item in target["projectSources"]
+                      if item == source]
+            if actual != matching:
+                violations.append("Channel/Gateway source must have one exact host owner: " + source)
+
+    def one_named(name):
+        keys = [key for key, target in targets.items() if target["name"] == name]
+        return keys[0] if len(keys) == 1 else None
+
+    engine, runtime = one_named("lubancode_engine"), one_named("lubancode_runtime")
+    for source in ("src/channel/types.cpp", "src/channel/channel_config.cpp"):
+        actual = [key for key, target in targets.items() for item in target["projectSources"]
+                  if item == source]
+        if engine is None or actual != [engine]:
+            violations.append("Neutral channel config/type source must belong once to engine: " + source)
+    required = {"lubancode_channel_host": (engine, one_named("mbedtls")),
+                "lubancode_channel_runtime": (runtime, owners.get("lubancode_channel_host"))}
+    for name, dependencies in (required.items() if relevant else ()):
+        key = owners.get(name)
+        if key is not None and any(dep is None or dep not in targets[key]["dependencies"]
+                                   for dep in dependencies):
+            violations.append("Channel/Gateway host dependency direction differs: " + name)
+    for target in targets.values():
+        if target["name"] == "lubancode_core" and owners.get("lubancode_channel_runtime") not in target["dependencies"]:
+            violations.append("CLI core must explicitly depend on Channel/Gateway runtime host")
+
+    for name, key in owners.items():
+        seen, pending = set(), list(targets[key]["dependencies"])
+        while pending:
+            dependency = pending.pop()
+            if dependency in seen:
+                continue
+            if dependency not in targets:
+                raise ValueError("unknown build dependency: " + dependency)
+            seen.add(dependency)
+            target = targets[dependency]
+            forbidden = {"lubancore_sdk", "lubancode_core", "lubancode_updater", "miniz"}
+            if name == "lubancode_channel_host":
+                forbidden |= {"lubancode_runtime", "lubancode_channel_runtime"}
+            host_service_sources = any(source.startswith(("src/package/", "src/updater/"))
+                                       or source == "src/config/update_checker.cpp"
+                                       for source in target["projectSources"])
+            if target["name"] in forbidden or dependency == key or host_service_sources:
+                violations.append("Channel/Gateway host has a reverse dependency: " + name + " -> " + target["name"])
+            pending.extend(target["dependencies"])
+    return violations
 
 
 def inspect_graph(targets: dict) -> dict:
@@ -39,8 +111,8 @@ def inspect_graph(targets: dict) -> dict:
     violations = ["SDK depends on host-only target: " + targets[key]["name"]
                   for key in sorted(closure) if targets[key]["name"] in FORBIDDEN_TARGETS]
     violations.extend("SDK depends on host-only source: " + name
-                      for name in sources if name in SDK_HOST_ONLY_SOURCE_FILES
-                      or name.startswith(SDK_HOST_ONLY_SOURCE_PREFIXES))
+                      for name in sources if sdk_host_only_source(name))
+    violations.extend(channel_ownership_violations(targets))
     # A combined build keeps the CLI query implementation, but only its existing
     # updater may own it. SDK-only defines neither. Inspect all actual targets,
     # including disconnected hosts, so omission or duplicate compilation cannot
