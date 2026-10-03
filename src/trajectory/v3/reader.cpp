@@ -526,9 +526,15 @@ std::vector<ToolActionSnapshot> FoldToolActions(const V3Ledger& ledger) {
                 }
                 // fixture 双写期:writer 落 provider_tool_call_id,早期 fixture
                 // 用 providerToolCallId——读取两侧都认。
-                snapshot.provider_tool_call_id =
-                    JsonString(event.payload, "provider_tool_call_id")
-                        .value_or(JsonString(event.payload, "providerToolCallId").value_or(""));
+                if (auto id = JsonString(event.payload, "provider_tool_call_id")) {
+                    snapshot.provider_tool_call_id = *id;
+                } else if (auto id = JsonString(event.payload, "providerToolCallId")) {
+                    snapshot.provider_tool_call_id = *id;
+                } else if (!snapshot.provider_tool_call_id.has_value()) {
+                    // Keep the old initial missing-ID default. Later retry
+                    // Pending facts do not redeclare or erase the call owner.
+                    snapshot.provider_tool_call_id = std::string();
+                }
                 break;
             case K::ToolExecutionStarted:
                 attempt->started = true;
