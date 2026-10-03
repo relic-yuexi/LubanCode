@@ -61,3 +61,15 @@ Close→同ID恢复，核原引用、模型正文和不重写。默认旧 CAS/Re
 与 CLI/parity 原册保全，远端三平台、实际完整argv、非零册与 ASan收件。
 本地只静读/纯数据/AST/docs，禁止 configure/build/CTest/原生；不推送。
 公开后台 Close/父取消/许可域仍按旧待答，不在这笔替用户定。
+
+## 首轮 inline 夹具修订
+
+`9f67c1cf` 首轮远端 Linux/macOS 实跑六案，五过、一败；失败在
+inline report 的 entries 数量：实际2，原断言要求1。原 recall 报告保留
+全部候选审计项，max_results 只限制采用项。夹具先在同项目写过大段，
+又添 inline 主题，旧候选仍会列入报告。
+
+这次只让 inline 会话选已拥有的 `other-2` 项目目录，先独立种一条主题。
+六CASE、预算、命令、断言、零 Store/Read、inline 正文与 SHA 采用核验
+全留。生产装配/CAS/bridge/Reader 和其他五案逐字保；旧失败另封，
+新头仍须独立三平台/ASan，不重跑旧头或借旧绿。
