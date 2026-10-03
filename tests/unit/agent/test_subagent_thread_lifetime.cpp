@@ -447,6 +447,7 @@ TEST_CASE("线程启动事务: 退出capture重入关闭不被Reap锁住") {
     StartupWatchdog watchdog;
     auto coordinator = std::make_shared<tools::AgentTaskCoordinator>();
     auto gate = std::make_shared<StartGate>();
+    auto worker_exit = std::make_shared<StartGate>();
     auto receipt = std::make_shared<std::atomic<bool>>(false);
     struct Cleanup {
         std::shared_ptr<tools::AgentTaskCoordinator> coordinator;
@@ -462,8 +463,15 @@ TEST_CASE("线程启动事务: 退出capture重入关闭不被Reap锁住") {
     cleanup->coordinator = coordinator;
     cleanup->gate = gate;
     ReleaseStartGate release{gate};
-    REQUIRE(coordinator->StartThread(1, [cleanup, receipt] { receipt->store(true); }, receipt));
+    ReleaseStartGate release_worker_exit{worker_exit};
+    REQUIRE(coordinator->StartThread(1, [cleanup, receipt, worker_exit] {
+        worker_exit->EnterAndWait();
+        receipt->store(true);
+    }, receipt));
+    // Retire all startup copies and the main owner before the worker can exit.
+    // Its capture destruction must enter the retirement gate on that worker.
     cleanup.reset();
+    worker_exit->Release();
     REQUIRE(gate->AwaitEntered());
     reap = std::async(std::launch::async, [coordinator] { coordinator->ReapExitedThreads(); });
     REQUIRE(WaitUntil([&] { return coordinator->HasReapingThreadForTesting(); }, std::chrono::seconds(5)));
