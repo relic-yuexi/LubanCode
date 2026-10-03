@@ -10,6 +10,11 @@
 
 namespace lubancode::agent {
 
+// The bridge may frame even a short body with native payload source paths,
+// capture status and retrieval instructions. Reserve the smallest standard
+// preview tier for that framing; it still competes for the batch's capacity.
+inline constexpr std::size_t kToolPreviewMetadataReserveBytes = 4096;
+
 // First-use byte budgets only. The caller serializes the selected adapter input,
 // subtracts fixed JSON bytes and separately reserved output/protocol capacity.
 // JSON escaping is budgeted explicitly by the caller, never hidden in an online
@@ -32,10 +37,12 @@ inline ToolBatchBudgetPlan PlanToolBatchBudget(const api::Message& results,
             plan.error = "tool_batch.invalid_pairing";
             return plan;
         }
-        // Tiny bodies still need a nonzero cap; an empty success is legitimate.
-        plan.preview_bytes.push_back(std::min<std::size_t>(32768,
-                                                          std::max<std::size_t>(result->capture_complete ? 1 : 1024,
-                                                                                result->content.size())));
+        // Cap the body before addition to avoid overflow. This is a desired
+        // ceiling, not a charge for bytes actually sent: water filling below
+        // and the final serialized-input check still enforce real capacity.
+        plan.preview_bytes.push_back(
+            std::min<std::size_t>(32768 - kToolPreviewMetadataReserveBytes,
+                                  result->content.size()) + kToolPreviewMetadataReserveBytes);
     }
     if (plan.preview_bytes.empty()) return plan;
     // Water filling keeps small results whole, shares the remaining budget among
