@@ -26,6 +26,15 @@ using Report = memory::v1::SaveReport;
 constexpr auto kPlanFile = "sdk-memory-write-plan.json";
 constexpr std::size_t kPlanCap = 4096, kReportCap = 524288, kTotalCap = 67108864, kCallCap = 64;
 Error Fail(std::string code, std::string message = {}) { return {std::move(code), std::move(message)}; }
+const char* WriteOutcomeName(lubancode::platform::WriteOutcome outcome) {
+    switch (outcome) {
+    case lubancode::platform::WriteOutcome::NotCommitted: return "NotCommitted";
+    case lubancode::platform::WriteOutcome::CommittedDurabilityNotRequested: return "CommittedDurabilityNotRequested";
+    case lubancode::platform::WriteOutcome::CommittedDurabilityUnconfirmed: return "CommittedDurabilityUnconfirmed";
+    case lubancode::platform::WriteOutcome::CommittedDurable: return "CommittedDurable";
+    }
+    return "Unknown";
+}
 bool Safe(const std::string& s) { return s.find('\0') == std::string::npos && lubancode::platform::IsValidUtf8(s); }
 bool SafeJson(const Json& j) {
     if (j.is_string()) return Safe(j.get<std::string>());
@@ -219,7 +228,19 @@ std::expected<Json, std::string> SessionMemoryWrite::Open(const lubancode::traje
         const auto bytes = Plan(context.session_id).dump();
         const auto saved = lubancode::platform::AtomicWriteFile(session_dir_ / kPlanFile, bytes,
             lubancode::platform::WriteDurability::ProcessCrashDurability);
-        if (!saved || saved->outcome != lubancode::platform::WriteOutcome::CommittedDurable) return std::unexpected("sdk.memory_write.plan_write_failed");
+        if (!saved) {
+            const auto& error = saved.error();
+            return std::unexpected("sdk.memory_write.plan_write_failed: " + Json{
+                {"atomicCode", error.code},
+                {"failureKind", error.failure_kind == lubancode::platform::WriteFailureKind::TransientReject
+                    ? "TransientReject" : "Permanent"},
+                {"outcome", WriteOutcomeName(error.outcome)}, {"message", error.message}}.dump());
+        }
+        if (saved->outcome != lubancode::platform::WriteOutcome::CommittedDurable) {
+            return std::unexpected("sdk.memory_write.plan_write_failed: " + Json{
+                {"outcome", WriteOutcomeName(saved->outcome)},
+                {"message", "plan receipt was not CommittedDurable"}}.dump());
+        }
         snapshot_.plan_sha256 = lubancode::platform::Sha256Hex(bytes);
     }
     return legacy_ ? Json::object() : Json{{"hostBindings", {{"memoryWrite", {{"schemaVersion", 1}, {"sha256", snapshot_.plan_sha256}}}}}};
