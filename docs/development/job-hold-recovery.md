@@ -28,6 +28,8 @@ Hold 采用旧记录时只建本 coordinator 的 owned 投影。保真 job/actio
 
 知识值必须从本次真卷推出。保 Fold 原 state，分别核真实业务 attempt 的 Started/terminal；不能只看 `dispatched_count==0`，不能把 attempt 1 接单 done 当业务已结束。业务 attempt>1 的 failed/cancelled/unknown 都须参与知识分类，不能沿旧 `observed_missing` 仅认 done 的判据漏掉。terminal execution、observed state 和 admission completeness 分开存；不能凭字符串 `succeeded` 猜全部链已确认。TerminalConfirmed 仅指这套真实业务/观测/接单链齐，不声称全卷或 provider 已认证。Hold 记录不占 running/queued quota，不进入 dispatch queue，不持 worker，不借上一进程捕获或 executor。
 
+成功执行但业务结果落仓失败，Observed 仍可报 succeeded；这份报告须留 TerminalDeliveryGap。确认成功须有同一实际业务 persisted 事件和 observed resultRef。失败、取消原路不强求正文结果仓。当前 admission 齐否沿共用 Fold 的 current-chain 投影，不能从它宣称全历史采用已独立验证。
+
 ## Get / Wait / Cancel / Close
 
 `GetJob` 沿原授权门取 owned 快照，明确上述 held/knowledge/来源。无键与拒绝沿旧路。`WaitJobs` 保原“等业务终态”口径：已知未执行的 held 注册项到点返回 timed_out，状态仍未完成；unknown/真实终态按旧 terminal 判据返回，同时带知识与缺口。satisfied 从来不等于执行成功。新 Job 仍按原时长和完成泵运行。
@@ -49,6 +51,8 @@ Async Restore 在原 session 独占 owner 下执行。新增策略只约束恢�
 ## 远端验收候选
 
 固定新来源册，实际用原 V3Writer、ToolActionSession、coordinator 和 AsyncToolRuntime；源码计数不能抵原生执行。每个成功检查有唯一 marker，focused/ASan 校完整 argv、JUnit、LastTest、非零断言。
+
+新来源固定 `tests/unit/tools/test_tool_job_hold_recovery.cpp` 六册。SDK focused 共 28 来源，ASan mandatory 共 33 来源；原 16 册与启动事务 6 册保留。六条完成标记分别钉住注册/接单缺口、新旧隔离、派发未知、四种业务终态、Async 传播、Legacy/身份门。它们只在断言走完后输出，本地文本计数不当原生通过凭据。
 
 1. 真 registered 未 dispatch 窗：Hold Get 为 KnownNotDispatched；Pump、Wait、Grant、Cancel、Shutdown 后旧 executor=0、旧卷逐字不动；Wait 到点，不能假终态。
 2. 真 queued/awaiting 两窗：Hold 不压队、不占 quota；新 Submit 成功且实际 executor=1，只归新 action；旧迟票不启动。
