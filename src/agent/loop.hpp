@@ -207,7 +207,8 @@ struct TurnWiring {
     // Explicit new capability. Older CLI/child wiring leaves both callbacks empty.
     std::function<ActionPreDecision(const std::string&, const std::string&, const nlohmann::json&)> on_pre_action;
     std::function<tools::Tool::Result(const std::string&, const std::string&, const nlohmann::json&,
-        const tools::Tool::Result&, const tools::ToolInvocationIdentity&, const ToolTraceEvent&)> on_post_action;
+        const tools::Tool::Result&, const tools::ToolInvocationIdentity&,
+        const ToolTraceEvent&, const ToolTraceEvent&)> on_post_action;
     // Per-turn known failure of the explicit Action host. Preserve completed
     // raw/results, but do not start a summary or another model after this fails.
     // Older hosts leave this empty; it is never retained beyond this turn.

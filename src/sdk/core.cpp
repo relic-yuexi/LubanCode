@@ -1061,15 +1061,22 @@ struct Session::Impl final : rt::InteractionBroker {
             };
             wiring.on_post_action = [&, action_trigger, actual = bridge.get()](const std::string& call, const std::string& name,
                 const Json& arguments, const lubancode::tools::Tool::Result& original,
-                const lubancode::tools::ToolInvocationIdentity& identity, const lubancode::agent::ToolTraceEvent& finished) {
+                const lubancode::tools::ToolInvocationIdentity& identity,
+                const lubancode::agent::ToolTraceEvent& started, const lubancode::agent::ToolTraceEvent& finished) {
                 // Finished is no longer an active execution in the bridge. Use
                 // the snapshot actually issued by MarkExecutionStarted, not a
                 // second active-identity query after its terminal event.
                 const auto declared = actual->V3DeclaredCallOrigin(call);
                 if (!declared || identity.session_id != session_id || identity.operation_id != input.operation_id ||
                     identity.turn_id != operation.turn_id || identity.action_id != declared->action_id || identity.attempt == 0 ||
+                    started.kind != lubancode::agent::ToolTraceEventKind::ExecutionStarted ||
                     finished.kind != lubancode::agent::ToolTraceEventKind::ExecutionFinished ||
-                    finished.thread_id != session_id || finished.turn_id != operation.turn_id) {
+                    started.execution_id.empty() || finished.execution_id != started.execution_id ||
+                    started.tool_use_id != call || finished.tool_use_id != call ||
+                    started.tool_name != name || finished.tool_name != name ||
+                    started.turn_id != operation.turn_id || finished.turn_id != operation.turn_id ||
+                    (!started.thread_id.empty() && started.thread_id != session_id) ||
+                    (!finished.thread_id.empty() && finished.thread_id != session_id)) {
                     action_failure = "sdk.action.owner_invalid: actual finished main execution is required";
                     return original;
                 }

@@ -115,9 +115,15 @@ void ActualSummaryStop() {
                     value.hook.reason = failure; }
                 return value;
             };
-            wiring.on_post_action = [&](const auto&, const auto& name, const Json&, const tools::Tool::Result& raw,
-                const tools::ToolInvocationIdentity&, const agent::ToolTraceEvent& finished) {
+            wiring.on_post_action = [&](const auto& call, const auto& name, const Json&, const tools::Tool::Result& raw,
+                const tools::ToolInvocationIdentity&, const agent::ToolTraceEvent& started, const agent::ToolTraceEvent& finished) {
+                CHECK(started.kind == agent::ToolTraceEventKind::ExecutionStarted);
                 CHECK(finished.kind == agent::ToolTraceEventKind::ExecutionFinished);
+                CHECK_FALSE(started.execution_id.empty()); CHECK(started.execution_id == finished.execution_id);
+                CHECK(started.tool_use_id == call); CHECK(finished.tool_use_id == call);
+                CHECK(started.tool_name == name); CHECK(finished.tool_name == name);
+                CHECK(started.turn_id == finished.turn_id);
+                CHECK(started.thread_id.empty()); CHECK(finished.thread_id.empty());
                 if (failed && name == "large_result") failure = "fixture.action.required_post_failed";
                 return raw;
             };
@@ -178,8 +184,15 @@ void ActualReceiptStop() {
                 return value; // only the real deferred Adopt will trip the writer
             };
             wiring.on_post_action = [&, trigger](const auto& call, const auto& name, const Json& arguments,
-                const tools::Tool::Result& raw, const tools::ToolInvocationIdentity&, const agent::ToolTraceEvent& finished) {
+                const tools::Tool::Result& raw, const tools::ToolInvocationIdentity&,
+                const agent::ToolTraceEvent& started, const agent::ToolTraceEvent& finished) {
+                CHECK(started.kind == agent::ToolTraceEventKind::ExecutionStarted);
                 CHECK(finished.kind == agent::ToolTraceEventKind::ExecutionFinished);
+                CHECK_FALSE(started.execution_id.empty()); CHECK(started.execution_id == finished.execution_id);
+                CHECK(started.tool_use_id == call); CHECK(finished.tool_use_id == call);
+                CHECK(started.tool_name == name); CHECK(finished.tool_name == name);
+                CHECK(started.turn_id == finished.turn_id);
+                CHECK(started.thread_id.empty()); CHECK(finished.thread_id.empty());
                 auto context = trigger(call, name, arguments);
                 context.input["result"] = {{"text", raw.content}, {"isError", raw.is_error},
                     {"outcome", agent::ToString(finished.outcome)}, {"errorCode", finished.error_code}};

@@ -907,7 +907,8 @@ tools::Tool::Result CompleteToolCall(ToolCallFrame& frame, tools::Tool::Result r
         }
     }
     if (wiring.on_post_action && frame.fired_finished) {
-        result = wiring.on_post_action(call.id, call.name, frame.effective_input, result, frame.invocation, *frame.fired_finished);
+        result = wiring.on_post_action(call.id, call.name, frame.effective_input, result, frame.invocation,
+                                       frame.fired_started, *frame.fired_finished);
         if (wiring.action_receipt_failure_reason) {
             const auto error = wiring.action_receipt_failure_reason();
             if (!error.empty()) { result.execution_control = tools::ExecutionControl::StopIndeterminate;
