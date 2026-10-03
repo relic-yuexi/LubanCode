@@ -72,3 +72,4 @@ git diff --check
 - [HealthBus 批次寿命夹具](agent-health-batch-fixture.md)
 - [Owned Job 四场探针正文就绪](owned-job-probe-readiness.md)
 - [SDK MemorySave 四场报告诊断](sdk-memory-save-diagnostic.md)
+- [SDK Job 当前前置组合](sdk-job-current-integration.md)
