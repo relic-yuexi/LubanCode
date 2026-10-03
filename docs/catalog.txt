@@ -194,3 +194,4 @@ DOC development/middleware-deferred-effects.md
 DOC development/middleware-exception-observation.md
 DOC development/middleware-job-post-contract.md
 DOC development/job-post-live-invocation.md
+DOC development/sdk-operation-turn-binding.md

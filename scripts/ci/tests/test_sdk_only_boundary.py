@@ -288,6 +288,34 @@ class BoundaryTests(unittest.TestCase):
                              "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]})
         self.assert_rejected(self.check(testing=True), "reverse host include")
 
+    def operation_turn_reference(self):
+        self.source_file("src/sdk/operation_ledger.cpp", '#include "sdk/operation_ledger.hpp"\n')
+        self.source_file("src/sdk/operation_ledger.hpp", '#include "runtime/session_service.hpp"\n')
+        self.source_file("src/runtime/session_service.hpp", "#pragma once\n")
+        self.targets.append({"id": "binding", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+            "sources": [{"path": "src/sdk/operation_ledger.cpp", "compileGroupIndex": 0}], "compileGroups": [{}]})
+
+    def test_private_operation_turn_reference_has_exact_owner_and_testing_gate(self):
+        self.operation_turn_reference()
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        report = self.check(testing=True)
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.assertIn("src/runtime/session_service.hpp", report["scannedProjectFiles"])
+        self.targets[-1]["name"] = "arbitrary_host"
+        self.assert_rejected(self.check(testing=True), "unregistered private SDK reference owner")
+        self.targets[-1]["name"] = "lubancore_sdk_tests"
+        self.source_file("src/sdk/operation_ledger_extra.cpp", "int fixture;\n")
+        self.targets[-1]["sources"][0]["path"] = "src/sdk/operation_ledger_extra.cpp"
+        self.assert_rejected(self.check(testing=True), "unregistered private SDK reference implementation")
+
+    def test_operation_turn_reference_cannot_hide_reverse_host_includes(self):
+        self.operation_turn_reference()
+        self.flags["BUILD_TESTING"] = "ON"
+        self.source_file("src/runtime/session_service.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
     def add_search_probe(self):
         self.source_file(boundary.SEARCH_PROBE_SOURCE, "int main() { return 0; }\n")
         probe = {"id": "probe", "name": boundary.SEARCH_PROBE_TARGET, "type": "EXECUTABLE",

@@ -150,7 +150,7 @@ PRIVATE_TEST_PROBES = {
 # Real private implementations compiled into the SDK reference-test executable,
 # rather than exposed as additional DLL ABI. No other SDK implementation gets
 # this testing-only exception.
-PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp", "src/sdk/memory.cpp", "src/sdk/action_dispatch.cpp"}
+PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp", "src/sdk/memory.cpp", "src/sdk/action_dispatch.cpp", "src/sdk/operation_ledger.cpp"}
 # Preserve the SDK state/stdio guard when this implementation moves into a
 # shared internal header. Other runtime process code keeps its existing scope.
 SDK_STATE_BOUNDARY_FILES = {"src/runtime/middleware_deferred_effects.hpp",
@@ -299,7 +299,7 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
     def check_project_path(name: str, owner: str) -> None:
         if host_path(name):
             violations.append(f"target {owner} includes host source {name}")
-        if name == "src/sdk/memory.cpp" and owner not in {"lubancore_sdk", "lubancore_sdk_tests"}:
+        if name in {"src/sdk/memory.cpp", "src/sdk/operation_ledger.cpp"} and owner not in {"lubancore_sdk", "lubancore_sdk_tests"}:
             violations.append(f"unregistered private SDK reference owner: {owner} includes {name}")
         if owner == "lubancore_sdk_tests" and name.startswith("src/sdk/") and name.endswith(".cpp"):
             if not expect_testing:
