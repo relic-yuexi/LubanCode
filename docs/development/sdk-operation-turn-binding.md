@@ -22,7 +22,7 @@
 
 V3 envelope enum/字符串/statusless、C++ schema 与 Python validator 同笔加精确 shape。V3 Reader 实际读取入口调用共用锚校准：版本/ID/SHA、同 SID/run、turn 与 operation 各唯一、锚先于本 turn 已存消息/请求/工具事实。旧无锚账照旧可读；没有锚不能拿最近 operation 或消息角色补关系。
 
-SDK strict 读面再用原 operations.jsonl 校验器产出的同份 owned accepted/dispatched/final 投影。核 operationId/inputId/payloadHash、确已派工及后来 main final 的 turn。主 final 仍一 turn 一 op；不把新行塞进旧 operations.jsonl，也不改主结果索引。V3 层不反向 include SDK，不复制 schema/hash parser。严格关系失败须给 `sdk.resume.operation_turn_invalid`；原 operations 错误保原码。
+SDK strict 读面只从已打开 regular 件读 operations.jsonl，单件最多 64 MiB；同份 owned bytes 交原 `SessionService::ReadOperationFactsOwned` 校验器，产出 accepted/dispatched/final 投影。核 operationId/inputId/payloadHash、确已派工及后来 main final 的 turn；另一 op 也不能占这枚 turn。主 final 仍一 turn 一 op；不把新行塞进旧 operations.jsonl，也不改主结果索引。V3 层不反向 include SDK，不复制 schema/hash parser。严格关系失败须给 `sdk.resume.operation_turn_invalid`；原 operations 错误保原码。
 
 strict helper 是本笔内部入口；默认公开恢复行为及未来冻结选项装配不冒称已完成。新事实的原生 shape 与跨行校准确须进入实际 V3 Reader，不能只留未调用 helper。关系材料分 NotApplicable/Incomplete/Rejected/Validated；Validated 只证历史关系，不证现场确认或执行成功。
 

@@ -1675,6 +1675,28 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (auto error = CheckExecutionPolicy(kind_name, line.payload)) {
             return error;
         }
+    } else if (line.kind == K::SdkOperationTurnBound) {
+        if (!line.turn_id || line.step_id || line.action_id || line.request_id || line.parent_turn_id ||
+            line.compact_id || line.command_id || line.hook_dispatch_id || line.task_id || line.title_generation_id ||
+            line.effects || line.effect_refs)
+            return Err("schema3.bad_operation_turn", "main operation anchor requires only a turn identity");
+        if (line.turn_id->empty() || line.turn_id->size() > 200 || line.turn_id->find_first_not_of(
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos)
+            return Err("schema3.bad_operation_turn", "invalid main operation turn ID");
+        if (line.payload.size() != 5 || !line.payload.contains("version") ||
+            !line.payload.at("version").is_number_integer() || line.payload.at("version") != 1 ||
+            !line.payload.contains("layout") || line.payload.at("layout") != "sdk_main_operation_turn_v1")
+            return Err("schema3.bad_operation_turn", "unknown main operation anchor layout or version");
+        for (const char* key : {"operationId", "inputId"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) return error;
+            const auto value = line.payload.at(key).get<std::string>();
+            if (value.size() > 200 || value.find_first_not_of(
+                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos)
+                return Err("schema3.bad_operation_turn", "invalid main operation anchor ID");
+        }
+        if (!line.payload.contains("payloadHash") || !line.payload.at("payloadHash").is_string() ||
+            !IsHex64(line.payload.at("payloadHash").get<std::string>()))
+            return Err("schema3.bad_operation_turn", "main operation anchor requires payload SHA256");
     } else if (line.kind == K::ToolJobAdopted) {
         if (auto error = CheckToolPayload(kind_name, line, true)) return error;
         if (line.payload.at("attempt") != 1 || !line.turn_id || !line.step_id)

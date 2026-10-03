@@ -488,6 +488,16 @@ std::expected<ResumeProjection, std::string> ProjectResume(
 // cancelled;running 查不明 = unknown;审批未过停 awaiting_approval。
 inline constexpr std::string_view kOwnedJobLayout = "parent_admission_job_business_v1";
 
+inline constexpr std::string_view kSdkMainOperationTurnLayout = "sdk_main_operation_turn_v1";
+// Owned historical provenance only. It cannot create a live operation lease.
+struct OperationTurnBindingFacts {
+    std::string session_id, run_id, turn_id, operation_id, input_id, payload_hash;
+    std::string event_id, line_hash;
+    std::uint64_t seq = 0;
+};
+std::expected<std::vector<OperationTurnBindingFacts>, std::string>
+ReadOperationTurnBindings(const V3Ledger& ledger);
+
 // Verified, owned provenance for the versioned internal business-attempt-1
 // layout. No field grants a live capability or authorizes historical dispatch.
 struct OwnedJobAdoptionFacts {
