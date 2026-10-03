@@ -144,6 +144,8 @@ Result<std::shared_ptr<SessionLua>> SessionLua::Prepare(
             const auto& plan = owner->saved_plan_;
             if (!plan.is_object() || plan.value("schemaVersion", Json()) != 1 ||
                 plan.value("sessionId", Json()) != owner->resume_id_ ||
+                plan.value("profile", Json()) != "Whitelisted" || plan.value("stdio", Json()) != false ||
+                plan.value("protectedCalls", Json()) != false ||
                 !plan.contains("enabled") || !plan["enabled"].is_boolean() || plan.dump() != owner->saved_bytes_)
                 return std::unexpected(Fail("sdk.lua.plan_invalid", "saved plan is invalid or noncanonical"));
             owner->snapshot_.enabled = plan["enabled"].get<bool>();
@@ -210,6 +212,7 @@ Result<void> SessionLua::Load(const lua::v1::Selection& selection) {
     profile.memory_cap_bytes = selection.memory_cap_bytes;
     profile.wall_budget = selection.wall_budget;
     profile.allow_print = false;
+    profile.allow_error_catching = false;
     for (const auto& script : selection.scripts) {
         if (!Text(script.path, 4096) || !Name(script.tool_name) ||
             !selected_names.insert(script.tool_name).second || !selected_paths.insert(script.path).second)
@@ -264,7 +267,8 @@ SessionLua::Json SessionLua::Plan(const std::string& id) const {
         {"description", item.description}, {"contentSha256", item.content_sha256},
         {"inputSchema", Json::parse(item.input_schema_json)}});
     return Json{{"schemaVersion", 1}, {"sessionId", id}, {"enabled", snapshot_.enabled},
-        {"profile", "Whitelisted"}, {"stdio", false}, {"root", snapshot_.root}, {"entries", std::move(entries)},
+        {"profile", "Whitelisted"}, {"stdio", false}, {"protectedCalls", false},
+        {"root", snapshot_.root}, {"entries", std::move(entries)},
         {"limits", {{"instructions", snapshot_.instruction_budget}, {"memoryBytes", snapshot_.memory_cap_bytes},
                     {"wallMilliseconds", snapshot_.wall_budget.count()}}}};
 }

@@ -20,6 +20,7 @@ LuaProfile Profile(std::size_t memory = 128 * 1024) {
     profile.instruction_budget = 2'000'000;
     profile.wall_budget = std::chrono::milliseconds(100);
     profile.allow_print = false;
+    profile.allow_error_catching = false;
     return profile;
 }
 
@@ -87,6 +88,40 @@ TEST_CASE("Lua protected: selected whitelist opens its real libraries and retain
     REQUIRE(trusted.has_value());
     CHECK((*pure)->execute(Json::object()).content == "nil:nil:function");
     CHECK((*trusted)->execute(Json::object()).content == "table:function:function");
+
+    const std::string catches =
+        "return {name='catches',execute=function(input) "
+        "return type(pcall)..':'..type(xpcall)..':'.."
+        "type(assert(load('return pcall'))())..':'..type(_G['xp'..'call']) end}";
+    auto sdk_catches = LuaTool::LoadFromScript(catches, "sdk-catches", Profile());
+    REQUIRE(sdk_catches.has_value());
+    CHECK((*sdk_catches)->execute(Json::object()).content == "nil:nil:nil:nil");
+    for (const auto& legacy : {LuaProfile::HookDefault(), LuaProfile::PureDefault(), LuaProfile::TrustedDefault()}) {
+        auto old_catches = LuaTool::LoadFromScript(catches, "old-catches", legacy);
+        REQUIRE(old_catches.has_value());
+        CHECK((*old_catches)->execute(Json::object()).content == "function:function:function:function");
+        const std::string catch_error =
+            "return {name='catch-error',execute=function(input) "
+            "local ok,message=xpcall(function() error('original') end,function() return 'handled' end); "
+            "local ordinary=pcall(function() error('ordinary') end); "
+            "return tostring(ok)..':'..message..':'..tostring(ordinary) end}";
+        auto old_error = LuaTool::LoadFromScript(catch_error, "old-error", legacy);
+        REQUIRE(old_error.has_value());
+        CHECK((*old_error)->execute(Json::object()).content == "false:handled:false");
+    }
+    for (const auto* function : {"pcall", "xpcall"}) {
+        const std::string top = std::string(function) + "(function() return true end,function() end)";
+        const auto rejected = LuaTool::LoadFromScript(top, "top-catch", Profile());
+        REQUIRE_FALSE(rejected.has_value());
+        CHECK(rejected.error().find("attempt to call a nil value") != std::string::npos);
+        auto runtime = LuaTool::LoadFromScript(
+            "return {name='runtime-catch',execute=function(input) " + top + " end}", "runtime-catch", Profile());
+        REQUIRE(runtime.has_value());
+        const auto failed = (*runtime)->execute(Json::object());
+        CHECK(failed.is_error);
+        CHECK(failed.error_code == "plugin.lua_error");
+        CHECK(failed.content.find("attempt to call a nil value") != std::string::npos);
+    }
 }
 
 TEST_CASE("Lua protected: top level instructions and wall time share the guarded initialization") {

@@ -15,8 +15,9 @@ struct Script {
 
 // Explicit trusted local scripts. All three budgets must be positive. Admission
 // does not grant filesystem/process/network APIs, Package, or child tools.
-// Hook errors remain catchable by protected Lua calls. Scripts must cooperate
-// with cancellation; Close waits for actual return rather than forcing exit.
+// Script pcall/xpcall are unavailable before source evaluation; coroutine,
+// debug and package are excluded by the whitelist. Host protection remains.
+// Close waits for actual return; blocking native code is not forcibly stopped.
 struct Selection {
     std::string root; // Absolute UTF-8 ordinary directory, with no ambient fallback.
     std::vector<Script> scripts;

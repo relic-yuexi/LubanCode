@@ -27,9 +27,12 @@ namespace sdk = lubancore;
 using namespace std::chrono_literals;
 constexpr const char* kName = "plugin__counter__count";
 const std::string kScript =
-    "assert(print==nil,'stdio print must be disabled'); local calls=0; return {name='count',description='owned Lua counter',"
+    "assert(print==nil,'stdio print must be disabled'); "
+    "assert(pcall==nil and xpcall==nil and coroutine==nil and debug==nil,'script catches must be disabled'); "
+    "local calls=0; return {name='count',description='owned Lua counter',"
     "input_schema={type='object',properties={text={type='string'},loop={type='boolean'}},required={'text'}},"
-    "execute=function(input) if input.loop then while true do end end "
+    "execute=function(input) assert(pcall==nil and xpcall==nil,'script catches were restored'); "
+    "if input.loop then while true do end end "
     "calls=calls+1; return tostring(calls)..':'..input.text end}";
 
 void Check(bool value, const std::string& message) {

@@ -80,6 +80,9 @@ struct LuaProfile {
     std::chrono::milliseconds wall_budget{0};
     // SDK standalone 禁协议 stdout；旧 CLI/Hook 默认仍保留 print。
     bool allow_print = true;
+    // SDK removes script-level protected calls before source evaluation. The
+    // host's C lua_pcall boundaries and legacy CLI/Hook defaults stay intact.
+    bool allow_error_catching = true;
 
     static LuaProfile PureDefault();
     static LuaProfile TrustedDefault();

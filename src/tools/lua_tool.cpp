@@ -217,6 +217,12 @@ void OpenLuaLibraries(lua_State* L, const LuaProfile& profile) {
         if (profile.level == LuaProfile::Level::Pure) ApplyPureLuaProfile(L);
     }
     if (!profile.allow_print) { lua_pushnil(L); lua_setglobal(L, "print"); }
+    if (!profile.allow_error_catching) {
+        // Remove these before the script can save aliases or compile a chunk.
+        // C++ still owns the protected call that catches errors and guard exits.
+        lua_pushnil(L); lua_setglobal(L, "pcall");
+        lua_pushnil(L); lua_setglobal(L, "xpcall");
+    }
 }
 
 namespace {

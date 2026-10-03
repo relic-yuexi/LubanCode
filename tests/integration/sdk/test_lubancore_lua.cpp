@@ -152,6 +152,18 @@ TEST_CASE("SDK Lua validates the actual adopted systems and owned plan before re
         CHECK(Read(journal) == changed); CHECK(Read(plan) == saved_plan);
     }
     Write(journal, original);
+    const auto frozen_profile = Json::parse(saved_plan);
+    REQUIRE(frozen_profile.at("protectedCalls") == false);
+    for (const bool remove_entry : {false, true}) {
+        auto wrong_profile = frozen_profile;
+        if (remove_entry) wrong_profile.erase("protectedCalls");
+        else wrong_profile["protectedCalls"] = true;
+        const auto changed_plan = wrong_profile.dump();
+        Write(plan, changed_plan);
+        CHECK_NOTHROW(lubancore_consumer::LuaRestoreBad(directory.path, id));
+        CHECK(Read(journal) == original);
+        CHECK(Read(plan) == changed_plan);
+    }
     Write(plan, "{bad plan");
     CHECK_NOTHROW(lubancore_consumer::LuaRestoreBad(directory.path, id)); CHECK(Read(journal) == original);
     fs::remove(plan);
