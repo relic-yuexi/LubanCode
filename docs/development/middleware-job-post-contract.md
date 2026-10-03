@@ -8,7 +8,7 @@
 
 `MiddlewareDispatcher::Dispatch` 尾添内部 `DispatchReturnContract`，默认 Legacy；显式 JobPostSupplementsV1 只收 PostAction。错挂点在任何 callback/sink 之前明拒，不降回 Legacy。档由可信调用方按值传入，插件 JSON 不能打开它，更不能凭档取得执行或写账许可。
 
-Job Post 只收 null output、非 Denied、ResultSupplement 且 payload 恰为 `{text:string}`。单枚 text 至多 16KiB，无 NUL，须真 UTF-8；一 callback 至多 16 枚、32KiB。本次 dispatch 也最多 16 枚、32KiB。observer 沿 SDK Action 原规则：不得输出、deny 或给 effects。错误 code/message 沿原 Action 256/4096 字节及 UTF-8/NUL 口径。
+Job Post 只收 null output、非 Denied、ResultSupplement 且 payload 恰为 `{text:string}`。单枚 text 至多 16KiB，无 NUL，须真 UTF-8；一 callback 至多 16 枚、32KiB。本次 dispatch 也最多 16 枚、32KiB。observer 沿 SDK Action 原规则：不得输出、deny 或给 effects。实际返回的 HandlerError code/message 沿原 Action 256/4096 字节及 UTF-8/NUL 口径；真 catch 留原诊断与捕获入口，不冒称同帽。新档连未启用的 deny code/message 也先校 256/4096，防原 ProposalPayload 复制无界串；SDK 旧 false-deny 忽略规则不改。
 
 ## 谁持值，怎样入门
 
