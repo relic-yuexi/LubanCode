@@ -149,6 +149,9 @@ PRIVATE_TEST_PROBES = {
 # rather than exposed as additional DLL ABI. No other SDK implementation gets
 # this testing-only exception.
 PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp", "src/sdk/memory.cpp", "src/sdk/action_dispatch.cpp"}
+# Preserve the SDK state/stdio guard when this implementation moves into a
+# shared internal header. Other runtime process code keeps its existing scope.
+SDK_STATE_BOUNDARY_FILES = {"src/runtime/middleware_deferred_effects.hpp"}
 TERMINAL_PATH = re.compile(r"^src/platform/(?:console|clipboard|hidden_input|terminal_batch)(?:[_.]|$)")
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"\n]+)[>"]', re.MULTILINE)
 # Keep strings intact while removing comments; URL/regex literals are not comments.
@@ -451,7 +454,7 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         # Runtime state preservation and indirect diagnostics need real tests;
         # global cwd or signal operations inside child process code are not
         # equivalent to changing the embedding host's state.
-        if name.startswith(("src/sdk/", "src/runtime/assembly/")):
+        if name.startswith(("src/sdk/", "src/runtime/assembly/")) or name in SDK_STATE_BOUNDARY_FILES:
             code = code_only(text)
             for rule, pattern in (("direct host stdio", HOST_IO), ("process-global setter", GLOBAL_SETTERS)):
                 for match in pattern.finditer(code):
