@@ -94,6 +94,13 @@ void CheckRecord(const mw::DispatchOutcome& outcome, const std::string& name, So
     CHECK(record->outcome == status);
     CHECK(record->failure_source == source);
 }
+void CheckNextException(const mw::DispatchOutcome& outcome, const std::string& name, Source source,
+                        mw::HookPoint point = mw::HookPoint::PreAction) {
+    const auto* record = outcome.FindRecord(std::string(mw::ToString(point)) + "/" + name);
+    REQUIRE(record != nullptr);
+    CHECK(record->next_exception_source == source);
+    if (source != Source::None) CHECK(record->next_calls > 0);
+}
 void Committed(const v3::WriteReceipt& receipt) {
     REQUIRE_MESSAGE(receipt.status == v3::WriteReceipt::Status::Committed, receipt.error_message);
     REQUIRE_FALSE(receipt.id.empty()); REQUIRE(receipt.seq > 0); REQUIRE_FALSE(receipt.line_hash.empty());
@@ -210,6 +217,7 @@ TEST_CASE("middleware dispatch cause: policies") {
         CHECK(terminal == (variant == 2 ? 1 : 0));
         CHECK(outcome.terminal_runs == terminal);
         CheckRecord(outcome, "policy", Source::HandlerReturnedError);
+        CheckNextException(outcome, "policy", Source::None);
         const std::vector<std::string> expected{"requested", "started:PreAction/policy", "failed:PreAction/policy:fixture.failure"};
         CHECK(sink.Events() == expected);
     }
@@ -221,9 +229,10 @@ TEST_CASE("middleware dispatch cause: policies") {
         ++terminal; throw std::runtime_error("actual terminal exception");
     });
     CHECK(outcome.kind == Kind::Failed); CHECK(outcome.cause == Cause::KeepOriginalUnavailable);
-    CHECK(outcome.failure_source == Source::TerminalThrew); CHECK(terminal == 1);
+    CHECK(outcome.failure_source == Source::HandlerThrew); CHECK(terminal == 1);
     CHECK(outcome.error_code == std::string(mw::err::kHandlerFailed));
-    CheckRecord(outcome, "unavailable", Source::TerminalThrew);
+    CheckRecord(outcome, "unavailable", Source::HandlerThrew);
+    CheckNextException(outcome, "unavailable", Source::TerminalThrew);
 }
 
 TEST_CASE("middleware dispatch cause: cancellation") {
@@ -240,6 +249,7 @@ TEST_CASE("middleware dispatch cause: cancellation") {
         CHECK(outcome.failure_source == Source::None); CHECK(handlers == (during ? 1 : 0)); CHECK(terminal == 0);
         CHECK(outcome.error_code == (during ? std::string() : std::string(mw::err::kDispatchCancelled)));
         CheckRecord(outcome, "cancel", Source::None, during ? "completed" : "skipped_cancelled");
+        CheckNextException(outcome, "cancel", Source::None);
     }
     for (bool required : {false, true}) {
         auto forged = Definition("forged", Error(std::string(mw::err::kDispatchCancelled)));
@@ -251,6 +261,7 @@ TEST_CASE("middleware dispatch cause: cancellation") {
         CHECK(outcome.failure_source == Source::HandlerReturnedError);
         CHECK(outcome.error_code == std::string(mw::err::kDispatchCancelled));
         CheckRecord(outcome, "forged", Source::HandlerReturnedError);
+        CheckNextException(outcome, "forged", Source::None);
     }
     std::atomic<bool> late{false};
     mw::MiddlewareDispatcher dispatcher(Publish({Definition("pass", Pass())}));
@@ -344,13 +355,17 @@ TEST_CASE("middleware dispatch cause: exceptions") {
         throw std::runtime_error("real terminal throw");
     });
     CHECK(terminal_failed.kind == Kind::Failed); CHECK(terminal_failed.cause == Cause::RequiredAbort);
-    CHECK(terminal_failed.failure_source == Source::TerminalThrew); CHECK(terminal_failed.terminal_runs == 1);
+    CHECK(terminal_failed.failure_source == Source::HandlerThrew); CHECK(terminal_failed.terminal_runs == 1);
+    CheckRecord(terminal_failed, "wrap", Source::HandlerThrew);
+    CheckNextException(terminal_failed, "wrap", Source::TerminalThrew);
     struct ContinuationFault final : RecordingSink {
         void OnContinuationConsumed(const mw::InvocationMeta&) override { throw std::runtime_error("real sink continuation throw"); }
     } sink;
     const auto continuation_failed = terminal.Dispatch(mw::HookPoint::PreAction, Trigger(), nullptr, &sink);
-    CHECK(continuation_failed.kind == Kind::Failed); CHECK(continuation_failed.failure_source == Source::ContinuationThrew);
+    CHECK(continuation_failed.kind == Kind::Failed); CHECK(continuation_failed.failure_source == Source::HandlerThrew);
     CHECK(continuation_failed.terminal_runs == 0); CHECK(continuation_failed.error_code == std::string(mw::err::kHandlerFailed));
+    CheckRecord(continuation_failed, "wrap", Source::HandlerThrew);
+    CheckNextException(continuation_failed, "wrap", Source::ContinuationThrew);
     for (bool rethrow : {false, true}) {
         auto recovered = Definition("caught", [rethrow](const mw::InvocationCtx&, const Json&, mw::NextCall& next)
                 -> std::expected<mw::HandlerReturn, mw::HandlerError> {
@@ -365,7 +380,121 @@ TEST_CASE("middleware dispatch cause: exceptions") {
         const auto actual = catcher.Dispatch(mw::HookPoint::PreAction, Trigger(), [](const Json&) -> Json { throw std::runtime_error("original terminal throw"); });
         CHECK(actual.cause == Cause::RequiredAbort);
         CHECK(actual.failure_source == (rethrow ? Source::HandlerThrew : Source::HandlerReturnedError));
+        CheckRecord(actual, "caught", rethrow ? Source::HandlerThrew : Source::HandlerReturnedError);
+        CheckNextException(actual, "caught", Source::TerminalThrew);
     }
+    // The observed downstream throw is not an opaque handler exception ID.
+    for (bool downstream : {false, true}) {
+        auto nonstd = Definition("nonstd", [downstream](const mw::InvocationCtx&, const Json&, mw::NextCall& next)
+                -> mw::HandlerReturn {
+            if (downstream) return mw::HandlerReturn::Value(next().value);
+            throw 17;
+        });
+        nonstd.required = true;
+        mw::MiddlewareDispatcher dispatcher(Publish({nonstd}));
+        const auto actual = dispatcher.Dispatch(mw::HookPoint::PreAction, Trigger(), [](const Json&) -> Json { throw 17; });
+        CHECK(actual.kind == Kind::Failed); CHECK(actual.cause == Cause::RequiredAbort);
+        CHECK(actual.failure_source == Source::HandlerThrew);
+        CHECK(actual.error_code == std::string(mw::err::kHandlerFailed));
+        CHECK(actual.error_detail == "PreAction/nonstd: handler 抛未知异常"); CHECK(actual.terminal_runs == (downstream ? 1 : 0));
+        CheckRecord(actual, "nonstd", Source::HandlerThrew);
+        CheckNextException(actual, "nonstd", downstream ? Source::TerminalThrew : Source::None);
+    }
+    for (int variant = 0; variant != 3; ++variant) {
+        int caught = 0;
+        auto replace = Definition("replace", [variant, &caught](const mw::InvocationCtx&, const Json&, mw::NextCall& next)
+                -> mw::HandlerReturn {
+            try { next(); } catch (const std::runtime_error& error) {
+                ++caught; CHECK(std::string(error.what()) == "identical exception");
+                if (variant == 0) throw;
+                if (variant == 1) throw std::runtime_error("identical exception");
+            }
+            // The original catch has exited. A fresh throw still belongs here.
+            throw std::runtime_error("identical exception");
+        });
+        replace.required = true;
+        mw::MiddlewareDispatcher dispatcher(Publish({replace}));
+        const auto actual = dispatcher.Dispatch(mw::HookPoint::PreAction, Trigger(), [](const Json&) -> Json {
+            throw std::runtime_error("identical exception");
+        });
+        CHECK(caught == 1); CHECK(actual.terminal_runs == 1);
+        CHECK(actual.kind == Kind::Failed); CHECK(actual.cause == Cause::RequiredAbort);
+        CHECK(actual.failure_source == Source::HandlerThrew);
+        CHECK(actual.error_code == std::string(mw::err::kHandlerFailed));
+        CHECK(actual.error_detail == "PreAction/replace: handler 抛异常: identical exception");
+        CheckRecord(actual, "replace", Source::HandlerThrew);
+        CheckNextException(actual, "replace", Source::TerminalThrew);
+    }
+    auto swallowed = Definition("swallowed", [](const mw::InvocationCtx&, const Json& input, mw::NextCall& next) {
+        try { next(); } catch (...) { return mw::HandlerReturn::Value(input); }
+        return mw::HandlerReturn::Value(input);
+    });
+    swallowed.required = true;
+    mw::MiddlewareDispatcher recovered(Publish({swallowed}));
+    const auto succeeded = recovered.Dispatch(mw::HookPoint::PreAction, Trigger(), [](const Json&) -> Json { throw 29; });
+    CHECK(succeeded.kind == Kind::Completed); CHECK(succeeded.cause == Cause::None);
+    CHECK(succeeded.failure_source == Source::None); CHECK(succeeded.error_code.empty()); CHECK(succeeded.terminal_runs == 1);
+    const bool kept_input = succeeded.value == Trigger().input;
+    CHECK(kept_input);
+    CheckRecord(succeeded, "swallowed", Source::None, "completed_short_circuit");
+    CheckNextException(succeeded, "swallowed", Source::TerminalThrew);
+
+    // Retrying a native Next after a throw is old behavior. Each real attempt
+    // needs its own terminal slot; later success retains the last throw fact.
+    struct RetrySink final : RecordingSink {
+        int calls = 0; bool fail_second = false;
+        void OnContinuationConsumed(const mw::InvocationMeta& meta) override {
+            ++calls;
+            if (fail_second && calls == 2) throw std::runtime_error("second continuation throw");
+            RecordingSink::OnContinuationConsumed(meta);
+        }
+    };
+    for (bool fail_second : {false, true}) {
+        RetrySink retry_sink; retry_sink.fail_second = fail_second;
+        int terminals = 0;
+        auto retry = Definition("retry", [](const mw::InvocationCtx&, const Json&, mw::NextCall& next) {
+            try { next(); } catch (...) {}
+            return mw::HandlerReturn::Value(next().value);
+        });
+        retry.required = true;
+        mw::MiddlewareDispatcher dispatcher(Publish({retry}));
+        const auto actual = dispatcher.Dispatch(mw::HookPoint::PreAction, Trigger(), [&](const Json& input) -> Json {
+            if (++terminals == 1) throw std::runtime_error("first terminal throw");
+            return input;
+        }, &retry_sink);
+        CHECK(retry_sink.calls == 2); CHECK(actual.terminal_runs == (fail_second ? 1 : 2));
+        CHECK(terminals == actual.terminal_runs);
+        CHECK(actual.kind == (fail_second ? Kind::Failed : Kind::Completed));
+        CHECK(actual.cause == (fail_second ? Cause::RequiredAbort : Cause::None));
+        CHECK(actual.failure_source == (fail_second ? Source::HandlerThrew : Source::None));
+        CHECK(actual.error_code == (fail_second ? std::string(mw::err::kHandlerFailed) : std::string()));
+        CheckRecord(actual, "retry", fail_second ? Source::HandlerThrew : Source::None,
+                    fail_second ? "failed" : "completed");
+        CheckNextException(actual, "retry", fail_second ? Source::ContinuationThrew : Source::TerminalThrew);
+        const auto* record = actual.FindRecord("PreAction/retry"); REQUIRE(record != nullptr);
+        CHECK(record->next_calls == 2); CHECK(record->next_consumed == !fail_second);
+    }
+    auto inner = Definition("inner", Pass(), 2); inner.required = true;
+    mw::MiddlewareDispatcher frames(Publish({Definition("outer", Pass(), 1), inner}));
+    const auto inner_failed = frames.Dispatch(mw::HookPoint::PreAction, Trigger(), [](const Json&) -> Json { throw 31; });
+    CHECK(inner_failed.kind == Kind::Failed); CHECK(inner_failed.cause == Cause::RequiredAbort);
+    CHECK(inner_failed.failure_source == Source::HandlerThrew); CHECK(inner_failed.terminal_runs == 1);
+    CheckRecord(inner_failed, "inner", Source::HandlerThrew);
+    CheckNextException(inner_failed, "inner", Source::TerminalThrew);
+    CheckRecord(inner_failed, "outer", Source::None, "completed");
+    CheckNextException(inner_failed, "outer", Source::None);
+    const auto fresh = frames.Dispatch(mw::HookPoint::PreAction, Trigger());
+    CHECK(fresh.kind == Kind::Completed); CHECK(fresh.cause == Cause::None); CHECK(fresh.failure_source == Source::None);
+    CheckNextException(fresh, "inner", Source::None); CheckNextException(fresh, "outer", Source::None);
+    mw::DispatchOutcome owned;
+    {
+        auto definition = Definition("owned", Pass()); definition.required = true;
+        mw::MiddlewareDispatcher scoped(Publish({definition}));
+        owned = scoped.Dispatch(mw::HookPoint::PreAction, Trigger(), [](const Json&) -> Json { throw 43; });
+    }
+    CHECK(owned.kind == Kind::Failed); CHECK(owned.cause == Cause::RequiredAbort);
+    CHECK(owned.failure_source == Source::HandlerThrew); CHECK(owned.terminal_runs == 1);
+    CheckRecord(owned, "owned", Source::HandlerThrew); CheckNextException(owned, "owned", Source::TerminalThrew);
     mw::MiddlewareDispatcher empty(Publish({}));
     CHECK_THROWS_AS(empty.Dispatch(mw::HookPoint::PreAction, Trigger(), [](const Json&) -> Json { throw std::runtime_error("unchanged empty terminal throw"); }), std::runtime_error);
     for (bool throwing : {false, true}) {
@@ -380,6 +509,7 @@ TEST_CASE("middleware dispatch cause: exceptions") {
         CHECK(actual.kind == Kind::Completed); CHECK(actual.cause == Cause::None); CHECK(actual.failure_source == Source::None);
         CHECK(actual.terminal_runs == 1);
         CheckRecord(actual, "observer", throwing ? Source::HandlerThrew : Source::HandlerReturnedError);
+        CheckNextException(actual, "observer", Source::None);
     }
     struct CompletionFault final : RecordingSink {
         void OnInvocationCompleted(const mw::InvocationMeta&, std::optional<std::string>, std::uint64_t) override {
@@ -392,6 +522,7 @@ TEST_CASE("middleware dispatch cause: exceptions") {
     const auto observed = completion_failed.Dispatch(mw::HookPoint::PreAction, Trigger(), nullptr, &completion);
     CHECK(observed.kind == Kind::Completed); CHECK(observed.cause == Cause::None);
     CheckRecord(observed, "observer", Source::ObserverCompletionThrew);
+    CheckNextException(observed, "observer", Source::None);
 
     // A real materialization factory can return an empty handler. Do not edit
     // the frozen registry or forge a result to reach this producer branch.
@@ -409,6 +540,7 @@ TEST_CASE("middleware dispatch cause: exceptions") {
     CHECK(no_handler.kind == Kind::Failed); CHECK(no_handler.cause == Cause::RequiredAbort);
     CHECK(no_handler.failure_source == Source::MissingHandler); CHECK(no_handler.terminal_runs == 0);
     CheckRecord(no_handler, "absent", Source::MissingHandler);
+    CheckNextException(no_handler, "absent", Source::None);
 }
 
 TEST_CASE("middleware dispatch cause: snapshot") {
@@ -423,6 +555,8 @@ TEST_CASE("middleware dispatch cause: snapshot") {
     CHECK_FALSE(report->lease.Snapshot().cause.has_value());
     const auto actual = dispatcher.Dispatch(mw::HookPoint::PostAction, captured.Input(), nullptr, report->sink.get());
     CHECK(actual.cause == Cause::RequiredAbort); CHECK(actual.failure_source == Source::HandlerReturnedError);
+    const auto owned_actual = actual;
+    CheckNextException(owned_actual, "required", Source::None, mw::HookPoint::PostAction);
     REQUIRE(report->lease.Finish(actual).has_value());
     const auto snapshot = report->lease.Snapshot();
     REQUIRE(snapshot.complete()); CHECK(snapshot.cause == Cause::RequiredAbort);
@@ -438,6 +572,8 @@ TEST_CASE("middleware dispatch cause: snapshot") {
         CHECK(event->session_id == snapshot.scope.session_id); CHECK(event->run_id == snapshot.scope.run_id);
         CHECK(event->turn_id == snapshot.scope.turn_id); CHECK(event->step_id == snapshot.scope.step_id); CHECK(event->action_id == snapshot.scope.action_id);
         CHECK_FALSE(event->payload.contains("cause")); CHECK_FALSE(event->payload.contains("failureSource"));
+        CHECK_FALSE(event->payload.contains("nextExceptionSource"));
+        CHECK_FALSE(event->payload.contains("next_exception_source"));
     }
     NativeRig ordinary;
     {
@@ -454,6 +590,10 @@ TEST_CASE("middleware dispatch cause: snapshot") {
     CHECK(retired.complete()); CHECK(retired.closed); CHECK(retired.cause == Cause::RequiredAbort);
     CHECK(retired.failure_source == Source::HandlerReturnedError);
     CHECK(retired.receipts.size() == snapshot.receipts.size());
+    // The lease owns final cause/source and native receipts, not invocation
+    // records. Those co-observations remain in the separately owned outcome.
+    CheckRecord(owned_actual, "required", Source::HandlerReturnedError, "failed", mw::HookPoint::PostAction);
+    CheckNextException(owned_actual, "required", Source::None, mw::HookPoint::PostAction);
 
     // Native confirmation has a separate truth value from the handler result.
     auto armed = std::make_shared<std::atomic<bool>>(false);

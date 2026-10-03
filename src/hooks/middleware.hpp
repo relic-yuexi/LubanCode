@@ -507,6 +507,11 @@ struct InvocationRecord {
     // This invocation's own failure; optional/observer failure may be ignored
     // by the aggregate. A returned HandlerError never supplies this tag.
     DispatchFailureSource failure_source = DispatchFailureSource::None;
+    // Last exception co-observed by this invocation's actual synchronous Next,
+    // retained across a later successful retry. Not the
+    // identity or ancestral cause of the exception later caught by a handler.
+    // Only None, TerminalThrew or ContinuationThrew are produced here.
+    DispatchFailureSource next_exception_source = DispatchFailureSource::None;
 };
 
 struct DispatchOutcome {

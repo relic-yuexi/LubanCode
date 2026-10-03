@@ -191,3 +191,4 @@ DOC development/sdk-command-execution-limits.md
 DOC development/middleware-native-receipts.md
 DOC development/middleware-dispatch-cause.md
 DOC development/middleware-deferred-effects.md
+DOC development/middleware-exception-observation.md
