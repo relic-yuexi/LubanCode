@@ -18,6 +18,7 @@
 - [子结果严格历史采用合同](child-history-adoption.md)
 - [Runner 就绪探针与失败原件](runner-probe-evidence.md)
 - [后台子代理线程启动收口](agent-thread-start-cleanup.md)
+- [线程 capture 收尾夹具](thread-capture-owner-fixture.md)
 - [前台子 Agent 本次调用上下文](child-foreground-context.md)
 - [可取消审批与逐票 lease 合同](scoped-approval-lease.md)
 - [前台子轮异步审批接线合同](child-async-approval.md)
