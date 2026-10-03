@@ -5,6 +5,7 @@
 #include <set>
 #include <sstream>
 
+#include "approval_mode.hpp"
 #include "trajectory/canonical_json.hpp"
 #include "trajectory/v3/envelope.hpp"
 #include "runtime/middleware_v3_sink.hpp"
@@ -75,7 +76,7 @@ void ExistingPermissionChain() {
         };
         wiring.on_permission_evaluate = [&](const auto&, const auto& name, tools::ApprovalClass kind,
             const Json& input, const runtime::ToolHookDecision& pre) {
-            runtime::PermissionContext context; context.mode = runtime::ApprovalMode::Yolo;
+            runtime::PermissionContext context; context.mode = lubancode::ApprovalMode::Yolo;
             context.always_allowed = &temporary;
             return runtime::EvaluatePermission(context, pre, kind, name, input);
         };
