@@ -28,6 +28,10 @@
 
 worker 只执行和投完成信封，不碰 writer。独立取消旗、正数限额和 owned 捕获随本票保活。StopIndeterminate 保未知，不按 `!is_error` 洗成成功。Post 在串行收件方、jobs 锁外取真实业务配对和 raw；不借下一轮模型状态。Post 未确认优先保 gap。
 
+真实 Started 落稳后，一律调用 owned `RunCommand.execute`，传本票取消源和实际限额，收平台原有取消或预算正文。这个窗口不承诺零 spawn；不手造 command raw，也不补假限额资料。
+
+执行体抛异常或完成信封受损，保真正 unknown 终态和 gap，不拿预分配诊断充 command raw，不进入普通 Post 或写成功 Observed。已取得的真实结果随收件拥有者保留，也不能据此补可信终态。
+
 完成泵缓存每阶段首次 native receipt：终态、原文持久化、Observed 分开。原执行成功或失败文本均可留 raw；preview 单独有界。缺 raw/观测不改业务结局。已落 terminal 不再写第二枚；任一未确认就冻结收账，不重写、重派或降为普通失败。首批不声称 rich payload 支持。
 
 ## 收场与恢复

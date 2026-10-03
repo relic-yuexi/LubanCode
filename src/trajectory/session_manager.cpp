@@ -1621,7 +1621,7 @@ std::vector<ReplayMessage> EffectiveConversationFromV3(const v3::V3Ledger& ledge
                                                        const v3::ModelContext& context) {
     std::map<std::string, std::string> provider_call_to_action;
     for (const auto& action : v3::FoldToolActions(ledger)) {
-        if (action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
+        if (action.provider_reply_required && action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
             provider_call_to_action[*action.provider_tool_call_id] = action.tool_call_id;
         }
     }
@@ -1735,7 +1735,7 @@ struct V3FoldError {
 std::map<std::string, std::string> ProviderCallToActionMap(const v3::V3Ledger& ledger) {
     std::map<std::string, std::string> mapping;
     for (const auto& action : v3::FoldToolActions(ledger)) {
-        if (action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
+        if (action.provider_reply_required && action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
             mapping[*action.provider_tool_call_id] = action.tool_call_id;
         }
     }

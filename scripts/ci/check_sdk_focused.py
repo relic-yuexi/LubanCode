@@ -19,6 +19,7 @@ REQUIRED = {
     "sdk.focused.tool_job_start_transaction",
     "sdk.focused.tool_job_hold_recovery",
     "sdk.focused.tool_job_owned_registration",
+    "sdk.focused.tool_job_owned_adoption",
     "sdk.focused.owned_job_admission",
     "sdk.focused.run_command_execution_limits",
     "sdk.focused.session_recovery_view",
@@ -418,6 +419,40 @@ def check_command_limits_native(section, command, platform_name=None):
         raise RuntimeError("Command limits actual boundary records do not cover both platform shells")
 
 
+JOB_ADOPTION_PATHS = ("held-provenance", "parent-chain", "native-raw-post",
+                      "sessions-cancel-limits", "startup-close", "native-gap-hold")
+
+
+def check_job_adoption_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_tool_job_owned_adoption.cpp"):
+        raise RuntimeError("Owned Job adoption registration must run the single actual source")
+
+
+def check_job_adoption_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("Owned Job adoption native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Owned Job adoption executable is not the actual native fixture")
+    check_job_adoption_registration(command, executable)
+    check_native_command(section, command)
+    counts = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(counts) != 1 or tuple(map(int, counts[0])) != (6, 6, 0):
+        raise RuntimeError("Owned Job adoption native roster differs from 6 successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Owned Job adoption native assertions did not actually pass")
+    for path in JOB_ADOPTION_PATHS:
+        if section.splitlines().count("[job-owned-adoption-path] " + path) != 1:
+            raise RuntimeError("Owned Job adoption actual path did not finish once: " + path)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -455,6 +490,8 @@ def main():
             check_owned_job_registration(test.get("command", []))
         if test["name"] == "sdk.focused.tool_job_owned_registration":
             check_prepared_job_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.tool_job_owned_adoption":
+            check_job_adoption_registration(test.get("command", []))
         if test["name"] == "sdk.focused.run_command_execution_limits":
             check_command_limits_registration(test.get("command", []))
         if test["name"] == "sdk.focused.atomic_write":
@@ -515,6 +552,9 @@ def main():
         if case.attrib["name"] == "sdk.focused.tool_job_owned_registration":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_prepared_job_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.tool_job_owned_adoption":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_job_adoption_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.run_command_execution_limits":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_command_limits_native(sections[0], registered["command"])
