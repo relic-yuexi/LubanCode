@@ -79,3 +79,4 @@ git diff --check
 - [SDK Memory 片段 CAS SPI](sdk-memory-blob-spi.md)
 - [SDK 主 Operation 与 turn 真实锚](sdk-operation-turn-binding.md)
 - [Journal 原生追加与关闭回执](journal-native-receipts.md)
+- [Windows 命令 Job 实际观测](windows-command-job-observation.md)
