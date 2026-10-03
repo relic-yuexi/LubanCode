@@ -11,7 +11,7 @@ from scripts.ci.tests import test_sdk_only_boundary as file_api_fixtures
 def complete_channel_hosts(targets):
     targets["engine"]["name"] = "lubancode_engine"
     targets["engine"]["projectSources"].extend(
-        ["src/channel/types.cpp", "src/channel/channel_config.cpp"])
+        ["src/channel/types.cpp", "src/channel/channel_config.cpp", *sorted(closure.SDK_NEUTRAL_PACKAGE_SOURCES)])
     targets["runtime"] = {"name": "lubancode_runtime", "type": "STATIC_LIBRARY",
                           "projectSources": ["src/runtime/session_runtime.cpp"], "dependencies": ["engine"]}
     targets["channel_host"] = {"name": "lubancode_channel_host", "type": "STATIC_LIBRARY",
@@ -77,17 +77,36 @@ class OptionalHostClosureTests(unittest.TestCase):
     def test_package_may_remain_in_cli_without_entering_the_sdk_closure(self):
         complete_channel_hosts(self.targets)
         self.targets["cli"] = {"name": "lubancode_core", "type": "STATIC_LIBRARY",
-                               "projectSources": ["src/package/manifest.cpp"],
+                               "projectSources": ["src/package/inventory.cpp"],
                                "dependencies": ["host", "channel_runtime"]}
         self.assertEqual(closure.inspect_graph(self.targets)["status"], "passed")
         self.targets["sdk"]["dependencies"].append("cli")
         report = closure.inspect_graph(self.targets)
         self.assertEqual(report["status"], "failed")
         self.assertTrue(any("lubancode_core" in v for v in report["violations"]))
-        self.assertTrue(any("src/package/manifest.cpp" in v for v in report["violations"]))
+        self.assertTrue(any("src/package/inventory.cpp" in v for v in report["violations"]))
         self.targets["sdk"]["dependencies"].remove("cli")
         self.targets["engine"]["projectSources"].append("src/package/semver.cpp")
         self.assertEqual(closure.inspect_graph(self.targets)["status"], "failed")
+
+    def test_neutral_package_parsers_have_single_static_engine_ownership(self):
+        complete_channel_hosts(self.targets)
+        self.assertEqual(closure.inspect_graph(self.targets)["status"], "passed")
+        for source in sorted(closure.SDK_NEUTRAL_PACKAGE_SOURCES):
+            for variant in ("missing", "runtime", "duplicate", "host", "renamed", "shared"):
+                with self.subTest(source=source, variant=variant):
+                    targets = deepcopy(self.targets)
+                    if variant in ("missing", "runtime", "host"):
+                        targets["engine"]["projectSources"].remove(source)
+                    if variant in ("runtime", "host", "duplicate"):
+                        targets[{"runtime": "runtime", "host": "host", "duplicate": "engine"}[variant]]["projectSources"].append(source)
+                    elif variant == "renamed":
+                        targets["engine"]["name"] = "innocent_parser"
+                    elif variant == "shared":
+                        targets["engine"]["type"] = "SHARED_LIBRARY"
+                    report = closure.inspect_graph(targets)
+                    self.assertEqual(report["status"], "failed")
+                    self.assertTrue(any("Neutral Package parser must belong once" in reason for reason in report["violations"]))
 
     def test_cli_release_query_has_one_exact_static_owner(self):
         for variant in ("missing", "engine", "duplicate", "renamed", "shared"):
@@ -130,7 +149,7 @@ class OptionalHostClosureTests(unittest.TestCase):
         targets["engine"]["name"] = "lubancode_engine"
         targets["engine"]["projectSources"].extend(
             ["src/agent/loop.cpp", "src/runtime/scoped_approval.cpp",
-             "src/channel/types.cpp", "src/channel/channel_config.cpp"])
+             "src/channel/types.cpp", "src/channel/channel_config.cpp", *sorted(closure.SDK_NEUTRAL_PACKAGE_SOURCES)])
         targets["runtime"] = {"name": "lubancode_runtime", "type": "STATIC_LIBRARY",
                               "projectSources": ["src/runtime/session_runtime.cpp"],
                               "dependencies": ["engine"]}
@@ -147,7 +166,7 @@ class OptionalHostClosureTests(unittest.TestCase):
     def test_loop_lease_missing_or_duplicate_provider_is_rejected(self):
         self.targets["engine"]["name"] = "lubancode_engine"
         self.targets["engine"]["projectSources"].extend(
-            ["src/channel/types.cpp", "src/channel/channel_config.cpp"])
+            ["src/channel/types.cpp", "src/channel/channel_config.cpp", *sorted(closure.SDK_NEUTRAL_PACKAGE_SOURCES)])
         self.targets["engine"]["projectSources"].append("src/agent/loop.cpp")
         self.assertEqual(closure.inspect_graph(self.targets)["status"], "failed")
         self.targets["engine"]["projectSources"].append("src/runtime/scoped_approval.cpp")

@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 
 
 REQUIRED = {
+    "sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest",
     "sdk.focused.lubancore_session",
     "sdk.focused.lubancore_scoped_approval",
     "sdk.focused.lubancore_child_approval",
@@ -39,6 +40,23 @@ REQUIRED = {
     "sdk.focused.atomic_write",
     "sdk.focused.v3_result_store",
 }
+
+
+def check_package_registration(command: list, source: str, executable: str):
+    if (len(command) != 2 or not isinstance(command[0], str) or
+            command[0].replace("\\", "/").rsplit("/", 1)[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*" + source):
+        raise RuntimeError("Package command must select exactly the registered native source")
+
+
+def check_package_native(native_section: str, expected: int):
+    cases = re.findall(r"\[doctest\] test cases:\s+(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", native_section)
+    assertions = re.findall(r"\[doctest\] assertions:\s+(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", native_section)
+    if cases != [(str(expected), str(expected), "0")] or len(assertions) != 1:
+        raise RuntimeError("Package native source roster differs from required passing cases")
+    total, passed, failed = map(int, assertions[0])
+    if not total or total != passed or failed:
+        raise RuntimeError("Package native assertions are empty or failed")
 
 
 def check_result_store_native(native_section: str, platform_name: str):
@@ -121,6 +139,9 @@ def main():
             raise RuntimeError("SDK test is disabled, mislabeled or unbounded: " + test["name"])
         if test["name"] == "sdk.focused.atomic_write":
             check_plan_retry_registration(test.get("command", []))
+        if test["name"] in ("sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest"):
+            source = "test_package_manifest.cpp" if test["name"] == "sdk.focused.package_manifest" else "test_lubancore_package_manifest.cpp"
+            check_package_registration(test.get("command", []), source, "lubancore_sdk_tests")
     (evidence / "context.json").write_text(json.dumps({
         "githubSha": os.environ.get("GITHUB_SHA"), "buildDir": str(build),
         "configuration": args.config, "sdkOnly": args.sdk_only,
@@ -151,6 +172,10 @@ def main():
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])
+        if case.attrib["name"] == "sdk.focused.package_manifest":
+            check_package_native(sections[0], 15)
+        if case.attrib["name"] == "sdk.focused.lubancore_package_manifest":
+            check_package_native(sections[0], 8)
         if case.attrib["name"] == "sdk.focused.v3_result_store":
             check_result_store_native(sections[0], os.name)
         if case.attrib["name"] == "sdk.focused.atomic_write":

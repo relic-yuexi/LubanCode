@@ -17,6 +17,33 @@ focused = importlib.util.module_from_spec(FOCUSED_SPEC)
 FOCUSED_SPEC.loader.exec_module(focused)
 
 
+class PackageNativeEvidenceTests(unittest.TestCase):
+    def test_original_and_public_source_filters_cannot_be_replaced_or_reduced(self):
+        for source in ("test_package_manifest.cpp", "test_lubancore_package_manifest.cpp"):
+            for executable in ("lubancode_tests", "lubancore_sdk_tests"):
+                command = ["C:/actual build/" + executable + ".exe", "--source-file=*" + source]
+                focused.check_package_registration(command, source, executable)
+                for wrong in ([], ["fake", command[1]], [command[0], "--source-file=*other.cpp"],
+                              [*command, "--test-case=only-one"]):
+                    with self.subTest(source=source, command=wrong), self.assertRaises(RuntimeError):
+                        focused.check_package_registration(wrong, source, executable)
+
+    def test_exact_original_and_public_native_case_rosters(self):
+        for count in (15, 8):
+            body = f'[doctest] test cases: {count} | {count} passed | 0 failed\n[doctest] assertions: 20 | 20 passed | 0 failed'
+            focused.check_package_native(body, count)
+
+    def test_missing_duplicate_changed_skipped_and_empty_native_reports_reject(self):
+        for count in (15, 8):
+            body = f'[doctest] test cases: {count} | {count} passed | 0 failed\n[doctest] assertions: 20 | 20 passed | 0 failed'
+            for invalid in ('', body + '\n' + body, body.replace(f'{count} passed', '0 passed'),
+                            body.replace('20 | 20 passed', '0 | 0 passed'),
+                            body.replace('20 passed | 0 failed', '19 passed | 1 failed'),
+                            body.replace(f'test cases: {count}', f'test cases: {count + 1}')):
+                with self.subTest(count=count, invalid=invalid), self.assertRaises(RuntimeError):
+                    focused.check_package_native(invalid, count)
+
+
 class ResultStoreWindowsPathsTests(unittest.TestCase):
     summary = "[doctest] test cases: 17 | 17 passed | 0 failed"
     markers = ("[result-store-path] target-extended", "[result-store-path] temporary-threshold",
@@ -143,6 +170,7 @@ class InstalledHeadersTests(unittest.TestCase):
         self.addCleanup(self.scratch.cleanup)
         self.repo = Path(self.scratch.name)
         self.headers = {
+            "include/lubancore/packages.hpp",
             "include/lubancore/api.hpp", "include/lubancore/core.hpp",
             "include/lubancore/extensions.hpp", "include/lubancore/detail/types.hpp",
             "include/lubancore/results.hpp",

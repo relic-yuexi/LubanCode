@@ -366,7 +366,7 @@ class BoundaryTests(unittest.TestCase):
 
     def test_release_query_and_package_sources_cannot_hide_in_sdk_only_targets(self):
         for path in ("src/config/update_checker.cpp", "src/config/update_checker.hpp",
-                     "src/package/manifest.cpp", "src/package/manifest.hpp"):
+                     "src/package/inventory.cpp", "src/package/inventory.hpp"):
             with self.subTest(path=path):
                 self.source_file(path, "int host_material;\n")
                 self.targets.append({"id": "hidden", "name": "neutral_name", "type": "STATIC_LIBRARY",
@@ -375,11 +375,76 @@ class BoundaryTests(unittest.TestCase):
                 self.targets.pop()
 
     def test_private_header_cannot_reimport_release_query_or_package(self):
-        for path in ("src/config/update_checker.hpp", "src/package/manifest.hpp"):
+        for path in ("src/config/update_checker.hpp", "src/package/catalog.hpp"):
             with self.subTest(path=path):
                 self.source_file(path, "#pragma once\n")
                 self.source_file("src/neutral/bridge.hpp", '#include "' + path.removeprefix("src/") + '"\n')
                 self.assert_rejected(self.check(), "reverse host include")
+
+    def add_package_parsers(self):
+        self.targets[1]["name"] = "lubancode_engine"
+        for name in sorted(boundary.SDK_NEUTRAL_PACKAGE_FILES):
+            contents = '#include "package/semver.hpp"\n' if name.endswith(".cpp") else "#pragma once\n"
+            self.source_file(name, contents)
+        self.source_file("src/package/manifest.hpp", '#include "package/semver.hpp"\n')
+        self.source_file("src/sdk/core.cpp", '#include "package/manifest.hpp"\n')
+        self.targets[1]["sources"].extend({"path": name, "compileGroupIndex": 0}
+                                         for name in sorted(boundary.SDK_NEUTRAL_PACKAGE_SOURCES))
+
+    def test_package_exact_two_parsers_and_recursive_headers_are_neutral(self):
+        self.add_package_parsers()
+        for testing in (False, True):
+            self.flags["BUILD_TESTING"] = "ON" if testing else "OFF"
+            report = self.check(testing)
+            self.assertEqual(report["status"], "passed", report["violations"])
+            self.assertTrue(boundary.SDK_NEUTRAL_PACKAGE_FILES <= set(report["scannedProjectFiles"]))
+
+    def test_package_parsers_require_their_exact_static_single_owner(self):
+        self.add_package_parsers()
+        originals = list(self.targets[1]["sources"])
+        for source in sorted(boundary.SDK_NEUTRAL_PACKAGE_SOURCES):
+            for variant in ("missing", "duplicate", "sdk", "shared", "renamed"):
+                with self.subTest(source=source, variant=variant):
+                    self.targets[1]["sources"] = list(originals)
+                    self.targets[1]["name"], self.targets[1]["type"] = "lubancode_engine", "STATIC_LIBRARY"
+                    if variant in ("missing", "sdk"):
+                        self.targets[1]["sources"] = [entry for entry in originals if entry["path"] != source]
+                    if variant == "sdk":
+                        self.targets[0]["sources"].append({"path": source, "compileGroupIndex": 0})
+                    elif variant == "duplicate":
+                        self.targets[1]["sources"].append({"path": source, "compileGroupIndex": 0})
+                    elif variant == "shared":
+                        self.targets[1]["type"] = "SHARED_LIBRARY"
+                    elif variant == "renamed":
+                        self.targets[1]["name"] = "innocent_parser"
+                    self.assert_rejected(self.check(), "Neutral Package parser must belong once")
+                    if variant == "sdk":
+                        self.targets[0]["sources"].pop()
+
+    def test_package_exceptions_do_not_cover_nearby_sources_or_recursive_host_headers(self):
+        self.add_package_parsers()
+        for name in ("src/package/manifest_extra.cpp", "src/package/semver_extra.cpp", "src/package/component.cpp"):
+            with self.subTest(name=name):
+                self.source_file(name, "int only_fixture;\n")
+                self.targets[1]["sources"].append({"path": name, "compileGroupIndex": 0})
+                self.assert_rejected(self.check(), "includes host source " + name)
+                self.targets[1]["sources"].pop()
+        self.source_file("src/package/component.hpp", "#pragma once\n")
+        self.source_file("src/package/semver.hpp", '#include "package/component.hpp"\n')
+        self.assert_rejected(self.check(), "reverse host include")
+
+    def test_original_package_test_exception_is_exact_and_testing_only(self):
+        source = "tests/unit/packages/test_package_manifest.cpp"
+        self.source_file(source, "int fixture;\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": source, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(True)["status"], "passed")
+        nearby = "tests/unit/packages/test_package_component.cpp"
+        self.source_file(nearby, "int fixture;\n")
+        self.targets[-1]["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(True), "non-SDK test compilation")
 
     def test_terminal_platform_source_is_not_a_core_exception(self):
         self.source_file("src/platform/console_posix.cpp", "int terminal;\n")

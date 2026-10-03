@@ -29,6 +29,7 @@
 #include <vector>
 
 namespace lubancore_consumer {
+void Packages();
 void BuiltinSearch(const std::filesystem::path& base, const std::filesystem::path& resource_root);
 void MemorySeed(const std::filesystem::path& base);
 void MemoryResume(const std::filesystem::path& base);
@@ -1686,6 +1687,7 @@ int main(int argc, char** argv) {
             CloseAndStreams(base);
             ReentryAndOverflow(base);
             InvalidOptions(base);
+        } else if (mode == "packages") { lubancore_consumer::Packages();
         } else if (mode == "isolation") {
             FourSessionIsolation(base);
             SmallToolCaptureLifetime(base);

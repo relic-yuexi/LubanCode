@@ -11,6 +11,7 @@ add_library(lubancore_sdk SHARED
   src/sdk/subagents.cpp
   src/sdk/memory.cpp
   src/sdk/memory_write.cpp
+  src/sdk/packages.cpp
   src/sdk/extensions.cpp
   src/sdk/results.cpp
   src/sdk/result_projection.cpp

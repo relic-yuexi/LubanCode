@@ -26,6 +26,10 @@ SDK_NEUTRAL_CHANNEL_FILES = {
     "src/channel/types.cpp", "src/channel/types.hpp",
     "src/channel/channel_config.cpp", "src/channel/channel_config.hpp",
 }
+SDK_NEUTRAL_PACKAGE_SOURCES = frozenset({"src/package/semver.cpp", "src/package/manifest.cpp"})
+SDK_NEUTRAL_PACKAGE_FILES = SDK_NEUTRAL_PACKAGE_SOURCES | {
+    "src/package/semver.hpp", "src/package/manifest.hpp",
+}
 CHANNEL_HOST_SOURCES = frozenset({
     "src/channel/account_lock.cpp",
     "src/channel/account_state.cpp",
@@ -110,6 +114,7 @@ SDK_HOST_ONLY_SOURCE_FILES = {
 }
 HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/", *SDK_HOST_ONLY_SOURCE_PREFIXES)
 SHARED_SDK_TEST_SOURCES = {
+    "tests/unit/packages/test_package_manifest.cpp",
     "tests/unit/trajectory_v3/test_v3_result_store.cpp",
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",
@@ -191,14 +196,28 @@ def relative(path: Path, root: Path) -> str | None:
 
 
 def sdk_host_only_source(path: str) -> bool:
-    return path not in SDK_NEUTRAL_CHANNEL_FILES and (
+    return path not in (SDK_NEUTRAL_CHANNEL_FILES | SDK_NEUTRAL_PACKAGE_FILES) and (
         path in SDK_HOST_ONLY_SOURCE_FILES or path.startswith(SDK_HOST_ONLY_SOURCE_PREFIXES))
 
 
 def host_path(path: str) -> bool:
-    return path not in SDK_NEUTRAL_CHANNEL_FILES and (
+    return path not in (SDK_NEUTRAL_CHANNEL_FILES | SDK_NEUTRAL_PACKAGE_FILES) and (
         path == "src/main.cpp" or path in SDK_HOST_ONLY_SOURCE_FILES
         or path.startswith(HOST_PREFIXES) or bool(TERMINAL_PATH.match(path)))
+
+
+def package_ownership_violations(targets: dict) -> list[str]:
+    engines = [key for key, target in targets.items() if target["name"] == "lubancode_engine"]
+    sources = {source for target in targets.values() for source in target["projectSources"]}
+    if not engines and not sources & SDK_NEUTRAL_PACKAGE_SOURCES:
+        return []
+    violations = []
+    for source in sorted(SDK_NEUTRAL_PACKAGE_SOURCES):
+        owners = [key for key, target in targets.items() for item in target["projectSources"] if item == source]
+        if (len(engines) != 1 or owners != engines or
+                targets[engines[0]]["type"] != "STATIC_LIBRARY"):
+            violations.append("Neutral Package parser must belong once to static engine: " + source)
+    return violations
 
 
 def prepare(build: Path) -> None:
@@ -321,6 +340,10 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
             compiled = {entry["projectPath"] for entry in source_facts if entry["compiled"]}
             if compiled != {SEARCH_PROBE_SOURCE}:
                 violations.append("search probe must compile only its isolated fixture")
+    violations.extend(package_ownership_violations({key: {
+        "name": target["name"], "type": target["type"],
+        "projectSources": [entry["projectPath"] for entry in target["sources"] if entry["compiled"]],
+    } for key, target in targets.items()}))
     for target in targets.values():
         if target["name"] == SEARCH_PROBE_TARGET:
             for dependency in target["dependencies"]:

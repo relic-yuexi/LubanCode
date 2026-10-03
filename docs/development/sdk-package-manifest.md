@@ -4,7 +4,7 @@
 
 ## 公开入口与值
 
-拟公开 `packages::v1::AnalyzeManifest(Input)`。`Input` 持有 YAML 文本，可另给显式 LubanCode 版本和平台；省略即不评那项兼容性，不取进程环境、版本头、HOME 或 cwd。
+公开 `packages::v1::AnalyzeManifest(Input) -> Result<Analysis>`，头文件为 `lubancore/packages.hpp`。`Input` 持有 YAML 文本，可另给显式 LubanCode 版本和平台；省略即不评那项兼容性，不取进程环境、版本头、HOME 或 cwd。
 
 YAML 最多 256 KiB，宿主版本最多 4096 字节，平台最多 16 字节；三项都须为合法 UTF-8 且无 NUL。版本参数沿原 `ParseSemVer`；平台参数只认 `windows/linux/macos`。入口或宿主参数越界报公开错误；清单语法、字段或值错误则返回 owned 分析账，带原 parser 的字段、行号与说明。空清单仍交原 parser 报错，不偷偷变成空包。
 
@@ -30,7 +30,7 @@ SDK source/include/实际 FileAPI 门只为这两 CPP 和两头开精确例外�
 
 ## 远端验收与后笔
 
-三平台实际运行原 `test_package_manifest.cpp` 全部 15 CASE，并收精确 source-filter 登记、JUnit、LastTest 和非零断言；CLI 全量原门不减。新增公开安装消费者只用 SDK/STL，验错误字段行号、原 scalar 接受规则、预发布版本、兼容省略/匹配/不匹配、UTF-8/NUL/读取帽和 owned 值寿命。新增 focused/ASan 以真实 source 和最终 CASE 数登记，九份 FileAPI 校两源唯一 owner 与宿主闭包不回流。
+三平台实际运行原 `test_package_manifest.cpp` 全部 15 CASE，并收精确 source-filter 登记、JUnit、LastTest 和非零断言；CLI 全量原门不减。新增公开安装消费者只用 SDK/STL，验错误字段行号、原 scalar 接受规则、预发布版本、兼容省略/匹配/不匹配、UTF-8/NUL/字节帽和 owned 值寿命。新 `test_lubancore_package_manifest.cpp` 固定 8 CASE，原 15 CASE 也编入 SDK-only；focused/ASan 均核精确过滤、真实 CASE 数和非零全过断言。九份 FileAPI 校两源唯一 owner 与宿主闭包不回流。
 
 第一笔不迁完整 `AnalyzePackage`。后笔先给显式根有界盘点，再拆七类原 parser 的中立材料边界、复用同份字节和引用规则，最后接内容挂载与代码事务；没有这些证据，不称 SDK 已具 CLI 全部 Package 能力。
 
