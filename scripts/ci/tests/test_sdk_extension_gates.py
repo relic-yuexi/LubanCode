@@ -316,6 +316,75 @@ class OwnedJobAdmissionGateTests(unittest.TestCase):
                 focused.check_owned_job_native(bad, command)
 
 
+class PreparedJobGateTests(unittest.TestCase):
+    command = ['/real build/lubancore_sdk_tests', '--source-file=*test_tool_job_owned_registration.cpp']
+
+    def body(self, command=None):
+        command = self.command if command is None else command
+        return "\n".join(('Command: ' + ' '.join('"' + value + '"' for value in command),
+            '[doctest] test cases: 6 | 6 passed | 0 failed',
+            '[doctest] assertions: 100 | 100 passed | 0 failed', 'Test Passed.',
+            *('[job-owned-registration-path] ' + path for path in focused.PREPARED_JOB_PATHS)))
+
+    def test_actual_sdk_cli_full_argv_and_crlf(self):
+        for executable in ('/real build/lubancore_sdk_tests', 'C:/real build/lubancode_tests.exe'):
+            command = [executable, self.command[1]]
+            focused.check_prepared_job_registration(command, executable.replace('\\', '/').split('/')[-1].removesuffix('.exe'))
+            for ending in ('\n', '\r\n'):
+                focused.check_prepared_job_native(self.body(command).replace('\n', ending), command)
+
+    def test_missing_nonlist_and_nonstring_argv_reject_stably(self):
+        for bad in (None, {}, [], self.command[:1], tuple(self.command), [7, self.command[1]], [self.command[0], None]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(RuntimeError):
+                    focused.check_prepared_job_registration(bad)
+                with self.assertRaises(RuntimeError):
+                    focused.check_prepared_job_native(self.body(), bad)
+
+    def test_foreign_same_basename_full_path_and_other_filter_reject(self):
+        for bad in (['/foreign build/lubancore_sdk_tests', self.command[1]],
+                    self.command + ['--test-case=one'],
+                    [self.command[0], '--source-file=*test_tool_job_coordinator.cpp'],
+                    [self.command[0], '--source-file=*test_tool_job_owned_registration_extra.cpp']):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_prepared_job_native(self.body(bad), self.command)
+
+    def test_registration_source_and_executable_are_exact(self):
+        for bad in ([self.command[0], '--source-file=*test_tool_job_owned_registration_extra.cpp'],
+                    ['/real build/unrelated_tests', self.command[1]], self.command + ['--test-case=one']):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_prepared_job_registration(bad)
+
+    def test_each_actual_path_must_finish_once(self):
+        body = self.body()
+        for path in focused.PREPARED_JOB_PATHS:
+            marker = '[job-owned-registration-path] ' + path
+            for bad in (body.replace(marker, ''), body + '\n' + marker,
+                        body.replace(marker, 'foreign-owner: ' + marker)):
+                with self.subTest(path=path), self.assertRaises(RuntimeError):
+                    focused.check_prepared_job_native(bad, self.command)
+
+    def test_nonzero_six_cases_assertions_and_pass_receipt_are_required(self):
+        body = self.body()
+        for bad in (body.replace('6 | 6 passed', '0 | 0 passed'),
+                    body.replace('6 | 6 passed', '5 | 5 passed'),
+                    body.replace('6 | 6 passed', '7 | 7 passed'),
+                    body.replace('6 passed | 0 failed', '5 passed | 1 failed'),
+                    body.replace('100 | 100 passed', '0 | 0 passed'),
+                    body.replace('100 passed | 0 failed', '99 passed | 1 failed'),
+                    body.replace('Test Passed.', ''), body + '\nTest Passed.'):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_prepared_job_native(bad, self.command)
+
+    def test_missing_duplicate_and_bad_quote_command_reject(self):
+        body = self.body()
+        first = body.splitlines()[0]
+        for bad in (body.replace(first, ''), body + '\n' + first,
+                    body.replace(first, 'Command: "unterminated')):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_prepared_job_native(bad, self.command)
+
+
 class ResultStoreWindowsPathsTests(unittest.TestCase):
     summary = "[doctest] test cases: 17 | 17 passed | 0 failed"
     markers = ("[result-store-path] target-extended", "[result-store-path] temporary-threshold",

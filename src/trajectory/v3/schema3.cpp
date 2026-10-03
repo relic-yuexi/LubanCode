@@ -945,6 +945,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             }
         }
     } else if (line.kind == K::ToolExecutionPending) {
+        if (line.payload.contains("preparedOnly") && !line.payload["preparedOnly"].is_boolean())
+            return Err("schema3.bad_type", "tool.execution.pending.preparedOnly 应为 boolean");
         // §4.14:已接纳待执行,必须带 reason(queued/approval/dependency/backoff)。
         if (auto error = CheckToolPayload(kind_name, line, true)) {
             return error;
@@ -1639,6 +1641,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
     }
     // ---- 异步工具族(单 P0;全部 statusless 事实行)----
     else if (line.kind == K::ToolJobRegistered) {
+        if (line.payload.contains("preparedOnly") && !line.payload["preparedOnly"].is_boolean())
+            return Err("schema3.bad_type", "tool.job.registered.preparedOnly 应为 boolean");
         // job 注册落稳(单 §5:注册落稳前不派发)。attempt 从 1 起(注册
         // 挂发起 Action 的执行尝试);mode 只收 job_handle|native_deferred;
         // originRef 落信封 turnId/stepId + payload assistantMessageRef;
