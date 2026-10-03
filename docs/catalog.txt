@@ -192,3 +192,5 @@ DOC development/middleware-native-receipts.md
 DOC development/middleware-dispatch-cause.md
 DOC development/middleware-deferred-effects.md
 DOC development/middleware-exception-observation.md
+DOC development/agent-health-batch-fixture.md
+DOC development/owned-job-probe-readiness.md

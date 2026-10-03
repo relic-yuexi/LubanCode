@@ -113,19 +113,37 @@ bool WaitTokenExpired(std::weak_ptr<const void> token) {
 }  // namespace
 
 TEST_CASE("钩子总线:长回调跨析构截止时间后返回,脱离线程只摸共享状态") {
+    struct BatchState {
+        Gate preparation;
+        Gate business;
+        std::atomic<int> hits{0};
+    };
+    const auto state = std::make_shared<BatchState>();
     auto bus = std::make_unique<runtime::AgentHealthHookBus>();
     const auto token = bus->lifetime_token_for_test();
-    Gate gate;
-    std::atomic<int> hits{0};
+    struct OpenOnExit {
+        std::shared_ptr<BatchState> state;
+        ~OpenOnExit() {
+            state->preparation.Open();
+            state->business.Open();
+        }
+    } cleanup{state};  // 失败先开两门,再让总线收线;回调只持共享值
 
-    bus->Subscribe([&](const agent::AgentSupervisionEvent&) {
-        if (hits.fetch_add(1, std::memory_order_acq_rel) == 0) {
-            gate.EnterAndWait();  // 第一枚进门就闩上:派发线程持批卡在回调里
+    bus->Subscribe([state](const agent::AgentSupervisionEvent& event) {
+        if (event.reason_code == "seed") {
+            state->preparation.EnterAndWait();
+            return;  // 准备事件不计入原两条业务事件
+        }
+        if (state->hits.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            state->business.EnterAndWait();  // first 持本批卡住,second 已在同批
         }
     });
+    bus->Publish(MakeEvent("seed"));
+    state->preparation.WaitEntered();  // 确实持住准备批,此刻不会再取队列
     bus->Publish(MakeEvent("first"));
     bus->Publish(MakeEvent("second"));
-    gate.WaitEntered();  // 派发线程已吃进这批、正卡在门闩上
+    state->preparation.Open();  // 两条已入队,下一批必同时取走
+    state->business.WaitEntered();  // 本批 first 真入业务门,再验跨截止收场
 
     // 析构在另一根线程上跑:门闩不开,派发线程跨过 1s 截止时间,
     // 析构必走 detach 分支放行——宿主就此释放,旧代码此刻已埋下 UB。
@@ -133,9 +151,9 @@ TEST_CASE("钩子总线:长回调跨析构截止时间后返回,脱离线程只�
     destroyer.join();
     CHECK_FALSE(token.expired());  // 脱离线程还活着(只被共享状态保命)
 
-    gate.Open();  // 放开长回调:线程回来只摸共享状态,跑完手头一批再退
+    state->business.Open();  // 放开长回调:线程回来只摸共享状态,跑完手头一批再退
     REQUIRE(WaitTokenExpired(token));
-    CHECK(hits.load() == 2);  // 批内剩余照派发(收线 = 跑完手头一批)
+    CHECK(state->hits.load() == 2);  // 批内剩余照派发(收线 = 跑完手头一批)
 }
 
 TEST_CASE("钩子总线:停止后拒收新 Publish,拒收计入 dropped 账") {

@@ -69,3 +69,5 @@ git diff --check
 - [中间件真实派发原因](middleware-dispatch-cause.md)
 - [中间件共用延后效果缓冲](middleware-deferred-effects.md)
 - [中间件异常出口与 Next 所见](middleware-exception-observation.md)
+- [HealthBus 批次寿命夹具](agent-health-batch-fixture.md)
+- [Owned Job 四场探针正文就绪](owned-job-probe-readiness.md)
