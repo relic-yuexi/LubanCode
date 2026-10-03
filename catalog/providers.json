@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "revision": "2026-09-18",
+  "revision": "2026-10-04",
   "providers": {
     "openai": {
       "name": "OpenAI",
@@ -27743,7 +27743,7 @@
       "wire": "openai-chat-completions",
       "base_url": "https://api.xiaomimimo.com/v1",
       "key_env": "MIMO_API_KEY",
-      "default_model": "mimo-v2-5-pro",
+      "default_model": "mimo-v2.6-pro",
       "reasoning_dialect": {
         "toggle": "thinking_type",
         "toggle_on": "enabled",
@@ -27887,6 +27887,87 @@
               "auto"
             ]
           }
+        },
+        "mimo-v2.6-flash": {
+          "name": "MiMo-V2.6-Flash",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "default_think": "auto",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "mimo-v2.6-pro": {
+          "name": "MiMo-V2.6-Pro",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "default_think": "auto",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "mimo-v2.6-pro-ultraspeed": {
+          "name": "MiMo-V2.6-Pro-UltraSpeed",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "default_think": "auto",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
         }
       }
     },
@@ -27896,7 +27977,7 @@
       "wire": "anthropic-messages",
       "base_url": "https://api.xiaomimimo.com/anthropic",
       "key_env": "MIMO_API_KEY",
-      "default_model": "mimo-v2-5-pro",
+      "default_model": "mimo-v2.6-pro",
       "reasoning_dialect": {
         "toggle": "thinking_type",
         "toggle_on": "enabled",
@@ -28046,6 +28127,87 @@
               "auto"
             ]
           }
+        },
+        "mimo-v2.6-flash": {
+          "name": "MiMo-V2.6-Flash",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "default_think": "auto",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "mimo-v2.6-pro": {
+          "name": "MiMo-V2.6-Pro",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "default_think": "auto",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
+        },
+        "mimo-v2.6-pro-ultraspeed": {
+          "name": "MiMo-V2.6-Pro-UltraSpeed",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "default_think": "auto",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "auto"
+            ]
+          }
         }
       }
     },
@@ -28055,7 +28217,7 @@
       "wire": "openai-responses",
       "base_url": "https://api.xiaomimimo.com/v1",
       "key_env": "MIMO_API_KEY",
-      "default_model": "mimo-v2-5-pro",
+      "default_model": "mimo-v2.6-pro",
       "reasoning_dialect": {
         "toggle": "enable_thinking_bool",
         "toggle_on": "true",
@@ -28197,6 +28359,120 @@
             "supportedEfforts": [
               "none",
               "auto"
+            ]
+          }
+        },
+        "mimo-v2.6-flash": {
+          "name": "MiMo-V2.6-Flash",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "default_think": "medium",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "mimo-v2.6-pro": {
+          "name": "MiMo-V2.6-Pro",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "default_think": "medium",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "mimo-v2.6-pro-ultraspeed": {
+          "name": "MiMo-V2.6-Pro-UltraSpeed",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "default_think": "medium",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "audio-recognition": true,
+            "video-recognition": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high"
             ]
           }
         }
@@ -36861,6 +37137,592 @@
         },
         "microsoft/wizardlm-2-8x22b": {
           "name": "WizardLM-2 8x22B"
+        },
+        "anthropic/claude-fable-5.1": {
+          "name": "Claude Fable 5.1",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "anthropic/claude-opus-5.5": {
+          "name": "Claude Opus 5.5",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "anthropic/claude-sonnet-5.5": {
+          "name": "Claude Sonnet 5.5",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "deepseek/deepseek-v4-flash-0731": {
+          "name": "DeepSeek V4 Flash 0731",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "deepseek/deepseek-v4-pro": {
+          "name": "DeepSeek V4 Pro 0423",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "deepseek/deepseek-v4.1-flash": {
+          "name": "DeepSeek V4.1 Flash",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "google/gemini-3.8-flash": {
+          "name": "Gemini 3.8 Flash",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "audio-recognition": true,
+            "file_input": true
+          }
+        },
+        "inclusionai/ling-3.0-flash-fin": {
+          "name": "Ling 3.0 Flash Fin",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "inclusionai/ling-3.0-flash-vl": {
+          "name": "Ling 3.0 Flash VL",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          }
+        },
+        "inclusionai/ling-3.1-flash": {
+          "name": "Ling 3.1 Flash",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "meta/muse-spark-1.3": {
+          "name": "Muse Spark 1.3",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6-astra": {
+          "name": "gpt-6-astra",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max",
+                  "ultra"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ]
+          },
+          "default_think": "medium"
+        },
+        "openai/gpt-6-astra-pro": {
+          "name": "GPT-6 Astra Pro",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6-luna": {
+          "name": "GPT-6 Luna",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6-luna-pro": {
+          "name": "GPT-6 Luna Pro",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6-sol": {
+          "name": "GPT-6 Sol",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6-sol-pro": {
+          "name": "GPT-6 Sol Pro",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6.1-sol": {
+          "name": "GPT-6.1 Sol",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6.1-sol-pro": {
+          "name": "GPT-6.1 Sol Pro",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "qwen/qwen3.8-flash": {
+          "name": "Qwen3.8 Flash",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          }
+        },
+        "qwen/qwen3.8-max-prime": {
+          "name": "Qwen3.8 Max Prime",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          }
+        },
+        "qwen/qwen3.8-omni-flash": {
+          "name": "Qwen3.8 Omni Flash",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "audio-recognition": true
+          }
+        },
+        "x-ai/grok-4.7": {
+          "name": "Grok 4.7",
+          "context_window": 500000,
+          "max_context_window": 500000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "xiaomi/mimo-v2.6-flash": {
+          "name": "MiMo-V2.6-Flash",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "audio-recognition": true
+          }
+        },
+        "xiaomi/mimo-v2.6-pro": {
+          "name": "MiMo-V2.6-Pro",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "audio-recognition": true
+          }
+        },
+        "z-ai/glm-5.3-flash": {
+          "name": "GLM 5.3 Flash",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          }
+        },
+        "z-ai/glm-5.3-prime": {
+          "name": "GLM 5.3 Prime",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "aion-labs/aion-3.5": {
+          "name": "Aion 3.5",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "aion-labs/aion-3.5-mini": {
+          "name": "Aion 3.5 Mini",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "cohere/command-a-plus": {
+          "name": "Command A+",
+          "context_window": 192000,
+          "max_context_window": 192000,
+          "max_output": 64000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "fireworks/ember-1": {
+          "name": "Ember-1",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "inception/mercury-2.5": {
+          "name": "Mercury 2.5",
+          "context_window": 260000,
+          "max_context_window": 260000,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "inference-net/schematron-v2-small": {
+          "name": "Schematron V2 Small",
+          "context_window": 128000,
+          "max_context_window": 128000,
+          "max_output": 4096,
+          "capabilities": {
+            "structured_output": true
+          }
+        },
+        "inference-net/schematron-v2-turbo": {
+          "name": "Schematron V2 Turbo",
+          "context_window": 128000,
+          "max_context_window": 128000,
+          "max_output": 8192,
+          "capabilities": {
+            "structured_output": true
+          }
+        },
+        "meta/muse-spark-1.3-contributor": {
+          "name": "Muse Spark 1.3 Contributor",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          }
+        },
+        "nex-agi/nex-n2.5-mini": {
+          "name": "Nex-N2.5-Mini",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 235929,
+          "capabilities": {
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "nex-agi/nex-n2.5-pro": {
+          "name": "Nex-N2.5-Pro",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 235929,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "perceptron/perceptron-mk1.5": {
+          "name": "Perceptron Mk1.5",
+          "context_window": 36864,
+          "max_context_window": 36864,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "audio-recognition": true
+          }
+        },
+        "prism-ml/ternary-bonsai-2-27b": {
+          "name": "Ternary Bonsai 2 27B",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "qwen/qwen3.8-max-0902": {
+          "name": "Qwen3.8 Max (0902)",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          }
+        },
+        "sakana/fugu-max": {
+          "name": "Fugu Max",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "sakana/fugu-ultra-v2": {
+          "name": "Fugu Ultra v2",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "upstage/solar-mini4": {
+          "name": "Solar Mini 4",
+          "context_window": 524288,
+          "max_context_window": 524288,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "xiaomi/mimo-v2.6-pro-ultraspeed": {
+          "name": "MiMo-V2.6-Pro-UltraSpeed",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "audio-recognition": true
+          }
+        },
+        "z-ai/glm-5.3-flashx": {
+          "name": "GLM 5.3 FlashX",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          }
         }
       }
     },
@@ -43427,6 +44289,592 @@
         },
         "microsoft/wizardlm-2-8x22b": {
           "name": "WizardLM-2 8x22B"
+        },
+        "anthropic/claude-fable-5.1": {
+          "name": "Claude Fable 5.1",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "anthropic/claude-opus-5.5": {
+          "name": "Claude Opus 5.5",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "anthropic/claude-sonnet-5.5": {
+          "name": "Claude Sonnet 5.5",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "deepseek/deepseek-v4-flash-0731": {
+          "name": "DeepSeek V4 Flash 0731",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "deepseek/deepseek-v4-pro": {
+          "name": "DeepSeek V4 Pro 0423",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "deepseek/deepseek-v4.1-flash": {
+          "name": "DeepSeek V4.1 Flash",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "google/gemini-3.8-flash": {
+          "name": "Gemini 3.8 Flash",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "audio-recognition": true,
+            "file_input": true
+          }
+        },
+        "inclusionai/ling-3.0-flash-fin": {
+          "name": "Ling 3.0 Flash Fin",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "inclusionai/ling-3.0-flash-vl": {
+          "name": "Ling 3.0 Flash VL",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          }
+        },
+        "inclusionai/ling-3.1-flash": {
+          "name": "Ling 3.1 Flash",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "meta/muse-spark-1.3": {
+          "name": "Muse Spark 1.3",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6-astra": {
+          "name": "gpt-6-astra",
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          },
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max",
+                  "ultra"
+                ]
+              }
+            ],
+            "supportedEfforts": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max",
+              "ultra"
+            ]
+          },
+          "default_think": "medium"
+        },
+        "openai/gpt-6-astra-pro": {
+          "name": "GPT-6 Astra Pro",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6-luna": {
+          "name": "GPT-6 Luna",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6-luna-pro": {
+          "name": "GPT-6 Luna Pro",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6-sol": {
+          "name": "GPT-6 Sol",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6-sol-pro": {
+          "name": "GPT-6 Sol Pro",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6.1-sol": {
+          "name": "GPT-6.1 Sol",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "openai/gpt-6.1-sol-pro": {
+          "name": "GPT-6.1 Sol Pro",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "qwen/qwen3.8-flash": {
+          "name": "Qwen3.8 Flash",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          }
+        },
+        "qwen/qwen3.8-max-prime": {
+          "name": "Qwen3.8 Max Prime",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          }
+        },
+        "qwen/qwen3.8-omni-flash": {
+          "name": "Qwen3.8 Omni Flash",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "audio-recognition": true
+          }
+        },
+        "x-ai/grok-4.7": {
+          "name": "Grok 4.7",
+          "context_window": 500000,
+          "max_context_window": 500000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "xiaomi/mimo-v2.6-flash": {
+          "name": "MiMo-V2.6-Flash",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "audio-recognition": true
+          }
+        },
+        "xiaomi/mimo-v2.6-pro": {
+          "name": "MiMo-V2.6-Pro",
+          "context_window": 1050000,
+          "max_context_window": 1050000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "audio-recognition": true
+          }
+        },
+        "z-ai/glm-5.3-flash": {
+          "name": "GLM 5.3 Flash",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          }
+        },
+        "z-ai/glm-5.3-prime": {
+          "name": "GLM 5.3 Prime",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "aion-labs/aion-3.5": {
+          "name": "Aion 3.5",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "aion-labs/aion-3.5-mini": {
+          "name": "Aion 3.5 Mini",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          }
+        },
+        "cohere/command-a-plus": {
+          "name": "Command A+",
+          "context_window": 192000,
+          "max_context_window": 192000,
+          "max_output": 64000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "fireworks/ember-1": {
+          "name": "Ember-1",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "inception/mercury-2.5": {
+          "name": "Mercury 2.5",
+          "context_window": 260000,
+          "max_context_window": 260000,
+          "max_output": 65536,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "inference-net/schematron-v2-small": {
+          "name": "Schematron V2 Small",
+          "context_window": 128000,
+          "max_context_window": 128000,
+          "max_output": 4096,
+          "capabilities": {
+            "structured_output": true
+          }
+        },
+        "inference-net/schematron-v2-turbo": {
+          "name": "Schematron V2 Turbo",
+          "context_window": 128000,
+          "max_context_window": 128000,
+          "max_output": 8192,
+          "capabilities": {
+            "structured_output": true
+          }
+        },
+        "meta/muse-spark-1.3-contributor": {
+          "name": "Muse Spark 1.3 Contributor",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "file_input": true
+          }
+        },
+        "nex-agi/nex-n2.5-mini": {
+          "name": "Nex-N2.5-Mini",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 235929,
+          "capabilities": {
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "nex-agi/nex-n2.5-pro": {
+          "name": "Nex-N2.5-Pro",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 235929,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "perceptron/perceptron-mk1.5": {
+          "name": "Perceptron Mk1.5",
+          "context_window": 36864,
+          "max_context_window": 36864,
+          "max_output": 8192,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "audio-recognition": true
+          }
+        },
+        "prism-ml/ternary-bonsai-2-27b": {
+          "name": "Ternary Bonsai 2 27B",
+          "context_window": 262144,
+          "max_context_window": 262144,
+          "max_output": 32768,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true
+          }
+        },
+        "qwen/qwen3.8-max-0902": {
+          "name": "Qwen3.8 Max (0902)",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          }
+        },
+        "sakana/fugu-max": {
+          "name": "Fugu Max",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "sakana/fugu-ultra-v2": {
+          "name": "Fugu Ultra v2",
+          "context_window": 1000000,
+          "max_context_window": 1000000,
+          "max_output": 128000,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "file_input": true
+          }
+        },
+        "upstage/solar-mini4": {
+          "name": "Solar Mini 4",
+          "context_window": 524288,
+          "max_context_window": 524288,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          }
+        },
+        "xiaomi/mimo-v2.6-pro-ultraspeed": {
+          "name": "MiMo-V2.6-Pro-UltraSpeed",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true,
+            "audio-recognition": true
+          }
+        },
+        "z-ai/glm-5.3-flashx": {
+          "name": "GLM 5.3 FlashX",
+          "context_window": 1048576,
+          "max_context_window": 1048576,
+          "max_output": 131072,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "image": true,
+            "video": true,
+            "video-recognition": true
+          }
         }
       }
     },
