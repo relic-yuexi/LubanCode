@@ -2,6 +2,8 @@
 
 首笔只收中立 Coordinator 当前 Post 调用。基线 `bf48042d6f780fd18cb7f3a2c8446779ab46f8b7`；旧 `codex/sdk-job-admission` 本地与远端引用保留。公开 Jobs、SDK Job Operation、持久 binding、SessionJobs 装配均不在这笔。公开 Close、父取消和 Job 许可域仍待答，不替用户定政策。
 
+实现前吸收前置夹具 API 单词修正 `445ad858`（本树提交 `fcccdabf`）；原 c1b 远端编译红另留。此举没有改本笔生产、册数或断言，不拿父支状态证明本笔原生通过。
+
 ## 实际 producer 与借用
 
 `SettleOwned` 已持真实 OwnedRecord、当前实例/epoch、业务 attempt1、actual completion、Started/terminal/persisted 回执和实际 capability。它在调用本 record Post 时签内部 `OwnedJobPostInvocation`。该 handle 不从 JSON、ledger、同 run 旧锚、父 Operation 或 caller nonce 构造；只签当前具体 record，不能凭 `current_owned_callback == impl` 为另一份 Job 发许可。
