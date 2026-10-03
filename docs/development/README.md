@@ -44,3 +44,4 @@ git diff --check
 - [SDK 前台子 Agent 装配](sdk-subagent-assembly.md)
 - [结果仓 Windows 原生路径入口](result-store-windows-io.md)
 - [SDK 渠道与 Gateway 宿主边界](sdk-channel-gateway-boundary.md)
+- [SDK Memory 写计划失败诊断](sdk-plan-atomic-diagnostic.md)
