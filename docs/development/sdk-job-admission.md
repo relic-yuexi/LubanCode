@@ -41,3 +41,7 @@ Hold 与 thread startup 合同不能替新交单验收。#309 首轮真实恢复
 新原生册必须走真实 Prepare 与 AgentLoop，核最终参数由共同改参/权限门产出、Deny/Ask/取消与注册元数据不串；新严格路线在缺完整 owner/Post 时明确拒绝，旧 gate 与工具执行计数均为零，下一模型只见拒绝。原 RunOneTool/CLI 协议与旧 Job16、startup6、Hold6断言全留；不拿镜像 reducer 或值类型测试报完整 SDK Jobs。
 
 新增 source 依实际名册接三平台 focused 与必需 ASan，完整 argv/非零册数/JUnit/LastTest交叉校；本笔实际六案、六路径，focused 由35增至36，必需 ASan 由40增至41，安装消费者仍25。公开安装消费者数不因内部原语增加。本地只跑静态、纯数据和 docs。
+
+## 首轮夹具收口
+
+`ee577795` 远端真跑暴露两处夹具错：实际 AsyncToolRuntime::Create 需要 writer 与同场 writer_mutex，测试漏后者；首次 V3 注入写失败回原 Rejected/v3writer.injected，同时 writer 已 broken，测试却硬认 IoFailed。只补真实共享锁，并精确核原首回执、broken 与注入/退场次数；不改 Writer 分类、不补第二写来迎断言。六案与真实 StopIndeterminate、零 inline/下一模型、未 Started/终态未落全部保留。旧失败留原件，鲜头另验，不称旧头通过。
