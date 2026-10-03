@@ -110,6 +110,8 @@ SDK_HOST_ONLY_SOURCE_FILES = {
 }
 HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/", *SDK_HOST_ONLY_SOURCE_PREFIXES)
 SHARED_SDK_TEST_SOURCES = {
+    "tests/unit/tools/test_tool_job_coordinator.cpp",
+    "tests/unit/tools/test_tool_job_start_transaction.cpp",
     "tests/unit/trajectory_v3/test_v3_result_store.cpp",
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",

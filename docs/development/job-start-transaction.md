@@ -22,4 +22,6 @@ worker 只持本 Job owned context/cancel/epoch 和稳定协调器 mailbox。Sta
 
 保原 JobCoordinator 16 册和所有原断言。新来源固定 6 册：真实 executor copy 抛错、启动前标准/非标准拒绝、启动后抛错但真 worker 仍归 owner、失败后配额/资源供下一 Job、失败收账未确认、真实 Shutdown/Reap 与 capture 退场。失败解门先于 future join，等待有界。每条主路末尾唯一标记，三平台 focused 与 ASan 从真实 registration/JUnit/LastTest 核源、六册、非零断言和标记。
 
+新六册各自创建独占临时根；只有 `create_directory` 真创建成功才认领，已有候选换名，不删别场目录。构造失败也先关真实 writer，再清自有根。原十六册 SDK/CLI 两份 registration 共用同名 CTest resource lock，防旧固定夹具根并行撞场；原来源和断言不改。
+
 本地只读源码、跑纯数据和文档检查。configure、编译、CTest、原生进程全交远端 CI。新头实证单列，不能借旧 CI 验收。

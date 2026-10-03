@@ -33,6 +33,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -241,10 +242,15 @@ struct JobRecoveryPlan {
 
 class ToolJobCoordinator {
 public:
+    // Internal lifecycle seam. Publish any live thread directly into the owned
+    // destination before returning or throwing; never retain it elsewhere.
+    using ThreadStarter = std::function<void(std::thread&, std::function<void()>)>;
+
     struct Options {
         JobConcurrencyLimits limits;
         std::shared_ptr<GlobalRunningQuota> global;  // 缺省自建(limit 8)
         std::function<std::int64_t()> clock_ms;      // 缺省墙钟;测试注固定钟
+        ThreadStarter thread_starter;  // Empty uses a real std::thread.
     };
 
     // writer:本会话 v3 单写者(引用,寿命由调用方保证,协调器不收柄);

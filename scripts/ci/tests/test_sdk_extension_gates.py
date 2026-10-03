@@ -17,6 +17,73 @@ focused = importlib.util.module_from_spec(FOCUSED_SPEC)
 FOCUSED_SPEC.loader.exec_module(focused)
 
 
+class JobStartupGateTests(unittest.TestCase):
+    def body(self, command, original=False):
+        import shlex
+        count = 16 if original else 6
+        return "\n".join(("Command: " + " ".join('"' + value + '"' for value in command),
+            f"[doctest] test cases: {count} | {count} passed | 0 failed",
+            "[doctest] assertions: 91 | 91 passed | 0 failed",
+            *("[job-start-path] " + path for path in focused.JOB_START_PATHS)))
+
+    def test_actual_sdk_and_cli_commands_cover_new_and_original_sources(self):
+        for exe in ("/build/real/lubancore_sdk_tests", "C:/build real/lubancode_tests.exe"):
+            for original in (False, True):
+                source = "test_tool_job_coordinator.cpp" if original else "test_tool_job_start_transaction.cpp"
+                command = [exe, "--source-file=*" + source]
+                focused.check_job_start_native(self.body(command, original), command, original)
+
+    def test_full_command_same_basename_foreign_checkout_and_extra_filter_reject(self):
+        command = ["/build/real/lubancore_sdk_tests", "--source-file=*test_tool_job_start_transaction.cpp"]
+        for bad in ([command[0].replace("/real/", "/foreign/"), command[1]], command + ["--test-case=one"]):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_job_start_native(self.body(bad), command)
+
+    def test_missing_duplicate_and_decorated_markers_reject(self):
+        command = ["/build/real/lubancore_sdk_tests", "--source-file=*test_tool_job_start_transaction.cpp"]
+        body = self.body(command)
+        for path in focused.JOB_START_PATHS:
+            marker = "[job-start-path] " + path
+            for bad in (body.replace(marker, ""), body + "\n" + marker, body.replace(marker, "other-source: " + marker)):
+                with self.subTest(path=path), self.assertRaises(RuntimeError):
+                    focused.check_job_start_native(bad, command)
+
+    def test_empty_failed_changed_case_and_assertion_counts_reject(self):
+        command = ["/build/real/lubancore_sdk_tests", "--source-file=*test_tool_job_start_transaction.cpp"]
+        body = self.body(command)
+        for bad in (body.replace("6 | 6 passed", "0 | 0 passed"), body.replace("6 | 6 passed", "5 | 5 passed"),
+                    body.replace("6 passed | 0 failed", "5 passed | 1 failed"),
+                    body.replace("91 | 91 passed", "0 | 0 passed"), body.replace("91 passed | 0 failed", "90 passed | 1 failed"),
+                    body + "\n[doctest] test cases: 6 | 6 passed | 0 failed"):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_job_start_native(bad, command)
+
+    def test_bad_source_executable_and_missing_duplicate_command_reject(self):
+        command = ["/build/real/lubancore_sdk_tests", "--source-file=*test_tool_job_start_transaction.cpp"]
+        for bad in (["/build/real/other", command[1]], [command[0], "--source-file=*test_tool_job.cpp"], [], command + ["extra"]):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_job_start_native(self.body(command), bad)
+        body = self.body(command)
+        line = body.splitlines()[0]
+        for bad in (body.replace(line, ""), body + "\n" + line):
+            with self.assertRaises(RuntimeError): focused.check_job_start_native(bad, command)
+
+    def test_registration_failure_preserves_raw_non_utf8_before_throwing(self):
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as temporary:
+            build = Path(temporary)
+            result = subprocess.CompletedProcess(["ctest"], 17, b"raw\xffstdout", b"raw\xffstderr")
+            with patch.object(focused.subprocess, "run", return_value=result), \
+                    patch.object(sys, "argv", ["check", "--build-dir", str(build)]), \
+                    self.assertRaises(subprocess.CalledProcessError):
+                focused.main()
+            evidence = build / "test-evidence" / "sdk-focused"
+            self.assertEqual((evidence / "registration.stdout").read_bytes(), b"raw\xffstdout")
+            self.assertEqual((evidence / "registration.stderr").read_bytes(), b"raw\xffstderr")
+            self.assertIn('"returncode": 17', (evidence / "registration-result.json").read_text())
+
+
 class ResultStoreWindowsPathsTests(unittest.TestCase):
     summary = "[doctest] test cases: 17 | 17 passed | 0 failed"
     markers = ("[result-store-path] target-extended", "[result-store-path] temporary-threshold",
