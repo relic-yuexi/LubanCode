@@ -50,6 +50,7 @@ EVENT_KEYS = COMMON_KEYS | {
 
 KINDS = {
     "session.started", "session.ended", "system.change",
+    "sdk.operation.turn.bound",
     "context.system.applied", "context.input.applied", "context.tool_previews.reduced",
     "model.request.prepared", "model.request.sent", "model.request.failed",
     "model.response.started", "model.response.delta", "model.response.completed",
@@ -124,6 +125,7 @@ KIND_STATUS = {
     "cancelled": "cancelled", "rejected": "rejected", "unknown": "unknown",
 }
 STATUSLESS_KINDS = {
+    "sdk.operation.turn.bound",
     "tool.job.adopted",
     "session.started", "system.change", "model.request.prepared",
     "model.response.started", "model.response.delta", "compact.requested",
@@ -435,7 +437,26 @@ def validate_line(obj: object, expect_seq: int) -> dict:
         if id_field is not None and not isinstance(obj.get(id_field), str):
             raise ValidationError(f"{kind} 必带 {id_field}")
         payload = obj.get("payload") or {}
-        if kind.startswith(("tool.execution.", "tool.result.")):
+        if kind == "sdk.operation.turn.bound":
+            if not isinstance(obj.get("turnId"), str) or not obj["turnId"] or any(
+                    key in obj for key in ("parentTurnId", "stepId", "requestId", "actionId", "compactId",
+                                          "commandId", "hookDispatchId", "taskId", "titleGenerationId", "effects", "effectRefs")):
+                raise ValidationError("main operation anchor requires only a turn identity")
+            if len(obj["turnId"]) > 200 or any(char not in
+                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for char in obj["turnId"]):
+                raise ValidationError("invalid main operation turn ID")
+            if set(payload) != {"layout", "version", "operationId", "inputId", "payloadHash"} or \
+                    type(payload.get("version")) is not int or payload["version"] != 1 or \
+                    payload.get("layout") != "sdk_main_operation_turn_v1":
+                raise ValidationError("unknown main operation anchor layout/version")
+            for key in ("operationId", "inputId"):
+                value = payload[key]
+                if not isinstance(value, str) or not 0 < len(value) <= 200 or \
+                        any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for char in value):
+                    raise ValidationError("invalid main operation anchor identity: " + key)
+            if not is_hex64(payload["payloadHash"]):
+                raise ValidationError("main operation anchor payloadHash must be lowercase SHA-256")
+        elif kind.startswith(("tool.execution.", "tool.result.")):
             # 工具族载荷合同(§4.14-4.16/§4.19;与 C++ schema3 同口径)。
             if kind == "tool.execution.pending":
                 check_tool_payload(obj, kind, payload, True)
@@ -1320,6 +1341,30 @@ def self_test() -> int:
     bad = dict(goal_applied); bad["status"] = "done"
     if not expect_fail(lambda: validate_line(bad, 4), "goal statusless"):
         failures += 1
+    # The private main-operation anchor shares its exact C++ single-line shape.
+    anchor = dict(goal_applied)
+    anchor.update({"kind": "sdk.operation.turn.bound", "turnId": "turn-000001", "payload": {
+        "layout": "sdk_main_operation_turn_v1", "version": 1,
+        "operationId": "op-1", "inputId": "in-1", "payloadHash": "a" * 64}})
+    try:
+        validate_line(anchor, 4)
+    except ValidationError as error:
+        failures += 1
+        print(f"self-test main operation anchor rejected: {error}")
+    invalid_anchors = []
+    for key, value in (("version", True), ("version", 2), ("layout", "foreign"),
+                       ("operationId", "../op"), ("inputId", ""), ("inputId", "x" * 201),
+                       ("payloadHash", "A" * 64), ("payloadHash", "a" * 63), ("extra", 1)):
+        invalid_anchors.append({**anchor, "payload": {**anchor["payload"], key: value}})
+    invalid_anchors.append({key: value for key, value in anchor.items() if key != "turnId"})
+    invalid_anchors.extend({**anchor, "turnId": value} for value in ("", "../turn", "x" * 201))
+    for key in ("status", "parentTurnId", "stepId", "requestId", "actionId", "compactId",
+                "commandId", "hookDispatchId", "taskId", "titleGenerationId", "effects", "effectRefs"):
+        invalid_anchors.append({**anchor, key: [] if key in ("effects", "effectRefs") else
+                                "done" if key == "status" else "foreign-1"})
+    for bad_anchor in invalid_anchors:
+        if not expect_fail(lambda: validate_line(bad_anchor, 4), "main operation anchor exact shape"):
+            failures += 1
     bad = dict(goal_applied)
     bad["payload"] = {**bad["payload"], "toStateRevision": 2}
     if not expect_fail(lambda: validate_line(bad, 4), "goal revision +1"):

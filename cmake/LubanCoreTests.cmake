@@ -66,6 +66,9 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   # Real private Action host adapters exercise native sink receipts without
   # exporting new private symbols or adding a public writer-fault option.
   "${CMAKE_SOURCE_DIR}/src/sdk/action_dispatch.cpp"
+  # The internal turn-binding fixture calls the same producer/strict reader;
+  # it grants no extra shared-library ABI or alternate execution stack.
+  "${CMAKE_SOURCE_DIR}/src/sdk/operation_ledger.cpp"
   # The public-only child acceptance source is also built after relocation. It
   # belongs to these fixture executables, never the SDK library closure.
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/subagents.cpp"

@@ -6,8 +6,10 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "platform/sha256.hpp"
 #include "platform/bounded_read.hpp"
@@ -233,6 +235,8 @@ std::expected<V3Ledger, std::string> ReadVerifiedV3Lines(
     }
     if (auto owned = ReadOwnedJobAdoptions(ledger); !owned)
         return std::unexpected("v3reader.invalid_owned_job: " + owned.error());
+    if (auto bound = ReadOperationTurnBindings(ledger); !bound)
+        return std::unexpected(bound.error());
     return ledger;
 }
 
@@ -1541,6 +1545,65 @@ bool OwnedPostMatches(const V3Ledger& ledger, const EventLine& post,
 }
 
 } // namespace
+
+std::expected<std::vector<OperationTurnBindingFacts>, std::string>
+ReadOperationTurnBindings(const V3Ledger& ledger) {
+    std::vector<OperationTurnBindingFacts> facts;
+    if (std::none_of(ledger.events.begin(), ledger.events.end(), [](const auto& event) {
+            return event.kind == EventKindV3::SdkOperationTurnBound;
+        })) return facts;
+    std::set<std::string> operations, turns, inputs;
+    std::map<std::string, std::uint64_t> first_turn_seq;
+    struct TurnOwner {
+        std::string session_id, run_id;
+        bool consistent = true;
+    };
+    std::map<std::string, TurnOwner> turn_owners;
+    std::map<std::pair<std::string, std::string>, std::uint64_t> run_started_seq;
+    const auto note_turn = [&](const auto& line) {
+        if (!line.turn_id) return;
+        const auto [it, inserted] = first_turn_seq.emplace(*line.turn_id, line.seq);
+        if (!inserted) it->second = std::min(it->second, line.seq);
+        const auto [owner, first_owner] = turn_owners.emplace(
+            *line.turn_id, TurnOwner{line.session_id, line.run_id});
+        if (!first_owner && (owner->second.session_id != line.session_id || owner->second.run_id != line.run_id))
+            owner->second.consistent = false;
+    };
+    for (const auto& message : ledger.messages) note_turn(message);
+    for (const auto& event : ledger.events) {
+        note_turn(event);
+        if (event.kind == EventKindV3::SessionStarted)
+            run_started_seq.emplace(std::make_pair(event.session_id, event.run_id), event.seq);
+    }
+    try {
+        for (const auto& event : ledger.events) {
+            if (event.kind != EventKindV3::SdkOperationTurnBound) continue;
+            const auto invalid = [] { return std::unexpected(std::string("v3reader.operation_turn_invalid")); };
+            if (!event.turn_id || event.session_id != ledger.session_id || event.run_id.empty() ||
+                event.payload.at("layout").get<std::string>() != kSdkMainOperationTurnLayout ||
+                event.payload.at("version") != 1)
+                return invalid();
+            OperationTurnBindingFacts fact;
+            fact.session_id = event.session_id; fact.run_id = event.run_id; fact.turn_id = *event.turn_id;
+            fact.operation_id = event.payload.at("operationId").get<std::string>();
+            fact.input_id = event.payload.at("inputId").get<std::string>();
+            fact.payload_hash = event.payload.at("payloadHash").get<std::string>();
+            fact.event_id = event.event_id; fact.seq = event.seq; fact.line_hash = event.line_hash;
+            if (!operations.insert(fact.operation_id).second || !turns.insert(fact.turn_id).second ||
+                !inputs.insert(fact.input_id).second || first_turn_seq.at(fact.turn_id) != event.seq)
+                return invalid();
+            const auto started = run_started_seq.find(std::make_pair(event.session_id, event.run_id));
+            if (started == run_started_seq.end() || started->second >= event.seq) return invalid();
+            const auto& owner = turn_owners.at(fact.turn_id);
+            if (!owner.consistent || owner.session_id != fact.session_id || owner.run_id != fact.run_id)
+                return invalid();
+            facts.push_back(std::move(fact));
+        }
+    } catch (const nlohmann::json::exception&) {
+        return std::unexpected("v3reader.operation_turn_invalid: malformed anchor");
+    }
+    return facts;
+}
 
 std::expected<OwnedJobAdoptionFacts, std::string> ReadOwnedJobRegistration(
     const V3Ledger& ledger, std::string_view job_id) {
