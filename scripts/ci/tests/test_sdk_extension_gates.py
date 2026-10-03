@@ -22,22 +22,24 @@ class ResultStoreWindowsPathsTests(unittest.TestCase):
     markers = ("[result-store-path] target-extended", "[result-store-path] temporary-threshold",
                "[result-store-path-length] target-extended target=340 temporary=344",
                "[result-store-path-length] temporary-threshold target=247 temporary=251")
+    owners = ('[result-store-fixture] {"marker":"target-extended","root":"C:/temp/owner-target","cleanup":"removed"}',
+              '[result-store-fixture] {"marker":"temporary-threshold","root":"C:/temp/owner-temp","cleanup":"removed"}')
 
     def test_actual_windows_pair_and_original_posix_roster(self):
-        focused.check_result_store_native("\n".join((self.summary, *self.markers)), "nt")
+        focused.check_result_store_native("\n".join((self.summary, *self.markers, *self.owners)), "nt")
         focused.check_result_store_native(self.summary, "posix")
 
     def test_missing_decorated_and_duplicate_windows_markers_reject(self):
         for marker in self.markers:
             with self.subTest(marker=marker):
-                body = "\n".join((self.summary, *(value for value in self.markers if value != marker)))
+                body = "\n".join((self.summary, *(value for value in self.markers if value != marker), *self.owners))
                 for changed in (body, body + "\nother-source: " + marker,
-                                "\n".join((self.summary, *self.markers, marker))):
+                                "\n".join((self.summary, *self.markers, *self.owners, marker))):
                     with self.assertRaisesRegex(RuntimeError, "actual Windows path did not finish once"):
                         focused.check_result_store_native(changed, "nt")
 
     def test_wrong_real_path_length_rejects(self):
-        body = "\n".join((self.summary, *self.markers)).replace("temporary=251", "temporary=247")
+        body = "\n".join((self.summary, *self.markers, *self.owners)).replace("temporary=251", "temporary=247")
         with self.assertRaisesRegex(RuntimeError, "actual Windows path did not finish once"):
             focused.check_result_store_native(body, "nt")
 
@@ -47,6 +49,27 @@ class ResultStoreWindowsPathsTests(unittest.TestCase):
                      self.summary + "\n" + self.summary):
             with self.subTest(body=body), self.assertRaisesRegex(RuntimeError, "17 successful cases"):
                 focused.check_result_store_native(body, "posix")
+
+    def test_missing_duplicate_decorated_cleanup_records_reject(self):
+        body = "\n".join((self.summary, *self.markers, *self.owners))
+        for owner in self.owners:
+            for bad in (body.replace(owner, ''), body + '\n' + owner,
+                        body.replace(owner, 'foreign-source: ' + owner)):
+                with self.subTest(bad=bad), self.assertRaisesRegex(RuntimeError, "owned cleanup"):
+                    focused.check_result_store_native(bad, 'nt')
+
+    def test_bad_cleanup_owner_or_status_reject(self):
+        body = "\n".join((self.summary, *self.markers, *self.owners))
+        for bad in (body.replace('"removed"', '"failed"'), body.replace('"root":"C:/temp/owner-target"', '"root":""'),
+                    body.replace(self.owners[0], '[result-store-fixture] not-json'),
+                    body.replace('"marker":"target-extended"', '"marker":"foreign"')):
+            with self.subTest(bad=bad), self.assertRaisesRegex(RuntimeError, "owned cleanup"):
+                focused.check_result_store_native(bad, 'nt')
+
+    def test_same_normalized_root_cannot_belong_to_both_paths(self):
+        body = "\n".join((self.summary, *self.markers, *self.owners)).replace('C:/temp/owner-temp', 'c:/TEMP/owner-target')
+        with self.assertRaisesRegex(RuntimeError, "owned roots were reused"):
+            focused.check_result_store_native(body, 'nt')
 
 
 class MemoryCasWindowsPathsTests(unittest.TestCase):
