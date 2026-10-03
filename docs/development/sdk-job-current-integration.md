@@ -21,3 +21,13 @@
 预核目标为 41 focused 来源、47 ASan 来源、25 installed consumer。41 来源共有 368 处 `TEST_CASE`：Windows 不登记三条 POSIX host-boundary 案，POSIX 不登记三条 Windows atomic-write 案，各平台预期 365。实施后须从实际表、两处 selector 与原源码重数；这些数字只记静态名册，不能冒充实跑。合完交 exact source/tree/parents、冲突处理与纯数据结果，根代理二读后才推远端独立组合 CI。
 
 本地只读源码、Git、文档和纯 Python；不 configure、编译、CTest 或运行原生程序。
+
+## Memory worker batch：已有返回值诊断
+
+本次窄补基线为 `f526e0785e430c5bf874ed4ae143024fd10c135f`。只给 `tests/unit/memory/test_project_memory.cpp` 的连续六笔入队案添诊断，不拿后面同 id 更新案资料替这案。
+
+原轮询、20 秒/25 毫秒等待、补拉条件、两轮 Drain、47 CASE 与全部断言照留。轮询后原两次 `Status` 各绑定实际返回值，打印已有队列计数；原 Drain 只绑定本次返回的完成队列，打印轮次、数量及其中 `job_id/operation_id/outcome/memory_id/error`。不新增 Status、Drain、结果读取、文件访问、重试或其他 getter，不读正文。生产与 CI 名册不改。
+
+诊断写 stderr，前缀独立用 `[memory-worker-batch-*]`，不冒成功路径 marker。字段与 JSON 单行各设硬帽，坏 UTF-8 用 replace，截断明报；诊断异常只记失败标志，不改实际返回值、不盖原异常和断言。现有完成值不是原生 WriteReceipt，也不暴露 failed report；不能从字段猜确认状态或把 Busy/OS 当唯一根因。
+
+合同先单独提交，再改测试。静态反剥新 helper、打印与临时绑定后，原整源须逐字还原；CASE、原等待/条件/断言及各查询调用数另核。本地仍不编译或执行原生，鲜远程原件另收，旧失败与 seal 不动。
