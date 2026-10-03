@@ -727,6 +727,7 @@ jobs:
         if: needs.changes.outputs.runner_tests == 'true'
         shell: bash
         run: |
+          cmake --build build --config Release --target luban_runner_release_tests -j 4
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
           "$PY" -m unittest discover -s scripts/ci/tests -p test_runner_release_gate.py
           "$PY" scripts/ci/check_runner_release.py --build-dir build
@@ -1119,6 +1120,7 @@ jobs:
       - name: Run native Runner Release diagnostics
         if: needs.changes.outputs.runner_tests == 'true'
         run: |
+          cmake --build build --target luban_runner_release_tests -j "$(nproc)"
           if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
           "$PY" -m unittest discover -s scripts/ci/tests -p test_runner_release_gate.py
           "$PY" scripts/ci/check_runner_release.py --build-dir build

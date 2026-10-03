@@ -27,7 +27,7 @@ def validate_registration(tests):
     command = test.get("command", [])
     if (len(command) != 2 or not isinstance(command[0], str)
             or command[0].replace("\\", "/").rsplit("/", 1)[-1] not in
-            ("lubancode_tests", "lubancode_tests.exe") or command[1] != SOURCE_FILTER):
+            ("luban_runner_release_tests", "luban_runner_release_tests.exe") or command[1] != SOURCE_FILTER):
         raise RuntimeError("Runner Release command does not select exactly the original CLI source")
     properties = test.get("properties", [])
     props = {prop["name"]: prop["value"] for prop in properties}
@@ -62,7 +62,7 @@ def validate_results(results, native_log):
     if len(commands) != 1:
         raise RuntimeError("Native Runner Release command is missing or duplicated")
     command = shlex.split(commands[0].replace("\\", "/"))
-    if (len(command) != 2 or command[0].rsplit("/", 1)[-1] not in ("lubancode_tests", "lubancode_tests.exe")
+    if (len(command) != 2 or command[0].rsplit("/", 1)[-1] not in ("luban_runner_release_tests", "luban_runner_release_tests.exe")
             or command[1] != SOURCE_FILTER):
         raise RuntimeError("Native Runner Release command runs a different source or binary")
     if section.count("Test Passed.") != 1 or "Test Failed." in section:

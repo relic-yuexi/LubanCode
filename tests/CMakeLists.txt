@@ -14,9 +14,9 @@ list(SORT LUBANCODE_TEST_SOURCES)
 if(NOT LUBANCODE_BUILD_SDK)
   list(FILTER LUBANCODE_TEST_SOURCES EXCLUDE REGEX "/(unit|integration)/sdk/")
 endif()
-if(NOT TARGET luban_job_runner_client)
-  list(FILTER LUBANCODE_TEST_SOURCES EXCLUDE REGEX "/unit/job_runner/test_runner_release_diagnostic\\.cpp$")
-endif()
+# This source gets its own CLI-only executable below. Keep the Runner client
+# edge out of the App/SDK aggregate, including when both hosts are enabled.
+list(FILTER LUBANCODE_TEST_SOURCES EXCLUDE REGEX "/unit/job_runner/test_runner_release_diagnostic\\.cpp$")
 
 # glob 兜底(2026-08-28):examples 域的册在主树 configure 偶发漏收
 # (同 cmake 同 pattern 的独立项目能收,工头 worktree 也能收;增量与全新
@@ -91,9 +91,18 @@ add_executable(lubancode_tests
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 if(TARGET luban_job_runner_client)
-  # This CLI-only source calls the same Process implementation as the Runner.
-  # Runner-only returns before this file; SDK targets never acquire this edge.
-  target_link_libraries(lubancode_tests PRIVATE luban_job_runner_client)
+  # Use the same production Process owner without adding its platform objects
+  # to the App/SDK aggregate. SDK-only and Runner-only return before this block.
+  add_executable(luban_runner_release_tests
+    support/main.cpp
+    unit/job_runner/test_runner_release_diagnostic.cpp)
+  target_link_libraries(luban_runner_release_tests PRIVATE luban_job_runner_client doctest::doctest)
+  target_compile_features(luban_runner_release_tests PRIVATE cxx_std_23)
+  add_test(NAME unit.job_runner.runner_release_diagnostic
+    COMMAND luban_runner_release_tests "--source-file=*test_runner_release_diagnostic.cpp")
+  set_tests_properties(unit.job_runner.runner_release_diagnostic PROPERTIES
+    LABELS "unit;job_runner;unit.job_runner" TIMEOUT 180
+    ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
 endif()
 if(LUBANCODE_BUILD_SDK)
   target_link_libraries(lubancode_tests PRIVATE lubancore_sdk)

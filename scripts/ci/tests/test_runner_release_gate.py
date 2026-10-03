@@ -12,11 +12,11 @@ spec.loader.exec_module(gate)
 
 
 def fixtures():
-    tests = [{"name": gate.REQUIRED, "command": ["/build/tests/lubancode_tests", gate.SOURCE_FILTER],
+    tests = [{"name": gate.REQUIRED, "command": ["/build/tests/luban_runner_release_tests", gate.SOURCE_FILTER],
               "properties": [{"name": "TIMEOUT", "value": 180},
                              {"name": "LABELS", "value": ["unit", "job_runner", "unit.job_runner"]}]}]
     results = f'<testsuite tests="1" failures="0"><testcase name="{gate.REQUIRED}" status="run" /></testsuite>'
-    log = (f'1/1 Testing: {gate.REQUIRED}\nCommand: "/build/tests/lubancode_tests" "{gate.SOURCE_FILTER}"\n{gate.READY_MARKER}\n'
+    log = (f'1/1 Testing: {gate.REQUIRED}\nCommand: "/build/tests/luban_runner_release_tests" "{gate.SOURCE_FILTER}"\n{gate.READY_MARKER}\n'
            '[doctest] test cases: 1 | 1 passed | 0 failed | 694 skipped\n'
            '[doctest] assertions: 8 | 8 passed | 0 failed |\nTest Passed.\n')
     return tests, results, log
@@ -36,8 +36,9 @@ class RunnerReleaseGateTests(unittest.TestCase):
 
     def test_exact_cli_filter(self):
         tests, _, _ = fixtures()
-        for command in ([], ["luban-runner", gate.SOURCE_FILTER], ["lubancode_tests", "--source-file=*runner*.cpp"],
-                        ["lubancode_tests", gate.SOURCE_FILTER, "--test-case=*Release*"]):
+        for command in ([], ["luban-runner", gate.SOURCE_FILTER], ["lubancode_tests", gate.SOURCE_FILTER],
+                        ["luban_runner_release_tests", "--source-file=*runner*.cpp"],
+                        ["luban_runner_release_tests", gate.SOURCE_FILTER, "--test-case=*Release*"]):
             with self.subTest(command=command), self.assertRaises(RuntimeError):
                 gate.validate_registration([{**tests[0], "command": command}])
 
@@ -86,10 +87,11 @@ class RunnerReleaseGateTests(unittest.TestCase):
 
     def test_native_command_cannot_borrow_registration(self):
         _, results, log = fixtures()
-        for bad in (log.replace('/build/tests/lubancode_tests', '/another/binary'),
+        for bad in (log.replace('/build/tests/luban_runner_release_tests', '/another/binary'),
+                    log.replace('/build/tests/luban_runner_release_tests', '/build/tests/lubancode_tests'),
                     log.replace(gate.SOURCE_FILTER, '--source-file=*test_other.cpp'),
-                    log + '\nCommand: "lubancode_tests"',
-                    log.replace(f'Command: "/build/tests/lubancode_tests" "{gate.SOURCE_FILTER}"\n', '')):
+                    log + '\nCommand: "luban_runner_release_tests"',
+                    log.replace(f'Command: "/build/tests/luban_runner_release_tests" "{gate.SOURCE_FILTER}"\n', '')):
             with self.subTest(bad=bad), self.assertRaises(RuntimeError):
                 gate.validate_results(results, bad)
 
