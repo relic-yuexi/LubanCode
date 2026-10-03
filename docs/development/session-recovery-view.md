@@ -180,7 +180,8 @@ unset 路径收至 EOF，每次 append 先核容器和 size_t 余量。计行、
 对应源码只添公开值形状和 SDK 装配接线；实际 factory/view、严格 operations parser 与
 owned Continue 都归内部。新增两来源固定 8+4 共 12 册，核 finite 精确边界/+1、
 CLI unset 真长卷不误拒、SDK 调高预算再开场、MAX 附近算术不回空件、真实同柄拒偷建，
-以及报告半完场、四场隔离。consumer 保基线 20；focused 实际 24→26，ASan required 29→31。
+以及报告半完场、四场隔离。consumer 保基线 20；初稿基线 focused 24→26、ASan required 29→31。
+合入 Windows result-store 来源守门后，实际 focused 27、ASan required 32；consumer 仍为 20。
 最终从本树登记与实际来源核数，不凭旧头绿灯算验收。
 
 SDK 同 ID V3 锁前预检也沿有限主账 owned 读取与 Verify，不先走旧整卷无界读取。

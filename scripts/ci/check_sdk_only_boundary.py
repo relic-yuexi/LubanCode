@@ -25,6 +25,7 @@ HOST_TARGETS = {
 HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/", "src/updater/")
 SHARED_SDK_TEST_SOURCES = {
     "tests/unit/trajectory/test_session_recovery_view.cpp",
+    "tests/unit/trajectory_v3/test_v3_result_store.cpp",
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",
     "tests/unit/runtime/test_session_execution.cpp",

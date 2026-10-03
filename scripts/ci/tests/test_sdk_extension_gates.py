@@ -17,6 +17,38 @@ focused = importlib.util.module_from_spec(FOCUSED_SPEC)
 FOCUSED_SPEC.loader.exec_module(focused)
 
 
+class ResultStoreWindowsPathsTests(unittest.TestCase):
+    summary = "[doctest] test cases: 17 | 17 passed | 0 failed"
+    markers = ("[result-store-path] target-extended", "[result-store-path] temporary-threshold",
+               "[result-store-path-length] target-extended target=340 temporary=344",
+               "[result-store-path-length] temporary-threshold target=247 temporary=251")
+
+    def test_actual_windows_pair_and_original_posix_roster(self):
+        focused.check_result_store_native("\n".join((self.summary, *self.markers)), "nt")
+        focused.check_result_store_native(self.summary, "posix")
+
+    def test_missing_decorated_and_duplicate_windows_markers_reject(self):
+        for marker in self.markers:
+            with self.subTest(marker=marker):
+                body = "\n".join((self.summary, *(value for value in self.markers if value != marker)))
+                for changed in (body, body + "\nother-source: " + marker,
+                                "\n".join((self.summary, *self.markers, marker))):
+                    with self.assertRaisesRegex(RuntimeError, "actual Windows path did not finish once"):
+                        focused.check_result_store_native(changed, "nt")
+
+    def test_wrong_real_path_length_rejects(self):
+        body = "\n".join((self.summary, *self.markers)).replace("temporary=251", "temporary=247")
+        with self.assertRaisesRegex(RuntimeError, "actual Windows path did not finish once"):
+            focused.check_result_store_native(body, "nt")
+
+    def test_empty_or_changed_native_roster_rejects(self):
+        for body in ("", "[doctest] test cases: 0 | 0 passed | 0 failed",
+                     self.summary.replace("17 passed | 0 failed", "16 passed | 1 failed"),
+                     self.summary + "\n" + self.summary):
+            with self.subTest(body=body), self.assertRaisesRegex(RuntimeError, "17 successful cases"):
+                focused.check_result_store_native(body, "posix")
+
+
 class MemoryCasWindowsPathsTests(unittest.TestCase):
     markers = ("[memory-cas-path] target-extended", "[memory-cas-path] temporary-threshold")
 

@@ -24,6 +24,7 @@ endif()
 list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/trajectory/test_session_recovery_view.cpp"
   "${_lubancore_tests_root}/unit/platform/test_atomic_write.cpp"
+  "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_result_store.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_session_resources.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_session_execution.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_execution_owner.cpp"
@@ -97,6 +98,12 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     endif()
   elseif(sdk_basename STREQUAL "test_session_recovery_view.cpp")
     set(sdk_original_test "unit.trajectory.session_recovery_view")
+  elseif(sdk_basename STREQUAL "test_v3_result_store.cpp")
+    set(sdk_original_test "unit.trajectory_v3.v3_result_store")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-result-store")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-result-store")
+    endif()
   elseif(sdk_basename STREQUAL "test_session_resources.cpp" OR
          sdk_basename STREQUAL "test_session_execution.cpp" OR
          sdk_basename STREQUAL "test_execution_owner.cpp" OR
