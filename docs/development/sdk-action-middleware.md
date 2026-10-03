@@ -110,3 +110,8 @@ definition_hash 只表宿主所声明实现版本，不认证任意原生函数�
 
 首轮 `30d7c1dc` 的 ASan 构建还报原生夹具类型错：审批枚举实际定义在 `lubancode::ApprovalMode`，不在 runtime 命名空间。
 后续只改这处具名值域引用，权限链、十场及全部断言照留；旧编译失败原件单独封存，新源须重跑远端原生门。
+
+`38a2bf96` 的远端 Linux 两条 focused 路报三处 binding 负例失败。原断言把“拒开”与错误码合在一起，原日志没有实际返回码，不能据报错文字认定坏卷已开场。
+构造前 Prepare 拒坏初始绑定、错指纹或非普通计划时，公开出口保 `sdk.action.plan_invalid`；SessionLock 内 opening 拒绝才沿 Service 包成 `sdk.action.open_failed`。
+这三处构造前负例须先校准真实 seq=1 的 system message、SessionStarted/各版/有效 system 引用，再分别核 `!session` 和精确 `sdk.action.plan_invalid`，打印当次实际返回码。
+零工厂、零模型、零工具与旧 journal 原字节断言照留；正确旧卷仍须恢复成功。不改生产闸、不接纳错误码集合，旧失败原件单独封存。
