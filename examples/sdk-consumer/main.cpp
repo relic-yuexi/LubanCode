@@ -28,6 +28,22 @@
 #include <utility>
 #include <vector>
 
+namespace lubancore_consumer {
+void Packages();
+void Actions(const std::filesystem::path& base);
+void BuiltinSearch(const std::filesystem::path& base, const std::filesystem::path& resource_root);
+void MemorySeed(const std::filesystem::path& base);
+void MemoryResume(const std::filesystem::path& base);
+void MemorySaveSeed(const std::filesystem::path& base);
+void MemorySaveResume(const std::filesystem::path& base);
+void Subagents(const std::filesystem::path& base);
+void SubagentSeed(const std::filesystem::path& base);
+void SubagentResume(const std::filesystem::path& base);
+void Lua(const std::filesystem::path& base);
+void LuaSeed(const std::filesystem::path& base);
+void LuaResume(const std::filesystem::path& base);
+}
+
 // Deliberately only installed public headers and the C++ standard library.
 // The fixture supplies model replies; Agent, permissions, tools and persistence
 // all run inside the actual SDK library.
@@ -1487,6 +1503,125 @@ void PublicResults(const fs::path& base) {
     Progress("completed: PublicResults");
 }
 
+std::size_t CountText(const std::string& text, const std::string& needle) {
+    std::size_t count = 0;
+    for (std::size_t pos = 0; (pos = text.find(needle, pos)) != std::string::npos; pos += needle.size()) ++count;
+    return count;
+}
+sdk::SessionOptions SkillOptions(const Paths& paths, bool attachment, std::string system,
+                                const std::shared_ptr<std::atomic<int>>& calls) {
+    auto options = Options(paths, [attachment, system, calls](const sdk::ModelRequest& request, sdk::Cancellation)
+        -> sdk::Result<sdk::ModelReply> {
+        Check(request.system.starts_with(system), "Skills lost the effective user prompt");
+        Check(CountText(request.system, "paint: fixture paint") == 1, "Skills prompt missing or appended twice");
+        Check(std::count_if(request.tools.begin(), request.tools.end(), [](const auto& t) { return t.name == "skill"; }) == 1,
+              "Skills tool missing or registered twice");
+        if ((*calls)++ == 0) return Call("skill-call", "skill", attachment ?
+            R"({"name":"paint","path":"references/live.txt"})" : R"({"name":"paint"})");
+        Check(HasReply(request, attachment ? "LIVE_AFTER_RESTART" : "FROZEN_BODY_MARKER"), "real SkillTool returned wrong content");
+        return Text("skill-answer");
+    });
+    options.system_prompt = std::move(system);
+    options.skills = sdk::skills::v1::Selection{Utf8(paths.root / "skills"), {"paint"}};
+    return options;
+}
+result::ToolResultIdentity CheckSkillResult(const std::shared_ptr<sdk::Session>& session, const sdk::Receipt& receipt,
+                                          const std::string& marker) {
+    const auto operation = Take(session->WaitResult(receipt.operation_id, 30s), "wait Skills turn");
+    Check(operation.state == sdk::OperationState::Succeeded && operation.final_text == "skill-answer", operation.error);
+    const auto all = Take(session->ListToolResults(receipt.operation_id), "list Skills results");
+    const auto plan = Take(session->DescribeSkills(), "describe Skills result owner");
+    Check(plan.entries.size() == 1 && plan.entries[0].name == "paint", "Skills result owner changed");
+    const auto expected_body = marker == "FROZEN_BODY_MARKER" ?
+        "技能目录: " + plan.entries[0].directory + "(技能内相对路径以此为基准)\nFROZEN_BODY_MARKER\n" :
+        "技能材料 paint/references/live.txt:\nLIVE_AFTER_RESTART";
+    int raw = 0, formal = 0;
+    result::ToolResultIdentity identity;
+    std::optional<result::ToolResultSummary> raw_row, formal_row;
+    std::string raw_body, formal_body;
+    for (const auto& row : all) {
+        if (!row.selected || row.tool_name != "skill") continue;
+        const auto snapshot = Take(session->ReadToolResult(row.identity), "read complete Skills result");
+        Check(snapshot.result().summary.identity == row.identity && snapshot.result().metadata_state == result::ArtifactState::Verified,
+              "Skills durable metadata is not verified");
+        Check(row.identity.session_id == session->id() && row.identity.operation_id == receipt.operation_id &&
+              row.identity.turn_id == operation.turn_id && !row.identity.tool_call_id.empty() &&
+              !row.identity.persisted_event_id.empty() && row.attempt > 0, "Skills result identity escaped its turn");
+        std::string body;
+        for (const auto& channel : snapshot.result().channels) {
+            if (!channel.text) continue;
+            Check(channel.capture_complete && channel.artifact_verified, "Skills result is incomplete");
+            Check(channel.state == result::ArtifactState::Verified, "Skills channel is not verified");
+            body += *channel.text;
+        }
+        Check(body == expected_body, "persisted Skills result changed exact content or source directory");
+        if (row.identity.result_id.starts_with("capture-")) { ++raw; raw_row = row; raw_body = body; }
+        else if (row.identity.result_id.starts_with("res-")) { ++formal; identity = row.identity; formal_row = row; formal_body = body; }
+        else Check(false, "unexpected selected Skills identity");
+    }
+    Check(raw == 1 && formal == 1, "Skills raw/formal result identities differ from the public contract");
+    Check(raw_row->identity.tool_call_id == formal_row->identity.tool_call_id && raw_row->attempt == formal_row->attempt &&
+          raw_row->identity.persisted_event_id != formal_row->identity.persisted_event_id &&
+          raw_row->identity.result_id != formal_row->identity.result_id && raw_body == formal_body,
+          "Skills raw/formal sources do not share one action or preserve equal bytes");
+    return identity;
+}
+void SkillsSeed(const fs::path& base) {
+    auto paths = PathsAt(base);
+    fs::create_directories(base / "skills" / "paint" / "references");
+    Write(base / "skills" / "paint" / "SKILL.md", "---\nname: paint\ndescription: fixture paint\n---\nFROZEN_BODY_MARKER\n");
+    Write(base / "skills" / "paint" / "references" / "live.txt", "LIVE_BEFORE_RESTART");
+    auto runtime = Runtime(paths);
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    auto session = Take(runtime->OpenSession(SkillOptions(paths, false, "SKILLS_USER_A", calls)), "open Skills seed");
+    auto plan = Take(session->DescribeSkills(), "describe Skills seed");
+    Check(plan.enabled && plan.entries.size() == 1 && plan.entries[0].name == "paint" && plan.plan_sha256.size() == 64,
+          "public Skills snapshot is not frozen");
+    const auto receipt = Take(session->Submit("skills-seed", "load body"), "submit Skills seed");
+    const auto identity = CheckSkillResult(session, receipt, "FROZEN_BODY_MARKER");
+    Write(base / "skills-id.txt", session->id());
+    Write(base / "skills-plan-hash.txt", plan.plan_sha256);
+    Write(base / "skills-identity.txt", identity.session_id + "\n" + identity.operation_id + "\n" + identity.turn_id + "\n" +
+          identity.tool_call_id + "\n" + identity.persisted_event_id + "\n" + identity.result_id + "\n");
+    Take(session->Close(), "close Skills seed");
+    Check(Take(session->DescribeSkills(), "describe closed Skills").plan_sha256 == plan.plan_sha256, "Close lost Skills value snapshot");
+    Take(session->ReadToolResult(identity), "read closed Skills body");
+    Take(runtime->Shutdown(), "shutdown Skills seed");
+    Check(calls->load() == 2, "Skills seed repeated model execution");
+}
+void SkillsResume(const fs::path& base) {
+    auto paths = PathsAt(base);
+    Write(base / "skills" / "paint" / "references" / "live.txt", "LIVE_AFTER_RESTART");
+    auto runtime = Runtime(paths);
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    auto options = SkillOptions(paths, true, "SKILLS_USER_A", calls);
+    options.system_prompt.clear();
+    options.resume_session_id = Read(base / "skills-id.txt");
+    auto session = Take(runtime->OpenSession(std::move(options)), "resume Skills in another process");
+    Check(Take(session->DescribeSkills(), "describe resumed Skills").plan_sha256 == Read(base / "skills-plan-hash.txt"), "resume changed frozen plan");
+    result::ToolResultIdentity identity;
+    std::ifstream in(base / "skills-identity.txt", std::ios::binary);
+    for (auto* value : {&identity.session_id, &identity.operation_id, &identity.turn_id, &identity.tool_call_id,
+                        &identity.persisted_event_id, &identity.result_id}) Check(static_cast<bool>(std::getline(in, *value)), "missing Skills identity");
+    Take(session->ReadToolResult(identity), "read body after process restart");
+    Check(calls->load() == 0, "restart query repeated model execution");
+    CheckSkillResult(session, Take(session->Submit("skills-live", "read live attachment"), "submit resumed Skills"), "LIVE_AFTER_RESTART");
+    Take(session->Close(), "close resumed Skills");
+    calls = std::make_shared<std::atomic<int>>(0);
+    options = SkillOptions(paths, true, "SKILLS_USER_B", calls);
+    options.resume_session_id = Read(base / "skills-id.txt");
+    session = Take(runtime->OpenSession(std::move(options)), "replace Skills user prompt");
+    CheckSkillResult(session, Take(session->Submit("skills-replaced", "read attachment again"), "submit replaced Skills"), "LIVE_AFTER_RESTART");
+    Take(session->Close(), "close replaced Skills");
+    calls = std::make_shared<std::atomic<int>>(0);
+    options = SkillOptions(paths, true, "SKILLS_USER_B", calls);
+    options.system_prompt.clear();
+    options.resume_session_id = Read(base / "skills-id.txt");
+    session = Take(runtime->OpenSession(std::move(options)), "preserve adopted Skills prompt");
+    CheckSkillResult(session, Take(session->Submit("skills-preserved", "read attachment once more"), "submit preserved Skills"), "LIVE_AFTER_RESTART");
+    Take(session->Close(), "close preserved Skills");
+    Take(runtime->Shutdown(), "shutdown Skills resume");
+}
 void ResultSeed(const fs::path& base) {
     const auto paths = PathsAt(base);
     auto runtime = Runtime(paths);
@@ -1543,11 +1678,12 @@ void ResultResume(const fs::path& base) {
 int main(int argc, char** argv) {
     Progress("entered main");
     try {
-        Check(argc == 3, "usage: lubancore_consumer smoke|isolation|extensions|results|result-seed|result-resume|seed|resume|recovery-seed|recovery-resume ABSOLUTE_STATE_DIRECTORY");
+        Check(argc >= 2, "usage: lubancore_consumer MODE ABSOLUTE_STATE_DIRECTORY [ABSOLUTE_INSTALLED_RESOURCE_ROOT]");
+        const std::string mode = argv[1];
+        Check(argc == (mode == "builtin-search" ? 4 : 3), "builtin-search requires STATE and installed ROOT; other modes require STATE only");
         const fs::path base = Path(argv[2]);
         Check(base.is_absolute(), "state directory must be absolute");
         fs::create_directories(base);
-        const std::string mode = argv[1];
         if (mode == "smoke") {
             Check(!sdk::Version().empty(), "installed library has no version");
             FileAndCommand(base);
@@ -1555,12 +1691,27 @@ int main(int argc, char** argv) {
             CloseAndStreams(base);
             ReentryAndOverflow(base);
             InvalidOptions(base);
+        } else if (mode == "packages") { lubancore_consumer::Packages();
         } else if (mode == "isolation") {
             FourSessionIsolation(base);
             SmallToolCaptureLifetime(base);
         }
         else if (mode == "extensions") PublicExtensions(base);
+        else if (mode == "actions") lubancore_consumer::Actions(base);
         else if (mode == "results") PublicResults(base);
+        else if (mode == "skills-seed") SkillsSeed(base);
+        else if (mode == "skills-resume") SkillsResume(base);
+        else if (mode == "memory-seed") lubancore_consumer::MemorySeed(base);
+        else if (mode == "memory-resume") lubancore_consumer::MemoryResume(base);
+        else if (mode == "memory-save-seed") lubancore_consumer::MemorySaveSeed(base);
+        else if (mode == "memory-save-resume") lubancore_consumer::MemorySaveResume(base);
+        else if (mode == "subagents") lubancore_consumer::Subagents(base);
+        else if (mode == "subagent-seed") lubancore_consumer::SubagentSeed(base);
+        else if (mode == "subagent-resume") lubancore_consumer::SubagentResume(base);
+        else if (mode == "lua") lubancore_consumer::Lua(base);
+        else if (mode == "lua-seed") lubancore_consumer::LuaSeed(base);
+        else if (mode == "lua-resume") lubancore_consumer::LuaResume(base);
+        else if (mode == "builtin-search") lubancore_consumer::BuiltinSearch(base, Path(argv[3]));
         else if (mode == "result-seed") ResultSeed(base);
         else if (mode == "result-resume") ResultResume(base);
         else if (mode == "seed") Seed(base);

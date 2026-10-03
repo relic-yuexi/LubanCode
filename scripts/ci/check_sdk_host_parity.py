@@ -69,6 +69,8 @@ def main():
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("Host source filter ran no native test cases: " + name)
+        if name == "sdk.host.tool_runtime" and int(counts[0]) != 14:
+            raise RuntimeError("Host tool runtime roster differs from 14 cases")
     print(f"Host parity: all {len(REQUIRED)} registered test files executed successfully")
 
 

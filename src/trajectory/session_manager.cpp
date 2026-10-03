@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <exception>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -26,6 +27,34 @@
 
 namespace lubancode::trajectory {
 namespace {
+
+std::expected<MemoryCapabilityLease, std::string> OpenLockedMemory(
+    const SessionManagerOptions& options, const std::string& workspace_key,
+    const std::filesystem::path& session_dir, const std::string& session_id) {
+    auto opened = OpenMemoryCapability({workspace_key, session_id}, session_dir / "artifacts",
+                                      options.memory_capability_factory);
+    if (!opened) return std::unexpected(opened.error().code + ": " + opened.error().message);
+    return std::move(*opened);
+}
+
+std::expected<nlohmann::json, std::string> InvokeOpeningParticipant(
+    const V3OpeningParticipant& participant, const V3OpeningContext& context) {
+    try {
+        auto extra = participant(context);
+        if (!extra) return std::unexpected(extra.error());
+        if (!extra->is_object()) return std::unexpected("opening.metadata_not_object");
+        for (auto it = extra->begin(); it != extra->end(); ++it) {
+            if (it.key() != "hostBindings" || !it.value().is_object()) {
+                return std::unexpected("opening.reserved_metadata");
+            }
+        }
+        return extra;
+    } catch (const std::exception&) {
+        return std::unexpected("opening.participant_exception");
+    } catch (...) {
+        return std::unexpected("opening.participant_exception");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 小工具
@@ -803,10 +832,19 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     if (!lock_file.has_value()) {
         return std::unexpected("session.lock_failed: " + lock_file.error());
     }
+    auto memory_capability = OpenLockedMemory(options_, workspace_key_, directory->session_dir(),
+                                              manifest.session_id);
+    if (!memory_capability) return std::unexpected("session.memory_open_failed: " + memory_capability.error());
     // 首行 system(§1.2/§4.3):正文是"建场此刻已知"的基础版,宿主递进
     // 完整拼装结果;settingsVersion 从 1 起,后续切换逐次 +1。开张失败按
     // P0-C 同款纪律清 0 字节残留(先放句柄,再按所有权凭据删目标名空文件)。
     nlohmann::json system_extra = nlohmann::json::object({{"settingsVersion", 1}});
+    if (options_.v3_opening_participant) {
+        auto opening = InvokeOpeningParticipant(options_.v3_opening_participant,
+            {directory->session_dir(), manifest.session_id, nullptr, memory_capability->share()});
+        if (!opening) return std::unexpected("session.opening_failed: " + opening.error());
+        system_extra.update(*opening);
+    }
     v3::V3WriterOptions writer_options;
     // 会话级事实随 session.started 落账(R2):列表投影的 cwd/run_kind
     // 以此为权威来源,v2 manifest 不再是唯一出处。
@@ -827,6 +865,7 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     session.v3_main = std::move(*writer);
     session.manifest = manifest;
     session.lock = std::move(*lock_file);
+    session.memory_capability = std::move(*memory_capability);
     // v3 没有 session.json 可翻:状态只住内存,封口/恢复按账面事实。
     session.status = SessionStatus::Running;
     // T11-B:建场基线——起手审批档落 approval.mode.applied(source=launch),
@@ -1033,6 +1072,9 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
     if (!new_lock.has_value()) {
         return fail("clear.step1_failed", new_lock.error());
     }
+    auto memory_capability = OpenLockedMemory(options_, workspace_key_, new_directory->session_dir(),
+                                              new_manifest.session_id);
+    if (!memory_capability) return fail("clear.step1_failed", memory_capability.error());
     outcome.boundary_operation_id = NewStampId();
     const std::string create_op = NewStampId();
     LifecycleIntent intent;
@@ -1202,6 +1244,7 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
     new_session.main = std::move(*new_recorder);
     new_session.manifest = new_manifest;
     new_session.lock = std::move(*new_lock);
+    new_session.memory_capability = std::move(*memory_capability);
     if (const auto transition = TransitionSessionStatus(
             new_session.session_dir(), &new_session.manifest, SessionStatus::Running);
         !transition.has_value()) {
@@ -1214,6 +1257,7 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
     if (const auto sha = old.main->Close(); sha.has_value()) {
         outcome.old_journal_sha256 = *sha;
     }
+    old.memory_capability.CloseWrites();
     old.lock.Release();
     active_ = std::move(new_session);
     outcome.active_switched = true;
@@ -1376,6 +1420,7 @@ ClearOutcome SessionManager::ClearV3Locked(const ClearRequest& request,
     outcome.new_command_completed_event_id = completed_receipt.id;
 
     // ---- 第 7 步:切 active,放旧锁;旧写者随换值自然关柄。
+    old.memory_capability.CloseWrites();
     old.lock.Release();
     active_ = std::move(*session);
     outcome.new_session_running = true;
@@ -1431,6 +1476,7 @@ CloseOutcome SessionManager::CloseV3Locked(const CloseRequest& request,
     }
     session.status = SessionStatus::Closed;
     // 封口即放锁(§3.3.2 同一口径:没有活 writer 的场不攥独占锁)。
+    session.memory_capability.CloseWrites();
     session.lock.Release();
     return outcome;
 }
@@ -1506,6 +1552,7 @@ CloseOutcome SessionManager::Close(const CloseRequest& request, ClearParticipant
         outcome.journal_sha256 = *sha;
     }
     // 封口即放锁:没有活 writer 的 session 不许再攥独占锁(§3.3.2)。
+    session.memory_capability.CloseWrites();
     session.lock.Release();
     return outcome;
 }
@@ -1728,7 +1775,8 @@ void AppendConversationText(const nlohmann::json& content, ReplayMessage* out) {
 // 键已带场名,原样沿用。
 std::expected<V3ResumeFold, V3FoldError> FoldV3ResumeChain(
     const v3::V3Ledger& own, const std::filesystem::path& own_stream) {
-    auto projection = v3::ProjectResume(own_stream);
+    (void)own_stream; // Ancestor resolver remains a path reader; this own volume does not reopen.
+    auto projection = v3::ProjectResume(own);
     if (!projection.has_value()) {
         return std::unexpected(V3FoldError{"corrupt", projection.error()});
     }
@@ -2140,7 +2188,38 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     std::uint64_t source_seq = 0;
     V3ResumeFold chain_fold;       // v3 源的链折算(第 6.5 步导入新场用)
     bool has_chain_fold = false;
-    const auto v3_probe = v3::ProbeV3SessionStream(source_dir);
+    std::optional<v3::V3Ledger> bounded_preflight;
+    v3::V3StreamProbe v3_probe;
+    std::error_code layout_error;
+    const auto logical_main = source_dir / (source_id + ".jsonl");
+    const bool bounded_same_id = options_.recovery_capture.limits &&
+        !std::filesystem::exists(platform::FileIoPath(source_dir / "main.jsonl"), layout_error) && !layout_error &&
+        std::filesystem::exists(platform::FileIoPath(logical_main), layout_error) && !layout_error;
+    if (bounded_same_id) {
+        // A finite SDK budget precedes the old getline/whole-file reader.
+        // Eligibility only: adopted facts are recaptured under the native lock.
+        const auto& limits = *options_.recovery_capture.limits;
+        auto captured = JournalFileAnchor::ReadExisting(logical_main,
+            (std::min)(limits.journal.max_bytes, limits.view_total_bytes));
+        if (!captured) return fail("resume.source_corrupt", captured.error());
+        auto closed = captured->anchor->Close();
+        if (!closed) return fail("resume.source_corrupt", closed.error());
+        const auto first_end = captured->bytes.find('\n');
+        const auto first = nlohmann::json::parse(captured->bytes.substr(0, first_end), nullptr, false);
+        if (!first.is_object() || !first.contains("schemaVersion") ||
+            !first["schemaVersion"].is_number_integer() || first["schemaVersion"] != 3)
+            return fail("resume.source_format_unknown", "bounded V3 first line is not schemaVersion 3");
+        auto raw = RecoveryStreamLines(captured->bytes, limits.journal, true);
+        if (!raw) return fail("resume.source_corrupt", raw.error());
+        auto ledger = v3::ReadV3LedgerOwned(logical_main, *raw);
+        if (!ledger) return fail("resume.source_corrupt", ledger.error());
+        bounded_preflight = std::move(*ledger);
+        v3_probe.status = v3::V3StreamProbe::Status::V3Stream;
+        v3_probe.stream = logical_main;
+    } else {
+        // CLI unset and legacy V2/AsNew keep the original layout reader.
+        v3_probe = v3::ProbeV3SessionStream(source_dir);
+    }
     if (v3_probe.status == v3::V3StreamProbe::Status::FormatConflict) {
         return fail("resume.source_format_conflict",
                     v3_probe.detail + ";两种主账并存须人工裁决,不自动选边");
@@ -2153,7 +2232,9 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     }
     if (v3_probe.status == v3::V3StreamProbe::Status::V3Stream) {
         const std::filesystem::path& v3_stream = v3_probe.stream;
-        auto ledger = v3::ReadV3Ledger(v3_stream);
+        auto ledger = bounded_preflight
+            ? std::expected<v3::V3Ledger, std::string>(std::move(*bounded_preflight))
+            : v3::ReadV3Ledger(v3_stream);
         if (!ledger.has_value()) {
             return fail("resume.source_corrupt", ledger.error());
         }
@@ -2536,7 +2617,12 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
                                                     const std::string& source_run_id,
                                                     const std::string& source_run_kind,
                                                     ResumeOutcome outcome) {
-    const auto fail = [&outcome](std::string code, std::string message) {
+    std::shared_ptr<JournalFileAnchor> opening_anchor;
+    const auto fail = [&outcome, &opening_anchor](std::string code, std::string message) {
+        if (opening_anchor) {
+            const auto closed = opening_anchor->Close();
+            if (!closed) message += ";" + closed.error();
+        }
         outcome.error_code = std::move(code);
         outcome.message = std::move(message);
         return outcome;
@@ -2548,6 +2634,7 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     // Acquire 撞上的是极小窗(拿到即拒,不硬闯)。
     const std::filesystem::path source_dir = SessionDirOf(source_id);
     if (active_.has_value() && active_->session_id() == source_id) {
+        active_->memory_capability.CloseWrites();
         active_->lock.Release();
         active_.reset();
     }
@@ -2555,14 +2642,134 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     if (!lock_file.has_value()) {
         return fail("resume.step5_failed", "源场独占锁拿不下: " + lock_file.error());
     }
+    auto memory_capability = OpenLockedMemory(options_, workspace_key_, source_dir, source_id);
+    if (!memory_capability) return fail("resume.opening_failed", memory_capability.error());
+    (void)source_run_kind; // Lock-preflight values never become adopted facts.
+    auto capture = CaptureSessionRecovery(source_dir, workspace_key_, source_id,
+        options_.recovery_capture, options_.recovery_factory);
+    if (!capture) return fail("resume.source_corrupt", capture.error());
+    opening_anchor = capture->anchor;
+    const auto* main_value = capture->view.Find(RecoveryKeyKind::MainV3);
+    auto raw = RecoveryStreamLines(main_value->bytes, options_.recovery_capture.limits
+        ? std::optional(options_.recovery_capture.limits->journal) : std::nullopt, true);
+    if (!raw) return fail("resume.source_corrupt", raw.error());
+    auto source = v3::ReadV3LedgerOwned(outcome.source_v3_stream, *raw);
+    if (!source) return fail("resume.source_corrupt", source.error());
+    if (source->session_id != source_id || source->run_id.empty())
+        return fail("resume.source_corrupt", "recovery.source_scope_mismatch");
+    const auto tail = source->LastEntry();
+    if (!tail) return fail("resume.source_corrupt", "recovery.empty_source");
+    const auto captured_tail_hash = tail->is_message
+        ? source->messages[tail->index].line_hash : source->events[tail->index].line_hash;
+    // Preserve the original host eligibility fence. These lock-preflight values
+    // may reject drift; they never supply the subsequently adopted fold.
+    if (options_.v3_opening_participant && (source->run_id != source_run_id ||
+        source->lines != outcome.source_event_count || tail->seq != outcome.source_event_count ||
+        captured_tail_hash != outcome.source_main_last_event_hash))
+        return fail("resume.source_changed", "source changed before the locked opening");
+    const std::string locked_run_id = source->run_id;
+    std::string locked_run_kind;
+    for (const auto& event : source->events) {
+        if (event.kind != v3::EventKindV3::SessionStarted) continue;
+        const auto kind = event.payload.find("runKind");
+        if (kind != event.payload.end() && kind->is_string()) locked_run_kind = kind->get<std::string>();
+        break;
+    }
+    if (locked_run_kind == RunKindName(RunKind::OneShot))
+        return fail("resume.source_not_resumable", "one_shot source cannot be resumed");
+    auto folded = FoldV3ResumeChain(*source, outcome.source_v3_stream);
+    if (!folded) return fail(folded.error().code == "chain" ? "resume.source_chain_broken" : "resume.source_corrupt", folded.error().message);
+    outcome.source_verified = true;
+    outcome.source_event_count = source->lines;
+    outcome.source_main_last_event_hash = captured_tail_hash;
+    outcome.effective_conversation = std::move(folded->conversation);
+    ReplayState projection;
+    projection.session_id = source->session_id;
+    projection.run_id = source->run_id;
+    projection.effective_conversation = outcome.effective_conversation;
+    outcome.replay_version = "v3-context-chain-2";
+    outcome.imported_state_hash = ComputeReplayStateHash(projection);
+    outcome.control = ReplayControlState{};
+    outcome.source_title.reset();
+    outcome.source_title_event_id.clear();
+    outcome.source_title_seq = 0;
+    outcome.source_title_line_hash.clear();
+    outcome.source_approval_mode.reset();
+    for (const auto& event : source->events) {
+        if (event.kind == v3::EventKindV3::SessionTitleApplied) {
+            const auto title = event.payload.find("title");
+            if (title != event.payload.end() && title->is_string() &&
+                !title->get<std::string>().empty()) {
+                outcome.control.title = title->get<std::string>();
+                outcome.source_title = title->get<std::string>();
+                outcome.source_title_event_id = event.event_id;
+                outcome.source_title_seq = event.seq;
+                outcome.source_title_line_hash = event.line_hash;
+            }
+        } else if (event.kind == v3::EventKindV3::ApprovalModeApplied) {
+            const auto mode = event.payload.find("mode");
+            if (mode != event.payload.end() && mode->is_string()) {
+                outcome.source_approval_mode = ParseApprovalModeOrDefault(mode->get<std::string>());
+            }
+        } else if (event.kind == v3::EventKindV3::SessionContextWindowApplied) {
+            // 上下文预算单(P1):窗口预算折进 control(末枚胜,同标题
+            // 口径)。身份/来源照抄——恢复裁决在 runtime 侧,这里只交
+            // 事实,不裁"该不该套用"。
+            const auto window = event.payload.find("contextWindow");
+            const bool window_valid =
+                window != event.payload.end() &&
+                ((window->is_number_unsigned() && window->get<std::uint64_t>() > 0) ||
+                 (window->is_number_integer() && window->get<std::int64_t>() > 0));
+            if (window_valid) {
+                outcome.control.context_window = window->get<std::uint64_t>();
+                const auto read_string = [&event](const char* key) {
+                    const auto field = event.payload.find(key);
+                    return field != event.payload.end() && field->is_string()
+                               ? field->get<std::string>()
+                               : std::string();
+                };
+                outcome.control.context_window_provider = read_string("provider");
+                outcome.control.context_window_model = read_string("model");
+                outcome.control.context_window_source = read_string("source");
+            }
+        }
+    }
+    if (options_.v3_opening_participant) {
+        const auto* root = source->FindMessage(source->context.system_message_ref);
+        if (!root || !root->system_meta || root->message.value("role", std::string()) != "system" ||
+            !root->message.contains("content") || !root->message["content"].is_string()) {
+            return fail("resume.opening_failed", "opening.effective_system_missing");
+        }
+        if (root->system_meta->contains("settingsVersion")) {
+            const auto& version = root->system_meta->at("settingsVersion");
+            if ((!version.is_number_unsigned() && !version.is_number_integer()) ||
+                (version.is_number_integer() && !version.is_number_unsigned() && version.get<std::int64_t>() < 1) ||
+                (version.is_number_unsigned() && version.get<std::uint64_t>() == 0)) {
+                return fail("resume.opening_failed", "opening.invalid_settings_version");
+            }
+        }
+        auto opening = InvokeOpeningParticipant(options_.v3_opening_participant,
+            {source_dir, source_id, &*source, memory_capability->share(), &capture->view});
+        if (!opening) return fail("resume.opening_failed", opening.error());
+        const auto saved_bindings = root->system_meta && root->system_meta->contains("hostBindings")
+            ? root->system_meta->at("hostBindings") : nlohmann::json::object();
+        const auto expected_bindings = opening->contains("hostBindings")
+            ? opening->at("hostBindings") : nlohmann::json::object();
+        if (saved_bindings != expected_bindings) {
+            return fail("resume.opening_failed", "opening.host_bindings_mismatch");
+        }
+    }
     v3::V3WriterOptions writer_options;
     // launch_cwd/run_kind 是 Start 时写 session.started 用的,续卷不写;
     // 故障注入照递(测试专用,生产恒空)。
     writer_options.inject_io_failure = options_.v3_main_io_fault;
-    auto writer = v3::V3Writer::Continue(outcome.source_v3_stream, std::move(writer_options));
+    auto writer = v3::V3Writer::ContinueOwnedPrefix(outcome.source_v3_stream, main_value->bytes, *capture->anchor, std::move(writer_options));
     if (!writer.has_value()) {
         return fail("resume.step5_failed", "源账续卷验不过: " + writer.error());
     }
+
+    auto anchor_closed = capture->anchor->Close();
+    if (!anchor_closed) return fail("resume.step5_failed", anchor_closed.error());
 
     ActiveSession session;
     session.directory = TrajectoryDirectory::OpenExisting(source_dir);
@@ -2574,15 +2781,17 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     session.manifest.workspace_key = workspace_key_;
     session.manifest.session_id = source_id;
     session.manifest.launch_cwd = options_.launch_cwd;
-    session.manifest.main_run_id = source_run_id;
+    session.manifest.main_run_id = locked_run_id;
     session.manifest.run_kind =
-        source_run_kind.empty() ? RunKindName(options_.main_run_kind) : source_run_kind;
+        locked_run_kind.empty() ? RunKindName(options_.main_run_kind) : locked_run_kind;
     session.manifest.start_reason = "resume";
     session.manifest.status = SessionStatusName(SessionStatus::Running);
     session.manifest.created_at_ms = clock_->WallMs();
     session.manifest.lubancode_version = options_.lubancode_version;
     session.manifest.event_schema_version = options_.recorder.event_schema_version;
     session.lock = std::move(*lock_file);
+    session.memory_capability = std::move(*memory_capability);
+    session.recovery_view = std::make_shared<const SessionRecoveryView>(std::move(capture->view));
     session.status = SessionStatus::Running;
 
     // 续接事实入账:lifecycle 的 resume_reference(§3.2 恢复引用账)。
@@ -2674,7 +2883,7 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     // 从账上恢复发号计数器),不另起。
     active_ = std::move(session);
     outcome.new_session_id = source_id;
-    outcome.new_main_run_id = source_run_id;
+    outcome.new_main_run_id = locked_run_id;
     outcome.new_run_started_event_id = std::string();  // v3 无 run.started,身份在账首行
     outcome.imported_history_count = 0;                // 不抄链,本账自足
     outcome.new_session_running = true;
@@ -2814,6 +3023,13 @@ void SessionManager::ContinueNewSide(const std::filesystem::path& next_dir,
         report->sessions.push_back(std::move(next_entry));
         return;
     }
+    auto memory_capability = OpenLockedMemory(options_, workspace_key_, next_dir, next_id);
+    if (!memory_capability) {
+        next_entry.status = SessionStatus::Incomplete;
+        next_entry.notes.push_back("memory capability refused: " + memory_capability.error());
+        report->sessions.push_back(std::move(next_entry));
+        return;
+    }
     const std::filesystem::path next_main = next_dir / "main.jsonl";
     std::optional<TrajectoryRecorder> recorder;
     if (next_facts.has_run_started) {
@@ -2938,6 +3154,7 @@ void SessionManager::ContinueNewSide(const std::filesystem::path& next_dir,
         session.main = std::move(*recorder);
         session.manifest = *manifest;
         session.lock = std::move(*next_lock);
+        session.memory_capability = std::move(*memory_capability);
         session.status = SessionStatus::Running;
         active_ = std::move(session);
         report->adopted_session_id = next_id;

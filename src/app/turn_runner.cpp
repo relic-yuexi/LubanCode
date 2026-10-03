@@ -639,7 +639,8 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
             // 里顺手做错。
             hooks.trajectory_spawn = [ledger, hub, main_bridge](
                                          const std::string& task_label, const std::string& parent_run_id,
-                                         lubancode::runtime::SubagentSpawnFailure* failure_out)
+                                         lubancode::runtime::SubagentSpawnFailure* failure_out,
+                                         lubancode::runtime::SubagentDispatchMode mode)
                                         -> std::unique_ptr<lubancode::runtime::TrajectorySubagentBridge> {
                 const std::string parent_call_id = hub->current_agent_call_id();
                 auto child = ledger->SpawnSubagent(parent_call_id, task_label, parent_run_id);
@@ -656,16 +657,34 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
                     }
                     return nullptr;
                 }
-                if (parent_run_id.empty() && !parent_call_id.empty()) {
-                    main_bridge->AttachChildRun(parent_call_id, (*child)->run_id());
+                if (parent_run_id.empty() && mode == lubancode::runtime::SubagentDispatchMode::Foreground &&
+                    main_bridge->ManagesToolResultPreviews()) {
+                    auto attached = main_bridge->AttachChildRun(parent_call_id, (*child)->run_id(), (*child)->ParentSpawn());
+                    if (!attached) {
+                        lubancode::runtime::SubagentSpawnFailure failure;
+                        failure.stage = "attach_parent";
+                        failure.error_code = attached.error();
+                        failure.detail = "父轮绑定未确认，孩子没有开跑";
+                        failure.reserved_run_id = (*child)->run_id();
+                        failure.cleanup_receipt = (*child)->Finish(
+                            lubancode::runtime::SubagentExecutionOutcome::StartupRejected, attached.error());
+                        ledger->NoteSubagentStartFailed(failure, parent_run_id, parent_call_id,
+                                                        main_bridge->current_turn_id());
+                        if (failure_out) *failure_out = std::move(failure);
+                        return nullptr;
+                    }
+                } else if (parent_run_id.empty() && !parent_call_id.empty() && !main_bridge->ManagesToolResultPreviews()) {
+                    // V2 keeps its existing boundary; background/nested V3 are
+                    // explicitly outside this foreground observation capability.
+                    (void)main_bridge->AttachChildRun(parent_call_id, (*child)->run_id());
                 }
                 return std::move(*child);
             };
-            // 子账收口(run terminal 落定)后回填父桥:父侧 agent 调用的
-            // 执行终态事件引用子账 terminal hash(§3.5 边界对账)。
-            hooks.trajectory_child_finished = [main_bridge](const std::string& run_id,
-                                                            const std::string& terminal_hash) {
-                main_bridge->NoteChildTerminal(run_id, terminal_hash);
+            // Owned terminal evidence; V3 parent terminal observation/adoption
+            // is a later gate. Legacy V2 reads only a complete handoff hash.
+            hooks.trajectory_child_finished = [registry = main_bridge->child_terminal_registry()](
+                const lubancode::runtime::SubagentTerminalReceipt& receipt) {
+                registry->Store(receipt);
             };
         }
         if (wiring.on_post_tool_use_hook) {
@@ -1346,7 +1365,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 视图账。三条路(错误早退/打断/正常)都从这里过——footer 恰一枚,
     // 不再从中途裸退。事件流(批二)也在这收口:tone 三档映射终态,错误
     // 文案随 Failed 带上;没收尾的条目由适配器按 Cancelled 兜底。
-    const std::string turn_error_text = result.has_value() ? std::string() : result.error();
+    std::string turn_error_text = result.has_value() ? std::string() : result.error();
     const auto finish_turn_chrome = [&](lubancode::cli::TurnFooterTone tone) {
         // P0-2 轨迹:轮收口走同一只漏斗(错误早退/步数满/正常三路都过这)。
         // tone 三档映射 turn.completed/cancelled/failed;Stop 钩子续跑轮在
@@ -1513,6 +1532,18 @@ RunTurnResult RunTurn(TurnContext ctx) {
         };
         lubancode::agent::RunStopContinuation(loop, wiring, stop_options, drive);
         out.cancelled = out.cancelled || drive.cancelled;
+        if (drive.side_effect_indeterminate) {
+            // The Stop request really ran. Keep its unknown side effect and
+            // fail this turn instead of publishing a successful footer/ledger.
+            out.status = 1;
+            turn_failed = true;
+            turn_error_text = drive.error;
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            TermErr() << "\n" << theme.error << tr("error.prefix") << turn_error_text
+                      << theme.reset << "\n";
+            TermErr().flush();
+            TermOut().flush();
+        }
     }
 
     // 安全点(轮收):后台子代理这轮攒下的 hooks 记录归并落账,报信一行。

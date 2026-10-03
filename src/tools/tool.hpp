@@ -37,6 +37,14 @@ enum class RecoveryCapability {
 // needs_confirm=false 严格配对；需确认工具必须显式声明其真实类别。
 enum class ApprovalClass { None, FileEdit, FileDestructive, Command, External };
 
+// Owned identity of one actual started action. Empty defaults preserve older
+// hosts; strict targets require every field, never accepting model-supplied IDs.
+struct ToolInvocationIdentity {
+    std::string session_id, operation_id, turn_id, action_id;
+    std::uint64_t attempt = 0;
+};
+enum class ExecutionControl { Continue, StopIndeterminate };
+
 // 工具执行上下文(子代理 x 停止失效单:取消令牌贯通工具进程)。渐进迁移
 // 的口子:RunOneTool 把"这一次调用"的取消旗从这里递进来,工具 override
 // execute(input, context) 便可在长操作里查旗、收子进程树;没 override 的
@@ -56,6 +64,7 @@ struct ToolExecutionContext {
     // 未开会话的调用路),富二进制块按稳定错误收口,不吞字节也不冒充
     // 落盘。文本结果不受影响。
     std::string artifact_dir;
+    ToolInvocationIdentity invocation;
 };
 
 class Tool {
@@ -106,6 +115,9 @@ public:
         ToolResultPayload payload;
         std::string content;    // = payload 的文本投影(派生缓存,只读)
         bool is_error = false;  // 执行失败/被拒绝时置位
+        // A completed invocation can still have unconfirmed side effects. Stop
+        // the batch/model independently of is_error and crash recovery outcomes.
+        ExecutionControl execution_control = ExecutionControl::Continue;
 
         // 文本桥(MCP 富结果单 P0.2):旧聚合初始化 Tool::Result{"文本", true}
         // 照旧编译——构造器把文本包成一枚 TextContent,行为与从前一字不差。

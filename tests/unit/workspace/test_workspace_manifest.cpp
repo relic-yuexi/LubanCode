@@ -6,6 +6,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -65,6 +66,63 @@ bool HasStaleLockEvidence(const fs::path& workspace_dir) {
 }
 
 }  // namespace
+
+TEST_CASE("manifest: absent file stays Missing with no diagnostic or side effects") {
+    const fs::path root = TempRoot("read-absent");
+    const auto read = workspace::ReadWorkspaceManifest(root);
+    CHECK(read.status == workspace::ManifestRead::Status::Missing);
+    CHECK(read.error_code.empty());
+    CHECK(read.error_text.empty());
+    CHECK_FALSE(fs::exists(root / "workspace.json"));
+    CHECK(fs::is_empty(root));
+}
+
+TEST_CASE("manifest: malformed JSON stays Corrupt without changing bytes") {
+    const fs::path root = TempRoot("read-corrupt");
+    const std::string bytes = "{not-json";
+    Write(root / "workspace.json", bytes);
+    const auto read = workspace::ReadWorkspaceManifest(root);
+    CHECK(read.status == workspace::ManifestRead::Status::Corrupt);
+    CHECK(read.error_code == "schema.missing_field");
+    CHECK_FALSE(read.error_text.empty());
+    CHECK(ReadAll(root / "workspace.json") == bytes);
+}
+
+#ifdef _WIN32
+TEST_CASE("manifest: Windows absent read waits for delayed atomic publication") {
+    const fs::path root = TempRoot("read-delayed-publish");
+    workspace::WorkspaceManifest expected;
+    expected.workspace_key = "delayed-publication";
+    expected.identity_kind = "cwd_fallback";
+    expected.identity_root = platform::PathToUtf8(root);
+    const fs::path staged = root / "staged.json";
+    Write(staged, expected.ToJson().dump());
+    REQUIRE_FALSE(fs::exists(root / "workspace.json"));
+    std::promise<void> entered;
+    auto entered_future = entered.get_future();
+    // async's future joins before the captured promise/root leave scope, including
+    // REQUIRE failures. No publisher thread can remain blocked during cleanup.
+    auto reader = std::async(std::launch::async, [&] {
+        // Entry acknowledgement is before the first probe, not a probe observer.
+        entered.set_value();
+        return workspace::ReadWorkspaceManifest(root);
+    });
+    REQUIRE(entered_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    // Keep the file truly absent during this window. An immediate Missing return
+    // is a failure; publication cannot race ahead of this check.
+    REQUIRE(reader.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+    REQUIRE_FALSE(fs::exists(root / "workspace.json"));
+    // Prepare bytes before starting the read budget. Publish through the same
+    // platform rename used by AtomicWriteFile, without extra writes in the window.
+    REQUIRE(platform::ReplaceFileAtomically(staged, root / "workspace.json").has_value());
+    REQUIRE(reader.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto read = reader.get();
+    REQUIRE(read.status == workspace::ManifestRead::Status::Ok);
+    CHECK(read.manifest.workspace_key == expected.workspace_key);
+    CHECK(read.error_code.empty());
+    CHECK(read.error_text.empty());
+}
+#endif
 
 TEST_CASE("manifest:首仓原子写 v2,字段照冻结合同") {
     const fs::path root = TempRoot("first");

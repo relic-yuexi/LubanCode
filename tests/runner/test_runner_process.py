@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -19,20 +22,286 @@ THIS = str(Path(__file__).resolve())
 WINDOWS = os.name == "nt"
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if WINDOWS else 0
 TERMINAL = {"succeeded", "failed", "cancelled", "indeterminate"}
+EVIDENCE_FILE_LIMIT = 256 * 1024
+EVIDENCE_TOTAL_LIMIT = 2 * 1024 * 1024
+EVIDENCE_ENTRY_LIMIT = 64
 
 
-def eventually(check, timeout=10):
+def eventually(check, timeout=10, failure_detail=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = check()
         if value:
             return value
         time.sleep(0.04)
-    raise AssertionError("condition did not become true")
+    detail = failure_detail() if failure_detail is not None else ""
+    raise AssertionError("condition did not become true" + (": " + detail if detail else ""))
 
 
 def read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def endpoint_ready(path, old_boot, *, windows=WINDOWS, errors=None):
+    try:
+        endpoint = read_json(path)
+    except FileNotFoundError as error:
+        if errors is not None:
+            errors[:] = [repr(error)]
+        return False
+    except PermissionError as error:
+        # Python's Windows CRT may retain only EACCES, without a Win32 code.
+        # A bounded retry is not evidence of the underlying sharing mode.
+        if not windows or error.errno != errno.EACCES or getattr(error, "winerror", None) not in (None, 32, 33):
+            raise
+        if errors is not None:
+            errors[:] = [repr(error)]
+        return False
+    return endpoint.get("boot_id") != old_boot
+
+
+def safe_output(value, *, stream=None):
+    stream = sys.stdout if stream is None else stream
+    try:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        display = value.encode(encoding, errors="backslashreplace").decode(encoding)
+        print(display, file=stream, flush=True)
+        return True
+    except (UnicodeError, OSError, ValueError):
+        # Console failure must not replace the stored fixture exception.
+        return False
+
+
+def capture_failure_records(runner):
+    records = {}
+    errors = []
+    remaining = EVIDENCE_TOTAL_LIMIT
+    count = 0
+    for service_log in runner.base.glob("service-*.log"):
+        if count >= EVIDENCE_ENTRY_LIMIT:
+            break
+        count += 1
+        try:
+            raw, info = read_evidence_bytes(service_log, min(EVIDENCE_FILE_LIMIT, remaining))
+            records[service_log.name] = raw
+            remaining -= len(raw)
+            if info.st_size > len(raw):
+                errors.append(f"post-close service evidence truncated: {service_log.name} observedBytes={info.st_size}")
+        except Exception:
+            errors.append("reading service evidence failed:\n" + traceback.format_exc())
+    # Synthetic fixture records only. Never archive identity/auth or task logs.
+    for filename in ("jobs.json", "endpoint.json"):
+        snapshot = runner.root / filename
+        try:
+            if snapshot.is_file():
+                raw, info = read_evidence_bytes(snapshot, min(EVIDENCE_FILE_LIMIT, remaining))
+                records[filename] = raw
+                remaining -= len(raw)
+                if info.st_size > len(raw):
+                    errors.append(f"post-close fixture record truncated: {filename} observedBytes={info.st_size}")
+        except Exception:
+            errors.append("reading fixture records failed:\n" + traceback.format_exc())
+    return records, errors
+
+
+def read_evidence_bytes(path, cap):
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if not WINDOWS:
+        flags |= os.O_NONBLOCK | os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("fixture evidence is not a regular file")
+        chunks = []
+        count = 0
+        while count < cap:
+            chunk = os.read(descriptor, min(4096, cap - count))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            count += len(chunk)
+        return b"".join(chunks), os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def capture_failure_observation(runner):
+    """Read only this disposable fixture's named files, before close mutates it."""
+    records = {}
+    entries = []
+    remaining = EVIDENCE_TOTAL_LIMIT
+
+    def retain(name, raw, *, actual_bytes=None, state="value", error=None):
+        nonlocal remaining
+        if len(entries) >= EVIDENCE_ENTRY_LIMIT:
+            return False
+        actual_bytes = len(raw) if actual_bytes is None else actual_bytes
+        stored = raw[:min(EVIDENCE_FILE_LIMIT, remaining)]
+        remaining -= len(stored)
+        entry = {"name": name, "state": state, "actualBytes": actual_bytes,
+                 "storedBytes": len(stored), "sha256": hashlib.sha256(stored).hexdigest(),
+                 "truncated": actual_bytes > len(stored)}
+        if error is not None:
+            entry["error"] = error
+        entries.append(entry)
+        if state == "value":
+            records["failure-time/" + name] = stored
+        return True
+
+    def read(name, path):
+        if len(entries) >= EVIDENCE_ENTRY_LIMIT:
+            return
+        try:
+            raw, info = read_evidence_bytes(path, min(EVIDENCE_FILE_LIMIT, remaining))
+            retain(name, raw, actual_bytes=info.st_size)
+        except FileNotFoundError:
+            retain(name, b"", state="absent")
+        except ValueError as error:
+            retain(name, b"", state="not_regular", error=repr(error))
+        except Exception as error:
+            retain(name, b"", state="read_error", error=repr(error))
+
+    for name in ("jobs.json", "endpoint.json"):
+        read(name, runner.root / name)
+    for path in sorted(runner.base.glob("service-*.log")):
+        read(path.name, path)
+    # Direct calls retain exact response bytes before parse. Requests, argv,
+    # identity.json and auth tokens are never archived.
+    receipts = getattr(runner, "start_receipts", [])
+    job_ids = set()
+    markers = set()
+    for index, receipt in enumerate(receipts):
+        if len(entries) >= EVIDENCE_ENTRY_LIMIT:
+            break
+        stem = f"receipts/start-{index:02d}"
+        for stream in ("stdout", "stderr"):
+            if stream in receipt:
+                retain(stem + "." + stream, receipt[stream])
+            else:
+                retain(stem + "." + stream, b"", state="absent")
+        retain(stem + ".json", json.dumps({"returncode": receipt.get("returncode"),
+                "job_id": receipt.get("job_id")}, sort_keys=True).encode("utf-8"))
+        if re.fullmatch(r"[0-9a-f]{32}", str(receipt.get("job_id", ""))):
+            job_ids.add(receipt["job_id"])
+        if receipt.get("marker") is not None:
+            markers.add(Path(receipt["marker"]))
+    for handle in getattr(runner, "handles", []):
+        if len(job_ids) >= EVIDENCE_ENTRY_LIMIT:
+            break
+        if re.fullmatch(r"[0-9a-f]{32}", str(handle.get("job_id", ""))):
+            job_ids.add(handle["job_id"])
+    for name in getattr(runner, "fixture_markers", set()):
+        if len(markers) >= EVIDENCE_ENTRY_LIMIT:
+            break
+        markers.add(Path(name))
+    # Worker/Node response files are created only under this fixture's base.
+    for name in ("receipt.json", "receipt.stdout", "receipt.stderr"):
+        read("receipts/worker-" + name, runner.base / name)
+    for job_id in sorted(job_ids):
+        for name in ("stdout.log", "stderr.log"):
+            read("jobs/" + job_id + "/" + name, runner.root / "jobs" / job_id / name)
+    for marker in sorted(markers):
+        if marker.parent == getattr(runner, "project", None):
+            read("markers/" + marker.name, marker)
+    manifest = {"schemaVersion": 1, "phase": "before-close", "entries": entries,
+                "fileLimit": EVIDENCE_FILE_LIMIT, "totalLimit": EVIDENCE_TOTAL_LIMIT,
+                "entryLimit": EVIDENCE_ENTRY_LIMIT, "entryLimitReached": len(entries) == EVIDENCE_ENTRY_LIMIT,
+                "capturedBytes": EVIDENCE_TOTAL_LIMIT - remaining}
+    records["failure-time/evidence.json"] = json.dumps(manifest, indent=2).encode("utf-8")
+    return records
+
+
+def preserve_failure(runner, report_path, name, error, *, records=None):
+    if records is None:
+        records, errors = capture_failure_records(runner)
+        if errors:
+            error += "\n" + "\n".join(errors)
+    evidence = Path(report_path).parent / "failures" / name
+    evidence.mkdir(parents=True, exist_ok=True)
+    (evidence / "traceback.txt").write_text(error, encoding="utf-8")
+    for filename, raw in records.items():
+        destination = evidence / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(raw)
+    # All original files land before console presentation starts.
+    for filename, raw in records.items():
+        if filename.startswith("service-") and filename.endswith(".log"):
+            safe_output(raw.decode("utf-8", errors="replace")[-4000:])
+
+
+def write_report(path, report):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+
+def run_case(binary, report_path, report, name, check):
+    temporary = None
+    runner = None
+    status = "failed"
+    errors = []
+    records = {}
+    observation = {}
+    try:
+        temporary = tempfile.TemporaryDirectory(prefix="luban-runner-test-")
+        runner = Runner(binary, temporary.name)
+        runner.start_service()
+        check(runner)
+        status = "passed"
+    except Exception:
+        errors.append(traceback.format_exc())
+        if runner:
+            try:
+                observation = capture_failure_observation(runner)
+            except Exception:
+                errors.append("reading failure-time evidence failed:\n" + traceback.format_exc())
+    finally:
+        if runner:
+            if not observation:
+                try:
+                    # Cache this phase even for a passed body: close or directory
+                    # cleanup may still fail. Success publishes none of it.
+                    observation = capture_failure_observation(runner)
+                except Exception:
+                    status = "failed"
+                    errors.append("reading failure-time evidence failed:\n" + traceback.format_exc())
+            try:
+                runner.close()
+            except Exception:
+                status = "failed"
+                errors.append("closing fixture failed:\n" + traceback.format_exc())
+            # Cache only fixture-owned records while the source directory still
+            # exists. A later cleanup failure can remove some or all originals.
+            try:
+                records, read_errors = capture_failure_records(runner)
+                records.update(observation)
+                if read_errors:
+                    status = "failed"
+                    errors.extend(read_errors)
+            except Exception:
+                status = "failed"
+                errors.append("reading fixture evidence failed:\n" + traceback.format_exc())
+        if temporary:
+            try:
+                temporary.cleanup()
+            except Exception:
+                status = "failed"
+                errors.append("removing fixture directory failed:\n" + traceback.format_exc())
+        if errors:
+            try:
+                preserve_failure(runner, report_path, name, "\n".join(errors), records=records)
+            except Exception:
+                status = "failed"
+                errors.append("preserving evidence failed:\n" + traceback.format_exc())
+        # Success discards the memory-only cache. It never publishes service or
+        # identity material. Report state includes both service and dir cleanup.
+        report["tests"].append({"name": name, "status": status, **({"errors": errors} if errors else {})})
+        write_report(report_path, report)
+    if errors:
+        safe_output("\n".join(errors), stream=sys.stderr)
+    safe_output(f"{name}: {status}")
+    return status
 
 
 def write_json(path, data):
@@ -42,18 +311,22 @@ def write_json(path, data):
     temporary.replace(path)
 
 
-def request(binary, root, runner_id, body):
+def request(binary, root, runner_id, body, *, on_response=None):
     result = subprocess.run(
         [binary, "request", "--state-root", str(root), "--runner-id", runner_id],
-        input=json.dumps(body) + "\n", text=True, encoding="utf-8", capture_output=True,
+        input=(json.dumps(body) + "\n").encode("utf-8"), capture_output=True,
         timeout=12, creationflags=NO_WINDOW,
     )
+    if on_response is not None:
+        on_response(result)
+    stdout = result.stdout.decode("utf-8")
+    stderr = result.stderr.decode("utf-8")
     try:
-        reply = json.loads(result.stdout)
+        reply = json.loads(stdout)
     except ValueError as error:
-        raise AssertionError(f"request exited {result.returncode}: stdout={result.stdout[:2000]!r}, "
-                             f"stderr={result.stderr[:2000]!r}") from error
-    assert result.returncode == (0 if reply.get("ok") else 1), result.stderr
+        raise AssertionError(f"request exited {result.returncode}: stdout={stdout[:2000]!r}, "
+                             f"stderr={stderr[:2000]!r}") from error
+    assert result.returncode == (0 if reply.get("ok") else 1), stderr
     return reply
 
 
@@ -62,6 +335,50 @@ def events(path):
         return []
     lines = Path(path).read_text(encoding="utf-8").splitlines()
     return [json.loads(line) for line in lines if line.endswith("}")]
+
+
+class WindowsReplacementBlock:
+    """Hold a real readable file handle without FILE_SHARE_DELETE."""
+    def __init__(self, path):
+        assert WINDOWS
+        from ctypes import wintypes
+        self.api = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.api.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        self.api.CreateFileW.restype = wintypes.HANDLE
+        self.api.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.api.CloseHandle.restype = wintypes.BOOL
+        self.handle = self.api.CreateFileW(str(Path(path).resolve()), 0x80000000, 0x1 | 0x2,
+                                          None, 3, 0x80, None)  # READ, share READ|WRITE, OPEN_EXISTING
+        if self.handle == ctypes.c_void_p(-1).value:
+            self.handle = None
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def close(self):
+        if self.handle is not None:
+            if not self.api.CloseHandle(self.handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.handle = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
+def store_diagnostic(runner, event, file):
+    rows = [row for row in events(runner.log_path) if row.get("event") == event and row.get("file") == file]
+    if not rows:
+        return None
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["atomic_code"] == "atomic.replace_failed", row
+    assert row["failure_kind"] == "TransientReject" and row["outcome"] == "NotCommitted", row
+    assert isinstance(row["message"], str) and row["message"], row
+    assert isinstance(row["attempt"], int) and 1 <= row["attempt"] <= 51, row
+    assert set(row) == {"event", "file", "atomic_code", "failure_kind", "outcome", "attempt", "message"}, row
+    return row
 
 
 def fixture_job(marker, nonce, duration, child_marker=None):
@@ -84,7 +401,10 @@ def fixture_job(marker, nonce, duration, child_marker=None):
 
 def fixture_worker(binary, root, runner_id, payload, receipt, gate):
     eventually(lambda: Path(gate).exists())
-    reply = request(binary, root, runner_id, read_json(payload))
+    def keep_response(result):
+        Path(receipt).with_suffix(".stdout").write_bytes(result.stdout)
+        Path(receipt).with_suffix(".stderr").write_bytes(result.stderr)
+    reply = request(binary, root, runner_id, read_json(payload), on_response=keep_response)
     write_json(receipt, {"reply": reply, "worker_pid": os.getpid()})
     while True:
         time.sleep(0.1)
@@ -162,32 +482,55 @@ class Runner:
         self.project.mkdir()
         self.secret = "local-secret-" + uuid.uuid4().hex
         self.handles = []
+        self.start_receipts = []
+        self.fixture_markers = set()
         self.process = None
         self.stream = None
+        self.log_path = None
 
-    def start_service(self):
+    def start_service(self, on_spawn=None):
         old_boot = read_json(self.root / "endpoint.json")["boot_id"] if (self.root / "endpoint.json").exists() else None
-        self.stream = open(self.base / ("service-" + uuid.uuid4().hex + ".log"), "wb")
+        self.log_path = self.base / ("service-" + uuid.uuid4().hex + ".log")
+        self.stream = open(self.log_path, "wb")
         env = dict(os.environ, RUNNER_TEST_SECRET=self.secret)
         self.process = subprocess.Popen([self.binary, "serve", "--state-root", str(self.root)],
             stdin=subprocess.DEVNULL, stdout=self.stream, stderr=subprocess.STDOUT, env=env,
             start_new_session=not WINDOWS, creationflags=NO_WINDOW)
+        if on_spawn is not None:
+            on_spawn()
+        readiness_errors = []
         def ready():
             assert self.process.poll() is None, "Runner exited before readiness"
             endpoint = self.root / "endpoint.json"
-            return endpoint.exists() and read_json(endpoint).get("boot_id") != old_boot
-        eventually(ready)
+            return endpoint_ready(endpoint, old_boot, errors=readiness_errors)
+        eventually(ready, failure_detail=lambda: readiness_errors[-1] if readiness_errors else "")
         self.runner_id = read_json(self.root / "identity.json")["runner_id"]
         info = self.call({"method": "runner.info"})
         assert info["ok"] and info["capabilities"]["worker_exit_survival"] == "independent_domain_required"
         assert not info["capabilities"]["arbitrary_service_restart_survival"]
 
     def call(self, body, runner_id=None):
-        return request(self.binary, self.root, runner_id or self.runner_id, body)
+        if body.get("method") != "job.start":
+            return request(self.binary, self.root, runner_id or self.runner_id, body)
+        receipt = {}
+        argv = body.get("spec", {}).get("argv", [])
+        if len(argv) >= 5 and argv[2:4] == [THIS, "_job"]:
+            marker = Path(argv[4])
+            if marker.parent == self.project:
+                receipt["marker"] = marker
+        self.start_receipts.append(receipt)
+        def keep_response(result):
+            receipt.update(stdout=result.stdout, stderr=result.stderr, returncode=result.returncode)
+        reply = request(self.binary, self.root, runner_id or self.runner_id, body, on_response=keep_response)
+        receipt["job_id"] = reply.get("job", {}).get("job_id")
+        return reply
 
     def spec(self, name, duration=20, child=False):
         marker = self.project / (name + ".jsonl")
         child_marker = self.project / (name + "-child.jsonl") if child else "-"
+        self.fixture_markers.add(marker)
+        if child:
+            self.fixture_markers.add(child_marker)
         return {"argv": [sys.executable, "-u", THIS, "_job", str(marker), name, str(duration), str(child_marker)],
                 "cwd": str(self.project), "env_refs": ["RUNNER_TEST_SECRET"]}
 
@@ -343,14 +686,49 @@ def crash(runner, starting=False):
         # Replay a valid interrupted ledger snapshot with an unrelated live PID.
         book_path = runner.root / "jobs.json"
         book = read_json(book_path)
+        assert book["schemaVersion"] == 1 and len(book["records"]) == 1, book
         record = next(iter(book["records"].values()))
+        assert record["state"] == "running" and record["exit_code"] is None, record
+        assert record["session_id"] == handle["session_id"] and record["job_id"] == handle["job_id"], record
+        assert record["job_nonce"] == handle["job_nonce"] == record["process_nonce"], record
+        assert record["runner_id"] == runner.runner_id and record["pid"] > 0, record
+        assert record["owner_boot_id"] == read_json(runner.root / "endpoint.json")["boot_id"], record
+        assert not record["cancel_requested"] and not record["cancel_delivered"], record
+        canonical = json.dumps(book["records"], sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        assert book["sha256"] == hashlib.sha256(canonical.encode("utf-8")).hexdigest(), book
         record["pid"] = 0 if starting else sentinel.pid
         if starting:
             record["state"] = "starting"
         canonical = json.dumps(book["records"], sort_keys=True, ensure_ascii=False, separators=(",", ":"))
         book["sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         write_json(book_path, book)
-        runner.start_service()
+        if WINDOWS and not starting:
+            # Exercise both startup writes: recovery saves jobs before publishing endpoint.
+            for filename in ("jobs.json", "endpoint.json"):
+                runner.kill_service()
+                write_json(book_path, book)  # Replay the same valid unfinished snapshot.
+                target = runner.root / filename
+                before = target.read_bytes()
+                endpoint_before = (runner.root / "endpoint.json").read_bytes()
+                with WindowsReplacementBlock(target) as blocker:
+                    def release_after_rejection():
+                        rejected = eventually(lambda: store_diagnostic(runner, "runner.store_retry", filename))
+                        assert rejected["attempt"] == 1, rejected
+                        assert runner.process.poll() is None, "Runner died during a retryable short rejection"
+                        assert target.read_bytes() == before, "Short rejection changed the old target"
+                        assert (runner.root / "endpoint.json").read_bytes() == endpoint_before
+                        blocker.close()
+                    runner.start_service(on_spawn=release_after_rejection)
+                assert (runner.root / "endpoint.json").read_bytes() != endpoint_before
+                assert store_diagnostic(runner, "runner.store_failed", filename) is None
+                saved = read_json(book_path)
+                assert saved["records"][next(iter(book["records"]))]["state"] == "indeterminate"
+                assert runner.job_call("job.get", handle)["job"]["state"] == "indeterminate"
+                assert sentinel.poll() is None
+                print(f"windows_{Path(filename).stem}_short_reject_recovery: passed (real handle; persisted indeterminate)",
+                      flush=True)
+        else:
+            runner.start_service()
         current = runner.job_call("job.get", handle)
         assert current["ok"] and current["job"]["state"] == "indeterminate"
         assert runner.job_call("job.cancel", handle)["error"]["code"] == "runner.job_indeterminate"
@@ -360,6 +738,8 @@ def crash(runner, starting=False):
         assert sentinel.poll() is None
         time.sleep(2.2)  # POSIX orphan is allowed to finish; no resume is promised.
         assert sum(row["event"] == "started" for row in events(marker)) == 1
+        if WINDOWS and not starting:
+            print("windows_store_short_reject_idempotency: passed (same key not rerun; sentinel untouched)", flush=True)
     finally:
         sentinel.terminate()
         sentinel.wait(timeout=10)
@@ -383,6 +763,32 @@ def state_fencing(runner):
     runner.start_service()
     assert runner.runner_id != old_id
     assert runner.call({"method": "runner.info"}, runner_id=old_id)["error"]["code"] == "runner.identity_mismatch"
+    if WINDOWS:
+        current_id = runner.runner_id
+        runner.kill_service()
+        endpoint = runner.root / "endpoint.json"
+        before = endpoint.read_bytes()
+        book_before = (runner.root / "jobs.json").read_bytes()
+        with WindowsReplacementBlock(endpoint):
+            def observe_budget_exhaustion():
+                assert runner.process.wait(timeout=10) == 1, "Blocked Runner did not fail closed"
+                retry = store_diagnostic(runner, "runner.store_retry", "endpoint.json")
+                failure = store_diagnostic(runner, "runner.store_failed", "endpoint.json")
+                assert retry is not None and retry["attempt"] == 1, retry
+                assert failure is not None and 2 <= failure["attempt"] <= 51, failure
+                assert {"ok": False, "error": {"code": "runner.store_failed"}} in events(runner.log_path)
+                assert endpoint.read_bytes() == before, "Exhausted retry changed the old endpoint"
+                assert (runner.root / "jobs.json").read_bytes() == book_before, "Exhausted retry changed the book"
+            try:
+                runner.start_service(on_spawn=observe_budget_exhaustion)
+            except AssertionError as error:
+                assert str(error) == "Runner exited before readiness", str(error)
+            else:
+                raise AssertionError("Permanently held endpoint unexpectedly became ready")
+        runner.kill_service()  # Close the failed service log before a new launch.
+        runner.start_service()
+        assert runner.runner_id == current_id
+        print("windows_endpoint_short_reject_budget: passed (bounded failure; old bytes kept; release restarts)", flush=True)
 
 
 def launch_failure(runner):
@@ -459,26 +865,7 @@ def main():
     ]
     report = {"schemaVersion": 1, "tests": []}
     for name, check in cases:
-        runner = None
-        status = "failed"
-        with tempfile.TemporaryDirectory(prefix="luban-runner-test-") as directory:
-            try:
-                runner = Runner(str(Path(args.runner).resolve()), directory)
-                runner.start_service()
-                check(runner)
-                status = "passed"
-            except Exception:
-                traceback.print_exc()
-                if runner:
-                    for service_log in runner.base.glob("service-*.log"):
-                        print(service_log.read_text(encoding="utf-8", errors="replace")[-4000:], flush=True)
-            finally:
-                if runner:
-                    runner.close()
-        report["tests"].append({"name": name, "status": status})
-        print(f"{name}: {status}", flush=True)
-    Path(args.report).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.report).write_text(json.dumps(report, indent=2), encoding="utf-8")
+        run_case(str(Path(args.runner).resolve()), args.report, report, name, check)
     return 0 if all(case["status"] == "passed" for case in report["tests"]) else 1
 
 

@@ -19,6 +19,7 @@
 
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -101,7 +102,9 @@ public:
     BootstrapResult BootstrapChild(const V3Writer& parent, std::string_view child_run_id,
                                    std::string_view child_system_content,
                                    std::string_view task_prompt,
-                                   Durability durability = Durability::PowerLoss) const;
+                                   Durability durability = Durability::PowerLoss,
+                                   // Empty in production; follows the real Close.
+                                   std::function<std::optional<std::string>()> close_fault = {}) const;
 
     // 步 3:父账 subagent.linked(引用子账检查点)。
     WriteReceipt Link(V3Writer& parent, const ChildCheckpointRef& checkpoint,
@@ -120,6 +123,8 @@ public:
     const std::string& action_id() const { return action_id_; }
     const std::string& task_id() const { return task_id_; }
     const ChildSessionRef& child() const { return child_; }
+    const ParentActionRef& parent_action() const { return parent_ref_; }
+    const WriteReceipt& requested_receipt() const { return spawn_receipt_; }
 
 private:
     SubagentSpawn(std::string action_id, std::string turn_id, std::string step_id,

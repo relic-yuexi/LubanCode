@@ -6,12 +6,14 @@
 #pragma once
 
 #include <cstdint>
+#include <expected>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -20,6 +22,7 @@
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 #include "runtime/tool_trajectory_sink.hpp"
+#include "runtime/subagent_terminal.hpp"
 #include "telemetry/wake.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/v3/result_store.hpp"
@@ -186,10 +189,17 @@ public:
     // ---- 子代理边界(§3.5:父子文件只传边界引用与 terminal hash) ----
     // agent 工具派工时挂子 run 引用:该 call 的 started/终态事件带
     // relations.child_run_id。
-    void AttachChildRun(const std::string& call_id, const std::string& agent_run_id);
+    std::expected<void, std::string> AttachChildRun(
+        const std::string& call_id, const std::string& agent_run_id,
+        std::optional<SubagentSpawnProvenance> provenance = std::nullopt);
     // 子账收口后报终态 hash:该 call 的执行终态 payload 带
     // child_run_id 与 child_terminal_event_hash(双向对账的父侧)。
-    void NoteChildTerminal(const std::string& agent_run_id, const std::string& terminal_event_hash);
+    void NoteChildTerminal(const SubagentTerminalReceipt& receipt);
+    // Only receipt storage is shared; this does not keep the parent writer or
+    // other spawn callbacks alive beyond their existing borrowing contract.
+    std::shared_ptr<SubagentTerminalRegistry> child_terminal_registry() const {
+        return child_terminals_;
+    }
 
     // ---- P0-4:verification 与 outcome(§5.5/§五 5.5) ----
     // 验证点落账:started+recorded 两枚,observed_after_seq 钉在当前账尾。
@@ -241,6 +251,10 @@ public:
         std::string step_id;
     };
     std::optional<V3CallOrigin> V3DeclaredCallOrigin(const std::string& provider_call_id) const;
+    // Only a started active action yields this identity; it is borrowed from no
+    // mutable last-call slot and copied for the current Tool::execute invocation.
+    std::optional<std::pair<std::string, std::uint64_t>> V3ExecutingCallIdentity(
+        const std::string& provider_call_id) const;
     // request_id -> 流式预留的 assistant messageId(提前档调用证据锚;
     // 流没起账/请求簿没有 → nullopt)。
     std::optional<std::string> V3ReservedAssistantMessageId(const std::string& request_id) const;
@@ -390,7 +404,8 @@ private:
         int input_round_index = 0;
     };
     std::map<std::string, RequestTurnBook> request_turns_;
-    std::map<std::string, std::string> child_terminal_hashes_;  // agent_run_id -> hash
+    std::shared_ptr<SubagentTerminalRegistry> child_terminals_ =
+        std::make_shared<SubagentTerminalRegistry>();
     std::set<std::string> started_io_failed_;  // started 落不住被拦的 execution
     std::set<std::string> storage_blocked_;    // 磁盘 reserve 不足被拦的 execution
     std::vector<VerificationBook> verifications_;

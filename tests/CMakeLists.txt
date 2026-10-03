@@ -14,6 +14,9 @@ list(SORT LUBANCODE_TEST_SOURCES)
 if(NOT LUBANCODE_BUILD_SDK)
   list(FILTER LUBANCODE_TEST_SOURCES EXCLUDE REGEX "/(unit|integration)/sdk/")
 endif()
+# This source gets its own CLI-only executable below. Keep the Runner client
+# edge out of the App/SDK aggregate, including when both hosts are enabled.
+list(FILTER LUBANCODE_TEST_SOURCES EXCLUDE REGEX "/unit/job_runner/test_runner_release_diagnostic\\.cpp$")
 
 # glob 兜底(2026-08-28):examples 域的册在主树 configure 偶发漏收
 # (同 cmake 同 pattern 的独立项目能收,工头 worktree 也能收;增量与全新
@@ -87,8 +90,27 @@ add_executable(lubancode_tests
   ${LUBANCODE_TEST_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
+if(TARGET luban_job_runner_client)
+  # Use the same production Process owner without adding its platform objects
+  # to the App/SDK aggregate. SDK-only and Runner-only return before this block.
+  add_executable(luban_runner_release_tests
+    support/main.cpp
+    unit/job_runner/test_runner_release_diagnostic.cpp)
+  target_link_libraries(luban_runner_release_tests PRIVATE luban_job_runner_client doctest::doctest)
+  target_compile_features(luban_runner_release_tests PRIVATE cxx_std_23)
+  add_test(NAME unit.job_runner.runner_release_diagnostic
+    COMMAND luban_runner_release_tests "--source-file=*test_runner_release_diagnostic.cpp")
+  set_tests_properties(unit.job_runner.runner_release_diagnostic PROPERTIES
+    LABELS "unit;job_runner;unit.job_runner" TIMEOUT 180
+    ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
+endif()
 if(LUBANCODE_BUILD_SDK)
   target_link_libraries(lubancode_tests PRIVATE lubancore_sdk)
+  # Scoped pending/reference tests call private implementation symbols. Compile
+  # the real source locally rather than exporting a new private SDK DLL ABI.
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/approval.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/memory.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/action_dispatch.cpp")
   if(WIN32)
     add_custom_command(TARGET lubancode_tests POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -101,7 +123,7 @@ endif()
 # 路径随 target 的 PUBLIC usage 递)。
 target_link_libraries(lubancode_tests PRIVATE mbedtls)
 # 更新器 C++ 化批一第③单:miniz 冒烟册(tests/unit/updater)直接用
-# mz_zip_writer/mz_zip_reader 造一枚 zip 再读回——engine 对 miniz 是
+# mz_zip_writer/mz_zip_reader 造一枚 zip 再读回——updater 对 miniz 是
 # PRIVATE 链,这里照 mbedTLS 的先例显式补上。
 target_link_libraries(lubancode_tests PRIVATE miniz)
 # 批二余款:测试共用的回合事件录音器(Callbacks 显示回调退役,观察点
@@ -429,6 +451,9 @@ endforeach()
 if(LUBANCODE_BUILD_SDK)
   # Private production-reader fixture; keep detail symbols out of the SDK ABI.
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/results.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/subagents.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/actions.cpp")
   include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
   include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreHostTests.cmake")
 endif()

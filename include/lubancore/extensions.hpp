@@ -16,17 +16,23 @@ namespace lubancore::detail { struct ExtensionNextAccess; }
 // Each session freezes its own assembly; Close drains it and then releases it.
 namespace lubancore::extensions::v1 {
 
-enum class Point { PreUser, PostUser, PreRequest };
+enum class Point { PreUser, PostUser, PreRequest, PreAction, PostAction };
 enum class Stage { Default, Estimate, Capacity };
 enum class FailurePolicy { Abort, KeepOriginal };
 // Host-supplied registration provenance, never a field in an extension manifest.
 enum class SourceLayer { Extension, Project, User, Session };
 
 struct SessionContext { std::string session_id; std::string cwd; };
+struct ExecutionIdentity {
+    std::string session_id, operation_id, turn_id, action_id;
+    std::uint64_t attempt = 0;
+};
 struct Input {
     std::uint32_t schema_version = 1;
     // PreUser/PostUser: exactly {"prompt":string}. PreRequest: frozen model-input
     // snapshot; Capacity additionally carries tokenEstimate and host budget fields.
+    // PreAction: exactly {"arguments":object}. PostAction: arguments and result
+    // {text,isError,outcome,errorCode}; fields come from actual finished capture.
     // No credentials are supplied. These JSON contracts are versioned separately
     // from the experimental C++ ABI.
     std::string json;
@@ -44,6 +50,10 @@ struct Context {
     // Only identities already issued by the host. Missing levels stay absent.
     std::optional<std::string> turn_id, step_id, request_id;
     Cancellation cancellation;
+    // Main Action only, copied from the actual declared/started call. PreAction
+    // has no execution identity; a wire call ID is not an execution identity.
+    std::optional<std::string> action_id, wire_call_id, tool_name, effective_cwd;
+    std::optional<ExecutionIdentity> execution;
 };
 struct DownstreamOutcome {
     enum class Kind { Value, Denied, Failed };
@@ -59,8 +69,8 @@ public:
     // Copies share one invocation grant. At most one call reaches the downstream
     // chain. Cross-thread calls reject without consuming the owner's grant.
     // Saved copies expire as Invoke returns and retain no session resources.
-    // Observers cannot call Next. PreUser alone can propose a replacement,
-    // strictly {"prompt":string}; other points/stages reject a candidate.
+    // Observers cannot call Next. PreUser proposes exactly {"prompt":string};
+    // PreAction proposes exactly {"arguments":object}. PostAction cannot rewrite.
     Result<DownstreamOutcome> Call(std::optional<std::string> candidate_json = std::nullopt) const;
 private:
     struct State;
@@ -69,11 +79,13 @@ private:
     friend struct ::lubancore::detail::ExtensionNextAccess;
 };
 
-enum class EffectType { ContextAppend, AdmissionDecision };
+enum class EffectType { ContextAppend, AdmissionDecision, ResultSupplement };
 struct Effect {
     EffectType type = EffectType::ContextAppend;
     // ContextAppend: {"text":string}. AdmissionDecision is Capacity-only:
-    // {"decision":"allow"|"recover"|"reject", "reason":string}.
+    // {"decision":"allow"|"recover"|"reject", "reason":string}. PreAction
+    // accepts only {"decision":"ask","reason":string}. PostAction alone accepts
+    // ResultSupplement: exactly {"text":string}; the host supplies provenance.
     std::string payload_json;
 };
 struct HandlerReturn {

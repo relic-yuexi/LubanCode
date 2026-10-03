@@ -1,0 +1,87 @@
+# SDK 显式 standalone Lua 合同
+
+基线为渠道宿主分支 `e52dc07f`。首笔只接宿主明确选定的 standalone `.lua` 工具；SDK 默认关闭。实现候选已接好，原生验收待远端 CI。Package、manifest-backed Lua、Lua 中间件能力束另开小批，原 CLI 三路装配照旧。
+
+## 公开什么
+
+`SessionOptions.lua` 收显式 Lua 选择值。宿主给绝对目录、精确相对脚本路径、预期完整工具名，以及正数指令预算、内存帽、墙钟预算；不收进程默认 cwd、HOME 或 CLI 配置作为兜底。不扫描或执行未选脚本，也不替宿主改名。
+
+同份已打开普通文件字节过固定读取帽、UTF-8/NUL 与根内路径检查，再交现有 `LuaTool::LoadFromScript`。实际工具名、说明和 object schema 都验过，才注册进本场工具表；完整名须与宿主声明一致。缺件、坏类型、重名、与 builtin/custom/MCP 名冲突或任一必选件加载失败，整场拒开，不跳过坏件装半张表。
+
+选名最多 128 件，单脚本最多 1 MiB，累计实际读取最多 16 MiB，冻结计划最多 256 KiB。先校三项执行预算均为正且可由内部类型表示，再构造 state；不以零值偷偷关帽。入口指纹只覆盖选定源码与声明，不冒称 Lua 堆快照。
+
+首笔只用现有 `Whitelisted` 画像：字符串、表、数学、UTF-8、字符串编译与时间函数。`dofile/loadfile/require`、进程与文件 API、Trusted 全库、Host HTTP/Secret 均不开放。此处是本批能力范围，不把 Lua VM 或文件检查当 OS 隔离。
+
+SDK 额外明确禁 `print`，免得脚本向 Worker 的协议 stdout 写字节。内部画像用 `allow_print=false` 声明，冻结计划记下 `stdio=false`；CLI Pure/Trusted、既有 Whitelisted Hook 仍沿原默认 `allow_print=true`。不暗改既有 Hook，也不在本批增 logger 能力。
+
+## 真正可见、真正可调
+
+原 `LuaTool::deferred()` 为 true。现有 `Agent::BuildToolDefinitions` 只在宿主设 `tool_filter` 时过滤，只在 `native_deferred_tools` 启用时标 Deferred。公开 SDK 当前均未开启，故所选 Lua 按普通工具定义出现在真实首个模型请求，沿原 `RunOneTool` 执行；不复制工具执行器，不为本批另造搜索或激活协议。CLI 原延迟工具发现与激活不改。
+
+工具名仍沿 `plugin__<文件stem>__<脚本name>`。保留 External 审批、真实 schema 验参、raw/formal/selected 与主 V3 采用链。未经显式子 Agent profile 准入，不自动给孩子或 Explore 多挂工具；本批验收以主场真实调用为准。
+
+## 共用装载与预算
+
+`src/tools/lua_tool.hpp/.cpp` 已有 VM、LuaGuard 和转换件，SDK 复用它们。落公开装配前先补三处中立收口：
+
+1. `LoadFromScript` 改用已有 `OpenLuaLibraries`。现实现直接开全库，只处理 Pure，传 Whitelisted 尚未真正生效；修后 CLI 原 Pure/Trusted 仍走同一条件与原库集合。
+2. 临时 `lua_State` 用 RAII 持有。编译、顶层初始化、定义转换或 C++ 异常都关闭一次；成功一次移交 LuaTool。失败不留下半只 VM。
+3. 顶层初始化与每次执行同设指令账、内存帽和墙钟 deadline。初始化不跑模型或工具。调用接本次真实取消旗，返回与异常时清掉 guard 借旗及 deadline；不用监控线程或新停止系统。预算沿现有 instruction hook 检查，不承诺硬实时中断任意 C 函数。
+
+旧 CLI 未请求墙钟预算时保持旧零值行为；本批 SDK 必须显式给正预算。脚本返回值仍走原 Lua 到 Tool::Result 转换，不另定义 Lua 专属运行栈。
+
+SDK 画像按宿主定案收紧：开库后、装载脚本前摘掉 `pcall` 与 `xpcall`，脚本不能从全局、别名或字符串编译入口取回原函数。现白名单原本就不开放 coroutine、debug、require、package 与 io；本笔继续保这条线。内部 `allow_error_catching=false` 只给 SDK，旧 Pure/Trusted/Hook 默认仍为 true。C++ 宿主用于接 OOM、脚本错误及 hook 中断的 `lua_pcall` 边界不撤。
+
+冻结计划明确记 `protectedCalls=false`，在恢复装载任何脚本前核画像。缺字段、true 或旧画像不能悄悄升级成新场；拒开时旧计划、账本与模型调用不动。可信脚本仍须配合宿主退出；hook 按指令步长查旗，阻塞 C 函数和进程隔离不由这两项删函数保证。Close 发取消，等实际调用退场。
+
+内存帽也管装载与入参转换。当前开库、guard 注册和 `PushJsonToLua` 尚在受保护调用之外；Lua OOM 可直接 panic/longjmp，C++ RAII 接不住。本批先沿共用 VM 将会分配的初始化、开库、脚本定义提取和调用入参搬到真实 `lua_pcall` 边界；边界内不得让 longjmp 越过待销毁的 C++ 持值。需要中间 JSON/string 时，由边界外 owner 持有，C callback 只借到本次返回。失败退回稳定错误、恢复栈顶、清取消借旗与 deadline，关闭 VM 一次；取消或 OOM 不杀宿主，也不污染下一次调用。初始化 OOM 与大入参 OOM 都用真实小正预算验，随后健康调用仍能活着退场；不以 fake 错误代替。
+
+这份受保护保证只覆盖 standalone `LuaTool::LoadFromScript/Run`。共享转换入口销毁其 C++ 计划后再抛回既有 Lua 错误链，调用方仍须有外层保护；现 manifest/Hook 宿主装配没有在本批全部迁入保护边界，不据此声称那些旧宿主也已 OOM 安全。
+
+## 谁拥有，怎么关场
+
+本场 registry 直接持有每件 LuaTool；每件工具独占 VM、guard 和互斥锁。省掉 CLI `EmbeddedLuaRuntime` 的目录扫描和借用 adapter，仍调用同一 VM 实现。不同场不共用 VM 或可变 globals；同一 VM 调用串行。
+
+取消沿 `ToolExecutionContext.cancel` 传入，只借到这次调用退出。同 state 等锁时与拿锁后须核本次取消，不读上一回合残留地址。关闭沿现有 Session worker、ExecutionOwner 和 SessionResources：停接、置取消旗、等真实调用退场，清回合借用与 Agent，再销 registry/VM。禁止 detach 假收工，不把尚在调用的 VM 先关掉。
+
+描述与开场冻结信息若提供查询，只返回 owned 值；闭场后照样可读。公开头不暴露 `lua_State`、LuaTool、CLI ToolRuntime 或裸 callback 借用。
+
+## 同 ID 恢复
+
+冻结声明含目录与精确入口、预期/实际工具名、源码摘要、schema、Whitelisted 画像和三项预算。默认关闭也须有明确新场声明。聚合现有 opening gate，不能替换 Skills/Memory/Subagents 等绑定。新场 under-owner 落冻结计划，成功才写 system 绑定；恢复省略沿旧计划，显式变化、缺件、入口漂移、坏声明或坏绑定拒绝，不静默升级旧无计划会话。
+
+校绑定还要逐枚核场身份：初始 system、用于确认初始采用的 SessionStarted、每条已采用 revision 的 system、当前有效 system 均须归 `resume_session_id`；不能只信卷首身份或相同指纹。真正不存在的恢复目录仍报既有 `sdk.session.open_failed`。目录已有但链接、不可读或材料坏了，须沿 `sdk.lua.plan_invalid` 拒绝，不退成旧无计划。
+
+静态材料检查可在 MCP 之前；独占 owner 下恢复校准必须在工具、模型和续账之前。当前资源装配可能先连 MCP，本合同不虚称整条开场已在 MCP 之前，也不允许为读取失败去调用脚本工具。
+
+恢复从同份冻结源码构造新 VM，不回放历史工具，不恢复先前 Lua globals/闭包。运行中保留本场 VM 状态；跨 Close 的 Lua 状态持久化另批。旧工具结果与真实模型输入仍从既有 V3 raw/formal/selected/context/prepared 原链读取，不拿源码 fingerprint 冒充运行状态或 Close 回执。
+
+## Package 留待后笔
+
+现 `src/package/component.hpp/.cpp` 带 ChannelManifest、Workflow、Agent、Plugin parser；`mounting.hpp/.cpp` 折四张材料表；`code_mounting.cpp` 又暂存 process/Lua/MCP 并整包发布。它们目前由 CLI core 持有。直接搬入 SDK 会带回渠道宿主等依赖，不能借一处公开路径宣布已完成 Package。
+
+下一笔先划纯解析/分析值与宿主执行发布边界，复用原 parser、整包 invalid、引用/信任/停用与覆盖规则；不复制 schema，不造静库环。之后逐件接公开 Skills/Profile/Agent 材料，再接 manifest Lua/受控能力与 Package code 事务。CLI 命令、reload 钉旧快照、code 须新会话和坏包诊断都保留。
+
+## 远端验收
+
+三平台安装消费者只调公开 SDK：默认关闭、精确选件、首个真实 Backend 请求有定义、真实 Submit 调脚本并进入下一请求；同项目两场与异项目两场各自 VM；审批、取消、Close；初始化/转换失败不遗留 VM；同 ID 新 VM 恢复不重跑旧工具；漂移/缺坏/重复声明拒启，未选脚本不读取。
+
+原 CLI Lua/manifest/Package 来源册继续实际运行。新增原生来源与非零 case 数纳入 focused/ASan；最终数按真实源码登记，不先拿计划数冒实跑。九份实际 FileAPI 继续核 source owner 和 SDK 闭包，Package/渠道/Gateway/更新器仍禁回；Lua 当前已链接，本批不宣称已经瘦出默认 SDK。
+
+当前源码登记 9 册 SDK Lua、6 册中立 Lua 保护边界；focused 27 来源，ASan 33 来源，安装消费者 23 册。第 9 册先真正采用替换 system，再重算真实账 hash 链，逐项改坏绑定、已采用消息归属和起始事件归属；公共 Reader 仍读得开时，SDK 必须在模型前拒开，旧账与计划不动。以上均待当前分支头远端实跑，数量不作通过证据。
+
+本地只查代码、文档与纯数据。configure、编译、CTest、项目原生进程一概交远端 CI。
+
+### 已有调用身份与夹具校准
+
+`dbc341a1` 的远端安装消费已实际运行，Lua/seed 卡在结果身份检查。旧夹具硬比 `ToolResultIdentity.tool_call_id == "lua-call"`，混了模型 wire call ID 与账本 action ID。现有 `TrajectoryTurnBridge::V3OutputCompleted` 保留 provider 原号作配对键，另由 `V3Writer::NewActionId()` 发账本号；公开结果索引沿已落盘 action ID，不回填 provider 号。
+
+校准只改验收宿主。模型往返仍核原 `lua-call`；两条公开结果必须均 selected，同本场、operation、turn、工具与 attempt=1，且共同采用一枚非空账本 action ID。raw/formal 数量、独立 result/persisted 身份、verified 元数据和模型实际采用正文逐条照核。失败诊断打印所有公开身份原值，便于远端追查。SDK/Agent/结果索引与执行预算不改；原四份 POSIX 首红另封，不能回填成已过。新头仍须三平台原生实跑。
+
+### SDK 捕获入口收紧验收
+
+这笔承接宿主明确选择，先改合同，再动代码。六册中立保护来源增加真实画像对照：SDK 初始化与执行均取不到 `pcall/xpcall`，旧 CLI/Hook 两函数仍可真接普通脚本错误；原 OOM、墙钟、指令、真实取消与后续健康调用照验。公开安装计数脚本在定义与执行两处核无捕获入口；三平台 SDK 和安装后新进程恢复都实际走新画像。第九册恢复再核缺字段/放开捕获的冻结画像拒开、零模型、旧字节不动。现9/6册、27focused/33ASan/23消费名册与预算不缩。
+
+### 中立测试闭包登记
+
+`990082a9` 远端安装消费者已真实通过公开 Lua 八路径与新进程恢复；独立 SDK 的 testing ON 架构门却拒 `tests/unit/tools/test_lua_protected.cpp`。原因是该册已加入真实 CMake 名册，却漏进中立测试源精确名单，不是 Lua 生产源带回宿主。这笔只登记该单源、仅 testing ON；testing OFF、邻近 tools 测试、逆向宿主 include 仍拒。补正反纯数据例，再交实际 FileAPI 验，不能删掉保护边界来源去换绿。

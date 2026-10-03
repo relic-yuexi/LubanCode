@@ -449,42 +449,63 @@ RipgrepSmokeResult BundledRipgrepRunner::smoke_result() const {
     return smoke_result_;
 }
 
+std::expected<void, SearchBackendErrorInfo> BundledRipgrepRunner::Prepare() {
+    EnsureSmoke();
+    std::lock_guard<std::mutex> lock(smoke_mutex_);
+    if (smoke_result_.status != RipgrepSmokeStatus::Ready) {
+        return std::unexpected(SearchBackendErrorInfo{
+            smoke_result_.code.value_or(SearchBackendError::BackendMissing),
+            smoke_result_.message});
+    }
+    return {};
+}
+
 void BundledRipgrepRunner::EnsureSmoke() {
     std::lock_guard<std::mutex> lock(smoke_mutex_);
     if (smoke_done_) {
         return;  // 每实例只 smoke 一次(工具实例共享,别让并发调用各起一遍进程)
     }
-    // 定位:单枚注入(测试,不回退)优先;否则整批候选(注入或生产)走
-    // 三层发现——随包 → rg-stage → PATH,命中件照过版本门。
-    if (exe_override_.has_value()) {
-        smoke_result_ = RunRipgrepSmoke(*exe_override_, version_probe_);
+    try {
+        // 定位:单枚注入(测试,不回退)优先;否则整批候选(注入或生产)走
+        // 三层发现——随包 → rg-stage → PATH,命中件照过版本门。
+        if (exe_override_.has_value()) {
+            smoke_result_ = RunRipgrepSmoke(*exe_override_, version_probe_);
+            smoke_done_ = true;
+            return;
+        }
+        const std::vector<RipgrepCandidate> candidates =
+            candidates_override_.has_value() ? *candidates_override_ : CollectRipgrepCandidates();
+        const RipgrepDiscovery discovery = DiscoverRipgrep(candidates);
+        if (!discovery.hit.has_value()) {
+            // 三层全缺:稳定错照旧,文案升级成修复指引(不裸抛路径)。
+            smoke_result_.status = RipgrepSmokeStatus::Missing;
+            smoke_result_.code = SearchBackendError::BackendMissing;
+            smoke_result_.message = FormatRipgrepAllMissingGuidance(discovery.tiers);
+            smoke_result_.exe = discovery.tiers.empty() ? std::filesystem::path{}
+                                                       : discovery.tiers.front().candidate.exe;
+            smoke_done_ = true;
+            return;
+        }
+        smoke_result_ = RunRipgrepSmoke(discovery.hit->exe, version_probe_);
+        smoke_result_.source = discovery.hit->source;
+        if (discovery.hit->source != RipgrepSource::Bundled) {
+            // 自愈一行账(单子 §四层 2):exe 旁缺件,兜底层有货,直接用兜底
+            // 路径不拷贝。落 LogSink(默认 stderr,装配了文件 sink 落日志),
+            // 不进工具正文——正文只留搜索结果。
+            platform::LogSink::Instance().Warn(
+                "search", std::string("rg 兜底命中 ") + std::string(ToString(discovery.hit->source)) +
+                              " 层: " + PathToUtf8(discovery.hit->exe) + "(exe 旁 libexec 缺件;直接用该路径,不拷贝)");
+        }
         smoke_done_ = true;
-        return;
-    }
-    const std::vector<RipgrepCandidate> candidates =
-        candidates_override_.has_value() ? *candidates_override_ : CollectRipgrepCandidates();
-    const RipgrepDiscovery discovery = DiscoverRipgrep(candidates);
-    if (!discovery.hit.has_value()) {
-        // 三层全缺:稳定错照旧,文案升级成修复指引(不裸抛路径)。
-        smoke_result_.status = RipgrepSmokeStatus::Missing;
-        smoke_result_.code = SearchBackendError::BackendMissing;
-        smoke_result_.message = FormatRipgrepAllMissingGuidance(discovery.tiers);
-        smoke_result_.exe = discovery.tiers.empty() ? std::filesystem::path{}
-                                                    : discovery.tiers.front().candidate.exe;
+    } catch (...) {
+        // Record failure while still holding the cache lock. Concurrent callers
+        // cannot repeat a failed probe or replace its result with another attempt.
+        smoke_result_.status = RipgrepSmokeStatus::SmokeFailed;
+        smoke_result_.code = SearchBackendError::SpawnFailed;
+        smoke_result_.message = "ripgrep preparation failed";
+        smoke_result_.exe = exe_override_.value_or(std::filesystem::path{});
         smoke_done_ = true;
-        return;
     }
-    smoke_result_ = RunRipgrepSmoke(discovery.hit->exe, version_probe_);
-    smoke_result_.source = discovery.hit->source;
-    if (discovery.hit->source != RipgrepSource::Bundled) {
-        // 自愈一行账(单子 §四层 2):exe 旁缺件,兜底层有货,直接用兜底
-        // 路径不拷贝。落 LogSink(默认 stderr,装配了文件 sink 落日志),
-        // 不进工具正文——正文只留搜索结果。
-        platform::LogSink::Instance().Warn(
-            "search", std::string("rg 兜底命中 ") + std::string(ToString(discovery.hit->source)) +
-                          " 层: " + PathToUtf8(discovery.hit->exe) + "(exe 旁 libexec 缺件;直接用该路径,不拷贝)");
-    }
-    smoke_done_ = true;
 }
 
 std::expected<RipgrepRunResult, SearchBackendErrorInfo>
@@ -496,15 +517,11 @@ BundledRipgrepRunner::Run(const SearchRequest& request, const SearchPolicy& poli
     }
 
     // 前置:定位 -> 缺件/不可执行/版本 smoke(每实例一次,四路稳定错误)。
-    EnsureSmoke();
+    const auto prepared = Prepare();
+    if (!prepared) return std::unexpected(prepared.error());
     std::filesystem::path rg_exe;
     {
         std::lock_guard<std::mutex> lock(smoke_mutex_);
-        if (smoke_result_.status != RipgrepSmokeStatus::Ready) {
-            return std::unexpected(SearchBackendErrorInfo{
-                smoke_result_.code.value_or(SearchBackendError::BackendMissing),
-                smoke_result_.message});
-        }
         rg_exe = smoke_result_.exe;
     }
 

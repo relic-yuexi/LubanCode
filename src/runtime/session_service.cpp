@@ -10,6 +10,10 @@
 
 #include "runtime/session_service.hpp"
 
+#include <limits>
+#include <map>
+#include <set>
+
 #include <algorithm>
 #include <chrono>
 #include <exception>
@@ -23,6 +27,7 @@
 #include "config/config.hpp"  // HomeLubancodeDir:身份裁决的全局件止步
 #include "platform/atomic_write.hpp"  // 原件原子写(ProcessCrashDurability=fsync 档)
 #include "platform/sha256.hpp"
+#include "platform/text_encoding.hpp"
 #include "runtime/command_service.hpp"
 #include "runtime/async_tool_runtime.hpp"
 #include "runtime/goal_coordinator.hpp"
@@ -289,6 +294,10 @@ SessionRuntime::Options SessionService::BuildRuntimeOptions(const SessionLaunchR
     options.trajectory_one_shot = request.one_shot;
     options.trajectory_training_policy = request.training_policy;
     options.trajectory_v3_system_content = request.v3_system_content;
+    options.trajectory_v3_opening_participant = request.v3_opening_participant;
+    options.trajectory_memory_capability_factory = request.memory_capability_factory;
+    options.trajectory_recovery_capture = request.recovery_capture;
+    options.trajectory_recovery_factory = request.recovery_factory;
     // 身份:显式递的整份吃;否则按 cwd 四级裁决(commondir→marker→
     // config→cwd),home 递进去做全局件止步——与三端被收编前的原装配
     // 逐句对应(终端/one-shot:current_path;app-server:前端指定 cwd)。
@@ -801,6 +810,82 @@ std::vector<SessionService::OperationFact> SessionService::ReadOperationFacts(
                 }
             }
         }
+        facts.push_back(std::move(fact));
+    }
+    return facts;
+}
+
+std::expected<std::vector<SessionService::OperationFact>, std::string>
+SessionService::ReadOperationFactsOwned(const std::string& bytes) {
+    if (bytes.find('\0') != std::string::npos || !platform::IsValidUtf8(bytes))
+        return std::unexpected("recovery.operations_invalid:invalid_text");
+    auto raw = trajectory::RecoveryStreamLines(bytes, std::nullopt);
+    if (!raw) return std::unexpected("recovery.operations_invalid:" + raw.error());
+    enum class Stage { Accepted, Dispatched, Final };
+    std::map<std::string, Stage> stages;
+    std::set<std::string> client_keys, bound_turns;
+    std::vector<OperationFact> facts;
+    for (const auto& text : *raw) {
+        const auto line = nlohmann::json::parse(text, nullptr, false);
+        const auto bad = [] { return std::unexpected(std::string("recovery.operations_invalid")); };
+        if (!line.is_object() || !line.contains("schemaVersion") ||
+            (line["schemaVersion"] != 1 && line["schemaVersion"] != 2) ||
+            !line["schemaVersion"].is_number_integer()) return bad();
+        const auto string = [&](const char* key, bool required) {
+            const auto value = line.find(key);
+            return value == line.end() ? !required : value->is_string();
+        };
+        const auto integer = [&](const char* key) {
+            const auto value = line.find(key);
+            if (value == line.end()) return false;
+            return value->is_number_unsigned()
+                ? value->get<std::uint64_t>() <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())
+                : value->is_number_integer() && value->get<std::int64_t>() >= 0;
+        };
+        if (!string("kind", true) || !string("operationId", true)) return bad();
+        OperationFact fact;
+        fact.kind = line["kind"].get<std::string>();
+        fact.operation_id = line["operationId"].get<std::string>();
+        if (fact.operation_id.empty() || fact.operation_id.size() > 200 ||
+            fact.operation_id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos) return bad();
+        const auto prior = stages.find(fact.operation_id);
+        if (fact.kind == "operation.accepted") {
+            if (!string("inputId", true) || !string("clientOperationId", true) || !string("payloadHash", true) ||
+                !integer("receivedAtMs") || !string("inputRef", line["schemaVersion"] == 2) ||
+                !string("originSessionId", false) || !string("originOperationId", false)) return bad();
+            fact.input_id = line["inputId"].get<std::string>();
+            fact.client_operation_id = line["clientOperationId"].get<std::string>();
+            fact.payload_hash = line["payloadHash"].get<std::string>();
+            fact.received_at_ms = line["receivedAtMs"].get<std::int64_t>();
+            if (prior != stages.end() || fact.input_id.empty() || fact.payload_hash.size() != 64 ||
+                fact.payload_hash.find_first_not_of("0123456789abcdef") != std::string::npos ||
+                (!fact.client_operation_id.empty() && !client_keys.insert(fact.client_operation_id).second)) return bad();
+            stages.emplace(fact.operation_id, Stage::Accepted);
+        } else if (fact.kind == "operation.dispatched") {
+            if (!integer("dispatchedAtMs")) return bad();
+            if (prior == stages.end() || prior->second != Stage::Accepted) return bad();
+            prior->second = Stage::Dispatched;
+            fact.dispatched_at_ms = line["dispatchedAtMs"].get<std::int64_t>();
+        } else if (fact.kind == "operation.final") {
+            if (!string("turnId", true) || !string("executionStatus", true) || !integer("finalizedAtMs") ||
+                !line.contains("usageReported") || !line["usageReported"].is_boolean() ||
+                !line.contains("finalMessageRefs") || !line["finalMessageRefs"].is_array()) return bad();
+            if (prior == stages.end() || prior->second != Stage::Dispatched) return bad();
+            prior->second = Stage::Final;
+            fact.turn_id = line["turnId"].get<std::string>();
+            if (!fact.turn_id.empty() && (fact.turn_id.size() > 200 ||
+                fact.turn_id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos ||
+                !bound_turns.insert(fact.turn_id).second)) return bad();
+            fact.execution_status = line["executionStatus"].get<std::string>();
+            if (fact.execution_status != "success" && fact.execution_status != "error" &&
+                fact.execution_status != "cancelled" && fact.execution_status != "interrupted") return bad();
+            fact.usage_reported = line["usageReported"].get<bool>();
+            fact.finalized_at_ms = line["finalizedAtMs"].get<std::int64_t>();
+            for (const auto& ref : line["finalMessageRefs"]) {
+                if (!ref.is_string()) return bad();
+                fact.final_message_refs.push_back(ref.get<std::string>());
+            }
+        } else return bad();
         facts.push_back(std::move(fact));
     }
     return facts;
