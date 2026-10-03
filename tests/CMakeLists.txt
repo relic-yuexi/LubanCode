@@ -93,6 +93,7 @@ if(LUBANCODE_BUILD_SDK)
   # the real source locally rather than exporting a new private SDK DLL ABI.
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/approval.cpp")
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/memory.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/action_dispatch.cpp")
   if(WIN32)
     add_custom_command(TARGET lubancode_tests POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -434,6 +435,7 @@ if(LUBANCODE_BUILD_SDK)
   # Private production-reader fixture; keep detail symbols out of the SDK ABI.
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/results.cpp")
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/subagents.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/actions.cpp")
   include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
   include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreHostTests.cmake")
 endif()

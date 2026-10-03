@@ -6,7 +6,7 @@ project(lubancore_installed_consumer LANGUAGES CXX)
 find_package(LubanCore CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-add_executable(lubancore_consumer main.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp)
+add_executable(lubancore_consumer main.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp actions.cpp)
 target_compile_features(lubancore_consumer PRIVATE cxx_std_23)
 target_link_libraries(lubancore_consumer PRIVATE LubanCore::Core Threads::Threads)
 if(MSVC)
@@ -32,6 +32,8 @@ add_test(NAME sdk.consumer.isolation
   COMMAND lubancore_consumer isolation "${CMAKE_CURRENT_BINARY_DIR}/state-isolation")
 add_test(NAME sdk.consumer.extensions
   COMMAND lubancore_consumer extensions "${CMAKE_CURRENT_BINARY_DIR}/state-extensions")
+add_test(NAME sdk.consumer.actions
+  COMMAND lubancore_consumer actions "${CMAKE_CURRENT_BINARY_DIR}/state-actions")
 add_test(NAME sdk.consumer.results
   COMMAND lubancore_consumer results "${CMAKE_CURRENT_BINARY_DIR}/state-results")
 add_test(NAME sdk.consumer.skills_seed
@@ -78,7 +80,7 @@ set_tests_properties(sdk.consumer.memory_save_seed PROPERTIES FIXTURES_SETUP sdk
 set_tests_properties(sdk.consumer.memory_save_resume PROPERTIES FIXTURES_REQUIRED sdk_memory_save_restart)
 set_tests_properties(sdk.consumer.subagent_seed PROPERTIES FIXTURES_SETUP sdk_child_restart)
 set_tests_properties(sdk.consumer.subagent_resume PROPERTIES FIXTURES_REQUIRED sdk_child_restart)
-set_tests_properties(sdk.consumer.builtin_search sdk.consumer.smoke sdk.consumer.isolation sdk.consumer.extensions sdk.consumer.results sdk.consumer.seed sdk.consumer.resume
+set_tests_properties(sdk.consumer.builtin_search sdk.consumer.smoke sdk.consumer.isolation sdk.consumer.extensions sdk.consumer.actions sdk.consumer.results sdk.consumer.seed sdk.consumer.resume
   sdk.consumer.recovery_seed sdk.consumer.recovery_resume sdk.consumer.result_seed sdk.consumer.result_resume
   sdk.consumer.skills_seed sdk.consumer.skills_resume sdk.consumer.memory_seed sdk.consumer.memory_resume
   sdk.consumer.memory_save_seed sdk.consumer.memory_save_resume

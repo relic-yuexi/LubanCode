@@ -29,6 +29,7 @@
 #include <vector>
 
 namespace lubancore_consumer {
+void Actions(const std::filesystem::path& base);
 void BuiltinSearch(const std::filesystem::path& base, const std::filesystem::path& resource_root);
 void MemorySeed(const std::filesystem::path& base);
 void MemoryResume(const std::filesystem::path& base);
@@ -1691,6 +1692,7 @@ int main(int argc, char** argv) {
             SmallToolCaptureLifetime(base);
         }
         else if (mode == "extensions") PublicExtensions(base);
+        else if (mode == "actions") lubancore_consumer::Actions(base);
         else if (mode == "results") PublicResults(base);
         else if (mode == "skills-seed") SkillsSeed(base);
         else if (mode == "skills-resume") SkillsResume(base);

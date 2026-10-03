@@ -978,6 +978,7 @@ InvocationRecord RunObserver(DispatchState& state, std::size_t entry_pos) {
     ctx.step_id = state.trigger.step_id;
     ctx.action_id = state.trigger.action_id;
     ctx.request_id = state.trigger.request_id;
+    ctx.action_scope = state.trigger.action_scope;
     ctx.cancel = state.trigger.cancel;
     const InvocationMeta meta = MakeMeta(ctx, record);
 
@@ -1097,6 +1098,7 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
     ctx.step_id = state.trigger.step_id;
     ctx.action_id = state.trigger.action_id;
     ctx.request_id = state.trigger.request_id;
+    ctx.action_scope = state.trigger.action_scope;
     ctx.cancel = state.trigger.cancel;
     const InvocationMeta meta = MakeMeta(ctx, record);
 
