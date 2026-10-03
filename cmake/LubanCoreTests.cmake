@@ -42,7 +42,8 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/runtime/test_child_history_adoption.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_scoped_turn_bindings.cpp")
 list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
-  "${_lubancore_tests_root}/unit/runtime/test_owned_job_admission.cpp")
+  "${_lubancore_tests_root}/unit/runtime/test_owned_job_admission.cpp"
+  "${_lubancore_tests_root}/unit/runtime/test_middleware_native_receipts.cpp")
 set(_lubancore_tests_exclude)
 if(LUBANCODE_BUILD_CLI)
   set(_lubancore_tests_exclude EXCLUDE_FROM_ALL)
@@ -143,6 +144,7 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
          sdk_basename STREQUAL "test_child_parent_observation.cpp" OR
          sdk_basename STREQUAL "test_child_history_adoption.cpp" OR
          sdk_basename STREQUAL "test_owned_job_admission.cpp" OR
+         sdk_basename STREQUAL "test_middleware_native_receipts.cpp" OR
          sdk_basename STREQUAL "test_scoped_turn_bindings.cpp")
     set(sdk_original_test "unit.runtime.${sdk_stem}")
   else()
