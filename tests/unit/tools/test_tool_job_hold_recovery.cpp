@@ -456,6 +456,41 @@ TEST_CASE("Legacy recovery remains default and Hold rejects foreign plans before
         CHECK_FALSE(restored.coordinator->GetJob(terminal.job_id).recovery.has_value());
         REQUIRE(restored.coordinator->Shutdown());
     }
+    {
+        // This is the real producer, not Seed::Register's fully declared
+        // protocol fixture. Its absent call-owner material cannot be filled
+        // from a guessed assistant call or admitted as a complete Hold plan.
+        Seed produced("actual-producer");
+        std::atomic<unsigned> producer_calls{0};
+        auto coordinator = std::make_shared<ToolJobCoordinator>(*produced.writer, Allow,
+            [&](const JobExecutionContext&) { ++producer_calls; return Tool::Result{"actual-produced-result", false}; });
+        const auto started = coordinator->StartJob(produced.Request("actual-producer-call"));
+        REQUIRE_MESSAGE(started.ok, started.error);
+        const auto waited = coordinator->WaitJobs({started.job_id}, 2000, true);
+        REQUIRE(waited.satisfied); REQUIRE(waited.statuses.size() == 1);
+        CHECK(waited.statuses.front().state == "succeeded"); CHECK(producer_calls == 1);
+        REQUIRE(coordinator->Shutdown()); coordinator.reset();
+        REQUIRE(produced.writer->Close().has_value()); produced.writer.reset();
+        const auto verified = Read(produced.journal);
+        const auto actions = v3::FoldToolActions(verified);
+        const auto* action = v3::FindActionSnapshot(actions, started.action_id);
+        REQUIRE(action != nullptr); REQUIRE(action->assistant_message_ref.has_value());
+        REQUIRE(action->provider_tool_call_id.has_value());
+        CHECK(action->provider_tool_call_id->empty());
+        CHECK_FALSE(action->tool_name.has_value()); CHECK_FALSE(action->declared_args.has_value());
+        const auto plan = ToolJobCoordinator::PlanRecovery(verified, JobRecoveryPolicy::Hold);
+        REQUIRE(plan.items.size() == 1); CHECK(plan.items.front().tool_name.empty());
+        std::atomic<unsigned> recovered_calls{0};
+        auto continued = v3::V3Writer::Continue(produced.journal); REQUIRE(continued.has_value());
+        ToolJobCoordinator recovered(*continued, Allow,
+            [&](const JobExecutionContext&) { ++recovered_calls; return Tool::Result{"must-not-replay", false}; });
+        const auto before = Bytes(produced.journal);
+        CHECK_THROWS_WITH_AS(recovered.AdoptRecovery(plan), "job.recovery.invalid_source", std::invalid_argument);
+        CHECK(recovered.GetJob(started.job_id).state == "unknown_job");
+        CHECK(recovered.running_count() == 0); CHECK(recovered.queued_count() == 0);
+        CHECK(recovered_calls == 0); CHECK(Bytes(produced.journal) == before);
+        REQUIRE(recovered.Shutdown()); CHECK(Bytes(produced.journal) == before);
+    }
     Restored restored(seed, "invalid-plan"); restored.Attach();
     const auto before = Bytes(restored.journal);
     for (int variant = 0; variant != 4; ++variant) {
