@@ -690,7 +690,17 @@ TEST_CASE("SDK frozen plan: native sharing rejection releases the actual handle 
     held.value = CreateFileW(native.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     REQUIRE(held.value != INVALID_HANDLE_VALUE);
+    // DELETE-open and replacement are distinct native calls. The held handle
+    // rejects deletion with 32; MoveFileExW may report 5 for that same denial.
+    PlanBlockingHandle delete_probe;
+    delete_probe.value = CreateFileW(native.c_str(), DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const DWORD delete_error = delete_probe.value == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    REQUIRE(delete_probe.value == INVALID_HANDLE_VALUE);
+    REQUIRE(delete_error == ERROR_SHARING_VIOLATION);
     unsigned calls = 0, waits = 0;
+    DWORD replacement_error = ERROR_SUCCESS;
     bool sharing_verified = false;
     const auto saved = WriteFrozenPlanWithRetry(target, frozen,
         [&](const auto& path, auto bytes, auto durability) -> PlanWriteResult {
@@ -704,7 +714,11 @@ TEST_CASE("SDK frozen plan: native sharing rejection releases the actual handle 
                 REQUIRE(result.error().code == "atomic.replace_failed");
                 REQUIRE(result.error().failure_kind == WriteFailureKind::TransientReject);
                 REQUIRE(result.error().outcome == WriteOutcome::NotCommitted);
-                REQUIRE(result.error().message.ends_with("Windows 错误码 32"));
+                const std::string prefix = "原子替换失败: 原子替换文件失败，Windows 错误码 ";
+                const auto access_denied = prefix + std::to_string(ERROR_ACCESS_DENIED);
+                const auto sharing_denied = prefix + std::to_string(ERROR_SHARING_VIOLATION);
+                REQUIRE((result.error().message == access_denied || result.error().message == sharing_denied));
+                replacement_error = result.error().message == access_denied ? ERROR_ACCESS_DENIED : ERROR_SHARING_VIOLATION;
                 REQUIRE(ReadAll(target) == "old plan");
                 REQUIRE(TempLeftovers(root.path).empty());
                 sharing_verified = true;
@@ -720,6 +734,7 @@ TEST_CASE("SDK frozen plan: native sharing rejection releases the actual handle 
     REQUIRE(calls == 2); REQUIRE(waits == 1);
     REQUIRE(held.value == INVALID_HANDLE_VALUE);
     REQUIRE(ReadAll(target) == frozen); REQUIRE(TempLeftovers(root.path).empty());
+    std::cout << "[sdk-plan-native-error] delete-open=" << delete_error << " replace=" << replacement_error << '\n';
     std::cout << "[sdk-plan-retry] windows-sharing-recovery\n";
 #else
     const auto saved = lubancore::detail::WriteFrozenPlan(target, frozen);
