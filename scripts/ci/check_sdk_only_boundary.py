@@ -124,6 +124,7 @@ SHARED_SDK_TEST_SOURCES = {
     "tests/unit/tools/test_tool_job_post_live_invocation.cpp",
     "tests/unit/tools/test_run_command_execution_limits.cpp",
     "tests/unit/trajectory/test_session_recovery_view.cpp",
+    "tests/unit/trajectory/test_journal_native_receipts.cpp",
     "tests/unit/trajectory_v3/test_v3_result_store.cpp",
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",
