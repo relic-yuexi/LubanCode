@@ -1456,8 +1456,8 @@ jobs:
           import re
           import xml.etree.ElementTree as ET
           from pathlib import Path
-          required = {test['name'] for test in
-                      json.loads(Path('build/asan-host-registration.json').read_text())['tests']}
+          registered_tests = json.loads(Path('build/asan-host-registration.json').read_text())['tests']
+          required = {test['name'] for test in registered_tests}
           cases = ET.parse('build/asan-results.xml').getroot().findall('.//testcase')
           # JUnit system-out may truncate successful output before doctest's
           # summary. Match each source's complete native log section instead.
@@ -1484,7 +1484,10 @@ jobs:
                   import sys
                   sys.path.insert(0, str(Path.cwd() / 'scripts' / 'ci'))
                   from check_sdk_focused import check_package_native
-                  check_package_native(sections[0], 15 if name == 'unit.packages.package_manifest' else 8)
+                  commands = [test.get('command', []) for test in registered_tests if test['name'] == name]
+                  if len(commands) != 1:
+                      raise SystemExit('ASan Package source has no unique registered command')
+                  check_package_native(sections[0], 15 if name == 'unit.packages.package_manifest' else 8, commands[0])
               if name == 'unit.runtime.execution_owner' and int(counts[0]) != 7:
                   raise SystemExit('ASan shared execution-owner native roster differs from 7 cases')
               if name == 'unit.runtime.subagent_terminal_receipt' and int(counts[0]) != 7:

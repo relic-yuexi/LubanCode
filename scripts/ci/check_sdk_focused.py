@@ -49,7 +49,22 @@ def check_package_registration(command: list, source: str, executable: str):
         raise RuntimeError("Package command must select exactly the registered native source")
 
 
-def check_package_native(native_section: str, expected: int):
+def check_package_native(native_section: str, expected: int, registered_command: list):
+    source = "test_package_manifest.cpp" if expected == 15 else "test_lubancore_package_manifest.cpp"
+    if (expected not in (15, 8) or len(registered_command) != 2 or
+            not isinstance(registered_command[0], str) or
+            not all(isinstance(argument, str) for argument in registered_command)):
+        raise RuntimeError("Package actual command lacks a valid registered source")
+    executable = registered_command[0].replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".exe")
+    if executable not in ("lubancode_tests", "lubancore_sdk_tests"):
+        raise RuntimeError("Package actual command lacks the native test executable")
+    check_package_registration(registered_command, source, executable)
+    commands = re.findall(r"^Command: ([^\r\n]+)\r?$", native_section, flags=re.M)
+    if len(commands) != 1:
+        raise RuntimeError("Package actual command is missing or duplicated")
+    actual_command = shlex.split(commands[0].replace("\\", "/"))
+    if actual_command != [argument.replace("\\", "/") for argument in registered_command]:
+        raise RuntimeError("Package actual command differs from the registered path or arguments")
     cases = re.findall(r"\[doctest\] test cases:\s+(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", native_section)
     assertions = re.findall(r"\[doctest\] assertions:\s+(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", native_section)
     if cases != [(str(expected), str(expected), "0")] or len(assertions) != 1:
@@ -126,9 +141,16 @@ def main():
     command = ["ctest", "--test-dir", str(build), "-C", args.config]
     if not args.sdk_only:
         command += ["-L", "^sdk-focused$"]
-    listed = subprocess.run(command + ["--show-only=json-v1"], check=True, text=True,
-                            encoding="utf-8", capture_output=True)
-    (evidence / "tests.json").write_text(listed.stdout, encoding="utf-8")
+    registration_command = command + ["--show-only=json-v1"]
+    listed = subprocess.run(registration_command, capture_output=True)
+    (evidence / "registration.stdout").write_bytes(listed.stdout)
+    (evidence / "registration.stderr").write_bytes(listed.stderr)
+    (evidence / "registration-result.json").write_text(json.dumps({
+        "command": registration_command, "returncode": listed.returncode,
+        "githubSha": os.environ.get("GITHUB_SHA"),
+    }, indent=2) + "\n", encoding="utf-8")
+    (evidence / "tests.json").write_bytes(listed.stdout)
+    listed.check_returncode()
     tests = json.loads(listed.stdout)["tests"]
     if len(tests) != len(REQUIRED) or {t["name"] for t in tests} != REQUIRED:
         raise RuntimeError("SDK test files are missing, duplicated or unexpected")
@@ -173,9 +195,11 @@ def main():
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])
         if case.attrib["name"] == "sdk.focused.package_manifest":
-            check_package_native(sections[0], 15)
+            registered = next(test["command"] for test in tests if test["name"] == case.attrib["name"])
+            check_package_native(sections[0], 15, registered)
         if case.attrib["name"] == "sdk.focused.lubancore_package_manifest":
-            check_package_native(sections[0], 8)
+            registered = next(test["command"] for test in tests if test["name"] == case.attrib["name"])
+            check_package_native(sections[0], 8, registered)
         if case.attrib["name"] == "sdk.focused.v3_result_store":
             check_result_store_native(sections[0], os.name)
         if case.attrib["name"] == "sdk.focused.atomic_write":

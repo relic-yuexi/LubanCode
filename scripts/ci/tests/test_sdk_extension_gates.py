@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,6 +20,14 @@ FOCUSED_SPEC.loader.exec_module(focused)
 
 
 class PackageNativeEvidenceTests(unittest.TestCase):
+    def evidence(self, count, executable="lubancore_sdk_tests"):
+        source = "test_package_manifest.cpp" if count == 15 else "test_lubancore_package_manifest.cpp"
+        command = ["C:/actual build/" + executable + ".exe", "--source-file=*" + source]
+        body = (f'Command: "{command[0]}" "{command[1]}"\n'
+                f'[doctest] test cases: {count} | {count} passed | 0 failed\n'
+                '[doctest] assertions: 20 | 20 passed | 0 failed')
+        return command, body
+
     def test_original_and_public_source_filters_cannot_be_replaced_or_reduced(self):
         for source in ("test_package_manifest.cpp", "test_lubancore_package_manifest.cpp"):
             for executable in ("lubancode_tests", "lubancore_sdk_tests"):
@@ -30,18 +40,47 @@ class PackageNativeEvidenceTests(unittest.TestCase):
 
     def test_exact_original_and_public_native_case_rosters(self):
         for count in (15, 8):
-            body = f'[doctest] test cases: {count} | {count} passed | 0 failed\n[doctest] assertions: 20 | 20 passed | 0 failed'
-            focused.check_package_native(body, count)
+            for executable in ("lubancode_tests", "lubancore_sdk_tests"):
+                command, body = self.evidence(count, executable)
+                focused.check_package_native(body, count, command)
+                focused.check_package_native(body.replace("\n", "\r\n"), count, command)
+
+    def test_same_basename_foreign_checkout_path_and_extra_actual_filters_reject(self):
+        for count in (15, 8):
+            command, body = self.evidence(count)
+            for bad in (body.replace("C:/actual build/", "D:/foreign checkout/"),
+                        body.replace('"--source-file=*', '"--source-file=*other-'),
+                        body.replace('"\n[doctest]', '" "--test-case=one"\n[doctest]'),
+                        body + '\nCommand: "fake"', body.replace('Command:', 'Unrelated:')):
+                with self.subTest(count=count, bad=bad), self.assertRaises(RuntimeError):
+                    focused.check_package_native(bad, count, command)
+
+    def test_registration_failure_retains_original_stdout_stderr_and_exitcode(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            failed = subprocess.CompletedProcess([], 17, b"\xffraw-stdout\n", b"\xffraw-stderr\n")
+            with patch("sys.argv", ["check", "--build-dir", scratch]), \
+                    patch.object(focused.subprocess, "run", return_value=failed) as mocked:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    focused.main()
+                self.assertEqual(mocked.call_count, 1)
+                self.assertNotIn("check", mocked.call_args.kwargs)
+            evidence = Path(scratch) / "test-evidence/sdk-focused"
+            self.assertEqual((evidence / "registration.stdout").read_bytes(), failed.stdout)
+            self.assertEqual((evidence / "tests.json").read_bytes(), failed.stdout)
+            self.assertEqual((evidence / "registration.stderr").read_bytes(), failed.stderr)
+            result = json.loads((evidence / "registration-result.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["returncode"], 17)
+            self.assertEqual(result["command"][-1], "--show-only=json-v1")
 
     def test_missing_duplicate_changed_skipped_and_empty_native_reports_reject(self):
         for count in (15, 8):
-            body = f'[doctest] test cases: {count} | {count} passed | 0 failed\n[doctest] assertions: 20 | 20 passed | 0 failed'
+            command, body = self.evidence(count)
             for invalid in ('', body + '\n' + body, body.replace(f'{count} passed', '0 passed'),
                             body.replace('20 | 20 passed', '0 | 0 passed'),
                             body.replace('20 passed | 0 failed', '19 passed | 1 failed'),
                             body.replace(f'test cases: {count}', f'test cases: {count + 1}')):
                 with self.subTest(count=count, invalid=invalid), self.assertRaises(RuntimeError):
-                    focused.check_package_native(invalid, count)
+                    focused.check_package_native(invalid, count, command)
 
 
 class ResultStoreWindowsPathsTests(unittest.TestCase):
