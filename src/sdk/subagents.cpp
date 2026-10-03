@@ -1,5 +1,6 @@
 #include "sdk/subagents.hpp"
 #include "sdk/operation_ledger.hpp"
+#include "sdk/plan_write.hpp"
 
 #include <algorithm>
 #include <array>
@@ -480,9 +481,21 @@ std::expected<SessionSubagentPlan::Json, std::string> SessionSubagentPlan::Open(
     } else {
         if (!resume_id_.empty() || bytes->has_value()) return std::unexpected("sdk.subagent.plan_invalid: unexpected new/resume plan state");
         const auto plan = Plan(context.session_id).dump();
-        auto written = lubancode::platform::AtomicWriteFile(context.session_dir / kPlanFile, plan,
-            lubancode::platform::WriteDurability::ProcessCrashDurability);
-        if (!written) return std::unexpected("sdk.subagent.plan_write_failed: " + written.error().message);
+        auto written = WriteFrozenPlan(context.session_dir / kPlanFile, plan);
+        if (!written) {
+            const auto& error = written.error();
+            return std::unexpected("sdk.subagent.plan_write_failed: " + Json{
+                {"atomicCode", error.code},
+                {"failureKind", error.failure_kind == lubancode::platform::WriteFailureKind::TransientReject
+                    ? "TransientReject" : "Permanent"},
+                {"outcome", PlanWriteOutcomeName(error.outcome)}, {"message", error.message}}
+                .dump(-1, ' ', false, Json::error_handler_t::replace));
+        }
+        if (written->outcome != lubancode::platform::WriteOutcome::CommittedDurable)
+            return std::unexpected("sdk.subagent.plan_write_failed: " + Json{
+                {"outcome", PlanWriteOutcomeName(written->outcome)},
+                {"message", "plan receipt was not CommittedDurable"}}
+                .dump(-1, ' ', false, Json::error_handler_t::replace));
         snapshot_.plan_sha256 = lubancode::platform::Sha256Hex(plan);
     }
     snapshot_.session_id = context.session_id;

@@ -28,6 +28,8 @@
 
 旧 CLI 未请求墙钟预算时保持旧零值行为；本批 SDK 必须显式给正预算。脚本返回值仍走原 Lua 到 Tool::Result 转换，不另定义 Lua 专属运行栈。
 
+内存帽也管装载与入参转换。当前开库、guard 注册和 `PushJsonToLua` 尚在受保护调用之外；Lua OOM 可直接 panic/longjmp，C++ RAII 接不住。本批先沿共用 VM 将会分配的初始化、开库、脚本定义提取和调用入参搬到真实 `lua_pcall` 边界；边界内不得让 longjmp 越过待销毁的 C++ 持值。需要中间 JSON/string 时，由边界外 owner 持有，C callback 只借到本次返回。失败退回稳定错误、恢复栈顶、清取消借旗与 deadline，关闭 VM 一次；取消或 OOM 不杀宿主，也不污染下一次调用。初始化 OOM 与大入参 OOM 都用真实小正预算验，随后健康调用仍能活着退场；不以 fake 错误代替。
+
 ## 谁拥有，怎么关场
 
 本场 registry 直接持有每件 LuaTool；每件工具独占 VM、guard 和互斥锁。省掉 CLI `EmbeddedLuaRuntime` 的目录扫描和借用 adapter，仍调用同一 VM 实现。不同场不共用 VM 或可变 globals；同一 VM 调用串行。
