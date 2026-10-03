@@ -17,6 +17,7 @@ REQUIRED = {
     "sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest",
     "sdk.focused.tool_job_coordinator",
     "sdk.focused.tool_job_start_transaction",
+    "sdk.focused.run_command_execution_limits",
     "sdk.focused.session_recovery_view",
     "sdk.focused.lubancore_recovery_view",
     "sdk.focused.lubancore_session",
@@ -284,6 +285,63 @@ def check_job_start_native(section, command, original=False):
                 raise RuntimeError("Job startup actual path did not finish once: " + path)
 
 
+COMMAND_LIMITS_PATHS = ("boundary", "timeout", "cancel", "four-contexts", "invalid-and-background", "legacy")
+
+
+def check_command_limits_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(part, str) for part in command) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_run_command_execution_limits.cpp"):
+        raise RuntimeError("Command limits must run the single actual native source")
+
+
+def check_command_limits_native(section, command, platform_name=None):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(part, str) for part in command)):
+        raise RuntimeError("Command limits fixture lacks a valid registered argument list")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Command limits fixture executable is not registered")
+    check_command_limits_registration(command, executable)
+    check_native_command(section, command)
+    counts = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if counts != [("6", "6", "0")]:
+        raise RuntimeError("Command limits native roster differs from six successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            assertions[0][0] != assertions[0][1] or assertions[0][2] != "0" or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Command limits native assertions are empty or failed")
+    for path in COMMAND_LIMITS_PATHS:
+        if section.splitlines().count("[command-limits-path] " + path) != 1:
+            raise RuntimeError("Command limits actual path did not finish once: " + path)
+    prefix = "[command-limits-shell] "
+    shell_lines = [line[len(prefix):] for line in section.splitlines() if line.startswith(prefix)]
+    if len(shell_lines) != 2:
+        raise RuntimeError("Command limits require both actual shell boundary records")
+    records = []
+    fields = {"shell", "cwd", "exact_command", "excess_command", "timeout_ms", "max_output_bytes",
+              "exact_request_bytes", "excess_request_bytes", "exact_outcome", "excess_error_code"}
+    for line in shell_lines:
+        try:
+            record = json.loads(line)
+        except (ValueError, TypeError) as error:
+            raise RuntimeError("Command limits shell boundary record is invalid") from error
+        if (not isinstance(record, dict) or set(record) != fields or
+                any(not isinstance(record[key], str) or not record[key] or "\0" in record[key]
+                    for key in ("shell", "cwd", "exact_command", "excess_command")) or
+                any(type(record[key]) is not int or record[key] != value for key, value in
+                    (("timeout_ms", 15000), ("max_output_bytes", 128),
+                     ("exact_request_bytes", 128), ("excess_request_bytes", 129))) or
+                record["exact_outcome"] != "succeeded" or record["excess_error_code"] != "process.output_limit"):
+            raise RuntimeError("Command limits shell boundary record differs from actual passing boundary")
+        records.append(record)
+    expected_shells = {"cmd", "powershell"} if (platform_name or os.name) == "nt" else {"sh", "bash"}
+    if {record["shell"] for record in records} != expected_shells:
+        raise RuntimeError("Command limits actual boundary records do not cover both platform shells")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -317,6 +375,8 @@ def main():
         if test["name"] in ("sdk.focused.tool_job_coordinator", "sdk.focused.tool_job_start_transaction"):
             source = "test_" + test["name"].removeprefix("sdk.focused.") + ".cpp"
             check_job_start_registration(test.get("command", []), source)
+        if test["name"] == "sdk.focused.run_command_execution_limits":
+            check_command_limits_registration(test.get("command", []))
         if test["name"] == "sdk.focused.atomic_write":
             check_plan_retry_registration(test.get("command", []))
         if test["name"] in ("sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest"):
@@ -366,6 +426,9 @@ def main():
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_job_start_native(sections[0], registered["command"],
                 case.attrib["name"] == "sdk.focused.tool_job_coordinator")
+        if case.attrib["name"] == "sdk.focused.run_command_execution_limits":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_command_limits_native(sections[0], registered["command"])
         check_recovery_source(case.attrib["name"], sections[0], int(counts[0]))
         if case.attrib["name"] == "sdk.focused.v3_result_store":
             check_result_store_native(sections[0], os.name)
