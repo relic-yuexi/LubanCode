@@ -12,6 +12,8 @@
 
 首笔只用现有 `Whitelisted` 画像：字符串、表、数学、UTF-8、字符串编译与时间函数。`dofile/loadfile/require`、进程与文件 API、Trusted 全库、Host HTTP/Secret 均不开放。此处是本批能力范围，不把 Lua VM 或文件检查当 OS 隔离。
 
+SDK 额外明确禁 `print`，免得脚本向 Worker 的协议 stdout 写字节。内部画像用 `allow_print=false` 声明，冻结计划记下 `stdio=false`；CLI Pure/Trusted、既有 Whitelisted Hook 仍沿原默认 `allow_print=true`。不暗改既有 Hook，也不在本批增 logger 能力。
+
 ## 真正可见、真正可调
 
 原 `LuaTool::deferred()` 为 true。现有 `Agent::BuildToolDefinitions` 只在宿主设 `tool_filter` 时过滤，只在 `native_deferred_tools` 启用时标 Deferred。公开 SDK 当前均未开启，故所选 Lua 按普通工具定义出现在真实首个模型请求，沿原 `RunOneTool` 执行；不复制工具执行器，不为本批另造搜索或激活协议。CLI 原延迟工具发现与激活不改。
@@ -29,6 +31,8 @@
 旧 CLI 未请求墙钟预算时保持旧零值行为；本批 SDK 必须显式给正预算。脚本返回值仍走原 Lua 到 Tool::Result 转换，不另定义 Lua 专属运行栈。
 
 内存帽也管装载与入参转换。当前开库、guard 注册和 `PushJsonToLua` 尚在受保护调用之外；Lua OOM 可直接 panic/longjmp，C++ RAII 接不住。本批先沿共用 VM 将会分配的初始化、开库、脚本定义提取和调用入参搬到真实 `lua_pcall` 边界；边界内不得让 longjmp 越过待销毁的 C++ 持值。需要中间 JSON/string 时，由边界外 owner 持有，C callback 只借到本次返回。失败退回稳定错误、恢复栈顶、清取消借旗与 deadline，关闭 VM 一次；取消或 OOM 不杀宿主，也不污染下一次调用。初始化 OOM 与大入参 OOM 都用真实小正预算验，随后健康调用仍能活着退场；不以 fake 错误代替。
+
+这份受保护保证只覆盖 standalone `LuaTool::LoadFromScript/Run`。共享转换入口销毁其 C++ 计划后再抛回既有 Lua 错误链，调用方仍须有外层保护；现 manifest/Hook 宿主装配没有在本批全部迁入保护边界，不据此声称那些旧宿主也已 OOM 安全。
 
 ## 谁拥有，怎么关场
 
