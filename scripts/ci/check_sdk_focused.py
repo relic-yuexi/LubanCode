@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
@@ -87,6 +88,39 @@ def check_recovery_source(name: str, native_section: str, count: int):
             raise RuntimeError("Recovery actual path did not finish once: " + name + ":" + path)
 
 
+PLAN_RETRY_PATHS = ("retry-success", "permanent-stop", "committed-stop", "attempt-budget",
+                    "deadline-budget", "native-write")
+
+
+def check_plan_retry_registration(command, executable="lubancore_sdk_tests"):
+    if (len(command) != 2 or not isinstance(command[0], str) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_atomic_write.cpp"):
+        raise RuntimeError("SDK plan retry must run the single actual atomic-write source")
+
+
+def check_plan_retry_native(native_section: str, platform_name: str, executable="lubancore_sdk_tests"):
+    commands = re.findall(r"^Command: ([^\r\n]+)$", native_section, flags=re.M)
+    if len(commands) != 1:
+        raise RuntimeError("SDK plan retry native log must identify one actual command")
+    check_plan_retry_registration(shlex.split(commands[0].replace("\\", "/")), executable)
+    expected = 25 if platform_name == "nt" else 22
+    counts = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", native_section)
+    if len(counts) != 1 or tuple(map(int, counts[0])) != (expected, expected, 0):
+        raise RuntimeError(f"SDK plan retry native roster differs from {expected} successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", native_section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            native_section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("SDK plan retry native assertions did not actually pass")
+    paths = (*PLAN_RETRY_PATHS, "windows-sharing-recovery") if platform_name == "nt" else PLAN_RETRY_PATHS
+    for path in paths:
+        if native_section.splitlines().count("[sdk-plan-retry] " + path) != 1:
+            raise RuntimeError("SDK plan retry actual path did not finish once: " + path)
+    if platform_name != "nt" and "[sdk-plan-retry] windows-sharing-recovery" in native_section.splitlines():
+        raise RuntimeError("SDK plan retry POSIX evidence cannot claim a Windows sharing probe")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -110,6 +144,8 @@ def main():
         if (props.get("DISABLED") or "sdk-focused" not in props.get("LABELS", [])
                 or not 0 < float(props.get("TIMEOUT", 0)) <= 300):
             raise RuntimeError("SDK test is disabled, mislabeled or unbounded: " + test["name"])
+        if test["name"] == "sdk.focused.atomic_write":
+            check_plan_retry_registration(test.get("command", []))
     (evidence / "context.json").write_text(json.dumps({
         "githubSha": os.environ.get("GITHUB_SHA"), "buildDir": str(build),
         "configuration": args.config, "sdkOnly": args.sdk_only,
@@ -143,6 +179,8 @@ def main():
         check_recovery_source(case.attrib["name"], sections[0], int(counts[0]))
         if case.attrib["name"] == "sdk.focused.v3_result_store":
             check_result_store_native(sections[0], os.name)
+        if case.attrib["name"] == "sdk.focused.atomic_write":
+            check_plan_retry_native(sections[0], os.name)
         if case.attrib["name"] == "sdk.focused.lubancore_memory_cas" and int(counts[0]) != 10:
             raise RuntimeError("Memory CAS native roster differs from 10 cases")
         if case.attrib["name"] == "sdk.focused.lubancore_memory_cas":

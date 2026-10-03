@@ -114,6 +114,68 @@ class RecoverySourceProofTests(unittest.TestCase):
                     focused.check_recovery_source("sdk.focused." + stem, body, len(paths))
 
 
+class PlanRetryEvidenceTests(unittest.TestCase):
+    def body(self, platform="posix", executable="lubancore_sdk_tests"):
+        count = 25 if platform == "nt" else 22
+        paths = focused.PLAN_RETRY_PATHS
+        if platform == "nt":
+            paths = (*paths, "windows-sharing-recovery")
+        return "\n".join((
+            f'Command: "C:/actual build/{executable}.exe" "--source-file=*test_atomic_write.cpp"',
+            f"[doctest] test cases: {count} | {count} passed | 0 failed | 200 skipped",
+            "[doctest] assertions: 120 | 120 passed | 0 failed |",
+            *("[sdk-plan-retry] " + path for path in paths), "Test Passed."))
+
+    def test_exact_windows_and_posix_native_and_asan_command(self):
+        focused.check_plan_retry_native(self.body("nt"), "nt")
+        focused.check_plan_retry_native(self.body(), "posix")
+        focused.check_plan_retry_native(self.body(executable="lubancode_tests"), "posix", "lubancode_tests")
+
+    def test_empty_old_wrong_and_failed_native_rosters_reject(self):
+        for platform, old in (("nt", 19), ("posix", 16)):
+            count = 25 if platform == "nt" else 22
+            for bad in (0, old, count - 1, count + 1):
+                body = self.body(platform).replace(f"{count} | {count} passed", f"{bad} | {bad} passed")
+                with self.subTest(platform=platform, bad=bad), self.assertRaisesRegex(RuntimeError, "native roster"):
+                    focused.check_plan_retry_native(body, platform)
+            for body in (self.body(platform).replace(f"{count} passed | 0 failed", f"{count - 1} passed | 1 failed"),
+                         self.body(platform) + f"\n[doctest] test cases: {count} | {count} passed | 0 failed"):
+                with self.assertRaisesRegex(RuntimeError, "native roster"):
+                    focused.check_plan_retry_native(body, platform)
+
+    def test_missing_decorated_or_duplicate_path_cannot_borrow_success(self):
+        for path in (*focused.PLAN_RETRY_PATHS, "windows-sharing-recovery"):
+            marker = "[sdk-plan-retry] " + path
+            for body in (self.body("nt").replace(marker, ""),
+                         self.body("nt").replace(marker, "other-source: " + marker),
+                         self.body("nt") + "\n" + marker):
+                with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, "actual path did not finish once"):
+                    focused.check_plan_retry_native(body, "nt")
+
+    def test_wrong_source_wrong_binary_and_extra_filter_reject(self):
+        for command in ([], ["lubancore_sdk_tests", "--source-file=*test_other.cpp"],
+                        ["other_tests", "--source-file=*test_atomic_write.cpp"],
+                        ["lubancore_sdk_tests", "--source-file=*test_atomic_write.cpp", "--test-case=one"]):
+            with self.subTest(command=command), self.assertRaisesRegex(RuntimeError, "single actual atomic-write source"):
+                focused.check_plan_retry_registration(command)
+        with self.assertRaisesRegex(RuntimeError, "single actual atomic-write source"):
+            focused.check_plan_retry_native(self.body().replace("test_atomic_write.cpp", "test_other.cpp"), "posix")
+        with self.assertRaisesRegex(RuntimeError, "identify one actual command"):
+            focused.check_plan_retry_native(self.body() + '\nCommand: "lubancore_sdk_tests"', "posix")
+
+    def test_empty_failed_assertions_or_missing_ctest_pass_reject(self):
+        for body in (self.body().replace("120 | 120 passed", "0 | 0 passed"),
+                     self.body().replace("120 passed | 0 failed", "119 passed | 1 failed"),
+                     self.body().replace("Test Passed.", "Test Failed."),
+                     self.body() + "\n[doctest] assertions: 120 | 120 passed | 0 failed |"):
+            with self.assertRaisesRegex(RuntimeError, "assertions did not actually pass"):
+                focused.check_plan_retry_native(body, "posix")
+
+    def test_posix_cannot_claim_windows_native_handle(self):
+        with self.assertRaisesRegex(RuntimeError, "cannot claim a Windows sharing probe"):
+            focused.check_plan_retry_native(self.body() + "\n[sdk-plan-retry] windows-sharing-recovery", "posix")
+
+
 class InstalledHeadersTests(unittest.TestCase):
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory(prefix="sdk-extension-gate-data-")
