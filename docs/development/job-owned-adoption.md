@@ -45,3 +45,9 @@ RequestShutdown 先关准入、撤 epoch、请求本票取消。等线程时不�
 用真实 Writer、原声明与共同 Prepare 登记，再真采用、真写父句柄链、真执行 `run_command`，重读校账。六册覆盖：采用留票零执行与来源/权限拒绝；真父链前后和所有缺件；真实成功/失败文本与 Post；取消/限额/同项目两场及异项目隔离；真线程发布前后抛错和关场串行 drain；真实 native 写回执及每阶段 gap、Hold/Legacy 零恢复重跑。保旧 Job16、启动6、Hold6、登记6、J1六场与命令限额6；不放宽预算或结果断言。
 
 真实新来源才添 focused/ASan 门，按源并集算注册数，完整 argv、唯一 marker、非零断言、JUnit/LastTest 互核。CI 失败保原件，再修源码、推新头；不 rerun 旧头抹失败。
+
+## 首轮夹具类型校准
+
+首源 `8bf71560` 在三份远端构建日志报出四处测试类型错误：Action 投影实际字段为 `tool_call_id`；`V3Writer::Close()` 返回 `expected<void, string>`，不能传给只接 native WriteReceipt 的断言。受阻腿新册原生尚未执行，不据静核或上游绿报通过。
+
+下一笔只沿真实声明收这四处调用：仍比较同枚 Action ID，仍要求实际 Close 成功。生产、六 CASE/六 marker、来源登记、所有业务断言和预算不改。首红单独封存；新 source 重新跑远端 CI。
