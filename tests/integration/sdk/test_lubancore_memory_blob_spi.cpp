@@ -280,7 +280,7 @@ TEST_CASE("SDK Memory blob SPI: actual owned Store Read and model adoption") {
     CHECK(std::none_of(request.tools.begin(), request.tools.end(), [](const auto& tool) { return tool.name == "memory_save"; }));
     REQUIRE((*disabled)->Close().has_value());
     auto inline_state = std::make_shared<State>();
-    auto inline_session = (*runtime)->OpenSession(Options(paths, inline_state)); REQUIRE(inline_session.has_value());
+    auto inline_session = (*runtime)->OpenSession(Options(paths, inline_state, paths.root / "other-2")); REQUIRE(inline_session.has_value());
     Seed(*inline_session, "BLOB_INLINE_MARKER", "inline", 8);
     const auto [inline_receipt, inline_operation] = Run(*inline_session, "inline", std::string(kNeedle) + "inline");
     CHECK(inline_operation.state == sdk::OperationState::Succeeded); CHECK(inline_operation.result_persisted);
