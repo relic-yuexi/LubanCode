@@ -12,6 +12,7 @@
 #include "memory/topic_store.hpp"
 #include "platform/atomic_write.hpp"
 #include "platform/bounded_read.hpp"
+#include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "platform/text_encoding.hpp"
 #include "runtime/session_service.hpp"
