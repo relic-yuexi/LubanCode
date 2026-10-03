@@ -244,6 +244,28 @@ class BoundaryTests(unittest.TestCase):
                              "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]})
         self.assert_rejected(self.check(testing=True), "reverse host include")
 
+    def test_lua_protection_allowance_is_one_neutral_test_source(self):
+        shared = "tests/unit/tools/test_lua_protected.cpp"
+        self.source_file(shared, '#include "tools/lua_tool.hpp"\n')
+        self.source_file("src/tools/lua_tool.hpp", "#pragma once\n")
+        target = {"id": "lua-protection", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "lubancode_runtime"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        nearby = "tests/unit/tools/test_lua_tool.cpp"
+        self.source_file(nearby, '#include "tools/lua_tool.hpp"\n')
+        target["sources"].append({"path": nearby, "compileGroupIndex": 0})
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["sources"].pop()
+        self.source_file("src/tools/lua_tool.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
     def test_child_terminal_allowance_remains_testing_only_and_neutral(self):
         shared = "tests/unit/runtime/test_subagent_terminal_receipt.cpp"
         self.source_file(shared, '#include "runtime/subagent_terminal.hpp"\n')

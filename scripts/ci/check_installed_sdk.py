@@ -26,6 +26,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.memory_seed", "sdk.consumer.memory_resume",
     "sdk.consumer.memory_save_seed", "sdk.consumer.memory_save_resume",
     "sdk.consumer.subagents", "sdk.consumer.subagent_seed", "sdk.consumer.subagent_resume",
+    "sdk.consumer.lua", "sdk.consumer.lua_seed", "sdk.consumer.lua_resume",
     "sdk.consumer.result_seed", "sdk.consumer.result_resume",
     "sdk.consumer.seed", "sdk.consumer.resume",
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
@@ -37,6 +38,7 @@ REQUIRED_PUBLIC_HEADERS = {
     "include/lubancore/skills.hpp",
     "include/lubancore/memory.hpp",
     "include/lubancore/subagents.hpp",
+    "include/lubancore/lua.hpp",
 }
 
 
