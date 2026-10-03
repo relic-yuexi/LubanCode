@@ -69,3 +69,9 @@ SDK 额外明确禁 `print`，免得脚本向 Worker 的协议 stdout 写字节�
 当前源码登记 9 册 SDK Lua、6 册中立 Lua 保护边界；focused 27 来源，ASan 33 来源，安装消费者 23 册。第 9 册先真正采用替换 system，再重算真实账 hash 链，逐项改坏绑定、已采用消息归属和起始事件归属；公共 Reader 仍读得开时，SDK 必须在模型前拒开，旧账与计划不动。以上均待当前分支头远端实跑，数量不作通过证据。
 
 本地只查代码、文档与纯数据。configure、编译、CTest、项目原生进程一概交远端 CI。
+
+### 已有调用身份与夹具校准
+
+`dbc341a1` 的远端安装消费已实际运行，Lua/seed 卡在结果身份检查。旧夹具硬比 `ToolResultIdentity.tool_call_id == "lua-call"`，混了模型 wire call ID 与账本 action ID。现有 `TrajectoryTurnBridge::V3OutputCompleted` 保留 provider 原号作配对键，另由 `V3Writer::NewActionId()` 发账本号；公开结果索引沿已落盘 action ID，不回填 provider 号。
+
+校准只改验收宿主。模型往返仍核原 `lua-call`；两条公开结果必须均 selected，同本场、operation、turn、工具与 attempt=1，且共同采用一枚非空账本 action ID。raw/formal 数量、独立 result/persisted 身份、verified 元数据和模型实际采用正文逐条照核。失败诊断打印所有公开身份原值，便于远端追查。SDK/Agent/结果索引与执行预算不改；原四份 POSIX 首红另封，不能回填成已过。新头仍须三平台原生实跑。
