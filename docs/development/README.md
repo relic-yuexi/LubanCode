@@ -7,6 +7,7 @@
 - [SDK 显式 Skills 合同](sdk-skills.md)
 - [SDK 项目 Memory 只读召回合同](sdk-memory-recall.md)
 - [Memory CAS 能力合同](memory-cas-capability.md)
+- [本卷同 ID 恢复读面合同](session-recovery-view.md)
 - [项目 Memory 提交与回执合同](memory-project-commit.md)
 - [Memory worker 争锁与更新失败诊断](memory-worker-contention-diagnostics.md)
 - [Memory worker 有界争锁验收](memory-worker-busy-acceptance.md)

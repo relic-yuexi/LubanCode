@@ -109,6 +109,19 @@ struct RuntimeOptions {
     std::string data_root;
     std::string resource_root;
 };
+// Finite, positive per-opening read budgets. Same-ID resume can raise them;
+// they do not change saved Memory plans, authorization or per-entity Memory caps.
+struct RecoveryStreamReadLimits {
+    std::size_t max_bytes = 0, max_lines = 0, max_line_bytes = 0;
+};
+struct RecoveryReadLimits {
+    RecoveryStreamReadLimits journal{128u * 1024u * 1024u, 262144u, 8u * 1024u * 1024u};
+    RecoveryStreamReadLimits operations{16u * 1024u * 1024u, 65536u, 256u * 1024u};
+    std::size_t result_total_bytes = 128u * 1024u * 1024u;
+    std::size_t view_total_bytes = 384u * 1024u * 1024u;
+    std::size_t result_directory_entries = 4096u, view_directory_entries = 8192u;
+    std::size_t directory_name_bytes = 1024u, directory_name_total_bytes = 8u * 1024u * 1024u;
+};
 struct SessionOptions {
     std::string cwd; // required absolute existing directory; never process chdir
     std::string model;
@@ -148,6 +161,7 @@ struct SessionOptions {
     std::chrono::milliseconds approval_timeout{300000};
     int max_steps_per_turn = 0;
     std::size_t context_window_tokens = 128000;
+    RecoveryReadLimits recovery_read_limits{};
 };
 // operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };

@@ -1,4 +1,5 @@
 #include "sdk/memory.hpp"
+#include "trajectory/session_recovery_view.hpp"
 
 #include <algorithm>
 #include <array>
@@ -11,6 +12,7 @@
 #include "memory/topic_store.hpp"
 #include "platform/atomic_write.hpp"
 #include "platform/bounded_read.hpp"
+#include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "platform/text_encoding.hpp"
 #include "runtime/session_service.hpp"
@@ -199,14 +201,22 @@ std::expected<Json, std::string> SessionMemory::Open(const lubancode::trajectory
     if (context.source) {
         if (context.session_id != resume_id_ || context.session_dir != expected_resume_dir_)
             return std::unexpected("sdk.memory.resume_mismatch");
-        auto bytes = ReadOwned(context.session_dir / kPlanFile, owned_root_, kPlanBytes);
-        if (!bytes) return fail(bytes.error());
-        if (legacy_ ? bytes->has_value() : !bytes->has_value() || **bytes != saved_plan_bytes_)
-            return std::unexpected("sdk.memory.plan_invalid: plan changed before locked adoption");
+        // Legacy/off sources adopt only the locked V3 binding. No path read
+        // reuses the lock-preflight plan as adopted Memory facts.
+        if (snapshot_.enabled) {
+            if (!context.recovery_view || context.recovery_view->session_id != context.session_id ||
+                context.recovery_view->workspace_key != identity_.workspace_key)
+                return std::unexpected("sdk.memory.recovery_view_missing");
+            const auto* plan = context.recovery_view->Find(lubancode::trajectory::RecoveryKeyKind::MemoryPlan);
+            if (!plan || plan->state != lubancode::trajectory::RecoveryReadState::Value || plan->bytes != saved_plan_bytes_)
+                return std::unexpected("sdk.memory.plan_invalid: plan changed before locked adoption");
+        }
         auto binding = CheckBinding(*context.source);
         if (!binding) return fail(binding.error());
-        auto reports = CheckSavedReports(*context.source);
-        if (!reports) return fail(reports.error());
+        if (snapshot_.enabled) {
+            auto reports = CheckSavedReports(*context.source, *context.recovery_view);
+            if (!reports) return fail(reports.error());
+        }
     } else if (!resume_id_.empty()) return std::unexpected("sdk.memory.resume_mismatch");
     else if (snapshot_.enabled) {
         auto prior = ReadOwned(context.session_dir / kPlanFile, owned_root_, kPlanBytes);
@@ -305,8 +315,12 @@ Result<memory::v1::RecallReport> SessionMemory::ReadReport(const std::string& op
     if (!bytes) return std::unexpected(bytes.error());
     if (!*bytes) return std::unexpected(Fail("sdk.memory.report_unavailable"));
     if (actual_bytes) *actual_bytes = (**bytes).size();
+    return ParseReportBytes(operation_id, **bytes);
+}
+Result<memory::v1::RecallReport> SessionMemory::ParseReportBytes(
+    const std::string& operation_id, const std::string& bytes) const {
     try {
-        const auto envelope = Json::parse(**bytes);
+        const auto envelope = Json::parse(bytes);
         const auto& payload = envelope.at("payload");
         if (!payload.is_object() || envelope.at("sha256") != lubancode::platform::Sha256Hex(payload.dump()) ||
             payload.at("schemaVersion") != 1 || payload.at("sessionId") != snapshot_.session_id ||
@@ -428,60 +442,61 @@ Result<void> SessionMemory::ValidateReport(const memory::v1::RecallReport& repor
     return {};
 }
 
-Result<void> SessionMemory::CheckSavedReports(const v3::V3Ledger& source) const {
+Result<void> SessionMemory::CheckSavedReports(const v3::V3Ledger& source, const lubancode::trajectory::SessionRecoveryView& view) const {
     if (!snapshot_.enabled) return {};
-    auto directory = ReportDirectory(session_dir_, false);
-    if (!directory) return directory;
     std::map<std::string, std::string> final_turns, final_statuses;
     std::set<std::string> complete_finals;
-    std::set<std::string> accepted, bound_turns;
-    for (const auto& fact : lubancode::runtime::SessionService::ReadOperationFacts(session_dir_)) {
+    std::set<std::string> accepted, dispatched, bound_turns;
+    const auto* operations = view.Find(lubancode::trajectory::RecoveryKeyKind::Operations);
+    if (!operations) return std::unexpected(Fail("sdk.memory.recovery_view_missing"));
+    auto facts = lubancode::runtime::SessionService::ReadOperationFactsOwned(operations->bytes);
+    if (!facts) return std::unexpected(Fail("sdk.memory.report_invalid", facts.error()));
+    for (const auto& fact : *facts) {
         if (!SafeId(fact.operation_id)) return std::unexpected(Fail("sdk.memory.report_invalid"));
         if (fact.kind == "operation.accepted") accepted.insert(fact.operation_id);
+        if (fact.kind == "operation.dispatched") dispatched.insert(fact.operation_id);
         if (fact.kind != "operation.final") continue;
         if (!final_turns.emplace(fact.operation_id, fact.turn_id).second ||
             (!fact.turn_id.empty() && !bound_turns.insert(fact.turn_id).second))
             return std::unexpected(Fail("sdk.memory.report_invalid", "operation turn is not unique"));
         final_statuses.emplace(fact.operation_id, fact.execution_status);
         if (fact.execution_status != "interrupted") {
-            auto result_bytes = ReadOwned(session_dir_ / "sdk-results" / (fact.operation_id + ".json"), owned_root_, 67108864);
-            if (!result_bytes) return std::unexpected(result_bytes.error());
-            if (*result_bytes) {
-                const auto result = Json::parse(**result_bytes, nullptr, false);
+            const auto* result_bytes = view.Find(lubancode::trajectory::RecoveryKeyKind::SdkResult, fact.operation_id);
+            if (result_bytes && result_bytes->state == lubancode::trajectory::RecoveryReadState::Value) {
+                const auto result = Json::parse(result_bytes->bytes, nullptr, false);
                 if (result.is_object() && result.value("operationId", Json()) == fact.operation_id &&
                     result.value("turnId", Json()) == fact.turn_id && result.value("complete", Json()) == true)
                     complete_finals.insert(fact.operation_id);
             }
         }
     }
-    std::error_code ec;
-    const auto path = session_dir_ / "sdk-memory-recalls";
-    if (!fs::exists(path, ec)) {
-        if (ec || !complete_finals.empty()) return std::unexpected(Fail("sdk.memory.report_unavailable"));
+    for (const auto& entry : view.results.entries) {
+        if (!entry.temporary && !dispatched.contains(lubancode::platform::PathToUtf8(fs::u8path(entry.name).stem())))
+            return std::unexpected(Fail("sdk.memory.report_invalid", "SDK result has no preceding operation dispatch"));
+    }
+    if (!view.reports.present) {
+        if (!complete_finals.empty()) return std::unexpected(Fail("sdk.memory.report_unavailable"));
         return {};
     }
-    fs::directory_iterator iterator(path, ec), end;
-    if (ec) return std::unexpected(Fail("sdk.memory.read_failed"));
     std::set<std::string> reports, report_turns;
     std::size_t used = 0, directory_entries = 0;
-    while (iterator != end) {
+    for (const auto& entry : view.reports.entries) {
         if (++directory_entries > 4096) return std::unexpected(Fail("sdk.memory.report_limit"));
-        const auto file = iterator->path();
-        // AtomicWriteFile may leave an uncommitted sibling after a process
-        // crash. It is never a report and is not adopted or repaired here.
-        if (file.extension() == ".tmp") { iterator.increment(ec); if (ec) return std::unexpected(Fail("sdk.memory.read_failed")); continue; }
-        const auto id = file.stem().string();
+        const auto file = fs::u8path(entry.name);
+        if (entry.temporary) continue;
+        const auto id = lubancode::platform::PathToUtf8(file.stem());
         if (reports.size() >= 4096 || file.extension() != ".json" || !SafeId(id) || !accepted.contains(id) || !reports.insert(id).second)
             return std::unexpected(Fail("sdk.memory.report_invalid"));
-        std::size_t actual_bytes = 0;
-        auto report = ReadReport(id, &actual_bytes, 67108864 - used);
-        used += actual_bytes;
+        const auto* bytes = view.Find(lubancode::trajectory::RecoveryKeyKind::MemoryRecall, id);
+        if (!bytes || bytes->state != lubancode::trajectory::RecoveryReadState::Value)
+            return std::unexpected(Fail("sdk.memory.report_unavailable"));
+        if (bytes->bytes.size() > 67108864 - used) return std::unexpected(Fail("sdk.memory.report_limit"));
+        used += bytes->bytes.size();
+        auto report = ParseReportBytes(id, bytes->bytes);
         if (!report) {
             if (report.error().code.starts_with("sdk.memory.read.") || report.error().code == "sdk.memory.invalid_text")
                 return std::unexpected(report.error());
             if (complete_finals.contains(id)) return std::unexpected(report.error());
-            iterator.increment(ec);
-            if (ec) return std::unexpected(Fail("sdk.memory.read_failed"));
             continue;
         }
         if (!report->turn_id.empty() && !report_turns.insert(report->turn_id).second)
@@ -493,8 +508,6 @@ Result<void> SessionMemory::CheckSavedReports(const v3::V3Ledger& source) const 
             return std::unexpected(Fail("sdk.memory.report_invalid", "successful operation has no complete recall result"));
         auto valid = ValidateReport(*report, source);
         if (!valid && complete_finals.contains(id)) return valid;
-        iterator.increment(ec);
-        if (ec) return std::unexpected(Fail("sdk.memory.read_failed"));
     }
     for (const auto& [id, turn] : final_turns) {
         (void)turn;
