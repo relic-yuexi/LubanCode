@@ -37,6 +37,7 @@ namespace {
 thread_local const void* current_job_worker = nullptr;
 thread_local const void* current_job_shutdown = nullptr;
 thread_local const void* current_owned_callback = nullptr;
+thread_local const void* current_owned_post_invocation = nullptr;
 struct JobThreadScope {
     const void*& slot;
     const void* previous;
@@ -44,6 +45,15 @@ struct JobThreadScope {
     ~JobThreadScope() { slot = previous; }
 };
 }  // namespace
+
+struct OwnedJobPostInvocation::State {
+    const void* issuer = nullptr;
+    const void* record = nullptr;
+    const OwnedJobCompletion* completion = nullptr;
+    std::uint64_t epoch = 0;
+    std::thread::id thread;
+    std::atomic<bool> active{true};
+};
 
 namespace {
 
@@ -371,6 +381,7 @@ struct ToolJobCoordinator::Impl {
     std::optional<PreparedRegistrationContext> prepared_context;
     PreparedJobOwner prepared_owner;
     bool prepared_revoked = false;
+    OwnedJobPostPhase owned_post_phase = OwnedJobPostPhase::Open;
     std::map<std::string, std::shared_ptr<PreparedRecord>> prepared;
     std::map<std::string, std::shared_ptr<OwnedRecord>> owned;
     std::vector<std::string> owned_queue;
@@ -505,7 +516,22 @@ struct ToolJobCoordinator::Impl {
             record.post_invoked = true;
             {
                 JobThreadScope callback(current_owned_callback, this);
-                record.post = record.capability->post(completed);
+                if (record.capability->live_post) {
+                    // This unique invocation is created from the actual record
+                    // and completion, not from caller-provided identity values.
+                    auto state = std::make_shared<OwnedJobPostInvocation::State>();
+                    state->issuer = this; state->record = &record; state->completion = &completed;
+                    state->epoch = prepared_owner.epoch; state->thread = std::this_thread::get_id();
+                    JobThreadScope active(current_owned_post_invocation, state.get());
+                    struct Revoke {
+                        OwnedJobPostInvocation::State& state;
+                        ~Revoke() { state.active.store(false, std::memory_order_release); }
+                    } revoke{*state};
+                    const OwnedJobPostInvocation invocation(state);
+                    record.post = record.capability->live_post(completed, invocation);
+                } else {
+                    record.post = record.capability->post(completed);
+                }
             }
             if (!ReceiptOk(*record.post) || writer->broken()) { FreezeOwned(record, "job.owned.post_unconfirmed"); return; }
             const auto ledger = trajectory::v3::ReadV3Ledger(writer->path());
@@ -1516,6 +1542,8 @@ void ToolJobCoordinator::RequestShutdown() {
         std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
         impl_->closing = true;
         impl_->prepared_revoked = true;
+        if (impl_->owned_post_phase != OwnedJobPostPhase::Retired)
+            impl_->owned_post_phase = OwnedJobPostPhase::Draining;
         for (auto& [id, record] : impl_->prepared) { (void)id; record->revoked = true; }
         // Cancellation is an intent, not proof a callback has returned. This
         // phase never calls an authorization gate, clock or executor.
@@ -1641,6 +1669,7 @@ bool ToolJobCoordinator::Shutdown() {
         for (const auto& worker : workers) {
             std::erase_if(impl_->owned_workers, [&](const auto& owned) { return owned.finished == worker.finished; });
         }
+        impl_->owned_post_phase = OwnedJobPostPhase::Retired;
         impl_->writer = nullptr;
     }
     if (prepared_serial.owns_lock()) prepared_serial.unlock();
@@ -1863,7 +1892,8 @@ OwnedJobAdoption ToolJobCoordinator::AdoptPreparedJob(
     // Keep every user capture outside the jobs lock, including rejection unwind.
     auto cap = std::make_shared<OwnedJobCapability>(std::move(capability));
     const auto& limit = cap->command_limits;
-    if (!cap->command || !cap->scope_gate || !cap->post || !limit.timeout_ms ||
+    if (!cap->command || !cap->scope_gate || (!cap->post && !cap->live_post) ||
+        (cap->post && cap->live_post) || !limit.timeout_ms ||
         limit.timeout_ms > 86400000 || !limit.max_output_bytes ||
         limit.max_output_bytes > platform::kDefaultMaxOutputBytes) return reject("job.owned.missing_capability");
     std::lock_guard serial(*impl_->prepared_context->writer_serial);
@@ -2276,6 +2306,13 @@ OwnedJobStatusView ToolJobCoordinator::GetOwnedJob(const PreparedJobOwner& owner
         }
     }
     if (current_owned_callback != impl_.get()) PumpOwnedJobs();
+    return SnapshotOwnedJob(owner, id);
+}
+
+OwnedJobStatusView ToolJobCoordinator::SnapshotOwnedJob(const PreparedJobOwner& owner,
+                                                       const std::string& id) const {
+    OwnedJobStatusView out;
+    if (!impl_->prepared_context) { out.access_denied = true; return out; }
     std::lock_guard serial(*impl_->prepared_context->writer_serial);
     std::lock_guard lock(impl_->jobs_mutex);
     const auto found = impl_->owned.find(id);
@@ -2288,6 +2325,49 @@ OwnedJobStatusView ToolJobCoordinator::GetOwnedJob(const PreparedJobOwner& owner
     out.adopted_receipt = record.adopted; out.dispatched_receipt = record.dispatched; out.started_receipt = record.started;
     out.terminal_receipt = record.terminal; out.persisted_receipt = record.persisted; out.post_receipt = record.post; out.observed_receipt = record.observed;
     return out;
+}
+
+std::expected<OwnedJobPostSnapshot, std::string> ToolJobCoordinator::CheckOwnedPostInvocation(
+    const OwnedJobPostInvocation& invocation) const {
+    const auto state = invocation.state_.lock();
+    // Reject before locks/pointer access: an observer may be joined by the host
+    // holding writer_serial, and saved weak handles must never retain borrows.
+    if (!state || state->issuer != impl_.get() ||
+        state->thread != std::this_thread::get_id() ||
+        current_owned_post_invocation != state.get() || current_owned_callback != impl_.get() ||
+        !state->active.load(std::memory_order_acquire) || !impl_->prepared_context)
+        return std::unexpected("job.post.invalid_invocation");
+    std::lock_guard serial(*impl_->prepared_context->writer_serial);
+    std::lock_guard lock(impl_->jobs_mutex);
+    if (impl_->owned_post_phase == OwnedJobPostPhase::Retired || !impl_->writer ||
+        impl_->writer->closed() || impl_->writer->broken())
+        return std::unexpected("job.post.writer_unavailable");
+    const auto& completion = *state->completion;
+    const auto found = impl_->owned.find(completion.scope.job_id);
+    if (state->epoch != impl_->prepared_owner.epoch ||
+        completion.scope.owner != impl_->prepared_owner || completion.scope.attempt != 1 ||
+        found == impl_->owned.end() || found->second.get() != state->record)
+        return std::unexpected("job.post.invalid_invocation");
+    const auto& record = *found->second;
+    const auto matches = [](const auto& receipt, const auto& actual) {
+        return receipt && ReceiptOk(*receipt) && receipt->id == actual.id &&
+            receipt->seq == actual.seq && receipt->line_hash == actual.line_hash;
+    };
+    if (!record.settlement_started || record.settled || !record.post_invoked ||
+        !record.job.dispatched || !record.capability || !record.capability->live_post ||
+        !record.facts || !record.adopted || !ReceiptOk(*record.adopted) ||
+        record.scope.action_id != completion.scope.action_id ||
+        record.scope.turn_id != completion.scope.turn_id ||
+        record.scope.step_id != completion.scope.step_id ||
+        record.scope.owner != completion.scope.owner ||
+        impl_->writer->session_id() != completion.scope.owner.session_id ||
+        impl_->writer->run_id() != completion.scope.owner.run_id ||
+        !matches(record.started, completion.started_receipt) ||
+        !matches(record.terminal, completion.terminal_receipt) ||
+        !matches(record.persisted, completion.persisted_receipt))
+        return std::unexpected("job.post.invalid_invocation");
+    return OwnedJobPostSnapshot{completion, record.facts, *record.adopted,
+        impl_->owned_post_phase, record.job.cancel_requested};
 }
 
 OwnedJobWaitResult ToolJobCoordinator::WaitOwnedJobs(const PreparedJobOwner& owner,

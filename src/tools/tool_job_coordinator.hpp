@@ -28,6 +28,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <expected>
 #include <functional>
 #include <filesystem>
 #include <memory>
@@ -255,6 +256,29 @@ struct OwnedJobCompletion {
     Tool::Result raw;
     trajectory::v3::WriteReceipt started_receipt, terminal_receipt, persisted_receipt;
 };
+enum class OwnedJobPostPhase { Open, Draining, Retired };
+
+struct OwnedJobPostSnapshot {
+    OwnedJobCompletion completion;
+    std::shared_ptr<const PreparedJobFacts> facts;
+    trajectory::v3::WriteReceipt adopted_receipt;
+    OwnedJobPostPhase phase = OwnedJobPostPhase::Retired;
+    bool cancel_requested = false;
+};
+
+// A copyable opaque weak handle, not an extendable execution permission. Only
+// the actual producer creates its state; the synchronous Post owns the lease.
+// Default/expired/foreign-thread handles cannot borrow a writer or live record.
+class OwnedJobPostInvocation {
+public:
+    OwnedJobPostInvocation() = default;
+private:
+    struct State;
+    std::weak_ptr<State> state_;
+    explicit OwnedJobPostInvocation(const std::shared_ptr<State>& state) : state_(state) {}
+    friend class ToolJobCoordinator;
+};
+
 struct OwnedJobCapability {
     std::shared_ptr<RunCommandTool> command;
     std::function<JobAuthDecision(const OwnedJobScope&, const nlohmann::json&,
@@ -263,6 +287,10 @@ struct OwnedJobCapability {
     // absent from the verified source is unconfirmed, never a successful Post.
     std::function<trajectory::v3::WriteReceipt(const OwnedJobCompletion&)> post;
     CommandExecutionLimits command_limits;
+    // Explicit opt-in. Select exactly one of post/live_post; the legacy default
+    // remains post. Check the actual invocation synchronously, never postpone it.
+    std::function<trajectory::v3::WriteReceipt(const OwnedJobCompletion&,
+                                             const OwnedJobPostInvocation&)> live_post;
 };
 enum class OwnedJobAdoptionState { Rejected, Adopted, Unconfirmed };
 struct OwnedJobAdoption {
@@ -448,6 +476,13 @@ public:
     OwnedJobAdmission ConfirmParentAdmission(const PreparedJobOwner& owner, const std::string& job_id,
                                              const ParentJobAdmissionRefs& refs);
     OwnedJobStatusView GetOwnedJob(const PreparedJobOwner& owner, const std::string& job_id);
+    // Host-safe serial -> jobs projection only: no Pump/Reap/clock/writer I/O.
+    // Do not call from an observer whose callback owner is joining that thread.
+    OwnedJobStatusView SnapshotOwnedJob(const PreparedJobOwner& owner, const std::string& job_id) const;
+    // Only the current actual Post invocation can pass. Foreign threads fail
+    // before taking writer_serial; returned values own no live writer borrow.
+    std::expected<OwnedJobPostSnapshot, std::string> CheckOwnedPostInvocation(
+        const OwnedJobPostInvocation& invocation) const;
     OwnedJobWaitResult WaitOwnedJobs(const PreparedJobOwner& owner, const std::vector<std::string>& ids,
                                      std::uint64_t timeout_ms, bool wait_all);
     JobCancelResult CancelOwnedJob(const PreparedJobOwner& owner, const std::string& job_id,

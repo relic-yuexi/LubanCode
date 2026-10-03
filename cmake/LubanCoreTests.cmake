@@ -28,6 +28,7 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/tools/test_tool_job_hold_recovery.cpp"
   "${_lubancore_tests_root}/unit/tools/test_tool_job_owned_registration.cpp"
   "${_lubancore_tests_root}/unit/tools/test_tool_job_owned_adoption.cpp"
+  "${_lubancore_tests_root}/unit/tools/test_tool_job_post_live_invocation.cpp"
   "${_lubancore_tests_root}/unit/tools/test_run_command_execution_limits.cpp"
   "${_lubancore_tests_root}/unit/trajectory/test_session_recovery_view.cpp"
   "${_lubancore_tests_root}/unit/platform/test_atomic_write.cpp"
@@ -134,6 +135,7 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
          sdk_basename STREQUAL "test_tool_job_hold_recovery.cpp" OR
          sdk_basename STREQUAL "test_tool_job_owned_registration.cpp" OR
          sdk_basename STREQUAL "test_tool_job_owned_adoption.cpp" OR
+         sdk_basename STREQUAL "test_tool_job_post_live_invocation.cpp" OR
          sdk_basename STREQUAL "test_run_command_execution_limits.cpp")
     set(sdk_original_test "unit.tools.${sdk_stem}")
     set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "tools-${sdk_stem}")
