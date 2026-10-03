@@ -44,7 +44,8 @@ public:
 private:
     // 公共实现:effective_cancel 是本调用真用的取消旗(execute 两个口各算
     // 各的)。置位即收整棵进程树,结果分型 cancelled(与超时分开记账)。
-    Result Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel);
+    Result Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel,
+               const CommandExecutionLimits* limits = nullptr);
 
     const std::atomic<bool>* cancel_ = nullptr;
 };

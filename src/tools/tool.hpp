@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -45,6 +46,14 @@ struct ToolInvocationIdentity {
 };
 enum class ExecutionControl { Continue, StopIndeterminate };
 
+// Owned per-invocation limits. Absence preserves legacy execution; present
+// values must both be positive and within the RunCommand host bounds. The
+// tool must not retain this image on its shared instance.
+struct CommandExecutionLimits {
+    std::uint64_t timeout_ms = 0;
+    std::uint64_t max_output_bytes = 0;
+};
+
 // 工具执行上下文(子代理 x 停止失效单:取消令牌贯通工具进程)。渐进迁移
 // 的口子:RunOneTool 把"这一次调用"的取消旗从这里递进来,工具 override
 // execute(input, context) 便可在长操作里查旗、收子进程树;没 override 的
@@ -65,6 +74,7 @@ struct ToolExecutionContext {
     // 落盘。文本结果不受影响。
     std::string artifact_dir;
     ToolInvocationIdentity invocation;
+    std::optional<CommandExecutionLimits> command_limits;
 };
 
 class Tool {
