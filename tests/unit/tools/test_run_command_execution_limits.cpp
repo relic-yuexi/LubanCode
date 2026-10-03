@@ -240,6 +240,20 @@ nlohmann::json ProcessDiagnosticSnapshot(const ProcessDiagnosticBuffer& buffer) 
             {"stage", lubancode::platform::ProcessDiagnosticStageName(item.stage)},
             {"steady_ns", item.steady_ns}, {"pid", item.pid}, {"pgid", item.pgid},
             {"rc", item.rc}, {"system_error", item.system_error}, {"detail", item.detail}});
+        if (item.stage == ProcessDiagnosticStage::JobAccountingQueryAfter) {
+            nlohmann::json values = nullptr;
+            if (item.rc != 0) {
+                const auto& accounting = item.job_accounting;
+                values = {{"total_processes", accounting.total_processes},
+                    {"active_processes", accounting.active_processes},
+                    {"terminated_processes", accounting.terminated_processes},
+                    {"total_user_time_100ns", accounting.total_user_time_100ns},
+                    {"total_kernel_time_100ns", accounting.total_kernel_time_100ns}};
+            }
+            records.back()["job_accounting"] = {
+                {"state", item.rc != 0 ? "reported" : "query_failed"},
+                {"cpu_time_unit", "100ns"}, {"values", std::move(values)}};
+        }
     }
     return {{"capacity", ProcessDiagnosticBuffer::kCapacity}, {"reserved", reserved},
         {"overflow", reserved > ProcessDiagnosticBuffer::kCapacity || buffer.Overflowed()},

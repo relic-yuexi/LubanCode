@@ -30,11 +30,34 @@ namespace {
 void RecordWindowsProcessDiagnostic(ProcessDiagnosticBuffer* diagnostics,
                                      ProcessDiagnosticStage stage, DWORD pid = 0,
                                      std::int64_t rc = 0, DWORD system_error = 0,
-                                     std::int64_t detail = 0) noexcept {
+                                     std::int64_t detail = 0,
+                                     ProcessDiagnosticJobAccounting job_accounting = {}) noexcept {
     if (!diagnostics) return;
     const DWORD saved_error = GetLastError();
     const int saved_errno = errno;
-    diagnostics->Record(stage, pid, -1, rc, system_error, detail);
+    diagnostics->Record(stage, pid, -1, rc, system_error, detail, job_accounting);
+    errno = saved_errno;
+    SetLastError(saved_error);
+}
+
+void ObserveTimeoutJobAccounting(HANDLE job, DWORD pid,
+                                 ProcessDiagnosticBuffer* diagnostics) noexcept {
+    if (!diagnostics || job == nullptr) return;
+    const DWORD saved_error = GetLastError();
+    const int saved_errno = errno;
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::JobAccountingQueryBefore, pid);
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+    const BOOL queried = QueryInformationJobObject(job, JobObjectBasicAccountingInformation,
+                                                   &accounting, sizeof(accounting), nullptr);
+    const DWORD query_error = queried ? 0 : GetLastError();
+    ProcessDiagnosticJobAccounting values{};
+    if (queried) {
+        values = {accounting.TotalProcesses, accounting.ActiveProcesses,
+                  accounting.TotalTerminatedProcesses, accounting.TotalUserTime.QuadPart,
+                  accounting.TotalKernelTime.QuadPart};
+    }
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::JobAccountingQueryAfter,
+                                    pid, queried, query_error, 0, values);
     errno = saved_errno;
     SetLastError(saved_error);
 }
@@ -611,6 +634,9 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
             result.cancelled = true;
         } else if (wait_result == WAIT_TIMEOUT) {
             result.timed_out = true;
+            if (diagnostics && job != nullptr) {
+                ObserveTimeoutJobAccounting(job, pi.dwProcessId, diagnostics);
+            }
         }
         if (job != nullptr) {
             CloseDiagnosticJob(job, pi.dwProcessId, diagnostics);  // KILL_ON_JOB_CLOSE:关句柄的一瞬间,job 里所有进程全杀

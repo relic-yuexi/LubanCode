@@ -71,7 +71,21 @@ enum class ProcessDiagnosticStage : std::uint32_t {
     CancelReaderIoBefore,
     CancelReaderIoAfter,
     ExitCodeRead,
+    JobAccountingQueryBefore,
+    JobAccountingQueryAfter,
 };
+
+// Internal values from one successful JobObjectBasicAccountingInformation
+// query. They describe that Job's accounting, never probe or task identity.
+struct ProcessDiagnosticJobAccounting {
+    std::uint32_t total_processes;
+    std::uint32_t active_processes;
+    std::uint32_t terminated_processes;
+    std::int64_t total_user_time_100ns;
+    std::int64_t total_kernel_time_100ns;
+};
+static_assert(std::is_trivial_v<ProcessDiagnosticJobAccounting>);
+static_assert(std::is_standard_layout_v<ProcessDiagnosticJobAccounting>);
 
 struct ProcessDiagnosticRecord {
     ProcessDiagnosticStage stage;
@@ -81,6 +95,8 @@ struct ProcessDiagnosticRecord {
     std::int64_t rc;
     std::int64_t detail;
     std::uint32_t system_error;
+    // Valid only for JobAccountingQueryAfter with a successful native rc.
+    ProcessDiagnosticJobAccounting job_accounting;
 };
 static_assert(std::is_trivial_v<ProcessDiagnosticRecord>);
 static_assert(std::is_standard_layout_v<ProcessDiagnosticRecord>);
@@ -93,7 +109,8 @@ public:
     // Each slot has one writer; release publishes its complete POD record.
     void Record(ProcessDiagnosticStage stage, std::int64_t pid = -1,
                 std::int64_t pgid = -1, std::int64_t rc = 0,
-                std::uint32_t system_error = 0, std::int64_t detail = 0) noexcept {
+                std::uint32_t system_error = 0, std::int64_t detail = 0,
+                ProcessDiagnosticJobAccounting job_accounting = {}) noexcept {
         const int saved_errno = errno;
         const auto index = reserved_.fetch_add(1, std::memory_order_relaxed);
         if (index >= kCapacity) {
@@ -105,7 +122,7 @@ public:
         slot.record = {stage,
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count(),
-            pid, pgid, rc, detail, system_error};
+            pid, pgid, rc, detail, system_error, job_accounting};
         slot.published.store(true, std::memory_order_release);
         errno = saved_errno;
     }
@@ -219,6 +236,8 @@ constexpr const char* ProcessDiagnosticStageName(ProcessDiagnosticStage stage) n
         LUBAN_PROCESS_DIAGNOSTIC_NAME(CancelReaderIoBefore)
         LUBAN_PROCESS_DIAGNOSTIC_NAME(CancelReaderIoAfter)
         LUBAN_PROCESS_DIAGNOSTIC_NAME(ExitCodeRead)
+        LUBAN_PROCESS_DIAGNOSTIC_NAME(JobAccountingQueryBefore)
+        LUBAN_PROCESS_DIAGNOSTIC_NAME(JobAccountingQueryAfter)
 #undef LUBAN_PROCESS_DIAGNOSTIC_NAME
     }
     return "UnknownStage";

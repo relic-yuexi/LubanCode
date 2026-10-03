@@ -12,7 +12,7 @@
 
 仅前台 Windows `RunProcess` 已记录真实 `TimeoutObserved` 后、关现有 Job 前，且借入 `ProcessDiagnosticBuffer` 非空、Job 仍非空，调用一次 `QueryInformationJobObject(..., JobObjectBasicAccountingInformation, ...)`。取消和输出超帽不触发该 query。没有 Job 的旧 fallback 不添虚构统计。
 
-只留原 query rc / GetLastError、TotalProcesses、ActiveProcesses、TotalTerminatedProcesses、TotalUserTime、TotalKernelTime。CPU 保原 100 ns 数值，进程计数不冒充探针身份或业务任务数。成功 API 的 LastError 可能陈旧；失败以 rc 为准。query 失败时统计值不可采用，JSON 明列 `query_failed`、`values=null`。
+只留原 query rc、失败时即时 GetLastError、TotalProcesses、ActiveProcesses、TotalTerminatedProcesses、TotalUserTime、TotalKernelTime。CPU 保原 100 ns 数值，进程计数不冒充探针身份或业务任务数。成功 query 的 error 归零，不采用可能陈旧的 LastError。query 失败时统计值不可采用，JSON 明列 `query_failed`、`values=null`。
 
 借用只跨当前同步调用。记录沿现有 128 槽固定 POD；尾添统计 POD 和两枚 stage，不改既有枚举值。单槽写完再 release 发布，序列化只读 acquire 已发布槽。槽满、未发布或缺阶段保未知，不能倒推成功。
 
