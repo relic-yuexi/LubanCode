@@ -52,6 +52,22 @@ REQUIRED = {
 LUA_PATHS = ("off-and-visible", "four-sessions", "approval", "cancel-and-close",
              "invalid-budget", "bad-declarations", "resume-fresh-vm", "resume-drift", "owned-opening")
 
+
+def check_native_command(section: str, registered: list[str]):
+    if (not isinstance(registered, list) or not registered or
+            not all(isinstance(argument, str) for argument in registered) or not registered[0]):
+        raise RuntimeError("Native source lacks a valid registered command")
+    commands = re.findall(r"^Command: ([^\r\n]*)\r?$", section, flags=re.M)
+    if len(commands) != 1:
+        raise RuntimeError("Native source command is missing or duplicated")
+    try:
+        actual = shlex.split(commands[0].replace("\\", "/"))
+    except ValueError as error:
+        raise RuntimeError("Native source command is not a valid argument list") from error
+    if actual != [argument.replace("\\", "/") for argument in registered]:
+        raise RuntimeError("Native source command differs from the registered path or arguments")
+
+
 def check_lua_native(section, *, protected=False, executable="lubancore_sdk_tests"):
     source = "test_lua_protected.cpp" if protected else "test_lubancore_lua.cpp"
     expected = 6 if protected else len(LUA_PATHS)
@@ -333,6 +349,10 @@ def main():
                     if native_sections[index] == case.attrib["name"]]
         if len(sections) != 1:
             raise RuntimeError("Native log does not identify one SDK source: " + case.attrib["name"])
+        commands = [test.get("command", []) for test in tests if test["name"] == case.attrib["name"]]
+        if len(commands) != 1:
+            raise RuntimeError("SDK source has no unique registered command: " + case.attrib["name"])
+        check_native_command(sections[0], commands[0])
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])

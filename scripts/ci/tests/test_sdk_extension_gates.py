@@ -19,6 +19,58 @@ focused = importlib.util.module_from_spec(FOCUSED_SPEC)
 FOCUSED_SPEC.loader.exec_module(focused)
 
 
+class NativeCommandEvidenceTests(unittest.TestCase):
+    def test_posix_full_argument_list_accepts_the_actual_registration(self):
+        command = ["/real checkout/build/tests/lubancore_sdk_tests", "--source-file=*test_real.cpp"]
+        body = 'Command: "/real checkout/build/tests/lubancore_sdk_tests" "--source-file=*test_real.cpp"\n'
+        focused.check_native_command(body, command)
+        focused.check_native_command(body.replace("\n", "\r\n"), command)
+
+    def test_windows_spaces_and_backslashes_only_normalize_separators(self):
+        command = [r"C:\actual checkout\build\tests\Release\lubancore_sdk_tests.exe",
+                   "--source-file=*test_real.cpp"]
+        body = 'Command: "C:\\actual checkout\\build\\tests\\Release\\lubancore_sdk_tests.exe" "--source-file=*test_real.cpp"\n'
+        focused.check_native_command(body, command)
+        focused.check_native_command(body.replace("\\", "/"), command)
+        focused.check_native_command(body, [part.replace("\\", "/") for part in command])
+        with self.assertRaises(RuntimeError):
+            focused.check_native_command(body.replace("actual checkout", "ACTUAL checkout"), command)
+
+    def test_same_basename_from_another_checkout_cannot_replace_the_registered_binary(self):
+        command = ["/actual/build/lubancore_sdk_tests", "--source-file=*test_real.cpp"]
+        for executable in ("/foreign/build/lubancore_sdk_tests", "lubancore_sdk_tests"):
+            body = f'Command: "{executable}" "{command[1]}"\n'
+            with self.subTest(executable=executable), self.assertRaises(RuntimeError):
+                focused.check_native_command(body, command)
+
+    def test_added_removed_or_changed_arguments_cannot_borrow_a_passing_native_summary(self):
+        command = ["/actual/build/lubancore_sdk_tests", "--source-file=*test_real.cpp"]
+        variants = [command + ["--test-case=only-one"], command + ["--source-file=*another.cpp"],
+                    command[:1], [command[0], "--source-file=*another.cpp"]]
+        for changed in variants:
+            body = "Command: " + " ".join('"' + part + '"' for part in changed) + "\n"
+            body += "[doctest] test cases: 10 | 10 passed | 0 failed\nTest Passed.\n"
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                focused.check_native_command(body, command)
+
+    def test_missing_duplicate_or_decorated_command_is_rejected(self):
+        command = ["/actual/build/lubancore_sdk_tests", "--source-file=*test_real.cpp"]
+        line = 'Command: "/actual/build/lubancore_sdk_tests" "--source-file=*test_real.cpp"\n'
+        for body in ("Test Passed.\n", line + line, "borrowed: " + line, line + 'Command: "foreign"\n'):
+            with self.subTest(body=body), self.assertRaises(RuntimeError):
+                focused.check_native_command(body, command)
+
+    def test_invalid_registration_or_unparseable_command_is_rejected(self):
+        command = ["/actual/build/lubancore_sdk_tests", "--source-file=*test_real.cpp"]
+        line = 'Command: "/actual/build/lubancore_sdk_tests" "--source-file=*test_real.cpp"\n'
+        for invalid in (None, [], "native", [3, command[1]], [command[0], None], ["", command[1]]):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                focused.check_native_command(line, invalid)
+        for body in ('Command: "unterminated\n', "Command: \n"):
+            with self.subTest(body=body), self.assertRaises(RuntimeError):
+                focused.check_native_command(body, command)
+
+
 class PackageNativeEvidenceTests(unittest.TestCase):
     def evidence(self, count, executable="lubancore_sdk_tests"):
         source = "test_package_manifest.cpp" if count == 15 else "test_lubancore_package_manifest.cpp"

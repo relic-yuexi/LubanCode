@@ -1540,7 +1540,7 @@ jobs:
           from pathlib import Path
           import sys
           sys.path.insert(0, 'scripts/ci')
-          from check_sdk_focused import check_recovery_source
+          from check_sdk_focused import check_native_command, check_recovery_source
           registered_tests = json.loads(Path('build/asan-host-registration.json').read_text())['tests']
           required = {test['name'] for test in registered_tests}
           cases = ET.parse('build/asan-results.xml').getroot().findall('.//testcase')
@@ -1560,6 +1560,10 @@ jobs:
                           if native_sections[index] == name]
               if len(sections) != 1:
                   raise SystemExit('ASan native log does not identify one source: ' + name)
+              commands = [test.get('command', []) for test in registered_tests if test['name'] == name]
+              if len(commands) != 1:
+                  raise SystemExit('ASan source has no unique registered command: ' + name)
+              check_native_command(sections[0], commands[0])
               counts = re.findall(r'\[doctest\] test cases:\s+(\d+)', sections[0])
               if len(counts) != 1 or int(counts[0]) == 0:
                   raise SystemExit('ASan source filter ran no native test cases: ' + name)
