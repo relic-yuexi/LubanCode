@@ -12,6 +12,14 @@
 
 ## 现有路径
 
+### 现有 Producer 的声明缺口
+
+`StartJobCommon` 现向真实 `ToolActionSession::Admit` 传 `provider=nullopt`，只写 `toolName`。`JobStartRequest` 也未带原 provider call-id。完整 assistant 调用块虽在账里，共用 Fold 仍无法按空号取出那枚声明的工具名与参数；不能按名称猜一枚，也不能补假参数。保留重试 Pending 的已有 ID，并不补齐这种从未落号的旧账。
+
+本笔 Hold 只采用来源材料完整的真实账。现有 producer 这类缺件明确报 `job.recovery.invalid_source`，不发布恢复记录，不执行、不补账；它不等于 SDK 后台能力已交付。后续显式 owned producer 须持可信 provider ID 并在新入口落稳；Legacy producer 尚未迁移，本笔不改它。
+
+原六册内另添真实 `StartJob → Wait/Shutdown → Close → Read/Continue → PlanHold/Adopt` 负验。assistant 声明沿实际 Writer 完整落账，原工具真执行一次；关场后重读，确认声明材料缺失，恢复明确拒绝、executor 为零、原卷逐字不动。不得手补恢复字段绕过严门。此节先提交，再落这段回归；`7ebd3f33` 及此前旧轮各留各的原件，新头独立验收。
+
 ### 首轮失败与共享折叠修补
 
 源 `023e635c` 的鲜 CI `37102791017` 已真跑新册。Linux SDK-only 原件里六案四过两败；两个合法业务 attempt 2 窗都在 Adopt 报 `job.recovery.invalid_source`。原卷已过 Reader 与 Continue，不是坏卷，也不能放宽严格准入。
