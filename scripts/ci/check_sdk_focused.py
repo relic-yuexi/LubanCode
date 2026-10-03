@@ -14,6 +14,8 @@ import xml.etree.ElementTree as ET
 
 REQUIRED = {
     "sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest",
+    "sdk.focused.tool_job_coordinator",
+    "sdk.focused.tool_job_start_transaction",
     "sdk.focused.lubancore_session",
     "sdk.focused.lubancore_scoped_approval",
     "sdk.focused.lubancore_child_approval",
@@ -178,6 +180,41 @@ def check_plan_retry_native(native_section: str, platform_name: str, executable=
         raise RuntimeError("SDK plan retry POSIX evidence cannot claim a Windows sharing probe")
 
 
+JOB_START_PATHS = ("executor-copy", "before-thread", "after-thread", "queued-successor",
+                   "unconfirmed-terminal", "capture-close")
+
+
+def check_job_start_registration(command, source, executable="lubancore_sdk_tests"):
+    if source not in ("test_tool_job_coordinator.cpp", "test_tool_job_start_transaction.cpp"):
+        raise RuntimeError("unexpected Job startup source")
+    if (len(command) != 2 or not isinstance(command[0], str) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*" + source):
+        raise RuntimeError("Job startup must run the single actual source")
+
+
+def check_job_start_native(section, command, original=False):
+    source = "test_tool_job_coordinator.cpp" if original else "test_tool_job_start_transaction.cpp"
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe") if command else ""
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Job startup executable is not the actual native fixture")
+    check_job_start_registration(command, source, executable)
+    lines = re.findall(r"^Command:\s*(.+)$", section, flags=re.M)
+    if len(lines) != 1 or shlex.split(lines[0].replace("\\", "/")) != [value.replace("\\", "/") for value in command]:
+        raise RuntimeError("Job startup native command differs from full registration argv")
+    expected = 16 if original else 6
+    counts = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(counts) != 1 or tuple(map(int, counts[0])) != (expected, expected, 0):
+        raise RuntimeError("Job startup native roster differs from its successful source")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(assertions) != 1 or int(assertions[0][0]) <= 0 or int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0:
+        raise RuntimeError("Job startup assertions are empty or failed")
+    if not original:
+        for path in JOB_START_PATHS:
+            if section.splitlines().count("[job-start-path] " + path) != 1:
+                raise RuntimeError("Job startup actual path did not finish once: " + path)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -208,6 +245,9 @@ def main():
         if (props.get("DISABLED") or "sdk-focused" not in props.get("LABELS", [])
                 or not 0 < float(props.get("TIMEOUT", 0)) <= 300):
             raise RuntimeError("SDK test is disabled, mislabeled or unbounded: " + test["name"])
+        if test["name"] in ("sdk.focused.tool_job_coordinator", "sdk.focused.tool_job_start_transaction"):
+            source = "test_" + test["name"].removeprefix("sdk.focused.") + ".cpp"
+            check_job_start_registration(test.get("command", []), source)
         if test["name"] == "sdk.focused.atomic_write":
             check_plan_retry_registration(test.get("command", []))
         if test["name"] in ("sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest"):
@@ -249,6 +289,10 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_package_manifest":
             registered = next(test["command"] for test in tests if test["name"] == case.attrib["name"])
             check_package_native(sections[0], 8, registered)
+        if case.attrib["name"] in ("sdk.focused.tool_job_coordinator", "sdk.focused.tool_job_start_transaction"):
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_job_start_native(sections[0], registered["command"],
+                case.attrib["name"] == "sdk.focused.tool_job_coordinator")
         if case.attrib["name"] == "sdk.focused.v3_result_store":
             check_result_store_native(sections[0], os.name)
         if case.attrib["name"] == "sdk.focused.atomic_write":

@@ -95,6 +95,21 @@ class BoundaryTests(unittest.TestCase):
         self.targets[-1]["name"] = "lubancore_sdk_tests"
         self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
 
+    def test_exact_job_sources_are_only_compiled_when_testing_is_on(self):
+        for name in ("tests/unit/tools/test_tool_job_coordinator.cpp", "tests/unit/tools/test_tool_job_start_transaction.cpp"):
+            self.source_file(name, "int fixture_only;\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+            "sources": [{"path": name, "compileGroupIndex": 0} for name in
+                ("tests/unit/tools/test_tool_job_coordinator.cpp", "tests/unit/tools/test_tool_job_start_transaction.cpp")],
+            "compileGroups": [{}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        report = self.check(testing=True)
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.targets[-1]["sources"][0]["path"] = "tests/unit/tools/test_tool_job_unrelated.cpp"
+        self.source_file("tests/unit/tools/test_tool_job_unrelated.cpp", "int unrelated;\n")
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
     def test_real_private_memory_cas_reference_is_only_testing_on(self):
         reference = "src/sdk/memory.cpp"
         self.source_file(reference, '#include "sdk/memory.hpp"\n')
