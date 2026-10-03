@@ -131,11 +131,13 @@ struct Seed {
         auto receipt = writer->AppendEvent(std::move(event), v3::Durability::PowerLoss);
         Committed(receipt); return receipt;
     }
-    void Register(bool approval = false, bool native = false) {
+    void Register(bool approval = false, bool native = false, bool legacy_provider_id = false) {
         const auto request = Request("old-call");
         mode = native ? "native_deferred" : "job_handle";
         action = v3::ToolActionSession::Admit(*writer, request.turn_id, request.step_id,
-            action_id, "queued", request.assistant_message_ref, "old-call");
+            action_id, "queued", request.assistant_message_ref,
+            legacy_provider_id ? std::optional<std::string>{} : std::optional<std::string>{"old-call"},
+            legacy_provider_id ? nlohmann::json{{"providerToolCallId", "old-call"}} : nlohmann::json::object());
         REQUIRE(action->last_event_id().has_value());
         nlohmann::json payload{{"tool_call_id", action_id}, {"attempt", 1u}, {"jobId", job_id},
             {"mode", mode}, {"assistantMessageRef", request.assistant_message_ref},
@@ -231,7 +233,19 @@ struct Restored {
 };
 void Passive(Restored& restored, const Seed& seed, JobRecoveryKnowledge knowledge) {
     const auto before = Bytes(restored.journal);
+    const auto ledger = Read(restored.journal);
+    const auto actions = v3::FoldToolActions(ledger);
+    const auto* action = v3::FindActionSnapshot(actions, seed.action_id);
+    REQUIRE(action != nullptr);
+    REQUIRE(action->provider_tool_call_id.has_value());
+    CHECK(*action->provider_tool_call_id == "old-call");
+    REQUIRE(action->tool_name.has_value());
+    CHECK(*action->tool_name == "project_write");
+    REQUIRE(action->declared_args.has_value());
+    CHECK(*action->declared_args == nlohmann::json::object());
     const auto plan = restored.Plan(); REQUIRE(plan.items.size() == 1);
+    CHECK(plan.items.front().tool_name == *action->tool_name);
+    CHECK(plan.items.front().tool_input == *action->declared_args);
     REQUIRE(plan.items.front().recovery.has_value());
     CHECK(plan.items.front().recovery->knowledge == knowledge);
     REQUIRE(restored.coordinator->AdoptRecovery(plan) == 1);
@@ -322,18 +336,21 @@ TEST_CASE("Hold recovery reserves old queued approval keys while new jobs execut
 TEST_CASE("Hold recovery keeps dispatched and started gaps unknown without new execution") {
     Watchdog watchdog;
     for (bool started : {false, true}) {
-        Seed seed(started ? "started" : "dispatched"); seed.Register(); seed.Admission(); seed.Dispatch(started);
-        std::atomic<unsigned> calls{0}; Restored restored(seed, "unknown");
-        restored.Attach([&](const JobExecutionContext&) { ++calls; return Tool::Result{"not-old", false}; });
-        Passive(restored, seed, JobRecoveryKnowledge::ExecutionUnconfirmed);
-        const auto status = restored.coordinator->GetJob(seed.job_id); REQUIRE(status.recovery.has_value());
-        CHECK(status.state == "unknown"); CHECK(status.recovery->original_state == "running");
-        CHECK(status.recovery->execution_attempt == 2); CHECK(status.recovery->execution_started == started);
-        CHECK(status.recovery->dispatched_count == 1); CHECK(status.recovery->execution_terminal_event.empty());
-        const auto wait = restored.coordinator->WaitJobs({seed.job_id}, 0, true); CHECK(wait.satisfied);
-        REQUIRE(wait.statuses.size() == 1); CHECK(wait.statuses.front().recovery->knowledge == JobRecoveryKnowledge::ExecutionUnconfirmed);
-        CHECK_FALSE(restored.coordinator->CancelJob(seed.job_id, "test-held").ok);
-        const auto before = Bytes(restored.journal); REQUIRE(restored.coordinator->Shutdown()); CHECK(Bytes(restored.journal) == before); CHECK(calls == 0);
+        for (bool legacy_provider_id : {false, true}) {
+            Seed seed(started ? "started" : "dispatched");
+            seed.Register(false, false, legacy_provider_id); seed.Admission(); seed.Dispatch(started);
+            std::atomic<unsigned> calls{0}; Restored restored(seed, "unknown");
+            restored.Attach([&](const JobExecutionContext&) { ++calls; return Tool::Result{"not-old", false}; });
+            Passive(restored, seed, JobRecoveryKnowledge::ExecutionUnconfirmed);
+            const auto status = restored.coordinator->GetJob(seed.job_id); REQUIRE(status.recovery.has_value());
+            CHECK(status.state == "unknown"); CHECK(status.recovery->original_state == "running");
+            CHECK(status.recovery->execution_attempt == 2); CHECK(status.recovery->execution_started == started);
+            CHECK(status.recovery->dispatched_count == 1); CHECK(status.recovery->execution_terminal_event.empty());
+            const auto wait = restored.coordinator->WaitJobs({seed.job_id}, 0, true); CHECK(wait.satisfied);
+            REQUIRE(wait.statuses.size() == 1); CHECK(wait.statuses.front().recovery->knowledge == JobRecoveryKnowledge::ExecutionUnconfirmed);
+            CHECK_FALSE(restored.coordinator->CancelJob(seed.job_id, "test-held").ok);
+            const auto before = Bytes(restored.journal); REQUIRE(restored.coordinator->Shutdown()); CHECK(Bytes(restored.journal) == before); CHECK(calls == 0);
+        }
     }
     Mark("dispatched-unknown");
 }
