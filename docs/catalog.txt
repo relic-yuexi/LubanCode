@@ -166,6 +166,7 @@ DOC development/child-parent-observation.md
 DOC development/sdk-subagent-assembly.md
 DOC development/child-history-adoption.md
 DOC development/result-store-windows-io.md
+DOC development/sdk-channel-gateway-boundary.md
 DOC development/sdk-plan-atomic-diagnostic.md
 DOC development/updater-lock-ready.md
 DOC development/sdk-plan-short-reject.md

@@ -43,6 +43,7 @@ git diff --check
 - [公开子 Agent、Memory CAS 与忙锁验收组合](sdk-child-cas-integration.md)
 - [SDK 前台子 Agent 装配](sdk-subagent-assembly.md)
 - [结果仓 Windows 原生路径入口](result-store-windows-io.md)
+- [SDK 渠道与 Gateway 宿主边界](sdk-channel-gateway-boundary.md)
 - [SDK Memory 写计划失败诊断](sdk-plan-atomic-diagnostic.md)
 - [Updater 活持锁夹具就绪](updater-lock-ready.md)
 - [SDK 冻结计划短拒重试](sdk-plan-short-reject.md)

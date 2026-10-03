@@ -281,27 +281,29 @@ endif()
 # 不管走没走 vcpkg 都 FetchContent 自建,两条构建路认同一份依赖,vcpkg.json
 # 不动。
 # ---------------------------------------------------------------------------
-_lubancode_tarball(_lubancode_mbedtls_url "Mbed-TLS/mbedtls" "v3.6.3")
-set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
-set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
-set(GEN_FILES OFF CACHE BOOL "" FORCE)
-set(ENABLE_ZLIB_SUPPORT OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-  mbedtls
-  URL ${_lubancode_mbedtls_url}
-)
-FetchContent_MakeAvailable(mbedtls)
-# 别人家的 C,顶层 -Wall/-W4 会刷一屏没意义的告警,单独关掉(同 lua/yaml-cpp)。
-foreach(_lubancode_mbed_target mbedtls mbedx509 mbedcrypto)
-  if(TARGET ${_lubancode_mbed_target})
-    if(MSVC)
-      target_compile_options(${_lubancode_mbed_target} PRIVATE /w)
-    else()
-      target_compile_options(${_lubancode_mbed_target} PRIVATE -w)
+if(LUBANCODE_BUILD_CLI)
+  _lubancode_tarball(_lubancode_mbedtls_url "Mbed-TLS/mbedtls" "v3.6.3")
+  set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+  set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+  set(GEN_FILES OFF CACHE BOOL "" FORCE)
+  set(ENABLE_ZLIB_SUPPORT OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    mbedtls
+    URL ${_lubancode_mbedtls_url}
+  )
+  FetchContent_MakeAvailable(mbedtls)
+  # 别人家的 C,顶层 -Wall/-W4 会刷一屏没意义的告警,单独关掉(同 lua/yaml-cpp)。
+  foreach(_lubancode_mbed_target mbedtls mbedx509 mbedcrypto)
+    if(TARGET ${_lubancode_mbed_target})
+      if(MSVC)
+        target_compile_options(${_lubancode_mbed_target} PRIVATE /w)
+      else()
+        target_compile_options(${_lubancode_mbed_target} PRIVATE -w)
+      endif()
     endif()
-  endif()
-endforeach()
-unset(_lubancode_mbed_target)
+  endforeach()
+  unset(_lubancode_mbed_target)
+endif()
 
 # ---------------------------------------------------------------------------
 # miniz 3.0.2(更新器 C++ 化批一第③单):zip 读写底座,批二解包层用它拆
@@ -833,132 +835,9 @@ add_library(lubancode_engine STATIC
   # (延迟工具索引/模型目录指令/魂)收进同一次解析,产 AssembledPrompt{text,
   # manifest}。
   src/agent/resolved_prompt_builder.cpp
-  # 多渠道消息接入与常驻 ChannelPlugin 单阶段 1:纯合同与假 sidecar。
-  # types(ChannelInboundEvent/MessageProvenance/ReplyAction)、
-  # channel.yaml schema 1 parser、Bridge v1 帧编解码与双向 router 骨架。
-  # 唯一真源 docs/architecture/channels/*;纯库,不 include app/cli/
-  # runtime/agent/package(package 反过来吃它,见 package/component.cpp)。
+  # 通用 Config 保留渠道纯数据与严格解析；网络/账号/Gateway 归 CLI 宿主。
   src/channel/types.cpp
-  src/channel/manifest.cpp
-  src/channel/frame.cpp
-  src/channel/bridge_protocol.cpp
-  src/channel/router.cpp
-  # 多渠道消息接入单阶段 2:ChannelManager 与入站耐久。账号状态机+
-  # generation+退避+锁(account_state/account_lock)、append-only journal
-  # 与三级去重(ingress_store)、每账号每会话队列与背压(inbox)、pairing
-  # (pairing)、channels 配置段解析(channel_config)、多账号生命周期与桥
-  # 接线(manager,Transport 抽象注入,真进程 stdio 留阶段 5)。唤醒经
-  # ChannelWakeCoordinator 小口由装配层适配 runtime 的 IdleWakeCoordinator
-  #(依赖方向:runtime -> engine,channel 不能反向 include)。
-  src/channel/digest.cpp
-  src/channel/account_state.cpp
-  src/channel/account_lock.cpp
   src/channel/channel_config.cpp
-  src/channel/ingress_store.cpp
-  src/channel/inbox.cpp
-  src/channel/pairing.cpp
-  src/channel/manager.cpp
-  # 多渠道消息接入单阶段 3:ChannelRouter(准入链/binding/session key/
-  # 工具与记忆策略;manager 的路由准入经它)。
-  src/channel/channel_router.cpp
-  # QQ 机器人接入单 Q0:权限与激活合同。激活决策(五闸权威函数)、凭据
-  # resolver(来源优先级/secret_file 读取规矩/泄露禁令/sidecar 环境白名单)、
-  # 受保护路径闸的纯谓词(执行入口的包装在 runtime/agent_channel_engine)。
-  src/channel/activation.cpp
-  src/channel/credentials.cpp
-  src/channel/tool_guard.cpp
-  # QQBot Windows 修复单 §5.2/§5.1:统一凭据写入服务(安全创建/收紧/
-  # 孤儿回收)与渠道设置服务(平台注册表 + channels 定点提交)。
-  src/channel/credential_store.cpp
-  src/channel/channel_setup.cpp
-  # 传输底座共享层(飞书/企微设计单 R0,原 src/channel/qq 四件升共享层,
-  # 纯搬家零逻辑变化):ws_frame(RFC6455 帧纯函数)/tcp_socket(跨平台
-  # TCP+select 超时)/tls(mbedTLS 客户端流)/ws_client(升级握手+读写+
-  # close)——平台无关,QQ/飞书/企微的 WS 渠道共用。
-  src/channel/transport/ws_frame.cpp
-  src/channel/transport/tcp_socket.cpp
-  src/channel/transport/tls.cpp
-  src/channel/transport/ws_client.cpp
-  # SV-07(渠道中立合同退出 QQ 实现头):平台无关网关传输 seam
-  #(IGatewayTransport/GatewayConnectError/MakeWsTransportFactory,纯搬自
-  # qq_gateway,行为零变化)。
-  src/channel/transport/gateway_transport.cpp
-  # 架构审查 SV-08(三渠道 Bridge 收发机械合并):QQ/飞书/企微适配器共用
-  # 的进程内 Bridge 端点——宿主来向帧解码、to_host 出站缓冲与输出锁收拢
-  # 一只组合件,Feed/Drain/Reply/Notify 窄口(纯搬移,行为零变化)。
-  src/channel/bridge_endpoint.cpp
-  # QQ 机器人接入单 Q1(§十五定案:原生 C++ 进程内直连):平台协议件。
-  # qq_proto(payload/C2C 映射/发送载荷/token/错误分型纯函数)/
-  # qq_http(受控 GET/POST seam,生产走 net/http_transport)/
-  # qq_spool(sidecar spool 先落盘再上报,ACK 后清理)/qq_auth(token 单飞
-  # 刷新)/qq_messages(v2 发送,稳定 msg_seq)/qq_gateway(事件连接状态机:
-  # Identify/Heartbeat/Resume/退避)/qq_adapter(ChannelBridgeTransport 进程内
-  # 实现——Bridge 隔离语义保留,manager 零改动)。
-  src/channel/qq/qq_proto.cpp
-  src/channel/qq/qq_http.cpp
-  src/channel/qq/qq_spool.cpp
-  src/channel/qq/qq_auth.cpp
-  src/channel/qq/qq_messages.cpp
-  # QQ 接入单 Q4:富媒体传输(附件受控下载 + 分片两步上传拿 file_info)。
-  src/channel/qq/qq_media.cpp
-  src/channel/qq/qq_gateway.cpp
-  src/channel/qq/qq_adapter.cpp
-  # 飞书长连接适配器(飞书/企微设计单 F1,§五):pbbp2 帧编解码纯函数/
-  # 协议映射(事件→统一事件、发送体、错误分型)/HTTP seam(引导+令牌+
-  # 回话一行适配 net/http_transport)/tenant_access_token 单飞刷新/回话
-  # 发送(锚 message_id)/网关状态机(引导→拨号→ping→事件拆包重组→
-  # ACK→退避重连,凭据类错不重试)/ChannelBridgeTransport 进程内实现。
-  # 复用件:transport 共享层(WS/TLS)、qq_spool(渠道中性入站账)、
-  # qq_adapter 的 ConnectionSnapshot(中性连接快照)。
-  src/channel/feishu/feishu_frame.cpp
-  src/channel/feishu/feishu_proto.cpp
-  src/channel/feishu/feishu_http.cpp
-  src/channel/feishu/feishu_auth.cpp
-  src/channel/feishu/feishu_messages.cpp
-  src/channel/feishu/feishu_gateway.cpp
-  src/channel/feishu/feishu_adapter.cpp
-  # QQ 接入单 Q7:菜单/面板回调的宿主侧命令识别与回正文构建(纯函数,
-  # 渠道库);官方 v2_menu/v2_panels 载荷纯函数 + 显式启用的发布器
-  #(读远端→差异/冲突裁决→PUT/复用,独立 QPM 限速)。
-  src/channel/channel_commands.cpp
-  src/channel/qq/qq_menu.cpp
-  # 企业微信智能机器人长连接适配器(W1,飞书与企业微信接入设计单 §六):
-  # wecom_proto(帧构造/解析/消息映射/错误分型纯函数)/wecom_gateway
-  # (订阅→心跳→读循环→退避重连;写侧网关线程独占,发送线程经递交口
-  # 排队)/wecom_adapter(ChannelBridgeTransport 进程内实现,spool 复用
-  # qq 件,req_id 锚 + markdown 分段 + 限流账)。
-  src/channel/wecombot/wecom_proto.cpp
-  src/channel/wecombot/wecom_gateway.cpp
-  src/channel/wecombot/wecom_adapter.cpp
-  # QQ 机器人接入单 Q2:渠道会话映射账(session_key+workspace -> V3 场,
-  # resume-as-new 更新映射)与工作绑定账(sid -> 场/轮,恢复反查)。
-  src/channel/session_map.cpp
-  src/channel/work_ledger.cpp
-  # 持久 Agent 总装单 G1:Gateway 骨架——profile 裁决/锁(pid+start token
-  # +boot_id)/boot history 与 SafeMode/文件控制面/只读探测。纯库,与
-  # channel/trajectory 同层(依赖 platform/trajectory 身份核,不 include
-  # runtime/app/cli)。
-  src/gateway/profile.cpp
-  src/gateway/control_server.cpp
-  # QQ 接入单 Q1b:渠道配对批准/拒绝的文件控制面(命令/回执,stop 同款
-  # 通道;纯文件账,零 runtime 依赖)。
-  src/gateway/pairing_command.cpp
-  src/gateway/process.cpp
-  src/gateway/status.cpp
-  # 常驻总装 V1:最小任务账(once/run-now)、本地 DurableReplyOutbox、
-  # job 控制命令文件与泵合同口。纯文件账,零 runtime 依赖。
-  # V2:周期调度引擎(interval/cron/时区 DST/misfire,纯函数零 IO)。
-  src/gateway/automation_store.cpp
-  src/gateway/automation_schedule.cpp
-  src/gateway/reply_outbox.cpp
-  src/gateway/work_pump.cpp
-  # 常驻总装 V4:服务安装与常驻运维——平台服务单元生成(schtasks XML/
-  # systemd unit/launchd plist,纯函数)+ 服务管理器操作(可注入 runner)
-  # + install.json 安装记录;doctor 体检清单(一项一码)与健康探针
-  # (--wait-ready)。凭据检查复用 channel 纯函数 resolver(同 engine 层,
-  # 与 status.cpp 读 channel 账同款边界)。
-  src/gateway/service.cpp
-  src/gateway/doctor.cpp
   src/insights/finding.cpp
   src/insights/session_summary.cpp
   src/insights/report_model.cpp
@@ -1022,13 +901,10 @@ target_include_directories(lubancode_engine PUBLIC
 target_link_libraries(lubancode_engine PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
 if(WIN32)
   # ws2_32:net/http_transport 的 getaddrinfo 要 Winsock(静态库的 PRIVATE
-  # 系统依赖会以 link-only 形态传给消费方);crypt32:transport/tls 的 Windows
-  # 信任根(系统证书店导出 + SSL 策略校验,连接状态单 §四)。
-  target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs ws2_32 crypt32)
+  # 系统依赖会以 link-only 形态传给消费方)。渠道 TLS 的 crypt32 留在宿主。
+  target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs ws2_32)
 endif()
 target_link_libraries(lubancode_engine PRIVATE lubancode_lua)
-# mbedTLS(QQ Q1):TLS 底座。PRIVATE——qq/ 内部件,头不外递,消费方零感知。
-target_link_libraries(lubancode_engine PRIVATE mbedtls)
 # yaml-cpp 走 PUBLIC:engine 的头(memory/front matter)把 yaml 头递给
 # 消费方,拆 target 后 core/workflow 那层也直接吃,PRIVATE 会断 include 路径。
 target_link_libraries(lubancode_engine PUBLIC yaml-cpp::yaml-cpp)
@@ -1147,29 +1023,6 @@ add_library(lubancode_runtime STATIC
   src/runtime/idle_wake.cpp
   # loop 单:goal 单立的会话工作分流合同在这里实装(公平泵 PumpNextWork)。
   src/runtime/session_work_scheduler.cpp
-  # 多渠道消息接入单阶段 3:TurnIngress(回合入口统一合同,含渠道事件
-  # 折算)、ChannelSessionHost(headless 单飞/限额/每会话 FIFO)、
-  # AgentChannelEngine(SessionRuntime+Agent+Run 的渠道装配)。
-  src/runtime/turn_ingress.cpp
-  src/runtime/channel_session_host.cpp
-  src/runtime/agent_channel_engine.cpp
-  # 常驻总装 V1:共用 headless 装配(从渠道引擎/SessionService 提炼,核齐
-  # 工具栅栏/预算/取消链/reply selection)与 Gateway 有界主泵总装。
-  src/runtime/headless_executor.cpp
-  src/runtime/automation_pump.cpp
-  # QQ 接入单 Q2:渠道 work 泵(V3 与 outbox 总装——ingress/路由/绑定/
-  # 执行/reply selection/outbox/投递的次序链与恢复裁决)。
-  src/runtime/channel_work_pump.cpp
-  # QQ 接入单 Q6:渠道远端审批 broker(平台中立——pending 表/随机 opaque
-  # token/操作者身份复核/超时默认拒绝/幂等,复用 runtime 四态合同)。
-  src/runtime/channel_interaction_broker.cpp
-  # QQ 接入单 Q5:聊天侧任务桥(渠道会话的模型经 create/list/cancel_
-  # reminder 落 automation 域命令;归属闸/幂等键/渠道上下文冻结)。
-  src/runtime/channel_automation.cpp
-  # QQ 接入单 Q4:渠道附件接纳服务(白名单/净化/下载落仓/有界预览)。
-  src/runtime/channel_media_service.cpp
-  src/runtime/channel_file_delivery.cpp
-  src/runtime/headless_progress.cpp
   # 远端首批组件：节点本地结果同步策略与稳定预览，尚未接远端服务。
   src/remote/result_sync.cpp
   # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
@@ -1216,6 +1069,188 @@ if(MSVC)
 endif()
 
 if(LUBANCODE_BUILD_CLI)
+# Channel/Gateway implementations are host services. Their sole source owners
+# depend on the neutral engine/runtime; neither Core archive links back here.
+add_library(lubancode_channel_host STATIC
+  # 多渠道消息接入与常驻 ChannelPlugin 单阶段 1:纯合同与假 sidecar。
+  # types(ChannelInboundEvent/MessageProvenance/ReplyAction)、
+  # channel.yaml schema 1 parser、Bridge v1 帧编解码与双向 router 骨架。
+  # 唯一真源 docs/architecture/channels/*;纯库,不 include app/cli/
+  # runtime/agent/package(package 反过来吃它,见 package/component.cpp)。
+  src/channel/manifest.cpp
+  src/channel/frame.cpp
+  src/channel/bridge_protocol.cpp
+  src/channel/router.cpp
+  # 多渠道消息接入单阶段 2:ChannelManager 与入站耐久。账号状态机+
+  # generation+退避+锁(account_state/account_lock)、append-only journal
+  # 与三级去重(ingress_store)、每账号每会话队列与背压(inbox)、pairing
+  # (pairing)、channels 配置段解析(channel_config)、多账号生命周期与桥
+  # 接线(manager,Transport 抽象注入,真进程 stdio 留阶段 5)。唤醒经
+  # ChannelWakeCoordinator 小口由装配层适配 runtime 的 IdleWakeCoordinator
+  #(依赖方向:runtime -> engine,channel 不能反向 include)。
+  src/channel/digest.cpp
+  src/channel/account_state.cpp
+  src/channel/account_lock.cpp
+  src/channel/ingress_store.cpp
+  src/channel/inbox.cpp
+  src/channel/pairing.cpp
+  src/channel/manager.cpp
+  # 多渠道消息接入单阶段 3:ChannelRouter(准入链/binding/session key/
+  # 工具与记忆策略;manager 的路由准入经它)。
+  src/channel/channel_router.cpp
+  # QQ 机器人接入单 Q0:权限与激活合同。激活决策(五闸权威函数)、凭据
+  # resolver(来源优先级/secret_file 读取规矩/泄露禁令/sidecar 环境白名单)、
+  # 受保护路径闸的纯谓词(执行入口的包装在 runtime/agent_channel_engine)。
+  src/channel/activation.cpp
+  src/channel/credentials.cpp
+  src/channel/tool_guard.cpp
+  # QQBot Windows 修复单 §5.2/§5.1:统一凭据写入服务(安全创建/收紧/
+  # 孤儿回收)与渠道设置服务(平台注册表 + channels 定点提交)。
+  src/channel/credential_store.cpp
+  src/channel/channel_setup.cpp
+  # 传输底座共享层(飞书/企微设计单 R0,原 src/channel/qq 四件升共享层,
+  # 纯搬家零逻辑变化):ws_frame(RFC6455 帧纯函数)/tcp_socket(跨平台
+  # TCP+select 超时)/tls(mbedTLS 客户端流)/ws_client(升级握手+读写+
+  # close)——平台无关,QQ/飞书/企微的 WS 渠道共用。
+  src/channel/transport/ws_frame.cpp
+  src/channel/transport/tcp_socket.cpp
+  src/channel/transport/tls.cpp
+  src/channel/transport/ws_client.cpp
+  # SV-07(渠道中立合同退出 QQ 实现头):平台无关网关传输 seam
+  #(IGatewayTransport/GatewayConnectError/MakeWsTransportFactory,纯搬自
+  # qq_gateway,行为零变化)。
+  src/channel/transport/gateway_transport.cpp
+  # 架构审查 SV-08(三渠道 Bridge 收发机械合并):QQ/飞书/企微适配器共用
+  # 的进程内 Bridge 端点——宿主来向帧解码、to_host 出站缓冲与输出锁收拢
+  # 一只组合件,Feed/Drain/Reply/Notify 窄口(纯搬移,行为零变化)。
+  src/channel/bridge_endpoint.cpp
+  # QQ 机器人接入单 Q1(§十五定案:原生 C++ 进程内直连):平台协议件。
+  # qq_proto(payload/C2C 映射/发送载荷/token/错误分型纯函数)/
+  # qq_http(受控 GET/POST seam,生产走 net/http_transport)/
+  # qq_spool(sidecar spool 先落盘再上报,ACK 后清理)/qq_auth(token 单飞
+  # 刷新)/qq_messages(v2 发送,稳定 msg_seq)/qq_gateway(事件连接状态机:
+  # Identify/Heartbeat/Resume/退避)/qq_adapter(ChannelBridgeTransport 进程内
+  # 实现——Bridge 隔离语义保留,manager 零改动)。
+  src/channel/qq/qq_proto.cpp
+  src/channel/qq/qq_http.cpp
+  src/channel/qq/qq_spool.cpp
+  src/channel/qq/qq_auth.cpp
+  src/channel/qq/qq_messages.cpp
+  # QQ 接入单 Q4:富媒体传输(附件受控下载 + 分片两步上传拿 file_info)。
+  src/channel/qq/qq_media.cpp
+  src/channel/qq/qq_gateway.cpp
+  src/channel/qq/qq_adapter.cpp
+  # 飞书长连接适配器(飞书/企微设计单 F1,§五):pbbp2 帧编解码纯函数/
+  # 协议映射(事件→统一事件、发送体、错误分型)/HTTP seam(引导+令牌+
+  # 回话一行适配 net/http_transport)/tenant_access_token 单飞刷新/回话
+  # 发送(锚 message_id)/网关状态机(引导→拨号→ping→事件拆包重组→
+  # ACK→退避重连,凭据类错不重试)/ChannelBridgeTransport 进程内实现。
+  # 复用件:transport 共享层(WS/TLS)、qq_spool(渠道中性入站账)、
+  # qq_adapter 的 ConnectionSnapshot(中性连接快照)。
+  src/channel/feishu/feishu_frame.cpp
+  src/channel/feishu/feishu_proto.cpp
+  src/channel/feishu/feishu_http.cpp
+  src/channel/feishu/feishu_auth.cpp
+  src/channel/feishu/feishu_messages.cpp
+  src/channel/feishu/feishu_gateway.cpp
+  src/channel/feishu/feishu_adapter.cpp
+  # QQ 接入单 Q7:菜单/面板回调的宿主侧命令识别与回正文构建(纯函数,
+  # 渠道库);官方 v2_menu/v2_panels 载荷纯函数 + 显式启用的发布器
+  #(读远端→差异/冲突裁决→PUT/复用,独立 QPM 限速)。
+  src/channel/channel_commands.cpp
+  src/channel/qq/qq_menu.cpp
+  # 企业微信智能机器人长连接适配器(W1,飞书与企业微信接入设计单 §六):
+  # wecom_proto(帧构造/解析/消息映射/错误分型纯函数)/wecom_gateway
+  # (订阅→心跳→读循环→退避重连;写侧网关线程独占,发送线程经递交口
+  # 排队)/wecom_adapter(ChannelBridgeTransport 进程内实现,spool 复用
+  # qq 件,req_id 锚 + markdown 分段 + 限流账)。
+  src/channel/wecombot/wecom_proto.cpp
+  src/channel/wecombot/wecom_gateway.cpp
+  src/channel/wecombot/wecom_adapter.cpp
+  # QQ 机器人接入单 Q2:渠道会话映射账(session_key+workspace -> V3 场,
+  # resume-as-new 更新映射)与工作绑定账(sid -> 场/轮,恢复反查)。
+  src/channel/session_map.cpp
+  src/channel/work_ledger.cpp
+  # 持久 Agent 总装单 G1:Gateway 骨架——profile 裁决/锁(pid+start token
+  # +boot_id)/boot history 与 SafeMode/文件控制面/只读探测。纯库,与
+  # channel/trajectory 同层(依赖 platform/trajectory 身份核,不 include
+  # runtime/app/cli)。
+  src/gateway/profile.cpp
+  src/gateway/control_server.cpp
+  # QQ 接入单 Q1b:渠道配对批准/拒绝的文件控制面(命令/回执,stop 同款
+  # 通道;纯文件账,零 runtime 依赖)。
+  src/gateway/pairing_command.cpp
+  src/gateway/process.cpp
+  src/gateway/status.cpp
+  # 常驻总装 V1:最小任务账(once/run-now)、本地 DurableReplyOutbox、
+  # job 控制命令文件与泵合同口。纯文件账,零 runtime 依赖。
+  # V2:周期调度引擎(interval/cron/时区 DST/misfire,纯函数零 IO)。
+  src/gateway/automation_store.cpp
+  src/gateway/automation_schedule.cpp
+  src/gateway/reply_outbox.cpp
+  src/gateway/work_pump.cpp
+  # 常驻总装 V4:服务安装与常驻运维——平台服务单元生成(schtasks XML/
+  # systemd unit/launchd plist,纯函数)+ 服务管理器操作(可注入 runner)
+  # + install.json 安装记录;doctor 体检清单(一项一码)与健康探针
+  # (--wait-ready)。凭据检查复用 channel 纯函数 resolver(同 engine 层,
+  # 与 status.cpp 读 channel 账同款边界)。
+  src/gateway/service.cpp
+  src/gateway/doctor.cpp
+)
+target_include_directories(lubancode_channel_host PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(lubancode_channel_host PUBLIC lubancode_engine PRIVATE mbedtls)
+if(WIN32)
+  # transport/tls 的 Windows 信任根(系统证书店导出 + SSL 策略校验)。
+  target_link_libraries(lubancode_channel_host PRIVATE ws2_32 crypt32)
+endif()
+target_compile_features(lubancode_channel_host PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_channel_host PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
+if(MSVC)
+  target_compile_options(lubancode_channel_host PRIVATE /MP)
+endif()
+
+add_library(lubancode_channel_runtime STATIC
+  # 多渠道消息接入单阶段 3:TurnIngress(回合入口统一合同,含渠道事件
+  # 折算)、ChannelSessionHost(headless 单飞/限额/每会话 FIFO)、
+  # AgentChannelEngine(SessionRuntime+Agent+Run 的渠道装配)。
+  src/runtime/turn_ingress.cpp
+  src/runtime/channel_session_host.cpp
+  src/runtime/agent_channel_engine.cpp
+  # 常驻总装 V1:共用 headless 装配(从渠道引擎/SessionService 提炼,核齐
+  # 工具栅栏/预算/取消链/reply selection)与 Gateway 有界主泵总装。
+  src/runtime/headless_executor.cpp
+  src/runtime/automation_pump.cpp
+  # QQ 接入单 Q2:渠道 work 泵(V3 与 outbox 总装——ingress/路由/绑定/
+  # 执行/reply selection/outbox/投递的次序链与恢复裁决)。
+  src/runtime/channel_work_pump.cpp
+  # QQ 接入单 Q6:渠道远端审批 broker(平台中立——pending 表/随机 opaque
+  # token/操作者身份复核/超时默认拒绝/幂等,复用 runtime 四态合同)。
+  src/runtime/channel_interaction_broker.cpp
+  # QQ 接入单 Q5:聊天侧任务桥(渠道会话的模型经 create/list/cancel_
+  # reminder 落 automation 域命令;归属闸/幂等键/渠道上下文冻结)。
+  src/runtime/channel_automation.cpp
+  # QQ 接入单 Q4:渠道附件接纳服务(白名单/净化/下载落仓/有界预览)。
+  src/runtime/channel_media_service.cpp
+  src/runtime/channel_file_delivery.cpp
+  src/runtime/headless_progress.cpp
+)
+target_include_directories(lubancode_channel_runtime PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(lubancode_channel_runtime PUBLIC
+  lubancode_runtime lubancode_channel_host)
+target_compile_features(lubancode_channel_runtime PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_channel_runtime PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
+if(MSVC)
+  target_compile_options(lubancode_channel_runtime PRIVATE /MP)
+endif()
+
 # Installation updates belong to the host. Keep this target out of the SDK's
 # engine/runtime dependency graph even in a combined CLI + SDK build.
 add_library(lubancode_updater STATIC
@@ -1416,7 +1451,8 @@ target_include_directories(lubancode_core PUBLIC
   ${CMAKE_BINARY_DIR}/generated)        # 0.19.x:embedded_prompts.hpp(提示词嵌入)
 # core = engine + runtime + cli 纯逻辑:引擎与运行时的传递依赖从这两层
 # PUBLIC 递过来(cpr/json/lua/yaml 在 engine 上,这里不再重复挂)。
-target_link_libraries(lubancode_core PUBLIC lubancode_runtime lubancode_updater)
+target_link_libraries(lubancode_core PUBLIC
+  lubancode_runtime lubancode_updater lubancode_channel_runtime)
 target_compile_features(lubancode_core PUBLIC cxx_std_23)
 target_precompile_headers(lubancode_core PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
