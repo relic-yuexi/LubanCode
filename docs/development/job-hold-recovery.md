@@ -1,6 +1,14 @@
 # 显式 Hold Recovery：中立小笔候选
 
-本笔先定合同，随后实现。基线是启动事务 `e944c56b`；它的独立远端 CI 尚在跑。本笔只添中立恢复策略，供下一批 SDK Jobs 使用。不开放 SDK 后台入口，不决定用户尚未答复的 SDK Close 规则。
+本笔先定合同，随后实现。起点是启动事务 `e944c56b`；它的独立远端 CI 尚在跑。本笔只添中立恢复策略，供下一批 SDK Jobs 使用。不开放 SDK 后台入口，不决定用户尚未答复的 SDK Close 规则。
+
+## 发布基线与组合门
+
+实现 `b2833406` 已在私有线收好。发布前先用普通 merge 接 SDK 组合 `373df8d894239dcbbd3a69a6ca17af3bde4a14d4`，叶 PR 改以 `codex/sdk-completion-integration` 为 base；共享 feature/main 不动。此处先提交合同，再合代码。
+
+本笔五份生产改动、新六册与旧 16/启动 6 册断言保持原文。组合只收上游已落实现、夹具和证据门；冲突取真实并集，不拣回旧 API，也不删旧来源或完成标记。发布门拟为 SDK focused 35 来源、ASan mandatory 40 来源、installed consumer 25 模式，合后须核实际名册、source 归属、完整 argv 与原 Resource Lock。
+
+这些数字只定新头验收范围。上游局部绿灯、旧独立头静核或运行结果都不算 Hold 新头通过。实际受测 merge parents/tree、九份 FileAPI、三平台原件和 ASan 原件另记；本地不 configure、编译或跑原生。
 
 ## 现有路径
 
@@ -52,7 +60,7 @@ Async Restore 在原 session 独占 owner 下执行。新增策略只约束恢�
 
 固定新来源册，实际用原 V3Writer、ToolActionSession、coordinator 和 AsyncToolRuntime；源码计数不能抵原生执行。每个成功检查有唯一 marker，focused/ASan 校完整 argv、JUnit、LastTest、非零断言。
 
-新来源固定 `tests/unit/tools/test_tool_job_hold_recovery.cpp` 六册。SDK focused 共 28 来源，ASan mandatory 共 33 来源；原 16 册与启动事务 6 册保留。六条完成标记分别钉住注册/接单缺口、新旧隔离、派发未知、四种业务终态、Async 传播、Legacy/身份门。它们只在断言走完后输出，本地文本计数不当原生通过凭据。
+新来源固定 `tests/unit/tools/test_tool_job_hold_recovery.cpp` 六册。独立实现起点原定 SDK focused 28、ASan mandatory 33；发布改接上述组合后，按 35/40/25 实际并集收证。原 16 册与启动事务 6 册保留。六条完成标记分别钉住注册/接单缺口、新旧隔离、派发未知、四种业务终态、Async 传播、Legacy/身份门。它们只在断言走完后输出，本地文本计数不当原生通过凭据。
 
 1. 真 registered 未 dispatch 窗：Hold Get 为 KnownNotDispatched；Pump、Wait、Grant、Cancel、Shutdown 后旧 executor=0、旧卷逐字不动；Wait 到点，不能假终态。
 2. 真 queued/awaiting 两窗：Hold 不压队、不占 quota；新 Submit 成功且实际 executor=1，只归新 action；旧迟票不启动。
