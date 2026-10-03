@@ -14,6 +14,9 @@ list(SORT LUBANCODE_TEST_SOURCES)
 if(NOT LUBANCODE_BUILD_SDK)
   list(FILTER LUBANCODE_TEST_SOURCES EXCLUDE REGEX "/(unit|integration)/sdk/")
 endif()
+if(NOT TARGET luban_job_runner_client)
+  list(FILTER LUBANCODE_TEST_SOURCES EXCLUDE REGEX "/unit/job_runner/test_runner_release_diagnostic\\.cpp$")
+endif()
 
 # glob 兜底(2026-08-28):examples 域的册在主树 configure 偶发漏收
 # (同 cmake 同 pattern 的独立项目能收,工头 worktree 也能收;增量与全新
@@ -87,6 +90,11 @@ add_executable(lubancode_tests
   ${LUBANCODE_TEST_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
+if(TARGET luban_job_runner_client)
+  # This CLI-only source calls the same Process implementation as the Runner.
+  # Runner-only returns before this file; SDK targets never acquire this edge.
+  target_link_libraries(lubancode_tests PRIVATE luban_job_runner_client)
+endif()
 if(LUBANCODE_BUILD_SDK)
   target_link_libraries(lubancode_tests PRIVATE lubancore_sdk)
   # Scoped pending/reference tests call private implementation symbols. Compile

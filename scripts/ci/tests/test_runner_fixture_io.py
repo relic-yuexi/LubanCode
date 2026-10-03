@@ -184,6 +184,95 @@ class RunnerFixtureIoTests(unittest.TestCase):
                     fixture.run_case("never executed", report_path, report, mode + "-next", lambda _: None)
                 self.assertEqual(len(json.loads(report_path.read_text(encoding="utf-8"))["tests"]), 2)
 
+    def test_response_bytes_are_retained_before_invalid_json_rejection(self):
+        result = types.SimpleNamespace(stdout=b"not-json\r\n\xff", stderr=b"original\r\n", returncode=1)
+        original = []
+        with patch.object(fixture.subprocess, "run", return_value=result):
+            with self.assertRaises(UnicodeDecodeError):
+                fixture.request("never executed", "unused", "fixture-id", {"method": "job.start"},
+                                on_response=original.append)
+        self.assertEqual(original[0].stdout, b"not-json\r\n\xff")
+        self.assertEqual(original[0].stderr, b"original\r\n")
+
+    def test_failure_time_state_receipt_logs_and_marker_are_owned_and_separate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            state = base / "runner-state"
+            project = base / "project"
+            state.mkdir(); project.mkdir()
+            job_id = "a" * 32
+            logs = state / "jobs" / job_id
+            logs.mkdir(parents=True)
+            before = b'{"state":"failed","error_code":"runner.launch_failed"}'
+            (state / "jobs.json").write_bytes(before)
+            (state / "identity.json").write_bytes(b"auth token never retained")
+            (logs / "stdout.log").write_bytes(b"own fixture stdout")
+            (logs / "stderr.log").write_bytes(b"own fixture stderr")
+            marker = project / "case.jsonl"
+            marker.write_bytes(b'{"event":"started"}\n')
+            runner = types.SimpleNamespace(base=base, root=state, project=project, handles=[],
+                fixture_markers={marker}, start_receipts=[{"stdout": b'{"ok":true}\r\n', "stderr": b"",
+                                                         "returncode": 0, "job_id": job_id}])
+            original = fixture.capture_failure_observation(runner)
+            (state / "jobs.json").write_bytes(b'{"state":"cancelled"}')
+            after, errors = fixture.capture_failure_records(runner)
+            self.assertFalse(errors)
+            after.update(original)
+            report = base / "report/results.json"
+            fixture.preserve_failure(runner, report, "failure", "original", records=after)
+            saved = report.parent / "failures/failure"
+            self.assertEqual((saved / "failure-time/jobs.json").read_bytes(), before)
+            self.assertEqual((saved / "jobs.json").read_bytes(), b'{"state":"cancelled"}')
+            self.assertEqual((saved / "failure-time/receipts/start-00.stdout").read_bytes(), b'{"ok":true}\r\n')
+            self.assertEqual((saved / ("failure-time/jobs/" + job_id + "/stderr.log")).read_bytes(), b"own fixture stderr")
+            self.assertEqual((saved / "failure-time/markers/case.jsonl").read_bytes(), marker.read_bytes())
+            self.assertFalse(any(path.name == "identity.json" for path in saved.rglob("*")))
+
+    def test_missing_not_regular_and_io_error_are_distinct(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "jobs.json").mkdir()
+            runner = types.SimpleNamespace(base=base, root=base)
+            saved = fixture.capture_failure_observation(runner)
+            entries = {e["name"]: e for e in json.loads(saved["failure-time/evidence.json"])["entries"]}
+            # Windows refuses opening a directory; POSIX opens then rejects fstat.
+            self.assertIn(entries["jobs.json"]["state"], {"not_regular", "read_error"})
+            self.assertEqual(entries["endpoint.json"]["state"], "absent")
+            with patch.object(fixture, "read_evidence_bytes", side_effect=PermissionError(errno.EACCES, "real error")):
+                saved = fixture.capture_failure_observation(runner)
+            entry = json.loads(saved["failure-time/evidence.json"])["entries"][0]
+            self.assertEqual(entry["state"], "read_error")
+            self.assertIn("real error", entry["error"])
+
+    def test_file_total_and_entry_caps_are_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "jobs.json").write_bytes(b"0123456789")
+            (base / "endpoint.json").write_bytes(b"abcdefghij")
+            runner = types.SimpleNamespace(base=base, root=base)
+            with patch.object(fixture, "EVIDENCE_FILE_LIMIT", 6), patch.object(fixture, "EVIDENCE_TOTAL_LIMIT", 8):
+                records = fixture.capture_failure_observation(runner)
+            manifest = json.loads(records["failure-time/evidence.json"])
+            self.assertEqual(records["failure-time/jobs.json"], b"012345")
+            self.assertEqual(records["failure-time/endpoint.json"], b"ab")
+            self.assertEqual(manifest["capturedBytes"], 8)
+            self.assertEqual([entry["actualBytes"] for entry in manifest["entries"][:2]], [10, 10])
+            self.assertTrue(all(entry["truncated"] for entry in manifest["entries"][:2]))
+            with patch.object(fixture, "EVIDENCE_ENTRY_LIMIT", 1):
+                records = fixture.capture_failure_observation(runner)
+            manifest = json.loads(records["failure-time/evidence.json"])
+            self.assertEqual(len(manifest["entries"]), 1)
+            self.assertTrue(manifest["entryLimitReached"])
+
+    def test_diagnostic_read_descriptor_is_closed_on_read_error(self):
+        with patch.object(fixture.os, "open", return_value=77), \
+             patch.object(fixture.os, "fstat", return_value=types.SimpleNamespace(st_mode=0o100600)), \
+             patch.object(fixture.os, "read", side_effect=OSError("read failed")), \
+             patch.object(fixture.os, "close") as close:
+            with self.assertRaisesRegex(OSError, "read failed"):
+                fixture.read_evidence_bytes("never opened", 10)
+        close.assert_called_once_with(77)
+
 
 if __name__ == "__main__":
     unittest.main()
