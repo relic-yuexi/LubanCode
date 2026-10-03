@@ -1,7 +1,11 @@
 #include "trajectory/journal.hpp"
 
 #include <cstdio>
+#include <algorithm>
+#include <array>
+#include <cerrno>
 #include <fstream>
+#include <exception>
 #include <utility>
 
 #include "hooks/hash.hpp"
@@ -14,9 +18,12 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <io.h>
+#include <fcntl.h>
 #include <share.h>
 #include <windows.h>
 #else
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -42,6 +49,174 @@ bool FlushFileDurable(std::FILE* file, Durability durability) {
 }
 
 }  // namespace
+
+struct JournalFileAnchor::Impl {
+#ifdef _WIN32
+    HANDLE file = INVALID_HANDLE_VALUE;
+    BY_HANDLE_FILE_INFORMATION identity{};
+    bool CloseNative() {
+        return file == INVALID_HANDLE_VALUE ||
+            CloseHandle(std::exchange(file, INVALID_HANDLE_VALUE)) != FALSE;
+    }
+#else
+    int file = -1;
+    struct stat identity{};
+    bool CloseNative() { return file < 0 || ::close(std::exchange(file, -1)) == 0; }
+#endif
+    ~Impl() { (void)CloseNative(); }
+};
+
+JournalFileAnchor::JournalFileAnchor(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+JournalFileAnchor::JournalFileAnchor(JournalFileAnchor&&) noexcept = default;
+JournalFileAnchor& JournalFileAnchor::operator=(JournalFileAnchor&&) noexcept = default;
+JournalFileAnchor::~JournalFileAnchor() = default;
+
+std::expected<void, std::string> JournalFileAnchor::Close() {
+    if (impl_ && !impl_->CloseNative()) {
+#ifdef _WIN32
+        return std::unexpected("recovery.anchor_close_failed:" + std::to_string(GetLastError()));
+#else
+        return std::unexpected("recovery.anchor_close_failed:" + std::to_string(errno));
+#endif
+    }
+    return {};
+}
+
+std::expected<JournalFileAnchor::Capture, std::string> JournalFileAnchor::ReadExisting(
+    const std::filesystem::path& path, std::optional<std::size_t> max_bytes, bool follow_path) {
+    // Allocate ownership before opening a native handle. Later exceptions use
+    // the same checked failure cleanup, including allocation during byte reads.
+    auto anchor = std::shared_ptr<JournalFileAnchor>(new JournalFileAnchor(std::make_unique<Impl>()));
+    auto& impl = anchor->impl_;
+    const auto fail = [&](std::string error) -> std::expected<Capture, std::string> {
+        if (!impl->CloseNative()) {
+#ifdef _WIN32
+            error += ";recovery.close_failed:" + std::to_string(GetLastError());
+#else
+            error += ";recovery.close_failed:" + std::to_string(errno);
+#endif
+        }
+        return std::unexpected(std::move(error));
+    };
+    try {
+#ifdef _WIN32
+    impl->file = CreateFileW(platform::FileIoPath(path).c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, follow_path ? 0 : FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (impl->file == INVALID_HANDLE_VALUE)
+        return fail("recovery.open_failed:" + std::to_string(GetLastError()));
+    if (GetFileType(impl->file) != FILE_TYPE_DISK ||
+        !GetFileInformationByHandle(impl->file, &impl->identity) ||
+        (impl->identity.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (!follow_path && (impl->identity.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)))
+        return fail("recovery.nonregular");
+#else
+    impl->file = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | (follow_path ? 0 : O_NOFOLLOW));
+    if (impl->file < 0)
+        return fail("recovery.open_failed:" + std::to_string(errno));
+    if (::fstat(impl->file, &impl->identity) != 0 || !S_ISREG(impl->identity.st_mode))
+        return fail("recovery.nonregular");
+#endif
+    std::string bytes;
+    std::array<char, 4096> buffer{};
+    for (;;) {
+        std::size_t request = buffer.size();
+        if (max_bytes) {
+            if (bytes.size() > *max_bytes) return fail("recovery.byte_limit");
+            request = (std::min)(request, *max_bytes - bytes.size());
+            if (request == 0) request = 1; // Probe EOF without cap + 1 arithmetic.
+        }
+        std::size_t count = 0;
+#ifdef _WIN32
+        DWORD read = 0;
+        if (!ReadFile(impl->file, buffer.data(), static_cast<DWORD>(request), &read, nullptr))
+            return fail("recovery.read_failed:" + std::to_string(GetLastError()));
+        count = read;
+#else
+        ssize_t read;
+        do { read = ::read(impl->file, buffer.data(), request); } while (read < 0 && errno == EINTR);
+        if (read < 0) return fail("recovery.read_failed:" + std::to_string(errno));
+        count = static_cast<std::size_t>(read);
+#endif
+        if (!count) break;
+        if ((max_bytes && count > *max_bytes - bytes.size()) ||
+            count > bytes.max_size() - bytes.size()) return fail("recovery.byte_limit");
+        bytes.append(buffer.data(), count);
+    }
+    return Capture{std::move(bytes), std::move(anchor)};
+    } catch (const std::exception& error) {
+        return fail(std::string("recovery.read_exception:") + error.what());
+    } catch (...) {
+        return fail("recovery.read_exception");
+    }
+}
+
+std::expected<JournalWriter, std::string> JournalWriter::OpenExistingVerified(
+    const std::filesystem::path& path, std::string_view prefix, const JournalFileAnchor& anchor) {
+    if (!anchor.impl_) return std::unexpected("recovery.anchor_missing");
+    int descriptor = -1;
+#ifdef _WIN32
+    if (anchor.impl_->file == INVALID_HANDLE_VALUE) return std::unexpected("recovery.anchor_closed");
+    const errno_t opened = _wsopen_s(&descriptor, platform::FileIoPath(path).c_str(),
+        _O_RDWR | _O_APPEND | _O_BINARY | _O_NOINHERIT, _SH_DENYNO, 0);
+    if (opened != 0) return std::unexpected("recovery.append_open_failed:" + std::to_string(opened));
+    const auto file = reinterpret_cast<HANDLE>(_get_osfhandle(descriptor));
+    BY_HANDLE_FILE_INFORMATION identity{};
+    const bool regular = file != INVALID_HANDLE_VALUE && GetFileType(file) == FILE_TYPE_DISK &&
+        GetFileInformationByHandle(file, &identity) && !(identity.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+    const auto& old = anchor.impl_->identity;
+    const bool same = regular && identity.dwVolumeSerialNumber == old.dwVolumeSerialNumber &&
+        identity.nFileIndexHigh == old.nFileIndexHigh && identity.nFileIndexLow == old.nFileIndexLow;
+    const auto close_descriptor = [&] { return _close(descriptor); };
+#else
+    if (anchor.impl_->file < 0) return std::unexpected("recovery.anchor_closed");
+    descriptor = ::open(path.c_str(), O_RDWR | O_APPEND | O_CLOEXEC | O_NONBLOCK);
+    if (descriptor < 0) return std::unexpected("recovery.append_open_failed:" + std::to_string(errno));
+    struct stat identity{};
+    const bool regular = ::fstat(descriptor, &identity) == 0 && S_ISREG(identity.st_mode);
+    const bool same = regular && identity.st_dev == anchor.impl_->identity.st_dev &&
+        identity.st_ino == anchor.impl_->identity.st_ino;
+    const auto close_descriptor = [&] { return ::close(descriptor); };
+#endif
+    if (!same) {
+        std::string error = "recovery.object_changed";
+        if (close_descriptor() != 0) error += ";recovery.close_failed:" + std::to_string(errno);
+        return std::unexpected(std::move(error));
+    }
+#ifdef _WIN32
+    std::FILE* stream = _fdopen(descriptor, "a+b");
+#else
+    std::FILE* stream = ::fdopen(descriptor, "a+b");
+#endif
+    if (!stream) {
+        const int error = errno;
+        std::string message = "recovery.fdopen_failed:" + std::to_string(error);
+        if (close_descriptor() != 0) message += ";recovery.close_failed:" + std::to_string(errno);
+        return std::unexpected(std::move(message));
+    }
+    const auto fail = [&](std::string error) -> std::expected<JournalWriter, std::string> {
+        if (std::fclose(stream) != 0) error += ";recovery.close_failed:" + std::to_string(errno);
+        return std::unexpected(std::move(error));
+    };
+    if (std::fseek(stream, 0, SEEK_SET) != 0) return fail("recovery.seek_failed");
+    std::array<char, 4096> buffer{};
+    std::size_t consumed = 0;
+    while (consumed < prefix.size()) {
+        const auto request = (std::min)(buffer.size(), prefix.size() - consumed);
+        const auto count = std::fread(buffer.data(), 1, request, stream);
+        if (count != request || std::string_view(buffer.data(), count) != prefix.substr(consumed, count))
+            return fail(std::ferror(stream) ? "recovery.prefix_read_failed" : "recovery.prefix_changed");
+        consumed += count;
+    }
+    if (std::fread(buffer.data(), 1, 1, stream) != 0) return fail("recovery.prefix_extended");
+    if (std::ferror(stream)) return fail("recovery.prefix_read_failed");
+    std::clearerr(stream);
+    if (std::fseek(stream, 0, SEEK_END) != 0) return fail("recovery.seek_failed");
+    JournalWriter writer;
+    writer.path_ = path;
+    writer.file_ = stream;
+    return writer;
+}
 
 std::string ComputeEventHash(std::string_view prev_hash,
                              std::string_view canonical_event_without_event_hash) {

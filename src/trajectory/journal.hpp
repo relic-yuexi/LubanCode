@@ -14,8 +14,11 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <expected>
 #include <filesystem>
+#include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -27,6 +30,32 @@ namespace lubancode::trajectory {
 // 链头:首枚事件的前置 hash(§8.3 的链锚,写进 v1 合同)。
 inline constexpr std::string_view kGenesisHash =
     "0000000000000000000000000000000000000000000000000000000000000000";
+
+// Internal native witness. Capture follows the existing journal path, keeps the
+// opened regular object alive and owns bytes. Providers cannot mint its identity.
+class JournalFileAnchor {
+public:
+    struct Capture;
+    JournalFileAnchor(JournalFileAnchor&&) noexcept;
+    JournalFileAnchor& operator=(JournalFileAnchor&&) noexcept;
+    ~JournalFileAnchor();
+    JournalFileAnchor(const JournalFileAnchor&) = delete;
+    JournalFileAnchor& operator=(const JournalFileAnchor&) = delete;
+    static std::expected<Capture, std::string> ReadExisting(
+        const std::filesystem::path& path, std::optional<std::size_t> max_bytes,
+        bool follow_path = true);
+    std::expected<void, std::string> Close();
+private:
+    struct Impl;
+    explicit JournalFileAnchor(std::unique_ptr<Impl> impl);
+    std::unique_ptr<Impl> impl_;
+    friend class JournalWriter;
+};
+
+struct JournalFileAnchor::Capture {
+    std::string bytes;
+    std::shared_ptr<JournalFileAnchor> anchor;
+};
 
 // event_hash = SHA256(prev_hash || canonical_event_without_event_hash)。
 // 输入两段 hex 字符串与"不含 event_hash 键"的 canonical JSON 文本。
@@ -49,6 +78,12 @@ public:
 
     static std::expected<JournalWriter, std::string> Open(const std::filesystem::path& path,
                                                           OpenMode mode);
+
+    // No create, same opened object as Capture, complete owned prefix and EOF.
+    // The returned stream retains native append mode for the unchanged writer.
+    static std::expected<JournalWriter, std::string> OpenExistingVerified(
+        const std::filesystem::path& path, std::string_view prefix,
+        const JournalFileAnchor& anchor);
 
     // 追加一行(不带换行;本件补 '\n')并按档落稳。写失败 false,此后句柄
     // 视为 broken,调用方应停止提交并按 §7.4 收口。

@@ -753,6 +753,7 @@ add_library(lubancode_engine STATIC
   src/trajectory/blob_store.cpp
   src/trajectory/cas_store.cpp
   src/trajectory/journal.cpp
+  src/trajectory/session_recovery_view.cpp
   src/trajectory/recorder.cpp
   src/trajectory/directory.cpp
   # P0-1b:session 独占锁(PID+起始 token 身份核)、SessionManager 与

@@ -22,6 +22,7 @@ if(NOT LUBANCORE_FOCUSED_TEST_SOURCES)
   message(FATAL_ERROR "SDK build requires registered integration/sdk tests")
 endif()
 list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
+  "${_lubancore_tests_root}/unit/trajectory/test_session_recovery_view.cpp"
   "${_lubancore_tests_root}/unit/platform/test_atomic_write.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_session_resources.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_session_execution.cpp"
@@ -94,6 +95,8 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     if(TEST "${sdk_original_test}")
       set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "platform-atomic-write")
     endif()
+  elseif(sdk_basename STREQUAL "test_session_recovery_view.cpp")
+    set(sdk_original_test "unit.trajectory.session_recovery_view")
   elseif(sdk_basename STREQUAL "test_session_resources.cpp" OR
          sdk_basename STREQUAL "test_session_execution.cpp" OR
          sdk_basename STREQUAL "test_execution_owner.cpp" OR
