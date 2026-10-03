@@ -40,7 +40,7 @@ void Take(sdk::Result<void> value, const std::string& where) {
     if (!value) throw std::runtime_error(where + ": " + value.error().code + ": " + value.error().message);
 }
 std::string Utf8(const fs::path& path) {
-    const auto bytes = path.generic_u8string();
+    const auto bytes = path.u8string();
     return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
 }
 std::string Read(const fs::path& path) {
