@@ -208,3 +208,4 @@ DOC development/sdk-operation-turn-binding.md
 DOC development/journal-native-receipts.md
 DOC development/windows-command-job-observation.md
 DOC development/agent-transcript-stable-fixture.md
+DOC development/sdk-pr-consolidation.md

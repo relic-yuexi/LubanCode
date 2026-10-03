@@ -82,3 +82,7 @@ git diff --check
 - [Journal 原生追加与关闭回执](journal-native-receipts.md)
 - [Windows 命令 Job 实际观测](windows-command-job-observation.md)
 - [终态面板夹具与重复渲染](agent-transcript-stable-fixture.md)
+- [SDK 私有组合与 PR 收口](sdk-pr-consolidation.md)
+- [Managed 会话身份合同](lubancore-managed-identity.md)
+- [LubanCore 模块边界](lubancore-module-boundaries.md)
+- [SDK 授权原语](lubancore-authorization-primitives.md)
