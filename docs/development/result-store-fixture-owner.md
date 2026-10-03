@@ -25,3 +25,9 @@ CI `37091233908` 的 Windows 全量 701 场有两场失败：`sdk.focused.v3_res
 新头三平台 full、六套 SDK focused/消费者及实际 ASan 原件分头收。Windows 六套 focused 中两套为实际 Windows，另核完整全量里原两册：各 17/17、零失败、两枚原路径标记各一次；本场根与清场记录必须齐，相关同 tag 根不得复用。focused25、consumer20、ASanRequired31来源并集不减。Windows 路径子例不冒称 ASan 或 POSIX 跑过。
 
 先提交合同，再改夹具；不本地 configure、compile、CTest 或运行原生程序。旧失败证明另封，新头结果不得改写旧清场缺证边界。
+
+## 全量两册原件
+
+真实 full Test 前只读登记原两册，并让原同一次 full CTest 生成 JUnit。Test 后无论成功或失败，都从该次 LastTest 精确提取这两册段落，保完整实际 Command；另保登记原件与 JUnit 对应两条。其余全量段落不上传，也不重跑原生。
+
+提取件写好后再裁验收。少册、重复册、坏命令、零用例、失败或缺清场事实均不得通过；缺件状态如实登记。每段实际命令必须等于对应完整注册 argv，Windows 四条 owned-root 记录须各一次、清场已完且根互不重用。focused 门也验本册两条清场事实。纯数据反例另核失败仍留原件，不把合成日志当原生通过。
