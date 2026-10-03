@@ -4,10 +4,15 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -57,15 +62,81 @@ PreviewChannel StdChannel(std::string text, std::uint64_t output_bytes = 0) {
     return channel;
 }
 
+std::filesystem::path NativeFixtureDirectory(const std::filesystem::path& path) {
+#ifdef _WIN32
+    // A short parent still owns long descendants. Start recursive cleanup in
+    // the explicit namespace instead of depending on its parent's length.
+    auto absolute = std::filesystem::absolute(path).lexically_normal();
+    absolute.make_preferred();
+    const auto& native = absolute.native();
+    if (native.starts_with(L"\\\\?\\")) return absolute;
+    if (native.starts_with(L"\\\\")) {
+        return std::filesystem::path(L"\\\\?\\UNC\\" + native.substr(2));
+    }
+    if (native.size() >= 3 && native[1] == L':' && native[2] == L'\\') {
+        return std::filesystem::path(L"\\\\?\\" + native);
+    }
+    throw std::runtime_error("result-store fixture requires an absolute native directory");
+#else
+    return path;
+#endif
+}
+
 struct StoreHarness {
     std::filesystem::path dir;
+    bool owned = false;
 
     explicit StoreHarness(const char* tag) {
-        dir = std::filesystem::temp_directory_path() /
-              ("lubancode-v3-store-" + std::string(tag));
-        std::error_code ec;
-        std::filesystem::remove_all(dir, ec);
-        std::filesystem::create_directories(dir, ec);
+        static std::atomic<std::uint64_t> sequence{0};
+        for (unsigned attempt = 0; attempt < 16; ++attempt) {
+            const auto tick = std::chrono::steady_clock::now().time_since_epoch().count();
+            auto candidate = std::filesystem::temp_directory_path() /
+                ("lubancode-v3-store-" + std::string(tag) + "-" + std::to_string(tick) +
+                 "-" + std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)));
+            std::error_code ec;
+            const bool created = std::filesystem::create_directory(NativeFixtureDirectory(candidate), ec);
+            INFO("result-store fixture create root=" << lubancode::platform::PathToUtf8(candidate)
+                 << " error=" << ec.value() << " message=" << ec.message());
+            REQUIRE_FALSE(ec);
+            if (!created) continue;  // Existing is never accepted or removed.
+            dir = std::move(candidate);
+            owned = true;
+            return;
+        }
+        FAIL("result-store fixture could not claim a unique directory in 16 attempts");
+    }
+
+    StoreHarness(const StoreHarness&) = delete;
+    StoreHarness& operator=(const StoreHarness&) = delete;
+
+    bool Cleanup() {
+        if (!owned) return true;
+        owned = false;  // Retain the first failure, without a cleanup retry.
+        const auto native = NativeFixtureDirectory(dir);
+        std::error_code remove_error;
+        std::filesystem::remove_all(native, remove_error);
+        std::error_code probe_error;
+        const bool remains = std::filesystem::exists(native, probe_error);
+        INFO("result-store fixture cleanup root=" << lubancode::platform::PathToUtf8(dir)
+             << " remove_error=" << remove_error.value() << " message=" << remove_error.message()
+             << " probe_error=" << probe_error.value() << " message=" << probe_error.message()
+             << " remains=" << remains);
+        CHECK_FALSE(remove_error);
+        CHECK_FALSE(probe_error);
+        CHECK_FALSE(remains);
+        return !remove_error && !probe_error && !remains;
+    }
+
+    ~StoreHarness() noexcept {
+        if (!owned) return;
+        try { Cleanup(); }
+        catch (const std::exception& error) {
+            try { CHECK_MESSAGE(false, "result-store fixture cleanup threw: " << error.what()); }
+            catch (...) {}  // A reporting exception cannot terminate unwinding.
+        } catch (...) {
+            try { CHECK_MESSAGE(false, "result-store fixture cleanup threw a non-standard exception"); }
+            catch (...) {}
+        }
     }
 };
 
@@ -146,6 +217,9 @@ void CheckWindowsNativeStore(const char* marker, std::size_t target_chars) {
     CHECK(second.result_id == "res-000002");
     CHECK(ReadFile(platform::FileIoPath(target)) == "actual native channel");
     CHECK_FALSE(fs::exists(platform::FileIoPath(temp)));
+    REQUIRE(harness.Cleanup());
+    std::cout << "[result-store-fixture] " << nlohmann::json({
+        {"marker", marker}, {"root", platform::PathToUtf8(harness.dir)}, {"cleanup", "removed"}}).dump() << '\n';
     std::cout << "[result-store-path-length] " << marker << " target=" << target.native().size()
               << " temporary=" << temp.native().size() << '\n';
     std::cout << "[result-store-path] " << marker << '\n';

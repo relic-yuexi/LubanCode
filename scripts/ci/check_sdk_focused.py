@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -125,6 +126,32 @@ def check_action_paths(section: str, *, native: bool):
             raise RuntimeError("Action actual internal path did not finish once: " + path)
 
 
+def check_result_store_owned_roots(native_section: str, platform_name: str):
+    if platform_name != "nt":
+        return []
+    prefix = "[result-store-fixture] "
+    lines = [line for line in native_section.splitlines() if line.startswith(prefix)]
+    if len(lines) != 2:
+        raise RuntimeError("Result-store owned cleanup records are missing or duplicated")
+    records = []
+    for line in lines:
+        try:
+            record = json.loads(line[len(prefix):])
+        except (ValueError, TypeError) as error:
+            raise RuntimeError("Result-store owned cleanup record is invalid") from error
+        if (not isinstance(record, dict) or set(record) != {"marker", "root", "cleanup"}
+                or record["cleanup"] != "removed" or not isinstance(record["root"], str)
+                or not record["root"] or "\0" in record["root"]):
+            raise RuntimeError("Result-store owned cleanup record is invalid")
+        records.append(record)
+    if {r["marker"] for r in records} != {"target-extended", "temporary-threshold"}:
+        raise RuntimeError("Result-store owned cleanup source markers are wrong")
+    roots = [ntpath.normcase(ntpath.normpath(r["root"])) for r in records]
+    if len(set(roots)) != len(roots):
+        raise RuntimeError("Result-store owned roots were reused")
+    return roots
+
+
 def check_result_store_native(native_section: str, platform_name: str):
     counts = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", native_section)
     if len(counts) != 1 or tuple(map(int, counts[0])) != (17, 17, 0):
@@ -136,6 +163,7 @@ def check_result_store_native(native_section: str, platform_name: str):
         lengths = f"[result-store-path-length] {name} target={target} temporary={temporary}"
         if native_section.splitlines().count(marker) != 1 or native_section.splitlines().count(lengths) != 1:
             raise RuntimeError("Result-store actual Windows path did not finish once: " + name)
+    check_result_store_owned_roots(native_section, platform_name)
 
 
 def check_memory_cas_paths(native_section: str, platform_name: str):
