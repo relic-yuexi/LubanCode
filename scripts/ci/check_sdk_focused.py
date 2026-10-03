@@ -18,6 +18,7 @@ REQUIRED = {
     "sdk.focused.tool_job_coordinator",
     "sdk.focused.tool_job_start_transaction",
     "sdk.focused.tool_job_hold_recovery",
+    "sdk.focused.owned_job_admission",
     "sdk.focused.session_recovery_view",
     "sdk.focused.lubancore_recovery_view",
     "sdk.focused.lubancore_session",
@@ -254,6 +255,35 @@ JOB_START_PATHS = ("executor-copy", "before-thread", "after-thread", "queued-suc
                    "unconfirmed-terminal", "capture-close")
 JOB_HOLD_PATHS = ("registered-admission", "new-job-isolation", "dispatched-unknown",
                   "terminal-facts", "async-propagation", "legacy-and-owner")
+OWNED_JOB_PATHS = ("owned-snapshot", "shared-denials", "ask-cancel-retire",
+                   "deferred-capability", "loop-no-fallback", "receipt-unknown-stop")
+
+
+def check_owned_job_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_owned_job_admission.cpp"):
+        raise RuntimeError("Owned Job admission must run the single actual source")
+
+
+def check_owned_job_native(section, command):
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe") if command else ""
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Owned Job admission executable is not the actual native fixture")
+    check_owned_job_registration(command, executable)
+    check_native_command(section, command)
+    counts = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(counts) != 1 or tuple(map(int, counts[0])) != (6, 6, 0):
+        raise RuntimeError("Owned Job admission native roster differs from 6 successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Owned Job admission native assertions did not actually pass")
+    for path in OWNED_JOB_PATHS:
+        if section.splitlines().count("[owned-job-path] " + path) != 1:
+            raise RuntimeError("Owned Job admission actual path did not finish once: " + path)
 
 
 def check_job_start_registration(command, source, executable="lubancore_sdk_tests"):
@@ -328,6 +358,8 @@ def main():
         if test["name"] in ("sdk.focused.tool_job_coordinator", "sdk.focused.tool_job_start_transaction", "sdk.focused.tool_job_hold_recovery"):
             source = "test_" + test["name"].removeprefix("sdk.focused.") + ".cpp"
             check_job_start_registration(test.get("command", []), source)
+        if test["name"] == "sdk.focused.owned_job_admission":
+            check_owned_job_registration(test.get("command", []))
         if test["name"] == "sdk.focused.atomic_write":
             check_plan_retry_registration(test.get("command", []))
         if test["name"] in ("sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest"):
@@ -380,6 +412,9 @@ def main():
         if case.attrib["name"] == "sdk.focused.tool_job_hold_recovery":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_job_hold_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.owned_job_admission":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_owned_job_native(sections[0], registered["command"])
         check_recovery_source(case.attrib["name"], sections[0], int(counts[0]))
         if case.attrib["name"] == "sdk.focused.v3_result_store":
             check_result_store_native(sections[0], os.name)

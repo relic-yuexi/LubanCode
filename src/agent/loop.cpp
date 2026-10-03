@@ -931,6 +931,59 @@ tools::Tool::Result CompleteToolCall(ToolCallFrame& frame, tools::Tool::Result r
 
 }  // namespace
 
+std::expected<OwnedPreparedToolInput, tools::Tool::Result> PrepareOwnedToolInput(
+    tools::ToolRegistry& registry, const api::ToolUseBlock& call, const TurnWiring& wiring,
+    const std::function<bool(const tools::Tool&)>& tool_filter, const std::string& filter_denial,
+    const ToolTraceContext* trace, const std::atomic<bool>* cancel,
+    const tools::ProxyCallContext* proxy, const std::function<bool(const tools::Tool&)>& turn_gate,
+    const std::string& turn_gate_denial) {
+    ToolCallFrame frame{registry, call, wiring, tool_filter, filter_denial, trace, cancel, proxy,
+                        turn_gate, turn_gate_denial};
+    frame.started_at = std::chrono::steady_clock::now();
+    const auto checked = [&](tools::Tool::Result result) {
+        if (wiring.action_receipt_failure_reason) {
+            const auto error = wiring.action_receipt_failure_reason();
+            if (!error.empty()) {
+                result.is_error = true;
+                result.execution_control = tools::ExecutionControl::StopIndeterminate;
+                if (result.error_code.empty()) result.error_code = "job.admission.receipt_unconfirmed";
+                result.AppendText("\n" + error);
+            }
+        }
+        return result;
+    };
+    const auto reject = [&](tools::Tool::Result result) {
+        FinishTrace(frame, result);
+        // UI retirement also stays on this short host stack. Query after both
+        // actual retirement callbacks so a failed refusal receipt cannot escape.
+        return std::unexpected(checked(DispatchDone(frame, std::move(result))));
+    };
+    if (wiring.on_pre_action || wiring.on_post_action || wiring.on_post_tool_use_hook || wiring.on_post_tool_hook) {
+        auto rejected = MissingOwnedJobAdmission();
+        return reject(std::move(rejected.result));
+    }
+    if (cancel != nullptr && cancel->load(std::memory_order_acquire)) {
+        tools::Tool::Result rejected{"This call was cancelled before owned preparation.", true};
+        rejected.outcome = ToString(ToolOutcome::CancelledBeforeStart);
+        rejected.error_code = "runtime.tool.cancelled_before_start";
+        return reject(std::move(rejected));
+    }
+    auto gate = PrepareToolCall(frame);
+    // The existing host may report an unconfirmed receipt even on refusal.
+    // Preserve that stop signal; never turn it into an ordinary denial.
+    auto done = checked(std::move(gate.done));
+    if (!gate.allowed || done.execution_control == tools::ExecutionControl::StopIndeterminate)
+        return std::unexpected(std::move(done));
+    if (cancel != nullptr && cancel->load(std::memory_order_acquire)) {
+        tools::Tool::Result rejected{"This call was cancelled after owned preparation.", true};
+        rejected.outcome = ToString(ToolOutcome::CancelledBeforeStart);
+        rejected.error_code = "runtime.tool.cancelled_before_start";
+        return reject(std::move(rejected));
+    }
+    return OwnedPreparedToolInput{call.id, call.name, std::move(frame.effective_input), frame.source_kind,
+                                  std::move(frame.source_instance), frame.effect_class};
+}
+
 // 执行一枚工具调用的完整链(公开导出;阶段实现在上面,注释在那头):
 // 找工具/延迟挂载谓词 -> PreToolUse(含 updatedInput 的 schema 复检) ->
 // 确认档(needs_confirm + PermissionRequest)-> execution_started -> 执行
@@ -2373,7 +2426,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                             // id 幂等去重,只派发一次。流中断而工具已执行的
                             // 恢复归协调器账面(dispatched 无终态 → unknown_
                             // hold,不盲重跑)。
-                            if (wiring.tool_batch_gate != nullptr && !e.tool_use_id.empty()) {
+                            if (wiring.tool_batch_gate != nullptr &&
+                                wiring.tool_batch_gate->admission_mode() == JobAdmissionMode::Legacy &&
+                                !e.tool_use_id.empty()) {
                                 for (const api::ToolUseBlock& done : assembler.completed_tool_uses()) {
                                     if (done.id != e.tool_use_id) {
                                         continue;
@@ -2789,6 +2844,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         if (gate_armed) {
             adjudications = wiring.tool_batch_gate->AdjudicateBatch(batch_calls);
         }
+        // Explicit owned admission is unavailable in this slice. Reject the
+        // selected non-inline calls before consuming Prepare/Action receipts.
+        const bool owned_admission = gate_armed &&
+            wiring.tool_batch_gate->admission_mode() != JobAdmissionMode::Legacy;
         const auto call_is_inline = [&adjudications](std::size_t index) {
             return index >= adjudications.size() ||
                    adjudications[index].mode == ToolProtocolMode::Inline;
@@ -2801,7 +2860,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         if (trace_armed && wiring.on_tool_trace) {
             for (std::size_t i = 0; i < batch_calls.size(); ++i) {
                 const api::ToolUseBlock& call = batch_calls[i];
-                if (!call_is_inline(i)) {
+                if (!call_is_inline(i) && !owned_admission) {
                     scheduled_slot[i] = scheduled_ids.size();
                     continue;  // job_handle/native_deferred:协调器自落链,不占栅栏
                 }
@@ -2875,6 +2934,45 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     continue;
                 }
                 const api::ToolUseBlock& call = batch_calls[i];
+                if (owned_admission) {
+                    auto receipt = MissingOwnedJobAdmission();
+                    ToolTraceContext rejection_trace;
+                    const ToolTraceContext* rejection_context = nullptr;
+                    if (trace_armed && scheduled_slot[i] < scheduled_ids.size()) {
+                        rejection_trace.execution_id = scheduled_ids[scheduled_slot[i]];
+                        rejection_trace.batch_id = batch_id;
+                        rejection_trace.sequence_in_batch = static_cast<int>(scheduled_slot[i]);
+                        rejection_trace.turn_id = wiring.turn_id;
+                        rejection_context = &rejection_trace;
+                    }
+                    ToolCallFrame frame{registry_, call, wiring, tool_filter_, tool_filter_denial_,
+                                        rejection_context, cancel, nullptr, tool_execution_policy_, tool_filter_denial_};
+                    frame.started_at = std::chrono::steady_clock::now();
+                    if (const auto* registration = registry_.RegistrationOf(call.name)) {
+                        frame.source_kind = registration->source_kind;
+                        frame.source_instance = registration->source_instance;
+                        frame.effect_class = registration->effect_class;
+                    }
+                    if (wiring.events != nullptr) wiring.events->OnToolStart(call.id, call.name, call.input, wiring.subordinate_stream);
+                    // These are the parent declaration's rejection events,
+                    // never coordinator admission or business Started/Finished.
+                    FinishTrace(frame, receipt.result);
+                    receipt.result = DispatchDone(frame, std::move(receipt.result));
+                    if (wiring.action_receipt_failure_reason) {
+                        const auto error = wiring.action_receipt_failure_reason();
+                        if (!error.empty()) {
+                            receipt.state = OwnedJobAdmissionState::Unconfirmed;
+                            receipt.result.execution_control = tools::ExecutionControl::StopIndeterminate;
+                            receipt.result.AppendText("\n" + error);
+                            side_effect_indeterminate = true;
+                            if (side_effect_error.empty()) side_effect_error = error;
+                        }
+                    }
+                    api::ToolResultBlock block{call.id, receipt.result.content, receipt.result.is_error,
+                                               receipt.result.payload.content, receipt.result.payload.structured_content};
+                    ordered_results[i] = std::move(block); // job_admission remains false.
+                    continue;
+                }
                 const std::optional<tools::Tool::Result> admission =
                     wiring.tool_batch_gate->TakeJobOrder(call, adjudications[i]);
                 if (admission.has_value() &&

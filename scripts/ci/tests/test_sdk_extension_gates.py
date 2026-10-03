@@ -272,6 +272,43 @@ class JobHoldGateTests(unittest.TestCase):
                 focused.check_job_hold_native(bad, command)
 
 
+class OwnedJobAdmissionGateTests(unittest.TestCase):
+    def body(self, command):
+        return "\n".join(('Command: ' + ' '.join('"' + value + '"' for value in command),
+            '[doctest] test cases: 6 | 6 passed | 0 failed',
+            '[doctest] assertions: 100 | 100 passed | 0 failed', 'Test Passed.',
+            *('[owned-job-path] ' + path for path in focused.OWNED_JOB_PATHS)))
+
+    def test_sdk_cli_six_actual_paths_with_full_argv(self):
+        for executable in ('/build real/lubancore_sdk_tests', 'C:/build real/lubancode_tests.exe'):
+            command = [executable, '--source-file=*test_owned_job_admission.cpp']
+            focused.check_owned_job_native(self.body(command), command)
+
+    def test_foreign_same_basename_extra_filter_and_other_source_reject(self):
+        command = ['/real/lubancore_sdk_tests', '--source-file=*test_owned_job_admission.cpp']
+        for bad in (['/foreign/lubancore_sdk_tests', command[1]], command + ['--test-case=one'],
+                    [command[0], '--source-file=*test_tool_job_coordinator.cpp']):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_owned_job_native(self.body(bad), command)
+
+    def test_missing_duplicate_empty_or_failed_evidence_reject(self):
+        command = ['/real/lubancore_sdk_tests', '--source-file=*test_owned_job_admission.cpp']
+        body = self.body(command)
+        bad_bodies = [body.replace('6 | 6 passed', '0 | 0 passed'),
+                      body.replace('6 | 6 passed', '5 | 5 passed'),
+                      body.replace('6 passed | 0 failed', '5 passed | 1 failed'),
+                      body.replace('100 | 100 passed', '0 | 0 passed'),
+                      body.replace('100 passed | 0 failed', '99 passed | 1 failed'),
+                      body.replace('Test Passed.', ''), body + '\nTest Passed.']
+        for path in focused.OWNED_JOB_PATHS:
+            marker = '[owned-job-path] ' + path
+            bad_bodies += [body.replace(marker, ''), body + '\n' + marker,
+                           body.replace(marker, 'other-owner: ' + marker)]
+        for bad in bad_bodies:
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_owned_job_native(bad, command)
+
+
 class ResultStoreWindowsPathsTests(unittest.TestCase):
     summary = "[doctest] test cases: 17 | 17 passed | 0 failed"
     markers = ("[result-store-path] target-extended", "[result-store-path] temporary-threshold",

@@ -633,6 +633,31 @@ public:
 // TurnGateDenied,不执行。空谓词 = 没有 turn 级条件工具(子代理/单测/
 // workflow/PTC/旧装配),行为与从前一字不差。turn_gate_denial 同
 // filter_denial 的"稳定码|人话"两截口径。
+// Internal synchronous preparation snapshot. It owns values only, and is not
+// a permission grant, Job identity, or proof of durable registration. The
+// caller still owns the registry/call/wiring until this function returns.
+struct OwnedPreparedToolInput {
+    std::string call_id;
+    std::string tool_name;
+    nlohmann::json effective_input;
+    ToolSourceKind source_kind = ToolSourceKind::Builtin;
+    std::string source_instance;
+    EffectClass effect_class = EffectClass::InProcessUnknown;
+};
+
+// Reuses the same Prepare stage as RunOneTool, without Started/Execute/Post.
+// Deferred Action/Post capabilities reject before any of those callbacks.
+// A rejection retains the original Result, including StopIndeterminate.
+std::expected<OwnedPreparedToolInput, tools::Tool::Result> PrepareOwnedToolInput(
+    tools::ToolRegistry& registry, const api::ToolUseBlock& call, const TurnWiring& wiring,
+    const std::function<bool(const tools::Tool&)>& tool_filter,
+    const std::string& filter_denial = std::string(),
+    const ToolTraceContext* trace = nullptr,
+    const std::atomic<bool>* cancel = nullptr,
+    const tools::ProxyCallContext* proxy = nullptr,
+    const std::function<bool(const tools::Tool&)>& turn_gate = {},
+    const std::string& turn_gate_denial = std::string());
+
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const TurnWiring& wiring,
                                 const std::function<bool(const tools::Tool&)>& tool_filter,
                                 const std::string& filter_denial = std::string(),

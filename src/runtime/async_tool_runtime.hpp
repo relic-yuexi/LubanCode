@@ -57,6 +57,9 @@ struct AsyncToolRuntimeOptions {
     bool job_handle_disabled = false;
     tools::ToolJobCoordinator::Options coordinator;
     tools::JobRecoveryPolicy recovery_policy = tools::JobRecoveryPolicy::Legacy;
+    // Internal only. The first owned slice rejects before dispatch because Job
+    // scope and completion adapters are not available; SDK defaults remain off.
+    agent::JobAdmissionMode admission_mode = agent::JobAdmissionMode::Legacy;
 };
 
 class AsyncToolRuntime final {
