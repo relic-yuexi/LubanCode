@@ -186,3 +186,4 @@ DOC development/sdk-job-admission.md
 DOC development/job-owned-registration.md
 DOC development/job-owned-adoption.md
 DOC development/sdk-command-execution-limits.md
+DOC development/agent-health-batch-fixture.md
