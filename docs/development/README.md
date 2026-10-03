@@ -48,3 +48,4 @@ git diff --check
 - [Updater 活持锁夹具就绪](updater-lock-ready.md)
 - [SDK 冻结计划短拒重试](sdk-plan-short-reject.md)
 - [Package 数字预发布号比较](package-prerelease-order.md)
+- [子历史采用册阶段诊断](child-history-stage-diagnostic.md)
