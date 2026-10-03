@@ -133,6 +133,105 @@
           "auto"
         ]
       }
+    },
+    "mimo-v2.6-flash": {
+      "name": "MiMo-V2.6-Flash",
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "max_output": 131072,
+      "default_think": "auto",
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true,
+        "image": true,
+        "video": true,
+        "audio-recognition": true,
+        "video-recognition": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      },
+      "evidence": {
+        "source": "https://mimo.mi.com/docs/en-US/api/model/list-models; https://mimo.mi.com/docs/en-US/api/chat/responses; https://mimo.mi.com/docs/zh-CN/tokenplan/integration/codex-configuration",
+        "checked": "2026-10-04",
+        "kind": "official-doc",
+        "note": "官方三协议均列出 V2.6 ID；上下文 1048576，输出 131072。思考只区分启用和关闭，Responses 档位映射另记端点覆写；未经在线调用验证。"
+      }
+    },
+    "mimo-v2.6-pro": {
+      "name": "MiMo-V2.6-Pro",
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "max_output": 131072,
+      "default_think": "auto",
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true,
+        "image": true,
+        "video": true,
+        "audio-recognition": true,
+        "video-recognition": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      },
+      "evidence": {
+        "source": "https://mimo.mi.com/docs/en-US/api/model/list-models; https://mimo.mi.com/docs/en-US/api/chat/responses; https://mimo.mi.com/docs/zh-CN/tokenplan/integration/codex-configuration",
+        "checked": "2026-10-04",
+        "kind": "official-doc",
+        "note": "官方三协议均列出 V2.6 ID；上下文 1048576，输出 131072。思考只区分启用和关闭，Responses 档位映射另记端点覆写；未经在线调用验证。"
+      }
+    },
+    "mimo-v2.6-pro-ultraspeed": {
+      "name": "MiMo-V2.6-Pro-UltraSpeed",
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "max_output": 131072,
+      "default_think": "auto",
+      "capabilities": {
+        "tools": true,
+        "reasoning": true,
+        "structured_output": true,
+        "image": true,
+        "video": true,
+        "audio-recognition": true,
+        "video-recognition": true
+      },
+      "reasoning": {
+        "controls": [
+          {
+            "kind": "toggle"
+          }
+        ],
+        "supportedEfforts": [
+          "none",
+          "auto"
+        ]
+      },
+      "evidence": {
+        "source": "https://mimo.mi.com/docs/en-US/api/model/list-models; https://mimo.mi.com/docs/en-US/api/chat/responses; https://mimo.mi.com/docs/zh-CN/tokenplan/integration/codex-configuration",
+        "checked": "2026-10-04",
+        "kind": "official-doc",
+        "note": "官方三协议均列出 V2.6 ID；上下文 1048576，输出 131072。思考只区分启用和关闭，Responses 档位映射另记端点覆写；未经在线调用验证。"
+      }
     }
   }
 }

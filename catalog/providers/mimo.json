@@ -14,7 +14,7 @@
       "wire": "openai-chat-completions",
       "base_url": "https://api.xiaomimimo.com/v1",
       "key_env": "MIMO_API_KEY",
-      "default_model": "mimo-v2-5-pro",
+      "default_model": "mimo-v2.6-pro",
       "reasoning_dialect": {
         "toggle": "thinking_type",
         "toggle_on": "enabled",
@@ -31,7 +31,10 @@
         "mimo-v2-5-pro-ultraspeed",
         "mimo-v2-flash",
         "mimo-v2-omni",
-        "mimo-v2-pro"
+        "mimo-v2-pro",
+        "mimo-v2.6-flash",
+        "mimo-v2.6-pro",
+        "mimo-v2.6-pro-ultraspeed"
       ]
     },
     {
@@ -41,7 +44,7 @@
       "wire": "anthropic-messages",
       "base_url": "https://api.xiaomimimo.com/anthropic",
       "key_env": "MIMO_API_KEY",
-      "default_model": "mimo-v2-5-pro",
+      "default_model": "mimo-v2.6-pro",
       "reasoning_dialect": {
         "toggle": "thinking_type",
         "toggle_on": "enabled",
@@ -64,7 +67,10 @@
         "mimo-v2-5-pro-ultraspeed",
         "mimo-v2-flash",
         "mimo-v2-omni",
-        "mimo-v2-pro"
+        "mimo-v2-pro",
+        "mimo-v2.6-flash",
+        "mimo-v2.6-pro",
+        "mimo-v2.6-pro-ultraspeed"
       ]
     },
     {
@@ -74,7 +80,7 @@
       "wire": "openai-responses",
       "base_url": "https://api.xiaomimimo.com/v1",
       "key_env": "MIMO_API_KEY",
-      "default_model": "mimo-v2-5-pro",
+      "default_model": "mimo-v2.6-pro",
       "reasoning_dialect": {
         "toggle": "enable_thinking_bool",
         "toggle_on": "true",
@@ -91,8 +97,88 @@
         "mimo-v2-5-pro-ultraspeed",
         "mimo-v2-flash",
         "mimo-v2-omni",
-        "mimo-v2-pro"
-      ]
+        "mimo-v2-pro",
+        "mimo-v2.6-flash",
+        "mimo-v2.6-pro",
+        "mimo-v2.6-pro-ultraspeed"
+      ],
+      "model_overrides": {
+        "mimo-v2.6-flash": {
+          "default_think": "medium",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "mimo-v2.6-pro": {
+          "default_think": "medium",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        },
+        "mimo-v2.6-pro-ultraspeed": {
+          "default_think": "medium",
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "effort",
+                "values": [
+                  "none",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              {
+                "kind": "toggle"
+              }
+            ],
+            "supportedEfforts": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        }
+      }
     }
   ],
   "models_ref": "models/mimo.json"
