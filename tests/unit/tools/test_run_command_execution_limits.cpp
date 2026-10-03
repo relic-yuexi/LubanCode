@@ -422,6 +422,33 @@ TEST_CASE("RunCommand execution limits: absent image preserves legacy fields and
             CHECK(Read(directory.path / (tag + ".done")) == tag);
         }
     }
+#ifdef _WIN32
+    // The new scoped pipeline must retain the old exit/error contract without
+    // collecting native output until exit. The boundary case above keeps the
+    // overflowing native process alive and requires output_limit before its
+    // host deadline; these actual calls check the other wrapper semantics.
+    struct ScriptCase { std::string command; int exit_code; std::string output; };
+    const std::array<ScriptCase, 4> scripts = {{
+        {"Write-Output 'scoped-wrapper-ok'", 0, "scoped-wrapper-ok"},
+        {"Write-Error 'scoped-wrapper-error'", 1, "scoped-wrapper-error"},
+        {"exit 7", 7, ""},
+        {"Write-Error 'before-native'; & " + Quote(Utf8(probe.executable), "powershell") +
+            " 'bad-argv'; Write-Output 'after-native'", 20, "after-native"}
+    }};
+    for (const auto& script : scripts) {
+        INFO("actual scoped PowerShell command: " << script.command);
+        const nlohmann::json input = {{"command", script.command}, {"shell", "powershell"},
+            {"cwd", Utf8(directory.path)}};
+        const auto result = tool.execute(input, Context(15000, 4096));
+        CHECK(result.is_error == (script.exit_code != 0));
+        CHECK(result.outcome == (script.exit_code == 0 ? "succeeded" : "process_exit_nonzero"));
+        REQUIRE(result.details.contains("exit_code"));
+        CHECK(result.details.at("exit_code").get<int>() == script.exit_code);
+        Limits(result, 15000, 4096);
+        if (!script.output.empty()) CHECK(result.content.find(script.output) != std::string::npos);
+        CHECK(result.content.find("#< CLIXML") == std::string::npos);
+    }
+#endif
     probe.CheckReleased();
     Mark("legacy");
 }

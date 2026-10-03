@@ -369,6 +369,29 @@ std::string BuildEncodedCommand(const std::string& user_command_utf8) {
         reinterpret_cast<const std::byte*>(wide.data()), wide.size() * sizeof(wchar_t)));
 }
 
+// A scoped capture limit must observe output while the native command still
+// runs. The legacy $oco assignment buffers the entire scriptblock, hiding an
+// overflow until exit. Keep that old path intact for calls without an image.
+// This pipeline checks actual ErrorRecords before formatting them as plain
+// text, without retaining an array. Preserve native LASTEXITCODE precedence
+// and explicit exit N; cmdlet-only errors still return a nonzero exit code.
+std::string BuildScopedEncodedCommand(const std::string& user_command_utf8) {
+    const std::string script_utf8 =
+        "$ProgressPreference='SilentlyContinue'\r\n"
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\r\n"
+        "$LASTEXITCODE = $null\r\n"
+        "$script:lubanCommandErrorSeen = $false\r\n"
+        "& { " + user_command_utf8 + " } 2>&1 | ForEach-Object { "
+        "if ($_ -is [System.Management.Automation.ErrorRecord]) { $script:lubanCommandErrorSeen = $true }; $_ "
+        "} | Out-String -Stream | Write-Output\r\n"
+        "$lec = $LASTEXITCODE\r\n"
+        "if ($lec -ne $null) { exit $lec }\r\n"
+        "if ($script:lubanCommandErrorSeen) { exit 1 } else { exit 0 }\r\n";
+    const std::wstring wide = platform::Utf8ToWide(script_utf8);
+    return platform::Base64Encode(std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(wide.data()), wide.size() * sizeof(wchar_t)));
+}
+
 // 后台专用的流式 wrapper(background 管理面单):与上面那颗的差异只有
 // 一处——命令裸执行,输出不落变量、不套 Out-String,stdout/stderr 由
 // platform 层直接接进日志文件。捕获式 wrapper 会把输出攒在内存里,进程
@@ -635,7 +658,8 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
         // 取消,ESC/面板 x 都只能等超时)——现在与 cmd 路同走 effective_cancel,
         // 置位即收整棵树。
         const std::wstring cmdline = std::wstring(ps_exe) + L" -NoProfile -NonInteractive -EncodedCommand " +
-                                      platform::Utf8ToWide(BuildEncodedCommand(command));
+                                      platform::Utf8ToWide(limits ? BuildScopedEncodedCommand(command)
+                                                                 : BuildEncodedCommand(command));
         proc = platform::RunProcess(cmdline, timeout_ms, effective_cancel, {},
                                     max_output_bytes,
                                     effective_cwd);
