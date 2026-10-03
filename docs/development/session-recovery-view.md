@@ -191,3 +191,11 @@ SDK 同 ID V3 锁前预检也沿有限主账 owned 读取与 Verify，不先走�
 宿主调高预算再 Resume，应能从真实旧账恢复。CLI nullopt 仍留原预检读取策略。
 主账保原 V3 Reader 跳过空物理行语义，计行帽仍计实际物理行；
 operations 严格读面继续拒空行与缺末换行，不沿宽容 live reader 跳坏行。
+
+选中 Memory 时，本笔 operations.jsonl 也核 opened regular/no-follow。旧 SDK
+ValidateOperationLedger/ReadOperationFacts 沿 exists/is_regular_file/ifstream 跟随路径；
+这条 owned operations 门新增拒绝 symlink，不能称所有 metadata 行为不变。
+plan/report 沿原 strict 门；CLI 未选 Memory 不探这组 operations metadata。
+主账 fake 必须保 File reference 全文和 snapshot token；核心再核 token 等 SHA(main bytes)，
+改 main 即在 domain adoption 前拒，不借后续 Continue 拒绝遮先行伪事实。
+Capture 取得 anchor 后，metadata/factory/核心核验失败都先 checked Close，再接原错误。
