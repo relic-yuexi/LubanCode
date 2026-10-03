@@ -11,11 +11,13 @@
 #include <algorithm>
 #include <exception>
 #include <initializer_list>
+#include <mutex>
 #include <sstream>
 #include <thread>
 #include <utility>
 
 #include "hooks/hash.hpp"
+#include "hooks/middleware_action_contract.hpp"
 
 namespace lubancode::hooks::middleware {
 
@@ -850,7 +852,23 @@ struct DispatchState {
     bool frozen = false;  // PreRequest freeze 边界已过(mutate 段收尾)
     TerminalFn terminal;
     int terminal_runs = 0;
+    DispatchReturnContract return_contract = DispatchReturnContract::Legacy;
+    std::mutex supplement_mutex;
+    action_contract::SupplementCost supplements;
 };
+
+std::expected<void, HandlerError> ReserveJobPostReturn(DispatchState& state, const HandlerReturn& result, bool observer) {
+    const auto cost = action_contract::CheckJobPostReturn(result, observer);
+    if (!cost) return std::unexpected(cost.error());
+    const std::lock_guard lock(state.supplement_mutex);
+    if (cost->count > action_contract::kEffectCount - state.supplements.count ||
+        cost->bytes > action_contract::kSupplementTotalBytes - state.supplements.bytes)
+        return std::unexpected(HandlerError{std::string(err::kResultInvalid),
+            "Job PostAction exceeds its dispatch supplement boundary"});
+    state.supplements.count += cost->count;
+    state.supplements.bytes += cost->bytes;
+    return {};
+}
 
 // 结局严酷度:Completed < Denied < Failed。外层后置可加工值,不能把下游
 // deny/失败洗成成功(§四:外层不能把 required deny 改成 allow)。
@@ -1017,10 +1035,23 @@ InvocationRecord RunObserver(DispatchState& state, std::size_t entry_pos) {
     try {
         auto result = handler(ctx, state.trigger.input, next);
         handler_returned = true;
+        DispatchFailureSource failure_source = DispatchFailureSource::HandlerReturnedError;
+        if (state.return_contract == DispatchReturnContract::JobPostSupplementsV1) {
+            if (result.has_value()) {
+                if (const auto checked = ReserveJobPostReturn(state, *result, true); !checked) {
+                    result = std::unexpected(checked.error());
+                    failure_source = DispatchFailureSource::ReturnContractRejected;
+                }
+            } else if (!action_contract::ValidHandlerError(state.point, result.error().code, result.error().message)) {
+                result = std::unexpected(HandlerError{std::string(err::kResultInvalid),
+                    "handler error requires a nonempty UTF-8 code and UTF-8 message"});
+                failure_source = DispatchFailureSource::ReturnContractRejected;
+            }
+        }
         record.duration_ms = elapsed_ms();
         if (!result.has_value()) {
             record.outcome = "failed";
-            record.failure_source = DispatchFailureSource::HandlerReturnedError;
+            record.failure_source = failure_source;
             record.error_code = result.error().code;
             record.detail = result.error().message;
             if (state.sink != nullptr) {
@@ -1155,6 +1186,14 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
         // terminal observation separate from the last observed exception.
         FrameException attempt_exception;
         try {
+            if (state.return_contract == DispatchReturnContract::JobPostSupplementsV1 && candidate.has_value()) {
+                DownstreamOutcome rejected;
+                rejected.kind = DownstreamOutcome::Kind::Invalid;
+                rejected.code = std::string(err::kNextBadCandidate);
+                rejected.message = "this hook cannot rewrite input";
+                rejected.failure_source = DispatchFailureSource::ReturnContractRejected;
+                return rejected;
+            }
             nlohmann::json effective_input = frame_input;
             if (candidate.has_value()) {
                 // 候选先存(§7.1):before_next 提案不冒充 handler 已完成;随后
@@ -1222,6 +1261,19 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
         } catch (...) {
             failure_source = DispatchFailureSource::HandlerThrew;
             result = std::unexpected(HandlerError{std::string(err::kHandlerFailed), "handler 抛未知异常"});
+        }
+    }
+    if (state.return_contract == DispatchReturnContract::JobPostSupplementsV1) {
+        if (result.has_value()) {
+            if (const auto checked = ReserveJobPostReturn(state, *result, false); !checked) {
+                result = std::unexpected(checked.error());
+                failure_source = DispatchFailureSource::ReturnContractRejected;
+            }
+        } else if (failure_source == DispatchFailureSource::HandlerReturnedError &&
+                   !action_contract::ValidHandlerError(state.point, result.error().code, result.error().message)) {
+            result = std::unexpected(HandlerError{std::string(err::kResultInvalid),
+                "handler error requires a nonempty UTF-8 code and UTF-8 message"});
+            failure_source = DispatchFailureSource::ReturnContractRejected;
         }
     }
     record.duration_ms = elapsed_ms();
@@ -1323,9 +1375,19 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
 }  // namespace
 
 DispatchOutcome MiddlewareDispatcher::Dispatch(HookPoint point, const DispatchTrigger& trigger, TerminalFn terminal,
-                                               MiddlewareEventSink* sink) {
+                                               MiddlewareEventSink* sink, DispatchReturnContract return_contract) {
+    if (return_contract != DispatchReturnContract::Legacy &&
+        (return_contract != DispatchReturnContract::JobPostSupplementsV1 || point != HookPoint::PostAction)) {
+        DispatchOutcome rejected;
+        rejected.kind = DispatchOutcome::Kind::Failed;
+        rejected.failure_source = DispatchFailureSource::ReturnContractRejected;
+        rejected.error_code = std::string(err::kResultInvalid);
+        rejected.error_detail = "JobPostSupplementsV1 requires PostAction";
+        return rejected;
+    }
     DispatchState state;
     state.point = point;
+    state.return_contract = return_contract;
     state.dispatch_id = NextMiddlewareDispatchId();
     state.revision = registry_->revision();
     state.trigger = trigger;

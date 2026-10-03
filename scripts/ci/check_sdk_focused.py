@@ -23,6 +23,7 @@ REQUIRED = {
     "sdk.focused.owned_job_admission",
     "sdk.focused.middleware_native_receipts",
     "sdk.focused.middleware_dispatch_cause",
+    "sdk.focused.middleware_job_post_contract",
     "sdk.focused.run_command_execution_limits",
     "sdk.focused.session_recovery_view",
     "sdk.focused.lubancore_recovery_view",
@@ -521,6 +522,44 @@ def check_middleware_cause_native(section, command):
             raise RuntimeError("Middleware dispatch cause actual path did not finish once: " + path)
 
 
+JOB_POST_PATHS = ("valid", "payload", "budget", "observer", "native-gap", "compatibility")
+JOB_POST_SDK_PATHS = ("pre-action", "post-action")
+
+
+def check_job_post_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_middleware_job_post_contract.cpp"):
+        raise RuntimeError("Job Post return registration must run the single absolute native source")
+
+
+def check_job_post_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("Job Post return native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Job Post return executable is not the actual native fixture")
+    check_job_post_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (6, 6, 0):
+        raise RuntimeError("Job Post return native roster differs from six successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Job Post return native assertions did not actually pass")
+    for prefix, paths in (("[middleware-job-post-contract-path] ", JOB_POST_PATHS),
+                          ("[middleware-job-post-sdk] ", JOB_POST_SDK_PATHS)):
+        for path in paths:
+            if section.splitlines().count(prefix + path) != 1:
+                raise RuntimeError("Job Post return actual path did not finish once: " + path)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -564,6 +603,8 @@ def main():
             check_middleware_receipt_registration(test.get("command", []))
         if test["name"] == "sdk.focused.middleware_dispatch_cause":
             check_middleware_cause_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.middleware_job_post_contract":
+            check_job_post_registration(test.get("command", []))
         if test["name"] == "sdk.focused.run_command_execution_limits":
             check_command_limits_registration(test.get("command", []))
         if test["name"] == "sdk.focused.atomic_write":
@@ -633,6 +674,9 @@ def main():
         if case.attrib["name"] == "sdk.focused.middleware_dispatch_cause":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_middleware_cause_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.middleware_job_post_contract":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_job_post_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.run_command_execution_limits":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_command_limits_native(sections[0], registered["command"])

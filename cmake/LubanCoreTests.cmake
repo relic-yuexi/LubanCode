@@ -44,7 +44,8 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
 list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/runtime/test_owned_job_admission.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_middleware_native_receipts.cpp"
-  "${_lubancore_tests_root}/unit/hooks/test_middleware_dispatch_cause.cpp")
+  "${_lubancore_tests_root}/unit/hooks/test_middleware_dispatch_cause.cpp"
+  "${_lubancore_tests_root}/unit/hooks/test_middleware_job_post_contract.cpp")
 set(_lubancore_tests_exclude)
 if(LUBANCODE_BUILD_CLI)
   set(_lubancore_tests_exclude EXCLUDE_FROM_ALL)
@@ -74,6 +75,7 @@ target_link_libraries(lubancore_sdk_tests PRIVATE
   lubancode_runtime lubancore_sdk doctest::doctest)
 target_include_directories(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}/support")
 target_compile_definitions(lubancore_sdk_tests PRIVATE
+  LUBANCORE_TEST_JOB_POST_SDK=1
   LUBANCODE_TEST_FIXTURES_DIR="${_lubancore_tests_root}/fixtures"
   LUBANCORE_TEST_SEARCH_PROBE="$<TARGET_FILE:lubancore_sdk_search_probe>"
   LUBANCORE_TEST_COMMAND_LIMITS_PROBE="$<TARGET_FILE:lubancore_command_limits_probe>")
@@ -94,6 +96,7 @@ endif()
 if(TARGET lubancode_tests)
   add_dependencies(lubancode_tests lubancore_sdk_tests)
   target_compile_definitions(lubancode_tests PRIVATE
+    LUBANCORE_TEST_JOB_POST_SDK=1
     LUBANCORE_TEST_SEARCH_PROBE="$<TARGET_FILE:lubancore_sdk_search_probe>")
 endif()
 foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
@@ -137,7 +140,8 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     if(TEST "${sdk_original_test}")
       set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "tools-${sdk_stem}")
     endif()
-  elseif(sdk_basename STREQUAL "test_middleware_dispatch_cause.cpp")
+  elseif(sdk_basename STREQUAL "test_middleware_dispatch_cause.cpp" OR
+         sdk_basename STREQUAL "test_middleware_job_post_contract.cpp")
     set(sdk_original_test "unit.hooks.${sdk_stem}")
   elseif(sdk_basename STREQUAL "test_session_resources.cpp" OR
          sdk_basename STREQUAL "test_session_execution.cpp" OR

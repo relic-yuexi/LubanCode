@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include "hooks/middleware_builtins.hpp"
+#include "hooks/middleware_action_contract.hpp"
 #include "platform/text_encoding.hpp"
 #include "sdk/callback_scope.hpp"
 
@@ -34,49 +35,13 @@ bool IsPrompt(const Json& value) {
     return value.is_object() && value.size() == 1 && value.contains("prompt") && value["prompt"].is_string();
 }
 
-constexpr std::size_t kActionArgumentsBytes = 1024 * 1024;
-constexpr std::size_t kActionTextBytes = 1024 * 1024;
-constexpr std::size_t kActionInputBytes = 2 * 1024 * 1024;
-constexpr std::size_t kSupplementBytes = 16 * 1024;
-constexpr std::size_t kSupplementTotalBytes = 32 * 1024;
-
-bool ActionPoint(mw::HookPoint point) {
-    return point == mw::HookPoint::PreAction || point == mw::HookPoint::PostAction;
-}
-bool ValidActionText(const std::string& text, std::size_t cap) {
-    return text.size() <= cap && text.find('\0') == std::string::npos &&
-        lubancode::platform::IsValidUtf8(text);
-}
-bool ActionJsonStrings(const Json& value) {
-    std::vector<const Json*> pending{&value};
-    while (!pending.empty()) {
-        const auto* current = pending.back(); pending.pop_back();
-        if (current->is_string() && !ValidActionText(current->get_ref<const std::string&>(), kActionInputBytes)) return false;
-        if (current->is_object()) {
-            for (auto it = current->begin(); it != current->end(); ++it) {
-                if (!ValidActionText(it.key(), kActionInputBytes)) return false;
-                pending.push_back(&it.value());
-            }
-        } else if (current->is_array()) for (const auto& entry : *current) pending.push_back(&entry);
-    }
-    return true;
-}
-bool IsArguments(const Json& value) {
-    return value.is_object() && value.size() == 1 && value.contains("arguments") &&
-        value["arguments"].is_object() && value.dump().size() <= kActionArgumentsBytes && ActionJsonStrings(value);
-}
-bool IsActionInput(const Json& value, mw::HookPoint point) {
-    if (point == mw::HookPoint::PreAction) return IsArguments(value);
-    if (!value.is_object() || value.size() != 2 || !value.contains("arguments") || !value["arguments"].is_object() ||
-        !value.contains("result") || !value["result"].is_object() || value["result"].size() != 4 ||
-        value.dump().size() > kActionInputBytes || Json{{"arguments", value["arguments"]}}.dump().size() > kActionArgumentsBytes ||
-        !ActionJsonStrings(value)) return false;
-    const auto& result = value["result"];
-    return result.contains("text") && result["text"].is_string() && result.contains("isError") && result["isError"].is_boolean() &&
-        result.contains("outcome") && result["outcome"].is_string() && result.contains("errorCode") && result["errorCode"].is_string() &&
-        ValidActionText(result["text"].get_ref<const std::string&>(), kActionTextBytes) &&
-        ValidActionText(result["errorCode"].get_ref<const std::string&>(), 256);
-}
+namespace ac = mw::action_contract;
+using ac::ActionPoint;
+using ac::ValidActionText;
+using ac::IsArguments;
+using ac::IsActionInput;
+using ac::kActionArgumentsBytes;
+using ac::kActionInputBytes;
 
 bool NonNegativeInteger(const Json& value) {
     return value.is_number_unsigned() || (value.is_number_integer() && value.get<std::int64_t>() >= 0);
@@ -105,7 +70,7 @@ bool IsEstimate(const Json& value) {
 
 Result<mw::HandlerReturn> ConvertReturn(const ext::HandlerReturn& source, const mw::InvocationCtx& context,
                                        bool observer) {
-    if (observer && (source.deny || !source.effects.empty())) {
+    if (observer && !ac::ObserverEffectsAllowed(source.deny, source.effects.size())) {
         return std::unexpected(InvalidResult("observers cannot deny or return effects"));
     }
     mw::HandlerReturn result;
@@ -155,10 +120,8 @@ Result<mw::HandlerReturn> ConvertReturn(const ext::HandlerReturn& source, const 
                 break;
             case ext::EffectType::AdmissionDecision: {
                 if (context.point == mw::HookPoint::PreAction) {
-                    if (!parsed->is_object() || parsed->size() != 2 || parsed->value("decision", Json()) != "ask" ||
-                        !parsed->contains("reason") || !(*parsed)["reason"].is_string() ||
-                        !ValidActionText((*parsed)["reason"].get_ref<const std::string&>(), 4096))
-                        return std::unexpected(InvalidResult("PreAction admission requires exactly {decision:ask,reason:string}"));
+                    if (const auto error = ac::AdmissionError(*parsed))
+                        return std::unexpected(InvalidResult(*error));
                     converted.type = mw::EffectType::AdmissionDecision;
                     break;
                 }
@@ -176,13 +139,8 @@ Result<mw::HandlerReturn> ConvertReturn(const ext::HandlerReturn& source, const 
                 break;
             }
             case ext::EffectType::ResultSupplement: {
-                if (context.point != mw::HookPoint::PostAction || !parsed->is_object() || parsed->size() != 1 ||
-                    !parsed->contains("text") || !(*parsed)["text"].is_string())
-                    return std::unexpected(InvalidResult("ResultSupplement requires PostAction and exactly {text:string}"));
-                const auto& text = (*parsed)["text"].get_ref<const std::string&>();
-                if (!ValidActionText(text, kSupplementBytes) || text.size() > kSupplementTotalBytes - supplement_bytes)
-                    return std::unexpected(InvalidResult("ResultSupplement exceeds its UTF-8 byte boundary"));
-                supplement_bytes += text.size();
+                if (const auto error = ac::SupplementError(context.point, *parsed, supplement_bytes))
+                    return std::unexpected(InvalidResult(*error));
                 converted.type = mw::EffectType::ResultSupplement;
                 break;
             }
@@ -490,9 +448,7 @@ Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Prepare(
                     auto result = module_ptr->instances_.at(instance_index)->Invoke(
                         callback_context, ext::Input{1, input.dump()}, lease.next());
                     if (!result) {
-                        if ((ActionPoint(native_context.point) && (!ValidActionText(result.error().code, 256) ||
-                            !ValidActionText(result.error().message, 4096))) || result.error().code.empty() || !lubancode::platform::IsValidUtf8(result.error().code) ||
-                            !lubancode::platform::IsValidUtf8(result.error().message)) {
+                        if (!ac::ValidHandlerError(native_context.point, result.error().code, result.error().message)) {
                             return std::unexpected(mw::HandlerError{
                                 std::string(mw::err::kResultInvalid), "handler error requires a nonempty UTF-8 code and UTF-8 message"});
                         }

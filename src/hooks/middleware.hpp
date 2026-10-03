@@ -226,8 +226,11 @@ enum class DispatchCause {
 };
 enum class DispatchFailureSource {
     None, MissingHandler, HandlerReturnedError, HandlerThrew,
-    TerminalThrew, ContinuationThrew, ObserverCompletionThrew
+    TerminalThrew, ContinuationThrew, ObserverCompletionThrew, ReturnContractRejected
 };
+// Trusted internal caller choice. It neither changes the frozen registry nor
+// supplies an execution owner. The Job profile is valid only for PostAction.
+enum class DispatchReturnContract { Legacy, JobPostSupplementsV1 };
 
 struct DownstreamOutcome {
     enum class Kind { Value, Denied, Failed, Invalid };
@@ -239,13 +242,14 @@ struct DownstreamOutcome {
     DispatchFailureSource failure_source = DispatchFailureSource::None;
 };
 
-// 至多一次 next 的边界。第二次调用不跑下游,回 Invalid(hook.next.already_consumed);
+// impl 正常返回非 Invalid 后才消费;随后再调不跑下游,回 already_consumed。
+// impl 抛错或返回 Invalid 不消费,原 native handler 仍可再试。SDK lease 另管。
 // 跨 invocation 拒绝由槽位过期机制保证(runtime 侧),执行核这边每次
 // invocation 造新 NextCall。
 class NextCall {
 public:
     NextCall() = default;
-    // impl:执行核注入的"候选采用 + 跑下游"。NextCall 自己把守至多一次。
+    // impl:执行核注入的"候选采用 + 跑下游";只锁已正常消费的下游结果。
     explicit NextCall(std::function<DownstreamOutcome(const std::optional<nlohmann::json>&)> impl)
         : impl_(std::move(impl)) {}
 
@@ -556,7 +560,8 @@ public:
     const FrozenRegistry& registry() const { return *registry_; }
 
     DispatchOutcome Dispatch(HookPoint point, const DispatchTrigger& trigger, TerminalFn terminal = nullptr,
-                             MiddlewareEventSink* sink = nullptr);
+                             MiddlewareEventSink* sink = nullptr,
+                             DispatchReturnContract return_contract = DispatchReturnContract::Legacy);
 
     // 链上嵌套深度上限(§4.1 嵌套限制的宿主侧一档;计划长度本身也有限)。
     static constexpr int kMaxChainDepth = 256;
