@@ -8,6 +8,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -60,6 +61,71 @@ std::vector<std::string> ReadLines(const std::filesystem::path& path) {
 }
 
 }  // namespace
+
+TEST_CASE("V3Writer: effective host binding survives switches and Continue") {
+    Harness harness("host-bindings");
+    const nlohmann::json bindings{{"skills", {{"schemaVersion", 1}, {"sha256", "plan-a"}}}};
+    auto writer = V3Writer::Start(harness.jsonl, "20260910-120000-AAAAAA", "run-000001",
+        "original", {{"settingsVersion", 7}, {"hostBindings", bindings}, {"initialOnly", "old"}});
+    REQUIRE(writer.has_value());
+    const auto first_root = writer->context().system_message_ref;
+    const auto switched = writer->SwitchSystem("replacement",
+        {{"cause", "system_prompt_changed"}, {"settingsVersion", 8}, {"systemChanged", true},
+         {"hostBindings", {{"skills", "caller-must-not-replace"}}}});
+    REQUIRE(switched.change_event.status == WriteReceipt::Status::Committed);
+    REQUIRE(switched.system_message.status == WriteReceipt::Status::Committed);
+    REQUIRE(switched.apply_event.status == WriteReceipt::Status::Committed);
+    auto rows = ReadLines(harness.jsonl);
+    REQUIRE(rows.size() == 5);
+    const auto change = nlohmann::json::parse(rows[2]);
+    const auto system = nlohmann::json::parse(rows[3]);
+    const auto applied = nlohmann::json::parse(rows[4]);
+    CHECK(change["payload"]["oldSystemMessageRef"] == first_root);
+    CHECK(change["payload"]["hostBindings"] == bindings);
+    CHECK(system["systemMeta"]["hostBindings"] == bindings);
+    CHECK(system["systemMeta"]["settingsVersion"] == 8);
+    CHECK(system["systemMeta"]["cause"] == "system_prompt_changed");
+    CHECK_FALSE(system["systemMeta"].contains("initialOnly"));
+    CHECK(applied["payload"]["hostBindings"] == bindings);
+    REQUIRE(writer->Close().has_value());
+    auto continued = V3Writer::Continue(harness.jsonl);
+    REQUIRE(continued.has_value());
+    const auto next = continued->SwitchSystem("third",
+        {{"cause", "system_prompt_changed"}, {"settingsVersion", 9}, {"systemChanged", true}});
+    REQUIRE(next.apply_event.status == WriteReceipt::Status::Committed);
+    rows = ReadLines(harness.jsonl);
+    REQUIRE(rows.size() == 8);
+    CHECK(nlohmann::json::parse(rows[6])["systemMeta"]["hostBindings"] == bindings);
+    CHECK(nlohmann::json::parse(rows[6])["systemMeta"]["settingsVersion"] == 9);
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
+
+TEST_CASE("V3Writer: an unadopted system cannot supply host bindings") {
+    Harness harness("unadopted-host-bindings");
+    const nlohmann::json bindings{{"skills", "adopted-plan"}};
+    auto writer = V3Writer::Start(harness.jsonl, "20260910-120000-AAAAAA", "run-000001",
+        "adopted", {{"settingsVersion", 1}, {"hostBindings", bindings}});
+    REQUIRE(writer.has_value());
+    const auto adopted_id = writer->context().system_message_ref;
+    MessageDraft pending;
+    pending.origin = MessageOrigin::SessionRuntime;
+    pending.message = {{"role", "system"}, {"content", "unadopted"}};
+    pending.system_meta = nlohmann::json{{"cause", "initial"}, {"changeEventRef", nullptr},
+        {"systemChanged", false}, {"settingsVersion", 99},
+        {"hostBindings", {{"skills", "unadopted-plan"}}}};
+    REQUIRE(writer->AppendMessage(std::move(pending), Durability::PowerLoss).status == WriteReceipt::Status::Committed);
+    REQUIRE(writer->Close().has_value());
+    auto continued = V3Writer::Continue(harness.jsonl);
+    REQUIRE(continued.has_value());
+    REQUIRE(continued->context().system_message_ref == adopted_id);
+    REQUIRE(continued->SwitchSystem("next", {{"cause", "system_prompt_changed"},
+        {"settingsVersion", 2}, {"systemChanged", true}}).apply_event.status == WriteReceipt::Status::Committed);
+    const auto rows = ReadLines(harness.jsonl);
+    REQUIRE(rows.size() == 6);
+    CHECK(nlohmann::json::parse(rows[3])["payload"]["oldSystemMessageRef"] == adopted_id);
+    CHECK(nlohmann::json::parse(rows[4])["systemMeta"]["hostBindings"] == bindings);
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
 
 TEST_CASE("开卷:首行 system,seq=1,turnId=null,不造空回合") {
     Harness harness("start");

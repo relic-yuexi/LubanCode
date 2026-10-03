@@ -21,6 +21,19 @@
 
 namespace lubancode::memory::queue {
 
+// CLI completion and retry readers share this private queue receipt view.
+// New project receipts confirm only their existing immutable result; this
+// entry point does not enqueue or repeat a topic update.
+struct MemorySaveReceipt {
+    bool exists = false;
+    bool committed = false;
+    std::string error;
+    std::string memory_id;
+    std::string workspace_key;
+};
+MemorySaveReceipt ReadMemorySaveReceipt(const std::filesystem::path& lifecycle_root,
+                                      const std::string& operation_id);
+
 // 本会话排队后等回执的 job(DrainWriteCompletions 的账)。Enqueue 与
 // Drain 可能落在不同线程(渠道会话),自带一把小锁;经 shared_ptr 间接
 // 持有,不删 MemoryWriteQueue 的移动构造(与监督器同款手法)。

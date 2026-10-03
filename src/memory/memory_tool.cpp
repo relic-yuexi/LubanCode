@@ -11,6 +11,9 @@ std::string MemorySaveTool::name() const {
 }
 
 std::string MemorySaveTool::description() const {
+    if (target_) return "同步保存一条已核实项目事实、明确偏好或纠正到正式项目记忆。"
+        "fact 须给项目证据；feedback 须 user-stated；不收候选、猜测、任务进度、密钥或全局记忆。"
+        "只有 committed 回执才确认落盘；indeterminate 停止执行，须由宿主核查。";
     // 文案在 src/prompts/tools/<语言>/memory_save.md,兜底是迁移前的原文。
     return tools::ToolText("memory_save", "description",
                     "把一条小而稳定的项目事实、用户明确偏好或用户明说的行事纠正排进后台记忆(正式入库,不经待审区)。"
@@ -94,16 +97,27 @@ nlohmann::json MemorySaveTool::input_schema() const {
     };
 }
 
-tools::Tool::Result MemorySaveTool::execute(const nlohmann::json& input) {
-    if (!memory_->generate_enabled()) return {"本场记忆写入未开启", true};
-    if (!input.is_object()) return {"memory_save 参数必须是 object", true};
+std::expected<SaveRequest, std::string> ParseMemorySaveInput(const nlohmann::json& input) {
+    if (!input.is_object()) return std::unexpected("memory_save 参数必须是 object");
     for (const char* field : {"kind", "title", "summary", "content"}) {
         if (!input.contains(field) || !input[field].is_string()) {
-            return {std::string("memory_save 缺字符串字段 ") + field, true};
+            return std::unexpected(std::string("memory_save 缺字符串字段 ") + field);
         }
     }
+    for (const char* field : {"id", "confidence", "expires_at", "occurred_at"}) {
+        if (input.contains(field) && !input[field].is_string())
+            return std::unexpected(std::string(field) + " 必须是字符串");
+    }
+    if (input.contains("scope")) {
+        if (!input["scope"].is_object()) return std::unexpected("scope 必须是 object");
+        for (const char* field : {"kind", "value"})
+            if (input["scope"].contains(field) && !input["scope"][field].is_string())
+                return std::unexpected(std::string("scope.") + field + " 必须是字符串");
+    }
+    if (input.contains("evidence") && !input["evidence"].is_array())
+        return std::unexpected("evidence 必须是数组");
     auto kind = ParseMemoryKind(input["kind"].get<std::string>());
-    if (!kind.has_value()) return {kind.error(), true};
+    if (!kind.has_value()) return std::unexpected(kind.error());
     SaveRequest request;
     request.kind = *kind;
     request.id = input.value("id", std::string());
@@ -122,33 +136,48 @@ tools::Tool::Result MemorySaveTool::execute(const nlohmann::json& input) {
     // 自行提交全局记忆。想升为 global 的,只该在结论里建议用户走
     // /memory remember global(须逐次确认)。
     if (request.scope.level == "user") {
-        return {"memory.global_unauthorized: 全局记忆不接受模型工具直写。"
+        return std::unexpected("memory.global_unauthorized: 全局记忆不接受模型工具直写。"
                 "如确属跨项目偏好,请在回复里建议用户执行 /memory remember global <kind> 标题 :: 正文,"
-                "由用户确认后入库。",
-                true};
+                "由用户确认后入库。");
     }
     if (input.contains("evidence") && input["evidence"].is_array()) {
         for (const auto& item : input["evidence"]) {
-            if (!item.is_object()) return {"evidence 每项必须是带 path 的 object", true};
+            if (!item.is_object()) return std::unexpected("evidence 每项必须是带 path 的 object");
+            for (const char* field : {"path", "symbol"})
+                if (item.contains(field) && !item[field].is_string())
+                    return std::unexpected(std::string("evidence.") + field + " 必须是字符串");
             MemoryEvidence evidence;
             evidence.path = item.value("path", std::string());
             evidence.symbol = item.value("symbol", std::string());
-            if (evidence.path.empty()) return {"evidence 每项必须有 path", true};
+            if (evidence.path.empty()) return std::unexpected("evidence 每项必须有 path");
             request.evidence.push_back(std::move(evidence));
         }
     }
     for (const char* field : {"keywords", "paths"}) {
         if (!input.contains(field)) continue;
-        if (!input[field].is_array()) return {std::string(field) + " 必须是字符串数组", true};
+        if (!input[field].is_array()) return std::unexpected(std::string(field) + " 必须是字符串数组");
         std::vector<std::string>& target = std::string(field) == "keywords" ? request.keywords : request.paths;
         for (const auto& item : input[field]) {
-            if (!item.is_string()) return {std::string(field) + " 必须是字符串数组", true};
+            if (!item.is_string()) return std::unexpected(std::string(field) + " 必须是字符串数组");
             target.push_back(item.get<std::string>());
         }
     }
+    return request;
+}
+
+tools::Tool::Result MemorySaveTool::execute(const nlohmann::json& input) {
+    return execute(input, {});
+}
+
+tools::Tool::Result MemorySaveTool::execute(const nlohmann::json& input,
+                                           const tools::ToolExecutionContext& context) {
+    if (!target_ && (!memory_ || !memory_->generate_enabled())) return {"本场记忆写入未开启", true};
+    auto request = ParseMemorySaveInput(input);
+    if (target_) return target_(std::move(request), context);
+    if (!request) return {request.error(), true};
     // 记忆写入调度单 P0:回执按 model_tool_save 投(§6.2 四路之二)。
     // 修复单 §五 B:job_id 是纯文件名;worker 启动失败另附一行,不混进 id。
-    auto queued = memory_->EnqueueSave(request, /*user_initiated=*/false,
+    auto queued = memory_->EnqueueSave(*request, /*user_initiated=*/false,
                                        MemoryWriteSource::ModelToolSave);
     if (!queued.has_value()) return {queued.error(), true};
     std::string note = "记忆已排进后台队列: " + queued->job_id +

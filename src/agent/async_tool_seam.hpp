@@ -24,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <utility>
 
 #include "api/types.hpp"
 #include "tools/tool.hpp"
@@ -41,6 +42,25 @@ enum class ToolProtocolMode { Inline, JobHandle, NativeDeferred };
 
 // 派发点(两档,见文件头)。
 enum class ToolDispatchPoint { OnAssistantComplete, OnCallItemComplete };
+
+// Explicit internal host choice. Legacy retains its existing optional admission
+// contract. OwnedRequired cannot dispatch through that legacy handoff; the
+// owned Job scope/completion adapter is not implemented in this first slice.
+enum class JobAdmissionMode { Legacy, OwnedRequired };
+enum class OwnedJobAdmissionState { Rejected, Accepted, Unconfirmed };
+struct OwnedJobAdmissionReceipt {
+    OwnedJobAdmissionState state = OwnedJobAdmissionState::Rejected;
+    tools::Tool::Result result;
+};
+
+// This first slice has no owned Job scope or completion adapter. An explicit
+// request for that route must not reach the legacy registration/worker path.
+inline OwnedJobAdmissionReceipt MissingOwnedJobAdmission() {
+    tools::Tool::Result result{"Owned Job scope and completion capability are unavailable; this call was not dispatched.", true};
+    result.outcome = "unavailable";
+    result.error_code = "job.admission.owned_scope_unavailable";
+    return {OwnedJobAdmissionState::Rejected, std::move(result)};
+}
 
 // 一枚调用的裁决结果。
 struct ToolCallAdjudication {
@@ -65,6 +85,10 @@ struct ToolCallAdjudication {
 class ToolBatchGate {
 public:
     virtual ~ToolBatchGate() = default;
+
+    // A session host sets this before the turn. It is not model input and not an
+    // authorization grant. Unknown values also reject through the owned route.
+    virtual JobAdmissionMode admission_mode() const noexcept { return JobAdmissionMode::Legacy; }
 
     // 流式提前档探针:单枚 call item 完整时被调(call 来自 assembler 的
     // completed_tool_uses——call_id 已定型、参数已收齐)。返回 true = 已

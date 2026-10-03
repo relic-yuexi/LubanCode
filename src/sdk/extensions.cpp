@@ -34,6 +34,50 @@ bool IsPrompt(const Json& value) {
     return value.is_object() && value.size() == 1 && value.contains("prompt") && value["prompt"].is_string();
 }
 
+constexpr std::size_t kActionArgumentsBytes = 1024 * 1024;
+constexpr std::size_t kActionTextBytes = 1024 * 1024;
+constexpr std::size_t kActionInputBytes = 2 * 1024 * 1024;
+constexpr std::size_t kSupplementBytes = 16 * 1024;
+constexpr std::size_t kSupplementTotalBytes = 32 * 1024;
+
+bool ActionPoint(mw::HookPoint point) {
+    return point == mw::HookPoint::PreAction || point == mw::HookPoint::PostAction;
+}
+bool ValidActionText(const std::string& text, std::size_t cap) {
+    return text.size() <= cap && text.find('\0') == std::string::npos &&
+        lubancode::platform::IsValidUtf8(text);
+}
+bool ActionJsonStrings(const Json& value) {
+    std::vector<const Json*> pending{&value};
+    while (!pending.empty()) {
+        const auto* current = pending.back(); pending.pop_back();
+        if (current->is_string() && !ValidActionText(current->get_ref<const std::string&>(), kActionInputBytes)) return false;
+        if (current->is_object()) {
+            for (auto it = current->begin(); it != current->end(); ++it) {
+                if (!ValidActionText(it.key(), kActionInputBytes)) return false;
+                pending.push_back(&it.value());
+            }
+        } else if (current->is_array()) for (const auto& entry : *current) pending.push_back(&entry);
+    }
+    return true;
+}
+bool IsArguments(const Json& value) {
+    return value.is_object() && value.size() == 1 && value.contains("arguments") &&
+        value["arguments"].is_object() && value.dump().size() <= kActionArgumentsBytes && ActionJsonStrings(value);
+}
+bool IsActionInput(const Json& value, mw::HookPoint point) {
+    if (point == mw::HookPoint::PreAction) return IsArguments(value);
+    if (!value.is_object() || value.size() != 2 || !value.contains("arguments") || !value["arguments"].is_object() ||
+        !value.contains("result") || !value["result"].is_object() || value["result"].size() != 4 ||
+        value.dump().size() > kActionInputBytes || Json{{"arguments", value["arguments"]}}.dump().size() > kActionArgumentsBytes ||
+        !ActionJsonStrings(value)) return false;
+    const auto& result = value["result"];
+    return result.contains("text") && result["text"].is_string() && result.contains("isError") && result["isError"].is_boolean() &&
+        result.contains("outcome") && result["outcome"].is_string() && result.contains("errorCode") && result["errorCode"].is_string() &&
+        ValidActionText(result["text"].get_ref<const std::string&>(), kActionTextBytes) &&
+        ValidActionText(result["errorCode"].get_ref<const std::string&>(), 256);
+}
+
 bool NonNegativeInteger(const Json& value) {
     return value.is_number_unsigned() || (value.is_number_integer() && value.get<std::int64_t>() >= 0);
 }
@@ -66,8 +110,13 @@ Result<mw::HandlerReturn> ConvertReturn(const ext::HandlerReturn& source, const 
     }
     mw::HandlerReturn result;
     if (source.output_json) {
+        if (ActionPoint(context.point) && (observer || context.point == mw::HookPoint::PostAction ||
+            !ValidActionText(*source.output_json, kActionArgumentsBytes)))
+            return std::unexpected(InvalidResult("Action output is forbidden or exceeds its text boundary"));
         auto parsed = ParseJson(*source.output_json, "handler output");
         if (!parsed) return std::unexpected(parsed.error());
+        if (context.point == mw::HookPoint::PreAction && !IsArguments(*parsed))
+            return std::unexpected(InvalidResult("PreAction output requires exactly {arguments:object}"));
         if (!observer && context.point == mw::HookPoint::PreRequest && context.stage == mw::Stage::Estimate &&
             !IsEstimate(*parsed)) {
             return std::unexpected(InvalidResult("Estimate requires an EST1 measurement object"));
@@ -75,6 +124,9 @@ Result<mw::HandlerReturn> ConvertReturn(const ext::HandlerReturn& source, const 
         result.output = std::move(*parsed);
     }
     if (source.deny) {
+        if (ActionPoint(context.point) && (context.point != mw::HookPoint::PreAction ||
+            !ValidActionText(source.deny_code, 256) || !ValidActionText(source.deny_message, 4096)))
+            return std::unexpected(InvalidResult("Action denial is forbidden or exceeds its text boundary"));
         if (source.deny_code.empty() || !lubancode::platform::IsValidUtf8(source.deny_code) ||
             !lubancode::platform::IsValidUtf8(source.deny_message)) {
             return std::unexpected(InvalidResult("Denied requires a nonempty UTF-8 code and UTF-8 message"));
@@ -83,7 +135,12 @@ Result<mw::HandlerReturn> ConvertReturn(const ext::HandlerReturn& source, const 
         result.deny_code = source.deny_code;
         result.deny_message = source.deny_message;
     }
+    std::size_t supplement_bytes = 0;
+    if (ActionPoint(context.point) && source.effects.size() > 16)
+        return std::unexpected(InvalidResult("Action returns more than 16 effects"));
     for (const auto& effect : source.effects) {
+        if (ActionPoint(context.point) && !ValidActionText(effect.payload_json, kActionInputBytes))
+            return std::unexpected(InvalidResult("Action effect exceeds its text boundary"));
         auto parsed = ParseJson(effect.payload_json, "effect payload");
         if (!parsed) return std::unexpected(parsed.error());
         mw::Effect converted;
@@ -97,6 +154,14 @@ Result<mw::HandlerReturn> ConvertReturn(const ext::HandlerReturn& source, const 
                 converted.type = mw::EffectType::ContextAppend;
                 break;
             case ext::EffectType::AdmissionDecision: {
+                if (context.point == mw::HookPoint::PreAction) {
+                    if (!parsed->is_object() || parsed->size() != 2 || parsed->value("decision", Json()) != "ask" ||
+                        !parsed->contains("reason") || !(*parsed)["reason"].is_string() ||
+                        !ValidActionText((*parsed)["reason"].get_ref<const std::string&>(), 4096))
+                        return std::unexpected(InvalidResult("PreAction admission requires exactly {decision:ask,reason:string}"));
+                    converted.type = mw::EffectType::AdmissionDecision;
+                    break;
+                }
                 if (context.point != mw::HookPoint::PreRequest || context.stage != mw::Stage::Capacity ||
                     !parsed->is_object() || parsed->size() != 2 || !parsed->contains("decision") ||
                     !(*parsed)["decision"].is_string() || !parsed->contains("reason") ||
@@ -108,6 +173,17 @@ Result<mw::HandlerReturn> ConvertReturn(const ext::HandlerReturn& source, const 
                     return std::unexpected(InvalidResult("capacity decision must be allow, recover or reject"));
                 }
                 converted.type = mw::EffectType::AdmissionDecision;
+                break;
+            }
+            case ext::EffectType::ResultSupplement: {
+                if (context.point != mw::HookPoint::PostAction || !parsed->is_object() || parsed->size() != 1 ||
+                    !parsed->contains("text") || !(*parsed)["text"].is_string())
+                    return std::unexpected(InvalidResult("ResultSupplement requires PostAction and exactly {text:string}"));
+                const auto& text = (*parsed)["text"].get_ref<const std::string&>();
+                if (!ValidActionText(text, kSupplementBytes) || text.size() > kSupplementTotalBytes - supplement_bytes)
+                    return std::unexpected(InvalidResult("ResultSupplement exceeds its UTF-8 byte boundary"));
+                supplement_bytes += text.size();
+                converted.type = mw::EffectType::ResultSupplement;
                 break;
             }
             default:
@@ -124,6 +200,8 @@ Result<mw::HookPoint> ConvertPoint(ext::Point point) {
         case ext::Point::PreUser: return mw::HookPoint::PreUser;
         case ext::Point::PostUser: return mw::HookPoint::PostUser;
         case ext::Point::PreRequest: return mw::HookPoint::PreRequest;
+        case ext::Point::PreAction: return mw::HookPoint::PreAction;
+        case ext::Point::PostAction: return mw::HookPoint::PostAction;
     }
     return std::unexpected(Error{std::string(mw::err::kManifestInvalid), "unsupported hook point"});
 }
@@ -204,11 +282,13 @@ Result<DownstreamOutcome> Next::Call(std::optional<std::string> candidate_json) 
         if (state_->consumed)
             return std::unexpected(Error{std::string(mw::err::kNextAlreadyConsumed), "Next has already been consumed"});
         if (candidate_json) {
-            if (state_->point != Point::PreUser)
+            if (state_->point != Point::PreUser && state_->point != Point::PreAction)
                 return std::unexpected(Error{std::string(mw::err::kNextBadCandidate), "this hook cannot rewrite input"});
+            if (state_->point == Point::PreAction && !ValidActionText(*candidate_json, kActionArgumentsBytes))
+                return std::unexpected(Error{std::string(mw::err::kNextBadCandidate), "PreAction candidate exceeds its UTF-8 boundary"});
             Json parsed = Json::parse(*candidate_json, nullptr, false);
-            if (parsed.is_discarded() || !IsPrompt(parsed))
-                return std::unexpected(Error{std::string(mw::err::kNextBadCandidate), "PreUser candidate must be exactly {prompt:string}"});
+            if (parsed.is_discarded() || (state_->point == Point::PreUser ? !IsPrompt(parsed) : !IsArguments(parsed)))
+                return std::unexpected(Error{std::string(mw::err::kNextBadCandidate), "candidate does not match its hook contract"});
             candidate = std::move(parsed);
         }
         // Consume before entering downstream; do not hold this lock around user
@@ -279,18 +359,10 @@ std::string SessionExtensions::OperationScope() const {
 
 std::string SessionExtensions::DescribePlan() const { return plan_json_; }
 
-Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Build(
-    std::vector<ext::Registration>& registrations, const ext::SessionContext& context,
-    std::optional<std::string> expected_plan_json) {
+Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Prepare(
+    const std::vector<ext::Registration>& registrations, const ext::SessionContext& context,
+    const std::optional<std::string>& expected_plan_json) {
     CallbackScope callback_scope;
-    struct Sources {
-        std::vector<ext::Registration>& registrations;
-        ~Sources() {
-            // Clear actual std::function sources. Moving is insufficient for
-            // small-buffer callbacks in some standard library implementations.
-            for (auto& registration : registrations) registration.factory = nullptr;
-        }
-    } sources{registrations};
     try {
         auto module = std::unique_ptr<SessionExtensions>(new SessionExtensions(context));
         if (registrations.empty()) {
@@ -398,10 +470,28 @@ Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Build(
                     callback_context.step_id = native_context.step_id;
                     callback_context.request_id = native_context.request_id;
                     callback_context.cancellation.flag = native_context.cancel;
+                    if (ActionPoint(native_context.point)) {
+                        const auto& action = native_context.action_scope;
+                        if (!action || action->session_id != callback_context.session_id ||
+                            action->operation_id != callback_context.operation_id || action->operation_id.empty() ||
+                            !native_context.turn_id || native_context.turn_id->empty() ||
+                            !native_context.action_id || native_context.action_id->empty() || action->wire_call_id.empty() ||
+                            action->tool_name.empty() || action->effective_cwd != module_ptr->context_.cwd ||
+                            (point == ext::Point::PreAction ? action->attempt.has_value() : !action->attempt || *action->attempt == 0) ||
+                            !IsActionInput(input, native_context.point))
+                            return std::unexpected(mw::HandlerError{"sdk.action.owner_or_input_invalid", "actual main Action scope or payload is invalid"});
+                        callback_context.action_id = native_context.action_id;
+                        callback_context.wire_call_id = action->wire_call_id;
+                        callback_context.tool_name = action->tool_name;
+                        callback_context.effective_cwd = action->effective_cwd;
+                        if (action->attempt) callback_context.execution = ext::ExecutionIdentity{
+                            action->session_id, action->operation_id, *native_context.turn_id, *native_context.action_id, *action->attempt};
+                    }
                     auto result = module_ptr->instances_.at(instance_index)->Invoke(
                         callback_context, ext::Input{1, input.dump()}, lease.next());
                     if (!result) {
-                        if (result.error().code.empty() || !lubancode::platform::IsValidUtf8(result.error().code) ||
+                        if ((ActionPoint(native_context.point) && (!ValidActionText(result.error().code, 256) ||
+                            !ValidActionText(result.error().message, 4096))) || result.error().code.empty() || !lubancode::platform::IsValidUtf8(result.error().code) ||
                             !lubancode::platform::IsValidUtf8(result.error().message)) {
                             return std::unexpected(mw::HandlerError{
                                 std::string(mw::err::kResultInvalid), "handler error requires a nonempty UTF-8 code and UTF-8 message"});
@@ -420,14 +510,47 @@ Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Build(
         Json plan = (*frozen)->DescribePlan();
         plan["schemaVersion"] = 1;
         plan["extensions"] = std::move(identities);
+        const bool has_action = std::any_of(registrations.begin(), registrations.end(), [](const auto& registration) {
+            return std::any_of(registration.manifest.handlers.begin(), registration.manifest.handlers.end(), [](const auto& handler) {
+                return handler.point == ext::Point::PreAction || handler.point == ext::Point::PostAction;
+            });
+        });
+        if (has_action) plan["sdkActionVersion"] = 1;
         const auto compatible = CheckResumePlan(plan, expected_plan_json);
         if (!compatible) return std::unexpected(compatible.error());
         module->plan_json_ = plan.dump();
+        module->prepared_registry_ = std::move(*frozen);
+        return module;
+    } catch (const std::exception& error) {
+        return std::unexpected(Error{"sdk.extension.assembly_failed", error.what()});
+    } catch (...) {
+        return std::unexpected(Error{"sdk.extension.assembly_failed", "extension assembly threw an unknown exception"});
+    }
+}
+
+Result<std::string> SessionExtensions::DescribeDeclarations(const std::vector<ext::Registration>& registrations) {
+    auto module = Prepare(registrations, {}, std::nullopt);
+    if (!module) return std::unexpected(module.error());
+    return (*module)->DescribePlan();
+}
+
+Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Build(
+    std::vector<ext::Registration>& registrations, const ext::SessionContext& context,
+    std::optional<std::string> expected_plan_json) {
+    CallbackScope callback_scope;
+    struct Sources {
+        std::vector<ext::Registration>& registrations;
+        ~Sources() { for (auto& registration : registrations) registration.factory = nullptr; }
+    } sources{registrations};
+    auto prepared = Prepare(registrations, context, expected_plan_json);
+    if (!prepared) return std::unexpected(prepared.error());
+    auto module = std::move(*prepared);
+    if (registrations.empty()) return module;
+    try {
         // Publication validates all conflicts, dependencies, stage ordering and
         // required/observer rules before a trusted factory can acquire resources.
         // Native wrappers capture indices; no dispatch becomes reachable until
         // all unique per-session instances have been installed below.
-        Sources factory_sources{registrations};
         module->instances_.reserve(registrations.size());
         for (const auto& registration : registrations) {
             Result<std::unique_ptr<ext::Instance>> instance = std::unexpected(Error{"sdk.extension.factory_failed", "factory did not return an instance"});
@@ -444,7 +567,7 @@ Result<std::unique_ptr<SessionExtensions>> SessionExtensions::Build(
             module->instances_.push_back(std::move(*instance));
         }
         module->dispatcher_ = std::make_unique<lubancode::hooks::HookDispatcher>();
-        module->dispatcher_->SetMiddleware(std::make_shared<mw::MiddlewareDispatcher>(std::move(*frozen)));
+        module->dispatcher_->SetMiddleware(std::make_shared<mw::MiddlewareDispatcher>(module->prepared_registry_));
         return module;
     } catch (const std::exception& error) {
         return std::unexpected(Error{"sdk.extension.assembly_failed", error.what()});

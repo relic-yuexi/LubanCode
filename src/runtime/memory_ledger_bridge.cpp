@@ -1,10 +1,8 @@
 #include "runtime/memory_ledger_bridge.hpp"
 
-#include <filesystem>
-#include <system_error>
-
 #include "platform/log_sink.hpp"
-#include "trajectory/blob_store.hpp"
+#include "platform/sha256.hpp"
+#include "trajectory/cas_store.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/v3/writer.hpp"
 
@@ -12,20 +10,89 @@ namespace lubancode::runtime {
 
 namespace {
 
-namespace fs = std::filesystem;
-
 // 合同 §四:≤512B 的小内容允许内联(snapshot_inline/snapshotInline),
 // 其余走内容寻址 blob。
 constexpr std::size_t kSnapshotInlineLimit = 512;
 
-std::string PathUtf8Text(const fs::path& path) {
-    const std::u8string value = path.generic_u8string();
-    return std::string(reinterpret_cast<const char*>(value.data()), value.size());
-}
 
 }  // namespace
 
 MemoryLedgerBridge::MemoryLedgerBridge(TrajectorySessionLedger& ledger) : ledger_(ledger) {}
+
+std::expected<std::string, std::string> MemoryLedgerBridge::StoreSnapshot(
+    const memory::InjectedMemoryRecord& record) {
+    auto capability = ledger_.memory_capability();
+    if (!capability || capability->scope() != trajectory::CasScope{ledger_.workspace_key(), ledger_.session_id()})
+        return std::unexpected("cas.scope_mismatch");
+    if (record.content.empty() || record.injected_bytes != record.content.size() ||
+        platform::Sha256Hex(record.content) != record.content_sha256)
+        return std::unexpected("cas.invalid_snapshot");
+    const auto receipt = capability->Store(record.content, "text/plain", trajectory::CasDurability::ProcessCrash);
+    if (!receipt.Confirms(trajectory::CasDurability::ProcessCrash))
+        return std::unexpected(receipt.error.code.empty() ? "cas.durability_unconfirmed" : receipt.error.code);
+    auto actual = capability->Read(receipt.reference, record.content.size());
+    if (!actual) return std::unexpected(actual.error().code);
+    if (*actual != record.content || receipt.reference.sha256 != record.content_sha256)
+        return std::unexpected("cas.read_mismatch");
+    return trajectory::MemoryCapability::LogicalReference(receipt.reference.sha256);
+}
+
+std::expected<MemoryLedgerBridge::ContextAdmission, std::string> MemoryLedgerBridge::AdmitRecallContext(
+    const std::string& text, const std::vector<memory::InjectedMemoryRecord>& records,
+    const std::string& turn_id) {
+    namespace v3 = trajectory::v3;
+    auto* writer = ledger_.v3_main_writer();
+    if (!writer || text.empty() || turn_id.empty())
+        return std::unexpected("memory.recall.invalid_context");
+    std::vector<nlohmann::json> payloads;
+    for (const auto& record : records) {
+        if (record.content.empty() || record.turn_id != turn_id || record.memory_level != "project" ||
+            record.injected_bytes != record.content.size() || text.find(record.content) == std::string::npos ||
+            platform::Sha256Hex(record.content) != record.content_sha256)
+            return std::unexpected("memory.recall.invalid_snapshot");
+        nlohmann::json payload{
+            {"memoryId", record.memory_id}, {"memoryLevel", record.memory_level},
+            {"memorySchema", static_cast<std::uint64_t>(record.memory_schema)},
+            {"memoryUpdatedAt", record.memory_updated_at}, {"contentSha256", record.content_sha256},
+            {"sourceEvidenceRefs", record.source_evidence_refs},
+            {"injectedBytes", static_cast<std::uint64_t>(record.injected_bytes)}};
+        if (record.content.size() > kSnapshotInlineLimit) {
+            auto stored = StoreSnapshot(record);
+            if (!stored) return std::unexpected("memory.recall.snapshot_failed: " + stored.error());
+            payload["snapshotRef"] = std::move(*stored);
+        } else payload["snapshotInline"] = record.content;
+        payloads.push_back(std::move(payload));
+    }
+    v3::MessageDraft draft;
+    draft.turn_id = turn_id;
+    draft.origin = v3::MessageOrigin::ContextRuntime;
+    draft.display = v3::DisplayMode::Hidden;
+    draft.message = nlohmann::json{{"role", "user"}, {"content", text}};
+    const auto stored = writer->AppendMessage(std::move(draft), trajectory::Durability::ProcessCrash);
+    if (stored.status != v3::WriteReceipt::Status::Committed)
+        return std::unexpected("memory.recall.snapshot_failed: " + stored.error_code);
+    const auto admitted = writer->AdmitMessages({stored.id}, trajectory::Durability::ProcessCrash);
+    if (admitted.status != v3::WriteReceipt::Status::Committed)
+        return std::unexpected("memory.recall.admission_failed: " + admitted.error_code);
+    ContextAdmission result;
+    result.message.role = api::Role::User;
+    result.message.content.push_back(api::TextBlock{text});
+    result.message_id = stored.id;
+    for (auto& payload : payloads) {
+        v3::EventDraft event;
+        event.kind = v3::EventKindV3::MemoryRecallInjected;
+        event.turn_id = turn_id;
+        payload["contextMessageRef"] = stored.id;
+        event.payload = std::move(payload);
+        const auto receipt = writer->AppendEvent(std::move(event), trajectory::Durability::ProcessCrash);
+        if (receipt.status != v3::WriteReceipt::Status::Committed) {
+            ledger_.BlockV3Execution("memory.recall.fact_failed");
+            result.error = "memory.recall.fact_failed: " + receipt.error_code;
+            return result;
+        }
+    }
+    return result;
+}
 
 // ---------------------------------------------------------------------------
 // v3 场:召回注入——快照消息 -> 链接纳 -> 事实行,三步按序落稳
@@ -47,21 +114,9 @@ std::expected<void, std::string> MemoryLedgerBridge::RecordRecallInjection(
     std::string snapshot_ref;
     std::string snapshot_inline;
     if (record.content.size() > kSnapshotInlineLimit) {
-        const fs::path artifact_root = ledger_.session_dir() / "artifacts";
-        trajectory::BlobStore blobs(artifact_root);
-        auto stored = blobs.Store(record.content, "text/plain", trajectory::Durability::ProcessCrash);
-        if (!stored.has_value()) {
-            return std::unexpected("memory.recall_snapshot_failed: " + stored.error());
-        }
-        if (stored->sha256 != record.content_sha256) {
-            return std::unexpected("memory.recall_snapshot_failed: 快照指纹与正文对不上");
-        }
-        std::error_code ec;
-        const fs::path relative = fs::relative(blobs.PathFor(stored->sha256), ledger_.session_dir(), ec);
-        if (ec) {
-            return std::unexpected("memory.recall_snapshot_failed: 快照路径解析失败: " + ec.message());
-        }
-        snapshot_ref = PathUtf8Text(relative);
+        auto stored = StoreSnapshot(record);
+        if (!stored) return std::unexpected("memory.recall_snapshot_failed: " + stored.error());
+        snapshot_ref = std::move(*stored);
     } else {
         snapshot_inline = record.content;
     }
@@ -132,24 +187,9 @@ std::expected<void, std::string> MemoryLedgerBridge::RecordRecallInjectionV3(
         std::string snapshot_ref;
         std::string snapshot_inline;
         if (record.content.size() > kSnapshotInlineLimit) {
-            const fs::path artifact_root = ledger_.session_dir() / "artifacts";
-            trajectory::BlobStore blobs(artifact_root);
-            auto stored =
-                blobs.Store(record.content, "text/plain", trajectory::Durability::ProcessCrash);
-            if (!stored.has_value()) {
-                return std::unexpected("memory.recall_snapshot_failed: " + stored.error());
-            }
-            if (stored->sha256 != record.content_sha256) {
-                return std::unexpected("memory.recall_snapshot_failed: 快照指纹与正文对不上");
-            }
-            std::error_code ec;
-            const fs::path relative =
-                fs::relative(blobs.PathFor(stored->sha256), ledger_.session_dir(), ec);
-            if (ec) {
-                return std::unexpected("memory.recall_snapshot_failed: 快照路径解析失败: " +
-                                       ec.message());
-            }
-            snapshot_ref = PathUtf8Text(relative);
+            auto stored = StoreSnapshot(record);
+            if (!stored) return std::unexpected("memory.recall_snapshot_failed: " + stored.error());
+            snapshot_ref = std::move(*stored);
         } else {
             snapshot_inline = record.content;
         }
@@ -283,6 +323,47 @@ std::string MemoryLedgerBridge::RecordSaveRequested(const memory::SaveLedgerNote
     }
     return "workspace_key=" + ledger_.workspace_key() + "/session_id=" + ledger_.session_id() +
            "/run_id=" + recorder->base_scope().run_id + "/event_id=" + receipt.event_id;
+}
+
+std::expected<MemoryLedgerBridge::SaveRequestReceipt, std::string> MemoryLedgerBridge::RecordSaveRequestedStrict(
+    const tools::ToolInvocationIdentity& identity, const nlohmann::json& request,
+    const std::string& request_sha256, const std::string& commit_key) {
+    auto* writer = ledger_.v3_main_writer();
+    if (!writer || identity.session_id != writer->session_id() || identity.operation_id.empty() ||
+        identity.turn_id.empty() || identity.action_id.empty() || identity.attempt == 0 ||
+        request_sha256 != platform::Sha256Hex(request.dump()) || commit_key.empty())
+        return std::unexpected("sdk.memory_write.invocation_invalid");
+    trajectory::v3::EventDraft draft;
+    draft.kind = trajectory::v3::EventKindV3::MemorySaveRequested;
+    draft.turn_id = identity.turn_id;
+    draft.action_id = identity.action_id;
+    draft.payload = {{"sdkMemoryWrite", 1}, {"operationId", identity.operation_id},
+        {"attempt", identity.attempt}, {"commitKey", commit_key},
+        {"saveRequestSha256", request_sha256}, {"normalizedRequest", request},
+        {"originator", "model_tool"}, {"sourceSession", identity.session_id}};
+    const auto saved = writer->AppendEvent(std::move(draft), trajectory::Durability::PowerLoss);
+    if (saved.status != trajectory::v3::WriteReceipt::Status::Committed || saved.id.empty())
+        return std::unexpected("sdk.memory_write.requested_failed: " + saved.error_code);
+    return SaveRequestReceipt{saved.id, "workspace_key=" + ledger_.workspace_key() +
+        "/session_id=" + writer->session_id() + "/run_id=" + writer->run_id() + "/event_id=" + saved.id};
+}
+
+std::expected<std::string, std::string> MemoryLedgerBridge::RecordSaveReceiptStrict(
+    const tools::ToolInvocationIdentity& identity, const nlohmann::json& receipt) {
+    auto* writer = ledger_.v3_main_writer();
+    if (!writer || identity.session_id != writer->session_id() || identity.turn_id.empty() ||
+        identity.action_id.empty() || identity.operation_id.empty() || identity.attempt == 0)
+        return std::unexpected("sdk.memory_write.invocation_invalid");
+    trajectory::v3::EventDraft draft;
+    draft.kind = trajectory::v3::EventKindV3::MemoryWriteReceipted;
+    draft.turn_id = identity.turn_id;
+    draft.action_id = identity.action_id;
+    draft.payload = {{"sdkMemoryWrite", 1}, {"operationId", identity.operation_id},
+        {"attempt", identity.attempt}, {"receipt", receipt}};
+    const auto saved = writer->AppendEvent(std::move(draft), trajectory::Durability::PowerLoss);
+    if (saved.status != trajectory::v3::WriteReceipt::Status::Committed || saved.id.empty())
+        return std::unexpected("sdk.memory_write.receipted_failed: " + saved.error_code);
+    return saved.id;
 }
 
 std::string MemoryLedgerBridge::RecordSaveRequestedV3(trajectory::v3::V3Writer& writer,

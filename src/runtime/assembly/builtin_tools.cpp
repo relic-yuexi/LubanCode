@@ -16,11 +16,13 @@
 
 namespace lubancode::runtime::assembly {
 
-std::unique_ptr<tools::Tool> CreateLocalTool(const std::string& name) {
+std::unique_ptr<tools::Tool> CreateLocalTool(
+    const std::string& name, std::shared_ptr<tools::IRipgrepRunner> search_runner) {
     if (name == "read_file") return std::make_unique<tools::ReadFileTool>();
     if (name == "run_command") return std::make_unique<tools::RunCommandTool>();
     if (name == "write_file") return std::make_unique<tools::WriteFileTool>();
     if (name == "edit_file") return std::make_unique<tools::EditFileTool>();
+    if (name == "search" && search_runner) return std::make_unique<tools::SearchTool>(std::move(search_runner));
     return nullptr;
 }
 

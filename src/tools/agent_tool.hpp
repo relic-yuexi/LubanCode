@@ -157,6 +157,19 @@ private:
 // RunState、RunState 又要活在 AgentTool 前"的环。AgentTool::Hooks 是它的
 // 别名,宿主/测试侧的既有用法一字不变;字段语义见各成员注释(原样迁来)。
 struct AgentSubagentHooks {
+    // Foreground-only explicit capability. Values identify a real main-parent
+    // child ledger; no hook/request/future retains this invocation's cancel flag.
+    std::function<runtime::ApprovalLease(const runtime::ChildApprovalRequest&)> on_child_tool_confirm_scoped;
+    // Required by the new capability. Evaluate the same configured rules and
+    // scope's effective floor, without the parent's temporary allowed/grant
+    // account. The legacy three-state evaluator cannot identify Allow's source.
+    std::function<runtime::PermissionVerdict(const runtime::ChildApprovalScope&,
+        const runtime::ToolHookDecision&, ApprovalClass, const std::string&, const nlohmann::json&)>
+        on_child_permission_evaluate;
+    std::function<bool(const runtime::ChildApprovalScope&, const std::string&)> on_child_tool_granted;
+    // Must be idempotent and must not throw. Called once after the entire child
+    // call (including continuation/Stop), never after each successful ticket.
+    std::function<void(const runtime::ChildApprovalScope&)> on_child_approval_scope_closed;
     // 子代理内部工具 needs_confirm() 为真时,原样转发给父级
     // on_tool_confirm——三档确认模式(yolo/auto/confirm)在父级那份
     // 回调里已经处理好了,这里不用重复实现。
@@ -255,11 +268,11 @@ struct AgentSubagentHooks {
     // 派出它的那只子代理,不是 main(单子 §12.3 第一条)。
     std::function<std::unique_ptr<runtime::TrajectorySubagentBridge>(
         const std::string& task_label, const std::string& parent_run_id,
-        runtime::SubagentSpawnFailure* failure_out)>
+        runtime::SubagentSpawnFailure* failure_out, runtime::SubagentDispatchMode mode)>
         trajectory_spawn;
-    // 子账收口(run terminal + 关柄)后的回填口:父桥记下子账终态
-    // hash,父侧 agent 调用的执行终态事件引用它(§3.5 边界对账)。
-    std::function<void(const std::string& run_id, const std::string& terminal_hash)>
+    // Owned native append/Close evidence. This callback does not persist a V3
+    // parent terminal observation or prove parent-model adoption.
+    std::function<void(const runtime::SubagentTerminalReceipt&)>
         trajectory_child_finished;
 
     // ESC/Ctrl+C 打断信号(宿主那份 cancel_flag 的地址)——子代理
@@ -332,7 +345,7 @@ struct AgentRunState {
     // 轨迹 spawn 钩子与进程级 dispatcher:后台/嵌套派工要用,定格成值。
     std::function<std::unique_ptr<runtime::TrajectorySubagentBridge>(
         const std::string& task_label, const std::string& parent_run_id,
-        runtime::SubagentSpawnFailure* failure_out)>
+        runtime::SubagentSpawnFailure* failure_out, runtime::SubagentDispatchMode mode)>
         trajectory_spawn;
     lubancode::hooks::HookDispatcher* hook_dispatcher = nullptr;
 
@@ -508,6 +521,9 @@ public:
     }
     void SetDetachedRegistryFactory(std::function<std::unique_ptr<ToolRegistry>()> factory) {
         run_state_->detached_registry_factory = std::move(factory);
+    }
+    void SetBackgroundThreadFactoryForTesting(AgentTaskCoordinator::ThreadFactory factory) {
+        coordinator_->SetThreadFactoryForTesting(std::move(factory));
     }
 
     // 后台能力判定(派工单 §二):当前入口有没有后台子代理后端。main 直派
@@ -742,10 +758,9 @@ public:
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return false; }  // 子代理内部的危险工具各自有确认关
     Result execute(const nlohmann::json& input) override;
-    // 子代理自带 CancelChain(面板 x/父轮 ESC/墙钟在 RunTask 里并根),外层
-    // 递进来的取消旗不另开旁路——using 把基类的 context 口带进重载集,
-    // AgentDispatchTool 等转发壳递 (input, context) 时走基类默认适配。
-    using Tool::execute;
+    // This call's flag joins the foreground CancelChain. The pointer is not
+    // retained by this shared facade, a child handle, or a detached worker.
+    Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override;
 
 private:
     // P0-3 的 typed 派工入口:execute()/AgentDispatchHandle 都汇到这。caller

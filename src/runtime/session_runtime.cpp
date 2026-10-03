@@ -36,6 +36,10 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
     ledger_options.one_shot = options_.trajectory_one_shot;
     ledger_options.training_policy = options_.trajectory_training_policy;
     ledger_options.v3_system_content = options_.trajectory_v3_system_content;
+    ledger_options.v3_opening_participant = options_.trajectory_v3_opening_participant;
+    ledger_options.memory_capability_factory = options_.trajectory_memory_capability_factory;
+    ledger_options.recovery_capture = options_.trajectory_recovery_capture;
+    ledger_options.recovery_factory = options_.trajectory_recovery_factory;
     auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
     if (ledger.has_value()) {
         trajectory_.emplace(std::move(*ledger));
@@ -118,6 +122,13 @@ std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::p
         ledger_options.lubancode_version = options_.lubancode_version;
         ledger_options.approval_mode = options_.approval_mode;
         ledger_options.launch_cwd = platform::PathToUtf8(ledger_options.workspace_identity.launch_cwd);
+        ledger_options.v3_opening_participant = options_.trajectory_v3_opening_participant;
+        ledger_options.memory_capability_factory = options_.trajectory_memory_capability_factory;
+        ledger_options.recovery_capture = options_.trajectory_recovery_capture;
+        ledger_options.recovery_factory = options_.trajectory_recovery_factory;
+        if (ledger_options.v3_opening_participant) {
+            ledger_options.v3_system_content = options_.trajectory_v3_system_content;
+        }
         auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
         if (!ledger.has_value()) {
             return ledger.error();
@@ -131,6 +142,13 @@ std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::p
     ledger_options.workspace_identity = std::move(*identity);
     ledger_options.lubancode_version = options_.lubancode_version;
     ledger_options.launch_cwd = platform::PathToUtf8(ledger_options.workspace_identity.launch_cwd);
+    ledger_options.v3_opening_participant = options_.trajectory_v3_opening_participant;
+    ledger_options.memory_capability_factory = options_.trajectory_memory_capability_factory;
+    ledger_options.recovery_capture = options_.trajectory_recovery_capture;
+    ledger_options.recovery_factory = options_.trajectory_recovery_factory;
+    if (ledger_options.v3_opening_participant) {
+        ledger_options.v3_system_content = options_.trajectory_v3_system_content;
+    }
     auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
     if (!ledger.has_value()) {
         return ledger.error();
