@@ -1,3 +1,14 @@
+# One testing-only, standard-library executable serves CLI-only, SDK-only and
+# combined fixtures. No library links or install rule belong to this target.
+add_executable(lubancore_command_limits_probe support/command_limits_probe.cpp)
+target_compile_features(lubancore_command_limits_probe PRIVATE cxx_std_23)
+set_target_properties(lubancore_command_limits_probe PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+if(MSVC)
+  set_property(TARGET lubancore_command_limits_probe PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
+
 if(NOT LUBANCODE_BUILD_CLI)
   if(LUBANCODE_BUILD_SDK)
     include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
@@ -90,6 +101,9 @@ add_executable(lubancode_tests
   ${LUBANCODE_TEST_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCORE_TEST_COMMAND_LIMITS_PROBE="$<TARGET_FILE:lubancore_command_limits_probe>")
+add_dependencies(lubancode_tests lubancore_command_limits_probe)
 if(TARGET luban_job_runner_client)
   # Use the same production Process owner without adding its platform objects
   # to the App/SDK aggregate. SDK-only and Runner-only return before this block.

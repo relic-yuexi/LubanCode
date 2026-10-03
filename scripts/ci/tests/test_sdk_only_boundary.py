@@ -184,6 +184,91 @@ class BoundaryTests(unittest.TestCase):
         self.targets.append(probe)
         return probe
 
+    def add_command_probe(self):
+        self.source_file(boundary.COMMAND_LIMITS_PROBE_SOURCE, "#include <iostream>\nint main() { return 0; }\n")
+        probe = {"id": "command-probe", "name": boundary.COMMAND_LIMITS_PROBE_TARGET,
+                 "type": "EXECUTABLE", "compileGroups": [{}],
+                 "sources": [{"path": boundary.COMMAND_LIMITS_PROBE_SOURCE, "compileGroupIndex": 0}]}
+        self.targets.append(probe)
+        return probe
+
+    def test_command_probe_testing_off_and_wrong_target_type_reject(self):
+        probe = self.add_command_probe()
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        probe["type"] = "STATIC_LIBRARY"
+        self.assert_rejected(self.check(testing=True), "executable target")
+
+    def test_command_probe_wrong_owner_and_adjacent_support_source_reject(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_command_probe()
+        probe["name"] = "unrelated_probe"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        probe["name"] = boundary.COMMAND_LIMITS_PROBE_TARGET
+        other = "tests/support/command_limits_probe_adjacent.cpp"
+        self.source_file(other, "int adjacent;\n")
+        probe["sources"].append({"path": other, "compileGroupIndex": 0})
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_command_probe_source_cannot_compile_directly_in_sdk_test_target(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_command_probe()
+        probe["name"] = "lubancore_sdk_tests"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_command_probe_must_not_link_a_project_library_or_enter_sdk_closure(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_command_probe()
+        probe["dependencies"] = [{"id": "engine"}]
+        self.assert_rejected(self.check(testing=True), "must not depend")
+        probe.pop("dependencies")
+        self.targets[0]["dependencies"].append({"id": "command-probe"})
+        self.assert_rejected(self.check(testing=True), "SDK library depends")
+
+    def test_command_probe_allows_only_cmake_regeneration_utility(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_command_probe()
+        self.targets.append({"id": "zero", "name": "ZERO_CHECK", "type": "UTILITY"})
+        probe["dependencies"] = [{"id": "zero"}]
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        self.targets[-1]["name"] = "arbitrary_utility"
+        self.assert_rejected(self.check(testing=True), "must not depend")
+
+    def test_command_probe_cannot_hide_project_or_platform_header_dependencies(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        self.add_command_probe()
+        for include in ("neutral/bridge.hpp", "windows.h"):
+            self.source_file(boundary.COMMAND_LIMITS_PROBE_SOURCE, '#include "' + include + '"\nint main() {}\n')
+            self.assert_rejected(self.check(testing=True), "only standard-library headers")
+
+    def test_command_source_is_only_one_testing_on_sdk_owned_shared_fixture(self):
+        shared = "tests/unit/tools/test_run_command_execution_limits.cpp"
+        self.source_file(shared, "int command_test;\n")
+        target = {"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "neutral_engine"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        nearby = "tests/unit/tools/test_run_command_process.cpp"
+        self.source_file(nearby, "int adjacent_test;\n")
+        target["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_command_source_still_rejects_reverse_host_headers(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        shared = "tests/unit/tools/test_run_command_execution_limits.cpp"
+        self.source_file(shared, '#include "tools/run_command.hpp"\n')
+        self.source_file("src/tools/run_command.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
     def test_search_probe_is_only_a_testing_on_isolated_executable(self):
         probe = self.add_search_probe()
         self.assert_rejected(self.check(), "testing is OFF")
