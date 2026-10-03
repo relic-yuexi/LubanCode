@@ -134,6 +134,56 @@ void PrintMemoryDiagnostic(const char* label, const MemoryDiagnostic& observatio
               << observation.dump(-1, ' ', true, MemoryDiagnostic::error_handler_t::replace) << '\n';
 }
 
+// MEMORY_WORKER_BATCH_DIAGNOSTIC_BEGIN
+void PrintMemoryWorkerBatchLine(const char* stage, const MemoryDiagnostic& observation) noexcept {
+    try {
+        const auto text = observation.dump(-1, ' ', true, MemoryDiagnostic::error_handler_t::replace);
+        if (text.size() > 16 * 1024) {
+            std::cerr << "[memory-worker-batch-diagnostic-failed] line_cap\n" << std::flush;
+            return;
+        }
+        std::cerr << (std::string("[memory-worker-batch-") + stage + "] " + text + "\n") << std::flush;
+    } catch (...) {
+        try { std::cerr << "[memory-worker-batch-diagnostic-failed]\n" << std::flush; } catch (...) {}
+    }
+}
+
+void PrintMemoryWorkerBatchStatus(const char* check, const memory::RuntimeStatus& status) noexcept {
+    try {
+        PrintMemoryWorkerBatchLine("status", {{"check", check}, {"pending_jobs", status.pending_jobs},
+            {"failed_jobs", status.failed_jobs}, {"entry_count", status.entry_count}});
+    } catch (...) {
+        try { std::cerr << "[memory-worker-batch-diagnostic-failed]\n" << std::flush; } catch (...) {}
+    }
+}
+
+void PrintMemoryWorkerBatchDrain(int round,
+    const std::vector<memory::ProjectMemory::MemoryWriteCompletion>& completions) noexcept {
+    try {
+        constexpr std::size_t cap = 32;
+        PrintMemoryWorkerBatchLine("drain", {{"round", round}, {"completion_count", completions.size()},
+            {"printed_cap", cap}, {"omitted_count", completions.size() > cap ? completions.size() - cap : 0}});
+        for (std::size_t i = 0; i < completions.size() && i < cap; ++i) {
+            const auto& completion = completions[i];
+            MemoryDiagnostic observation{{"round", round}, {"index", i}};
+            const auto field = [&](const char* key, const std::string& value, std::size_t byte_cap) {
+                observation[key] = value.substr(0, byte_cap);
+                observation[std::string(key) + "_bytes"] = value.size();
+                observation[std::string(key) + "_truncated"] = value.size() > byte_cap;
+            };
+            field("job_id", completion.job_id, 256);
+            field("operation_id", completion.operation_id, 256);
+            field("outcome", completion.outcome, 256);
+            field("memory_id", completion.memory_id, 256);
+            field("error", completion.error, 1024);
+            PrintMemoryWorkerBatchLine("completion", observation);
+        }
+    } catch (...) {
+        try { std::cerr << "[memory-worker-batch-diagnostic-failed]\n" << std::flush; } catch (...) {}
+    }
+}
+// MEMORY_WORKER_BATCH_DIAGNOSTIC_END
+
 class CaptureBackend : public api::Backend {
 public:
     std::expected<void, api::Error> send_stream(
@@ -775,13 +825,19 @@ TEST_CASE("ProjectMemory: 真 worker 连续入队不起风暴,全部提交且回
         // 这里有界重试兜底(生产路由同款)。
         if (++polls % 40 == 0) (void)store.EnsureWorkerRunning();
     }
-    CHECK(store.Status().pending_jobs == 0);
-    CHECK(store.Status().failed_jobs == 0);
+    const auto batch_pending_status = store.Status();
+    PrintMemoryWorkerBatchStatus("pending", batch_pending_status);
+    CHECK(batch_pending_status.pending_jobs == 0);
+    const auto batch_failed_status = store.Status();
+    PrintMemoryWorkerBatchStatus("failed", batch_failed_status);
+    CHECK(batch_failed_status.failed_jobs == 0);
     REQUIRE(store.ListEntries().size() == 6);
     // "已入库"只从回执来:6 张 committed,核对 job_id/operation_id 一一对应。
     std::size_t committed = 0;
     for (int drain_round = 0; drain_round < 2; ++drain_round) {
-        for (const auto& completion : store.DrainWriteCompletions()) {
+        const auto batch_completions = store.DrainWriteCompletions();
+        PrintMemoryWorkerBatchDrain(drain_round, batch_completions);
+        for (const auto& completion : batch_completions) {
             if (drain_round == 0) {
                 CHECK(completion.outcome == "committed");
                 CHECK_FALSE(completion.memory_id.empty());
