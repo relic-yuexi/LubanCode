@@ -43,7 +43,8 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/runtime/test_scoped_turn_bindings.cpp")
 list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/runtime/test_owned_job_admission.cpp"
-  "${_lubancore_tests_root}/unit/runtime/test_middleware_native_receipts.cpp")
+  "${_lubancore_tests_root}/unit/runtime/test_middleware_native_receipts.cpp"
+  "${_lubancore_tests_root}/unit/hooks/test_middleware_dispatch_cause.cpp")
 set(_lubancore_tests_exclude)
 if(LUBANCODE_BUILD_CLI)
   set(_lubancore_tests_exclude EXCLUDE_FROM_ALL)
@@ -136,6 +137,8 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     if(TEST "${sdk_original_test}")
       set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "tools-${sdk_stem}")
     endif()
+  elseif(sdk_basename STREQUAL "test_middleware_dispatch_cause.cpp")
+    set(sdk_original_test "unit.hooks.${sdk_stem}")
   elseif(sdk_basename STREQUAL "test_session_resources.cpp" OR
          sdk_basename STREQUAL "test_session_execution.cpp" OR
          sdk_basename STREQUAL "test_execution_owner.cpp" OR

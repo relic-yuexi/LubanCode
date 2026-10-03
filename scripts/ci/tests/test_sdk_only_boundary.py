@@ -481,6 +481,28 @@ class BoundaryTests(unittest.TestCase):
         self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
         self.assert_rejected(self.check(testing=True), "reverse host include")
 
+    def test_middleware_cause_allowance_is_exact_testing_only_and_keeps_the_host_boundary(self):
+        shared = "tests/unit/hooks/test_middleware_dispatch_cause.cpp"
+        self.source_file(shared, '#include "hooks/middleware.hpp"\n')
+        self.source_file("src/hooks/middleware.hpp", "#pragma once\n")
+        target = {"id": "receipts", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "receipt_tests"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        nearby = "tests/unit/hooks/test_middleware_runtime_wire.cpp"
+        self.source_file(nearby, "int unregistered_test;\n")
+        target["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["sources"][0]["path"] = shared
+        self.source_file("src/hooks/middleware.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
     def test_execution_owner_allowance_is_testing_only_and_keeps_the_host_boundary(self):
         shared = "tests/unit/runtime/test_execution_owner.cpp"
         self.source_file(shared, '#include "runtime/execution_owner.hpp"\n')

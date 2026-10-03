@@ -63,6 +63,9 @@ struct MiddlewareReceiptSnapshot {
     std::optional<hooks::middleware::DispatchOutcome::Kind> outcome;
     MiddlewareReceiptGap gap = MiddlewareReceiptGap::None;
     bool finished = false, closed = false;
+    // Owned live producer facts only; these tags are not stored V3 events.
+    std::optional<hooks::middleware::DispatchCause> cause;
+    std::optional<hooks::middleware::DispatchFailureSource> failure_source;
     // This is capture completeness, not successful Post settlement.
     bool complete() const { return finished && gap == MiddlewareReceiptGap::None; }
 };

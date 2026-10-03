@@ -135,6 +135,7 @@ SHARED_SDK_TEST_SOURCES = {
     "tests/unit/runtime/test_scoped_turn_bindings.cpp",
     "tests/unit/runtime/test_owned_job_admission.cpp",
     "tests/unit/runtime/test_middleware_native_receipts.cpp",
+    "tests/unit/hooks/test_middleware_dispatch_cause.cpp",
 }
 SEARCH_PROBE_TARGET = "lubancore_sdk_search_probe"
 SEARCH_PROBE_SOURCE = "tests/support/sdk_search_probe.cpp"
