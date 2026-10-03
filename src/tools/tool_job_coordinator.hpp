@@ -242,6 +242,56 @@ struct PreparedJobView {
     std::shared_ptr<const PreparedJobFacts> facts;
 };
 
+// J2b: actual command owner and business scope. Parent identity is causal only;
+// no SDK operation is invented or borrowed by this internal execution path.
+class RunCommandTool;
+struct OwnedJobScope {
+    PreparedJobOwner owner;
+    std::string job_id, action_id, turn_id, step_id, parent_action_id, provider_tool_call_id;
+    std::uint64_t attempt = 1;
+};
+struct OwnedJobCompletion {
+    OwnedJobScope scope;
+    Tool::Result raw;
+    trajectory::v3::WriteReceipt started_receipt, terminal_receipt, persisted_receipt;
+};
+struct OwnedJobCapability {
+    std::shared_ptr<RunCommandTool> command;
+    std::function<JobAuthDecision(const OwnedJobScope&, const nlohmann::json&,
+                                 const trajectory::v3::ToolIdentity&, const JobExecutionPolicy&)> scope_gate;
+    // Return the actual native receipt from this writer. A claimed confirmation
+    // absent from the verified source is unconfirmed, never a successful Post.
+    std::function<trajectory::v3::WriteReceipt(const OwnedJobCompletion&)> post;
+    CommandExecutionLimits command_limits;
+};
+enum class OwnedJobAdoptionState { Rejected, Adopted, Unconfirmed };
+struct OwnedJobAdoption {
+    OwnedJobAdoptionState state = OwnedJobAdoptionState::Rejected;
+    std::string error_code, error, admission_content;
+    std::shared_ptr<const PreparedJobFacts> facts;
+    std::optional<trajectory::v3::WriteReceipt> receipt;
+};
+struct ParentJobAdmissionRefs {
+    std::string terminal_event_id, persisted_event_id, selected_event_id;
+    std::string tool_message_id, admission_event_id;
+};
+struct OwnedJobAdmission {
+    bool confirmed = false;
+    std::string error_code, error;
+};
+struct OwnedJobStatusView {
+    OwnedJobScope scope;
+    std::string state, execution_state, gap, preview, result_ref;
+    bool access_denied = false, revoked = false, cancel_requested = false;
+    bool preview_truncated = false, worker_finished = false;
+    std::optional<trajectory::v3::WriteReceipt> adopted_receipt, dispatched_receipt, started_receipt;
+    std::optional<trajectory::v3::WriteReceipt> terminal_receipt, persisted_receipt, post_receipt, observed_receipt;
+};
+struct OwnedJobWaitResult {
+    bool satisfied = false, timed_out = false;
+    std::vector<OwnedJobStatusView> statuses;
+};
+
 // Recovery policy is an adoption choice, not JobExecutionPolicy.resume_policy.
 // Legacy keeps the existing repair/requeue path. Hold creates passive owned
 // projections only; newly submitted jobs keep their ordinary execution path.
@@ -338,6 +388,7 @@ struct JobRecoveryPlan {
         std::optional<JobRecoveryFacts> recovery;
         std::string admission_text;  // Actual current admitted tool-message body.
         bool prepared_only = false;  // J2a has no adoption/dispatch authority.
+        bool owned_layout = false;  // Historical J2b facts never grant dispatch authority.
     };
     std::vector<Item> items;
     JobRecoveryPolicy policy = JobRecoveryPolicy::Legacy;
@@ -390,6 +441,18 @@ public:
     std::optional<PreparedJobView> GetPreparedJob(
         const PreparedJobOwner& owner, const std::string& job_id) const;
     std::size_t prepared_count() const;
+
+    // Internal, registration-domain only. No public SDK Accepted/Job API.
+    OwnedJobAdoption AdoptPreparedJob(const PreparedJobOwner& owner, const std::string& job_id,
+                                     OwnedJobCapability capability);
+    OwnedJobAdmission ConfirmParentAdmission(const PreparedJobOwner& owner, const std::string& job_id,
+                                             const ParentJobAdmissionRefs& refs);
+    OwnedJobStatusView GetOwnedJob(const PreparedJobOwner& owner, const std::string& job_id);
+    OwnedJobWaitResult WaitOwnedJobs(const PreparedJobOwner& owner, const std::vector<std::string>& ids,
+                                     std::uint64_t timeout_ms, bool wait_all);
+    JobCancelResult CancelOwnedJob(const PreparedJobOwner& owner, const std::string& job_id,
+                                   const std::string& reason);
+    std::size_t PumpOwnedJobs();
 
     // ---- 四接口(单 §8)----
 

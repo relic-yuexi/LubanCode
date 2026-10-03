@@ -228,6 +228,9 @@ struct ToolActionSnapshot {
     std::string step_id;
     std::optional<std::string> assistant_message_ref;  // 声明消息
     std::optional<std::string> provider_tool_call_id;
+    // Prepared/owned business actions retain their provider ID as a cause;
+    // only the parent action owns the original provider reply obligation.
+    bool provider_reply_required = true;
     std::optional<std::string> tool_name;     // 声明块 function.name(取得到时)
     std::optional<nlohmann::json> declared_args;  // 声明块参数(原始 args 的
                                                   // owner 是 assistant 调用块)
@@ -483,6 +486,44 @@ std::expected<ResumeProjection, std::string> ProjectResume(
 
 // 执行投影(单 §6):registered → queued → running → succeeded/failed/
 // cancelled;running 查不明 = unknown;审批未过停 awaiting_approval。
+inline constexpr std::string_view kOwnedJobLayout = "parent_admission_job_business_v1";
+
+// Verified, owned provenance for the versioned internal business-attempt-1
+// layout. No field grants a live capability or authorizes historical dispatch.
+struct OwnedJobAdoptionFacts {
+    std::string job_id, action_id, parent_action_id;
+    std::string session_id, run_id, turn_id, step_id;
+    std::string assistant_message_ref, provider_tool_call_id;
+    std::string adopted_event_id, prepared_pending_event_id, registered_event_id;
+    std::string source_pending_event_id, source_admission_event_id;
+    std::uint64_t attempt = 1;
+    nlohmann::json original_input, effective_input;
+    std::string original_input_sha256, effective_input_sha256;
+    nlohmann::json tool_identity, execution_policy, prepared_owner, command_limits;
+};
+
+// Checks actual source rows/identity/order/hash and the declaration argument
+// digest. Called by every ReadV3Ledger path before publishing a ledger.
+std::expected<std::vector<OwnedJobAdoptionFacts>, std::string>
+ReadOwnedJobAdoptions(const V3Ledger& ledger);
+// Registration-only provenance, before adoption. adopted_event_id stays empty.
+std::expected<OwnedJobAdoptionFacts, std::string> ReadOwnedJobRegistration(
+    const V3Ledger& ledger, std::string_view job_id);
+const OwnedJobAdoptionFacts* FindOwnedJobAdoption(
+    const std::vector<OwnedJobAdoptionFacts>& facts, std::string_view job_id);
+// Includes the prepared-only crash window, before any adoption fact exists.
+bool IsOwnedJobBusinessAction(const V3Ledger& ledger, std::string_view action_id);
+// Copies native five-key provenance. No borrowed writer or ledger survives.
+std::optional<nlohmann::json> MakeOwnedJobReference(
+    const V3Ledger& ledger, std::string_view id);
+std::expected<void, std::string> CheckOwnedJobParentAdmission(
+    const V3Ledger& ledger, const OwnedJobAdoptionFacts& facts,
+    const nlohmann::json& parent_admission);
+std::expected<void, std::string> CheckOwnedJobPost(
+    const V3Ledger& ledger, const OwnedJobAdoptionFacts& facts,
+    std::string_view terminal_event_id, std::string_view persisted_event_id,
+    const nlohmann::json& post_ref);
+
 struct JobExecutionView {
     std::string job_id;
     std::string mode;  // job_handle|native_deferred(注册时申报)
@@ -498,6 +539,7 @@ struct JobExecutionView {
     std::optional<std::string> observed_result_ref;  // 终态观测的结果引用
     std::uint64_t observed_result_version = 0;
     std::vector<std::string> event_ids;
+    std::optional<OwnedJobAdoptionFacts> owned_adoption;
 };
 
 // 折叠全部 job(注册序,即 jobId 首次注册顺序)。状态机单调:dispatched

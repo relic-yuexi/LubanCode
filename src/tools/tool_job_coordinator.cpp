@@ -1,11 +1,15 @@
 // tool_job_coordinator.hpp 的实现。单写者纪律:所有 v3 账面追加发生在
-// 主锁(jobs_mutex)内的泵/派发/接口路径;worker 线程发布 owned mailbox,
-// 不碰 writer。旧租约与终态后的迟到信封拒收(计数,不落账)。
+// 旧主锁(jobs_mutex)或新登记域 writer serial 内的泵/派发/接口路径;
+// 新宿主 callback 不跨 jobs_mutex，worker 只发布 owned mailbox，不碰
+// writer。旧租约与终态后的迟到信封拒收(计数,不落账)。
 //
 // worker threads stay joinable. Impl keeps the mailbox alive; it does not own
 // everything an executor borrows. Shutdown joins callbacks and their captures
 // before the host releases its registry, backend, MCP Clients or Lua state.
 #include "tools/tool_job_coordinator.hpp"
+#include "tools/run_command.hpp"
+#include "platform/process.hpp"
+#include "platform/bounded_read.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -19,6 +23,7 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <variant>
 
 #include "hooks/hash.hpp"
 #include "platform/log_sink.hpp"
@@ -31,6 +36,7 @@ namespace lubancode::tools {
 namespace {
 thread_local const void* current_job_worker = nullptr;
 thread_local const void* current_job_shutdown = nullptr;
+thread_local const void* current_owned_callback = nullptr;
 struct JobThreadScope {
     const void*& slot;
     const void* previous;
@@ -160,6 +166,58 @@ struct PreparedRecord {
     bool revoked = false;
     std::shared_ptr<PreparedJobFacts> facts;
 };
+
+struct OwnedRecord {
+    JobRecord job;
+    OwnedJobScope scope;
+    std::shared_ptr<const PreparedJobFacts> facts;
+    std::shared_ptr<OwnedJobCapability> capability;
+    std::optional<WriteReceipt> adopted, dispatched, started, terminal, persisted, post, observed, cancelled;
+    nlohmann::json parent_admission;
+    std::string execution_state, gap;
+    bool settled = false;
+    bool settlement_started = false;
+    bool post_invoked = false;
+    std::shared_ptr<std::atomic<bool>> worker_finished;
+};
+
+OwnedJobScope ScopeOf(const PreparedJobFacts& f) {
+    return {f.owner, f.job_id, f.action_id, f.turn_id, f.step_id,
+            f.parent_action_id, f.provider_tool_call_id, 1};
+}
+
+bool SameWriterPrefix(const trajectory::v3::V3Ledger& ledger,
+                      const trajectory::v3::V3Writer& writer) {
+    const auto last = ledger.LastEntry();
+    if (!last || last->seq == std::numeric_limits<std::uint64_t>::max() ||
+        last->seq + 1 != writer.next_seq()) return false;
+    return writer.last_line_hash() == (last->is_message ? ledger.messages[last->index].line_hash
+                                                      : ledger.events[last->index].line_hash);
+}
+
+std::expected<std::string, std::string> ReadOwnedAdmissionArtifact(
+    const std::filesystem::path& session_dir, const nlohmann::json& ref) {
+    const auto fail = [] { return std::unexpected(std::string("job.owned.parent_material_invalid")); };
+    const auto relative = platform::Utf8ToPath(JsonStr(ref, "path"));
+    if (relative.empty() || relative.has_root_path() || relative.parent_path() != "artifacts") return fail();
+    for (const auto& part : relative) if (part == "." || part == "..") return fail();
+    const auto expected_bytes = ref.find("bytes");
+    if (expected_bytes == ref.end() || !expected_bytes->is_number_unsigned() ||
+        expected_bytes->get<std::uint64_t>() > 65536) return fail();
+    std::error_code error;
+    const auto real_root = std::filesystem::canonical(platform::FileIoPath(session_dir), error);
+    if (error) return fail();
+    const auto requested = platform::FileIoPath(session_dir / relative);
+    const auto real_file = std::filesystem::canonical(requested, error);
+    if (error) return fail();
+    const auto within = real_file.lexically_relative(real_root);
+    if (within.empty() || within.has_root_path()) return fail();
+    for (const auto& part : within) if (part == "..") return fail();
+    const auto bytes = platform::ReadBoundedRegularFile(requested, 65536);
+    if (!bytes || bytes->size() != expected_bytes->get<std::uint64_t>() ||
+        hooks::Sha256Hex(*bytes) != JsonStr(ref, "sha256")) return fail();
+    return *bytes;
+}
 
 struct PreparedSource {
     std::string pending_event_id;
@@ -314,6 +372,8 @@ struct ToolJobCoordinator::Impl {
     PreparedJobOwner prepared_owner;
     bool prepared_revoked = false;
     std::map<std::string, std::shared_ptr<PreparedRecord>> prepared;
+    std::map<std::string, std::shared_ptr<OwnedRecord>> owned;
+    std::vector<std::string> owned_queue;
 
     // 主锁:jobs/queue/writer 落账/资源占用。worker 经 owned mailbox 原子
     // 发布完成件;旧 debug 信封队列另设锁,泵在主锁内收信封。
@@ -390,6 +450,123 @@ struct ToolJobCoordinator::Impl {
         }
     }
 
+    void FreezeOwned(OwnedRecord& record, const std::string& gap) {
+        std::lock_guard lock(jobs_mutex);
+        if (record.gap.empty()) record.gap = gap;
+        record.job.state = "unknown";
+        record.settled = true;  // Never re-submit any earlier native stage.
+    }
+
+    void SettleOwned(OwnedRecord& record, const JobCompletionEnvelope& envelope) {
+        auto& job = record.job;
+        {
+            std::lock_guard lock(jobs_mutex);
+            if (record.settled || record.settlement_started) return;
+            record.settlement_started = true;
+            ReleaseDispatchReservationLocked(job);
+        }
+        try {
+            if (envelope.result.execution_control == ExecutionControl::StopIndeterminate) {
+                record.execution_state = "unknown";
+                record.terminal = job.action->MarkUnknown(*writer,
+                    envelope.error_code.empty() ? "job.execution_unconfirmed" : envelope.error_code);
+            } else if (envelope.cancelled) {
+                record.execution_state = "cancelled";
+                record.terminal = job.action->Cancel(*writer, "during_execution", "worker_saw_cancel");
+            } else if (envelope.succeeded) {
+                record.execution_state = "succeeded";
+                record.terminal = job.action->Finish(*writer, std::nullopt, envelope.duration_ms);
+            } else {
+                record.execution_state = "failed";
+                record.terminal = job.action->Fail(*writer,
+                    envelope.error_code.empty() ? "tool_failed" : envelope.error_code, envelope.duration_ms);
+            }
+            if (!ReceiptOk(*record.terminal)) { FreezeOwned(record, "job.owned.terminal_unconfirmed"); return; }
+            if (record.execution_state == "unknown") {
+                // Neither an executor exception nor a damaged completion
+                // report proves a command raw/ordinary Post result.
+                FreezeOwned(record, "job.owned.execution_unconfirmed"); return;
+            }
+            // Both successful and failed command text are real business raw.
+            // Rich blocks are deliberately outside this first internal slice.
+            for (const auto& block : envelope.result.payload.content) {
+                if (!std::holds_alternative<TextContent>(block)) {
+                    FreezeOwned(record, "job.owned.rich_result_unsupported"); return;
+                }
+            }
+            auto material = PersistTextLocked(job, "combined", envelope.result.content, record.terminal->id, 1);
+            if (!material.ok) { FreezeOwned(record, "job.owned.raw_unconfirmed"); return; }
+            record.persisted = job.action->PersistedResult(*writer, material.result_ref, record.terminal->id, 1);
+            if (!ReceiptOk(*record.persisted)) { FreezeOwned(record, "job.owned.persisted_unconfirmed"); return; }
+            job.result_ref = record.persisted->id; job.result_version = 1;
+            job.preview = material.preview.text; job.preview_truncated = material.preview.truncated;
+            OwnedJobCompletion completed{record.scope, envelope.result, *record.started,
+                                         *record.terminal, *record.persisted};
+            record.post_invoked = true;
+            {
+                JobThreadScope callback(current_owned_callback, this);
+                record.post = record.capability->post(completed);
+            }
+            if (!ReceiptOk(*record.post) || writer->broken()) { FreezeOwned(record, "job.owned.post_unconfirmed"); return; }
+            const auto ledger = trajectory::v3::ReadV3Ledger(writer->path());
+            const auto* actual = ledger ? ledger->FindEvent(record.post->id) : nullptr;
+            if (!ledger || !SameWriterPrefix(*ledger, *writer) || !actual ||
+                actual->seq != record.post->seq || actual->line_hash != record.post->line_hash ||
+                actual->seq <= record.persisted->seq ||
+                actual->kind != EventKindV3::HookCompleted || actual->session_id != record.scope.owner.session_id ||
+                actual->run_id != record.scope.owner.run_id || actual->action_id != record.scope.action_id ||
+                actual->turn_id != record.scope.turn_id || actual->step_id != record.scope.step_id) {
+                FreezeOwned(record, "job.owned.post_receipt_mismatch"); return;
+            }
+            EventDraft observation;
+            observation.kind = EventKindV3::ToolJobObserved;
+            observation.turn_id = record.scope.turn_id; observation.step_id = record.scope.step_id;
+            observation.action_id = record.scope.action_id;
+            const auto post_ref = trajectory::v3::MakeOwnedJobReference(*ledger, record.post->id);
+            if (!post_ref) { FreezeOwned(record, "job.owned.post_receipt_mismatch"); return; }
+            const auto adoptions = trajectory::v3::ReadOwnedJobAdoptions(*ledger);
+            const auto* adoption = adoptions ? trajectory::v3::FindOwnedJobAdoption(*adoptions, job.job_id) : nullptr;
+            if (!adoption || !trajectory::v3::CheckOwnedJobPost(*ledger, *adoption,
+                    record.terminal->id, record.persisted->id, *post_ref)) {
+                FreezeOwned(record, "job.owned.post_receipt_mismatch"); return;
+            }
+            observation.payload = {{"tool_call_id", job.action_id}, {"jobId", job.job_id},
+                {"observedStatus", record.execution_state}, {"resultRef", job.result_ref}, {"resultVersion", 1},
+                {"postEventRef", *post_ref}};
+            record.observed = writer->AppendEvent(std::move(observation), Durability::PowerLoss);
+            if (!ReceiptOk(*record.observed)) { FreezeOwned(record, "job.owned.observed_unconfirmed"); return; }
+            {
+                std::lock_guard lock(jobs_mutex);
+                job.state = record.execution_state;
+                job.failure = envelope.error_code;
+                record.settled = true;
+            }
+        } catch (...) { FreezeOwned(record, "job.owned.settlement_unconfirmed"); }
+        state_cv.notify_all();
+    }
+
+    void CloseOwnedBeforeStart(OwnedRecord& record, bool cancelled, const std::string& reason) {
+        {
+            std::lock_guard lock(jobs_mutex);
+            if (record.settled || record.settlement_started) return;
+            record.settlement_started = true;
+        }
+        try {
+            record.execution_state = cancelled ? "cancelled" : "rejected";
+            record.terminal = cancelled ? record.job.action->Cancel(*writer, "before_started", reason)
+                                        : record.job.action->Reject(*writer, reason);
+            if (!ReceiptOk(*record.terminal)) { FreezeOwned(record, "job.owned.terminal_unconfirmed"); return; }
+            record.observed = ObserveLocked(record.job, cancelled ? "cancelled" : "failed");
+            if (!ReceiptOk(*record.observed)) { FreezeOwned(record, "job.owned.observed_unconfirmed"); return; }
+            {
+                std::lock_guard lock(jobs_mutex);
+                record.job.state = cancelled ? "cancelled" : "failed";
+                record.job.failure = reason;
+                record.settled = true;
+            }
+        } catch (...) { FreezeOwned(record, "job.owned.settlement_unconfirmed"); }
+    }
+
     std::int64_t NowMs() const {
         if (clock_ms) {
             return clock_ms();
@@ -427,6 +604,10 @@ struct ToolJobCoordinator::Impl {
                 ++count;
             }
         }
+        for (const auto& [id, record] : owned) {
+            (void)id;
+            if (record->job.dispatch_quota_owned) ++count;
+        }
         return count;
     }
 
@@ -437,6 +618,10 @@ struct ToolJobCoordinator::Impl {
             if (!job->recovery.has_value() && job->state == "running" && job->tool_name == tool_name) {
                 ++count;
             }
+        }
+        for (const auto& [id, record] : owned) {
+            (void)id;
+            if (record->job.dispatch_quota_owned && record->job.tool_name == tool_name) ++count;
         }
         return count;
     }
@@ -1319,7 +1504,7 @@ ToolJobCoordinator::ToolJobCoordinator(trajectory::v3::V3Writer& writer,
 }
 
 ToolJobCoordinator::~ToolJobCoordinator() {
-    if (current_job_worker == impl_.get() || current_job_shutdown == impl_.get()) std::terminate();
+    if (current_job_worker == impl_.get() || current_job_shutdown == impl_.get() || current_owned_callback == impl_.get()) std::terminate();
     if (!Shutdown() && !shutdown_complete()) std::terminate();
 }
 
@@ -1340,6 +1525,13 @@ void ToolJobCoordinator::RequestShutdown() {
                 job->cancel_flag->store(true);
             }
         }
+        for (auto& [id, record] : impl_->owned) {
+            (void)id;
+            if (!record->settled) {
+                record->job.cancel_requested = true;
+                record->job.cancel_flag->store(true);
+            }
+        }
         for (const auto& worker : impl_->owned_workers) {
             worker.cancel->store(true);
         }
@@ -1351,7 +1543,7 @@ bool ToolJobCoordinator::Shutdown() {
     if (impl_ == nullptr) return true;
     // A callback cannot wait for its own exit. Detect the invalid lifecycle
     // call rather than deadlocking or pretending its borrows have been drained.
-    if (current_job_worker == impl_.get() || current_job_shutdown == impl_.get()) return false;
+    if (current_job_worker == impl_.get() || current_job_shutdown == impl_.get() || current_owned_callback == impl_.get()) return false;
     RequestShutdown();
     std::unique_lock shutdown(impl_->shutdown_mutex);
     impl_->shutdown_cv.wait(shutdown, [&] { return !impl_->shutdown_in_progress; });
@@ -1372,6 +1564,44 @@ bool ToolJobCoordinator::Shutdown() {
     if (impl_->prepared_context)
         prepared_serial = std::unique_lock<std::recursive_mutex>(*impl_->prepared_context->writer_serial);
     bool settled = true;
+    // Real joined completions are collected before retiring the shared writer.
+    // Host Post and all receipt validation run outside jobs_mutex.
+    if (impl_->prepared_context) {
+        for (auto& [id, record] : impl_->owned) {
+            (void)id;
+            try {
+            if (!record->settled) {
+                if (!record->cancelled) {
+                    record->cancelled = impl_->EmitCancelRequestedLocked(record->job, "session_shutdown");
+                    if (!ReceiptOk(*record->cancelled)) impl_->FreezeOwned(*record, "job.owned.cancel_unconfirmed");
+                }
+                if (!record->settled && !record->job.dispatched)
+                    impl_->CloseOwnedBeforeStart(*record, true, "session_shutdown");
+                if (!record->settled && record->job.dispatched) {
+                    bool found = false;
+                    for (const auto& worker : workers) {
+                        if (!worker.launch || worker.launch->completion.job_id != record->job.job_id) continue;
+                        found = true;
+                        if (worker.finished && worker.finished->load() && worker.launch->completion_ready.load()) {
+                            impl_->SettleOwned(*record, worker.launch->completion);
+                            worker.launch->completion_ready.store(false);
+                        }
+                        break;
+                    }
+                    if (!found || !record->settled) impl_->FreezeOwned(*record, "job.owned.completion_missing");
+                }
+            }
+            } catch (...) {
+                settled = false;
+                impl_->FreezeOwned(*record, "job.owned.shutdown_unconfirmed");
+            }
+            {
+                std::lock_guard lock(impl_->jobs_mutex);
+                impl_->ReleaseDispatchReservationLocked(record->job);
+            }
+            settled = settled && record->settled && record->gap.empty();
+        }
+    }
     {
         std::lock_guard lock(impl_->jobs_mutex);
         // All callbacks have exited. Settlement can fail independently of
@@ -1414,6 +1644,13 @@ bool ToolJobCoordinator::Shutdown() {
         impl_->writer = nullptr;
     }
     if (prepared_serial.owns_lock()) prepared_serial.unlock();
+    // Closing and the drained serial lease prohibit new insertions/users of
+    // these capabilities. Retire each capture without an allocating transfer
+    // container and outside writer/jobs locks; owned status remains queryable.
+    for (auto& [id, record] : impl_->owned) {
+        (void)id;
+        record->capability.reset();
+    }
     // Closing APIs reject before reading these callbacks, and every worker is
     // joined. Clear the actual sources outside all lifecycle/jobs locks: a
     // std::function move may retain an inline callable in its source, and even
@@ -1615,6 +1852,493 @@ std::optional<PreparedJobView> ToolJobCoordinator::GetPreparedJob(
 std::size_t ToolJobCoordinator::prepared_count() const {
     std::lock_guard lock(impl_->jobs_mutex);
     return impl_->prepared.size();
+}
+
+
+OwnedJobAdoption ToolJobCoordinator::AdoptPreparedJob(
+    const PreparedJobOwner& owner, const std::string& id, OwnedJobCapability capability) {
+    OwnedJobAdoption out;
+    auto reject = [&](const std::string& code) { out.error_code = out.error = code; return out; };
+    if (!impl_->prepared_context || current_owned_callback == impl_.get()) return reject("job.owned.disabled");
+    // Keep every user capture outside the jobs lock, including rejection unwind.
+    auto cap = std::make_shared<OwnedJobCapability>(std::move(capability));
+    const auto& limit = cap->command_limits;
+    if (!cap->command || !cap->scope_gate || !cap->post || !limit.timeout_ms ||
+        limit.timeout_ms > 86400000 || !limit.max_output_bytes ||
+        limit.max_output_bytes > platform::kDefaultMaxOutputBytes) return reject("job.owned.missing_capability");
+    std::lock_guard serial(*impl_->prepared_context->writer_serial);
+    trajectory::v3::V3Writer* writer = nullptr;
+    std::shared_ptr<const PreparedJobFacts> facts;
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        if (impl_->closing || impl_->prepared_revoked || !impl_->writer || impl_->writer->closed())
+            return reject("job.owned.closed");
+        if (owner != impl_->prepared_owner) return reject("job.owned.foreign_owner");
+        const auto found = impl_->prepared.find(id);
+        if (found == impl_->prepared.end() || found->second->revoked ||
+            found->second->state != PreparedJobRegistrationState::Registered) return reject("job.owned.not_registered");
+        if (impl_->owned.contains(id)) return reject("job.owned.already_adopted");
+        facts = found->second->facts;
+        writer = impl_->writer;
+    }
+    if (facts->tool_name != "run_command" || facts->tool_identity.logical_name != "run_command" ||
+        cap->command->name() != "run_command" ||
+        limit.max_output_bytes > facts->policy.max_output_bytes ||
+        (facts->policy.deadline_ms && limit.timeout_ms > facts->policy.deadline_ms))
+        return reject("job.owned.unsupported_binding");
+    const auto cwd = facts->effective_input.find("cwd");
+    if (cwd == facts->effective_input.end() || !cwd->is_string() ||
+        platform::Utf8ToPath(cwd->get<std::string>()) != owner.cwd)
+        return reject("job.owned.cwd_mismatch");
+    if (facts->effective_input.contains("run_in_background") &&
+        (!facts->effective_input.at("run_in_background").is_boolean() ||
+         facts->effective_input.at("run_in_background").get<bool>())) return reject("job.owned.background_bypass");
+    if (facts->effective_input.contains("max_runtime_ms")) return reject("job.owned.background_bypass");
+    auto read = trajectory::v3::ReadV3Ledger(writer->path());
+    if (!read || !SameWriterPrefix(*read, *writer)) return reject("job.owned.invalid_prefix");
+    auto source = trajectory::v3::ReadOwnedJobRegistration(*read, id);
+    if (!source || source->action_id != facts->action_id || source->parent_action_id != facts->parent_action_id ||
+        source->session_id != owner.session_id || source->run_id != owner.run_id ||
+        source->original_input != facts->original_input || source->effective_input != facts->effective_input ||
+        source->tool_identity != facts->tool_identity.ToJson() || source->execution_policy != facts->policy.ToJson() ||
+        source->original_input_sha256 != facts->original_input_sha256 ||
+        source->effective_input_sha256 != facts->effective_input_sha256 ||
+        source->prepared_pending_event_id != facts->pending_receipt->id ||
+        source->registered_event_id != facts->registered_receipt->id) return reject("job.owned.invalid_source");
+    const auto scope = ScopeOf(*facts);
+    JobAuthDecision permission;
+    try {
+        JobThreadScope callback(current_owned_callback, impl_.get());
+        permission = cap->scope_gate(scope, facts->effective_input, facts->tool_identity, facts->policy);
+    } catch (...) { return reject("job.owned.scope_failed"); }
+    if (!permission.allowed || permission.needs_approval) return reject("job.owned.scope_denied");
+    // A trusted callback may have appended actual policy facts. Re-read rather
+    // than treating the previous prefix check as an atomic admission lease.
+    read = trajectory::v3::ReadV3Ledger(writer->path());
+    if (!read || !SameWriterPrefix(*read, *writer)) return reject("job.owned.invalid_prefix");
+    source = trajectory::v3::ReadOwnedJobRegistration(*read, id);
+    if (!source) return reject("job.owned.invalid_source");
+    auto record = std::make_shared<OwnedRecord>();
+    record->facts = facts; record->scope = scope; record->capability = cap;
+    auto& job = record->job;
+    job.job_id = id; job.action_id = facts->action_id; job.turn_id = facts->turn_id; job.step_id = facts->step_id;
+    job.tool_name = facts->tool_name; job.tool_input = facts->effective_input; job.policy = facts->policy;
+    job.identity = facts->tool_identity; job.assistant_message_ref = facts->assistant_message_ref;
+    job.state = "parent_delivery_pending";
+    job.action = trajectory::v3::ToolActionSession::Reopen(facts->turn_id, facts->step_id, facts->action_id);
+    EventDraft draft;
+    draft.kind = EventKindV3::ToolJobAdopted;
+    draft.turn_id = facts->turn_id; draft.step_id = facts->step_id; draft.action_id = facts->action_id;
+    draft.payload = {{"tool_call_id", facts->action_id}, {"attempt", 1}, {"jobId", id},
+        {"layout", trajectory::v3::kOwnedJobLayout}, {"parentActionId", facts->parent_action_id},
+        {"provider_tool_call_id", facts->provider_tool_call_id}, {"toolName", facts->tool_name},
+        {"effectiveInput", facts->effective_input}, {"originalInputSha256", facts->original_input_sha256},
+        {"effectiveInputSha256", facts->effective_input_sha256}, {"toolIdentity", facts->tool_identity.ToJson()},
+        {"executionPolicy", facts->policy.ToJson()}, {"preparedOwner", source->prepared_owner},
+        {"commandLimits", {{"timeout_ms", limit.timeout_ms}, {"max_output_bytes", limit.max_output_bytes}}}};
+    for (const auto& [name, ref] : std::vector<std::pair<std::string, std::string>>{
+        {"assistantMessageRef", facts->assistant_message_ref}, {"sourcePendingEventRef", facts->source_pending_event_id},
+        {"sourceAdmissionEventRef", facts->source_admission_event_id}, {"preparedPendingEventRef", facts->pending_receipt->id},
+        {"registeredEventRef", facts->registered_receipt->id}}) {
+        const auto actual = trajectory::v3::MakeOwnedJobReference(*read, ref);
+        if (!actual) return reject("job.owned.invalid_reference");
+        draft.payload[name] = *actual;
+    }
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        if (impl_->closing || impl_->prepared_revoked || impl_->writer != writer || writer->closed())
+            return reject("job.owned.closed");
+        if (impl_->owned.contains(id)) return reject("job.owned.already_adopted");
+        impl_->owned.emplace(id, record);  // Stable owner before the first real write.
+    }
+    out.facts = facts;
+    try { record->adopted = writer->AppendEvent(std::move(draft), Durability::PowerLoss); }
+    catch (...) { record->gap = "job.owned.adoption_unconfirmed"; }
+    out.receipt = record->adopted;
+    if (!record->adopted || !ReceiptOk(*record->adopted)) {
+        impl_->FreezeOwned(*record, record->gap.empty() ? "job.owned.adoption_unconfirmed" : record->gap);
+        out.state = OwnedJobAdoptionState::Unconfirmed;
+        out.error_code = record->adopted ? record->adopted->error_code : record->gap;
+        out.error = record->adopted ? record->adopted->error_message : record->gap;
+        return out;
+    }
+    out.state = OwnedJobAdoptionState::Adopted;
+    out.admission_content = nlohmann::json{{"jobId", id}, {"status", "parent_delivery_pending"},
+        {"adoptionEventRef", record->adopted->id}, {"layout", trajectory::v3::kOwnedJobLayout}}.dump();
+    job.admission_text = out.admission_content;
+    return out;
+}
+
+OwnedJobAdmission ToolJobCoordinator::ConfirmParentAdmission(
+    const PreparedJobOwner& owner, const std::string& id, const ParentJobAdmissionRefs& refs) {
+    OwnedJobAdmission out;
+    auto reject = [&](const std::string& code) { out.error_code = out.error = code; return out; };
+    if (!impl_->prepared_context || current_owned_callback == impl_.get()) return reject("job.owned.disabled");
+    std::unique_lock serial(*impl_->prepared_context->writer_serial);
+    std::shared_ptr<OwnedRecord> record;
+    trajectory::v3::V3Writer* writer;
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        if (impl_->closing || impl_->prepared_revoked || !impl_->writer || impl_->writer->closed()) return reject("job.owned.closed");
+        if (owner != impl_->prepared_owner) return reject("job.owned.foreign_owner");
+        const auto found = impl_->owned.find(id);
+        if (found == impl_->owned.end()) return reject("job.owned.not_adopted");
+        record = found->second; writer = impl_->writer;
+        if (!record->gap.empty()) return reject(record->gap);
+        if (record->job.admission_complete) { out.confirmed = true; return out; }
+    }
+    const auto ledger = trajectory::v3::ReadV3Ledger(writer->path());
+    if (!ledger || !SameWriterPrefix(*ledger, *writer)) return reject("job.owned.invalid_prefix");
+    const auto adoptions = trajectory::v3::ReadOwnedJobAdoptions(*ledger);
+    if (!adoptions) return reject("job.owned.invalid_source");
+    const auto* actual = trajectory::v3::FindOwnedJobAdoption(*adoptions, id);
+    if (!actual || actual->adopted_event_id != record->adopted->id) return reject("job.owned.invalid_source");
+    nlohmann::json parent = nlohmann::json::object();
+    for (const auto& [name, ref] : std::vector<std::pair<std::string, std::string>>{
+        {"terminalEventRef", refs.terminal_event_id}, {"persistedEventRef", refs.persisted_event_id},
+        {"selectedEventRef", refs.selected_event_id}, {"toolMessageRef", refs.tool_message_id},
+        {"admissionEventRef", refs.admission_event_id}}) {
+        const auto value = trajectory::v3::MakeOwnedJobReference(*ledger, ref);
+        if (!value) return reject("job.owned.parent_reference_missing");
+        parent[name] = *value;
+    }
+    const auto check = trajectory::v3::CheckOwnedJobParentAdmission(*ledger, *actual, parent);
+    if (!check) return reject(check.error());
+    const auto expanded = trajectory::v3::ProjectResultPreview(*ledger, refs.tool_message_id);
+    if (!expanded.complete || expanded.result_selection_ref != refs.selected_event_id ||
+        expanded.source_result_event_refs.size() != 1 || expanded.source_result_event_refs.front() != refs.persisted_event_id)
+        return reject("job.owned.parent_material_missing");
+    // Persisted raw must be the truthful same handle; message text alone is
+    // not proof that the selected artifact contained this registration result.
+    bool found_text = false;
+    for (const auto& ref : expanded.result_refs) {
+        const auto bytes = ReadOwnedAdmissionArtifact(writer->path().parent_path(), ref);
+        if (!bytes) return reject(bytes.error());
+        if (JsonStr(ref, "mediaType") != "text/plain") continue;
+        if (*bytes != record->job.admission_text)
+            return reject("job.owned.parent_material_invalid");
+        if (found_text) return reject("job.owned.parent_material_ambiguous");
+        found_text = true;
+    }
+    if (!found_text) return reject("job.owned.parent_material_missing");
+    JobAuthDecision permission;
+    try {
+        JobThreadScope callback(current_owned_callback, impl_.get());
+        permission = record->capability->scope_gate(record->scope, record->job.tool_input,
+                                                    record->job.identity, record->job.policy);
+    } catch (...) { return reject("job.owned.scope_failed"); }
+    if (!permission.allowed || permission.needs_approval) return reject("job.owned.scope_denied");
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        if (impl_->closing || impl_->prepared_revoked || writer != impl_->writer || writer->closed()) return reject("job.owned.closed");
+        if (record->job.cancel_requested || record->job.cancel_flag->load()) return reject("job.owned.cancelled");
+        // Capacity counted when registered. Do not count one ticket twice.
+        impl_->owned_queue.push_back(id);
+        record->parent_admission = std::move(parent);
+        record->job.admission_complete = true;
+        record->job.state = "queued";
+        out.confirmed = true;
+    }
+    serial.unlock();
+    PumpOwnedJobs();
+    return out;
+}
+
+
+std::size_t ToolJobCoordinator::PumpOwnedJobs() {
+    if (!impl_->prepared_context || current_job_worker == impl_.get() || current_owned_callback == impl_.get()) return 0;
+    impl_->ReapFinishedWorkers();
+    std::lock_guard serial(*impl_->prepared_context->writer_serial);
+    trajectory::v3::V3Writer* writer;
+    std::vector<std::shared_ptr<OwnedRecord>> completions, queued;
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        if (!impl_->writer || impl_->writer->closed() || impl_->shutdown_complete) return 0;
+        writer = impl_->writer;
+        for (const auto& worker : impl_->owned_workers) {
+            if (!worker.finished || !worker.finished->load(std::memory_order_acquire) || !worker.launch ||
+                !worker.launch->completion_ready.load(std::memory_order_acquire)) continue;
+            const auto found = impl_->owned.find(worker.launch->completion.job_id);
+            if (found == impl_->owned.end()) continue;
+            impl_->ReleaseDispatchReservationLocked(found->second->job);
+            if (!found->second->settled && !found->second->settlement_started)
+                completions.push_back(found->second);
+            else {
+                const auto& actual = worker.launch->completion;
+                found->second->execution_state = actual.result.execution_control == ExecutionControl::StopIndeterminate ? "unknown" :
+                    actual.cancelled ? "cancelled" : actual.succeeded ? "succeeded" : "failed";
+                worker.launch->completion_ready.store(false, std::memory_order_release);
+            }
+        }
+        for (const auto& id : impl_->owned_queue) {
+            const auto found = impl_->owned.find(id);
+            if (found != impl_->owned.end() && found->second->job.state == "queued" && !found->second->settled)
+                queued.push_back(found->second);
+        }
+    }
+    std::size_t settled = 0;
+    for (const auto& record : completions) {
+        std::shared_ptr<Impl::WorkerLaunch> launch;
+        {
+            std::lock_guard lock(impl_->jobs_mutex);
+            for (const auto& worker : impl_->owned_workers)
+                if (worker.launch && worker.launch->completion.job_id == record->scope.job_id) { launch = worker.launch; break; }
+        }
+        if (!launch) continue;
+        impl_->SettleOwned(*record, launch->completion);
+        launch->completion_ready.store(false, std::memory_order_release);
+        ++settled;
+    }
+    for (const auto& record : queued) {
+        if (!record->gap.empty() || record->settled) continue;
+        bool cancelled;
+        {
+            std::lock_guard lock(impl_->jobs_mutex);
+            cancelled = impl_->closing || impl_->prepared_revoked || record->job.cancel_requested || record->job.cancel_flag->load();
+        }
+        if (cancelled) { impl_->CloseOwnedBeforeStart(*record, true, "cancelled_before_dispatch"); ++settled; continue; }
+        JobAuthDecision permission;
+        try {
+            JobThreadScope callback(current_owned_callback, impl_.get());
+            permission = record->capability->scope_gate(record->scope, record->job.tool_input,
+                                                       record->job.identity, record->job.policy);
+        } catch (...) { permission = {false, false, "scope_callback_failed"}; }
+        if (!permission.allowed || permission.needs_approval) {
+            impl_->CloseOwnedBeforeStart(*record, false, permission.reason.empty() ? "scope_denied" : permission.reason);
+            ++settled; continue;
+        }
+        // Protect the stable destination from Shutdown's transfer while a
+        // starter is between publishing a thread and returning/throwing.
+        std::unique_lock startup(impl_->shutdown_mutex, std::try_to_lock);
+        // A reaper can be joining a capture that queries this writer serial.
+        // Leave this ticket queued instead of waiting under that serial lock.
+        if (!startup.owns_lock() || impl_->shutdown_in_progress) continue;
+        std::shared_ptr<Impl::WorkerLaunch> launch;
+        std::shared_ptr<std::atomic<bool>> finished;
+        bool staged = false;
+        {
+            std::lock_guard lock(impl_->jobs_mutex);
+            auto& job = record->job;
+            if (impl_->closing || impl_->prepared_revoked || job.cancel_requested || job.cancel_flag->load() ||
+                job.state != "queued" || writer != impl_->writer) continue;
+            if ((impl_->limits.session_running && impl_->RunningCountLocked() >= impl_->limits.session_running) ||
+                (impl_->limits.per_tool && impl_->ToolRunningCountLocked(job.tool_name) >= impl_->limits.per_tool) ||
+                !impl_->ResourceFreeLocked(job) || !impl_->global->TryAcquire()) continue;
+            job.dispatch_quota_owned = true;
+        }
+        try {
+            launch = std::make_shared<Impl::WorkerLaunch>();
+            finished = std::make_shared<std::atomic<bool>>(false);
+            record->worker_finished = finished;
+            auto cap = record->capability;
+            launch->context = {record->job.job_id, record->job.tool_input, record->job.cancel_flag.get(),
+                               cap->command_limits.max_output_bytes};
+            // The producer, not an arbitrary executor, applies the actual
+            // command context and leaves operation identity explicitly absent.
+            launch->run = std::make_unique<JobExecutor>([cap](const JobExecutionContext& context) {
+                ToolExecutionContext invocation;
+                invocation.cancel = context.cancel;
+                invocation.command_limits = cap->command_limits;
+                return cap->command->execute(context.input, invocation);
+            });
+            launch->completion.job_id = record->job.job_id;
+            launch->completion.owner_epoch = "epoch-1";
+            launch->fallback_result = Tool::Result::Error("owned command executor threw");
+            launch->fallback_result.error_code = "tool.job.executor_exception";
+            launch->fallback_result.execution_control = ExecutionControl::StopIndeterminate;
+            launch->fallback_error_code = "tool.job.completion_unconfirmed";
+            EventDraft dispatch;
+            dispatch.kind = EventKindV3::ToolJobDispatched;
+            dispatch.turn_id = record->scope.turn_id; dispatch.step_id = record->scope.step_id;
+            dispatch.action_id = record->scope.action_id;
+            const auto ledger = trajectory::v3::ReadV3Ledger(writer->path());
+            const auto adoption = ledger ? trajectory::v3::MakeOwnedJobReference(*ledger, record->adopted->id) : std::nullopt;
+            if (!ledger || !SameWriterPrefix(*ledger, *writer) || !adoption) throw std::runtime_error("job.owned.invalid_prefix");
+            dispatch.payload = {{"tool_call_id", record->scope.action_id}, {"attempt", 1}, {"jobId", record->scope.job_id},
+                {"ownerEpoch", "epoch-1"}, {"adoptionEventRef", *adoption}, {"parentAdmission", record->parent_admission}};
+            record->dispatched = writer->AppendEvent(std::move(dispatch), Durability::PowerLoss);
+            if (!ReceiptOk(*record->dispatched)) { impl_->FreezeOwned(*record, "job.owned.dispatch_unconfirmed"); }
+            else {
+                const auto hash = record->facts->effective_input_sha256;
+                record->started = record->job.action->Start(*writer, hash,
+                    record->job.identity, trajectory::v3::ComputeToolIdempotencyKey(record->scope.action_id,
+                        record->job.identity, hash, ""), nlohmann::json{{"toolName", "run_command"}}, Durability::PowerLoss);
+                if (!ReceiptOk(*record->started)) impl_->FreezeOwned(*record, "job.owned.started_unconfirmed");
+            }
+            if (record->settled) {
+                std::lock_guard lock(impl_->jobs_mutex);
+                impl_->ReleaseDispatchReservationLocked(record->job); continue;
+            }
+            {
+                std::lock_guard lock(impl_->jobs_mutex);
+                impl_->workers.emplace_back();
+                impl_->workers.back().finished = finished; impl_->workers.back().launch = launch;
+                staged = true;
+                impl_->owned_workers.push_back({record->job.cancel_flag, finished, launch});
+                impl_->AcquireResourcesLocked(record->job);
+                record->job.state = "running"; record->job.dispatched = true;
+                record->job.owner_epoch = "epoch-1"; record->worker_finished = finished;
+            }
+            const auto self = impl_;
+            const auto cancel = record->job.cancel_flag;
+            std::function<void()> body = [self, launch, finished, cancel]() mutable {
+                JobThreadScope worker(current_job_worker, self.get());
+                (void)cancel; // Own the storage borrowed by launch->context.cancel.
+                const auto begin = std::chrono::steady_clock::now();
+                auto& envelope = launch->completion;
+                try {
+                    try {
+                        // Once actual Started is committed, cancellation goes
+                        // through the command's real scoped platform path. Do
+                        // not invent a command raw result before that call.
+                        envelope.result = (*launch->run)(launch->context);
+                    } catch (...) { envelope.result = std::move(launch->fallback_result); }
+                    envelope.succeeded = !envelope.result.is_error && envelope.result.execution_control != ExecutionControl::StopIndeterminate;
+                    envelope.cancelled = envelope.result.outcome == "cancelled_during_run";
+                    envelope.error_code = envelope.result.error_code;
+                    envelope.duration_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - begin).count());
+                } catch (...) {
+                    // Preserve the actual result already obtained. A reporting
+                    // failure is unconfirmed, not evidence of zero execution.
+                    envelope.succeeded = false; envelope.cancelled = false;
+                    envelope.result.execution_control = ExecutionControl::StopIndeterminate;
+                    envelope.error_code.swap(launch->fallback_error_code);
+                }
+                launch->completion_ready.store(true, std::memory_order_release);
+                self->state_cv.notify_all();
+                launch->run.reset(); // Actual executor capture retirement precedes finished.
+                finished->store(true, std::memory_order_release);
+                self->state_cv.notify_all();
+            };
+            {
+                JobThreadScope callback(current_owned_callback, impl_.get());
+                // Stable owner is already in workers. No jobs lock crosses
+                // user starter code; Shutdown waits this publication lease.
+                if (impl_->thread_starter) impl_->thread_starter(impl_->workers.back().thread, std::move(body));
+                else impl_->workers.back().thread = std::thread(std::move(body));
+            }
+            if (!impl_->workers.back().thread.joinable()) throw std::runtime_error("thread starter returned no owned thread");
+        } catch (...) {
+            if (staged && impl_->workers.back().thread.joinable()) continue; // Real execution wins over starter throw.
+            if (finished) finished->store(true, std::memory_order_release);
+            {
+                std::lock_guard lock(impl_->jobs_mutex);
+                impl_->ReleaseDispatchReservationLocked(record->job);
+            }
+            if (record->started && ReceiptOk(*record->started) && !record->settled) {
+                // A real started intent is not a command result. No worker
+                // was published, so no synthetic command raw/Post is produced.
+                {
+                    std::lock_guard lock(impl_->jobs_mutex);
+                    record->settlement_started = true;
+                }
+                try {
+                    record->execution_state = "failed";
+                    record->terminal = record->job.action->Fail(*writer, "tool.job.thread_start_failed");
+                    if (!ReceiptOk(*record->terminal)) impl_->FreezeOwned(*record, "job.owned.terminal_unconfirmed");
+                    else {
+                        EventDraft observation;
+                        observation.kind = EventKindV3::ToolJobObserved;
+                        observation.turn_id = record->scope.turn_id; observation.step_id = record->scope.step_id;
+                        observation.action_id = record->scope.action_id;
+                        observation.payload = {{"tool_call_id", record->scope.action_id}, {"jobId", record->scope.job_id},
+                            {"observedStatus", "failed"}, {"startupFailed", true}};
+                        record->observed = writer->AppendEvent(std::move(observation), Durability::PowerLoss);
+                        if (!ReceiptOk(*record->observed)) impl_->FreezeOwned(*record, "job.owned.observed_unconfirmed");
+                        else {
+                            std::lock_guard lock(impl_->jobs_mutex);
+                            record->job.state = "failed"; record->settled = true;
+                        }
+                    }
+                } catch (...) { impl_->FreezeOwned(*record, "job.owned.startup_unconfirmed"); }
+            } else if (!record->settled) impl_->FreezeOwned(*record, "job.owned.startup_unconfirmed");
+        }
+    }
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        std::erase_if(impl_->owned_queue, [&](const auto& id) {
+            const auto found = impl_->owned.find(id);
+            return found == impl_->owned.end() || found->second->job.state != "queued";
+        });
+    }
+    impl_->state_cv.notify_all();
+    return settled;
+}
+
+OwnedJobStatusView ToolJobCoordinator::GetOwnedJob(const PreparedJobOwner& owner, const std::string& id) {
+    OwnedJobStatusView out;
+    if (!impl_->prepared_context) { out.access_denied = true; return out; }
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        if (owner != impl_->prepared_owner || !impl_->owned.contains(id)) {
+            out.access_denied = true; return out;
+        }
+    }
+    if (current_owned_callback != impl_.get()) PumpOwnedJobs();
+    std::lock_guard serial(*impl_->prepared_context->writer_serial);
+    std::lock_guard lock(impl_->jobs_mutex);
+    const auto found = impl_->owned.find(id);
+    if (owner != impl_->prepared_owner || found == impl_->owned.end()) { out.access_denied = true; return out; }
+    const auto& record = *found->second;
+    out.scope = record.scope; out.state = record.job.state; out.execution_state = record.execution_state; out.gap = record.gap;
+    out.preview = record.job.preview; out.preview_truncated = record.job.preview_truncated; out.result_ref = record.job.result_ref;
+    out.cancel_requested = record.job.cancel_requested; out.revoked = impl_->prepared_revoked;
+    out.worker_finished = record.worker_finished && record.worker_finished->load(std::memory_order_acquire);
+    out.adopted_receipt = record.adopted; out.dispatched_receipt = record.dispatched; out.started_receipt = record.started;
+    out.terminal_receipt = record.terminal; out.persisted_receipt = record.persisted; out.post_receipt = record.post; out.observed_receipt = record.observed;
+    return out;
+}
+
+OwnedJobWaitResult ToolJobCoordinator::WaitOwnedJobs(const PreparedJobOwner& owner,
+    const std::vector<std::string>& ids, std::uint64_t timeout_ms, bool all) {
+    OwnedJobWaitResult out;
+    const auto now = std::chrono::steady_clock::now();
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::time_point::max() - now).count();
+    const auto deadline = now + std::chrono::milliseconds(std::min<std::uint64_t>(timeout_ms,
+        static_cast<std::uint64_t>(std::max<std::int64_t>(0, remaining))));
+    for (;;) {
+        out.statuses.clear();
+        for (const auto& id : ids) out.statuses.push_back(GetOwnedJob(owner, id));
+        const auto terminal = [](const auto& value) {
+            return !value.access_denied && IsTerminalJobState(value.state) &&
+                (!value.started_receipt || !ReceiptOk(*value.started_receipt) || value.worker_finished);
+        };
+        out.satisfied = !ids.empty() && (all ? std::all_of(out.statuses.begin(), out.statuses.end(), terminal)
+                                          : std::any_of(out.statuses.begin(), out.statuses.end(), terminal));
+        if (out.satisfied) return out;
+        if (current_owned_callback == impl_.get() || current_job_worker == impl_.get() ||
+            std::chrono::steady_clock::now() >= deadline || impl_->shutdown_complete) { out.timed_out = true; return out; }
+        std::unique_lock lock(impl_->jobs_mutex);
+        impl_->state_cv.wait_for(lock, std::chrono::milliseconds(10));
+    }
+}
+
+JobCancelResult ToolJobCoordinator::CancelOwnedJob(const PreparedJobOwner& owner,
+    const std::string& id, const std::string& reason) {
+    JobCancelResult out;
+    if (!impl_->prepared_context || current_owned_callback == impl_.get()) { out.error = "job.owned.disabled"; return out; }
+    std::unique_lock serial(*impl_->prepared_context->writer_serial);
+    std::shared_ptr<OwnedRecord> record;
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        const auto found = impl_->owned.find(id);
+        if (owner != impl_->prepared_owner || found == impl_->owned.end()) { out.error = "job.owned.foreign_owner"; return out; }
+        record = found->second;
+        if (record->settled) { out.ok = true; out.status = "already_terminal"; out.terminal = record->job.state; return out; }
+        if (impl_->closing || impl_->prepared_revoked || !impl_->writer || impl_->writer->closed()) { out.error = "job.owned.closed"; return out; }
+        record->job.cancel_requested = true;
+        record->job.cancel_flag->store(true);
+    }
+    if (!record->cancelled) {
+        record->cancelled = impl_->EmitCancelRequestedLocked(record->job, reason.empty() ? "cancel_requested" : reason);
+        if (!ReceiptOk(*record->cancelled)) { impl_->FreezeOwned(*record, "job.owned.cancel_unconfirmed"); out.error = record->gap; return out; }
+    }
+    if (!record->job.dispatched) impl_->CloseOwnedBeforeStart(*record, true, "cancelled_before_dispatch");
+    out.ok = true; out.status = "cancel_requested";
+    serial.unlock(); impl_->state_cv.notify_all();
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1950,6 +2674,8 @@ JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger&
     JobRecoveryPlan plan;
     plan.policy = policy;
     plan.source_session_id = ledger.session_id;
+    const auto owned_adoptions = trajectory::v3::ReadOwnedJobAdoptions(ledger);
+    if (!owned_adoptions) throw std::invalid_argument(owned_adoptions.error());
     const auto jobs = trajectory::v3::FoldJobExecutions(ledger);
     const auto actions = trajectory::v3::FoldToolActions(ledger);
     // 注册载荷(执行策略/turn/step)与派发计数(epoch 接续)。
@@ -1971,7 +2697,8 @@ JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger&
         } else if (event.kind == EventKindV3::ToolResultPersisted && event.action_id.has_value()) {
             const auto attempt_it = event.payload.find("attempt");
             if (attempt_it != event.payload.end() && attempt_it->is_number_unsigned() &&
-                attempt_it->get<std::uint64_t>() > 1) {
+                (attempt_it->get<std::uint64_t>() > 1 ||
+                 trajectory::v3::IsOwnedJobBusinessAction(ledger, *event.action_id))) {
                 business_persisted[*event.action_id] = event.event_id;
             }
         } else if (event.action_id.has_value() &&
@@ -2039,6 +2766,66 @@ JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger&
             if (terminal != terminal_events.end() && terminal->second.first == item.attempt) {
                 item.attempt_terminal_event = terminal->second.second;
             }
+        }
+        const auto* adoption = trajectory::v3::FindOwnedJobAdoption(*owned_adoptions, job.job_id);
+        if (adoption) {
+            item.owned_layout = true;
+            item.prepared_only = false; // True business facts must not hide behind the old temporary flag.
+            item.tool_name = adoption->tool_identity.value("logicalName", std::string());
+            item.tool_input = adoption->effective_input;
+            item.turn_id = adoption->turn_id; item.step_id = adoption->step_id;
+            JobRecoveryFacts facts;
+            facts.original_state = job.state; facts.turn_id = item.turn_id; facts.step_id = item.step_id;
+            facts.dispatched_count = item.dispatched_count;
+            facts.execution_attempt = 1; facts.execution_started = item.attempt_started;
+            if (snap && !snap->attempts.empty()) facts.execution_state = snap->attempts.back().status;
+            facts.execution_terminal_event = item.attempt_terminal_event;
+            bool post_confirmed = false;
+            for (const auto& event : ledger.events) {
+                if (event.kind == EventKindV3::ToolJobDispatched && JsonStr(event.payload, "jobId") == item.job_id) {
+                    const auto refs = event.payload.find("parentAdmission");
+                    item.admission_complete = refs != event.payload.end() &&
+                        trajectory::v3::CheckOwnedJobParentAdmission(ledger, *adoption, *refs).has_value();
+                }
+                if (event.kind == EventKindV3::HookCompleted && event.action_id == item.action_id &&
+                    event.session_id == adoption->session_id && event.run_id == adoption->run_id &&
+                    event.turn_id == item.turn_id && event.step_id == item.step_id) {
+                    const auto post_ref = trajectory::v3::MakeOwnedJobReference(ledger, event.event_id);
+                    if (post_ref && trajectory::v3::CheckOwnedJobPost(ledger, *adoption,
+                            item.attempt_terminal_event, item.business_result_ref, *post_ref)) post_confirmed = true;
+                }
+            }
+            facts.admission_complete = item.admission_complete;
+            const bool terminal = item.attempt_terminal != 0;
+            const bool observed = IsTerminalJobState(job.state);
+            const bool known_unstarted = !facts.execution_started && item.dispatched_count == 0 &&
+                (facts.execution_state == "cancelled" || facts.execution_state == "rejected");
+            const auto* terminal_event = ledger.FindEvent(item.attempt_terminal_event);
+            const bool known_start_failure = terminal_event && terminal_event->kind == EventKindV3::ToolExecutionFailed &&
+                JsonStr(terminal_event->payload, "error_code") == "tool.job.thread_start_failed";
+            const bool result_complete = known_unstarted || known_start_failure || (!item.business_result_ref.empty() &&
+                item.result_ref == item.business_result_ref && post_confirmed);
+            const bool matches = (job.state == "succeeded" && facts.execution_state == "done") ||
+                (job.state == "failed" && (facts.execution_state == "failed" || facts.execution_state == "rejected")) ||
+                (job.state == "cancelled" && facts.execution_state == "cancelled");
+            if (facts.execution_state == "unknown" || job.state == "unknown")
+                facts.knowledge = JobRecoveryKnowledge::ExecutionUnconfirmed;
+            else if (terminal || observed)
+                facts.knowledge = observed && terminal && matches && result_complete &&
+                    (item.admission_complete || known_unstarted) ? JobRecoveryKnowledge::TerminalConfirmed
+                                                               : JobRecoveryKnowledge::TerminalDeliveryGap;
+            else if (facts.execution_started || item.dispatched_count)
+                facts.knowledge = JobRecoveryKnowledge::ExecutionUnconfirmed;
+            else facts.knowledge = JobRecoveryKnowledge::KnownNotDispatched;
+            item.recovery = facts;
+            item.disposition = "owned_hold";
+            item.detail = facts.knowledge == JobRecoveryKnowledge::TerminalConfirmed ? "owned_terminal_confirmed" :
+                facts.knowledge == JobRecoveryKnowledge::TerminalDeliveryGap ? "owned_terminal_delivery_gap" :
+                facts.knowledge == JobRecoveryKnowledge::ExecutionUnconfirmed ? "owned_execution_unconfirmed" :
+                "owned_adopted_not_dispatched";
+            if (observed) item.terminal_state = job.state;
+            plan.items.push_back(std::move(item));
+            continue;
         }
         // 接单消息在当前链上?(job_handle 必有;缺则补链不重跑,单 §6。)
         const bool admission_message_done =
@@ -2192,7 +2979,9 @@ std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
         record->policy = item.policy;
         record->identity.logical_name = item.tool_name;
         record->identity.registration_source = "host_job_service";
-        if (plan.policy == JobRecoveryPolicy::Hold) {
+        if (plan.policy == JobRecoveryPolicy::Hold || item.owned_layout) {
+            if (!item.recovery || !impl_->writer || impl_->writer->session_id() != plan.source_session_id)
+                throw std::invalid_argument("job.recovery.invalid_source");
             record->mode = item.mode;
             record->recovery = item.recovery;
             record->state = item.recovery->original_state;
