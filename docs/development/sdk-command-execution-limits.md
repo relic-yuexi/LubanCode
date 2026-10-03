@@ -16,7 +16,7 @@
 
 画像归当次上下文，工具只在同步 `execute` 内借读，不存指针，不改共享 `RunCommandTool` 字段。取消仍优先取当次旗；旧 `SetCancel` 留作兜底。业务身份、权限、审批和 Session owner 都沿既有合同。
 
-启用画像时，实际进程结果附 owned 标量 `timeout_ms`、`max_output_bytes`、`captured_output_bytes`。最后一项记捕获原始字节数，先记再清洗 UTF-8，不声称含工具解释文案或清洗后投影。旧调用结果和文案不增字段。
+启用画像时，实际进程结果附 owned 标量 `timeout_ms`、`max_output_bytes`。帽管平台捕获字节；平台编码转换、UTF-8 清洗和工具解释文案不算捕获原文，不能拿最终正文长度反推捕获量。旧调用结果和文案不增字段。
 
 超限仍报 `process.output_limit`，超时报 `process.timeout`，取消仍报 `cancelled_during_run`。到帽便收整棵进程树、等捕获退出后才返回；不把半截结果报成功。画像内文案写实际帽，不劝模型绕进 CLI 后台入口。
 
