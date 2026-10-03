@@ -16,9 +16,11 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "platform/paths.hpp"
+#include "platform/process_diagnostics.hpp"
 #include "tools/background_tasks.hpp"
 #include "tools/run_command.hpp"
 
@@ -29,6 +31,8 @@ using lubancode::tools::CommandExecutionLimits;
 using lubancode::tools::RunCommandTool;
 using lubancode::tools::Tool;
 using lubancode::tools::ToolExecutionContext;
+using lubancode::platform::ProcessDiagnosticBuffer;
+using lubancode::platform::ProcessDiagnosticStage;
 
 struct Watchdog {
     std::mutex mutex;
@@ -225,11 +229,34 @@ std::mutex& DiagnosticMutex() {
     static std::mutex mutex;
     return mutex;
 }
+nlohmann::json ProcessDiagnosticSnapshot(const ProcessDiagnosticBuffer& buffer) {
+    const auto reserved = buffer.Reserved();
+    nlohmann::json records = nlohmann::json::array();
+    std::uint32_t unpublished = 0;
+    for (std::uint32_t i = 0; i < reserved && i < ProcessDiagnosticBuffer::kCapacity; ++i) {
+        lubancode::platform::ProcessDiagnosticRecord item{};
+        if (!buffer.ReadPublished(i, item)) { ++unpublished; continue; }
+        records.push_back({{"slot", i},
+            {"stage", lubancode::platform::ProcessDiagnosticStageName(item.stage)},
+            {"steady_ns", item.steady_ns}, {"pid", item.pid}, {"pgid", item.pgid},
+            {"rc", item.rc}, {"system_error", item.system_error}, {"detail", item.detail}});
+    }
+    return {{"capacity", ProcessDiagnosticBuffer::kCapacity}, {"reserved", reserved},
+        {"overflow", reserved > ProcessDiagnosticBuffer::kCapacity || buffer.Overflowed()},
+        {"unpublished", unpublished},
+#ifdef _WIN32
+        {"native_stages", "windows_foreground_caller_and_reader"}, {"error_domain", "win32_last_error"},
+#else
+        {"native_stages", "posix_parent_and_reader"}, {"error_domain", "posix_errno"},
+#endif
+        {"records", std::move(records)}};
+}
 void InvocationDiagnostic(const char* phase, const nlohmann::json& input,
                           const ToolExecutionContext* context, const fs::path& cwd,
                           const std::string& tag, std::chrono::milliseconds elapsed,
                           const Tool::Result* result = nullptr,
-                          const char* exception = nullptr) noexcept {
+                          const char* exception = nullptr,
+                          const ProcessDiagnosticBuffer* process = nullptr) noexcept {
     // The values and marker bytes belong to this actual call. Diagnostic reads
     // never replace Started/WaitStarted or any result assertion below.
     try {
@@ -255,6 +282,9 @@ void InvocationDiagnostic(const char* phase, const nlohmann::json& input,
                 {"content_hex", DiagnosticHex(result->content)}};
         }
         if (exception) record["exception"] = exception;
+        // The actual synchronous call has returned/thrown before snapshotting.
+        // Native records only become readable after their release publication.
+        if (process) record["process_stages"] = ProcessDiagnosticSnapshot(*process);
         // Hex retains original bytes even if an error contains invalid UTF-8.
         const std::string line = record.dump(-1, ' ', true,
             nlohmann::json::error_handler_t::replace);
@@ -273,30 +303,38 @@ void InvocationDiagnostic(const char* phase, const nlohmann::json& input,
 template <typename Call>
 Tool::Result RecordedInvocation(const nlohmann::json& input,
                                 const ToolExecutionContext* context,
-                                const fs::path& cwd, const std::string& tag, Call call) {
+                                const fs::path& cwd, const std::string& tag, Call call,
+                                ProcessDiagnosticBuffer* borrowed = nullptr) {
+    ProcessDiagnosticBuffer local;
+    ProcessDiagnosticBuffer* const process = borrowed ? borrowed : &local;
     InvocationDiagnostic("before", input, context, cwd, tag, 0ms);
     const auto start = std::chrono::steady_clock::now();
     const auto elapsed = [&] {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start);
     };
+    lubancode::platform::ScopedProcessDiagnostics scope(process);
+    process->Record(ProcessDiagnosticStage::ToolCallEntered);
     try {
         auto result = call();
-        InvocationDiagnostic("after", input, context, cwd, tag, elapsed(), &result);
+        process->Record(ProcessDiagnosticStage::ToolCallReturned);
+        InvocationDiagnostic("after", input, context, cwd, tag, elapsed(), &result, nullptr, process);
         return result;
     } catch (const std::exception& error) {
-        InvocationDiagnostic("threw", input, context, cwd, tag, elapsed(), nullptr, error.what());
+        process->Record(ProcessDiagnosticStage::ToolCallThrew);
+        InvocationDiagnostic("threw", input, context, cwd, tag, elapsed(), nullptr, error.what(), process);
         throw;
     } catch (...) {
-        InvocationDiagnostic("threw", input, context, cwd, tag, elapsed(), nullptr, "non_std_exception");
+        process->Record(ProcessDiagnosticStage::ToolCallThrew);
+        InvocationDiagnostic("threw", input, context, cwd, tag, elapsed(), nullptr, "non_std_exception", process);
         throw;
     }
 }
 Tool::Result ExecuteRecorded(RunCommandTool& tool, const nlohmann::json& input,
                              const ToolExecutionContext& context, const fs::path& cwd,
-                             const std::string& tag) {
+                             const std::string& tag, ProcessDiagnosticBuffer* process = nullptr) {
     return RecordedInvocation(input, &context, cwd, tag,
-        [&] { return tool.execute(input, context); });
+        [&] { return tool.execute(input, context); }, process);
 }
 Tool::Result ExecuteRecorded(RunCommandTool& tool, const nlohmann::json& input,
                              const fs::path& cwd, const std::string& tag) {
@@ -399,13 +437,18 @@ TEST_CASE("RunCommand execution limits: actual started cancellation returns afte
         const std::string tag = shell + "-cancel";
         const auto input = probe.Input(directory.path, shell, tag, 128, 60000);
         const auto context = Context(20000, 1024, &cancel);
+        // This owner survives the future and failure cleanup, including the
+        // RunProcess reader's actual join. Publishing only records POD slots.
+        ProcessDiagnosticBuffer process;
         std::future<Tool::Result> future;
         FinishCalls cleanup{{&cancel}, {&future}};
         future = std::async(std::launch::async, [&] {
-            return ExecuteRecorded(tool, input, context, directory.path, tag);
+            return ExecuteRecorded(tool, input, context, directory.path, tag, &process);
         });
         REQUIRE(WaitStarted(directory.path, tag));
+        process.Record(ProcessDiagnosticStage::TestCancelPublishBefore);
         cancel.store(true, std::memory_order_release);
+        process.Record(ProcessDiagnosticStage::TestCancelPublishAfter);
         REQUIRE(future.wait_for(10s) == std::future_status::ready);
         const auto result = future.get();
         REQUIRE(result.is_error);
