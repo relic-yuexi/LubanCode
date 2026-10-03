@@ -268,7 +268,10 @@ def check_owned_job_registration(command, executable="lubancore_sdk_tests"):
 
 
 def check_owned_job_native(section, command):
-    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe") if command else ""
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("Owned Job admission native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
     if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
         raise RuntimeError("Owned Job admission executable is not the actual native fixture")
     check_owned_job_registration(command, executable)

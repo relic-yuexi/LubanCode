@@ -291,6 +291,13 @@ class OwnedJobAdmissionGateTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(RuntimeError):
                 focused.check_owned_job_native(self.body(bad), command)
 
+    def test_malformed_native_argv_rejects_explicitly(self):
+        command = ['/real/lubancore_sdk_tests', '--source-file=*test_owned_job_admission.cpp']
+        body = self.body(command)
+        for bad in (None, {}, [], command[:1], [7, command[1]], [command[0], 7], tuple(command)):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_owned_job_native(body, bad)
+
     def test_missing_duplicate_empty_or_failed_evidence_reject(self):
         command = ['/real/lubancore_sdk_tests', '--source-file=*test_owned_job_admission.cpp']
         body = self.body(command)
