@@ -47,3 +47,4 @@ Close 失败单列 `sdk.events.provider_close_failed`，Session/Runtime 返回�
 真 held provider 测 Close 等退场、迟返 factory 回收；失败先开闸再 join。factory/Push/Next/Close 真实重入逐口拒绝。
 同项目两场、异项目两场核事件 SID/operation/queue 归属、独占宿主、四场退净。原 SDK native sources 保全，不用镜像队列函数替公开路径。
 交叉 CMake、focused/ASan/full argv、SDK-only closure、目录登记由 root 接；本地只纯检查，不 configure/build/CTest。
+另加 `examples/sdk-consumer/event_sink.cpp` 与原 main 的 `event-sink` 子命令。先单独 include 已安装 `events.hpp`，再 include `core.hpp`；仅标准库与公开 SDK，移位安装后真跑宿主队列、投递、CloseChecked、Session/Runtime Close。原 25 条 consumer 保全，新口独立登记第 26 条。
