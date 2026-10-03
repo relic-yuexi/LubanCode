@@ -30,22 +30,59 @@
 namespace lubancode::trajectory {
 namespace {
 
-bool FlushFileDurable(std::FILE* file, Durability durability) {
-    if (std::fflush(file) != 0) {
-        return false;
+JournalNativeIoResult ObserveNative(JournalNativeIoResult actual, JournalNativeIoProbe* probe) noexcept {
+    if (probe != nullptr) actual.injected_unconfirmed = probe->After(actual);
+    return actual;
+}
+
+bool Confirmed(const JournalNativeIoResult& actual) noexcept {
+    return actual.attempted && actual.succeeded && !actual.injected_unconfirmed;
+}
+
+void FlushFileDurable(std::FILE* file, Durability durability,
+                      JournalAppendReceipt& receipt, JournalNativeIoProbe* probe) noexcept {
+    JournalNativeIoResult flushed;
+    flushed.stage = JournalNativeStage::Flush;
+    flushed.attempted = true;
+    flushed.native_return = std::fflush(file);
+    if (flushed.native_return != 0) {
+        flushed.native_error = errno;
+        flushed.error_domain = JournalNativeErrorDomain::Errno;
     }
-    if (durability != Durability::PowerLoss) {
-        return true;
-    }
+    flushed.succeeded = flushed.native_return == 0;
+    receipt.flush = ObserveNative(flushed, probe);
+    if (!Confirmed(receipt.flush)) { receipt.failure = receipt.flush; return; }
+    receipt.confirmed_durability = Durability::ProcessCrash;
+    if (durability != Durability::PowerLoss) return;
+    JournalNativeIoResult synced;
+    synced.stage = JournalNativeStage::FileSync;
+    synced.attempted = true;
 #ifdef _WIN32
     const HANDLE handle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(file)));
     if (handle == INVALID_HANDLE_VALUE) {
-        return false;
+        synced.native_error = errno;
+        synced.stage = JournalNativeStage::FileHandle;
+        synced.native_return = -1;
+        synced.error_domain = JournalNativeErrorDomain::Errno;
+    } else {
+        synced.native_return = FlushFileBuffers(handle);
+        if (synced.native_return == FALSE) {
+            synced.native_error = GetLastError();
+            synced.error_domain = JournalNativeErrorDomain::Win32;
+        }
+        synced.succeeded = synced.native_return != FALSE;
     }
-    return FlushFileBuffers(handle) != FALSE;
 #else
-    return ::fsync(::fileno(file)) == 0;
+    synced.native_return = ::fsync(::fileno(file));
+    if (synced.native_return != 0) {
+        synced.native_error = errno;
+        synced.error_domain = JournalNativeErrorDomain::Errno;
+    }
+    synced.succeeded = synced.native_return == 0;
 #endif
+    receipt.file_sync = ObserveNative(synced, probe);
+    if (!Confirmed(receipt.file_sync)) { receipt.failure = receipt.file_sync; return; }
+    receipt.confirmed_durability = Durability::PowerLoss;
 }
 
 }  // namespace
@@ -231,17 +268,23 @@ JournalWriter::JournalWriter(JournalWriter&& other) noexcept
     : path_(std::move(other.path_)),
       file_(std::exchange(other.file_, nullptr)),
       line_count_(std::exchange(other.line_count_, 0)),
-      broken_(std::exchange(other.broken_, false)) {}
+      broken_(std::exchange(other.broken_, false)),
+      first_unconfirmed_append_(std::exchange(other.first_unconfirmed_append_, std::nullopt)),
+      first_close_receipt_(std::exchange(other.first_close_receipt_, std::nullopt)),
+      native_probe_(std::move(other.native_probe_)) {}
 
 JournalWriter& JournalWriter::operator=(JournalWriter&& other) noexcept {
     if (this != &other) {
         if (file_ != nullptr) {
-            std::fclose(file_);
+            (void)CloseDetailed();
         }
         path_ = std::move(other.path_);
         file_ = std::exchange(other.file_, nullptr);
         line_count_ = std::exchange(other.line_count_, 0);
         broken_ = std::exchange(other.broken_, false);
+        first_unconfirmed_append_ = std::exchange(other.first_unconfirmed_append_, std::nullopt);
+        first_close_receipt_ = std::exchange(other.first_close_receipt_, std::nullopt);
+        native_probe_ = std::move(other.native_probe_);
     }
     return *this;
 }
@@ -276,25 +319,87 @@ std::expected<JournalWriter, std::string> JournalWriter::Open(const std::filesys
     return writer;
 }
 
+std::expected<JournalWriter, std::string> JournalWriter::OpenWithNativeIoProbe(
+    const std::filesystem::path& path, OpenMode mode, std::shared_ptr<JournalNativeIoProbe> probe) {
+    auto opened = Open(path, mode);
+    if (opened) opened->native_probe_ = std::move(probe);
+    return opened;
+}
+
 bool JournalWriter::AppendLine(std::string_view line, Durability durability) {
-    if (broken_ || file_ == nullptr || line.empty()) {
-        return false;
+    return AppendLineDetailed(line, durability).status == JournalAppendStatus::Committed;
+}
+
+JournalAppendReceipt JournalWriter::AppendLineDetailed(std::string_view line, Durability durability) noexcept {
+    JournalAppendReceipt receipt;
+    receipt.requested_durability = durability;
+    receipt.line_count = line_count_;
+    if (broken_) { receipt.rejection = JournalBeforeIoReason::Broken; return receipt; }
+    if (file_ == nullptr) { receipt.rejection = JournalBeforeIoReason::Closed; return receipt; }
+    if (line.empty()) { receipt.rejection = JournalBeforeIoReason::EmptyLine; return receipt; }
+    JournalNativeIoResult body;
+    body.stage = JournalNativeStage::BodyWrite;
+    body.attempted = true;
+    body.requested_bytes = line.size();
+    body.written_bytes = std::fwrite(line.data(), 1, line.size(), file_);
+    if (body.written_bytes != line.size()) {
+        body.native_error = errno;
+        body.error_domain = JournalNativeErrorDomain::Errno;
     }
-    const bool wrote_body = std::fwrite(line.data(), 1, line.size(), file_) == line.size();
-    const bool wrote_newline = std::fwrite("\n", 1, 1, file_) == 1;
-    if (!wrote_body || !wrote_newline || !FlushFileDurable(file_, durability)) {
+    body.succeeded = body.written_bytes == line.size();
+    receipt.body = ObserveNative(body, native_probe_.get());
+    JournalNativeIoResult newline;
+    newline.stage = JournalNativeStage::NewlineWrite;
+    newline.attempted = true;
+    newline.requested_bytes = 1;
+    newline.written_bytes = std::fwrite("\n", 1, 1, file_);
+    if (newline.written_bytes != 1) {
+        newline.native_error = errno;
+        newline.error_domain = JournalNativeErrorDomain::Errno;
+    }
+    newline.succeeded = newline.written_bytes == 1;
+    receipt.newline = ObserveNative(newline, native_probe_.get());
+    if (!Confirmed(receipt.body)) receipt.failure = receipt.body;
+    else if (!Confirmed(receipt.newline)) receipt.failure = receipt.newline;
+    else FlushFileDurable(file_, durability, receipt, native_probe_.get());
+    if (receipt.failure) {
         broken_ = true;
-        return false;
+        receipt.status = JournalAppendStatus::Unconfirmed;
+        if (!first_unconfirmed_append_) first_unconfirmed_append_ = receipt;
+        return receipt;
     }
     ++line_count_;
-    return true;
+    receipt.line_count = line_count_;
+    receipt.status = JournalAppendStatus::Committed;
+    return receipt;
 }
 
 bool JournalWriter::Close() {
-    if (file_ != nullptr && std::fclose(std::exchange(file_, nullptr)) != 0) {
-        broken_ = true;
+    return CloseDetailed().ok();
+}
+
+JournalCloseReceipt JournalWriter::CloseDetailed() noexcept {
+    if (first_close_receipt_) return *first_close_receipt_;
+    JournalCloseReceipt receipt;
+    receipt.broken_before = broken_;
+    if (file_ != nullptr) {
+        JournalNativeIoResult closed;
+        closed.stage = JournalNativeStage::Close;
+        closed.attempted = true;
+        closed.native_return = std::fclose(std::exchange(file_, nullptr));
+        if (closed.native_return != 0) {
+            closed.native_error = errno;
+            closed.error_domain = JournalNativeErrorDomain::Errno;
+        }
+        closed.succeeded = closed.native_return == 0;
+        receipt.native = ObserveNative(closed, native_probe_.get());
+        receipt.status = Confirmed(*receipt.native) ? JournalCloseReceipt::Status::Closed
+                                                  : JournalCloseReceipt::Status::Unconfirmed;
+        if (receipt.status == JournalCloseReceipt::Status::Unconfirmed) broken_ = true;
     }
-    return !broken_;
+    receipt.broken_after = broken_;
+    first_close_receipt_ = receipt;
+    return receipt;
 }
 
 std::expected<std::string, std::string> JournalWriter::ComputeJournalSha256(
