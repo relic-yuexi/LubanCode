@@ -1,4 +1,5 @@
 #include "sdk/memory_write.hpp"
+#include "sdk/plan_write.hpp"
 
 #include <algorithm>
 #include <set>
@@ -226,8 +227,7 @@ std::expected<Json, std::string> SessionMemoryWrite::Open(const lubancode::traje
         if (!prior) return fail(prior.error());
         if (*prior) return std::unexpected("sdk.memory_write.plan_invalid");
         const auto bytes = Plan(context.session_id).dump();
-        const auto saved = lubancode::platform::AtomicWriteFile(session_dir_ / kPlanFile, bytes,
-            lubancode::platform::WriteDurability::ProcessCrashDurability);
+        const auto saved = WriteFrozenPlan(session_dir_ / kPlanFile, bytes);
         if (!saved) {
             const auto& error = saved.error();
             return std::unexpected("sdk.memory_write.plan_write_failed: " + Json{

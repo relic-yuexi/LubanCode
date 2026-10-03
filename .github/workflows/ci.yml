@@ -152,6 +152,11 @@ jobs:
                 cross_platform=true
                 runner_tests=$runner_present
                 code=true ;;
+              src/updater/lock.*|tests/integration/updater/test_updater_lock.cpp|tests/support/updater_lock_racer.cpp|scripts/ci/check_updater_lock.py|scripts/ci/tests/test_updater_lock_gate.py)
+                # The original CLI updater lock source needs three native platforms.
+                # This gate adds no SDK-focused or ASan source.
+                cross_platform=true
+                code=true ;;
               CMakeLists.txt|tests/CMakeLists.txt|cmake/*|vcpkg.json)
                 if [ "$remote_present" = true ] || [ "$assembly_present" = true ] || [ "$sdk_present" = true ] || [ "$worker_present" = true ] || [ "$runner_present" = true ]; then
                   cross_platform=true
@@ -718,6 +723,21 @@ jobs:
           cmake --build build --config Release --target lubancode -j 4
           cmake --build build --config Release --target lubancode_tests -j 4
 
+      - name: Run original CLI updater lock regressions
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_updater_lock_gate.py
+          "$PY" scripts/ci/check_updater_lock.py --build-dir build
+
+      - name: Upload updater lock evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-lock-${{ matrix.name }}
+          path: build/test-evidence/updater-lock/
+          if-no-files-found: error
+
       # 先查登记，后面的全量 Test 真跑；不重复执行，也不让零册冒绿。
       - name: Run project memory commit and CLI memory regressions
         if: needs.changes.outputs.memory_worker == 'true'
@@ -1080,6 +1100,20 @@ jobs:
           cmake --build build --target lubancode -j "$(nproc)"
           cmake --build build --target lubancode_tests -j "$(nproc)"
 
+      - name: Run original CLI updater lock regressions
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_updater_lock_gate.py
+          "$PY" scripts/ci/check_updater_lock.py --build-dir build
+
+      - name: Upload updater lock evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-lock-linux-manylinux
+          path: build/test-evidence/updater-lock/
+          if-no-files-found: error
+
       - name: Run project memory commit and CLI memory regressions
         if: needs.changes.outputs.memory_worker == 'true'
         shell: bash
@@ -1302,7 +1336,7 @@ jobs:
           # (Lua 钩子串),与本腿的悬垂/寿命合同无关,另立单子治理后再开。
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
         run: |
-          ctest --test-dir build -C Release -R '^(integration\.app_server\.app_server_session_parity|unit\.app_server\.app_server_browser|unit\.runtime\.tool_runtime|integration\.plugins\.tool_runtime_deferral|unit\.runtime\.session_execution|unit\.runtime\.execution_owner|unit\.runtime\.subagent_terminal_receipt|unit\.runtime\.child_foreground_integration|unit\.runtime\.child_parent_observation|unit\.runtime\.child_history_adoption|unit\.runtime\.scoped_turn_bindings|unit\.tools\.tool_job_coordinator|unit\.app\.turn_runner_scoped_bindings|unit\.agent\.(subagent_thread_lifetime|child_foreground_context)|integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection|lubancore_skills|lubancore_memory_recall|lubancore_memory_cas|lubancore_memory_save|lubancore_scoped_approval|lubancore_child_approval|lubancore_subagents|lubancore_actions|lubancore_builtin_search)|unit\.remote\.remote_result_sync|unit\.hooks\.middleware_core|unit\.memory\.memory_project_commit|unit\.trajectory_v3\.v3_result_store)$' \
+          ctest --test-dir build -C Release -R '^(integration\.app_server\.app_server_session_parity|unit\.app_server\.app_server_browser|unit\.runtime\.tool_runtime|integration\.plugins\.tool_runtime_deferral|unit\.runtime\.session_execution|unit\.runtime\.execution_owner|unit\.runtime\.subagent_terminal_receipt|unit\.runtime\.child_foreground_integration|unit\.runtime\.child_parent_observation|unit\.runtime\.child_history_adoption|unit\.runtime\.scoped_turn_bindings|unit\.tools\.tool_job_coordinator|unit\.app\.turn_runner_scoped_bindings|unit\.agent\.(subagent_thread_lifetime|child_foreground_context)|integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection|lubancore_skills|lubancore_memory_recall|lubancore_memory_cas|lubancore_memory_save|lubancore_scoped_approval|lubancore_child_approval|lubancore_subagents|lubancore_actions|lubancore_builtin_search)|unit\.remote\.remote_result_sync|unit\.hooks\.middleware_core|unit\.memory\.memory_project_commit|unit\.trajectory_v3\.v3_result_store|unit\.platform\.atomic_write)$' \
             --show-only=json-v1 > build/asan-host-registration.json
           python3 - <<'PY'
           import json
@@ -1324,17 +1358,23 @@ jobs:
                       'integration.sdk.lubancore_actions',
                       'integration.sdk.lubancore_builtin_search',
                       'unit.remote.remote_result_sync',
-                      'unit.hooks.middleware_core', 'unit.memory.memory_project_commit', 'unit.trajectory_v3.v3_result_store'}
+                      'unit.hooks.middleware_core', 'unit.memory.memory_project_commit', 'unit.trajectory_v3.v3_result_store',
+                      'unit.platform.atomic_write'}
           if len(tests) != len(required) or {test['name'] for test in tests} != required:
               raise SystemExit('ASan SDK/host lifetime regressions are not registered')
           for test in tests:
               props = {p['name']: p['value'] for p in test.get('properties', [])}
               if props.get('DISABLED'):
                   raise SystemExit('ASan SDK/host lifetime regression is disabled')
+              if test['name'] == 'unit.platform.atomic_write':
+                  import sys
+                  sys.path.insert(0, str(Path.cwd() / 'scripts' / 'ci'))
+                  from check_sdk_focused import check_plan_retry_registration
+                  check_plan_retry_registration(test.get('command', []), 'lubancode_tests')
           PY
           # channel_menu_pump 暂除外:该册对调度时序敏感,ASan 放慢后
           # "未配对点击"的拒绝态断言抢跑假红;渠道域不是本腿的合同面。
-          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\.|^unit\.tools\.tool_job_coordinator$|^integration\.app_server\.app_server_session_parity$|^unit\.app_server\.app_server_browser$|^integration\.plugins\.tool_runtime_deferral$|^unit\.app\.turn_runner_scoped_bindings$|^integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection|lubancore_skills|lubancore_memory_recall|lubancore_memory_cas|lubancore_memory_save|lubancore_scoped_approval|lubancore_child_approval|lubancore_subagents|lubancore_actions|lubancore_builtin_search)$|^unit\.remote\.remote_result_sync$|^unit\.hooks\.middleware_core$|^unit\.memory\.memory_project_commit$|^unit\.trajectory_v3\.v3_result_store$" \
+          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\.|^unit\.tools\.tool_job_coordinator$|^integration\.app_server\.app_server_session_parity$|^unit\.app_server\.app_server_browser$|^integration\.plugins\.tool_runtime_deferral$|^unit\.app\.turn_runner_scoped_bindings$|^integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection|lubancore_skills|lubancore_memory_recall|lubancore_memory_cas|lubancore_memory_save|lubancore_scoped_approval|lubancore_child_approval|lubancore_subagents|lubancore_actions|lubancore_builtin_search)$|^unit\.remote\.remote_result_sync$|^unit\.hooks\.middleware_core$|^unit\.memory\.memory_project_commit$|^unit\.trajectory_v3\.v3_result_store$|^unit\.platform\.atomic_write$" \
             -E "channel_menu_pump" --parallel 4 --output-on-failure --no-tests=error \
             --output-junit "$PWD/build/asan-results.xml"
           python3 - <<'PY'
@@ -1393,6 +1433,11 @@ jobs:
                           raise SystemExit('ASan child observation actual path did not finish once: ' + path)
                   if sections[0].splitlines().count('[child-observation-path] source-owner-alias') != 1:
                       raise SystemExit('ASan child observation actual Unix owner alias path did not finish once')
+              if name == 'unit.platform.atomic_write':
+                  import sys
+                  sys.path.insert(0, str(Path.cwd() / 'scripts' / 'ci'))
+                  from check_sdk_focused import check_plan_retry_native
+                  check_plan_retry_native(sections[0], 'posix', 'lubancode_tests')
               if name == 'unit.trajectory_v3.v3_result_store':
                   import sys
                   sys.path.insert(0, str(Path.cwd() / 'scripts' / 'ci'))
