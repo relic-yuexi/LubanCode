@@ -71,3 +71,4 @@ git diff --check
 - [中间件异常出口与 Next 所见](middleware-exception-observation.md)
 - [HealthBus 批次寿命夹具](agent-health-batch-fixture.md)
 - [Owned Job 四场探针正文就绪](owned-job-probe-readiness.md)
+- [SDK MemorySave 四场报告诊断](sdk-memory-save-diagnostic.md)
