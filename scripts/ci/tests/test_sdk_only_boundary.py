@@ -199,6 +199,36 @@ class BoundaryTests(unittest.TestCase):
                              "compileGroups": [{}]})
         self.assert_rejected(self.check(testing=True), "reverse host include")
 
+    def test_result_store_original_fixture_is_an_exact_testing_only_allowance(self):
+        shared = "tests/unit/trajectory_v3/test_v3_result_store.cpp"
+        self.source_file(shared, '#include "trajectory/v3/result_store.hpp"\n')
+        self.source_file("src/trajectory/v3/result_store.hpp", "#pragma once\n")
+        target = {"id": "result-store", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        report = self.check(testing=True)
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.assertIn("src/trajectory/v3/result_store.hpp", report["scannedProjectFiles"])
+        target["name"] = "lubancode_engine"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        nearby = "tests/unit/trajectory_v3/test_v3_reader.cpp"
+        self.source_file(nearby, "int unrelated_trajectory_test;\n")
+        target["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_result_store_original_fixture_cannot_import_a_recursive_host_header(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        shared = "tests/unit/trajectory_v3/test_v3_result_store.cpp"
+        self.source_file(shared, '#include "trajectory/v3/result_store.hpp"\n')
+        self.source_file("src/trajectory/v3/result_store.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.targets.append({"id": "result-store", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
     def test_child_terminal_allowance_remains_testing_only_and_neutral(self):
         shared = "tests/unit/runtime/test_subagent_terminal_receipt.cpp"
         self.source_file(shared, '#include "runtime/subagent_terminal.hpp"\n')
