@@ -70,3 +70,4 @@ git diff --check
 - [中间件共用延后效果缓冲](middleware-deferred-effects.md)
 - [中间件异常出口与 Next 所见](middleware-exception-observation.md)
 - [共享 Action 值校验与 Job Post 返回档](middleware-job-post-contract.md)
+- [真实 Job Post 调用借用](job-post-live-invocation.md)

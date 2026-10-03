@@ -121,6 +121,7 @@ SHARED_SDK_TEST_SOURCES = {
     "tests/unit/tools/test_tool_job_hold_recovery.cpp",
     "tests/unit/tools/test_tool_job_owned_registration.cpp",
     "tests/unit/tools/test_tool_job_owned_adoption.cpp",
+    "tests/unit/tools/test_tool_job_post_live_invocation.cpp",
     "tests/unit/tools/test_run_command_execution_limits.cpp",
     "tests/unit/trajectory/test_session_recovery_view.cpp",
     "tests/unit/trajectory_v3/test_v3_result_store.cpp",

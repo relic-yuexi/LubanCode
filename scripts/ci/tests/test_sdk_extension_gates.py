@@ -1108,5 +1108,84 @@ class LuaEvidenceTests(unittest.TestCase):
                     focused.check_lua_native(changed)
 
 
+class JobPostLiveInvocationGateTests(unittest.TestCase):
+    command = ['/real build/lubancore_sdk_tests', '--source-file=*test_tool_job_post_live_invocation.cpp']
+
+    def body(self, command=None):
+        command = self.command if command is None else command
+        return '\n'.join(('Command: ' + ' '.join('"' + value + '"' for value in command),
+            '[doctest] test cases: 6 | 6 passed | 0 failed',
+            '[doctest] assertions: 100 | 100 passed | 0 failed', 'Test Passed.',
+            *('[job-post-live-invocation-path] ' + path for path in focused.JOB_POST_LIVE_PATHS)))
+
+    def test_absolute_sdk_combined_and_windows_commands(self):
+        for exe in ('/real build/lubancore_sdk_tests', 'C:/real build/lubancode_tests.exe'):
+            command = [exe, self.command[1]]
+            executable = exe.split('/')[-1].removesuffix('.exe')
+            focused.check_job_post_live_registration(command, executable)
+            for ending in ('\n', '\r\n'):
+                focused.check_job_post_live_native(self.body(command).replace('\n', ending), command)
+
+    def test_registration_rejects_relative_foreign_and_filtered_sources(self):
+        bad = (None, {}, [], self.command[:1], tuple(self.command), [7, self.command[1]],
+               [self.command[0], None], ['lubancore_sdk_tests', self.command[1]],
+               ['../lubancore_sdk_tests', self.command[1]],
+               ['\\real build\\lubancore_sdk_tests', self.command[1]],
+               ['C:real build\\lubancore_sdk_tests', self.command[1]],
+               ['/real build/another_tests', self.command[1]],
+               [self.command[0], '--source-file=*test_tool_job_post_live_invocation_extra.cpp'],
+               [self.command[0], '--source-file=*test_tool_job_owned_adoption.cpp'],
+               self.command + ['--test-case=one'])
+        for command in bad:
+            with self.subTest(command=command), self.assertRaises(RuntimeError):
+                focused.check_job_post_live_registration(command)
+            with self.subTest(command=command), self.assertRaises(RuntimeError):
+                focused.check_job_post_live_native(self.body(), command)
+
+    def test_actual_argv_must_match_the_registered_full_path(self):
+        for command in (['/foreign build/lubancore_sdk_tests', self.command[1]],
+                        [self.command[0], '--source-file=*test_tool_job_owned_adoption.cpp'],
+                        self.command + ['--test-case=one']):
+            with self.subTest(command=command), self.assertRaises(RuntimeError):
+                focused.check_job_post_live_native(self.body(command), self.command)
+
+    def test_each_actual_path_must_finish_exactly_once(self):
+        for path in focused.JOB_POST_LIVE_PATHS:
+            marker = '[job-post-live-invocation-path] ' + path
+            for body in (self.body().replace(marker, ''), self.body() + '\n' + marker,
+                         self.body().replace(marker, 'foreign-owner: ' + marker)):
+                with self.subTest(path=path), self.assertRaises(RuntimeError):
+                    focused.check_job_post_live_native(body, self.command)
+
+    def test_empty_failed_or_different_roster_is_rejected(self):
+        body = self.body()
+        for changed in (body.replace('6 | 6 passed', '0 | 0 passed'),
+                        body.replace('6 | 6 passed', '5 | 5 passed'),
+                        body.replace('6 | 6 passed', '7 | 7 passed'),
+                        body.replace('6 passed | 0 failed', '5 passed | 1 failed'),
+                        body.replace('[doctest] test cases: 6 | 6 passed | 0 failed', ''),
+                        body + '\n[doctest] test cases: 6 | 6 passed | 0 failed'):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                focused.check_job_post_live_native(changed, self.command)
+
+    def test_native_assertions_and_success_cannot_be_missing_or_failed(self):
+        body = self.body()
+        for changed in (body.replace('100 | 100 passed', '0 | 0 passed'),
+                        body.replace('100 passed | 0 failed', '99 passed | 1 failed'),
+                        body.replace('[doctest] assertions: 100 | 100 passed | 0 failed', ''),
+                        body + '\n[doctest] assertions: 100 | 100 passed | 0 failed',
+                        body.replace('Test Passed.', ''), body + '\nTest Passed.'):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                focused.check_job_post_live_native(changed, self.command)
+
+    def test_native_command_cannot_be_absent_duplicated_or_malformed(self):
+        body = self.body()
+        first = body.splitlines()[0]
+        for changed in (body.replace(first, ''), body + '\n' + first,
+                        body.replace(first, 'Command: "unterminated')):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                focused.check_job_post_live_native(changed, self.command)
+
+
 if __name__ == "__main__":
     unittest.main()
