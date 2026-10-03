@@ -123,6 +123,7 @@ public:
         Check(user != request.messages.size(), "provider has no current user request");
         for (std::size_t i = user + 1; i < request.messages.size(); ++i) {
             for (const auto& reply : request.messages[i].tool_replies) {
+                Check(reply.call_id == "lua-call", "model reply changed the provider wire call identity");
                 ++observed_->actual_replies;
                 return sdk::ModelReply{reply.is_error ? "tool-error:" + reply.text : reply.text, {}, {}};
             }
@@ -156,26 +157,41 @@ sdk::Operation Run(const std::shared_ptr<sdk::Session>& session, const std::stri
     auto result = Take(session->WaitResult(receipt.operation_id, 20s), "wait Lua");
     Check(result.state == sdk::OperationState::Succeeded && result.result_persisted, "Lua did not finish durably");
     const auto captures = Take(session->ListToolResults(result.operation_id), "list actual Lua results");
-    Check(captures.size() == 2, "one Lua action did not retain both raw and formal sources");
+    std::string diagnostics = "\nLua query session=" + session->id() + " operation=" + result.operation_id +
+        " turn=" + result.turn_id + " final_text=" + result.final_text;
+    for (const auto& row : captures) {
+        const auto& id = row.identity;
+        diagnostics += "\nresult session=" + id.session_id + " operation=" + id.operation_id +
+            " turn=" + id.turn_id + " action=" + id.tool_call_id + " persisted=" + id.persisted_event_id +
+            " result=" + id.result_id + " tool=" + row.tool_name + " attempt=" + std::to_string(row.attempt) +
+            " selected=" + (row.selected ? "true" : "false");
+    }
+    Check(captures.size() == 2, "one Lua action did not retain both raw and formal sources" + diagnostics);
     Check(std::count_if(captures.begin(), captures.end(), [](const auto& row) {
               return row.identity.result_id.starts_with("capture-"); }) == 1 &&
           std::count_if(captures.begin(), captures.end(), [](const auto& row) {
               return row.identity.result_id.starts_with("res-"); }) == 1,
-          "Lua raw or formal source is missing or duplicated");
+          "Lua raw or formal source is missing or duplicated" + diagnostics);
     Check(captures[0].identity.result_id != captures[1].identity.result_id &&
           captures[0].identity.persisted_event_id != captures[1].identity.persisted_event_id,
-          "Lua raw and formal records reuse a persisted identity");
+          "Lua raw and formal records reuse a persisted identity" + diagnostics);
+    // Provider IDs remain wire correlation keys. The committed V3 action owns
+    // both persisted sources and receives its own identity from the writer.
+    Check(!captures[0].identity.tool_call_id.empty() &&
+          captures[0].identity.tool_call_id == captures[1].identity.tool_call_id &&
+          captures[0].identity.tool_call_id != "lua-call",
+          "Lua sources do not share the actual persisted action identity" + diagnostics);
     for (const auto& row : captures) {
         const auto& identity = row.identity;
         Check(row.selected && row.tool_name == kName && row.attempt == 1 &&
               identity.session_id == session->id() && identity.operation_id == result.operation_id &&
-              identity.turn_id == result.turn_id && identity.tool_call_id == "lua-call" &&
-              !identity.persisted_event_id.empty(), "Lua result did not enter this action's selected V3 chain");
-        const auto saved = Take(session->ReadToolResult(identity), "read actual Lua source");
+              identity.turn_id == result.turn_id && !identity.tool_call_id.empty() &&
+              !identity.persisted_event_id.empty(), "Lua result did not enter this action's selected V3 chain" + diagnostics);
+        const auto saved = Take(session->ReadToolResult(identity), "read actual Lua source" + diagnostics);
         Check(saved.result().summary.identity == identity && saved.result().metadata_state == sdk::results::v1::ArtifactState::Verified &&
               std::any_of(saved.result().channels.begin(), saved.result().channels.end(),
                 [&](const auto& channel) { return channel.text && channel.artifact_verified && *channel.text == result.final_text; }),
-              "model reply differs from the verified stored Lua source");
+              "model reply differs from the verified stored Lua source" + diagnostics);
     }
     return result;
 }
