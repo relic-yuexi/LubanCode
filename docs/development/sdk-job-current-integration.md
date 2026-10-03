@@ -16,7 +16,7 @@
 
 合并时保住两个 ASan selector、实际 required 名册、SDK-only 精确来源与宿主闭包、九份真实 FileAPI 图，以及原 CLI/full/安装消费路径。Health 从同一次 full 的 LastTest、JUnit 和单源 registration 抽五册原件，失败件先留后报错，不再跑一次 native 补证。
 
-补收继承路径漏门：只把 `src/platform/process_posix.cpp`、`src/platform/process_win.cpp`、`src/platform/process_diagnostics.hpp` 精确纳入两条 SDK/lifetime 分类。这三份共享进程运行源各自单改，也须选 SDK 三平台与 ASan；原 Windows `memory_worker` 分类照留，不扩成整个 platform glob，不改原生册、命令或预算。纯数据门分别核三路径与两条实际 case，并拒相邻拼写和目录，不拿这次组合碰巧改了 CI 充永久触发证据。
+补收继承路径漏门：只把 `src/platform/process_posix.cpp`、`src/platform/process_win.cpp`、`src/platform/process_diagnostics.hpp` 精确纳入两条 SDK/lifetime 分类。这三份共享进程运行源各自单改，也须选 SDK 三平台与 ASan；原 Windows `memory_worker` 分类照留，不扩成整个 platform glob，不改原生册、命令或预算。纯数据门分别核三路径与两条实际 case，并拒相邻拼写和目录，不拿这次组合碰巧改了 CI 充永久触发证据。这五条检查接到远程 SDK-only 门；检查文件单改也选该门，免得只留一册无人跑。
 
 预核目标为 41 focused 来源、47 ASan 来源、25 installed consumer。41 来源共有 368 处 `TEST_CASE`：Windows 不登记三条 POSIX host-boundary 案，POSIX 不登记三条 Windows atomic-write 案，各平台预期 365。实施后须从实际表、两处 selector 与原源码重数；这些数字只记静态名册，不能冒充实跑。合完交 exact source/tree/parents、冲突处理与纯数据结果，根代理二读后才推远端独立组合 CI。
 

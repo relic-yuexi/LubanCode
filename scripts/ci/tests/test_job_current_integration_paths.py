@@ -99,6 +99,12 @@ class SharedProcessClassificationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sdk_classification_branches(self.text + "\n" + lines[index] + "\n                code=true ;;\n")
 
+    def test_classification_checks_are_run_and_self_changes_select_sdk(self):
+        self.assertEqual(self.text.count(
+            '"$PY" -m unittest discover -s scripts/ci/tests -p test_job_current_integration_paths.py'), 1)
+        self.assertIn("scripts/ci/tests/test_job_current_integration_paths.py", self.branches[1][0])
+        self.assertIn("sdk_tests=$sdk_present", self.branches[1][1])
+
 
 if __name__ == "__main__":
     unittest.main()
