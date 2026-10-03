@@ -1,6 +1,6 @@
 # SDK main Action 中间件合同
 
-本笔只定接线合同，初稿基私有组合 `eb94b3531921c4e880ed293048cfc50f1befc637`；字段与协议帽补充随后同步组合新头，尚未实现或验收。
+初稿先基私有组合 `eb94b3531921c4e880ed293048cfc50f1befc637` 定合同，字段、固定帽与止损次序随后分别落文档提交。实现候选已接主场真实调用，远端原生验收尚待新头 CI；合同不充作通过证据。
 Action 指一枚真实工具调用。仍走现有 Prepare、权限、Started、Execute、Complete，不另造 ActionRun 或执行循环。
 
 ## 首批公开面
@@ -104,4 +104,5 @@ definition_hash 只表宿主所声明实现版本，不认证任意原生函数�
 远端须验真安装消费者只用公开头、默认零注册、schema/floor 复核、拒绝或 Ask 尚未获准时无 Started、唯一 Execute、raw/Post/formal 采用链。
 另验 callback 异常、迟 Next、取消/Close、同项目双场与异项目双场、同 ID 计划漂移先拒且模型/工具零重跑、旧卷字节不动。
 保原 CLI alias/scripts、公开三个旧点与实际孩子回归；新来源数量按最终代码实数冻结，不先冒报 native 通过。
+新 Action 来源固定 10 场，安装消费者也走同份公开实现的 10 条路径；另核真实权限链、摘要止损、回执止损与锁下 binding 四条内部路径。账故障沿已有 Ledger/V3Writer 注入，接真实 SDK Action adapter、Agent 与大结果摘要；公开 Session 没有 writer 故障入口，不把这项内部验收冒记成公开 Session 全栈故障。
 本地只读、静态、纯数据与文档门。configure、编译、CTest、原生程序全交远端 CI；共享分支另行收口。

@@ -196,6 +196,25 @@ public:
 // 里:每一枚都是"引擎问宿主、宿主答话"的关口——有返回值,或有落账副作
 // 用;显示出水不在这些口上(events 一只口管完)。
 struct TurnWiring {
+    struct ActionPreDecision {
+        runtime::ToolHookDecision hook;
+        bool failed = false;
+        std::string error_code;
+        // Host-owned receipt, invoked on this prepare frame after actual schema
+        // and policy adoption. No callback is retained by a tool or background job.
+        std::function<void(bool, const std::string&, const nlohmann::json&)> settle;
+    };
+    // Explicit new capability. Older CLI/child wiring leaves both callbacks empty.
+    std::function<ActionPreDecision(const std::string&, const std::string&, const nlohmann::json&)> on_pre_action;
+    std::function<tools::Tool::Result(const std::string&, const std::string&, const nlohmann::json&,
+        const tools::Tool::Result&, const tools::ToolInvocationIdentity&, const ToolTraceEvent&)> on_post_action;
+    // Per-turn known failure of the explicit Action host. Preserve completed
+    // raw/results, but do not start a summary or another model after this fails.
+    // Older hosts leave this empty; it is never retained beyond this turn.
+    std::function<std::string()> action_failure_reason;
+    // Actual unconfirmed middleware writes, distinct from a known handler
+    // failure. Checked after the prepare receipt and completed Post adoption.
+    std::function<std::string()> action_receipt_failure_reason;
     // Installed by the trajectory hub; summary sampling occurs only after raw
     // result persistence, and uses a separate request/usage ledger.
     std::function<void(api::Backend*, const runtime::ActionSummaryProfile&)> configure_action_summary;

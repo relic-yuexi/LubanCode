@@ -16,6 +16,7 @@ REQUIRED = {
     "sdk.focused.lubancore_scoped_approval",
     "sdk.focused.lubancore_child_approval",
     "sdk.focused.lubancore_subagents",
+    "sdk.focused.lubancore_actions",
     "sdk.focused.lubancore_builtin_search",
     "sdk.focused.lubancore_lifecycle",
     "sdk.focused.lubancore_host_boundary",
@@ -38,6 +39,25 @@ REQUIRED = {
     "sdk.focused.atomic_write",
     "sdk.focused.v3_result_store",
 }
+
+
+ACTION_PATHS = ("chain", "deny", "rewrite-schema", "force-ask", "post-failure",
+                "limits", "opening", "resume", "close", "isolation")
+
+
+def check_action_paths(section: str, *, native: bool):
+    lines = section.splitlines()
+    for path in ACTION_PATHS:
+        if lines.count("[sdk-action-path] " + path) != 1:
+            raise RuntimeError("Action actual public path did not finish once: " + path)
+    if not native:
+        return
+    counts = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(counts) != 1 or tuple(map(int, counts[0])) != (10, 10, 0):
+        raise RuntimeError("Action native roster differs from 10 successful cases")
+    for path in ("existing-permission-chain", "summary-stop", "receipt-stop", "binding-opening"):
+        if lines.count("[sdk-action-native] " + path) != 1:
+            raise RuntimeError("Action actual internal path did not finish once: " + path)
 
 
 def check_result_store_native(native_section: str, platform_name: str):
@@ -145,6 +165,8 @@ def main():
             raise RuntimeError("Actual child approval native roster differs from 14 cases")
         if case.attrib["name"] == "sdk.focused.lubancore_subagents" and int(counts[0]) != 12:
             raise RuntimeError("Public SDK child assembly native roster differs from 12 cases")
+        if case.attrib["name"] == "sdk.focused.lubancore_actions":
+            check_action_paths(sections[0], native=True)
         if case.attrib["name"] == "sdk.focused.child_parent_observation":
             if int(counts[0]) != 8:
                 raise RuntimeError("Child parent observation roster differs from 8 cases")

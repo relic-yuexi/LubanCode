@@ -225,6 +225,7 @@ struct ToolCallFrame {
     // 复用,保住"执行前证据"那一半)。
     std::chrono::steady_clock::time_point started_at{};
     ToolTraceEvent fired_started;
+    std::optional<ToolTraceEvent> fired_finished;
     bool crossed_start = false;
 
     // 阶段一解析出的目标与注册元数据(本批内稳定;P2 的热卸载/切场所有
@@ -308,6 +309,7 @@ void EmitTrace(ToolCallFrame& frame, ToolTraceEvent event) {
         frame.fired_started = event;
         frame.crossed_start = true;
     }
+    if (frame.wiring.on_post_action && event.kind == ToolTraceEventKind::ExecutionFinished) frame.fired_finished = event;
     frame.wiring.on_tool_trace(event);
 }
 
@@ -567,12 +569,38 @@ ToolCallGate PrepareToolCall(ToolCallFrame& frame) {
     // 与权限策略仍在确认回调里,钩子越不了权);updatedInput 只与 allow
     // 同返,先过一遍工具 schema,改写打回即拦。
     NotifyPhase(frame, runtime::ToolPhase::CheckingHook);
+    TurnWiring::ActionPreDecision action;
+    struct ActionReceipt {
+        TurnWiring::ActionPreDecision& action;
+        ToolCallFrame& frame;
+        bool settled = false;
+        ~ActionReceipt() {
+            if (!settled && action.settle) try { action.settle(false, "Action was not admitted", frame.effective_input); } catch (...) {}
+        }
+        void Adopt() {
+            if (action.settle) action.settle(true, {}, frame.effective_input);
+            settled = true;
+        }
+    } action_receipt{action, frame};
+    nlohmann::json hook_input = call.input;
+    if (wiring.on_pre_action) {
+        action = wiring.on_pre_action(call.id, call.name, call.input);
+        if (action.hook.decision == runtime::ToolHookDecision::Decision::Deny) {
+            NotifyPhase(frame, runtime::ToolPhase::Blocked);
+            tools::Tool::Result denied{action.hook.reason, true};
+            denied.outcome = ToString(ToolOutcome::HookDenied);
+            denied.error_code = action.error_code.empty() ? "sdk.action.denied" : action.error_code;
+            FinishTrace(frame, denied);
+            return {false, DispatchDone(frame, std::move(denied))};
+        }
+        if (action.hook.updated_input) hook_input = *action.hook.updated_input;
+    }
     runtime::ToolHookDecision pre;
     if (wiring.on_pre_tool_use_hook) {
-        pre = wiring.on_pre_tool_use_hook(call.id, call.name, call.input);
+        pre = wiring.on_pre_tool_use_hook(call.id, call.name, hook_input);
     } else if (wiring.on_pre_tool_hook) {
         // 旧回调兼容:非空 = deny。
-        const std::optional<std::string> legacy_blocked = wiring.on_pre_tool_hook(call.id, call.name, call.input);
+        const std::optional<std::string> legacy_blocked = wiring.on_pre_tool_hook(call.id, call.name, hook_input);
         if (legacy_blocked.has_value()) {
             pre.decision = runtime::ToolHookDecision::Decision::Deny;
             pre.reason = *legacy_blocked;
@@ -591,7 +619,11 @@ ToolCallGate PrepareToolCall(ToolCallFrame& frame) {
         return {false, DispatchDone(frame, std::move(denied))};
     }
 
-    frame.effective_input = call.input;
+    const bool action_force_ask = wiring.on_pre_action &&
+        (action.hook.decision == runtime::ToolHookDecision::Decision::Ask || pre.decision == runtime::ToolHookDecision::Decision::Ask);
+    if (action_force_ask) pre.decision = runtime::ToolHookDecision::Decision::Ask;
+
+    frame.effective_input = hook_input;
     if (pre.updated_input.has_value()) {
         const auto schema_error = tools::ValidateInputAgainstSchema(*pre.updated_input, tool->input_schema());
         if (schema_error.has_value()) {
@@ -610,7 +642,31 @@ ToolCallGate PrepareToolCall(ToolCallFrame& frame) {
         frame.effective_input = *pre.updated_input;
     }
 
-    if (tool->needs_confirm()) {
+    // Only an actual new Action rewrite opens this new schema/policy checkpoint.
+    // Older no-Action CLI input acceptance remains unchanged.
+    if (wiring.on_pre_action && action.hook.updated_input) {
+        const auto initial_error = tools::ValidateInputAgainstSchema(call.input, tool->input_schema());
+        const auto final_error = tools::ValidateInputAgainstSchema(frame.effective_input, tool->input_schema());
+        if (initial_error || final_error) {
+            tools::Tool::Result rejected{"Action rewrite failed schema validation: " +
+                (initial_error ? *initial_error : *final_error), true};
+            rejected.outcome = ToString(ToolOutcome::SchemaRejected);
+            rejected.error_code = "sdk.action.schema_rejected";
+            FinishTrace(frame, rejected);
+            return {false, DispatchDone(frame, std::move(rejected))};
+        }
+        const auto mode = wiring.on_mode_policy ? wiring.on_mode_policy(call.name, frame.effective_input) : std::string();
+        const auto scope = wiring.on_scope_gate ? wiring.on_scope_gate(call.name, frame.effective_input) : std::nullopt;
+        if (!mode.empty() || (scope && !scope->empty())) {
+            tools::Tool::Result rejected{!mode.empty() ? mode : *scope, true};
+            rejected.outcome = ToString(!mode.empty() ? ToolOutcome::ModeDenied : ToolOutcome::ScopeGatePending);
+            rejected.error_code = !mode.empty() ? runtime::kErrModeDenied : kErrScopeInstructionsRequired;
+            FinishTrace(frame, rejected);
+            return {false, DispatchDone(frame, std::move(rejected))};
+        }
+    }
+
+    if (tool->needs_confirm() || action_force_ask) {
         runtime::PermissionVerdict permission;
         if (wiring.on_permission_evaluate) {
             permission = wiring.on_permission_evaluate(call.id, call.name, tool->approval_class(),
@@ -639,6 +695,19 @@ ToolCallGate PrepareToolCall(ToolCallFrame& frame) {
             declined.details["deny_hit"] = permission.deny_hit;
             FinishTrace(frame, declined);
             return {false, DispatchDone(frame, std::move(declined))};
+        }
+        if (action_force_ask) permission.action = runtime::PermissionVerdict::Action::Ask;
+        if (wiring.on_pre_action && permission.action == runtime::PermissionVerdict::Action::Ask && wiring.on_permission_request) {
+            const auto reply = wiring.on_permission_request(call.id, call.name, frame.effective_input);
+            if (reply.decision == runtime::ToolHookDecision::Decision::Deny) {
+                tools::Tool::Result denied{reply.reason, true};
+                denied.outcome = ToString(ToolOutcome::PermissionDeclined); denied.error_code = kErrPermissionDeclined;
+                FinishTrace(frame, denied);
+                return {false, DispatchDone(frame, std::move(denied))};
+            }
+            if (reply.decision == runtime::ToolHookDecision::Decision::Ask) permission.action = runtime::PermissionVerdict::Action::Ask;
+            else if (reply.decision == runtime::ToolHookDecision::Decision::Allow && !action_force_ask)
+                permission.action = runtime::PermissionVerdict::Action::Allow;
         }
         if (permission.action == runtime::PermissionVerdict::Action::Allow) {
             // 显式预授权或档位自动放行，绝不进入 PermissionRequest/前端确认。
@@ -722,6 +791,7 @@ ToolCallGate PrepareToolCall(ToolCallFrame& frame) {
         }
     }
 
+    action_receipt.Adopt();
     return {true, tools::Tool::Result{}};
 }
 
@@ -731,9 +801,17 @@ ToolCallGate PrepareToolCall(ToolCallFrame& frame) {
 // 执行"的闸装在 sink 里),随后副作用闸问话。返回 nullopt = 可派发;有值
 // = 被 trace 闸拦下,已走显示收口(hub 侧已补终态栅栏,这里不发第二枚)。
 std::optional<tools::Tool::Result> MarkExecutionStarted(ToolCallFrame& frame) {
+    if (frame.wiring.action_receipt_failure_reason) {
+        const auto error = frame.wiring.action_receipt_failure_reason();
+        if (!error.empty()) {
+            tools::Tool::Result failed{error, true}; failed.error_code = "sdk.action.trajectory_failed";
+            failed.execution_control = tools::ExecutionControl::StopIndeterminate;
+            FinishTrace(frame, failed); return DispatchDone(frame, std::move(failed));
+        }
+    }
     // The new locally cancellable approval capability owns this checkpoint.
     // Legacy direct RunOneTool calls still pass the flag to the tool, as before.
-    if (frame.wiring.on_tool_confirm_scoped && frame.cancel != nullptr &&
+    if ((frame.wiring.on_tool_confirm_scoped || frame.wiring.on_pre_action) && frame.cancel != nullptr &&
         frame.cancel->load(std::memory_order_acquire)) {
         tools::Tool::Result cancelled{"本次调用已取消，该工具未执行。", true};
         cancelled.outcome = ToString(ToolOutcome::CancelledBeforeStart);
@@ -745,7 +823,7 @@ std::optional<tools::Tool::Result> MarkExecutionStarted(ToolCallFrame& frame) {
     // The phase callback can cancel this very call. Recheck after it, directly
     // before the durable started boundary; this is still a checkpoint, not an
     // atomic cancellation guarantee against another thread's later write.
-    if (frame.wiring.on_tool_confirm_scoped && frame.cancel != nullptr &&
+    if ((frame.wiring.on_tool_confirm_scoped || frame.wiring.on_pre_action) && frame.cancel != nullptr &&
         frame.cancel->load(std::memory_order_acquire)) {
         tools::Tool::Result cancelled{"本次调用已取消，该工具未执行。", true};
         cancelled.outcome = ToString(ToolOutcome::CancelledBeforeStart);
@@ -828,6 +906,15 @@ tools::Tool::Result CompleteToolCall(ToolCallFrame& frame, tools::Tool::Result r
             return DispatchDone(frame, std::move(failed));
         }
     }
+    if (wiring.on_post_action && frame.fired_finished) {
+        result = wiring.on_post_action(call.id, call.name, frame.effective_input, result, frame.invocation, *frame.fired_finished);
+        if (wiring.action_receipt_failure_reason) {
+            const auto error = wiring.action_receipt_failure_reason();
+            if (!error.empty()) { result.execution_control = tools::ExecutionControl::StopIndeterminate;
+                result.error_code = "sdk.action.trajectory_failed"; result.AppendText("\n" + error);
+                return DispatchDone(frame, std::move(result)); }
+        }
+    }
     if (wiring.on_post_tool_use_hook) {
         const std::vector<std::string> feedback =
             wiring.on_post_tool_use_hook(call.id, call.name, frame.effective_input, result);
@@ -869,7 +956,15 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // 阶段一:门禁与审批(拦下 = 终态已在阶段内收口,原样返回)。
     const ToolCallGate gate = PrepareToolCall(frame);
     if (!gate.allowed) {
-        return gate.done;
+        auto done = gate.done;
+        // Prepare's receipt destructor has retired by now, including rejected
+        // proposals. Check its real sink result before returning to the batch.
+        if (wiring.action_receipt_failure_reason) {
+            const auto error = wiring.action_receipt_failure_reason();
+            if (!error.empty()) { done.execution_control = tools::ExecutionControl::StopIndeterminate;
+                done.error_code = "sdk.action.trajectory_failed"; done.AppendText("\n" + error); }
+        }
+        return done;
     }
     // 阶段二:execution_started 先于真实执行;副作用闸拦下同理。
     const std::optional<tools::Tool::Result> blocked = MarkExecutionStarted(frame);
@@ -2832,6 +2927,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             return false;
         }();
         const bool tool_hooks_armed = wiring.on_pre_tool_hook != nullptr ||
+                                      wiring.on_pre_action != nullptr || wiring.on_post_action != nullptr ||
                                       wiring.on_pre_tool_use_hook != nullptr ||
                                       wiring.on_post_tool_hook != nullptr ||
                                       wiring.on_post_tool_use_hook != nullptr;
@@ -3040,6 +3136,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             continue;  // 下一步循环:不带空消息发请求
         }
         std::string batch_capacity_error;
+        const auto action_error = wiring.action_failure_reason ? wiring.action_failure_reason() : std::string{};
+        const auto action_receipt_error = wiring.action_receipt_failure_reason ? wiring.action_receipt_failure_reason() : std::string{};
+        if (!action_receipt_error.empty()) { side_effect_indeterminate = true; side_effect_error = action_receipt_error; }
         api::Request batch_request = request;
         bool batch_measured = false;
         if (wiring.rewrite_tool_results_for_history) {
@@ -3050,7 +3149,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 summary.model = model_;
                 summary.window_tokens = std::min<std::size_t>(window_tokens, 32768);
                 summary.cancel = cancel;
-                if (side_effect_indeterminate) wiring.configure_action_summary(nullptr, {});
+                if (side_effect_indeterminate || !action_error.empty()) wiring.configure_action_summary(nullptr, {});
                 else wiring.configure_action_summary(&backend_, summary);
             }
             batch_request.messages = context_.request_history();
@@ -3228,6 +3327,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         if (side_effect_indeterminate) {
             return stop_unknown();
         }
+        if (!action_error.empty()) return std::unexpected(action_error);
         if (interrupted) {
             return RunOutcome{true, false, false, last_stop_reason, steps_used};
         }
