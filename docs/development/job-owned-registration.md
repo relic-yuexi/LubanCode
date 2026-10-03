@@ -34,6 +34,8 @@
 
 暂存表只持 owned 值与内部归属，不留 std::function、TurnBridge、父取消旗、registry/tool/Session 裸指针。同一 Session writer 保活覆盖方法；外部 capture 退场在锁外。只靠 completion_ready 或 business terminal 不能退资源；J2b 真采用、派工、进程/capture finished/join 与锁外完成泵另交。
 
+新域 Shutdown 先 RequestShutdown 关准入，再等真实 writer serial，让在途 Register/读面退完才清 writer；锁内二次查 closing 的登记不能再写。等线程时不握 serial；清 Gate/executor 等 capture 前先释放 serial。旧默认 Shutdown 顺序不动。
+
 J2b 才接逐票采用与 worker，只收真实业务 scope、自有取消旗及 #310 的 owned CommandExecutionLimits。#310 本轮还有真实编译失败待修，本笔不先吸错误头。J2c 再接 Job 专用 Action：实际 Started/Terminal 归 Coordinator，Post 取业务配对与 raw，锁外串行派；owner/Post 不齐就沿 J1 拒。普通 Abort 保已知失败，真实 Adopt/Settle 未确认先 StopIndeterminate，不双写主轮证据。
 
 ## 六场远端验收
