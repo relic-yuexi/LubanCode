@@ -8,7 +8,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -20,6 +22,9 @@ THIS = str(Path(__file__).resolve())
 WINDOWS = os.name == "nt"
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if WINDOWS else 0
 TERMINAL = {"succeeded", "failed", "cancelled", "indeterminate"}
+EVIDENCE_FILE_LIMIT = 256 * 1024
+EVIDENCE_TOTAL_LIMIT = 2 * 1024 * 1024
+EVIDENCE_ENTRY_LIMIT = 64
 
 
 def eventually(check, timeout=10, failure_detail=None):
@@ -70,9 +75,18 @@ def safe_output(value, *, stream=None):
 def capture_failure_records(runner):
     records = {}
     errors = []
+    remaining = EVIDENCE_TOTAL_LIMIT
+    count = 0
     for service_log in runner.base.glob("service-*.log"):
+        if count >= EVIDENCE_ENTRY_LIMIT:
+            break
+        count += 1
         try:
-            records[service_log.name] = service_log.read_bytes()
+            raw, info = read_evidence_bytes(service_log, min(EVIDENCE_FILE_LIMIT, remaining))
+            records[service_log.name] = raw
+            remaining -= len(raw)
+            if info.st_size > len(raw):
+                errors.append(f"post-close service evidence truncated: {service_log.name} observedBytes={info.st_size}")
         except Exception:
             errors.append("reading service evidence failed:\n" + traceback.format_exc())
     # Synthetic fixture records only. Never archive identity/auth or task logs.
@@ -80,10 +94,122 @@ def capture_failure_records(runner):
         snapshot = runner.root / filename
         try:
             if snapshot.is_file():
-                records[filename] = snapshot.read_bytes()
+                raw, info = read_evidence_bytes(snapshot, min(EVIDENCE_FILE_LIMIT, remaining))
+                records[filename] = raw
+                remaining -= len(raw)
+                if info.st_size > len(raw):
+                    errors.append(f"post-close fixture record truncated: {filename} observedBytes={info.st_size}")
         except Exception:
             errors.append("reading fixture records failed:\n" + traceback.format_exc())
     return records, errors
+
+
+def read_evidence_bytes(path, cap):
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if not WINDOWS:
+        flags |= os.O_NONBLOCK | os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("fixture evidence is not a regular file")
+        chunks = []
+        count = 0
+        while count < cap:
+            chunk = os.read(descriptor, min(4096, cap - count))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            count += len(chunk)
+        return b"".join(chunks), os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def capture_failure_observation(runner):
+    """Read only this disposable fixture's named files, before close mutates it."""
+    records = {}
+    entries = []
+    remaining = EVIDENCE_TOTAL_LIMIT
+
+    def retain(name, raw, *, actual_bytes=None, state="value", error=None):
+        nonlocal remaining
+        if len(entries) >= EVIDENCE_ENTRY_LIMIT:
+            return False
+        actual_bytes = len(raw) if actual_bytes is None else actual_bytes
+        stored = raw[:min(EVIDENCE_FILE_LIMIT, remaining)]
+        remaining -= len(stored)
+        entry = {"name": name, "state": state, "actualBytes": actual_bytes,
+                 "storedBytes": len(stored), "sha256": hashlib.sha256(stored).hexdigest(),
+                 "truncated": actual_bytes > len(stored)}
+        if error is not None:
+            entry["error"] = error
+        entries.append(entry)
+        if state == "value":
+            records["failure-time/" + name] = stored
+        return True
+
+    def read(name, path):
+        if len(entries) >= EVIDENCE_ENTRY_LIMIT:
+            return
+        try:
+            raw, info = read_evidence_bytes(path, min(EVIDENCE_FILE_LIMIT, remaining))
+            retain(name, raw, actual_bytes=info.st_size)
+        except FileNotFoundError:
+            retain(name, b"", state="absent")
+        except ValueError as error:
+            retain(name, b"", state="not_regular", error=repr(error))
+        except Exception as error:
+            retain(name, b"", state="read_error", error=repr(error))
+
+    for name in ("jobs.json", "endpoint.json"):
+        read(name, runner.root / name)
+    for path in sorted(runner.base.glob("service-*.log")):
+        read(path.name, path)
+    # Direct calls retain exact response bytes before parse. Requests, argv,
+    # identity.json and auth tokens are never archived.
+    receipts = getattr(runner, "start_receipts", [])
+    job_ids = set()
+    markers = set()
+    for index, receipt in enumerate(receipts):
+        if len(entries) >= EVIDENCE_ENTRY_LIMIT:
+            break
+        stem = f"receipts/start-{index:02d}"
+        for stream in ("stdout", "stderr"):
+            if stream in receipt:
+                retain(stem + "." + stream, receipt[stream])
+            else:
+                retain(stem + "." + stream, b"", state="absent")
+        retain(stem + ".json", json.dumps({"returncode": receipt.get("returncode"),
+                "job_id": receipt.get("job_id")}, sort_keys=True).encode("utf-8"))
+        if re.fullmatch(r"[0-9a-f]{32}", str(receipt.get("job_id", ""))):
+            job_ids.add(receipt["job_id"])
+        if receipt.get("marker") is not None:
+            markers.add(Path(receipt["marker"]))
+    for handle in getattr(runner, "handles", []):
+        if len(job_ids) >= EVIDENCE_ENTRY_LIMIT:
+            break
+        if re.fullmatch(r"[0-9a-f]{32}", str(handle.get("job_id", ""))):
+            job_ids.add(handle["job_id"])
+    for name in getattr(runner, "fixture_markers", set()):
+        if len(markers) >= EVIDENCE_ENTRY_LIMIT:
+            break
+        markers.add(Path(name))
+    # Worker/Node response files are created only under this fixture's base.
+    for name in ("receipt.json", "receipt.stdout", "receipt.stderr"):
+        read("receipts/worker-" + name, runner.base / name)
+    for job_id in sorted(job_ids):
+        for name in ("stdout.log", "stderr.log"):
+            read("jobs/" + job_id + "/" + name, runner.root / "jobs" / job_id / name)
+    for marker in sorted(markers):
+        if marker.parent == getattr(runner, "project", None):
+            read("markers/" + marker.name, marker)
+    manifest = {"schemaVersion": 1, "phase": "before-close", "entries": entries,
+                "fileLimit": EVIDENCE_FILE_LIMIT, "totalLimit": EVIDENCE_TOTAL_LIMIT,
+                "entryLimit": EVIDENCE_ENTRY_LIMIT, "entryLimitReached": len(entries) == EVIDENCE_ENTRY_LIMIT,
+                "capturedBytes": EVIDENCE_TOTAL_LIMIT - remaining}
+    records["failure-time/evidence.json"] = json.dumps(manifest, indent=2).encode("utf-8")
+    return records
 
 
 def preserve_failure(runner, report_path, name, error, *, records=None):
@@ -95,7 +221,9 @@ def preserve_failure(runner, report_path, name, error, *, records=None):
     evidence.mkdir(parents=True, exist_ok=True)
     (evidence / "traceback.txt").write_text(error, encoding="utf-8")
     for filename, raw in records.items():
-        (evidence / filename).write_bytes(raw)
+        destination = evidence / filename
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(raw)
     # All original files land before console presentation starts.
     for filename, raw in records.items():
         if filename.startswith("service-") and filename.endswith(".log"):
@@ -114,6 +242,7 @@ def run_case(binary, report_path, report, name, check):
     status = "failed"
     errors = []
     records = {}
+    observation = {}
     try:
         temporary = tempfile.TemporaryDirectory(prefix="luban-runner-test-")
         runner = Runner(binary, temporary.name)
@@ -122,8 +251,21 @@ def run_case(binary, report_path, report, name, check):
         status = "passed"
     except Exception:
         errors.append(traceback.format_exc())
+        if runner:
+            try:
+                observation = capture_failure_observation(runner)
+            except Exception:
+                errors.append("reading failure-time evidence failed:\n" + traceback.format_exc())
     finally:
         if runner:
+            if not observation:
+                try:
+                    # Cache this phase even for a passed body: close or directory
+                    # cleanup may still fail. Success publishes none of it.
+                    observation = capture_failure_observation(runner)
+                except Exception:
+                    status = "failed"
+                    errors.append("reading failure-time evidence failed:\n" + traceback.format_exc())
             try:
                 runner.close()
             except Exception:
@@ -133,6 +275,7 @@ def run_case(binary, report_path, report, name, check):
             # exists. A later cleanup failure can remove some or all originals.
             try:
                 records, read_errors = capture_failure_records(runner)
+                records.update(observation)
                 if read_errors:
                     status = "failed"
                     errors.extend(read_errors)
@@ -168,18 +311,22 @@ def write_json(path, data):
     temporary.replace(path)
 
 
-def request(binary, root, runner_id, body):
+def request(binary, root, runner_id, body, *, on_response=None):
     result = subprocess.run(
         [binary, "request", "--state-root", str(root), "--runner-id", runner_id],
-        input=json.dumps(body) + "\n", text=True, encoding="utf-8", capture_output=True,
+        input=(json.dumps(body) + "\n").encode("utf-8"), capture_output=True,
         timeout=12, creationflags=NO_WINDOW,
     )
+    if on_response is not None:
+        on_response(result)
+    stdout = result.stdout.decode("utf-8")
+    stderr = result.stderr.decode("utf-8")
     try:
-        reply = json.loads(result.stdout)
+        reply = json.loads(stdout)
     except ValueError as error:
-        raise AssertionError(f"request exited {result.returncode}: stdout={result.stdout[:2000]!r}, "
-                             f"stderr={result.stderr[:2000]!r}") from error
-    assert result.returncode == (0 if reply.get("ok") else 1), result.stderr
+        raise AssertionError(f"request exited {result.returncode}: stdout={stdout[:2000]!r}, "
+                             f"stderr={stderr[:2000]!r}") from error
+    assert result.returncode == (0 if reply.get("ok") else 1), stderr
     return reply
 
 
@@ -254,7 +401,10 @@ def fixture_job(marker, nonce, duration, child_marker=None):
 
 def fixture_worker(binary, root, runner_id, payload, receipt, gate):
     eventually(lambda: Path(gate).exists())
-    reply = request(binary, root, runner_id, read_json(payload))
+    def keep_response(result):
+        Path(receipt).with_suffix(".stdout").write_bytes(result.stdout)
+        Path(receipt).with_suffix(".stderr").write_bytes(result.stderr)
+    reply = request(binary, root, runner_id, read_json(payload), on_response=keep_response)
     write_json(receipt, {"reply": reply, "worker_pid": os.getpid()})
     while True:
         time.sleep(0.1)
@@ -332,6 +482,8 @@ class Runner:
         self.project.mkdir()
         self.secret = "local-secret-" + uuid.uuid4().hex
         self.handles = []
+        self.start_receipts = []
+        self.fixture_markers = set()
         self.process = None
         self.stream = None
         self.log_path = None
@@ -358,11 +510,27 @@ class Runner:
         assert not info["capabilities"]["arbitrary_service_restart_survival"]
 
     def call(self, body, runner_id=None):
-        return request(self.binary, self.root, runner_id or self.runner_id, body)
+        if body.get("method") != "job.start":
+            return request(self.binary, self.root, runner_id or self.runner_id, body)
+        receipt = {}
+        argv = body.get("spec", {}).get("argv", [])
+        if len(argv) >= 5 and argv[2:4] == [THIS, "_job"]:
+            marker = Path(argv[4])
+            if marker.parent == self.project:
+                receipt["marker"] = marker
+        self.start_receipts.append(receipt)
+        def keep_response(result):
+            receipt.update(stdout=result.stdout, stderr=result.stderr, returncode=result.returncode)
+        reply = request(self.binary, self.root, runner_id or self.runner_id, body, on_response=keep_response)
+        receipt["job_id"] = reply.get("job", {}).get("job_id")
+        return reply
 
     def spec(self, name, duration=20, child=False):
         marker = self.project / (name + ".jsonl")
         child_marker = self.project / (name + "-child.jsonl") if child else "-"
+        self.fixture_markers.add(marker)
+        if child:
+            self.fixture_markers.add(child_marker)
         return {"argv": [sys.executable, "-u", THIS, "_job", str(marker), name, str(duration), str(child_marker)],
                 "cwd": str(self.project), "env_refs": ["RUNNER_TEST_SECRET"]}
 
