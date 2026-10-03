@@ -107,3 +107,6 @@ definition_hash 只表宿主所声明实现版本，不认证任意原生函数�
 保原 CLI alias/scripts、公开三个旧点与实际孩子回归；新来源数量按最终代码实数冻结，不先冒报 native 通过。
 新 Action 来源固定 10 场，安装消费者也走同份公开实现的 10 条路径；另核真实权限链、摘要止损、回执止损与锁下 binding 四条内部路径。账故障沿已有 Ledger/V3Writer 注入，接真实 SDK Action adapter、Agent 与大结果摘要；公开 Session 没有 writer 故障入口，不把这项内部验收冒记成公开 Session 全栈故障。
 本地只读、静态、纯数据与文档门。configure、编译、CTest、原生程序全交远端 CI；共享分支另行收口。
+
+首轮 `30d7c1dc` 的 ASan 构建还报原生夹具类型错：审批枚举实际定义在 `lubancode::ApprovalMode`，不在 runtime 命名空间。
+后续只改这处具名值域引用，权限链、十场及全部断言照留；旧编译失败原件单独封存，新源须重跑远端原生门。
