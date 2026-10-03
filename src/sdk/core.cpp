@@ -32,8 +32,10 @@
 #include "sdk/extensions.hpp"
 #include "sdk/results.hpp"
 #include "sdk/skills.hpp"
+#include "sdk/subagents.hpp"
 #include "sdk/memory.hpp"
 #include "sdk/memory_write.hpp"
+#include "sdk/operation_ledger.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/search_ripgrep.hpp"
 #include "trajectory/v3/reader.hpp"
@@ -70,102 +72,6 @@ bool Terminal(OperationState state) { return state != OperationState::Accepted &
 bool ValidId(const std::string& value) {
     return !value.empty() && value.size() <= 200 &&
         value.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") == std::string::npos;
-}
-Result<void> ValidateOperationLedger(const fs::path& session_dir) {
-    // The shared live-query reader deliberately skips incomplete lines. Recovery
-    // cannot do that: losing an accepted row also loses its dedupe key and the
-    // operation counter, permitting both repeated effects and reused IDs.
-    const auto path = session_dir / "operations.jsonl";
-    const auto invalid = [](std::string reason) -> Result<void> {
-        return std::unexpected(Failure("sdk.resume.operation_ledger_invalid", std::move(reason)));
-    };
-    enum class Stage { Accepted, Dispatched, Final };
-    std::map<std::string, Stage> stages;
-    const auto check_result_coverage = [&]() -> Result<void> {
-        std::error_code result_error;
-        const auto results = session_dir / "sdk-results";
-        const bool exists = fs::exists(results, result_error);
-        if (result_error) return invalid("cannot inspect SDK result directory");
-        if (!exists) return {};
-        fs::directory_iterator entries(results, result_error);
-        if (result_error) return invalid("cannot read SDK result directory");
-        for (; entries != fs::directory_iterator{}; entries.increment(result_error)) {
-            if (result_error) return invalid("cannot read SDK result directory");
-            if (entries->path().extension() != ".json") continue;
-            const auto id = lubancode::tools::PathToUtf8(entries->path().stem());
-            const auto fact = stages.find(id);
-            // Result bytes are written before operation.final, so Dispatched is
-            // valid during crash recovery. Missing acceptance/dispatch is not.
-            if (fact == stages.end() || fact->second == Stage::Accepted) {
-                return invalid("SDK result has no preceding operation dispatch");
-            }
-        }
-        if (result_error) return invalid("cannot read SDK result directory");
-        return {};
-    };
-    std::error_code ec;
-    const bool exists = fs::exists(path, ec);
-    if (ec) return invalid("cannot inspect operation ledger");
-    if (!exists) return check_result_coverage(); // new/empty sessions have a lazy ledger
-    if (!fs::is_regular_file(path, ec) || ec) return invalid("operation ledger is not a regular file");
-    std::ifstream input(path, std::ios::binary);
-    if (!input) return invalid("cannot read operation ledger");
-    std::set<std::string> keys;
-    std::set<std::string> bound_turns;
-    const auto is_string = [](const Json& row, const char* key) {
-        return row.contains(key) && row.at(key).is_string();
-    };
-    std::string line;
-    while (std::getline(input, line)) {
-        if (line.empty() || input.eof()) return invalid("incomplete operation ledger line");
-        const auto row = Json::parse(line, nullptr, false);
-        if (!row.is_object() || !row.contains("schemaVersion") || !row.at("schemaVersion").is_number_integer() ||
-            (row.at("schemaVersion") != 1 && row.at("schemaVersion") != 2) ||
-            !is_string(row, "kind") || !is_string(row, "operationId")) {
-            return invalid("invalid operation fact shape");
-        }
-        const auto id = row.at("operationId").get<std::string>();
-        const auto kind = row.at("kind").get<std::string>();
-        if (!ValidId(id)) return invalid("invalid operation ID");
-        const auto found = stages.find(id);
-        if (kind == "operation.accepted") {
-            if (found != stages.end() || !is_string(row, "inputId") || row.at("inputId") == "" ||
-                !is_string(row, "clientOperationId") || !is_string(row, "payloadHash")) {
-                return invalid("invalid or duplicate operation acceptance");
-            }
-            const auto key = row.at("clientOperationId").get<std::string>();
-            const auto hash = row.at("payloadHash").get<std::string>();
-            if ((!key.empty() && !keys.insert(key).second) || hash.size() != 64 ||
-                hash.find_first_not_of("0123456789abcdef") != std::string::npos) {
-                return invalid("conflicting operation acceptance");
-            }
-            stages.emplace(id, Stage::Accepted);
-        } else if (kind == "operation.dispatched") {
-            if (found == stages.end() || found->second != Stage::Accepted) {
-                return invalid("dispatch without one preceding acceptance");
-            }
-            found->second = Stage::Dispatched;
-        } else if (kind == "operation.final") {
-            if (found == stages.end() || found->second != Stage::Dispatched ||
-                !is_string(row, "turnId") || !is_string(row, "executionStatus") ||
-                row.at("executionStatus") == "" || !row.contains("finalMessageRefs") ||
-                !row.at("finalMessageRefs").is_array() || !row.contains("usageReported") ||
-                !row.at("usageReported").is_boolean()) {
-                return invalid("invalid final or missing preceding dispatch");
-            }
-            for (const auto& ref : row.at("finalMessageRefs")) {
-                if (!ref.is_string()) return invalid("invalid final message reference");
-            }
-            const auto turn = row.at("turnId").get<std::string>();
-            if (!turn.empty() && (!ValidId(turn) || !bound_turns.insert(turn).second))
-                return invalid("invalid turn identity or turn bound to multiple operations");
-            found->second = Stage::Final;
-        } else {
-            return invalid("unknown operation fact kind");
-        }
-    }
-    if (input.bad()) return invalid("failed while reading operation ledger");
-    return check_result_coverage();
 }
 Result<fs::path> AbsoluteDirectory(const std::string& value, bool create) {
     if (value.empty() || value.find('\0') != std::string::npos || !lubancode::platform::IsValidUtf8(value)) return std::unexpected(Failure("sdk.path.invalid", value));
@@ -275,6 +181,12 @@ struct Session::Impl final : rt::InteractionBroker {
     detail::SessionExtensions* extensions = nullptr;
     std::string extension_plan_json;
     skills::v1::Snapshot skills_snapshot;
+    detail::SessionSubagents* subagent_module = nullptr;
+    subagents::v1::Snapshot subagent_snapshot;
+    std::map<std::string, Result<std::vector<subagents::v1::Report>>> subagent_reports;
+    // Worker-only actual receipt values. A restored run does not populate these
+    // from child journal claims or the coordinator's business status.
+    std::map<std::pair<std::string, std::uint64_t>, subagents::v1::LiveTerminalReceipt> live_child_receipts;
     std::shared_ptr<detail::SessionMemory> memory_module;
     memory::v1::Snapshot memory_snapshot;
     std::map<std::string, Result<memory::v1::RecallReport>> memory_reports;
@@ -390,6 +302,11 @@ struct Session::Impl final : rt::InteractionBroker {
         } source_scope{options};
         auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
         if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
+        auto child_plan = detail::SessionSubagentPlan::Prepare(options.subagents,
+            lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key,
+            options.resume_session_id, options.cwd, options.model,
+            lubancode::ApprovalModeMachineName(Mode(options.approval_mode)), options.max_steps_per_turn);
+        if (!child_plan) return std::unexpected(child_plan.error());
         auto skill_module = detail::SessionSkills::Prepare(options.skills,
             lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key,
             options.resume_session_id, options.system_prompt);
@@ -473,6 +390,12 @@ struct Session::Impl final : rt::InteractionBroker {
             }
             std::set<std::string> tool_face;
             for (const auto& tool : registry->All()) tool_face.insert(tool->name());
+            if ((*child_plan)->enabled()) {
+                if (registry->Find("agent"))
+                    return std::unexpected(rt::assembly::SessionResourceFailure{
+                        rt::assembly::SessionResourceStage::Registry, "sdk.tool.duplicate", "agent", "subagents", {}});
+                tool_face.insert("agent");
+            }
             // The actual target is attached after exclusive ledger opening.
             // Include its reserved name in the frozen Skills tool surface.
             if (memory_write_module->Describe().enabled) {
@@ -487,6 +410,10 @@ struct Session::Impl final : rt::InteractionBroker {
                 rt::assembly::SessionResourceStage::Registry, frozen.error().code,
                 frozen.error().message, "skills", {}});
             if ((*skill_module)->enabled()) registry->Register((*skill_module)->BuildTool());
+            auto child_tools = (*child_plan)->BindTools(*registry);
+            if (!child_tools) return std::unexpected(rt::assembly::SessionResourceFailure{
+                rt::assembly::SessionResourceStage::Registry, child_tools.error().code,
+                child_tools.error().message, "subagents", {}});
             return registry;
         };
         std::string wire = "sdk_custom";
@@ -541,8 +468,9 @@ struct Session::Impl final : rt::InteractionBroker {
         auto skills_opening = (*skill_module)->OpeningParticipant();
         auto memory_opening = memory_module->OpeningParticipant();
         auto write_opening = memory_write_module->OpeningParticipant();
+        auto child_opening = (*child_plan)->OpeningParticipant();
         launch.v3_opening_participant = [skills_opening = std::move(skills_opening), memory_opening = std::move(memory_opening),
-                                       write_opening = std::move(write_opening)]
+                                       write_opening = std::move(write_opening), child_opening = std::move(child_opening)]
             (const lubancode::trajectory::V3OpeningContext& context) -> std::expected<Json, std::string> {
                 auto skills = skills_opening(context);
                 if (!skills) return std::unexpected(skills.error());
@@ -550,7 +478,9 @@ struct Session::Impl final : rt::InteractionBroker {
                 if (!memory) return std::unexpected(memory.error());
                 auto writes = write_opening(context);
                 if (!writes) return std::unexpected(writes.error());
-                for (const auto* part : {&*memory, &*writes}) if (part->contains("hostBindings")) {
+                auto children = child_opening(context);
+                if (!children) return std::unexpected(children.error());
+                for (const auto* part : {&*memory, &*writes, &*children}) if (part->contains("hostBindings")) {
                     if (!skills->contains("hostBindings")) (*skills)["hostBindings"] = Json::object();
                     for (auto it = (*part)["hostBindings"].begin(); it != (*part)["hostBindings"].end(); ++it)
                         (*skills)["hostBindings"][it.key()] = it.value();
@@ -564,7 +494,8 @@ struct Session::Impl final : rt::InteractionBroker {
         if (!service->runtime()) return std::unexpected(Failure(
             service->launch_error().find("sdk.skill.") != std::string::npos ? "sdk.skill.open_failed" :
             service->launch_error().find("sdk.memory.") != std::string::npos ? "sdk.memory.open_failed" :
-            service->launch_error().find("sdk.memory_write.") != std::string::npos ? "sdk.memory_write.open_failed" : "sdk.session.open_failed",
+            service->launch_error().find("sdk.memory_write.") != std::string::npos ? "sdk.memory_write.open_failed" :
+            service->launch_error().find("sdk.subagent.") != std::string::npos ? "sdk.subagent.open_failed" : "sdk.session.open_failed",
             service->launch_error()));
         session_id = service->trajectory()->session_id();
         session_dir = service->trajectory()->session_dir();
@@ -621,12 +552,23 @@ struct Session::Impl final : rt::InteractionBroker {
         profile.system_prompt = options.system_prompt;
         profile.runtime.max_steps_per_turn = options.max_steps_per_turn;
         profile.runtime.context_window_tokens = options.context_window_tokens;
+        detail::SessionSubagents* child_module_ptr = nullptr;
+        if ((*child_plan)->enabled()) {
+            auto children = detail::SessionSubagents::Build(*child_plan,
+                (*assembled)->backend(), (*assembled)->registry(), profile);
+            if (!children) return std::unexpected(children.error());
+            child_module_ptr = children->get();
+            (*assembled)->registry().Register(child_module_ptr->BuildTool());
+            (*assembled)->Attach(std::move(*children));
+        }
+        subagent_snapshot = (*child_plan)->Describe();
         std::optional<std::vector<api::Message>> restored_history;
         if (!options.resume_session_id.empty()) restored_history = service->trajectory()->LaunchResumeHistory();
         service->InitializeExecution(std::move(*assembled), std::move(profile), std::move(restored_history));
         auto loaded = LoadOperations();
         if (!loaded) return loaded;
         extensions = module_ptr;
+        subagent_module = child_module_ptr;
         skills_snapshot = (*skill_module)->Describe();
         return {};
     }
@@ -637,7 +579,7 @@ struct Session::Impl final : rt::InteractionBroker {
     }
 
     Result<void> LoadOperations() {
-        const auto valid = ValidateOperationLedger(session_dir);
+        const auto valid = detail::ValidateOperationLedger(session_dir);
         if (!valid) return valid;
         std::map<std::string, std::string> accepted_hashes;
         std::set<std::string> final_ids;
@@ -656,17 +598,23 @@ struct Session::Impl final : rt::InteractionBroker {
             operation.state = fact.execution_status == "success" ? OperationState::Succeeded :
                 fact.execution_status == "error" ? OperationState::Failed :
                 fact.execution_status == "cancelled" ? OperationState::Cancelled : OperationState::Indeterminate;
+            bool has_owned_result = false;
             std::ifstream input(session_dir / "sdk-results" / (fact.operation_id + ".json"), std::ios::binary);
             if (input) {
                 auto json = Json::parse(input, nullptr, false);
                 if (json.is_object() && json.value("operationId", "") == fact.operation_id && json.value("turnId", "") == fact.turn_id) {
+                    has_owned_result = true;
                     operation.final_text = json.value("finalText", "");
                     operation.error = json.value("error", "");
                     operation.result_persisted = json.value("complete", false) && operation.state != OperationState::Indeterminate;
                 }
             }
             if (!operation.result_persisted) {
-                operation.error = "sdk.result.unavailable: final operation exists without SDK result artifact";
+                // A real interrupted result can deliberately record complete=false.
+                // Preserve its owned failure cause; absence/corruption still has
+                // the established unavailable diagnostic.
+                if (!has_owned_result || operation.state != OperationState::Indeterminate || operation.error.empty())
+                    operation.error = "sdk.result.unavailable: final operation exists without SDK result artifact";
                 if (memory_snapshot.enabled || memory_write_snapshot.enabled) operation.state = OperationState::Indeterminate;
             }
         }
@@ -755,6 +703,20 @@ struct Session::Impl final : rt::InteractionBroker {
             } else {
                 CacheToolResults(operation, true, &*ledger);
             }
+            Result<std::vector<subagents::v1::Report>> children = std::vector<subagents::v1::Report>{};
+            if (subagent_snapshot.enabled) {
+                if (!operation.turn_id.empty() && turn_owners[operation.turn_id] != 1)
+                    return std::unexpected(Failure("sdk.subagent.report_invalid", "turn belongs to multiple accepted operations"));
+                if (!ledger) children = std::unexpected(Failure("sdk.subagent.report_unavailable", "verified parent journal unavailable"));
+                else if (operation.turn_id.empty() && operation.state == OperationState::Indeterminate)
+                    children = std::unexpected(Failure("sdk.subagent.report_unavailable", "interrupted operation has no owned durable turn envelope"));
+                else children = detail::ReadSubagentReports(*ledger, session_dir, session_id, id,
+                    operation.turn_id, operation.result_persisted,
+                    operation.state == OperationState::Cancelled ||
+                    (operation.state == OperationState::Failed && operation.error == "sdk.turn.limit_reached"));
+                if (!children && operation.result_persisted) return std::unexpected(children.error());
+            }
+            subagent_reports.insert_or_assign(id, std::move(children));
         }
         return {};
     }
@@ -867,7 +829,33 @@ struct Session::Impl final : rt::InteractionBroker {
             memory_write_indeterminate = memory_write_indeterminate || write_uncertain ||
                 (memory_write_snapshot.enabled && !writes_saved);
         }
-        const bool complete = ledger_ok && memory_saved && writes_saved && operation.state != OperationState::Indeterminate;
+        Result<std::vector<subagents::v1::Report>> children = std::vector<subagents::v1::Report>{};
+        if (subagent_snapshot.enabled && !operation.turn_id.empty()) {
+            if (!verified_memory) {
+                auto source = lubancode::trajectory::v3::ReadV3Ledger(session_dir / (session_id + ".jsonl"));
+                if (source) verified_memory = std::move(*source);
+            }
+            children = verified_memory ? detail::ReadSubagentReports(*verified_memory, session_dir,
+                session_id, operation.operation_id, operation.turn_id,
+                ledger_ok && operation.state != OperationState::Indeterminate,
+                operation.state == OperationState::Cancelled ||
+                (operation.state == OperationState::Failed && operation.error == "sdk.turn.limit_reached")) :
+                Result<std::vector<subagents::v1::Report>>(std::unexpected(Failure("sdk.subagent.report_unavailable", "verified parent journal unavailable")));
+            if (children) for (auto& report : *children) {
+                const auto found = live_child_receipts.find({report.parent_action_id, report.parent_attempt});
+                if (found != live_child_receipts.end()) report.live_receipt = found->second;
+            }
+        }
+        const bool children_saved = children.has_value();
+        if (!children_saved) {
+            operation.state = OperationState::Indeterminate;
+            operation.error += " sdk.subagent.adoption_unconfirmed";
+        }
+        {
+            std::lock_guard lock(mutex);
+            subagent_reports.insert_or_assign(operation.operation_id, std::move(children));
+        }
+        const bool complete = ledger_ok && memory_saved && writes_saved && children_saved && operation.state != OperationState::Indeterminate;
         const auto directory = session_dir / "sdk-results";
         std::error_code ec;
         fs::create_directories(directory, ec);
@@ -913,6 +901,7 @@ struct Session::Impl final : rt::InteractionBroker {
     }
 
     void Run(const rt::SessionService::QueuedInput& input, bool skip) {
+        live_child_receipts.clear();
         Operation operation;
         operation.operation_id = input.operation_id;
         if (skip) { operation.state = OperationState::Cancelled; Complete(std::move(operation), {}, false); return; }
@@ -1005,6 +994,97 @@ struct Session::Impl final : rt::InteractionBroker {
             if (!identity) return std::nullopt;
             return lubancode::tools::ToolInvocationIdentity{owner, op, turn, identity->first, identity->second};
         };
+        // The public worker supplies an actual main execution identity. Neither
+        // a naked tool call nor model input can manufacture this TLS admission.
+        lubancode::tools::ScopedDispatchIdentity main_identity(
+            lubancode::tools::AgentRunIdentity{0, 0, 0, writer->run_id()});
+        std::map<std::string, std::pair<std::string, std::uint64_t>> child_calls;
+        struct ChildTurnScope {
+            detail::SessionSubagents* owner;
+            ~ChildTurnScope() { if (owner) owner->ClearTurn(); }
+        } child_turn_scope{subagent_module};
+        if (subagent_module) {
+            lubancode::tools::AgentTool::Hooks hooks;
+            hooks.on_child_permission_evaluate = [this](const rt::ChildApprovalScope& scope,
+                const rt::ToolHookDecision& pre, lubancode::tools::ApprovalClass kind,
+                const std::string& name, const Json& arguments) {
+                rt::PermissionContext context;
+                context.mode = Mode(options.approval_mode);
+                if (scope.permission_floor != "inherit") {
+                    const auto floor = lubancode::ParseApprovalMode(scope.permission_floor);
+                    if (!floor) return rt::PermissionVerdict{rt::PermissionVerdict::Action::Deny,
+                        rt::PermissionVerdict::Reason::NoPrompt, true};
+                    context.mode = lubancode::StricterApprovalMode(context.mode, *floor);
+                }
+                // Deliberately omit the parent's ordinary AllowedTools. The
+                // child-only grant is checked by AgentTool after hook decisions.
+                return rt::EvaluatePermission(context, pre, kind, name, arguments);
+            };
+            hooks.on_child_tool_confirm_scoped = [this](const rt::ChildApprovalRequest& request) {
+                Approval approval;
+                approval.request_id = session_id + ":" + active_turn_id + ":" +
+                    service->runtime()->ids().NextPrefixedId("sdk-child-approval");
+                approval.operation_id = active_operation;
+                approval.tool_call_id = request.request.tool_use_id;
+                approval.tool_name = request.request.tool_name; approval.input_json = request.request.input.dump();
+                approval.cwd = request.scope.effective_cwd; approval.reason = request.request.reason;
+                const auto& s = request.scope;
+                approval.child = subagents::v1::ApprovalScope{s.host_session_id, s.host_run_id, s.host_operation_id,
+                    s.parent_session_id, s.parent_run_id, s.child_session_id, s.child_run_id,
+                    s.effective_cwd, s.permission_floor, request.child_turn_id,
+                    request.child_declared_action_id, request.child_declared_message_id};
+                auto admitted = approvals.RegisterChildScoped(request, std::move(approval), options.approval_timeout,
+                    [this](const Approval& ticket, const rt::ChildApprovalRequest&) {
+                        Event event; event.kind = "approval_requested";
+                        event.operation_id = ticket.operation_id; event.approval = ticket;
+                        Emit(std::move(event));
+                    });
+                return admitted ? std::move(*admitted) : rt::ApprovalLease{};
+            };
+            hooks.on_child_tool_granted = [this](const auto& scope, const auto& name) {
+                return approvals.ChildAllowed(scope, name);
+            };
+            hooks.on_child_approval_scope_closed = [this](const auto& scope) { approvals.CloseChildScope(scope); };
+            hooks.on_pre_tool_use_hook = wiring.on_pre_tool_use_hook;
+            hooks.on_permission_request = wiring.on_permission_request;
+            hooks.on_post_tool_use_hook = wiring.on_post_tool_use_hook;
+            hooks.trajectory_spawn = [&, actual = bridge.get()](const std::string& label,
+                const std::string& parent_run, rt::SubagentSpawnFailure* failure_out, rt::SubagentDispatchMode mode) {
+                const auto refuse = [&](std::string why) -> std::unique_ptr<rt::TrajectorySubagentBridge> {
+                    if (failure_out) *failure_out = {"parent_admission", "sdk.subagent.spawn_rejected", std::move(why), {}, false, {}};
+                    return {};
+                };
+                const auto call = hub.current_agent_call_id();
+                const auto identity = actual->V3ExecutingCallIdentity(call);
+                if (mode != rt::SubagentDispatchMode::Foreground || parent_run != writer->run_id() || call.empty() || !identity)
+                    return refuse("actual main started action is required");
+                auto child = service->trajectory()->SpawnSubagent(call, label, parent_run);
+                if (!child) {
+                    if (failure_out) *failure_out = child.error();
+                    service->trajectory()->NoteSubagentStartFailed(child.error(), {}, call, operation.turn_id);
+                    return std::unique_ptr<rt::TrajectorySubagentBridge>{};
+                }
+                const auto attached = actual->AttachChildRun(call, (*child)->run_id(), (*child)->ParentSpawn());
+                if (!attached) {
+                    const auto receipt = (*child)->Finish(rt::SubagentExecutionOutcome::StartupRejected,
+                        "sdk.subagent.parent_link_failed");
+                    actual->NoteChildTerminal(receipt);
+                    rt::SubagentSpawnFailure failure{"parent_link", "sdk.subagent.parent_link_failed",
+                        attached.error(), (*child)->run_id(), false, receipt};
+                    service->trajectory()->NoteSubagentStartFailed(failure, {}, call, operation.turn_id);
+                    if (failure_out) *failure_out = std::move(failure);
+                    return std::unique_ptr<rt::TrajectorySubagentBridge>{};
+                }
+                child_calls.emplace((*child)->run_id(), *identity);
+                return std::move(*child);
+            };
+            hooks.trajectory_child_finished = [&, actual = bridge.get()](const rt::SubagentTerminalReceipt& receipt) {
+                actual->NoteChildTerminal(receipt);
+                const auto owner = child_calls.find(receipt.run_id);
+                if (owner != child_calls.end()) live_child_receipts.insert_or_assign(owner->second, detail::CopyChildReceipt(receipt));
+            };
+            subagent_module->BindTurn(std::move(hooks), session_id, input.operation_id, operation.turn_id);
+        }
         api::Message message;
         message.role = api::Role::User;
         message.content.push_back(api::TextBlock{pre.prompt});
@@ -1100,14 +1180,19 @@ struct Session::Impl final : rt::InteractionBroker {
             }
         }
         const bool turn_cancelled = (outcome && outcome->cancelled) || (!outcome && interrupt.load());
-        const bool write_uncertain = memory_write_module->HasIndeterminate() ||
-            (outcome && outcome->side_effect_indeterminate);
-        bridge->EndTurn(outcome.has_value() && !write_uncertain, turn_cancelled && !write_uncertain,
-            write_uncertain ? "sdk.memory_write.indeterminate" : outcome ? "" : outcome.error());
+        const bool write_uncertain = memory_write_module->HasIndeterminate();
+        const bool effect_uncertain = outcome && outcome->side_effect_indeterminate;
+        const bool uncertain = write_uncertain || effect_uncertain;
+        std::string uncertain_error = write_uncertain ? "sdk.memory_write.indeterminate" : "sdk.side_effect.indeterminate";
+        if (effect_uncertain && !outcome->side_effect_error.empty()) uncertain_error += ": " + outcome->side_effect_error;
+        bridge->EndTurn(outcome.has_value() && !uncertain, turn_cancelled && !uncertain,
+            uncertain ? uncertain_error : outcome ? "" : outcome.error());
+        if (subagent_module) subagent_module->ClearTurn();
+        child_turn_scope.owner = nullptr;
         turn_bindings.Reset();
-        operation.state = write_uncertain ? OperationState::Indeterminate : turn_cancelled ? OperationState::Cancelled :
+        operation.state = uncertain ? OperationState::Indeterminate : turn_cancelled ? OperationState::Cancelled :
                           !outcome ? OperationState::Failed : OperationState::Succeeded;
-        if (write_uncertain) operation.error = "sdk.memory_write.indeterminate";
+        if (uncertain) operation.error = std::move(uncertain_error);
         else if (!outcome) operation.error = outcome.error();
         else if (outcome->hit_step_limit || outcome->hit_time_budget || outcome->hit_token_budget || outcome->hit_turn_limit) {
             operation.state = OperationState::Failed;
@@ -1185,6 +1270,7 @@ struct Session::Impl final : rt::InteractionBroker {
     }
     void RequestExecutionShutdown() {
         std::shared_ptr<rt::SessionService> service_to_stop;
+        detail::SessionSubagents* children_to_stop = nullptr;
         struct SignalScope {
             Impl& owner;
             std::shared_ptr<rt::SessionService>& service;
@@ -1200,9 +1286,15 @@ struct Session::Impl final : rt::InteractionBroker {
             std::lock_guard lock(mutex);
             if (closed) return;
             service_to_stop = service;
-            if (service_to_stop != nullptr) ++close_signals_inflight;
+            if (service_to_stop != nullptr) {
+                ++close_signals_inflight;
+                children_to_stop = subagent_module;
+            }
         }
         if (service_to_stop != nullptr) {
+            // The service snapshot pins the attachment. No coordinator work or
+            // callback retirement occurs under the public API mutex.
+            if (children_to_stop) children_to_stop->RequestClose();
             service_to_stop->RequestExecutionShutdown();
         }
     }
@@ -1233,6 +1325,7 @@ struct Session::Impl final : rt::InteractionBroker {
             cv.wait(lock, [&] { return close_signals_inflight == 0; });
             closed_service = std::move(service);
             extensions = nullptr;
+            subagent_module = nullptr;
             for (auto& weak : subscriptions) if (auto stream = weak.lock()) streams.push_back(std::move(stream));
             subscriptions.clear();
             cv.notify_all();
@@ -1275,6 +1368,19 @@ Result<std::string> Session::DescribeExtensions() const {
 Result<skills::v1::Snapshot> Session::DescribeSkills() const {
     std::lock_guard lock(impl_->mutex);
     return impl_->skills_snapshot;
+}
+Result<subagents::v1::Snapshot> Session::DescribeSubagents() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->subagent_snapshot;
+}
+Result<std::vector<subagents::v1::Report>> Session::GetSubagentReports(const std::string& operation_id) const {
+    std::lock_guard lock(impl_->mutex);
+    const auto operation = impl_->operations.find(operation_id);
+    if (operation == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
+    if (!Terminal(operation->second.state)) return std::unexpected(Failure("sdk.subagent.report_not_ready"));
+    const auto found = impl_->subagent_reports.find(operation_id);
+    if (found == impl_->subagent_reports.end()) return std::unexpected(Failure("sdk.subagent.report_not_ready"));
+    return found->second;
 }
 Result<memory::v1::Snapshot> Session::DescribeMemory() const {
     std::lock_guard lock(impl_->mutex);

@@ -38,3 +38,8 @@ git diff --check
 ```
 - [前台子执行组合验收](child-sdk-integration.md)
 - [前台子审批与父观察组合](child-approval-observation.md)
+- [SDK 前台子 Agent 装配](sdk-subagent-assembly.md)
+- [结果仓 Windows 原生路径入口](result-store-windows-io.md)
+- [SDK Memory 写计划失败诊断](sdk-plan-atomic-diagnostic.md)
+- [Updater 活持锁夹具就绪](updater-lock-ready.md)
+- [SDK 冻结计划短拒重试](sdk-plan-short-reject.md)

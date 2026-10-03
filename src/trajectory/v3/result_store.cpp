@@ -385,14 +385,16 @@ namespace {
 bool WriteImmutable(const std::filesystem::path& final_path, const std::string& data,
                     std::string* error) {
     std::error_code ec;
-    if (std::filesystem::exists(final_path, ec)) {
+    const auto native_final = platform::FileIoPath(final_path);
+    if (std::filesystem::exists(native_final, ec)) {
         *error = "结果仓不可变名已存在(结果不许覆盖): " + final_path.string();
         return false;
     }
     std::filesystem::path temp = final_path;
     temp += ".tmp";
+    const auto native_temp = platform::FileIoPath(temp);
     {
-        std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+        std::ofstream file(native_temp, std::ios::binary | std::ios::trunc);
         if (!file.is_open()) {
             *error = "结果仓开不了临时文件: " + temp.string();
             return false;
@@ -404,9 +406,9 @@ bool WriteImmutable(const std::filesystem::path& final_path, const std::string& 
             return false;
         }
     }
-    std::filesystem::rename(temp, final_path, ec);
+    std::filesystem::rename(native_temp, native_final, ec);
     if (ec) {
-        std::filesystem::remove(temp, ec);
+        std::filesystem::remove(native_temp, ec);
         *error = "结果仓发布不可变名失败: " + final_path.string();
         return false;
     }
@@ -449,14 +451,15 @@ std::expected<ResultStore, std::string> ResultStore::Open(
         return std::unexpected("invalid result prefix");
     }
     std::filesystem::path artifacts = session_dir / "artifacts";
+    const auto native_artifacts = platform::FileIoPath(artifacts);
     std::error_code ec;
-    std::filesystem::create_directories(artifacts, ec);
+    std::filesystem::create_directories(native_artifacts, ec);
     if (ec) {
         return std::unexpected("结果仓建目录失败: " + artifacts.string());
     }
     std::uint64_t next = 1;
     std::size_t entries = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(artifacts, ec)) {
+    for (const auto& entry : std::filesystem::directory_iterator(native_artifacts, ec)) {
         if (max_directory_entries && ++entries > max_directory_entries)
             return std::unexpected("result directory entry limit exceeded");
         const std::string name = entry.path().filename().string();
