@@ -50,10 +50,14 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   "${CMAKE_SOURCE_DIR}/src/sdk/approval.cpp"
   # The CAS fixture uses the real SDK Memory opening/report module privately.
   "${CMAKE_SOURCE_DIR}/src/sdk/memory.cpp"
+  # Real private Action host adapters exercise native sink receipts without
+  # exporting new private symbols or adding a public writer-fault option.
+  "${CMAKE_SOURCE_DIR}/src/sdk/action_dispatch.cpp"
   # The public-only child acceptance source is also built after relocation. It
   # belongs to these fixture executables, never the SDK library closure.
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/subagents.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/actions.cpp"
   ${LUBANCORE_FOCUSED_TEST_SOURCES})
 target_link_libraries(lubancore_sdk_tests PRIVATE
   lubancode_runtime lubancore_sdk doctest::doctest)

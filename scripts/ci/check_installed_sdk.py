@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 REQUIRED_TESTS = {
     "sdk.consumer.packages",
     "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.extensions",
+    "sdk.consumer.actions",
     "sdk.consumer.builtin_search",
     "sdk.consumer.results",
     "sdk.consumer.skills_seed", "sdk.consumer.skills_resume",
@@ -256,6 +257,14 @@ def main() -> None:
                                          case.find("failure") is not None or case.find("error") is not None
                                          for case in results):
         raise RuntimeError("consumer JUnit contains duplicate, skipped or failed tests")
+    from check_sdk_focused import check_action_paths
+    sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
+                        (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
+    action_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                       if sections[index] == "sdk.consumer.actions"]
+    if len(action_sections) != 1:
+        raise RuntimeError("consumer native log does not identify one Action test")
+    check_action_paths(action_sections[0], native=False)
 
 
 if __name__ == "__main__":

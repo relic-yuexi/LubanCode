@@ -1404,7 +1404,7 @@ jobs:
           # (Lua 钩子串),与本腿的悬垂/寿命合同无关,另立单子治理后再开。
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
         run: |
-          ctest --test-dir build -C Release -R '^(integration\.app_server\.app_server_session_parity|unit\.app_server\.app_server_browser|unit\.runtime\.tool_runtime|integration\.plugins\.tool_runtime_deferral|unit\.runtime\.session_execution|unit\.runtime\.execution_owner|unit\.runtime\.subagent_terminal_receipt|unit\.runtime\.child_foreground_integration|unit\.runtime\.child_parent_observation|unit\.runtime\.child_history_adoption|unit\.runtime\.scoped_turn_bindings|unit\.tools\.tool_job_coordinator|unit\.app\.turn_runner_scoped_bindings|unit\.agent\.(subagent_thread_lifetime|child_foreground_context)|integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection|lubancore_skills|lubancore_memory_recall|lubancore_memory_cas|lubancore_memory_save|lubancore_scoped_approval|lubancore_child_approval|lubancore_subagents|lubancore_builtin_search|lubancore_package_manifest|lubancore_lua)|unit\.remote\.remote_result_sync|unit\.hooks\.middleware_core|unit\.memory\.memory_project_commit|unit\.trajectory_v3\.v3_result_store|unit\.platform\.atomic_write|unit\.packages\.package_manifest|unit\.tools\.lua_protected)$' \
+          ctest --test-dir build -C Release -R '^(integration\.app_server\.app_server_session_parity|unit\.app_server\.app_server_browser|unit\.runtime\.tool_runtime|integration\.plugins\.tool_runtime_deferral|unit\.runtime\.session_execution|unit\.runtime\.execution_owner|unit\.runtime\.subagent_terminal_receipt|unit\.runtime\.child_foreground_integration|unit\.runtime\.child_parent_observation|unit\.runtime\.child_history_adoption|unit\.runtime\.scoped_turn_bindings|unit\.tools\.tool_job_coordinator|unit\.app\.turn_runner_scoped_bindings|unit\.agent\.(subagent_thread_lifetime|child_foreground_context)|integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection|lubancore_skills|lubancore_memory_recall|lubancore_memory_cas|lubancore_memory_save|lubancore_scoped_approval|lubancore_child_approval|lubancore_subagents|lubancore_builtin_search|lubancore_package_manifest|lubancore_lua|lubancore_actions)|unit\.remote\.remote_result_sync|unit\.hooks\.middleware_core|unit\.memory\.memory_project_commit|unit\.trajectory_v3\.v3_result_store|unit\.platform\.atomic_write|unit\.packages\.package_manifest|unit\.tools\.lua_protected)$' \
             --show-only=json-v1 > build/asan-host-registration.json
           python3 - <<'PY'
           import json
@@ -1424,6 +1424,7 @@ jobs:
                       'integration.sdk.lubancore_child_approval',
                       'integration.sdk.lubancore_subagents',
                       'integration.sdk.lubancore_lua', 'unit.tools.lua_protected',
+                      'integration.sdk.lubancore_actions',
                       'integration.sdk.lubancore_builtin_search',
                       'unit.remote.remote_result_sync',
                       'unit.hooks.middleware_core', 'unit.memory.memory_project_commit', 'unit.trajectory_v3.v3_result_store',
@@ -1449,7 +1450,7 @@ jobs:
           PY
           # channel_menu_pump 暂除外:该册对调度时序敏感,ASan 放慢后
           # "未配对点击"的拒绝态断言抢跑假红;渠道域不是本腿的合同面。
-          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\.|^unit\.tools\.tool_job_coordinator$|^integration\.app_server\.app_server_session_parity$|^unit\.app_server\.app_server_browser$|^integration\.plugins\.tool_runtime_deferral$|^unit\.app\.turn_runner_scoped_bindings$|^integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection|lubancore_skills|lubancore_memory_recall|lubancore_memory_cas|lubancore_memory_save|lubancore_scoped_approval|lubancore_child_approval|lubancore_subagents|lubancore_builtin_search|lubancore_package_manifest|lubancore_lua)$|^unit\.remote\.remote_result_sync$|^unit\.hooks\.middleware_core$|^unit\.memory\.memory_project_commit$|^unit\.trajectory_v3\.v3_result_store$|^unit\.platform\.atomic_write$|^unit\.packages\.package_manifest$|^unit\.tools\.lua_protected$" \
+          ctest --test-dir build -C Release -R "^unit\.(agent|runtime)\.|^unit\.tools\.tool_job_coordinator$|^integration\.app_server\.app_server_session_parity$|^unit\.app_server\.app_server_browser$|^integration\.plugins\.tool_runtime_deferral$|^unit\.app\.turn_runner_scoped_bindings$|^integration\.sdk\.(lubancore_extensions|lubancore_results|lubancore_result_projection|lubancore_skills|lubancore_memory_recall|lubancore_memory_cas|lubancore_memory_save|lubancore_scoped_approval|lubancore_child_approval|lubancore_subagents|lubancore_builtin_search|lubancore_package_manifest|lubancore_lua|lubancore_actions)$|^unit\.remote\.remote_result_sync$|^unit\.hooks\.middleware_core$|^unit\.memory\.memory_project_commit$|^unit\.trajectory_v3\.v3_result_store$|^unit\.platform\.atomic_write$|^unit\.packages\.package_manifest$|^unit\.tools\.lua_protected$" \
             -E "channel_menu_pump" --parallel 4 --output-on-failure --no-tests=error \
             --output-junit "$PWD/build/asan-results.xml"
           python3 - <<'PY'
@@ -1555,6 +1556,11 @@ jobs:
                   raise SystemExit('ASan scoped approval native roster differs from 14 cases')
               if name == 'integration.sdk.lubancore_child_approval' and int(counts[0]) != 14:
                   raise SystemExit('ASan actual child approval native roster differs from 14 cases')
+              if name == 'integration.sdk.lubancore_actions':
+                  import sys
+                  sys.path.insert(0, str(Path.cwd() / 'scripts' / 'ci'))
+                  from check_sdk_focused import check_action_paths
+                  check_action_paths(sections[0], native=True)
               if name == 'integration.sdk.lubancore_subagents' and int(counts[0]) != 12:
                   raise SystemExit('ASan public SDK child assembly native roster differs from 12 cases')
           print(f'ASan: all {len(required)} required lifetime sources executed nonempty native tests')

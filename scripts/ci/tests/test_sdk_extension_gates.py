@@ -83,6 +83,40 @@ class PackageNativeEvidenceTests(unittest.TestCase):
                     focused.check_package_native(invalid, count, command)
 
 
+class ActionPathGateTests(unittest.TestCase):
+    summary = "[doctest] test cases: 10 | 10 passed | 0 failed"
+    paths = tuple("[sdk-action-path] " + path for path in focused.ACTION_PATHS)
+    private_paths = tuple("[sdk-action-native] " + path for path in
+                          ("existing-permission-chain", "summary-stop", "receipt-stop", "binding-opening"))
+
+    def test_public_and_private_actual_paths(self):
+        focused.check_action_paths("\n".join(self.paths), native=False)
+        focused.check_action_paths("\n".join((self.summary, *self.paths, *self.private_paths)), native=True)
+
+    def test_missing_decorated_duplicate_public_paths_reject(self):
+        for marker in self.paths:
+            with self.subTest(marker=marker):
+                absent = "\n".join(value for value in self.paths if value != marker)
+                for body in (absent, absent + "\nother-source: " + marker, "\n".join((*self.paths, marker))):
+                    with self.assertRaisesRegex(RuntimeError, "public path did not finish once"):
+                        focused.check_action_paths(body, native=False)
+
+    def test_missing_or_duplicated_internal_paths_reject(self):
+        for marker in self.private_paths:
+            absent = "\n".join((self.summary, *self.paths, *(value for value in self.private_paths if value != marker)))
+            for body in (absent, absent + "\nother-source: " + marker,
+                         "\n".join((self.summary, *self.paths, *self.private_paths, marker))):
+                with self.assertRaisesRegex(RuntimeError, "internal path did not finish once"):
+                    focused.check_action_paths(body, native=True)
+
+    def test_zero_changed_failed_or_duplicate_native_summary_rejects(self):
+        for summary in ("", "[doctest] test cases: 0 | 0 passed | 0 failed",
+                        self.summary.replace("10 passed | 0 failed", "9 passed | 1 failed"),
+                        self.summary + "\n" + self.summary):
+            with self.assertRaisesRegex(RuntimeError, "10 successful cases"):
+                focused.check_action_paths("\n".join((summary, *self.paths, *self.private_paths)), native=True)
+
+
 class ResultStoreWindowsPathsTests(unittest.TestCase):
     summary = "[doctest] test cases: 17 | 17 passed | 0 failed"
     markers = ("[result-store-path] target-extended", "[result-store-path] temporary-threshold",
