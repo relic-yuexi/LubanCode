@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -160,8 +161,89 @@ public:
 
 enum class Failure { None, ObservationIo, CaptureFile, CaptureTempDirectory, BadResultName, MissingChild, ChildRootAlias };
 
+enum class HistoryDiagnosticCase {
+    Complete, PostHook, HistoricalChain, ObservationGap,
+    SourceGap, ArtifactGap, AdoptionGap, ScopeReuse
+};
+
+enum class HistoryDiagnosticStage {
+    CaseEnter, CaseLeave, OwnersBefore, OwnersAfter,
+    RealRunEnter, RealRunLeave, CheckHistoryEnter, CheckHistoryLeave,
+    CloseEnter, CloseLeave
+};
+
+// Opt-in history-source diagnostics. All text comes from this fixed vocabulary;
+// no callback or testcase stack is borrowed by a later owner/worker.
+class HistoryDiagnostics {
+public:
+    explicit HistoryDiagnostics(HistoryDiagnosticCase id) noexcept : id_(id) {}
+    unsigned NextRig() noexcept { return rigs_.fetch_add(1, std::memory_order_relaxed) + 1; }
+    void Record(unsigned rig, HistoryDiagnosticStage stage) noexcept {
+        if (lines_.fetch_add(1, std::memory_order_relaxed) >= 256) return;
+        const char* id = "invalid";
+        switch (id_) {
+            case HistoryDiagnosticCase::Complete: id = "complete"; break;
+            case HistoryDiagnosticCase::PostHook: id = "post-hook"; break;
+            case HistoryDiagnosticCase::HistoricalChain: id = "historical-chain"; break;
+            case HistoryDiagnosticCase::ObservationGap: id = "observation-gap"; break;
+            case HistoryDiagnosticCase::SourceGap: id = "source-gap"; break;
+            case HistoryDiagnosticCase::ArtifactGap: id = "artifact-gap"; break;
+            case HistoryDiagnosticCase::AdoptionGap: id = "adoption-gap"; break;
+            case HistoryDiagnosticCase::ScopeReuse: id = "scope-reuse"; break;
+        }
+        const char* point = "invalid";
+        switch (stage) {
+            case HistoryDiagnosticStage::CaseEnter: point = "case.enter"; break;
+            case HistoryDiagnosticStage::CaseLeave: point = "case.leave"; break;
+            case HistoryDiagnosticStage::OwnersBefore: point = "owners.before"; break;
+            case HistoryDiagnosticStage::OwnersAfter: point = "owners.after"; break;
+            case HistoryDiagnosticStage::RealRunEnter: point = "real-run.enter"; break;
+            case HistoryDiagnosticStage::RealRunLeave: point = "real-run.leave"; break;
+            case HistoryDiagnosticStage::CheckHistoryEnter: point = "check-history.enter"; break;
+            case HistoryDiagnosticStage::CheckHistoryLeave: point = "check-history.leave"; break;
+            case HistoryDiagnosticStage::CloseEnter: point = "close.enter"; break;
+            case HistoryDiagnosticStage::CloseLeave: point = "close.leave"; break;
+        }
+        // At most 256 fixed lines per case, each below 128 bytes. A leave marker
+        // means scope exit, including unwinding; it does not claim success.
+        std::fprintf(stderr, "[child-history-stage] case=%s rig=%u stage=%s\n", id, rig, point);
+        std::fflush(stderr);
+    }
+private:
+    HistoryDiagnosticCase id_;
+    std::atomic<unsigned> rigs_{0};
+    std::atomic<unsigned> lines_{0};
+};
+
+class HistoryStageSpan {
+public:
+    HistoryStageSpan(std::shared_ptr<HistoryDiagnostics> log, unsigned rig,
+        HistoryDiagnosticStage enter, HistoryDiagnosticStage leave) noexcept
+        : log_(std::move(log)), rig_(rig), leave_(leave) {
+        if (log_) log_->Record(rig_, enter);
+    }
+    HistoryStageSpan(const HistoryStageSpan&) = delete;
+    HistoryStageSpan& operator=(const HistoryStageSpan&) = delete;
+    ~HistoryStageSpan() noexcept { if (log_) log_->Record(rig_, leave_); }
+private:
+    std::shared_ptr<HistoryDiagnostics> log_;
+    unsigned rig_;
+    HistoryDiagnosticStage leave_;
+};
+
+struct HistoryOwnerBoundary {
+    std::shared_ptr<HistoryDiagnostics> log;
+    unsigned rig;
+    HistoryDiagnosticStage stage;
+    ~HistoryOwnerBoundary() noexcept { if (log) log->Record(rig, stage); }
+};
+
 struct Rig {
     const Directory& directory;
+    std::shared_ptr<HistoryDiagnostics> history_diagnostics;
+    unsigned history_rig = 0;
+    // Reverse destruction records after the original owning members retire.
+    HistoryOwnerBoundary history_after_owners;
     Backend backend;
     tools::ToolRegistry child_tools;
     std::shared_ptr<std::atomic<bool>> io_armed = std::make_shared<std::atomic<bool>>(false);
@@ -192,8 +274,15 @@ struct Rig {
     // fixture, before their capture vectors and parent bridge/books/writer.
     tools::ToolRegistry parent_tools;
     std::unique_ptr<agent::Agent> parent;
+    // This marker retires before parent; no original member moved or reset.
+    HistoryOwnerBoundary history_before_owners;
 
-    explicit Rig(const Directory& dir, std::string parent_session = "parent-session") : directory(dir) {
+    explicit Rig(const Directory& dir, std::string parent_session = "parent-session",
+        std::shared_ptr<HistoryDiagnostics> diagnostics = {})
+        : directory(dir), history_diagnostics(std::move(diagnostics)),
+          history_rig(history_diagnostics ? history_diagnostics->NextRig() : 0),
+          history_after_owners{history_diagnostics, history_rig, HistoryDiagnosticStage::OwnersAfter},
+          history_before_owners{history_diagnostics, history_rig, HistoryDiagnosticStage::OwnersBefore} {
         v3::V3WriterOptions options;
         options.inject_io_failure = [armed = io_armed]() -> std::optional<std::string> {
             if (armed->exchange(false)) return "armed native observation append";

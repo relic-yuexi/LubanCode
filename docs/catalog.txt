@@ -180,3 +180,4 @@ DOC development/sdk-completion-integration.md
 DOC development/job-start-transaction.md
 DOC development/result-store-fixture-owner.md
 DOC development/runner-release-diagnostic.md
+DOC development/child-history-stage-diagnostic.md

@@ -57,3 +57,4 @@ git diff --check
 - [Job 启动事务](job-start-transaction.md)
 - [结果仓夹具目录拥有与清场](result-store-fixture-owner.md)
 - [Runner Release 拒绝诊断与失败原件](runner-release-diagnostic.md)
+- [子历史采用册阶段诊断](child-history-stage-diagnostic.md)
