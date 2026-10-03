@@ -64,3 +64,4 @@ git diff --check
 - [Owned Job 接管与执行](job-owned-adoption.md)
 - [SDK Job 前置：命令执行限额](sdk-command-execution-limits.md)
 - [HealthBus 批次寿命夹具](agent-health-batch-fixture.md)
+- [Owned Job 四场探针正文就绪](owned-job-probe-readiness.md)

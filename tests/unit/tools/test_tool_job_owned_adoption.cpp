@@ -164,6 +164,68 @@ bool AwaitFile(const fs::path& path) {
     }
     return false;
 }
+// probe-readiness.helper.begin
+enum class ProbePayloadState { Missing, Incomplete, ReadFailed, NotEquivalent, Ready };
+struct ProbePayloadRead {
+    ProbePayloadState state = ProbePayloadState::Missing;
+    std::size_t bytes = 0;
+    std::error_code error;
+    bool newline_seen = false, tag_matches = false, read_exception = false;
+};
+ProbePayloadRead ReadStartedPayload(const fs::path& path, const std::string& tag, const fs::path& cwd) noexcept {
+    ProbePayloadRead read;
+    try {
+        if (!fs::is_regular_file(path, read.error)) {
+            if (read.error && read.error != std::errc::no_such_file_or_directory)
+                read.state = ProbePayloadState::ReadFailed;
+            return read;
+        }
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream.is_open()) { read.state = ProbePayloadState::ReadFailed; return read; }
+        const std::string content((std::istreambuf_iterator<char>(stream)), {});
+        read.bytes = content.size();
+        if (stream.bad()) { read.state = ProbePayloadState::ReadFailed; return read; }
+        read.state = ProbePayloadState::Incomplete;
+        const auto newline = content.find('\n');
+        if (newline == std::string::npos) return read;
+        read.newline_seen = true;
+        if (content.substr(0, newline) != tag) return read;
+        read.tag_matches = true;
+        if (newline + 1 == content.size() || content.find('\0') != std::string::npos) return read;
+        const auto actual_cwd = fs::u8path(content.substr(newline + 1));
+        if (!actual_cwd.is_absolute()) return read;
+        read.state = fs::equivalent(actual_cwd, cwd, read.error) && !read.error
+                         ? ProbePayloadState::Ready : ProbePayloadState::NotEquivalent;
+    } catch (...) {
+        read.state = ProbePayloadState::ReadFailed;
+        read.read_exception = true;
+    }
+    return read;
+}
+bool AwaitStartedPayload(const fs::path& path, const std::string& tag, const fs::path& cwd, ProbePayloadRead& last) {
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        last = ReadStartedPayload(path, tag, cwd);
+        if (last.state == ProbePayloadState::Ready) return true;
+        std::this_thread::sleep_for(5ms);
+    }
+    return false;
+}
+void PrintProbeReadiness(const std::string& tag, const ProbePayloadRead& last) noexcept {
+    const char* state = "missing";
+    switch (last.state) {
+        case ProbePayloadState::Missing: break;
+        case ProbePayloadState::Incomplete: state = "incomplete"; break;
+        case ProbePayloadState::ReadFailed: state = "read_failed"; break;
+        case ProbePayloadState::NotEquivalent: state = "not_equivalent"; break;
+        case ProbePayloadState::Ready: state = "ready"; break;
+    }
+    std::fprintf(stderr, "[owned-job-probe-readiness] tag=%s state=%s bytes=%zu fs_error=%d fs_category=%s newline=%d tag_matches=%d read_exception=%d\n",
+        tag.c_str(), state, last.bytes, last.error.value(), last.error.category().name(),
+        last.newline_seen ? 1 : 0, last.tag_matches ? 1 : 0, last.read_exception ? 1 : 0);
+    std::fflush(stderr);
+}
+// probe-readiness.helper.end
 void Release(const fs::path& cwd, const std::string& tag) {
     std::ofstream stream(cwd / (tag + ".release"), std::ios::binary);
     REQUIRE(stream.is_open()); stream.put('1'); stream.flush(); REQUIRE(stream.good());
@@ -595,7 +657,13 @@ TEST_CASE("Owned Job adoption: four real sessions isolate cancellation and scope
         Confirm(rig, registrations.back(), ParentChain(rig, sources.back(), adopted));
     }
     for (unsigned n = 0; n < 4; ++n) {
-        REQUIRE(AwaitFile(rigs[n]->cwd / ("parallel-" + std::to_string(n) + ".started")));
+        // probe-readiness.call.begin
+        const auto tag = "parallel-" + std::to_string(n);
+        ProbePayloadRead last;
+        const bool ready = AwaitStartedPayload(rigs[n]->cwd / (tag + ".started"), tag, rigs[n]->cwd, last);
+        if (!ready) PrintProbeReadiness(tag, last);
+        REQUIRE(ready);
+        // probe-readiness.call.end
         const auto content = Bytes(rigs[n]->cwd / ("parallel-" + std::to_string(n) + ".started"));
         const auto newline = content.find('\n'); REQUIRE(newline != std::string::npos);
         CHECK(fs::equivalent(fs::u8path(content.substr(newline + 1)), rigs[n]->cwd));
