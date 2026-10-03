@@ -152,6 +152,11 @@ jobs:
                 cross_platform=true
                 runner_tests=$runner_present
                 code=true ;;
+              src/updater/lock.*|tests/integration/updater/test_updater_lock.cpp|tests/support/updater_lock_racer.cpp|scripts/ci/check_updater_lock.py|scripts/ci/tests/test_updater_lock_gate.py)
+                # The original CLI updater lock source needs three native platforms.
+                # This gate adds no SDK-focused or ASan source.
+                cross_platform=true
+                code=true ;;
               CMakeLists.txt|tests/CMakeLists.txt|cmake/*|vcpkg.json)
                 if [ "$remote_present" = true ] || [ "$assembly_present" = true ] || [ "$sdk_present" = true ] || [ "$worker_present" = true ] || [ "$runner_present" = true ]; then
                   cross_platform=true
@@ -718,6 +723,21 @@ jobs:
           cmake --build build --config Release --target lubancode -j 4
           cmake --build build --config Release --target lubancode_tests -j 4
 
+      - name: Run original CLI updater lock regressions
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_updater_lock_gate.py
+          "$PY" scripts/ci/check_updater_lock.py --build-dir build
+
+      - name: Upload updater lock evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-lock-${{ matrix.name }}
+          path: build/test-evidence/updater-lock/
+          if-no-files-found: error
+
       # 先查登记，后面的全量 Test 真跑；不重复执行，也不让零册冒绿。
       - name: Run project memory commit and CLI memory regressions
         if: needs.changes.outputs.memory_worker == 'true'
@@ -1079,6 +1099,20 @@ jobs:
           set -e
           cmake --build build --target lubancode -j "$(nproc)"
           cmake --build build --target lubancode_tests -j "$(nproc)"
+
+      - name: Run original CLI updater lock regressions
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_updater_lock_gate.py
+          "$PY" scripts/ci/check_updater_lock.py --build-dir build
+
+      - name: Upload updater lock evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-lock-linux-manylinux
+          path: build/test-evidence/updater-lock/
+          if-no-files-found: error
 
       - name: Run project memory commit and CLI memory regressions
         if: needs.changes.outputs.memory_worker == 'true'
