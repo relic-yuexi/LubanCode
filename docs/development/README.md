@@ -63,3 +63,4 @@ git diff --check
 - [Job owned 暂存注册](job-owned-registration.md)
 - [Owned Job 接管与执行](job-owned-adoption.md)
 - [SDK Job 前置：命令执行限额](sdk-command-execution-limits.md)
+- [HealthBus 批次寿命夹具](agent-health-batch-fixture.md)
