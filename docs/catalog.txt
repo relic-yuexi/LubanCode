@@ -182,3 +182,4 @@ DOC development/job-hold-recovery.md
 DOC development/result-store-fixture-owner.md
 DOC development/runner-release-diagnostic.md
 DOC development/child-history-stage-diagnostic.md
+DOC development/sdk-job-admission.md
