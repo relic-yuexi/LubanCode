@@ -12,6 +12,14 @@
 
 ## 现有路径
 
+### 首轮失败与共享折叠修补
+
+源 `023e635c` 的鲜 CI `37102791017` 已真跑新册。Linux SDK-only 原件里六案四过两败；两个合法业务 attempt 2 窗都在 Adopt 报 `job.recovery.invalid_source`。原卷已过 Reader 与 Continue，不是坏卷，也不能放宽严格准入。
+
+`BeginNextAttempt` 只写本 action、attempt 和 reason。共享 `FoldToolActions` 原路却在每枚 Pending 缺 provider 字段时冲掉首次声明号，后续声明配对失去工具名。本次只收这条读取缺口：实际带 `provider_tool_call_id` 或旧别名 `providerToolCallId` 才更新；后续缺键继承已存声明号。首次缺号保持旧缺省，不新猜调用。writer、旧恢复重派、Hold 准入和持久事实都不改。
+
+原六案增核真实 Fold/Plan 工具名、声明参数和首次 provider 号，并用真实 Writer 验旧别名跨 attempt 2 保留。原断言、预算和六条完成标记不减。旧 `023e635c` 失败原件独立封存；修头须另取三平台与 ASan 原件，不重跑旧轮，不拿源码静核抵验收。
+
 `ToolJobCoordinator::PlanRecovery`（`src/tools/tool_job_coordinator.cpp:1575`）从真 V3 卷折 Job、Action、接单消息和结果。未 dispatch 的 `job_handle` 可成为 `requeue`；有 dispatch 而缺确认终态成为 `unknown_hold`。接单 attempt 1 完成，不等于业务 attempt 已执行。
 
 `AdoptRecovery`（同文件 1704）会补接单/观测、压旧 Job 入队，最后调用 `TryDispatchLocked`。只把 executor 暂时设空，挡不住恢复中间窗，也会改变旧失败含义。本笔不走这条旁门。
