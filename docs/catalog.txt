@@ -167,3 +167,4 @@ DOC development/child-history-adoption.md
 DOC development/result-store-windows-io.md
 DOC development/sdk-plan-atomic-diagnostic.md
 DOC development/updater-lock-ready.md
+DOC development/sdk-plan-short-reject.md
