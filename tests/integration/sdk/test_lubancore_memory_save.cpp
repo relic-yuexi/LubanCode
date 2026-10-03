@@ -9,6 +9,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <iostream> // scene-diagnostic.include
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -120,6 +121,44 @@ std::vector<sdk::memory::v1::SaveReport> Reports(const std::shared_ptr<sdk::Sess
     for (const auto& r : *value) { CHECK(r.session_id == session->id()); CHECK(r.operation_id == receipt.operation_id); }
     return *value;
 }
+// scene-diagnostic.helper.begin
+void PrintSceneDiagnostics(std::size_t scene, const sdk::Session& session, const sdk::Receipt& receipt,
+    const sdk::Operation& operation, const fs::path& cwd, const fs::path& fixture_root,
+    unsigned model_calls, const std::vector<sdk::memory::v1::SaveReport>& reports) noexcept {
+    try {
+        const auto data_root = fixture_root / "data";
+        Json record{{"scene", scene}, {"ownSessionId", session.id()}, {"operationId", receipt.operation_id},
+            {"cwd", Utf8(cwd)}, {"fixtureDataRoot", Utf8(data_root)}, {"modelCalls", model_calls},
+            {"operation", {{"operationId", operation.operation_id}, {"turnId", operation.turn_id},
+                {"stateEnum", static_cast<unsigned>(operation.state)}, {"resultPersisted", operation.result_persisted},
+                {"error", operation.error}}}, {"reportCount", reports.size()}, {"reports", Json::array()}};
+        for (const auto& r : reports) {
+            Json stages = Json::array();
+            for (const auto& stage : r.stages) stages.push_back({{"stage", stage.stage}, {"outcome", stage.outcome}});
+            const auto derived_target = data_root / "workspaces" / lubancode::tools::Utf8ToPath(r.workspace_key) /
+                "memory" / lubancode::tools::Utf8ToPath(r.memory_path);
+            record["reports"].push_back({{"sessionId", r.session_id}, {"operationId", r.operation_id},
+                {"turnId", r.turn_id}, {"actionId", r.action_id}, {"attempt", r.attempt},
+                {"workspaceKey", r.workspace_key}, {"planSha256", r.plan_sha256}, {"commitKey", r.commit_key},
+                {"requestedEventId", r.requested_event_id}, {"receiptedEventId", r.receipted_event_id},
+                {"sourceEventRef", r.source_event_ref}, {"saveRequestSha256", r.save_request_sha256},
+                {"requestSha256", r.request_sha256}, {"state", r.state}, {"memoryId", r.memory_id},
+                {"memoryPath", r.memory_path}, {"contentSha256", r.content_sha256},
+                {"committedAt", r.committed_at}, {"stages", std::move(stages)}, {"duplicate", r.duplicate},
+                {"errorCode", r.error_code}, {"error", r.error}, {"target", Utf8(derived_target)},
+                {"targetDerivedFromReport", true}, {"targetExistence", "not_checked"}});
+        }
+        // These are public report metadata, not raw native WriteReceipts. Do not
+        // make another report query, pump, read a file or infer its presence here.
+        std::cout << "[sdk-memory-save-scene] "
+            << record.dump(-1, ' ', true, Json::error_handler_t::replace) << '\n' << std::flush;
+    } catch (...) {
+        try {
+            std::cerr << "[sdk-memory-save-scene-diagnostic-failed] scene=" << scene << '\n' << std::flush;
+        } catch (...) {} // Diagnostic failure must not replace any native error.
+    }
+}
+// scene-diagnostic.helper.end
 bool WaitRequested(const fs::path& directory, const std::string& session) {
     const auto until = std::chrono::steady_clock::now() + 10s;
     while (std::chrono::steady_clock::now() < until) {
@@ -464,7 +503,9 @@ TEST_CASE("SDK memory_save: four Sessions retain local identities and project st
     for (std::size_t n = 0; n < sessions.size(); ++n) {
         auto operation = sessions[n]->WaitResult(receipts[n].operation_id, 30s); REQUIRE(operation.has_value()); INFO(operation->error);
         CHECK(operation->state == sdk::OperationState::Succeeded); CHECK(operation->result_persisted);
-        const auto r = Reports(sessions[n], receipts[n]); REQUIRE(r.size() == 1);
+        const auto r = Reports(sessions[n], receipts[n]); /* scene-diagnostic.call.begin */
+        PrintSceneDiagnostics(n, *sessions[n], receipts[n], *operation, cwd[n], f.root, traces[n]->models.load(), r);
+        /* scene-diagnostic.call.end */ REQUIRE(r.size() == 1);
         CHECK(r.front().workspace_key == Snapshot(sessions[n]).workspace_key); CHECK(r.front().memory_id == "preference.scene-" + std::to_string(n));
         CHECK(Read(Memory(sessions[n]) / lubancode::tools::Utf8ToPath(r.front().memory_path)).find("SESSION_" + std::to_string(n)) != std::string::npos);
         // Same local op string names the current Session's owned report.
