@@ -109,3 +109,7 @@ SID/run 同号跨父归属仍由既有真实子票册守住；公开夹具不假
 `d674d3e0` 的 Windows SDK-only 原日志 SHA256 `939ab227abbdd124bdd160072e630d662071919254643a2b1f5f28f698f33bef`，3524–3530 行，已证父 `Failed/result_persisted=true`、子 `failed/committed/closed`；只到一枚 child 请求、一枚工具执行。
 障碍 `active=false/obstacle_written=false`，setup 无错，原目录仍在、backup 不在；`before_child_final` 尚未走到，不能把这笔已知失败洗成捕获未知。
 下一诊断只在父原 Check 拒绝前打印已交给 fake Backend 的公开 `tool_reply.text`，不改参数、返回、断言或正文；本夹具不含凭据。子首工具之后究竟哪一步失败，等真实 preview 说明，不凭临时路径长度猜定产品故障。
+
+本分支随后只摘取结果仓原生 IO、原册精确登记与 Memory 写计划诊断八笔窄修；不带入组合中的 CAS 接口。
+本头实际为 24 册 SDK focused、29 册必需 ASan，安装消费仍 20 场，公开子 Agent 原 12 案不减；ResultStore 原 17 案及 Windows 两枚路径标记照验。
+旧 b58 的 Windows 真红与新组合的计划写入真红另封。诊断只补实际原子写阶段，未凭旧部分绿宣布故障已修；新头重取整套远端证据。
