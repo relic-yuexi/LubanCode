@@ -168,5 +168,6 @@ DOC development/child-history-adoption.md
 DOC development/result-store-windows-io.md
 DOC development/sdk-channel-gateway-boundary.md
 DOC development/sdk-plan-atomic-diagnostic.md
+DOC development/sdk-lua.md
 DOC development/updater-lock-ready.md
 DOC development/sdk-plan-short-reject.md

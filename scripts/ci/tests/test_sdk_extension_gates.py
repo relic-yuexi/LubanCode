@@ -149,6 +149,7 @@ class InstalledHeadersTests(unittest.TestCase):
             "include/lubancore/skills.hpp",
             "include/lubancore/memory.hpp",
             "include/lubancore/subagents.hpp",
+            "include/lubancore/lua.hpp",
         }
         for relative in self.headers:
             path = self.repo / relative
@@ -238,6 +239,44 @@ class InstalledSearchResourcesTests(unittest.TestCase):
         with patch.object(installed.os, "access", return_value=False):
             with self.assertRaisesRegex(RuntimeError, "lost executable permission"):
                 installed.check_search_resources(self.repo, self.prefix, self.stage, "linux")
+
+
+class LuaEvidenceTests(unittest.TestCase):
+    def body(self, protected=False, executable="lubancore_sdk_tests"):
+        source = "test_lua_protected.cpp" if protected else "test_lubancore_lua.cpp"
+        count = 6 if protected else 9
+        return "\n".join((
+            f'Command: "C:/actual build/{executable}.exe" "--source-file=*{source}"',
+            f"[doctest] test cases: {count} | {count} passed | 0 failed | 100 skipped",
+            "[doctest] assertions: 32 | 32 passed | 0 failed |",
+            *("[sdk-lua-path] " + path for path in focused.LUA_PATHS if not protected),
+            "Test Passed.",
+        ))
+
+    def test_actual_source_counts_and_paths(self):
+        focused.check_lua_native(self.body())
+        focused.check_lua_native(self.body(True), protected=True)
+        focused.check_lua_native(self.body(executable="lubancode_tests"), executable="lubancode_tests")
+
+    def test_empty_failed_wrong_source_or_borrowed_binary(self):
+        body = self.body()
+        for changed in (body.replace("9 | 9 passed", "0 | 0 passed"),
+                        body.replace("9 | 9 passed | 0 failed", "9 | 8 passed | 1 failed"),
+                        body.replace("32 | 32 passed", "0 | 0 passed"),
+                        body.replace("test_lubancore_lua.cpp", "test_other.cpp"),
+                        body.replace("lubancore_sdk_tests.exe", "another.exe"),
+                        body.replace("Test Passed.", "Test Failed.")):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                focused.check_lua_native(changed)
+
+    def test_missing_duplicate_or_foreign_marker_cannot_prove_a_path(self):
+        body = self.body()
+        for path in focused.LUA_PATHS:
+            marker = "[sdk-lua-path] " + path
+            for changed in (body.replace(marker, ""), body.replace(marker, marker + "\n" + marker),
+                            body.replace(marker, "different-source: " + marker)):
+                with self.subTest(path=path), self.assertRaises(RuntimeError):
+                    focused.check_lua_native(changed)
 
 
 if __name__ == "__main__":
