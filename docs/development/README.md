@@ -18,6 +18,7 @@
 - [父 V3 子终态观察与未知止损](child-parent-observation.md)
 - [子结果严格历史采用合同](child-history-adoption.md)
 - [Runner 就绪探针与失败原件](runner-probe-evidence.md)
+- [SDK 存储、事件与策略 SPI 合同](sdk-storage-spi.md)：场束与独占租约、CAS/named 映射、有界事件流、策略归属及逐口交付门。
 - [后台子代理线程启动收口](agent-thread-start-cleanup.md)
 - [线程 capture 收尾夹具](thread-capture-owner-fixture.md)
 - [前台子 Agent 本次调用上下文](child-foreground-context.md)

@@ -90,6 +90,7 @@ DOC development/memory-project-commit.md
 DOC development/memory-worker-contention-diagnostics.md
 DOC development/memory-worker-busy-acceptance.md
 DOC development/sdk-memory-save.md
+DOC development/sdk-storage-spi.md
 DOC development/agent-thread-start-cleanup.md
 DOC development/thread-capture-owner-fixture.md
 DOC development/child-foreground-context.md
