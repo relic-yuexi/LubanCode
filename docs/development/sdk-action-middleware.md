@@ -115,3 +115,7 @@ definition_hash 只表宿主所声明实现版本，不认证任意原生函数�
 构造前 Prepare 拒坏初始绑定、错指纹或非普通计划时，公开出口保 `sdk.action.plan_invalid`；SessionLock 内 opening 拒绝才沿 Service 包成 `sdk.action.open_failed`。
 这三处构造前负例须先校准真实 seq=1 的 system message、SessionStarted/各版/有效 system 引用，再分别核 `!session` 和精确 `sdk.action.plan_invalid`，打印当次实际返回码。
 零工厂、零模型、零工具与旧 journal 原字节断言照留；正确旧卷仍须恢复成功。不改生产闸、不接纳错误码集合，旧失败原件单独封存。
+
+同源 Windows 安装消费者另在首场 Post 的三字段检查失败；原日志只记 callback 错误，没有实际 Post 输入，不先判归属、捕获或路径。
+新诊断只在这份无凭据的合成工具夹具里、原检查之前打印实际公开 Post `Input.json` 与当场计数。`succeeded`、`isError=false`、空 `errorCode` 和全部模型/工具/工厂、状态、预算断言照留，生产不抢改。
+这份新源另验诊断与 binding 夹具修补；继承的新计划短拒问题仍由独立修补笔 #300 取远端证据，不借本次诊断承诺全绿。
