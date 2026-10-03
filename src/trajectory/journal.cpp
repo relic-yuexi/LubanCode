@@ -213,8 +213,8 @@ std::expected<JournalWriter, std::string> JournalWriter::OpenExistingVerified(
     std::clearerr(stream);
     if (std::fseek(stream, 0, SEEK_END) != 0) return fail("recovery.seek_failed");
     JournalWriter writer;
-    writer.path_ = path;
     writer.file_ = stream;
+    writer.path_ = path;
     return writer;
 }
 
