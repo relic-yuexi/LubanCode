@@ -196,6 +196,13 @@ struct LuaHandlerSpec {
 // handler 调用合同(C++ 内置与 Lua 同一形状;Lua 由 runtime 侧适配)。
 // ---------------------------------------------------------------------------
 // 一次 dispatch 的宿主发行身份(只读;hook 不自行开真人回合)。
+// Owned per-dispatch Action facts. No writer, permission source or cancellation
+// flag is retained here. Only a host's real started call supplies attempt.
+struct ActionScope {
+    std::string session_id, operation_id, wire_call_id, tool_name, effective_cwd;
+    std::optional<std::uint64_t> attempt;
+};
+
 struct InvocationCtx {
     std::string dispatch_id;
     std::string invocation_id;
@@ -206,6 +213,7 @@ struct InvocationCtx {
     std::string definition_hash;
     int depth = 0;  // 链上位置(next 框架深度;宿主嵌套预算用)
     std::optional<std::string> turn_id, step_id, action_id, request_id;
+    std::optional<ActionScope> action_scope;
     const std::atomic<bool>* cancel = nullptr;  // 取消旗(可空)
 };
 
@@ -449,6 +457,7 @@ struct DispatchTrigger {
     nlohmann::json input;  // 挂点专用候选副本(修改不改 session;采用经宿主)
     std::optional<std::string> origin, purpose, delivery_mode;  // 匹配条件(§4.47)
     std::optional<std::string> turn_id, step_id, action_id, request_id;
+    std::optional<ActionScope> action_scope;
     const std::atomic<bool>* cancel = nullptr;  // 取消旗(帧边界查,Lua 灌 guard)
     // PreRequest 分段驱动(§4.36):宿主按 mutate -> freeze -> estimate ->
     // capacity 逐段放行;估算输出由宿主落稳后再进容量段的输入,估算/容量

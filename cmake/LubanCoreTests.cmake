@@ -22,10 +22,13 @@ if(NOT LUBANCORE_FOCUSED_TEST_SOURCES)
   message(FATAL_ERROR "SDK build requires registered integration/sdk tests")
 endif()
 list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
+  "${_lubancore_tests_root}/unit/packages/test_package_manifest.cpp"
   "${_lubancore_tests_root}/unit/tools/test_tool_job_coordinator.cpp"
   "${_lubancore_tests_root}/unit/tools/test_tool_job_start_transaction.cpp"
   "${_lubancore_tests_root}/unit/tools/test_tool_job_hold_recovery.cpp"
+  "${_lubancore_tests_root}/unit/trajectory/test_session_recovery_view.cpp"
   "${_lubancore_tests_root}/unit/platform/test_atomic_write.cpp"
+  "${_lubancore_tests_root}/unit/tools/test_lua_protected.cpp"
   "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_result_store.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_session_resources.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_session_execution.cpp"
@@ -51,9 +54,14 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   "${CMAKE_SOURCE_DIR}/src/sdk/approval.cpp"
   # The CAS fixture uses the real SDK Memory opening/report module privately.
   "${CMAKE_SOURCE_DIR}/src/sdk/memory.cpp"
+  # Real private Action host adapters exercise native sink receipts without
+  # exporting new private symbols or adding a public writer-fault option.
+  "${CMAKE_SOURCE_DIR}/src/sdk/action_dispatch.cpp"
   # The public-only child acceptance source is also built after relocation. It
   # belongs to these fixture executables, never the SDK library closure.
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/subagents.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/actions.cpp"
   ${LUBANCORE_FOCUSED_TEST_SOURCES})
 target_link_libraries(lubancore_sdk_tests PRIVATE
   lubancode_runtime lubancore_sdk doctest::doctest)
@@ -98,12 +106,18 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     if(TEST "${sdk_original_test}")
       set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "platform-atomic-write")
     endif()
+  elseif(sdk_basename STREQUAL "test_package_manifest.cpp")
+    set(sdk_original_test "unit.packages.package_manifest")
+  elseif(sdk_basename STREQUAL "test_session_recovery_view.cpp")
+    set(sdk_original_test "unit.trajectory.session_recovery_view")
   elseif(sdk_basename STREQUAL "test_v3_result_store.cpp")
     set(sdk_original_test "unit.trajectory_v3.v3_result_store")
     set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-result-store")
     if(TEST "${sdk_original_test}")
       set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-result-store")
     endif()
+  elseif(sdk_basename STREQUAL "test_lua_protected.cpp")
+    set(sdk_original_test "unit.tools.lua_protected")
   elseif(sdk_basename STREQUAL "test_tool_job_coordinator.cpp" OR
          sdk_basename STREQUAL "test_tool_job_start_transaction.cpp" OR
          sdk_basename STREQUAL "test_tool_job_hold_recovery.cpp")

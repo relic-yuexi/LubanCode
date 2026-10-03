@@ -3,6 +3,7 @@ DOC README.md
 DOC development/child-approval-observation.md
 DOC development/sdk-child-cas-integration.md
 DOC development/memory-cas-capability.md
+DOC development/session-recovery-view.md
 
 # 上手与排错
 DOC getting-started/quickstart.md
@@ -88,6 +89,7 @@ DOC development/memory-worker-contention-diagnostics.md
 DOC development/memory-worker-busy-acceptance.md
 DOC development/sdk-memory-save.md
 DOC development/agent-thread-start-cleanup.md
+DOC development/thread-capture-owner-fixture.md
 DOC development/child-foreground-context.md
 DOC development/scoped-approval-lease.md
 DOC development/child-async-approval.md
@@ -165,10 +167,18 @@ DOC development/child-sdk-integration.md
 DOC development/child-parent-observation.md
 DOC development/sdk-subagent-assembly.md
 DOC development/child-history-adoption.md
+DOC development/sdk-action-middleware.md
 DOC development/result-store-windows-io.md
 DOC development/sdk-channel-gateway-boundary.md
 DOC development/sdk-plan-atomic-diagnostic.md
+DOC development/sdk-lua.md
 DOC development/updater-lock-ready.md
 DOC development/sdk-plan-short-reject.md
+DOC development/sdk-package-manifest.md
+DOC development/package-prerelease-order.md
+DOC development/sdk-completion-integration.md
 DOC development/job-start-transaction.md
 DOC development/job-hold-recovery.md
+DOC development/result-store-fixture-owner.md
+DOC development/runner-release-diagnostic.md
+DOC development/child-history-stage-diagnostic.md

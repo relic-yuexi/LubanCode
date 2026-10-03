@@ -30,11 +30,14 @@
 #include "sdk/approval.hpp"
 #include "sdk/callback_scope.hpp"
 #include "sdk/extensions.hpp"
+#include "sdk/action_opening.hpp"
+#include "sdk/action_dispatch.hpp"
 #include "sdk/results.hpp"
 #include "sdk/skills.hpp"
 #include "sdk/subagents.hpp"
 #include "sdk/memory.hpp"
 #include "sdk/memory_write.hpp"
+#include "sdk/lua.hpp"
 #include "sdk/operation_ledger.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/search_ripgrep.hpp"
@@ -68,6 +71,12 @@ struct CloseErrors {
 };
 
 Error Failure(std::string code, std::string message = {}) { return {std::move(code), std::move(message)}; }
+lubancode::trajectory::RecoveryReadLimits InternalRecoveryLimits(const RecoveryReadLimits& value) {
+    return {{value.journal.max_bytes, value.journal.max_lines, value.journal.max_line_bytes},
+        {value.operations.max_bytes, value.operations.max_lines, value.operations.max_line_bytes},
+        value.result_total_bytes, value.view_total_bytes, value.result_directory_entries,
+        value.view_directory_entries, value.directory_name_bytes, value.directory_name_total_bytes};
+}
 bool Terminal(OperationState state) { return state != OperationState::Accepted && state != OperationState::Running; }
 bool ValidId(const std::string& value) {
     return !value.empty() && value.size() <= 200 &&
@@ -192,6 +201,7 @@ struct Session::Impl final : rt::InteractionBroker {
     std::map<std::string, Result<memory::v1::RecallReport>> memory_reports;
     std::shared_ptr<detail::SessionMemoryWrite> memory_write_module;
     memory::v1::WriteSnapshot memory_write_snapshot;
+    lua::v1::Snapshot lua_snapshot;
     std::map<std::string, Result<std::vector<memory::v1::SaveReport>>> memory_saves;
     bool memory_write_indeterminate = false; // protected by mutex after publication
     mutable std::mutex mutex;
@@ -269,6 +279,9 @@ struct Session::Impl final : rt::InteractionBroker {
     }
 
     Result<void> Initialize() {
+        const auto recovery_limits = InternalRecoveryLimits(options.recovery_read_limits);
+        if (!lubancode::trajectory::ValidRecoveryReadLimits(recovery_limits))
+            return std::unexpected(Failure("sdk.recovery.invalid_limits"));
         auto cwd = AbsoluteDirectory(options.cwd, false);
         if (!cwd) return std::unexpected(cwd.error());
         options.cwd = lubancode::tools::PathToUtf8(*cwd);
@@ -302,6 +315,9 @@ struct Session::Impl final : rt::InteractionBroker {
         } source_scope{options};
         auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
         if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
+        auto action_opening = detail::SessionActionOpening::Prepare(options.extensions,
+            lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key, options.resume_session_id);
+        if (!action_opening) return std::unexpected(action_opening.error());
         auto child_plan = detail::SessionSubagentPlan::Prepare(options.subagents,
             lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key,
             options.resume_session_id, options.cwd, options.model,
@@ -319,6 +335,10 @@ struct Session::Impl final : rt::InteractionBroker {
             lubancode::tools::Utf8ToPath(roots.data_root), *identity, options.resume_session_id);
         if (!write_candidate) return std::unexpected(write_candidate.error());
         memory_write_module = std::move(*write_candidate);
+        auto lua_module = detail::SessionLua::Prepare(options.lua,
+            lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key,
+            options.resume_session_id);
+        if (!lua_module) return std::unexpected(lua_module.error());
         auto prepared_registry = std::make_unique<lubancode::tools::ToolRegistry>();
         std::shared_ptr<lubancode::tools::BundledRipgrepRunner> search_runner;
         for (const auto& name : options.builtin_tools) {
@@ -348,6 +368,25 @@ struct Session::Impl final : rt::InteractionBroker {
             return std::unexpected(Failure("sdk.tool.duplicate", "skill"));
         if (memory_write_module->Describe().enabled && prepared_registry->Find("memory_save"))
             return std::unexpected(Failure("sdk.tool.duplicate", "memory_save"));
+        for (const auto& name : (*lua_module)->Names()) {
+            if (prepared_registry->Find(name))
+                return std::unexpected(Failure("sdk.tool.duplicate", name));
+        }
+        auto lua_tools = (*lua_module)->TakeTools();
+        if (!lua_tools) return std::unexpected(lua_tools.error());
+        const auto lua_declaration = (*lua_module)->Describe();
+        for (auto& tool : *lua_tools) {
+            const auto entry = std::find_if(lua_declaration.entries.begin(), lua_declaration.entries.end(),
+                [&](const auto& item) { return item.tool_name == tool->name(); });
+            if (entry == lua_declaration.entries.end())
+                return std::unexpected(Failure("sdk.lua.plan_invalid", "tool is absent from its declaration"));
+            lubancode::tools::ToolRegistration registration;
+            registration.source_kind = lubancode::tools::ToolSourceKind::PluginLua;
+            registration.source_instance = entry->path;
+            registration.version_or_digest = entry->content_sha256;
+            registration.tool = std::move(tool);
+            prepared_registry->Register(std::move(registration));
+        }
         rt::assembly::SessionResourcesRequest resource_request;
         std::set<std::string> server_names;
         for (const auto& spec : options.mcp_servers) {
@@ -465,13 +504,22 @@ struct Session::Impl final : rt::InteractionBroker {
         launch.approval_mode = Mode(options.approval_mode);
         launch.workspaces_root = lubancode::tools::Utf8ToPath(roots.data_root) / "workspaces";
         launch.v3_system_content = (*skill_module)->EffectiveSystem();
+        launch.recovery_capture.limits = recovery_limits;
+        launch.recovery_capture.memory_metadata = memory_module->RequiresRecoveryMetadata();
         auto skills_opening = (*skill_module)->OpeningParticipant();
         auto memory_opening = memory_module->OpeningParticipant();
         auto write_opening = memory_write_module->OpeningParticipant();
         auto child_opening = (*child_plan)->OpeningParticipant();
+        auto lua_opening = (*lua_module)->OpeningParticipant();
+        auto action_gate = (*action_opening)->OpeningParticipant();
         launch.v3_opening_participant = [skills_opening = std::move(skills_opening), memory_opening = std::move(memory_opening),
-                                       write_opening = std::move(write_opening), child_opening = std::move(child_opening)]
+                                       write_opening = std::move(write_opening), child_opening = std::move(child_opening),
+                                       lua_opening = std::move(lua_opening), action_gate = std::move(action_gate)]
             (const lubancode::trajectory::V3OpeningContext& context) -> std::expected<Json, std::string> {
+                // Recheck the strict Action declaration before another opening
+                // participant can publish metadata or transfer an old system.
+                auto actions = action_gate(context);
+                if (!actions) return std::unexpected(actions.error());
                 auto skills = skills_opening(context);
                 if (!skills) return std::unexpected(skills.error());
                 auto memory = memory_opening(context);
@@ -480,7 +528,9 @@ struct Session::Impl final : rt::InteractionBroker {
                 if (!writes) return std::unexpected(writes.error());
                 auto children = child_opening(context);
                 if (!children) return std::unexpected(children.error());
-                for (const auto* part : {&*memory, &*writes, &*children}) if (part->contains("hostBindings")) {
+                auto scripts = lua_opening(context);
+                if (!scripts) return std::unexpected(scripts.error());
+                for (const auto* part : {&*memory, &*writes, &*children, &*scripts, &*actions}) if (part->contains("hostBindings")) {
                     if (!skills->contains("hostBindings")) (*skills)["hostBindings"] = Json::object();
                     for (auto it = (*part)["hostBindings"].begin(); it != (*part)["hostBindings"].end(); ++it)
                         (*skills)["hostBindings"][it.key()] = it.value();
@@ -495,12 +545,15 @@ struct Session::Impl final : rt::InteractionBroker {
             service->launch_error().find("sdk.skill.") != std::string::npos ? "sdk.skill.open_failed" :
             service->launch_error().find("sdk.memory.") != std::string::npos ? "sdk.memory.open_failed" :
             service->launch_error().find("sdk.memory_write.") != std::string::npos ? "sdk.memory_write.open_failed" :
-            service->launch_error().find("sdk.subagent.") != std::string::npos ? "sdk.subagent.open_failed" : "sdk.session.open_failed",
+            service->launch_error().find("sdk.subagent.") != std::string::npos ? "sdk.subagent.open_failed" :
+            service->launch_error().find("sdk.action.") != std::string::npos ? "sdk.action.open_failed" :
+            service->launch_error().find("sdk.lua.") != std::string::npos ? "sdk.lua.open_failed" : "sdk.session.open_failed",
             service->launch_error()));
         session_id = service->trajectory()->session_id();
         session_dir = service->trajectory()->session_dir();
         memory_snapshot = memory_module->Describe();
         memory_write_snapshot = memory_write_module->Describe();
+        lua_snapshot = (*lua_module)->Describe();
         if (!options.resume_session_id.empty() && session_id != options.resume_session_id) {
             return std::unexpected(Failure("sdk.resume.identity_changed"));
         }
@@ -518,7 +571,8 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         const auto plan_path = session_dir / "sdk-extension-plan.json";
         std::optional<std::string> expected_plan;
-        if (!options.resume_session_id.empty()) {
+        if ((*action_opening)->enabled()) expected_plan = (*action_opening)->plan();
+        if (!(*action_opening)->enabled() && !options.resume_session_id.empty()) {
             std::error_code inspect_error;
             const bool exists = fs::exists(plan_path, inspect_error);
             if (inspect_error) return std::unexpected(Failure("sdk.extension.resume_mismatch", "cannot inspect saved extension plan"));
@@ -542,7 +596,7 @@ struct Session::Impl final : rt::InteractionBroker {
         auto* module_ptr = module->get();
         extension_plan_json = module_ptr->DescribePlan();
         (*assembled)->Attach(std::move(*module));
-        if (options.resume_session_id.empty()) {
+        if (!(*action_opening)->enabled() && options.resume_session_id.empty()) {
             const auto written = lubancode::platform::AtomicWriteFile(plan_path, extension_plan_json,
                 lubancode::platform::WriteDurability::ProcessCrashDurability);
             if (!written) return std::unexpected(Failure("sdk.extension.plan_write_failed", written.error().message));
@@ -951,12 +1005,28 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         events.Start(operation.turn_id);
         lubancode::agent::TurnWiring wiring;
+        // This failure belongs only to the accepted current turn. A later Submit
+        // receives a new value and cannot inherit another turn's hook failure.
+        std::string action_failure;
+        std::string action_receipt_error;
+        const bool actions_enabled = extensions && extensions->HasActions();
+        if (actions_enabled) wiring.action_failure_reason = [&] { return action_failure; };
+        if (actions_enabled) wiring.action_receipt_failure_reason = [&, dispatcher] {
+            if (!middleware_healthy()) {
+                const auto* sink = dynamic_cast<rt::V3MiddlewareEventSink*>(dispatcher->middleware_sink());
+                const auto errors = sink ? sink->recent_errors() : std::vector<std::string>{};
+                action_receipt_error = "sdk.action.trajectory_failed";
+                if (!errors.empty()) action_receipt_error += ": " + errors.front();
+            }
+            return action_receipt_error;
+        };
         wiring.events = &events;
         wiring.turn_id = operation.turn_id;
         wiring.tool_artifact_dir = lubancode::tools::PathToUtf8(session_dir / "artifacts" / "sha256");
-        if (rt::HasPreRequestMiddleware(dispatcher)) {
+        if (rt::HasPreRequestMiddleware(dispatcher) || actions_enabled) {
             wiring.on_pre_request_hooks = [&, dispatcher](const std::string& step_id, const std::string& turn_id,
                 const Json& frozen_request, const rt::PreRequestBudget& budget) {
+                if (!action_failure.empty()) return action_failure;
                 auto context = hook_context;
                 context.turn_id = turn_id;
                 context.step_id = step_id;
@@ -994,6 +1064,75 @@ struct Session::Impl final : rt::InteractionBroker {
             if (!identity) return std::nullopt;
             return lubancode::tools::ToolInvocationIdentity{owner, op, turn, identity->first, identity->second};
         };
+        if (actions_enabled) {
+            const auto action_trigger = [&, actual = bridge.get()](const std::string& call, const std::string& name,
+                Json arguments, std::optional<std::uint64_t> attempt) -> std::optional<lubancode::hooks::middleware::DispatchTrigger> {
+                const auto declared = actual->V3DeclaredCallOrigin(call);
+                if (!declared || declared->turn_id != operation.turn_id || declared->action_id.empty() ||
+                    session_id.empty() || input.operation_id.empty() || name.empty()) return std::nullopt;
+                lubancode::hooks::middleware::DispatchTrigger trigger;
+                trigger.input = { {"arguments", std::move(arguments)} };
+                trigger.turn_id = declared->turn_id; trigger.step_id = declared->step_id;
+                trigger.action_id = declared->action_id;
+                trigger.origin = hook_context.origin; trigger.purpose = hook_context.purpose;
+                trigger.delivery_mode = hook_context.delivery_mode; trigger.cancel = &interrupt;
+                trigger.action_scope = lubancode::hooks::middleware::ActionScope{
+                    session_id, input.operation_id, call, name, options.cwd, attempt};
+                return trigger;
+            };
+            wiring.on_pre_action = [&, action_trigger](const std::string& call, const std::string& name, const Json& arguments) {
+                lubancode::agent::TurnWiring::ActionPreDecision rejected;
+                if (!action_failure.empty()) {
+                    rejected.failed = true; rejected.error_code = "sdk.action.previous_failure";
+                    rejected.hook.decision = rt::ToolHookDecision::Decision::Deny;
+                    rejected.hook.reason = action_failure;
+                    return rejected;
+                }
+                auto trigger = action_trigger(call, name, arguments, std::nullopt);
+                if (!trigger) {
+                    action_failure = "sdk.action.owner_invalid: actual accepted main declaration is required";
+                    rejected.failed = true; rejected.error_code = "sdk.action.owner_invalid";
+                    rejected.hook.decision = rt::ToolHookDecision::Decision::Deny;
+                    rejected.hook.reason = action_failure;
+                    return rejected;
+                }
+                auto result = detail::RunPreAction(*dispatcher, *trigger);
+                if (result.failed) action_failure = result.hook.reason;
+                return result;
+            };
+            wiring.on_post_action = [&, action_trigger, actual = bridge.get()](const std::string& call, const std::string& name,
+                const Json& arguments, const lubancode::tools::Tool::Result& original,
+                const lubancode::tools::ToolInvocationIdentity& identity,
+                const lubancode::agent::ToolTraceEvent& started, const lubancode::agent::ToolTraceEvent& finished) {
+                // Finished is no longer an active execution in the bridge. Use
+                // the snapshot actually issued by MarkExecutionStarted, not a
+                // second active-identity query after its terminal event.
+                const auto declared = actual->V3DeclaredCallOrigin(call);
+                if (!declared || identity.session_id != session_id || identity.operation_id != input.operation_id ||
+                    identity.turn_id != operation.turn_id || identity.action_id != declared->action_id || identity.attempt == 0 ||
+                    started.kind != lubancode::agent::ToolTraceEventKind::ExecutionStarted ||
+                    finished.kind != lubancode::agent::ToolTraceEventKind::ExecutionFinished ||
+                    started.execution_id.empty() || finished.execution_id != started.execution_id ||
+                    started.tool_use_id != call || finished.tool_use_id != call ||
+                    started.tool_name != name || finished.tool_name != name ||
+                    started.turn_id != operation.turn_id || finished.turn_id != operation.turn_id ||
+                    (!started.thread_id.empty() && started.thread_id != session_id) ||
+                    (!finished.thread_id.empty() && finished.thread_id != session_id)) {
+                    action_failure = "sdk.action.owner_invalid: actual finished main execution is required";
+                    return original;
+                }
+                auto trigger = action_trigger(call, name, arguments, identity.attempt);
+                if (!trigger || trigger->action_id != identity.action_id) {
+                    action_failure = "sdk.action.owner_invalid: declaration and execution differ";
+                    return original;
+                }
+                trigger->input["result"] = {{"text", original.content}, {"isError", original.is_error},
+                    {"outcome", lubancode::agent::ToString(finished.outcome)}, {"errorCode", finished.error_code}};
+                auto result = detail::RunPostAction(*dispatcher, *trigger, original);
+                if (!result) { action_failure = result.error(); return original; }
+                return std::move(*result);
+            };
+        }
         // The public worker supplies an actual main execution identity. Neither
         // a naked tool call nor model input can manufacture this TLS admission.
         lubancode::tools::ScopedDispatchIdentity main_identity(
@@ -1179,12 +1318,15 @@ struct Session::Impl final : rt::InteractionBroker {
                 }
             }
         }
+        if (!action_failure.empty() && !(outcome && outcome->side_effect_indeterminate))
+            outcome = std::unexpected(action_failure);
         const bool turn_cancelled = (outcome && outcome->cancelled) || (!outcome && interrupt.load());
         const bool write_uncertain = memory_write_module->HasIndeterminate();
-        const bool effect_uncertain = outcome && outcome->side_effect_indeterminate;
+        const bool effect_uncertain = (outcome && outcome->side_effect_indeterminate) || !action_receipt_error.empty();
         const bool uncertain = write_uncertain || effect_uncertain;
         std::string uncertain_error = write_uncertain ? "sdk.memory_write.indeterminate" : "sdk.side_effect.indeterminate";
-        if (effect_uncertain && !outcome->side_effect_error.empty()) uncertain_error += ": " + outcome->side_effect_error;
+        if (effect_uncertain && outcome && !outcome->side_effect_error.empty()) uncertain_error += ": " + outcome->side_effect_error;
+        else if (!action_receipt_error.empty()) uncertain_error += ": " + action_receipt_error;
         bridge->EndTurn(outcome.has_value() && !uncertain, turn_cancelled && !uncertain,
             uncertain ? uncertain_error : outcome ? "" : outcome.error());
         if (subagent_module) subagent_module->ClearTurn();
@@ -1398,6 +1540,10 @@ Result<memory::v1::RecallReport> Session::GetMemoryRecall(const std::string& ope
 Result<memory::v1::WriteSnapshot> Session::DescribeMemoryWrite() const {
     std::lock_guard lock(impl_->mutex);
     return impl_->memory_write_snapshot;
+}
+Result<lua::v1::Snapshot> Session::DescribeLua() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->lua_snapshot;
 }
 Result<std::vector<memory::v1::SaveReport>> Session::GetMemorySaves(const std::string& operation_id) const {
     std::lock_guard lock(impl_->mutex);

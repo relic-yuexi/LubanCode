@@ -149,6 +149,7 @@ struct MemoryHost {
         launch.workspaces_root = directory.root / "data" / "workspaces";
         launch.v3_system_content = "CAS component host";
         launch.memory_capability_factory = factory;
+        launch.recovery_capture.memory_metadata = memory->RequiresRecoveryMetadata();
         auto opening = memory->OpeningParticipant();
         launch.v3_opening_participant = [this, factory, opening = std::move(opening)](const traj::V3OpeningContext& context) {
             ++gates;

@@ -97,6 +97,8 @@ struct SessionLaunchRequest {
     std::string v3_system_content;
     trajectory::V3OpeningParticipant v3_opening_participant;
     std::shared_ptr<trajectory::MemoryCapabilityFactory> memory_capability_factory;
+    trajectory::RecoveryCaptureRequest recovery_capture;
+    trajectory::SessionRecoveryFactory recovery_factory;
 };
 
 // ---------------------------------------------------------------------------
@@ -240,6 +242,10 @@ public:
     // 回空表。协议查询面(operation/read)活场冷场同吃这一口,不在
     // app-server 再解析一遍行格式。
     static std::vector<OperationFact> ReadOperationFacts(const std::filesystem::path& session_dir);
+    // Only locked recovery adoption uses this strict owned-byte parser. The
+    // existing tolerant live/path reader and operations append remain intact.
+    static std::expected<std::vector<OperationFact>, std::string> ReadOperationFactsOwned(
+        const std::string& bytes);
 
     // 只读查重(§4.2 幂等键预查):键在内存去重表里的受理事实。found
     // =false 即无此键;同键异载荷报 operation_conflict 的裁决由调用方比

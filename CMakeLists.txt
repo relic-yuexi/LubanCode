@@ -697,6 +697,9 @@ add_library(lubancode_engine STATIC
   src/agent/model_router.cpp
   # 自定义 Agent 单阶段 1:Agent Definition 严格解析(yaml-cpp)与三层 Catalog。
   src/agent/agent_definition.cpp
+  # Owned root Package analysis shares the original pure parsers with the CLI.
+  src/package/semver.cpp
+  src/package/manifest.cpp
   src/agent/agent_catalog.cpp
   # 自定义 Agent 单阶段 3:AgentProfileResolver——父上下文 + Definition ->
   # Resolved AgentProfile 的唯一合并权威(AgentTool 派发与 Workflow 绑定共用)。
@@ -754,6 +757,7 @@ add_library(lubancode_engine STATIC
   src/trajectory/blob_store.cpp
   src/trajectory/cas_store.cpp
   src/trajectory/journal.cpp
+  src/trajectory/session_recovery_view.cpp
   src/trajectory/recorder.cpp
   src/trajectory/directory.cpp
   # P0-1b:session 独占锁(PID+起始 token 身份核)、SessionManager 与
@@ -1397,10 +1401,8 @@ add_library(lubancode_core STATIC
   src/workflow/compiler.cpp
   src/workflow/planner.cpp
   src/workflow/frontend.cpp
-  # 统一 Package 封装单阶段 1:根清单严格解析、SemVer/兼容范围、四层扫描、
+  # 统一 Package 封装单阶段 1:原两份值 parser 归 engine；这里保四层扫描、
   # 稳定盘点与内容哈希(纯逻辑,与 workflow 平级)。
-  src/package/semver.cpp
-  src/package/manifest.cpp
   src/package/inventory.cpp
   # 统一 Package 封装单阶段 2:六类组件的原生 parser 接线(ComponentSource-
   # Root)、mcp.yaml 解析、短名/全名引用解析、MountPlan(只产计划不执行)。

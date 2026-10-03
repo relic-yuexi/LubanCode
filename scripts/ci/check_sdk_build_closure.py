@@ -13,11 +13,13 @@ from pathlib import Path
 
 try:
     from .check_sdk_only_boundary import (CLIENT, CHANNEL_HOST_SOURCES, CHANNEL_RUNTIME_SOURCES,
-                                         CHANNEL_HOST_TARGETS, MBEDTLS_TARGETS,
+                                         CHANNEL_HOST_TARGETS, MBEDTLS_TARGETS, SDK_NEUTRAL_PACKAGE_SOURCES,
+                                         package_ownership_violations,
                                          prepare, read_reply, relative, sdk_host_only_source)
 except ImportError:
     from check_sdk_only_boundary import (CLIENT, CHANNEL_HOST_SOURCES, CHANNEL_RUNTIME_SOURCES,
-                                        CHANNEL_HOST_TARGETS, MBEDTLS_TARGETS,
+                                        CHANNEL_HOST_TARGETS, MBEDTLS_TARGETS, SDK_NEUTRAL_PACKAGE_SOURCES,
+                                        package_ownership_violations,
                                         prepare, read_reply, relative, sdk_host_only_source)
 
 
@@ -85,7 +87,8 @@ def channel_ownership_violations(targets: dict) -> list[str]:
             forbidden = {"lubancore_sdk", "lubancode_core", "lubancode_updater", "miniz"}
             if name == "lubancode_channel_host":
                 forbidden |= {"lubancode_runtime", "lubancode_channel_runtime"}
-            host_service_sources = any(source.startswith(("src/package/", "src/updater/"))
+            host_service_sources = any((source.startswith("src/package/") and source not in SDK_NEUTRAL_PACKAGE_SOURCES)
+                                       or source.startswith("src/updater/")
                                        or source == "src/config/update_checker.cpp"
                                        for source in target["projectSources"])
             if target["name"] in forbidden or dependency == key or host_service_sources:
@@ -113,6 +116,7 @@ def inspect_graph(targets: dict) -> dict:
     violations.extend("SDK depends on host-only source: " + name
                       for name in sources if sdk_host_only_source(name))
     violations.extend(channel_ownership_violations(targets))
+    violations.extend(package_ownership_violations(targets))
     # A combined build keeps the CLI query implementation, but only its existing
     # updater may own it. SDK-only defines neither. Inspect all actual targets,
     # including disconnected hosts, so omission or duplicate compilation cannot

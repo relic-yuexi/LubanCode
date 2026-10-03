@@ -18,6 +18,7 @@
 #include <lubancore/skills.hpp>
 #include <lubancore/subagents.hpp>
 #include <lubancore/memory.hpp>
+#include <lubancore/lua.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
@@ -109,6 +110,19 @@ struct RuntimeOptions {
     std::string data_root;
     std::string resource_root;
 };
+// Finite, positive per-opening read budgets. Same-ID resume can raise them;
+// they do not change saved Memory plans, authorization or per-entity Memory caps.
+struct RecoveryStreamReadLimits {
+    std::size_t max_bytes = 0, max_lines = 0, max_line_bytes = 0;
+};
+struct RecoveryReadLimits {
+    RecoveryStreamReadLimits journal{128u * 1024u * 1024u, 262144u, 8u * 1024u * 1024u};
+    RecoveryStreamReadLimits operations{16u * 1024u * 1024u, 65536u, 256u * 1024u};
+    std::size_t result_total_bytes = 128u * 1024u * 1024u;
+    std::size_t view_total_bytes = 384u * 1024u * 1024u;
+    std::size_t result_directory_entries = 4096u, view_directory_entries = 8192u;
+    std::size_t directory_name_bytes = 1024u, directory_name_total_bytes = 8u * 1024u * 1024u;
+};
 struct SessionOptions {
     std::string cwd; // required absolute existing directory; never process chdir
     std::string model;
@@ -148,6 +162,10 @@ struct SessionOptions {
     std::chrono::milliseconds approval_timeout{300000};
     int max_steps_per_turn = 0;
     std::size_t context_window_tokens = 128000;
+    // Explicit trusted standalone scripts; off on new Sessions, inherited from
+    // a matching frozen plan on resume. All three execution budgets are required.
+    std::optional<lua::v1::Selection> lua;
+    RecoveryReadLimits recovery_read_limits{};
 };
 // operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };
@@ -228,6 +246,8 @@ public:
     // Searches this Session only, even when another Session uses the same ID string.
     Result<memory::v1::RecallReport> GetMemoryRecall(const std::string& operation_id) const;
     Result<memory::v1::WriteSnapshot> DescribeMemoryWrite() const;
+    // Owned declaration only. Close keeps this value; resume creates fresh VMs.
+    Result<lua::v1::Snapshot> DescribeLua() const;
     // Pure owned values after operation completion, including after Close.
     Result<std::vector<memory::v1::SaveReport>> GetMemorySaves(const std::string& operation_id) const;
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.

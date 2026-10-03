@@ -29,6 +29,8 @@
 #include <vector>
 
 namespace lubancore_consumer {
+void Packages();
+void Actions(const std::filesystem::path& base);
 void BuiltinSearch(const std::filesystem::path& base, const std::filesystem::path& resource_root);
 void MemorySeed(const std::filesystem::path& base);
 void MemoryResume(const std::filesystem::path& base);
@@ -37,6 +39,9 @@ void MemorySaveResume(const std::filesystem::path& base);
 void Subagents(const std::filesystem::path& base);
 void SubagentSeed(const std::filesystem::path& base);
 void SubagentResume(const std::filesystem::path& base);
+void Lua(const std::filesystem::path& base);
+void LuaSeed(const std::filesystem::path& base);
+void LuaResume(const std::filesystem::path& base);
 }
 
 // Deliberately only installed public headers and the C++ standard library.
@@ -1686,11 +1691,13 @@ int main(int argc, char** argv) {
             CloseAndStreams(base);
             ReentryAndOverflow(base);
             InvalidOptions(base);
+        } else if (mode == "packages") { lubancore_consumer::Packages();
         } else if (mode == "isolation") {
             FourSessionIsolation(base);
             SmallToolCaptureLifetime(base);
         }
         else if (mode == "extensions") PublicExtensions(base);
+        else if (mode == "actions") lubancore_consumer::Actions(base);
         else if (mode == "results") PublicResults(base);
         else if (mode == "skills-seed") SkillsSeed(base);
         else if (mode == "skills-resume") SkillsResume(base);
@@ -1701,6 +1708,9 @@ int main(int argc, char** argv) {
         else if (mode == "subagents") lubancore_consumer::Subagents(base);
         else if (mode == "subagent-seed") lubancore_consumer::SubagentSeed(base);
         else if (mode == "subagent-resume") lubancore_consumer::SubagentResume(base);
+        else if (mode == "lua") lubancore_consumer::Lua(base);
+        else if (mode == "lua-seed") lubancore_consumer::LuaSeed(base);
+        else if (mode == "lua-resume") lubancore_consumer::LuaResume(base);
         else if (mode == "builtin-search") lubancore_consumer::BuiltinSearch(base, Path(argv[3]));
         else if (mode == "result-seed") ResultSeed(base);
         else if (mode == "result-resume") ResultResume(base);

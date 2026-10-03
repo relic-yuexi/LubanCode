@@ -231,6 +231,11 @@ std::expected<V3Ledger, std::string> ReadV3Ledger(const std::filesystem::path& j
     return ReadVerifiedV3Lines(jsonl, *raw, std::move(report));
 }
 
+std::expected<V3Ledger, std::string> ReadV3LedgerOwned(
+    const std::filesystem::path& jsonl, const std::vector<std::string>& lines) {
+    return ReadVerifiedV3Lines(jsonl, lines, VerifyV3Lines(lines), true);
+}
+
 std::expected<V3Ledger, std::string> ReadV3LedgerBounded(
     const std::filesystem::path& jsonl, std::size_t max_bytes,
     std::size_t max_lines, std::size_t max_line_bytes) {
@@ -1292,6 +1297,14 @@ std::expected<ResumeProjection, std::string> ProjectResume(const std::filesystem
     if (!own.has_value()) {
         return std::unexpected(own.error());
     }
+    return ProjectResume(*own, std::move(resolver), max_source_depth);
+}
+
+std::expected<ResumeProjection, std::string> ProjectResume(const V3Ledger& owned,
+                                                           SourceLedgerResolver resolver,
+                                                           int max_source_depth) {
+    const auto* own = &owned;
+    const auto& jsonl = owned.path;
     ResumeProjection projection;
     projection.timeline = ProjectHistoryTimeline(*own);
     projection.model_context = ProjectModelContext(*own);
