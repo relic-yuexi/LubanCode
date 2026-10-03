@@ -26,8 +26,16 @@
 
 ## 验收
 
-复用内部 `Process` 拥有者，组合 CLI+Runner 在原测试二进制加一册、一案。POSIX 真 Create 暂停子进程、Cancel 本场 group、Poll 确认退出并 reap，再真实 Release，核 gate write 拒绝、诊断原 count/errno、外码不变；这只证明已知故障入口，不证明旧 Mac 同因。Windows 同案核真实正常 Release，随后收本场进程。没有假 Error 或公开 fault flag。
+复用内部 `Process` 拥有者，组合 CLI+Runner 用专用 `luban_runner_release_tests` 跑原一册、一案。POSIX 真 Create 暂停子进程、Cancel 本场 group、Poll 确认退出并 reap，再真实 Release，核 gate write 拒绝、诊断原 count/errno、外码不变；这只证明已知故障入口，不证明旧 Mac 同因。Windows 同案核真实正常 Release，随后收本场进程。没有假 Error 或公开 fault flag。
 
-这册只在 CLI 与 Runner 都启用时编入、链接已有 Runner client；Runner-only 仍只构建原两目标，安装范围、十一场不变。SDK-only、SDK focused 与 ASan 不加此册，不冒称插桩覆盖。新增独立三平台原件门核注册来源、一案实际非零断言、原输出与平台标记。
+这册只在 CLI 与 Runner 都启用时编入专用程序，只链接已有 Runner client 与 doctest；Runner-only 仍只构建原两目标，安装范围、十一场不变。SDK-only、SDK focused 与 ASan 不加此册，不冒称插桩覆盖。新增独立三平台原件门核注册来源、一案实际非零断言、原输出与平台标记。
 
 纯 Python 另验回应原字节、失败前状态与收场状态分离、缺件/截取/IO 错误、身份不收、编码与清场错误不吞。原生只交远程 CI；合入前看本头真实 checkout、来源与原件，不借旧绿。
+
+## 独立测试程序接线合同
+
+`4f63bd53` 的 Mac 全量 703 场中，AppCommands 原册 27 案有三案失败：文件或目录 flush 注入没有挡住真实 Config 发布。Release 新案本身通过。对照 `37ac4b50`，实际 FileAPI 图多了 `lubancode_tests → luban_job_runner_client` 一条边；client 与 engine 都编入 `atomic_write.cpp`。原件没有 compileGroups、完整链接命令或符号绑定记录。源码中的两个注入 setter 也没有按 Runner 宏编成 no-op。眼下不能断称 Mach-O 绑定或某种编译宏就是根因。
+
+这笔只移除观测到的新链接边。专用程序复用原 `tests/support/main.cpp` 与原 Release CPP，两份源码不改；只链接实际 `luban_job_runner_client` 与 doctest，不另造跨域静库，不引 SDK、App、Config 或 engine。原巨型 CLI 测试不再编入这册，也不再因这册链接 Runner client。原 CTest 名、来源过滤、一案全部断言、180 秒 CTest 时限、内部十秒/40 毫秒等待与两枚平台标记照旧。checker 只准新专用 binary，拒旧巨型 binary 与来源借用。
+
+验收要看新头三平台全量与独立 Release 原件，并核 Mac AppCommands 27 案全部实过。SDK-only、Runner-only 目标图与安装仍走原路；本笔没有启动重试或生产行为变更。`4f63bd53` 的三案红与原日志另封，不拿新头成功倒推旧因。
