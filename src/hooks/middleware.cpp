@@ -825,6 +825,15 @@ struct FrameResult {
     DispatchOutcome::Kind kind = DispatchOutcome::Kind::Completed;
     nlohmann::json value;
     std::string code, message;
+    DispatchCause cause = DispatchCause::None;
+    DispatchFailureSource failure_source = DispatchFailureSource::None;
+};
+
+// Only the currently active synchronous continuation owns this slot. The
+// original exception is rethrown; observers never read or write this state.
+struct FrameException {
+    std::exception_ptr exception;
+    DispatchFailureSource source = DispatchFailureSource::None;
 };
 
 // 一次 dispatch 的执行账(计划本身只读;记录槽按计划序预置,执行中只回填)。
@@ -875,6 +884,8 @@ FrameResult ToFrameResult(const DownstreamOutcome& downstream) {
     frame.value = downstream.value;
     frame.code = downstream.code;
     frame.message = downstream.message;
+    frame.cause = downstream.cause;
+    frame.failure_source = downstream.failure_source;
     return frame;
 }
 
@@ -913,6 +924,8 @@ DownstreamOutcome ToDownstream(const FrameResult& frame) {
     out.value = frame.value;
     out.code = frame.code;
     out.message = frame.message;
+    out.cause = frame.cause;
+    out.failure_source = frame.failure_source;
     return out;
 }
 
@@ -953,7 +966,8 @@ void RecordEffect(DispatchState& state, InvocationRecord& record, const Invocati
     record.effects.push_back(std::move(effect));
 }
 
-FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann::json& input);
+FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann::json& input,
+                     FrameException* escaped = nullptr);
 
 // 观察者单跑(独立线程调用):无 next、看原始触发输入、失败不连累 dispatch。
 // 只读 DispatchState(计划/触发);自己的记录本地改完整个交回。
@@ -991,6 +1005,7 @@ InvocationRecord RunObserver(DispatchState& state, std::size_t entry_pos) {
 
     if (!handler) {
         record.outcome = "failed";
+        record.failure_source = DispatchFailureSource::MissingHandler;
         record.error_code = std::string(err::kHandlerFailed);
         record.detail = "观察者定义没有可执行 handler";
         if (state.sink != nullptr) {
@@ -998,11 +1013,14 @@ InvocationRecord RunObserver(DispatchState& state, std::size_t entry_pos) {
         }
         return record;
     }
+    bool handler_returned = false;
     try {
         auto result = handler(ctx, state.trigger.input, next);
+        handler_returned = true;
         record.duration_ms = elapsed_ms();
         if (!result.has_value()) {
             record.outcome = "failed";
+            record.failure_source = DispatchFailureSource::HandlerReturnedError;
             record.error_code = result.error().code;
             record.detail = result.error().message;
             if (state.sink != nullptr) {
@@ -1022,6 +1040,8 @@ InvocationRecord RunObserver(DispatchState& state, std::size_t entry_pos) {
         return record;
     } catch (const std::exception& e) {
         record.outcome = "failed";
+        record.failure_source = handler_returned ? DispatchFailureSource::ObserverCompletionThrew
+                                                : DispatchFailureSource::HandlerThrew;
         record.error_code = std::string(err::kHandlerFailed);
         record.detail = std::string("观察者 handler 抛异常: ") + e.what();
         record.duration_ms = elapsed_ms();
@@ -1031,6 +1051,8 @@ InvocationRecord RunObserver(DispatchState& state, std::size_t entry_pos) {
         return record;
     } catch (...) {
         record.outcome = "failed";
+        record.failure_source = handler_returned ? DispatchFailureSource::ObserverCompletionThrew
+                                                : DispatchFailureSource::HandlerThrew;
         record.error_code = std::string(err::kHandlerFailed);
         record.detail = "观察者 handler 抛未知异常";
         record.duration_ms = elapsed_ms();
@@ -1041,12 +1063,14 @@ InvocationRecord RunObserver(DispatchState& state, std::size_t entry_pos) {
     }
 }
 
-FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann::json& input) {
+FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann::json& input,
+                     FrameException* escaped) {
     // 嵌套深度(§4.1):链深守门。
     if (chain_pos > static_cast<std::size_t>(MiddlewareDispatcher::kMaxChainDepth)) {
         MarkSkippedRemaining(state, chain_pos, "skipped_failed_upstream", "链深超限,未进入");
         FrameResult failed;
         failed.kind = DispatchOutcome::Kind::Failed;
+        failed.cause = DispatchCause::DepthExceeded;
         failed.code = std::string(err::kNestingExceeded);
         failed.message = "链深超过 " + std::to_string(MiddlewareDispatcher::kMaxChainDepth);
         return failed;
@@ -1057,6 +1081,7 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
         MarkSkippedRemaining(state, chain_pos, "skipped_cancelled", "dispatch 取消");
         FrameResult failed;
         failed.kind = DispatchOutcome::Kind::Failed;
+        failed.cause = DispatchCause::Cancelled;
         failed.code = std::string(err::kDispatchCancelled);
         failed.message = "dispatch 取消(取消旗已置位)";
         return failed;
@@ -1071,7 +1096,22 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
         ++state.terminal_runs;
         FrameResult frame;
         frame.kind = DispatchOutcome::Kind::Completed;
-        frame.value = state.terminal ? state.terminal(input) : input;
+        if (state.terminal) {
+            // Tag only this real terminal call, and preserve its exception.
+            const auto invoke = [&]() -> nlohmann::json {
+                try { return state.terminal(input); }
+                catch (...) {
+                    if (escaped != nullptr) {
+                        escaped->exception = std::current_exception();
+                        escaped->source = DispatchFailureSource::TerminalThrew;
+                    }
+                    throw;
+                }
+            };
+            frame.value = invoke();
+        } else {
+            frame.value = input;
+        }
         return frame;
     }
 
@@ -1109,46 +1149,56 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
     // next 边界:候选先过宿主校验(挂点/阶段合同 + freeze),采用后跑下游
     // (至多一次由 NextCall 把守;重复调用不增加下游执行)。
     const nlohmann::json frame_input = input;
-    NextCall next([&state, &def, &meta, &record, chain_pos, frame_input](
+    FrameException next_exception;
+    NextCall next([&state, &def, &meta, &record, &next_exception, chain_pos, frame_input](
                       const std::optional<nlohmann::json>& candidate) -> DownstreamOutcome {
-        nlohmann::json effective_input = frame_input;
-        if (candidate.has_value()) {
-            // 候选先存(§7.1):before_next 提案不冒充 handler 已完成;随后
-            // 按合同 applied/rejected。
+        try {
+            nlohmann::json effective_input = frame_input;
+            if (candidate.has_value()) {
+                // 候选先存(§7.1):before_next 提案不冒充 handler 已完成;随后
+                // 按合同 applied/rejected。
+                if (state.sink != nullptr) {
+                    state.sink->OnOutputProposed(meta, "before_next", *candidate);
+                }
+                if (!InputRewriteAllowed(state.point, def.stage)) {
+                    EffectRecord rejected;
+                    rejected.type = std::string(ToString(EffectType::InputRewrite));
+                    rejected.payload = *candidate;
+                    rejected.reject_reason = state.frozen ? "输入已冻结(freeze 之后不许改写)"
+                                                          : "挂点不收输入改写(" + std::string(ToString(state.point)) + ")";
+                    record.effects.push_back(rejected);
+                    if (state.sink != nullptr) {
+                        state.sink->OnEffectRejected(meta, ToString(EffectType::InputRewrite), rejected.reject_reason);
+                        state.sink->OnEffectSettled(meta, ToString(EffectType::InputRewrite), /*applied=*/false,
+                                                    rejected.reject_reason, *candidate);
+                    }
+                    // 拒绝 != 失败:按进入本 handler 的版本继续(实际处置已记录)。
+                } else {
+                    EffectRecord adopted;
+                    adopted.type = std::string(ToString(EffectType::InputRewrite));
+                    adopted.payload = *candidate;
+                    adopted.applied = true;
+                    record.effects.push_back(std::move(adopted));
+                    if (state.sink != nullptr) {
+                        state.sink->OnEffectApplied(meta, ToString(EffectType::InputRewrite));
+                        state.sink->OnEffectSettled(meta, ToString(EffectType::InputRewrite), /*applied=*/true, {},
+                                                    *candidate);
+                    }
+                    effective_input = *candidate;
+                }
+            }
             if (state.sink != nullptr) {
-                state.sink->OnOutputProposed(meta, "before_next", *candidate);
+                state.sink->OnContinuationConsumed(meta);  // 一次性执行权(§7.1)
             }
-            if (!InputRewriteAllowed(state.point, def.stage)) {
-                EffectRecord rejected;
-                rejected.type = std::string(ToString(EffectType::InputRewrite));
-                rejected.payload = *candidate;
-                rejected.reject_reason = state.frozen ? "输入已冻结(freeze 之后不许改写)"
-                                                      : "挂点不收输入改写(" + std::string(ToString(state.point)) + ")";
-                record.effects.push_back(rejected);
-                if (state.sink != nullptr) {
-                    state.sink->OnEffectRejected(meta, ToString(EffectType::InputRewrite), rejected.reject_reason);
-                    state.sink->OnEffectSettled(meta, ToString(EffectType::InputRewrite), /*applied=*/false,
-                                                rejected.reject_reason, *candidate);
-                }
-                // 拒绝 != 失败:按进入本 handler 的版本继续(实际处置已记录)。
-            } else {
-                EffectRecord adopted;
-                adopted.type = std::string(ToString(EffectType::InputRewrite));
-                adopted.payload = *candidate;
-                adopted.applied = true;
-                record.effects.push_back(std::move(adopted));
-                if (state.sink != nullptr) {
-                    state.sink->OnEffectApplied(meta, ToString(EffectType::InputRewrite));
-                    state.sink->OnEffectSettled(meta, ToString(EffectType::InputRewrite), /*applied=*/true, {},
-                                                *candidate);
-                }
-                effective_input = *candidate;
+            return ToDownstream(RunFrame(state, chain_pos + 1, effective_input, &next_exception));
+        } catch (...) {
+            const auto actual = std::current_exception();
+            if (next_exception.exception != actual) {
+                next_exception.exception = actual;
+                next_exception.source = DispatchFailureSource::ContinuationThrew;
             }
+            throw;
         }
-        if (state.sink != nullptr) {
-            state.sink->OnContinuationConsumed(meta);  // 一次性执行权(§7.1)
-        }
-        return ToDownstream(RunFrame(state, chain_pos + 1, effective_input));
     });
 
     const Handler& handler = def.builtin;  // 发布期 lua 已物化成同形 Handler
@@ -1160,13 +1210,19 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
 
     std::expected<HandlerReturn, HandlerError> result =
         std::unexpected(HandlerError{std::string(err::kHandlerFailed), "定义没有可执行 handler"});
+    DispatchFailureSource failure_source = handler ? DispatchFailureSource::HandlerReturnedError
+                                                   : DispatchFailureSource::MissingHandler;
     if (handler) {
         try {
             result = handler(ctx, input, next);
         } catch (const std::exception& e) {
+            failure_source = next_exception.exception == std::current_exception()
+                                 ? next_exception.source : DispatchFailureSource::HandlerThrew;
             result = std::unexpected(
                 HandlerError{std::string(err::kHandlerFailed), std::string("handler 抛异常: ") + e.what()});
         } catch (...) {
+            failure_source = next_exception.exception == std::current_exception()
+                                 ? next_exception.source : DispatchFailureSource::HandlerThrew;
             result = std::unexpected(HandlerError{std::string(err::kHandlerFailed), "handler 抛未知异常"});
         }
     }
@@ -1176,6 +1232,7 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
 
     if (!result.has_value()) {
         record.outcome = "failed";
+        record.failure_source = failure_source;
         record.error_code = result.error().code;
         record.detail = result.error().message;
         if (state.sink != nullptr) {
@@ -1186,7 +1243,7 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
         if (policy == FailurePolicy::KeepOriginal && !next.consumed() && next.calls() == 0) {
             // optional 纯转换失败且未消费 next:以进入本 handler 的版本继续一次。
             record.detail += ";按 keep_original 以原输入继续";
-            return RunFrame(state, chain_pos + 1, frame_input);
+            return RunFrame(state, chain_pos + 1, frame_input, escaped);
         }
         if (policy == FailurePolicy::KeepOriginal && next.consumed() && next.last() != nullptr) {
             // next 已消费、下游已完成:采用下游收据(keep_downstream,§六)。
@@ -1200,6 +1257,10 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
         }
         FrameResult failed;
         failed.kind = DispatchOutcome::Kind::Failed;
+        failed.cause = def.required ? DispatchCause::RequiredAbort
+                                   : (def.failure_policy == FailurePolicy::Abort
+                                          ? DispatchCause::ConfiguredAbort : DispatchCause::KeepOriginalUnavailable);
+        failed.failure_source = failure_source;
         failed.code = record.error_code;
         failed.message = record.key + ": " + record.detail;
         return failed;
@@ -1229,6 +1290,7 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
         }
         FrameResult frame;
         frame.kind = denied ? DispatchOutcome::Kind::Denied : DispatchOutcome::Kind::Completed;
+        frame.cause = denied ? DispatchCause::ExplicitDenied : DispatchCause::None;
         frame.value = result->output;
         frame.code = result->deny_code;
         frame.message = result->deny_message;
@@ -1249,8 +1311,12 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
     frame.message = result->deny_message;
     if (result->deny) {
         frame.kind = DispatchOutcome::Kind::Denied;
+        frame.cause = DispatchCause::ExplicitDenied;
     } else if (next.last() != nullptr) {
-        frame.kind = WorseKind(frame.kind, ToFrameResult(*next.last()).kind);
+        const auto downstream = ToFrameResult(*next.last());
+        frame.kind = WorseKind(frame.kind, downstream.kind);
+        frame.cause = downstream.cause;
+        frame.failure_source = downstream.failure_source;
     }
     return frame;
 }
@@ -1382,6 +1448,8 @@ DispatchOutcome MiddlewareDispatcher::Dispatch(HookPoint point, const DispatchTr
     }
 
     state.outcome.kind = frame.kind;
+    state.outcome.cause = frame.cause;
+    state.outcome.failure_source = frame.failure_source;
     state.outcome.value = frame.value;
     state.outcome.terminal_runs = state.terminal_runs;
     if (frame.kind == DispatchOutcome::Kind::Denied) {

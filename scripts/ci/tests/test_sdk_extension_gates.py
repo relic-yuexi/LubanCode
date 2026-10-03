@@ -640,6 +640,75 @@ class MiddlewareNativeReceiptGateTests(unittest.TestCase):
                 focused.check_middleware_receipt_native(bad, self.command)
 
 
+class MiddlewareDispatchCauseGateTests(unittest.TestCase):
+    command = ['/real build/lubancore_sdk_tests', '--source-file=*test_middleware_dispatch_cause.cpp']
+
+    def body(self, command=None):
+        command = self.command if command is None else command
+        return "\n".join(('Command: ' + ' '.join('"' + value + '"' for value in command),
+            '[doctest] test cases: 6 | 6 passed | 0 failed',
+            '[doctest] assertions: 100 | 100 passed | 0 failed', 'Test Passed.',
+            *('[middleware-dispatch-cause-path] ' + path for path in focused.MIDDLEWARE_CAUSE_PATHS)))
+
+    def test_actual_sdk_cli_full_argv_and_crlf(self):
+        for executable in ('/real build/lubancore_sdk_tests', 'C:/real build/lubancode_tests.exe'):
+            command = [executable, self.command[1]]
+            focused.check_middleware_cause_registration(command, executable.replace('\\', '/').split('/')[-1].removesuffix('.exe'))
+            for ending in ('\n', '\r\n'):
+                focused.check_middleware_cause_native(self.body(command).replace('\n', ending), command)
+
+    def test_missing_nonlist_and_nonstring_argv_reject_stably(self):
+        for bad in (None, {}, [], self.command[:1], tuple(self.command), [7, self.command[1]], [self.command[0], None]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(RuntimeError):
+                    focused.check_middleware_cause_registration(bad)
+                with self.assertRaises(RuntimeError):
+                    focused.check_middleware_cause_native(self.body(), bad)
+
+    def test_foreign_same_basename_full_path_and_other_filter_reject(self):
+        for bad in (['/foreign build/lubancore_sdk_tests', self.command[1]],
+                    self.command + ['--test-case=one'],
+                    [self.command[0], '--source-file=*test_tool_job_coordinator.cpp'],
+                    [self.command[0], '--source-file=*test_middleware_dispatch_cause_extra.cpp']):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_middleware_cause_native(self.body(bad), self.command)
+
+    def test_registration_source_and_executable_are_exact(self):
+        for bad in ([self.command[0], '--source-file=*test_middleware_dispatch_cause_extra.cpp'],
+                    ['/real build/unrelated_tests', self.command[1]], self.command + ['--test-case=one']):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_middleware_cause_registration(bad)
+
+    def test_each_actual_path_must_finish_once(self):
+        body = self.body()
+        for path in focused.MIDDLEWARE_CAUSE_PATHS:
+            marker = '[middleware-dispatch-cause-path] ' + path
+            for bad in (body.replace(marker, ''), body + '\n' + marker,
+                        body.replace(marker, 'foreign-owner: ' + marker)):
+                with self.subTest(path=path), self.assertRaises(RuntimeError):
+                    focused.check_middleware_cause_native(bad, self.command)
+
+    def test_nonzero_six_cases_assertions_and_pass_receipt_are_required(self):
+        body = self.body()
+        for bad in (body.replace('6 | 6 passed', '0 | 0 passed'),
+                    body.replace('6 | 6 passed', '5 | 5 passed'),
+                    body.replace('6 | 6 passed', '7 | 7 passed'),
+                    body.replace('6 passed | 0 failed', '5 passed | 1 failed'),
+                    body.replace('100 | 100 passed', '0 | 0 passed'),
+                    body.replace('100 passed | 0 failed', '99 passed | 1 failed'),
+                    body.replace('Test Passed.', ''), body + '\nTest Passed.'):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_middleware_cause_native(bad, self.command)
+
+    def test_missing_duplicate_and_bad_quote_command_reject(self):
+        body = self.body()
+        first = body.splitlines()[0]
+        for bad in (body.replace(first, ''), body + '\n' + first,
+                    body.replace(first, 'Command: "unterminated')):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_middleware_cause_native(bad, self.command)
+
+
 class ResultStoreWindowsPathsTests(unittest.TestCase):
     summary = "[doctest] test cases: 17 | 17 passed | 0 failed"
     markers = ("[result-store-path] target-extended", "[result-store-path] temporary-threshold",

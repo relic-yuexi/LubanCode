@@ -218,12 +218,25 @@ struct InvocationCtx {
 };
 
 // next 的下游返回:业务结局是值,不是 Lua 错;协议违规才走错误。
+// Live producer facts. They neither classify an error string nor attest native
+// durability. None on the aggregate means no failure/denial won the old reduce.
+enum class DispatchCause {
+    None, RequiredAbort, ConfiguredAbort, KeepOriginalUnavailable,
+    Cancelled, ExplicitDenied, DepthExceeded
+};
+enum class DispatchFailureSource {
+    None, MissingHandler, HandlerReturnedError, HandlerThrew,
+    TerminalThrew, ContinuationThrew, ObserverCompletionThrew
+};
+
 struct DownstreamOutcome {
     enum class Kind { Value, Denied, Failed, Invalid };
     Kind kind = Kind::Value;
     nlohmann::json value;
     std::string code;     // Denied/Failed 的码;Invalid 的错误码
     std::string message;
+    DispatchCause cause = DispatchCause::None;
+    DispatchFailureSource failure_source = DispatchFailureSource::None;
 };
 
 // 至多一次 next 的边界。第二次调用不跑下游,回 Invalid(hook.next.already_consumed);
@@ -491,6 +504,9 @@ struct InvocationRecord {
     std::string error_code, detail;
     std::vector<EffectRecord> effects;
     std::uint64_t duration_ms = 0;
+    // This invocation's own failure; optional/observer failure may be ignored
+    // by the aggregate. A returned HandlerError never supplies this tag.
+    DispatchFailureSource failure_source = DispatchFailureSource::None;
 };
 
 struct DispatchOutcome {
@@ -506,6 +522,8 @@ struct DispatchOutcome {
     std::string error_code, error_detail;
     std::vector<InvocationRecord> records;  // 计划序(含跳过项与观察者)
     std::vector<std::string> context_appends;  // 已采用的 context.append 文本(计划序)
+    DispatchCause cause = DispatchCause::None;
+    DispatchFailureSource failure_source = DispatchFailureSource::None;
 
     bool Ok() const { return kind == Kind::Completed; }
     const InvocationRecord* FindRecord(std::string_view key) const {

@@ -66,3 +66,4 @@ git diff --check
 - [SDK Job Operation 与宿主收件合同](sdk-job-operation-binding.md)
 - [SDK Job 前置：命令执行限额](sdk-command-execution-limits.md)
 - [中间件实际 Hook 回执保存](middleware-native-receipts.md)
+- [中间件真实派发原因](middleware-dispatch-cause.md)

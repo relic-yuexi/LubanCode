@@ -189,3 +189,4 @@ DOC development/sdk-job-result-boundary.md
 DOC development/sdk-job-operation-binding.md
 DOC development/sdk-command-execution-limits.md
 DOC development/middleware-native-receipts.md
+DOC development/middleware-dispatch-cause.md

@@ -22,6 +22,7 @@ REQUIRED = {
     "sdk.focused.tool_job_owned_adoption",
     "sdk.focused.owned_job_admission",
     "sdk.focused.middleware_native_receipts",
+    "sdk.focused.middleware_dispatch_cause",
     "sdk.focused.run_command_execution_limits",
     "sdk.focused.session_recovery_view",
     "sdk.focused.lubancore_recovery_view",
@@ -487,6 +488,39 @@ def check_middleware_receipt_native(section, command):
             raise RuntimeError("Middleware native receipt actual path did not finish once: " + path)
 
 
+MIDDLEWARE_CAUSE_PATHS = ("policies", "cancellation", "denied", "propagation", "exceptions", "snapshot")
+
+
+def check_middleware_cause_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_middleware_dispatch_cause.cpp"):
+        raise RuntimeError("Middleware dispatch cause registration must run the single actual source")
+
+
+def check_middleware_cause_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("Middleware dispatch cause native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Middleware dispatch cause executable is not the actual native fixture")
+    check_middleware_cause_registration(command, executable)
+    check_native_command(section, command)
+    counts = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(counts) != 1 or tuple(map(int, counts[0])) != (6, 6, 0):
+        raise RuntimeError("Middleware dispatch cause native roster differs from 6 successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Middleware dispatch cause native assertions did not actually pass")
+    for path in MIDDLEWARE_CAUSE_PATHS:
+        if section.splitlines().count("[middleware-dispatch-cause-path] " + path) != 1:
+            raise RuntimeError("Middleware dispatch cause actual path did not finish once: " + path)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -528,6 +562,8 @@ def main():
             check_job_adoption_registration(test.get("command", []))
         if test["name"] == "sdk.focused.middleware_native_receipts":
             check_middleware_receipt_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.middleware_dispatch_cause":
+            check_middleware_cause_registration(test.get("command", []))
         if test["name"] == "sdk.focused.run_command_execution_limits":
             check_command_limits_registration(test.get("command", []))
         if test["name"] == "sdk.focused.atomic_write":
@@ -594,6 +630,9 @@ def main():
         if case.attrib["name"] == "sdk.focused.middleware_native_receipts":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_middleware_receipt_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.middleware_dispatch_cause":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_middleware_cause_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.run_command_execution_limits":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_command_limits_native(sections[0], registered["command"])

@@ -69,6 +69,8 @@ std::expected<void, std::string> MiddlewareReceiptLease::Finish(
         if (!complete) snap.gap = MiddlewareReceiptGap::InvalidSequence;
     }
     snap.outcome = outcome.kind;
+    snap.cause = outcome.cause;
+    snap.failure_source = outcome.failure_source;
     snap.finished = true;
     return {};
 }
