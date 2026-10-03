@@ -19,6 +19,8 @@ using Json = nlohmann::json;
 namespace fs = std::filesystem;
 
 v3::ChildAdoptionCheck CheckHistory(const Rig& rig, const v3::V3Ledger& source, std::size_t index = 0) {
+    const HistoryStageSpan stage(rig.history_diagnostics, rig.history_rig,
+        HistoryDiagnosticStage::CheckHistoryEnter, HistoryDiagnosticStage::CheckHistoryLeave);
     REQUIRE(rig.child_sources.size() > index);
     const auto& call = rig.child_sources[index].parent_action;
     const auto parent_calls = rig.backend.parent_calls, child_calls = rig.backend.child_calls;
@@ -36,6 +38,8 @@ v3::ChildAdoptionCheck CheckHistory(const Rig& rig, const v3::V3Ledger& source, 
 }
 
 void RealRun(Rig& rig) {
+    const HistoryStageSpan stage(rig.history_diagnostics, rig.history_rig,
+        HistoryDiagnosticStage::RealRunEnter, HistoryDiagnosticStage::RealRunLeave);
     const auto run = rig.Run();
     REQUIRE_MESSAGE(run.has_value(), (run ? std::string() : run.error()));
     std::string capture_errors;
@@ -116,6 +120,8 @@ v3::V3Ledger Verified(const fs::path& path) {
 }
 
 void CloseParent(Rig& rig) {
+    const HistoryStageSpan stage(rig.history_diagnostics, rig.history_rig,
+        HistoryDiagnosticStage::CloseEnter, HistoryDiagnosticStage::CloseLeave);
     const auto closed = rig.writer->Close(); REQUIRE_MESSAGE(closed.has_value(), (closed ? std::string() : closed.error()));
 }
 
@@ -128,10 +134,13 @@ std::map<std::string, std::string> ArtifactBytes(const fs::path& root) {
 } // namespace
 
 TEST_CASE("child history adoption validates only an actual full chain and returns owned values") {
+    const auto history_diagnostics = std::make_shared<HistoryDiagnostics>(HistoryDiagnosticCase::Complete);
+    const HistoryStageSpan case_stage(history_diagnostics, 0,
+        HistoryDiagnosticStage::CaseEnter, HistoryDiagnosticStage::CaseLeave);
     Directory directory;
     std::optional<v3::ChildHistoricalAdoption> owned;
     {
-        Rig rig(directory); RealRun(rig);
+        Rig rig(directory, "parent-session", history_diagnostics); RealRun(rig);
         const auto source = rig.Source(); const auto original_artifacts = ArtifactBytes(directory.root);
         const auto checked = CheckHistory(rig, source);
         REQUIRE_MESSAGE(checked.state == v3::ChildAdoptionState::Validated, checked.issue);
@@ -161,6 +170,9 @@ TEST_CASE("child history adoption validates only an actual full chain and return
 }
 
 TEST_CASE("child history keeps raw and actual PostToolUse effective material separate") {
+    const auto history_diagnostics = std::make_shared<HistoryDiagnostics>(HistoryDiagnosticCase::PostHook);
+    const HistoryStageSpan case_stage(history_diagnostics, 0,
+        HistoryDiagnosticStage::CaseEnter, HistoryDiagnosticStage::CaseLeave);
     // Regression for the real planner -> native-material producer -> result
     // store -> preview path. The original live Agent/bridge run below retains
     // its capacity and verifies actual consumption by the next model request.
@@ -276,7 +288,7 @@ TEST_CASE("child history keeps raw and actual PostToolUse effective material sep
         const auto empty = agent::PlanToolBatchBudget(mixed, 1);
         REQUIRE(empty.error.empty()); CHECK(empty.total_preview_bytes == 1);
     }
-    Directory directory; Rig rig(directory);
+    Directory directory; Rig rig(directory, "parent-session", history_diagnostics);
     rig.configure_wiring = [](agent::TurnWiring& wiring) {
         wiring.on_post_tool_use_hook = [](const std::string&, const std::string& name,
             const Json&, const tools::Tool::Result&) -> std::vector<std::string> {
@@ -297,7 +309,7 @@ TEST_CASE("child history keeps raw and actual PostToolUse effective material sep
             if (const auto* result = std::get_if<api::ToolResultBlock>(&block); result && result->content == effective) ++seen;
     CHECK(seen == 1);
     {
-        Directory summarized_directory; Rig summarized(summarized_directory);
+        Directory summarized_directory; Rig summarized(summarized_directory, "parent-session", history_diagnostics);
         summarized.parent->SetContextWindowTokens(32768);
         summarized.configure_wiring = [](agent::TurnWiring& wiring) {
             wiring.on_post_tool_use_hook = [](const std::string&, const std::string& name,
@@ -317,8 +329,11 @@ TEST_CASE("child history keeps raw and actual PostToolUse effective material sep
 }
 
 TEST_CASE("child history remains valid after native compact removes its old current-chain version") {
+    const auto history_diagnostics = std::make_shared<HistoryDiagnostics>(HistoryDiagnosticCase::HistoricalChain);
+    const HistoryStageSpan case_stage(history_diagnostics, 0,
+        HistoryDiagnosticStage::CaseEnter, HistoryDiagnosticStage::CaseLeave);
     {
-        Directory reduced_directory; Rig reduced(reduced_directory);
+        Directory reduced_directory; Rig reduced(reduced_directory, "parent-session", history_diagnostics);
         std::string replacement;
         reduced.configure_wiring = [&](agent::TurnWiring& wiring) {
             const auto rewrite = wiring.rewrite_tool_results_for_history;
@@ -357,7 +372,7 @@ TEST_CASE("child history remains valid after native compact removes its old curr
                 if (const auto* result = std::get_if<api::ToolResultBlock>(&block); result && result->content == replacement) ++actual;
         CHECK(actual == 1);
     }
-    Directory directory; Rig rig(directory); RealRun(rig);
+    Directory directory; Rig rig(directory, "parent-session", history_diagnostics); RealRun(rig);
     const auto before = CheckHistory(rig, rig.Source()); REQUIRE(before.adoption.has_value());
     auto compact = v3::CompactSession::Begin(*rig.writer, "manual", "history validation fixture", std::nullopt, Json::object());
     REQUIRE(compact.info.began); REQUIRE(compact.session);
@@ -391,7 +406,10 @@ TEST_CASE("child history remains valid after native compact removes its old curr
 }
 
 TEST_CASE("child history rejects altered producer and checkpoint claims after common verification") {
-    Directory directory; Rig rig(directory); RealRun(rig); CloseParent(rig);
+    const auto history_diagnostics = std::make_shared<HistoryDiagnostics>(HistoryDiagnosticCase::ObservationGap);
+    const HistoryStageSpan case_stage(history_diagnostics, 0,
+        HistoryDiagnosticStage::CaseEnter, HistoryDiagnosticStage::CaseLeave);
+    Directory directory; Rig rig(directory, "parent-session", history_diagnostics); RealRun(rig); CloseParent(rig);
     Restore saved(rig.writer->path()); const auto good = rig.Source();
     const auto action = rig.child_sources.front().parent_action.action_id;
     const auto observed = FindKind(good, v3::EventKindV3::SubagentObserved, action).event_id;
@@ -417,7 +435,10 @@ TEST_CASE("child history rejects altered producer and checkpoint claims after co
 }
 
 TEST_CASE("child history checks persistent child parent sources rather than same-string native identity") {
-    Directory directory, peer_directory; Rig rig(directory, "actual-parent-A"), peer(peer_directory, "actual-parent-B");
+    const auto history_diagnostics = std::make_shared<HistoryDiagnostics>(HistoryDiagnosticCase::SourceGap);
+    const HistoryStageSpan case_stage(history_diagnostics, 0,
+        HistoryDiagnosticStage::CaseEnter, HistoryDiagnosticStage::CaseLeave);
+    Directory directory, peer_directory; Rig rig(directory, "actual-parent-A", history_diagnostics), peer(peer_directory, "actual-parent-B", history_diagnostics);
     RealRun(rig); RealRun(peer); CloseParent(rig); CloseParent(peer);
     Restore parent_saved(rig.writer->path()), child_saved(rig.child_paths.front());
     CHECK(rig.child_sources.front().child.session_id == peer.child_sources.front().child.session_id);
@@ -444,7 +465,10 @@ TEST_CASE("child history checks persistent child parent sources rather than same
 }
 
 TEST_CASE("child history verifies actual named artifact bytes and rejects nonregular or escaped sources") {
-    Directory directory; Rig rig(directory); RealRun(rig); CloseParent(rig);
+    const auto history_diagnostics = std::make_shared<HistoryDiagnostics>(HistoryDiagnosticCase::ArtifactGap);
+    const HistoryStageSpan case_stage(history_diagnostics, 0,
+        HistoryDiagnosticStage::CaseEnter, HistoryDiagnosticStage::CaseLeave);
+    Directory directory; Rig rig(directory, "parent-session", history_diagnostics); RealRun(rig); CloseParent(rig);
     const auto source = rig.Source(); const auto checked = CheckHistory(rig, source); REQUIRE(checked.adoption.has_value());
     const auto* raw = source.FindEvent(checked.adoption->raw_persisted_event_id); REQUIRE(raw);
     Json combined;
@@ -481,7 +505,10 @@ TEST_CASE("child history verifies actual named artifact bytes and rejects nonreg
 }
 
 TEST_CASE("child history never accepts selected source or adopted message owner substitutions") {
-    Directory directory; Rig rig(directory); RealRun(rig); CloseParent(rig);
+    const auto history_diagnostics = std::make_shared<HistoryDiagnostics>(HistoryDiagnosticCase::AdoptionGap);
+    const HistoryStageSpan case_stage(history_diagnostics, 0,
+        HistoryDiagnosticStage::CaseEnter, HistoryDiagnosticStage::CaseLeave);
+    Directory directory; Rig rig(directory, "parent-session", history_diagnostics); RealRun(rig); CloseParent(rig);
     Restore saved(rig.writer->path()); const auto good = rig.Source(); const auto initial = CheckHistory(rig, good); REQUIRE(initial.adoption.has_value());
     const auto& value = *initial.adoption;
     for (int variant = 0; variant != 9; ++variant) {
@@ -529,7 +556,10 @@ TEST_CASE("child history never accepts selected source or adopted message owner 
 }
 
 TEST_CASE("child history scopes provider reuse and distinguishes ordinary tools from incomplete children") {
-    Directory directory; Rig rig(directory); rig.backend.parent_dispatches = 2; RealRun(rig);
+    const auto history_diagnostics = std::make_shared<HistoryDiagnostics>(HistoryDiagnosticCase::ScopeReuse);
+    const HistoryStageSpan case_stage(history_diagnostics, 0,
+        HistoryDiagnosticStage::CaseEnter, HistoryDiagnosticStage::CaseLeave);
+    Directory directory; Rig rig(directory, "parent-session", history_diagnostics); rig.backend.parent_dispatches = 2; RealRun(rig);
     REQUIRE(rig.child_sources.size() == 2);
     const auto source = rig.Source(); const auto first = CheckHistory(rig, source, 0), second = CheckHistory(rig, source, 1);
     REQUIRE(first.adoption.has_value()); REQUIRE(second.adoption.has_value());
