@@ -6,6 +6,7 @@
 - [LubanCore C++ SDK（实验版）](lubancore-sdk.md)
 - [SDK 显式 Skills 合同](sdk-skills.md)
 - [SDK 项目 Memory 只读召回合同](sdk-memory-recall.md)
+- [Memory CAS 能力合同](memory-cas-capability.md)
 - [项目 Memory 提交与回执合同](memory-project-commit.md)
 - [Memory worker 争锁与更新失败诊断](memory-worker-contention-diagnostics.md)
 - [Memory worker 有界争锁验收](memory-worker-busy-acceptance.md)
@@ -38,3 +39,9 @@ git diff --check
 ```
 - [前台子执行组合验收](child-sdk-integration.md)
 - [前台子审批与父观察组合](child-approval-observation.md)
+- [公开子 Agent、Memory CAS 与忙锁验收组合](sdk-child-cas-integration.md)
+- [SDK 前台子 Agent 装配](sdk-subagent-assembly.md)
+- [结果仓 Windows 原生路径入口](result-store-windows-io.md)
+- [SDK Memory 写计划失败诊断](sdk-plan-atomic-diagnostic.md)
+- [Updater 活持锁夹具就绪](updater-lock-ready.md)
+- [SDK 冻结计划短拒重试](sdk-plan-short-reject.md)

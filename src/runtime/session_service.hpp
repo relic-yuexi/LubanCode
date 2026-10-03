@@ -96,6 +96,7 @@ struct SessionLaunchRequest {
     // 递空,字段立在这让服务成为完整的开张入口。
     std::string v3_system_content;
     trajectory::V3OpeningParticipant v3_opening_participant;
+    std::shared_ptr<trajectory::MemoryCapabilityFactory> memory_capability_factory;
 };
 
 // ---------------------------------------------------------------------------

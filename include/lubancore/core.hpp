@@ -16,6 +16,7 @@
 #include <lubancore/extensions.hpp>
 #include <lubancore/results.hpp>
 #include <lubancore/skills.hpp>
+#include <lubancore/subagents.hpp>
 #include <lubancore/memory.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
@@ -82,6 +83,9 @@ struct Approval {
     std::string input_json;
     std::string cwd;
     std::string reason;
+    // Present only for a real main-foreground child ticket. Session acceptance
+    // then grants this child only; the ordinary parent allowed account is separate.
+    std::optional<subagents::v1::ApprovalScope> child;
 };
 struct McpServer {
     // Text results may continue the model loop. Image/audio/blob captures are
@@ -130,6 +134,9 @@ struct SessionOptions {
     std::optional<memory::v1::RecallOptions> memory;
     // Omitted is off for a new Session, or inherits the frozen resume plan.
     std::optional<memory::v1::WriteOptions> memory_write;
+    // Omitted is off for a new Session, or preserves its frozen resume plan.
+    // Foreground main dispatch only, depth one, explicit host step/second budgets.
+    std::optional<subagents::v1::Options> subagents;
     // Explicit trusted C++ registrations, frozen per session until Close.
     std::vector<extensions::v1::Registration> extensions;
     // Outbound result projection identity. New sessions default to Preview/v1;
@@ -214,6 +221,9 @@ public:
     // Close. This does not serialize or restore arbitrary extension state.
     Result<std::string> DescribeExtensions() const;
     Result<skills::v1::Snapshot> DescribeSkills() const;
+    Result<subagents::v1::Snapshot> DescribeSubagents() const;
+    // Checked, owned historical projections. Close retains them without a writer.
+    Result<std::vector<subagents::v1::Report>> GetSubagentReports(const std::string& operation_id) const;
     Result<memory::v1::Snapshot> DescribeMemory() const;
     // Searches this Session only, even when another Session uses the same ID string.
     Result<memory::v1::RecallReport> GetMemoryRecall(const std::string& operation_id) const;

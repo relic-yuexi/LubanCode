@@ -1,12 +1,8 @@
 #include "runtime/memory_ledger_bridge.hpp"
 
-#include <filesystem>
-#include <system_error>
-
 #include "platform/log_sink.hpp"
-#include "platform/bounded_read.hpp"
 #include "platform/sha256.hpp"
-#include "trajectory/blob_store.hpp"
+#include "trajectory/cas_store.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/v3/writer.hpp"
 
@@ -14,20 +10,32 @@ namespace lubancode::runtime {
 
 namespace {
 
-namespace fs = std::filesystem;
-
 // 合同 §四:≤512B 的小内容允许内联(snapshot_inline/snapshotInline),
 // 其余走内容寻址 blob。
 constexpr std::size_t kSnapshotInlineLimit = 512;
 
-std::string PathUtf8Text(const fs::path& path) {
-    const std::u8string value = path.generic_u8string();
-    return std::string(reinterpret_cast<const char*>(value.data()), value.size());
-}
 
 }  // namespace
 
 MemoryLedgerBridge::MemoryLedgerBridge(TrajectorySessionLedger& ledger) : ledger_(ledger) {}
+
+std::expected<std::string, std::string> MemoryLedgerBridge::StoreSnapshot(
+    const memory::InjectedMemoryRecord& record) {
+    auto capability = ledger_.memory_capability();
+    if (!capability || capability->scope() != trajectory::CasScope{ledger_.workspace_key(), ledger_.session_id()})
+        return std::unexpected("cas.scope_mismatch");
+    if (record.content.empty() || record.injected_bytes != record.content.size() ||
+        platform::Sha256Hex(record.content) != record.content_sha256)
+        return std::unexpected("cas.invalid_snapshot");
+    const auto receipt = capability->Store(record.content, "text/plain", trajectory::CasDurability::ProcessCrash);
+    if (!receipt.Confirms(trajectory::CasDurability::ProcessCrash))
+        return std::unexpected(receipt.error.code.empty() ? "cas.durability_unconfirmed" : receipt.error.code);
+    auto actual = capability->Read(receipt.reference, record.content.size());
+    if (!actual) return std::unexpected(actual.error().code);
+    if (*actual != record.content || receipt.reference.sha256 != record.content_sha256)
+        return std::unexpected("cas.read_mismatch");
+    return trajectory::MemoryCapability::LogicalReference(receipt.reference.sha256);
+}
 
 std::expected<MemoryLedgerBridge::ContextAdmission, std::string> MemoryLedgerBridge::AdmitRecallContext(
     const std::string& text, const std::vector<memory::InjectedMemoryRecord>& records,
@@ -49,17 +57,9 @@ std::expected<MemoryLedgerBridge::ContextAdmission, std::string> MemoryLedgerBri
             {"sourceEvidenceRefs", record.source_evidence_refs},
             {"injectedBytes", static_cast<std::uint64_t>(record.injected_bytes)}};
         if (record.content.size() > kSnapshotInlineLimit) {
-            trajectory::BlobStore blobs(ledger_.session_dir() / "artifacts");
-            auto blob = blobs.Store(record.content, "text/plain", trajectory::Durability::ProcessCrash);
-            if (!blob || blob->sha256 != record.content_sha256)
-                return std::unexpected("memory.recall.snapshot_failed: fragment blob did not persist");
-            auto actual = platform::ReadBoundedRegularFile(blobs.PathFor(blob->sha256), record.content.size());
-            if (!actual || *actual != record.content || platform::Sha256Hex(*actual) != record.content_sha256)
-                return std::unexpected("memory.recall.snapshot_failed: fragment blob differs");
-            std::error_code ec;
-            const auto relative = fs::relative(blobs.PathFor(blob->sha256), ledger_.session_dir(), ec);
-            if (ec) return std::unexpected("memory.recall.snapshot_failed: fragment path failed");
-            payload["snapshotRef"] = PathUtf8Text(relative);
+            auto stored = StoreSnapshot(record);
+            if (!stored) return std::unexpected("memory.recall.snapshot_failed: " + stored.error());
+            payload["snapshotRef"] = std::move(*stored);
         } else payload["snapshotInline"] = record.content;
         payloads.push_back(std::move(payload));
     }
@@ -114,21 +114,9 @@ std::expected<void, std::string> MemoryLedgerBridge::RecordRecallInjection(
     std::string snapshot_ref;
     std::string snapshot_inline;
     if (record.content.size() > kSnapshotInlineLimit) {
-        const fs::path artifact_root = ledger_.session_dir() / "artifacts";
-        trajectory::BlobStore blobs(artifact_root);
-        auto stored = blobs.Store(record.content, "text/plain", trajectory::Durability::ProcessCrash);
-        if (!stored.has_value()) {
-            return std::unexpected("memory.recall_snapshot_failed: " + stored.error());
-        }
-        if (stored->sha256 != record.content_sha256) {
-            return std::unexpected("memory.recall_snapshot_failed: 快照指纹与正文对不上");
-        }
-        std::error_code ec;
-        const fs::path relative = fs::relative(blobs.PathFor(stored->sha256), ledger_.session_dir(), ec);
-        if (ec) {
-            return std::unexpected("memory.recall_snapshot_failed: 快照路径解析失败: " + ec.message());
-        }
-        snapshot_ref = PathUtf8Text(relative);
+        auto stored = StoreSnapshot(record);
+        if (!stored) return std::unexpected("memory.recall_snapshot_failed: " + stored.error());
+        snapshot_ref = std::move(*stored);
     } else {
         snapshot_inline = record.content;
     }
@@ -199,24 +187,9 @@ std::expected<void, std::string> MemoryLedgerBridge::RecordRecallInjectionV3(
         std::string snapshot_ref;
         std::string snapshot_inline;
         if (record.content.size() > kSnapshotInlineLimit) {
-            const fs::path artifact_root = ledger_.session_dir() / "artifacts";
-            trajectory::BlobStore blobs(artifact_root);
-            auto stored =
-                blobs.Store(record.content, "text/plain", trajectory::Durability::ProcessCrash);
-            if (!stored.has_value()) {
-                return std::unexpected("memory.recall_snapshot_failed: " + stored.error());
-            }
-            if (stored->sha256 != record.content_sha256) {
-                return std::unexpected("memory.recall_snapshot_failed: 快照指纹与正文对不上");
-            }
-            std::error_code ec;
-            const fs::path relative =
-                fs::relative(blobs.PathFor(stored->sha256), ledger_.session_dir(), ec);
-            if (ec) {
-                return std::unexpected("memory.recall_snapshot_failed: 快照路径解析失败: " +
-                                       ec.message());
-            }
-            snapshot_ref = PathUtf8Text(relative);
+            auto stored = StoreSnapshot(record);
+            if (!stored) return std::unexpected("memory.recall_snapshot_failed: " + stored.error());
+            snapshot_ref = std::move(*stored);
         } else {
             snapshot_inline = record.content;
         }

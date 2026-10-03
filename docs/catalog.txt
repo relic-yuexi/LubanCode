@@ -1,6 +1,8 @@
 # 官方文档。每行一页；路径从 docs/ 起算。
 DOC README.md
 DOC development/child-approval-observation.md
+DOC development/sdk-child-cas-integration.md
+DOC development/memory-cas-capability.md
 
 # 上手与排错
 DOC getting-started/quickstart.md
@@ -160,4 +162,9 @@ DOC development/experiment-runner.md
 DOC development/runner-probe-evidence.md
 DOC development/child-sdk-integration.md
 DOC development/child-parent-observation.md
+DOC development/sdk-subagent-assembly.md
 DOC development/child-history-adoption.md
+DOC development/result-store-windows-io.md
+DOC development/sdk-plan-atomic-diagnostic.md
+DOC development/updater-lock-ready.md
+DOC development/sdk-plan-short-reject.md

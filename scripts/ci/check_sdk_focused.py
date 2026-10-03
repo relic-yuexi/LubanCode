@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import xml.etree.ElementTree as ET
@@ -15,6 +16,7 @@ REQUIRED = {
     "sdk.focused.lubancore_session",
     "sdk.focused.lubancore_scoped_approval",
     "sdk.focused.lubancore_child_approval",
+    "sdk.focused.lubancore_subagents",
     "sdk.focused.lubancore_builtin_search",
     "sdk.focused.lubancore_lifecycle",
     "sdk.focused.lubancore_host_boundary",
@@ -22,6 +24,7 @@ REQUIRED = {
     "sdk.focused.lubancore_extensions",
     "sdk.focused.lubancore_skills",
     "sdk.focused.lubancore_memory_recall",
+    "sdk.focused.lubancore_memory_cas",
     "sdk.focused.lubancore_memory_save",
     "sdk.focused.lubancore_results",
     "sdk.focused.lubancore_result_projection",
@@ -34,7 +37,63 @@ REQUIRED = {
     "sdk.focused.child_history_adoption",
     "sdk.focused.scoped_turn_bindings",
     "sdk.focused.atomic_write",
+    "sdk.focused.v3_result_store",
 }
+
+
+def check_result_store_native(native_section: str, platform_name: str):
+    counts = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", native_section)
+    if len(counts) != 1 or tuple(map(int, counts[0])) != (17, 17, 0):
+        raise RuntimeError("Result-store native roster differs from 17 successful cases")
+    if platform_name != "nt":
+        return
+    for name, target, temporary in (("target-extended", 340, 344), ("temporary-threshold", 247, 251)):
+        marker = "[result-store-path] " + name
+        lengths = f"[result-store-path-length] {name} target={target} temporary={temporary}"
+        if native_section.splitlines().count(marker) != 1 or native_section.splitlines().count(lengths) != 1:
+            raise RuntimeError("Result-store actual Windows path did not finish once: " + name)
+
+
+def check_memory_cas_paths(native_section: str, platform_name: str):
+    if platform_name != "nt":
+        return
+    for path in ("target-extended", "temporary-threshold"):
+        marker = "[memory-cas-path] " + path
+        if native_section.splitlines().count(marker) != 1:
+            raise RuntimeError("Memory CAS actual Windows path did not finish once: " + path)
+
+
+PLAN_RETRY_PATHS = ("retry-success", "permanent-stop", "committed-stop", "attempt-budget",
+                    "deadline-budget", "native-write")
+
+
+def check_plan_retry_registration(command, executable="lubancore_sdk_tests"):
+    if (len(command) != 2 or not isinstance(command[0], str) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_atomic_write.cpp"):
+        raise RuntimeError("SDK plan retry must run the single actual atomic-write source")
+
+
+def check_plan_retry_native(native_section: str, platform_name: str, executable="lubancore_sdk_tests"):
+    commands = re.findall(r"^Command: ([^\r\n]+)$", native_section, flags=re.M)
+    if len(commands) != 1:
+        raise RuntimeError("SDK plan retry native log must identify one actual command")
+    check_plan_retry_registration(shlex.split(commands[0].replace("\\", "/")), executable)
+    expected = 25 if platform_name == "nt" else 22
+    counts = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", native_section)
+    if len(counts) != 1 or tuple(map(int, counts[0])) != (expected, expected, 0):
+        raise RuntimeError(f"SDK plan retry native roster differs from {expected} successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", native_section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            native_section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("SDK plan retry native assertions did not actually pass")
+    paths = (*PLAN_RETRY_PATHS, "windows-sharing-recovery") if platform_name == "nt" else PLAN_RETRY_PATHS
+    for path in paths:
+        if native_section.splitlines().count("[sdk-plan-retry] " + path) != 1:
+            raise RuntimeError("SDK plan retry actual path did not finish once: " + path)
+    if platform_name != "nt" and "[sdk-plan-retry] windows-sharing-recovery" in native_section.splitlines():
+        raise RuntimeError("SDK plan retry POSIX evidence cannot claim a Windows sharing probe")
 
 
 def main():
@@ -60,6 +119,8 @@ def main():
         if (props.get("DISABLED") or "sdk-focused" not in props.get("LABELS", [])
                 or not 0 < float(props.get("TIMEOUT", 0)) <= 300):
             raise RuntimeError("SDK test is disabled, mislabeled or unbounded: " + test["name"])
+        if test["name"] == "sdk.focused.atomic_write":
+            check_plan_retry_registration(test.get("command", []))
     (evidence / "context.json").write_text(json.dumps({
         "githubSha": os.environ.get("GITHUB_SHA"), "buildDir": str(build),
         "configuration": args.config, "sdkOnly": args.sdk_only,
@@ -90,6 +151,14 @@ def main():
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])
+        if case.attrib["name"] == "sdk.focused.v3_result_store":
+            check_result_store_native(sections[0], os.name)
+        if case.attrib["name"] == "sdk.focused.atomic_write":
+            check_plan_retry_native(sections[0], os.name)
+        if case.attrib["name"] == "sdk.focused.lubancore_memory_cas" and int(counts[0]) != 10:
+            raise RuntimeError("Memory CAS native roster differs from 10 cases")
+        if case.attrib["name"] == "sdk.focused.lubancore_memory_cas":
+            check_memory_cas_paths(sections[0], os.name)
         if case.attrib["name"] == "sdk.focused.lubancore_memory_save" and int(counts[0]) != 12:
             raise RuntimeError("SDK memory-save native roster differs from 12 cases")
         if case.attrib["name"] == "sdk.focused.execution_owner" and int(counts[0]) != 7:
@@ -112,6 +181,8 @@ def main():
             raise RuntimeError("Scoped approval native roster differs from 14 cases")
         if case.attrib["name"] == "sdk.focused.lubancore_child_approval" and int(counts[0]) != 14:
             raise RuntimeError("Actual child approval native roster differs from 14 cases")
+        if case.attrib["name"] == "sdk.focused.lubancore_subagents" and int(counts[0]) != 12:
+            raise RuntimeError("Public SDK child assembly native roster differs from 12 cases")
         if case.attrib["name"] == "sdk.focused.child_parent_observation":
             if int(counts[0]) != 8:
                 raise RuntimeError("Child parent observation roster differs from 8 cases")
