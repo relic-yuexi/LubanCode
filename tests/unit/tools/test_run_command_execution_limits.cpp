@@ -57,14 +57,14 @@ struct Directory {
             std::error_code error;
             const bool created = fs::create_directory(candidate, error);
             if (created) { path = candidate; break; }
-            REQUIRE_MESSAGE(!error, "fresh test root: " + error.message());
+            REQUIRE_MESSAGE(!error, ("fresh test root: " + error.message()));
         }
         REQUIRE(!path.empty());
     }
     ~Directory() {
         std::error_code error;
         fs::remove_all(path, error);
-        try { CHECK_MESSAGE(!error, "owned test root cleanup: " + error.message()); }
+        try { CHECK_MESSAGE(!error, ("owned test root cleanup: " + error.message())); }
         catch (...) {}
     }
 };
