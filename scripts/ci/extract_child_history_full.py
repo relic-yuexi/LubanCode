@@ -16,6 +16,8 @@ REQUIRED = {
 FILTER = "--source-file=*test_child_history_adoption.cpp"
 CASE_IDS = ("complete", "post-hook", "historical-chain", "observation-gap",
             "source-gap", "artifact-gap", "adoption-gap", "scope-reuse")
+CASE_RIGS = {name: (1, 2) if name in {"post-hook", "historical-chain", "source-gap"} else (1,)
+             for name in CASE_IDS}
 
 
 def check_native(body):
@@ -44,16 +46,41 @@ def check_native(body):
                 raise RuntimeError("Full child-history stage has the wrong owner ordinal")
             if rig_id:
                 rig_ids.add(rig_id)
-        if not rig_ids or stages[0] != "0 stage=case.enter" or stages[-1] != "0 stage=case.leave":
+        if rig_ids != set(CASE_RIGS[case_id]) or stages[0] != "0 stage=case.enter" or stages[-1] != "0 stage=case.leave":
             raise RuntimeError("Full child-history case did not surround its owners")
         for rig_id in rig_ids:
             before, after = f"{rig_id} stage=owners.before", f"{rig_id} stage=owners.after"
             if stages.count(before) != 1 or stages.count(after) != 1 or stages.index(before) >= stages.index(after):
                 raise RuntimeError("Full child-history owner retirement is missing or reversed")
+            points = [value.split(" stage=", 1)[1] for value in stages if value.startswith(str(rig_id) + " stage=")]
+            if points.count("real-run.enter") != 1 or points.count("real-run.leave") != 1:
+                raise RuntimeError("Full child-history owner did not run exactly once")
+            check_optional = case_id == "source-gap" and rig_id == 2
+            if not check_optional and points.count("check-history.enter") == 0:
+                raise RuntimeError("Full child-history main owner is missing its adoption check")
+            active = []
+            retired = False
+            for point in points:
+                if point == "owners.before":
+                    if active:
+                        raise RuntimeError("Full child-history owner retired with an active stage")
+                    retired = True
+                elif point == "owners.after":
+                    if not retired:
+                        raise RuntimeError("Full child-history owner retirement is reversed")
+                else:
+                    if retired:
+                        raise RuntimeError("Full child-history work appears after owner retirement")
+                    operation, edge = point.split(".", 1)
+                    if edge == "enter":
+                        active.append(operation)
+                    elif not active or active.pop() != operation:
+                        raise RuntimeError("Full child-history stage leave precedes or mismatches enter")
+            if active:
+                raise RuntimeError("Full child-history owner has an incomplete stage pair")
             for point in ("real-run", "check-history", "close"):
                 enter, leave = f"{rig_id} stage={point}.enter", f"{rig_id} stage={point}.leave"
-                if ((point != "close" and stages.count(enter) == 0)
-                        or stages.count(enter) != stages.count(leave)):
+                if stages.count(enter) != stages.count(leave):
                     raise RuntimeError("Full child-history owner has an incomplete stage pair")
                 if any(index >= stages.index(before) for index, value in enumerate(stages) if value in (enter, leave)):
                     raise RuntimeError("Full child-history work appears after owner retirement")

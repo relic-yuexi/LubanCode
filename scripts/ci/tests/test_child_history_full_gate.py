@@ -15,9 +15,12 @@ def native_body():
     for case in gate.CASE_IDS:
         prefix = "[child-history-stage] case=" + case
         lines.append(prefix + " rig=0 stage=case.enter")
-        for stage in ("real-run.enter", "real-run.leave", "check-history.enter", "check-history.leave",
-                      "owners.before", "owners.after"):
-            lines.append(prefix + " rig=1 stage=" + stage)
+        for rig in gate.CASE_RIGS[case]:
+            stages = ["real-run.enter", "real-run.leave"]
+            if not (case == "source-gap" and rig == 2):
+                stages += ["check-history.enter", "check-history.leave"]
+            for stage in (*stages, "owners.before", "owners.after"):
+                lines.append(prefix + f" rig={rig} stage=" + stage)
         lines.extend(("[child-adoption-path] " + case, prefix + " rig=0 stage=case.leave"))
     return ("\n".join(lines) + "\n[doctest] test cases: 8 | 8 passed | 0 failed\n"
             + "[doctest] assertions: 80 | 80 passed | 0 failed\nTest Passed.\n")
@@ -56,6 +59,34 @@ class ChildHistoryFullGateTests(unittest.TestCase):
             build = Path(directory)
             materialize(build)
             self.assertEqual(gate.extract(build, "posix")["status"], "passed")
+
+    def test_source_gap_peer_with_no_adoption_check_is_the_real_roster(self):
+        body = native_body()
+        report = gate.check_native(body)
+        self.assertEqual(report["stages"]["source-gap"]["rigOrdinals"], [1, 2])
+        self.assertNotIn("case=source-gap rig=2 stage=check-history", body)
+
+    def test_missing_main_check_extra_or_missing_owner_reject(self):
+        body = native_body()
+        prefix = "[child-history-stage] case=source-gap rig="
+        variants = (body.replace(prefix + "1 stage=check-history.enter\n", "").replace(prefix + "1 stage=check-history.leave\n", ""),
+                    "\n".join(line for line in body.splitlines() if not line.startswith(prefix + "2 stage=")),
+                    body.replace(prefix + "2 stage=", prefix + "3 stage="))
+        for variant in variants:
+            with self.assertRaises(RuntimeError):
+                gate.check_native(variant)
+
+    def test_equal_enter_leave_counts_do_not_accept_reverse_or_mismatched_order(self):
+        body = native_body()
+        prefix = "[child-history-stage] case=complete rig=1 stage="
+        for operation in ("real-run", "check-history"):
+            old = prefix + operation + ".enter\n" + prefix + operation + ".leave\n"
+            new = prefix + operation + ".leave\n" + prefix + operation + ".enter\n"
+            with self.assertRaisesRegex(RuntimeError, "leave precedes"):
+                gate.check_native(body.replace(old, new))
+        body = body.replace(prefix + "owners.before\n", prefix + "close.leave\n" + prefix + "close.enter\n" + prefix + "owners.before\n")
+        with self.assertRaisesRegex(RuntimeError, "leave precedes"):
+            gate.check_native(body)
 
     def test_missing_input_still_saves_native_original(self):
         with tempfile.TemporaryDirectory() as directory:
