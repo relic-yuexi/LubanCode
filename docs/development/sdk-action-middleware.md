@@ -67,6 +67,7 @@ PostAction 位于原始 FinishTrace 与 capture 落稳之后，只追加带来�
 普通 handler 失败不凭空升级副作用未知；真正捕获、效果提交或关闭未确认，仍走原未知止损。
 required/Abort 的 Post 失败停止父模型后续，父操作保已知 Failed 与 raw 原件，不改成工具未执行；只有真实保存/sink 未确认才走未知。
 这道止损也须挡住同批结果摘要模型。当前 turn 独占一份失败事实；先禁摘要 Backend，再保真实 raw、rewrite、commit，真实副作用未知优先，随后按 Action 原错停成已知 Failed。新 Submit 不继承这份失败，不添全局终态枚举。
+真实 middleware 写回执若未确认，须在 dispatch、Pre 同帧采用回执和 Post 追加回执后立刻核账，Started 前与当批摘要前都设闸；它沿原 StopIndeterminate 收口并保账错误，不等到最终 Complete 才发现。普通 callback 抛错仍走上一条已知 Failed，不能借它伪造账失败。
 
 required/Abort 与 optional/KeepOriginal 沿原执行核语义。已消费 Next 的回执照留，不再跑下游。
 旁观者不返回效果、不拒绝、不能调 Next；例外必须另立合同，不能从内部效果矩阵推成公开能力。
