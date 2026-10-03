@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 
 
 REQUIRED_TESTS = {
+    "sdk.consumer.packages",
     "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.extensions",
     "sdk.consumer.builtin_search",
     "sdk.consumer.results",
@@ -30,6 +31,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
 REQUIRED_PUBLIC_HEADERS = {
+    "include/lubancore/packages.hpp",
     "include/lubancore/api.hpp", "include/lubancore/core.hpp", "include/lubancore/extensions.hpp",
     "include/lubancore/results.hpp",
     "include/lubancore/skills.hpp",
