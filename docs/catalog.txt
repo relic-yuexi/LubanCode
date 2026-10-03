@@ -206,3 +206,4 @@ DOC development/sdk-memory-blob-spi.md
 DOC development/sdk-operation-turn-binding.md
 DOC development/journal-native-receipts.md
 DOC development/windows-command-job-observation.md
+DOC development/agent-transcript-stable-fixture.md
