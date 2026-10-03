@@ -1,10 +1,10 @@
 # SDK 显式 standalone Lua 合同
 
-本批尚未实现或验收。基线为渠道宿主分支 `9a252c6a`。首笔只接宿主明确选定的 standalone `.lua` 工具；SDK 默认关闭。Package、manifest-backed Lua、Lua 中间件能力束另开小批，原 CLI 三路装配照旧。
+基线为渠道宿主分支 `e52dc07f`。首笔只接宿主明确选定的 standalone `.lua` 工具；SDK 默认关闭。实现候选已接好，原生验收待远端 CI。Package、manifest-backed Lua、Lua 中间件能力束另开小批，原 CLI 三路装配照旧。
 
 ## 公开什么
 
-拟在 `SessionOptions` 加显式 Lua 选择值。宿主给绝对目录、精确相对脚本路径、预期完整工具名，以及正数指令预算、内存帽、墙钟预算；不收进程默认 cwd、HOME 或 CLI 配置作为兜底。不扫描或执行未选脚本，也不替宿主改名。
+`SessionOptions.lua` 收显式 Lua 选择值。宿主给绝对目录、精确相对脚本路径、预期完整工具名，以及正数指令预算、内存帽、墙钟预算；不收进程默认 cwd、HOME 或 CLI 配置作为兜底。不扫描或执行未选脚本，也不替宿主改名。
 
 同份已打开普通文件字节过固定读取帽、UTF-8/NUL 与根内路径检查，再交现有 `LuaTool::LoadFromScript`。实际工具名、说明和 object schema 都验过，才注册进本场工具表；完整名须与宿主声明一致。缺件、坏类型、重名、与 builtin/custom/MCP 名冲突或任一必选件加载失败，整场拒开，不跳过坏件装半张表。
 
@@ -30,6 +30,8 @@ SDK 额外明确禁 `print`，免得脚本向 Worker 的协议 stdout 写字节�
 
 旧 CLI 未请求墙钟预算时保持旧零值行为；本批 SDK 必须显式给正预算。脚本返回值仍走原 Lua 到 Tool::Result 转换，不另定义 Lua 专属运行栈。
 
+本批沿既有可信协作脚本语义。指令、墙钟与取消通过 Lua hook 抛错，脚本仍可用 `pcall/xpcall` 等受保护入口捕获；不承诺脚本吞错后仍能在有限时间内退出。宿主只准入会配合退出的脚本。Close 置取消旗后等待真实调用退场，不能把软预算冒称进程隔离或硬停止保证。独立执行隔离另批处理。
+
 内存帽也管装载与入参转换。当前开库、guard 注册和 `PushJsonToLua` 尚在受保护调用之外；Lua OOM 可直接 panic/longjmp，C++ RAII 接不住。本批先沿共用 VM 将会分配的初始化、开库、脚本定义提取和调用入参搬到真实 `lua_pcall` 边界；边界内不得让 longjmp 越过待销毁的 C++ 持值。需要中间 JSON/string 时，由边界外 owner 持有，C callback 只借到本次返回。失败退回稳定错误、恢复栈顶、清取消借旗与 deadline，关闭 VM 一次；取消或 OOM 不杀宿主，也不污染下一次调用。初始化 OOM 与大入参 OOM 都用真实小正预算验，随后健康调用仍能活着退场；不以 fake 错误代替。
 
 这份受保护保证只覆盖 standalone `LuaTool::LoadFromScript/Run`。共享转换入口销毁其 C++ 计划后再抛回既有 Lua 错误链，调用方仍须有外层保护；现 manifest/Hook 宿主装配没有在本批全部迁入保护边界，不据此声称那些旧宿主也已 OOM 安全。
@@ -46,7 +48,7 @@ SDK 额外明确禁 `print`，免得脚本向 Worker 的协议 stdout 写字节�
 
 冻结声明含目录与精确入口、预期/实际工具名、源码摘要、schema、Whitelisted 画像和三项预算。默认关闭也须有明确新场声明。聚合现有 opening gate，不能替换 Skills/Memory/Subagents 等绑定。新场 under-owner 落冻结计划，成功才写 system 绑定；恢复省略沿旧计划，显式变化、缺件、入口漂移、坏声明或坏绑定拒绝，不静默升级旧无计划会话。
 
-校绑定还要逐枚核场身份：初始 system、每条已采用 revision 的 system、当前有效 system 均须归 `resume_session_id`；不能只信卷首身份或相同指纹。真正不存在的恢复目录仍报既有 `sdk.session.open_failed`。目录已有但链接、不可读或材料坏了，须沿 `sdk.lua.plan_invalid` 拒绝，不退成旧无计划。
+校绑定还要逐枚核场身份：初始 system、用于确认初始采用的 SessionStarted、每条已采用 revision 的 system、当前有效 system 均须归 `resume_session_id`；不能只信卷首身份或相同指纹。真正不存在的恢复目录仍报既有 `sdk.session.open_failed`。目录已有但链接、不可读或材料坏了，须沿 `sdk.lua.plan_invalid` 拒绝，不退成旧无计划。
 
 静态材料检查可在 MCP 之前；独占 owner 下恢复校准必须在工具、模型和续账之前。当前资源装配可能先连 MCP，本合同不虚称整条开场已在 MCP 之前，也不允许为读取失败去调用脚本工具。
 
@@ -63,5 +65,7 @@ SDK 额外明确禁 `print`，免得脚本向 Worker 的协议 stdout 写字节�
 三平台安装消费者只调公开 SDK：默认关闭、精确选件、首个真实 Backend 请求有定义、真实 Submit 调脚本并进入下一请求；同项目两场与异项目两场各自 VM；审批、取消、Close；初始化/转换失败不遗留 VM；同 ID 新 VM 恢复不重跑旧工具；漂移/缺坏/重复声明拒启，未选脚本不读取。
 
 原 CLI Lua/manifest/Package 来源册继续实际运行。新增原生来源与非零 case 数纳入 focused/ASan；最终数按真实源码登记，不先拿计划数冒实跑。九份实际 FileAPI 继续核 source owner 和 SDK 闭包，Package/渠道/Gateway/更新器仍禁回；Lua 当前已链接，本批不宣称已经瘦出默认 SDK。
+
+当前源码登记 9 册 SDK Lua、6 册中立 Lua 保护边界；focused 27 来源，ASan 33 来源，安装消费者 23 册。第 9 册先真正采用替换 system，再重算真实账 hash 链，逐项改坏绑定、已采用消息归属和起始事件归属；公共 Reader 仍读得开时，SDK 必须在模型前拒开，旧账与计划不动。以上均待当前分支头远端实跑，数量不作通过证据。
 
 本地只查代码、文档与纯数据。configure、编译、CTest、项目原生进程一概交远端 CI。
