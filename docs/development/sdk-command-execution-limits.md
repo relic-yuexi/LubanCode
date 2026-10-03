@@ -53,3 +53,11 @@ Windows 首轮运行验收发现：旧前台 PowerShell wrapper 把整段输出�
 缓冲归测试调用；取消场由调用方持有，活过 `RunProcess` 返回、读线程真实 join 和失败清场。原取消 store 前后各记真实发布时刻，不读取未发布槽。实际调用退场或抛出后才把已发布记录写入原逐调用资料；不截 join，也不留下后台。Windows 进程实现不变，只留下测试调用与旗发布资料，不冒称已有 Windows OS 阶段。
 
 原六场、断言、预算、成功标记、probe、PowerShell、注册与验收门全留。此笔只添诊断，持续内存耗尽不许诺日志完整；真实进程结局仍由原实现返回。源码改完先核结构和 diff，再交远端鲜头验收；本地不跑原生。
+
+## Windows 进程阶段诊断
+
+`4aba35e1` 的 Windows 全量原件另有一场红：`powershell-exact` 用了 15029 毫秒，报 `process.timeout`，started/done 均缺。cmd 两笔已过，仍不能据此定 PowerShell 启动哪一处出了错。本笔顺着同一 opt-in 缓冲补 Windows 真实阶段，前段“Windows 只有调用资料”随此笔收窄，不拿 POSIX 阶段代 Windows。
+
+只改前台 `RunProcess(wstring)`：冻结缓冲给 caller/reader，记实际 CreateProcess、建 Job、配置与绑定、ResumeThread、首次 Wait 及终结、首次取消/超时/超额、CloseJob 或 TerminateProcess、原 5 秒等待、读线程退出和真实 join。此入口靠 `CloseHandle(job)` 的 KILL_ON_JOB_CLOSE 收树，不冒称调用了 TerminateJobObject。每枚 API 返回后立即存返回码和 GetLastError；记录包住诊断时钟，再还原 LastError 与 errno。默认空指针不多查 GetProcessId、不读诊断时钟或原子。
+
+不改 API 短路、原失败出口、CloseJob/fallback 条件、ResumeThread 原返回码判断或任何预算。只记首个 Wait/read 与终结，不让轮询冲满 128 槽。读线程仍按值借同一缓冲，等真实 join 才读资料；原六场、断言、帽、probe、PowerShell、注册与门逐字核对。输出注明平台和错误域，不添加子进程输出标记。本地仍只查文本、纯数据和文档。
