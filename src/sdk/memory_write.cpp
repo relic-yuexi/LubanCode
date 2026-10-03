@@ -234,12 +234,14 @@ std::expected<Json, std::string> SessionMemoryWrite::Open(const lubancode::traje
                 {"atomicCode", error.code},
                 {"failureKind", error.failure_kind == lubancode::platform::WriteFailureKind::TransientReject
                     ? "TransientReject" : "Permanent"},
-                {"outcome", WriteOutcomeName(error.outcome)}, {"message", error.message}}.dump());
+                {"outcome", WriteOutcomeName(error.outcome)}, {"message", error.message}}
+                .dump(-1, ' ', false, Json::error_handler_t::replace));
         }
         if (saved->outcome != lubancode::platform::WriteOutcome::CommittedDurable) {
             return std::unexpected("sdk.memory_write.plan_write_failed: " + Json{
                 {"outcome", WriteOutcomeName(saved->outcome)},
-                {"message", "plan receipt was not CommittedDurable"}}.dump());
+                {"message", "plan receipt was not CommittedDurable"}}
+                .dump(-1, ' ', false, Json::error_handler_t::replace));
         }
         snapshot_.plan_sha256 = lubancode::platform::Sha256Hex(bytes);
     }
