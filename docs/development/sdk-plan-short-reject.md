@@ -2,7 +2,7 @@
 
 基线 `da9f805d820c2c1baccc013248d6fe0dc89c06e9`。本笔只管新场锁内写入子 Agent、MemoryWrite 与 Skills 冻结计划。恢复只读、工具执行、报告、事件账和全局 `AtomicWriteFile` 不改。
 
-本轮远端 Windows 原件已证三处失败：组合构建子 Agent 计划替换回错误码 32；SDK-only MemoryWrite 计划报 `atomic.replace_failed / TransientReject / NotCommitted / Windows32`；渠道隔离分支 `3ed` 的组合构建也报 `sdk.skill.plan_write_failed` 与 Windows32。Skills 新场先核锁内目录归属与旧计划缺件，再冻结同份 bytes，沿同一生产原子写提交，范围收在这条新场写口。这只说明本次原子替换受分享模式拒绝，不指认持句柄者，也不倒推旧 `2f3d8bc7` 唯一起因。原件另册封存，原生断言照留。
+本轮远端 Windows 原件已证三处失败：组合构建子 Agent 计划替换回错误码 32；SDK-only MemoryWrite 计划报 `atomic.replace_failed / TransientReject / NotCommitted / Windows32`；子 Agent 分支 `3ed` 的组合构建也报 `sdk.skill.plan_write_failed` 与 Windows32。Skills 新场先核锁内目录归属与旧计划缺件，再冻结同份 bytes，沿同一生产原子写提交，范围收在这条新场写口。这只说明本次原子替换受分享模式拒绝，不指认持句柄者，也不倒推旧 `2f3d8bc7` 唯一起因。原件另册封存，原生断言照留。
 
 真实场锁与计划 owner 仍归现有 opening participant。它在首次写入前照旧核身份、目录、旧计划与绑定。内部共用写入口固定同一逻辑 target、同一冻结 bytes、同一 `ProcessCrashDurability`；每次仍调生产 `AtomicWriteFile`。只在 `failure_kind == TransientReject` 且 `outcome == NotCommitted` 同时成立时再试。首次调用计入最多 51 次，单调时钟守 1 秒截止，间隔至多 20 毫秒；任一门耗尽，立即还最后真实错误。
 
