@@ -45,3 +45,4 @@ git diff --check
 - [SDK Memory 写计划失败诊断](sdk-plan-atomic-diagnostic.md)
 - [Updater 活持锁夹具就绪](updater-lock-ready.md)
 - [SDK 冻结计划短拒重试](sdk-plan-short-reject.md)
+- [终态面板夹具与重复渲染](agent-transcript-stable-fixture.md)
