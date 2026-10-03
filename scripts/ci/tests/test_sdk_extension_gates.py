@@ -169,6 +169,123 @@ class ActionPathGateTests(unittest.TestCase):
                 focused.check_action_paths("\n".join((summary, *self.paths, *self.private_paths)), native=True)
 
 
+class CommandLimitsEvidenceTests(unittest.TestCase):
+    command = ["C:/actual build/lubancore_sdk_tests.exe",
+               "--source-file=*test_run_command_execution_limits.cpp"]
+
+    def body(self, command=None, platform_name=None):
+        import os
+        command = self.command if command is None else command
+        shells = ("cmd", "powershell") if (platform_name or os.name) == "nt" else ("sh", "bash")
+        records = [json.dumps({"shell": shell, "cwd": "/actual/cwd", "exact_command": "probe exact 128",
+            "excess_command": "probe excess 129", "timeout_ms": 15000, "max_output_bytes": 128,
+            "exact_request_bytes": 128, "excess_request_bytes": 129,
+            "exact_outcome": "succeeded", "excess_error_code": "process.output_limit"}) for shell in shells]
+        return "\n".join(("Command: " + " ".join('"' + part + '"' for part in command),
+            "[doctest] test cases: 6 | 6 passed | 0 failed",
+            "[doctest] assertions: 101 | 101 passed | 0 failed",
+            *("[command-limits-path] " + path for path in focused.COMMAND_LIMITS_PATHS),
+            *("[command-limits-shell] " + record for record in records),
+            "Test Passed."))
+
+    def test_actual_sdk_and_cli_full_commands_and_crlf_are_accepted(self):
+        for exe in ("C:/actual build/lubancore_sdk_tests.exe", "/actual/build/lubancode_tests"):
+            command = [exe, self.command[1]]
+            focused.check_command_limits_native(self.body(command), command)
+            focused.check_command_limits_native(self.body(command).replace("\n", "\r\n"), command)
+        for platform_name in ("nt", "posix"):
+            focused.check_command_limits_native(self.body(platform_name=platform_name), self.command, platform_name)
+
+    def test_missing_duplicate_and_foreign_platform_shell_records_reject(self):
+        body = self.body(platform_name="nt")
+        records = [line for line in body.splitlines() if line.startswith("[command-limits-shell] ")]
+        for bad in (body.replace(records[0], ""), body + "\n" + records[0],
+                    body.replace(records[1], records[0]), body.replace('"powershell"', '"bash"')):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_command_limits_native(bad, self.command, "nt")
+
+    def test_malformed_and_failed_shell_records_reject(self):
+        body = self.body(platform_name="nt")
+        for bad in (body.replace('"max_output_bytes": 128', '"max_output_bytes": 129'),
+                    body.replace('"exact_outcome": "succeeded"', '"exact_outcome": "timed_out"'),
+                    body.replace('"excess_error_code": "process.output_limit"', '"excess_error_code": ""'),
+                    body.replace('"exact_request_bytes": 128', '"exact_request_bytes": true'),
+                    body.replace('[command-limits-shell] {', '[command-limits-shell] invalid{'),
+                    body.replace('"cwd": "/actual/cwd"', '"cwd": ""')):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_command_limits_native(bad, self.command, "nt")
+
+    def test_foreign_same_basename_and_extra_filter_cannot_borrow_passed_summary(self):
+        variants = [["D:/foreign build/lubancore_sdk_tests.exe", self.command[1]],
+                    [*self.command, "--test-case=only-one"],
+                    [self.command[0], "--source-file=*another.cpp"]]
+        for command in variants:
+            with self.subTest(command=command), self.assertRaises(RuntimeError):
+                focused.check_command_limits_native(self.body(command), self.command)
+
+    def test_registration_wrong_executable_source_and_extra_arguments_reject(self):
+        variants = [[], ["/actual/build/foreign", self.command[1]],
+                    [self.command[0], "--source-file=*test_tools.cpp"],
+                    [*self.command, "--source-file=*another.cpp"],
+                    [*self.command, "--test-case=only-one"]]
+        for command in variants:
+            with self.subTest(command=command), self.assertRaises(RuntimeError):
+                focused.check_command_limits_registration(command)
+
+    def test_missing_non_list_non_string_and_empty_registration_reject_stably(self):
+        for command in (None, "native", (), [], [None, self.command[1]],
+                        [self.command[0], 7], ["", self.command[1]]):
+            with self.subTest(command=command):
+                with self.assertRaises(RuntimeError):
+                    focused.check_command_limits_registration(command)
+                with self.assertRaises(RuntimeError):
+                    focused.check_command_limits_native(self.body(), command)
+
+    def test_missing_duplicate_and_decorated_actual_commands_reject(self):
+        body = self.body()
+        line = body.splitlines()[0]
+        for bad in (body.replace(line, ""), body + "\n" + line,
+                    body.replace(line, "another-source: " + line)):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_command_limits_native(bad, self.command)
+        for line in ('Command: "unterminated', 'Command: ""', 'Command: '):
+            with self.subTest(line=line), self.assertRaises(RuntimeError):
+                focused.check_command_limits_native(body.replace(body.splitlines()[0], line), self.command)
+
+    def test_missing_duplicate_changed_zero_and_failed_cases_reject(self):
+        body = self.body()
+        line = "[doctest] test cases: 6 | 6 passed | 0 failed"
+        for replacement in ("", line + "\n" + line,
+                            "[doctest] test cases: 0 | 0 passed | 0 failed",
+                            "[doctest] test cases: 5 | 5 passed | 0 failed",
+                            "[doctest] test cases: 7 | 7 passed | 0 failed",
+                            "[doctest] test cases: 6 | 5 passed | 1 failed"):
+            with self.subTest(replacement=replacement), self.assertRaises(RuntimeError):
+                focused.check_command_limits_native(body.replace(line, replacement), self.command)
+
+    def test_nonzero_assertions_and_actual_ctest_success_are_required(self):
+        body = self.body()
+        line = "[doctest] assertions: 101 | 101 passed | 0 failed"
+        for replacement in ("", line + "\n" + line,
+                            "[doctest] assertions: 0 | 0 passed | 0 failed",
+                            "[doctest] assertions: 101 | 100 passed | 1 failed"):
+            with self.subTest(replacement=replacement), self.assertRaises(RuntimeError):
+                focused.check_command_limits_native(body.replace(line, replacement), self.command)
+        for bad in (body.replace("Test Passed.", ""), body + "\nTest Passed.",
+                    body.replace("Test Passed.", "Test Failed.")):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_command_limits_native(bad, self.command)
+
+    def test_each_path_marker_is_exact_unique_and_not_borrowed(self):
+        body = self.body()
+        for path in focused.COMMAND_LIMITS_PATHS:
+            marker = "[command-limits-path] " + path
+            for bad in (body.replace(marker, ""), body + "\n" + marker,
+                        body.replace(marker, "borrowed: " + marker)):
+                with self.subTest(path=path, bad=bad), self.assertRaises(RuntimeError):
+                    focused.check_command_limits_native(bad, self.command)
+
+
 class JobStartupGateTests(unittest.TestCase):
     def body(self, command, original=False):
         import shlex

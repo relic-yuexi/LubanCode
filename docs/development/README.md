@@ -61,3 +61,4 @@ git diff --check
 - [子历史采用册阶段诊断](child-history-stage-diagnostic.md)
 - [SDK Job 共用准入与严格交单](sdk-job-admission.md)
 - [Job owned 暂存注册](job-owned-registration.md)
+- [SDK Job 前置：命令执行限额](sdk-command-execution-limits.md)

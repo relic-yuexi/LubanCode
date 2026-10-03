@@ -120,6 +120,7 @@ SHARED_SDK_TEST_SOURCES = {
     "tests/unit/tools/test_tool_job_start_transaction.cpp",
     "tests/unit/tools/test_tool_job_hold_recovery.cpp",
     "tests/unit/tools/test_tool_job_owned_registration.cpp",
+    "tests/unit/tools/test_run_command_execution_limits.cpp",
     "tests/unit/trajectory/test_session_recovery_view.cpp",
     "tests/unit/trajectory_v3/test_v3_result_store.cpp",
     "tests/unit/platform/test_atomic_write.cpp",
@@ -135,6 +136,12 @@ SHARED_SDK_TEST_SOURCES = {
 }
 SEARCH_PROBE_TARGET = "lubancore_sdk_search_probe"
 SEARCH_PROBE_SOURCE = "tests/support/sdk_search_probe.cpp"
+COMMAND_LIMITS_PROBE_TARGET = "lubancore_command_limits_probe"
+COMMAND_LIMITS_PROBE_SOURCE = "tests/support/command_limits_probe.cpp"
+PRIVATE_TEST_PROBES = {
+    SEARCH_PROBE_TARGET: SEARCH_PROBE_SOURCE,
+    COMMAND_LIMITS_PROBE_TARGET: COMMAND_LIMITS_PROBE_SOURCE,
+}
 # Real private implementations compiled into the SDK reference-test executable,
 # rather than exposed as additional DLL ABI. No other SDK implementation gets
 # this testing-only exception.
@@ -293,8 +300,8 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         if name.startswith("tests/"):
             if not expect_testing:
                 violations.append(f"testing is OFF but target {owner} includes {name}")
-            elif not ((owner == SEARCH_PROBE_TARGET and name == SEARCH_PROBE_SOURCE) or
-                      (owner == "lubancore_sdk_tests" and name != SEARCH_PROBE_SOURCE and (
+            elif not ((owner in PRIVATE_TEST_PROBES and name == PRIVATE_TEST_PROBES[owner]) or
+                      (owner == "lubancore_sdk_tests" and name not in PRIVATE_TEST_PROBES.values() and (
                           name.startswith(("tests/integration/sdk/", "tests/unit/sdk/", "tests/support/")) or
                           name in SHARED_SDK_TEST_SOURCES))):
                 violations.append(f"non-SDK test compilation: target {owner} includes {name}")
@@ -341,24 +348,26 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
             "artifacts": [entry["path"] for entry in target.get("artifacts", [])],
             "includeDirectories": [[str(path) for path in paths] for paths in include_groups],
         }
-        if target["name"] == SEARCH_PROBE_TARGET:
+        if target["name"] in PRIVATE_TEST_PROBES:
+            label = "search probe" if target["name"] == SEARCH_PROBE_TARGET else "command limits probe"
             if not expect_testing or target["type"] != "EXECUTABLE":
-                violations.append("search probe requires testing ON and an executable target")
+                violations.append(label + " requires testing ON and an executable target")
             compiled = {entry["projectPath"] for entry in source_facts if entry["compiled"]}
-            if compiled != {SEARCH_PROBE_SOURCE}:
-                violations.append("search probe must compile only its isolated fixture")
+            if compiled != {PRIVATE_TEST_PROBES[target["name"]]}:
+                violations.append(label + " must compile only its isolated fixture")
     violations.extend(package_ownership_violations({key: {
         "name": target["name"], "type": target["type"],
         "projectSources": [entry["projectPath"] for entry in target["sources"] if entry["compiled"]],
     } for key, target in targets.items()}))
     for target in targets.values():
-        if target["name"] == SEARCH_PROBE_TARGET:
+        if target["name"] in PRIVATE_TEST_PROBES:
+            label = "search probe" if target["name"] == SEARCH_PROBE_TARGET else "command limits probe"
             for dependency in target["dependencies"]:
                 # Visual Studio can add CMake's regeneration utility. It is not
                 # a linked SDK/runtime dependency and contains no probe code.
                 linked = targets.get(dependency, {})
                 if linked.get("name") != "ZERO_CHECK" or linked.get("type") != "UTILITY":
-                    violations.append("search probe must not depend on a project library or host target")
+                    violations.append(label + " must not depend on a project library or host target")
     sdk = [target_id for target_id, target in targets.items() if target["name"] == "lubancore_sdk"]
     if len(sdk) != 1 or targets[sdk[0]]["type"] != "SHARED_LIBRARY":
         violations.append("expected exactly one shared lubancore_sdk target")
@@ -372,8 +381,10 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
             raise ValueError(f"unknown build dependency {target_id}")
         sdk_closure.add(target_id)
         pending.extend(targets[target_id]["dependencies"])
-    if any(targets[target_id]["name"] == SEARCH_PROBE_TARGET for target_id in sdk_closure):
-        violations.append("SDK library depends on the private search probe")
+    for probe in PRIVATE_TEST_PROBES:
+        if any(targets[target_id]["name"] == probe for target_id in sdk_closure):
+            label = "search probe" if probe == SEARCH_PROBE_TARGET else "command limits probe"
+            violations.append("SDK library depends on the private " + label)
     sdk_sources = sorted({entry["projectPath"] for target_id in sdk_closure
                           for entry in targets[target_id]["sources"]
                           if entry["projectPath"] and entry["projectPath"].startswith("src/")})
@@ -417,6 +428,8 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         public = relative(path, public_root) is not None
         for match in includes_in(text):
             include = match.group(1)
+            if name == COMMAND_LIMITS_PROBE_SOURCE and include not in STANDARD_HEADERS:
+                violations.append("command limits probe must use only standard-library headers: " + include)
             resolved = next((candidate.resolve() for candidate in
                              (path.parent / include, *(directory / include for directory in include_dirs),
                               source / "src" / include, source / "include" / include,
