@@ -32,10 +32,12 @@ SessionApprovals、宿主插件/publisher 与模型调用不能塞进 coordinato
 2. 后笔：实际 Job scope、逐票 owner、采用落稳后派发、锁外串行完成泵与 Job-specific Action adapter；方能接受新交单。
 3. 最后接公开 Session 值配置/查询、冻结计划与锁下恢复。默认关闭、首批只选 SDK 自建 run_command，Resume 用显式 Hold，不重派旧 Job。
 
-Hold 与 thread startup 合同不能替新交单验收。进程限额另由 scoped command execution limits 交付：当前 RunCommand 用固定捕获帽，ToolExecutionContext 没 timeout/output cap；coordinator max_output_bytes 只截事后结果。本笔不声称真捕获阶段已守宿主帽，不改 CLI 背景分支。
+Hold 与 thread startup 合同不能替新交单验收。#309 首轮真实恢复失败暴露 Fold 材料缺口：后续 Pending 没带 provider 调用号，不能将首次 Admit 已有调用号抹空。先修共用 Fold、保严格 source 守门，再把修头普通并入本笔；旧失败单独留件，不借新组合冒称 Hold 已验收。
+
+进程限额另由 [#310](https://github.com/relic-yuexi/LubanCode/pull/310) 交付，已发布内部 owned 当次画像与六场测试源码，远端验收另收。它把真实进程 timeout/output cap 接进 ToolExecutionContext，默认空画像沿旧 CLI；仍不是公开 Jobs。本笔基线尚未含这笔时，RunCommand 仍用固定捕获帽，coordinator max_output_bytes 只截事后结果。后续装配须纳实际限额原语，不能凭事后正文截断声称守住捕获帽。
 
 ## 验收
 
 新原生册必须走真实 Prepare 与 AgentLoop，核最终参数由共同改参/权限门产出、Deny/Ask/取消与注册元数据不串；新严格路线在缺完整 owner/Post 时明确拒绝，旧 gate 与工具执行计数均为零，下一模型只见拒绝。原 RunOneTool/CLI 协议与旧 Job16、startup6、Hold6断言全留；不拿镜像 reducer 或值类型测试报完整 SDK Jobs。
 
-新增 source 依实际名册接三平台 focused 与必需 ASan，完整 argv/非零册数/JUnit/LastTest交叉校；预计以基线35/40/25为起点，准确增量定稿后复核。公开安装消费者数不因内部原语增加。本地只跑静态、纯数据和 docs。
+新增 source 依实际名册接三平台 focused 与必需 ASan，完整 argv/非零册数/JUnit/LastTest交叉校；本笔实际六案、六路径，focused 由35增至36，必需 ASan 由40增至41，安装消费者仍25。公开安装消费者数不因内部原语增加。本地只跑静态、纯数据和 docs。
