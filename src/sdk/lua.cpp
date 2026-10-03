@@ -15,6 +15,7 @@
 #include "platform/text_encoding.hpp"
 #include "tools/lua_tool.hpp"
 #include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/session_switch.hpp"
 #include "workspace/index.hpp"
 
 namespace lubancore::detail {
