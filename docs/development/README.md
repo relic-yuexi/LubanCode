@@ -49,3 +49,4 @@ git diff --check
 - [SDK 冻结计划短拒重试](sdk-plan-short-reject.md)
 - [SDK Package 根清单值分析](sdk-package-manifest.md)
 - [Package 数字预发布号比较](package-prerelease-order.md)
+- [SDK 当前模块组合验收](sdk-completion-integration.md)

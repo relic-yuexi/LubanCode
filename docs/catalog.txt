@@ -172,3 +172,4 @@ DOC development/updater-lock-ready.md
 DOC development/sdk-plan-short-reject.md
 DOC development/sdk-package-manifest.md
 DOC development/package-prerelease-order.md
+DOC development/sdk-completion-integration.md
