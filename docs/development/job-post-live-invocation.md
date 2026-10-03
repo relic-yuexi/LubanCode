@@ -31,3 +31,5 @@
 新册核六路：默认旧 Post；真实 owned producer/attempt1/五键；当前 callback 假票与跨 record/跨场拒绝；Shutdown 真 Draining、Retired 失效；真 writer gap 与首尝试撤销；Close/Continue 历史 PassiveHold 无 live 权、查询零 Pump。各案由真实声明、注册、adoption、父句柄链确认与实际 command 完成件起，不手填 owned map 或假成功回执。
 
 本地只做文本、纯数据、AST、文档检查。三平台原生与精确非零证据门交远端；源码登记不当原生验收。
+
+同一 Coordinator 再注册时，验“本次不增 worker/执行”，不把前场累计数误认零。真 worker 已退、writer 预先关闭那路，原 Pump 不收完成件；零时等待仍未满足，须由真实宿主 Shutdown drain 收未知缺口，再纯读快照。正常与 Post 写错两路仍走原 20 秒 Wait；关闭、缺口、计数、原生回执、幂等和六枚末标断言保留。这里只修夹具合同，不改执行与公开 Close 政策。

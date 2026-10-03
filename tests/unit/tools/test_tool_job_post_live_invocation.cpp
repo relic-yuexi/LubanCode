@@ -301,11 +301,14 @@ struct Rig {
 };
 
 PreparedJobRegistration Register(Rig& rig, const Source& source, std::optional<Json> rewrite = std::nullopt) {
+    const auto threads_before = rig.counts->thread.load();
+    const auto executions_before = rig.counts->execute.load();
     const auto result = rig.coordinator->RegisterPreparedJob(rig.Prepare(source, std::move(rewrite)));
     REQUIRE_MESSAGE(result.state == PreparedJobRegistrationState::Registered, result.error);
     REQUIRE(result.facts); REQUIRE(result.facts->pending_receipt); REQUIRE(result.facts->registered_receipt);
     Committed(*result.facts->pending_receipt); Committed(*result.facts->registered_receipt);
-    CHECK(rig.counts->execute.load() == 0); CHECK(rig.counts->thread.load() == 0);
+    CHECK(rig.counts->execute.load() == executions_before);
+    CHECK(rig.counts->thread.load() == threads_before);
     rig.LegacyUntouched();
     return result;
 }
@@ -700,8 +703,33 @@ TEST_CASE("Job Post live invocation: gap" "[unit][tools][tool_job_post_live_invo
         const auto adopted = Adopt(rig, registered, std::move(cap));
         Confirm(rig, registered, ParentChain(rig, source, adopted));
         rig.coordinator->PumpOwnedJobs(); AwaitFinishedWithoutPump(rig, registered);
-        if (fault == 2) CloseWriter(rig); // A true closed writer, not a fabricated failed receipt.
-        const auto view = Finished(rig, registered);
+        OwnedJobStatusView view;
+        if (fault == 2) {
+            const auto threads_before = rig.counts->thread.load();
+            const auto executions_before = rig.counts->execute.load();
+            CloseWriter(rig); // A true closed writer, not a fabricated failed receipt.
+            const auto pending = rig.coordinator->SnapshotOwnedJob(registered.facts->owner, registered.facts->job_id);
+            CHECK(rig.writer->closed()); CHECK(pending.worker_finished); CHECK(pending.state == "running");
+            REQUIRE(pending.started_receipt); Committed(*pending.started_receipt);
+            CHECK_FALSE(pending.terminal_receipt); CHECK_FALSE(pending.persisted_receipt);
+            CHECK_FALSE(pending.post_receipt); CHECK_FALSE(pending.observed_receipt);
+            CHECK(values->callbacks == 0);
+            // The existing pump rejects a closed writer. An ordinary wait
+            // cannot settle this completion; the actual owning-host drain can.
+            const auto waiting = rig.coordinator->WaitOwnedJobs(registered.facts->owner,
+                {registered.facts->job_id}, 0, true);
+            CHECK_FALSE(waiting.satisfied); CHECK(waiting.timed_out);
+            CHECK_FALSE(rig.coordinator->Shutdown()); CHECK(rig.coordinator->shutdown_complete());
+            view = rig.coordinator->SnapshotOwnedJob(registered.facts->owner, registered.facts->job_id);
+            CHECK(view.scope.owner == registered.facts->owner);
+            CHECK(view.scope.action_id == registered.facts->action_id); CHECK(view.scope.attempt == 1);
+            CHECK(view.worker_finished); CHECK(rig.coordinator->running_count() == 0);
+            CHECK(rig.quota->running.load() == 0);
+            CHECK(rig.counts->thread.load() == threads_before);
+            CHECK(rig.counts->execute.load() == executions_before); rig.LegacyUntouched();
+        } else {
+            view = Finished(rig, registered);
+        }
         CHECK(view.state == "unknown"); CHECK_FALSE(view.gap.empty()); CHECK_FALSE(view.observed_receipt);
         CHECK(values->callbacks == (fault == 2 ? 0U : 1U));
         if (fault != 2) {
