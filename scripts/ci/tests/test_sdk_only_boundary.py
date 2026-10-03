@@ -409,6 +409,35 @@ class BoundaryTests(unittest.TestCase):
                              "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]})
         self.assert_rejected(self.check(testing=True), "reverse host include")
 
+    def test_journal_receipt_source_is_exact_testing_on_and_sdk_test_owned(self):
+        shared = "tests/unit/trajectory/test_journal_native_receipts.cpp"
+        self.source_file(shared, "int journal_receipt_test;\n")
+        target = {"id": "journal_receipts", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        for owner in ("receipt_tests", "neutral_engine", "lubancore_sdk"):
+            with self.subTest(owner=owner):
+                target["name"] = owner
+                self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        nearby = "tests/unit/trajectory/test_journal_native_receipts_extra.cpp"
+        self.source_file(nearby, "int adjacent_journal_test;\n")
+        target["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_journal_receipt_source_keeps_recursive_reverse_host_rejection(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        shared = "tests/unit/trajectory/test_journal_native_receipts.cpp"
+        self.source_file(shared, '#include "trajectory/journal.hpp"\n')
+        self.source_file("src/trajectory/journal.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.targets.append({"id": "journal_receipts", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
     def test_search_probe_is_only_a_testing_on_isolated_executable(self):
         probe = self.add_search_probe()
         self.assert_rejected(self.check(), "testing is OFF")

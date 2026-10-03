@@ -201,3 +201,4 @@ DOC development/sdk-job-current-integration.md
 DOC development/sdk-event-sink-spi.md
 DOC development/sdk-memory-blob-spi.md
 DOC development/sdk-operation-turn-binding.md
+DOC development/journal-native-receipts.md
