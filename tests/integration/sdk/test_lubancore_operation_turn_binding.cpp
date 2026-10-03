@@ -416,6 +416,85 @@ TEST_CASE("SDK operation turn strict history rejects rehashed wrong relationship
         CHECK(rig.state->models.load() == 2); CHECK(rig.state->tools.load() == 1);
         Write(path, original); Write(dir / "operations.jsonl", original_operations);
     }
+    for (int owner_variant = 0; owner_variant < 5; ++owner_variant) {
+        CAPTURE(owner_variant);
+        auto rows = Rows(original);
+        const auto own_turn = [&](const Json& row) {
+            const auto turn = row.find("turnId");
+            return turn != row.end() && turn->is_string() && turn->get<std::string>() == start.turn_id;
+        };
+        if (owner_variant == 0) {
+            const auto started = std::find_if(rows.begin(), rows.end(), [](const auto& row) {
+                return row.value("kind", std::string()) == "session.started";
+            });
+            REQUIRE(started != rows.end());
+            REQUIRE(started->at("sessionId").get<std::string>() == start.facts->session_id);
+            REQUIRE(started->at("runId").get<std::string>() == start.facts->run_id);
+            REQUIRE(started->at("seq").get<std::uint64_t>() < start.facts->seq);
+            (*started)["sessionId"] = "foreign-start-session";
+            (*started)["runId"] = "foreign-start-run";
+            // Keep every anchored-turn row on that run. The old run-only
+            // lookup could pair this local-session anchor with a foreign SID's
+            // Started; neither the original input nor its context is changed.
+            unsigned changed = 0;
+            for (auto& row : rows) if (own_turn(row)) {
+                REQUIRE(row.at("sessionId").get<std::string>() == start.facts->session_id);
+                row["runId"] = "foreign-start-run";
+                ++changed;
+            }
+            REQUIRE(changed > 1);
+        } else {
+            const bool message = owner_variant <= 2;
+            const auto row = std::find_if(rows.begin(), rows.end(), [&](const auto& candidate) {
+                if (!own_turn(candidate)) return false;
+                return message ? candidate.at("type") == "message"
+                               : candidate.value("kind", std::string()) == "input.received";
+            });
+            REQUIRE(row != rows.end());
+            REQUIRE(row->at("sessionId").get<std::string>() == start.facts->session_id);
+            REQUIRE(row->at("runId").get<std::string>() == start.facts->run_id);
+            if (owner_variant == 1 || owner_variant == 3) (*row)["sessionId"] = "foreign-turn-session";
+            else (*row)["runId"] = "foreign-turn-run";
+        }
+        const auto changed = DumpRows(rows, true);
+        Write(path, changed);
+        // Native verification proves the modified real journal still has a
+        // legal shape, hash chain and context replay before the Reader rejects
+        // the cross-row owner relationship.
+        const auto shape = v3::VerifyV3File(path);
+        const auto shape_error = shape.error_code + " " + shape.message;
+        REQUIRE_MESSAGE(shape.ok, shape_error);
+        const auto rejected = v3::ReadV3Ledger(path);
+        REQUIRE_FALSE(rejected);
+        CHECK(rejected.error().find("v3reader.operation_turn_invalid") != std::string::npos);
+        CHECK(Bytes(path) == changed);
+        CHECK(Bytes(dir / "operations.jsonl") == original_operations);
+        CHECK(rig.state->models.load() == 2); CHECK(rig.state->tools.load() == 1);
+        Write(path, original);
+    }
+    {
+        // A legitimate later run is paired with its own local Started. The
+        // first system-message run is not an authority for subsequent anchors.
+        auto rows = Rows(original);
+        const auto anchor = std::find_if(rows.begin(), rows.end(), [](const auto& row) {
+            return row.value("kind", std::string()) == "sdk.operation.turn.bound";
+        });
+        REQUIRE(anchor != rows.end());
+        rows.erase(anchor + 1, rows.end());
+        for (auto& row : rows) if (row.value("kind", std::string()) == "session.started" ||
+                                  row.value("kind", std::string()) == "sdk.operation.turn.bound")
+            row["runId"] = "legitimate-later-run";
+        Write(path, DumpRows(rows, true));
+        const auto read = Ledger(path);
+        const auto bound = v3::ReadOperationTurnBindings(read);
+        REQUIRE(bound); REQUIRE(bound->size() == 1);
+        CHECK(bound->front().session_id == read.session_id);
+        CHECK(bound->front().run_id == "legitimate-later-run");
+        CHECK(bound->front().run_id != read.run_id);
+        CHECK(Bytes(dir / "operations.jsonl") == original_operations);
+        CHECK(rig.state->models.load() == 2); CHECK(rig.state->tools.load() == 1);
+        Write(path, original);
+    }
     const auto ledger = Ledger(path); const auto checked = sdk::CheckMainOperationTurnBindings(dir, ledger);
     REQUIRE(checked.state == Material::Validated); REQUIRE(checked.facts.size() == 1);
     CHECK(checked.facts[0].operation_id == accepted.operation_id); NativeFacts(ledger, checked.facts[0]);

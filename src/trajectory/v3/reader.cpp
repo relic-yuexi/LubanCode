@@ -9,6 +9,7 @@
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "platform/sha256.hpp"
 #include "platform/bounded_read.hpp"
@@ -1553,16 +1554,26 @@ ReadOperationTurnBindings(const V3Ledger& ledger) {
         })) return facts;
     std::set<std::string> operations, turns, inputs;
     std::map<std::string, std::uint64_t> first_turn_seq;
-    std::map<std::string, std::uint64_t> run_started_seq;
+    struct TurnOwner {
+        std::string session_id, run_id;
+        bool consistent = true;
+    };
+    std::map<std::string, TurnOwner> turn_owners;
+    std::map<std::pair<std::string, std::string>, std::uint64_t> run_started_seq;
     const auto note_turn = [&](const auto& line) {
         if (!line.turn_id) return;
         const auto [it, inserted] = first_turn_seq.emplace(*line.turn_id, line.seq);
         if (!inserted) it->second = std::min(it->second, line.seq);
+        const auto [owner, first_owner] = turn_owners.emplace(
+            *line.turn_id, TurnOwner{line.session_id, line.run_id});
+        if (!first_owner && (owner->second.session_id != line.session_id || owner->second.run_id != line.run_id))
+            owner->second.consistent = false;
     };
     for (const auto& message : ledger.messages) note_turn(message);
     for (const auto& event : ledger.events) {
         note_turn(event);
-        if (event.kind == EventKindV3::SessionStarted) run_started_seq.emplace(event.run_id, event.seq);
+        if (event.kind == EventKindV3::SessionStarted)
+            run_started_seq.emplace(std::make_pair(event.session_id, event.run_id), event.seq);
     }
     try {
         for (const auto& event : ledger.events) {
@@ -1581,8 +1592,11 @@ ReadOperationTurnBindings(const V3Ledger& ledger) {
             if (!operations.insert(fact.operation_id).second || !turns.insert(fact.turn_id).second ||
                 !inputs.insert(fact.input_id).second || first_turn_seq.at(fact.turn_id) != event.seq)
                 return invalid();
-            const auto started = run_started_seq.find(event.run_id);
+            const auto started = run_started_seq.find(std::make_pair(event.session_id, event.run_id));
             if (started == run_started_seq.end() || started->second >= event.seq) return invalid();
+            const auto& owner = turn_owners.at(fact.turn_id);
+            if (!owner.consistent || owner.session_id != fact.session_id || owner.run_id != fact.run_id)
+                return invalid();
             facts.push_back(std::move(fact));
         }
     } catch (const nlohmann::json::exception&) {

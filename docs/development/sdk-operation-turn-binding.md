@@ -22,6 +22,10 @@
 
 V3 envelope enum/字符串/statusless、C++ schema 与 Python validator 同笔加精确 shape。V3 Reader 实际读取入口调用共用锚校准：版本/ID/SHA、同 SID/run、turn 与 operation 各唯一、锚先于本 turn 已存消息/请求/工具事实。旧无锚账照旧可读；没有锚不能拿最近 operation 或消息角色补关系。
 
+Started 必须与锚同 SID/run；锚下同 turn 的每枚消息与事件也须同属这份 SID/run。只核有锚 turn，不把整个旧卷强制归同一 owner，也不把合法多 run 硬比卷首 run。原实现只按 run 字串找 Started，不能证明它属本场；本笔收严这条关系。原 relation 案保留六个变体，另加五个真实重哈希 owner 变体：先由 `VerifyV3File` 证 shape/hash/replay，再由实际 `ReadV3Ledger` 精准拒，册数和 marker 不增。
+
+同案还留正路：真实卷截到锚，Started 与锚同属本场新 run，首条 system 消息仍属原 run。实际 Reader 须接纳这份合法前缀，不把卷首 run 当全卷唯一 owner；操作账原字节与实际模型、工具计数保留。
+
 SDK strict 读面只从已打开 regular 件读 operations.jsonl，单件最多 64 MiB；同份 owned bytes 交原 `SessionService::ReadOperationFactsOwned` 校验器，产出 accepted/dispatched/final 投影。核 operationId/inputId/payloadHash、确已派工及后来 main final 的 turn；另一 op 也不能占这枚 turn。主 final 仍一 turn 一 op；不把新行塞进旧 operations.jsonl，也不改主结果索引。V3 层不反向 include SDK，不复制 schema/hash parser。严格关系失败须给 `sdk.resume.operation_turn_invalid`；原 operations 错误保原码。
 
 strict helper 是本笔内部入口；默认公开恢复行为及未来冻结选项装配不冒称已完成。新事实的原生 shape 与跨行校准确须进入实际 V3 Reader，不能只留未调用 helper。关系材料分 NotApplicable/Incomplete/Rejected/Validated；Validated 只证历史关系，不证现场确认或执行成功。
