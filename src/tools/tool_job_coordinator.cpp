@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <deque>
 #include <exception>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <thread>
@@ -149,6 +150,7 @@ struct JobRecord {
     // 恢复补链锚:账上当前 attempt 终态的事件 id(新 session 不带内存态,
     // persisted 的 executionEventRef 要指它)。
     std::string recovered_terminal_event;
+    std::optional<JobRecoveryFacts> recovery;
 };
 
 }  // namespace
@@ -318,7 +320,7 @@ struct ToolJobCoordinator::Impl {
         std::size_t count = 0;
         for (const auto& [id, job] : jobs) {
             (void)id;
-            if (job->state == "running") {
+            if (!job->recovery.has_value() && job->state == "running") {
                 ++count;
             }
         }
@@ -329,7 +331,7 @@ struct ToolJobCoordinator::Impl {
         std::size_t count = 0;
         for (const auto& [id, job] : jobs) {
             (void)id;
-            if (job->state == "running" && job->tool_name == tool_name) {
+            if (!job->recovery.has_value() && job->state == "running" && job->tool_name == tool_name) {
                 ++count;
             }
         }
@@ -594,6 +596,7 @@ struct ToolJobCoordinator::Impl {
     // dispatched -> attempt 2 execution -> an owned worker thread.
     enum class DispatchOutcome { Dispatched, KeepQueued, Cancelled, Failed };
     DispatchOutcome DispatchJobLocked(JobRecord& job) {
+        if (job.recovery.has_value()) return DispatchOutcome::KeepQueued;
         // 执行前查取消状态(单 §7:不因入队时获准就永久放行)。
         if (job.cancel_requested) {
             if (!job.cancel_event_written) {
@@ -832,7 +835,7 @@ struct ToolJobCoordinator::Impl {
         if (closing) return;
         for (std::size_t i = 0; i < queue.size();) {
             auto it = jobs.find(queue[i]);
-            if (it == jobs.end() ||
+            if (it == jobs.end() || it->second->recovery.has_value() ||
                 (it->second->state != "queued" && it->second->state != "registered")) {
                 queue.erase(queue.begin() + static_cast<std::ptrdiff_t>(i));
                 continue;
@@ -855,6 +858,10 @@ struct ToolJobCoordinator::Impl {
             return;  // 未知 job(协调器没接管):丢弃
         }
         JobRecord& job = *it->second;
+        if (job.recovery.has_value()) {
+            ++stale_rejected;  // No worker lease was created for a held record.
+            return;
+        }
         if (IsTerminalJobState(job.state) && !job.startup_settlement_pending) {
             // 合法终态只接纳一次(单 §6):取消与完成竞态由先到者收口,
             // 迟到信封拒收不落账。
@@ -951,7 +958,7 @@ struct ToolJobCoordinator::Impl {
         const std::int64_t now = NowMs();
         for (auto& [id, job] : jobs) {
             (void)id;
-            if (job->state != "running" || job->deadline_at_ms == 0) {
+            if (job->recovery.has_value() || job->state != "running" || job->deadline_at_ms == 0) {
                 continue;
             }
             if (static_cast<std::int64_t>(job->deadline_at_ms) > now) {
@@ -977,7 +984,7 @@ struct ToolJobCoordinator::Impl {
         std::size_t settled = 0;
         for (auto& [id, job] : jobs) {
             (void)id;
-            if (job->pending_completion.has_value() &&
+            if (!job->recovery.has_value() && job->pending_completion.has_value() &&
                 (job->startup_settlement_pending || !IsTerminalJobState(job->state))) {
                 const JobCompletionEnvelope retry = *job->pending_completion;
                 const std::string before = job->state;
@@ -1203,7 +1210,7 @@ void ToolJobCoordinator::RequestShutdown() {
         // phase never calls an authorization gate, clock or executor.
         for (auto& [id, job] : impl_->jobs) {
             (void)id;
-            if (job->state == "running" || job->state == "queued") {
+            if (!job->recovery.has_value() && (job->state == "running" || job->state == "queued")) {
                 job->cancel_flag->store(true);
             }
         }
@@ -1243,7 +1250,7 @@ bool ToolJobCoordinator::Shutdown() {
             // success/error; work never dispatched is known not to execute.
             for (auto& [id, job] : impl_->jobs) {
                 (void)id;
-                if (IsTerminalJobState(job->state)) continue;
+                if (job->recovery.has_value() || IsTerminalJobState(job->state)) continue;
                 job->cancel_requested = true;
                 job->cancel_flag->store(true);
                 if (!job->cancel_event_written) {
@@ -1259,7 +1266,10 @@ bool ToolJobCoordinator::Shutdown() {
             }
             impl_->PumpLocked();
             settled = settled && std::all_of(impl_->jobs.begin(), impl_->jobs.end(), [](const auto& item) {
-                return IsTerminalJobState(item.second->state) && !item.second->startup_settlement_pending;
+                // Passive recovery projections own no live worker. Closing
+                // them is not a receipt for their historical execution gaps.
+                return item.second->recovery.has_value() ||
+                    (IsTerminalJobState(item.second->state) && !item.second->startup_settlement_pending);
             });
         } catch (...) {
             settled = false;
@@ -1317,6 +1327,11 @@ bool ToolJobCoordinator::CompleteAdmission(const std::string& job_id,
         return false;
     }
     JobRecord& job = *it->second;
+    if (job.recovery.has_value()) {
+        if (admission_content != nullptr)
+            *admission_content = job.admission_complete ? job.admission_text : std::string();
+        return job.admission_complete;  // Never repair an old held admission.
+    }
     if (job.admission_facts_complete && !job.admission_complete) {
         if (!impl_->WriteAdmissionMessageLocked(job)) {
             return false;  // 接单链落账失败:恢复按 complete_delivery 补
@@ -1344,6 +1359,11 @@ JobStartResult ToolJobCoordinator::GrantApproval(const std::string& job_id) {
         return result;
     }
     JobRecord& job = *it->second;
+    if (job.recovery.has_value()) {
+        result.error_code = "job.recovery.held";
+        result.error = "held historical jobs cannot be granted or dispatched";
+        return result;
+    }
     if (job.state != "awaiting_approval") {
         result.error_code = "job.grant.not_awaiting";
         result.error = "job 状态是 " + job.state + ",不在审批挂起";
@@ -1392,6 +1412,7 @@ JobStatusView ToolJobCoordinator::GetJob(const std::string& job_id) {
     view.preview = job.preview;
     view.preview_truncated = job.preview_truncated;
     view.failure = job.failure;
+    view.recovery = job.recovery;
     return view;
 }
 
@@ -1436,12 +1457,14 @@ JobWaitResult ToolJobCoordinator::WaitJobs(const std::vector<std::string>& job_i
                     view.access_reason = auth.reason.empty() ? "授权闸门拒绝" : auth.reason;
                 } else {
                     view.state = job.state;
+                    if (job.recovery.has_value()) view.action_id = job.action_id;
                     view.cancel_requested = job.cancel_requested;
                     view.result_ref = job.result_ref;
                     view.result_version = job.result_version;
                     view.preview = job.preview;
                     view.preview_truncated = job.preview_truncated;
                     view.failure = job.failure;
+                    view.recovery = job.recovery;
                 }
             }
             if (IsTerminalJobState(view.state)) {
@@ -1487,9 +1510,20 @@ JobCancelResult ToolJobCoordinator::CancelJob(const std::string& job_id,
         return result;
     }
     if (IsTerminalJobState(job.state)) {
+        if (job.recovery.has_value() &&
+            job.recovery->knowledge != JobRecoveryKnowledge::TerminalConfirmed) {
+            result.status = "recovery_held";
+            result.error = "job.recovery.held";
+            return result;
+        }
         result.ok = true;
         result.status = "already_terminal";
         result.terminal = job.state;
+        return result;
+    }
+    if (job.recovery.has_value()) {
+        result.status = "recovery_held";
+        result.error = "job.recovery.held";
         return result;
     }
     const std::string effective_reason = reason.empty() ? "user_cancel" : reason;
@@ -1543,6 +1577,11 @@ bool ToolJobCoordinator::DebugSubmitEnvelope(const std::string& job_id,
     // envelope accepted after its final settlement and callback release.
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
     if (impl_->closing) return false;
+    const auto historical = impl_->jobs.find(job_id);
+    if (historical != impl_->jobs.end() && historical->second->recovery.has_value()) {
+        ++impl_->stale_rejected;
+        return false;
+    }
     JobCompletionEnvelope envelope;
     envelope.job_id = job_id;
     envelope.owner_epoch = owner_epoch;
@@ -1572,8 +1611,11 @@ bool ToolJobCoordinator::DebugSubmitEnvelope(const std::string& job_id,
 // 恢复(单 §6 表;纯读账定计划,账态注入可重复)
 // ---------------------------------------------------------------------------
 
-JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger& ledger) {
+JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger& ledger,
+                                                JobRecoveryPolicy policy) {
     JobRecoveryPlan plan;
+    plan.policy = policy;
+    plan.source_session_id = ledger.session_id;
     const auto jobs = trajectory::v3::FoldJobExecutions(ledger);
     const auto actions = trajectory::v3::FoldToolActions(ledger);
     // 注册载荷(执行策略/turn/step)与派发计数(epoch 接续)。
@@ -1665,6 +1707,55 @@ JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger&
             std::any_of(snap->message_versions.begin(), snap->message_versions.end(),
                         [](const auto& version) { return version.on_current_chain; });
         item.admission_complete = admission_message_done;
+        if (policy == JobRecoveryPolicy::Hold) {
+            JobRecoveryFacts facts;
+            facts.original_state = job.state;
+            facts.turn_id = item.turn_id;
+            facts.step_id = item.step_id;
+            facts.dispatched_count = item.dispatched_count;
+            facts.admission_complete = item.admission_complete;
+            if (snap != nullptr) {
+                for (auto attempt = snap->attempts.rbegin(); attempt != snap->attempts.rend(); ++attempt) {
+                    if (job.mode == "job_handle" && attempt->attempt <= 1) continue;
+                    facts.execution_attempt = attempt->attempt;
+                    facts.execution_started = attempt->started;
+                    facts.execution_state = attempt->status;
+                    const auto terminal = terminal_events.find(job.origin_action_id);
+                    if (terminal != terminal_events.end() && terminal->second.first == attempt->attempt)
+                        facts.execution_terminal_event = terminal->second.second;
+                    break;
+                }
+                for (const auto& version : snap->message_versions) {
+                    if (!version.on_current_chain) continue;
+                    const auto message = ledger.message_index.find(version.message_id);
+                    if (message != ledger.message_index.end())
+                        item.admission_text = JsonStr(ledger.messages[message->second].message, "content");
+                }
+            }
+            const bool business_terminal = !facts.execution_terminal_event.empty();
+            const bool observed_terminal = IsTerminalJobState(job.state);
+            const bool known_unexecuted_cancel = job.state == "cancelled" &&
+                item.dispatched_count == 0 && !facts.execution_started && !business_terminal;
+            const bool outcome_matches =
+                (job.state == "succeeded" && facts.execution_state == "done") ||
+                (job.state == "failed" && (facts.execution_state == "failed" || facts.execution_state == "rejected")) ||
+                (job.state == "cancelled" && facts.execution_state == "cancelled") || known_unexecuted_cancel;
+            // Execution/observation can be confirmed even when storing a
+            // successful result failed. That delivery gap is not a complete
+            // success receipt. Errors/cancellation have no body-store duty.
+            const bool result_complete = job.state != "succeeded" ||
+                (!item.business_result_ref.empty() && item.result_ref == item.business_result_ref);
+            if (job.mode != "job_handle") facts.knowledge = JobRecoveryKnowledge::UnsupportedMode;
+            else if (job.state == "unknown" || facts.execution_state == "unknown")
+                facts.knowledge = JobRecoveryKnowledge::ExecutionUnconfirmed;
+            else if (observed_terminal || business_terminal)
+                facts.knowledge = observed_terminal && item.admission_complete && outcome_matches && result_complete
+                    ? JobRecoveryKnowledge::TerminalConfirmed : JobRecoveryKnowledge::TerminalDeliveryGap;
+            else if (item.dispatched_count != 0 || facts.execution_started)
+                facts.knowledge = JobRecoveryKnowledge::ExecutionUnconfirmed;
+            else facts.knowledge = JobRecoveryKnowledge::KnownNotDispatched;
+            item.recovery = std::move(facts);
+        }
         // 终态观测缺口:业务执行终态(finished)已在账、observed 终态没落。
         const bool execution_terminal_in_ledger =
             job.dispatched && snap != nullptr && !snap->attempts.empty() &&
@@ -1705,6 +1796,31 @@ std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
     impl_->ReapFinishedWorkers();
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
     if (impl_->closing) return 0;
+    if (plan.policy == JobRecoveryPolicy::Hold) {
+        if (impl_->writer == nullptr || impl_->writer->session_id() != plan.source_session_id)
+            throw std::invalid_argument("job.recovery.foreign_session");
+        for (const auto& item : plan.items) {
+            if (item.job_id.empty() || item.action_id.empty() || item.turn_id.empty() ||
+                item.step_id.empty() || item.tool_name.empty() || !item.recovery.has_value() ||
+                item.recovery->turn_id != item.turn_id || item.recovery->step_id != item.step_id ||
+                item.recovery->dispatched_count != item.dispatched_count ||
+                item.recovery->admission_complete != item.admission_complete)
+                throw std::invalid_argument("job.recovery.invalid_source");
+            // Check every reserved numeric key before publishing any passive
+            // record. The legacy adoption path keeps its existing policy.
+            if (item.job_id.rfind("job-", 0) == 0 && item.job_id.size() > 4) {
+                const auto number = item.job_id.substr(4);
+                if (number.find_first_not_of("0123456789") == std::string::npos) {
+                    try {
+                        if (std::stoull(number) == std::numeric_limits<std::uint64_t>::max())
+                            throw std::invalid_argument("job.recovery.invalid_source");
+                    } catch (const std::out_of_range&) {
+                        throw std::invalid_argument("job.recovery.invalid_source");
+                    }
+                }
+            }
+        }
+    }
     std::size_t adopted = 0;
     for (const auto& item : plan.items) {
         if (impl_->jobs.count(item.job_id) > 0) {
@@ -1731,6 +1847,24 @@ std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
         record->policy = item.policy;
         record->identity.logical_name = item.tool_name;
         record->identity.registration_source = "host_job_service";
+        if (plan.policy == JobRecoveryPolicy::Hold) {
+            record->mode = item.mode;
+            record->recovery = item.recovery;
+            record->state = item.recovery->original_state;
+            if (item.recovery->knowledge == JobRecoveryKnowledge::ExecutionUnconfirmed ||
+                item.recovery->knowledge == JobRecoveryKnowledge::UnsupportedMode ||
+                (item.recovery->knowledge == JobRecoveryKnowledge::TerminalDeliveryGap &&
+                 !IsTerminalJobState(record->state))) record->state = "unknown";
+            record->dispatched = item.dispatched_count != 0;
+            record->admission_complete = item.admission_complete;
+            record->admission_text = item.admission_text;
+            record->result_ref = item.result_ref;
+            record->result_version = item.result_version;
+            record->cancel_requested = item.cancel_requested;
+            impl_->jobs[item.job_id] = std::move(record);
+            ++adopted;
+            continue;
+        }
         // 账面对齐:补链不重复落已有事件,续派从已终态 attempt 接续。
         record->action = trajectory::v3::ToolActionSession::ReopenAligned(
             item.turn_id, item.step_id, item.action_id, item.attempt, item.attempt_started,

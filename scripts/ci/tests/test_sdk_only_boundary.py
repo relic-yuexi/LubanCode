@@ -96,11 +96,11 @@ class BoundaryTests(unittest.TestCase):
         self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
 
     def test_exact_job_sources_are_only_compiled_when_testing_is_on(self):
-        for name in ("tests/unit/tools/test_tool_job_coordinator.cpp", "tests/unit/tools/test_tool_job_start_transaction.cpp"):
+        for name in ("tests/unit/tools/test_tool_job_coordinator.cpp", "tests/unit/tools/test_tool_job_start_transaction.cpp", "tests/unit/tools/test_tool_job_hold_recovery.cpp"):
             self.source_file(name, "int fixture_only;\n")
         self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
             "sources": [{"path": name, "compileGroupIndex": 0} for name in
-                ("tests/unit/tools/test_tool_job_coordinator.cpp", "tests/unit/tools/test_tool_job_start_transaction.cpp")],
+                ("tests/unit/tools/test_tool_job_coordinator.cpp", "tests/unit/tools/test_tool_job_start_transaction.cpp", "tests/unit/tools/test_tool_job_hold_recovery.cpp")],
             "compileGroups": [{}]})
         self.assert_rejected(self.check(), "testing is OFF")
         self.flags["BUILD_TESTING"] = "ON"
