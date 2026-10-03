@@ -6,11 +6,11 @@
 
 `SettleOwned` 已持真实 OwnedRecord、当前实例/epoch、业务 attempt1、actual completion、Started/terminal/persisted 回执和实际 capability。它在调用本 record Post 时签内部 `OwnedJobPostInvocation`。该 handle 不从 JSON、ledger、同 run 旧锚、父 Operation 或 caller nonce 构造；只签当前具体 record，不能凭 `current_owned_callback == impl` 为另一份 Job 发许可。
 
-handle 只持 producer 私有状态的弱引用。宿主可保存副本作检查；副本不延长许可，不延 writer、record、module 或 cancel storage 寿命。当前同步 callback 退出、抛错或退场，producer 先撤 handle，再校原 Post receipt/完成结算。其它线程、其它实例、其它 callback、失效 handle、恢复的历史材料都拒绝。
+实际 live lease 由 producer 内部独占。交给回调的 opaque handle 只持私有状态弱引用。宿主可保存副本作检查；副本不延长许可，不延 writer、record、module 或 cancel storage 寿命，不作延后执行的许可。当前同步 callback 退出、抛错或退场，producer 先撤 handle，再校原 Post receipt/完成结算。其它线程、其它实例、其它 callback、失效 handle、恢复的历史材料都拒绝。
 
 显式 `OwnedJobCapability::live_post` 只替换这份 capability 的 Post 调用口，返回真实原生 WriteReceipt。`post` 与 `live_post` 恰选一项。默认 `post` 的入口、gate 次数、clock、命令 worker、权限与原回执规则保留。
 
-`CheckOwnedPostInvocation` 返回 owned 值：真实完成件、冻结 Prepared facts、actual adoption 回执和本次 owner phase。先核本实例/epoch、当前具体 invocation/record/完成件、当前同步线程，再核 writer 仍 open/unbroken、实际 SID/run/attempt。值里没有 writer、cancel 裸指针、SDK Operation 或 main OperationScope。它证明本次 producer，不新增业务许可；原 scope gate 不变。中立 ledger capture factory 仍只校原生材料，不能单独签 live 权。
+`CheckOwnedPostInvocation` 返回 owned 值：真实完成件、冻结 Prepared facts、actual adoption 回执和本次 owner phase。先核本实例/epoch、当前具体 invocation/record/完成件、当前同步线程，再核 writer 仍 open/unbroken、实际 SID/run/attempt。异线程在拿 serial 锁之前拒绝。值里没有 writer、cancel 裸指针、SDK Operation 或 main OperationScope。它只证本次真实收件，不签持久 SDK 授权，也不新增业务许可；原 scope gate 不变。中立 ledger capture factory 仍只校原生材料，不能单独签 live 权。
 
 ## Open、Draining、Retired
 
@@ -20,7 +20,7 @@ handle 只持 producer 私有状态的弱引用。宿主可保存副本作检查
 
 本笔不启 Middleware observer、第二套执行器或新线程。callback 必须同步收完自己所拥有的调用；producer 借用活过 callback，返回后先撤。原 join、serial→jobs 锁序、锁外销 capability/capture 不改；join 不持 writer/jobs 锁。
 
-`SnapshotOwnedJob(owner, job_id) const` 只拷实际表内值，不 Pump、不补账、不等命令。Get/Wait 原义不改。关闭后可查已留 owned 值。PassiveHold 仅还原历史知识，不能取得 live invocation，不能重派、重跑 Post 或重建 SDK Operation。
+`SnapshotOwnedJob(owner, job_id) const` 沿 serial→jobs 锁序，只在宿主安全边界拷实际表内值，不 Pump、Reap、调用 clock、补账或等命令。mutable settlement 字段受 writer serial 保护，不能只握 jobs 锁偷读；此口不供正被 callback 主线程 join 的异线程 observer，也不冒称公开 SDK 任意线程缓存/Wait。Get/Wait 原义不改。关闭后可查已留 owned 值。PassiveHold 仅还原历史知识，不能取得 live invocation，不能重派、重跑 Post 或重建 SDK Operation。
 
 ## 范围与验收
 
