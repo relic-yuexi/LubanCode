@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <lubancore/api.hpp>
+#include <lubancore/events.hpp>
 #include <lubancore/extensions.hpp>
 #include <lubancore/results.hpp>
 #include <lubancore/skills.hpp>
@@ -73,20 +74,6 @@ struct Tool {
     // Custom tools conservatively require external-effect approval by default.
     bool requires_approval = true;
     std::function<Result<ToolResult>(const std::string&, const ToolContext&)> execute;
-};
-enum class ApprovalMode { Confirm, AcceptEdits, DontAsk, Yolo };
-enum class ApprovalDecision { Accept, AcceptForSession, Decline, Cancel };
-struct Approval {
-    std::string request_id; // opaque; scoped to this session and durable turn
-    std::string operation_id;
-    std::string tool_call_id;
-    std::string tool_name;
-    std::string input_json;
-    std::string cwd;
-    std::string reason;
-    // Present only for a real main-foreground child ticket. Session acceptance
-    // then grants this child only; the ordinary parent allowed account is separate.
-    std::optional<subagents::v1::ApprovalScope> child;
 };
 struct McpServer {
     // Text results may continue the model loop. Image/audio/blob captures are
@@ -166,6 +153,9 @@ struct SessionOptions {
     // a matching frozen plan on resume. All three execution budgets are required.
     std::optional<lua::v1::Selection> lua;
     RecoveryReadLimits recovery_read_limits{};
+    // Explicit trusted, per-Session subscription queue provider; null uses the
+    // original bounded in-memory queue. Each Subscribe owns an independent queue.
+    std::unique_ptr<events::v1::EventSink> event_sink;
 };
 // operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };
@@ -178,17 +168,6 @@ struct Operation {
     std::string error;
     bool result_persisted = false;
 };
-struct Event {
-    // Runtime event names plus approval_requested and operation_completed.
-    std::string kind;
-    std::string session_id;
-    std::string operation_id;
-    std::string turn_id;
-    std::string text;
-    std::string payload_json;
-    std::optional<Approval> approval;
-};
-
 class LUBANCORE_API EventStream {
 public:
     ~EventStream();
@@ -197,8 +176,12 @@ public:
     // nullopt = timeout. Closed/overflow streams return an explicit error.
     // One or more callers may wait; each event is consumed once per subscription.
     Result<std::optional<Event>> Next(std::chrono::milliseconds timeout);
-    // Wakes and waits for in-flight Next calls; no callbacks or detached threads.
+    // Wakes and waits for in-flight Next calls. Host queues close synchronously;
+    // no detached threads are created.
     void Close();
+    // Same cooperative retirement, with the actual provider Close receipt.
+    // Repeated calls retain that result; overflow remains a delivery error only.
+    Result<void> CloseChecked();
 private:
     struct Impl;
     explicit EventStream(std::shared_ptr<Impl>);

@@ -30,6 +30,7 @@
 #include "sdk/approval.hpp"
 #include "sdk/callback_scope.hpp"
 #include "sdk/extensions.hpp"
+#include "sdk/event_queue.hpp"
 #include "sdk/action_opening.hpp"
 #include "sdk/action_dispatch.hpp"
 #include "sdk/results.hpp"
@@ -123,55 +124,19 @@ std::string Status(OperationState state) {
 } // namespace
 
 struct EventStream::Impl {
-    explicit Impl(std::size_t limit) : capacity(limit) {}
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::deque<Event> events;
-    std::size_t capacity;
-    std::size_t active_reads = 0;
-    std::size_t bytes = 0;
-    bool closed = false;
-    std::string error = "sdk.events.closed";
-    void Push(const Event& event) {
-        std::lock_guard lock(mutex);
-        if (closed) return;
-        const auto cost = event.text.size() + event.payload_json.size() +
-            (event.approval ? event.approval->input_json.size() : 0);
-        if (events.size() >= capacity || cost > 16 * 1024 * 1024 || bytes > 16 * 1024 * 1024 - cost) {
-            error = "sdk.events.overflow";
-            closed = true;
-            events.clear();
-            bytes = 0;
-        } else { events.push_back(event); bytes += cost; }
-        cv.notify_all();
-    }
-    void Close() {
-        std::unique_lock lock(mutex);
-        closed = true;
-        cv.notify_all();
-        cv.wait(lock, [&] { return active_reads == 0; });
-        events.clear();
-        bytes = 0;
-    }
+    explicit Impl(std::shared_ptr<detail::EventQueueState> value) : queue(std::move(value)) {}
+    std::shared_ptr<detail::EventQueueState> queue;
+    void Push(const Event& event) { queue->Push(event); }
+    Result<void> CloseChecked() { return queue->CloseChecked(); }
 };
 
 EventStream::EventStream(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
 EventStream::~EventStream() { Close(); }
-void EventStream::Close() { impl_->Close(); }
+void EventStream::Close() { (void)CloseChecked(); }
+Result<void> EventStream::CloseChecked() { auto state = impl_; return state->CloseChecked(); }
 Result<std::optional<Event>> EventStream::Next(std::chrono::milliseconds timeout) {
     auto state = impl_;
-    if (timeout.count() < 0) return std::unexpected(Failure("sdk.timeout.invalid"));
-    std::unique_lock lock(state->mutex);
-    ++state->active_reads;
-    state->cv.wait_for(lock, timeout, [&] { return state->closed || !state->events.empty(); });
-    --state->active_reads;
-    state->cv.notify_all();
-    if (state->closed) return std::unexpected(Failure(state->error));
-    if (state->events.empty()) return std::optional<Event>{};
-    Event event = std::move(state->events.front());
-    state->events.pop_front();
-    state->bytes -= event.text.size() + event.payload_json.size() + (event.approval ? event.approval->input_json.size() : 0);
-    return std::optional<Event>{std::move(event)};
+    return state->queue->Next(timeout);
 }
 
 // One writer/Agent per session. Cwd belongs to tool adapters, never the process.
@@ -214,6 +179,7 @@ struct Session::Impl final : rt::InteractionBroker {
     std::map<std::string, Result<std::shared_ptr<const detail::OperationToolResultIndex>>> tool_results;
     std::set<std::string> cancelled;
     std::vector<std::weak_ptr<EventStream::Impl>> subscriptions;
+    std::shared_ptr<detail::EventDeliveryOwner> event_delivery;
     std::string active_operation;
     std::string active_turn_id; // worker-only; allocated by the durable V3 writer
     bool closing = false;
@@ -1409,6 +1375,7 @@ struct Session::Impl final : rt::InteractionBroker {
             cv.notify_all();
         }
         approvals.Close();
+        if (event_delivery) event_delivery->BeginClose();
     }
     void RequestExecutionShutdown() {
         std::shared_ptr<rt::SessionService> service_to_stop;
@@ -1441,7 +1408,7 @@ struct Session::Impl final : rt::InteractionBroker {
         }
     }
     Result<void> Close() {
-        if (in_session_worker) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+        if (in_session_worker || detail::InEventProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
         std::lock_guard close_lock(close_mutex);
         {
             std::lock_guard lock(mutex);
@@ -1454,7 +1421,6 @@ struct Session::Impl final : rt::InteractionBroker {
             const auto outcome = service->Close("sdk_close");
             if (!outcome.error_code.empty()) close_error = Failure(outcome.error_code, outcome.message);
         }
-        if (close_error && close_errors) close_errors->Remember(*close_error);
         // SessionService destruction also releases operations.jsonl. Keep query
         // projections, not the live writer, after Close (Windows delete/rename).
         std::shared_ptr<rt::SessionService> closed_service;
@@ -1494,7 +1460,12 @@ struct Session::Impl final : rt::InteractionBroker {
             memory_module.reset();
             memory_write_module.reset();
         }
-        for (auto& stream : streams) stream->Close();
+        for (auto& stream : streams) (void)stream->CloseChecked();
+        if (event_delivery) {
+            auto closed_delivery = event_delivery->CloseAndWait();
+            if (!closed_delivery && !close_error) close_error = closed_delivery.error();
+        }
+        if (close_error && close_errors) close_errors->Remember(*close_error);
         return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
     }
 };
@@ -1572,11 +1543,27 @@ Result<Receipt> Session::Submit(std::string key, std::string text) {
 }
 Result<std::shared_ptr<EventStream>> Session::Subscribe(std::size_t capacity) {
     if (capacity == 0 || capacity > 65536) return std::unexpected(Failure("sdk.events.invalid_capacity"));
-    std::lock_guard lock(impl_->mutex);
-    if (impl_->closing || impl_->closed || impl_->runtime_stopping->load()) return std::unexpected(Failure("sdk.session.closed"));
-    auto state = std::make_shared<EventStream::Impl>(capacity);
-    impl_->subscriptions.push_back(state);
-    return std::shared_ptr<EventStream>(new EventStream(std::move(state)));
+    if (detail::InEventProvider()) return std::unexpected(Failure("sdk.events.reentrant"));
+    std::shared_ptr<detail::EventDeliveryOwner> owner;
+    {
+        std::lock_guard lock(impl_->mutex);
+        if (impl_->closing || impl_->closed || impl_->runtime_stopping->load()) return std::unexpected(Failure("sdk.session.closed"));
+        owner = impl_->event_delivery;
+    }
+    // Actual factory runs without the API lock. Owner admission pins its sink;
+    // both closing gates are checked before publishing a subscription.
+    auto created = owner->CreateQueue(capacity);
+    if (!created) return std::unexpected(created.error());
+    auto state = std::make_shared<EventStream::Impl>(std::move(*created));
+    auto stream = std::shared_ptr<EventStream>(new EventStream(state));
+    bool late;
+    {
+        std::lock_guard lock(impl_->mutex);
+        late = impl_->closing || impl_->closed || impl_->runtime_stopping->load();
+        if (!late) impl_->subscriptions.push_back(state);
+    }
+    if (late) { (void)state->CloseChecked(); return std::unexpected(Failure("sdk.session.closed")); }
+    return stream;
 }
 std::vector<Approval> Session::PendingApprovals() const {
     return impl_->approvals.Pending();
@@ -1608,7 +1595,7 @@ Result<Operation> Session::ReadOperation(std::string id) const {
 }
 Result<Operation> Session::WaitResult(std::string id, std::chrono::milliseconds timeout) const {
     if (timeout.count() < 0) return std::unexpected(Failure("sdk.timeout.invalid"));
-    if (in_session_worker) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    if (in_session_worker || detail::InEventProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
     std::unique_lock lock(impl_->mutex);
     auto it = impl_->operations.find(id);
     if (it == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
@@ -1680,7 +1667,7 @@ Result<std::unique_ptr<Runtime>> Runtime::Create(RuntimeOptions options) {
     } catch (const std::exception& error) { return std::unexpected(Failure("sdk.runtime.create_failed", error.what())); }
 }
 Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
-    if (in_session_worker) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    if (in_session_worker || detail::InEventProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
     std::lock_guard lock(impl_->mutex);
     if (impl_->closed) return std::unexpected(Failure("sdk.runtime.closed"));
     try {
@@ -1688,6 +1675,7 @@ Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
         auto execution = std::make_shared<Session::Impl>();
         execution->roots = impl_->options;
         execution->runtime_stopping = impl_->stopping;
+        execution->event_delivery = std::make_shared<detail::EventDeliveryOwner>(std::move(options.event_sink));
         execution->options = std::move(options);
         auto opened = execution->Initialize();
         if (!opened) return std::unexpected(opened.error());
@@ -1700,7 +1688,7 @@ Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
 Result<void> Runtime::Shutdown() {
     // Also reject cross-session/runtime blocking lifecycle calls from a tool or
     // backend callback: two workers closing each other must not form a join cycle.
-    if (in_session_worker) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    if (in_session_worker || detail::InEventProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
     std::vector<std::shared_ptr<Session::Impl>> sessions;
     {
         std::lock_guard lock(impl_->mutex);
