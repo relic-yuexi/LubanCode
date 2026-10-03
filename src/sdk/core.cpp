@@ -37,6 +37,7 @@
 #include "sdk/skills.hpp"
 #include "sdk/subagents.hpp"
 #include "sdk/memory.hpp"
+#include "sdk/memory_blobs.hpp"
 #include "sdk/memory_write.hpp"
 #include "sdk/lua.hpp"
 #include "sdk/operation_ledger.hpp"
@@ -162,6 +163,7 @@ struct Session::Impl final : rt::InteractionBroker {
     // from child journal claims or the coordinator's business status.
     std::map<std::pair<std::string, std::uint64_t>, subagents::v1::LiveTerminalReceipt> live_child_receipts;
     std::shared_ptr<detail::SessionMemory> memory_module;
+    std::shared_ptr<lubancode::trajectory::MemoryCapabilityFactory> memory_blob_factory;
     memory::v1::Snapshot memory_snapshot;
     std::map<std::string, Result<memory::v1::RecallReport>> memory_reports;
     std::shared_ptr<detail::SessionMemoryWrite> memory_write_module;
@@ -472,6 +474,7 @@ struct Session::Impl final : rt::InteractionBroker {
         launch.v3_system_content = (*skill_module)->EffectiveSystem();
         launch.recovery_capture.limits = recovery_limits;
         launch.recovery_capture.memory_metadata = memory_module->RequiresRecoveryMetadata();
+        launch.memory_capability_factory = memory_blob_factory;
         auto skills_opening = (*skill_module)->OpeningParticipant();
         auto memory_opening = memory_module->OpeningParticipant();
         auto write_opening = memory_write_module->OpeningParticipant();
@@ -1408,7 +1411,7 @@ struct Session::Impl final : rt::InteractionBroker {
         }
     }
     Result<void> Close() {
-        if (in_session_worker || detail::InEventProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+        if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
         std::lock_guard close_lock(close_mutex);
         {
             std::lock_guard lock(mutex);
@@ -1459,6 +1462,7 @@ struct Session::Impl final : rt::InteractionBroker {
             options.backend.reset();
             memory_module.reset();
             memory_write_module.reset();
+            memory_blob_factory.reset();
         }
         for (auto& stream : streams) (void)stream->CloseChecked();
         if (event_delivery) {
@@ -1595,7 +1599,7 @@ Result<Operation> Session::ReadOperation(std::string id) const {
 }
 Result<Operation> Session::WaitResult(std::string id, std::chrono::milliseconds timeout) const {
     if (timeout.count() < 0) return std::unexpected(Failure("sdk.timeout.invalid"));
-    if (in_session_worker || detail::InEventProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
     std::unique_lock lock(impl_->mutex);
     auto it = impl_->operations.find(id);
     if (it == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
@@ -1667,15 +1671,19 @@ Result<std::unique_ptr<Runtime>> Runtime::Create(RuntimeOptions options) {
     } catch (const std::exception& error) { return std::unexpected(Failure("sdk.runtime.create_failed", error.what())); }
 }
 Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
-    if (in_session_worker || detail::InEventProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
-    std::lock_guard lock(impl_->mutex);
-    if (impl_->closed) return std::unexpected(Failure("sdk.runtime.closed"));
+    if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
     try {
+        // Wrap the provider before any rejected opening can retire its captures.
+        // Its actual Open still runs under the original Runtime/session locks.
+        auto memory_factory = detail::MakeMemoryBlobFactory(std::move(options.memory_blob_provider));
+        std::lock_guard lock(impl_->mutex);
+        if (impl_->closed) return std::unexpected(Failure("sdk.runtime.closed"));
         std::erase_if(impl_->sessions, [](const auto& session) { return session.expired(); });
         auto execution = std::make_shared<Session::Impl>();
         execution->roots = impl_->options;
         execution->runtime_stopping = impl_->stopping;
         execution->event_delivery = std::make_shared<detail::EventDeliveryOwner>(std::move(options.event_sink));
+        execution->memory_blob_factory = std::move(memory_factory);
         execution->options = std::move(options);
         auto opened = execution->Initialize();
         if (!opened) return std::unexpected(opened.error());
@@ -1688,7 +1696,7 @@ Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
 Result<void> Runtime::Shutdown() {
     // Also reject cross-session/runtime blocking lifecycle calls from a tool or
     // backend callback: two workers closing each other must not form a join cycle.
-    if (in_session_worker || detail::InEventProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
     std::vector<std::shared_ptr<Session::Impl>> sessions;
     {
         std::lock_guard lock(impl_->mutex);

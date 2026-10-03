@@ -19,6 +19,7 @@
 #include <lubancore/skills.hpp>
 #include <lubancore/subagents.hpp>
 #include <lubancore/memory.hpp>
+#include <lubancore/memory_blobs.hpp>
 #include <lubancore/lua.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
@@ -156,6 +157,8 @@ struct SessionOptions {
     // Explicit trusted, per-Session subscription queue provider; null uses the
     // original bounded in-memory queue. Each Subscribe owns an independent queue.
     std::unique_ptr<events::v1::EventSink> event_sink;
+    // Memory-fragment CAS only; null keeps File. Does not enable recall/save.
+    std::unique_ptr<memory_blobs::v1::Provider> memory_blob_provider;
 };
 // operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };

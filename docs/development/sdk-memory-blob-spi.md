@@ -10,7 +10,7 @@
 `Scope` 持 workspace/session；`Reference` 持 scope/SHA/完整 bytes/media type。
 `WriteRequest` 持 owned bytes 与请求耐久档；`WriteReceipt` 分
 NotCommitted/Committed/Indeterminate，另列实际确认档与 Error。
-`Store` 只给同步 Store/有帽 Read；`Provider::Open(Scope)` 返回本场独占 Store。
+`Store` 只给同步 Write/有帽 Read；`Provider::Open(Scope)` 返回本场独占 Store。
 `SessionOptions` 尾添可空独占 `memory_blob_provider`。空仍走原 File；
 选 provider 不自动开 recall、save 或用户 Memory。
 
