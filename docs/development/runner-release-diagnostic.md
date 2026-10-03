@@ -20,7 +20,7 @@
 
 失败场在 `Runner.close` 前另留状态快照，保失败当时 jobs/endpoint、服务输出、回应、夹具作业 stdout/stderr 和 marker。close 后仍保原有收场快照；临时目录清理失败仍用 owned 缓存。两阶段分名存，不拿收场后的状态代替失败时状态。成功场只丢缓存，不上传输出。
 
-只读明确列出的本场文件。单件最多 256 KiB，单次快照最多 2 MiB、最多 64 件；超过时明确记截取、原件实际大小和已存前缀 SHA。缺件、非 regular、读错分别记清。POSIX 打开时不阻塞 FIFO、不跟随最终链接；Windows 从实际已打开文件判 regular。文件柄与缓存都归本场，不扫描他场目录。夹具 stdout 中的 `RUNNER_TEST_SECRET` 是本场生成的 nonce，不是 Runner 认证值；这些原件只证远程 CI 夹具，不改产品 preview/full 同步合同。
+只读明确列出的本场文件。单件最多 256 KiB，每次快照留存的文件内容最多 2 MiB、最多登记 64 件；状态清单 `evidence.json` 另附，不计进内容预算。超过时明确记截取、原件实际大小和已存前缀 SHA。缺件、非 regular、读错分别记清。POSIX 打开时不阻塞 FIFO、不跟随最终链接；Windows 从实际已打开文件判 regular。文件柄与缓存都归本场，不扫描他场目录。夹具 stdout 中的 `RUNNER_TEST_SECRET` 是本场生成的 nonce，不是 Runner 认证值；这些原件只证远程 CI 夹具，不改产品 preview/full 同步合同。
 
 原十一场名称、时限、断言逐条保留。原响应的 JSON 与退出码校验照旧；先存字节再显示，编码错误不能盖过原错。
 
