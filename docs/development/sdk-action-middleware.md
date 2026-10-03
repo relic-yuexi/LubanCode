@@ -119,3 +119,9 @@ definition_hash 只表宿主所声明实现版本，不认证任意原生函数�
 同源 Windows 安装消费者另在首场 Post 的三字段检查失败；原日志只记 callback 错误，没有实际 Post 输入，不先判归属、捕获或路径。
 新诊断只在这份无凭据的合成工具夹具里、原检查之前打印实际公开 Post `Input.json` 与当场计数。`succeeded`、`isError=false`、空 `errorCode` 和全部模型/工具/工厂、状态、预算断言照留，生产不抢改。
 这份新源另验诊断与 binding 夹具修补；继承的新计划短拒问题仍由独立修补笔 #300 取远端证据，不借本次诊断承诺全绿。
+
+`ee253028` 的 Windows SDK-only 原件已打印当次 Post 输入：`outcome=tool_error`、`isError=true`，正文为 `sdk.tool.exception: tool effect crossed cwd or cancellation`，工厂/模型/工具计数为 1/1/0。
+原完整日志 SHA-256 为 `c25808754dc87731eba97da9480a168792ac74132ba0994af55a1ee11d271f31`。它证明工具前门拒绝，Post 原样传出真实失败；不改 Finished、状态或生产路径。
+夹具先用 `generic_u8string()` 冻结 cwd，SDK 则 canonical 后用 `u8string()` 交给 ToolContext；Windows 同一目录在这两处分别带 `/` 与 `\\`，硬比文本便会误拒。
+本次只把夹具共用 UTF-8 路径出口改为 native `u8string()`。Rig 的 canonical root、真实目录、cwd/取消/实参检查、Post 三字段和全部计数/预算断言照留。
+新源另跑远端三平台；旧日志未记实际 cwd 与取消旗，不能倒填这两值，也不借诊断轮其他平台绿替新源验收。
