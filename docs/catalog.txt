@@ -99,6 +99,7 @@ DOC development/child-async-approval.md
 DOC development/sdk-updater-boundary.md
 DOC development/sdk-release-query-boundary.md
 DOC development/lubancore-builtin-search.md
+DOC development/lubancore-authorization-primitives.md
 DOC development/worker-host.md
 DOC development/naming.md
 DOC development/search-ripgrep-migration.md

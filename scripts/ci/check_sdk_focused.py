@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 
 
 REQUIRED = {
+    "sdk.focused.lubancore_authorization",
     "sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest",
     "sdk.focused.tool_job_coordinator",
     "sdk.focused.tool_job_start_transaction",

@@ -5,6 +5,7 @@ include(CMakePackageConfigHelpers)
 
 add_library(lubancore_sdk SHARED
   src/sdk/core.cpp
+  src/sdk/authorization.cpp
   src/sdk/event_queue.cpp
   src/sdk/approval.cpp
   src/sdk/operation_ledger.cpp

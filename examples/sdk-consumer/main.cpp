@@ -49,6 +49,7 @@ void LuaResume(const std::filesystem::path& base);
 // Deliberately only installed public headers and the C++ standard library.
 // The fixture supplies model replies; Agent, permissions, tools and persistence
 // all run inside the actual SDK library.
+void CheckSdkAuthorizationConsumer();
 namespace {
 namespace sdk = lubancore;
 namespace ext = lubancore::extensions::v1;
@@ -1686,7 +1687,8 @@ int main(int argc, char** argv) {
         const fs::path base = Path(argv[2]);
         Check(base.is_absolute(), "state directory must be absolute");
         fs::create_directories(base);
-        if (mode == "smoke") {
+        if (mode == "authorization") CheckSdkAuthorizationConsumer();
+        else if (mode == "smoke") {
             Check(!sdk::Version().empty(), "installed library has no version");
             FileAndCommand(base);
             SharedDirectoryIsolation(base);
