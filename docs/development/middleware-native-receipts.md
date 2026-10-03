@@ -18,7 +18,7 @@ capture 不改变 Middleware 的调用/合并/异常策略。native 未确认或
 
 sink 借 writer，宿主保证单写并在真实 Dispatcher 返回、observer 都 join 后先退 sink，再退 writer。lease 只持共享 owned 记录状态，不含 writer、Session、回调或取消旗；快照可在 sink/writer 退出后查，不会写账、Pump 或保活执行资源。
 
-一份 capture 只容一场 dispatch。宿主 Finish 实际 DispatchOutcome 后才封录面；校 dispatch/revision，不接受另场 outcome。封录面、重复绑定、换场、lease 关闭或 sink 退场后不再入册，不追加任何账。Finish 只说明收集退场，不代表 PostSettlement、真实补料持久采用或 Job 成功。快照分别给实际 outcome 和 capture gap；普通失败不靠 is_error 或文案猜状态。
+一份 capture 只容一场 dispatch。宿主 Finish 实际 DispatchOutcome 后才封录面；校 dispatch/revision，不接受另场 outcome。封录面、重复绑定、换场或 lease 关闭后拒新阶段；已经入场的真实提交仍可能随后落账，首回执照缓存。Close 不等于 Dispatcher 排空，宿主仍先等 Dispatch/observer 退场，再销 sink/writer；不持记录锁跨 Writer callback。Finish 只说明收集退场，不代表 PostSettlement、真实补料持久采用或 Job 成功。快照分别给实际 outcome 和 capture gap；普通失败不靠 is_error 或文案猜状态。输入引用规范化为已经核准的五键，原调用方多余字段不进入快照。
 
 ## 下一笔才接 typed PostSettlement
 
