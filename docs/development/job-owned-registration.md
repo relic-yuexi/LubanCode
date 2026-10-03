@@ -45,3 +45,11 @@ J2b 才接逐票采用与 worker，只收真实业务 scope、自有取消旗及
 关闭案另验真 writer.Close 后首次注册零 Pending；成功暂存关场后，换 default/Legacy 协调器重读 Plan/Adopt，仍零 append/executor。不能拿 registration-only 实例自拒顶这条恢复验收。
 
 测试与 CI 接线由另一代理独写；本代理写合同、Header/production/owner。新增来源按实际 union 推导 focused/必需 ASan/安装消费者；三平台新 CI、完整 argv、非零断言、JUnit/LastTest 与六 marker 交叉核，不挪父笔通过。当前只定内部实现边界，不报 SDK 后台 Job 已交付。
+
+## e934 关闭路径修订
+
+本头远端 CI `37110146170` 的 macOS combined 原六案四过两败；`clock==0` 共三次读到 1。原日志 job `111166354780`，SHA256 `be56afe104ab0edad5cbed0ef8d121443386fc592a238131ff4f132b6d56abe1`。
+
+实际 Shutdown 仍调用旧 `PumpLocked`，它先跑 `CheckDeadlinesLocked`，即使旧 jobs 为空也调用宿主 clock。capacity 在 Shutdown 后沿用计数；close 在同次 Shutdown 后查两回，三处红与这条生产链相符。构造只收 clock source，没有调用它。
+
+新 registration-only Shutdown 跳过旧业务 Pump；serial 排空、writer 退场、锁外 capture 销毁和关闭回执照原序。旧默认域仍跑原 Pump。六案、六 marker、`clock/executor/Gate/thread==0`、所有原断言与时间帽均保，不把计数改成 1。旧 e934 首红原件另封；修订源须取全新远端 CI，本地仍不跑原生。

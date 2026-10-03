@@ -1396,7 +1396,9 @@ bool ToolJobCoordinator::Shutdown() {
                     else settled = false;
                 }
             }
-            impl_->PumpLocked();
+            // The registration-only table has no business jobs/deadlines.
+            // Do not enter the legacy pump or invoke its host clock on close.
+            if (!impl_->prepared_context) impl_->PumpLocked();
             settled = settled && std::all_of(impl_->jobs.begin(), impl_->jobs.end(), [](const auto& item) {
                 // Passive recovery projections own no live worker. Closing
                 // them is not a receipt for their historical execution gaps.
