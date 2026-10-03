@@ -161,11 +161,11 @@ int CompareSemVer(const SemVer& a, const SemVer& b) {
             return digit_a ? -1 : 1;  // 数字标识符低于字母标识符
         }
         if (digit_a && digit_b) {
-            std::int64_t va = 0;
-            std::int64_t vb = 0;
-            for (const char c : sa) va = va * 10 + (c - '0');
-            for (const char c : sb) vb = vb * 10 + (c - '0');
-            if (va != vb) return va < vb ? -1 : 1;
+            // Parsed numeric identifiers are canonical (no leading zero), but
+            // may have arbitrarily many digits. Compare without integer casts.
+            if (sa.size() != sb.size()) return sa.size() < sb.size() ? -1 : 1;
+            const int cmp = sa.compare(sb);
+            if (cmp != 0) return cmp < 0 ? -1 : 1;
         } else {
             const int cmp = sa.compare(sb);
             if (cmp != 0) return cmp < 0 ? -1 : 1;
