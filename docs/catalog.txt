@@ -178,3 +178,4 @@ DOC development/package-prerelease-order.md
 DOC development/sdk-completion-integration.md
 DOC development/job-start-transaction.md
 DOC development/result-store-fixture-owner.md
+DOC development/runner-release-diagnostic.md

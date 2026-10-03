@@ -55,3 +55,4 @@ git diff --check
 - [SDK 当前模块组合验收](sdk-completion-integration.md)
 - [Job 启动事务](job-start-transaction.md)
 - [结果仓夹具目录拥有与清场](result-store-fixture-owner.md)
+- [Runner Release 拒绝诊断与失败原件](runner-release-diagnostic.md)

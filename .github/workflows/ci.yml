@@ -148,7 +148,7 @@ jobs:
                 worker_tests=$worker_present
                 runner_tests=$runner_present
                 code=true ;;
-              scripts/ci/tests/test_runner_only_boundary.py)
+              scripts/ci/tests/test_runner_only_boundary.py|tests/unit/job_runner/test_runner_release_diagnostic.cpp|scripts/ci/check_runner_release.py|scripts/ci/tests/test_runner_release_gate.py)
                 cross_platform=true
                 runner_tests=$runner_present
                 code=true ;;
@@ -761,6 +761,23 @@ jobs:
           path: build/test-evidence/release-query/
           if-no-files-found: error
 
+      - name: Run native Runner Release diagnostics
+        if: needs.changes.outputs.runner_tests == 'true'
+        shell: bash
+        run: |
+          cmake --build build --config Release --target luban_runner_release_tests -j 4
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_runner_release_gate.py
+          "$PY" scripts/ci/check_runner_release.py --build-dir build
+
+      - name: Upload Runner Release evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-release-${{ matrix.name }}
+          path: build/test-evidence/runner-release/
+          if-no-files-found: error
+
       - name: Run original CLI updater lock regressions
         shell: bash
         run: |
@@ -1185,6 +1202,22 @@ jobs:
         with:
           name: release-query-linux-manylinux
           path: build/test-evidence/release-query/
+          if-no-files-found: error
+
+      - name: Run native Runner Release diagnostics
+        if: needs.changes.outputs.runner_tests == 'true'
+        run: |
+          cmake --build build --target luban_runner_release_tests -j "$(nproc)"
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_runner_release_gate.py
+          "$PY" scripts/ci/check_runner_release.py --build-dir build
+
+      - name: Upload Runner Release evidence
+        if: always() && needs.changes.outputs.runner_tests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-release-linux-manylinux
+          path: build/test-evidence/runner-release/
           if-no-files-found: error
 
       - name: Run original CLI updater lock regressions

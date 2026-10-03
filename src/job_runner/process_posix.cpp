@@ -160,9 +160,16 @@ void Process::Release() {
     char release = 'g';
     ssize_t count;
     do { count = write(impl_->gate, &release, 1); } while (count < 0 && errno == EINTR);
+    const int failure = count < 0 ? errno : 0;
     close(impl_->gate);
     impl_->gate = -1;
-    if (count != 1) throw Error("runner.launch_failed");
+    if (count != 1) {
+        // Capture the write result before close can change errno. Never include
+        // command, environment or authentication material in this diagnostic.
+        std::cerr << "runner.release_failed stage=release syscall=write count=" << count
+                  << " errno=" << failure << '\n';
+        throw Error("runner.launch_failed");
+    }
 }
 void Process::Cancel() {
     if (impl_->exit || impl_->child == 0) return;
