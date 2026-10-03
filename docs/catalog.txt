@@ -171,3 +171,4 @@ DOC development/sdk-plan-atomic-diagnostic.md
 DOC development/updater-lock-ready.md
 DOC development/sdk-plan-short-reject.md
 DOC development/job-start-transaction.md
+DOC development/job-hold-recovery.md

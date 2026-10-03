@@ -48,3 +48,4 @@ git diff --check
 - [Updater 活持锁夹具就绪](updater-lock-ready.md)
 - [SDK 冻结计划短拒重试](sdk-plan-short-reject.md)
 - [Job 启动事务](job-start-transaction.md)
+- [显式 Hold Recovery](job-hold-recovery.md)
