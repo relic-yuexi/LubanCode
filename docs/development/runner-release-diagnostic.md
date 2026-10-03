@@ -39,3 +39,13 @@
 这笔只移除观测到的新链接边。专用程序复用原 `tests/support/main.cpp` 与原 Release CPP，两份源码不改；只链接实际 `luban_job_runner_client` 与 doctest，不另造跨域静库，不引 SDK、App、Config 或 engine。原巨型 CLI 测试不再编入这册，也不再因这册链接 Runner client。原 CTest 名、来源过滤、一案全部断言、180 秒 CTest 时限、内部十秒/40 毫秒等待与两枚平台标记照旧。checker 只准新专用 binary，拒旧巨型 binary 与来源借用。
 
 验收要看新头三平台全量与独立 Release 原件，并核 Mac AppCommands 27 案全部实过。SDK-only、Runner-only 目标图与安装仍走原路；本笔没有启动重试或生产行为变更。`4f63bd53` 的三案红与原日志另封，不拿新头成功倒推旧因。
+
+## Windows 正常 Release 夹具入口
+
+`ac71846a`、CI `37096054943` 的 Windows 专用程序构建成功。原一案在零退出断言处见实际退出码 `1`，一案失败、七条断言六过。Release 没抛错，第二次 Poll 返回相同结果；其后全量 Test 跳过。原日志和失败 ZIP 已另封，日志 SHA 为 `12bfda640f759156000fd118d45174827480218de65019c2d8470f6373e6e099`。
+
+夹具用了 `cmd.exe /c exit 0`，生产 Quote 逐参数加引号；cmd 另有命令语法。子进程 stdout/stderr 没有上传，目录收场时已移除，不能把这条可疑路径写成唯一根因。
+
+本次只把 Windows 正常对照换成实际 `GetModuleFileNameW` 返回的专用程序，传 `--help`。`tests/support/main.cpp` 用原 doctest main；帮助入口退出，不递归执行测试案。实际模块路径先核非空、未截断，再交同一生产 Process 创建、Release、等待和 Poll。保原零退出、第二次 Poll、进程句柄收场、十秒/40 毫秒等待、一案、七条断言、180 秒 CTest 时限和平台标记。生产 Quote、Process 与 POSIX 故障对照不改。
+
+新头仍须远端三平台原件。不能把本地静读写成子进程实跑，也不能拿旧 Linux/macOS 成功代验新源。
