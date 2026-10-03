@@ -46,6 +46,8 @@ SDK 额外明确禁 `print`，免得脚本向 Worker 的协议 stdout 写字节�
 
 冻结声明含目录与精确入口、预期/实际工具名、源码摘要、schema、Whitelisted 画像和三项预算。默认关闭也须有明确新场声明。聚合现有 opening gate，不能替换 Skills/Memory/Subagents 等绑定。新场 under-owner 落冻结计划，成功才写 system 绑定；恢复省略沿旧计划，显式变化、缺件、入口漂移、坏声明或坏绑定拒绝，不静默升级旧无计划会话。
 
+校绑定还要逐枚核场身份：初始 system、每条已采用 revision 的 system、当前有效 system 均须归 `resume_session_id`；不能只信卷首身份或相同指纹。真正不存在的恢复目录仍报既有 `sdk.session.open_failed`。目录已有但链接、不可读或材料坏了，须沿 `sdk.lua.plan_invalid` 拒绝，不退成旧无计划。
+
 静态材料检查可在 MCP 之前；独占 owner 下恢复校准必须在工具、模型和续账之前。当前资源装配可能先连 MCP，本合同不虚称整条开场已在 MCP 之前，也不允许为读取失败去调用脚本工具。
 
 恢复从同份冻结源码构造新 VM，不回放历史工具，不恢复先前 Lua globals/闭包。运行中保留本场 VM 状态；跨 Close 的 Lua 状态持久化另批。旧工具结果与真实模型输入仍从既有 V3 raw/formal/selected/context/prepared 原链读取，不拿源码 fingerprint 冒充运行状态或 Close 回执。
