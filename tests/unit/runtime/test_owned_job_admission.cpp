@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -306,6 +307,7 @@ TEST_CASE("Owned Job loop pairs missing capability before early registration whi
     auto writer = trajectory::v3::V3Writer::Start(journal, "20261003-120000-OWNED", "run-000001", "system");
     REQUIRE(writer.has_value()); std::atomic<unsigned> auth{0}, execute{0}, origin{0};
     runtime::AsyncToolRuntime::Hooks hooks; hooks.writer = &*writer;
+    hooks.writer_mutex = std::make_shared<std::recursive_mutex>();
     hooks.auth = [&](const auto&, const auto&) { ++auth; return tools::JobAuthDecision{true, false, {}}; };
     hooks.executor = [&](const auto&) { ++execute; return tools::Tool::Result{"unexpected worker", false}; };
     hooks.call_origin_resolver = [&](const auto&) -> std::optional<tools::JobStartRequest> { ++origin; return std::nullopt; };
@@ -345,18 +347,22 @@ TEST_CASE("Owned Job rejection with a real unconfirmed writer receipt stops same
         if (variant == 2) wiring.on_pre_tool_use_hook = [&](const auto&, const auto&, const auto&) {
             ++counts->pre; cancel.store(true); return runtime::ToolHookDecision{};
         };
-        std::string receipt_error; unsigned attempted = 0; bool actual_io_failed = false;
+        std::string receipt_error; unsigned attempted = 0; bool actual_write_unconfirmed = false;
+        std::optional<trajectory::v3::WriteReceipt> actual_receipt;
         wiring.on_tool_trace = [&](const agent::ToolTraceEvent& event) {
             if (event.kind != agent::ToolTraceEventKind::ExecutionFinished || event.tool_use_id != "call-owned") return;
             ++attempted; armed = true;
-            const auto receipt = action.Reject(*writer, "preparation-refused");
-            actual_io_failed = receipt.status == trajectory::v3::WriteReceipt::Status::IoFailed;
+            auto receipt = action.Reject(*writer, "preparation-refused");
+            actual_write_unconfirmed = receipt.status != trajectory::v3::WriteReceipt::Status::Committed && writer->broken();
             receipt_error = receipt.error_code;
+            actual_receipt.emplace(std::move(receipt));
         };
         wiring.action_receipt_failure_reason = [&] { return receipt_error; };
         agent::ToolTraceContext trace; trace.execution_id = "refusal-owned";
         const auto refused = agent::PrepareOwnedToolInput(registry, Call(), wiring, {}, {}, &trace, &cancel);
-        REQUIRE_FALSE(refused.has_value()); CHECK(actual_io_failed); CHECK(attempted == 1); CHECK(injected == 1);
+        REQUIRE_FALSE(refused.has_value()); CHECK(actual_write_unconfirmed); CHECK(attempted == 1); CHECK(injected == 1);
+        REQUIRE(actual_receipt.has_value()); CHECK(actual_receipt->status == trajectory::v3::WriteReceipt::Status::Rejected);
+        CHECK(actual_receipt->error_code == "v3writer.injected"); CHECK(writer->broken());
         CHECK(refused.error().execution_control == tools::ExecutionControl::StopIndeterminate);
         CHECK(refused.error().content.find(receipt_error) != std::string::npos);
         CHECK(refused.error().outcome == (variant == 0 ? "unavailable" : "cancelled_before_start"));
@@ -377,19 +383,23 @@ TEST_CASE("Owned Job rejection with a real unconfirmed writer receipt stops same
     registry.Register(std::make_unique<Probe>(counts, "job_probe", false));
     registry.Register(std::make_unique<Probe>(counts, "inline_probe", false));
     Backend backend; BatchGate gate; agent::TurnWiring wiring; wiring.tool_batch_gate = &gate; wiring.turn_id = "turn-owned";
-    std::string receipt_error; unsigned attempted = 0; bool actual_io_failed = false;
+    std::string receipt_error; unsigned attempted = 0; bool actual_write_unconfirmed = false;
+    std::optional<trajectory::v3::WriteReceipt> actual_receipt;
     wiring.on_tool_trace = [&](const agent::ToolTraceEvent& event) {
         if (event.kind != agent::ToolTraceEventKind::ExecutionFinished || event.tool_use_id != "call-owned") return;
         ++attempted; armed = true;
-        const auto receipt = action.Reject(*writer, "missing-owned-capability");
-        actual_io_failed = receipt.status == trajectory::v3::WriteReceipt::Status::IoFailed;
+        auto receipt = action.Reject(*writer, "missing-owned-capability");
+        actual_write_unconfirmed = receipt.status != trajectory::v3::WriteReceipt::Status::Committed && writer->broken();
         receipt_error = receipt.error_code;
+        actual_receipt.emplace(std::move(receipt));
     };
     wiring.action_receipt_failure_reason = [&] { return receipt_error; };
     agent::Agent agent(backend, registry, Profile());
     const auto outcome = agent.Run("reject without unsafe continuation", wiring);
     const auto error = outcome.has_value() ? std::string{} : outcome.error(); REQUIRE_MESSAGE(outcome.has_value(), error);
-    CHECK(actual_io_failed); CHECK(attempted == 1); CHECK(injected == 1); CHECK_FALSE(receipt_error.empty());
+    CHECK(actual_write_unconfirmed); CHECK(attempted == 1); CHECK(injected == 1); CHECK_FALSE(receipt_error.empty());
+    REQUIRE(actual_receipt.has_value()); CHECK(actual_receipt->status == trajectory::v3::WriteReceipt::Status::Rejected);
+    CHECK(actual_receipt->error_code == "v3writer.injected"); CHECK(writer->broken());
     CHECK(outcome->side_effect_indeterminate); CHECK(outcome->side_effect_error == receipt_error);
     CHECK(backend.requests.size() == 1); CHECK(counts->execute == 0); CHECK(gate.early == 0); CHECK(gate.take == 0);
     CHECK_FALSE(action.started()); CHECK(action.terminal() == trajectory::v3::ToolActionSession::Terminal::None);
