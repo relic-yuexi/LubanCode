@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -179,6 +180,129 @@ void Started(const fs::path& cwd, const std::string& tag) {
     INFO("actual started marker: " << text);
     CHECK(MatchesStarted(text, cwd, tag));
 }
+
+std::string DiagnosticHex(const std::string& bytes) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string hex;
+    hex.reserve(bytes.size() * 2);
+    for (const unsigned char byte : bytes) {
+        hex.push_back(digits[byte >> 4]);
+        hex.push_back(digits[byte & 15]);
+    }
+    return hex;
+}
+nlohmann::json DiagnosticMarker(const fs::path& path) {
+    nlohmann::json record = {{"path", Utf8(path)}};
+    std::error_code error;
+    const auto status = fs::symlink_status(path, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && !fs::exists(status))) {
+        record["state"] = "absent";
+        return record;
+    }
+    if (error) {
+        record["state"] = "status_failed";
+        record["error"] = error.message();
+        return record;
+    }
+    if (!fs::is_regular_file(status)) {
+        record["state"] = "not_regular";
+        return record;
+    }
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream.is_open()) {
+        record["state"] = "open_failed";
+        return record;
+    }
+    const std::string bytes{std::istreambuf_iterator<char>(stream),
+                            std::istreambuf_iterator<char>()};
+    record["state"] = stream.bad() ? "read_failed" : "read";
+    record["size_bytes"] = bytes.size();
+    record["bytes_hex"] = DiagnosticHex(bytes);
+    return record;
+}
+std::mutex& DiagnosticMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+void InvocationDiagnostic(const char* phase, const nlohmann::json& input,
+                          const ToolExecutionContext* context, const fs::path& cwd,
+                          const std::string& tag, std::chrono::milliseconds elapsed,
+                          const Tool::Result* result = nullptr,
+                          const char* exception = nullptr) noexcept {
+    // The values and marker bytes belong to this actual call. Diagnostic reads
+    // never replace Started/WaitStarted or any result assertion below.
+    try {
+        nlohmann::json record = {{"phase", phase}, {"shell", input.at("shell")},
+            {"tag", tag}, {"input", input}, {"cwd", Utf8(cwd)},
+            {"entry", context ? "explicit_context" : "legacy_direct"},
+            {"elapsed_ms", elapsed.count()}, {"limits", nullptr},
+            {"started", DiagnosticMarker(cwd / (tag + ".started"))},
+            {"done", DiagnosticMarker(cwd / (tag + ".done"))}};
+        if (context && context->command_limits) {
+            record["limits"] = {{"timeout_ms", context->command_limits->timeout_ms},
+                {"max_output_bytes", context->command_limits->max_output_bytes}};
+        }
+        if (context) {
+            record["cancel_present"] = context->cancel != nullptr;
+            if (context->cancel) record["cancel_requested"] = context->cancel->load();
+        }
+        if (result) {
+            record["result"] = {{"is_error", result->is_error},
+                {"outcome", result->outcome}, {"error_code", result->error_code},
+                {"details", result->details}, {"content", result->content},
+                {"content_size_bytes", result->content.size()},
+                {"content_hex", DiagnosticHex(result->content)}};
+        }
+        if (exception) record["exception"] = exception;
+        // Hex retains original bytes even if an error contains invalid UTF-8.
+        const std::string line = record.dump(-1, ' ', true,
+            nlohmann::json::error_handler_t::replace);
+        std::lock_guard lock(DiagnosticMutex());
+        std::fprintf(stderr, "[command-limits-invocation] %s\n", line.c_str());
+        std::fflush(stderr);
+    } catch (...) {
+        // Diagnostics must not change the tool outcome or unwind its cleanup.
+        try {
+            std::lock_guard lock(DiagnosticMutex());
+            std::fprintf(stderr, "[command-limits-invocation] diagnostic_unavailable phase=%s\n", phase);
+            std::fflush(stderr);
+        } catch (...) {}
+    }
+}
+template <typename Call>
+Tool::Result RecordedInvocation(const nlohmann::json& input,
+                                const ToolExecutionContext* context,
+                                const fs::path& cwd, const std::string& tag, Call call) {
+    InvocationDiagnostic("before", input, context, cwd, tag, 0ms);
+    const auto start = std::chrono::steady_clock::now();
+    const auto elapsed = [&] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start);
+    };
+    try {
+        auto result = call();
+        InvocationDiagnostic("after", input, context, cwd, tag, elapsed(), &result);
+        return result;
+    } catch (const std::exception& error) {
+        InvocationDiagnostic("threw", input, context, cwd, tag, elapsed(), nullptr, error.what());
+        throw;
+    } catch (...) {
+        InvocationDiagnostic("threw", input, context, cwd, tag, elapsed(), nullptr, "non_std_exception");
+        throw;
+    }
+}
+Tool::Result ExecuteRecorded(RunCommandTool& tool, const nlohmann::json& input,
+                             const ToolExecutionContext& context, const fs::path& cwd,
+                             const std::string& tag) {
+    return RecordedInvocation(input, &context, cwd, tag,
+        [&] { return tool.execute(input, context); });
+}
+Tool::Result ExecuteRecorded(RunCommandTool& tool, const nlohmann::json& input,
+                             const fs::path& cwd, const std::string& tag) {
+    return RecordedInvocation(input, nullptr, cwd, tag,
+        [&] { return tool.execute(input); });
+}
 void Mark(const char* path) {
     std::printf("[command-limits-path] %s\n", path);
     std::fflush(stdout);
@@ -208,7 +332,7 @@ TEST_CASE("RunCommand execution limits: exact ASCII cap and one-byte overflow us
     for (const auto& shell : Shells()) {
         const std::string exact = shell + "-exact";
         const auto exact_input = probe.Input(directory.path, shell, exact, 128, 0);
-        const auto success = tool.execute(exact_input, Context(15000, 128));
+        const auto success = ExecuteRecorded(tool, exact_input, Context(15000, 128), directory.path, exact);
         REQUIRE_FALSE(success.is_error);
         CHECK(success.outcome == "succeeded");
         Limits(success, 15000, 128);
@@ -217,7 +341,7 @@ TEST_CASE("RunCommand execution limits: exact ASCII cap and one-byte overflow us
         CHECK(success.content.ends_with(std::string(126, 'A') + "\r\n"));
         const std::string excess = shell + "-excess";
         const auto excess_input = probe.Input(directory.path, shell, excess, 129, 60000);
-        const auto rejected = tool.execute(excess_input, Context(15000, 128));
+        const auto rejected = ExecuteRecorded(tool, excess_input, Context(15000, 128), directory.path, excess);
         REQUIRE(rejected.is_error);
         CHECK(rejected.outcome == "output_limit");
         CHECK(rejected.error_code == "process.output_limit");
@@ -251,7 +375,7 @@ TEST_CASE("RunCommand execution limits: started host timeout and tighter model t
             auto input = probe.Input(directory.path, shell, tag, 128, 60000);
             const std::uint64_t actual = model_tightens ? 5000 : 8000;
             input["timeout_ms"] = model_tightens ? 5000 : 20000;
-            const auto result = tool.execute(input, Context(8000, 1024));
+            const auto result = ExecuteRecorded(tool, input, Context(8000, 1024), directory.path, tag);
             REQUIRE(result.is_error);
             CHECK(result.outcome == "timed_out");
             CHECK(result.error_code == "process.timeout");
@@ -277,7 +401,9 @@ TEST_CASE("RunCommand execution limits: actual started cancellation returns afte
         const auto context = Context(20000, 1024, &cancel);
         std::future<Tool::Result> future;
         FinishCalls cleanup{{&cancel}, {&future}};
-        future = std::async(std::launch::async, [&] { return tool.execute(input, context); });
+        future = std::async(std::launch::async, [&] {
+            return ExecuteRecorded(tool, input, context, directory.path, tag);
+        });
         REQUIRE(WaitStarted(directory.path, tag));
         cancel.store(true, std::memory_order_release);
         REQUIRE(future.wait_for(10s) == std::future_status::ready);
@@ -321,7 +447,7 @@ TEST_CASE("RunCommand execution limits: four concurrent contexts share one tool 
                          cwds[2] / "context-2.release", cwds[3] / "context-3.release"}};
     for (std::size_t i = 0; i < futures.size(); ++i) {
         futures[i] = std::async(std::launch::async, [&, i] {
-            return tool.execute(inputs[i], contexts[i]);
+            return ExecuteRecorded(tool, inputs[i], contexts[i], cwds[i], "context-" + std::to_string(i));
         });
     }
     for (std::size_t i = 0; i < futures.size(); ++i) {
@@ -374,7 +500,8 @@ TEST_CASE("RunCommand execution limits: invalid images and background escape rou
     for (std::size_t i = 0; i < invalid.size(); ++i) {
         const std::string tag = "invalid-" + std::to_string(i);
         auto context = Context(invalid[i].timeout_ms, invalid[i].max_output_bytes);
-        const auto result = tool.execute(probe.Input(directory.path, Shells()[i % 2], tag, 128, 0), context);
+        const auto result = ExecuteRecorded(tool,
+            probe.Input(directory.path, Shells()[i % 2], tag, 128, 0), context, directory.path, tag);
         REQUIRE(result.is_error);
         CHECK(result.error_code == "process.invalid_execution_limits");
         CHECK_FALSE(fs::exists(directory.path / (tag + ".started")));
@@ -385,7 +512,7 @@ TEST_CASE("RunCommand execution limits: invalid images and background escape rou
             auto input = probe.Input(directory.path, shell, tag, 128, 0);
             if (variant == 0) input["run_in_background"] = true;
             else input["max_runtime_ms"] = variant == 1 ? nlohmann::json(nullptr) : nlohmann::json(variant - 2);
-            const auto result = tool.execute(input, Context(15000, 128));
+            const auto result = ExecuteRecorded(tool, input, Context(15000, 128), directory.path, tag);
             REQUIRE(result.is_error);
             CHECK(result.error_code == "process.execution_mode_rejected");
             CHECK_FALSE(fs::exists(directory.path / (tag + ".started")));
@@ -411,7 +538,9 @@ TEST_CASE("RunCommand execution limits: absent image preserves legacy fields and
             input["timeout_ms"] = 15000;
             input["run_in_background"] = false;
             input["max_runtime_ms"] = nullptr; // Legacy ignores this foreground field.
-            const auto result = explicit_context ? tool.execute(input, ToolExecutionContext{}) : tool.execute(input);
+            const auto result = explicit_context
+                ? ExecuteRecorded(tool, input, ToolExecutionContext{}, directory.path, tag)
+                : ExecuteRecorded(tool, input, directory.path, tag);
             REQUIRE_FALSE(result.is_error);
             CHECK(result.outcome == "succeeded");
             CHECK(result.details.at("timeout_ms").get<int>() == 15000);
@@ -435,11 +564,13 @@ TEST_CASE("RunCommand execution limits: absent image preserves legacy fields and
         {"Write-Error 'before-native'; & " + Quote(Utf8(probe.executable), "powershell") +
             " 'bad-argv'; Write-Output 'after-native'", 20, "after-native"}
     }};
+    std::size_t script_index = 0;
     for (const auto& script : scripts) {
         INFO("actual scoped PowerShell command: " << script.command);
         const nlohmann::json input = {{"command", script.command}, {"shell", "powershell"},
             {"cwd", Utf8(directory.path)}};
-        const auto result = tool.execute(input, Context(15000, 4096));
+        const auto result = ExecuteRecorded(tool, input, Context(15000, 4096),
+            directory.path, "scoped-wrapper-" + std::to_string(script_index++));
         CHECK(result.is_error == (script.exit_code != 0));
         CHECK(result.outcome == (script.exit_code == 0 ? "succeeded" : "process_exit_nonzero"));
         REQUIRE(result.details.contains("exit_code"));
