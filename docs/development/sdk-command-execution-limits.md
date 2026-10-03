@@ -33,3 +33,11 @@ Windows 首轮运行验收发现：旧前台 PowerShell wrapper 把整段输出�
 超额 probe 输出后仍停留 60 秒；宿主帽 15 秒。PowerShell 必须先报输出超限，不能靠等退出或放宽时限过验收。Windows 同笔补验流式 wrapper 的正常输出、cmdlet ErrorRecord、显式 exit 与 native 非零码优先；六场原册、原断言和预算均留。
 
 新来源须登记真实 `unit.tools` 与 `sdk.focused` 两套 CTest；focused 35、必需 ASan 40、安装消费仍 25。保留原来源、完整 argv、非零原生断言、JUnit、资源锁及预算。真 CI 原件核源头、checkout/merge 同树；不借 #308 或其它叶笔绿。只在远端编译和跑原生，本地只读、文档与纯数据门。
+
+## 本轮调用诊断
+
+`c0682677` 的 Windows 全量原件中，同源 SDK 册有两场失败：PowerShell 恰到帽的调用报错，超时场未见真实 started 文件。前一份 focused 与后一份 CLI 同源册均过，不能代这份全量红账，也不能据此断定负载、启动或捕获哪一处出了错。原输出没有留下报错调用的完整结果，也没有标出缺 started 那笔的 shell 与 tag。
+
+本笔只给原生册添逐调用资料。调用前后以独立 `[command-limits-invocation]` 前缀，记真实 shell、tag、完整入参、当次上下文画像、结果 `is_error/outcome/error_code/details/content` 和耗时；started/done 文件分别记存在状态、读取状态与原字节。并发调用逐行写出，资料归本次调用，不存工具或进程借用。诊断读取失败也留说明，不替原断言作判断。
+
+六场原册、六条成功标记、所有断言、时限、捕获帽、会合闸和失败清场均不改。PowerShell 实现、probe、注册名册与 CI 门也不改。诊断不是修复，更不算本头原生已过；另推鲜头后，只认远端实际调用与失败原件。本地只做结构核对、文档与 diff 检查，不起编译器、CTest、probe 或项目 PowerShell。
