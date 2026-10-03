@@ -11,8 +11,9 @@
 | Recovery #290 | `3e7f653d` | same-ID 锁内 owned 前缀、有限预检、真实对象身份复核 |
 | Capture 夹具 #304 | `19a82704` | main 先交还引用，再放真 worker 退出；原闸、预算和断言保留 |
 | 长路径夹具 #306 | `a777ad8a` | create-new 才认领，extended 根清场留首错，原两册与路径长度保留 |
-| Runner 诊断 #299 | `ac71846a` | 原 Release 源独立测试目标、真实 errno/count、原外码与状态不改 |
+| Runner 诊断 #299 | `ac71846a`，修件 `9907672b` / `b260079a` | 原 Release 源独立目标、真实 errno/count；Windows 用同一实际程序帮助入口核正常零退出，保原7断言；POSIX9断言照旧 |
 | Transcript 夹具 #298 | `ea86327a` | 无活执行时固定真实 Done 快照；原渲染器、原14册及断言保留 |
+| 子历史阶段诊断 | `74154a19` | 原8案、11个实际Rig、原断言和180秒预算照留；owned固定stderr标记夹住真实执行与成员析构，失败仅报已到阶段 |
 
 解决冲突只取各笔已审入口与门的并集。Package 两 CPP 与 Lua 共用核心各归原唯一 owner；SDK 测试只加合同列明的中立源，不放开递归宿主 include。Action/Lua/Recovery 相交处保持同一 SessionExecution 与 opening lock；不再养一份 Agent、审批表或恢复器。
 
