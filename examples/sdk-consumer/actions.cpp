@@ -242,7 +242,7 @@ void ActionCase(const std::string& name, const fs::path& base) {
         auto post = Definition("post", ext::Point::PostAction);
         auto next_saved = std::make_shared<ext::Next>();
         options.extensions.push_back(Registration(state, {first, second, post},
-            [next_saved](const ext::Context& context, const ext::Input& input, ext::Next next) -> sdk::Result<ext::HandlerReturn> {
+            [next_saved, state](const ext::Context& context, const ext::Input& input, ext::Next next) -> sdk::Result<ext::HandlerReturn> {
                 if (context.hook_name == "first") {
                     *next_saved = next;
                     return Continue(next, R"({"arguments":{"value":"adopted"}})");
@@ -251,6 +251,8 @@ void ActionCase(const std::string& name, const fs::path& base) {
                     Check(input.json == R"({"arguments":{"value":"adopted"}})", "Next did not feed the downstream Action");
                     return Continue(next);
                 }
+                std::cerr << "[sdk-action-post] input=" << input.json << " factories=" << state->factories.load()
+                          << " models=" << state->models.load() << " tools=" << state->tools.load() << '\n';
                 Check(input.json.find("\"outcome\":\"succeeded\"") != std::string::npos &&
                     input.json.find("\"isError\":false") != std::string::npos &&
                     input.json.find("\"errorCode\":\"\"") != std::string::npos,
@@ -484,7 +486,12 @@ void ActionRestore(const fs::path& base, const std::string& id, bool reject) {
     const auto directory = SessionDir(rig.root, id), journal = directory / (id + ".jsonl");
     const auto bytes = Read(journal); auto session = rig.runtime->OpenSession(std::move(options));
     if (reject) {
-        Check(!session && session.error().code == "sdk.action.open_failed", "bad Action binding entered the real Session");
+        std::cerr << "[sdk-action-binding] actual_open=" << session.has_value()
+                  << " error_code=" << (session ? std::string{} : session.error().code)
+                  << " factories=" << state->factories.load() << " models=" << state->models.load()
+                  << " tools=" << state->tools.load() << " journal_unchanged=" << (Read(journal) == bytes) << '\n';
+        Check(!session, "bad Action binding entered the real Session");
+        Check(session.error().code == "sdk.action.plan_invalid", "Action binding rejected at the wrong phase: " + session.error().code);
         Check(state->factories == 0 && Read(journal) == bytes, "bad Action binding wrote the old journal or ran a factory");
     } else {
         auto opened = Take(std::move(session), "valid binding restore"); Take(opened->Close(), "Close valid binding restore");

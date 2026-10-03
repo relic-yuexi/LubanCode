@@ -1,5 +1,6 @@
 #include "child_observation_fixture.hpp"
 
+#include <algorithm>
 #include <array>
 #include <map>
 #include <set>
@@ -229,6 +230,33 @@ fs::path ActionDirectory(const fs::path& base, const std::string& id) {
         }
     REQUIRE_FALSE(result.empty()); return result;
 }
+void AdoptedActionSystem(const v3::V3Ledger& ledger, const std::string& session_id, const char* variant) {
+    REQUIRE(ledger.session_id == session_id);
+    REQUIRE_FALSE(ledger.messages.empty());
+    const auto& initial = ledger.messages.front();
+    REQUIRE(initial.seq == 1);
+    REQUIRE(initial.message.value("role", std::string{}) == "system");
+    REQUIRE_FALSE(initial.message_id.empty());
+    const auto started = std::find_if(ledger.events.begin(), ledger.events.end(), [](const auto& event) {
+        return event.kind == v3::EventKindV3::SessionStarted;
+    });
+    REQUIRE(started != ledger.events.end());
+    const auto& chain = started->payload.at("context").at("contextChain");
+    REQUIRE(chain.is_array());
+    REQUIRE_FALSE(chain.empty());
+    const auto started_ref = chain.front().at("messageRef").get<std::string>();
+    REQUIRE(started_ref == initial.message_id);
+    REQUIRE_FALSE(ledger.revision_chains.empty());
+    for (const auto& [revision, adopted] : ledger.revision_chains) {
+        REQUIRE(adopted.first == initial.message_id);
+        std::cout << "[sdk-action-binding-ref] variant=" << variant << " revision=" << revision
+                  << " system_ref=" << adopted.first << '\n';
+    }
+    REQUIRE(ledger.context.system_message_ref == initial.message_id);
+    std::cout << "[sdk-action-binding-ref] variant=" << variant << " seq=" << initial.seq
+              << " initial_ref=" << initial.message_id << " started_ref=" << started_ref
+              << " effective_ref=" << ledger.context.system_message_ref << '\n';
+}
 std::string RehashBinding(const std::string& original, unsigned variant) {
     std::vector<Json> rows; std::istringstream input(original); std::string line;
     while (std::getline(input, line)) { REQUIRE_FALSE(line.empty()); rows.push_back(Json::parse(line)); }
@@ -252,11 +280,17 @@ void OwnedOpeningGate() {
     Directory directory; const auto id = lubancore_consumer::ActionSeed(directory.root);
     const auto own = ActionDirectory(directory.root, id), journal = own / (id + ".jsonl"), plan = own / "sdk-extension-plan.json";
     const auto original = Read(journal), saved_plan = Read(plan);
+    const auto original_ledger = v3::ReadV3Ledger(journal);
+    const auto original_error = original_ledger.has_value() ? std::string{} : original_ledger.error();
+    REQUIRE_MESSAGE(original_ledger.has_value(), original_error);
+    AdoptedActionSystem(*original_ledger, id, "original");
     for (unsigned variant = 0; variant < 2; ++variant) {
         const auto changed = RehashBinding(original, variant); Write(journal, changed);
         const auto readable = v3::ReadV3Ledger(journal);
         const auto error = readable.has_value() ? std::string{} : readable.error();
         REQUIRE_MESSAGE(readable.has_value(), error);
+        AdoptedActionSystem(*readable, id, variant == 0 ? "missing-binding" : "wrong-fingerprint");
+        REQUIRE(readable->messages.front().message_id == original_ledger->messages.front().message_id);
         CHECK_NOTHROW(lubancore_consumer::ActionRestore(directory.root, id, true)); CHECK(Read(journal) == changed);
     }
     Write(journal, original);
