@@ -142,6 +142,62 @@ class BoundaryTests(unittest.TestCase):
         report = self.check()
         self.assertEqual(report["status"], "passed", report["violations"])
 
+    def job_post_reference(self, private=False):
+        reference = "tests/unit/hooks/test_middleware_job_post_contract.cpp" if private else "src/sdk/extensions.cpp"
+        self.source_file(reference, '#include "hooks/middleware_action_contract.hpp"\n')
+        self.source_file("src/hooks/middleware_action_contract.hpp", '#include "hooks/middleware.hpp"\n')
+        self.source_file("src/hooks/middleware.hpp", "#pragma once\n")
+        target = {"id": "job_post_reference", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        if private:
+            self.flags["BUILD_TESTING"] = "ON"
+            self.targets.append(target)
+        else:
+            self.targets[0]["sources"].extend(target["sources"])
+
+    def test_job_post_contract_header_is_scanned_without_public_exposure(self):
+        for private in (False, True):
+            with self.subTest(private=private):
+                self.job_post_reference(private)
+                report = self.check(testing=private)
+                self.assertEqual(report["status"], "passed", report["violations"])
+                self.assertIn("src/hooks/middleware_action_contract.hpp", report["scannedProjectFiles"])
+        self.source_file("include/lubancore/core.hpp", '#include "hooks/middleware_action_contract.hpp"\n')
+        self.assert_rejected(self.check(testing=True), "exposes non-public include")
+
+    def test_job_post_contract_header_rejects_transitive_host_dependencies(self):
+        self.job_post_reference(private=True)
+        self.source_file("src/hooks/middleware_action_contract.hpp", '#include "neutral/job_post_bridge.hpp"\n')
+        for host in ("app/turn_runner.hpp", "channel/manager.hpp", "updater/updater.hpp"):
+            with self.subTest(host=host):
+                self.source_file("src/neutral/job_post_bridge.hpp", f'#include "{host}"\n')
+                self.source_file("src/" + host, "#pragma once\n")
+                self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_job_post_contract_preserves_stdio_and_global_state_guards(self):
+        self.job_post_reference()
+        for code, reason in (("std::cerr << 1;", "direct host stdio"),
+                             ("printf(\"fixture\");", "direct host stdio"),
+                             ("chdir(\"fixture\");", "process-global setter"),
+                             ("SetEnvironmentVariableW(nullptr, nullptr);", "process-global setter")):
+            with self.subTest(code=code):
+                self.source_file("src/hooks/middleware_action_contract.hpp", code + "\n")
+                self.assert_rejected(self.check(), reason)
+
+    def test_job_post_native_source_allowance_rejects_cli_and_neighbors(self):
+        self.job_post_reference(private=True)
+        target = self.targets[-1]
+        self.flags["BUILD_TESTING"] = "OFF"
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        nearby = "tests/unit/hooks/test_middleware_job_post_contract_extra.cpp"
+        self.source_file(nearby, "int fixture_only;\n")
+        target["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["sources"][0]["path"] = "tests/unit/hooks/test_middleware_job_post_contract.cpp"
+        target["name"] = "lubancode_tests"
+        self.assert_rejected(self.check(testing=True), "host/resource target")
+
     def test_testing_on_does_not_enable_the_cli_test_graph(self):
         self.flags["BUILD_TESTING"] = "ON"
         self.source_file("tests/unit/cli/test_prompt.cpp", "int cli_test;\n")

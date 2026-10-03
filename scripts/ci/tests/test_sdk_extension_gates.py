@@ -709,6 +709,80 @@ class MiddlewareDispatchCauseGateTests(unittest.TestCase):
                 focused.check_middleware_cause_native(bad, self.command)
 
 
+class JobPostReturnGateTests(unittest.TestCase):
+    command = ['/real build/lubancore_sdk_tests', '--source-file=*test_middleware_job_post_contract.cpp']
+
+    def body(self, command=None):
+        command = self.command if command is None else command
+        return "\n".join(('Command: ' + ' '.join('"' + value + '"' for value in command),
+            '[doctest] test cases: 6 | 6 passed | 0 failed',
+            '[doctest] assertions: 100 | 100 passed | 0 failed', 'Test Passed.',
+            *('[middleware-job-post-contract-path] ' + path for path in focused.JOB_POST_PATHS),
+            *('[middleware-job-post-sdk] ' + path for path in focused.JOB_POST_SDK_PATHS)))
+
+    def test_sdk_and_combined_absolute_arguments_and_line_endings(self):
+        for exe in ('/real build/lubancore_sdk_tests', 'C:/real build/lubancode_tests.exe'):
+            command = [exe, self.command[1]]
+            focused.check_job_post_registration(command, exe.replace('\\', '/').split('/')[-1].removesuffix('.exe'))
+            for ending in ('\n', '\r\n'):
+                focused.check_job_post_native(self.body(command).replace('\n', ending), command)
+
+    def test_bad_or_relative_registered_arguments_are_rejected(self):
+        bad = (None, {}, [], self.command[:1], tuple(self.command), [7, self.command[1]],
+               [self.command[0], None], ['lubancore_sdk_tests', self.command[1]],
+               ['../lubancore_sdk_tests', self.command[1]],
+               ['\\real build\\lubancore_sdk_tests', self.command[1]],
+               ['C:real build\\lubancore_sdk_tests', self.command[1]],
+               [self.command[0], '--source-file=*test_middleware_job_post_contract_extra.cpp'],
+               [self.command[0], '--source-file=*test_middleware_dispatch_cause.cpp'],
+               self.command + ['--test-case=one'])
+        for command in bad:
+            with self.subTest(command=command), self.assertRaises(RuntimeError):
+                focused.check_job_post_registration(command)
+            with self.subTest(command=command), self.assertRaises(RuntimeError):
+                focused.check_job_post_native(self.body(), command)
+
+    def test_actual_foreign_path_or_wrong_command_is_rejected(self):
+        for command in (['/foreign build/lubancore_sdk_tests', self.command[1]],
+                        [self.command[0], '--source-file=*test_middleware_dispatch_cause.cpp']):
+            with self.subTest(command=command), self.assertRaises(RuntimeError):
+                focused.check_job_post_native(self.body(command), self.command)
+
+    def test_each_native_and_public_sdk_path_must_finish_once(self):
+        for prefix, paths in (('[middleware-job-post-contract-path] ', focused.JOB_POST_PATHS),
+                              ('[middleware-job-post-sdk] ', focused.JOB_POST_SDK_PATHS)):
+            for path in paths:
+                marker = prefix + path
+                for body in (self.body().replace(marker, ''), self.body() + '\n' + marker,
+                             self.body().replace(marker, 'foreign-owner: ' + marker)):
+                    with self.subTest(path=path), self.assertRaises(RuntimeError):
+                        focused.check_job_post_native(body, self.command)
+
+    def test_roster_assertions_and_success_receipt_cannot_be_empty_or_failed(self):
+        body = self.body()
+        bad = (body.replace('6 | 6 passed', '0 | 0 passed'),
+               body.replace('6 | 6 passed', '5 | 5 passed'),
+               body.replace('6 | 6 passed', '7 | 7 passed'),
+               body.replace('6 passed | 0 failed', '5 passed | 1 failed'),
+               body + '\n[doctest] test cases: 6 | 6 passed | 0 failed',
+               body.replace('100 | 100 passed', '0 | 0 passed'),
+               body.replace('100 passed | 0 failed', '99 passed | 1 failed'),
+               body.replace('[doctest] assertions: 100 | 100 passed | 0 failed', ''),
+               body + '\n[doctest] assertions: 100 | 100 passed | 0 failed',
+               body.replace('Test Passed.', ''), body + '\nTest Passed.')
+        for section in bad:
+            with self.subTest(section=section), self.assertRaises(RuntimeError):
+                focused.check_job_post_native(section, self.command)
+
+    def test_actual_command_cannot_be_missing_duplicated_or_malformed(self):
+        body = self.body()
+        command_line = body.splitlines()[0]
+        for section in (body.replace(command_line, ''), body + '\n' + command_line,
+                        body.replace(command_line, 'Command: "unterminated')):
+            with self.subTest(section=section), self.assertRaises(RuntimeError):
+                focused.check_job_post_native(section, self.command)
+
+
 class ResultStoreWindowsPathsTests(unittest.TestCase):
     summary = "[doctest] test cases: 17 | 17 passed | 0 failed"
     markers = ("[result-store-path] target-extended", "[result-store-path] temporary-threshold",

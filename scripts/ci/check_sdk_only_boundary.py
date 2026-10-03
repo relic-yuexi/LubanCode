@@ -136,6 +136,7 @@ SHARED_SDK_TEST_SOURCES = {
     "tests/unit/runtime/test_owned_job_admission.cpp",
     "tests/unit/runtime/test_middleware_native_receipts.cpp",
     "tests/unit/hooks/test_middleware_dispatch_cause.cpp",
+    "tests/unit/hooks/test_middleware_job_post_contract.cpp",
 }
 SEARCH_PROBE_TARGET = "lubancore_sdk_search_probe"
 SEARCH_PROBE_SOURCE = "tests/support/sdk_search_probe.cpp"
@@ -151,7 +152,8 @@ PRIVATE_TEST_PROBES = {
 PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp", "src/sdk/memory.cpp", "src/sdk/action_dispatch.cpp"}
 # Preserve the SDK state/stdio guard when this implementation moves into a
 # shared internal header. Other runtime process code keeps its existing scope.
-SDK_STATE_BOUNDARY_FILES = {"src/runtime/middleware_deferred_effects.hpp"}
+SDK_STATE_BOUNDARY_FILES = {"src/runtime/middleware_deferred_effects.hpp",
+                            "src/hooks/middleware_action_contract.hpp"}
 TERMINAL_PATH = re.compile(r"^src/platform/(?:console|clipboard|hidden_input|terminal_batch)(?:[_.]|$)")
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"\n]+)[>"]', re.MULTILINE)
 # Keep strings intact while removing comments; URL/regex literals are not comments.
