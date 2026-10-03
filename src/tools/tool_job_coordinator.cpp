@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <deque>
 #include <exception>
+#include <expected>
 #include <limits>
 #include <map>
 #include <stdexcept>
@@ -21,6 +22,7 @@
 
 #include "hooks/hash.hpp"
 #include "platform/log_sink.hpp"
+#include "platform/paths.hpp"
 #include "trajectory/canonical_json.hpp"
 #include "trajectory/v3/result_store.hpp"
 
@@ -153,6 +155,103 @@ struct JobRecord {
     std::optional<JobRecoveryFacts> recovery;
 };
 
+struct PreparedRecord {
+    PreparedJobRegistrationState state = PreparedJobRegistrationState::Unconfirmed;
+    bool revoked = false;
+    std::shared_ptr<PreparedJobFacts> facts;
+};
+
+struct PreparedSource {
+    std::string pending_event_id;
+    std::string admission_event_id;
+};
+
+// Run under the host's real writer serial mutex, without jobs_mutex. These
+// facts come from the verified file, not from a host-created input snapshot.
+std::expected<PreparedSource, std::string> CheckPreparedSource(
+    const trajectory::v3::V3Ledger& ledger, const PreparedJobRequest& request) {
+    const auto& owner = request.owner;
+    const auto* message = ledger.FindMessage(request.assistant_message_ref);
+    if (!message || message->session_id != owner.session_id || message->run_id != owner.run_id ||
+        message->turn_id != request.turn_id || message->step_id != request.step_id ||
+        JsonStr(message->message, "role") != "assistant")
+        return std::unexpected("job.prepared.invalid_declaration");
+    const auto calls = message->message.find("tool_calls");
+    if (calls == message->message.end() || !calls->is_array())
+        return std::unexpected("job.prepared.invalid_declaration");
+    unsigned matching_calls = 0;
+    for (const auto& call : *calls) {
+        if (JsonStr(call, "id") != request.provider_tool_call_id) continue;
+        ++matching_calls;
+        const auto function = call.find("function");
+        if (function == call.end() || !function->is_object() ||
+            JsonStr(*function, "name") != request.tool_name)
+            return std::unexpected("job.prepared.invalid_declaration");
+        const auto args = function->find("arguments");
+        if (args == function->end() || !args->is_string())
+            return std::unexpected("job.prepared.invalid_declaration");
+        const auto original = nlohmann::json::parse(args->get<std::string>(), nullptr, false);
+        if (original.is_discarded() || !original.is_object() || original != request.original_input)
+            return std::unexpected("job.prepared.invalid_declaration");
+    }
+    if (matching_calls != 1)
+        return std::unexpected("job.prepared.ambiguous_declaration");
+    PreparedSource source;
+    unsigned matching_pending = 0;
+    unsigned matching_admission = 0;
+    std::uint64_t admission_seq = 0, pending_seq = 0;
+    for (const auto& event : ledger.events) {
+        // A persisted temporary ticket can never be registered a second time,
+        // even through a fresh coordinator instance. Pending also protects the
+        // committed-first-write/failed-registration window.
+        if (event.kind == EventKindV3::ToolExecutionPending || event.kind == EventKindV3::ToolJobRegistered) {
+            const auto prepared_only = event.payload.find("preparedOnly");
+            if (prepared_only != event.payload.end() && !prepared_only->is_boolean())
+                return std::unexpected("job.prepared.invalid_marker");
+            if (prepared_only != event.payload.end() && prepared_only->get<bool>() &&
+                (JsonStr(event.payload, "parentActionId") == request.parent_action_id ||
+                 (JsonStr(event.payload, "assistantMessageRef") == request.assistant_message_ref &&
+                  JsonStr(event.payload, "provider_tool_call_id") == request.provider_tool_call_id)))
+                return std::unexpected("job.prepared.already_registered");
+        }
+        if (event.kind == EventKindV3::ContextInputApplied) {
+            const auto added = event.payload.find("addedMessageRefs");
+            if (added == event.payload.end() || !added->is_array()) continue;
+            for (const auto& id : *added) {
+                if (!id.is_string() || id.get<std::string>() != request.assistant_message_ref) continue;
+                if (event.session_id != owner.session_id || event.run_id != owner.run_id || event.seq <= message->seq)
+                    return std::unexpected("job.prepared.foreign_admission");
+                ++matching_admission;
+                admission_seq = event.seq;
+                source.admission_event_id = event.event_id;
+            }
+        }
+        if (event.action_id != request.parent_action_id) continue;
+        if (event.session_id != owner.session_id || event.run_id != owner.run_id ||
+            event.turn_id != request.turn_id || event.step_id != request.step_id)
+            return std::unexpected("job.prepared.foreign_action");
+        if (event.kind == EventKindV3::ToolExecutionPending) {
+            ++matching_pending;
+            if (JsonStr(event.payload, "tool_call_id") != request.parent_action_id ||
+                JsonStr(event.payload, "assistantMessageRef") != request.assistant_message_ref ||
+                JsonStr(event.payload, "provider_tool_call_id") != request.provider_tool_call_id ||
+                !event.payload.contains("attempt") || event.payload.at("attempt") != 1 || event.seq <= message->seq)
+                return std::unexpected("job.prepared.invalid_pending");
+            source.pending_event_id = event.event_id;
+            pending_seq = event.seq;
+        } else if (event.kind == EventKindV3::ToolExecutionStarted ||
+                   event.kind == EventKindV3::ToolExecutionFinished || event.kind == EventKindV3::ToolExecutionFailed ||
+                   event.kind == EventKindV3::ToolExecutionCancelled || event.kind == EventKindV3::ToolExecutionRejected ||
+                   event.kind == EventKindV3::ToolExecutionUnknown)
+            return std::unexpected("job.prepared.source_already_executed");
+    }
+    const bool on_chain = std::any_of(ledger.context.chain.begin(), ledger.context.chain.end(),
+        [&](const auto& node) { return node.message_ref == request.assistant_message_ref; });
+    if (matching_pending != 1 || matching_admission != 1 || pending_seq <= admission_seq || !on_chain)
+        return std::unexpected("job.prepared.unadmitted_declaration");
+    return source;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -211,6 +310,10 @@ struct ToolJobCoordinator::Impl {
     std::shared_ptr<GlobalRunningQuota> global;
     std::function<std::int64_t()> clock_ms;
     std::weak_ptr<Impl> self_lock;  // worker 闭包经它拿稳定引用
+    std::optional<PreparedRegistrationContext> prepared_context;
+    PreparedJobOwner prepared_owner;
+    bool prepared_revoked = false;
+    std::map<std::string, std::shared_ptr<PreparedRecord>> prepared;
 
     // 主锁:jobs/queue/writer 落账/资源占用。worker 经 owned mailbox 原子
     // 发布完成件;旧 debug 信封队列另设锁,泵在主锁内收信封。
@@ -1192,6 +1295,27 @@ ToolJobCoordinator::ToolJobCoordinator(trajectory::v3::V3Writer& writer,
                                               : std::make_shared<GlobalRunningQuota>();
     impl_->clock_ms = std::move(options.clock_ms);
     impl_->self_lock = impl_;
+    if (options.prepared_registration) {
+        auto context = std::move(*options.prepared_registration);
+        if (!context.writer_serial || context.project_id.empty() || !context.cwd.is_absolute())
+            throw std::invalid_argument("job.prepared.invalid_context");
+        std::error_code error;
+        const auto canonical = std::filesystem::canonical(context.cwd, error);
+        if (error || canonical != context.cwd || !std::filesystem::is_directory(canonical, error) || error)
+            throw std::invalid_argument("job.prepared.invalid_context");
+        std::lock_guard serial(*context.writer_serial);
+        static std::atomic<std::uint64_t> next_coordinator{1};
+        auto instance = next_coordinator.load();
+        for (;;) {
+            if (instance == std::numeric_limits<std::uint64_t>::max())
+                throw std::overflow_error("job.prepared.owner_exhausted");
+            if (next_coordinator.compare_exchange_weak(instance, instance + 1)) break;
+        }
+        impl_->prepared_owner = PreparedJobOwner{writer.session_id(), writer.run_id(), instance, 1,
+                                                 context.project_id, context.cwd};
+        impl_->prepared_revoked = writer.closed();
+        impl_->prepared_context = std::move(context);
+    }
 }
 
 ToolJobCoordinator::~ToolJobCoordinator() {
@@ -1206,6 +1330,8 @@ void ToolJobCoordinator::RequestShutdown() {
     {
         std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
         impl_->closing = true;
+        impl_->prepared_revoked = true;
+        for (auto& [id, record] : impl_->prepared) { (void)id; record->revoked = true; }
         // Cancellation is an intent, not proof a callback has returned. This
         // phase never calls an authorization gate, clock or executor.
         for (auto& [id, job] : impl_->jobs) {
@@ -1239,6 +1365,12 @@ bool ToolJobCoordinator::Shutdown() {
         workers.swap(impl_->workers);
     }
     for (auto& worker : workers) if (worker.thread.joinable()) worker.thread.join();
+    // Only the new registration domain reads the real writer outside jobs.
+    // Drain that serial lease before retiring its pointer; never hold it while
+    // joining workers or destroying host callbacks/captures.
+    std::unique_lock<std::recursive_mutex> prepared_serial;
+    if (impl_->prepared_context)
+        prepared_serial = std::unique_lock<std::recursive_mutex>(*impl_->prepared_context->writer_serial);
     bool settled = true;
     {
         std::lock_guard lock(impl_->jobs_mutex);
@@ -1264,7 +1396,9 @@ bool ToolJobCoordinator::Shutdown() {
                     else settled = false;
                 }
             }
-            impl_->PumpLocked();
+            // The registration-only table has no business jobs/deadlines.
+            // Do not enter the legacy pump or invoke its host clock on close.
+            if (!impl_->prepared_context) impl_->PumpLocked();
             settled = settled && std::all_of(impl_->jobs.begin(), impl_->jobs.end(), [](const auto& item) {
                 // Passive recovery projections own no live worker. Closing
                 // them is not a receipt for their historical execution gaps.
@@ -1279,6 +1413,7 @@ bool ToolJobCoordinator::Shutdown() {
         }
         impl_->writer = nullptr;
     }
+    if (prepared_serial.owns_lock()) prepared_serial.unlock();
     // Closing APIs reject before reading these callbacks, and every worker is
     // joined. Clear the actual sources outside all lifecycle/jobs locks: a
     // std::function move may retain an inline callable in its source, and even
@@ -1303,22 +1438,204 @@ bool ToolJobCoordinator::shutdown_complete() const {
     return impl_ == nullptr || impl_->shutdown_complete.load();
 }
 
+std::optional<PreparedJobOwner> ToolJobCoordinator::PreparedOwner() const {
+    if (!impl_->prepared_context) return std::nullopt;
+    std::lock_guard serial(*impl_->prepared_context->writer_serial);
+    std::lock_guard lock(impl_->jobs_mutex);
+    if (impl_->closing || impl_->prepared_revoked || !impl_->writer) return std::nullopt;
+    if (impl_->writer->closed()) {
+        impl_->prepared_revoked = true;
+        for (auto& [id, record] : impl_->prepared) { (void)id; record->revoked = true; }
+        return std::nullopt;
+    }
+    return impl_->prepared_owner;
+}
+
+PreparedJobRegistration ToolJobCoordinator::RegisterPreparedJob(const PreparedJobRequest& request) {
+    PreparedJobRegistration result;
+    auto refuse = [&](const char* code, const std::string& message = std::string()) {
+        result.error_code = code;
+        result.error = message.empty() ? code : message;
+        return result;
+    };
+    if (!impl_->prepared_context) return refuse("job.prepared.disabled");
+    std::lock_guard serial(*impl_->prepared_context->writer_serial);
+    trajectory::v3::V3Writer* writer = nullptr;
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        if (impl_->closing || impl_->prepared_revoked || !impl_->writer)
+            return refuse("job.prepared.closed");
+        writer = impl_->writer;
+        if (writer->closed()) {
+            impl_->prepared_revoked = true;
+            for (auto& [id, record] : impl_->prepared) { (void)id; record->revoked = true; }
+            return refuse("job.prepared.closed");
+        }
+        if (request.owner != impl_->prepared_owner || writer->session_id() != request.owner.session_id ||
+            writer->run_id() != request.owner.run_id) return refuse("job.prepared.foreign_owner");
+        if (writer->broken()) {
+            impl_->prepared_revoked = true;
+            result.state = PreparedJobRegistrationState::Unconfirmed;
+            return refuse("job.prepared.writer_broken");  // No fabricated new receipt.
+        }
+    }
+    if (request.provider_tool_call_id.empty() || request.assistant_message_ref.empty() ||
+        request.parent_action_id.empty() || request.turn_id.empty() || request.step_id.empty() ||
+        request.tool_name.empty() || !request.original_input.is_object() || !request.effective_input.is_object() ||
+        request.tool_identity.logical_name != request.tool_name || request.tool_identity.registration_source.empty() ||
+        request.tool_identity.version.empty() || request.tool_identity.execution_scope != platform::PathToUtf8(request.owner.cwd) ||
+        !request.policy.allow_background || request.policy.resume_policy != "hold" || request.policy.retry_policy != "none")
+        return refuse("job.prepared.bad_request");
+    const auto original_bytes = trajectory::CanonicalJsonDump(request.original_input);
+    const auto effective_bytes = trajectory::CanonicalJsonDump(request.effective_input);
+    if (!original_bytes || !effective_bytes) return refuse("job.prepared.bad_arguments");
+    const auto ledger = trajectory::v3::ReadV3Ledger(writer->path());
+    if (!ledger) return refuse("job.prepared.invalid_ledger", ledger.error());
+    const auto last = ledger->LastEntry();
+    if (!last || ledger->session_id != request.owner.session_id ||
+        last->seq == std::numeric_limits<std::uint64_t>::max() || last->seq + 1 != writer->next_seq())
+        return refuse("job.prepared.writer_prefix_mismatch");
+    const auto& last_hash = last->is_message ? ledger->messages[last->index].line_hash : ledger->events[last->index].line_hash;
+    if (last_hash != writer->last_line_hash()) return refuse("job.prepared.writer_prefix_mismatch");
+    const auto source = CheckPreparedSource(*ledger, request);
+    if (!source) return refuse("job.prepared.invalid_source", source.error());
+
+    // Allocate every stable owner/table node and both event payloads before a
+    // real write. A later write exception cannot discard the retained owner.
+    auto facts = std::make_shared<PreparedJobFacts>();
+    facts->owner = request.owner;
+    facts->provider_tool_call_id = request.provider_tool_call_id;
+    facts->assistant_message_ref = request.assistant_message_ref;
+    facts->parent_action_id = request.parent_action_id;
+    facts->turn_id = request.turn_id;
+    facts->step_id = request.step_id;
+    facts->tool_name = request.tool_name;
+    facts->original_input = request.original_input;
+    facts->effective_input = request.effective_input;
+    facts->original_input_sha256 = hooks::Sha256Hex(*original_bytes);
+    facts->effective_input_sha256 = hooks::Sha256Hex(*effective_bytes);
+    facts->tool_identity = request.tool_identity;
+    facts->policy = request.policy;
+    facts->source_pending_event_id = source->pending_event_id;
+    facts->source_admission_event_id = source->admission_event_id;
+    auto record = std::make_shared<PreparedRecord>();
+    record->facts = facts;
+    std::lock_guard lock(impl_->jobs_mutex);
+    if (impl_->closing || impl_->prepared_revoked || impl_->writer != writer || writer->closed()) {
+        impl_->prepared_revoked = true;
+        return refuse("job.prepared.closed");
+    }
+    if (writer->session_id() != request.owner.session_id || writer->run_id() != request.owner.run_id ||
+        last->seq + 1 != writer->next_seq() || last_hash != writer->last_line_hash())
+        return refuse("job.prepared.writer_prefix_mismatch");
+    if (impl_->prepared.size() >= impl_->limits.queued_max ||
+        impl_->queue.size() >= impl_->limits.queued_max - impl_->prepared.size())
+        return refuse("job.prepared.capacity");
+    for (const auto& [id, existing] : impl_->prepared) {
+        (void)id;
+        if (existing->facts->parent_action_id == request.parent_action_id ||
+            (existing->facts->assistant_message_ref == request.assistant_message_ref &&
+             existing->facts->provider_tool_call_id == request.provider_tool_call_id))
+            return refuse("job.prepared.duplicate");
+    }
+    facts->action_id = writer->NewActionId();
+    facts->job_id = "job-owned-" + facts->action_id;
+    EventDraft pending;
+    pending.kind = EventKindV3::ToolExecutionPending;
+    pending.status = trajectory::v3::OpStatus::Pending;
+    pending.turn_id = request.turn_id;
+    pending.step_id = request.step_id;
+    pending.action_id = facts->action_id;
+    pending.payload = {{"tool_call_id", facts->action_id}, {"attempt", 1}, {"reason", "queued"},
+                       {"assistantMessageRef", request.assistant_message_ref},
+                       {"provider_tool_call_id", request.provider_tool_call_id}, {"toolName", request.tool_name},
+                       {"parentActionId", request.parent_action_id}, {"preparedOnly", true}};
+    EventDraft registered;
+    registered.kind = EventKindV3::ToolJobRegistered;
+    registered.turn_id = request.turn_id;
+    registered.step_id = request.step_id;
+    registered.action_id = facts->action_id;
+    registered.payload = {{"tool_call_id", facts->action_id}, {"attempt", 1}, {"jobId", facts->job_id},
+        {"mode", "job_handle"}, {"assistantMessageRef", request.assistant_message_ref},
+        {"provider_tool_call_id", request.provider_tool_call_id}, {"parentActionId", request.parent_action_id},
+        {"preparedOnly", true}, {"executionPolicy", request.policy.ToJson()},
+        {"effectiveInput", request.effective_input}, {"originalInputSha256", facts->original_input_sha256},
+        {"effectiveInputSha256", facts->effective_input_sha256}, {"toolIdentity", request.tool_identity.ToJson()},
+        {"sourcePendingEventRef", source->pending_event_id}, {"sourceAdmissionEventRef", source->admission_event_id},
+        {"preparedOwner", {{"sessionId", request.owner.session_id}, {"runId", request.owner.run_id},
+                           {"coordinatorId", request.owner.coordinator_id}, {"epoch", request.owner.epoch},
+                           {"projectId", request.owner.project_id}, {"cwd", platform::PathToUtf8(request.owner.cwd)}}}};
+    const auto [entry, inserted] = impl_->prepared.emplace(facts->job_id, record);
+    if (!inserted) return refuse("job.prepared.duplicate");
+    result.facts = facts;
+    try {
+        facts->pending_receipt.emplace(writer->AppendEvent(std::move(pending), Durability::ProcessCrash));
+        if (!ReceiptOk(*facts->pending_receipt)) {
+            const bool uncertain = writer->broken() || facts->pending_receipt->status == WriteReceipt::Status::IoFailed;
+            record->state = result.state = uncertain ? PreparedJobRegistrationState::Unconfirmed : PreparedJobRegistrationState::Rejected;
+            result.error_code = facts->pending_receipt->error_code;
+            result.error = facts->pending_receipt->error_message;
+            if (!uncertain) impl_->prepared.erase(entry);
+            return result;
+        }
+        facts->registered_receipt.emplace(writer->AppendEvent(std::move(registered), Durability::PowerLoss));
+        if (!ReceiptOk(*facts->registered_receipt)) {
+            // Pending really committed. A failed registration is a retained
+            // gap even when the native rejection itself was deterministic.
+            record->state = result.state = PreparedJobRegistrationState::Unconfirmed;
+            result.error_code = facts->registered_receipt->error_code;
+            result.error = facts->registered_receipt->error_message;
+            return result;
+        }
+        record->state = result.state = PreparedJobRegistrationState::Registered;
+        return result;
+    } catch (...) {
+        record->state = result.state = PreparedJobRegistrationState::Unconfirmed;
+        result.error_code = "job.prepared.write_unconfirmed";
+        result.error = "registration write threw; retained owner, no dispatch or retry";
+        return result;
+    }
+}
+
+std::optional<PreparedJobView> ToolJobCoordinator::GetPreparedJob(
+    const PreparedJobOwner& owner, const std::string& job_id) const {
+    if (!impl_->prepared_context) return std::nullopt;
+    std::lock_guard serial(*impl_->prepared_context->writer_serial);
+    std::lock_guard lock(impl_->jobs_mutex);
+    if (owner != impl_->prepared_owner) return std::nullopt;
+    if (impl_->writer && impl_->writer->closed()) {
+        impl_->prepared_revoked = true;
+        for (auto& [id, record] : impl_->prepared) { (void)id; record->revoked = true; }
+    }
+    const auto found = impl_->prepared.find(job_id);
+    if (found == impl_->prepared.end()) return std::nullopt;
+    return PreparedJobView{found->second->state, found->second->revoked || impl_->prepared_revoked, found->second->facts};
+}
+
+std::size_t ToolJobCoordinator::prepared_count() const {
+    std::lock_guard lock(impl_->jobs_mutex);
+    return impl_->prepared.size();
+}
+
 // ---------------------------------------------------------------------------
 // 四接口
 // ---------------------------------------------------------------------------
 
 JobStartResult ToolJobCoordinator::StartJob(const JobStartRequest& request) {
+    if (impl_->prepared_context) return JobStartResult{false, "job.prepared.registration_only", "legacy start disabled in prepared domain"};
     impl_->ReapFinishedWorkers();
     return impl_->StartJobCommon(request, /*early=*/false);
 }
 
 JobStartResult ToolJobCoordinator::StartJobEarly(const JobStartRequest& request) {
+    if (impl_->prepared_context) return JobStartResult{false, "job.prepared.registration_only", "legacy early start disabled in prepared domain"};
     impl_->ReapFinishedWorkers();
     return impl_->StartJobCommon(request, /*early=*/true);
 }
 
 bool ToolJobCoordinator::CompleteAdmission(const std::string& job_id,
                                            std::string* admission_content) {
+    if (impl_->prepared_context) return false;
     impl_->ReapFinishedWorkers();
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
     if (impl_->closing) return false;
@@ -1344,6 +1661,7 @@ bool ToolJobCoordinator::CompleteAdmission(const std::string& job_id,
 }
 
 JobStartResult ToolJobCoordinator::GrantApproval(const std::string& job_id) {
+    if (impl_->prepared_context) return JobStartResult{false, "job.prepared.registration_only", "legacy grant disabled in prepared domain"};
     impl_->ReapFinishedWorkers();
     JobStartResult result;
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
@@ -1380,6 +1698,10 @@ JobStartResult ToolJobCoordinator::GrantApproval(const std::string& job_id) {
 }
 
 JobStatusView ToolJobCoordinator::GetJob(const std::string& job_id) {
+    if (impl_->prepared_context) {
+        JobStatusView view; view.job_id = job_id; view.access_denied = true;
+        view.access_reason = "job.prepared.registration_only"; return view;
+    }
     impl_->ReapFinishedWorkers();
     JobStatusView view;
     view.job_id = job_id;
@@ -1418,6 +1740,15 @@ JobStatusView ToolJobCoordinator::GetJob(const std::string& job_id) {
 
 JobWaitResult ToolJobCoordinator::WaitJobs(const std::vector<std::string>& job_ids,
                                            std::uint64_t timeout_ms, bool wait_all) {
+    if (impl_->prepared_context) {
+        JobWaitResult result;
+        for (const auto& id : job_ids) {
+            JobStatusView view; view.job_id = id; view.access_denied = true;
+            view.access_reason = "job.prepared.registration_only";
+            result.statuses.push_back(std::move(view));
+        }
+        return result;
+    }
     impl_->ReapFinishedWorkers();
     JobWaitResult result;
     if (job_ids.empty()) {
@@ -1487,6 +1818,7 @@ JobWaitResult ToolJobCoordinator::WaitJobs(const std::vector<std::string>& job_i
 
 JobCancelResult ToolJobCoordinator::CancelJob(const std::string& job_id,
                                               const std::string& reason) {
+    if (impl_->prepared_context) return JobCancelResult{false, "job.prepared.registration_only", "registration_only", {}};
     impl_->ReapFinishedWorkers();
     JobCancelResult result;
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
@@ -1562,6 +1894,7 @@ JobCancelResult ToolJobCoordinator::CancelJob(const std::string& job_id,
 }
 
 std::size_t ToolJobCoordinator::PumpCompletions() {
+    if (impl_->prepared_context) return 0;
     impl_->ReapFinishedWorkers();
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
     if (impl_->closing) return 0;
@@ -1572,6 +1905,7 @@ std::size_t ToolJobCoordinator::PumpCompletions() {
 
 bool ToolJobCoordinator::DebugSubmitEnvelope(const std::string& job_id,
                                              const std::string& owner_epoch, Tool::Result result) {
+    if (impl_->prepared_context) return false;
     impl_->ReapFinishedWorkers();
     // Hold the publication gate through posting. Shutdown must never lose an
     // envelope accepted after its final settlement and callback release.
@@ -1628,6 +1962,9 @@ JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger&
     for (const auto& event : ledger.events) {
         const std::string job_id = JsonStr(event.payload, "jobId");
         if (event.kind == EventKindV3::ToolJobRegistered) {
+            const auto prepared = event.payload.find("preparedOnly");
+            if (prepared != event.payload.end() && !prepared->is_boolean())
+                throw std::invalid_argument("job.recovery.invalid_prepared_marker");
             registered[job_id] = &event;
         } else if (event.kind == EventKindV3::ToolJobDispatched) {
             dispatch_counts[job_id] += 1;
@@ -1657,6 +1994,8 @@ JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger&
         item.mode = job.mode;
         auto reg = registered.find(job.job_id);
         if (reg != registered.end()) {
+            const auto prepared = reg->second->payload.find("preparedOnly");
+            item.prepared_only = prepared != reg->second->payload.end() && prepared->is_boolean() && prepared->get<bool>();
             const auto policy_it = reg->second->payload.find("executionPolicy");
             if (policy_it != reg->second->payload.end()) {
                 item.policy = JobExecutionPolicy::FromJson(policy_it.value());
@@ -1763,7 +2102,10 @@ JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger&
         const bool observed_missing = job.state == "running" && execution_terminal_in_ledger;
         const bool terminal_state = IsTerminalJobState(job.state);
         if (terminal_state) item.terminal_state = job.state;
-        if (job.mode != "job_handle") {
+        if (item.prepared_only) {
+            item.disposition = "prepared_hold";
+            item.detail = "prepared registration has no adoption or dispatch authority";
+        } else if (job.mode != "job_handle") {
             item.disposition = "unsupported_mode";
             item.detail = "mode=" + job.mode + " 的执行归后续批次(P1 只接 job_handle)";
         } else if (!admission_message_done) {
@@ -1793,6 +2135,7 @@ JobRecoveryPlan ToolJobCoordinator::PlanRecovery(const trajectory::v3::V3Ledger&
 }
 
 std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
+    if (impl_->prepared_context) return 0;
     impl_->ReapFinishedWorkers();
     std::lock_guard<std::mutex> lock(impl_->jobs_mutex);
     if (impl_->closing) return 0;
@@ -1800,6 +2143,7 @@ std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
         if (impl_->writer == nullptr || impl_->writer->session_id() != plan.source_session_id)
             throw std::invalid_argument("job.recovery.foreign_session");
         for (const auto& item : plan.items) {
+            if (item.prepared_only || item.disposition == "prepared_hold") continue;
             if (item.job_id.empty() || item.action_id.empty() || item.turn_id.empty() ||
                 item.step_id.empty() || item.tool_name.empty() || !item.recovery.has_value() ||
                 item.recovery->turn_id != item.turn_id || item.recovery->step_id != item.step_id ||
@@ -1823,6 +2167,7 @@ std::size_t ToolJobCoordinator::AdoptRecovery(const JobRecoveryPlan& plan) {
     }
     std::size_t adopted = 0;
     for (const auto& item : plan.items) {
+        if (item.prepared_only || item.disposition == "prepared_hold") continue;
         if (impl_->jobs.count(item.job_id) > 0) {
             continue;  // 已接管(重复 Adopt 幂等)
         }

@@ -60,3 +60,4 @@ git diff --check
 - [Runner Release 拒绝诊断与失败原件](runner-release-diagnostic.md)
 - [子历史采用册阶段诊断](child-history-stage-diagnostic.md)
 - [SDK Job 共用准入与严格交单](sdk-job-admission.md)
+- [Job owned 暂存注册](job-owned-registration.md)

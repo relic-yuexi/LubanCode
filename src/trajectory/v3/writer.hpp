@@ -63,8 +63,9 @@ struct V3WriterOptions {
     // "未知",不许暗填 main_session。
     std::string launch_cwd;
     std::string run_kind;
-    // 注入提交失败(测试专用;生产恒空):返回稳定码则该枚提交按 IoFailed
-    // 收(writer 句柄随后 broken)。锁内调用,须廉价无副作用。
+    // 注入未确认提交(测试专用;生产恒空):保首枚真实原回执(当前为
+    // Rejected/v3writer.injected),并置 broken;已断句柄后续调用 IoFailed。
+    // 锁内调用,须廉价无副作用。
     std::function<std::optional<std::string>()> inject_io_failure;
     // Test-only checked Close failure after the real journal handle is closed.
     std::function<std::optional<std::string>()> inject_close_failure;
@@ -337,6 +338,7 @@ public:
     std::uint64_t next_seq() const;
     std::string last_line_hash() const;
     bool broken() const;
+    bool closed() const;
     const ContextView& context() const;  // 当前内存视图(链/版本/当前 system)
     // 本账上是否已有该 messageId(PrepareRequest 引用先落稳的判据)。
     bool HasMessageId(std::string_view message_id) const;

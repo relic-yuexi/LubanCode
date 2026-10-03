@@ -29,6 +29,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -167,6 +168,80 @@ struct JobStartResult {
     std::string admission_content;
 };
 
+// Internal J2a registration domain. The trusted host supplies the same serial
+// mutex used by its real writer/turn owner, not a coordinator-local substitute.
+// This instance rejects all legacy dispatch/adoption entrances. No worker or
+// public SDK capability is enabled by these values.
+struct PreparedRegistrationContext {
+    std::shared_ptr<std::recursive_mutex> writer_serial;
+    std::string project_id;
+    std::filesystem::path cwd;
+};
+
+struct PreparedJobOwner {
+    std::string session_id;
+    std::string run_id;
+    std::uint64_t coordinator_id = 0;
+    std::uint64_t epoch = 0;
+    std::string project_id;
+    std::filesystem::path cwd;
+    bool operator==(const PreparedJobOwner&) const = default;
+};
+
+struct PreparedJobRequest {
+    PreparedJobOwner owner;
+    std::string provider_tool_call_id;
+    std::string assistant_message_ref;
+    std::string parent_action_id;
+    std::string turn_id;
+    std::string step_id;
+    std::string tool_name;
+    nlohmann::json original_input;
+    nlohmann::json effective_input;
+    trajectory::v3::ToolIdentity tool_identity;
+    JobExecutionPolicy policy;
+};
+
+enum class PreparedJobRegistrationState { Rejected, Registered, Unconfirmed };
+
+// Immutable owned facts, shared by a returned receipt and the temporary table.
+// There is no borrowed invocation/operation, callback, tool, or cancellation.
+struct PreparedJobFacts {
+    PreparedJobOwner owner;
+    std::string job_id;
+    std::string action_id;
+    std::uint64_t attempt = 1;
+    std::string provider_tool_call_id;
+    std::string assistant_message_ref;
+    std::string parent_action_id;
+    std::string turn_id;
+    std::string step_id;
+    std::string tool_name;
+    nlohmann::json original_input;
+    nlohmann::json effective_input;
+    std::string original_input_sha256;
+    std::string effective_input_sha256;
+    trajectory::v3::ToolIdentity tool_identity;
+    JobExecutionPolicy policy;
+    std::string source_pending_event_id;
+    std::string source_admission_event_id;
+    std::optional<trajectory::v3::WriteReceipt> pending_receipt;
+    std::optional<trajectory::v3::WriteReceipt> registered_receipt;
+};
+
+struct PreparedJobRegistration {
+    PreparedJobRegistrationState state = PreparedJobRegistrationState::Rejected;
+    std::string error_code;
+    std::string error;
+    std::shared_ptr<const PreparedJobFacts> facts;
+};
+
+struct PreparedJobView {
+    PreparedJobRegistrationState state = PreparedJobRegistrationState::Rejected;
+    bool revoked = false;
+    std::shared_ptr<const PreparedJobFacts> facts;
+};
+
 // Recovery policy is an adoption choice, not JobExecutionPolicy.resume_policy.
 // Legacy keeps the existing repair/requeue path. Hold creates passive owned
 // projections only; newly submitted jobs keep their ordinary execution path.
@@ -262,6 +337,7 @@ struct JobRecoveryPlan {
         std::string terminal_state;
         std::optional<JobRecoveryFacts> recovery;
         std::string admission_text;  // Actual current admitted tool-message body.
+        bool prepared_only = false;  // J2a has no adoption/dispatch authority.
     };
     std::vector<Item> items;
     JobRecoveryPolicy policy = JobRecoveryPolicy::Legacy;
@@ -283,6 +359,7 @@ public:
         std::shared_ptr<GlobalRunningQuota> global;  // 缺省自建(limit 8)
         std::function<std::int64_t()> clock_ms;      // 缺省墙钟;测试注固定钟
         ThreadStarter thread_starter;  // Empty uses a real std::thread.
+        std::optional<PreparedRegistrationContext> prepared_registration;
     };
 
     // writer:本会话 v3 单写者(引用,寿命由调用方保证,协调器不收柄);
@@ -303,6 +380,16 @@ public:
     // on the ordinary owning-host path, including settlement write failures.
     bool Shutdown();
     bool shutdown_complete() const;
+
+    // Registration-only internal value path. Owner values match the actual
+    // writer/instance/epoch; they are not credentials or permission grants.
+    // Reads/validates the real declaration under writer_serial, outside jobs.
+    // Only Pending/Registered are written: no admission message or execution.
+    std::optional<PreparedJobOwner> PreparedOwner() const;
+    PreparedJobRegistration RegisterPreparedJob(const PreparedJobRequest& request);
+    std::optional<PreparedJobView> GetPreparedJob(
+        const PreparedJobOwner& owner, const std::string& job_id) const;
+    std::size_t prepared_count() const;
 
     // ---- 四接口(单 §8)----
 
