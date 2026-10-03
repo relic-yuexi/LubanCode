@@ -69,6 +69,8 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
     std::map<std::string, KnownJob> known_by_call;   // provider call id -> job
     std::map<std::string, KnownJob> known_by_job;    // job id -> job(泵路由)
 
+    agent::JobAdmissionMode admission_mode() const noexcept override { return options.admission_mode; }
+
     // ---- 能力闸(单 §4 末):合成 + 快照落账 ------------------------------
     ProviderToolContract ContractFor(bool call_marked_async) const {
         ProviderToolContract contract;
@@ -126,6 +128,7 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
     // ---- agent::ToolBatchGate:流式提前档探针 ----------------------------
     bool OnCallItemComplete(const api::ToolUseBlock& call,
                             const StreamCallContext& context) override {
+        if (admission_mode() != agent::JobAdmissionMode::Legacy) return false;
         if (shutdown_requested.load()) return false;
         const auto policy_it = options.tools.find(call.name);
         if (policy_it == options.tools.end()) {
@@ -251,6 +254,7 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
     // ---- agent::ToolBatchGate:接单 --------------------------------------
     std::optional<tools::Tool::Result> TakeJobOrder(
         const api::ToolUseBlock& call, const ToolCallAdjudication& adjudication) override {
+        if (admission_mode() != agent::JobAdmissionMode::Legacy) return agent::MissingOwnedJobAdmission().result;
         if (shutdown_requested.load()) return tools::Tool::Result::Error("job.coordinator.closed");
         // 提前档派过的:只补接单(幂等),不重派。
         std::optional<KnownJob> early;
