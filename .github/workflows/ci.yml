@@ -157,6 +157,10 @@ jobs:
                 # This gate adds no SDK-focused or ASan source.
                 cross_platform=true
                 code=true ;;
+              tests/unit/app/test_agent_task_transcript.cpp)
+                # Keep the original CLI transcript source in three-platform full CI.
+                cross_platform=true
+                code=true ;;
               CMakeLists.txt|tests/CMakeLists.txt|cmake/*|vcpkg.json)
                 if [ "$remote_present" = true ] || [ "$assembly_present" = true ] || [ "$sdk_present" = true ] || [ "$worker_present" = true ] || [ "$runner_present" = true ]; then
                   cross_platform=true
