@@ -236,6 +236,42 @@ class JobStartupGateTests(unittest.TestCase):
             self.assertIn('"returncode": 17', (evidence / "registration-result.json").read_text())
 
 
+class JobHoldGateTests(unittest.TestCase):
+    def body(self, command):
+        return "\n".join(('Command: ' + ' '.join('"' + value + '"' for value in command),
+            '[doctest] test cases: 6 | 6 passed | 0 failed',
+            '[doctest] assertions: 91 | 91 passed | 0 failed',
+            *('[job-hold-path] ' + path for path in focused.JOB_HOLD_PATHS)))
+
+    def test_sdk_cli_full_argv_actual_six_paths(self):
+        for executable in ('/build/real/lubancore_sdk_tests', 'C:/build real/lubancode_tests.exe'):
+            command = [executable, '--source-file=*test_tool_job_hold_recovery.cpp']
+            focused.check_job_hold_native(self.body(command), command)
+
+    def test_foreign_same_basename_extra_filter_and_old_source_reject(self):
+        command = ['/build/real/lubancore_sdk_tests', '--source-file=*test_tool_job_hold_recovery.cpp']
+        for bad in ([command[0].replace('/real/', '/foreign/'), command[1]],
+                    command + ['--test-case=one'], [command[0], '--source-file=*test_tool_job_coordinator.cpp']):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_job_hold_native(self.body(bad), command)
+
+    def test_six_paths_counts_and_nonempty_assertions_are_required(self):
+        command = ['/build/real/lubancore_sdk_tests', '--source-file=*test_tool_job_hold_recovery.cpp']
+        body = self.body(command)
+        bad_bodies = [body.replace('6 | 6 passed', '0 | 0 passed'),
+                      body.replace('6 | 6 passed', '5 | 5 passed'),
+                      body.replace('6 passed | 0 failed', '5 passed | 1 failed'),
+                      body.replace('91 | 91 passed', '0 | 0 passed'),
+                      body.replace('91 passed | 0 failed', '90 passed | 1 failed')]
+        for path in focused.JOB_HOLD_PATHS:
+            marker = '[job-hold-path] ' + path
+            bad_bodies += [body.replace(marker, ''), body + '\n' + marker,
+                           body.replace(marker, 'foreign: ' + marker)]
+        for bad in bad_bodies:
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                focused.check_job_hold_native(bad, command)
+
+
 class ResultStoreWindowsPathsTests(unittest.TestCase):
     summary = "[doctest] test cases: 17 | 17 passed | 0 failed"
     markers = ("[result-store-path] target-extended", "[result-store-path] temporary-threshold",

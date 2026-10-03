@@ -546,8 +546,11 @@ void AsyncToolRuntime::RestoreFromLedger() {
             "async-gate", "恢复读账失败,异步欠账不重建: " + ledger.error_or(""));
         return;
     }
-    const auto plan = ToolJobCoordinator::PlanRecovery(*ledger);
+    const auto plan = ToolJobCoordinator::PlanRecovery(*ledger, impl_->options.recovery_policy);
     impl_->coordinator_->AdoptRecovery(plan);
+    // Explicit hold also forbids repairing old deferred delivery messages.
+    // The live planner remains available for newly submitted jobs.
+    if (impl_->options.recovery_policy == tools::JobRecoveryPolicy::Hold) return;
     impl_->planner_->RestoreFromLedger(*ledger);
 }
 

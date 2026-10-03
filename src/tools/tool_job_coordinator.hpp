@@ -167,6 +167,31 @@ struct JobStartResult {
     std::string admission_content;
 };
 
+// Recovery policy is an adoption choice, not JobExecutionPolicy.resume_policy.
+// Legacy keeps the existing repair/requeue path. Hold creates passive owned
+// projections only; newly submitted jobs keep their ordinary execution path.
+enum class JobRecoveryPolicy { Legacy, Hold };
+enum class JobRecoveryKnowledge {
+    KnownNotDispatched,
+    ExecutionUnconfirmed,
+    TerminalDeliveryGap,
+    TerminalConfirmed,
+    UnsupportedMode,
+};
+
+struct JobRecoveryFacts {
+    JobRecoveryKnowledge knowledge = JobRecoveryKnowledge::ExecutionUnconfirmed;
+    std::string original_state;  // Exact FoldJobExecutions state, not a new fact.
+    std::string turn_id;
+    std::string step_id;
+    int dispatched_count = 0;
+    std::uint64_t execution_attempt = 0;  // job_handle business begins at >1.
+    bool execution_started = false;
+    std::string execution_state;  // Actual business attempt status, if present.
+    std::string execution_terminal_event;
+    bool admission_complete = false;
+};
+
 struct JobStatusView {
     std::string job_id;
     std::string action_id;  // v3 Action 身份(P2:完成通知引用)
@@ -181,6 +206,9 @@ struct JobStatusView {
     // 四接口都过授权闸门(单 §8:jobId 不是访问凭证);拒时 state 留空。
     bool access_denied = false;
     std::string access_reason;
+    // Present only for an explicitly held historical record. A terminal state
+    // or a satisfied wait does not imply execution or delivery was confirmed.
+    std::optional<JobRecoveryFacts> recovery;
 };
 
 struct JobWaitResult {
@@ -232,8 +260,12 @@ struct JobRecoveryPlan {
         // An observation is independent of admission-message delivery. Filling
         // a missing tool message must retain a terminal job, never requeue it.
         std::string terminal_state;
+        std::optional<JobRecoveryFacts> recovery;
+        std::string admission_text;  // Actual current admitted tool-message body.
     };
     std::vector<Item> items;
+    JobRecoveryPolicy policy = JobRecoveryPolicy::Legacy;
+    std::string source_session_id;
 };
 
 // ---------------------------------------------------------------------------
@@ -324,7 +356,9 @@ public:
     // ---- 恢复(单 §6 表)----
 
     // 纯读账定恢复计划(不持锁、不写账;静态,任意线程)。
-    static JobRecoveryPlan PlanRecovery(const trajectory::v3::V3Ledger& ledger);
+    static JobRecoveryPlan PlanRecovery(
+        const trajectory::v3::V3Ledger& ledger,
+        JobRecoveryPolicy policy = JobRecoveryPolicy::Legacy);
 
     // 采用计划:requeue 重入队(不重写注册,接管派发 epoch 接续递增);
     // unknown_hold 落 tool.job.observed(unknown) 不盲跑;complete_delivery
