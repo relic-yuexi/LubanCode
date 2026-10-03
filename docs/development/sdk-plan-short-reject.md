@@ -15,3 +15,11 @@
 原 `test_atomic_write.cpp` 十九份静态 CASE 逐字留存，其中三份只在 Windows 编译，原生实跑为 Windows 十九案、POSIX 十六案。另补六案：短拒后真成功；永久拒即停；已提交态不再试；次数耗尽还最后错；截止耗尽不多写；Windows 真句柄不分享删除，先证生产 sharing rejection、释放原句柄再原子提交，POSIX 同册验真实耐久提交。门据实际平台核 Windows 二十五案、POSIX 二十二案与六枚路径标记；真 Windows 路径只在关键断言通过后另留唯一标记。SDK focused 仍二十五份来源；ASan 原三十份 required 来源补入现有 `unit.platform.atomic_write`，实为三十一份，核该来源二十二案、JUnit 和 LastTest。没有新增测试 CPP，六套安装消费者仍二十场，子 Agent 原十二场与四会话隔离照跑。
 
 先提交合同，再交代码二读、推远端三平台 CI。本地只读源码、纯数据、AST、文档与 diff；不配置、不编译、不跑原生。新头失败仍留原件，成功分项不代全量验收。
+
+## Windows 夹具原码校准
+
+后续独立测试补丁从私有 `22bba238` 分出。`f3a278b6` 与 Recovery `3e7f653d` 各两份 Windows 原生日志已证：真不分享 DELETE 句柄挡住原子替换，底层回错误码 5；原夹具硬认替换必回 32，二十五案实过二十四案。这处错误假设只属于新增夹具，不能把四份红账算作生产修复证据。
+
+校准后仍持原真实句柄，先另调 `CreateFileW(target, DELETE, ...)`，硬核 `ERROR_SHARING_VIOLATION(32)`；再调真实 `AtomicWriteFile`。两次 syscall 各记各码。原子替换只许 Windows 实际 `ERROR_ACCESS_DENIED(5)` 或 `ERROR_SHARING_VIOLATION(32)`，诊断正文须逐字合现有格式；code、TransientReject、NotCommitted、旧 target 字节、无临时残件仍逐项核。先见这些事实才放原句柄，再核第二次真实提交 Durable。不得把前一调用的 32 冒作换名回码。
+
+这笔只改本案，不改平台生产分类、重试范围或时限。原十九案前缀、六案总数、Windows 二十五/POSIX 二十二、focused 二十五、ASan 三十一与消费者二十照留。新码同时留进成功原始输出，远端新头重新验，旧红原件继续封存。
