@@ -30,7 +30,9 @@ SDK 额外明确禁 `print`，免得脚本向 Worker 的协议 stdout 写字节�
 
 旧 CLI 未请求墙钟预算时保持旧零值行为；本批 SDK 必须显式给正预算。脚本返回值仍走原 Lua 到 Tool::Result 转换，不另定义 Lua 专属运行栈。
 
-本批沿既有可信协作脚本语义。指令、墙钟与取消通过 Lua hook 抛错，脚本仍可用 `pcall/xpcall` 等受保护入口捕获；不承诺脚本吞错后仍能在有限时间内退出。宿主只准入会配合退出的脚本。Close 置取消旗后等待真实调用退场，不能把软预算冒称进程隔离或硬停止保证。独立执行隔离另批处理。
+SDK 画像按宿主定案收紧：开库后、装载脚本前摘掉 `pcall` 与 `xpcall`，脚本不能从全局、别名或字符串编译入口取回原函数。现白名单原本就不开放 coroutine、debug、require、package 与 io；本笔继续保这条线。内部 `allow_error_catching=false` 只给 SDK，旧 Pure/Trusted/Hook 默认仍为 true。C++ 宿主用于接 OOM、脚本错误及 hook 中断的 `lua_pcall` 边界不撤。
+
+冻结计划明确记 `protectedCalls=false`，在恢复装载任何脚本前核画像。缺字段、true 或旧画像不能悄悄升级成新场；拒开时旧计划、账本与模型调用不动。可信脚本仍须配合宿主退出；hook 按指令步长查旗，阻塞 C 函数和进程隔离不由这两项删函数保证。Close 发取消，等实际调用退场。
 
 内存帽也管装载与入参转换。当前开库、guard 注册和 `PushJsonToLua` 尚在受保护调用之外；Lua OOM 可直接 panic/longjmp，C++ RAII 接不住。本批先沿共用 VM 将会分配的初始化、开库、脚本定义提取和调用入参搬到真实 `lua_pcall` 边界；边界内不得让 longjmp 越过待销毁的 C++ 持值。需要中间 JSON/string 时，由边界外 owner 持有，C callback 只借到本次返回。失败退回稳定错误、恢复栈顶、清取消借旗与 deadline，关闭 VM 一次；取消或 OOM 不杀宿主，也不污染下一次调用。初始化 OOM 与大入参 OOM 都用真实小正预算验，随后健康调用仍能活着退场；不以 fake 错误代替。
 
@@ -75,3 +77,7 @@ SDK 额外明确禁 `print`，免得脚本向 Worker 的协议 stdout 写字节�
 `dbc341a1` 的远端安装消费已实际运行，Lua/seed 卡在结果身份检查。旧夹具硬比 `ToolResultIdentity.tool_call_id == "lua-call"`，混了模型 wire call ID 与账本 action ID。现有 `TrajectoryTurnBridge::V3OutputCompleted` 保留 provider 原号作配对键，另由 `V3Writer::NewActionId()` 发账本号；公开结果索引沿已落盘 action ID，不回填 provider 号。
 
 校准只改验收宿主。模型往返仍核原 `lua-call`；两条公开结果必须均 selected，同本场、operation、turn、工具与 attempt=1，且共同采用一枚非空账本 action ID。raw/formal 数量、独立 result/persisted 身份、verified 元数据和模型实际采用正文逐条照核。失败诊断打印所有公开身份原值，便于远端追查。SDK/Agent/结果索引与执行预算不改；原四份 POSIX 首红另封，不能回填成已过。新头仍须三平台原生实跑。
+
+### SDK 捕获入口收紧验收
+
+这笔承接宿主明确选择，先改合同，再动代码。六册中立保护来源增加真实画像对照：SDK 初始化与执行均取不到 `pcall/xpcall`，旧 CLI/Hook 两函数仍可真接普通脚本错误；原 OOM、墙钟、指令、真实取消与后续健康调用照验。公开安装计数脚本在定义与执行两处核无捕获入口；三平台 SDK 和安装后新进程恢复都实际走新画像。第九册恢复再核缺字段/放开捕获的冻结画像拒开、零模型、旧字节不动。现9/6册、27focused/33ASan/23消费名册与预算不缩。
