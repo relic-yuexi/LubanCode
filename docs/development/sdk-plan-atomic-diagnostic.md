@@ -10,6 +10,7 @@
 仅补 `SessionMemoryWrite::Open` 发布新计划时的错误正文。`sdk.memory_write.plan_write_failed` 外码、失败返回和原开场状态照留。
 AtomicWriteFile 失败时，正文带实际 `atomicCode`、`failureKind`、`outcome` 和底层 `message`；成功回执若不是 `CommittedDurable`，仍拒开，正文带实际 outcome。
 不输出计划正文、凭据或环境变量；底层消息只沿原平台文件错误，可能含这次本地写盘路径。
+底层消息若含本地编码坏字节，仅诊断 JSON 渲染替换坏字节；不让渲染异常盖掉原错误阶段。
 不开重试，不删 target，不将已提交但耐久未确认改称未提交，不改全局 AtomicWrite、路径转换或持久档位。
 
 ## 验收与界限
