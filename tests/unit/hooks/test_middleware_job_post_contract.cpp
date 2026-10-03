@@ -193,7 +193,7 @@ Json Normalize(Json value, const std::string& dispatch) {
 std::vector<Json> Payloads(const v3::V3Ledger& ledger, const std::string& dispatch) {
     std::vector<Json> result;
     for (const auto& event : ledger.events) if (event.hook_dispatch_id == dispatch)
-        result.push_back(Json{{"kind", v3::ToString(event.kind)}, {"payload", Normalize(event.payload, dispatch)}});
+        result.push_back(Json{{"kind", v3::EventKindV3Name(event.kind)}, {"payload", Normalize(event.payload, dispatch)}});
     return result;
 }
 
