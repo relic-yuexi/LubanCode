@@ -142,6 +142,8 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.v3_system_content = options.v3_system_content;
     manager_options.v3_opening_participant = options.v3_opening_participant;
     manager_options.memory_capability_factory = options.memory_capability_factory;
+    manager_options.recovery_capture = options.recovery_capture;
+    manager_options.recovery_factory = options.recovery_factory;
     // T08:主账写者的提交故障注入(测试专用;生产恒空)。
     manager_options.v3_main_io_fault = options.v3_main_io_fault;
     // 子代理空轨迹单 P0-C:main stream 同样走延迟开卷——正式 .jsonl 由
@@ -161,19 +163,33 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     impl.workflow_node_start_fault = options.workflow_node_start_fault;
     impl.manager = std::make_unique<trajectory::SessionManager>(std::move(manager_options));
 
-    if (options.require_v3_resume &&
-        (!options.resume_at_launch || options.resume_source_session_id.empty() ||
-         !trajectory::v3::FindV3SessionStream(
-             impl.manager->SessionDirOf(options.resume_source_session_id)).has_value())) {
-        return std::unexpected("resume.v3_source_required: explicit V3 source is unavailable");
+    const bool explicit_finite_resume = options.recovery_capture.limits && options.require_v3_resume &&
+        options.resume_at_launch && !options.resume_source_session_id.empty();
+    bool source_layout_available = false;
+    if (options.require_v3_resume && options.resume_at_launch && !options.resume_source_session_id.empty()) {
+        const auto source = impl.manager->SessionDirOf(options.resume_source_session_id);
+        if (explicit_finite_resume) {
+            // Only inspect layout here. ResumeAsNew performs finite owned first
+            // line/schema/Verify before host admission, avoiding Probe's getline.
+            std::error_code ec;
+            source_layout_available = std::filesystem::exists(platform::FileIoPath(
+                source / (options.resume_source_session_id + ".jsonl")), ec) && !ec;
+            if (source_layout_available)
+                source_layout_available = !std::filesystem::exists(platform::FileIoPath(source / "main.jsonl"), ec) && !ec;
+        } else {
+            source_layout_available = trajectory::v3::FindV3SessionStream(source).has_value();
+        }
     }
+    if (options.require_v3_resume && !source_layout_available)
+        return std::unexpected("resume.v3_source_required: explicit V3 source is unavailable");
 
     // --continue 启动路(§10.4):直接建 start_reason=resume 的新 session,
     // 不先造空 session。没有可恢复场(或源场验不过)回落普通开张,与旧路
     // --continue 的 quiet_if_none 语义一致;真出错(目录坏了开不出新场)
     // 照旧失败退出,不回退旧写口。
     if (options.resume_at_launch) {
-        const std::string latest = impl.manager->LatestResumableSessionId();
+        const std::string latest = explicit_finite_resume ? std::string()
+            : impl.manager->LatestResumableSessionId();
         // 显式指名的源不受 LatestResumable 的"running 不碰"连坐——那是
         // 自动挑最近场的筛子;接管硬杀场(running、无活锁)是常驻恢复的
         // 正路(V0 受理底线),可恢复性(活锁/one_shot/验卷)由 ResumeAsNew

@@ -265,6 +265,45 @@ class MemoryCasWindowsPathsTests(unittest.TestCase):
                     focused.check_memory_cas_paths(body + duplicate + "\n", "nt")
 
 
+class RecoverySourceProofTests(unittest.TestCase):
+    def section(self, stem):
+        prefix = "[session-recovery-path] " if stem == "session_recovery_view" else "[sdk-recovery-path] "
+        return ('Command: "native-fixture" "--source-file=*test_' + stem + '.cpp"\n' +
+                "\n".join(prefix + path for path in focused.RECOVERY_PATHS[stem]) + "\n")
+
+    def test_two_exact_sources_require_all_their_actual_unique_paths(self):
+        for stem, paths in focused.RECOVERY_PATHS.items():
+            focused.check_recovery_source("sdk.focused." + stem, self.section(stem), len(paths))
+            domain = "unit.trajectory." if stem == "session_recovery_view" else "integration.sdk."
+            focused.check_recovery_source(domain + stem, self.section(stem), len(paths))
+
+    def test_empty_reduced_or_extra_case_rosters_are_rejected(self):
+        for stem, paths in focused.RECOVERY_PATHS.items():
+            for count in (0, len(paths) - 1, len(paths) + 1):
+                with self.subTest(stem=stem, count=count), self.assertRaisesRegex(RuntimeError, "roster differs"):
+                    focused.check_recovery_source("sdk.focused." + stem, self.section(stem), count)
+
+    def test_wrong_borrowed_or_duplicate_source_filters_are_rejected(self):
+        for stem, paths in focused.RECOVERY_PATHS.items():
+            for command in ("*test_other.cpp", "*test_" + stem + ".cpp.extra"):
+                body = self.section(stem).replace("*test_" + stem + ".cpp", command)
+                with self.assertRaisesRegex(RuntimeError, "exact source"):
+                    focused.check_recovery_source("sdk.focused." + stem, body, len(paths))
+            with self.assertRaisesRegex(RuntimeError, "exact source"):
+                focused.check_recovery_source("sdk.focused." + stem, self.section(stem) +
+                    'Command: "--source-file=*test_' + stem + '.cpp"\n', len(paths))
+
+    def test_missing_decorated_or_duplicate_paths_cannot_pass(self):
+        for stem, paths in focused.RECOVERY_PATHS.items():
+            prefix = "[session-recovery-path] " if stem == "session_recovery_view" else "[sdk-recovery-path] "
+            marker = prefix + paths[0]
+            for body in (self.section(stem).replace(marker + "\n", ""),
+                         self.section(stem).replace(marker, "other-source: " + marker),
+                         self.section(stem) + marker + "\n"):
+                with self.assertRaisesRegex(RuntimeError, "did not finish once"):
+                    focused.check_recovery_source("sdk.focused." + stem, body, len(paths))
+
+
 class PlanRetryEvidenceTests(unittest.TestCase):
     def body(self, platform="posix", executable="lubancore_sdk_tests"):
         count = 25 if platform == "nt" else 22

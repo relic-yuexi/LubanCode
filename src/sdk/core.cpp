@@ -71,6 +71,12 @@ struct CloseErrors {
 };
 
 Error Failure(std::string code, std::string message = {}) { return {std::move(code), std::move(message)}; }
+lubancode::trajectory::RecoveryReadLimits InternalRecoveryLimits(const RecoveryReadLimits& value) {
+    return {{value.journal.max_bytes, value.journal.max_lines, value.journal.max_line_bytes},
+        {value.operations.max_bytes, value.operations.max_lines, value.operations.max_line_bytes},
+        value.result_total_bytes, value.view_total_bytes, value.result_directory_entries,
+        value.view_directory_entries, value.directory_name_bytes, value.directory_name_total_bytes};
+}
 bool Terminal(OperationState state) { return state != OperationState::Accepted && state != OperationState::Running; }
 bool ValidId(const std::string& value) {
     return !value.empty() && value.size() <= 200 &&
@@ -273,6 +279,9 @@ struct Session::Impl final : rt::InteractionBroker {
     }
 
     Result<void> Initialize() {
+        const auto recovery_limits = InternalRecoveryLimits(options.recovery_read_limits);
+        if (!lubancode::trajectory::ValidRecoveryReadLimits(recovery_limits))
+            return std::unexpected(Failure("sdk.recovery.invalid_limits"));
         auto cwd = AbsoluteDirectory(options.cwd, false);
         if (!cwd) return std::unexpected(cwd.error());
         options.cwd = lubancode::tools::PathToUtf8(*cwd);
@@ -495,6 +504,8 @@ struct Session::Impl final : rt::InteractionBroker {
         launch.approval_mode = Mode(options.approval_mode);
         launch.workspaces_root = lubancode::tools::Utf8ToPath(roots.data_root) / "workspaces";
         launch.v3_system_content = (*skill_module)->EffectiveSystem();
+        launch.recovery_capture.limits = recovery_limits;
+        launch.recovery_capture.memory_metadata = memory_module->RequiresRecoveryMetadata();
         auto skills_opening = (*skill_module)->OpeningParticipant();
         auto memory_opening = memory_module->OpeningParticipant();
         auto write_opening = memory_write_module->OpeningParticipant();

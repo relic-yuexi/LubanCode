@@ -25,6 +25,7 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/packages/test_package_manifest.cpp"
   "${_lubancore_tests_root}/unit/tools/test_tool_job_coordinator.cpp"
   "${_lubancore_tests_root}/unit/tools/test_tool_job_start_transaction.cpp"
+  "${_lubancore_tests_root}/unit/trajectory/test_session_recovery_view.cpp"
   "${_lubancore_tests_root}/unit/platform/test_atomic_write.cpp"
   "${_lubancore_tests_root}/unit/tools/test_lua_protected.cpp"
   "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_result_store.cpp"
@@ -106,6 +107,8 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     endif()
   elseif(sdk_basename STREQUAL "test_package_manifest.cpp")
     set(sdk_original_test "unit.packages.package_manifest")
+  elseif(sdk_basename STREQUAL "test_session_recovery_view.cpp")
+    set(sdk_original_test "unit.trajectory.session_recovery_view")
   elseif(sdk_basename STREQUAL "test_v3_result_store.cpp")
     set(sdk_original_test "unit.trajectory_v3.v3_result_store")
     set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-result-store")

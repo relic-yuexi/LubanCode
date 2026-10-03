@@ -20,6 +20,7 @@ public:
         std::string resume_id, std::filesystem::path cwd);
     lubancode::trajectory::V3OpeningParticipant OpeningParticipant();
     memory::v1::Snapshot Describe() const { return snapshot_; }
+    bool RequiresRecoveryMetadata() const { return snapshot_.enabled; }
     struct Recall {
         std::string context;
         memory::v1::RecallReport report;
@@ -38,7 +39,10 @@ private:
     nlohmann::json Plan(const std::string& session_id) const;
     std::expected<nlohmann::json, std::string> Open(const lubancode::trajectory::V3OpeningContext& context);
     Result<void> CheckBinding(const lubancode::trajectory::v3::V3Ledger& source) const;
-    Result<void> CheckSavedReports(const lubancode::trajectory::v3::V3Ledger& source) const;
+    Result<void> CheckSavedReports(const lubancode::trajectory::v3::V3Ledger& source,
+        const lubancode::trajectory::SessionRecoveryView& view) const;
+    Result<memory::v1::RecallReport> ParseReportBytes(const std::string& operation_id,
+        const std::string& bytes) const;
     std::filesystem::path owned_root_, session_dir_, expected_resume_dir_, cwd_;
     lubancode::workspace::WorkspaceIdentity identity_;
     memory::v1::Snapshot snapshot_;

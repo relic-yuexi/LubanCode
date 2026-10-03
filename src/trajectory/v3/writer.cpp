@@ -11,6 +11,7 @@
 
 #include "trajectory/canonical_json.hpp"
 #include "trajectory/journal.hpp"
+#include "trajectory/session_recovery_view.hpp"
 
 namespace lubancode::trajectory::v3 {
 
@@ -675,6 +676,53 @@ std::expected<V3Writer, std::string> V3Writer::Continue(const std::filesystem::p
         auto line = nlohmann::json::parse(raw, nullptr, false);
         if (line.is_discarded()) {
             continue;  // VerifyV3File 已保证不会走到这
+        }
+        lines.push_back(line);
+        last_hash = line.at("lineHash").get<std::string>();
+        if (line.at("type").get<std::string>() == "message") {
+            impl->message_ids.insert(line.at("messageId").get<std::string>());
+            if (line.at("message").value("role", std::string()) == "system" &&
+                line.contains("systemMeta") && line["systemMeta"].contains("hostBindings")) {
+                impl->system_host_bindings[line.at("messageId").get<std::string>()] =
+                    line["systemMeta"]["hostBindings"];
+            }
+        }
+    }
+    impl->last_hash = last_hash;
+    if (!lines.empty()) {
+        impl->session_id = lines.front().at("sessionId").get<std::string>();
+        impl->run_id = lines.front().at("runId").get<std::string>();
+    }
+    RestoreIdCounters(impl->id_counters, lines);
+    return V3Writer(std::move(impl));
+}
+
+std::expected<V3Writer, std::string> V3Writer::ContinueOwnedPrefix(const std::filesystem::path& jsonl_path,
+    std::string_view prefix, const JournalFileAnchor& anchor, V3WriterOptions options, const V3Clock* clock) {
+    auto raw_lines = RecoveryStreamLines(prefix, std::nullopt, true);
+    if (!raw_lines) return std::unexpected(raw_lines.error());
+    V3VerifyReport report = VerifyV3Lines(*raw_lines);
+    if (!report.ok) {
+        return std::unexpected("v3writer.continue_not_clean: " + report.error_code + " " +
+                               report.message);
+    }
+    auto journal = JournalWriter::OpenExistingVerified(jsonl_path, prefix, anchor);
+    if (!journal.has_value()) {
+        return std::unexpected(journal.error());
+    }
+    auto impl = std::make_unique<Impl>();
+    impl->journal = std::move(*journal);
+    impl->options = std::move(options);
+    impl->clock = clock;
+    impl->next_seq = report.lines + 1;
+    impl->context = std::move(report.context);
+    // 身份、尾 hash、id 计数器、messageId 集合从重放行恢复。
+    std::vector<nlohmann::json> lines;
+    std::string last_hash;
+    for (const auto& raw : *raw_lines) {
+        auto line = nlohmann::json::parse(raw, nullptr, false);
+        if (line.is_discarded()) {
+            continue;  // VerifyV3Lines 已保证不会走到这
         }
         lines.push_back(line);
         last_hash = line.at("lineHash").get<std::string>();

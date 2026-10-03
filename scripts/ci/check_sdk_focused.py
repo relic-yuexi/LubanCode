@@ -17,6 +17,8 @@ REQUIRED = {
     "sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest",
     "sdk.focused.tool_job_coordinator",
     "sdk.focused.tool_job_start_transaction",
+    "sdk.focused.session_recovery_view",
+    "sdk.focused.lubancore_recovery_view",
     "sdk.focused.lubancore_session",
     "sdk.focused.lubancore_scoped_approval",
     "sdk.focused.lubancore_child_approval",
@@ -175,6 +177,29 @@ def check_memory_cas_paths(native_section: str, platform_name: str):
             raise RuntimeError("Memory CAS actual Windows path did not finish once: " + path)
 
 
+RECOVERY_PATHS = {
+    "session_recovery_view": ("native-byte-bounds", "metadata-roster-bounds", "immutable-main-reference", "strict-operation-order",
+                              "native-existing-prefix", "owned-projection-append", "bounded-preflight-cli-unset", "cli-real-resumed-model"),
+    "lubancore_recovery_view": ("public-budget-raise", "locked-memory-owned-view", "completed-versus-partial", "four-session-isolation"),
+}
+
+
+def check_recovery_source(name: str, native_section: str, count: int):
+    stem = name.rsplit(".", 1)[-1]
+    if stem not in RECOVERY_PATHS:
+        return
+    paths = RECOVERY_PATHS[stem]
+    if count != len(paths):
+        raise RuntimeError("Recovery native roster differs from actual source: " + name)
+    filters = re.findall(r'--source-file=([^"\s]+)', native_section)
+    if filters != ["*test_" + stem + ".cpp"]:
+        raise RuntimeError("Recovery native command does not identify the exact source: " + name)
+    prefix = "[session-recovery-path] " if stem == "session_recovery_view" else "[sdk-recovery-path] "
+    for path in paths:
+        if native_section.splitlines().count(prefix + path) != 1:
+            raise RuntimeError("Recovery actual path did not finish once: " + name + ":" + path)
+
+
 PLAN_RETRY_PATHS = ("retry-success", "permanent-stop", "committed-stop", "attempt-budget",
                     "deadline-budget", "native-write")
 
@@ -321,6 +346,7 @@ def main():
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_job_start_native(sections[0], registered["command"],
                 case.attrib["name"] == "sdk.focused.tool_job_coordinator")
+        check_recovery_source(case.attrib["name"], sections[0], int(counts[0]))
         if case.attrib["name"] == "sdk.focused.v3_result_store":
             check_result_store_native(sections[0], os.name)
         if case.attrib["name"] == "sdk.focused.atomic_write":

@@ -10,6 +10,7 @@
 
 namespace lubancode::trajectory {
 class MemoryCapability;
+struct SessionRecoveryView;
 namespace v3 {
 struct V3Ledger;
 }
@@ -23,6 +24,8 @@ struct V3OpeningContext {
     // Created by the real locked owner before this gate. Retaining this owned
     // handle does not retain the ledger pointer or keep the write lease open.
     std::shared_ptr<MemoryCapability> memory_capability;
+    // Only the locked same-ID recovery invocation supplies this borrowed view.
+    const SessionRecoveryView* recovery_view = nullptr;
 };
 
 // Internal, synchronous pre-publication gate. It may commit owned host metadata,

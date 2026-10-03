@@ -118,6 +118,7 @@ SHARED_SDK_TEST_SOURCES = {
     "tests/unit/tools/test_lua_protected.cpp",
     "tests/unit/tools/test_tool_job_coordinator.cpp",
     "tests/unit/tools/test_tool_job_start_transaction.cpp",
+    "tests/unit/trajectory/test_session_recovery_view.cpp",
     "tests/unit/trajectory_v3/test_v3_result_store.cpp",
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",
