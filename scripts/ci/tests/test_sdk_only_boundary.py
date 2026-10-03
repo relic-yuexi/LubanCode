@@ -364,6 +364,23 @@ class BoundaryTests(unittest.TestCase):
                              "sources": [{"path": "src/cli/renamed.cpp"}]})
         self.assert_rejected(self.check(), "includes host source")
 
+    def test_release_query_and_package_sources_cannot_hide_in_sdk_only_targets(self):
+        for path in ("src/config/update_checker.cpp", "src/config/update_checker.hpp",
+                     "src/package/manifest.cpp", "src/package/manifest.hpp"):
+            with self.subTest(path=path):
+                self.source_file(path, "int host_material;\n")
+                self.targets.append({"id": "hidden", "name": "neutral_name", "type": "STATIC_LIBRARY",
+                                     "sources": [{"path": path, "compileGroupIndex": 0}], "compileGroups": [{}]})
+                self.assert_rejected(self.check(), "includes host source " + path)
+                self.targets.pop()
+
+    def test_private_header_cannot_reimport_release_query_or_package(self):
+        for path in ("src/config/update_checker.hpp", "src/package/manifest.hpp"):
+            with self.subTest(path=path):
+                self.source_file(path, "#pragma once\n")
+                self.source_file("src/neutral/bridge.hpp", '#include "' + path.removeprefix("src/") + '"\n')
+                self.assert_rejected(self.check(), "reverse host include")
+
     def test_terminal_platform_source_is_not_a_core_exception(self):
         self.source_file("src/platform/console_posix.cpp", "int terminal;\n")
         self.targets[1]["sources"].append({"path": "src/platform/console_posix.cpp", "compileGroupIndex": 0})

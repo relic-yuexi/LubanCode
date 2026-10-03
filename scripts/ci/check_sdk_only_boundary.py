@@ -22,7 +22,9 @@ HOST_TARGETS = {
     "lubancode", "lubancode_core", "lubancode_updater", "miniz", "lubancode_app", "lubancode_tests", "lubancore_host_tests",
     "lubancode_official_skills", "lubancode_official_docs", "lubancode_assistant_web",
 }
-HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/", "src/updater/")
+SDK_HOST_ONLY_SOURCE_PREFIXES = ("src/updater/", "src/package/")
+SDK_HOST_ONLY_SOURCE_FILES = {"src/config/update_checker.cpp", "src/config/update_checker.hpp"}
+HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/", *SDK_HOST_ONLY_SOURCE_PREFIXES)
 SHARED_SDK_TEST_SOURCES = {
     "tests/unit/trajectory_v3/test_v3_result_store.cpp",
     "tests/unit/platform/test_atomic_write.cpp",
@@ -105,7 +107,8 @@ def relative(path: Path, root: Path) -> str | None:
 
 
 def host_path(path: str) -> bool:
-    return path == "src/main.cpp" or path.startswith(HOST_PREFIXES) or bool(TERMINAL_PATH.match(path))
+    return (path == "src/main.cpp" or path in SDK_HOST_ONLY_SOURCE_FILES
+            or path.startswith(HOST_PREFIXES) or bool(TERMINAL_PATH.match(path)))
 
 
 def prepare(build: Path) -> None:
