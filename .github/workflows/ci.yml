@@ -152,6 +152,9 @@ jobs:
                 cross_platform=true
                 runner_tests=$runner_present
                 code=true ;;
+              src/package/semver.*|src/package/manifest.*|tests/unit/packages/test_package_manifest.cpp|scripts/ci/check_package_manifest.py|scripts/ci/tests/test_package_manifest_gate.py)
+                cross_platform=true
+                code=true ;;
               src/config/update_checker.*|tests/unit/config/test_update_checker.cpp|scripts/ci/check_release_query.py|scripts/ci/tests/test_release_query_gate.py)
                 cross_platform=true
                 sdk_tests=$sdk_present
@@ -727,6 +730,21 @@ jobs:
           cmake --build build --config Release --target lubancode -j 4
           cmake --build build --config Release --target lubancode_tests -j 4
 
+      - name: Run original CLI Package manifest source
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_package_manifest_gate.py
+          "$PY" scripts/ci/check_package_manifest.py --build-dir build
+
+      - name: Upload CLI Package manifest evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-manifest-${{ matrix.name }}
+          path: build/test-evidence/package-manifest/
+          if-no-files-found: error
+
       - name: Run original CLI Release query source
         if: needs.changes.outputs.sdk_tests == 'true'
         shell: bash
@@ -1119,6 +1137,21 @@ jobs:
           set -e
           cmake --build build --target lubancode -j "$(nproc)"
           cmake --build build --target lubancode_tests -j "$(nproc)"
+
+      - name: Run original CLI Package manifest source
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+          "$PY" -m unittest discover -s scripts/ci/tests -p test_package_manifest_gate.py
+          "$PY" scripts/ci/check_package_manifest.py --build-dir build
+
+      - name: Upload CLI Package manifest evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-manifest-linux-manylinux
+          path: build/test-evidence/package-manifest/
+          if-no-files-found: error
 
       - name: Run original CLI Release query source
         if: needs.changes.outputs.sdk_tests == 'true'
