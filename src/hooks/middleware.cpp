@@ -829,10 +829,10 @@ struct FrameResult {
     DispatchFailureSource failure_source = DispatchFailureSource::None;
 };
 
-// Only the currently active synchronous continuation owns this slot. The
-// original exception is rethrown; observers never read or write this state.
+// Only the currently active synchronous Next owns this observation. The
+// original exception is rethrown; no opaque exception identity is inferred.
+// Observers never read or write this state.
 struct FrameException {
-    std::exception_ptr exception;
     DispatchFailureSource source = DispatchFailureSource::None;
 };
 
@@ -1097,12 +1097,11 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
         FrameResult frame;
         frame.kind = DispatchOutcome::Kind::Completed;
         if (state.terminal) {
-            // Tag only this real terminal call, and preserve its exception.
+            // Observe only this real terminal call, and preserve its exception.
             const auto invoke = [&]() -> nlohmann::json {
                 try { return state.terminal(input); }
                 catch (...) {
                     if (escaped != nullptr) {
-                        escaped->exception = std::current_exception();
                         escaped->source = DispatchFailureSource::TerminalThrew;
                     }
                     throw;
@@ -1152,6 +1151,9 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
     FrameException next_exception;
     NextCall next([&state, &def, &meta, &record, &next_exception, chain_pos, frame_input](
                       const std::optional<nlohmann::json>& candidate) -> DownstreamOutcome {
+        // Native Next may retry after impl throws. Keep each attempt's
+        // terminal observation separate from the last observed exception.
+        FrameException attempt_exception;
         try {
             nlohmann::json effective_input = frame_input;
             if (candidate.has_value()) {
@@ -1190,13 +1192,11 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
             if (state.sink != nullptr) {
                 state.sink->OnContinuationConsumed(meta);  // 一次性执行权(§7.1)
             }
-            return ToDownstream(RunFrame(state, chain_pos + 1, effective_input, &next_exception));
+            return ToDownstream(RunFrame(state, chain_pos + 1, effective_input, &attempt_exception));
         } catch (...) {
-            const auto actual = std::current_exception();
-            if (next_exception.exception != actual) {
-                next_exception.exception = actual;
-                next_exception.source = DispatchFailureSource::ContinuationThrew;
-            }
+            next_exception.source = attempt_exception.source == DispatchFailureSource::TerminalThrew
+                                        ? DispatchFailureSource::TerminalThrew
+                                        : DispatchFailureSource::ContinuationThrew;
             throw;
         }
     });
@@ -1216,19 +1216,18 @@ FrameResult RunFrame(DispatchState& state, std::size_t chain_pos, const nlohmann
         try {
             result = handler(ctx, input, next);
         } catch (const std::exception& e) {
-            failure_source = next_exception.exception == std::current_exception()
-                                 ? next_exception.source : DispatchFailureSource::HandlerThrew;
+            failure_source = DispatchFailureSource::HandlerThrew;
             result = std::unexpected(
                 HandlerError{std::string(err::kHandlerFailed), std::string("handler 抛异常: ") + e.what()});
         } catch (...) {
-            failure_source = next_exception.exception == std::current_exception()
-                                 ? next_exception.source : DispatchFailureSource::HandlerThrew;
+            failure_source = DispatchFailureSource::HandlerThrew;
             result = std::unexpected(HandlerError{std::string(err::kHandlerFailed), "handler 抛未知异常"});
         }
     }
     record.duration_ms = elapsed_ms();
     record.next_consumed = next.consumed();
     record.next_calls = next.calls();
+    record.next_exception_source = next_exception.source;
 
     if (!result.has_value()) {
         record.outcome = "failed";
