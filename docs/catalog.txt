@@ -170,3 +170,5 @@ DOC development/sdk-channel-gateway-boundary.md
 DOC development/sdk-plan-atomic-diagnostic.md
 DOC development/updater-lock-ready.md
 DOC development/sdk-plan-short-reject.md
+DOC development/package-prerelease-order.md
+DOC development/child-history-stage-diagnostic.md
