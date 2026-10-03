@@ -86,6 +86,62 @@ class BoundaryTests(unittest.TestCase):
         self.flags["BUILD_TESTING"] = "ON"
         self.assertEqual(self.check(testing=True)["status"], "passed")
 
+    def deferred_action_reference(self, private=False):
+        reference = "src/sdk/action_dispatch.cpp"
+        self.source_file(reference, '#include "runtime/middleware_deferred_effects.hpp"\n')
+        self.source_file("src/runtime/middleware_deferred_effects.hpp", '#include "hooks/middleware.hpp"\n')
+        self.source_file("src/hooks/middleware.hpp", "#pragma once\n")
+        target = {"id": "deferred_reference", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        if private:
+            self.flags["BUILD_TESTING"] = "ON"
+            self.targets.append(target)
+        else:
+            self.targets[0]["sources"].extend(target["sources"])
+
+    def test_deferred_action_header_is_recorded_in_production_and_private_reference(self):
+        for private in (False, True):
+            with self.subTest(private=private):
+                self.deferred_action_reference(private)
+                report = self.check(testing=private)
+                self.assertEqual(report["status"], "passed", report["violations"])
+                self.assertIn("src/runtime/middleware_deferred_effects.hpp", report["scannedProjectFiles"])
+                self.assertIn({"from": "src/sdk/action_dispatch.cpp",
+                               "to": "src/runtime/middleware_deferred_effects.hpp"}, report["projectIncludeEdges"])
+
+    def test_deferred_action_header_cannot_smuggle_transitive_host_dependencies(self):
+        self.deferred_action_reference(private=True)
+        self.source_file("src/runtime/middleware_deferred_effects.hpp", '#include "neutral/deferred_bridge.hpp"\n')
+        for host in ("app/turn_runner.hpp", "channel/manager.hpp", "updater/updater.hpp"):
+            with self.subTest(host=host):
+                self.source_file("src/neutral/deferred_bridge.hpp", f'#include "{host}"\n')
+                self.source_file("src/" + host, "#pragma once\n")
+                self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_public_header_cannot_expose_internal_deferred_action_header(self):
+        self.deferred_action_reference()
+        self.source_file("include/lubancore/core.hpp", '#include "runtime/middleware_deferred_effects.hpp"\n')
+        self.assert_rejected(self.check(), "exposes non-public include")
+
+    def test_deferred_action_move_preserves_host_stdio_and_global_state_guards(self):
+        self.deferred_action_reference()
+        for code, reason in (("std::cerr << 1;", "direct host stdio"),
+                             ("printf(\"fixture\");", "direct host stdio"),
+                             ("chdir(\"fixture\");", "process-global setter"),
+                             ("SetEnvironmentVariableW(nullptr, nullptr);", "process-global setter")):
+            with self.subTest(code=code):
+                self.source_file("src/runtime/middleware_deferred_effects.hpp", code + "\n")
+                self.assert_rejected(self.check(), reason)
+
+    def test_deferred_action_state_guard_ignores_comments_and_literals(self):
+        self.deferred_action_reference()
+        self.source_file("src/runtime/middleware_deferred_effects.hpp",
+                         '// std::cout << 1; setenv("fixture", "fixture", 1);\n'
+                         'const char* diagnostic = "std::cerr chdir SetEnvironmentVariableW";\n'
+                         'const char* fixture = R"(printf("fixture"); chdir("fixture"))";\n')
+        report = self.check()
+        self.assertEqual(report["status"], "passed", report["violations"])
+
     def test_testing_on_does_not_enable_the_cli_test_graph(self):
         self.flags["BUILD_TESTING"] = "ON"
         self.source_file("tests/unit/cli/test_prompt.cpp", "int cli_test;\n")

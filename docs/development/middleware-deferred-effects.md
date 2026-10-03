@@ -6,7 +6,7 @@
 
 `Pending` 持实际 invocation meta、类型、准许值、原因与 JSON 副本。队列与 mutex 都归缓冲对象；下游 sink 仍借裸指针，不延长 Session、writer 或 Dispatcher 寿命。非效果事件即时转发；`OnOutputProposed` 先转发，再按原条件缓存 input.rewrite。`OnEffectSettled` 锁住队列入项，顺序沿真实回调到达次序。原未覆写的接口仍走基类缺省，不能顺手添转发。
 
-Pre 成功返回 settle lambda，以 shared_ptr 持住缓冲对象；不捕获短命 outcome 或 DispatchScope。Pre 拒绝、失败或坏参数沿原路立即 Settle。Post 用栈对象，实际 Dispatch 返回且 observer 全部 join 后才 Settle，见 `action_dispatch.cpp:89/126`、`hooks/middleware.cpp:1416`。观察者启动或回调抛错时，原 jthread 退场纪律照留，不把异常收成成功。
+Pre 成功返回 settle lambda，以 shared_ptr 持住缓冲对象；不捕获短命 outcome 或 DispatchScope。Pre 拒绝、失败或坏参数沿原路立即 Settle。Post 用栈对象，实际 Dispatch 返回且 observer 全部 join 后才 Settle，见固定基头 `1f9296e0` 中 `action_dispatch.cpp` 与 `hooks/middleware.cpp`。观察者启动或回调抛错时，原 jthread 退场纪律照留，不把异常收成成功。
 
 `Settle` 沿原宿主串行调用，队列遍历不另加 mutex；它不能与 Dispatch/observer 入队并跑。sink 至少活到实际 Dispatch、observer join 与 Settle 全部退出。Pre lambda 销毁只退缓冲值，不自动补 Settle；主 Prepare 的 `ActionReceipt` 仍在未准入退场时调用原失败结算，见 `agent/loop.cpp:574`。本笔不把 shared_ptr 说成下游借用保护。
 
@@ -20,4 +20,4 @@ SDK Post 当前先拷原工具结果、拼合补料，再调用 in-memory Settle
 
 文本门从固定基头抽原 struct，逐字比新 header 内 class；再从两版 SDK 文件剥去原 class、新 include 与别名，逐字比剩余 caller。存 class/blob SHA 和基头，不能拿结构相似代替保行为证据。复用原 SDK Action 十案、四条内部 marker、安装 Action 与旧中间件/CLI 回归，不添镜像 CASE。
 
-根代理只给 SDK-only 闭包登记这个精确内部头，保邻近 header、逆 host include、公开头暴露与 testing-OFF 拒绝；三平台/ASan 仍验实际原来源。源码与门均待二审和 fresh CI。本地只查文本、纯 Python、AST 与文档，不配置、编译、CTest 或运行原生程序。
+SDK-only 沿实际 include 图穿过新内部头，旧 CPP 与测试例外表不扩。原 SDK stdio/全局状态禁线只补这件精确头，保住移出前那道门；逆 host include、公开头暴露与 testing-OFF 拒绝照留。两条 CI 分类精确登记新头；三平台/ASan 仍验实际原来源。源码与门均待二审和 fresh CI。本地只查文本、纯 Python、AST 与文档，不配置、编译、CTest 或运行原生程序。
