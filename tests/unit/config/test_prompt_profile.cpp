@@ -99,6 +99,7 @@ TEST_CASE("黄金基线:未选 Profile 的 default 拼装与逐段重构逐字�
     REQUIRE(parts.size() == std::size(embedded::kCoreModules));
     parts.push_back(BuildEnvironmentSegment("D:/work", "2026-07-18"));
     parts.push_back(embedded::kFeature_files);
+    parts.push_back(embedded::kFeature_file_tool_policy);
     parts.push_back(embedded::kFeature_shell);
     parts.push_back(embedded::kFeature_delegation);
     parts.push_back(embedded::kFeature_todo);
@@ -112,6 +113,7 @@ TEST_CASE("黄金基线:法(persona)替换 core 时,其余段次序与内容照�
     parts.push_back("你是测试人格。");
     parts.push_back(BuildEnvironmentSegment("D:/work", "2026-07-18"));
     parts.push_back(embedded::kFeature_files);
+    parts.push_back(embedded::kFeature_file_tool_policy);
     parts.push_back(embedded::kFeature_shell);
     parts.push_back(embedded::kFeature_delegation);
     parts.push_back(embedded::kFeature_todo);
@@ -254,6 +256,7 @@ TEST_CASE("Profile 只影响点名 Agent:用户层放着别的 Profile 文件,de
     }
     parts.push_back(BuildEnvironmentSegment("D:/work", "2026-07-18"));
     parts.push_back(embedded::kFeature_files);
+    parts.push_back(embedded::kFeature_file_tool_policy);
     parts.push_back(embedded::kFeature_shell);
     parts.push_back(embedded::kFeature_delegation);
     parts.push_back(embedded::kFeature_todo);

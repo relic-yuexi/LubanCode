@@ -5,3 +5,4 @@
 - [x] 补回归测试，覆盖旧模块升级、短输出、多来源与预算上限。
 - [x] 提交分支 codex/file-tools-preview-budget 并创建 PR #330；未运行本地构建或测试。
 - [ ] 远程 GitHub Actions 编译与回归测试通过。
+- [x] 首轮 macOS 远程 CI 645/646 册通过；新增模块导致 prompt_profile 三处逐段黄金基线漏项，已补齐后重跑。
