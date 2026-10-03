@@ -94,7 +94,7 @@ KINDS = {
     # statusless 事实行:registered/dispatched/acknowledged 只表示事件已
     # 发生,不等于业务 job 已完成;unknown 是执行投影状态(payload
     # observedStatus),不硬塞信封 status。
-    "tool.job.registered", "tool.job.dispatched", "tool.job.observed",
+    "tool.job.registered", "tool.job.adopted", "tool.job.dispatched", "tool.job.observed",
     "tool.job.cancel_requested",
     "tool.delivery.prepared", "tool.delivery.acknowledged",
     "tool.delivery.uncertain",
@@ -124,6 +124,7 @@ KIND_STATUS = {
     "cancelled": "cancelled", "rejected": "rejected", "unknown": "unknown",
 }
 STATUSLESS_KINDS = {
+    "tool.job.adopted",
     "session.started", "system.change", "model.request.prepared",
     "model.response.started", "model.response.delta", "compact.requested",
     "compact.range.retreated",
@@ -541,12 +542,81 @@ def validate_line(obj: object, expect_seq: int) -> dict:
                             raise ValidationError("wireCallRef.async 应为 boolean")
                     if "approvalRequired" in payload and not isinstance(payload["approvalRequired"], bool):
                         raise ValidationError("tool.job.registered approvalRequired 应为 boolean")
+                elif kind == "tool.job.adopted":
+                    check_tool_payload(obj, kind, payload, True)
+                    if "\0" in payload["jobId"]:
+                        raise ValidationError("owned Job jobId contains NUL")
+                    if payload.get("layout") != "parent_admission_job_business_v1" or payload.get("attempt") != 1 \
+                            or type(payload.get("attempt")) is not int or not obj.get("turnId") or not obj.get("stepId"):
+                        raise ValidationError("owned Job requires the known business-attempt-one layout")
+                    for key in ("parentActionId", "provider_tool_call_id", "toolName"):
+                        if not isinstance(payload.get(key), str) or not payload[key] or "\0" in payload[key]:
+                            raise ValidationError(f"owned Job {key} must be nonempty text")
+                    if payload["toolName"] != "run_command" or payload["parentActionId"] == obj.get("actionId"):
+                        raise ValidationError("owned Job has an invalid command/action role")
+                    for key in ("assistantMessageRef", "sourcePendingEventRef", "sourceAdmissionEventRef",
+                                "preparedPendingEventRef", "registeredEventRef"):
+                        ref = payload.get(key)
+                        if not isinstance(ref, dict) or not is_ref(ref) or type(ref["seq"]) is not int \
+                                or ref["seq"] <= 0 or not ref["id"] or ref["sessionId"] != obj["sessionId"] \
+                                or ref["runId"] != obj["runId"]:
+                            raise ValidationError(f"owned Job {key} must be an actual same-owner five-key reference")
+                    for key in ("originalInputSha256", "effectiveInputSha256"):
+                        if not is_hex64(payload.get(key)):
+                            raise ValidationError(f"owned Job {key} must be hex64")
+                    for key in ("effectiveInput", "preparedOwner", "toolIdentity", "executionPolicy", "commandLimits"):
+                        if not isinstance(payload.get(key), dict):
+                            raise ValidationError(f"owned Job {key} must be an object")
+                    owner, identity, policy, limits, inputs = (payload[key] for key in
+                        ("preparedOwner", "toolIdentity", "executionPolicy", "commandLimits", "effectiveInput"))
+                    for key in ("sessionId", "runId", "projectId", "cwd"):
+                        if not isinstance(owner.get(key), str) or not owner[key] or "\0" in owner[key]:
+                            raise ValidationError(f"owned Job owner {key} must be nonempty text")
+                    if owner["sessionId"] != obj["sessionId"] or owner["runId"] != obj["runId"]:
+                        raise ValidationError("owned Job owner differs from its envelope")
+                    for key in ("coordinatorId", "epoch"):
+                        if type(owner.get(key)) is not int or owner[key] <= 0:
+                            raise ValidationError("owned Job owner counter must be positive")
+                    for key in ("logicalName", "registrationSource", "version", "executionScope"):
+                        if not isinstance(identity.get(key), str) or not identity[key] or "\0" in identity[key]:
+                            raise ValidationError(f"owned Job tool identity {key} must be nonempty text")
+                    if identity["logicalName"] != payload["toolName"] or identity["executionScope"] != owner["cwd"]:
+                        raise ValidationError("owned Job tool identity differs from its target")
+                    if policy.get("allow_background") is not True or policy.get("retry_policy") != "none" \
+                            or policy.get("resume_policy") != "hold":
+                        raise ValidationError("owned Job requires explicit background permission, no retry and Hold")
+                    if "side_effect_class" in policy and (not isinstance(policy["side_effect_class"], str)
+                            or not policy["side_effect_class"]):
+                        raise ValidationError("owned Job side effect must be nonempty text")
+                    if "resource_keys" in policy and (not isinstance(policy["resource_keys"], list)
+                            or any(not isinstance(key, str) or not key for key in policy["resource_keys"])):
+                        raise ValidationError("owned Job resource keys must be an array of nonempty text")
+                    for key, upper in (("timeout_ms", 86400000), ("max_output_bytes", 2097152)):
+                        if type(limits.get(key)) is not int or not 0 < limits[key] <= upper:
+                            raise ValidationError("owned command limits must be positive and bounded")
+                    deadline = policy.get("deadline_ms", 0)
+                    if type(policy.get("max_output_bytes")) is not int or limits["max_output_bytes"] > policy["max_output_bytes"] \
+                            or type(deadline) is not int or deadline < 0 \
+                            or deadline and limits["timeout_ms"] > deadline:
+                        raise ValidationError("owned command limits broaden the frozen policy")
+                    if inputs.get("cwd") != owner["cwd"] or "max_runtime_ms" in inputs \
+                            or inputs.get("run_in_background", False) is not False:
+                        raise ValidationError("owned command input must keep its target and synchronous execution")
                 elif kind == "tool.job.dispatched":
                     check_tool_payload(obj, kind, payload, True)
                     if not isinstance(payload.get("ownerEpoch"), str) or not payload["ownerEpoch"]:
                         raise ValidationError("tool.job.dispatched ownerEpoch 应为非空 string")
                 elif kind == "tool.job.observed":
                     check_tool_payload(obj, kind, payload, False)
+                    if "startupFailed" in payload:
+                        if type(payload["startupFailed"]) is not bool:
+                            raise ValidationError("startupFailed must be boolean")
+                        if payload["startupFailed"] and (payload.get("observedStatus") != "failed"
+                                or "resultRef" in payload or "postEventRef" in payload):
+                            raise ValidationError("confirmed startup failure cannot claim raw or Post")
+                    if "postEventRef" in payload and (not isinstance(payload["postEventRef"], dict)
+                            or not is_ref(payload["postEventRef"])):
+                        raise ValidationError("owned Post requires native five-key provenance")
                     if payload.get("observedStatus") not in (
                             "registered", "queued", "running", "succeeded", "failed",
                             "cancelled", "unknown", "awaiting_approval"):

@@ -63,9 +63,12 @@ struct V3WriterOptions {
     // "未知",不许暗填 main_session。
     std::string launch_cwd;
     std::string run_kind;
-    // 注入提交失败(测试专用;生产恒空):返回稳定码则该枚提交按 IoFailed
-    // 收(writer 句柄随后 broken)。锁内调用,须廉价无副作用。
+    // 注入未确认提交(测试专用;生产恒空):保首枚真实原回执(当前为
+    // Rejected/v3writer.injected),并置 broken;已断句柄后续调用 IoFailed。
+    // 锁内调用,须廉价无副作用。
     std::function<std::optional<std::string>()> inject_io_failure;
+    // Test-only checked Close failure after the real journal handle is closed.
+    std::function<std::optional<std::string>()> inject_close_failure;
 };
 
 // 链节点(schema 文档 §2.4)。
@@ -178,6 +181,10 @@ public:
     static std::expected<V3Writer, std::string> Continue(
         const std::filesystem::path& jsonl_path, V3WriterOptions options = V3WriterOptions{},
         const V3Clock* clock = nullptr);
+    static std::expected<V3Writer, std::string> ContinueOwnedPrefix(
+        const std::filesystem::path& jsonl_path, std::string_view prefix,
+        const JournalFileAnchor& anchor, V3WriterOptions options = V3WriterOptions{},
+        const V3Clock* clock = nullptr);
 
     // 只关写句柄,不代写 session.ended。封口事实须由领域先落稳。
     // 可重复调用;保留身份、路径与上下文查询,此后提交拒绝。
@@ -226,6 +233,8 @@ public:
     // 三步全过内存才换根;第 2 步后崩溃,恢复仍用旧根(变更未完成)。
     // settings_version/soul 等缘由进 change 元数据;system_changed=false
     // 表示设置变了但正文未变,仍走三步留档,不制造假版本差异(链重接)。
+    // Opaque hostBindings are inherited from the effective system root only;
+    // cause/settingsVersion and other change metadata are never inherited.
     struct SwitchSystemResult {
         WriteReceipt change_event;
         WriteReceipt system_message;
@@ -329,6 +338,7 @@ public:
     std::uint64_t next_seq() const;
     std::string last_line_hash() const;
     bool broken() const;
+    bool closed() const;
     const ContextView& context() const;  // 当前内存视图(链/版本/当前 system)
     // 本账上是否已有该 messageId(PrepareRequest 引用先落稳的判据)。
     bool HasMessageId(std::string_view message_id) const;
@@ -357,6 +367,9 @@ struct V3VerifyReport {
 // 逐行验:严格解析、语义校验、seq 从 1 连续、prevHash/lineHash 衔接;
 // 四类提交事件重放链状态。失败给首错。
 V3VerifyReport VerifyV3File(const std::filesystem::path& path);
+// Same verification/replay over an owned, already split input. The caller
+// checks complete newlines and bounds before constructing these lines.
+V3VerifyReport VerifyV3Lines(const std::vector<std::string>& lines);
 
 // 重放一枚提交事件到视图(Continue/VerifyV3File/读取侧 P2 共用同一份
 // 链重放,单一事实来源)。返回错误码或空串。

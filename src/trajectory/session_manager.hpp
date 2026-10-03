@@ -10,6 +10,8 @@
 // fake);轨迹侧只掌账、只落事实。
 #pragma once
 
+#include "trajectory/session_recovery_view.hpp"
+
 #include <atomic>
 #include <cstdint>
 #include <expected>
@@ -25,6 +27,8 @@
 #include <nlohmann/json.hpp>
 
 #include "trajectory/directory.hpp"
+#include "trajectory/cas_store.hpp"
+#include "trajectory/opening.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/replay.hpp"
 #include "trajectory/session_lock.hpp"
@@ -235,10 +239,14 @@ struct EventRef {
 // session.json(盘上身份在 v3 账首行)。
 struct ActiveSession {
     TrajectoryDirectory directory;
-    std::optional<TrajectoryRecorder> main;  // 关柄后仍在,只是拒写
-    std::optional<v3::V3Writer> v3_main;     // v3 场的主账写者(与 main 互斥)
     SessionManifest manifest;
     SessionLock lock;
+    MemoryCapabilityLease memory_capability;
+    std::shared_ptr<const SessionRecoveryView> recovery_view;
+    // Member order also closes native writers before sealing CAS writes and
+    // releasing the lock on a failed opening or owner's destruction.
+    std::optional<TrajectoryRecorder> main;  // 关柄后仍在,只是拒写
+    std::optional<v3::V3Writer> v3_main;     // v3 场的主账写者(与 main 互斥)
     SessionStatus status = SessionStatus::Preparing;
 
     std::filesystem::path session_dir() const { return directory.session_dir(); }
@@ -520,6 +528,10 @@ struct SessionManagerOptions {
     // 建场时宿主还不知道最终 system,首行先立"此刻已知"的底,第一次
     // 模型请求带上真 system 时走 §4.3 三步切换。恢复不重拼(§4.3)。
     std::string v3_system_content;
+    V3OpeningParticipant v3_opening_participant;
+    std::shared_ptr<MemoryCapabilityFactory> memory_capability_factory;
+    RecoveryCaptureRequest recovery_capture;
+    SessionRecoveryFactory recovery_factory;
     // v3 主账写者的提交故障注入(测试专用;生产恒空 = 零行为):非空稳定
     // 码即该枚提交按 IoFailed 收,写者句柄随后 broken——T08 召回快照的
     // fail-closed 测试用,与 subagent_start_fault 同款纪律。

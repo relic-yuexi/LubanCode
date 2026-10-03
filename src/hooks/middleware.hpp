@@ -196,6 +196,13 @@ struct LuaHandlerSpec {
 // handler 调用合同(C++ 内置与 Lua 同一形状;Lua 由 runtime 侧适配)。
 // ---------------------------------------------------------------------------
 // 一次 dispatch 的宿主发行身份(只读;hook 不自行开真人回合)。
+// Owned per-dispatch Action facts. No writer, permission source or cancellation
+// flag is retained here. Only a host's real started call supplies attempt.
+struct ActionScope {
+    std::string session_id, operation_id, wire_call_id, tool_name, effective_cwd;
+    std::optional<std::uint64_t> attempt;
+};
+
 struct InvocationCtx {
     std::string dispatch_id;
     std::string invocation_id;
@@ -206,25 +213,43 @@ struct InvocationCtx {
     std::string definition_hash;
     int depth = 0;  // 链上位置(next 框架深度;宿主嵌套预算用)
     std::optional<std::string> turn_id, step_id, action_id, request_id;
+    std::optional<ActionScope> action_scope;
     const std::atomic<bool>* cancel = nullptr;  // 取消旗(可空)
 };
 
 // next 的下游返回:业务结局是值,不是 Lua 错;协议违规才走错误。
+// Live producer facts. They neither classify an error string nor attest native
+// durability. None on the aggregate means no failure/denial won the old reduce.
+enum class DispatchCause {
+    None, RequiredAbort, ConfiguredAbort, KeepOriginalUnavailable,
+    Cancelled, ExplicitDenied, DepthExceeded
+};
+enum class DispatchFailureSource {
+    None, MissingHandler, HandlerReturnedError, HandlerThrew,
+    TerminalThrew, ContinuationThrew, ObserverCompletionThrew, ReturnContractRejected
+};
+// Trusted internal caller choice. It neither changes the frozen registry nor
+// supplies an execution owner. The Job profile is valid only for PostAction.
+enum class DispatchReturnContract { Legacy, JobPostSupplementsV1 };
+
 struct DownstreamOutcome {
     enum class Kind { Value, Denied, Failed, Invalid };
     Kind kind = Kind::Value;
     nlohmann::json value;
     std::string code;     // Denied/Failed 的码;Invalid 的错误码
     std::string message;
+    DispatchCause cause = DispatchCause::None;
+    DispatchFailureSource failure_source = DispatchFailureSource::None;
 };
 
-// 至多一次 next 的边界。第二次调用不跑下游,回 Invalid(hook.next.already_consumed);
+// impl 正常返回非 Invalid 后才消费;随后再调不跑下游,回 already_consumed。
+// impl 抛错或返回 Invalid 不消费,原 native handler 仍可再试。SDK lease 另管。
 // 跨 invocation 拒绝由槽位过期机制保证(runtime 侧),执行核这边每次
 // invocation 造新 NextCall。
 class NextCall {
 public:
     NextCall() = default;
-    // impl:执行核注入的"候选采用 + 跑下游"。NextCall 自己把守至多一次。
+    // impl:执行核注入的"候选采用 + 跑下游";只锁已正常消费的下游结果。
     explicit NextCall(std::function<DownstreamOutcome(const std::optional<nlohmann::json>&)> impl)
         : impl_(std::move(impl)) {}
 
@@ -449,6 +474,7 @@ struct DispatchTrigger {
     nlohmann::json input;  // 挂点专用候选副本(修改不改 session;采用经宿主)
     std::optional<std::string> origin, purpose, delivery_mode;  // 匹配条件(§4.47)
     std::optional<std::string> turn_id, step_id, action_id, request_id;
+    std::optional<ActionScope> action_scope;
     const std::atomic<bool>* cancel = nullptr;  // 取消旗(帧边界查,Lua 灌 guard)
     // PreRequest 分段驱动(§4.36):宿主按 mutate -> freeze -> estimate ->
     // capacity 逐段放行;估算输出由宿主落稳后再进容量段的输入,估算/容量
@@ -482,6 +508,14 @@ struct InvocationRecord {
     std::string error_code, detail;
     std::vector<EffectRecord> effects;
     std::uint64_t duration_ms = 0;
+    // This invocation's own failure; optional/observer failure may be ignored
+    // by the aggregate. A returned HandlerError never supplies this tag.
+    DispatchFailureSource failure_source = DispatchFailureSource::None;
+    // Last exception co-observed by this invocation's actual synchronous Next,
+    // retained across a later successful retry. Not the
+    // identity or ancestral cause of the exception later caught by a handler.
+    // Only None, TerminalThrew or ContinuationThrew are produced here.
+    DispatchFailureSource next_exception_source = DispatchFailureSource::None;
 };
 
 struct DispatchOutcome {
@@ -497,6 +531,8 @@ struct DispatchOutcome {
     std::string error_code, error_detail;
     std::vector<InvocationRecord> records;  // 计划序(含跳过项与观察者)
     std::vector<std::string> context_appends;  // 已采用的 context.append 文本(计划序)
+    DispatchCause cause = DispatchCause::None;
+    DispatchFailureSource failure_source = DispatchFailureSource::None;
 
     bool Ok() const { return kind == Kind::Completed; }
     const InvocationRecord* FindRecord(std::string_view key) const {
@@ -524,7 +560,8 @@ public:
     const FrozenRegistry& registry() const { return *registry_; }
 
     DispatchOutcome Dispatch(HookPoint point, const DispatchTrigger& trigger, TerminalFn terminal = nullptr,
-                             MiddlewareEventSink* sink = nullptr);
+                             MiddlewareEventSink* sink = nullptr,
+                             DispatchReturnContract return_contract = DispatchReturnContract::Legacy);
 
     // 链上嵌套深度上限(§4.1 嵌套限制的宿主侧一档;计划长度本身也有限)。
     static constexpr int kMaxChainDepth = 256;

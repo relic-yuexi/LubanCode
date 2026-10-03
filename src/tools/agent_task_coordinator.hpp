@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -125,6 +126,10 @@ struct AgentDispatchRequest {
     AgentRunIdentity caller;   // 派工者身份(经 TLS 校准,见下)
     std::shared_ptr<const SubagentDispatchEnv> env;  // null = main 直派,引擎读自家活账
     AgentDispatchHandle* fail_account = nullptr;     // 连败账随调用方的 handle 走
+    // Foreground-only call borrow. Never copy into a detached worker/env.
+    const std::atomic<bool>* foreground_cancel = nullptr;
+    // Whole owned ancestor invocation: causal evidence, never child identity.
+    std::optional<ToolInvocationIdentity> parent_invocation_cause;
 };
 
 // ---- 当前派工身份的线程局部账 -------------------------------------------
@@ -183,7 +188,7 @@ public:
 
     // 会话收场(单子 §6.2):进 Closing 后任何 handle 再派工都回稳定
     // session_closing,不新起线程。取消/收柄由 JoinAllBounded 办。
-    void RequestClose() { closing_.store(true, std::memory_order_release); }
+    void RequestClose();
     bool closing() const { return closing_.load(std::memory_order_acquire); }
 
     // handle 的派工口(closing 在这判,admission 在台账注册事务里判)。
@@ -195,8 +200,17 @@ public:
     // Failed/Cancelled 只是账面收口,证明不了 OS 线程已经 return;拿业务
     // 终态去 join 还在跑的线程,join 会无期限押死孵化路(监督器强收后正是
     // 这个形状)。
-    void TrackThread(int task_id, std::thread thread,
+    using ThreadBody = std::function<void()>;
+    using ThreadFactory = std::function<std::thread(ThreadBody)>;
+    // Reserve an owner before creating any live thread. false means closing won
+    // admission; allocation/factory failures propagate with no live thread lost.
+    bool StartThread(int task_id, ThreadBody body,
                      std::shared_ptr<std::atomic<bool>> exit_receipt);
+    // Internal deterministic seam, not a public SDK feature. A factory returns
+    // one joinable thread or throws before creating it; it must not synchronously
+    // close this coordinator from inside the startup callback.
+    void SetThreadFactoryForTesting(ThreadFactory factory);
+    bool HasReapingThreadForTesting();
     void ReapExitedThreads();
 
     // 退出兜底:广播取消 -> 逐线程按退出回执有界等 -> 回执在手就 join,
@@ -224,8 +238,12 @@ private:
         int task_id = 0;
         std::thread thread;
         std::shared_ptr<std::atomic<bool>> exit_receipt;  // worker 最后一笔置位
+        bool starting = true;  // protected by threads_mutex_
+        bool reaping = false;  // Close still owns/waits for a lock-free join
     };
-    std::vector<TaskThreadEntry> threads_;
+    std::vector<std::shared_ptr<TaskThreadEntry>> threads_;
+    std::condition_variable threads_ready_;
+    std::shared_ptr<const ThreadFactory> thread_factory_;
 };
 
 // 绑定 caller identity 的窄句柄(单子 §6.1/§6.4):工具表里挂的是它,不是
@@ -236,7 +254,8 @@ class AgentDispatchHandle {
 public:
     AgentDispatchHandle() = default;
     AgentDispatchHandle(std::weak_ptr<AgentTaskCoordinator> coordinator, AgentRunIdentity identity,
-                        std::shared_ptr<const SubagentDispatchEnv> env);
+                        std::shared_ptr<const SubagentDispatchEnv> env,
+                        std::optional<ToolInvocationIdentity> parent_invocation_cause = std::nullopt);
 
     const AgentRunIdentity& identity() const { return identity_; }
     // 冻结派工环境(只读):薄壳按当前入口修 schema 的后台可见性用(派工单
@@ -244,6 +263,7 @@ public:
     const std::shared_ptr<const SubagentDispatchEnv>& env() const { return env_; }
     // 派工入口:身份先经 TLS 校准(见 CurrentDispatchIdentity),再进协调器。
     Tool::Result Dispatch(const nlohmann::json& input);
+    Tool::Result Dispatch(const nlohmann::json& input, const ToolExecutionContext& context);
     // 薄壳的 schema/description 只读转发口(协调器亡 = null,壳退静态文案)。
     Tool* facade_tool() const;
 
@@ -258,6 +278,7 @@ private:
     std::weak_ptr<AgentTaskCoordinator> coordinator_;
     AgentRunIdentity identity_;
     std::shared_ptr<const SubagentDispatchEnv> env_;
+    std::optional<ToolInvocationIdentity> parent_invocation_cause_;
     std::string param_fail_cause_;
     int param_fail_streak_ = 0;
 };

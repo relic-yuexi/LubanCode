@@ -18,17 +18,143 @@ import sys
 
 
 CLIENT = "client-lubancore-boundary"
-HOST_TARGETS = {
-    "lubancode", "lubancode_core", "lubancode_app", "lubancode_tests", "lubancore_host_tests",
-    "lubancode_official_skills", "lubancode_official_docs", "lubancode_assistant_web",
+# Freeze host ownership independently from the current CMake source lists.
+# File API reports must prove every implementation's actual sole target owner.
+CHANNEL_HOST_TARGETS = {"lubancode_channel_host", "lubancode_channel_runtime"}
+MBEDTLS_TARGETS = {"mbedtls", "mbedx509", "mbedcrypto"}
+SDK_NEUTRAL_CHANNEL_FILES = {
+    "src/channel/types.cpp", "src/channel/types.hpp",
+    "src/channel/channel_config.cpp", "src/channel/channel_config.hpp",
 }
-HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/")
+SDK_NEUTRAL_PACKAGE_SOURCES = frozenset({"src/package/semver.cpp", "src/package/manifest.cpp"})
+SDK_NEUTRAL_PACKAGE_FILES = SDK_NEUTRAL_PACKAGE_SOURCES | {
+    "src/package/semver.hpp", "src/package/manifest.hpp",
+}
+CHANNEL_HOST_SOURCES = frozenset({
+    "src/channel/account_lock.cpp",
+    "src/channel/account_state.cpp",
+    "src/channel/activation.cpp",
+    "src/channel/bridge_endpoint.cpp",
+    "src/channel/bridge_protocol.cpp",
+    "src/channel/channel_commands.cpp",
+    "src/channel/channel_router.cpp",
+    "src/channel/channel_setup.cpp",
+    "src/channel/credential_store.cpp",
+    "src/channel/credentials.cpp",
+    "src/channel/digest.cpp",
+    "src/channel/feishu/feishu_adapter.cpp",
+    "src/channel/feishu/feishu_auth.cpp",
+    "src/channel/feishu/feishu_frame.cpp",
+    "src/channel/feishu/feishu_gateway.cpp",
+    "src/channel/feishu/feishu_http.cpp",
+    "src/channel/feishu/feishu_messages.cpp",
+    "src/channel/feishu/feishu_proto.cpp",
+    "src/channel/frame.cpp",
+    "src/channel/inbox.cpp",
+    "src/channel/ingress_store.cpp",
+    "src/channel/manager.cpp",
+    "src/channel/manifest.cpp",
+    "src/channel/pairing.cpp",
+    "src/channel/qq/qq_adapter.cpp",
+    "src/channel/qq/qq_auth.cpp",
+    "src/channel/qq/qq_gateway.cpp",
+    "src/channel/qq/qq_http.cpp",
+    "src/channel/qq/qq_media.cpp",
+    "src/channel/qq/qq_menu.cpp",
+    "src/channel/qq/qq_messages.cpp",
+    "src/channel/qq/qq_proto.cpp",
+    "src/channel/qq/qq_spool.cpp",
+    "src/channel/router.cpp",
+    "src/channel/session_map.cpp",
+    "src/channel/tool_guard.cpp",
+    "src/channel/transport/gateway_transport.cpp",
+    "src/channel/transport/tcp_socket.cpp",
+    "src/channel/transport/tls.cpp",
+    "src/channel/transport/ws_client.cpp",
+    "src/channel/transport/ws_frame.cpp",
+    "src/channel/wecombot/wecom_adapter.cpp",
+    "src/channel/wecombot/wecom_gateway.cpp",
+    "src/channel/wecombot/wecom_proto.cpp",
+    "src/channel/work_ledger.cpp",
+    "src/gateway/automation_schedule.cpp",
+    "src/gateway/automation_store.cpp",
+    "src/gateway/control_server.cpp",
+    "src/gateway/doctor.cpp",
+    "src/gateway/pairing_command.cpp",
+    "src/gateway/process.cpp",
+    "src/gateway/profile.cpp",
+    "src/gateway/reply_outbox.cpp",
+    "src/gateway/service.cpp",
+    "src/gateway/status.cpp",
+    "src/gateway/work_pump.cpp",
+})
+CHANNEL_RUNTIME_SOURCES = frozenset({
+    "src/runtime/agent_channel_engine.cpp",
+    "src/runtime/automation_pump.cpp",
+    "src/runtime/channel_automation.cpp",
+    "src/runtime/channel_file_delivery.cpp",
+    "src/runtime/channel_interaction_broker.cpp",
+    "src/runtime/channel_media_service.cpp",
+    "src/runtime/channel_session_host.cpp",
+    "src/runtime/channel_work_pump.cpp",
+    "src/runtime/headless_executor.cpp",
+    "src/runtime/headless_progress.cpp",
+    "src/runtime/turn_ingress.cpp",
+})
+HOST_TARGETS = {
+    "lubancode", "lubancode_core", "lubancode_updater", "miniz", "lubancode_app", "lubancode_tests", "lubancore_host_tests",
+    "lubancode_official_skills", "lubancode_official_docs", "lubancode_assistant_web",
+    *CHANNEL_HOST_TARGETS, *MBEDTLS_TARGETS,
+}
+SDK_HOST_ONLY_SOURCE_PREFIXES = ("src/updater/", "src/package/", "src/channel/", "src/gateway/")
+SDK_HOST_ONLY_SOURCE_FILES = {
+    "src/config/update_checker.cpp", "src/config/update_checker.hpp",
+    *CHANNEL_RUNTIME_SOURCES,
+    *(name.removesuffix(".cpp") + ".hpp" for name in CHANNEL_RUNTIME_SOURCES),
+}
+HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/", *SDK_HOST_ONLY_SOURCE_PREFIXES)
 SHARED_SDK_TEST_SOURCES = {
+    "tests/unit/packages/test_package_manifest.cpp",
+    "tests/unit/tools/test_lua_protected.cpp",
+    "tests/unit/tools/test_tool_job_coordinator.cpp",
+    "tests/unit/tools/test_tool_job_start_transaction.cpp",
+    "tests/unit/tools/test_tool_job_hold_recovery.cpp",
+    "tests/unit/tools/test_tool_job_owned_registration.cpp",
+    "tests/unit/tools/test_tool_job_owned_adoption.cpp",
+    "tests/unit/tools/test_tool_job_post_live_invocation.cpp",
+    "tests/unit/tools/test_run_command_execution_limits.cpp",
+    "tests/unit/trajectory/test_session_recovery_view.cpp",
+    "tests/unit/trajectory_v3/test_v3_result_store.cpp",
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",
     "tests/unit/runtime/test_session_execution.cpp",
+    "tests/unit/runtime/test_execution_owner.cpp",
+    "tests/unit/runtime/test_subagent_terminal_receipt.cpp",
+    "tests/unit/runtime/test_child_foreground_integration.cpp",
+    "tests/unit/runtime/test_child_parent_observation.cpp",
+    "tests/unit/runtime/test_child_history_adoption.cpp",
     "tests/unit/runtime/test_scoped_turn_bindings.cpp",
+    "tests/unit/runtime/test_owned_job_admission.cpp",
+    "tests/unit/runtime/test_middleware_native_receipts.cpp",
+    "tests/unit/hooks/test_middleware_dispatch_cause.cpp",
+    "tests/unit/hooks/test_middleware_job_post_contract.cpp",
 }
+SEARCH_PROBE_TARGET = "lubancore_sdk_search_probe"
+SEARCH_PROBE_SOURCE = "tests/support/sdk_search_probe.cpp"
+COMMAND_LIMITS_PROBE_TARGET = "lubancore_command_limits_probe"
+COMMAND_LIMITS_PROBE_SOURCE = "tests/support/command_limits_probe.cpp"
+PRIVATE_TEST_PROBES = {
+    SEARCH_PROBE_TARGET: SEARCH_PROBE_SOURCE,
+    COMMAND_LIMITS_PROBE_TARGET: COMMAND_LIMITS_PROBE_SOURCE,
+}
+# Real private implementations compiled into the SDK reference-test executable,
+# rather than exposed as additional DLL ABI. No other SDK implementation gets
+# this testing-only exception.
+PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp", "src/sdk/memory.cpp", "src/sdk/action_dispatch.cpp"}
+# Preserve the SDK state/stdio guard when this implementation moves into a
+# shared internal header. Other runtime process code keeps its existing scope.
+SDK_STATE_BOUNDARY_FILES = {"src/runtime/middleware_deferred_effects.hpp",
+                            "src/hooks/middleware_action_contract.hpp"}
 TERMINAL_PATH = re.compile(r"^src/platform/(?:console|clipboard|hidden_input|terminal_batch)(?:[_.]|$)")
 INCLUDE = re.compile(r'^\s*#\s*include\s*[<"]([^>"\n]+)[>"]', re.MULTILINE)
 # Keep strings intact while removing comments; URL/regex literals are not comments.
@@ -92,8 +218,29 @@ def relative(path: Path, root: Path) -> str | None:
         return None
 
 
+def sdk_host_only_source(path: str) -> bool:
+    return path not in (SDK_NEUTRAL_CHANNEL_FILES | SDK_NEUTRAL_PACKAGE_FILES) and (
+        path in SDK_HOST_ONLY_SOURCE_FILES or path.startswith(SDK_HOST_ONLY_SOURCE_PREFIXES))
+
+
 def host_path(path: str) -> bool:
-    return path == "src/main.cpp" or path.startswith(HOST_PREFIXES) or bool(TERMINAL_PATH.match(path))
+    return path not in (SDK_NEUTRAL_CHANNEL_FILES | SDK_NEUTRAL_PACKAGE_FILES) and (
+        path == "src/main.cpp" or path in SDK_HOST_ONLY_SOURCE_FILES
+        or path.startswith(HOST_PREFIXES) or bool(TERMINAL_PATH.match(path)))
+
+
+def package_ownership_violations(targets: dict) -> list[str]:
+    engines = [key for key, target in targets.items() if target["name"] == "lubancode_engine"]
+    sources = {source for target in targets.values() for source in target["projectSources"]}
+    if not engines and not sources & SDK_NEUTRAL_PACKAGE_SOURCES:
+        return []
+    violations = []
+    for source in sorted(SDK_NEUTRAL_PACKAGE_SOURCES):
+        owners = [key for key, target in targets.items() for item in target["projectSources"] if item == source]
+        if (len(engines) != 1 or owners != engines or
+                targets[engines[0]]["type"] != "STATIC_LIBRARY"):
+            violations.append("Neutral Package parser must belong once to static engine: " + source)
+    return violations
 
 
 def prepare(build: Path) -> None:
@@ -152,12 +299,20 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
     def check_project_path(name: str, owner: str) -> None:
         if host_path(name):
             violations.append(f"target {owner} includes host source {name}")
+        if name == "src/sdk/memory.cpp" and owner not in {"lubancore_sdk", "lubancore_sdk_tests"}:
+            violations.append(f"unregistered private SDK reference owner: {owner} includes {name}")
+        if owner == "lubancore_sdk_tests" and name.startswith("src/sdk/") and name.endswith(".cpp"):
+            if not expect_testing:
+                violations.append(f"testing is OFF but private SDK reference is compiled: {name}")
+            elif name not in PRIVATE_SDK_TEST_IMPLEMENTATIONS:
+                violations.append(f"unregistered private SDK reference implementation: {name}")
         if name.startswith("tests/"):
             if not expect_testing:
                 violations.append(f"testing is OFF but target {owner} includes {name}")
-            elif owner != "lubancore_sdk_tests" or not (
-                    name.startswith(("tests/integration/sdk/", "tests/unit/sdk/", "tests/support/")) or
-                    name in SHARED_SDK_TEST_SOURCES):
+            elif not ((owner in PRIVATE_TEST_PROBES and name == PRIVATE_TEST_PROBES[owner]) or
+                      (owner == "lubancore_sdk_tests" and name not in PRIVATE_TEST_PROBES.values() and (
+                          name.startswith(("tests/integration/sdk/", "tests/unit/sdk/", "tests/support/")) or
+                          name in SHARED_SDK_TEST_SOURCES))):
                 violations.append(f"non-SDK test compilation: target {owner} includes {name}")
 
     for reference in configurations[0].get("targets", []):
@@ -202,6 +357,26 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
             "artifacts": [entry["path"] for entry in target.get("artifacts", [])],
             "includeDirectories": [[str(path) for path in paths] for paths in include_groups],
         }
+        if target["name"] in PRIVATE_TEST_PROBES:
+            label = "search probe" if target["name"] == SEARCH_PROBE_TARGET else "command limits probe"
+            if not expect_testing or target["type"] != "EXECUTABLE":
+                violations.append(label + " requires testing ON and an executable target")
+            compiled = {entry["projectPath"] for entry in source_facts if entry["compiled"]}
+            if compiled != {PRIVATE_TEST_PROBES[target["name"]]}:
+                violations.append(label + " must compile only its isolated fixture")
+    violations.extend(package_ownership_violations({key: {
+        "name": target["name"], "type": target["type"],
+        "projectSources": [entry["projectPath"] for entry in target["sources"] if entry["compiled"]],
+    } for key, target in targets.items()}))
+    for target in targets.values():
+        if target["name"] in PRIVATE_TEST_PROBES:
+            label = "search probe" if target["name"] == SEARCH_PROBE_TARGET else "command limits probe"
+            for dependency in target["dependencies"]:
+                # Visual Studio can add CMake's regeneration utility. It is not
+                # a linked SDK/runtime dependency and contains no probe code.
+                linked = targets.get(dependency, {})
+                if linked.get("name") != "ZERO_CHECK" or linked.get("type") != "UTILITY":
+                    violations.append(label + " must not depend on a project library or host target")
     sdk = [target_id for target_id, target in targets.items() if target["name"] == "lubancore_sdk"]
     if len(sdk) != 1 or targets[sdk[0]]["type"] != "SHARED_LIBRARY":
         violations.append("expected exactly one shared lubancore_sdk target")
@@ -215,6 +390,10 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
             raise ValueError(f"unknown build dependency {target_id}")
         sdk_closure.add(target_id)
         pending.extend(targets[target_id]["dependencies"])
+    for probe in PRIVATE_TEST_PROBES:
+        if any(targets[target_id]["name"] == probe for target_id in sdk_closure):
+            label = "search probe" if probe == SEARCH_PROBE_TARGET else "command limits probe"
+            violations.append("SDK library depends on the private " + label)
     sdk_sources = sorted({entry["projectPath"] for target_id in sdk_closure
                           for entry in targets[target_id]["sources"]
                           if entry["projectPath"] and entry["projectPath"].startswith("src/")})
@@ -258,6 +437,8 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         public = relative(path, public_root) is not None
         for match in includes_in(text):
             include = match.group(1)
+            if name == COMMAND_LIMITS_PROBE_SOURCE and include not in STANDARD_HEADERS:
+                violations.append("command limits probe must use only standard-library headers: " + include)
             resolved = next((candidate.resolve() for candidate in
                              (path.parent / include, *(directory / include for directory in include_dirs),
                               source / "src" / include, source / "include" / include,
@@ -276,7 +457,7 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         # Runtime state preservation and indirect diagnostics need real tests;
         # global cwd or signal operations inside child process code are not
         # equivalent to changing the embedding host's state.
-        if name.startswith(("src/sdk/", "src/runtime/assembly/")):
+        if name.startswith(("src/sdk/", "src/runtime/assembly/")) or name in SDK_STATE_BOUNDARY_FILES:
             code = code_only(text)
             for rule, pattern in (("direct host stdio", HOST_IO), ("process-global setter", GLOBAL_SETTERS)):
                 for match in pattern.finditer(code):

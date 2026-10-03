@@ -31,6 +31,7 @@
 
 #include "memory/project_memory.hpp"
 #include "runtime/trajectory_session.hpp"
+#include "tools/tool.hpp"
 
 namespace lubancode::runtime {
 
@@ -46,8 +47,28 @@ public:
         const memory::InjectedMemoryRecord& record) override;
     std::string RecordSaveRequested(const memory::SaveLedgerNote& note) override;
     std::string current_session_id() const override;
+    struct SaveRequestReceipt { std::string event_id, source_event_ref; };
+    std::expected<SaveRequestReceipt, std::string> RecordSaveRequestedStrict(
+        const tools::ToolInvocationIdentity& invocation, const nlohmann::json& normalized_request,
+        const std::string& save_request_sha256, const std::string& commit_key);
+    std::expected<std::string, std::string> RecordSaveReceiptStrict(
+        const tools::ToolInvocationIdentity& invocation, const nlohmann::json& receipt);
+
+    struct ContextAdmission {
+        api::Message message;
+        std::string message_id;
+        std::string error; // partial adoption: the input is real, but fact closure failed
+    };
+    // Neutral host seam. Adopt the complete formatted recall once, including
+    // provenance and guards, then return that exact input for RunAdmittedHistory.
+    // Per-topic facts retain their fragment snapshots without adopting them again.
+    std::expected<ContextAdmission, std::string> AdmitRecallContext(
+        const std::string& text, const std::vector<memory::InjectedMemoryRecord>& records,
+        const std::string& turn_id);
 
 private:
+    std::expected<std::string, std::string> StoreSnapshot(
+        const memory::InjectedMemoryRecord& record);
     // v3 场的两个落点;v2 老路在 cpp 的 RecordXxxV2。
     std::expected<void, std::string> RecordRecallInjectionV3(
         trajectory::v3::V3Writer& writer, const memory::InjectedMemoryRecord& record);

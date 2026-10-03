@@ -335,6 +335,7 @@ MaterialToolPairingIndex BuildMaterialToolPairingIndex(
         }
     }
     for (const auto& action : trajectory::v3::FoldToolActions(ledger)) {
+        if (!action.provider_reply_required) continue;
         if (action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
             index.action_to_provider[action.tool_call_id] = *action.provider_tool_call_id;
         }
@@ -594,6 +595,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
     if (input.allow_closed_step_compaction && input.parent_turn_id)
         protected_turns.insert(*input.parent_turn_id);
     for (const auto& action : trajectory::v3::FoldToolActions(ledger)) {
+        if (!action.provider_reply_required) continue;
         if (action.turn_id.empty() || ToolStatusTerminal(action.folded_status)) {
             continue;
         }
@@ -636,6 +638,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
     while (!pairing_stable) {
         pairing_stable = true;
         for (const auto& action : trajectory::v3::FoldToolActions(ledger)) {
+            if (!action.provider_reply_required) continue;
             std::optional<std::size_t> removed_side;
             std::optional<std::size_t> retained_side;
             if (action.assistant_message_ref) {
@@ -729,6 +732,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                 std::set<std::string> ids;
                 for (const auto* line : step.messages) ids.insert(line->message_id);
                 for (const auto& action : actions) {
+                    if (!action.provider_reply_required) continue;
                     if (action.turn_id != current_turn || action.step_id != *step.step_id) continue;
                     bool result_in_step = false;
                     for (const auto& version : action.message_versions)
@@ -798,6 +802,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
         const auto ids = current.RemovedIds();
         const std::set<std::string> removed(ids.begin(), ids.end());
         for (const auto& action : trajectory::v3::FoldToolActions(ledger)) {
+            if (!action.provider_reply_required) continue;
             if (action.turn_id != input.parent_turn_id || !action.assistant_message_ref ||
                 !removed.count(*action.assistant_message_ref)) continue;
             nlohmann::json evidence = nlohmann::json::array();
@@ -1517,6 +1522,7 @@ V3CompactRunResult RunV3Compact(trajectory::v3::V3Writer& writer,
                                                            retained_ids_now.end());
         bool pairing_ok = true;
         for (const auto& action : trajectory::v3::FoldToolActions(ledger)) {
+            if (!action.provider_reply_required) continue;
             bool in_removed = false;
             bool in_retained = false;
             for (const auto& version : action.message_versions) {

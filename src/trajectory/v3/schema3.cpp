@@ -57,7 +57,7 @@ std::optional<IdRequirement> IdRequirementForKind(EventKindV3 kind) {
     // subagent.* 挂父工具 Action 的口径);tool.delivery.* 挂被投递结果的
     // Action。jobId/deliveryId 走 payload(同 goalId 口径,不占信封身份
     // 字段族);targetRequestId 用信封 requestId(不拿 deliveryId 代替)。
-    if (in({K::ToolJobRegistered, K::ToolJobDispatched, K::ToolJobObserved,
+    if (in({K::ToolJobRegistered, K::ToolJobAdopted, K::ToolJobDispatched, K::ToolJobObserved,
             K::ToolJobCancelRequested, K::ToolDeliveryPrepared,
             K::ToolDeliveryAcknowledged, K::ToolDeliveryUncertain})) {
         return IdRequirement{"actionId", true};
@@ -945,6 +945,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             }
         }
     } else if (line.kind == K::ToolExecutionPending) {
+        if (line.payload.contains("preparedOnly") && !line.payload["preparedOnly"].is_boolean())
+            return Err("schema3.bad_type", "tool.execution.pending.preparedOnly 应为 boolean");
         // §4.14:已接纳待执行,必须带 reason(queued/approval/dependency/backoff)。
         if (auto error = CheckToolPayload(kind_name, line, true)) {
             return error;
@@ -1639,6 +1641,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
     }
     // ---- 异步工具族(单 P0;全部 statusless 事实行)----
     else if (line.kind == K::ToolJobRegistered) {
+        if (line.payload.contains("preparedOnly") && !line.payload["preparedOnly"].is_boolean())
+            return Err("schema3.bad_type", "tool.job.registered.preparedOnly 应为 boolean");
         // job 注册落稳(单 §5:注册落稳前不派发)。attempt 从 1 起(注册
         // 挂发起 Action 的执行尝试);mode 只收 job_handle|native_deferred;
         // originRef 落信封 turnId/stepId + payload assistantMessageRef;
@@ -1671,6 +1675,79 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (auto error = CheckExecutionPolicy(kind_name, line.payload)) {
             return error;
         }
+    } else if (line.kind == K::ToolJobAdopted) {
+        if (auto error = CheckToolPayload(kind_name, line, true)) return error;
+        if (line.payload.at("attempt") != 1 || !line.turn_id || !line.step_id)
+            return Err("schema3.bad_owned_job", "owned Job requires business attempt 1 and turn/step");
+        for (const char* key : {"layout", "jobId", "parentActionId", "provider_tool_call_id", "toolName"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) return error;
+            if (line.payload.at(key).get<std::string>().find('\0') != std::string::npos)
+                return Err("schema3.bad_owned_job", "owned Job text contains NUL");
+        }
+        if (line.payload.at("layout") != "parent_admission_job_business_v1" ||
+            line.payload.at("toolName") != "run_command" ||
+            line.payload.at("parentActionId") == *line.action_id)
+            return Err("schema3.bad_owned_job", "unknown owned Job layout or action role");
+        for (const char* key : {"assistantMessageRef", "sourcePendingEventRef", "sourceAdmissionEventRef",
+                                "preparedPendingEventRef", "registeredEventRef"}) {
+            if (auto error = CheckRefField(kind_name, line.payload, key, true)) return error;
+            const auto& ref = line.payload.at(key);
+            if (!ref.is_object() || ref.at("sessionId") != line.session_id || ref.at("runId") != line.run_id ||
+                !JsonIsNonNegativeInt(ref.at("seq")) || ref.at("seq").get<std::uint64_t>() == 0 ||
+                ref.at("id").get<std::string>().empty())
+                return Err("schema3.bad_owned_job", "owned Job source must be a same-owner native five-key reference");
+        }
+        for (const char* key : {"originalInputSha256", "effectiveInputSha256"}) {
+            if (auto error = CheckStringField(kind_name, line.payload, key)) return error;
+            if (!IsHex64(line.payload.at(key).get<std::string>()))
+                return Err("schema3.bad_owned_job", "owned Job input digest must be hex64");
+        }
+        for (const char* key : {"effectiveInput", "preparedOwner", "toolIdentity", "executionPolicy", "commandLimits"}) {
+            if (!line.payload.contains(key) || !line.payload.at(key).is_object())
+                return Err("schema3.bad_owned_job", std::string("owned Job requires object: ") + key);
+        }
+        const auto& owner = line.payload.at("preparedOwner");
+        for (const char* key : {"sessionId", "runId", "projectId", "cwd"}) {
+            if (auto error = CheckStringField(kind_name, owner, key)) return error;
+            if (owner.at(key).get<std::string>().find('\0') != std::string::npos)
+                return Err("schema3.bad_owned_job", "owned Job owner text contains NUL");
+        }
+        if (owner.at("sessionId") != line.session_id || owner.at("runId") != line.run_id)
+            return Err("schema3.bad_owned_job", "owned Job owner differs from envelope");
+        for (const char* key : {"coordinatorId", "epoch"})
+            if (!owner.contains(key) || !JsonIsNonNegativeInt(owner.at(key)) || owner.at(key).get<std::uint64_t>() == 0)
+                return Err("schema3.bad_owned_job", "owned Job owner counter must be positive");
+        const auto& identity = line.payload.at("toolIdentity");
+        for (const char* key : {"logicalName", "registrationSource", "version", "executionScope"}) {
+            if (auto error = CheckStringField(kind_name, identity, key)) return error;
+            if (identity.at(key).get<std::string>().find('\0') != std::string::npos)
+                return Err("schema3.bad_owned_job", "owned Job identity text contains NUL");
+        }
+        if (identity.at("logicalName") != line.payload.at("toolName") || identity.at("executionScope") != owner.at("cwd"))
+            return Err("schema3.bad_owned_job", "owned Job tool identity differs from target");
+        if (auto error = CheckExecutionPolicy(kind_name, line.payload)) return error;
+        const auto& policy = line.payload.at("executionPolicy");
+        if (!policy.contains("allow_background") || policy.at("allow_background") != true ||
+            !policy.contains("retry_policy") || policy.at("retry_policy") != "none" ||
+            !policy.contains("resume_policy") || policy.at("resume_policy") != "hold")
+            return Err("schema3.bad_owned_job", "owned Job policy must explicitly allow background with no retry and passive recovery");
+        const auto& limits = line.payload.at("commandLimits");
+        for (const char* key : {"timeout_ms", "max_output_bytes"})
+            if (!limits.contains(key) || !JsonIsNonNegativeInt(limits.at(key)) || limits.at(key).get<std::uint64_t>() == 0)
+                return Err("schema3.bad_owned_job", "owned command limits must be positive");
+        if (limits.at("timeout_ms").get<std::uint64_t>() > 86400000 ||
+            limits.at("max_output_bytes").get<std::uint64_t>() > 2097152)
+            return Err("schema3.bad_owned_job", "owned command limits exceed supported range");
+        if (!policy.contains("max_output_bytes") || !JsonIsNonNegativeInt(policy.at("max_output_bytes")) ||
+            limits.at("max_output_bytes").get<std::uint64_t>() > policy.at("max_output_bytes").get<std::uint64_t>() ||
+            (policy.contains("deadline_ms") && policy.at("deadline_ms").get<std::uint64_t>() != 0 &&
+             limits.at("timeout_ms").get<std::uint64_t>() > policy.at("deadline_ms").get<std::uint64_t>()))
+            return Err("schema3.bad_owned_job", "owned command limits broaden the frozen policy");
+        const auto& input = line.payload.at("effectiveInput");
+        if (!input.contains("cwd") || input.at("cwd") != owner.at("cwd") ||
+            input.contains("max_runtime_ms") ||
+            (input.contains("run_in_background") && input.at("run_in_background") != false))
+            return Err("schema3.bad_owned_job", "owned command input must keep its target and synchronous execution");
     } else if (line.kind == K::ToolJobDispatched) {
         // 派发事实(不等于业务 job 已完成)。ownerEpoch 为当前执行/接管
         // 租约代号(单 §5;租约细节拟议待 P1 确认,这里只钉非空 string)。
@@ -1695,6 +1772,18 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         }
         if (auto error = CheckObservedStatus(kind_name, line.payload)) {
             return error;
+        }
+        if (line.payload.contains("startupFailed")) {
+            if (!line.payload.at("startupFailed").is_boolean())
+                return Err("schema3.bad_owned_job", "startupFailed must be boolean");
+            if (line.payload.at("startupFailed") == true &&
+                (line.payload.at("observedStatus") != "failed" || line.payload.contains("resultRef") || line.payload.contains("postEventRef")))
+                return Err("schema3.bad_owned_job", "confirmed startup failure cannot claim raw or Post");
+        }
+        if (line.payload.contains("postEventRef")) {
+            if (auto error = CheckRefField(kind_name, line.payload, "postEventRef", true)) return error;
+            if (!line.payload.at("postEventRef").is_object())
+                return Err("schema3.bad_owned_job", "owned Post requires native five-key provenance");
         }
         if (line.payload.contains("ownerEpoch")) {
             if (auto error = CheckStringField(kind_name, line.payload, "ownerEpoch")) {

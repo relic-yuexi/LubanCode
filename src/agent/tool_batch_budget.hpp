@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "api/types.hpp"
+#include "tools/tool_content.hpp"
 
 namespace lubancode::agent {
 
@@ -32,10 +33,16 @@ inline ToolBatchBudgetPlan PlanToolBatchBudget(const api::Message& results,
             plan.error = "tool_batch.invalid_pairing";
             return plan;
         }
-        // Tiny bodies still need a nonzero cap; an empty success is legitimate.
-        plan.preview_bytes.push_back(std::min<std::size_t>(32768,
-                                                          std::max<std::size_t>(result->capture_complete ? 1 : 1024,
-                                                                                result->content.size())));
+        // A separate raw_payload requires source/channel metadata even when the
+        // compatibility body is tiny. Ask for the existing cap, then water-fill
+        // within available; the bridge still checks the actual representation.
+        // Plain text keeps its old desired budget, including empty success.
+        const auto desired = tools::HasNativePayloadBeyondProjection(result->content, result->blocks)
+                                 ? std::size_t{32768}
+                                 : std::min<std::size_t>(32768,
+                                       std::max<std::size_t>(result->capture_complete ? 1 : 1024,
+                                                             result->content.size()));
+        plan.preview_bytes.push_back(desired);
     }
     if (plan.preview_bytes.empty()) return plan;
     // Water filling keeps small results whole, shares the remaining budget among

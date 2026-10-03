@@ -5,8 +5,17 @@
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <stdexcept>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include "platform/sha256.hpp"
+#include "platform/text_encoding.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
@@ -36,7 +45,29 @@ bool LooksLikeExternalLink(const std::string& path) {
     return true;
 }
 
+Tool::Result StrictSkillFailure(const SkillFileError& error) {
+    Tool::Result result{error.code + ": " + error.message, true};
+    result.error_code = error.code;
+    result.outcome = "unavailable";
+    return result;
+}
+
+bool IsSkillBodyFilename(const std::filesystem::path& path) {
+#ifdef _WIN32
+    const auto filename = path.filename().native();
+    return filename.size() == 8 &&
+        ::CompareStringOrdinal(filename.c_str(), 8, L"SKILL.md", 8, TRUE) == CSTR_EQUAL;
+#else
+    return path.filename() == "SKILL.md";
+#endif
+}
+
 }  // namespace
+
+void SkillTool::SetSkills(std::vector<SkillMeta> skills) {
+    if (strict_read_policy_) throw std::logic_error("Strict skill plans cannot be reloaded");
+    skills_ = std::move(skills);
+}
 
 std::string SkillTool::name() const {
     return "skill";
@@ -188,12 +219,74 @@ Tool::Result SkillTool::ReadSkillResource(const SkillMeta& meta, const std::stri
     return {"技能材料 " + meta.name + "/" + relative_path + ":\n" + content, false};
 }
 
+Tool::Result SkillTool::ReadStrictSkill(const SkillMeta& meta,
+                                      const std::optional<std::string>& relative_path) const {
+    try {
+        const auto paths = ResolveStrictSkillPaths(meta, *strict_read_policy_);
+        if (!paths) return StrictSkillFailure(paths.error());
+        if (!relative_path) {
+            const auto content = ReadSkillFileBounded(paths->skill_md);
+            if (!content) return StrictSkillFailure(content.error());
+            if (platform::Sha256Hex(*content) != meta.content_hash)
+                return StrictSkillFailure({"skill.drifted", "Skill body changed since this session's scan: " + meta.name});
+            const auto parsed = ParseSkillMarkdownStrict(*content);
+            if (!parsed) return StrictSkillFailure(parsed.error());
+            return {"技能目录: " + meta.dir_path + "(技能内相对路径以此为基准)\n" + parsed->body, false};
+        }
+        const auto& relative = *relative_path;
+        if (relative.empty() || relative.find('\0') != std::string::npos || !platform::IsValidUtf8(relative) ||
+            relative.front() == '/' || relative.front() == '\\' || relative.back() == '/' || relative.back() == '\\' ||
+            LooksLikeExternalLink(relative))
+            return StrictSkillFailure({"skill.path.invalid", "Skill path must be a nonempty local relative path"});
+        auto target = paths->directory;
+        std::size_t begin = 0;
+        while (begin <= relative.size()) {
+            const auto end = relative.find_first_of("/\\", begin);
+            const auto piece = relative.substr(begin, end == std::string::npos ? end : end - begin);
+            if (piece.empty() || piece == "." || piece == ".." || piece.find(':') != std::string::npos)
+                return StrictSkillFailure({"skill.path.invalid", "Skill path contains an invalid segment"});
+            target /= Utf8ToPath(piece);
+            if (end == std::string::npos) break;
+            begin = end + 1;
+        }
+        std::error_code ec;
+        const auto resolved = std::filesystem::canonical(target, ec);
+        if (ec || !StrictSkillPathWithin(resolved, paths->directory) ||
+            !std::filesystem::is_regular_file(resolved, ec) || ec)
+            return StrictSkillFailure({"skill.path.outside", "Skill resource is missing, not a regular file, or outside its directory"});
+        if (IsSkillBodyFilename(target) || IsSkillBodyFilename(resolved))
+            return StrictSkillFailure({"skill.path.body_alias", "SKILL.md and its aliases must be loaded through name, without path"});
+        // An attachment in alpha may hard-link beta's body. Compare every
+        // selected body's frozen mapping; this does not hash live attachments
+        // or invent identities for unselected materials.
+        for (const auto& selected : skills_) {
+            const auto selected_paths = ResolveStrictSkillPaths(selected, *strict_read_policy_);
+            if (!selected_paths) return StrictSkillFailure(selected_paths.error());
+            const bool body_alias = std::filesystem::equivalent(resolved, selected_paths->skill_md, ec);
+            if (ec)
+                return StrictSkillFailure({"skill.path.invalid", "Cannot verify the skill resource's file identity"});
+            if (body_alias)
+                return StrictSkillFailure({"skill.path.body_alias", "Selected SKILL.md bodies and their aliases must be loaded through name, without path"});
+        }
+        const auto content = ReadSkillFileBounded(resolved);
+        if (!content) return StrictSkillFailure(content.error());
+        return {"技能材料 " + meta.name + "/" + relative + ":\n" + *content, false};
+    } catch (const std::exception&) {
+        return StrictSkillFailure({"skill.path.invalid", "Cannot resolve the frozen skill source"});
+    }
+}
+
 Tool::Result SkillTool::execute(const nlohmann::json& input) {
     if (!input.contains("name") || !input.at("name").is_string()) {
         return {"缺少必填参数 name(字符串)", true};
     }
     const std::string name = input.at("name").get<std::string>();
     std::string relative_path;
+    if (strict_read_policy_ && (!IsValidAgentSkillName(name) ||
+        (input.contains("path") && (!input.at("path").is_string() ||
+         input.at("path").get_ref<const std::string&>().empty())))) {
+        return StrictSkillFailure({"skill.path.invalid", "Strict skill name/path is invalid; omit path to load the body"});
+    }
     if (input.contains("path") && !input.at("path").is_null()) {
         if (!input.at("path").is_string()) {
             return {"参数 path 须是字符串(技能目录内的相对路径)", true};
@@ -232,6 +325,9 @@ Tool::Result SkillTool::execute(const nlohmann::json& input) {
             }
         }
     }
+
+    if (strict_read_policy_)
+        return ReadStrictSkill(*it, input.contains("path") ? std::optional<std::string>(relative_path) : std::nullopt);
 
     // 受控资源读取(§六:path 给了就读技能目录内的相对材料,不碰正文)。
     if (!relative_path.empty()) {

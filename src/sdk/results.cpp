@@ -195,9 +195,13 @@ Result<OperationToolResultIndex> IndexToolResults(const v3::V3Ledger& ledger,
             return std::unexpected(Failure("sdk.result.index_invalid", "result index scope does not match session and turn"));
         OperationToolResultIndex index;
         const auto actions = v3::FoldToolActions(ledger);
+        std::set<std::string> owned_business_actions;
+        for (const auto& action : actions)
+            if (!action.provider_reply_required) owned_business_actions.insert(action.tool_call_id);
         std::set<std::string> selected_sources;
         for (const auto& event : ledger.events) {
             if (event.kind != v3::EventKindV3::ToolResultSelected || event.turn_id != turn_id) continue;
+            if (event.action_id && owned_business_actions.contains(*event.action_id)) continue;
             for (const auto& source : event.payload.at("sourceResultEventRefs")) {
                 if (!source.is_string()) return std::unexpected(Failure("sdk.result.index_invalid", "cross-session result source is unsupported"));
                 const auto id = source.get<std::string>();
@@ -210,6 +214,7 @@ Result<OperationToolResultIndex> IndexToolResults(const v3::V3Ledger& ledger,
         }
         for (const auto& event : ledger.events) {
             if (event.kind != v3::EventKindV3::ToolResultPersisted || event.turn_id != turn_id) continue;
+            if (event.action_id && owned_business_actions.contains(*event.action_id)) continue;
             if (index.entries.size() == kMaxResults) return std::unexpected(Failure("sdk.result.index_too_large", "too many persisted results in operation"));
             if (event.session_id != session_id || !ValidId(event.event_id) || !event.action_id || !ValidId(*event.action_id) ||
                 event.payload.at("tool_call_id") != *event.action_id)

@@ -174,10 +174,17 @@ public:
         // 宿主还不知道最终 system,第一次模型请求带上真 system 时走 §4.3
         // 三步切换(旧 system -> change 事件 -> 新 system)。
         std::string v3_system_content;
+        trajectory::V3OpeningParticipant v3_opening_participant;
+        std::shared_ptr<trajectory::MemoryCapabilityFactory> memory_capability_factory;
+        trajectory::RecoveryCaptureRequest recovery_capture;
+        trajectory::SessionRecoveryFactory recovery_factory;
         // 故障注入(测试专用;生产恒空 = 零行为):子账首枚 run.started
         // 提交前问一次,返回稳定码即按该码注入一次失败(子代理空轨迹单
         // 5.1 的 fault injection)。只作用于子账,不影响 main。
         std::function<std::optional<std::string>()> subagent_start_fault;
+        // Test-only, empty in production: report a failure after the child
+        // writer's actual checked Close. Never applies to the parent writer.
+        std::function<std::optional<std::string>()> subagent_close_fault;
         // v3 主账写者的提交故障注入(测试专用;生产恒空 = 零行为):非空
         // 稳定码即该枚提交按 IoFailed 收,写者随后 broken——T08(V3-GAP-03)
         // 召回快照 fail-closed 的测试缝,经 SessionManager 递进 writer。
@@ -202,6 +209,7 @@ public:
 
     // main stream(轮次桥从这只造)。
     trajectory::TrajectoryRecorder* main();
+    std::shared_ptr<trajectory::MemoryCapability> memory_capability() const;
     // v3 主账写者(v2 场 nullptr)。异步工具 P2 的会话级运行时从这取
     // 共享写者;互斥锁见 v3_tool_results_mutex。
     trajectory::v3::V3Writer* v3_main_writer();
@@ -259,6 +267,8 @@ public:
 
     // 父账边界:子代理 finished 时补的边界引用(child run id + 子账终态
     // hash),由主桥的 OnToolTrace 落——这里只给查口。
+    std::optional<SubagentTerminalReceipt> ChildTerminalReceipt(const std::string& agent_run_id) const;
+    // Legacy hash projection; empty means no confirmed complete handoff.
     std::optional<std::string> ChildTerminalHash(const std::string& agent_run_id) const;
 
     // 正常封口(/exit 与 EOF):turn 收齐后 run terminal + session.ended +

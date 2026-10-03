@@ -6,9 +6,14 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <initializer_list>
+#include <iostream>
+#include <map>
 #include <thread>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
@@ -17,7 +22,9 @@
 #include "api/types.hpp"
 #include "config/config.hpp"
 #include "memory/memory_tool.hpp"
+#include "memory/frontmatter.hpp"
 #include "memory/project_memory.hpp"
+#include "platform/bounded_read.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "tools/registry.hpp"
@@ -51,6 +58,131 @@ std::string Read(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
 }
+
+using MemoryDiagnostic = nlohmann::json;
+
+std::string DiagnosticHex(const std::string& bytes) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string hex;
+    for (const unsigned char byte : bytes) {
+        hex += digits[byte >> 4];
+        hex += digits[byte & 15];
+    }
+    return hex;
+}
+
+MemoryDiagnostic MemoryDiagnosticFile(const fs::path& path, std::size_t cap,
+                                      std::initializer_list<const char*> fields) {
+    MemoryDiagnostic observation{{"path", platform::PathToUtf8(path)}, {"byte_cap", cap},
+                                 {"raw_not_verified", true}};
+    std::error_code ec;
+    const auto status = fs::symlink_status(path, ec);
+    observation["file_type"] = static_cast<int>(status.type());
+    if (ec) observation["status_error"] = ec.message();
+    const auto bytes = platform::ReadBoundedRegularFile(path, cap);
+    if (!bytes) {
+        observation["read_error"] = bytes.error();
+        return observation;
+    }
+    observation["bytes"] = bytes->size();
+    const auto value = MemoryDiagnostic::parse(*bytes, nullptr, false);
+    if (!value.is_object()) {
+        observation["parse_error"] = value.is_discarded() ? "invalid JSON" : "not an object";
+        return observation;
+    }
+    observation["fields"] = MemoryDiagnostic::object();
+    for (const auto* field : fields) {
+        if (value.contains(field)) observation["fields"][field] = value.at(field);
+    }
+    return observation;
+}
+
+MemoryDiagnostic MemoryDiagnosticDirectory(const fs::path& path) {
+    MemoryDiagnostic observation{{"path", platform::PathToUtf8(path)}, {"entry_cap", 32},
+                                 {"names", MemoryDiagnostic::array()}};
+    std::error_code ec;
+    fs::directory_iterator entry(path, ec);
+    if (ec) {
+        observation["enumeration_error"] = ec.message();
+        return observation;
+    }
+    const fs::directory_iterator end;
+    while (entry != end && observation["names"].size() < 32) {
+        observation["names"].push_back(platform::PathToUtf8(entry->path().filename()));
+        entry.increment(ec);
+        if (ec) {
+            observation["enumeration_error"] = ec.message();
+            break;
+        }
+    }
+    observation["capped"] = !ec && entry != end;
+    return observation;
+}
+
+MemoryDiagnostic MemoryQueueObservation(const fs::path& home) {
+    const auto queue = home / "memory-jobs";
+    return {{"pending", MemoryDiagnosticDirectory(queue / "pending")},
+            {"failed", MemoryDiagnosticDirectory(queue / "failed")},
+            {"worker_owner", MemoryDiagnosticFile(queue / "worker.lock" / "owner", 4096,
+                {"schema_version", "pid", "process_start_token", "owner_token", "acquired_at_ms"})}};
+}
+
+void PrintMemoryDiagnostic(const char* label, const MemoryDiagnostic& observation) {
+    // ASCII output also survives a Windows runner's legacy console encoding.
+    // Error hex below preserves bytes even when a native error is not UTF-8.
+    std::cout << "[memory-worker-diagnostic] " << label << " "
+              << observation.dump(-1, ' ', true, MemoryDiagnostic::error_handler_t::replace) << '\n';
+}
+
+// MEMORY_WORKER_BATCH_DIAGNOSTIC_BEGIN
+void PrintMemoryWorkerBatchLine(const char* stage, const MemoryDiagnostic& observation) noexcept {
+    try {
+        const auto text = observation.dump(-1, ' ', true, MemoryDiagnostic::error_handler_t::replace);
+        if (text.size() > 16 * 1024) {
+            std::cerr << "[memory-worker-batch-diagnostic-failed] line_cap\n" << std::flush;
+            return;
+        }
+        std::cerr << (std::string("[memory-worker-batch-") + stage + "] " + text + "\n") << std::flush;
+    } catch (...) {
+        try { std::cerr << "[memory-worker-batch-diagnostic-failed]\n" << std::flush; } catch (...) {}
+    }
+}
+
+void PrintMemoryWorkerBatchStatus(const char* check, const memory::RuntimeStatus& status) noexcept {
+    try {
+        PrintMemoryWorkerBatchLine("status", {{"check", check}, {"pending_jobs", status.pending_jobs},
+            {"failed_jobs", status.failed_jobs}, {"entry_count", status.entry_count}});
+    } catch (...) {
+        try { std::cerr << "[memory-worker-batch-diagnostic-failed]\n" << std::flush; } catch (...) {}
+    }
+}
+
+void PrintMemoryWorkerBatchDrain(int round,
+    const std::vector<memory::ProjectMemory::MemoryWriteCompletion>& completions) noexcept {
+    try {
+        constexpr std::size_t cap = 32;
+        PrintMemoryWorkerBatchLine("drain", {{"round", round}, {"completion_count", completions.size()},
+            {"printed_cap", cap}, {"omitted_count", completions.size() > cap ? completions.size() - cap : 0}});
+        for (std::size_t i = 0; i < completions.size() && i < cap; ++i) {
+            const auto& completion = completions[i];
+            MemoryDiagnostic observation{{"round", round}, {"index", i}};
+            const auto field = [&](const char* key, const std::string& value, std::size_t byte_cap) {
+                observation[key] = value.substr(0, byte_cap);
+                observation[std::string(key) + "_bytes"] = value.size();
+                observation[std::string(key) + "_truncated"] = value.size() > byte_cap;
+            };
+            field("job_id", completion.job_id, 256);
+            field("operation_id", completion.operation_id, 256);
+            field("outcome", completion.outcome, 256);
+            field("memory_id", completion.memory_id, 256);
+            field("error", completion.error, 1024);
+            PrintMemoryWorkerBatchLine("completion", observation);
+        }
+    } catch (...) {
+        try { std::cerr << "[memory-worker-batch-diagnostic-failed]\n" << std::flush; } catch (...) {}
+    }
+}
+// MEMORY_WORKER_BATCH_DIAGNOSTIC_END
 
 class CaptureBackend : public api::Backend {
 public:
@@ -345,21 +477,201 @@ TEST_CASE("ProjectMemory: 两个 worker 争锁仍会捞净队列") {
         REQUIRE(store.EnqueueSave(request).has_value());
     }
 
+    const auto epoch = std::chrono::steady_clock::now();
+    MemoryDiagnostic first_trace, second_trace;
+    const auto run_observed = [&](MemoryDiagnostic& trace) {
+        const auto start = std::chrono::steady_clock::now();
+        auto result = memory::RunPendingMemoryJobs(root / "home");
+        const auto end = std::chrono::steady_clock::now();
+        trace = {{"start_us", std::chrono::duration_cast<std::chrono::microseconds>(start - epoch).count()},
+                 {"end_us", std::chrono::duration_cast<std::chrono::microseconds>(end - epoch).count()},
+                 {"elapsed_us", std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()}};
+        if (result) trace["count"] = *result;
+        else {
+            trace["error"] = result.error();
+            trace["error_hex"] = DiagnosticHex(result.error());
+        }
+        // Read after the original call returns; never hold an observer's file
+        // handle while that same call is taking or releasing its queue lock.
+        trace["after_return"] = MemoryQueueObservation(root / "home");
+        return result;
+    };
     auto first = std::async(std::launch::async, [&]() {
-        return memory::RunPendingMemoryJobs(root / "home");
+        return run_observed(first_trace);
     });
     auto second = std::async(std::launch::async, [&]() {
-        return memory::RunPendingMemoryJobs(root / "home");
+        return run_observed(second_trace);
     });
     const auto first_count = first.get();
     const auto second_count = second.get();
-    REQUIRE(first_count.has_value());
-    REQUIRE(second_count.has_value());
-    CHECK(*first_count + *second_count == 8);
+    PrintMemoryDiagnostic("concurrent.first", first_trace);
+    PrintMemoryDiagnostic("concurrent.second", second_trace);
+    const bool at_least_one_completed = first_count.has_value() || second_count.has_value();
+    REQUIRE(at_least_one_completed);
+    const std::string live_busy = "等待 memory worker 锁超时: 持有者活着: pid " +
+                                  std::to_string(platform::CurrentProcessId());
+    // Busy is an error receipt, never a fabricated successful count of zero.
+    std::size_t completed = 0;
+    if (first_count) completed += *first_count;
+    else CHECK(first_count.error() == live_busy);
+    if (second_count) completed += *second_count;
+    else CHECK(second_count.error() == live_busy);
+    CHECK(completed == 8);
     CHECK(store.ListEntries().size() == 8);
     CHECK(store.Status().pending_jobs == 0);
     // SV-01:争锁归争锁,独占不破——没有 job 因两头争读被误进 failed。
     CHECK(store.Status().failed_jobs == 0);
+    const auto after_release = memory::RunPendingMemoryJobs(root / "home");
+    REQUIRE(after_release.has_value());
+    CHECK(*after_release == 0);
+}
+
+TEST_CASE("ProjectMemory: live worker Busy preserves queued bytes and release drains durable jobs") {
+    const fs::path root = TempRoot("worker-live-busy");
+    struct RootCleanup {
+        fs::path path;
+        ~RootCleanup() {
+            std::error_code error;
+            fs::remove_all(path, error);
+        }
+    } cleanup{root};
+    const fs::path home = root / "home";
+    const fs::path repo = root / "repo";
+    fs::create_directories(repo / ".git");
+    const auto identity = memory::ResolveProjectIdentity(repo, home);
+    REQUIRE(identity.has_value());
+    memory::Options options;
+    options.global_allowed = true;
+    options.enabled = true;
+    // The default empty executable prevents an implicit background worker.
+    memory::ProjectMemory store(*identity, home, options);
+    std::map<std::string, memory::SaveRequest> expected;
+    std::map<std::string, std::string> job_to_memory;
+    for (int i = 0; i < 2; ++i) {
+        memory::SaveRequest request;
+        request.kind = memory::MemoryKind::Fact;
+        request.id = "fact.busy-release-" + std::to_string(i);
+        request.title = "Busy release " + std::to_string(i);
+        request.summary = request.title;
+        request.content = "BUSY_RELEASE_BODY_" + std::to_string(i);
+        const auto queued = store.EnqueueSave(request);
+        REQUIRE(queued.has_value());
+        CHECK(queued->worker_state == memory::MemoryWorkerLaunchState::Unavailable);
+        REQUIRE(job_to_memory.emplace(queued->job_id, request.id).second);
+        expected.emplace(request.id, request);
+    }
+    REQUIRE(store.ListEntries().empty());
+    REQUIRE(store.Status().pending_jobs == 2);
+    REQUIRE(store.Status().failed_jobs == 0);
+    const fs::path pending = home / "memory-jobs" / "pending";
+    std::map<std::string, std::string> before_jobs;
+    for (const auto& [job_id, memory_id] : job_to_memory) {
+        (void)memory_id;
+        const auto bytes = platform::ReadBoundedRegularFile(pending / fs::path(job_id), 64 * 1024);
+        REQUIRE(bytes.has_value());
+        REQUIRE_FALSE(bytes->empty());
+        before_jobs.emplace(job_id, *bytes);
+    }
+    const fs::path catalog = store.memory_dir() / ".state" / "catalog.json";
+    const bool catalog_existed = fs::exists(catalog);
+    std::string catalog_before;
+    if (catalog_existed) {
+        const auto bytes = platform::ReadBoundedRegularFile(catalog, 64 * 1024);
+        REQUIRE(bytes.has_value());
+        catalog_before = *bytes;
+    }
+    REQUIRE(store.DrainWriteCompletions().empty());
+
+    memory::OwnerLock held;
+    const auto acquired = memory::OwnerLock::TryAcquire(home / "memory-jobs" / "worker.lock", &held);
+    REQUIRE(acquired.status == memory::OwnerLock::Status::Acquired);
+    REQUIRE(held.holds());
+    const auto started = std::chrono::steady_clock::now();
+    const auto busy = memory::RunPendingMemoryJobs(home);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    MemoryDiagnostic trace{{"elapsed_us", std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()},
+                           {"owner_pid", platform::CurrentProcessId()},
+                           {"after_return", MemoryQueueObservation(home)}};
+    if (!busy) {
+        trace["error"] = busy.error();
+        trace["error_hex"] = DiagnosticHex(busy.error());
+    } else trace["count"] = *busy;
+    PrintMemoryDiagnostic("live-busy.held", trace);
+    REQUIRE_FALSE(busy.has_value());
+    const std::string live_busy = "等待 memory worker 锁超时: 持有者活着: pid " +
+                                  std::to_string(platform::CurrentProcessId());
+    CHECK(busy.error() == live_busy);
+    // Only a lower bound: native I/O may extend the planned 50 x 50ms backoff.
+    CHECK(elapsed >= std::chrono::milliseconds(2500));
+    CHECK(held.holds());
+    CHECK(store.ListEntries().empty());
+    CHECK(store.Status().pending_jobs == 2);
+    CHECK(store.Status().failed_jobs == 0);
+    CHECK(store.DrainWriteCompletions().empty());
+    CHECK(fs::exists(catalog) == catalog_existed);
+    if (catalog_existed) {
+        const auto bytes = platform::ReadBoundedRegularFile(catalog, 64 * 1024);
+        REQUIRE(bytes.has_value());
+        CHECK(*bytes == catalog_before);
+    }
+    std::map<std::string, std::string> after_jobs;
+    for (const auto& item : fs::directory_iterator(pending)) {
+        REQUIRE(item.is_regular_file());
+        const auto bytes = platform::ReadBoundedRegularFile(item.path(), 64 * 1024);
+        REQUIRE(bytes.has_value());
+        after_jobs.emplace(platform::PathToUtf8(item.path().filename()), *bytes);
+    }
+    CHECK(after_jobs == before_jobs);
+
+    held.Release();
+    REQUIRE_FALSE(held.holds());
+    const auto drained = memory::RunPendingMemoryJobs(home);
+    REQUIRE(drained.has_value());
+    CHECK(*drained == 2);
+    const auto entries = store.ListEntries();
+    REQUIRE(entries.size() == 2);
+    std::map<std::string, std::string> actual_bodies;
+    for (const auto& entry : entries) {
+        const auto request = expected.find(entry.id);
+        REQUIRE(request != expected.end());
+        CHECK(entry.title == request->second.title);
+        CHECK(entry.summary == request->second.summary);
+        const auto text = store.ReadTopicForShow(entry.id);
+        REQUIRE(text.has_value());
+        const auto topic = memory::frontmatter::Parse(text->first);
+        REQUIRE(topic.has_value());
+        CHECK(topic->entry.id == entry.id);
+        CHECK(topic->entry.title == request->second.title);
+        CHECK(topic->body == request->second.content);
+        const auto metadata_end = text->first.find("\n---\n", 4);
+        REQUIRE(metadata_end != std::string::npos);
+        const std::string raw_body = "\n# " + request->second.title + "\n\n" + request->second.content + "\n";
+        CHECK(text->first.substr(metadata_end + 5) == raw_body);
+        REQUIRE(actual_bodies.emplace(entry.id, topic->body).second);
+    }
+    // Drain confirms the existing formal commit receipt; pending disappearance
+    // alone is never used as evidence that a write was durable.
+    const auto completions = store.DrainWriteCompletions();
+    REQUIRE(completions.size() == 2);
+    std::map<std::string, std::string> completed_jobs;
+    for (const auto& completion : completions) {
+        CHECK(completion.outcome == "committed");
+        CHECK(completion.error.empty());
+        CHECK(completion.layer == "project");
+        REQUIRE(job_to_memory.contains(completion.job_id));
+        CHECK(completion.memory_id == job_to_memory.at(completion.job_id));
+        const auto stem = completion.job_id.substr(0, completion.job_id.size() - 5);
+        CHECK(completion.operation_id == "memsave-" + stem);
+        REQUIRE(completed_jobs.emplace(completion.job_id, completion.memory_id).second);
+    }
+    CHECK(completed_jobs == job_to_memory);
+    CHECK(store.Status().pending_jobs == 0);
+    CHECK(store.Status().failed_jobs == 0);
+    const auto after_release = memory::RunPendingMemoryJobs(home);
+    REQUIRE(after_release.has_value());
+    CHECK(*after_release == 0);
+    CHECK(store.DrainWriteCompletions().empty());
+    std::cout << "[memory-worker-busy] memory-worker-busy.bound-and-release\n";
 }
 
 TEST_CASE("MemorySaveTool: 默认关闭、敏感内容与合法排队") {
@@ -513,13 +825,19 @@ TEST_CASE("ProjectMemory: 真 worker 连续入队不起风暴,全部提交且回
         // 这里有界重试兜底(生产路由同款)。
         if (++polls % 40 == 0) (void)store.EnsureWorkerRunning();
     }
-    CHECK(store.Status().pending_jobs == 0);
-    CHECK(store.Status().failed_jobs == 0);
+    const auto batch_pending_status = store.Status();
+    PrintMemoryWorkerBatchStatus("pending", batch_pending_status);
+    CHECK(batch_pending_status.pending_jobs == 0);
+    const auto batch_failed_status = store.Status();
+    PrintMemoryWorkerBatchStatus("failed", batch_failed_status);
+    CHECK(batch_failed_status.failed_jobs == 0);
     REQUIRE(store.ListEntries().size() == 6);
     // "已入库"只从回执来:6 张 committed,核对 job_id/operation_id 一一对应。
     std::size_t committed = 0;
     for (int drain_round = 0; drain_round < 2; ++drain_round) {
-        for (const auto& completion : store.DrainWriteCompletions()) {
+        const auto batch_completions = store.DrainWriteCompletions();
+        PrintMemoryWorkerBatchDrain(drain_round, batch_completions);
+        for (const auto& completion : batch_completions) {
             if (drain_round == 0) {
                 CHECK(completion.outcome == "committed");
                 CHECK_FALSE(completion.memory_id.empty());
@@ -544,17 +862,50 @@ TEST_CASE("ProjectMemory: 真 worker 同 id 更新提交成功但 entry_count �
     options.global_allowed = true;
     memory::ProjectMemory store(*identity, root / "home", options, LUBANCODE_MEMORY_WORKER_EXE);
     REQUIRE(store.set_enabled(true).has_value());
+    int drain_round = 0;
     const auto drain_all = [&]() {
+        const auto start = std::chrono::steady_clock::now();
+        auto wakes = MemoryDiagnostic::array();
         const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
         int polls = 0;
         while (store.Status().pending_jobs > 0 && std::chrono::steady_clock::now() < until) {
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
             // 模拟空闲唤醒泵的补拉(生产路由同款)。
-            if (++polls % 40 == 0) (void)store.EnsureWorkerRunning();
+            if (++polls % 40 == 0) {
+                const auto wake = store.EnsureWorkerRunning();
+                wakes.push_back({{"poll", polls}, {"state", memory::MemoryWorkerLaunchStateName(wake.state)},
+                                 {"error_code", wake.error_code}, {"error", wake.error},
+                                 {"error_hex", DiagnosticHex(wake.error)}});
+            }
         }
+        const auto end = std::chrono::steady_clock::now();
+        const auto status = store.Status();
+        const MemoryDiagnostic drain{{"round", ++drain_round}, {"polls", polls},
+            {"elapsed_us", std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()},
+            {"pending_jobs", status.pending_jobs}, {"failed_jobs", status.failed_jobs},
+            {"entry_count", status.entry_count}, {"has_running_worker", store.HasRunningWorker()},
+            {"spawn_count", store.WorkerSpawnCount()}, {"existing_wakes", std::move(wakes)},
+            {"queue", MemoryQueueObservation(root / "home")},
+            {"close_receipt", "not exposed by existing worker API; not inferred"}};
+        PrintMemoryDiagnostic("same-id.drain", drain);
         CHECK(store.Status().pending_jobs == 0);
         std::size_t ok = 0;
         for (const auto& completion : store.DrainWriteCompletions()) {
+            MemoryDiagnostic observed{{"round", drain_round}, {"job_id", completion.job_id},
+                {"operation_id", completion.operation_id}, {"outcome", completion.outcome},
+                {"memory_id", completion.memory_id}, {"error", completion.error},
+                {"error_hex", DiagnosticHex(completion.error)}};
+            const auto operation = platform::Utf8ToPath(completion.operation_id);
+            if (operation.empty() || operation.has_parent_path() || operation == "." || operation == "..") {
+                observed["receipt_read_error"] = "operation is not a fixture-local filename";
+            } else {
+                // ConfirmProjectCommitReceipt would reflush a receipt. Read its
+                // existing raw fields only; no new lock, writes or consumption.
+                observed["raw_result"] = MemoryDiagnosticFile(
+                    identity->workspace_dir / "lifecycle" / operation / "result.json", 128 * 1024,
+                    {"operation_id", "workspace_key", "status", "commit_state", "stages", "outcome"});
+            }
+            PrintMemoryDiagnostic("same-id.completion", observed);
             REQUIRE(completion.outcome == "committed");
             ++ok;
         }

@@ -15,6 +15,10 @@
 #include <lubancore/api.hpp>
 #include <lubancore/extensions.hpp>
 #include <lubancore/results.hpp>
+#include <lubancore/skills.hpp>
+#include <lubancore/subagents.hpp>
+#include <lubancore/memory.hpp>
+#include <lubancore/lua.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
@@ -80,6 +84,9 @@ struct Approval {
     std::string input_json;
     std::string cwd;
     std::string reason;
+    // Present only for a real main-foreground child ticket. Session acceptance
+    // then grants this child only; the ordinary parent allowed account is separate.
+    std::optional<subagents::v1::ApprovalScope> child;
 };
 struct McpServer {
     // Text results may continue the model loop. Image/audio/blob captures are
@@ -98,8 +105,23 @@ struct McpServer {
 struct RuntimeOptions {
     // Required absolute UTF-8 paths. data_root is the owned persistence root;
     // resource_root identifies installed resources (no ambient home lookup).
+    // An admitted search uses only resource_root/libexec/rg (rg.exe on Windows),
+    // prepares it before session startup, and requires the bundled rg version.
     std::string data_root;
     std::string resource_root;
+};
+// Finite, positive per-opening read budgets. Same-ID resume can raise them;
+// they do not change saved Memory plans, authorization or per-entity Memory caps.
+struct RecoveryStreamReadLimits {
+    std::size_t max_bytes = 0, max_lines = 0, max_line_bytes = 0;
+};
+struct RecoveryReadLimits {
+    RecoveryStreamReadLimits journal{128u * 1024u * 1024u, 262144u, 8u * 1024u * 1024u};
+    RecoveryStreamReadLimits operations{16u * 1024u * 1024u, 65536u, 256u * 1024u};
+    std::size_t result_total_bytes = 128u * 1024u * 1024u;
+    std::size_t view_total_bytes = 384u * 1024u * 1024u;
+    std::size_t result_directory_entries = 4096u, view_directory_entries = 8192u;
+    std::size_t directory_name_bytes = 1024u, directory_name_total_bytes = 8u * 1024u * 1024u;
 };
 struct SessionOptions {
     std::string cwd; // required absolute existing directory; never process chdir
@@ -112,11 +134,23 @@ struct SessionOptions {
     std::optional<Connection> connection;
     // Empty creates a new V3 session. Nonempty strictly resumes that same V3 ID.
     std::string resume_session_id;
-    // Explicit admission. Currently read_file/write_file/edit_file/run_command.
+    // Explicit admission. read_file/write_file/edit_file/run_command/search.
+    // Search defaults to this session's cwd; null/empty paths do the same.
     // run_command is foreground-only; detached jobs and CLI parity are not claimed.
     std::vector<std::string> builtin_tools;
     std::vector<Tool> custom_tools;
     std::vector<McpServer> mcp_servers;
+    // Explicit local selection, frozen per session. SKILL.md drift is rejected;
+    // ordinary attachments are read live on demand. Never discovers HOME/cwd.
+    std::optional<skills::v1::Selection> skills;
+    // Explicit trusted project recall. Empty defaults off; on resume it preserves
+    // the saved Memory plan. An explicit resume value must match that plan.
+    std::optional<memory::v1::RecallOptions> memory;
+    // Omitted is off for a new Session, or inherits the frozen resume plan.
+    std::optional<memory::v1::WriteOptions> memory_write;
+    // Omitted is off for a new Session, or preserves its frozen resume plan.
+    // Foreground main dispatch only, depth one, explicit host step/second budgets.
+    std::optional<subagents::v1::Options> subagents;
     // Explicit trusted C++ registrations, frozen per session until Close.
     std::vector<extensions::v1::Registration> extensions;
     // Outbound result projection identity. New sessions default to Preview/v1;
@@ -128,7 +162,12 @@ struct SessionOptions {
     std::chrono::milliseconds approval_timeout{300000};
     int max_steps_per_turn = 0;
     std::size_t context_window_tokens = 128000;
+    // Explicit trusted standalone scripts; off on new Sessions, inherited from
+    // a matching frozen plan on resume. All three execution budgets are required.
+    std::optional<lua::v1::Selection> lua;
+    RecoveryReadLimits recovery_read_limits{};
 };
+// operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };
 enum class OperationState { Accepted, Running, Succeeded, Failed, Cancelled, Indeterminate };
 struct Operation {
@@ -199,6 +238,18 @@ public:
     // Frozen selected/overridden middleware plan, retained as pure JSON after
     // Close. This does not serialize or restore arbitrary extension state.
     Result<std::string> DescribeExtensions() const;
+    Result<skills::v1::Snapshot> DescribeSkills() const;
+    Result<subagents::v1::Snapshot> DescribeSubagents() const;
+    // Checked, owned historical projections. Close retains them without a writer.
+    Result<std::vector<subagents::v1::Report>> GetSubagentReports(const std::string& operation_id) const;
+    Result<memory::v1::Snapshot> DescribeMemory() const;
+    // Searches this Session only, even when another Session uses the same ID string.
+    Result<memory::v1::RecallReport> GetMemoryRecall(const std::string& operation_id) const;
+    Result<memory::v1::WriteSnapshot> DescribeMemoryWrite() const;
+    // Owned declaration only. Close keeps this value; resume creates fresh VMs.
+    Result<lua::v1::Snapshot> DescribeLua() const;
+    // Pure owned values after operation completion, including after Close.
+    Result<std::vector<memory::v1::SaveReport>> GetMemorySaves(const std::string& operation_id) const;
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
     // Cooperative custom tools/backends MUST return after cancellation; Close waits
     // for them and never destroys live borrowed state or pretends a timeout stopped it.

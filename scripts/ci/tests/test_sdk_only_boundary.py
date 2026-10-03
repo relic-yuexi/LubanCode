@@ -86,6 +86,118 @@ class BoundaryTests(unittest.TestCase):
         self.flags["BUILD_TESTING"] = "ON"
         self.assertEqual(self.check(testing=True)["status"], "passed")
 
+    def deferred_action_reference(self, private=False):
+        reference = "src/sdk/action_dispatch.cpp"
+        self.source_file(reference, '#include "runtime/middleware_deferred_effects.hpp"\n')
+        self.source_file("src/runtime/middleware_deferred_effects.hpp", '#include "hooks/middleware.hpp"\n')
+        self.source_file("src/hooks/middleware.hpp", "#pragma once\n")
+        target = {"id": "deferred_reference", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        if private:
+            self.flags["BUILD_TESTING"] = "ON"
+            self.targets.append(target)
+        else:
+            self.targets[0]["sources"].extend(target["sources"])
+
+    def test_deferred_action_header_is_recorded_in_production_and_private_reference(self):
+        for private in (False, True):
+            with self.subTest(private=private):
+                self.deferred_action_reference(private)
+                report = self.check(testing=private)
+                self.assertEqual(report["status"], "passed", report["violations"])
+                self.assertIn("src/runtime/middleware_deferred_effects.hpp", report["scannedProjectFiles"])
+                self.assertIn({"from": "src/sdk/action_dispatch.cpp",
+                               "to": "src/runtime/middleware_deferred_effects.hpp"}, report["projectIncludeEdges"])
+
+    def test_deferred_action_header_cannot_smuggle_transitive_host_dependencies(self):
+        self.deferred_action_reference(private=True)
+        self.source_file("src/runtime/middleware_deferred_effects.hpp", '#include "neutral/deferred_bridge.hpp"\n')
+        for host in ("app/turn_runner.hpp", "channel/manager.hpp", "updater/updater.hpp"):
+            with self.subTest(host=host):
+                self.source_file("src/neutral/deferred_bridge.hpp", f'#include "{host}"\n')
+                self.source_file("src/" + host, "#pragma once\n")
+                self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_public_header_cannot_expose_internal_deferred_action_header(self):
+        self.deferred_action_reference()
+        self.source_file("include/lubancore/core.hpp", '#include "runtime/middleware_deferred_effects.hpp"\n')
+        self.assert_rejected(self.check(), "exposes non-public include")
+
+    def test_deferred_action_move_preserves_host_stdio_and_global_state_guards(self):
+        self.deferred_action_reference()
+        for code, reason in (("std::cerr << 1;", "direct host stdio"),
+                             ("printf(\"fixture\");", "direct host stdio"),
+                             ("chdir(\"fixture\");", "process-global setter"),
+                             ("SetEnvironmentVariableW(nullptr, nullptr);", "process-global setter")):
+            with self.subTest(code=code):
+                self.source_file("src/runtime/middleware_deferred_effects.hpp", code + "\n")
+                self.assert_rejected(self.check(), reason)
+
+    def test_deferred_action_state_guard_ignores_comments_and_literals(self):
+        self.deferred_action_reference()
+        self.source_file("src/runtime/middleware_deferred_effects.hpp",
+                         '// std::cout << 1; setenv("fixture", "fixture", 1);\n'
+                         'const char* diagnostic = "std::cerr chdir SetEnvironmentVariableW";\n'
+                         'const char* fixture = R"(printf("fixture"); chdir("fixture"))";\n')
+        report = self.check()
+        self.assertEqual(report["status"], "passed", report["violations"])
+
+    def job_post_reference(self, private=False):
+        reference = "tests/unit/hooks/test_middleware_job_post_contract.cpp" if private else "src/sdk/extensions.cpp"
+        self.source_file(reference, '#include "hooks/middleware_action_contract.hpp"\n')
+        self.source_file("src/hooks/middleware_action_contract.hpp", '#include "hooks/middleware.hpp"\n')
+        self.source_file("src/hooks/middleware.hpp", "#pragma once\n")
+        target = {"id": "job_post_reference", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        if private:
+            self.flags["BUILD_TESTING"] = "ON"
+            self.targets.append(target)
+        else:
+            self.targets[0]["sources"].extend(target["sources"])
+
+    def test_job_post_contract_header_is_scanned_without_public_exposure(self):
+        for private in (False, True):
+            with self.subTest(private=private):
+                self.job_post_reference(private)
+                report = self.check(testing=private)
+                self.assertEqual(report["status"], "passed", report["violations"])
+                self.assertIn("src/hooks/middleware_action_contract.hpp", report["scannedProjectFiles"])
+        self.source_file("include/lubancore/core.hpp", '#include "hooks/middleware_action_contract.hpp"\n')
+        self.assert_rejected(self.check(testing=True), "exposes non-public include")
+
+    def test_job_post_contract_header_rejects_transitive_host_dependencies(self):
+        self.job_post_reference(private=True)
+        self.source_file("src/hooks/middleware_action_contract.hpp", '#include "neutral/job_post_bridge.hpp"\n')
+        for host in ("app/turn_runner.hpp", "channel/manager.hpp", "updater/updater.hpp"):
+            with self.subTest(host=host):
+                self.source_file("src/neutral/job_post_bridge.hpp", f'#include "{host}"\n')
+                self.source_file("src/" + host, "#pragma once\n")
+                self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_job_post_contract_preserves_stdio_and_global_state_guards(self):
+        self.job_post_reference()
+        for code, reason in (("std::cerr << 1;", "direct host stdio"),
+                             ("printf(\"fixture\");", "direct host stdio"),
+                             ("chdir(\"fixture\");", "process-global setter"),
+                             ("SetEnvironmentVariableW(nullptr, nullptr);", "process-global setter")):
+            with self.subTest(code=code):
+                self.source_file("src/hooks/middleware_action_contract.hpp", code + "\n")
+                self.assert_rejected(self.check(), reason)
+
+    def test_job_post_native_source_allowance_rejects_cli_and_neighbors(self):
+        self.job_post_reference(private=True)
+        target = self.targets[-1]
+        self.flags["BUILD_TESTING"] = "OFF"
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        nearby = "tests/unit/hooks/test_middleware_job_post_contract_extra.cpp"
+        self.source_file(nearby, "int fixture_only;\n")
+        target["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["sources"][0]["path"] = "tests/unit/hooks/test_middleware_job_post_contract.cpp"
+        target["name"] = "lubancode_tests"
+        self.assert_rejected(self.check(testing=True), "host/resource target")
+
     def test_testing_on_does_not_enable_the_cli_test_graph(self):
         self.flags["BUILD_TESTING"] = "ON"
         self.source_file("tests/unit/cli/test_prompt.cpp", "int cli_test;\n")
@@ -94,6 +206,214 @@ class BoundaryTests(unittest.TestCase):
         self.assert_rejected(self.check(testing=True), "host/resource target")
         self.targets[-1]["name"] = "lubancore_sdk_tests"
         self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_exact_job_sources_are_only_compiled_when_testing_is_on(self):
+        for name in ("tests/unit/tools/test_tool_job_coordinator.cpp", "tests/unit/tools/test_tool_job_start_transaction.cpp", "tests/unit/tools/test_tool_job_hold_recovery.cpp"):
+            self.source_file(name, "int fixture_only;\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+            "sources": [{"path": name, "compileGroupIndex": 0} for name in
+                ("tests/unit/tools/test_tool_job_coordinator.cpp", "tests/unit/tools/test_tool_job_start_transaction.cpp", "tests/unit/tools/test_tool_job_hold_recovery.cpp")],
+            "compileGroups": [{}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        report = self.check(testing=True)
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.targets[-1]["sources"][0]["path"] = "tests/unit/tools/test_tool_job_unrelated.cpp"
+        self.source_file("tests/unit/tools/test_tool_job_unrelated.cpp", "int unrelated;\n")
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_real_private_memory_cas_reference_is_only_testing_on(self):
+        reference = "src/sdk/memory.cpp"
+        self.source_file(reference, '#include "sdk/memory.hpp"\n')
+        self.source_file("src/sdk/memory.hpp", '#include "trajectory/cas_store.hpp"\n')
+        self.source_file("src/trajectory/cas_store.hpp", "#pragma once\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        report = self.check(testing=True)
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.assertIn("src/trajectory/cas_store.hpp", report["scannedProjectFiles"])
+        self.targets[-1]["name"] = "arbitrary_host"
+        self.assert_rejected(self.check(testing=True), "unregistered private SDK reference")
+
+    def test_real_private_approval_reference_is_only_testing_on(self):
+        reference = "src/sdk/approval.cpp"
+        self.source_file(reference, '#include "sdk/approval.hpp"\n')
+        self.source_file("src/sdk/approval.hpp", '#include "runtime/scoped_approval.hpp"\n')
+        self.source_file("src/runtime/scoped_approval.hpp", "#pragma once\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        report = self.check(testing=True)
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.assertIn("src/runtime/scoped_approval.hpp", report["scannedProjectFiles"])
+        self.targets[-1]["sources"][0]["path"] = "src/sdk/core.cpp"
+        self.assert_rejected(self.check(testing=True), "unregistered private SDK reference")
+
+    def test_private_approval_reference_cannot_hide_a_host_include(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        reference = "src/sdk/approval.cpp"
+        self.source_file(reference, '#include "sdk/approval.hpp"\n')
+        self.source_file("src/sdk/approval.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_real_private_action_adapter_has_exact_testing_on_allowance(self):
+        reference = "src/sdk/action_dispatch.cpp"
+        self.source_file(reference, '#include "sdk/action_dispatch.hpp"\n')
+        self.source_file("src/sdk/action_dispatch.hpp", '#include "hooks/middleware.hpp"\n')
+        self.source_file("src/hooks/middleware.hpp", "#pragma once\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        report = self.check(testing=True)
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.assertIn("src/hooks/middleware.hpp", report["scannedProjectFiles"])
+        self.source_file("src/sdk/action_opening.cpp", "int opening;\n")
+        self.targets[-1]["sources"][0]["path"] = "src/sdk/action_opening.cpp"
+        self.assert_rejected(self.check(testing=True), "unregistered private SDK reference")
+
+    def test_private_action_adapter_cannot_hide_a_reverse_host_include(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        reference = "src/sdk/action_dispatch.cpp"
+        self.source_file(reference, '#include "sdk/action_dispatch.hpp"\n')
+        self.source_file("src/sdk/action_dispatch.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": reference, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def add_search_probe(self):
+        self.source_file(boundary.SEARCH_PROBE_SOURCE, "int main() { return 0; }\n")
+        probe = {"id": "probe", "name": boundary.SEARCH_PROBE_TARGET, "type": "EXECUTABLE",
+                 "sources": [{"path": boundary.SEARCH_PROBE_SOURCE, "compileGroupIndex": 0}],
+                 "compileGroups": [{}]}
+        self.targets.append(probe)
+        return probe
+
+    def add_command_probe(self):
+        self.source_file(boundary.COMMAND_LIMITS_PROBE_SOURCE, "#include <iostream>\nint main() { return 0; }\n")
+        probe = {"id": "command-probe", "name": boundary.COMMAND_LIMITS_PROBE_TARGET,
+                 "type": "EXECUTABLE", "compileGroups": [{}],
+                 "sources": [{"path": boundary.COMMAND_LIMITS_PROBE_SOURCE, "compileGroupIndex": 0}]}
+        self.targets.append(probe)
+        return probe
+
+    def test_command_probe_testing_off_and_wrong_target_type_reject(self):
+        probe = self.add_command_probe()
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        probe["type"] = "STATIC_LIBRARY"
+        self.assert_rejected(self.check(testing=True), "executable target")
+
+    def test_command_probe_wrong_owner_and_adjacent_support_source_reject(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_command_probe()
+        probe["name"] = "unrelated_probe"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        probe["name"] = boundary.COMMAND_LIMITS_PROBE_TARGET
+        other = "tests/support/command_limits_probe_adjacent.cpp"
+        self.source_file(other, "int adjacent;\n")
+        probe["sources"].append({"path": other, "compileGroupIndex": 0})
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_command_probe_source_cannot_compile_directly_in_sdk_test_target(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_command_probe()
+        probe["name"] = "lubancore_sdk_tests"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_command_probe_must_not_link_a_project_library_or_enter_sdk_closure(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_command_probe()
+        probe["dependencies"] = [{"id": "engine"}]
+        self.assert_rejected(self.check(testing=True), "must not depend")
+        probe.pop("dependencies")
+        self.targets[0]["dependencies"].append({"id": "command-probe"})
+        self.assert_rejected(self.check(testing=True), "SDK library depends")
+
+    def test_command_probe_allows_only_cmake_regeneration_utility(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_command_probe()
+        self.targets.append({"id": "zero", "name": "ZERO_CHECK", "type": "UTILITY"})
+        probe["dependencies"] = [{"id": "zero"}]
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        self.targets[-1]["name"] = "arbitrary_utility"
+        self.assert_rejected(self.check(testing=True), "must not depend")
+
+    def test_command_probe_cannot_hide_project_or_platform_header_dependencies(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        self.add_command_probe()
+        for include in ("neutral/bridge.hpp", "windows.h"):
+            self.source_file(boundary.COMMAND_LIMITS_PROBE_SOURCE, '#include "' + include + '"\nint main() {}\n')
+            self.assert_rejected(self.check(testing=True), "only standard-library headers")
+
+    def test_command_source_is_only_one_testing_on_sdk_owned_shared_fixture(self):
+        shared = "tests/unit/tools/test_run_command_execution_limits.cpp"
+        self.source_file(shared, "int command_test;\n")
+        target = {"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "neutral_engine"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        nearby = "tests/unit/tools/test_run_command_process.cpp"
+        self.source_file(nearby, "int adjacent_test;\n")
+        target["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_command_source_still_rejects_reverse_host_headers(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        shared = "tests/unit/tools/test_run_command_execution_limits.cpp"
+        self.source_file(shared, '#include "tools/run_command.hpp"\n')
+        self.source_file("src/tools/run_command.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_search_probe_is_only_a_testing_on_isolated_executable(self):
+        probe = self.add_search_probe()
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        probe["type"] = "STATIC_LIBRARY"
+        self.assert_rejected(self.check(testing=True), "executable target")
+
+    def test_search_probe_cannot_broaden_its_source_allowance(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_search_probe()
+        other = "tests/support/unrelated_probe.cpp"
+        self.source_file(other, "int other;\n")
+        probe["sources"].append({"path": other, "compileGroupIndex": 0})
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_search_probe_cannot_link_runtime_or_enter_sdk_closure(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_search_probe()
+        probe["dependencies"] = [{"id": "engine"}]
+        self.assert_rejected(self.check(testing=True), "must not depend")
+        probe.pop("dependencies")
+        self.targets[0]["dependencies"].append({"id": "probe"})
+        self.assert_rejected(self.check(testing=True), "SDK library depends")
+
+    def test_search_probe_allows_only_the_cmake_regeneration_utility(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_search_probe()
+        self.targets.append({"id": "zero", "name": "ZERO_CHECK", "type": "UTILITY"})
+        probe["dependencies"] = [{"id": "zero"}]
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        self.targets[-1]["name"] = "other_utility"
+        self.assert_rejected(self.check(testing=True), "must not depend")
 
     def test_unbuilt_host_target_cannot_hide_behind_exclude_from_all(self):
         target = {"id": "host", "type": "UTILITY"}
@@ -132,6 +452,186 @@ class BoundaryTests(unittest.TestCase):
                              "compileGroups": [{}]})
         self.assert_rejected(self.check(testing=True), "reverse host include")
 
+    def test_result_store_original_fixture_is_an_exact_testing_only_allowance(self):
+        shared = "tests/unit/trajectory_v3/test_v3_result_store.cpp"
+        self.source_file(shared, '#include "trajectory/v3/result_store.hpp"\n')
+        self.source_file("src/trajectory/v3/result_store.hpp", "#pragma once\n")
+        target = {"id": "result-store", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        report = self.check(testing=True)
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.assertIn("src/trajectory/v3/result_store.hpp", report["scannedProjectFiles"])
+        target["name"] = "lubancode_engine"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        nearby = "tests/unit/trajectory_v3/test_v3_reader.cpp"
+        self.source_file(nearby, "int unrelated_trajectory_test;\n")
+        target["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_result_store_original_fixture_cannot_import_a_recursive_host_header(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        shared = "tests/unit/trajectory_v3/test_v3_result_store.cpp"
+        self.source_file(shared, '#include "trajectory/v3/result_store.hpp"\n')
+        self.source_file("src/trajectory/v3/result_store.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.targets.append({"id": "result-store", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_lua_protection_allowance_is_one_neutral_test_source(self):
+        shared = "tests/unit/tools/test_lua_protected.cpp"
+        self.source_file(shared, '#include "tools/lua_tool.hpp"\n')
+        self.source_file("src/tools/lua_tool.hpp", "#pragma once\n")
+        target = {"id": "lua-protection", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "lubancode_runtime"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        nearby = "tests/unit/tools/test_lua_tool.cpp"
+        self.source_file(nearby, '#include "tools/lua_tool.hpp"\n')
+        target["sources"].append({"path": nearby, "compileGroupIndex": 0})
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["sources"].pop()
+        self.source_file("src/tools/lua_tool.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_child_terminal_allowance_remains_testing_only_and_neutral(self):
+        shared = "tests/unit/runtime/test_subagent_terminal_receipt.cpp"
+        self.source_file(shared, '#include "runtime/subagent_terminal.hpp"\n')
+        self.source_file("src/runtime/subagent_terminal.hpp", "#pragma once\n")
+        self.targets.append({"id": "receipt", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": shared, "compileGroupIndex": 0}],
+                             "compileGroups": [{}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        self.source_file("src/runtime/subagent_terminal.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_child_integration_allowance_cannot_enter_library_or_borrow_host_headers(self):
+        shared = "tests/unit/runtime/test_child_foreground_integration.cpp"
+        self.source_file(shared, '#include "tools/agent_tool.hpp"\n')
+        self.source_file("src/tools/agent_tool.hpp", "#pragma once\n")
+        target = {"id": "integration", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "lubancode_runtime"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        self.source_file("src/tools/agent_tool.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_child_observation_allowance_remains_testing_only_and_cannot_import_host_state(self):
+        shared = "tests/unit/runtime/test_child_parent_observation.cpp"
+        self.source_file(shared, '#include "runtime/trajectory_turn_bridge.hpp"\n')
+        self.source_file("src/runtime/trajectory_turn_bridge.hpp", "#pragma once\n")
+        target = {"id": "observation", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "lubancode_runtime"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        self.source_file("src/runtime/trajectory_turn_bridge.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_child_adoption_allowance_follows_its_shared_fixture_and_remains_testing_only(self):
+        shared = "tests/unit/runtime/test_child_history_adoption.cpp"
+        self.source_file(shared, '#include "child_observation_fixture.hpp"\n')
+        self.source_file("tests/support/child_observation_fixture.hpp", '#include "runtime/trajectory_turn_bridge.hpp"\n')
+        self.source_file("src/runtime/trajectory_turn_bridge.hpp", "#pragma once\n")
+        target = {"id": "adoption", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}],
+                  "compileGroups": [{"includes": [{"path": str(self.source / "tests/support")}]}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "lubancode_runtime"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        self.source_file("tests/support/child_observation_fixture.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_middleware_receipt_allowance_is_exact_testing_only_and_keeps_the_host_boundary(self):
+        shared = "tests/unit/runtime/test_middleware_native_receipts.cpp"
+        self.source_file(shared, '#include "runtime/middleware_v3_sink.hpp"\n')
+        self.source_file("src/runtime/middleware_v3_sink.hpp", "#pragma once\n")
+        target = {"id": "receipts", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "receipt_tests"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        nearby = "tests/unit/runtime/test_middleware_session_binding.cpp"
+        self.source_file(nearby, "int unregistered_test;\n")
+        target["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["sources"][0]["path"] = shared
+        self.source_file("src/runtime/middleware_v3_sink.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_middleware_cause_allowance_is_exact_testing_only_and_keeps_the_host_boundary(self):
+        shared = "tests/unit/hooks/test_middleware_dispatch_cause.cpp"
+        self.source_file(shared, '#include "hooks/middleware.hpp"\n')
+        self.source_file("src/hooks/middleware.hpp", "#pragma once\n")
+        target = {"id": "receipts", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "receipt_tests"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        nearby = "tests/unit/hooks/test_middleware_runtime_wire.cpp"
+        self.source_file(nearby, "int unregistered_test;\n")
+        target["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["sources"][0]["path"] = shared
+        self.source_file("src/hooks/middleware.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_execution_owner_allowance_is_testing_only_and_keeps_the_host_boundary(self):
+        shared = "tests/unit/runtime/test_execution_owner.cpp"
+        self.source_file(shared, '#include "runtime/execution_owner.hpp"\n')
+        self.source_file("src/runtime/execution_owner.hpp", "#pragma once\n")
+        target = {"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "execution_tests"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        self.source_file("src/runtime/execution_owner.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
     def test_turn_bindings_allowance_excludes_its_cli_host_test(self):
         shared = "tests/unit/runtime/test_scoped_turn_bindings.cpp"
         host = "tests/unit/app/test_turn_runner_scoped_bindings.cpp"
@@ -167,6 +667,88 @@ class BoundaryTests(unittest.TestCase):
         self.targets.append({"id": "hidden", "name": "innocent_name", "type": "STATIC_LIBRARY",
                              "sources": [{"path": "src/cli/renamed.cpp"}]})
         self.assert_rejected(self.check(), "includes host source")
+
+    def test_release_query_and_package_sources_cannot_hide_in_sdk_only_targets(self):
+        for path in ("src/config/update_checker.cpp", "src/config/update_checker.hpp",
+                     "src/package/inventory.cpp", "src/package/inventory.hpp"):
+            with self.subTest(path=path):
+                self.source_file(path, "int host_material;\n")
+                self.targets.append({"id": "hidden", "name": "neutral_name", "type": "STATIC_LIBRARY",
+                                     "sources": [{"path": path, "compileGroupIndex": 0}], "compileGroups": [{}]})
+                self.assert_rejected(self.check(), "includes host source " + path)
+                self.targets.pop()
+
+    def test_private_header_cannot_reimport_release_query_or_package(self):
+        for path in ("src/config/update_checker.hpp", "src/package/catalog.hpp"):
+            with self.subTest(path=path):
+                self.source_file(path, "#pragma once\n")
+                self.source_file("src/neutral/bridge.hpp", '#include "' + path.removeprefix("src/") + '"\n')
+                self.assert_rejected(self.check(), "reverse host include")
+
+    def add_package_parsers(self):
+        self.targets[1]["name"] = "lubancode_engine"
+        for name in sorted(boundary.SDK_NEUTRAL_PACKAGE_FILES):
+            contents = '#include "package/semver.hpp"\n' if name.endswith(".cpp") else "#pragma once\n"
+            self.source_file(name, contents)
+        self.source_file("src/package/manifest.hpp", '#include "package/semver.hpp"\n')
+        self.source_file("src/sdk/core.cpp", '#include "package/manifest.hpp"\n')
+        self.targets[1]["sources"].extend({"path": name, "compileGroupIndex": 0}
+                                         for name in sorted(boundary.SDK_NEUTRAL_PACKAGE_SOURCES))
+
+    def test_package_exact_two_parsers_and_recursive_headers_are_neutral(self):
+        self.add_package_parsers()
+        for testing in (False, True):
+            self.flags["BUILD_TESTING"] = "ON" if testing else "OFF"
+            report = self.check(testing)
+            self.assertEqual(report["status"], "passed", report["violations"])
+            self.assertTrue(boundary.SDK_NEUTRAL_PACKAGE_FILES <= set(report["scannedProjectFiles"]))
+
+    def test_package_parsers_require_their_exact_static_single_owner(self):
+        self.add_package_parsers()
+        originals = list(self.targets[1]["sources"])
+        for source in sorted(boundary.SDK_NEUTRAL_PACKAGE_SOURCES):
+            for variant in ("missing", "duplicate", "sdk", "shared", "renamed"):
+                with self.subTest(source=source, variant=variant):
+                    self.targets[1]["sources"] = list(originals)
+                    self.targets[1]["name"], self.targets[1]["type"] = "lubancode_engine", "STATIC_LIBRARY"
+                    if variant in ("missing", "sdk"):
+                        self.targets[1]["sources"] = [entry for entry in originals if entry["path"] != source]
+                    if variant == "sdk":
+                        self.targets[0]["sources"].append({"path": source, "compileGroupIndex": 0})
+                    elif variant == "duplicate":
+                        self.targets[1]["sources"].append({"path": source, "compileGroupIndex": 0})
+                    elif variant == "shared":
+                        self.targets[1]["type"] = "SHARED_LIBRARY"
+                    elif variant == "renamed":
+                        self.targets[1]["name"] = "innocent_parser"
+                    self.assert_rejected(self.check(), "Neutral Package parser must belong once")
+                    if variant == "sdk":
+                        self.targets[0]["sources"].pop()
+
+    def test_package_exceptions_do_not_cover_nearby_sources_or_recursive_host_headers(self):
+        self.add_package_parsers()
+        for name in ("src/package/manifest_extra.cpp", "src/package/semver_extra.cpp", "src/package/component.cpp"):
+            with self.subTest(name=name):
+                self.source_file(name, "int only_fixture;\n")
+                self.targets[1]["sources"].append({"path": name, "compileGroupIndex": 0})
+                self.assert_rejected(self.check(), "includes host source " + name)
+                self.targets[1]["sources"].pop()
+        self.source_file("src/package/component.hpp", "#pragma once\n")
+        self.source_file("src/package/semver.hpp", '#include "package/component.hpp"\n')
+        self.assert_rejected(self.check(), "reverse host include")
+
+    def test_original_package_test_exception_is_exact_and_testing_only(self):
+        source = "tests/unit/packages/test_package_manifest.cpp"
+        self.source_file(source, "int fixture;\n")
+        self.targets.append({"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": source, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(True)["status"], "passed")
+        nearby = "tests/unit/packages/test_package_component.cpp"
+        self.source_file(nearby, "int fixture;\n")
+        self.targets[-1]["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(True), "non-SDK test compilation")
 
     def test_terminal_platform_source_is_not_a_core_exception(self):
         self.source_file("src/platform/console_posix.cpp", "int terminal;\n")
@@ -240,6 +822,71 @@ std::cerr << "not executable";
         self.json_file("model.json", model)
         with self.assertRaisesRegex(ValueError, "different source/build"):
             boundary.inspect(self.source, self.build, "Release", False)
+
+    def test_neutral_channel_config_and_types_keep_their_recursive_headers(self):
+        self.source_file("src/channel/types.hpp", "#include <string>\n")
+        self.source_file("src/channel/types.cpp", '#include "channel/types.hpp"\n')
+        self.source_file("src/channel/channel_config.hpp", '#include "channel/types.hpp"\n')
+        self.source_file("src/channel/channel_config.cpp", '#include "channel/channel_config.hpp"\n')
+        self.source_file("src/config/config.hpp", '#include "channel/channel_config.hpp"\n')
+        self.source_file("src/neutral/bridge.hpp", '#include "config/config.hpp"\n')
+        self.targets[1]["sources"].extend(
+            [{"path": name, "compileGroupIndex": 0} for name in
+             ("src/channel/types.cpp", "src/channel/channel_config.cpp")])
+        report = self.check()
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.assertTrue(boundary.SDK_NEUTRAL_CHANNEL_FILES <= set(report["scannedProjectFiles"]))
+
+    def test_disconnected_channel_hosts_or_tls_targets_do_not_belong_in_sdk_only(self):
+        for name in sorted(boundary.CHANNEL_HOST_TARGETS | boundary.MBEDTLS_TARGETS):
+            with self.subTest(name=name):
+                self.targets.append({"id": "disconnected", "name": name,
+                                     "type": "STATIC_LIBRARY", "sources": []})
+                self.assert_rejected(self.check(), "host/resource target")
+                self.targets.pop()
+
+    def test_all_frozen_host_sources_are_rejected_even_under_neutral_target_name(self):
+        for source in sorted(boundary.CHANNEL_HOST_SOURCES | boundary.CHANNEL_RUNTIME_SOURCES):
+            with self.subTest(source=source):
+                self.source_file(source, "int host_fixture_only;\n")
+                self.targets[1]["sources"].append({"path": source, "compileGroupIndex": 0})
+                try:
+                    self.assert_rejected(self.check(), "target neutral_engine includes host source " + source)
+                finally:
+                    self.targets[1]["sources"].pop()
+
+    def test_new_host_sources_and_neutral_lookalikes_are_not_allowlisted(self):
+        for source in ("src/channel/new_transport.cpp", "src/gateway/new_host.cpp",
+                       "src/channel/types_extra.cpp", "src/channel/channel_config_extra.cpp"):
+            with self.subTest(source=source):
+                self.source_file(source, "int host_fixture_only;\n")
+                self.targets[1]["sources"].append({"path": source, "compileGroupIndex": 0})
+                try:
+                    self.assert_rejected(self.check(), "target neutral_engine includes host source " + source)
+                finally:
+                    self.targets[1]["sources"].pop()
+
+    def test_neutral_config_exception_cannot_forward_to_transport_or_gateway_header(self):
+        self.source_file("src/config/config.hpp", '#include "channel/channel_config.hpp"\n')
+        self.source_file("src/neutral/bridge.hpp", '#include "config/config.hpp"\n')
+        for header in ("channel/channel_router.hpp", "channel/transport/tls.hpp", "gateway/profile.hpp"):
+            with self.subTest(header=header):
+                self.source_file("src/" + header, "#pragma once\n")
+                self.source_file("src/channel/channel_config.hpp", '#include "' + header + '"\n')
+                self.assert_rejected(self.check(), "reverse host include")
+
+    def test_runtime_host_headers_cannot_leak_through_sdk_or_precompiled_header(self):
+        for source in sorted(boundary.CHANNEL_RUNTIME_SOURCES):
+            header = source.removesuffix(".cpp") + ".hpp"
+            self.source_file(header, "#pragma once\n")
+            include = header.removeprefix("src/")
+            for kind in ("direct", "pch"):
+                with self.subTest(header=header, kind=kind):
+                    self.source_file("src/sdk/core.cpp", '#include "' + include + '"\n' if kind == "direct" else "int fixture;\n")
+                    self.targets[0]["compileGroups"] = [{}] if kind == "direct" else [
+                        {"precompileHeaders": [{"header": str(self.source / header)}]}]
+                    reason = "reverse host include" if kind == "direct" else "target lubancore_sdk includes host source " + header
+                    self.assert_rejected(self.check(), reason)
 
 
 if __name__ == "__main__":
