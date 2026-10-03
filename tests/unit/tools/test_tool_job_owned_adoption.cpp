@@ -486,8 +486,8 @@ TEST_CASE("Owned Job adoption: complete capability holds and real provenance rej
     const auto actions = v3::FoldToolActions(ledger);
     unsigned parent_count = 0, business_count = 0;
     for (const auto& action : actions) {
-        if (action.action_id == source.action) { CHECK(action.provider_reply_required); ++parent_count; }
-        if (action.action_id == registered.facts->action_id) { CHECK_FALSE(action.provider_reply_required); ++business_count; }
+        if (action.tool_call_id == source.action) { CHECK(action.provider_reply_required); ++parent_count; }
+        if (action.tool_call_id == registered.facts->action_id) { CHECK_FALSE(action.provider_reply_required); ++business_count; }
     }
     CHECK(parent_count == 1); CHECK(business_count == 1);
     CHECK(Events(ledger, v3::EventKindV3::ToolExecutionFinished, registered.facts->action_id) == 0);
@@ -835,7 +835,9 @@ TEST_CASE("Owned Job adoption: real native write gaps freeze settlement and all 
                 CHECK(folded.front().dispatched);
             }
         }
-        REQUIRE(rig.coordinator->Shutdown()); rig.coordinator.reset(); Committed(rig.writer->Close());
+        REQUIRE(rig.coordinator->Shutdown()); rig.coordinator.reset();
+        const auto source_closed = rig.writer->Close();
+        REQUIRE_MESSAGE(source_closed.has_value(), (source_closed ? std::string() : source_closed.error()));
         for (const auto policy : {JobRecoveryPolicy::Legacy, JobRecoveryPolicy::Hold}) {
             auto writer = v3::V3Writer::Continue(snapshot); REQUIRE(writer.has_value());
             unsigned executions = 0;
@@ -847,7 +849,8 @@ TEST_CASE("Owned Job adoption: real native write gaps freeze settlement and all 
             CHECK(recovered.AdoptRecovery(plan) == (phase == 0 ? 0 : 1)); recovered.PumpCompletions();
             CHECK(executions == 0); CHECK(recovered.running_count() == 0); CHECK(recovered.queued_count() == 0);
             REQUIRE(recovered.Shutdown()); CHECK(Bytes(snapshot) == bytes);
-            Committed(writer->Close());
+            const auto recovered_closed = writer->Close();
+            REQUIRE_MESSAGE(recovered_closed.has_value(), (recovered_closed ? std::string() : recovered_closed.error()));
         }
         probe.Released();
     }
