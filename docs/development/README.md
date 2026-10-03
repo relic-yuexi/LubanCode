@@ -59,3 +59,4 @@ git diff --check
 - [Runner Release 拒绝诊断与失败原件](runner-release-diagnostic.md)
 - [子历史采用册阶段诊断](child-history-stage-diagnostic.md)
 - [SDK Job 前置：命令执行限额](sdk-command-execution-limits.md)
+- [SDK MemorySave 四场报告诊断](sdk-memory-save-diagnostic.md)
