@@ -26,6 +26,6 @@
 
 ## 验收
 
-独立私有、纯标准库 probe 只进测试目标，测试关闭时不出现，不落 SDK 依赖闭包或安装包。三平台同源原生册走实际 RunCommand 两种 shell：Windows cmd/PowerShell，POSIX sh/bash。测无效画像与背景绕路零进程；恰到帽成功、帽加一强制终止；宿主时限真生效及模型只能收紧；取消等真实退出；同工具、同项目二场及异项目二场限额不串；缺省画像沿旧路径。
+独立私有、纯标准库 probe 只进测试目标，测试关闭时不出现，不落 SDK 依赖闭包或安装包。三平台同源原生册走实际 RunCommand 两种 shell：Windows cmd/PowerShell，POSIX sh/bash。测无效画像与背景绕路零进程；恰到帽成功、帽加一强制终止；宿主时限真生效及模型只能收紧；取消等真实退出；四笔同工具真实并发调用，两笔同 cwd、另两笔各取 cwd，限额不串；缺省画像沿旧路径。这里只验内部调用上下文，公开 SDK Session 后台装配与隔离另笔。
 
 新来源须登记真实 `unit.tools` 与 `sdk.focused` 两套 CTest；focused 35、必需 ASan 40、安装消费仍 25。保留原来源、完整 argv、非零原生断言、JUnit、资源锁及预算。真 CI 原件核源头、checkout/merge 同树；不借 #308 或其它叶笔绿。只在远端编译和跑原生，本地只读、文档与纯数据门。
