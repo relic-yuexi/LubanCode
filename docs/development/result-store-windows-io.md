@@ -22,3 +22,10 @@ POSIX `FileIoPath` 原样返回；Windows 继续沿现函数对 reserved/trailin
 该生产原册进入 SDK focused 与必需 ASan 门，原来源并集照留；三平台 full、六套消费者与 SDK/Host/Worker/Runner/实际依赖图须验同一鲜头。
 合同与静核不充原生通过；Windows 实际故障是否就此消失，须等新远端消费者同场回执。旧 b58/bef 失败原件另封，不拿旧部分绿替新头。
 本地不 configure、不编译、不 CTest、不运行原生夹具；只静态、纯数据和文档检查。
+
+## SDK-only 原册登记补口
+
+`2f3d8bc7` 远端 Linux 与 macOS 安装消费均已跑过；SDK-only 随后在 dependency boundary 拒绝新增原册 `tests/unit/trajectory_v3/test_v3_result_store.cpp`。实际报告仅此一条：该来源已进 CMake focused 清单，却漏进 `SHARED_SDK_TEST_SOURCES`。
+下一笔只登记这一条完整路径。仅 `BUILD_TESTING=ON`、`lubancore_sdk_tests` 所有者可用；OFF、别的 target、相邻 trajectory 原册、递归宿主头仍须拒绝。
+用合成 File API 纯数据反例核这四条拒线，不跑 CMake 或原生进程。原 17 用例、两枚 Windows 路径标记、25 册 focused、30 册必需 ASan 与消费断言照留。
+漏项旧头另封原报告；新头重走远端三平台，不拿这份清单修补充原生通过。
