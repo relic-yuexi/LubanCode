@@ -11,6 +11,7 @@ add_library(lubancore_sdk SHARED
   src/sdk/skills.cpp
   src/sdk/subagents.cpp
   src/sdk/memory.cpp
+  src/sdk/memory_blobs.cpp
   src/sdk/memory_write.cpp
   src/sdk/packages.cpp
   src/sdk/lua.cpp

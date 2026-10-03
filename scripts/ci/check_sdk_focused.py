@@ -25,6 +25,7 @@ REQUIRED = {
     "sdk.focused.middleware_native_receipts",
     "sdk.focused.middleware_dispatch_cause",
     "sdk.focused.middleware_job_post_contract",
+    "sdk.focused.lubancore_memory_blob_spi",
     "sdk.focused.run_command_execution_limits",
     "sdk.focused.session_recovery_view",
     "sdk.focused.lubancore_recovery_view",
@@ -646,6 +647,55 @@ def check_event_sink_consumer(section, command):
         raise RuntimeError("EventSink relocated consumer did not finish its actual owned queue")
 
 
+MEMORY_BLOB_PATHS = ('actual', 'resume', 'receipt', 'isolation', 'drain', 'opening')
+
+
+def check_memory_blob_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_lubancore_memory_blob_spi.cpp"):
+        raise RuntimeError("Memory blob registration must run the single absolute native source")
+
+
+def check_memory_blob_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("Memory blob native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Memory blob executable is not the actual native fixture")
+    check_memory_blob_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (6, 6, 0):
+        raise RuntimeError("Memory blob native roster differs from six successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Memory blob native assertions did not actually pass")
+    for path in MEMORY_BLOB_PATHS:
+        if section.splitlines().count("[sdk-memory-blob-path] " + path) != 1:
+            raise RuntimeError("Memory blob actual path did not finish once: " + path)
+
+
+def check_memory_blob_consumer(section, command):
+    if (not isinstance(command, list) or len(command) != 3 or
+            not all(isinstance(value, str) and value for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in ("lubancore_consumer", "lubancore_consumer.exe") or
+            command[1] != "memory-blobs"):
+        raise RuntimeError("Memory blob consumer must run its actual relocated command")
+    check_native_command(section, command)
+    if (section.splitlines().count("[sdk-memory-blob-consumer] actual-owned-store") != 1 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Memory blob relocated consumer did not finish its actual owned queue")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -695,6 +745,8 @@ def main():
             check_job_post_live_registration(test.get("command", []))
         if test["name"] == "sdk.focused.lubancore_event_sink":
             check_event_sink_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_memory_blob_spi":
+            check_memory_blob_registration(test.get("command", []))
         if test["name"] == "sdk.focused.run_command_execution_limits":
             check_command_limits_registration(test.get("command", []))
         if test["name"] == "sdk.focused.atomic_write":
@@ -773,6 +825,9 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_event_sink":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_event_sink_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_memory_blob_spi":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_memory_blob_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.run_command_execution_limits":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_command_limits_native(sections[0], registered["command"])

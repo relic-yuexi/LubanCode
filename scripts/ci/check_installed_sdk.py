@@ -22,6 +22,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.extensions",
     "sdk.consumer.actions",
     "sdk.consumer.event_sink",
+    "sdk.consumer.memory_blobs",
     "sdk.consumer.builtin_search",
     "sdk.consumer.results",
     "sdk.consumer.skills_seed", "sdk.consumer.skills_resume",
@@ -42,6 +43,7 @@ REQUIRED_PUBLIC_HEADERS = {
     "include/lubancore/subagents.hpp",
     "include/lubancore/lua.hpp",
     "include/lubancore/events.hpp",
+    "include/lubancore/memory_blobs.hpp",
 }
 
 
@@ -259,7 +261,7 @@ def main() -> None:
                                          case.find("failure") is not None or case.find("error") is not None
                                          for case in results):
         raise RuntimeError("consumer JUnit contains duplicate, skipped or failed tests")
-    from check_sdk_focused import check_action_paths, check_event_sink_consumer
+    from check_sdk_focused import check_action_paths, check_event_sink_consumer, check_memory_blob_consumer
     sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
                         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
     action_sections = [sections[index + 1] for index in range(1, len(sections), 2)
@@ -273,6 +275,12 @@ def main() -> None:
     if len(event_sections) != 1 or len(event_tests) != 1:
         raise RuntimeError("consumer native log and registration must identify one EventSink test")
     check_event_sink_consumer(event_sections[0], event_tests[0].get("command"))
+    memory_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                       if sections[index] == "sdk.consumer.memory_blobs"]
+    memory_tests = [test for test in listing["tests"] if test["name"] == "sdk.consumer.memory_blobs"]
+    if len(memory_sections) != 1 or len(memory_tests) != 1:
+        raise RuntimeError("consumer native log and registration must identify one Memory blob test")
+    check_memory_blob_consumer(memory_sections[0], memory_tests[0].get("command"))
 
 
 if __name__ == "__main__":

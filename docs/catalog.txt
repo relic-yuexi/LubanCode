@@ -199,3 +199,4 @@ DOC development/owned-job-probe-readiness.md
 DOC development/sdk-memory-save-diagnostic.md
 DOC development/sdk-job-current-integration.md
 DOC development/sdk-event-sink-spi.md
+DOC development/sdk-memory-blob-spi.md

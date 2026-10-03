@@ -22,3 +22,5 @@ ctest --test-dir /path/to/consumer-build -C Release --output-on-failure
 示例只承诺这里列出、远端 CI 实跑通过的范围。文件、Memory 等 fixture 显式传入临时 `resources`；`builtin-search` 另传移位后的安装资源根，实跑随包 ripgrep。示例也不验证模型供应商联网、数据库、远端部署或多用户沙箱。
 
 测试数据放在消费工程构建目录下，每轮用新子目录，不清理调用方已有目录。
+
+- `memory-blobs`：只调公开 SDK，宿主显式提供本场独占 Memory 片段存储。实际提交、采用大片段，再关场、同ID恢复；核原引用、模型正文和旧片段不重写。数据帽与 SHA 校验不当宿主堆内存硬帽。具体承诺见 [Memory 片段 CAS SPI](../../docs/development/sdk-memory-blob-spi.md)。远端原生仍须按当前提交验收。

@@ -76,3 +76,4 @@ git diff --check
 - [SDK MemorySave 四场报告诊断](sdk-memory-save-diagnostic.md)
 - [SDK Job 当前前置组合](sdk-job-current-integration.md)
 - [SDK 订阅事件队列 SPI](sdk-event-sink-spi.md)
+- [SDK Memory 片段 CAS SPI](sdk-memory-blob-spi.md)
