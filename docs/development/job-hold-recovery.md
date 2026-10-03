@@ -32,6 +32,8 @@ Hold 采用旧记录时只建本 coordinator 的 owned 投影。保真 job/actio
 
 `GetJob` 沿原授权门取 owned 快照，明确上述 held/knowledge/来源。无键与拒绝沿旧路。`WaitJobs` 保原“等业务终态”口径：已知未执行的 held 注册项到点返回 timed_out，状态仍未完成；unknown/真实终态按旧 terminal 判据返回，同时带知识与缺口。satisfied 从来不等于执行成功。新 Job 仍按原时长和完成泵运行。
 
+`src/tools/job_tools.cpp` 复用这份值，只在恢复字段有值时给 `job_get` / `job_wait` 添 `recovery`：policy、knowledge、原 state、turn/step、dispatch 次数、真实业务 attempt/Started/terminal 与 admission 齐否。Legacy JSON 不添字段。字段不许可重跑，也不把知识枚举推成业务成功。六册须真调两枚工具，核这份 JSON 投影；不能另写同逻辑镜像冒作验收。
+
 `GrantApproval` 对 held 旧项明确拒绝 `job.recovery.held`，不改 state、不压队。`CompleteAdmission`（同文件 1310–1328）也是旧欠链补账入口：held 未齐项明确拒；已齐项只返回原回执，不调用 WriteAdmissionMessage。`CancelJob` 首笔也明确拒绝 held 非终态项，不新写过去执行结局或取消意愿；真实已确认终态可沿 `already_terminal` 只读回答。下一公开 SDK 若要允许写取消意愿，应另有合同，不能把这批只读 Hold 偷换成那个产品入口。
 
 Pump、TryDispatch、取消和关场各处都检查 `recovery_held`；不能只在 Adopt 末尾漏调用。新 Submit 与新 Job 批次不受阻。关场沿现 owned worker 真 join/完成泵/capture 锁外清理，旧 held 项没有 live worker，不触发 shutdown 合成 Cancelled、补投递或失败收账。生命周期清理成功可关闭；这个成功只说明本次实际 owner 已退，不补齐旧 Job 持久确认。历史缺口仍留在 retained 投影里，不能从 Shutdown bool 推出旧业务已确认。现关闭后 Get 的 `coordinator.closed` 保留；未来 SDK 若需闭场查询，应由 SDK 缓存 owned 值，不能回用已关闭 writer。
