@@ -25,6 +25,7 @@ REQUIRED = {
     "sdk.focused.middleware_native_receipts",
     "sdk.focused.middleware_dispatch_cause",
     "sdk.focused.middleware_job_post_contract",
+    "sdk.focused.journal_native_receipts",
     "sdk.focused.run_command_execution_limits",
     "sdk.focused.session_recovery_view",
     "sdk.focused.lubancore_recovery_view",
@@ -596,6 +597,41 @@ def check_job_post_live_native(section, command):
             raise RuntimeError("Job live Post actual path did not finish once: " + path)
 
 
+JOURNAL_RECEIPT_PATHS = ('committed', 'before-io', 'append-gap', 'flush-gap', 'close', 'move')
+
+
+def check_journal_receipt_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_journal_native_receipts.cpp"):
+        raise RuntimeError("Journal receipt registration must run the single absolute native source")
+
+
+def check_journal_receipt_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("Journal receipt native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Journal receipt executable is not the actual native fixture")
+    check_journal_receipt_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (6, 6, 0):
+        raise RuntimeError("Journal receipt native roster differs from six successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Journal receipt native assertions did not actually pass")
+    for path in JOURNAL_RECEIPT_PATHS:
+        if section.splitlines().count("[journal-native-receipt-path] " + path) != 1:
+            raise RuntimeError("Journal receipt actual path did not finish once: " + path)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -643,6 +679,8 @@ def main():
             check_job_post_registration(test.get("command", []))
         if test["name"] == "sdk.focused.tool_job_post_live_invocation":
             check_job_post_live_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.journal_native_receipts":
+            check_journal_receipt_registration(test.get("command", []))
         if test["name"] == "sdk.focused.run_command_execution_limits":
             check_command_limits_registration(test.get("command", []))
         if test["name"] == "sdk.focused.atomic_write":
@@ -718,6 +756,9 @@ def main():
         if case.attrib["name"] == "sdk.focused.tool_job_post_live_invocation":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_job_post_live_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.journal_native_receipts":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_journal_receipt_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.run_command_execution_limits":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_command_limits_native(sections[0], registered["command"])

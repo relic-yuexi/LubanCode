@@ -31,6 +31,7 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/tools/test_tool_job_post_live_invocation.cpp"
   "${_lubancore_tests_root}/unit/tools/test_run_command_execution_limits.cpp"
   "${_lubancore_tests_root}/unit/trajectory/test_session_recovery_view.cpp"
+  "${_lubancore_tests_root}/unit/trajectory/test_journal_native_receipts.cpp"
   "${_lubancore_tests_root}/unit/platform/test_atomic_write.cpp"
   "${_lubancore_tests_root}/unit/tools/test_lua_protected.cpp"
   "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_result_store.cpp"

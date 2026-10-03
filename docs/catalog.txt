@@ -198,3 +198,4 @@ DOC development/agent-health-batch-fixture.md
 DOC development/owned-job-probe-readiness.md
 DOC development/sdk-memory-save-diagnostic.md
 DOC development/sdk-job-current-integration.md
+DOC development/journal-native-receipts.md
