@@ -73,12 +73,17 @@ struct Rendezvous {
         Check(cv.wait_for(lock, 15s, [&] { return arrived == 4; }), "four actual Sessions did not overlap");
     }
 };
+struct HistoricalTool {
+    sdk::ToolReply reply;
+    sdk::ToolCall call;
+    std::string final_text;
+};
 struct Observed {
     std::mutex mutex;
     std::condition_variable cv;
     std::vector<std::string> inputs;
     std::vector<sdk::ToolReply> replies;
-    std::optional<sdk::ToolReply> old_reply;
+    std::optional<HistoricalTool> old_tool;
     std::shared_ptr<Rendezvous> rendezvous;
     std::optional<std::size_t> block_at;
     std::atomic<unsigned> requests{0}, destroyed{0}, cancellations{0};
@@ -111,11 +116,25 @@ public:
                 Check(tool->input_schema_json.find(field) != std::string::npos, "actual todo schema missing a field");
         }
         std::unique_lock lock(state_->mutex);
-        if (state_->old_reply && !state_->saw_old_reply) {
-            for (const auto& message : request.messages) for (const auto& reply : message.tool_replies)
-                if (reply.call_id == state_->old_reply->call_id && reply.text == state_->old_reply->text &&
-                    reply.is_error == state_->old_reply->is_error) state_->saw_old_reply = true;
-            Check(state_->saw_old_reply, "same-ID resume lost actual historical tool reply");
+        if (state_->old_tool && !state_->saw_old_reply) {
+            const auto& old = *state_->old_tool;
+            unsigned calls = 0, replies = 0, finals = 0;
+            for (const auto& message : request.messages) {
+                for (const auto& call : message.tool_calls) if (call.id == old.call.id) {
+                    Check(message.role == "assistant" && call.name == old.call.name &&
+                        call.input_json == old.call.input_json, "restored durable call lost its tool or exact input");
+                    ++calls;
+                }
+                for (const auto& reply : message.tool_replies) if (reply.call_id == old.reply.call_id) {
+                    Check(reply.text == old.reply.text && reply.is_error == old.reply.is_error,
+                        "restored durable reply changed actual text or error state");
+                    ++replies;
+                }
+                if (message.role == "assistant" && message.text == old.final_text) ++finals;
+            }
+            Check(calls == 1 && replies == 1 && finals == 1,
+                "same-ID resume lost the exact durable call/reply pair or completed answer");
+            state_->saw_old_reply = true;
         }
         if (state_->block_at && state_->turn == *state_->block_at && !state_->pending) {
             state_->entered = true; state_->cv.notify_all();
@@ -192,6 +211,49 @@ void Closed(const std::shared_ptr<sdk::Session>& session, const std::shared_ptr<
 void WaitBlocked(const std::shared_ptr<Observed>& state) {
     std::unique_lock lock(state->mutex);
     Check(state->cv.wait_for(lock, 15s, [&] { return state->entered; }), "actual backend did not enter pending work");
+}
+HistoricalTool SavedHistory(const std::shared_ptr<sdk::Session>& session, const sdk::Receipt& receipt,
+                            const sdk::ToolReply& live_reply, const std::string& input) {
+    namespace result = sdk::results::v1;
+    const auto operation = Take(session->ReadOperation(receipt.operation_id), "seed ReadOperation");
+    Check(operation.state == sdk::OperationState::Succeeded && operation.result_persisted &&
+        !operation.turn_id.empty(), "historical tool owner was not a completed durable operation");
+    const auto rows = Take(session->ListToolResults(receipt.operation_id), "seed ListToolResults");
+    Check(rows.size() == 2, "one historical invocation must expose raw and formal material");
+    std::optional<result::ToolResultSummary> raw, formal;
+    for (const auto& row : rows) {
+        Check(row.selected && row.tool_name == "todo_write" && row.attempt == 1 &&
+            row.identity.session_id == session->id() && row.identity.operation_id == receipt.operation_id &&
+            row.identity.turn_id == operation.turn_id && !row.identity.tool_call_id.empty() &&
+            !row.identity.persisted_event_id.empty(), "historical result identity escaped its actual invocation");
+        const auto snapshot = Take(session->ReadToolResult(row.identity), "seed ReadToolResult");
+        const auto& saved = snapshot.result();
+        Check(saved.summary.identity == row.identity && saved.summary.attempt == row.attempt &&
+            saved.summary.selected && saved.summary.tool_name == "todo_write" &&
+            saved.metadata_state == result::ArtifactState::Verified,
+            "historical result metadata did not verify its exact public identity");
+        unsigned matching_channels = 0;
+        for (const auto& channel : saved.channels) if (channel.channel == "combined") {
+            Check(channel.state == result::ArtifactState::Verified && channel.artifact_verified &&
+                channel.capture_complete && channel.text && *channel.text == live_reply.text,
+                "saved historical tool material differs from the actual model reply");
+            ++matching_channels;
+        }
+        Check(matching_channels == 1, "historical result has no unique verified combined channel");
+        if (row.identity.result_id.starts_with("capture-")) {
+            Check(!raw, "duplicate raw historical tool material"); raw = row;
+        } else if (row.identity.result_id.starts_with("res-")) {
+            Check(!formal, "duplicate formal historical tool material"); formal = row;
+        } else Check(false, "unexpected historical result identity");
+    }
+    Check(raw && formal && raw->identity.tool_call_id == formal->identity.tool_call_id &&
+        raw->attempt == formal->attempt && raw->identity.persisted_event_id != formal->identity.persisted_event_id &&
+        raw->identity.result_id != formal->identity.result_id, "raw/formal history did not bind the same actual action");
+    // Live requests use the provider's call ID. Same-ID V3 recovery pairs both
+    // assistant and tool messages with the durable action ID from this API row.
+    HistoricalTool expected{live_reply, {formal->identity.tool_call_id, "todo_write", input}, operation.final_text};
+    expected.reply.call_id = formal->identity.tool_call_id;
+    return expected;
 }
 void Admission(const fs::path& root) {
     auto runtime = Runtime(root);
@@ -292,17 +354,21 @@ void Recovery(const fs::path& root) {
     const auto receipt = Submit(session, "seed-request-1");
     const auto saved_reply = Finish(session, seed, "seed", 1, receipt);
     Reply(saved_reply, "已更新 2 项,共 1 项,1 项已完成");
+    const auto saved_history = SavedHistory(session, receipt, saved_reply, kReplaced);
     const auto id = session->id(); Closed(session, seed);
-    auto resumed = State({kReplaced, kReplaced}); resumed->old_reply = saved_reply;
+    auto resumed = State({kReplaced, kReplaced}); resumed->old_tool = saved_history;
     auto restored = Take(runtime->OpenSession(Options(root / "project", resumed, "restored", true, id)), "same-ID OpenSession");
     Check(restored->id() == id, "restore changed Session identity");
     const auto old = Take(restored->ReadOperation(receipt.operation_id), "restored ReadOperation");
     Check(old.state == sdk::OperationState::Succeeded && old.result_persisted && old.final_text == Final("seed", 1),
         "restore lost the completed operation");
+    const auto repeated = Submit(restored, "seed-request-1");
+    Check(repeated.operation_id == receipt.operation_id && resumed->requests == 0,
+        "same-ID old idempotency key re-executed the completed tool operation");
     Reply(Turn(restored, resumed, "restored", 0), "已创建,共 1 项,1 项已完成");
     Reply(Turn(restored, resumed, "restored", 1), "清单没有变化,共 1 项,1 项已完成");
     Check(resumed->saw_old_reply, "restore fabricated a new empty history"); Closed(restored, resumed);
-    auto off = State({}); off->old_reply = saved_reply;
+    auto off = State({}); off->old_tool = saved_history;
     auto unselected = Take(runtime->OpenSession(Options(root / "project", off, "restored-off", false, id)), "unselected resume");
     const auto plain = Submit(unselected, "unselected-resume");
     const auto result = Take(unselected->WaitResult(plain.operation_id, 30s), "unselected resume WaitResult");
