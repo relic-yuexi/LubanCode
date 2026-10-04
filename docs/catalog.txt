@@ -215,3 +215,4 @@ DOC development/v3-journal-witness.md
 DOC development/sdk-package-inventory.md
 DOC development/sdk-lua-build-profile.md
 DOC development/sdk-todo-write.md
+DOC development/sdk-agentic-rag-example.md

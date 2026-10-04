@@ -167,6 +167,7 @@ PRIVATE_TEST_PROBES = {
 # this testing-only exception.
 PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp", "src/sdk/memory.cpp", "src/sdk/action_dispatch.cpp", "src/sdk/operation_ledger.cpp", "src/sdk/job_operations.cpp"}
 TODO_CONSUMER_SOURCE = "examples/sdk-consumer/todo_write.cpp"
+RAG_CONSUMER_SOURCE = "examples/sdk-consumer/agentic_rag.cpp"
 
 
 def todo_consumer_ownership_violations(targets, testing):
@@ -177,6 +178,16 @@ def todo_consumer_ownership_violations(targets, testing):
     if sorted(owners) != expected:
         return ["Todo consumer helper requires exactly the selected reference-test owner when testing is ON"]
     return []
+
+def rag_consumer_ownership_violations(targets, testing):
+    owners = [(target["name"], target["type"]) for target in targets.values()
+              for entry in target["sources"]
+              if entry.get("compiled") and entry.get("projectPath") == RAG_CONSUMER_SOURCE]
+    expected = [("lubancore_sdk_tests", "EXECUTABLE")] if testing else []
+    if sorted(owners) != expected:
+        return ["RAG consumer helper requires exactly the selected reference-test owner when testing is ON"]
+    return []
+
 
 # Preserve the SDK state/stdio guard when this implementation moves into a
 # shared internal header. Other runtime process code keeps its existing scope.
@@ -330,6 +341,8 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
             violations.append(f"target {owner} includes host source {name}")
         if name == TODO_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
             violations.append("Todo consumer helper is not a selected testing-only source: " + owner)
+        if name == RAG_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
+            violations.append("RAG consumer helper is not a selected testing-only source: " + owner)
         if name in {"src/sdk/memory.cpp", "src/sdk/operation_ledger.cpp", "src/sdk/job_operations.cpp"} and owner not in {"lubancore_sdk", "lubancore_sdk_tests"}:
             violations.append(f"unregistered private SDK reference owner: {owner} includes {name}")
         if owner == "lubancore_sdk_tests" and name.startswith("src/sdk/") and name.endswith(".cpp"):
@@ -375,7 +388,7 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
             source_facts.append({"path": str(path), "projectPath": name,
                                  "compiled": "compileGroupIndex" in entry,
                                  "generated": entry.get("isGenerated", False)})
-            if name and (name.startswith(("src/", "include/", "tests/")) or name == TODO_CONSUMER_SOURCE):
+            if name and (name.startswith(("src/", "include/", "tests/")) or name in {TODO_CONSUMER_SOURCE, RAG_CONSUMER_SOURCE}):
                 check_project_path(name, target["name"])
                 group_index = entry.get("compileGroupIndex")
                 include_dirs = include_groups[group_index] if group_index is not None else ()
@@ -415,6 +428,8 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
                     violations.append(label + " must not depend on a project library or host target")
     if (source / TODO_CONSUMER_SOURCE).is_file():
         violations.extend(todo_consumer_ownership_violations(targets, expect_testing))
+    if (source / RAG_CONSUMER_SOURCE).is_file():
+        violations.extend(rag_consumer_ownership_violations(targets, expect_testing))
     sdk = [target_id for target_id, target in targets.items() if target["name"] == "lubancore_sdk"]
     if len(sdk) != 1 or targets[sdk[0]]["type"] != "SHARED_LIBRARY":
         violations.append("expected exactly one shared lubancore_sdk target")

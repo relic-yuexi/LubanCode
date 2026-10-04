@@ -6,7 +6,7 @@ project(lubancore_installed_consumer LANGUAGES CXX)
 find_package(LubanCore CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp lua_build_profile.cpp actions.cpp event_sink.cpp memory_blobs.cpp todo_write.cpp)
+add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp lua_build_profile.cpp actions.cpp event_sink.cpp memory_blobs.cpp todo_write.cpp agentic_rag.cpp)
 if(NOT DEFINED LubanCore_WITH_LUA OR NOT LubanCore_WITH_LUA MATCHES "^(ON|OFF)$")
   message(FATAL_ERROR "Installed LubanCore must declare its Lua build profile")
 endif()
@@ -66,6 +66,26 @@ add_test(NAME sdk.consumer.memory_blobs
 add_test(NAME sdk.consumer.todo_write
   COMMAND lubancore_consumer todo-write "${CMAKE_CURRENT_BINARY_DIR}/state-todo-write")
 set_tests_properties(sdk.consumer.todo_write PROPERTIES TIMEOUT 120)
+add_test(NAME sdk.consumer.agentic_rag
+  COMMAND lubancore_consumer agentic-rag "${CMAKE_CURRENT_BINARY_DIR}/state-agentic-rag")
+set_tests_properties(sdk.consumer.agentic_rag PROPERTIES TIMEOUT 120)
+# Remote CI builds this example as a separate project before configuring this
+# consumer. With no option this directory still builds and runs independently.
+set(LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE "" CACHE FILEPATH "Explicit independently built installed-SDK RAG example for CI")
+if(LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE)
+  if(NOT IS_ABSOLUTE "${LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE}" OR
+      NOT EXISTS "${LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE}" OR
+      IS_DIRECTORY "${LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE}")
+    message(FATAL_ERROR "RAG demo must name an existing absolute independently built executable")
+  endif()
+  get_filename_component(_rag_demo_name "${LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE}" NAME)
+  if(NOT _rag_demo_name MATCHES "^lubancore_rag(\\.exe)?$")
+    message(FATAL_ERROR "RAG demo executable must be lubancore_rag")
+  endif()
+  add_test(NAME sdk.consumer.agentic_rag_demo
+    COMMAND "${LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE}" --fixture "${CMAKE_CURRENT_BINARY_DIR}/state-agentic-rag-demo")
+  set_tests_properties(sdk.consumer.agentic_rag_demo PROPERTIES TIMEOUT 120)
+endif()
 add_test(NAME sdk.consumer.results
   COMMAND lubancore_consumer results "${CMAKE_CURRENT_BINARY_DIR}/state-results")
 add_test(NAME sdk.consumer.skills_seed

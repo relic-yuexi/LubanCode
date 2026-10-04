@@ -36,6 +36,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.event_sink",
     "sdk.consumer.memory_blobs",
     "sdk.consumer.todo_write",
+    "sdk.consumer.agentic_rag", "sdk.consumer.agentic_rag_demo",
     "sdk.consumer.builtin_search",
     "sdk.consumer.results",
     "sdk.consumer.skills_seed", "sdk.consumer.skills_resume",
@@ -99,6 +100,37 @@ def check_todo_consumer_copy(source: Path, seal: dict) -> dict:
     return {"source": str(path), "sha256": seal["sha256"], "includes": seal["includes"]}
 
 
+def check_rag_consumer_evidence(listing: dict, sections: list[str], context: dict,
+                               scratch: Path, prefix: Path, consumer_build: Path) -> None:
+    """Pair the two real RAG registrations with their executed, complete logs."""
+    try:
+        from .check_sdk_focused import check_agentic_rag_consumer, check_agentic_rag_demo
+        from .sdk_rag_demo import inside
+    except ImportError:
+        try:
+            from check_sdk_focused import check_agentic_rag_consumer, check_agentic_rag_demo
+            from sdk_rag_demo import inside
+        except ModuleNotFoundError:
+            from scripts.ci.check_sdk_focused import check_agentic_rag_consumer, check_agentic_rag_demo
+            from scripts.ci.sdk_rag_demo import inside
+    for name, demo in (("sdk.consumer.agentic_rag", False), ("sdk.consumer.agentic_rag_demo", True)):
+        tests = [test for test in listing.get("tests", []) if test.get("name") == name]
+        logs = [sections[index + 1] for index in range(1, len(sections), 2) if sections[index] == name]
+        if len(tests) != 1 or len(logs) != 1:
+            raise RuntimeError("RAG registration and native log must identify one executed test: " + name)
+        if any(prop.get("name") == "DISABLED" and prop.get("value") for prop in tests[0].get("properties", [])):
+            raise RuntimeError("RAG registration is disabled: " + name)
+        command = tests[0].get("command")
+        if demo:
+            check_agentic_rag_demo(logs[0], command, context, scratch, prefix)
+        else:
+            check_agentic_rag_consumer(logs[0], command)
+            if (not inside(Path(command[0]).resolve(), consumer_build.resolve()) or
+                    not Path(command[0]).is_file() or not Path(command[0]).stat().st_size or
+                    not inside(Path(command[2]).resolve(), consumer_build.resolve())):
+                raise RuntimeError("RAG consumer borrowed a binary/state outside its actual relocated build")
+
+
 def check_search_resources(repo: Path, prefix: Path, staged_dir: Path, platform: str) -> dict:
     """Check relocation preserves exactly the staged backend and license/manifest."""
     binary = "rg.exe" if platform == "win32" else "rg"
@@ -150,6 +182,28 @@ def run(args: list[str], env: dict[str, str], *, capture: bool = False) -> str:
     return result.stdout if capture else ""
 
 
+def run_demo_command(args: list[str], env: dict[str, str], receipt: Path) -> None:
+    """Retain the actual independent configure/ALL result even when it fails."""
+    report = {"argv": args, "status": "running", "returncode": None,
+              "output": str(receipt.with_suffix(".log")), "output_encoding": "raw_bytes"}
+    receipt.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print("+ " + shlex.join(args), flush=True)
+    try:
+        result = subprocess.run(args, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, check=False)
+    except OSError as error:
+        report.update(status="failed", error=str(error))
+        receipt.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        raise
+    receipt.with_suffix(".log").write_bytes(result.stdout or b"")
+    if result.stdout:
+        print(result.stdout.decode("utf-8", errors="replace"), flush=True)
+    report.update(status="passed" if result.returncode == 0 else "failed", returncode=result.returncode)
+    receipt.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    if result.returncode:
+        raise RuntimeError(f"RAG independent command exited with {result.returncode}: {args[0]}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -159,6 +213,11 @@ def main() -> None:
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     todo_source = check_todo_consumer_source(repo)
+    try:
+        from . import sdk_rag_demo as rag
+    except ImportError:
+        import sdk_rag_demo as rag
+    rag_source = rag.seal_sources(repo)
     producer_build = args.build_dir.resolve()
     profile_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
     profile_entries = {line.split(":", 1)[0]: line.split("=", 1)[1] for line in profile_cache.splitlines()
@@ -189,6 +248,8 @@ def main() -> None:
     prefix = scratch / "installed"
     consumer_source = scratch / "source"
     consumer_build = scratch / "build"
+    demo_source = scratch / "rag-source"
+    demo_build = scratch / "rag-build"
     evidence = producer_build / "test-evidence" / "sdk-consumer"
     evidence.mkdir(parents=True, exist_ok=True)
     (evidence / "consumer-context.json").write_text(json.dumps({
@@ -201,6 +262,7 @@ def main() -> None:
         "required_tests": sorted(required_tests), "lua_profile": args.lua_profile, "status": "running",
         "install_mode": args.install_mode,
         "todo_consumer_source": todo_source,
+        "rag_source": rag_source, "rag_demo": None,
     }, indent=2) + "\n", encoding="utf-8")
     print(f"SDK consumer evidence directory: {scratch}", flush=True)
 
@@ -260,6 +322,8 @@ def main() -> None:
     shutil.copytree(repo / "examples" / "sdk-consumer", consumer_source)
     (evidence / "todo-consumer-source.json").write_text(
         json.dumps(check_todo_consumer_copy(consumer_source, todo_source), indent=2) + "\n", encoding="utf-8")
+    (evidence / "rag-consumer-source.json").write_text(
+        json.dumps(rag.check_copy(consumer_source, rag_source, consumer=True), indent=2) + "\n", encoding="utf-8")
     # Neither inherited loader variables nor a producer PATH may rescue a
     # broken installed package. Ordinary system compiler/tool directories stay.
     blocked = (repo, producer_build, staging)
@@ -279,10 +343,43 @@ def main() -> None:
         library_dirs = [str(prefix / "lib"), str(prefix / "lib64")]
         env["LD_LIBRARY_PATH"] = os.pathsep.join(library_dirs)
 
+    # A separate source tree and configure/build prove the documented example
+    # consumes the relocated package. No add_subdirectory or producer executable.
+    rag.copy_demo(repo, demo_source, rag_source)
+    rag.prepare(demo_build)
+    demo_configure = ["cmake", "-S", str(demo_source), "-B", str(demo_build),
+                      "-DCMAKE_BUILD_TYPE=Release", f"-DCMAKE_PREFIX_PATH={prefix}",
+                      "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF", "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF"]
+    demo_all_build = ["cmake", "--build", str(demo_build), "--config", "Release", "--parallel", "4"]
+    demo_evidence = {"status": "running", "source": str(demo_source), "build": str(demo_build),
+                     "scratch": str(scratch), "installed_prefix": str(prefix), "source_seal": rag_source,
+                     "configure_argv": demo_configure, "all_build_argv": demo_all_build}
+    try:
+        run_demo_command(demo_configure, env, evidence / "rag-demo-configure.json")
+        run_demo_command(demo_all_build, env, evidence / "rag-demo-all-build.json")
+        demo_context = rag.inspect_demo(scratch, demo_source, demo_build, prefix, repo, rag_source,
+                                       producer_build=producer_build)
+    except Exception as error:
+        demo_evidence.update(status="failed", error=str(error))
+        # Preserve the original configure/build exception even if diagnostics
+        # themselves cannot be copied from a partially generated build tree.
+        try:
+            rag.preserve_demo(evidence, demo_build, demo_source, demo_evidence)
+            context_path = evidence / "consumer-context.json"
+            failed_context = json.loads(context_path.read_text(encoding="utf-8"))
+            failed_context.update(status="failed", rag_demo=demo_evidence)
+            context_path.write_text(json.dumps(failed_context, indent=2) + "\n", encoding="utf-8")
+        except OSError as diagnostic_error:
+            print("RAG failure evidence copy failed: " + str(diagnostic_error), file=sys.stderr, flush=True)
+        raise
+    demo_evidence.update(demo_context)
+    rag.preserve_demo(evidence, demo_build, demo_source, demo_evidence)
+
     run(["cmake", "-S", str(consumer_source), "-B", str(consumer_build),
          "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON",
          f"-DCMAKE_PREFIX_PATH={prefix}",
          f"-DLUBANCORE_CONSUMER_RESOURCE_ROOT={prefix / 'share/lubancore'}",
+         f"-DLUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE={demo_context['executable']}",
          "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF",
          "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF"], env)
     cache = (consumer_build / "CMakeCache.txt").read_text(encoding="utf-8")
@@ -331,6 +428,15 @@ def main() -> None:
     from check_sdk_focused import check_action_paths, check_event_sink_consumer, check_memory_blob_consumer, check_package_inventory_consumer, check_lua_build_consumer, check_todo_write_consumer
     sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
                         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
+    check_rag_consumer_evidence(listing, sections, demo_context, scratch, prefix, consumer_build)
+    rag.check_copy(consumer_source, rag_source, consumer=True)
+    after_demo = rag.inspect_demo(scratch, demo_source, demo_build, prefix, repo, rag_source,
+                                  producer_build=producer_build)
+    if after_demo != demo_context:
+        raise RuntimeError("RAG source, build graph, installed package or executable changed during acceptance")
+    demo_evidence.update(status="passed", registration=next(test for test in listing["tests"]
+                         if test["name"] == "sdk.consumer.agentic_rag_demo"))
+    rag.preserve_demo(evidence, demo_build, demo_source, demo_evidence)
     action_sections = [sections[index + 1] for index in range(1, len(sections), 2)
                        if sections[index] == "sdk.consumer.actions"]
     if len(action_sections) != 1:
@@ -378,7 +484,7 @@ def main() -> None:
         raise RuntimeError("installed Lua profile differs from the actual producer")
     context_path = evidence / "consumer-context.json"
     context = json.loads(context_path.read_text(encoding="utf-8"))
-    context.update(status="passed", consumer_executable=profile_command[0])
+    context.update(status="passed", consumer_executable=profile_command[0], rag_demo=demo_evidence)
     context_path.write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
     if not with_lua:
         from check_sdk_lua_cross_profile import run_cross_images
