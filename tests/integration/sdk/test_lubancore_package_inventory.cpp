@@ -322,6 +322,28 @@ TEST_CASE("Package inventory rejects unsafe explicit roots hosts and limit decla
         }
         const auto current_name_index = name_index++;
         INFO("invalid-name fixture index=", current_name_index, ", name bytes=", name_hex);
+#ifdef __APPLE__
+        // APFS can refuse a non-UTF-8 name before the inventory can observe it.
+        // Keep the actual SDK rejection when the filesystem permits the name;
+        // otherwise prove this exact native refusal, not a blanket skipped case.
+        if (current_name_index == 3) {
+            errno = 0;
+            std::ofstream file(root / name, std::ios::binary | std::ios::trunc);
+            const auto open_error = errno;
+            INFO("invalid-UTF-8 native open errno=", open_error, ", fail=", file.fail(), ", bad=", file.bad());
+            if (!file.is_open()) {
+                REQUIRE(open_error == EILSEQ);
+                CHECK(file.fail());
+                CHECK_FALSE(file.bad());
+                REQUIRE(fs::is_empty(root));
+                CHECK(Take(pkg::InventoryExplicitRoot(Input(root))).files.empty());
+                std::cout << "[sdk-package-inventory-filename] native-refused-invalid-utf8 errno=" << open_error << '\n';
+                continue;
+            }
+            file.close();
+            REQUIRE_FALSE(file.fail());
+        } else
+#endif
         Write(root / name, "");
         Rejected(Input(root), "sdk.package.invalid_input");
         REQUIRE(fs::remove(root / name));
