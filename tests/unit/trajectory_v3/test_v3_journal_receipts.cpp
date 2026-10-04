@@ -78,7 +78,8 @@ v3::V3Writer Start(Directory& directory, const fs::path& path,
     options.journal_native_io_probe = std::make_shared<Probe>(state);
     auto writer = v3::V3Writer::Start(path, "20260910-120000-AAAAAA", "run-000001", "system",
         nlohmann::json::object(), std::move(options), &directory.clock);
-    REQUIRE_MESSAGE(writer.has_value(), writer.has_value() ? "" : writer.error());
+    const auto start_error = writer.has_value() ? std::string{} : writer.error();
+    REQUIRE_MESSAGE(writer.has_value(), start_error);
     REQUIRE(state->count == 8); // Two actual PowerLoss startup rows, four boundaries each.
     CHECK_FALSE(writer->first_unconfirmed_journal_append());
     return std::move(*writer);
@@ -373,7 +374,8 @@ TEST_CASE("V3 Journal witnesses survive moves and owned-prefix recovery starts a
     REQUIRE(original.Close().has_value()); const auto seq = original.next_seq(); const auto hash = original.last_line_hash();
     auto captured = tr::JournalFileAnchor::ReadExisting(path, std::nullopt); REQUIRE(captured.has_value());
     auto continued = v3::V3Writer::ContinueOwnedPrefix(path, captured->bytes, *captured->anchor, {}, &directory.clock);
-    REQUIRE_MESSAGE(continued.has_value(), continued.has_value() ? "" : continued.error());
+    const auto continue_error = continued.has_value() ? std::string{} : continued.error();
+    REQUIRE_MESSAGE(continued.has_value(), continue_error);
     REQUIRE(captured->anchor->Close().has_value()); CHECK_FALSE(continued->first_unconfirmed_journal_append());
     CHECK(continued->session_id() == original.session_id()); CHECK(continued->run_id() == original.run_id());
     CHECK(continued->next_seq() == seq); CHECK(continued->last_line_hash() == hash);
