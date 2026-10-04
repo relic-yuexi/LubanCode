@@ -1,0 +1,7 @@
+# 模型目录更新（2026-10-04）
+
+- [x] 核对 OpenRouter 当前目录，接续工作区已添加的 26 条模型，再补 18 条近期具名新模型；两个端点各新增 45 个 ID（另含池内已有 GPT-6 Astra）。
+- [x] 补 MiMo V2.6 Flash、Pro、Pro-UltraSpeed 到官方 Chat、Messages、Responses 端点，默认模型改为 mimo-v2.6-pro。
+- [x] 记录来源；不猜推理档位，不复制异常输出上限，不加入 batch 与路由器条目。
+- [x] 运行仓库已有生成器更新发布目录：70 个端点、2469 条展开模型记录，revision=2026-10-04；未运行本地 CI、构建或测试。
+- [x] 提交独立 PR #331（codex/catalog-models-20261004），已启动远程 GitHub Actions；全绿后合入主分支。

@@ -272,6 +272,10 @@ TEST_CASE("运行时覆盖:用户 features 模块文件压过嵌入版,别的模
 
     CHECK(Contains(prompt, "改文件前唱一段昆曲"));
     CHECK_FALSE(Contains(prompt, embedded::kFeature_files));
+    // Existing file modules are preserved, but the new tool/script policy is
+    // still seeded or loaded from the embedded fallback on upgrade.
+    CHECK(Contains(prompt, embedded::kFeature_file_tool_policy));
+    CHECK(Contains(prompt, "不得新建临时 Python、Node 或 shell 脚本"));
     // 没覆盖的模块照用嵌入版。
     CHECK(Contains(prompt, embedded::kFeature_shell));
     CHECK(prompt.find(AssembledDefaultPersona()) == 0);  // core 没覆盖,仍是嵌入默认
