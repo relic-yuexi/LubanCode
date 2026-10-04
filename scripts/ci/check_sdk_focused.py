@@ -31,6 +31,7 @@ REQUIRED = {
     "sdk.focused.journal_native_receipts",
     "sdk.focused.v3_journal_receipts",
     "sdk.focused.lubancore_job_operations",
+    "sdk.focused.lubancore_package_inventory",
     "sdk.focused.run_command_execution_limits",
     "sdk.focused.session_recovery_view",
     "sdk.focused.lubancore_recovery_view",
@@ -841,6 +842,57 @@ def check_job_operation_native(section, command):
             raise RuntimeError("Job operation actual path did not finish once: " + path)
 
 
+PACKAGE_INVENTORY_PATHS = ('owned', 'fingerprint', 'manifest', 'input', 'limits', 'links', 'changed', 'isolation')
+
+
+def check_package_inventory_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_lubancore_package_inventory.cpp"):
+        raise RuntimeError("Package inventory must register the single absolute native source")
+
+
+def check_package_inventory_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("Package inventory native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Package inventory executable is not the actual native fixture")
+    check_package_inventory_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (8, 8, 0):
+        raise RuntimeError("Package inventory roster differs from eight successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Package inventory native assertions did not actually pass")
+    for path in PACKAGE_INVENTORY_PATHS:
+        if section.splitlines().count("[sdk-package-inventory-path] " + path) != 1:
+            raise RuntimeError("Package inventory actual path did not finish once: " + path)
+
+
+def check_package_inventory_consumer(section, command):
+    def absolute(value):
+        return (isinstance(value, str) and bool(value) and "\0" not in value and
+                (value.startswith("/") or (ntpath.isabs(value) and bool(ntpath.splitdrive(value)[0]))))
+    if (not isinstance(command, list) or len(command) != 3 or
+            not all(isinstance(value, str) and value for value in command) or
+            not absolute(command[0]) or not absolute(command[2]) or
+            command[0].replace("\\", "/").split("/")[-1] not in ("lubancore_consumer", "lubancore_consumer.exe") or
+            command[1] != "package-inventory"):
+        raise RuntimeError("Package inventory consumer must run its absolute relocated command and state")
+    check_native_command(section, command)
+    if (section.splitlines().count("[sdk-package-inventory-consumer] complete") != 1 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Package inventory consumer did not finish the actual owned capture")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -896,6 +948,8 @@ def main():
             check_operation_turn_binding_registration(test.get("command", []))
         if test["name"] == "sdk.focused.journal_native_receipts":
             check_journal_receipt_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_package_inventory":
+            check_package_inventory_registration(test.get("command", []))
         if test["name"] == "sdk.focused.lubancore_job_operations":
             check_job_operation_registration(test.get("command", []))
         if test["name"] == "sdk.focused.v3_journal_receipts":
@@ -987,6 +1041,9 @@ def main():
         if case.attrib["name"] == "sdk.focused.journal_native_receipts":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_journal_receipt_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_package_inventory":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_package_inventory_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.lubancore_job_operations":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_job_operation_native(sections[0], registered["command"])

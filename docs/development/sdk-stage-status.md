@@ -30,4 +30,8 @@
 
 先补 [Job 实际绑定](sdk-job-operation-binding-v1.md) 与 [V3 Journal 回执](v3-journal-witness.md)。前者核真实 Service、主 Operation/turn 锚与已 adopted Job，历史只读 PassiveHold；后者保实际追加凭证和首次 Close 结果。两项仍属内部前置，不开放后台执行或完整 JournalStore。
 
-两条私有支线收成同一批，只开一张实施 PR。新增来源须进 SDK-only、组合、三平台全量与 ASan；验实际 argv、非零断言、各六条路径、JUnit 与完整 LastTest。源未通过前不勾已验收。功能分支到 main 继续走 Draft #234；当前与 main 有冲突，最终组合须另解冲突、验 CI、取得合入确认。
+两条私有支线已收成 Draft [#332](https://github.com/relic-yuexi/LubanCode/pull/332)，源 `fb1bef4b`。源中已同步 main `3b973ffe`；共享功能分支尚未收入。新增来源进 SDK-only、组合、三平台全量与 ASan；验实际 argv、非零断言、各六条路径、JUnit 与完整 LastTest。旧源 Job 夹具漏直接声明头，四条 Linux/macOS 腿在编译处失败，余腿取消。本源补一行包含，保六案正文；[新原生 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37225193222) 正在重验，不能借 #325 或旧轮结果勾完本批。
+
+下一笔 [Package 显式根有界盘点](sdk-package-inventory.md) 在私有分支接线。只盘宿主明给的单根，五道帽封顶；返回持值文件账、目录、摘要、七类入口形状和根清单分析。源树需静止，遇链接或可见变动整次失败。它不解析组件正文、不解跨包引用，也不挂载或执行。新八案与安装迁位消费者另算来源；源码审查、纯数据门或旧清单测试都不能代三平台原生验收。
+
+当前只留 #234 总 PR 与 #332 实施 PR。Package 先在私有支线开发，不添平行实施 PR。功能分支到 main 继续留 Draft；最终组合须验 CI，再取得合入确认。

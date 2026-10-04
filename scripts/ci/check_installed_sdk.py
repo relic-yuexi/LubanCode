@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 REQUIRED_TESTS = {
     "sdk.consumer.authorization",
     "sdk.consumer.packages",
+    "sdk.consumer.package_inventory",
     "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.extensions",
     "sdk.consumer.actions",
     "sdk.consumer.event_sink",
@@ -263,7 +264,7 @@ def main() -> None:
                                          case.find("failure") is not None or case.find("error") is not None
                                          for case in results):
         raise RuntimeError("consumer JUnit contains duplicate, skipped or failed tests")
-    from check_sdk_focused import check_action_paths, check_event_sink_consumer, check_memory_blob_consumer
+    from check_sdk_focused import check_action_paths, check_event_sink_consumer, check_memory_blob_consumer, check_package_inventory_consumer
     sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
                         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
     action_sections = [sections[index + 1] for index in range(1, len(sections), 2)
@@ -283,6 +284,12 @@ def main() -> None:
     if len(memory_sections) != 1 or len(memory_tests) != 1:
         raise RuntimeError("consumer native log and registration must identify one Memory blob test")
     check_memory_blob_consumer(memory_sections[0], memory_tests[0].get("command"))
+    package_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                        if sections[index] == "sdk.consumer.package_inventory"]
+    package_tests = [test for test in listing["tests"] if test["name"] == "sdk.consumer.package_inventory"]
+    if len(package_sections) != 1 or len(package_tests) != 1:
+        raise RuntimeError("consumer log and registration must identify one Package inventory test")
+    check_package_inventory_consumer(package_sections[0], package_tests[0].get("command"))
 
 
 if __name__ == "__main__":

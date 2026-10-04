@@ -26,9 +26,13 @@ SDK_NEUTRAL_CHANNEL_FILES = {
     "src/channel/types.cpp", "src/channel/types.hpp",
     "src/channel/channel_config.cpp", "src/channel/channel_config.hpp",
 }
-SDK_NEUTRAL_PACKAGE_SOURCES = frozenset({"src/package/semver.cpp", "src/package/manifest.cpp"})
+SDK_NEUTRAL_PACKAGE_SOURCES = frozenset({
+    "src/package/semver.cpp", "src/package/manifest.cpp",
+    "src/package/inventory.cpp", "src/package/inventory_snapshot.cpp",
+})
 SDK_NEUTRAL_PACKAGE_FILES = SDK_NEUTRAL_PACKAGE_SOURCES | {
     "src/package/semver.hpp", "src/package/manifest.hpp",
+    "src/package/inventory.hpp", "src/package/inventory_snapshot.hpp",
 }
 CHANNEL_HOST_SOURCES = frozenset({
     "src/channel/account_lock.cpp",

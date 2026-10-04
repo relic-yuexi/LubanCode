@@ -700,6 +700,8 @@ add_library(lubancode_engine STATIC
   # Owned root Package analysis shares the original pure parsers with the CLI.
   src/package/semver.cpp
   src/package/manifest.cpp
+  src/package/inventory.cpp
+  src/package/inventory_snapshot.cpp
   src/agent/agent_catalog.cpp
   # 自定义 Agent 单阶段 3:AgentProfileResolver——父上下文 + Definition ->
   # Resolved AgentProfile 的唯一合并权威(AgentTool 派发与 Workflow 绑定共用)。
@@ -1401,9 +1403,7 @@ add_library(lubancode_core STATIC
   src/workflow/compiler.cpp
   src/workflow/planner.cpp
   src/workflow/frontend.cpp
-  # 统一 Package 封装单阶段 1:原两份值 parser 归 engine；这里保四层扫描、
-  # 稳定盘点与内容哈希(纯逻辑,与 workflow 平级)。
-  src/package/inventory.cpp
+  # Package 值 parser、路径材料与有界盘点归唯一 engine owner。
   # 统一 Package 封装单阶段 2:六类组件的原生 parser 接线(ComponentSource-
   # Root)、mcp.yaml 解析、短名/全名引用解析、MountPlan(只产计划不执行)。
   src/package/component.cpp

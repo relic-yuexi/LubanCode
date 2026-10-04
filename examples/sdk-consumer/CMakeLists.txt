@@ -6,7 +6,7 @@ project(lubancore_installed_consumer LANGUAGES CXX)
 find_package(LubanCore CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp lua.cpp actions.cpp event_sink.cpp memory_blobs.cpp)
+add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp actions.cpp event_sink.cpp memory_blobs.cpp)
 target_compile_features(lubancore_consumer PRIVATE cxx_std_23)
 target_link_libraries(lubancore_consumer PRIVATE LubanCore::Core Threads::Threads)
 if(MSVC)
@@ -24,6 +24,8 @@ add_test(NAME sdk.consumer.authorization
   COMMAND lubancore_consumer authorization "${CMAKE_CURRENT_BINARY_DIR}/state-authorization")
 add_test(NAME sdk.consumer.packages
   COMMAND lubancore_consumer packages "${CMAKE_CURRENT_BINARY_DIR}/state-packages")
+add_test(NAME sdk.consumer.package_inventory
+  COMMAND lubancore_consumer package-inventory "${CMAKE_CURRENT_BINARY_DIR}/state-package-inventory")
 add_test(NAME sdk.consumer.lua
   COMMAND lubancore_consumer lua "${CMAKE_CURRENT_BINARY_DIR}/state-lua")
 add_test(NAME sdk.consumer.lua_seed
@@ -97,7 +99,7 @@ set_tests_properties(sdk.consumer.memory_save_seed PROPERTIES FIXTURES_SETUP sdk
 set_tests_properties(sdk.consumer.memory_save_resume PROPERTIES FIXTURES_REQUIRED sdk_memory_save_restart)
 set_tests_properties(sdk.consumer.subagent_seed PROPERTIES FIXTURES_SETUP sdk_child_restart)
 set_tests_properties(sdk.consumer.subagent_resume PROPERTIES FIXTURES_REQUIRED sdk_child_restart)
-set_tests_properties(sdk.consumer.authorization sdk.consumer.packages sdk.consumer.builtin_search sdk.consumer.smoke sdk.consumer.isolation sdk.consumer.extensions sdk.consumer.actions sdk.consumer.event_sink sdk.consumer.memory_blobs sdk.consumer.results sdk.consumer.seed sdk.consumer.resume
+set_tests_properties(sdk.consumer.authorization sdk.consumer.packages sdk.consumer.package_inventory sdk.consumer.builtin_search sdk.consumer.smoke sdk.consumer.isolation sdk.consumer.extensions sdk.consumer.actions sdk.consumer.event_sink sdk.consumer.memory_blobs sdk.consumer.results sdk.consumer.seed sdk.consumer.resume
   sdk.consumer.recovery_seed sdk.consumer.recovery_resume sdk.consumer.result_seed sdk.consumer.result_resume
   sdk.consumer.skills_seed sdk.consumer.skills_resume sdk.consumer.memory_seed sdk.consumer.memory_resume
   sdk.consumer.memory_save_seed sdk.consumer.memory_save_resume

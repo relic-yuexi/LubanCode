@@ -30,6 +30,7 @@
 
 namespace lubancore_consumer {
 void Packages();
+void PackageInventory(const std::filesystem::path& base);
 void EventSink(const std::filesystem::path& base);
 void MemoryBlobs(const std::filesystem::path& base);
 void Actions(const std::filesystem::path& base);
@@ -1696,6 +1697,7 @@ int main(int argc, char** argv) {
             ReentryAndOverflow(base);
             InvalidOptions(base);
         } else if (mode == "packages") { lubancore_consumer::Packages();
+        } else if (mode == "package-inventory") { lubancore_consumer::PackageInventory(base);
         } else if (mode == "isolation") {
             FourSessionIsolation(base);
             SmallToolCaptureLifetime(base);
