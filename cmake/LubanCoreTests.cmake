@@ -132,6 +132,11 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
   set_tests_properties("${sdk_test}" PROPERTIES
     LABELS "sdk-focused" TIMEOUT 300
     ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
+  # SDK-only and combined builds keep this fixed-duration shell fixture isolated
+  # from other CTest processes, while its own four concurrent contexts still run.
+  if(WIN32 AND sdk_basename STREQUAL "test_run_command_execution_limits.cpp")
+    set_tests_properties("${sdk_test}" PROPERTIES RUN_SERIAL TRUE)
+  endif()
   if(sdk_basename STREQUAL "test_atomic_write.cpp")
     set(sdk_original_test "unit.platform.atomic_write")
     set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "platform-atomic-write")

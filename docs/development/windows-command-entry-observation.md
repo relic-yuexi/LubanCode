@@ -29,3 +29,11 @@ Windows PowerShell 两份前台 builder 仅在本次配置有效时插三条观�
 只改 `process_diagnostics.hpp`、`run_command.cpp` 与原 `test_run_command_execution_limits.cpp`。原六 CASE、六 path marker、每次执行、Started/done/实际结果和退场断言都留。exact 15s、host 8s、model 5s、cancel 20s 与原输出帽不变。纯源码守卫剥掉新增诊断后核原函数/六案逐字；新远端仍留完整 argv、JUnit、LastTest 与原 POD stages。
 
 更早 Probe main/参数/cwd 入口尚无新证据。这笔不添环境传参或 Probe 早期 Unicode 改动。即便 wrapper-ready 已确认而 user-block-entry 未确认，也只收窄待查区间，不认唯一根因。
+
+## Windows 原册调度
+
+`be378d08` 本轮 job `111539649641` 中，同一 SDK 限额册先在 focused 阶段通过，全量阶段又与 MemoryRecall、MemorySave、Subagents 同起。后一次 `powershell-exact` 等 15013ms，三入口未确认；`powershell-host-timeout` 等 8018ms，三入口均确认且 PID 同为 10180，probe 起步标记仍缺。两条 CTest 当时已有彼此互斥锁，不能靠再添同锁排除其它册负载；现证据也未锁定唯一根因。
+
+只给 Windows 的 `unit.tools.run_command_execution_limits` 和 `sdk.focused.run_command_execution_limits` 加 `RUN_SERIAL=TRUE`，让它们各自独占 CTest 调度。CLI-only、SDK-only 与 combined 均覆盖。原资源锁保留，册内四场并发仍实跑；六 CASE、完整参数、结果断言、各层预算与全量 `--parallel 4` 原样。此改动只排除已见外部并发，不能称产品进程实现已修复。实际 Windows 登记须带布尔 `RUN_SERIAL=true`；Linux/macOS 不加这条要求。
+
+Windows 全量 Test 在实际执行前，按同一选择参数保存整份登记；成功、失败都上传登记、原 JUnit 和原 LastTest，单列 `full-test-originals-windows-msvc`。原四处局部取证门照留，不再添解析器。未过滤全量之外的手动单册运行不冒称全量原件；原件与新调度须由远端实际执行核验。

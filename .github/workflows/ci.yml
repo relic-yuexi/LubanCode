@@ -991,8 +991,22 @@ jobs:
             if [ '${{ needs.changes.outputs.runner_tests }}' = true ]; then PROCESS_LABELS="${PROCESS_LABELS:+$PROCESS_LABELS|}runner-process"; fi
             PROCESS_FILTER=()
             if [ -n "$PROCESS_LABELS" ]; then PROCESS_FILTER=(-LE "^($PROCESS_LABELS)$"); fi
+            if [ '${{ matrix.name }}' = windows-msvc ]; then
+              ctest --test-dir build -C Release "${PROCESS_FILTER[@]}" --show-only=json-v1 > build/windows-full-test-registration.json
+            fi
             ctest --test-dir build -C Release "${PROCESS_FILTER[@]}" --parallel 4 --output-on-failure --no-tests=error --output-junit "$PWD/build/result-store-full-results.xml"
           fi
+
+      - name: Upload Windows full Test originals
+        if: always() && matrix.name == 'windows-msvc' && inputs.test_filter == '' && (steps.test.outcome == 'success' || steps.test.outcome == 'failure')
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-test-originals-windows-msvc
+          path: |
+            build/windows-full-test-registration.json
+            build/result-store-full-results.xml
+            build/Testing/Temporary/LastTest.log
+          if-no-files-found: error
 
       - name: Extract actual full command-limits source pair
         if: always() && needs.changes.outputs.sdk_tests == 'true' && inputs.test_filter == '' && (steps.test.outcome == 'success' || steps.test.outcome == 'failure')
