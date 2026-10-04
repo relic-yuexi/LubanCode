@@ -43,7 +43,7 @@ CLI 的 `/todos` 展示、回合收口提醒、压缩时保留活动项，以及
    关闭后不得再提交，新场不得接走旧清单。
 
 每册打印 `[sdk-todo-write-path] <name>`。安装消费者为
-`examples/sdk-consumer/todo_write.cpp`，入口 `TodoWrite(args)`；仅用公开
+`examples/sdk-consumer/todo_write.cpp`，入口 `TodoWrite(base)`；仅用公开
 SDK 与 STL，实际跑模型工具轮次，不包含私有 Todo 类型。
 
 Linux、macOS、Windows 在远程 CI 验安装迁位及原生册；Lua ON/OFF 都要跑。
