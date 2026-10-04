@@ -30,6 +30,7 @@
 #include "sdk/operation_ledger.hpp"
 #include "tools/registry.hpp"
 #include "tools/run_command.hpp"
+#include "tools/tool_job_coordinator.hpp"
 #include "trajectory/canonical_json.hpp"
 #include "trajectory/v3/tool_action.hpp"
 #include "workspace/identity.hpp"
