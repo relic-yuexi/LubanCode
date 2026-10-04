@@ -5,10 +5,12 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -266,6 +268,7 @@ struct ModelState {
     std::mutex mutex;
     const std::string instance = Token();
     std::vector<sdk::ToolReply> actual_replies, expected_history;
+    std::vector<sdk::ToolCall> actual_calls, expected_calls;
     std::string expected_answer;
     bool history_seen = false;
     std::atomic<unsigned> requests{0}, destroyed{0}, approvals{0};
@@ -285,11 +288,27 @@ public:
         {
             std::lock_guard lock(state_->mutex);
             if (!state_->expected_history.empty() && !state_->history_seen) {
+                Check(state_->expected_calls.size() == state_->expected_history.size(), "restored call/reply expectations differ");
                 for (const auto& old : state_->expected_history) {
-                    unsigned found = 0;
-                    for (const auto& message : request.messages) for (const auto& reply : message.tool_replies)
-                        if (reply.call_id == old.call_id && reply.text == old.text && reply.is_error == old.is_error) ++found;
-                    Check(found == 1, "same-ID restore lost or duplicated actual tool history");
+                    const auto expected = std::find_if(state_->expected_calls.begin(), state_->expected_calls.end(),
+                        [&](const auto& call) { return call.id == old.call_id; });
+                    Check(expected != state_->expected_calls.end(), "restored reply lacks its durable call expectation");
+                    std::optional<std::size_t> call_at, reply_at;
+                    for (std::size_t i = 0; i < request.messages.size(); ++i) {
+                        const auto& message = request.messages[i];
+                        for (const auto& call : message.tool_calls) if (call.id == old.call_id) {
+                            Check(!call_at && message.role == "assistant" && call.name == expected->name &&
+                                call.input_json == expected->input_json, "same-ID restore changed or duplicated the actual tool call");
+                            call_at = i;
+                        }
+                        for (const auto& reply : message.tool_replies) if (reply.call_id == old.call_id) {
+                            Check(!reply_at && reply.text == old.text && reply.is_error == old.is_error,
+                                "same-ID restore changed or duplicated the actual tool reply");
+                            reply_at = i;
+                        }
+                    }
+                    Check(call_at && reply_at && *call_at < *reply_at,
+                        "same-ID restore lost the actual assistant-call/tool-reply pairing");
                 }
                 Check(std::any_of(request.messages.begin(), request.messages.end(), [&](const auto& message) {
                     return message.role == "assistant" && message.text == state_->expected_answer;
@@ -318,7 +337,9 @@ public:
         Check(queries_ < 2, "fixture requested an unbounded query loop");
         const std::string query = queries_ == 0 ? first_ : "preview";
         pending_ = "rag-" + model_ + "-" + state_->instance + "-" + std::to_string(operation_) + "-" + std::to_string(++queries_);
-        return sdk::ModelReply{"", {{pending_, "retrieve_evidence", "{\"query\":\"" + query + "\"}"}}, std::nullopt};
+        sdk::ToolCall call{pending_, "retrieve_evidence", "{\"query\":\"" + query + "\"}"};
+        { std::lock_guard lock(state_->mutex); state_->actual_calls.push_back(call); }
+        return sdk::ModelReply{"", {std::move(call)}, std::nullopt};
     }
 private:
     std::shared_ptr<ModelState> state_;
@@ -374,19 +395,56 @@ void Succeeded(const sdk::Operation& operation, const std::vector<Evidence>& doc
 std::size_t Queries(const std::shared_ptr<RetrievalState>& state) {
     std::lock_guard lock(state->mutex); return state->queries.size();
 }
+const std::string& EvidenceText(const results::SavedSnapshot& snapshot) {
+    const std::string* found = nullptr;
+    for (const auto& channel : snapshot.result().channels) {
+        if (!channel.text || !channel.text->starts_with("Evidence results:\n")) continue;
+        Check(!found && channel.state == results::ArtifactState::Verified && channel.artifact_verified &&
+            channel.capture_complete, "actual owned retrieval bytes were not captured exactly once");
+        found = &*channel.text;
+    }
+    Check(found != nullptr, "actual owned retrieval bytes were not captured");
+    return *found;
+}
 std::vector<results::SavedSnapshot> Saved(const std::shared_ptr<sdk::Session>& session, const sdk::Receipt& receipt) {
-    std::vector<results::SavedSnapshot> out;
+    struct Materials { std::optional<results::SavedSnapshot> raw, formal; };
+    std::map<std::pair<std::string, std::uint64_t>, Materials> invocations;
+    std::set<std::string> persisted_ids, result_ids;
+    const auto operation = Take(session->ReadOperation(receipt.operation_id), "read saved result owner");
     for (const auto& summary : Take(session->ListToolResults(receipt.operation_id), "ListToolResults")) if (summary.selected) {
         Check(summary.tool_name == "retrieve_evidence" && summary.identity.session_id == session->id() &&
-            summary.identity.operation_id == receipt.operation_id, "saved evidence crossed its owning operation");
+            summary.identity.operation_id == receipt.operation_id && !operation.turn_id.empty() &&
+            summary.identity.turn_id == operation.turn_id && !summary.identity.tool_call_id.empty() &&
+            !summary.identity.persisted_event_id.empty() && !summary.identity.result_id.empty() && summary.attempt > 0,
+            "saved evidence crossed its owning operation or has incomplete durable identity");
+        Check(persisted_ids.insert(summary.identity.persisted_event_id).second &&
+            result_ids.insert(summary.identity.result_id).second, "saved evidence repeated a persisted identity");
         auto snapshot = Take(session->ReadToolResult(summary.identity), "ReadToolResult");
-        Check(snapshot.result().metadata_state == results::ArtifactState::Verified &&
+        Check(snapshot.result().summary.identity == summary.identity && snapshot.result().summary.attempt == summary.attempt &&
+            snapshot.result().summary.selected && snapshot.result().metadata_state == results::ArtifactState::Verified &&
             snapshot.policy().mode == results::Mode::Preview && snapshot.policy().version == 1,
             "saved evidence was unverified or changed the default preview policy");
-        Check(std::any_of(snapshot.result().channels.begin(), snapshot.result().channels.end(), [](const auto& channel) {
-            return channel.artifact_verified && channel.capture_complete && channel.text && channel.text->starts_with("Evidence results:\n");
-        }), "actual owned retrieval bytes were not captured");
-        out.push_back(std::move(snapshot));
+        (void)EvidenceText(snapshot);
+        auto& materials = invocations[{summary.identity.tool_call_id, summary.attempt}];
+        if (summary.identity.result_id.starts_with("capture-")) {
+            Check(!materials.raw, "one retrieval attempt repeated its raw capture");
+            materials.raw = std::move(snapshot);
+        } else if (summary.identity.result_id.starts_with("res-")) {
+            Check(!materials.formal, "one retrieval attempt repeated its formal result");
+            materials.formal = std::move(snapshot);
+        } else Check(false, "selected retrieval material has an unknown result identity");
+    }
+    std::vector<results::SavedSnapshot> out;
+    for (auto& [identity, materials] : invocations) {
+        (void)identity;
+        Check(materials.raw && materials.formal, "retrieval invocation lost raw or formal saved material");
+        Check(!materials.raw->result().execution_event_id.empty() &&
+            materials.raw->result().execution_event_id == materials.formal->result().execution_event_id &&
+            EvidenceText(*materials.raw) == EvidenceText(*materials.formal),
+            "retrieval raw/formal materials disagree about their actual execution or evidence");
+        // selected marks every immutable source used by a selection. Raw and
+        // formal material share one durable action/attempt; they are one call.
+        out.push_back(std::move(*materials.formal));
     }
     return out;
 }
@@ -434,8 +492,10 @@ void Retrieval(const fs::path& base) {
     auto fast_model = std::make_shared<ModelState>(); auto fast_retrieval = std::make_shared<RetrievalState>();
     auto fast = Take(runtime->OpenSession(Options(directory.path / "project", fast_model, "sufficient", documents,
         fast_retrieval, {}, "worker")), "open sufficient evidence");
-    Succeeded(Finish(fast, fast_model, Submit(fast, "query-once")), documents);
+    const auto fast_receipt = Submit(fast, "query-once");
+    Succeeded(Finish(fast, fast_model, fast_receipt), documents);
     Check(Queries(fast_retrieval) == 1 && fast_model->requests == 2, "actual sufficient evidence did not end querying");
+    Check(Saved(fast, fast_receipt).size() == 1, "one sufficient retrieval did not preserve one actual invocation");
     Closed(fast, fast_model, fast_retrieval); Take(runtime->Shutdown(), "Shutdown");
 }
 void Sources(const fs::path& base) {
@@ -547,17 +607,41 @@ void Isolation(const fs::path& base) {
 void Recovery(const fs::path& base) {
     Directory directory(base); const auto documents = Documents("restore", Token());
     std::string sid, answer; sdk::Receipt receipt; std::vector<sdk::ToolReply> replies;
+    std::vector<sdk::ToolCall> calls;
     {
         auto runtime = Runtime(directory.path); auto model = std::make_shared<ModelState>(); auto retrieval = std::make_shared<RetrievalState>();
         auto session = Take(runtime->OpenSession(Options(directory.path / "project", model, "seed", documents, retrieval)), "open seed");
         sid = session->id(); receipt = Submit(session, "seed-key"); const auto operation = Finish(session, model, receipt);
         Succeeded(operation, documents); answer = operation.final_text;
-        { std::lock_guard lock(model->mutex); replies = model->actual_replies; }
-        Check(replies.size() == 2 && Saved(session, receipt).size() == 2, "seed did not persist actual retrieval history");
+        std::vector<sdk::ToolReply> live_replies; std::vector<sdk::ToolCall> live_calls;
+        { std::lock_guard lock(model->mutex); live_replies = model->actual_replies; live_calls = model->actual_calls; }
+        const auto saved = Saved(session, receipt);
+        Check(live_replies.size() == 2 && live_calls.size() == 2 && saved.size() == 2,
+            "seed did not persist actual retrieval history");
+        std::set<std::string> matched_live_ids, durable_ids;
+        for (const auto& snapshot : saved) {
+            const auto& body = EvidenceText(snapshot);
+            const auto matches = std::count_if(live_replies.begin(), live_replies.end(),
+                [&](const auto& reply) { return !reply.is_error && reply.text == body; });
+            Check(matches == 1, "durable retrieval material has no unique actual model reply");
+            const auto reply = std::find_if(live_replies.begin(), live_replies.end(),
+                [&](const auto& value) { return !value.is_error && value.text == body; });
+            Check(matched_live_ids.insert(reply->call_id).second, "durable retrieval reused one live reply");
+            const auto call = std::find_if(live_calls.begin(), live_calls.end(),
+                [&](const auto& value) { return value.id == reply->call_id; });
+            Check(call != live_calls.end() && call->name == "retrieve_evidence" && Query(call->input_json).has_value(),
+                "actual model reply lacks its issued retrieval call");
+            const auto& action = snapshot.result().summary.identity.tool_call_id;
+            Check(durable_ids.insert(action).second, "durable retrieval action was counted twice");
+            // Restored history pairs assistant calls and replies by the durable
+            // action ID. Keep the real issued arguments and real saved bytes.
+            calls.push_back({action, call->name, call->input_json});
+            replies.push_back({action, reply->text, reply->is_error});
+        }
         Closed(session, model, retrieval); Take(runtime->Shutdown(), "seed Shutdown");
     }
     auto runtime = Runtime(directory.path); auto model = std::make_shared<ModelState>(); auto retrieval = std::make_shared<RetrievalState>();
-    model->expected_history = replies; model->expected_answer = answer;
+    model->expected_history = replies; model->expected_calls = calls; model->expected_answer = answer;
     auto session = Take(runtime->OpenSession(Options(directory.path / "project", model, "restored", documents, retrieval, sid)), "restore same ID");
     Check(session->id() == sid && Queries(retrieval) == 0 && model->requests == 0, "opening re-executed old retrieval");
     Check(Take(session->ReadOperation(receipt.operation_id), "old operation").final_text == answer,

@@ -22,6 +22,10 @@
 
 不设置 `SessionOptions.result_policy`，沿默认 Preview/v1。示例向外展示检索证据也须经过已核保存材料与公开 `ResultProjector`，Node 不许 full。可信本地保存结果与模型上下文不因此删减，preview 不是资料授权。
 
+`ListToolResults` 列持久材料，不按调用去重。同一次调用的 `capture-*` 原始材料与 `res-*` 正式材料都可标成 `selected`。共用 `Saved` 先核 Session、Operation、turn，再按 durable action ID 与 attempt 分组；每组须各有一份原始与正式材料，核同一执行凭证、完整正文与默认 policy，才以正式 snapshot 代表这次调用。两次查询仍须保存两次真实调用；一次就足够的查询也须核一组，不能把四份材料误算四次调用。
+
+恢复历史按 durable action ID 配对；不能拿运行期 provider call ID 直接比较。夹具从真实保存材料取 action ID，再与当场已发调用、实际模型回复逐一对账。恢复后须看到同号 assistant 调用与后随回复，名称、参数、正文与错误态都核；不凭相同文本就认作恢复成功。安装消费者与独立参考程序共用这份修法，六案与预算不改。
+
 ## 验收与编译归属
 
 新原生来源 `tests/integration/sdk/test_lubancore_agentic_rag.cpp` 固定六 CASE；实际路径末标 `[sdk-agentic-rag-path]` 各一次：`retrieval`、`sources`、`preview`、`isolation`、`recovery`、`lifetime`。安装消费者走同份公开 SDK/STL 实现，六路完成后印 `[sdk-agentic-rag-consumer] complete`。
