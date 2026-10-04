@@ -28,11 +28,14 @@
 
 #include <atomic>
 #include <cstdint>
+#include <expected>
 #include <functional>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -166,6 +169,182 @@ struct JobStartResult {
     std::string admission_content;
 };
 
+// Internal J2a registration domain. The trusted host supplies the same serial
+// mutex used by its real writer/turn owner, not a coordinator-local substitute.
+// This instance rejects all legacy dispatch/adoption entrances. No worker or
+// public SDK capability is enabled by these values.
+struct PreparedRegistrationContext {
+    std::shared_ptr<std::recursive_mutex> writer_serial;
+    std::string project_id;
+    std::filesystem::path cwd;
+};
+
+struct PreparedJobOwner {
+    std::string session_id;
+    std::string run_id;
+    std::uint64_t coordinator_id = 0;
+    std::uint64_t epoch = 0;
+    std::string project_id;
+    std::filesystem::path cwd;
+    bool operator==(const PreparedJobOwner&) const = default;
+};
+
+struct PreparedJobRequest {
+    PreparedJobOwner owner;
+    std::string provider_tool_call_id;
+    std::string assistant_message_ref;
+    std::string parent_action_id;
+    std::string turn_id;
+    std::string step_id;
+    std::string tool_name;
+    nlohmann::json original_input;
+    nlohmann::json effective_input;
+    trajectory::v3::ToolIdentity tool_identity;
+    JobExecutionPolicy policy;
+};
+
+enum class PreparedJobRegistrationState { Rejected, Registered, Unconfirmed };
+
+// Immutable owned facts, shared by a returned receipt and the temporary table.
+// There is no borrowed invocation/operation, callback, tool, or cancellation.
+struct PreparedJobFacts {
+    PreparedJobOwner owner;
+    std::string job_id;
+    std::string action_id;
+    std::uint64_t attempt = 1;
+    std::string provider_tool_call_id;
+    std::string assistant_message_ref;
+    std::string parent_action_id;
+    std::string turn_id;
+    std::string step_id;
+    std::string tool_name;
+    nlohmann::json original_input;
+    nlohmann::json effective_input;
+    std::string original_input_sha256;
+    std::string effective_input_sha256;
+    trajectory::v3::ToolIdentity tool_identity;
+    JobExecutionPolicy policy;
+    std::string source_pending_event_id;
+    std::string source_admission_event_id;
+    std::optional<trajectory::v3::WriteReceipt> pending_receipt;
+    std::optional<trajectory::v3::WriteReceipt> registered_receipt;
+};
+
+struct PreparedJobRegistration {
+    PreparedJobRegistrationState state = PreparedJobRegistrationState::Rejected;
+    std::string error_code;
+    std::string error;
+    std::shared_ptr<const PreparedJobFacts> facts;
+};
+
+struct PreparedJobView {
+    PreparedJobRegistrationState state = PreparedJobRegistrationState::Rejected;
+    bool revoked = false;
+    std::shared_ptr<const PreparedJobFacts> facts;
+};
+
+// J2b: actual command owner and business scope. Parent identity is causal only;
+// no SDK operation is invented or borrowed by this internal execution path.
+class RunCommandTool;
+struct OwnedJobScope {
+    PreparedJobOwner owner;
+    std::string job_id, action_id, turn_id, step_id, parent_action_id, provider_tool_call_id;
+    std::uint64_t attempt = 1;
+};
+struct OwnedJobCompletion {
+    OwnedJobScope scope;
+    Tool::Result raw;
+    trajectory::v3::WriteReceipt started_receipt, terminal_receipt, persisted_receipt;
+};
+enum class OwnedJobPostPhase { Open, Draining, Retired };
+
+struct OwnedJobPostSnapshot {
+    OwnedJobCompletion completion;
+    std::shared_ptr<const PreparedJobFacts> facts;
+    trajectory::v3::WriteReceipt adopted_receipt;
+    OwnedJobPostPhase phase = OwnedJobPostPhase::Retired;
+    bool cancel_requested = false;
+};
+
+// A copyable opaque weak handle, not an extendable execution permission. Only
+// the actual producer creates its state; the synchronous Post owns the lease.
+// Default/expired/foreign-thread handles cannot borrow a writer or live record.
+class OwnedJobPostInvocation {
+public:
+    OwnedJobPostInvocation() = default;
+private:
+    struct State;
+    std::weak_ptr<State> state_;
+    explicit OwnedJobPostInvocation(const std::shared_ptr<State>& state) : state_(state) {}
+    friend class ToolJobCoordinator;
+};
+
+struct OwnedJobCapability {
+    std::shared_ptr<RunCommandTool> command;
+    std::function<JobAuthDecision(const OwnedJobScope&, const nlohmann::json&,
+                                 const trajectory::v3::ToolIdentity&, const JobExecutionPolicy&)> scope_gate;
+    // Return the actual native receipt from this writer. A claimed confirmation
+    // absent from the verified source is unconfirmed, never a successful Post.
+    std::function<trajectory::v3::WriteReceipt(const OwnedJobCompletion&)> post;
+    CommandExecutionLimits command_limits;
+    // Explicit opt-in. Select exactly one of post/live_post; the legacy default
+    // remains post. Check the actual invocation synchronously, never postpone it.
+    std::function<trajectory::v3::WriteReceipt(const OwnedJobCompletion&,
+                                             const OwnedJobPostInvocation&)> live_post;
+};
+enum class OwnedJobAdoptionState { Rejected, Adopted, Unconfirmed };
+struct OwnedJobAdoption {
+    OwnedJobAdoptionState state = OwnedJobAdoptionState::Rejected;
+    std::string error_code, error, admission_content;
+    std::shared_ptr<const PreparedJobFacts> facts;
+    std::optional<trajectory::v3::WriteReceipt> receipt;
+};
+struct ParentJobAdmissionRefs {
+    std::string terminal_event_id, persisted_event_id, selected_event_id;
+    std::string tool_message_id, admission_event_id;
+};
+struct OwnedJobAdmission {
+    bool confirmed = false;
+    std::string error_code, error;
+};
+struct OwnedJobStatusView {
+    OwnedJobScope scope;
+    std::string state, execution_state, gap, preview, result_ref;
+    bool access_denied = false, revoked = false, cancel_requested = false;
+    bool preview_truncated = false, worker_finished = false;
+    std::optional<trajectory::v3::WriteReceipt> adopted_receipt, dispatched_receipt, started_receipt;
+    std::optional<trajectory::v3::WriteReceipt> terminal_receipt, persisted_receipt, post_receipt, observed_receipt;
+};
+struct OwnedJobWaitResult {
+    bool satisfied = false, timed_out = false;
+    std::vector<OwnedJobStatusView> statuses;
+};
+
+// Recovery policy is an adoption choice, not JobExecutionPolicy.resume_policy.
+// Legacy keeps the existing repair/requeue path. Hold creates passive owned
+// projections only; newly submitted jobs keep their ordinary execution path.
+enum class JobRecoveryPolicy { Legacy, Hold };
+enum class JobRecoveryKnowledge {
+    KnownNotDispatched,
+    ExecutionUnconfirmed,
+    TerminalDeliveryGap,
+    TerminalConfirmed,
+    UnsupportedMode,
+};
+
+struct JobRecoveryFacts {
+    JobRecoveryKnowledge knowledge = JobRecoveryKnowledge::ExecutionUnconfirmed;
+    std::string original_state;  // Exact FoldJobExecutions state, not a new fact.
+    std::string turn_id;
+    std::string step_id;
+    int dispatched_count = 0;
+    std::uint64_t execution_attempt = 0;  // job_handle business begins at >1.
+    bool execution_started = false;
+    std::string execution_state;  // Actual business attempt status, if present.
+    std::string execution_terminal_event;
+    bool admission_complete = false;
+};
+
 struct JobStatusView {
     std::string job_id;
     std::string action_id;  // v3 Action 身份(P2:完成通知引用)
@@ -180,6 +359,9 @@ struct JobStatusView {
     // 四接口都过授权闸门(单 §8:jobId 不是访问凭证);拒时 state 留空。
     bool access_denied = false;
     std::string access_reason;
+    // Present only for an explicitly held historical record. A terminal state
+    // or a satisfied wait does not imply execution or delivery was confirmed.
+    std::optional<JobRecoveryFacts> recovery;
 };
 
 struct JobWaitResult {
@@ -231,8 +413,14 @@ struct JobRecoveryPlan {
         // An observation is independent of admission-message delivery. Filling
         // a missing tool message must retain a terminal job, never requeue it.
         std::string terminal_state;
+        std::optional<JobRecoveryFacts> recovery;
+        std::string admission_text;  // Actual current admitted tool-message body.
+        bool prepared_only = false;  // J2a has no adoption/dispatch authority.
+        bool owned_layout = false;  // Historical J2b facts never grant dispatch authority.
     };
     std::vector<Item> items;
+    JobRecoveryPolicy policy = JobRecoveryPolicy::Legacy;
+    std::string source_session_id;
 };
 
 // ---------------------------------------------------------------------------
@@ -241,10 +429,16 @@ struct JobRecoveryPlan {
 
 class ToolJobCoordinator {
 public:
+    // Internal lifecycle seam. Publish any live thread directly into the owned
+    // destination before returning or throwing; never retain it elsewhere.
+    using ThreadStarter = std::function<void(std::thread&, std::function<void()>)>;
+
     struct Options {
         JobConcurrencyLimits limits;
         std::shared_ptr<GlobalRunningQuota> global;  // 缺省自建(limit 8)
         std::function<std::int64_t()> clock_ms;      // 缺省墙钟;测试注固定钟
+        ThreadStarter thread_starter;  // Empty uses a real std::thread.
+        std::optional<PreparedRegistrationContext> prepared_registration;
     };
 
     // writer:本会话 v3 单写者(引用,寿命由调用方保证,协调器不收柄);
@@ -265,6 +459,35 @@ public:
     // on the ordinary owning-host path, including settlement write failures.
     bool Shutdown();
     bool shutdown_complete() const;
+
+    // Registration-only internal value path. Owner values match the actual
+    // writer/instance/epoch; they are not credentials or permission grants.
+    // Reads/validates the real declaration under writer_serial, outside jobs.
+    // Only Pending/Registered are written: no admission message or execution.
+    std::optional<PreparedJobOwner> PreparedOwner() const;
+    PreparedJobRegistration RegisterPreparedJob(const PreparedJobRequest& request);
+    std::optional<PreparedJobView> GetPreparedJob(
+        const PreparedJobOwner& owner, const std::string& job_id) const;
+    std::size_t prepared_count() const;
+
+    // Internal, registration-domain only. No public SDK Accepted/Job API.
+    OwnedJobAdoption AdoptPreparedJob(const PreparedJobOwner& owner, const std::string& job_id,
+                                     OwnedJobCapability capability);
+    OwnedJobAdmission ConfirmParentAdmission(const PreparedJobOwner& owner, const std::string& job_id,
+                                             const ParentJobAdmissionRefs& refs);
+    OwnedJobStatusView GetOwnedJob(const PreparedJobOwner& owner, const std::string& job_id);
+    // Host-safe serial -> jobs projection only: no Pump/Reap/clock/writer I/O.
+    // Do not call from an observer whose callback owner is joining that thread.
+    OwnedJobStatusView SnapshotOwnedJob(const PreparedJobOwner& owner, const std::string& job_id) const;
+    // Only the current actual Post invocation can pass. Foreign threads fail
+    // before taking writer_serial; returned values own no live writer borrow.
+    std::expected<OwnedJobPostSnapshot, std::string> CheckOwnedPostInvocation(
+        const OwnedJobPostInvocation& invocation) const;
+    OwnedJobWaitResult WaitOwnedJobs(const PreparedJobOwner& owner, const std::vector<std::string>& ids,
+                                     std::uint64_t timeout_ms, bool wait_all);
+    JobCancelResult CancelOwnedJob(const PreparedJobOwner& owner, const std::string& job_id,
+                                   const std::string& reason);
+    std::size_t PumpOwnedJobs();
 
     // ---- 四接口(单 §8)----
 
@@ -318,7 +541,9 @@ public:
     // ---- 恢复(单 §6 表)----
 
     // 纯读账定恢复计划(不持锁、不写账;静态,任意线程)。
-    static JobRecoveryPlan PlanRecovery(const trajectory::v3::V3Ledger& ledger);
+    static JobRecoveryPlan PlanRecovery(
+        const trajectory::v3::V3Ledger& ledger,
+        JobRecoveryPolicy policy = JobRecoveryPolicy::Legacy);
 
     // 采用计划:requeue 重入队(不重写注册,接管派发 epoch 接续递增);
     // unknown_hold 落 tool.job.observed(unknown) 不盲跑;complete_delivery

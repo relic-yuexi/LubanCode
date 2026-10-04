@@ -125,6 +125,26 @@ public:
     Result execute(const Json& input, const tools::ToolExecutionContext& context) override {
         auto effective = input;
         const bool command = name() == "run_command";
+        const bool search = name() == "search";
+        if (search) {
+            // The CLI parser's ambient cwd/null defaults are intentionally kept
+            // there. SDK binding supplies an explicit session root every time.
+            if (!input.is_object()) return Result::Error("sdk.tool.invalid_input: expected object");
+            const auto path = input.find("path");
+            if (path != input.end() && !path->is_null() && !path->is_string()) {
+                return Result::Error("sdk.tool.invalid_path: expected string or null");
+            }
+            for (const char* field : {"mode", "pattern", "glob"}) {
+                const auto value = input.find(field);
+                if (value == input.end() || value->is_null()) continue;
+                if (!value->is_string()) return Result::Error("sdk.tool.invalid_input: expected string");
+                const auto text = value->get<std::string>();
+                if (text.find('\0') != std::string::npos || !lubancode::platform::IsValidUtf8(text)) {
+                    return Result::Error("sdk.tool.invalid_input: NUL or invalid UTF-8");
+                }
+            }
+            if (path == input.end() || path->is_null() || *path == "") effective["path"] = cwd_;
+        }
         if (command && input.contains("run_in_background") && input.at("run_in_background") != false) {
             return Result::Error("sdk.tool.unsupported: background command jobs are not enabled");
         }
@@ -132,6 +152,7 @@ public:
         if (effective.contains(key) && effective.at(key).is_string()) {
             const auto value = effective.at(key).get<std::string>();
             if (value.find('\0') != std::string::npos) return Result::Error("sdk.tool.invalid_path: NUL");
+            if (search && !lubancode::platform::IsValidUtf8(value)) return Result::Error("sdk.tool.invalid_path: invalid UTF-8");
             auto path = tools::Utf8ToPath(value);
             if (path.is_relative()) effective[key] = tools::PathToUtf8(tools::Utf8ToPath(cwd_) / path);
         } else if (command && !effective.contains(key)) {

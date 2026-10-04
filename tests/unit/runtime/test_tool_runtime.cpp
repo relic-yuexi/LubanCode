@@ -8,7 +8,10 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
@@ -16,11 +19,15 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <utility>
+#include <variant>
 #include <vector>
 #include <nlohmann/json.hpp>
 
@@ -32,7 +39,11 @@
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "runtime/plugin_tool.hpp"
+#include "runtime/scoped_turn_bindings.hpp"
+#include "runtime/tool_trace_hub.hpp"
+#include "scoped_turn_fixture.hpp"
 #include "tool_assembly_fixture.hpp"
+#include "trajectory/v3/reader.hpp"
 
 namespace {
 
@@ -103,6 +114,182 @@ void WriteAgent(const std::filesystem::path& directory, const std::string& name)
 }  // namespace
 
 using namespace lubancode::app;
+
+namespace {
+namespace parallel_fixture = lubancode::test_support::turn_scope;
+
+struct InvocationObservation {
+    int index;
+    std::thread::id thread;
+    lubancode::tools::ToolInvocationIdentity identity;
+};
+struct InvocationGate {
+    std::mutex mutex;
+    std::condition_variable changed;
+    int entered = 0, completed = 0, timeouts = 0;
+    std::vector<InvocationObservation> execution;
+    std::vector<std::pair<std::thread::id, lubancode::tools::ToolInvocationIdentity>> callbacks;
+};
+class InvocationRead final : public lubancode::tools::Tool {
+public:
+    InvocationRead(std::shared_ptr<InvocationGate> gate, bool stop)
+        : gate_(std::move(gate)), stop_(stop) {}
+    std::string name() const override { return "read_file"; }
+    std::string description() const override { return "Read owned invocation identity."; }
+    nlohmann::json input_schema() const override {
+        return {{"type", "object"}, {"properties", {{"i", {{"type", "integer"}}}}}};
+    }
+    lubancode::tools::EffectClass effect_class() const override {
+        return lubancode::tools::EffectClass::ReadOnlyLocal;
+    }
+    Result execute(const nlohmann::json&) override { return {"context required", true}; }
+    Result execute(const nlohmann::json& input, const lubancode::tools::ToolExecutionContext& context) override {
+        const int index = input.at("i").get<int>();
+        {
+            std::unique_lock lock(gate_->mutex);
+            gate_->execution.push_back({index, std::this_thread::get_id(), context.invocation});
+            ++gate_->entered;
+            gate_->changed.notify_all();
+            if (!gate_->changed.wait_for(lock, std::chrono::seconds(5), [&] { return gate_->entered >= 2; }))
+                ++gate_->timeouts;
+            ++gate_->completed;
+        }
+        Result result{"read#" + std::to_string(index), stop_ && index == 0};
+        if (stop_ && index == 0) {
+            result.execution_control = lubancode::tools::ExecutionControl::StopIndeterminate;
+            result.error_code = "fixture.indeterminate";
+        }
+        return result;
+    }
+private:
+    std::shared_ptr<InvocationGate> gate_;
+    bool stop_;
+};
+class InvocationWrite final : public lubancode::tools::Tool {
+public:
+    std::atomic<int> calls{0};
+    std::string name() const override { return "write_file"; }
+    std::string description() const override { return "Later exclusive probe."; }
+    nlohmann::json input_schema() const override { return {{"type", "object"}}; }
+    Result execute(const nlohmann::json&) override { ++calls; return {"unexpected later write", false}; }
+};
+
+void VerifyParallelOwnedInvocation(bool stop) {
+    using namespace lubancode;
+    const auto main_thread = std::this_thread::get_id();
+    parallel_fixture::SessionFixture session;
+    parallel_fixture::Backend backend;
+    tools::ToolRegistry registry;
+    auto gate = std::make_shared<InvocationGate>();
+    registry.Register(std::make_unique<InvocationRead>(gate, stop));
+    auto write = std::make_unique<InvocationWrite>();
+    auto* write_probe = write.get();
+    registry.Register(std::move(write));
+    std::vector<api::StreamEvent> batch{api::MessageStart{"invocation-message", "scope-model"}};
+    const int calls = stop ? 4 : 2;
+    for (int index = 0; index != calls; ++index) {
+        batch.push_back(api::ToolUseStart{index, "provider-call-" + std::to_string(index),
+                                        index == 2 ? "write_file" : "read_file"});
+        batch.push_back(api::ToolUseInputDelta{index, nlohmann::json{{"i", index}}.dump()});
+        batch.push_back(api::ContentBlockDone{index});
+    }
+    batch.push_back(api::MessageDone{"tool_use", api::Usage{}});
+    backend.replies = {std::move(batch), parallel_fixture::TextReply("finished")};
+    agent::AgentProfile profile;
+    profile.request.model = "scope-model";
+    profile.system_prompt = "Preserve turn bindings.";
+    profile.runtime.max_steps_per_turn = 5;
+    profile.runtime.tool_batch_strategy = agent::ToolBatchStrategy::ParallelRead;
+    profile.runtime.parallel_read_concurrency = 2;
+    agent::Agent loop(backend, registry, std::move(profile));
+    auto* ledger = session.session->trajectory();
+    REQUIRE(ledger->v3_main_writer() != nullptr);
+    auto bridge = ledger->NewTurnBridge({"fixture", "responses", "owned-invocation", {}});
+    REQUIRE(bridge != nullptr);
+    const auto turn = ledger->v3_main_writer()->NewTurnId();
+    runtime::ToolTraceHub hub(session.session->ids());
+    agent::TurnWiring wiring;
+    runtime::ScopedTurnBindings bindings(loop);
+    bindings.Bind(wiring, {.hub = &hub, .trajectory = bridge.get(),
+                          .thread_id = ledger->session_id(), .turn_id = turn});
+    wiring.tool_invocation_identity = [&](const std::string& provider_call) -> std::optional<tools::ToolInvocationIdentity> {
+        const auto actual = bridge->V3ExecutingCallIdentity(provider_call);
+        if (!actual) return std::nullopt; // A callback before started cannot forge identity.
+        tools::ToolInvocationIdentity identity{ledger->session_id(), "host-operation", turn, actual->first, actual->second};
+        std::lock_guard lock(gate->mutex);
+        gate->callbacks.emplace_back(std::this_thread::get_id(), identity);
+        return identity;
+    };
+    bridge->BeginTurn(turn, "external_user");
+    api::Message input;
+    input.role = api::Role::User;
+    input.content.push_back(api::TextBlock{"two concurrent reads"});
+    bridge->RecordInput(input);
+    const auto outcome = loop.Run(std::move(input), wiring);
+    REQUIRE(outcome.has_value());
+    bridge->EndTurn(!stop, false, stop ? "fixture.indeterminate" : "");
+    bindings.Reset(); // The live bridge borrow retires before reading or closing its owner.
+    CHECK_FALSE(wiring.tool_invocation_identity);
+    CHECK(outcome->side_effect_indeterminate == stop);
+    CHECK_FALSE(outcome->cancelled);
+    CHECK(write_probe->calls.load() == 0);
+    CHECK(backend.requests.size() == (stop ? 1 : 2));
+    REQUIRE(gate->execution.size() == 2);
+    REQUIRE(gate->callbacks.size() == 2);
+    CHECK(gate->entered == 2);
+    CHECK(gate->completed == 2); // Both already-started workers exited before the turn returned.
+    CHECK(gate->timeouts == 0); // A serial implementation cannot satisfy the two-entry barrier.
+    const auto source = trajectory::v3::ReadV3Ledger(ledger->v3_main_writer()->path());
+    const auto source_error = source.has_value() ? std::string() : source.error();
+    REQUIRE_MESSAGE(source.has_value(), source_error);
+    std::set<std::string> action_ids;
+    for (const auto& observation : gate->execution) {
+        CHECK(observation.thread != main_thread);
+        const auto& identity = observation.identity;
+        CHECK(identity.session_id == ledger->session_id());
+        CHECK(identity.operation_id == "host-operation");
+        CHECK(identity.turn_id == turn);
+        CHECK(identity.action_id != "provider-call-" + std::to_string(observation.index));
+        CHECK(identity.attempt > 0);
+        CHECK(action_ids.insert(identity.action_id).second);
+        int started = 0, callbacks = 0;
+        for (const auto& event : source->events) {
+            if (event.kind == trajectory::v3::EventKindV3::ToolExecutionStarted && event.action_id == identity.action_id) {
+                ++started;
+                CHECK(event.turn_id == turn);
+                CHECK(event.payload.at("attempt").get<std::uint64_t>() == identity.attempt);
+            }
+        }
+        for (const auto& callback : gate->callbacks) {
+            CHECK(callback.first == main_thread);
+            if (callback.second.action_id == identity.action_id) {
+                ++callbacks;
+                CHECK(callback.second.attempt == identity.attempt);
+            }
+        }
+        CHECK(started == 1);
+        CHECK(callbacks == 1);
+    }
+    std::size_t result_count = 0;
+    for (const auto& message : loop.history()) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+                CHECK(result->tool_use_id == "provider-call-" + std::to_string(result_count));
+                CHECK(result->is_error == (stop && result_count != 1));
+                ++result_count;
+            }
+        }
+    }
+    CHECK(result_count == static_cast<std::size_t>(calls));
+}
+}  // namespace
+
+TEST_CASE("ToolRuntime: parallel reads resolve durable action identity on the main thread") {
+    VerifyParallelOwnedInvocation(false);
+}
+TEST_CASE("ToolRuntime: indeterminate parallel completion joins peers and stops later execution") {
+    VerifyParallelOwnedInvocation(true);
+}
 
 TEST_CASE("默认装配:主表有 agent/todo_write/基础工具,子表同级(含 agent 转发壳与 todo)") {
     ToolAssemblyFixture fixture;  // 显式插件根为空,不读也不修改真实 HOME。

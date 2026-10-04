@@ -281,42 +281,46 @@ endif()
 # 不管走没走 vcpkg 都 FetchContent 自建,两条构建路认同一份依赖,vcpkg.json
 # 不动。
 # ---------------------------------------------------------------------------
-_lubancode_tarball(_lubancode_mbedtls_url "Mbed-TLS/mbedtls" "v3.6.3")
-set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
-set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
-set(GEN_FILES OFF CACHE BOOL "" FORCE)
-set(ENABLE_ZLIB_SUPPORT OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-  mbedtls
-  URL ${_lubancode_mbedtls_url}
-)
-FetchContent_MakeAvailable(mbedtls)
-# 别人家的 C,顶层 -Wall/-W4 会刷一屏没意义的告警,单独关掉(同 lua/yaml-cpp)。
-foreach(_lubancode_mbed_target mbedtls mbedx509 mbedcrypto)
-  if(TARGET ${_lubancode_mbed_target})
-    if(MSVC)
-      target_compile_options(${_lubancode_mbed_target} PRIVATE /w)
-    else()
-      target_compile_options(${_lubancode_mbed_target} PRIVATE -w)
+if(LUBANCODE_BUILD_CLI)
+  _lubancode_tarball(_lubancode_mbedtls_url "Mbed-TLS/mbedtls" "v3.6.3")
+  set(ENABLE_PROGRAMS OFF CACHE BOOL "" FORCE)
+  set(ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+  set(GEN_FILES OFF CACHE BOOL "" FORCE)
+  set(ENABLE_ZLIB_SUPPORT OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    mbedtls
+    URL ${_lubancode_mbedtls_url}
+  )
+  FetchContent_MakeAvailable(mbedtls)
+  # 别人家的 C,顶层 -Wall/-W4 会刷一屏没意义的告警,单独关掉(同 lua/yaml-cpp)。
+  foreach(_lubancode_mbed_target mbedtls mbedx509 mbedcrypto)
+    if(TARGET ${_lubancode_mbed_target})
+      if(MSVC)
+        target_compile_options(${_lubancode_mbed_target} PRIVATE /w)
+      else()
+        target_compile_options(${_lubancode_mbed_target} PRIVATE -w)
+      endif()
     endif()
-  endif()
-endforeach()
-unset(_lubancode_mbed_target)
+  endforeach()
+  unset(_lubancode_mbed_target)
+endif()
 
 # ---------------------------------------------------------------------------
 # miniz 3.0.2(更新器 C++ 化批一第③单):zip 读写底座,批二解包层用它拆
-# 更新整包。与 yaml-cpp/lua/mbedTLS 同待遇:不管走没走 vcpkg 都
-# FetchContent 源码自建,两条构建路认同一份源码,vcpkg.json 不动。tag
+# 更新整包。仅 CLI 宿主需要它;SDK-only 不下载或定义此目标。
+# 宿主两条构建路认同一份 FetchContent 源码,vcpkg.json 不动。tag
 # 3.0.2 对应上游 amd_92ec3a8。默认形态(非 amalgamated)只编 miniz.c/
 # miniz_zip.c/miniz_tinfl.c/miniz_tdef.c——正是 zip reader/writer 与
 # tinfl 要的源;示例/模糊测试在子项目形态默认关,这里再显式钉一遍,
 # 防上游默认翻转。cmake_minimum_required 还停在 3.0,靠上面给 yaml-cpp
 # 设的 CMAKE_POLICY_VERSION_MINIMUM 3.5 过门。
 # ---------------------------------------------------------------------------
+# Keep the pre-existing static-dependency policy on both product paths.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+if(LUBANCODE_BUILD_CLI)
 _lubancode_tarball(_lubancode_miniz_url "richgel999/miniz" "3.0.2")
 # vcpkg 路顶层没钉全局静态(那条 set 只在非 vcpkg 分支里),这里补钉:
 # 两条构建路 miniz 一律静态,exe 不带 miniz.dll。
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
 set(INSTALL_PROJECT OFF CACHE BOOL "" FORCE)
@@ -330,6 +334,7 @@ if(MSVC)
   target_compile_options(miniz PRIVATE /w)
 else()
   target_compile_options(miniz PRIVATE -w)
+endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -449,6 +454,9 @@ if(MSVC)
     PROPERTIES COMPILE_OPTIONS "/EHa")
 endif()
 add_library(lubancode_engine STATIC
+  # Agent loop consumes this neutral lease directly. Keep its implementation
+  # beside the consumer: runtime depends on engine, never the reverse.
+  src/runtime/scoped_approval.cpp
   ${_lubancode_platform_sources}
   src/platform/network_proxy.cpp
   src/platform/text_encoding.cpp
@@ -502,7 +510,6 @@ add_library(lubancode_engine STATIC
   src/config/command_permission.cpp
   src/config/model_catalog.cpp
   src/config/provider_catalog.cpp
-  src/config/update_checker.cpp
   src/config/prompt_files.cpp
   src/config/project_instructions.cpp
   src/config/skill_store.cpp
@@ -629,6 +636,7 @@ add_library(lubancode_engine STATIC
   src/memory/owner_lock.cpp
   src/memory/recall_engine.cpp
   src/memory/topic_store.cpp
+  src/memory/project_commit.cpp
   src/memory/candidate_store.cpp
   src/memory/worker_queue.cpp
   src/memory/editor_adapter.cpp
@@ -689,6 +697,9 @@ add_library(lubancode_engine STATIC
   src/agent/model_router.cpp
   # 自定义 Agent 单阶段 1:Agent Definition 严格解析(yaml-cpp)与三层 Catalog。
   src/agent/agent_definition.cpp
+  # Owned root Package analysis shares the original pure parsers with the CLI.
+  src/package/semver.cpp
+  src/package/manifest.cpp
   src/agent/agent_catalog.cpp
   # 自定义 Agent 单阶段 3:AgentProfileResolver——父上下文 + Definition ->
   # Resolved AgentProfile 的唯一合并权威(AgentTool 派发与 Workflow 绑定共用)。
@@ -744,7 +755,9 @@ add_library(lubancode_engine STATIC
   src/trajectory/canonical_json.cpp
   src/trajectory/schema.cpp
   src/trajectory/blob_store.cpp
+  src/trajectory/cas_store.cpp
   src/trajectory/journal.cpp
+  src/trajectory/session_recovery_view.cpp
   src/trajectory/recorder.cpp
   src/trajectory/directory.cpp
   # P0-1b:session 独占锁(PID+起始 token 身份核)、SessionManager 与
@@ -807,6 +820,7 @@ add_library(lubancode_engine STATIC
   # 带来源链的 resume(历史索引/模型输入/执行状态三恢复)。
   # session_switch:新会话写 v3 的最小开关(默认关,接线点清单见头注)。
   src/trajectory/v3/reader.cpp
+  src/trajectory/v3/child_adoption.cpp
   src/trajectory/v3/session_switch.cpp
   # Token 账本与使用洞察单 A0(合同与夹具):accounting 是 usage 投影与
   # 计价的纯领域层;insights 是摘要/finding/报告合同与脱敏。都不 include
@@ -825,12 +839,248 @@ add_library(lubancode_engine STATIC
   # (延迟工具索引/模型目录指令/魂)收进同一次解析,产 AssembledPrompt{text,
   # manifest}。
   src/agent/resolved_prompt_builder.cpp
+  # 通用 Config 保留渠道纯数据与严格解析；网络/账号/Gateway 归 CLI 宿主。
+  src/channel/types.cpp
+  src/channel/channel_config.cpp
+  src/insights/finding.cpp
+  src/insights/session_summary.cpp
+  src/insights/report_model.cpp
+  src/insights/redaction.cpp
+  # Token 账本单 A3(/prompt audit):static/runtime 两层审法 + runtime 读侧
+  # 装配(纯规则零 IO;CollectRuntimeRequests 只读 Journal)。正文不进
+  # 任何输出,证据只落 hash/token/计数/段名/事件引用。
+  src/insights/prompt_auditor.cpp
+  # Token 账本单 A4(Session Analyzer):验账闸、摩擦归类、功能信号、
+  # 摘要派生仓(原子写/stale 判定)与一间 session 的分析管线。坏账整间
+  # 排除且理由可见;同一封口 session 重算字节相同。
+  src/insights/integrity_gate.cpp
+  # T14(Insights 接入 Session v3):验过 v3 树的领域读模型——请求事实
+  # (prepared 引用/视图指纹/usage owner)、工具折叠快照与失败明细;
+  # prompt 审计/摩擦分类/会话分析只吃这份,不再各扫 JSONL。
+  src/insights/v3_facts.cpp
+  src/insights/friction_classifier.cpp
+  src/insights/feature_signal.cpp
+  src/insights/derived_store.cpp
+  src/insights/session_analyzer.cpp
+  # Token 账本单 A5(/insights):摘要聚合(七节材料)、生成管线
+  # (discover/verify/增量判定/汇总)、报告仓(原子写 + latest 替换 +
+  # derived-only clean)与自包含 HTML renderer(CSP/转义/筛选)。
+  # 纯领域件,不 include app/cli。
+  src/insights/workspace_aggregator.cpp
+  src/insights/insights_generate.cpp
+  src/insights/report_store.cpp
+  src/insights/html_renderer.cpp
+  src/insights/insights_health.cpp
+  # 端云协同可观测架构与 Telemetry 插件设计单 T0(合同与离线投影):
+  # features.telemetry Activation、trace/span/resource/data class 合同、
+  # 确定性 trace/span id、纯 TelemetryProjector(只吃 Journal,不联网)、
+  # D1 allowlist-first Redactor、离线 OTLP/HTTP JSON encoder。纯库,不
+  # include app/cli/exporter/云端 SDK;只读 trajectory 合同与 platform
+  # 抽象(依赖方向见该单 §25.2)。
+  src/telemetry/activation.cpp
+  src/telemetry/contract.cpp
+  src/telemetry/identity.cpp
+  src/telemetry/redactor.cpp
+  src/telemetry/projector.cpp
+  # T07 / V3-GAP-02:session v3 账投影(Session/turn/request/tool/compact/
+  # Hook → span 映射;usage owner 与 T06 同源)。
+  src/telemetry/projector_v3.cpp
+  src/telemetry/otlp_json.cpp
+  # T1(本地 Service 与 Spool):committed wake 窄口、cursor 与 catch-up、
+  # 有界优先级队列、segmented spool 与崩溃恢复、TelemetryService 生命周期
+  # 与 /telemetry、/doctor telemetry 本地面。仍是纯本地件:T2 才有 exporter。
+  src/telemetry/cursor.cpp
+  src/telemetry/batch_queue.cpp
+  src/telemetry/spool.cpp
+  src/telemetry/service.cpp
+  # T2(OTLP/HTTP 出口):单次 OTLP/HTTP JSON POST(cpr 底座)、§19.2/§19.3
+  # 重试/退避/partial success 分型、§8.4 consent 与回环/公网分界、
+  # §15.4 凭证 seam(装配层适配 runtime::SecretResolver)。
+  src/telemetry/exporter.cpp
+)
+target_include_directories(lubancode_engine PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(lubancode_engine PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
+if(WIN32)
+  # ws2_32:net/http_transport 的 getaddrinfo 要 Winsock(静态库的 PRIVATE
+  # 系统依赖会以 link-only 形态传给消费方)。渠道 TLS 的 crypt32 留在宿主。
+  target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs ws2_32)
+endif()
+target_link_libraries(lubancode_engine PRIVATE lubancode_lua)
+# yaml-cpp 走 PUBLIC:engine 的头(memory/front matter)把 yaml 头递给
+# 消费方,拆 target 后 core/workflow 那层也直接吃,PRIVATE 会断 include 路径。
+target_link_libraries(lubancode_engine PUBLIC yaml-cpp::yaml-cpp)
+target_compile_features(lubancode_engine PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_engine PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
+if(MSVC)
+  target_compile_options(lubancode_engine PRIVATE /MP)
+endif()
+
+# runtime:事件合同 + 会话/轮次/命令编排。不认终端(守门见
+# test_app_boundary_gate.cpp),链 engine(agent/config/tools 的内核件)。
+add_library(lubancode_runtime STATIC
+  # SDK-1:后端与基础工具共用装配,无宿主/终端依赖。
+  src/runtime/assembly/backend.cpp
+  src/runtime/assembly/builtin_tools.cpp
+  src/runtime/assembly/mcp.cpp
+  src/runtime/assembly/session_resources.cpp
+  src/runtime/execution_owner.cpp
+  src/runtime/session_execution.cpp
+  # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
+  src/runtime/runtime_contract.cpp
+  # 会话管理器单第六步:会话查询/搬删的 runtime 侧命令服务(合同消费方)。
+  src/runtime/session_command_service.cpp
+  # 第三步:TurnRuntime 纯逻辑核(权限/hooks/usage/取消),cli/app 零依赖。
+  # 第五步:TurnItem 领域条目 + 中立 diff 行表(diff 计算移出 ToolDisplay)。
+  src/runtime/turn_item.cpp
+  # 终端回合视觉收束单:TurnView 中立视图模型(turn/step/batch/item 四层
+  # + metrics + turn 活动态),零 cli 依赖,枚举序列化同钉。
+  src/runtime/turn_view.cpp
+  # 第六步:SessionRuntime(会话存档账/权限账/thread 身份/事件接线)。
+  src/runtime/session_runtime.cpp
+  # AppServer 接入 Session v3 第一棒:三端共用的会话服务入口(开张/
+  # 恢复/输入接纳与操作去重/域命令/收口;§十.1 统一服务入口)。
+  src/runtime/session_service.cpp
+  # 第七步:CommandService(typed API:/model、/resume、审批回答)。
+  src/runtime/command_service.cpp
+  # plugins 本地 Tool 运行时(冻结合同 + process v1):manifest 强校验、
+  # 进程协议帧、无 shell 进程执行、工具装配层。
+  src/runtime/plugin_contract.cpp
+  src/runtime/plugin_process.cpp
+  src/runtime/plugin_tool.cpp
+  # plugins 第 4 步:内嵌 Lua 进 RuntimeManager(三道软墙)。
+  src/runtime/plugin_lua.cpp
+  # Lua 受控 HTTP 与 Secret 宿主能力(阶段 0+1):错误码总表、URL 规范化、
+  # transport seam 与 fake;SecretValue RAII、窄 dotenv parser、env
+  # provider、数据目录与打码器。不接真网(阶段 2)、不碰 Lua state(阶段 3)。
+  src/runtime/plugin_http.cpp
+  src/runtime/secret_resolver.cpp
+  # 同单阶段 3:Lua Host API(luban.http/luban.secrets)与动态调用上下文
+  # (LuaCallContext RAII、SecretRef userdata、取消接线、manifest-backed
+  # state 的加载/对账/调用机制)。挂载接 manifest 是阶段 4;中立传输底座
+  # 在 engine(src/net/http_transport.cpp,阶段 2 已落)。
+  src/runtime/plugin_lua_host.cpp
+  # 同单阶段 4:manifest-backed Lua 的挂载 owner(ManifestLuaRuntime)——
+  # v2 manifest 接 LuaHostState、SecretResolver 与受控传输,standalone 扫描
+  # 挂载 + Package 事务成品接管 + 模型侧 adapter。裸 .lua 不经这里。
+  src/runtime/plugin_lua_manifest.cpp
+  # 逐枚追踪单:canonical 工具事件的装配层分线器(持久栅栏/UI 投影/录制)。
+  src/runtime/tool_trace_hub.cpp
+  # P0-2 轨迹单写口:hub 的轨迹抽象口 + 会话账本/轮次边界桥(flag 门控,
+  # §十五接线。trajectory 纯库在 engine;这层是 runtime 适配)。AR-12 起
+  # 桥类按类边界分件:主轮/旁路/子代理/workflow 四桥各自成件,账本主体与
+  # 装配留 trajectory_session.cpp(公共面仍经 trajectory_session.hpp 聚合)。
+  src/runtime/trajectory_session.cpp
+  src/runtime/trajectory_turn_bridge.cpp
+  src/runtime/trajectory_bypass_bridge.cpp
+  src/runtime/trajectory_subagent_bridge.cpp
+  src/runtime/trajectory_workflow_bridge.cpp
+  # 异步工具单 P2:批次闸门/投递规划/能力闸/会话级总成——AgentLoop 的
+  # 协议模式裁决 seam 实现 + ResultDeliveryPlanner + ProviderToolContract
+  # Validator + AsyncToolRuntime(五宿主接线共用,不各造)。
+  src/runtime/provider_tool_contract.cpp
+  src/runtime/result_delivery_planner.cpp
+  src/runtime/async_tool_runtime.cpp
+  src/runtime/scoped_turn_bindings.cpp
+  # Soul 会话冻结单 P0:SessionSoulSnapshot(会话魂双状态的快照侧)+ 会话
+  # 目录的快照 blob 读写。纯数据与纯函数,app/runtime 共用。
+  src/runtime/session_soul.cpp
+  # 轨迹 v3 P3 显示侧第一棒:HistoryTimeline → 显示 DTO 的 runtime 投影
+  # (逐消息上下文状态标志 + CompactMarkerView 持久 token 字段);cli 与
+  # app_server 都从这层拿,显示层不直接碰 reader.hpp 的 C++ 结构。
+  src/runtime/trajectory_history_view.cpp
+  # 轨迹 v3 compact 运行时接线(compact 全链单):把已落库的 v3
+  # CompactSession 状态机接进会话运行时——manual/auto 触发、范围冻结、
+  # 发送前容量门禁与 §4.64 整轮回退(compact.range.retreated)、压缩请求
+  # 组装、模型采样(抽象 client)、必需内容校验、applied 原子提交。只依赖
+  # trajectory/v3 库,不认 api::Backend。
+  src/runtime/v3_compact_runtime.cpp
+  src/runtime/action_summary.cpp
+  # /goal 持久目标单:领域类型/状态机转换表/objective 计数/序列化。
+  src/runtime/goal_types.cpp
+  # /goal 持久目标单:目标状态机唯一写口(命令面/预算闸/防空转/硬门槛/回放)。
+  src/runtime/goal_coordinator.cpp
+  # /goal 持久目标单:独立无工具的终点判定模型调用(strict schema/一次 repair)。
+  src/runtime/goal_evaluator.cpp
+  # /goal 持久目标单:每轮喂执行模型的动态 GoalContext(纯函数)。
+  src/runtime/goal_context.cpp
+  # /goal 持久目标单:compact 守恒的 goal snapshot(拼装/校验/hash)。
+  src/runtime/goal_compact.cpp
+  # /goal 持久目标单:ToolTraceHub 事件 -> GoalEvidence 的采证适配器(纯函数)。
+  src/runtime/goal_evidence.cpp
+  # 轨迹 v3 §4.67 Goal 模式 G0:GoalService——goal 状态唯一持久写口
+  # (不可变快照 + state.goal.applied 提交锚 + CAS + 只读投影)。
+  src/runtime/goal_service.cpp
+  # 轨迹 v3 §4.67 Goal 模式 G2:验收收口编排(采证/checkpoint 入账 ->
+  # 排评估 -> 判词门槛 -> 采用与续排意图同一快照提交)。
+  src/runtime/goal_evaluation_flow.cpp
+  # /loop 会话定时循环单:领域类型/状态机转换表/interval 解析/错过合并账。
+  src/runtime/loop_types.cpp
+  # /loop 会话定时循环单:内存 scheduler(timer 只发 wake/泵取件/退避/expiry)。
+  # 骨架拆解反弹·问题 3:loop 单拍执行的调度状态机(自 app/wirings 下沉,
+  # 通知走回调,零终端)。
+  src/runtime/loop_tick_driver.cpp
+  # /loop 会话定时循环单:空闲唤醒多路总口(替单枚 SetIdleWakeHook)。
+  src/runtime/idle_wake.cpp
+  # loop 单:goal 单立的会话工作分流合同在这里实装(公平泵 PumpNextWork)。
+  src/runtime/session_work_scheduler.cpp
+  # 远端首批组件：节点本地结果同步策略与稳定预览，尚未接远端服务。
+  src/remote/result_sync.cpp
+  # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
+  # 归本库;engine 不反向引 runtime 的链接纪律见 turn_runtime.cpp 头注)。
+  src/runtime/middleware_assembly.cpp
+  # Host/service drain coordination belongs above the engine's V3 event sink.
+  src/runtime/middleware_session_binding.cpp
+  # LuaHook 单 P1-C:hook 宿主能力束(受控文件/插件状态/context 候选/
+  # 结构化日志 + 统一工具执行服务/子执行 v3 记账/递归治理;§五/§5.1)。
+  # Lua 边界的形状转换在 plugin_lua_host.cpp,这里是宿主执行件。
+  src/runtime/hook_host_services.cpp
+  # LuaHook 单 P1-D:hook 包校验与试跑引擎(§8.2 静态检查 + fixtures
+  # fake 档;`lubancode hook validate/test` 的芯,CLI 只打印)。
+  src/runtime/hook_package_check.cpp
+  # loop 单遗留(骨架):scheduled prompt -> 安全动作的 catalog 与 resolver。
+  src/runtime/scheduled_action.cpp
+  # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
+  # 合同与纯函数(ModePolicy 硬闸、Plan shell 分类、<proposed_plan> 扫描)。
+  # 骨架拆解批五先行半批:预算闸(三尺 + 停因分型 + 连撞计数)——三外壳
+  # (loop/goal/workflow)各声明自己的尺,机制只此一份。
+  src/runtime/budget_gate.cpp
+  # 骨架拆解批五先行半批:重试退避(固定/指数/阶梯 + 上限 + 抖动档 +
+  # 可取消等待)——loop 的 5s/15s 与 workflow 的节点级指数同走这枚。
+  # (监督器三件已挪 engine——见 engine 源列表注:断 engine→runtime
+  # 反向引用,GCC 单遍链接 undefined。)
+  # 统一回放接口只收信封、次序与坏行恢复规矩;loop/goal/workflow
+  # 各自保留域编解码与折叠口。
+  src/runtime/replay.cpp
+)
+target_include_directories(lubancode_runtime PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(lubancode_runtime PUBLIC lubancode_engine)
+# Lua 受控 HTTP 单·阶段 3:plugin_lua_host.cpp 直碰 lua C API。engine 是
+# PRIVATE 链 lua 的(usage requirement 不外传),这里补一份——只给本 target
+# 的编译用 include 路径与符号,不往 core/app 递。
+target_link_libraries(lubancode_runtime PRIVATE lubancode_lua)
+target_compile_features(lubancode_runtime PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_runtime PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
+if(MSVC)
+  target_compile_options(lubancode_runtime PRIVATE /MP)
+endif()
+
+if(LUBANCODE_BUILD_CLI)
+# Channel/Gateway implementations are host services. Their sole source owners
+# depend on the neutral engine/runtime; neither Core archive links back here.
+add_library(lubancode_channel_host STATIC
   # 多渠道消息接入与常驻 ChannelPlugin 单阶段 1:纯合同与假 sidecar。
   # types(ChannelInboundEvent/MessageProvenance/ReplyAction)、
   # channel.yaml schema 1 parser、Bridge v1 帧编解码与双向 router 骨架。
   # 唯一真源 docs/architecture/channels/*;纯库,不 include app/cli/
   # runtime/agent/package(package 反过来吃它,见 package/component.cpp)。
-  src/channel/types.cpp
   src/channel/manifest.cpp
   src/channel/frame.cpp
   src/channel/bridge_protocol.cpp
@@ -845,7 +1095,6 @@ add_library(lubancode_engine STATIC
   src/channel/digest.cpp
   src/channel/account_state.cpp
   src/channel/account_lock.cpp
-  src/channel/channel_config.cpp
   src/channel/ingress_store.cpp
   src/channel/inbox.cpp
   src/channel/pairing.cpp
@@ -951,61 +1200,68 @@ add_library(lubancode_engine STATIC
   # 与 status.cpp 读 channel 账同款边界)。
   src/gateway/service.cpp
   src/gateway/doctor.cpp
-  src/insights/finding.cpp
-  src/insights/session_summary.cpp
-  src/insights/report_model.cpp
-  src/insights/redaction.cpp
-  # Token 账本单 A3(/prompt audit):static/runtime 两层审法 + runtime 读侧
-  # 装配(纯规则零 IO;CollectRuntimeRequests 只读 Journal)。正文不进
-  # 任何输出,证据只落 hash/token/计数/段名/事件引用。
-  src/insights/prompt_auditor.cpp
-  # Token 账本单 A4(Session Analyzer):验账闸、摩擦归类、功能信号、
-  # 摘要派生仓(原子写/stale 判定)与一间 session 的分析管线。坏账整间
-  # 排除且理由可见;同一封口 session 重算字节相同。
-  src/insights/integrity_gate.cpp
-  # T14(Insights 接入 Session v3):验过 v3 树的领域读模型——请求事实
-  # (prepared 引用/视图指纹/usage owner)、工具折叠快照与失败明细;
-  # prompt 审计/摩擦分类/会话分析只吃这份,不再各扫 JSONL。
-  src/insights/v3_facts.cpp
-  src/insights/friction_classifier.cpp
-  src/insights/feature_signal.cpp
-  src/insights/derived_store.cpp
-  src/insights/session_analyzer.cpp
-  # Token 账本单 A5(/insights):摘要聚合(七节材料)、生成管线
-  # (discover/verify/增量判定/汇总)、报告仓(原子写 + latest 替换 +
-  # derived-only clean)与自包含 HTML renderer(CSP/转义/筛选)。
-  # 纯领域件,不 include app/cli。
-  src/insights/workspace_aggregator.cpp
-  src/insights/insights_generate.cpp
-  src/insights/report_store.cpp
-  src/insights/html_renderer.cpp
-  src/insights/insights_health.cpp
-  # 端云协同可观测架构与 Telemetry 插件设计单 T0(合同与离线投影):
-  # features.telemetry Activation、trace/span/resource/data class 合同、
-  # 确定性 trace/span id、纯 TelemetryProjector(只吃 Journal,不联网)、
-  # D1 allowlist-first Redactor、离线 OTLP/HTTP JSON encoder。纯库,不
-  # include app/cli/exporter/云端 SDK;只读 trajectory 合同与 platform
-  # 抽象(依赖方向见该单 §25.2)。
-  src/telemetry/activation.cpp
-  src/telemetry/contract.cpp
-  src/telemetry/identity.cpp
-  src/telemetry/redactor.cpp
-  src/telemetry/projector.cpp
-  # T07 / V3-GAP-02:session v3 账投影(Session/turn/request/tool/compact/
-  # Hook → span 映射;usage owner 与 T06 同源)。
-  src/telemetry/projector_v3.cpp
-  src/telemetry/otlp_json.cpp
-  # T1(本地 Service 与 Spool):committed wake 窄口、cursor 与 catch-up、
-  # 有界优先级队列、segmented spool 与崩溃恢复、TelemetryService 生命周期
-  # 与 /telemetry、/doctor telemetry 本地面。仍是纯本地件:T2 才有 exporter。
-  src/telemetry/cursor.cpp
-  src/telemetry/batch_queue.cpp
-  src/telemetry/spool.cpp
-  src/telemetry/service.cpp
-  # T2(OTLP/HTTP 出口):单次 OTLP/HTTP JSON POST(cpr 底座)、§19.2/§19.3
-  # 重试/退避/partial success 分型、§8.4 consent 与回环/公网分界、
-  # §15.4 凭证 seam(装配层适配 runtime::SecretResolver)。
-  src/telemetry/exporter.cpp
+)
+target_include_directories(lubancode_channel_host PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(lubancode_channel_host PUBLIC lubancode_engine PRIVATE mbedtls)
+if(WIN32)
+  # transport/tls 的 Windows 信任根(系统证书店导出 + SSL 策略校验)。
+  target_link_libraries(lubancode_channel_host PRIVATE ws2_32 crypt32)
+endif()
+target_compile_features(lubancode_channel_host PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_channel_host PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
+if(MSVC)
+  target_compile_options(lubancode_channel_host PRIVATE /MP)
+endif()
+
+add_library(lubancode_channel_runtime STATIC
+  # 多渠道消息接入单阶段 3:TurnIngress(回合入口统一合同,含渠道事件
+  # 折算)、ChannelSessionHost(headless 单飞/限额/每会话 FIFO)、
+  # AgentChannelEngine(SessionRuntime+Agent+Run 的渠道装配)。
+  src/runtime/turn_ingress.cpp
+  src/runtime/channel_session_host.cpp
+  src/runtime/agent_channel_engine.cpp
+  # 常驻总装 V1:共用 headless 装配(从渠道引擎/SessionService 提炼,核齐
+  # 工具栅栏/预算/取消链/reply selection)与 Gateway 有界主泵总装。
+  src/runtime/headless_executor.cpp
+  src/runtime/automation_pump.cpp
+  # QQ 接入单 Q2:渠道 work 泵(V3 与 outbox 总装——ingress/路由/绑定/
+  # 执行/reply selection/outbox/投递的次序链与恢复裁决)。
+  src/runtime/channel_work_pump.cpp
+  # QQ 接入单 Q6:渠道远端审批 broker(平台中立——pending 表/随机 opaque
+  # token/操作者身份复核/超时默认拒绝/幂等,复用 runtime 四态合同)。
+  src/runtime/channel_interaction_broker.cpp
+  # QQ 接入单 Q5:聊天侧任务桥(渠道会话的模型经 create/list/cancel_
+  # reminder 落 automation 域命令;归属闸/幂等键/渠道上下文冻结)。
+  src/runtime/channel_automation.cpp
+  # QQ 接入单 Q4:渠道附件接纳服务(白名单/净化/下载落仓/有界预览)。
+  src/runtime/channel_media_service.cpp
+  src/runtime/channel_file_delivery.cpp
+  src/runtime/headless_progress.cpp
+)
+target_include_directories(lubancode_channel_runtime PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_BINARY_DIR}/generated)
+target_link_libraries(lubancode_channel_runtime PUBLIC
+  lubancode_runtime lubancode_channel_host)
+target_compile_features(lubancode_channel_runtime PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_channel_runtime PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
+if(MSVC)
+  target_compile_options(lubancode_channel_runtime PRIVATE /MP)
+endif()
+
+# Installation updates belong to the host. Keep this target out of the SDK's
+# engine/runtime dependency graph even in a combined CLI + SDK build.
+add_library(lubancode_updater STATIC
+  # Release discovery and version parsing are CLI update services, not SDK
+  # session services. Keep their sole implementation beside the existing host
+  # updater; engine/runtime must never link back to this target.
+  src/config/update_checker.cpp
   # 更新助手 C++ 化·批一第①单(契约层移植):四方契约(generate_manifest.py/
   # install_plan.py/install.ps1/此处)的 C++ 侧——包内相对路径筛查、大小写
   # 折叠键、归档成员名筛查、用户数据路径判定(paths.cpp)与 manifest.json
@@ -1062,210 +1318,13 @@ add_library(lubancode_engine STATIC
   src/updater/install_apply.cpp
   src/updater/flat_handover.cpp
 )
-target_include_directories(lubancode_engine PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/src
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
-  ${CMAKE_BINARY_DIR}/generated)
-target_link_libraries(lubancode_engine PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
-if(WIN32)
-  # ws2_32:net/http_transport 的 getaddrinfo 要 Winsock(静态库的 PRIVATE
-  # 系统依赖会以 link-only 形态传给消费方);crypt32:transport/tls 的 Windows
-  # 信任根(系统证书店导出 + SSL 策略校验,连接状态单 §四)。
-  target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs ws2_32 crypt32)
-endif()
-target_link_libraries(lubancode_engine PRIVATE lubancode_lua)
-# mbedTLS(QQ Q1):TLS 底座。PRIVATE——qq/ 内部件,头不外递,消费方零感知。
-target_link_libraries(lubancode_engine PRIVATE mbedtls)
-# yaml-cpp 走 PUBLIC:engine 的头(memory/front matter)把 yaml 头递给
-# 消费方,拆 target 后 core/workflow 那层也直接吃,PRIVATE 会断 include 路径。
-target_link_libraries(lubancode_engine PUBLIC yaml-cpp::yaml-cpp)
-# miniz(更新器批一③):zip 读写底座,批二解包层才真用上;本单只把链接
-# 关系立起来让引擎目标编译通过。PRIVATE——更新器将属 engine 内部件,
-# 头不外递,消费方零感知(同 mbedtls 的挂法)。
-target_link_libraries(lubancode_engine PRIVATE miniz)
-target_compile_features(lubancode_engine PUBLIC cxx_std_23)
-target_precompile_headers(lubancode_engine PRIVATE
+target_link_libraries(lubancode_updater PRIVATE lubancode_engine miniz)
+target_compile_features(lubancode_updater PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_updater PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
 if(MSVC)
-  target_compile_options(lubancode_engine PRIVATE /MP)
+  target_compile_options(lubancode_updater PRIVATE /MP)
 endif()
-
-# runtime:事件合同 + 会话/轮次/命令编排。不认终端(守门见
-# test_app_boundary_gate.cpp),链 engine(agent/config/tools 的内核件)。
-add_library(lubancode_runtime STATIC
-  # SDK-1:后端与基础工具共用装配,无宿主/终端依赖。
-  src/runtime/assembly/backend.cpp
-  src/runtime/assembly/builtin_tools.cpp
-  src/runtime/assembly/mcp.cpp
-  src/runtime/assembly/session_resources.cpp
-  src/runtime/session_execution.cpp
-  # 显示系统剥离单第一步:runtime 合同(纯类型 + 序列化,零 cli/app 依赖)。
-  src/runtime/runtime_contract.cpp
-  # 会话管理器单第六步:会话查询/搬删的 runtime 侧命令服务(合同消费方)。
-  src/runtime/session_command_service.cpp
-  # 第三步:TurnRuntime 纯逻辑核(权限/hooks/usage/取消),cli/app 零依赖。
-  # 第五步:TurnItem 领域条目 + 中立 diff 行表(diff 计算移出 ToolDisplay)。
-  src/runtime/turn_item.cpp
-  # 终端回合视觉收束单:TurnView 中立视图模型(turn/step/batch/item 四层
-  # + metrics + turn 活动态),零 cli 依赖,枚举序列化同钉。
-  src/runtime/turn_view.cpp
-  # 第六步:SessionRuntime(会话存档账/权限账/thread 身份/事件接线)。
-  src/runtime/session_runtime.cpp
-  # AppServer 接入 Session v3 第一棒:三端共用的会话服务入口(开张/
-  # 恢复/输入接纳与操作去重/域命令/收口;§十.1 统一服务入口)。
-  src/runtime/session_service.cpp
-  # 第七步:CommandService(typed API:/model、/resume、审批回答)。
-  src/runtime/command_service.cpp
-  # plugins 本地 Tool 运行时(冻结合同 + process v1):manifest 强校验、
-  # 进程协议帧、无 shell 进程执行、工具装配层。
-  src/runtime/plugin_contract.cpp
-  src/runtime/plugin_process.cpp
-  src/runtime/plugin_tool.cpp
-  # plugins 第 4 步:内嵌 Lua 进 RuntimeManager(三道软墙)。
-  src/runtime/plugin_lua.cpp
-  # Lua 受控 HTTP 与 Secret 宿主能力(阶段 0+1):错误码总表、URL 规范化、
-  # transport seam 与 fake;SecretValue RAII、窄 dotenv parser、env
-  # provider、数据目录与打码器。不接真网(阶段 2)、不碰 Lua state(阶段 3)。
-  src/runtime/plugin_http.cpp
-  src/runtime/secret_resolver.cpp
-  # 同单阶段 3:Lua Host API(luban.http/luban.secrets)与动态调用上下文
-  # (LuaCallContext RAII、SecretRef userdata、取消接线、manifest-backed
-  # state 的加载/对账/调用机制)。挂载接 manifest 是阶段 4;中立传输底座
-  # 在 engine(src/net/http_transport.cpp,阶段 2 已落)。
-  src/runtime/plugin_lua_host.cpp
-  # 同单阶段 4:manifest-backed Lua 的挂载 owner(ManifestLuaRuntime)——
-  # v2 manifest 接 LuaHostState、SecretResolver 与受控传输,standalone 扫描
-  # 挂载 + Package 事务成品接管 + 模型侧 adapter。裸 .lua 不经这里。
-  src/runtime/plugin_lua_manifest.cpp
-  # 逐枚追踪单:canonical 工具事件的装配层分线器(持久栅栏/UI 投影/录制)。
-  src/runtime/tool_trace_hub.cpp
-  # P0-2 轨迹单写口:hub 的轨迹抽象口 + 会话账本/轮次边界桥(flag 门控,
-  # §十五接线。trajectory 纯库在 engine;这层是 runtime 适配)。AR-12 起
-  # 桥类按类边界分件:主轮/旁路/子代理/workflow 四桥各自成件,账本主体与
-  # 装配留 trajectory_session.cpp(公共面仍经 trajectory_session.hpp 聚合)。
-  src/runtime/trajectory_session.cpp
-  src/runtime/trajectory_turn_bridge.cpp
-  src/runtime/trajectory_bypass_bridge.cpp
-  src/runtime/trajectory_subagent_bridge.cpp
-  src/runtime/trajectory_workflow_bridge.cpp
-  # 异步工具单 P2:批次闸门/投递规划/能力闸/会话级总成——AgentLoop 的
-  # 协议模式裁决 seam 实现 + ResultDeliveryPlanner + ProviderToolContract
-  # Validator + AsyncToolRuntime(五宿主接线共用,不各造)。
-  src/runtime/provider_tool_contract.cpp
-  src/runtime/result_delivery_planner.cpp
-  src/runtime/async_tool_runtime.cpp
-  src/runtime/scoped_turn_bindings.cpp
-  # Soul 会话冻结单 P0:SessionSoulSnapshot(会话魂双状态的快照侧)+ 会话
-  # 目录的快照 blob 读写。纯数据与纯函数,app/runtime 共用。
-  src/runtime/session_soul.cpp
-  # 轨迹 v3 P3 显示侧第一棒:HistoryTimeline → 显示 DTO 的 runtime 投影
-  # (逐消息上下文状态标志 + CompactMarkerView 持久 token 字段);cli 与
-  # app_server 都从这层拿,显示层不直接碰 reader.hpp 的 C++ 结构。
-  src/runtime/trajectory_history_view.cpp
-  # 轨迹 v3 compact 运行时接线(compact 全链单):把已落库的 v3
-  # CompactSession 状态机接进会话运行时——manual/auto 触发、范围冻结、
-  # 发送前容量门禁与 §4.64 整轮回退(compact.range.retreated)、压缩请求
-  # 组装、模型采样(抽象 client)、必需内容校验、applied 原子提交。只依赖
-  # trajectory/v3 库,不认 api::Backend。
-  src/runtime/v3_compact_runtime.cpp
-  src/runtime/action_summary.cpp
-  # /goal 持久目标单:领域类型/状态机转换表/objective 计数/序列化。
-  src/runtime/goal_types.cpp
-  # /goal 持久目标单:目标状态机唯一写口(命令面/预算闸/防空转/硬门槛/回放)。
-  src/runtime/goal_coordinator.cpp
-  # /goal 持久目标单:独立无工具的终点判定模型调用(strict schema/一次 repair)。
-  src/runtime/goal_evaluator.cpp
-  # /goal 持久目标单:每轮喂执行模型的动态 GoalContext(纯函数)。
-  src/runtime/goal_context.cpp
-  # /goal 持久目标单:compact 守恒的 goal snapshot(拼装/校验/hash)。
-  src/runtime/goal_compact.cpp
-  # /goal 持久目标单:ToolTraceHub 事件 -> GoalEvidence 的采证适配器(纯函数)。
-  src/runtime/goal_evidence.cpp
-  # 轨迹 v3 §4.67 Goal 模式 G0:GoalService——goal 状态唯一持久写口
-  # (不可变快照 + state.goal.applied 提交锚 + CAS + 只读投影)。
-  src/runtime/goal_service.cpp
-  # 轨迹 v3 §4.67 Goal 模式 G2:验收收口编排(采证/checkpoint 入账 ->
-  # 排评估 -> 判词门槛 -> 采用与续排意图同一快照提交)。
-  src/runtime/goal_evaluation_flow.cpp
-  # /loop 会话定时循环单:领域类型/状态机转换表/interval 解析/错过合并账。
-  src/runtime/loop_types.cpp
-  # /loop 会话定时循环单:内存 scheduler(timer 只发 wake/泵取件/退避/expiry)。
-  # 骨架拆解反弹·问题 3:loop 单拍执行的调度状态机(自 app/wirings 下沉,
-  # 通知走回调,零终端)。
-  src/runtime/loop_tick_driver.cpp
-  # /loop 会话定时循环单:空闲唤醒多路总口(替单枚 SetIdleWakeHook)。
-  src/runtime/idle_wake.cpp
-  # loop 单:goal 单立的会话工作分流合同在这里实装(公平泵 PumpNextWork)。
-  src/runtime/session_work_scheduler.cpp
-  # 多渠道消息接入单阶段 3:TurnIngress(回合入口统一合同,含渠道事件
-  # 折算)、ChannelSessionHost(headless 单飞/限额/每会话 FIFO)、
-  # AgentChannelEngine(SessionRuntime+Agent+Run 的渠道装配)。
-  src/runtime/turn_ingress.cpp
-  src/runtime/channel_session_host.cpp
-  src/runtime/agent_channel_engine.cpp
-  # 常驻总装 V1:共用 headless 装配(从渠道引擎/SessionService 提炼,核齐
-  # 工具栅栏/预算/取消链/reply selection)与 Gateway 有界主泵总装。
-  src/runtime/headless_executor.cpp
-  src/runtime/automation_pump.cpp
-  # QQ 接入单 Q2:渠道 work 泵(V3 与 outbox 总装——ingress/路由/绑定/
-  # 执行/reply selection/outbox/投递的次序链与恢复裁决)。
-  src/runtime/channel_work_pump.cpp
-  # QQ 接入单 Q6:渠道远端审批 broker(平台中立——pending 表/随机 opaque
-  # token/操作者身份复核/超时默认拒绝/幂等,复用 runtime 四态合同)。
-  src/runtime/channel_interaction_broker.cpp
-  # QQ 接入单 Q5:聊天侧任务桥(渠道会话的模型经 create/list/cancel_
-  # reminder 落 automation 域命令;归属闸/幂等键/渠道上下文冻结)。
-  src/runtime/channel_automation.cpp
-  # QQ 接入单 Q4:渠道附件接纳服务(白名单/净化/下载落仓/有界预览)。
-  src/runtime/channel_media_service.cpp
-  src/runtime/channel_file_delivery.cpp
-  src/runtime/headless_progress.cpp
-  # 远端首批组件：节点本地结果同步策略与稳定预览，尚未接远端服务。
-  src/remote/result_sync.cpp
-  # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
-  # 归本库;engine 不反向引 runtime 的链接纪律见 turn_runtime.cpp 头注)。
-  src/runtime/middleware_assembly.cpp
-  # Host/service drain coordination belongs above the engine's V3 event sink.
-  src/runtime/middleware_session_binding.cpp
-  # LuaHook 单 P1-C:hook 宿主能力束(受控文件/插件状态/context 候选/
-  # 结构化日志 + 统一工具执行服务/子执行 v3 记账/递归治理;§五/§5.1)。
-  # Lua 边界的形状转换在 plugin_lua_host.cpp,这里是宿主执行件。
-  src/runtime/hook_host_services.cpp
-  # LuaHook 单 P1-D:hook 包校验与试跑引擎(§8.2 静态检查 + fixtures
-  # fake 档;`lubancode hook validate/test` 的芯,CLI 只打印)。
-  src/runtime/hook_package_check.cpp
-  # loop 单遗留(骨架):scheduled prompt -> 安全动作的 catalog 与 resolver。
-  src/runtime/scheduled_action.cpp
-  # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
-  # 合同与纯函数(ModePolicy 硬闸、Plan shell 分类、<proposed_plan> 扫描)。
-  # 骨架拆解批五先行半批:预算闸(三尺 + 停因分型 + 连撞计数)——三外壳
-  # (loop/goal/workflow)各声明自己的尺,机制只此一份。
-  src/runtime/budget_gate.cpp
-  # 骨架拆解批五先行半批:重试退避(固定/指数/阶梯 + 上限 + 抖动档 +
-  # 可取消等待)——loop 的 5s/15s 与 workflow 的节点级指数同走这枚。
-  # (监督器三件已挪 engine——见 engine 源列表注:断 engine→runtime
-  # 反向引用,GCC 单遍链接 undefined。)
-  # 统一回放接口只收信封、次序与坏行恢复规矩;loop/goal/workflow
-  # 各自保留域编解码与折叠口。
-  src/runtime/replay.cpp
-)
-target_include_directories(lubancode_runtime PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/src
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
-  ${CMAKE_BINARY_DIR}/generated)
-target_link_libraries(lubancode_runtime PUBLIC lubancode_engine)
-# Lua 受控 HTTP 单·阶段 3:plugin_lua_host.cpp 直碰 lua C API。engine 是
-# PRIVATE 链 lua 的(usage requirement 不外传),这里补一份——只给本 target
-# 的编译用 include 路径与符号,不往 core/app 递。
-target_link_libraries(lubancode_runtime PRIVATE lubancode_lua)
-target_compile_features(lubancode_runtime PUBLIC cxx_std_23)
-target_precompile_headers(lubancode_runtime PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
-if(MSVC)
-  target_compile_options(lubancode_runtime PRIVATE /MP)
-endif()
-
-if(LUBANCODE_BUILD_CLI)
 # Terminal platform implementations belong to the CLI host, not SDK internals.
 if(WIN32)
   set(_lubancode_terminal_sources src/platform/console_win.cpp src/platform/clipboard_win.cpp)
@@ -1342,10 +1401,8 @@ add_library(lubancode_core STATIC
   src/workflow/compiler.cpp
   src/workflow/planner.cpp
   src/workflow/frontend.cpp
-  # 统一 Package 封装单阶段 1:根清单严格解析、SemVer/兼容范围、四层扫描、
+  # 统一 Package 封装单阶段 1:原两份值 parser 归 engine；这里保四层扫描、
   # 稳定盘点与内容哈希(纯逻辑,与 workflow 平级)。
-  src/package/semver.cpp
-  src/package/manifest.cpp
   src/package/inventory.cpp
   # 统一 Package 封装单阶段 2:六类组件的原生 parser 接线(ComponentSource-
   # Root)、mcp.yaml 解析、短名/全名引用解析、MountPlan(只产计划不执行)。
@@ -1396,7 +1453,8 @@ target_include_directories(lubancode_core PUBLIC
   ${CMAKE_BINARY_DIR}/generated)        # 0.19.x:embedded_prompts.hpp(提示词嵌入)
 # core = engine + runtime + cli 纯逻辑:引擎与运行时的传递依赖从这两层
 # PUBLIC 递过来(cpr/json/lua/yaml 在 engine 上,这里不再重复挂)。
-target_link_libraries(lubancode_core PUBLIC lubancode_runtime)
+target_link_libraries(lubancode_core PUBLIC
+  lubancode_runtime lubancode_updater lubancode_channel_runtime)
 target_compile_features(lubancode_core PUBLIC cxx_std_23)
 target_precompile_headers(lubancode_core PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")

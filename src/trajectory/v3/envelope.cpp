@@ -352,6 +352,8 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::WorkflowRunFailed: return "workflow.run.failed";
         case EventKindV3::WorkflowRunCancelled: return "workflow.run.cancelled";
         case EventKindV3::ToolJobRegistered: return "tool.job.registered";
+        case EventKindV3::ToolJobAdopted: return "tool.job.adopted";
+        case EventKindV3::SdkOperationTurnBound: return "sdk.operation.turn.bound";
         case EventKindV3::ToolJobDispatched: return "tool.job.dispatched";
         case EventKindV3::ToolJobObserved: return "tool.job.observed";
         case EventKindV3::ToolJobCancelRequested: return "tool.job.cancel_requested";
@@ -499,6 +501,8 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::WorkflowRunCancelled,
             // 异步工具族(单 P0):事实行,全部 statusless。
             EventKindV3::ToolJobRegistered,
+            EventKindV3::ToolJobAdopted,
+            EventKindV3::SdkOperationTurnBound,
             EventKindV3::ToolJobDispatched,
             EventKindV3::ToolJobObserved,
             EventKindV3::ToolJobCancelRequested,

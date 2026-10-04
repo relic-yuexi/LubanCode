@@ -3,7 +3,7 @@
 - 状态：目标架构草案；第一阶段窄 SDK 已交付，其余层按下表分期。本单不是实现清单，也不替代各专项单的合同。
 - 日期：2026-10-01
 - 级别：P1（方向性总图，防止拆分过程中丢失目的）
-- 核查基线：功能分支 `feature/distributed-support-roadmap` 头 `a151d8b4`（已合入 #257、#258、Worker #245）；Runner #246 仍为 Draft，新组合头待验收。
+- 核查基线：功能分支 `feature/distributed-support-roadmap` 头 `02eda80a`（已合 #257、#258、Worker #245、Runner #246，并收入 main #259）；Runner 源 `31186d6f` 三平台与独立安装 CI 已过，实际合并同树。身份接口 #261 与合同 #260 仍为 Draft，不算已交付。
 - 关联：
   - [LubanCore 与 CLI 分离](LubanCore与CLI分离_核心库独立成宿主底座设计.todo)：SDK 边界与分期（本单的落地主线）。
   - [分布式支持路线图](分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo)、[分布式 D0 开工讨论](分布式D0开工讨论与分支拆分.todo)：跨节点方向。
@@ -43,7 +43,7 @@ L3 核心层      Agent Runtime（唯一 owner）
         ▲ 实现接口 / 依赖反转
 L4 基础设施层  模型与工具适配器 │ 存储与检索适配器 │ 缓存/队列/平台适配器
         │ 读写事实 / 保存外置结果
-数据与上下文   权威事实源（session.json、main.jsonl、artifacts）→ 重放 → 派生状态与读模型 → 投影 → 模型请求视图
+数据与上下文   权威事实源（V3 <session_id>.jsonl、artifacts）→ 重放 → 派生状态与读模型 → 投影 → 模型请求视图
 
 左侧：横切治理（配置作用范围、ExecutionContext、权限与执行门禁、资源控制、可观测与恢复）
 右侧：后续扩展与编排（知识与上下文、任务规划、工作流与多 Agent、工具与交互、Extension Registry）
@@ -99,7 +99,7 @@ L4 基础设施层  模型与工具适配器 │ 存储与检索适配器 │ �
 | 接口 | 现状 |
 |---|---|
 | ModelProvider | **部分**：公开 `Backend` 可由宿主注入；多协议适配在 `src/api/`（Anthropic、Chat、Responses、Gemini）；未形成统一 SPI 文档 |
-| ToolExecutor | **部分**：公开 `Tool` 结构供宿主注册；内置工具未进公开 SDK |
+| ToolExecutor | **部分**：公开 `Tool` 结构供宿主注册；已有 read_file、write_file、edit_file、前台 run_command；search 等尚未准入 |
 | JournalStore | **无**：账为本地文件实现，未抽接口；合同见 `docs/development/workspace-storage-v2/P0-0-contracts.md` |
 | BlobStore | **部分**：`src/trajectory/blob_store.*` 内部；公开 `results.hpp` 暴露只读快照与投影 |
 | EventSink | **部分**：`src/runtime/event_sink.hpp` 内部；SDK 事件流 |
@@ -117,7 +117,7 @@ L4 基础设施层  模型与工具适配器 │ 存储与检索适配器 │ �
 
 | 方块 | 现状 |
 |---|---|
-| 权威事实源 | **已有**：`session.json`、`main.jsonl`、`artifacts`（`docs/architecture/trajectory-v3-schema.md`） |
+| 权威事实源 | **已有**：V3 主账为 `sessions/<id>/<id>.jsonl`，首行带身份，另有 `artifacts`；无 `session.json`、`main.jsonl`，这两项属旧 V2（`docs/architecture/trajectory-v3-schema.md`） |
 | 派生状态与读模型 | **已有**：Session 索引、Checkpoint、导出（`session_index`、`export_projection`）；SDK 持久索引仍整账验卷，无增量索引与字节帽 |
 | 模型请求视图 | **已有**：固定前缀＋历史＋摘要指令；Compact 相关缺陷另有专项单 |
 
@@ -147,8 +147,8 @@ L4 基础设施层  模型与工具适配器 │ 存储与检索适配器 │ �
 
 | 部件 | 作用 | 状态 |
 |---|---|---|
-| `luban-worker`（#245） | 只用公开 SDK，在远端进程托管会话；父管道 IPC；持久幂等提交、取消、恢复；异步拉取冻结 preview | 已合入功能分支 `a151d8b4`；源码头 `c4528f61` 的三平台 18 场进程验收与 CI 已过 |
-| 独立 Runner（#246） | 独立持有实验进程，Worker 或 Node 退出后实验继续；`job.*` 本地协议 | Draft；本地候选已接新 Worker 与 main 基底，新组合头待验收，未接 Worker |
+| `luban-worker`（#245） | 只用公开 SDK，在远端进程托管会话；父管道 IPC；持久幂等提交、取消、恢复；异步拉取冻结 preview | 已合入 `a151d8b4`；源 `c4528f61` 三平台安装移位各 18 场通过（TSan 按条件跳过）；仍为本地可信 IPC |
+| 独立 Runner（#246） | 独立持有实验进程，部署在调用者终止域外时可继续；`job.*` 本地协议 | 已合 `02eda80a`；源 `31186d6f` [CI](https://github.com/relic-yuexi/LubanCode/actions/runs/36925552325) 已过，三平台组合与独立安装各 11 场；未接正式 Worker `job.*`，不保机器重启续跑 |
 | 网络 Node/Control、登记与心跳、鉴权 | 两端部署、控制面 | **无**，见部署草案 |
 | 持久 outbox/ACK、全文分块/附件下载/历史补传 | 可靠上行 | **无** |
 | 池化模式、Sandbox 池 | 集群模式 | 后续单，各守前置门 |
@@ -162,7 +162,7 @@ L4 基础设施层  模型与工具适配器 │ 存储与检索适配器 │ �
 | 个人本地 | CLI 或嵌入式 SDK，JSONL 本地账 | L1(CLI/SDK)、L3、本地 L4；**现已可用** |
 | 嵌入自有程序（后端服务、桌面应用） | 链接 `LubanCore::Core`（C++）；其他语言见第七节 | 公开 SDK；**窄接口现已可用**，高级能力逐项迁入 |
 | 手机与端侧 | SDK 嵌入，模型远端或本地 | SDK 依赖闭包仍含渠道、Gateway、updater、Lua 等，**不是最小依赖包**；须另设依赖瘦身批 |
-| 服务端单机 | Worker 托管多场，或 AppServer | Worker 本机主管 IPC 已合入；公开服务接口（HTTP/gRPC）无 |
+| 服务端单机 | Worker 托管多场，或 AppServer | Worker 已合入，仍为本地可信父管道 IPC；公开服务接口（HTTP/gRPC）无 |
 | 工业多节点 | Control + Node + 池化 | 身份、ACL、存储适配、租约；**未开工** |
 
 ## 七、跨语言接入
@@ -172,7 +172,7 @@ C++ SDK 只服务 C++ 宿主（头文件为 C++23，无跨编译器 ABI 承诺�
 | 接入方式 | 宿主语言 | 现状 | 适用 |
 |---|---|---|---|
 | 链接 C++ SDK | 仅 C++ | **已有（窄）** | 嵌入 C++ 程序、端侧 |
-| 进程间协议（管道 JSON） | 任意 | **部分**：`luban-worker`（#245，已合入）的本机主管 v1；`examples/node-client/lubancode_worker_client.js` 连 AppServer 1.3，不能直接用作 Worker v1 客户端 | 微服务化、跨语言宿主 |
+| 进程间协议（管道 JSON） | 任意 | **部分**：`luban-worker`（#245，已合入）具私有本地协议与 Python 实进程验收；`examples/node-client/lubancode_worker_client.js` 实为 AppServer 1.3 数字 ID JSON-RPC 示例，不能当 Worker 客户端 | 微服务化、跨语言宿主 |
 | 网络服务（HTTP/SSE、gRPC） | 任意 | **部分/无**：AppServer 有 WebSocket 与本地网页，非公开稳定合同；gRPC 无 | 远程调用、多端接入 |
 | C ABI + 各语言绑定（FFI） | Python、Go、Rust、Java、Swift、Kotlin 等 | **无**：公开头为 C++ 类，无 C 接口层 | 需直接链接进非 C++ 进程，如 iOS、Android App |
 
@@ -231,16 +231,14 @@ Journal 承担崩溃恢复，不是普通记录存储。任何实现都必须保
 
 ### 分期
 
-1. **收口当前批**：Worker #245 已合入功能分支；Runner #246 接最新基底后重验；更新总 PR #234 描述；合 main 前在最终组合头上重跑完整原生 CI。
-2. **身份与授权骨架**（先于 Node/Control）：落地 `ExecutionContext`（tenant / actor / project / session）、租户分目录、默认拒绝的授权检查点、租户配置层预留与隔离测试，先在 SDK 与 Worker 落地（对应路线图 D6 的第一项）。单人时取默认租户与管理员。
-3. **Worker 进程协议合同**：冻结帧格式、方法、错误码、取消与恢复语义、兼容规则，且所有请求带 `ExecutionContext`（第七节）。
-4. **Node 与 Control 最小版**：Node 配置后主动登记并报 health，绑定租户，开 Worker；Control 仅列节点、下发任务、看状态与 preview，按租户过滤；节点鉴权（共享令牌或 mTLS）；随后持久 outbox/ACK 与事件游标。首用设计以[部署草案](../docs/architecture/remote-agent-deployment.md)为准（会话固定在节点，离线不撤销已受理工作）。
-5. **SDK 完整化**：把已有能力逐项迁入公开 SDK（内置工具、Lua/Package、子 Agent、Action、Detached job、Memory/Skills），每项独立验证、同时做成可选模块；CLI 迁移保留原功能。可与第 2～4 步并行，但先定模块划分表，避免互相踩。
-6. **SPI 抽象**：把 JournalStore、BlobStore、EventSink、PolicyProvider 抽成明确接口，本地文件账作默认实现；先出接口合同、一致性测试与参考实现（第八节），再谈数据库。授权检查点经 PolicyProvider 接入。
-7. **依赖瘦身**：把渠道、Gateway、updater 等从 SDK 依赖闭包拆出，形成最小依赖包，服务手机与端侧。可与第 6 步并行。
-8. **公开服务接入**：在 AppServer/Worker 基础上交付 HTTP/SSE，按需 gRPC，复用第 3 步同一份方法与事件合同。C ABI 仅在确有嵌入非 C++ 进程的需求时再做。
-9. **多租户功能面与存储适配**：登录与外部身份、配额、成员与 ACL 管理、可观测公开接口；数据库、对象存储、队列适配；池化模式与 Sandbox 池另见后续单。待出现第二位使用者再排期。
-10. **扩展与编排**：Extension Registry 升级（动态库、热卸载、沙箱），工作流与多 Agent 进入公开 SDK。
+1. **收口当前批**：Worker #245、Runner #246 已合功能分支，总 PR #234 留 Draft。合 main 前在最终组合头重跑完整原生 CI。身份原语 #261 的 SDK/host/ASan 门已过，Linux 全量 Skills 冻结清单册超时，整轮失败；独立修复与新组合另验。
+2. **SDK 完整化**：每项先写短合同，说明公开什么、谁拥有、怎样关场；每项小 PR，收齐远端三平台安装与行为证据。依次内置工具（已有读写改文件、前台命令，当前补 search）→ Memory/Skills → 子 Agent/Action → Lua/Package → Detached/后台 job。最后一项先补线程创建失败清理。CLI 逐项迁移并保留原功能。
+3. **SPI 抽象**：先抽 `JournalStore`、`BlobStore`、`EventSink`、`PolicyProvider`，只交合同与本地文件参考实现，不引入数据库。后续身份继续扩充同一 Policy 接口，不另造授权表。
+4. **依赖瘦身**：渠道、Gateway、updater、Lua 等移出 SDK 最小依赖包；CI 查 SDK-only 构建、拉取、导出与动态库依赖闭包。可与 SPI 并行。
+5. **身份与治理**：按 D6 落 `ExecutionContext`（tenant / actor / project / session）、配置范围、ACL 与默认拒绝门。已有原语 Draft 留作后续起点；首批只管新 Managed 会话及同 ID 恢复，旧账认领、迁入与回滚另 PR。
+6. **公开服务接入**：依托 AppServer/Worker 交 HTTP/SSE，冻结 Worker 进程协议与兼容规则，再按需 gRPC；补持久 outbox/ACK 与事件游标。
+7. **分布式与存储适配**：Node/Control、登记、心跳与鉴权；再接数据库、对象存储、队列适配器。网络托管前须先过身份门；池化模式与 Sandbox 池各守前置门，另单展开。
+8. **扩展与编排**：Extension Registry 升级（动态库、热卸载、沙箱），工作流与多 Agent 进入公开 SDK。
 
 ## 十、不做与风险
 

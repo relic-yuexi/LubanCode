@@ -18,11 +18,77 @@
 #include <optional>
 
 #include "platform/paths.hpp"
+#include "platform/process_diagnostics.hpp"
 #include "platform/text_encoding.hpp"  // Utf8PrefixBoundary:输出帽对齐 UTF-8 边界
 
 namespace lubancode::platform {
 
 namespace {
+
+// These observations never change the caller's native error state. Keep the
+// default path free of diagnostic clocks, atomic writes and extra OS queries.
+void RecordWindowsProcessDiagnostic(ProcessDiagnosticBuffer* diagnostics,
+                                     ProcessDiagnosticStage stage, DWORD pid = 0,
+                                     std::int64_t rc = 0, DWORD system_error = 0,
+                                     std::int64_t detail = 0,
+                                     ProcessDiagnosticJobAccounting job_accounting = {}) noexcept {
+    if (!diagnostics) return;
+    const DWORD saved_error = GetLastError();
+    const int saved_errno = errno;
+    diagnostics->Record(stage, pid, -1, rc, system_error, detail, job_accounting);
+    errno = saved_errno;
+    SetLastError(saved_error);
+}
+
+void ObserveTimeoutJobAccounting(HANDLE job, DWORD pid,
+                                 ProcessDiagnosticBuffer* diagnostics) noexcept {
+    if (!diagnostics || job == nullptr) return;
+    const DWORD saved_error = GetLastError();
+    const int saved_errno = errno;
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::JobAccountingQueryBefore, pid);
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+    const BOOL queried = QueryInformationJobObject(job, JobObjectBasicAccountingInformation,
+                                                   &accounting, sizeof(accounting), nullptr);
+    const DWORD query_error = queried ? 0 : GetLastError();
+    ProcessDiagnosticJobAccounting values{};
+    if (queried) {
+        values = {accounting.TotalProcesses, accounting.ActiveProcesses,
+                  accounting.TotalTerminatedProcesses, accounting.TotalUserTime.QuadPart,
+                  accounting.TotalKernelTime.QuadPart};
+    }
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::JobAccountingQueryAfter,
+                                    pid, queried, query_error, 0, values);
+    errno = saved_errno;
+    SetLastError(saved_error);
+}
+
+BOOL ReadDiagnosticPipe(HANDLE pipe, void* bytes, DWORD size, DWORD* read_count,
+                         ProcessDiagnosticBuffer* diagnostics, DWORD pid, bool& first) {
+    if (first) {
+        RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderFirstReadBefore, pid);
+    }
+    const BOOL rc = ReadFile(pipe, bytes, size, read_count, nullptr);
+    const DWORD read_error = diagnostics ? GetLastError() : 0;
+    if (first) {
+        RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderFirstReadAfter,
+                                        pid, rc, read_error, *read_count);
+        first = false;
+    }
+    if (!rc || *read_count == 0) {
+        RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderReadTerminal,
+                                        pid, rc, read_error, *read_count);
+    }
+    return rc;
+}
+
+BOOL CloseDiagnosticJob(HANDLE job, DWORD pid, ProcessDiagnosticBuffer* diagnostics) {
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::CloseJobBefore, pid);
+    const BOOL rc = CloseHandle(job);
+    const DWORD close_error = diagnostics ? GetLastError() : 0;
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::CloseJobAfter,
+                                    pid, rc, close_error);
+    return rc;
+}
 
 // 输出帽是字节刀,但刀口不许劈进多字节序列的腰里——中文输出恰好在
 // limit 上断成 0xE5 开头的半截汉字,这坨字节流到 nlohmann::json 序列化
@@ -357,6 +423,8 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const EnvP
 ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std::atomic<bool>* cancel,
                          const EnvPairs& extra_env, std::size_t max_output_bytes,
                          const std::string& cwd_utf8) {
+    ProcessDiagnosticBuffer* const diagnostics = process_diagnostics;
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ProcessEntered);
     ProcessResult result;
 
     // 显式环境块(P0 并发修复):不再临时改宿主环境再还原——Hook
@@ -408,10 +476,14 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
         current_directory = cwd_wide.c_str();
     }
 
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::CreateProcessBefore);
     const BOOL ok = CreateProcessW(
         nullptr, cmdline_buf.data(), nullptr, nullptr, TRUE,
         CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
         const_cast<LPWSTR>(env_block.c_str()), current_directory, &si, &pi);
+    const DWORD create_error = diagnostics ? GetLastError() : 0;
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::CreateProcessAfter,
+                                    pi.dwProcessId, ok, create_error);
 
     // 子进程已经拿到了自己那份继承来的句柄,父进程这边的可以关了。
     CloseHandle(write_pipe);
@@ -429,17 +501,33 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     // Job Object:进程挂在 CREATE_SUSPENDED 状态先分进 job,再恢复运行,
     // 这样超时时关掉 job 句柄,进程本身和它派生出来的所有子进程一起死,
     // 不会漏杀。
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::CreateJobBefore, pi.dwProcessId);
     HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    const DWORD job_error = diagnostics ? GetLastError() : 0;
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::CreateJobAfter,
+                                    pi.dwProcessId, reinterpret_cast<std::intptr_t>(job), job_error);
     if (job != nullptr) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit{};
         limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limit, sizeof(limit));
-        if (!AssignProcessToJobObject(job, pi.hProcess)) {
-            CloseHandle(job);
+        const BOOL configured = SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limit, sizeof(limit));
+        const DWORD configure_error = diagnostics ? GetLastError() : 0;
+        RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ConfigureJobAfter,
+                                        pi.dwProcessId, configured, configure_error);
+        RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::AssignJobBefore, pi.dwProcessId);
+        const BOOL assigned = AssignProcessToJobObject(job, pi.hProcess);
+        const DWORD assign_error = diagnostics ? GetLastError() : 0;
+        RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::AssignJobAfter,
+                                        pi.dwProcessId, assigned, assign_error);
+        if (!assigned) {
+            CloseDiagnosticJob(job, pi.dwProcessId, diagnostics);
             job = nullptr;
         }
     }
-    ResumeThread(pi.hThread);
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ResumeBefore, pi.dwProcessId);
+    const DWORD resumed = ResumeThread(pi.hThread);
+    const DWORD resume_error = diagnostics ? GetLastError() : 0;
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ResumeAfter,
+                                    pi.dwProcessId, resumed, resume_error);
     CloseHandle(pi.hThread);
 
     // overflow_event:读线程发现输出超上限时置信号,主线程的等待立刻醒来
@@ -450,10 +538,13 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     std::atomic<bool> output_over_limit{false};
     std::atomic<bool> reader_stop{false};
     std::atomic<bool> reader_done{false};
-    std::thread reader([&] {
+    std::thread reader([&, diagnostics] {
+        RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderEntered, pi.dwProcessId);
         char buf[4096];
         DWORD n = 0;
-        while (!reader_stop.load() && ReadFile(read_pipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
+        bool first_read = true;
+        while (!reader_stop.load() &&
+               ReadDiagnosticPipe(read_pipe, buf, sizeof(buf), &n, diagnostics, pi.dwProcessId, first_read) && n > 0) {
             if (output.size() < max_output_bytes) {
                 const std::size_t room = max_output_bytes - output.size();
                 const std::size_t take = std::min<std::size_t>(n, room);
@@ -475,6 +566,8 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
             // 超限之后继续读但直接丢弃——不读的话管道缓冲区一满,子进程会
             // 卡在写上死不掉;反正马上就要被杀,读空到 EOF 为止。
         }
+        RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderExited,
+                                        pi.dwProcessId, 0, 0, reader_stop.load() ? 1 : 0);
         reader_done.store(true);
     });
 
@@ -488,8 +581,10 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     const auto started_at = std::chrono::steady_clock::now();
     DWORD wait_result = WAIT_FAILED;
     bool hit_cancel = false;
+    bool first_wait = true;
     while (true) {
         if (output_over_limit.load()) {
+            RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::OutputLimitObserved, pi.dwProcessId);
             wait_result = WAIT_OBJECT_0 + 1;
             break;
         }
@@ -497,11 +592,24 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
         // 读线程仍会写 output_over_limit，主线程改为短轮询兜底。
         const bool needs_poll = cancel != nullptr || overflow_event == nullptr;
         const DWORD slice = needs_poll && (wait_ms == INFINITE || wait_ms > 100) ? 100 : wait_ms;
+        if (first_wait) {
+            RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::WaitBeforeFirst,
+                                            pi.dwProcessId, 0, 0, slice);
+        }
         wait_result = WaitForMultipleObjects(wait_count, wait_handles, FALSE, slice);
+        const DWORD wait_error = diagnostics ? GetLastError() : 0;
+        if (first_wait) {
+            RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::WaitAfterFirst,
+                                            pi.dwProcessId, wait_result, wait_error, slice);
+            first_wait = false;
+        }
         if (wait_result == WAIT_OBJECT_0) {
+            RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::WaitTerminal,
+                                            pi.dwProcessId, wait_result, wait_error);
             break;  // 进程退出
         }
         if (cancel != nullptr && cancel->load()) {
+            RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::CancelObserved, pi.dwProcessId);
             hit_cancel = true;
             break;
         }
@@ -516,26 +624,43 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
         }
     }
     if (hit_cancel || wait_result == WAIT_TIMEOUT || wait_result == WAIT_OBJECT_0 + 1) {
+        if (!hit_cancel) {
+            RecordWindowsProcessDiagnostic(diagnostics, wait_result == WAIT_TIMEOUT
+                ? ProcessDiagnosticStage::TimeoutObserved : ProcessDiagnosticStage::OutputLimitObserved,
+                pi.dwProcessId, wait_result);
+        }
         // 取消、超时,或者输出超上限:都要把整个 Job 杀干净。
         if (hit_cancel) {
             result.cancelled = true;
         } else if (wait_result == WAIT_TIMEOUT) {
             result.timed_out = true;
+            if (diagnostics && job != nullptr) {
+                ObserveTimeoutJobAccounting(job, pi.dwProcessId, diagnostics);
+            }
         }
         if (job != nullptr) {
-            CloseHandle(job);  // KILL_ON_JOB_CLOSE:关句柄的一瞬间,job 里所有进程全杀
+            CloseDiagnosticJob(job, pi.dwProcessId, diagnostics);  // KILL_ON_JOB_CLOSE:关句柄的一瞬间,job 里所有进程全杀
             job = nullptr;
         } else {
-            TerminateProcess(pi.hProcess, 1);
+            RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::TerminateProcessBefore, pi.dwProcessId);
+            const BOOL terminated = TerminateProcess(pi.hProcess, 1);
+            const DWORD terminate_error = diagnostics ? GetLastError() : 0;
+            RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::TerminateProcessAfter,
+                                            pi.dwProcessId, terminated, terminate_error);
         }
-        WaitForSingleObject(pi.hProcess, 5000);
+        RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::WaitTerminationBefore,
+                                        pi.dwProcessId, 0, 0, 5000);
+        const DWORD waited = WaitForSingleObject(pi.hProcess, 5000);
+        const DWORD terminate_wait_error = diagnostics ? GetLastError() : 0;
+        RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::WaitTerminationAfter,
+                                        pi.dwProcessId, waited, terminate_wait_error, 5000);
     }
 
     // 根进程退出不等于后代也退出:后代若继承了管道写端还活着,ReadFile 永远
     // 等不到 EOF,直接 join 会吊死。先把 Job 收掉(连带杀光可能残留的后代),
     // 写端才会全关、读线程才能收尾。
     if (job != nullptr) {
-        CloseHandle(job);
+        CloseDiagnosticJob(job, pi.dwProcessId, diagnostics);
         job = nullptr;
     }
 
@@ -547,15 +672,31 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     }
     if (!reader_done.load()) {
         reader_stop.store(true);
+        RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderStopPublished, pi.dwProcessId);
+        bool first_cancel_io = true;
         while (!reader_done.load()) {
-            CancelSynchronousIo(reader.native_handle());
+            if (first_cancel_io) {
+                RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::CancelReaderIoBefore, pi.dwProcessId);
+            }
+            const BOOL cancelled_io = CancelSynchronousIo(reader.native_handle());
+            const DWORD cancel_io_error = diagnostics ? GetLastError() : 0;
+            if (first_cancel_io) {
+                RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::CancelReaderIoAfter,
+                                                pi.dwProcessId, cancelled_io, cancel_io_error);
+                first_cancel_io = false;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     }
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderJoinBefore, pi.dwProcessId);
     reader.join();
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderJoinAfter, pi.dwProcessId);
 
     DWORD exit_code = 0;
-    GetExitCodeProcess(pi.hProcess, &exit_code);
+    const BOOL got_exit_code = GetExitCodeProcess(pi.hProcess, &exit_code);
+    const DWORD exit_code_error = diagnostics ? GetLastError() : 0;
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ExitCodeRead,
+                                    pi.dwProcessId, got_exit_code, exit_code_error, exit_code);
     result.exit_code = exit_code;
     // 截断的刀口对齐 UTF-8 码点边界(见文件头 AlignOutputToUtf8Boundary)。
     AlignOutputToUtf8Boundary(output, max_output_bytes);
@@ -563,7 +704,7 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     result.output_truncated = output_over_limit.load();
 
     if (job != nullptr) {
-        CloseHandle(job);
+        CloseDiagnosticJob(job, pi.dwProcessId, diagnostics);
     }
     if (overflow_event != nullptr) {
         CloseHandle(overflow_event);
@@ -571,6 +712,8 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     CloseHandle(read_pipe);
     CloseHandle(pi.hProcess);
 
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ProcessReturned,
+                                    pi.dwProcessId, result.exit_code, 0, result.cancelled ? 1 : 0);
     return result;
 }
 

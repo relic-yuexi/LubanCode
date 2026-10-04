@@ -14,6 +14,7 @@
 #include <clocale>
 #include <cstdlib>
 #include <ctime>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -139,6 +140,10 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.recorder.event_schema_version = options.event_schema_version;
     // 接线点 1:v3 建场的首行基础 system(manager 侧 V3Writer::Start 用)。
     manager_options.v3_system_content = options.v3_system_content;
+    manager_options.v3_opening_participant = options.v3_opening_participant;
+    manager_options.memory_capability_factory = options.memory_capability_factory;
+    manager_options.recovery_capture = options.recovery_capture;
+    manager_options.recovery_factory = options.recovery_factory;
     // T08:主账写者的提交故障注入(测试专用;生产恒空)。
     manager_options.v3_main_io_fault = options.v3_main_io_fault;
     // 子代理空轨迹单 P0-C:main stream 同样走延迟开卷——正式 .jsonl 由
@@ -153,23 +158,38 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     impl.workspace_root_text = platform::PathToUtf8(options.workspace_root);
     impl.training_policy = options.training_policy;
     impl.subagent_start_fault = options.subagent_start_fault;
+    impl.subagent_close_fault = options.subagent_close_fault;
     impl.workflow_start_fault = options.workflow_start_fault;
     impl.workflow_node_start_fault = options.workflow_node_start_fault;
     impl.manager = std::make_unique<trajectory::SessionManager>(std::move(manager_options));
 
-    if (options.require_v3_resume &&
-        (!options.resume_at_launch || options.resume_source_session_id.empty() ||
-         !trajectory::v3::FindV3SessionStream(
-             impl.manager->SessionDirOf(options.resume_source_session_id)).has_value())) {
-        return std::unexpected("resume.v3_source_required: explicit V3 source is unavailable");
+    const bool explicit_finite_resume = options.recovery_capture.limits && options.require_v3_resume &&
+        options.resume_at_launch && !options.resume_source_session_id.empty();
+    bool source_layout_available = false;
+    if (options.require_v3_resume && options.resume_at_launch && !options.resume_source_session_id.empty()) {
+        const auto source = impl.manager->SessionDirOf(options.resume_source_session_id);
+        if (explicit_finite_resume) {
+            // Only inspect layout here. ResumeAsNew performs finite owned first
+            // line/schema/Verify before host admission, avoiding Probe's getline.
+            std::error_code ec;
+            source_layout_available = std::filesystem::exists(platform::FileIoPath(
+                source / (options.resume_source_session_id + ".jsonl")), ec) && !ec;
+            if (source_layout_available)
+                source_layout_available = !std::filesystem::exists(platform::FileIoPath(source / "main.jsonl"), ec) && !ec;
+        } else {
+            source_layout_available = trajectory::v3::FindV3SessionStream(source).has_value();
+        }
     }
+    if (options.require_v3_resume && !source_layout_available)
+        return std::unexpected("resume.v3_source_required: explicit V3 source is unavailable");
 
     // --continue 启动路(§10.4):直接建 start_reason=resume 的新 session,
     // 不先造空 session。没有可恢复场(或源场验不过)回落普通开张,与旧路
     // --continue 的 quiet_if_none 语义一致;真出错(目录坏了开不出新场)
     // 照旧失败退出,不回退旧写口。
     if (options.resume_at_launch) {
-        const std::string latest = impl.manager->LatestResumableSessionId();
+        const std::string latest = explicit_finite_resume ? std::string()
+            : impl.manager->LatestResumableSessionId();
         // 显式指名的源不受 LatestResumable 的"running 不碰"连坐——那是
         // 自动挑最近场的筛子;接管硬杀场(running、无活锁)是常驻恢复的
         // 正路(V0 受理底线),可恢复性(活锁/one_shot/验卷)由 ResumeAsNew
@@ -223,7 +243,49 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
                 // v3 源:续接场沿用源场生效 system(§4.10 默认;v2 源的
                 // 迁移新场保持基础版,三步切换由后续按需走)。
                 if (resumed.source_is_v3) {
-                    ledger.AdoptSourceSystemV3_(resumed.source_v3_stream);
+                    if (options.v3_opening_participant) {
+                        // In-place embedded recovery already owns this effective
+                        // root. Do not manufacture a switch back to its own text.
+                        auto saved = v3::ReadV3Ledger(resumed.source_v3_stream);
+                        if (!saved) return std::unexpected("resume.system_adoption_failed: " + saved.error());
+                        const auto context = v3::ProjectModelContext(*saved);
+                        const auto* root = saved->FindMessage(context.system_message_id);
+                        if (!root || !root->system_meta || root->message.value("role", std::string()) != "system" ||
+                            !root->message.contains("content") || !root->message["content"].is_string()) {
+                            return std::unexpected("resume.system_adoption_failed: effective system metadata missing");
+                        }
+                        std::uint64_t settings_version = 1;  // legacy roots did not require this key
+                        if (root->system_meta->contains("settingsVersion")) {
+                            const auto& version = root->system_meta->at("settingsVersion");
+                            if ((!version.is_number_unsigned() && !version.is_number_integer()) ||
+                                (version.is_number_integer() && !version.is_number_unsigned() && version.get<std::int64_t>() < 1) ||
+                                (version.is_number_unsigned() && version.get<std::uint64_t>() == 0)) {
+                                return std::unexpected("resume.system_adoption_failed: invalid settingsVersion");
+                            }
+                            settings_version = version.get<std::uint64_t>();
+                        }
+                        auto& books = *ledger.impl_->v3_books;
+                        books.system_content = context.system_content;
+                        books.settings_version = settings_version;
+                        if (!options.v3_system_content.empty() && options.v3_system_content != books.system_content) {
+                            if (books.settings_version == std::numeric_limits<std::uint64_t>::max()) {
+                                return std::unexpected("resume.system_adoption_failed: settingsVersion exhausted");
+                            }
+                            nlohmann::json change{{"cause", "system_prompt_changed"},
+                                {"settingsVersion", books.settings_version + 1}, {"systemChanged", true}};
+                            const auto switched = books.writer->SwitchSystem(options.v3_system_content,
+                                std::move(change), v3::MessageOrigin::SessionRuntime, trajectory::Durability::PowerLoss);
+                            if (switched.change_event.status != v3::WriteReceipt::Status::Committed ||
+                                switched.system_message.status != v3::WriteReceipt::Status::Committed ||
+                                switched.apply_event.status != v3::WriteReceipt::Status::Committed) {
+                                return std::unexpected("resume.system_adoption_failed: system transition not committed");
+                            }
+                            books.system_content = options.v3_system_content;
+                            ++books.settings_version;
+                        }
+                    } else {
+                        ledger.AdoptSourceSystemV3_(resumed.source_v3_stream);
+                    }
                 }
                 HardenLedgerDirectories(ledger.impl_->active->directory, &ledger.io_errors_);
                 return ledger;
@@ -314,6 +376,10 @@ trajectory::TrajectoryRecorder* TrajectorySessionLedger::main() {
     return impl_ != nullptr && impl_->active != nullptr && impl_->active->main.has_value()
                ? &*impl_->active->main
                : nullptr;
+}
+
+std::shared_ptr<trajectory::MemoryCapability> TrajectorySessionLedger::memory_capability() const {
+    return impl_ && impl_->active ? impl_->active->memory_capability.share() : nullptr;
 }
 
 std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
@@ -580,7 +646,7 @@ trajectory::ClearOutcome TrajectorySessionLedger::ClearSession(
             impl_->main_run_id = impl_->active->manifest.main_run_id;
         }
         BindV3Books_();
-        impl_->child_terminal_hashes.clear();
+        impl_->child_terminals = std::make_shared<SubagentTerminalRegistry>();
         record_selection_ = nullptr;  // 惰性重建(RecordSelectionController)
         environment_captured_ = false;  // 新 run 须重采环境快照
     }
@@ -694,7 +760,7 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
     // 按账面现行版本重采。
     impl_->v3_books.reset();
     BindV3Books_();
-    impl_->child_terminal_hashes.clear();
+    impl_->child_terminals = std::make_shared<SubagentTerminalRegistry>();
     record_selection_ = nullptr;
     environment_captured_ = false;
     // v3 源:续接场沿用源场生效 system(§4.10 默认,三步切换补账——本场

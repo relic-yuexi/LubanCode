@@ -21,6 +21,9 @@ public:
         std::vector<extensions::v1::Registration>& registrations,
         const extensions::v1::SessionContext& context,
         std::optional<std::string> expected_plan_json = std::nullopt);
+    // Declaration-only publication; no factory is called or copied.
+    static Result<std::string> DescribeDeclarations(
+        const std::vector<extensions::v1::Registration>& registrations);
     ~SessionExtensions() override;
     SessionExtensions(const SessionExtensions&) = delete;
     SessionExtensions& operator=(const SessionExtensions&) = delete;
@@ -29,8 +32,17 @@ public:
     // Worker-only writes at turn boundaries; observers read a synchronized copy.
     void SetOperationScope(std::string operation_id);
     std::string DescribePlan() const;
+    bool HasActions() const {
+        using Point = lubancode::hooks::middleware::HookPoint;
+        return prepared_registry_ && (!prepared_registry_->Selected(Point::PreAction).empty() ||
+            !prepared_registry_->Selected(Point::PostAction).empty());
+    }
 
 private:
+    static Result<std::unique_ptr<SessionExtensions>> Prepare(
+        const std::vector<extensions::v1::Registration>& registrations,
+        const extensions::v1::SessionContext& context,
+        const std::optional<std::string>& expected_plan_json);
     explicit SessionExtensions(extensions::v1::SessionContext context);
     std::string OperationScope() const;
     extensions::v1::SessionContext context_;
@@ -40,6 +52,7 @@ private:
     // members still exist while user destructors query session diagnostics.
     std::vector<std::unique_ptr<extensions::v1::Instance>> instances_;
     std::unique_ptr<lubancode::hooks::HookDispatcher> dispatcher_;
+    std::shared_ptr<const lubancode::hooks::middleware::FrozenRegistry> prepared_registry_;
     std::string plan_json_;
 };
 

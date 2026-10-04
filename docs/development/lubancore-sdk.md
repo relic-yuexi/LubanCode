@@ -18,6 +18,10 @@ SDK 与 AppServer 共用会话执行对象，多会话隔离与寿命验收也�
 `LubanCore::Core` 是公开安装目标；仓库内部旧名
 `lubancode_core` 仍带 CLI 实现，两者不能混用。
 
+依赖瘦身首笔把 updater 与 miniz 归到 CLI 宿主目标；SDK-only 不定义它们，
+组合构建也核 SDK 实际传递闭包。本笔仍待远端三平台验收，合同见
+[更新器归宿主](sdk-updater-boundary.md)。渠道、Gateway、Lua 尚未拆完。
+
 后端、基础工具与 MCP 已共用 `runtime/assembly`。SDK 与 AppServer 共用执行对象，
 各自保留受理与排队；CLI、one-shot 仍用原会话栈。完整工具、插件、Hook 和记忆等
 能力尚未统一迁入公开 SDK。
@@ -83,11 +87,25 @@ Agent 类型清单与按名派发现在同取当前 Package 快照，补上旧�
 
 ## 构建与安装
 
+搜索按场显式启用：`builtin_tools = {"search"}`。它复用 CLI 的 SearchTool，
+保留 grep/glob、输出上限与取消；参数中省去、置空或清空 `path`，都落到本场 cwd。
+相对路径也从本场 cwd 起算。绝对路径仍属可信本地工具，本批不加文件沙箱。
+建场先检查 `<resource_root>/libexec/rg[.exe]`，过版本门后才启动 MCP 和模型。
+SDK 不从 HOME、PATH 或宿主程序旁找替代品。合同见
+[内置搜索接入](lubancore-builtin-search.md)。
+
+要随 SDK 安装搜索后端，先按仓库 manifest 校验资源，再显式交给 CMake。
+下面以 Linux x64 为例；macOS ARM64 用 `macos-arm64`，Windows x64 用 `windows-x64`。
+
+```sh
+bash scripts/fetch_ripgrep.sh --target rg-stage --platform linux-x64 --cache rg-cache
+```
+
 独立 SDK 构建须同时关闭 CLI、启用 SDK。下面先关闭测试，走默认 `ALL` 和普通安装，
 不指定构建目标，也不筛安装组件。`sdk-prefix` 可换成所需安装目录。
 
 ```sh
-cmake -S . -B build-sdk -DCMAKE_BUILD_TYPE=Release -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=ON -DBUILD_TESTING=OFF
+cmake -S . -B build-sdk -DCMAKE_BUILD_TYPE=Release -DLUBANCODE_BUILD_CLI=OFF -DLUBANCODE_BUILD_SDK=ON -DBUILD_TESTING=OFF -DLUBANCODE_BUNDLED_RG_DIR="$PWD/rg-stage/libexec"
 cmake --build build-sdk --config Release --parallel 4
 cmake --install build-sdk --config Release --prefix sdk-prefix
 ```
@@ -108,6 +126,9 @@ ctest --test-dir build-sdk -C Release -L sdk-focused --output-on-failure --no-te
 消费方只需 `find_package(LubanCore CONFIG REQUIRED)`，链接 `LubanCore::Core`，
 包含 `<lubancore/core.hpp>`。公开头仅用标准库，不要求内部 `src` 或第三方头。
 `LubanCore_RESOURCE_DIR` 指向安装后资源目录。验收程序见 `examples/sdk-consumer`。
+宿主把此目录显式填入 `RuntimeOptions.resource_root`。搬迁整个安装目录后，资源根也跟着
+更新；组件安装与 SDK-only 普通安装都会携带 rg、MIT 许可和固定版本 manifest。
+未交 rg stage 时，SDK 仍可用于其他工具；启用 search 会在建场时报缺件。
 
 当前输出共享库。C++23 编译器、标准库、编译配置须匹配；尚无跨工具链 ABI 承诺。
 Windows SDK 构建统一使用动态 CRT（Release `/MD`、Debug `/MDd`），消费方也须相同。
@@ -197,7 +218,20 @@ ExtensionRuntime、后台命令、远端 Worker 或 Node 结果同步已交付�
 
 ## 工具、权限与并发边界
 
-工具默认空表。首批可显式启用 `read_file`、`write_file`、`edit_file`、`run_command`，
+显式 Skills 正在本批接入，验收见 [SDK Skills 合同](sdk-skills.md)。宿主传
+`SessionOptions::skills = skills::v1::Selection{absolute_root, {"skill-name"}}`，再调
+`DescribeSkills()` 查本场冻结选名、指纹、依赖缺口和提示段。附件按需读当前文件；
+正文和同 ID 恢复拒绝指纹漂移。省略便关闭，不沿个人目录发现，不自动挂依赖工具。
+新开场与恢复门共用会话运行栈，闭场只留值清单；本批尚未收远端原生验收。
+
+项目 Memory 只读召回正在下一笔接入，合同见 [SDK Memory 召回](sdk-memory-recall.md)。
+宿主给 `SessionOptions::memory` 显式参数，再调 `DescribeMemory()` 查计划、
+`GetMemoryRecall(operation_id)` 查本场逐轮报告。同 ID 恢复省略参数便沿存档；
+正文、来源与护栏归入共有 V3 采用链。首笔不写 Memory、不起后台提取，原生验收仍待远端 CI。
+operation_id 只在 Session 内唯一，wire 按 `(session_id, operation_id)` 寻址。
+损坏 blob 拦住本次快照时，模型不再运行，未收稳完成账则留 Indeterminate，不能报持久失败。
+
+工具默认空表。可显式启用 `read_file`、`write_file`、`edit_file`、`run_command`、`search`，
 也可注入自定义工具，或按服务与工具名单挂 MCP。内置实现沿用共用装配，不另写一套工具。
 相对文件路径和命令 cwd 按会话目录解析，不调用进程级 chdir。命令只开放前台执行；
 `run_in_background` 真值会明确拒绝。MCP 使用显式完整环境与会话 cwd，启动失败拒绝建场，

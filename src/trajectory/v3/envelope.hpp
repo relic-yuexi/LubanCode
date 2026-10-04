@@ -232,6 +232,9 @@ enum class EventKindV3 {
     // resultRef+resultVersion=payload;targetRequestId=信封 requestId;
     // originRef=信封 turnId/stepId+payload assistantMessageRef。
     ToolJobRegistered,
+    ToolJobAdopted,
+    // Internal SDK main-input/turn provenance; statusless, no live authority.
+    SdkOperationTurnBound,
     ToolJobDispatched,
     ToolJobObserved,
     ToolJobCancelRequested,

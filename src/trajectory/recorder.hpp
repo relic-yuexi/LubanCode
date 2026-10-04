@@ -114,6 +114,8 @@ struct RecorderOptions {
     //(schema 类,不可重试;子代理空轨迹单 5.1 的 fault injection 用)。
     // 锁内调用,须廉价且无副作用。
     std::function<std::optional<std::string>(EventKind)> inject_submit_reject;
+    // Test-only failure at the checked Close boundary, after releasing FILE*.
+    std::function<std::optional<std::string>()> inject_close_failure;
 };
 
 // 子代理空轨迹单 P0-C:清掉"预留了却从未提交过任何事件"的 stream 残留。
