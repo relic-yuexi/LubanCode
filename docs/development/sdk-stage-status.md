@@ -31,3 +31,19 @@
 先补 [Job 实际绑定](sdk-job-operation-binding-v1.md) 与 [V3 Journal 回执](v3-journal-witness.md)。前者核真实 Service、主 Operation/turn 锚与已 adopted Job，历史只读 PassiveHold；后者保实际追加凭证和首次 Close 结果。两项仍属内部前置，不开放后台执行或完整 JournalStore。
 
 两条私有支线收成同一批，只开一张实施 PR。新增来源须进 SDK-only、组合、三平台全量与 ASan；验实际 argv、非零断言、各六条路径、JUnit 与完整 LastTest。源未通过前不勾已验收。功能分支到 main 继续走 Draft #234；当前与 main 有冲突，最终组合须另解冲突、验 CI、取得合入确认。
+
+远端已验源 `ec3d19e2`，源中已同步 main `3b973ffe`；共享功能分支尚未收入。[本源原生 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37228276882) 六套 SDK 各过 50 册 focused、426 条原生用例与 28 项迁位消费；ASan 实跑 149 册，56 必需来源过。新增两册各六案在六套 SDK 与 ASan 均过。
+
+整源仍未验收。全量 Linux 748、macOS 751 过；Windows 实跑 750 册，749 过、一册失败。失败来源为 `sdk.focused.run_command_execution_limits`，原六案四过两败：当场 `powershell-exact` 等满 15000ms，`powershell-host-timeout` 等满 8000ms，都返回 `process.timeout`，未读到 started/done。CreateProcess、AssignJob、Resume 均成功；当场 ToolResult、进程 POD 与 Job accounting 原件保留。更后同源通过不能盖掉这笔失败，也尚不能断唯一起因。下一笔只补同次 shell、包装与用户块入口观测；原时限、输出帽、六案和硬断言不改。早先编译失败、取消轮另封，不借旧绿收账。
+
+## 私有候选，尚未合入
+
+以下候选只排开发与验收次序，不替已合基线添能力。维持一张实施 PR；当前 #332 收口后，再按模块交下一笔。
+
+| 候选 | 交付范围 | 当前验收边界 |
+| --- | --- | --- |
+| [Package 盘点](https://github.com/relic-yuexi/LubanCode/blob/42eca2c3bb894a289aab6305961158e397235904/docs/development/sdk-package-inventory.md)与 Lua ON/OFF，源 `42eca2c3` | Package 显式根盘点；SDK 可关闭 Lua 编译依赖；两份移位安装包验跨画像恢复 | [远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37231298587) 在跑；Linux、macOS 的 ON/OFF 原件已过，尚不算三平台整源验收。macOS 第四枚坏 UTF-8 文件名由原生文件系统拒造，只证明原生拒绝；其余三枚由实际 SDK 拒绝 |
+| 操作日志退场，源 `473c609a` | 首追加、首次 checked Close 与未知结果持值；关场先退所有 writer owner，再核关闭凭证 | [远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37228560157) 在跑；只迁操作日志，不称完整 JournalStore 已能替换 |
+| ResultPolicy 开场锁试点，源 `5ae20f22` | 新场在实际开场锁内发布；恢复先读同份捕获字节；持有原生耐久凭证 | [远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37232350552) 在跑；真缺文件的旧场仍走兼容口。未知耐久结果不得靠读回文件改成成功 |
+| 主场 `todo_write`，源 `f2386e75` | 显式准入，每场自持清单；整表替换；恢复保历史、重新起空表 | 源码与 ON/OFF 验收门已封，尚未送本源原生 CI；CLI 展示、提醒、压缩与子场清单仍归宿主 |
+| Agentic RAG 参考例 | 宿主经公开 Tool 注入检索器，实际模型工具回环取证、补查、引用来源 | 按架构单近期目标开发；不增核心检索 API、向量库或依赖。尚无整源原生验收 |
