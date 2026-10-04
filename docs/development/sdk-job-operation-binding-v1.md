@@ -28,7 +28,7 @@ Job Operation ID 只在真实 append Committed 后从该枚 event ID 派生 `job
 
 V3 envelope/schema3/实际 `ReadV3Ledger` 与 Python shape validator 同笔登记；不改 Writer。Reader 先调用现有真实 registration/adoption 与主锚校验，再核本事实引用、摘要、顺序和唯一 Job/业务 Action/operation ID。坏 owner、坏 hash、错 turn、错引用或重复绑定须明确拒，不能最后一枚赢。
 
-SDK strict 历史入口还须调用 `CheckMainOperationTurnBindings`，核同份 File operations 来源；普通 V3 Reader 只核本卷材料，不假称它读过 SDK 操作台账。恢复只交 `PassiveHold` owned 值，无现场租约、Writer 或 Coordinator，零 append、零派工、零 Post、零修账。未绑定旧 Job 不补 operation；没有新事实时保持 NotApplicable。合法尚无父 final 的绑定前缀可读，不合成主 final 或 Job terminal。
+SDK strict 历史入口还须调用 `CheckMainOperationTurnBindings`，核同份 File operations 来源；普通 V3 Reader 只核本卷材料，不假称它读过 SDK 操作台账。本笔现场绑定和历史入口均收该核口的 `Validated`、`Incomplete`：后者仍须有真实 accepted/dispatched/主锚，只缺父 final；`Rejected`、`NotApplicable` 均拒。恢复只交 `PassiveHold` owned 值，无现场租约、Writer 或 Coordinator，零 append、零派工、零 Post、零修账。未绑定旧 Job 不补 operation；没有新事实时保持 NotApplicable。合法尚无父 final 的绑定前缀可读，不合成主 final 或 Job terminal。
 
 整场仍由 File V3/operations/result store 持账。本笔不添数据库、Journal factory、第二条运行栈或后台线程。
 
