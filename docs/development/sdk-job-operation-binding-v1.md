@@ -4,7 +4,7 @@
 
 ## 实际入口与归属
 
-`src/sdk/job_operations.hpp/.cpp` 提供内部 owned 值表。实际登记入口只借这次 `SessionService`、`ToolJobCoordinator` 和 Job ID；Job ID 只选本 Coordinator 当前真实 record。调用方不能传 SID/run/op/action/attempt DTO，不能从历史卷恢复现场许可。值表退出不留 Service、Writer、Coordinator、工具、取消旗或回调裸借用。
+`src/sdk/job_operations.hpp/.cpp` 提供内部 owned 值表。实际登记入口只借这次 `SessionService`、`ToolJobCoordinator` 和 Job ID；Job ID 只选本 Coordinator 当前真实 record。调用方不能传 SID/run/op/action/attempt DTO，不能从历史卷恢复现场许可。值表退出不留 Service、Writer、Coordinator、工具、取消旗或回调裸借用。宿主须保 Service、Coordinator 和实际 Writer 活到在途 Bind 退完；期间不得外部直写、关 Service 或换场。本笔不交并发 Service Close 租约。退出先 Close 值表，再 Shutdown Coordinator，最后 Close Service。
 
 Coordinator 新增中立同步核口 `WithOwnedJobBindingSource(actual_writer, job_id, consume)`。沿真实 `writer_serial → jobs_mutex` 核 Writer 同指针、当前实例/epoch、Open、已 adopted 且 `parent_delivery_pending`、未 dispatched/Started/terminal、无 gap。交 owned Prepared facts 与首次 adoption 回执。释放 jobs 锁后才进内部 consumer；serial 持到 binding append 返回。既有 callback guard 挡递归关闭，不跑 scope/Post/Gate/clock/Pump，不发线程。这个核口不签执行许可。
 
@@ -22,7 +22,7 @@ Job Operation ID 只在真实 append Committed 后从该枚 event ID 派生 `job
 
 每次绑定只 append 一枚，档位 PowerLoss。值表先占稳定记录与容量，再进真实 append；首次 native receipt 原样缓存。阶段区分 `RejectedBeforeWrite`、`Unconfirmed`、`CommittedPublicationGap`、`Bound`；native Rejected 若 writer broken 仍属未确认。实际已写后的拒绝不能洗成零写。首 append/发布 gap 保留，同票不重登、不读回升级、不 Confirm、不派工。缺原生回执不造 IoFailed 或 OS 故障。
 
-发布回调只是内部测试/宿主同步发布口，在 writer/jobs 锁外调用。异常保首 Committed 与 publication gap；不能重写绑定迎回执。值表容量计入未确认记录。纯 Snapshot 不读文件、不 Pump、不调用 clock 或回调。内部 Close 停新绑定、等本次在途 Bind/发布退完、保 owned 快照与首错；不替用户决定进程取消。同步发布内递归 Close 明确拒，不能自等。
+发布回调只是内部测试/宿主同步发布口，在 writer/jobs 锁外调用。异常保首 Committed 与 publication gap；不能重写绑定迎回执。值表容量计入未确认记录。纯 Snapshot 不读文件、不 Pump、不调用 clock 或回调。内部 Close 停新绑定、等本次在途 Bind/发布退完、保 owned 快照与首错；不替用户决定进程取消。当前线程只要仍在任一 Bind 内，便拒再次 Bind 或 Close，含跨表套调，免得回调等外层退场。
 
 ## 严格读面与恢复
 
@@ -36,6 +36,6 @@ SDK strict 历史入口还须调用 `CheckMainOperationTurnBindings`，核同份
 
 生产：`src/sdk/job_operations.hpp/.cpp`、Coordinator 两件、V3 envelope/schema3/reader、`scripts/validate_trajectory_v3.py`。新册 `tests/integration/sdk/test_lubancore_job_operations.cpp` 固定六 CASE；末标 `[sdk-job-operations-path]` 各一次：`source`、`gap`、`history`、`relation`、`isolation`、`lifetime`。根代理管 CMake/CI/目录门，本笔不改这些交叉文件。
 
-六路用真实 Service 输入接纳/Pop/主锚、真实声明与 Coordinator Register/Adopt：正向绑定与原/有效参数；首次 Writer 注入未确认和真实发布 gap；checked Close/Continue 的 PassiveHold 与旧无绑定场；真重 hash 坏关系先 Verify 再 Reader 精准拒；同项目二场加异项目二场；真实在途发布退场与纯查询零 Pump。绑定前后 executor/Gate/clock/thread 为零；旧来源、册数、预算、断言与默认路径保留。
+六路用真实 Service 输入接纳/Pop/主锚、真实声明与 Coordinator Register/Adopt：正向绑定与原/有效参数；首次 Writer 注入未确认和真实发布 gap；checked Close/Continue 的 PassiveHold 与旧无绑定场；真重 hash 坏关系先 Verify 再 Reader 精准拒；同项目二场加异项目二场；真实在途发布退场与纯查询零 Pump。绑定前后 executor/旧 Gate/clock/thread 为零；每票 Adopt 已真实调用一次 owned scope Gate，绑定、读面和退场不得再增。旧来源、册数、预算、断言与默认路径保留。
 
 本地只做文本、Python、AST 与文档检查。新原生来源交三平台远端，取完整 argv、非零六 CASE/断言、marker、JUnit 与 LastTest。父支绿不替新源验收。
