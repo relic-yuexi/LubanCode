@@ -49,6 +49,9 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/runtime/test_middleware_native_receipts.cpp"
   "${_lubancore_tests_root}/unit/hooks/test_middleware_dispatch_cause.cpp"
   "${_lubancore_tests_root}/unit/hooks/test_middleware_job_post_contract.cpp")
+if(NOT LUBANCORE_WITH_LUA)
+  list(FILTER LUBANCORE_FOCUSED_TEST_SOURCES EXCLUDE REGEX "/test_(lubancore_lua|lua_protected)\\.cpp$")
+endif()
 set(_lubancore_tests_exclude)
 if(LUBANCODE_BUILD_CLI)
   set(_lubancore_tests_exclude EXCLUDE_FROM_ALL)
@@ -76,13 +79,17 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   # The public-only child acceptance source is also built after relocation. It
   # belongs to these fixture executables, never the SDK library closure.
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/subagents.cpp"
-  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua_build_profile.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/actions.cpp"
   ${LUBANCORE_FOCUSED_TEST_SOURCES})
+if(LUBANCORE_WITH_LUA)
+  target_sources(lubancore_sdk_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua.cpp")
+endif()
 target_link_libraries(lubancore_sdk_tests PRIVATE
   lubancode_runtime lubancore_sdk doctest::doctest)
 target_include_directories(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}/support")
 target_compile_definitions(lubancore_sdk_tests PRIVATE
+  LUBANCORE_CONSUMER_WITH_LUA=$<BOOL:${LUBANCORE_WITH_LUA}>
   LUBANCORE_TEST_JOB_POST_SDK=1
   LUBANCODE_TEST_FIXTURES_DIR="${_lubancore_tests_root}/fixtures"
   LUBANCORE_TEST_SEARCH_PROBE="$<TARGET_FILE:lubancore_sdk_search_probe>"
@@ -152,6 +159,12 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "sdk-package-inventory")
     if(TEST "${sdk_original_test}")
       set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "sdk-package-inventory")
+    endif()
+  elseif(sdk_basename STREQUAL "test_lubancore_lua_build_profile.cpp")
+    set(sdk_original_test "integration.sdk.lubancore_lua_build_profile")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "sdk-lua-build-profile")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "sdk-lua-build-profile")
     endif()
   elseif(sdk_basename STREQUAL "test_lua_protected.cpp")
     set(sdk_original_test "unit.tools.lua_protected")

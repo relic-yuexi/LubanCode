@@ -45,6 +45,8 @@ void SubagentResume(const std::filesystem::path& base);
 void Lua(const std::filesystem::path& base);
 void LuaSeed(const std::filesystem::path& base);
 void LuaResume(const std::filesystem::path& base);
+void LuaBuildProfile(const std::filesystem::path& base);
+void LuaBuildCross(const std::string& mode, const std::filesystem::path& base);
 }
 
 // Deliberately only installed public headers and the C++ standard library.
@@ -1719,6 +1721,9 @@ int main(int argc, char** argv) {
         else if (mode == "lua") lubancore_consumer::Lua(base);
         else if (mode == "lua-seed") lubancore_consumer::LuaSeed(base);
         else if (mode == "lua-resume") lubancore_consumer::LuaResume(base);
+        else if (mode == "lua-build-profile") lubancore_consumer::LuaBuildProfile(base);
+        else if (mode == "lua-build-seed-off" || mode == "lua-build-resume-off" ||
+                 mode == "lua-build-seed-on" || mode == "lua-build-reject-on") lubancore_consumer::LuaBuildCross(mode, base);
         else if (mode == "builtin-search") lubancore_consumer::BuiltinSearch(base, Path(argv[3]));
         else if (mode == "result-seed") ResultSeed(base);
         else if (mode == "result-resume") ResultResume(base);

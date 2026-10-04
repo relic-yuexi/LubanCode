@@ -17,6 +17,15 @@ import re
 import sys
 
 
+try:
+    from .sdk_lua_profile import lua_graph_violations, read_lua_profile
+except ImportError:
+    try:
+        from sdk_lua_profile import lua_graph_violations, read_lua_profile
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_lua_profile import lua_graph_violations, read_lua_profile
+
+
 CLIENT = "client-lubancore-boundary"
 # Freeze host ownership independently from the current CMake source lists.
 # File API reports must prove every implementation's actual sole target owner.
@@ -265,7 +274,7 @@ def read_reply(reply: Path, reference: dict) -> dict:
     return json.loads((reply / filename).read_text(encoding="utf-8"))
 
 
-def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dict:
+def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_profile: str | None = None) -> dict:
     source, build = source.resolve(), build.resolve()
     reply = build / ".cmake/api/v1/reply"
     indices = sorted(reply.glob("index-*.json"))
@@ -299,6 +308,8 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         if value.upper() not in accepted:
             violations.append(f"cache {name} must be {'ON' if expected else 'OFF'}, got {value}")
 
+    with_lua = read_lua_profile(entries, lua_profile)
+    flags["LUBANCORE_WITH_LUA"] = "ON" if with_lua else "OFF"
     targets = {}
     source_contexts: list[tuple[Path, tuple[Path, ...]]] = []
 
@@ -374,6 +385,11 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         "name": target["name"], "type": target["type"],
         "projectSources": [entry["projectPath"] for entry in target["sources"] if entry["compiled"]],
     } for key, target in targets.items()}))
+    if "LUBANCORE_WITH_LUA" in entries or lua_profile is not None:
+        violations.extend(lua_graph_violations({key: {
+            "name": target["name"], "type": target["type"],
+            "projectSources": [entry["projectPath"] or entry["path"] for entry in target["sources"] if entry["compiled"]],
+        } for key, target in targets.items()}, with_lua))
     for target in targets.values():
         if target["name"] in PRIVATE_TEST_PROBES:
             label = "search probe" if target["name"] == SEARCH_PROBE_TARGET else "command limits probe"
@@ -443,6 +459,8 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         public = relative(path, public_root) is not None
         for match in includes_in(text):
             include = match.group(1)
+            if not with_lua and include.replace("\\", "/").split("/")[-1] in {"lua.h", "lauxlib.h", "lualib.h"}:
+                violations.append("Lua OFF includes native Lua header: " + name + " -> " + include)
             if name == COMMAND_LIMITS_PROBE_SOURCE and include not in STANDARD_HEADERS:
                 violations.append("command limits probe must use only standard-library headers: " + include)
             resolved = next((candidate.resolve() for candidate in
@@ -490,6 +508,7 @@ def main() -> int:
     parser.add_argument("--build-dir", required=True, type=Path)
     parser.add_argument("--source-dir", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--config", default="Release")
+    parser.add_argument("--lua-profile", choices=("on", "off"), default="on")
     parser.add_argument("--expect-testing", choices=("on", "off"))
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
@@ -499,7 +518,7 @@ def main() -> int:
     if args.expect_testing is None or args.report is None:
         parser.error("checking requires --expect-testing and --report")
     try:
-        report = inspect(args.source_dir, args.build_dir, args.config, args.expect_testing == "on")
+        report = inspect(args.source_dir, args.build_dir, args.config, args.expect_testing == "on", args.lua_profile)
     except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
         report = {"schemaVersion": 1, "githubSha": os.environ.get("GITHUB_SHA"),
                   "status": "failed", "violations": [str(error)]}

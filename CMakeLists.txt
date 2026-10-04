@@ -21,6 +21,10 @@ option(LUBANCODE_BUILD_WORKER_HOST "Build the private supervisor IPC worker host
 if(LUBANCODE_BUILD_WORKER_HOST)
   set(LUBANCODE_BUILD_SDK ON)
 endif()
+option(LUBANCORE_WITH_LUA "Include Lua in the Core build (OFF requires SDK-only)" ON)
+if(NOT LUBANCORE_WITH_LUA AND (LUBANCODE_BUILD_CLI OR NOT LUBANCODE_BUILD_SDK))
+  message(FATAL_ERROR "LUBANCORE_WITH_LUA=OFF requires LUBANCODE_BUILD_CLI=OFF and LUBANCODE_BUILD_SDK=ON")
+endif()
 if(NOT LUBANCODE_BUILD_CLI AND NOT LUBANCODE_BUILD_SDK AND NOT LUBANCODE_BUILD_EXPERIMENT_RUNNER)
   message(FATAL_ERROR "Enable LUBANCODE_BUILD_CLI or LUBANCODE_BUILD_SDK or LUBANCODE_BUILD_EXPERIMENT_RUNNER")
 endif()
@@ -256,6 +260,7 @@ endif()
 # (github.com 主站连不通,原因见上)。
 # ---------------------------------------------------------------------------
 include(FetchContent)
+if(LUBANCORE_WITH_LUA)
 enable_language(C)
 _lubancode_tarball(_lubancode_lua_url "lua/lua" "v5.4.7")
 FetchContent_Declare(
@@ -270,6 +275,7 @@ target_include_directories(lubancode_lua PUBLIC ${lua_SOURCE_DIR})
 if(MSVC)
   # lua 是别人家的 C 代码,顶层的 /W4 会刷一屏没意义的告警,单独关掉。
   target_compile_options(lubancode_lua PRIVATE /w)
+endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -447,7 +453,7 @@ endif()
 # 分支反而能过——帧展开信息有无之别)。/EHa 让 Lua 边界 TU 的帧始终带
 # 全量展开表,longjmp 走异步展开,不再看运气。只给这两个 TU 上,不全局
 # 放开(/EHa 会关掉一些编译器优化假设)。
-if(MSVC)
+if(MSVC AND LUBANCORE_WITH_LUA)
   set_source_files_properties(
     src/runtime/plugin_lua_host.cpp
     src/tools/lua_tool.cpp
@@ -623,7 +629,6 @@ add_library(lubancode_engine STATIC
   src/tools/tool_search.cpp
   src/tools/deferred_tool_resolver.cpp
   src/tools/plugin_loader.cpp
-  src/tools/lua_tool.cpp
   src/tools/web_fetch.cpp
   src/tools/web_search.cpp
   src/memory/project_memory.cpp
@@ -910,7 +915,10 @@ if(WIN32)
   # 系统依赖会以 link-only 形态传给消费方)。渠道 TLS 的 crypt32 留在宿主。
   target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs ws2_32)
 endif()
-target_link_libraries(lubancode_engine PRIVATE lubancode_lua)
+if(LUBANCORE_WITH_LUA)
+  target_sources(lubancode_engine PRIVATE src/tools/lua_tool.cpp)
+  target_link_libraries(lubancode_engine PRIVATE lubancode_lua)
+endif()
 # yaml-cpp 走 PUBLIC:engine 的头(memory/front matter)把 yaml 头递给
 # 消费方,拆 target 后 core/workflow 那层也直接吃,PRIVATE 会断 include 路径。
 target_link_libraries(lubancode_engine PUBLIC yaml-cpp::yaml-cpp)
@@ -954,7 +962,6 @@ add_library(lubancode_runtime STATIC
   src/runtime/plugin_process.cpp
   src/runtime/plugin_tool.cpp
   # plugins 第 4 步:内嵌 Lua 进 RuntimeManager(三道软墙)。
-  src/runtime/plugin_lua.cpp
   # Lua 受控 HTTP 与 Secret 宿主能力(阶段 0+1):错误码总表、URL 规范化、
   # transport seam 与 fake;SecretValue RAII、窄 dotenv parser、env
   # provider、数据目录与打码器。不接真网(阶段 2)、不碰 Lua state(阶段 3)。
@@ -964,11 +971,9 @@ add_library(lubancode_runtime STATIC
   # (LuaCallContext RAII、SecretRef userdata、取消接线、manifest-backed
   # state 的加载/对账/调用机制)。挂载接 manifest 是阶段 4;中立传输底座
   # 在 engine(src/net/http_transport.cpp,阶段 2 已落)。
-  src/runtime/plugin_lua_host.cpp
   # 同单阶段 4:manifest-backed Lua 的挂载 owner(ManifestLuaRuntime)——
   # v2 manifest 接 LuaHostState、SecretResolver 与受控传输,standalone 扫描
   # 挂载 + Package 事务成品接管 + 模型侧 adapter。裸 .lua 不经这里。
-  src/runtime/plugin_lua_manifest.cpp
   # 逐枚追踪单:canonical 工具事件的装配层分线器(持久栅栏/UI 投影/录制)。
   src/runtime/tool_trace_hub.cpp
   # P0-2 轨迹单写口:hub 的轨迹抽象口 + 会话账本/轮次边界桥(flag 门控,
@@ -1033,7 +1038,6 @@ add_library(lubancode_runtime STATIC
   src/remote/result_sync.cpp
   # LuaHook 单 P0-B:中间件核装配(lua_factory 碰 runtime 侧 Lua 适配器,
   # 归本库;engine 不反向引 runtime 的链接纪律见 turn_runtime.cpp 头注)。
-  src/runtime/middleware_assembly.cpp
   # Host/service drain coordination belongs above the engine's V3 event sink.
   src/runtime/middleware_session_binding.cpp
   # LuaHook 单 P1-C:hook 宿主能力束(受控文件/插件状态/context 候选/
@@ -1042,7 +1046,6 @@ add_library(lubancode_runtime STATIC
   src/runtime/hook_host_services.cpp
   # LuaHook 单 P1-D:hook 包校验与试跑引擎(§8.2 静态检查 + fixtures
   # fake 档;`lubancode hook validate/test` 的芯,CLI 只打印)。
-  src/runtime/hook_package_check.cpp
   # loop 单遗留(骨架):scheduled prompt -> 安全动作的 catalog 与 resolver。
   src/runtime/scheduled_action.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
@@ -1066,7 +1069,15 @@ target_link_libraries(lubancode_runtime PUBLIC lubancode_engine)
 # Lua 受控 HTTP 单·阶段 3:plugin_lua_host.cpp 直碰 lua C API。engine 是
 # PRIVATE 链 lua 的(usage requirement 不外传),这里补一份——只给本 target
 # 的编译用 include 路径与符号,不往 core/app 递。
-target_link_libraries(lubancode_runtime PRIVATE lubancode_lua)
+if(LUBANCORE_WITH_LUA)
+  target_sources(lubancode_runtime PRIVATE
+    src/runtime/plugin_lua.cpp
+    src/runtime/plugin_lua_host.cpp
+    src/runtime/plugin_lua_manifest.cpp
+    src/runtime/middleware_assembly.cpp
+    src/runtime/hook_package_check.cpp)
+  target_link_libraries(lubancode_runtime PRIVATE lubancode_lua)
+endif()
 target_compile_features(lubancode_runtime PUBLIC cxx_std_23)
 target_precompile_headers(lubancode_runtime PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
