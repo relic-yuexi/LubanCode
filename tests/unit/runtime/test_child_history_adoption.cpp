@@ -199,10 +199,10 @@ TEST_CASE("child history keeps raw and actual PostToolUse effective material sep
             batch.content = {result};
             const auto full = agent::PlanToolBatchBudget(batch, 65536);
             REQUIRE(full.error.empty()); REQUIRE(full.preview_bytes.size() == 1);
-            CHECK(full.preview_bytes.front() == (needs_raw ? std::size_t{32768} : result.content.size()));
+            CHECK(full.preview_bytes.front() == (needs_raw ? std::size_t{32768} : std::size_t{4114}));
             const auto plan = agent::PlanToolBatchBudget(batch, 4096);
             REQUIRE(plan.error.empty()); REQUIRE(plan.preview_bytes.size() == 1);
-            CHECK(plan.preview_bytes.front() == (needs_raw ? std::size_t{4096} : result.content.size()));
+            CHECK(plan.preview_bytes.front() == 4096);
             CHECK(plan.total_preview_bytes <= 4096);
             v3::ResultStore::PersistRequest material;
             material.result_kind = "text";
@@ -225,7 +225,7 @@ TEST_CASE("child history keeps raw and actual PostToolUse effective material sep
                 result.capture_complete = false;
                 batch.content = {result};
                 const auto incomplete = agent::PlanToolBatchBudget(batch, 4096);
-                REQUIRE(incomplete.error.empty()); CHECK(incomplete.preview_bytes.front() == 1024);
+                REQUIRE(incomplete.error.empty()); CHECK(incomplete.preview_bytes.front() == 4096);
                 continue;
             }
             CHECK(material.outputs.back().channel == "raw_payload");
@@ -281,12 +281,15 @@ TEST_CASE("child history keeps raw and actual PostToolUse effective material sep
         mixed.content = {plain, rich};
         const auto shared = agent::PlanToolBatchBudget(mixed, 4106);
         REQUIRE(shared.error.empty());
-        CHECK(shared.preview_bytes == std::vector<std::size_t>{10, 4096});
+        CHECK(shared.preview_bytes == std::vector<std::size_t>{2053, 2053});
         CHECK(shared.total_preview_bytes == 4106);
         plain.content.clear(); plain.blocks = {tools::TextContent{plain.content}};
         mixed.content = {plain};
         const auto empty = agent::PlanToolBatchBudget(mixed, 1);
-        REQUIRE(empty.error.empty()); CHECK(empty.total_preview_bytes == 1);
+        CHECK(empty.error == "tool_batch.minimum_preview_exceeds_capacity");
+        const auto empty_minimum = agent::PlanToolBatchBudget(mixed, 1024);
+        REQUIRE(empty_minimum.error.empty()); CHECK(empty_minimum.total_preview_bytes == 1024);
+        CHECK(plain.content.empty());
     }
     Directory directory; Rig rig(directory, "parent-session", history_diagnostics);
     rig.configure_wiring = [](agent::TurnWiring& wiring) {

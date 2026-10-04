@@ -133,15 +133,17 @@ def inspect_graph(targets: dict) -> dict:
     # Job binding is a private SDK implementation, not a new neutral runtime
     # owner. Only the two reference executables may compile their own copy.
     job_source = "src/sdk/job_operations.cpp"
-    job_owners = [key for key, target in targets.items() if job_source in target["projectSources"]]
-    if job_owners:
-        if sdk[0] not in job_owners:
-            violations.append("Job binding implementation must belong to the shared SDK")
-        for key in job_owners:
-            target = targets[key]
-            if key != sdk[0] and not (target["name"] in {"lubancore_sdk_tests", "lubancode_tests"}
-                                     and target["type"] == "EXECUTABLE"):
-                violations.append("Job binding has an unregistered reference owner: " + target["name"])
+    job_owners = {key: target["projectSources"].count(job_source) for key, target in targets.items()
+                  if job_source in target["projectSources"]}
+    if job_owners.get(sdk[0]) != 1:
+        violations.append("Job binding implementation must belong exactly once to the shared SDK")
+    for key, occurrences in job_owners.items():
+        target = targets[key]
+        if occurrences != 1:
+            violations.append("Job binding has duplicate source occurrences: " + target["name"])
+        if key != sdk[0] and not (target["name"] in {"lubancore_sdk_tests", "lubancode_tests"}
+                                 and target["type"] == "EXECUTABLE"):
+            violations.append("Job binding has an unregistered reference owner: " + target["name"])
     # Agent loop calls the neutral lease directly. A runtime-owned provider can
     # appear in the SDK's transitive graph and still fail a single-pass static
     # host link: runtime is scanned before its engine dependency. Require the
