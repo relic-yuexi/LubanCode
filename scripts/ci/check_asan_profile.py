@@ -170,19 +170,34 @@ def check_graph(manifest, targets, cache, source, build, filename):
     expected = sorted(manifest['compile_sources'] + manifest['attachments'])
     groups = aggregate.get('compileGroups', [])
     require(bool(groups), 'aggregate compile groups missing')
+    owner_path = aggregate.get('paths', {}).get('build')
+    require(isinstance(owner_path, str) and bool(owner_path), 'aggregate build owner path missing')
+    owner = Path(owner_path)
+    owner = (owner if owner.is_absolute() else build / owner).resolve()
+    require(owner.is_relative_to(build), 'aggregate build owner escapes the build tree')
+    pch_source = owner / 'CMakeFiles' / (aggregate['name'] + '.dir') / 'cmake_pch.hxx.cxx'
     actual, generated = [], []
-    for item in aggregate.get('sources', []):
+    for source_index, item in enumerate(aggregate.get('sources', [])):
         if 'compileGroupIndex' not in item:
             continue
         require(type(item['compileGroupIndex']) is int and 0 <= item['compileGroupIndex'] < len(groups),
                 'aggregate source references an invalid compile group')
         path = Path(item['path'])
         path = (path if path.is_absolute() else source / path).resolve()
-        if item.get('isGenerated'):
-            require(path.is_relative_to(build) and path.name == 'cmake_pch.hxx.cxx',
-                    'unexpected generated aggregate compilation: ' + str(path))
+        if path == pch_source:
+            # CMake's actual PCH translation unit can omit isGenerated. Its
+            # target-owned path and the linked compile group's header identify
+            # this single exception; a same-named file elsewhere is no substitute.
+            group = groups[item['compileGroupIndex']]
+            headers = group.get('precompileHeaders', [])
+            require(len(headers) == 1 and
+                    Path(headers[0].get('header', '')).is_absolute() and
+                    Path(headers[0].get('header', '')).resolve() == source / 'tests/support/pch.hpp' and
+                    group.get('sourceIndexes', []).count(source_index) == 1,
+                    'aggregate PCH lacks its actual header/compile-group binding')
             generated.append(str(path))
         else:
+            require(not item.get('isGenerated'), 'unexpected generated aggregate compilation: ' + str(path))
             require(path.is_relative_to(source), 'foreign aggregate source: ' + str(path))
             actual.append(path.relative_to(source).as_posix())
     require(sorted(actual) == expected, 'actual aggregate compilation closure differs')

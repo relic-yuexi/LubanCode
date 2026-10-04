@@ -84,6 +84,7 @@ class ProfileTests(unittest.TestCase):
             path.write_bytes(b'fake fixture data, not an executable')
         targets['lubancode_lua']['type'] = 'STATIC_LIBRARY'
         target = targets['lubancode_tests']
+        target['paths'] = {'build': 'tests', 'source': 'tests'}
         target['dependencies'] = [{'id': name} for name in names[3:]]
         target['sources'] = [{'path': name, 'compileGroupIndex': 0}
                              for name in self.manifest['compile_sources'] + self.manifest['attachments']]
@@ -95,6 +96,7 @@ class ProfileTests(unittest.TestCase):
             definitions.append(macro + '="' + (self.build / 'tests' / name).as_posix() + '"')
         target['compileGroups'] = [{'language': 'CXX', 'compileCommandFragments': [{'fragment': '-O3 -fsanitize=address'}],
                                     'defines': [{'define': value} for value in definitions],
+                                    'sourceIndexes': list(range(len(target['sources']))),
                                     'precompileHeaders': [{'header': (self.source / 'tests/support/pch.hpp').as_posix()}]}]
         cache = {'LUBANCODE_ASAN_TEST_PROFILE': 'ON', 'LUBANCODE_BUILD_CLI': 'ON', 'LUBANCODE_BUILD_SDK': 'ON',
                  'LUBANCORE_WITH_LUA': 'ON', 'LUBANCODE_ASAN_PROFILE_FILE': str(self.filename),
@@ -150,6 +152,45 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(self.check_graph(targets, cache)['status'], 'passed')
         del cache['LUBANCORE_WITH_LUA']  # Older checkout has mandatory Lua, no optional profile yet.
         self.assertEqual(self.check_graph(targets, cache)['status'], 'passed')
+
+    def test_actual_pch_without_generated_flag_is_bound_to_its_target_and_group(self):
+        # df72's first remote File API reports this relative path and no
+        # isGenerated field. Preserve that shape with the build below source.
+        self.build = self.source / 'build'
+        self.filename = self.build / 'asan-profile/manifest.json'
+        for flag in ('missing', True):
+            targets, cache = self.graph()
+            target = targets['lubancode_tests']
+            # Match the actual leading PCH source and its distinct group, not
+            # just the absence of a flag on the old synthetic last source.
+            source = {'backtrace': 0, 'compileGroupIndex': 0,
+                      'path': 'build/tests/CMakeFiles/lubancode_tests.dir/cmake_pch.hxx.cxx', 'sourceGroupIndex': 0}
+            if flag is True: source['isGenerated'] = True
+            target['sources'] = [source] + target['sources'][:-1]
+            target['compileGroups'] = [deepcopy(target['compileGroups'][0]) for _ in range(3)]
+            for group in target['compileGroups']: group['sourceIndexes'] = []
+            for index, item in enumerate(target['sources']):
+                item['compileGroupIndex'] = min(index, 2)
+                target['compileGroups'][min(index, 2)]['sourceIndexes'].append(index)
+            self.assertEqual(self.check_graph(targets, cache)['status'], 'passed')
+
+    def test_pch_same_name_wrong_owner_missing_binding_and_duplicates_are_rejected(self):
+        for mutation in ('other-owner', 'outside-build', 'owner-escape', 'wrong-name',
+                         'missing-header', 'foreign-header', 'missing-group-binding', 'duplicate', 'other-generated'):
+            targets, cache = self.graph()
+            target = targets['lubancode_tests']
+            source = target['sources'][-1]
+            del source['isGenerated']
+            if mutation == 'other-owner': source['path'] = (self.build / 'other/CMakeFiles/lubancode_tests.dir/cmake_pch.hxx.cxx').as_posix()
+            if mutation == 'outside-build': source['path'] = (self.source / 'tests/CMakeFiles/lubancode_tests.dir/cmake_pch.hxx.cxx').as_posix()
+            if mutation == 'owner-escape': target['paths']['build'] = '../foreign'
+            if mutation == 'wrong-name': source['path'] += '.other'
+            if mutation == 'missing-header': target['compileGroups'][0]['precompileHeaders'] = []
+            if mutation == 'foreign-header': target['compileGroups'][0]['precompileHeaders'][0]['header'] = str(self.source / 'foreign.hpp')
+            if mutation == 'missing-group-binding': target['compileGroups'][0]['sourceIndexes'].remove(len(target['sources']) - 1)
+            if mutation == 'duplicate': target['sources'].append(deepcopy(source))
+            if mutation == 'other-generated': target['sources'][0]['isGenerated'] = True
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError): self.check_graph(targets, cache)
 
     def test_graph_missing_extra_duplicate_and_foreign_source_rejected(self):
         for mutation in ('missing', 'extra', 'duplicate', 'foreign', 'missing-helper', 'required-only', 'invalid-group'):
