@@ -216,3 +216,4 @@ DOC development/sdk-package-inventory.md
 DOC development/sdk-lua-build-profile.md
 DOC development/sdk-todo-write.md
 DOC development/sdk-agentic-rag-example.md
+DOC development/sdk-asan-compile-profile.md
