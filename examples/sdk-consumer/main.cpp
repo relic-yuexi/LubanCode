@@ -33,6 +33,7 @@ void Packages();
 void PackageInventory(const std::filesystem::path& base);
 void EventSink(const std::filesystem::path& base);
 void MemoryBlobs(const std::filesystem::path& base);
+void TodoWrite(const std::filesystem::path& base);
 void Actions(const std::filesystem::path& base);
 void BuiltinSearch(const std::filesystem::path& base, const std::filesystem::path& resource_root);
 void MemorySeed(const std::filesystem::path& base);
@@ -1707,6 +1708,7 @@ int main(int argc, char** argv) {
         else if (mode == "extensions") PublicExtensions(base);
         else if (mode == "event-sink") lubancore_consumer::EventSink(base);
         else if (mode == "memory-blobs") lubancore_consumer::MemoryBlobs(base);
+        else if (mode == "todo-write") lubancore_consumer::TodoWrite(base);
         else if (mode == "actions") lubancore_consumer::Actions(base);
         else if (mode == "results") PublicResults(base);
         else if (mode == "skills-seed") SkillsSeed(base);

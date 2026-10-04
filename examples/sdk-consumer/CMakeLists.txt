@@ -6,7 +6,7 @@ project(lubancore_installed_consumer LANGUAGES CXX)
 find_package(LubanCore CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp lua_build_profile.cpp actions.cpp event_sink.cpp memory_blobs.cpp)
+add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp lua_build_profile.cpp actions.cpp event_sink.cpp memory_blobs.cpp todo_write.cpp)
 if(NOT DEFINED LubanCore_WITH_LUA OR NOT LubanCore_WITH_LUA MATCHES "^(ON|OFF)$")
   message(FATAL_ERROR "Installed LubanCore must declare its Lua build profile")
 endif()
@@ -63,6 +63,9 @@ add_test(NAME sdk.consumer.event_sink
   COMMAND lubancore_consumer event-sink "${CMAKE_CURRENT_BINARY_DIR}/state-event-sink")
 add_test(NAME sdk.consumer.memory_blobs
   COMMAND lubancore_consumer memory-blobs "${CMAKE_CURRENT_BINARY_DIR}/state-memory-blobs")
+add_test(NAME sdk.consumer.todo_write
+  COMMAND lubancore_consumer todo-write "${CMAKE_CURRENT_BINARY_DIR}/state-todo-write")
+set_tests_properties(sdk.consumer.todo_write PROPERTIES TIMEOUT 120)
 add_test(NAME sdk.consumer.results
   COMMAND lubancore_consumer results "${CMAKE_CURRENT_BINARY_DIR}/state-results")
 add_test(NAME sdk.consumer.skills_seed

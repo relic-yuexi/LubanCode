@@ -81,6 +81,7 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/subagents.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua_build_profile.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/actions.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/todo_write.cpp"
   ${LUBANCORE_FOCUSED_TEST_SOURCES})
 if(LUBANCORE_WITH_LUA)
   target_sources(lubancore_sdk_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua.cpp")

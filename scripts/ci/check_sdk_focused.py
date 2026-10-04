@@ -36,6 +36,7 @@ REQUIRED = {
     "sdk.focused.middleware_dispatch_cause",
     "sdk.focused.middleware_job_post_contract",
     "sdk.focused.lubancore_memory_blob_spi",
+    "sdk.focused.lubancore_todo_write",
     "sdk.focused.lubancore_operation_turn_binding",
     "sdk.focused.journal_native_receipts",
     "sdk.focused.v3_journal_receipts",
@@ -712,6 +713,60 @@ def check_memory_blob_consumer(section, command):
         raise RuntimeError("Memory blob relocated consumer did not finish its actual owned queue")
 
 
+TODO_WRITE_PATHS = ('admission', 'replacement', 'validation', 'isolation', 'recovery', 'lifetime')
+
+
+def check_todo_write_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_lubancore_todo_write.cpp"):
+        raise RuntimeError("Todo write registration must run the single absolute native source")
+
+
+def check_todo_write_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("Todo write native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Todo write executable is not the actual native fixture")
+    check_todo_write_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (6, 6, 0):
+        raise RuntimeError("Todo write native roster differs from six successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Todo write native assertions did not actually pass")
+    for path in TODO_WRITE_PATHS:
+        if section.splitlines().count("[sdk-todo-write-path] " + path) != 1:
+            raise RuntimeError("Todo write actual path did not finish once: " + path)
+
+
+def check_todo_write_consumer(section, command):
+    if (not isinstance(command, list) or len(command) != 3 or
+            not all(isinstance(value, str) and value for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in ("lubancore_consumer", "lubancore_consumer.exe") or
+            command[1] != "todo-write" or
+            not (command[2].startswith("/") or
+                 (ntpath.isabs(command[2]) and bool(ntpath.splitdrive(command[2])[0])))):
+        raise RuntimeError("Todo write consumer must run its actual relocated command")
+    check_native_command(section, command)
+    if (section.splitlines().count("[sdk-todo-write-consumer] complete") != 1 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Todo write relocated consumer did not finish its actual rounds")
+    for path in TODO_WRITE_PATHS:
+        if section.splitlines().count("[sdk-todo-write-path] " + path) != 1:
+            raise RuntimeError("Todo write relocated path did not finish once: " + path)
+
+
 OPERATION_TURN_BINDING_PATHS = ("actual", "source", "gap", "history", "relation", "isolation")
 
 
@@ -1010,6 +1065,8 @@ def main():
             check_event_sink_registration(test.get("command", []))
         if test["name"] == "sdk.focused.lubancore_memory_blob_spi":
             check_memory_blob_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_todo_write":
+            check_todo_write_registration(test.get("command", []))
         if test["name"] == "sdk.focused.lubancore_operation_turn_binding":
             check_operation_turn_binding_registration(test.get("command", []))
         if test["name"] == "sdk.focused.journal_native_receipts":
@@ -1103,6 +1160,9 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_memory_blob_spi":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_memory_blob_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_todo_write":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_todo_write_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.lubancore_operation_turn_binding":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_operation_turn_binding_native(sections[0], registered["command"])

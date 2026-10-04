@@ -35,6 +35,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.actions",
     "sdk.consumer.event_sink",
     "sdk.consumer.memory_blobs",
+    "sdk.consumer.todo_write",
     "sdk.consumer.builtin_search",
     "sdk.consumer.results",
     "sdk.consumer.skills_seed", "sdk.consumer.skills_resume",
@@ -58,6 +59,44 @@ REQUIRED_PUBLIC_HEADERS = {
     "include/lubancore/events.hpp",
     "include/lubancore/memory_blobs.hpp",
 }
+
+
+def check_todo_consumer_source(repo: Path) -> dict:
+    """Seal the relocated Todo helper's public/standard-library include surface."""
+    try:
+        from .check_sdk_only_boundary import CPP_TOKENS, STANDARD_HEADERS, includes_in, without_comments
+    except ImportError:
+        try:
+            from check_sdk_only_boundary import CPP_TOKENS, STANDARD_HEADERS, includes_in, without_comments
+        except ModuleNotFoundError:
+            from scripts.ci.check_sdk_only_boundary import CPP_TOKENS, STANDARD_HEADERS, includes_in, without_comments
+    relative = "examples/sdk-consumer/todo_write.cpp"
+    path = repo / relative
+    if not path.is_file():
+        raise RuntimeError("Todo relocated helper source is missing")
+    raw = path.read_bytes()
+    text = raw.decode("utf-8")
+    # Synthetic directives inside raw literals are not preprocessor includes.
+    directives = CPP_TOKENS.sub(lambda match: re.sub(r"[^\n]", " ", match.group())
+                               if match.group().startswith('R"') else match.group(), without_comments(text))
+    includes = list(includes_in(text))
+    if len(re.findall(r"^\s*#\s*include\b", directives, flags=re.M)) != len(includes):
+        raise RuntimeError("Todo relocated helper contains a dynamic include")
+    headers = [match.group(1) for match in includes]
+    if headers.count("lubancore/core.hpp") != 1:
+        raise RuntimeError("Todo relocated helper must include the installed SDK core header once")
+    if any(header not in STANDARD_HEADERS and header != "lubancore/core.hpp" for header in headers):
+        raise RuntimeError("Todo relocated helper exposes a private/nonstandard include")
+    if any(not re.match(r"#\s*include\s*<", match.group().lstrip()) for match in includes):
+        raise RuntimeError("Todo relocated helper includes must use installed/standard search paths")
+    return {"path": relative, "sha256": hashlib.sha256(raw).hexdigest(), "includes": headers}
+
+
+def check_todo_consumer_copy(source: Path, seal: dict) -> dict:
+    path = source / "todo_write.cpp"
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != seal["sha256"]:
+        raise RuntimeError("Todo relocated helper differs from its public source seal")
+    return {"source": str(path), "sha256": seal["sha256"], "includes": seal["includes"]}
 
 
 def check_search_resources(repo: Path, prefix: Path, staged_dir: Path, platform: str) -> dict:
@@ -119,6 +158,7 @@ def main() -> None:
     parser.add_argument("--lua-cross-profile-context", type=Path)
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
+    todo_source = check_todo_consumer_source(repo)
     producer_build = args.build_dir.resolve()
     profile_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
     profile_entries = {line.split(":", 1)[0]: line.split("=", 1)[1] for line in profile_cache.splitlines()
@@ -160,6 +200,7 @@ def main() -> None:
         "installed_prefix": str(prefix),
         "required_tests": sorted(required_tests), "lua_profile": args.lua_profile, "status": "running",
         "install_mode": args.install_mode,
+        "todo_consumer_source": todo_source,
     }, indent=2) + "\n", encoding="utf-8")
     print(f"SDK consumer evidence directory: {scratch}", flush=True)
 
@@ -217,6 +258,8 @@ def main() -> None:
         if any(path in contents for path in forbidden):
             raise RuntimeError(f"installed CMake package leaks a producer or staging path: {config}")
     shutil.copytree(repo / "examples" / "sdk-consumer", consumer_source)
+    (evidence / "todo-consumer-source.json").write_text(
+        json.dumps(check_todo_consumer_copy(consumer_source, todo_source), indent=2) + "\n", encoding="utf-8")
     # Neither inherited loader variables nor a producer PATH may rescue a
     # broken installed package. Ordinary system compiler/tool directories stay.
     blocked = (repo, producer_build, staging)
@@ -285,7 +328,7 @@ def main() -> None:
                                          case.find("failure") is not None or case.find("error") is not None
                                          for case in results):
         raise RuntimeError("consumer JUnit contains duplicate, skipped or failed tests")
-    from check_sdk_focused import check_action_paths, check_event_sink_consumer, check_memory_blob_consumer, check_package_inventory_consumer, check_lua_build_consumer
+    from check_sdk_focused import check_action_paths, check_event_sink_consumer, check_memory_blob_consumer, check_package_inventory_consumer, check_lua_build_consumer, check_todo_write_consumer
     sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
                         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
     action_sections = [sections[index + 1] for index in range(1, len(sections), 2)
@@ -305,6 +348,12 @@ def main() -> None:
     if len(memory_sections) != 1 or len(memory_tests) != 1:
         raise RuntimeError("consumer native log and registration must identify one Memory blob test")
     check_memory_blob_consumer(memory_sections[0], memory_tests[0].get("command"))
+    todo_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                     if sections[index] == "sdk.consumer.todo_write"]
+    todo_tests = [test for test in listing["tests"] if test["name"] == "sdk.consumer.todo_write"]
+    if len(todo_sections) != 1 or len(todo_tests) != 1:
+        raise RuntimeError("consumer log and registration must identify one Todo write test")
+    check_todo_write_consumer(todo_sections[0], todo_tests[0].get("command"))
     package_sections = [sections[index + 1] for index in range(1, len(sections), 2)
                         if sections[index] == "sdk.consumer.package_inventory"]
     package_tests = [test for test in listing["tests"] if test["name"] == "sdk.consumer.package_inventory"]
