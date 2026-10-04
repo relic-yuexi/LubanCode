@@ -99,6 +99,7 @@ struct V3Writer::Impl {
     std::unordered_map<std::string, nlohmann::json> system_host_bindings;
     bool broken = false;
     bool closed = false;
+    std::optional<std::expected<void, std::string>> first_close_result;
     V3WriterOptions options;
     const V3Clock* clock = nullptr;
     V3Clock owned_clock;  // 无注入时的默认钟
@@ -255,7 +256,8 @@ struct V3Writer::Impl {
             receipt.error_message = "注入的提交失败(测试)";
             return receipt;
         }
-        if (!journal.AppendLine(*final_line, durability)) {
+        receipt.journal_append = journal.AppendLineDetailed(*final_line, durability);
+        if (receipt.journal_append->status != JournalAppendStatus::Committed) {
             broken = true;
             receipt.error_code = "v3writer.io_failed";
             receipt.error_message = "追加落盘失败,句柄已断";
@@ -294,18 +296,23 @@ V3Writer::~V3Writer() = default;
 std::expected<void, std::string> V3Writer::Close() {
     if (impl_ == nullptr) return {};
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->first_close_result) return *impl_->first_close_result;
     impl_->closed = true;
     if (!impl_->journal.Close()) {
         impl_->broken = true;
-        return std::unexpected("v3writer.close_failed: 日志写句柄关闭失败或已有写入错误");
+        impl_->first_close_result.emplace(std::unexpected(
+            std::string("v3writer.close_failed: 日志写句柄关闭失败或已有写入错误")));
+        return *impl_->first_close_result;
     }
     if (impl_->options.inject_close_failure) {
         if (const auto injected = impl_->options.inject_close_failure()) {
             impl_->broken = true;
-            return std::unexpected(*injected);
+            impl_->first_close_result.emplace(std::unexpected(*injected));
+            return *impl_->first_close_result;
         }
     }
-    return {};
+    impl_->first_close_result.emplace();
+    return *impl_->first_close_result;
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +326,10 @@ std::expected<V3Writer, std::string> V3Writer::Start(const std::filesystem::path
                                                      nlohmann::json system_extra,
                                                      V3WriterOptions options,
                                                      const V3Clock* clock) {
-    auto journal = JournalWriter::Open(jsonl_path, JournalWriter::OpenMode::CreateNew);
+    auto journal = options.journal_native_io_probe
+        ? JournalWriter::OpenWithNativeIoProbe(jsonl_path, JournalWriter::OpenMode::CreateNew,
+                                              options.journal_native_io_probe)
+        : JournalWriter::Open(jsonl_path, JournalWriter::OpenMode::CreateNew);
     if (!journal.has_value()) {
         return std::unexpected(journal.error());
     }
@@ -652,6 +662,8 @@ std::optional<Schema3Error> VerifyLine(const nlohmann::json& line, std::string_v
 std::expected<V3Writer, std::string> V3Writer::Continue(const std::filesystem::path& jsonl_path,
                                                         V3WriterOptions options,
                                                         const V3Clock* clock) {
+    if (options.journal_native_io_probe)
+        return std::unexpected("v3writer.native_probe_resume_unsupported");
     V3VerifyReport report = VerifyV3File(jsonl_path);
     if (!report.ok) {
         return std::unexpected("v3writer.continue_not_clean: " + report.error_code + " " +
@@ -699,6 +711,8 @@ std::expected<V3Writer, std::string> V3Writer::Continue(const std::filesystem::p
 
 std::expected<V3Writer, std::string> V3Writer::ContinueOwnedPrefix(const std::filesystem::path& jsonl_path,
     std::string_view prefix, const JournalFileAnchor& anchor, V3WriterOptions options, const V3Clock* clock) {
+    if (options.journal_native_io_probe)
+        return std::unexpected("v3writer.native_probe_resume_unsupported");
     auto raw_lines = RecoveryStreamLines(prefix, std::nullopt, true);
     if (!raw_lines) return std::unexpected(raw_lines.error());
     V3VerifyReport report = VerifyV3Lines(*raw_lines);
@@ -1297,6 +1311,11 @@ bool V3Writer::closed() const {
     if (impl_ == nullptr) return true;
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->closed;
+}
+std::optional<trajectory::JournalAppendReceipt> V3Writer::first_unconfirmed_journal_append() const {
+    if (impl_ == nullptr) return std::nullopt;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->journal.first_unconfirmed_append();
 }
 const ContextView& V3Writer::context() const { return impl_->context; }
 bool V3Writer::HasMessageId(std::string_view message_id) const {
