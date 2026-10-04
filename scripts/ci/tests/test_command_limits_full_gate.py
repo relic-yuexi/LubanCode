@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
 import tempfile
 import unittest
@@ -34,6 +35,8 @@ def materialize(build, platform="posix"):
     for name, (binary, timeout) in gate.REQUIRED.items():
         command = [str(build / "tests" / (binary + (".exe" if platform == "nt" else ""))).replace("\\", "/"), gate.FILTER]
         tests.append({"name": name, "command": command, "properties": [{"name": "TIMEOUT", "value": timeout}]})
+        if platform == "nt":
+            tests[-1]["properties"].append({"name": "RUN_SERIAL", "value": True})
         bodies[name] = native_body(name, command, platform)
     (build / "command-limits-full-registration.json").write_text(json.dumps({"tests": tests}), encoding="utf-8")
     (build / "Testing/Temporary").mkdir(parents=True)
@@ -178,6 +181,32 @@ class CommandLimitsFullGateTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError): gate.extract(build, "posix")
                 self.check_manifest(build, "failed")
 
+    def test_windows_both_actual_registrations_require_true_run_serial_and_keep_originals(self):
+        for selected in range(2):
+            for value in (None, False, 0, 1, "TRUE", "false", [], {}):
+                with self.subTest(selected=selected, value=value), tempfile.TemporaryDirectory() as directory:
+                    build = Path(directory); tests, bodies = materialize(build, "nt")
+                    properties = tests[selected]["properties"]
+                    properties[:] = [item for item in properties if item["name"] != "RUN_SERIAL"]
+                    if value is not None:
+                        properties.append({"name": "RUN_SERIAL", "value": value})
+                    raw = json.dumps({"tests": tests}).encode()
+                    (build / "command-limits-full-registration.json").write_bytes(raw)
+                    with self.assertRaisesRegex(RuntimeError, 'isolate external CTest load'):
+                        gate.extract(build, "nt")
+                    output = self.check_manifest(build, "failed")
+                    self.assertEqual((output / 'registration.json').read_bytes(), raw)
+                    self.assertEqual((output / 'LastTest.log').read_text(encoding='utf-8'), ''.join(bodies.values()))
+
+    def test_posix_registration_has_no_new_serial_requirement(self):
+        for value in (None, False, True):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                build = Path(directory); tests, _ = materialize(build)
+                if value is not None:
+                    for test in tests: test['properties'].append({'name': 'RUN_SERIAL', 'value': value})
+                (build / 'command-limits-full-registration.json').write_text(json.dumps({'tests': tests}), encoding='utf-8')
+                self.assertEqual(gate.extract(build, 'posix')['status'], 'passed')
+
     def test_missing_inputs_keep_available_bytes_and_failed_manifest(self):
         for name in ("command-limits-full-registration.json", "result-store-full-results.xml", "Testing/Temporary/LastTest.log"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
@@ -218,6 +247,55 @@ class CommandLimitsFullGateTests(unittest.TestCase):
             self.assertFalse((output / 'junit-unparsed.xml').exists())
             self.assertFalse((output / 'native-unscoped.log').exists())
             self.assertEqual((output / 'foreign-evidence.json').read_bytes(), b'owned elsewhere')
+
+
+class CommandLimitsSchedulingWiringTests(unittest.TestCase):
+    def test_windows_cli_and_sdk_registration_sites_are_independently_scoped(self):
+        # Inspect only this narrow CMake addition. Actual remote registration is
+        # checked above, so a text match cannot serve as native scheduling proof.
+        root = CI.parents[1]
+        sites = (
+            ('tests/CMakeLists.txt', 'foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)',
+             'test_name', 'unit.tools.run_command_execution_limits', 'test_name'),
+            ('cmake/LubanCoreTests.cmake', 'foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)',
+             'sdk_basename', 'test_run_command_execution_limits.cpp', 'sdk_test'),
+        )
+        for filename, loop, selector, value, target in sites:
+            text = (root / filename).read_text(encoding='utf-8')
+            body = text.split(loop, 1)[1].split('endforeach()', 1)[0]
+            block = (f'if(WIN32 AND {selector} STREQUAL "{value}")\n'
+                     f'    set_tests_properties("${{{target}}}" PROPERTIES RUN_SERIAL TRUE)\n'
+                     '  endif()')
+            with self.subTest(filename=filename):
+                self.assertEqual(body.count(block), 1)
+                self.assertEqual(body.count('RUN_SERIAL'), 1)
+                self.assertLess(body.index('add_test('), body.index(block))
+                self.assertNotIn('LUBANCODE_BUILD_SDK', body)
+        root_tests = (root / 'tests/CMakeLists.txt').read_text(encoding='utf-8')
+        self.assertLess(root_tests.index('foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)'),
+                        root_tests.index('# Reuse the SDK test graph'))
+
+    def test_windows_full_original_upload_follows_actual_test_and_keeps_scoped_gates(self):
+        workflow = (CI.parents[1] / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+        job = workflow.split('  build-test:\n', 1)[1].split('  linux-manylinux:\n', 1)[0]
+        body = job.split('      - name: Test\n', 1)[1].split('      - name: ', 1)[0]
+        capture = ('if [ \'${{ matrix.name }}\' = windows-msvc ]; then\n'
+                   '              ctest --test-dir build -C Release "${PROCESS_FILTER[@]}" --show-only=json-v1 > build/windows-full-test-registration.json\n'
+                   '            fi')
+        actual = 'ctest --test-dir build -C Release "${PROCESS_FILTER[@]}" --parallel 4 --output-on-failure --no-tests=error --output-junit "$PWD/build/result-store-full-results.xml"'
+        self.assertEqual(body.count(capture), 1)
+        self.assertLess(body.index(capture), body.index(actual))
+        self.assertEqual(body.count(actual), 1)
+        upload = job.split('      - name: Upload Windows full Test originals\n', 1)[1].split('      - name: ', 1)[0]
+        self.assertIn("if: always() && matrix.name == 'windows-msvc' && inputs.test_filter == '' && (steps.test.outcome == 'success' || steps.test.outcome == 'failure')", upload)
+        self.assertIn('uses: actions/upload-artifact@v4', upload)
+        self.assertIn('name: full-test-originals-windows-msvc', upload)
+        for path in ('build/windows-full-test-registration.json', 'build/result-store-full-results.xml',
+                     'build/Testing/Temporary/LastTest.log'):
+            self.assertEqual(upload.count(path), 1)
+        self.assertIn('if-no-files-found: error', upload)
+        for scope in ('command-limits', 'child-history', 'agent-health', 'result-store'):
+            self.assertRegex(job, r'      - name: Extract actual full ' + re.escape(scope))
 
 
 if __name__ == "__main__":

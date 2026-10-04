@@ -466,6 +466,11 @@ foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)
       LABELS "${test_kind};${test_domain};${test_kind}.${test_domain};v3-default"
       TIMEOUT "${test_timeout}")
   endif()
+  # Keep external CTest load out of the fixed shell-start/timeout measurement.
+  # This also applies to CLI-only builds; the source's four-context case stays concurrent.
+  if(WIN32 AND test_name STREQUAL "unit.tools.run_command_execution_limits")
+    set_tests_properties("${test_name}" PROPERTIES RUN_SERIAL TRUE)
+  endif()
 endforeach()
 
 # Reuse the SDK test graph in both combined and SDK-only configurations.

@@ -49,7 +49,9 @@ def check_source_native(name, section, platform, command):
     return {"nativeCases": 6, "nativeAssertions": int(assertions[0][0]), "command": command}
 
 
-def _registered_commands(raw, build):
+def _registered_commands(raw, build, platform_name):
+    if platform_name not in ("nt", "posix"):
+        raise RuntimeError("Command limits full registration platform is invalid")
     try:
         document = json.loads(raw)
     except (ValueError, UnicodeError) as error:
@@ -76,6 +78,8 @@ def _registered_commands(raw, build):
         timeout = props.get("TIMEOUT")
         if type(timeout) not in (int, float) or timeout != REQUIRED[name][1]:
             raise RuntimeError("Command limits registration changed its actual source timeout")
+        if platform_name == "nt" and props.get("RUN_SERIAL") is not True:
+            raise RuntimeError("Windows command limits registration must isolate external CTest load")
         commands[name] = command
     return commands
 
@@ -160,7 +164,7 @@ def extract(build, platform_name):
             raise RuntimeError("Command limits full JUnit XML is invalid") from junit_error
         context["stage"] = "validate-registration"
         save_context()
-        commands = _registered_commands(raw["registration"], build)
+        commands = _registered_commands(raw["registration"], build, platform_name)
         if (len(sections) != 2 or {name for name, _ in sections} != set(REQUIRED) or
                 len(cases) != 2 or {case.attrib.get("name") for case in cases} != set(REQUIRED)):
             raise RuntimeError("Command limits full native or JUnit source pair is missing or duplicated")
