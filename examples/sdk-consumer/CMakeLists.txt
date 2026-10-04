@@ -6,7 +6,12 @@ project(lubancore_installed_consumer LANGUAGES CXX)
 find_package(LubanCore CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp actions.cpp event_sink.cpp memory_blobs.cpp)
+add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp lua_build_profile.cpp actions.cpp event_sink.cpp memory_blobs.cpp)
+if(NOT DEFINED LubanCore_WITH_LUA OR NOT LubanCore_WITH_LUA MATCHES "^(ON|OFF)$")
+  message(FATAL_ERROR "Installed LubanCore must declare its Lua build profile")
+endif()
+target_compile_definitions(lubancore_consumer PRIVATE
+  LUBANCORE_CONSUMER_WITH_LUA=$<BOOL:${LubanCore_WITH_LUA}>)
 target_compile_features(lubancore_consumer PRIVATE cxx_std_23)
 target_link_libraries(lubancore_consumer PRIVATE LubanCore::Core Threads::Threads)
 if(MSVC)
@@ -26,6 +31,10 @@ add_test(NAME sdk.consumer.packages
   COMMAND lubancore_consumer packages "${CMAKE_CURRENT_BINARY_DIR}/state-packages")
 add_test(NAME sdk.consumer.package_inventory
   COMMAND lubancore_consumer package-inventory "${CMAKE_CURRENT_BINARY_DIR}/state-package-inventory")
+add_test(NAME sdk.consumer.lua_build_profile
+  COMMAND lubancore_consumer lua-build-profile "${CMAKE_CURRENT_BINARY_DIR}/state-lua-build-profile")
+set_tests_properties(sdk.consumer.lua_build_profile PROPERTIES TIMEOUT 120)
+if(LubanCore_WITH_LUA)
 add_test(NAME sdk.consumer.lua
   COMMAND lubancore_consumer lua "${CMAKE_CURRENT_BINARY_DIR}/state-lua")
 add_test(NAME sdk.consumer.lua_seed
@@ -35,6 +44,7 @@ add_test(NAME sdk.consumer.lua_resume
 set_tests_properties(sdk.consumer.lua_seed PROPERTIES FIXTURES_SETUP sdk_lua_restart)
 set_tests_properties(sdk.consumer.lua_resume PROPERTIES FIXTURES_REQUIRED sdk_lua_restart)
 set_tests_properties(sdk.consumer.lua sdk.consumer.lua_seed sdk.consumer.lua_resume PROPERTIES TIMEOUT 120)
+endif()
 set(LUBANCORE_CONSUMER_RESOURCE_ROOT "" CACHE PATH "Explicit relocated installed SDK resource root for real search acceptance")
 if(NOT IS_ABSOLUTE "${LUBANCORE_CONSUMER_RESOURCE_ROOT}")
   message(FATAL_ERROR "Set LUBANCORE_CONSUMER_RESOURCE_ROOT to the absolute relocated share/lubancore directory")

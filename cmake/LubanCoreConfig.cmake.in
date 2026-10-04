@@ -2,4 +2,5 @@
 include("${CMAKE_CURRENT_LIST_DIR}/LubanCoreTargets.cmake")
 set(LubanCore_VERSION "@PROJECT_VERSION@")
 set(LubanCore_RESOURCE_DIR "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_DATADIR@/lubancore")
+set(LubanCore_WITH_LUA "@_lubancore_lua_profile@")
 check_required_components(LubanCore)

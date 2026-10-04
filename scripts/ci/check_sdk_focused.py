@@ -13,6 +13,15 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 
+try:
+    from .sdk_lua_profile import focused_roster, read_lua_profile
+except ImportError:
+    try:
+        from sdk_lua_profile import focused_roster, read_lua_profile
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_lua_profile import focused_roster, read_lua_profile
+
+
 REQUIRED = {
     "sdk.focused.lubancore_authorization",
     "sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest",
@@ -32,6 +41,7 @@ REQUIRED = {
     "sdk.focused.v3_journal_receipts",
     "sdk.focused.lubancore_job_operations",
     "sdk.focused.lubancore_package_inventory",
+    "sdk.focused.lubancore_lua_build_profile",
     "sdk.focused.run_command_execution_limits",
     "sdk.focused.session_recovery_view",
     "sdk.focused.lubancore_recovery_view",
@@ -893,11 +903,62 @@ def check_package_inventory_consumer(section, command):
         raise RuntimeError("Package inventory consumer did not finish the actual owned capture")
 
 
+LUA_BUILD_PATHS = ("default-off", "selection", "disabled-resume", "frozen-plan", "isolation", "lifetime")
+
+def check_lua_build_registration(command, executable="lubancore_sdk_tests"):
+    absolute = lambda value: isinstance(value, str) and bool(value) and "\0" not in value and (
+        value.startswith("/") or (ntpath.isabs(value) and bool(ntpath.splitdrive(value)[0])))
+    if (not isinstance(command, list) or len(command) != 2 or not absolute(command[0]) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_lubancore_lua_build_profile.cpp"):
+        raise RuntimeError("Lua build profile must register its actual absolute native source")
+
+def check_lua_build_native(section, command, enabled=True):
+    if not isinstance(command, list) or not command or not isinstance(command[0], str):
+        raise RuntimeError("Lua build native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Lua build profile ran a foreign native executable")
+    check_lua_build_registration(command, executable)
+    check_native_command(section, command)
+    summaries = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if summaries != [("6", "6", "0")]:
+        raise RuntimeError("Lua build native roster differs from six actual cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or assertions[0][0] != assertions[0][1] or
+            int(assertions[0][2]) != 0 or section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Lua build native assertions did not pass")
+    profile = "on" if enabled else "off"
+    observed = [line for line in section.splitlines() if line.startswith("[sdk-lua-build-case-profile] ")]
+    if sorted(observed) != sorted("[sdk-lua-build-case-profile] " + path + " " + profile for path in LUA_BUILD_PATHS):
+        raise RuntimeError("Lua native evidence contains a different or duplicate configured profile")
+    for path in LUA_BUILD_PATHS:
+        if (section.splitlines().count("[sdk-lua-build-path] " + path) != 1 or
+                section.splitlines().count("[sdk-lua-build-case-profile] " + path + " " + profile) != 1):
+            raise RuntimeError("Lua actual case/profile did not finish once: " + path)
+
+def check_lua_build_consumer(section, command, enabled=True):
+    absolute = lambda value: isinstance(value, str) and bool(value) and "\0" not in value and (
+        value.startswith("/") or (ntpath.isabs(value) and bool(ntpath.splitdrive(value)[0])))
+    if (not isinstance(command, list) or len(command) != 3 or not absolute(command[0]) or not absolute(command[2]) or
+            command[0].replace("\\", "/").split("/")[-1] not in ("lubancore_consumer", "lubancore_consumer.exe") or
+            command[1] != "lua-build-profile"):
+        raise RuntimeError("Lua build consumer must run its actual absolute relocated command")
+    check_native_command(section, command)
+    profile = "on" if enabled else "off"
+    if [line for line in section.splitlines() if line.startswith("[sdk-lua-build-profile] ")] != ["[sdk-lua-build-profile] " + profile]:
+        raise RuntimeError("Lua consumer evidence contains a different or duplicate configured profile")
+    if any(section.splitlines().count(marker) != 1 for marker in (
+            "[sdk-lua-build-profile] " + profile, "[sdk-lua-build-consumer] complete", "Test Passed.")):
+        raise RuntimeError("Lua actual installed profile did not finish once")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
     parser.add_argument("--config", default="Release")
     parser.add_argument("--sdk-only", action="store_true")
+    parser.add_argument("--lua-profile", choices=("on", "off"), default="on")
     args = parser.parse_args()
     build = args.build_dir.resolve()
     evidence = build / "test-evidence" / "sdk-focused"
@@ -915,8 +976,13 @@ def main():
     }, indent=2) + "\n", encoding="utf-8")
     (evidence / "tests.json").write_bytes(listed.stdout)
     listed.check_returncode()
+    cache = (build / "CMakeCache.txt").read_text(encoding="utf-8")
+    entries = {line.split(":", 1)[0]: line.split("=", 1)[1] for line in cache.splitlines()
+               if ":" in line and "=" in line and not line.startswith(("#", "//"))}
+    with_lua = read_lua_profile(entries, args.lua_profile)
+    required = focused_roster(REQUIRED, with_lua)
     tests = json.loads(listed.stdout)["tests"]
-    if len(tests) != len(REQUIRED) or {t["name"] for t in tests} != REQUIRED:
+    if len(tests) != len(required) or {t["name"] for t in tests} != required:
         raise RuntimeError("SDK test files are missing, duplicated or unexpected")
     for test in tests:
         props = {p["name"]: p["value"] for p in test.get("properties", [])}
@@ -948,6 +1014,8 @@ def main():
             check_operation_turn_binding_registration(test.get("command", []))
         if test["name"] == "sdk.focused.journal_native_receipts":
             check_journal_receipt_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_lua_build_profile":
+            check_lua_build_registration(test.get("command", []))
         if test["name"] == "sdk.focused.lubancore_package_inventory":
             check_package_inventory_registration(test.get("command", []))
         if test["name"] == "sdk.focused.lubancore_job_operations":
@@ -963,8 +1031,8 @@ def main():
             check_package_registration(test.get("command", []), source, "lubancore_sdk_tests")
     (evidence / "context.json").write_text(json.dumps({
         "githubSha": os.environ.get("GITHUB_SHA"), "buildDir": str(build),
-        "configuration": args.config, "sdkOnly": args.sdk_only,
-        "requiredTests": sorted(REQUIRED),
+        "configuration": args.config, "sdkOnly": args.sdk_only, "luaProfile": args.lua_profile,
+        "requiredTests": sorted(required),
     }, indent=2), encoding="utf-8")
     results = evidence / "results.xml"
     try:
@@ -975,7 +1043,7 @@ def main():
         if native_log.exists():
             shutil.copyfile(native_log, evidence / "LastTest.log")
     cases = ET.parse(results).getroot().findall(".//testcase")
-    if len(cases) != len(REQUIRED) or {c.attrib["name"] for c in cases} != REQUIRED:
+    if len(cases) != len(required) or {c.attrib["name"] for c in cases} != required:
         raise RuntimeError("JUnit does not cover every SDK test file")
     # Successful JUnit output can be truncated before the doctest summary.
     native_sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
@@ -1041,6 +1109,8 @@ def main():
         if case.attrib["name"] == "sdk.focused.journal_native_receipts":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_journal_receipt_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_lua_build_profile":
+            check_lua_build_native(sections[0], commands[0], with_lua)
         if case.attrib["name"] == "sdk.focused.lubancore_package_inventory":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_package_inventory_native(sections[0], registered["command"])
@@ -1109,7 +1179,7 @@ def main():
                 marker = "[child-adoption-path] " + path
                 if sections[0].splitlines().count(marker) != 1:
                     raise RuntimeError("Child adoption actual path did not finish once: " + path)
-    print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
+    print(f"SDK focused: all {len(required)} registered test files executed nonempty native test cases")
 
 
 if __name__ == "__main__":

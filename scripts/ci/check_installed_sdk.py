@@ -17,10 +17,20 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 
+try:
+    from .sdk_lua_profile import consumer_roster, read_lua_profile
+except ImportError:
+    try:
+        from sdk_lua_profile import consumer_roster, read_lua_profile
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_lua_profile import consumer_roster, read_lua_profile
+
+
 REQUIRED_TESTS = {
     "sdk.consumer.authorization",
     "sdk.consumer.packages",
     "sdk.consumer.package_inventory",
+    "sdk.consumer.lua_build_profile",
     "sdk.consumer.smoke", "sdk.consumer.isolation", "sdk.consumer.extensions",
     "sdk.consumer.actions",
     "sdk.consumer.event_sink",
@@ -105,9 +115,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, required=True)
     parser.add_argument("--install-mode", choices=("component", "full"), default="component")
+    parser.add_argument("--lua-profile", choices=("on", "off"), default="on")
+    parser.add_argument("--lua-cross-profile-context", type=Path)
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     producer_build = args.build_dir.resolve()
+    profile_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
+    profile_entries = {line.split(":", 1)[0]: line.split("=", 1)[1] for line in profile_cache.splitlines()
+                       if ":" in line and "=" in line and not line.startswith(("#", "//"))}
+    with_lua = read_lua_profile(profile_entries, args.lua_profile)
+    required_tests = consumer_roster(REQUIRED_TESTS, with_lua)
+    if not with_lua and args.lua_cross_profile_context is None:
+        raise RuntimeError("Lua OFF installed acceptance requires a passed ON consumer context")
     runner_temp = os.environ.get("RUNNER_TEMP")
     if not runner_temp:
         raise RuntimeError("RUNNER_TEMP is required for this remote CI check")
@@ -139,7 +158,7 @@ def main() -> None:
         "consumer_source": str(consumer_source),
         "consumer_build": str(consumer_build),
         "installed_prefix": str(prefix),
-        "required_tests": sorted(REQUIRED_TESTS),
+        "required_tests": sorted(required_tests), "lua_profile": args.lua_profile, "status": "running",
         "install_mode": args.install_mode,
     }, indent=2) + "\n", encoding="utf-8")
     print(f"SDK consumer evidence directory: {scratch}", flush=True)
@@ -240,7 +259,9 @@ def main() -> None:
     enabled = {test["name"] for test in listing["tests"] if not any(
         prop["name"] == "DISABLED" and prop["value"]
         for prop in test.get("properties", []))}
-    missing = REQUIRED_TESTS - enabled
+    if len(listing["tests"]) != len(required_tests) or {test["name"] for test in listing["tests"]} != required_tests:
+        raise RuntimeError("installed consumer registration differs from its exact Lua profile roster")
+    missing = required_tests - enabled
     if missing:
         raise RuntimeError("installed consumer is missing enabled tests: " + ", ".join(sorted(missing)))
     print("installed consumer tests: " + ", ".join(sorted(enabled)), flush=True)
@@ -258,13 +279,13 @@ def main() -> None:
                 shutil.copy2(log, evidence / name)
     results = ET.parse(evidence / "consumer-results.xml").getroot().findall(".//testcase")
     executed = {case.attrib.get("name") for case in results}
-    if not results or not REQUIRED_TESTS <= executed:
+    if not results or executed != required_tests:
         raise RuntimeError("consumer JUnit is missing required executed tests")
     if len(executed) != len(results) or any(case.attrib.get("status") != "run" or case.find("skipped") is not None or
                                          case.find("failure") is not None or case.find("error") is not None
                                          for case in results):
         raise RuntimeError("consumer JUnit contains duplicate, skipped or failed tests")
-    from check_sdk_focused import check_action_paths, check_event_sink_consumer, check_memory_blob_consumer, check_package_inventory_consumer
+    from check_sdk_focused import check_action_paths, check_event_sink_consumer, check_memory_blob_consumer, check_package_inventory_consumer, check_lua_build_consumer
     sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
                         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
     action_sections = [sections[index + 1] for index in range(1, len(sections), 2)
@@ -290,6 +311,34 @@ def main() -> None:
     if len(package_sections) != 1 or len(package_tests) != 1:
         raise RuntimeError("consumer log and registration must identify one Package inventory test")
     check_package_inventory_consumer(package_sections[0], package_tests[0].get("command"))
+    profile_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                        if sections[index] == "sdk.consumer.lua_build_profile"]
+    profile_tests = [test for test in listing["tests"] if test["name"] == "sdk.consumer.lua_build_profile"]
+    if len(profile_sections) != 1 or len(profile_tests) != 1:
+        raise RuntimeError("consumer log and registration must identify one Lua build profile test")
+    profile_command = profile_tests[0].get("command")
+    check_lua_build_consumer(profile_sections[0], profile_command, with_lua)
+    installed_profile = prefix / "lib" / "cmake" / "LubanCore" / "LubanCoreConfig.cmake"
+    if not installed_profile.is_file():
+        candidates = list(prefix.rglob("LubanCoreConfig.cmake"))
+        if len(candidates) != 1:
+            raise RuntimeError("installed Lua profile config is missing or ambiguous")
+        installed_profile = candidates[0]
+    profile_declaration = re.findall(r'set\(LubanCore_WITH_LUA "(ON|OFF)"\)', installed_profile.read_text(encoding="utf-8"))
+    if profile_declaration != ["ON" if with_lua else "OFF"]:
+        raise RuntimeError("installed Lua profile differs from the actual producer")
+    context_path = evidence / "consumer-context.json"
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    context.update(status="passed", consumer_executable=profile_command[0])
+    context_path.write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
+    if not with_lua:
+        from check_sdk_lua_cross_profile import run_cross_images
+        try:
+            run_cross_images(args.lua_cross_profile_context.resolve(), context_path, evidence / "lua-cross-profile")
+        except Exception as error:
+            context.update(status="failed", lua_cross_profile_error=str(error))
+            context_path.write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
+            raise
 
 
 if __name__ == "__main__":
