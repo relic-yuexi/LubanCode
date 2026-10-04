@@ -159,10 +159,10 @@ void Describe(InventorySnapshot& snapshot) {
             if (root_file == directory) snapshot.issues.push_back({IssueKind::Error, path,
                 "invalid_top_level_type", "Reserved package entry has the wrong type"});
         } else {
-            const auto near = NearMissStandardDir(path);
-            snapshot.issues.push_back({near.empty() ? IssueKind::Info : IssueKind::Warning, path,
-                near.empty() ? "unknown_top_level" : "near_miss_directory",
-                near.empty() ? "Unknown top-level entry is retained in inventory" : "Possible misspelling of " + near});
+            const auto near_miss = NearMissStandardDir(path);
+            snapshot.issues.push_back({near_miss.empty() ? IssueKind::Info : IssueKind::Warning, path,
+                near_miss.empty() ? "unknown_top_level" : "near_miss_directory",
+                near_miss.empty() ? "Unknown top-level entry is retained in inventory" : "Possible misspelling of " + near_miss});
         }
     };
     for (const auto& dir : snapshot.directories) top(dir, true);
