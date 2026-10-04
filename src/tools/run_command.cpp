@@ -31,6 +31,7 @@
 #include <span>
 
 #include "platform/base64.hpp"  // Base64Encode:-EncodedCommand 的公共内核(审计 P2)
+#include "platform/process_diagnostics.hpp"
 #endif
 
 namespace lubancode::tools {
@@ -339,6 +340,59 @@ namespace {
 //      代价是这条路径下 $? 会被 Out-String/Write-Output 这两级管道盖掉,
 //      所以退出码改靠 $LASTEXITCODE(外部程序、或者脚本里显式 exit N)来判断,
 //      查不到 $LASTEXITCODE 时才退回去看 $?。
+std::optional<platform::ProcessCommandStartObservation> CurrentCommandStartObservation() noexcept {
+    const auto* buffer = platform::process_diagnostics;
+    const auto* held = buffer ? buffer->CommandStartObservation() : nullptr;
+    if (!held) return std::nullopt;
+    try {
+        if (held->tag.empty() || held->tag.size() > 64 ||
+            held->tag.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-") !=
+                std::string::npos) return std::nullopt;
+        for (const auto& path : held->paths_utf8) {
+            if (path.empty() || path.size() > 32768 || path.find('\0') != std::string::npos ||
+                path.find_first_of("\r\n") != std::string::npos || !platform::IsValidUtf8(path) ||
+                !std::filesystem::u8path(path).is_absolute()) return std::nullopt;
+        }
+        return *held;
+    } catch (...) {
+        // Observation setup must never reject or unwind a command.
+        return std::nullopt;
+    }
+}
+
+std::string CommandStartStatement(const platform::ProcessCommandStartObservation& observation,
+                                  std::size_t index) {
+    constexpr const char* stages[] = {"shell-entry", "wrapper-ready", "user-block-entry"};
+    std::string path;
+    for (const char ch : observation.paths_utf8[index]) {
+        path.push_back(ch);
+        if (ch == '\'') path.push_back(ch);
+    }
+    // The .NET call returns void; neither success nor a caught diagnostic
+    // failure enters the original output/ErrorRecord pipeline.
+    return "try { [System.IO.File]::WriteAllText('" + path + "', ('" + observation.tag +
+        "\t" + stages[index] + "\t' + $PID.ToString() + \"`n\"), [System.Text.Encoding]::ASCII) } catch {}\r\n";
+}
+
+std::optional<std::string> AddCommandStartObservation(const std::string& script, bool scoped) noexcept {
+    const auto observation = CurrentCommandStartObservation();
+    if (!observation) return std::nullopt;
+    try {
+        const std::string needle = scoped ? "& { " : "$oco = & { ";
+        const auto position = script.find(needle);
+        if (position == std::string::npos) return std::nullopt;
+        // Prepare every added value before touching the original script. An
+        // allocation failure leaves its original bytes, never a partial edit.
+        const auto shell = CommandStartStatement(*observation, 0);
+        const auto ready = CommandStartStatement(*observation, 1);
+        const auto user = CommandStartStatement(*observation, 2);
+        return shell + script.substr(0, position) + ready + needle + user +
+            script.substr(position + needle.size());
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 std::string BuildEncodedCommand(const std::string& user_command_utf8) {
     // 退出码契约(进程生命线单 P1"PowerShell 退出码包装会误判"),先定后写:
     //   1. 显式 exit N —— 原样(N 直接终止进程,下面的判定碰不到它);
@@ -364,7 +418,8 @@ std::string BuildEncodedCommand(const std::string& user_command_utf8) {
         "if ($lec -ne $null) { exit $lec }\r\n"  // 末次 native 的码优先
         "if ($errseen) { exit 1 } else { exit 0 }\r\n";  // cmdlet 报错/找不到命令 vs 干净
 
-    const std::wstring wide = platform::Utf8ToWide(script_utf8);
+    const auto observed_script = AddCommandStartObservation(script_utf8, false);
+    const std::wstring wide = platform::Utf8ToWide(observed_script ? *observed_script : script_utf8);
     return platform::Base64Encode(std::span<const std::byte>(
         reinterpret_cast<const std::byte*>(wide.data()), wide.size() * sizeof(wchar_t)));
 }
@@ -387,7 +442,8 @@ std::string BuildScopedEncodedCommand(const std::string& user_command_utf8) {
         "$lec = $LASTEXITCODE\r\n"
         "if ($lec -ne $null) { exit $lec }\r\n"
         "if ($script:lubanCommandErrorSeen) { exit 1 } else { exit 0 }\r\n";
-    const std::wstring wide = platform::Utf8ToWide(script_utf8);
+    const auto observed_script = AddCommandStartObservation(script_utf8, true);
+    const std::wstring wide = platform::Utf8ToWide(observed_script ? *observed_script : script_utf8);
     return platform::Base64Encode(std::span<const std::byte>(
         reinterpret_cast<const std::byte*>(wide.data()), wide.size() * sizeof(wchar_t)));
 }
