@@ -256,6 +256,10 @@ struct OwnedJobCompletion {
     Tool::Result raw;
     trajectory::v3::WriteReceipt started_receipt, terminal_receipt, persisted_receipt;
 };
+struct OwnedJobBindingSource {
+    std::shared_ptr<const PreparedJobFacts> facts;
+    trajectory::v3::WriteReceipt adopted_receipt;
+};
 enum class OwnedJobPostPhase { Open, Draining, Retired };
 
 struct OwnedJobPostSnapshot {
@@ -479,6 +483,12 @@ public:
     // Host-safe serial -> jobs projection only: no Pump/Reap/clock/writer I/O.
     // Do not call from an observer whose callback owner is joining that thread.
     OwnedJobStatusView SnapshotOwnedJob(const PreparedJobOwner& owner, const std::string& job_id) const;
+    // Internal synchronous producer only. The real writer serial outlives
+    // consume; jobs is released first. No writer borrow survives this call.
+    // This validates a current record, not historical execution permission.
+    std::expected<void, std::string> WithOwnedJobBindingSource(
+        trajectory::v3::V3Writer& actual_writer, const std::string& job_id,
+        const std::function<void(const OwnedJobBindingSource&)>& consume) const;
     // Only the current actual Post invocation can pass. Foreign threads fail
     // before taking writer_serial; returned values own no live writer borrow.
     std::expected<OwnedJobPostSnapshot, std::string> CheckOwnedPostInvocation(

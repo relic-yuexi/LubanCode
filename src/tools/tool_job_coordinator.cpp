@@ -2327,6 +2327,33 @@ OwnedJobStatusView ToolJobCoordinator::SnapshotOwnedJob(const PreparedJobOwner& 
     return out;
 }
 
+std::expected<void, std::string> ToolJobCoordinator::WithOwnedJobBindingSource(
+    trajectory::v3::V3Writer& actual_writer, const std::string& id,
+    const std::function<void(const OwnedJobBindingSource&)>& consume) const {
+    if (!impl_->prepared_context || !consume || current_owned_callback == impl_.get())
+        return std::unexpected("job.binding.source_unavailable");
+    std::lock_guard serial(*impl_->prepared_context->writer_serial);
+    OwnedJobBindingSource source;
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        const auto found = impl_->owned.find(id);
+        if (impl_->closing || impl_->prepared_revoked || impl_->owned_post_phase != OwnedJobPostPhase::Open ||
+            impl_->writer != &actual_writer || actual_writer.closed() || actual_writer.broken() ||
+            found == impl_->owned.end()) return std::unexpected("job.binding.source_unavailable");
+        const auto& record = *found->second;
+        if (!record.facts || record.facts->owner != impl_->prepared_owner ||
+            record.scope.attempt != 1 || record.scope.owner != impl_->prepared_owner ||
+            record.job.state != "parent_delivery_pending" || record.job.dispatched ||
+            record.settled || record.settlement_started || !record.gap.empty() || record.started ||
+            record.dispatched || record.terminal || !record.adopted || !ReceiptOk(*record.adopted))
+            return std::unexpected("job.binding.source_unavailable");
+        source = {record.facts, *record.adopted};
+    }
+    JobThreadScope callback(current_owned_callback, impl_.get());
+    consume(source);
+    return {};
+}
+
 std::expected<OwnedJobPostSnapshot, std::string> ToolJobCoordinator::CheckOwnedPostInvocation(
     const OwnedJobPostInvocation& invocation) const {
     const auto state = invocation.state_.lock();

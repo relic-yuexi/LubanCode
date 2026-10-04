@@ -14,6 +14,7 @@
 #include "platform/sha256.hpp"
 #include "platform/bounded_read.hpp"
 #include "trajectory/canonical_json.hpp"
+#include "trajectory/v3/schema3.hpp"
 
 namespace lubancode::trajectory::v3 {
 
@@ -237,6 +238,8 @@ std::expected<V3Ledger, std::string> ReadVerifiedV3Lines(
         return std::unexpected("v3reader.invalid_owned_job: " + owned.error());
     if (auto bound = ReadOperationTurnBindings(ledger); !bound)
         return std::unexpected(bound.error());
+    if (auto jobs = ReadJobOperationBindings(ledger); !jobs)
+        return std::unexpected(jobs.error());
     return ledger;
 }
 
@@ -1603,6 +1606,59 @@ ReadOperationTurnBindings(const V3Ledger& ledger) {
         return std::unexpected("v3reader.operation_turn_invalid: malformed anchor");
     }
     return facts;
+}
+
+std::expected<std::vector<JobOperationBindingFacts>, std::string>
+ReadJobOperationBindings(const V3Ledger& ledger) {
+    std::vector<JobOperationBindingFacts> result;
+    if (std::none_of(ledger.events.begin(), ledger.events.end(), [](const auto& event) {
+            return event.kind == EventKindV3::SdkJobOperationBound;
+        })) return result;
+    const auto anchors = ReadOperationTurnBindings(ledger);
+    const auto adopted = ReadOwnedJobAdoptions(ledger);
+    if (!anchors || !adopted) return std::unexpected("v3reader.job_operation_invalid_source");
+    std::set<std::pair<std::string, std::string>> jobs;
+    std::set<std::string> actions;
+    try {
+        for (const auto& event : ledger.events) {
+            if (event.kind != EventKindV3::SdkJobOperationBound) continue;
+            const auto invalid = [] { return std::unexpected(std::string("v3reader.job_operation_invalid")); };
+            if (ValidateEventLine(event)) return invalid();
+            const auto* job = FindOwnedJobAdoption(*adopted, event.payload.at("jobId").get<std::string>());
+            if (!job || !OwnedEvent(event, *job, job->action_id) || event.payload.at("attempt") != 1 ||
+                event.payload.at("tool_call_id") != job->action_id ||
+                event.payload.at("originalInputSha256") != job->original_input_sha256 ||
+                event.payload.at("effectiveInputSha256") != job->effective_input_sha256 ||
+                !jobs.emplace(job->run_id, job->job_id).second || !actions.insert(job->action_id).second)
+                return invalid();
+            const auto parent = std::find_if(anchors->begin(), anchors->end(), [&](const auto& anchor) {
+                return anchor.turn_id == job->turn_id && anchor.session_id == job->session_id && anchor.run_id == job->run_id;
+            });
+            const auto* adoption = ledger.FindEvent(job->adopted_event_id);
+            const auto* assistant = ledger.FindMessage(job->assistant_message_ref);
+            if (parent == anchors->end() || !adoption || !assistant || parent->seq >= assistant->seq ||
+                adoption->seq >= event.seq) return invalid();
+            for (const auto& [key, id] : std::vector<std::pair<std::string, std::string>>{
+                    {"parentOperationRef", parent->event_id}, {"assistantMessageRef", job->assistant_message_ref},
+                    {"sourcePendingEventRef", job->source_pending_event_id}, {"sourceAdmissionEventRef", job->source_admission_event_id},
+                    {"preparedPendingEventRef", job->prepared_pending_event_id}, {"registeredEventRef", job->registered_event_id},
+                    {"adoptionEventRef", job->adopted_event_id}}) {
+                const auto actual = MakeOwnedJobReference(ledger, id);
+                if (!actual || event.payload.at(key) != *actual ||
+                    !OwnedReferenceMatches(ledger, *actual, job->session_id, job->run_id)) return invalid();
+            }
+            for (const auto& later : ledger.events) {
+                if (later.action_id == job->action_id &&
+                    (later.kind == EventKindV3::ToolJobDispatched || later.kind == EventKindV3::ToolExecutionStarted) &&
+                    later.seq <= event.seq) return invalid();
+            }
+            result.push_back({job->session_id, job->run_id, job->turn_id, job->step_id, job->action_id, job->job_id,
+                1, event.seq, "jobop-" + event.event_id, parent->operation_id, parent->input_id, parent->payload_hash,
+                event.event_id, event.line_hash, parent->event_id, job->adopted_event_id,
+                job->original_input_sha256, job->effective_input_sha256});
+        }
+    } catch (const nlohmann::json::exception&) { return std::unexpected("v3reader.job_operation_invalid: malformed binding"); }
+    return result;
 }
 
 std::expected<OwnedJobAdoptionFacts, std::string> ReadOwnedJobRegistration(

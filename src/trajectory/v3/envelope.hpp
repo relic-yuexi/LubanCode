@@ -324,6 +324,8 @@ enum class EventKindV3 {
     // 不复制累计用量:用量唯一可累计事实仍是 assistant message 的 usage
     // owner(§五),本行只带当次判定数字与剩余量。
     ContextPressureRecorded,
+    // Internal Job Operation provenance; no live authority or execution.
+    SdkJobOperationBound,
 };
 
 const char* EventKindV3Name(EventKindV3 kind);

@@ -377,6 +377,7 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::ToolObservationLate: return "tool.observation.late";
         case EventKindV3::RecoveryNoteRecorded: return "recovery.note.recorded";
         case EventKindV3::ContextPressureRecorded: return "context.pressure.recorded";
+        case EventKindV3::SdkJobOperationBound: return "sdk.job.operation.bound";
 
     }
     return "unknown";
@@ -503,6 +504,7 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::ToolJobRegistered,
             EventKindV3::ToolJobAdopted,
             EventKindV3::SdkOperationTurnBound,
+            EventKindV3::SdkJobOperationBound,
             EventKindV3::ToolJobDispatched,
             EventKindV3::ToolJobObserved,
             EventKindV3::ToolJobCancelRequested,
