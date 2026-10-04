@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -229,6 +230,74 @@ std::mutex& DiagnosticMutex() {
     static std::mutex mutex;
     return mutex;
 }
+void ConfigureShellEntryObservation(ProcessDiagnosticBuffer& process,
+                                    const nlohmann::json& input, const fs::path& cwd,
+                                    const std::string& tag) noexcept {
+#ifdef _WIN32
+    try {
+        if (process.Reserved() != 0 || process.CommandStartObservation()) return;
+        const auto shell = input.at("shell").get<std::string>();
+        if (shell != "powershell" && shell != "pwsh") return;
+        lubancode::platform::ProcessCommandStartObservation observation;
+        observation.tag = tag;
+        constexpr const char* suffixes[] = {"shell-entry", "wrapper-ready", "user-block-entry"};
+        for (std::size_t i = 0; i < observation.paths_utf8.size(); ++i) {
+            const auto path = fs::absolute(cwd / (tag + "." + suffixes[i] + ".observation"));
+            std::ofstream file(path, std::ios::binary | std::ios::trunc);
+            if (!file.is_open()) return;
+            file.flush();
+            if (!file.good()) return;
+            observation.paths_utf8[i] = Utf8(path);
+        }
+        process.ConfigureCommandStartObservation(std::move(observation));
+    } catch (...) {
+        // A missing observation never changes the original call or assertion.
+    }
+#else
+    (void)process; (void)input; (void)cwd; (void)tag;
+#endif
+}
+nlohmann::json ShellEntryObservations(const ProcessDiagnosticBuffer& process) {
+    const auto* configured = process.CommandStartObservation();
+    if (!configured) return {{"state", "not_configured"}};
+    nlohmann::json result = {{"state", "configured"}, {"records", nlohmann::json::array()}};
+    constexpr const char* stages[] = {"shell-entry", "wrapper-ready", "user-block-entry"};
+    for (std::size_t i = 0; i < configured->paths_utf8.size(); ++i) {
+        const auto path = fs::u8path(configured->paths_utf8[i]);
+        nlohmann::json record = {{"stage", stages[i]}, {"path", configured->paths_utf8[i]}};
+        std::error_code error;
+        const auto status = fs::symlink_status(path, error);
+        if (error || !fs::is_regular_file(status)) {
+            record["state"] = error ? "status_failed" : "not_regular";
+            if (error) record["error"] = error.message();
+        } else {
+            std::ifstream file(path, std::ios::binary);
+            if (!file.is_open()) {
+                record["state"] = "open_failed";
+            } else {
+                std::array<char, 257> bytes{};
+                file.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+                const auto count = static_cast<std::size_t>(file.gcount());
+                const std::string text(bytes.data(), std::min<std::size_t>(count, 256));
+                record["bytes_hex"] = DiagnosticHex(text);
+                record["read_bytes"] = count;
+                if (file.bad()) record["state"] = "read_failed";
+                else if (count > 256) record["state"] = "limit_exceeded";
+                else {
+                    const std::string prefix = configured->tag + "\t" + stages[i] + "\t";
+                    const auto pid = text.starts_with(prefix) ? text.substr(prefix.size()) : std::string{};
+                    const bool complete = pid.size() > 1 && pid.size() <= 11 &&
+                        pid.front() != '0' && pid.back() == '\n' &&
+                        pid.substr(0, pid.size() - 1).find_first_not_of("0123456789") == std::string::npos;
+                    record["state"] = complete ? "confirmed" : "unconfirmed";
+                    if (complete) record["shell_pid_decimal"] = pid.substr(0, pid.size() - 1);
+                }
+            }
+        }
+        result["records"].push_back(std::move(record));
+    }
+    return result;
+}
 nlohmann::json ProcessDiagnosticSnapshot(const ProcessDiagnosticBuffer& buffer) {
     const auto reserved = buffer.Reserved();
     nlohmann::json records = nlohmann::json::array();
@@ -298,7 +367,10 @@ void InvocationDiagnostic(const char* phase, const nlohmann::json& input,
         if (exception) record["exception"] = exception;
         // The actual synchronous call has returned/thrown before snapshotting.
         // Native records only become readable after their release publication.
-        if (process) record["process_stages"] = ProcessDiagnosticSnapshot(*process);
+        if (process) {
+            record["process_stages"] = ProcessDiagnosticSnapshot(*process);
+            record["shell_entry_observations"] = ShellEntryObservations(*process);
+        }
         // Hex retains original bytes even if an error contains invalid UTF-8.
         const std::string line = record.dump(-1, ' ', true,
             nlohmann::json::error_handler_t::replace);
@@ -321,6 +393,7 @@ Tool::Result RecordedInvocation(const nlohmann::json& input,
                                 ProcessDiagnosticBuffer* borrowed = nullptr) {
     ProcessDiagnosticBuffer local;
     ProcessDiagnosticBuffer* const process = borrowed ? borrowed : &local;
+    ConfigureShellEntryObservation(*process, input, cwd, tag);
     InvocationDiagnostic("before", input, context, cwd, tag, 0ms);
     const auto start = std::chrono::steady_clock::now();
     const auto elapsed = [&] {
