@@ -320,7 +320,8 @@ TEST_CASE("Package inventory rejects unsafe explicit roots hosts and limit decla
             constexpr char digits[] = "0123456789abcdef";
             name_hex.push_back(digits[byte >> 4]); name_hex.push_back(digits[byte & 15]);
         }
-        INFO("invalid-name fixture index=", name_index++, ", name bytes=", name_hex);
+        const auto current_name_index = name_index++;
+        INFO("invalid-name fixture index=", current_name_index, ", name bytes=", name_hex);
         Write(root / name, "");
         Rejected(Input(root), "sdk.package.invalid_input");
         REQUIRE(fs::remove(root / name));
