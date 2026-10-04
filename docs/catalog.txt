@@ -213,3 +213,4 @@ DOC development/sdk-stage-status.md
 DOC development/sdk-job-operation-binding-v1.md
 DOC development/v3-journal-witness.md
 DOC development/windows-command-entry-observation.md
+DOC development/sdk-asan-compile-profile.md

@@ -102,7 +102,11 @@ if(MSVC)
   target_compile_options(lubancore_sdk_tests PRIVATE /MP /FS)
 endif()
 if(TARGET lubancode_tests)
-  add_dependencies(lubancode_tests lubancore_sdk_tests)
+  if(LUBANCODE_ASAN_TEST_PROFILE)
+    add_dependencies(lubancode_tests lubancore_sdk_search_probe)
+  else()
+    add_dependencies(lubancode_tests lubancore_sdk_tests)
+  endif()
   target_compile_definitions(lubancode_tests PRIVATE
     LUBANCORE_TEST_JOB_POST_SDK=1
     LUBANCORE_TEST_SEARCH_PROBE="$<TARGET_FILE:lubancore_sdk_search_probe>")

@@ -83,6 +83,11 @@ endforeach()
 list(LENGTH LUBANCODE_TEST_SOURCES LUBANCODE_TEST_SOURCE_COUNT)
 message(STATUS "lubancode: 收录 ${LUBANCODE_TEST_SOURCE_COUNT} 册测试")
 
+set(LUBANCODE_TEST_COMPILE_SOURCES "${LUBANCODE_TEST_SOURCES}")
+if(LUBANCODE_ASAN_TEST_PROFILE)
+  include("${CMAKE_SOURCE_DIR}/cmake/LubanCodeAsanTests.cmake")
+endif()
+
 add_executable(lubancode_tests
   support/main.cpp
   support/api_fixture.cpp
@@ -98,7 +103,7 @@ add_executable(lubancode_tests
   # 多渠道消息接入单阶段 1:纯内存 Channel Bridge v1 假 sidecar,供
   # tests/unit/channel 冒烟测试与未来真渠道适配器 conformance suite 复用。
   support/fake_channel_sidecar.cpp
-  ${LUBANCODE_TEST_SOURCES}
+  ${LUBANCODE_TEST_COMPILE_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_definitions(lubancode_tests PRIVATE
