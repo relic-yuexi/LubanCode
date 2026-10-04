@@ -6,7 +6,10 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <type_traits>
+#include <utility>
 
 namespace lubancode::platform {
 
@@ -101,9 +104,26 @@ struct ProcessDiagnosticRecord {
 static_assert(std::is_trivial_v<ProcessDiagnosticRecord>);
 static_assert(std::is_standard_layout_v<ProcessDiagnosticRecord>);
 
+// Trusted, private same-call observation. No command JSON/public SDK option.
+// Initialized before recording starts, then owned by the borrowed buffer.
+struct ProcessCommandStartObservation {
+    std::string tag;
+    // shell-entry, wrapper-ready, user-block-entry, in that order.
+    std::array<std::string, 3> paths_utf8;
+};
+
 class ProcessDiagnosticBuffer {
 public:
     static constexpr std::uint32_t kCapacity = 128;
+
+    bool ConfigureCommandStartObservation(ProcessCommandStartObservation value) {
+        if (Reserved() != 0 || command_start_observation_) return false;
+        command_start_observation_.emplace(std::move(value));
+        return true;
+    }
+    const ProcessCommandStartObservation* CommandStartObservation() const noexcept {
+        return command_start_observation_ ? &*command_start_observation_ : nullptr;
+    }
 
     // The borrowed buffer must outlive every caller/reader that records into it.
     // Each slot has one writer; release publishes its complete POD record.
@@ -151,6 +171,8 @@ private:
     std::array<Slot, kCapacity> slots_{};
     std::atomic<std::uint32_t> reserved_{0};
     std::atomic<bool> overflow_{false};
+    // Never mutated once a caller/reader can observe the buffer.
+    std::optional<ProcessCommandStartObservation> command_start_observation_;
 };
 
 inline thread_local ProcessDiagnosticBuffer* process_diagnostics = nullptr;
