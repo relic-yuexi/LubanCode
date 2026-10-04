@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
@@ -65,7 +66,10 @@ struct Directory {
 };
 void Write(const fs::path& path, const std::string& bytes) {
     fs::create_directories(path.parent_path());
+    errno = 0;
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    const auto open_error = errno;
+    INFO("fixture native open errno=", open_error, ", fail=", file.fail(), ", bad=", file.bad());
     REQUIRE(file.is_open());
     file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     file.close();
@@ -309,7 +313,14 @@ TEST_CASE("Package inventory rejects unsafe explicit roots hosts and limit decla
     CHECK(defaults.file_bytes == 16 * 1024 * 1024);
     CHECK(defaults.total_bytes == 64 * 1024 * 1024);
 #ifndef _WIN32
+    unsigned name_index = 0;
     for (const auto& name : std::array<std::string, 4>{"bad\tname", "bad\nname", "bad\\name", "bad" + std::string(1, static_cast<char>(0xff))}) {
+        std::string name_hex;
+        for (const unsigned char byte : name) {
+            constexpr char digits[] = "0123456789abcdef";
+            name_hex.push_back(digits[byte >> 4]); name_hex.push_back(digits[byte & 15]);
+        }
+        INFO("invalid-name fixture index=", name_index++, ", name bytes=", name_hex);
         Write(root / name, "");
         Rejected(Input(root), "sdk.package.invalid_input");
         REQUIRE(fs::remove(root / name));
