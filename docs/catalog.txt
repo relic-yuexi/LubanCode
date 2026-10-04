@@ -213,3 +213,4 @@ DOC development/sdk-stage-status.md
 DOC development/sdk-job-operation-binding-v1.md
 DOC development/v3-journal-witness.md
 DOC development/sdk-package-inventory.md
+DOC development/sdk-lua-build-profile.md
