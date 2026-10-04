@@ -45,6 +45,33 @@ class OptionalHostClosureTests(unittest.TestCase):
         self.assertEqual(report["status"], "passed")
         self.assertEqual(set(report["sdkBuildClosure"]), {"sdk", "engine"})
 
+    def test_job_binding_is_sdk_owned_with_only_real_reference_executable_copies(self):
+        source = "src/sdk/job_operations.cpp"
+        self.targets["sdk"]["projectSources"].append(source)
+        for name in ("lubancore_sdk_tests", "lubancode_tests"):
+            self.targets[name] = {"name": name, "type": "EXECUTABLE",
+                                  "projectSources": [source], "dependencies": ["sdk"]}
+        self.assertEqual(closure.inspect_graph(self.targets)["status"], "passed")
+        for name in ("engine", "disconnected_archive", "another_test"):
+            with self.subTest(name=name):
+                targets = deepcopy(self.targets)
+                targets[name] = {"name": name, "type": "STATIC_LIBRARY",
+                                 "projectSources": [source], "dependencies": []}
+                report = closure.inspect_graph(targets)
+                self.assertEqual(report["status"], "failed")
+                self.assertTrue(any("unregistered reference owner" in v for v in report["violations"]))
+        self.targets["sdk"]["projectSources"].remove(source)
+        self.assertTrue(any("must belong to the shared SDK" in v
+                            for v in closure.inspect_graph(self.targets)["violations"]))
+
+    def test_job_binding_reference_name_cannot_hide_a_library(self):
+        source = "src/sdk/job_operations.cpp"
+        self.targets["sdk"]["projectSources"].append(source)
+        self.targets["reference"] = {"name": "lubancore_sdk_tests", "type": "STATIC_LIBRARY",
+                                     "projectSources": [source], "dependencies": []}
+        self.assertTrue(any("unregistered reference owner" in v
+                            for v in closure.inspect_graph(self.targets)["violations"]))
+
     def test_direct_and_transitive_host_dependency_are_rejected(self):
         for owner in ("sdk", "engine"):
             with self.subTest(owner=owner):

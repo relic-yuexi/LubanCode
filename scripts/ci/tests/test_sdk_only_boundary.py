@@ -295,6 +295,13 @@ class BoundaryTests(unittest.TestCase):
         self.targets.append({"id": "binding", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
             "sources": [{"path": "src/sdk/operation_ledger.cpp", "compileGroupIndex": 0}], "compileGroups": [{}]})
 
+    def job_operations_reference(self):
+        self.source_file("src/sdk/job_operations.cpp", '#include "sdk/job_operations.hpp"\n')
+        self.source_file("src/sdk/job_operations.hpp", '#include "runtime/session_service.hpp"\n')
+        self.source_file("src/runtime/session_service.hpp", "#pragma once\n")
+        self.targets.append({"id": "binding", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+            "sources": [{"path": "src/sdk/job_operations.cpp", "compileGroupIndex": 0}], "compileGroups": [{}]})
+
     def test_private_operation_turn_reference_has_exact_owner_and_testing_gate(self):
         self.operation_turn_reference()
         self.assert_rejected(self.check(), "testing is OFF")
@@ -311,6 +318,28 @@ class BoundaryTests(unittest.TestCase):
 
     def test_operation_turn_reference_cannot_hide_reverse_host_includes(self):
         self.operation_turn_reference()
+        self.flags["BUILD_TESTING"] = "ON"
+        self.source_file("src/runtime/session_service.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_private_job_operations_reference_has_exact_owner_and_testing_gate(self):
+        self.job_operations_reference()
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        report = self.check(testing=True)
+        self.assertEqual(report["status"], "passed", report["violations"])
+        self.assertIn("src/runtime/session_service.hpp", report["scannedProjectFiles"])
+        for owner in ("arbitrary_host", "lubancode_engine", "lubancode_runtime"):
+            self.targets[-1]["name"] = owner
+            self.assert_rejected(self.check(testing=True), "unregistered private SDK reference owner")
+        self.targets[-1]["name"] = "lubancore_sdk_tests"
+        self.source_file("src/sdk/job_operations_extra.cpp", "int fixture;\n")
+        self.targets[-1]["sources"][0]["path"] = "src/sdk/job_operations_extra.cpp"
+        self.assert_rejected(self.check(testing=True), "unregistered private SDK reference implementation")
+
+    def test_job_operations_reference_cannot_hide_reverse_host_includes(self):
+        self.job_operations_reference()
         self.flags["BUILD_TESTING"] = "ON"
         self.source_file("src/runtime/session_service.hpp", '#include "app/turn_runner.hpp"\n')
         self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
@@ -433,6 +462,35 @@ class BoundaryTests(unittest.TestCase):
         shared = "tests/unit/trajectory/test_journal_native_receipts.cpp"
         self.source_file(shared, '#include "trajectory/journal.hpp"\n')
         self.source_file("src/trajectory/journal.hpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.targets.append({"id": "journal_receipts", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                             "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_v3_journal_witness_source_is_exact_testing_on_and_sdk_test_owned(self):
+        shared = "tests/unit/trajectory_v3/test_v3_journal_receipts.cpp"
+        self.source_file(shared, "int journal_receipt_test;\n")
+        target = {"id": "journal_receipts", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        for owner in ("receipt_tests", "neutral_engine", "lubancore_sdk"):
+            with self.subTest(owner=owner):
+                target["name"] = owner
+                self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        nearby = "tests/unit/trajectory_v3/test_v3_journal_receipts_extra.cpp"
+        self.source_file(nearby, "int adjacent_journal_test;\n")
+        target["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_v3_journal_witness_source_keeps_recursive_reverse_host_rejection(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        shared = "tests/unit/trajectory_v3/test_v3_journal_receipts.cpp"
+        self.source_file(shared, '#include "trajectory/v3/writer.hpp"\n')
+        self.source_file("src/trajectory/v3/writer.hpp", '#include "app/turn_runner.hpp"\n')
         self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
         self.targets.append({"id": "journal_receipts", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
                              "sources": [{"path": shared, "compileGroupIndex": 0}], "compileGroups": [{}]})

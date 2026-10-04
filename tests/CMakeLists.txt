@@ -126,6 +126,7 @@ if(LUBANCODE_BUILD_SDK)
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/memory.cpp")
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/action_dispatch.cpp")
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/operation_ledger.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/job_operations.cpp")
   if(WIN32)
     add_custom_command(TARGET lubancode_tests POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
