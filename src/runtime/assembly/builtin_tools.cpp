@@ -10,6 +10,7 @@
 #include "tools/search.hpp"
 #include "tools/search_ripgrep.hpp"
 #include "tools/skill_tool.hpp"
+#include "tools/todo_tool.hpp"
 #include "tools/web_fetch.hpp"
 #include "tools/web_search.hpp"
 #include "tools/write_file.hpp"
@@ -23,6 +24,9 @@ std::unique_ptr<tools::Tool> CreateLocalTool(
     if (name == "write_file") return std::make_unique<tools::WriteFileTool>();
     if (name == "edit_file") return std::make_unique<tools::EditFileTool>();
     if (name == "search" && search_runner) return std::make_unique<tools::SearchTool>(std::move(search_runner));
+    // A new table belongs to this exact opening, never a project/host singleton.
+    // SDK Close retires it with the registry; resume starts a fresh table.
+    if (name == "todo_write") return std::make_unique<tools::TodoWriteTool>(std::make_shared<tools::TodoListState>());
     return nullptr;
 }
 
