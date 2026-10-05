@@ -52,7 +52,7 @@ HTTP 夹具另核线程退净。源码和纯数据已查，这份新组合仍待
 
 首组合 `92f93572` 的[远程 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37284807084)在重复 Location 安装消费报普通网络错，macOS 33／34 通过；HTTP 第 21 笔后停止，服务正常退净。原日志未记底层 CPR 错误码。查 curl 源码，部分版本会在第二枚头进入回调前拒绝协议；这条差异能解释现象，不能据此断定唯一成因。
 
-窄修只保底层实际失败状态，并将 `NetworkFailed`、CPR `WEIRD_SERVER_REPLY` 和真实跳转状态同时成立时归为 `redirect_invalid`。没有状态、304、普通状态和其它网络码不套；取消、时限与字节帽仍先判。不解析错误文案，不拿残留响应跟随跳转。原案、HTTP 夹具和预算照留，23 项纯门、文档与独立源码复核通过。新组合 `57d70c91` 已同步功能分支，另跑[本源 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37288325660)，尚待原生验收。
+窄修只保底层实际失败状态，并将 `NetworkFailed`、CPR `WEIRD_SERVER_REPLY` 和真实跳转状态同时成立时归为 `redirect_invalid`。没有状态、304、普通状态和其它网络码不套；取消、时限与字节帽仍先判。不解析错误文案，不拿残留响应跟随跳转。原案、HTTP 夹具和预算照留，23 项纯门、文档与独立源码复核通过。新组合 `57d70c91` 已同步功能分支，[本源 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37288325660)整轮失败：Windows combined 四场生命周期案撞 Memory 活锁；Web 九套原生与安装消费均核过实际 30 笔 HTTP 和正常退场。
 
 本源预期 ON 六套各 55 册 focused／458 CASE／34 场消费，OFF 三套各
 53 册／443 CASE／31 场消费；全量 Linux 758、Windows 760、macOS 761；
@@ -77,7 +77,7 @@ ON 六套各 54 册 focused、452 条原生 CASE、33 项安装消费；OFF 三�
 
 这笔只在实际调用前收窄原有相对 process timeout；平台启动与 kill／capture／join 照原语义，不承诺截止那刻已退净。六条真实原生路径核登记／排队、授权耗时、运行预算、晚线程、启动抛错／Close，以及严格恢复。CI 另核完整 argv、六案、非零断言和 owned 终态事实；没有 command 就不能编 timeout，已调用就须有正预算，配额与线程必须真退净。三平台 SDK ON 预期各 56 册／464 CASE，OFF 各 54／449；安装消费仍为 34／31；全量预期 760／762／763，ASan 155 册／62 重点来源／19 支持件。源码与纯门已查，这份组合尚未完成原生验收。公共 SDK Job 仍未开启。
 
-`6900159b` 首轮远端暴露两项接线漏处：Lua 画像纯册仍写旧名册 55，实际已增至 56；截止案两行 `REQUIRE_MESSAGE` 消息含裸条件式，编译报错。下一组合更新名册、只给条件式添括号；六案、预算及业务行为不改。首轮并未跑完新增原生案，不能记作截止逻辑已通过。
+`6900159b` [首轮远端](https://github.com/relic-yuexi/LubanCode/actions/runs/37291725260)已失败，暴露两项接线漏处：Lua 画像纯册仍写旧名册 55，实际已增至 56；截止案两行 `REQUIRE_MESSAGE` 消息含裸条件式，编译报错。下一组合更新名册、只给条件式添括号；六案、预算及业务行为不改。三套 combined 和 ASan 均未执行 focused 或全量原生案，不能记作截止逻辑已通过；三套 combined 安装消费各 34 项及独立 RAG 示例实际通过。
 
 下一组合还接[Managed 开场预留](managed-opening-reservation.md)与[归属侧记](managed-session-ownership.md)。内部 owner 先原子新建空目录、拿真实 SessionLock、缓存本次首笔耐久发布，再逐字重核归属，最后才建正文子目录。未知发布与失败残留留原样，不借重试补成已确认。LocalTrusted 开场、候选、祖先、管理与删除路径拒绝有标记或归属不明的账。原始 SDK 预读与完整 Policy 尚未接管，不能称公开 Managed 已交付。两册分别六案、十案，真实锁、未知发布、旧本地恢复、晚标记与祖先拒绝均须远端验收。
 
@@ -86,6 +86,8 @@ ON 六套各 54 册 focused、452 条原生 CASE、33 项安装消费；OFF 三�
 这份开场／交接组合预期 ON 各 59 focused／486 CASE，OFF 各 57／471；消费仍 34／31。两册 Managed 与一册交接各注册 original 和 focused，全量较 `6900159b` 增六项，预期 Linux 766、Windows 768、macOS 769；ASan 158 册／65 重点门／19 支持件。这里只列验收名册，实际登记、执行、关场与完整 CI 仍须新源给证据。
 
 `532ed159` 随后在启动前失败。GitHub 报分类步骤“表达式超过 21000 字符”，作业、附件与原生执行均为零。新修把 PR base、push before 两枚提交参数搬至 step 环境变量；分类脚本只读变量，整段不再含 GitHub 插值。路径、选择器、预算与原生案数照旧，另加纯门拦住把模板插值搬回长脚本。须等修正源真正启动并完成三平台验收。
+
+修正源 `a7165eec` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37297587597)已启动。三套 SDK-only 又停在 Todo 纯门：这册仍写 ON 55／OFF 53，实际名册已到 59／57；RAG 同类旧数也须改齐。下一源只改这两处预期，消费仍 34／31；整套 SDK 纯门本地 282 项通过，没有配置、编译或执行原生程序。combined 与 ASan 仍待实际结果，这笔失败不能替它们记过关。
 
 ## 后续装配规矩
 
