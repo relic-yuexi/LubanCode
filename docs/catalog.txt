@@ -84,6 +84,7 @@ DOC development/i18n.md
 DOC development/lubancore-managed-identity.md
 DOC development/managed-opening-reservation.md
 DOC development/managed-session-ownership.md
+DOC development/memory-project-commit-handoff.md
 DOC development/lubancore-module-boundaries.md
 DOC development/lubancore-sdk.md
 DOC development/sdk-skills.md

@@ -1,5 +1,8 @@
 """Pure receipt mutations only; this suite never launches native programs."""
 import unittest
+import fnmatch
+from pathlib import Path
+import re
 
 from scripts.ci.sdk_managed_opening import SOURCES, check_managed_opening_native, check_managed_opening_registration
 
@@ -16,6 +19,20 @@ def receipt(stem, executable='/tmp/build/lubancore_sdk_tests'):
 
 
 class ManagedOpeningGateTests(unittest.TestCase):
+    def test_both_real_classifiers_cover_shared_owner_sources(self):
+        workflow = (Path(__file__).resolve().parents[3] / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+        patterns = re.findall(r'^\s*([^\n]*scripts/ci/sdk_managed_opening\.py[^\n]*)\)\s*$', workflow, re.M)
+        self.assertEqual(len(patterns), 2)
+        sources = ['src/trajectory/managed_session_ownership.cpp', 'src/trajectory/managed_session_ownership.hpp',
+                   'src/trajectory/managed_session_reservation.cpp', 'src/trajectory/managed_session_reservation.hpp',
+                   'tests/unit/trajectory/test_managed_session_ownership.cpp', 'tests/unit/trajectory/test_managed_session_reservation.cpp',
+                   'scripts/ci/sdk_managed_opening.py', 'scripts/ci/tests/test_sdk_managed_opening_gates.py']
+        for pattern in patterns:
+            for source in sources:
+                with self.subTest(source=source):
+                    self.assertTrue(any(fnmatch.fnmatchcase(source, item) for item in pattern.strip().split('|')))
+            self.assertFalse(any(fnmatch.fnmatchcase('docs/readme.md', item) for item in pattern.strip().split('|')))
+
     def test_both_actual_native_sources_and_platform_executables(self):
         for stem in SOURCES:
             for executable in ('/tmp/build/lubancore_sdk_tests', 'D:/build/lubancode_tests.exe'):
