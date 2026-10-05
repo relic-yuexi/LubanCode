@@ -82,6 +82,8 @@ public:
         std::shared_ptr<trajectory::MemoryCapabilityFactory> trajectory_memory_capability_factory;
         trajectory::RecoveryCaptureRequest trajectory_recovery_capture;
         trajectory::SessionRecoveryFactory trajectory_recovery_factory;
+        // Internal test-only, one fresh journal: observes actual native IO. Never public SDK input.
+        std::shared_ptr<trajectory::JournalNativeIoProbe> trajectory_journal_native_io_probe;
     };
 
     explicit SessionRuntime(Options options);

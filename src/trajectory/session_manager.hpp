@@ -532,6 +532,8 @@ struct SessionManagerOptions {
     std::shared_ptr<MemoryCapabilityFactory> memory_capability_factory;
     RecoveryCaptureRequest recovery_capture;
     SessionRecoveryFactory recovery_factory;
+    // Internal test-only, one fresh journal: observes actual native IO. Never public SDK input.
+    std::shared_ptr<JournalNativeIoProbe> journal_native_io_probe;
     // v3 主账写者的提交故障注入(测试专用;生产恒空 = 零行为):非空稳定
     // 码即该枚提交按 IoFailed 收,写者句柄随后 broken——T08 召回快照的
     // fail-closed 测试用,与 subagent_start_fault 同款纪律。

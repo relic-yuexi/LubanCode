@@ -99,6 +99,8 @@ struct SessionLaunchRequest {
     std::shared_ptr<trajectory::MemoryCapabilityFactory> memory_capability_factory;
     trajectory::RecoveryCaptureRequest recovery_capture;
     trajectory::SessionRecoveryFactory recovery_factory;
+    // Internal test-only, one fresh journal: observes actual native IO. Never public SDK input.
+    std::shared_ptr<trajectory::JournalNativeIoProbe> journal_native_io_probe;
 };
 
 // ---------------------------------------------------------------------------

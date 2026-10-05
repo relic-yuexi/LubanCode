@@ -40,6 +40,7 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
     ledger_options.memory_capability_factory = options_.trajectory_memory_capability_factory;
     ledger_options.recovery_capture = options_.trajectory_recovery_capture;
     ledger_options.recovery_factory = options_.trajectory_recovery_factory;
+    ledger_options.journal_native_io_probe = std::move(options_.trajectory_journal_native_io_probe);
     auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
     if (ledger.has_value()) {
         trajectory_.emplace(std::move(*ledger));
