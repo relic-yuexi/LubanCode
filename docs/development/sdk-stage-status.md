@@ -114,3 +114,13 @@ ON 六套各 54 册 focused、452 条原生 CASE、33 项安装消费；OFF 三�
 Jobs 两册17 CASE 加结果仓八案，共增三册25 CASE。合树静态名册为 SDK Lua ON/OFF 62/60 册、511/496 CASE，安装消费35/32场；全量预期 Linux/Windows/macOS 772/774/775。ASan 当前选择式选出重点68册、执行来源161册、wildcard编译正文161份、附件23份；这里列接线范围，不冒充实跑。公开 Blob／Journal SPI 尚未接入。
 
 CI 会留安装/移位消费者原 argv、显式真实 probe 的 File API 归属与字节指纹、公开十路径、私有七路径，以及四份写后未知 typed 原件。注册、JUnit、LastTest 三者须相符，失败也留原件。原 deadline 六 CASE 和 CLI 命令路径不改；本地仅跑纯数据、AST、脚本语法与文档检查。详见 [Command Jobs 合同](sdk-command-jobs.md)。
+
+### 首轮组合实测与窄修
+
+`605d200f` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37312694121)整轮失败，241 件原证冻结，摘要 `defb4ccbc2f70540f1301e21ab4b20f2ceb26184d443db0496e3e8baac9f037b`。六套安装消费停在私有 probe 准备：SDK-only 原本关闭测试，图内没有该 target；Linux/macOS combined 只编 SDK 库，没有 probe 可执行件；Windows combined 图带真实 ZERO_CHECK 再生依赖，遭旧“零依赖”门拒。消费、focused、全量与 OFF 本轮均未执行。
+
+ASan 真跑了 161 册，其中 159 过、两册失败；1827 CASE 中两案败，71195 断言中 11 条败。新 Jobs 公开十案、私有七案和不可变结果八案均实过，四份写后未知回执逐字段保住；TSan 十四册实过。这些局部结果不能验收整树。Lua 恢复坏声明仍遭拒绝，但会话身份先过 Jobs 绑定门，旧夹具硬认 Lua 错误码；子会话捕获夹具堵着旧固定临时名，独占临时件改名后未再触发故障。后源只修明确预检期待和真实 no-replace 拒绝点，保原硬断言，不改生产顺序。
+
+probe 后源改用独立、标准库私有夹具，复制原源码，在 CI 临时目录单独配置和编译，再从真实 File API 取实际可执行件并移位。产品测试开关、SDK 闭包和原 CMake 图照旧。配置或编译失败也保有界原 reply；成功后仍严核源码、目标与 artifact 归属。上传的原图先记 `not_evaluated`，不能拿“已保存”充作“已通过”。安装消费还留真实 helper 与 jobs 头文件原字节。
+
+旧 Windows ready 首读失败另补[原件与清场诊断](workspace-racer-ready-evidence.md)：保存首次字节、真实句柄与 argv，失败前收同一只 helper。六 CASE、原前缀断言、锁状态和预算照留；没有重读求绿，也未断言根因。这些后源改动只过源码与纯门，仍须新一轮远端验证。
