@@ -13,3 +13,5 @@ lease 声明先于 OwnerLock，退出时先释放真实磁盘锁（包括原删�
 仅同一实际 project_commit 实现实例共享该表；SDK 多场共用同一 DLL。其他直接 OwnerLock 路及独立静态／DSO 副本仍过原磁盘锁，不宣称跨模块全局队列。没有新公共 API、SDK core 改动、调度线程或生产测试口。
 
 新册 `test_memory_project_commit_handoff.cpp` 用真 Commit 路和既有 `commit_testing::WriteFile` 停住真实写阶段。验同目录／别名交接、等待取消零 Intent/Topic、异项目独立、坏／外部活锁不偷、异常退票、同线程已持／已排重入；真线程均 join。原12+12案、所有预算与断言不改。本地只查源码／纯数据，三平台与 ASan 交远端；不本地配置、编译、CTest 或原生执行。
+
+六 CASE／六标记 `[memory-project-handoff-path]`：`same-directory`、`aliases`、`waiting-cancel`、`independent`、`retirement`、`external-lock`。首案验两笔实际交接；别名案在 Windows 验大小写拼写，POSIX 验父目录 symlink，未据此声称多票公平或 Windows 短名已实测。
