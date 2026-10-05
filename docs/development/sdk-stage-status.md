@@ -1,6 +1,6 @@
 # SDK 阶段进度与验收边界
 
-核查日期：2026-10-05。已合基线为功能分支 `756bf02a`；[#325](https://github.com/relic-yuexi/LubanCode/pull/325) 的已验源 `2c376020` 与合入头同树。
+核查日期：2026-10-05。已合基线为功能分支 `6e2702b2`；[#332](https://github.com/relic-yuexi/LubanCode/pull/332) 的已验源 `0066ac3e` 与合入头同树。
 
 目标：新宿主只调用公开 SDK，便能运行完整会话，不必复制内部运行栈。CLI 逐项迁入，原功能保住。现已能嵌入；CLI 主入口和 one-shot 仍用内部装配，尚未全部对齐。
 
@@ -8,7 +8,7 @@
 
 | 阶段 | 已合范围 | 接下来补什么 |
 | --- | --- | --- |
-| 收口当前批 | Worker #245、Runner #246、SDK #325 已合功能分支；旧子 PR 已收口 | #332 窄修复已推，审查与本源 CI 全过再合 |
+| 收口当前批 | Worker #245、Runner #246、SDK #325、Job 日志 #332 已合功能分支；旧子 PR 已收口 | 下一笔 Web／可选 Lua 等组合在已有 CI 分支验收，未添实施 PR |
 | SDK 完整化 | 五件内置工具；显式 Skills；项目 Memory Recall/Save 和片段 CAS；前台深度一子 Agent；主 Action；strict standalone Lua；Package 清单分析 | 其余 CLI 工具、自动 Memory、Skills 管理、Package 挂载、后台与嵌套子任务、公开 Job、CLI 主入口迁移 |
 | 四口 SPI | Session 真接 EventSink；召回片段真接 Memory Blob provider；公开 PolicyProvider 原语 | 完整 JournalStore/BlobStore，替换结果与恢复读写，接真实 Session 授权；本阶段不引数据库 |
 | 依赖瘦身 | updater、Release 查询、渠道、Gateway 留宿主；Package 只带中立 parser | 可关闭 Lua 的编译画像已在私有候选通过，仍待合入；继续检查依赖闭包 |
@@ -25,11 +25,11 @@
 
 859 件材料逐大小与 SHA256 复核，封账摘要为 `e82c9e15e01e0150287bb03ebb1c10f2326a6038a323fd3f5e450b7c98822278`。全量结论取实际日志与保留原件；并未上传每册完整 JUnit/LastTest。LSan 关闭，浏览器和 TSan 按路径跳过。SDK 插桩不能替 Worker/Runner 插桩。
 
-## 当前实施批：#332
+## 已收口：#332
 
-[#332](https://github.com/relic-yuexi/LubanCode/pull/332) 源 `0066ac3e` 仍为 Draft，尚未合入。它补[真实 Job 来源绑定](sdk-job-operation-binding-v1.md)与 [V3 日志回执](v3-journal-witness.md)，并同步 main `3b973ffe`。Job 历史只读 PassiveHold；首次未确认追加和首次 checked Close 持值，不靠重复 Close 改口。这批仍属内部前置，尚未开放后台 Job 或完整 JournalStore。
+[#332](https://github.com/relic-yuexi/LubanCode/pull/332) 源 `0066ac3e` 已合进功能分支 `6e2702b2`。它补[真实 Job 来源绑定](sdk-job-operation-binding-v1.md)与 [V3 日志回执](v3-journal-witness.md)，并同步 main `3b973ffe`。Job 历史只读 PassiveHold；首次未确认追加和首次 checked Close 持值，不靠重复 Close 改口。这批仍属内部前置，尚未开放后台 Job 或完整 JournalStore。
 
-本源[原生 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37276915212)和[文档 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37276915234)已触发。scoped PowerShell 包装器三枚 cmdlet 改用模块限定名，原管道、格式、错误流和退出码保住；原第六案末补 legacy/scoped 对象表格逐字对照。尚待本源验收。
+本源[原生 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37276915212)和[文档 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37276915234)整轮均过。六套 SDK 各 50 册 focused／426 CASE／28 场安装移位消费；全量 Linux 748、Windows 750、macOS 751；ASan 实跑 149 册、56 册重点门、1742 CASE／65795 断言。559 件材料逐件复核，封账摘要 `b4618090fd1026b3c538de9a4dbb5995f7402e4a202ec4525d9865c7778a473c`。scoped PowerShell 包装器三枚 cmdlet 改用模块限定名，原管道、格式、错误流和退出码保住；原第六案末补 legacy/scoped 对象表格逐字对照。Windows 两套 focused exact 实耗 2242／2299ms，两份实际对象表格均 76 字节且逐字相等；全量双源码也保登记、JUnit 与 LastTest。审查、评论与线程无待办，合入前重查源头和目标未漂移。
 
 前源 `52fa7d6d` 的[原生 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37250651084)整轮失败；[文档 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37250651072)通过。它留下这些实际结果：
 
@@ -39,7 +39,7 @@
 - 监督器五案通过。健康拍夹具只由手动拍驱动，消除背景拍先改状态、稍后入通知时断言抢跑；生产监督器未改。
 - 失败原件已封 568 件，摘要 `96ce13da2b5e4d8131638ec2dc9372f7c3a90064ac1f6ea6b2a96462773fec60`。Windows 全量另保完整实际登记、JUnit 和 LastTest；ASan 保 raw File API、149 册实跑与 56 册重点门。
 
-入口观测只收窄待查区间，尚不能断唯一起因。全量较后通过不能盖掉这次失败。修复后验新源，审查和远端 CI 全过才合功能分支。
+入口观测只收窄待查区间，尚不能断唯一起因。全量较后通过不能盖掉这次失败。新源修复已单独验收，失败原件继续封存。
 
 ## 下一笔候选
 
@@ -49,6 +49,10 @@
 模型只能收窄预算，Close 等请求真退出；不支持 gzip 时明确拒绝编码，不添解压依赖。
 原 CLI 19 案保住，另补两案；SDK 六案和安装消费核实际 HTTP、预算、取消与四场隔离，
 HTTP 夹具另核线程退净。源码和纯数据已查，这份新组合仍待自己的远程 CI。
+
+首组合 `92f93572` 的[远程 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37284807084)在重复 Location 安装消费报普通网络错，macOS 33／34 通过；HTTP 第 21 笔后停止，服务正常退净。原日志未记底层 CPR 错误码。查 curl 源码，部分版本会在第二枚头进入回调前拒绝协议；这条差异能解释现象，不能据此断定唯一成因。
+
+窄修只保底层实际失败状态，并将 `NetworkFailed`、CPR `WEIRD_SERVER_REPLY` 和真实跳转状态同时成立时归为 `redirect_invalid`。没有状态、304、普通状态和其它网络码不套；取消、时限与字节帽仍先判。不解析错误文案，不拿残留响应跟随跳转。原案、HTTP 夹具和预算照留，23 项纯门、文档与独立源码复核通过。新组合 `57d70c91` 已同步功能分支，另跑[本源 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37288325660)，尚待原生验收。
 
 本源预期 ON 六套各 55 册 focused／458 CASE／34 场消费，OFF 三套各
 53 册／443 CASE／31 场消费；全量 Linux 758、Windows 760、macOS 761；

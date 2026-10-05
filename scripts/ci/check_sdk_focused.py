@@ -12,6 +12,14 @@ import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 
+try:
+    from .sdk_owned_job_deadline import check_owned_job_deadline_registration, check_owned_job_deadline_native
+except ImportError:
+    try:
+        from sdk_owned_job_deadline import check_owned_job_deadline_registration, check_owned_job_deadline_native
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_owned_job_deadline import check_owned_job_deadline_registration, check_owned_job_deadline_native
+
 
 try:
     from .sdk_lua_profile import focused_roster, read_lua_profile
@@ -23,6 +31,7 @@ except ImportError:
 
 
 REQUIRED = {
+    "sdk.focused.lubancore_owned_job_deadline",
     "sdk.focused.lubancore_web_fetch",
     "sdk.focused.lubancore_authorization",
     "sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest",
@@ -1264,6 +1273,8 @@ def main():
             check_package_inventory_registration(test.get("command", []))
         if test["name"] == "sdk.focused.lubancore_job_operations":
             check_job_operation_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_owned_job_deadline":
+            check_owned_job_deadline_registration(test.get("command", []))
         if test["name"] == "sdk.focused.v3_journal_receipts":
             check_v3_journal_witness_registration(test.get("command", []))
         if test["name"] == "sdk.focused.run_command_execution_limits":
@@ -1369,6 +1380,8 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_job_operations":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_job_operation_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_owned_job_deadline":
+            check_owned_job_deadline_native(sections[0], commands[0])
         if case.attrib["name"] == "sdk.focused.v3_journal_receipts":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_v3_journal_witness_native(sections[0], registered["command"])
