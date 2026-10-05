@@ -46,7 +46,7 @@
 | 模块 | 合同与已验范围 |
 | --- | --- |
 | [Package 盘点](sdk-package-inventory.md) | 显式根、有界目录与文件清单；不挂载、不执行、不替宿主授信 |
-| Lua ON/OFF | 默认 ON；OFF 真去编译依赖；三平台跨画像恢复，禁用画像在 I/O 和模型调用前拒绝 Lua 计划 |
+| Lua ON/OFF | 默认 ON；OFF 真去编译依赖；三平台跨画像恢复，在读取所选 Lua 脚本、创建 VM 和调用模型前拒绝启用的 Lua 来源 |
 | [主场 Todo](sdk-todo-write.md) | 每场自持清单，整表替换；恢复保历史、重新起空表；CLI 提醒与展示留宿主 |
 | [Agentic RAG 参考例](sdk-agentic-rag-example.md) | 仅公开 SDK 和标准库；宿主注入检索工具，真实模型工具回环；不增核心检索 API 或向量库 |
 
@@ -54,7 +54,7 @@ ON 六套各 54 册 focused、452 条原生 CASE、33 项安装消费；OFF 三�
 
 876 件材料已封，摘要 `d1ec767ac5539b1b0c58fe6081f44db582fa29ac99f91a9bf89c03d109ab0264`。本地组合 `640c0f71` 只另加监督器夹具修复，尚未送它自己那轮 CI；不得借 `37219c98` 绿灯验收。
 
-操作日志退场、ResultPolicy 开场锁与 Managed ownership 另留私有前置；真实 Managed 授权尚未接管。后台 Job 按后续短合同定取消、许可和 Close 次序，不能把内部值表算成公开执行。
+操作日志退场、ResultPolicy 开场锁与 Managed ownership 另留私有前置；真实 Managed 授权尚未接管。[后台 Job 合同](sdk-background-jobs.md)先定取消、许可和 Close 次序，尚未公开执行。
 
 ## 后续装配规矩
 
