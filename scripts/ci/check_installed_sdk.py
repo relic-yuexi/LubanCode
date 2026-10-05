@@ -277,13 +277,29 @@ def main() -> None:
     # The SDK-only product graph intentionally has no testing targets. Build
     # this independent, standard-only fixture on the remote CI runner, then
     # relocate its actual File API artifact. Never enable producer tests here.
-    run_demo_command(job_fixture["configure"], env, evidence / "command-jobs-probe-configure.json",
-                     label="Command Jobs private probe configure")
-    run_demo_command(job_fixture["buildCommand"], env, evidence / "command-jobs-probe-build.json",
-                     label="Command Jobs private probe build")
+    try:
+        run_demo_command(job_fixture["configure"], env, evidence / "command-jobs-probe-configure.json",
+                         label="Command Jobs private probe configure")
+        run_demo_command(job_fixture["buildCommand"], env, evidence / "command-jobs-probe-build.json",
+                         label="Command Jobs private probe build")
+    finally:
+        # Preserve the actual reply before source/target/artifact eligibility.
+        # Capture failure must not replace the original configure/build error.
+        try:
+            observed = command_jobs.preserve_probe_reply(job_fixture["build"],
+                                                         evidence / "command-jobs-file-api-observed")
+        except Exception as error:
+            observed = {"schemaVersion": 1, "githubSha": os.environ.get("GITHUB_SHA"),
+                        "producerBuild": job_fixture["build"], "status": "capture_failed",
+                        "acceptance": "not_evaluated", "error": str(error)}
+        (evidence / "command-jobs-file-api-observed.json").write_text(
+            json.dumps(observed, indent=2) + "\n", encoding="utf-8")
+    if observed["status"] != "copied":
+        raise RuntimeError("Command Jobs private probe original File API evidence unavailable")
     job_probe = command_jobs.copy_probe(job_fixture["source"], job_fixture["build"], scratch,
                                        evidence=evidence / "command-jobs-file-api")
     job_probe["fixture"] = job_fixture
+    job_probe["fileApiObserved"] = observed
     (evidence / "command-jobs-probe.json").write_text(json.dumps(job_probe, indent=2) + "\n", encoding="utf-8")
     (evidence / "consumer-context.json").write_text(json.dumps({
         "github_sha": os.environ.get("GITHUB_SHA"),

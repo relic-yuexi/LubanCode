@@ -231,6 +231,41 @@ def prepare_probe_fixture(repo, scratch, evidence):
                              "--target", PROBE_TARGET, "--parallel", "4"]}
 
 
+def preserve_probe_reply(build, output):
+    """Save bounded observed originals before any target eligibility check.
+
+    A copied graph is evidence, never an acceptance result. Even malformed JSON
+    or a missing executable must remain inspectable after the scratch is gone.
+    """
+    build, output = Path(build).resolve(), Path(output)
+    reply = build / ".cmake/api/v1/reply"
+    require(not output.exists(), "probe observed File API destination already exists")
+    require(not reply.is_symlink(), "probe observed File API directory is linked")
+    paths = sorted(reply.glob("*.json")) if reply.is_dir() else []
+    require(len(paths) <= 4096, "probe observed File API exceeds file cap")
+    originals = []
+    total = 0
+    for path in paths:
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 16 * 1024 * 1024,
+                "probe observed File API member linked or oversized")
+        data = path.read_bytes()
+        require(len(data) <= 16 * 1024 * 1024, "probe observed File API member grew beyond cap")
+        total += len(data)
+        require(total <= 256 * 1024 * 1024, "probe observed File API exceeds byte cap")
+        originals.append((path.name, data))
+    output.mkdir(parents=True)
+    files = []
+    for name, data in originals:
+        saved = output / name
+        saved.write_bytes(data)
+        require(saved.read_bytes() == data, "probe observed File API copy differs")
+        files.append({"name": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    return {"schemaVersion": 1, "githubSha": os.environ.get("GITHUB_SHA"),
+            "producerBuild": str(build), "directory": str(output),
+            "status": "copied" if files else "no_reply_json", "acceptance": "not_evaluated",
+            "files": files}
+
+
 def preserve_probe_file_api(reply, index_path, index, model_ref, model, target_ref, target, output):
     """Keep original JSON bytes, including every codemodel target/directory.
 

@@ -288,6 +288,30 @@ class ClosureTests(unittest.TestCase):
                 (reply / "target.json").write_text(json.dumps(bad))
                 with self.subTest(key=key), self.assertRaises(RuntimeError):
                     gate.copy_probe(repo, build, scratch / key)
+            # A failed eligibility check must leave the actual original graph;
+            # preserving it never converts the rejection into acceptance.
+            (reply / "target.json").write_text(json.dumps(target))
+            binary.unlink()
+            observed = gate.preserve_probe_reply(build, root / "observed-missing-artifact")
+            self.assertEqual(observed["acceptance"], "not_evaluated")
+            self.assertEqual(observed["status"], "copied")
+            with self.assertRaisesRegex(RuntimeError, "artifact unavailable"):
+                gate.copy_probe(repo, build, scratch / "missing-artifact", evidence=root / "rejected-raw")
+            self.assertFalse((root / "rejected-raw").exists())
+            for item in observed["files"]:
+                saved = root / "observed-missing-artifact" / item["name"]
+                self.assertEqual(saved.read_bytes(), (reply / item["name"]).read_bytes())
+                self.assertEqual(gate.digest(saved), item["sha256"])
+            # Malformed originals remain bytes, not a manufactured graph.
+            (reply / "target.json").write_bytes(b'{ broken original')
+            malformed = gate.preserve_probe_reply(build, root / "observed-malformed")
+            self.assertEqual(malformed["status"], "copied")
+            self.assertEqual((root / "observed-malformed/target.json").read_bytes(), b'{ broken original')
+            with self.assertRaises(RuntimeError):
+                gate.preserve_probe_reply(build, root / "observed-malformed")
+            absent = gate.preserve_probe_reply(root / "unconfigured", root / "observed-empty")
+            self.assertEqual(absent["status"], "no_reply_json")
+            self.assertEqual(absent["files"], [])
 
 
 class FullRunTests(unittest.TestCase):
