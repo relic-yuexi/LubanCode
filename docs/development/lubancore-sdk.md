@@ -1,5 +1,8 @@
 # LubanCore C++ SDK（实验版）
 
+本页介绍这条分支的接口。哪些已合入、哪轮 CI 已过，见
+[SDK 阶段进度](sdk-stage-status.md)。新候选不能借旧源绿灯算交付。
+
 本批提供真实会话闭环。`Runtime` 协调活会话关场，`Session` 句柄持执行资源，经现有
 `SessionService` 接纳输入，再用 `Agent`、轨迹桥和工具表跑回合。
 它不启动 CLI 或 AppServer 子进程。
@@ -11,16 +14,16 @@ AppServer 共用资源拥有、CLI 显式工具装配，以及四路回合临时
 SDK 与 AppServer 共用会话执行对象，多会话隔离与寿命验收也已通过。第一阶段收工。
 可信 C++ 扩展已由 [PR #255](https://github.com/relic-yuexi/LubanCode/pull/255) 交付，
 沿用现有中间件核；每场实例、冻结装配、真实上下文接纳和整场卸载均已验收。
-公开安装头为 `api.hpp`、`core.hpp`、`extensions.hpp`、`results.hpp`。
+公开安装入口为 `core.hpp`；各模块另供公开头，均只依赖 SDK 和标准库。
 持久工具结果查询与双层投影已由 [#257](https://github.com/relic-yuexi/LubanCode/pull/257)
 合入功能分支，本批远端 CI 已过。Worker [#245](https://github.com/relic-yuexi/LubanCode/pull/245)
 已接公开接口，三平台各验真实搬迁进程 18 场，已合入功能分支 `a151d8b4`。
 `LubanCore::Core` 是公开安装目标；仓库内部旧名
 `lubancode_core` 仍带 CLI 实现，两者不能混用。
 
-依赖瘦身首笔把 updater 与 miniz 归到 CLI 宿主目标；SDK-only 不定义它们，
-组合构建也核 SDK 实际传递闭包。本笔仍待远端三平台验收，合同见
-[更新器归宿主](sdk-updater-boundary.md)。渠道、Gateway、Lua 尚未拆完。
+updater、Release 查询、渠道与 Gateway 已归宿主，组合构建也核 SDK 传递闭包，
+合同见[更新器归宿主](sdk-updater-boundary.md)。可关闭 Lua 的编译画像已收入本条
+候选；已合范围和逐源证据仍以阶段进度为准。
 
 后端、基础工具与 MCP 已共用 `runtime/assembly`。SDK 与 AppServer 共用执行对象，
 各自保留受理与排队；CLI、one-shot 仍用原会话栈。完整工具、插件、Hook 和记忆等
@@ -94,6 +97,19 @@ Agent 类型清单与按名派发现在同取当前 Package 快照，补上旧�
 SDK 不从 HOME、PATH 或宿主程序旁找替代品。合同见
 [内置搜索接入](lubancore-builtin-search.md)。
 
+网页抓取也须显式启用。配置只管本场，模型不能加大下载或输出帽：
+
+```cpp
+options.builtin_tools.push_back("web_fetch");
+options.web_fetch = lubancore::web_fetch::v1::Options{};
+options.web_fetch->max_download_bytes = 1024 * 1024;
+options.web_fetch->max_output_bytes = 16 * 1024;
+```
+
+`DescribeCapabilities()` 无网络调用，返回 owned 能力值；失败须按错误处理。
+取消、重定向、解压能力与 Close 次序见[web_fetch 合同](sdk-web-fetch.md)。
+这项已进当前候选源码，远端验收状态见阶段进度。
+
 要随 SDK 安装搜索后端，先按仓库 manifest 校验资源，再显式交给 CMake。
 下面以 Linux x64 为例；macOS ARM64 用 `macos-arm64`，Windows x64 用 `windows-x64`。
 
@@ -111,8 +127,8 @@ cmake --install build-sdk --config Release --prefix sdk-prefix
 ```
 
 这套配置不定义 CLI、`lubancode_core`、`lubancode_app`、终端资源复制或 CLI 测试目标。
-内部仍构建 runtime/engine 与其依赖；渠道、Gateway、updater、Lua 等旧层尚未细拆，
-当前安装包不等于最小依赖包。CLI 默认开启；CLI 与 SDK 同时关闭会明确报错。
+内部仍构建 runtime/engine 与其依赖；宿主层已剔除，Lua 可按独立画像关闭，
+当前安装包仍带网络与模型底座。CLI 默认开启；CLI 与 SDK 同时关闭会明确报错。
 同时构建 CLI 与 SDK 时，可保留 CLI 默认值，按 `--component LubanCore` 单独安装 SDK。
 
 要跑 SDK 专项，打开同一构建目录中的测试开关，再构建默认 `ALL`：

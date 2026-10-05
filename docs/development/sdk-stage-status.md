@@ -43,6 +43,17 @@
 
 ## 下一笔候选
 
+当前组合已保留 #332 的 `0066ac3e` 窄修复，接入
+[有界 web_fetch](sdk-web-fetch.md)。宿主显式选择工具并冻结每场上限；默认不开放。
+公开配置与能力快照只含 SDK／标准库值，内部单次请求 Transport 留替换口。
+模型只能收窄预算，Close 等请求真退出；不支持 gzip 时明确拒绝编码，不添解压依赖。
+原 CLI 19 案保住，另补两案；SDK 六案和安装消费核实际 HTTP、预算、取消与四场隔离，
+HTTP 夹具另核线程退净。源码和纯数据已查，这份新组合仍待自己的远程 CI。
+
+本源预期 ON 六套各 55 册 focused／458 CASE／34 场消费，OFF 三套各
+53 册／443 CASE／31 场消费；全量 Linux 758、Windows 760、macOS 761；
+ASan 154 册实跑、61 册重点来源及 19 份支持件。预期不能代替实际原件。
+
 私有源 `37219c98` 的[整轮 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37245678268) 已通过，仍未合入功能分支。
 
 | 模块 | 合同与已验范围 |
@@ -54,7 +65,7 @@
 
 ON 六套各 54 册 focused、452 条原生 CASE、33 项安装消费；OFF 三套各 52 册、437 条 CASE、30 项消费。三平台跨画像各五条真实命令；九套独立 RAG 示例从四份复制源码单独构建和执行。全量 Linux 756、Windows 758、macOS 759；ASan 实跑 153 册，60 册重点来源通过，另核 18 份附件和实际 PCH。
 
-876 件材料已封，摘要 `d1ec767ac5539b1b0c58fe6081f44db582fa29ac99f91a9bf89c03d109ab0264`。本地组合 `640c0f71` 只另加监督器夹具修复，尚未送它自己那轮 CI；不得借 `37219c98` 绿灯验收。
+876 件材料已封，摘要 `d1ec767ac5539b1b0c58fe6081f44db582fa29ac99f91a9bf89c03d109ab0264`。本地旧组合 `640c0f71` 只另加监督器夹具修复。上面的新组合还接了 scoped PowerShell 修复、Web 工具和验收门；不得借 `37219c98` 绿灯验收。
 
 操作日志退场、ResultPolicy 开场锁与 Managed ownership 另留私有前置；真实 Managed 授权尚未接管。[后台 Job 合同](sdk-background-jobs.md)先定取消、许可和 Close 次序，尚未公开执行。
 
