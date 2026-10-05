@@ -1,4 +1,5 @@
 """Pure mutations of native publication receipts; no native execution."""
+import ast
 import fnmatch
 from pathlib import Path
 import re
@@ -19,6 +20,16 @@ def receipt(executable='/tmp/build/lubancore_sdk_tests'):
 
 
 class ImmutableResultGateTests(unittest.TestCase):
+    def test_actual_asan_first_selector_matches_inline_registration_roster(self):
+        root = Path(__file__).resolve().parents[3]
+        workflow = (root / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+        block = re.search(r'^  linux-asan:\n(.*?)(?=^  [A-Za-z][\w-]*:|\Z)', workflow, re.M | re.S).group(1)
+        literal = re.findall(r'^          required = (\{.*?\})\r?\n          if len\(tests\)', block, re.M | re.S)
+        self.assertEqual(len(literal), 1)
+        required = ast.literal_eval(literal[0])
+        self.assertEqual(required, set(asan.make_manifest(root)['selected'][0]))
+        self.assertIn('unit.trajectory_v3.v3_result_immutable_publication', required)
+
     def test_both_classifiers_cover_shared_writer_and_new_gate(self):
         root = Path(__file__).resolve().parents[3]
         workflow = (root / '.github/workflows/ci.yml').read_text(encoding='utf-8')

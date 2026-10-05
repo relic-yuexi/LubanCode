@@ -1779,7 +1779,7 @@ jobs:
                       'integration.sdk.lubancore_event_sink',
                       'integration.sdk.lubancore_builtin_search',
                       'unit.remote.remote_result_sync',
-                      'unit.hooks.middleware_core', 'unit.hooks.middleware_dispatch_cause', 'unit.hooks.middleware_job_post_contract', 'unit.memory.memory_project_commit', 'unit.memory.memory_project_commit_handoff', 'unit.trajectory_v3.v3_result_store',
+                      'unit.hooks.middleware_core', 'unit.hooks.middleware_dispatch_cause', 'unit.hooks.middleware_job_post_contract', 'unit.memory.memory_project_commit', 'unit.memory.memory_project_commit_handoff', 'unit.trajectory_v3.v3_result_store', 'unit.trajectory_v3.v3_result_immutable_publication',
                       'unit.platform.atomic_write', 'unit.packages.package_manifest',
                       'integration.sdk.lubancore_package_manifest'}
           if len(tests) != len(required) or {test['name'] for test in tests} != required:
