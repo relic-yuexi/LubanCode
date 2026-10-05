@@ -778,9 +778,13 @@ struct IncomingSessionRefs {
     std::vector<std::string> resume_referrers;
     std::vector<std::string> subagent_referrers;
     std::vector<std::string> memory_files;
+    // Body was not read: ownership is Managed, malformed or unreadable. These
+    // are unknown references, never fabricated resume/subagent facts.
+    std::vector<std::string> ownership_unreadable_sessions;
 
     bool empty() const {
-        return resume_referrers.empty() && subagent_referrers.empty() && memory_files.empty();
+        return resume_referrers.empty() && subagent_referrers.empty() && memory_files.empty() &&
+               ownership_unreadable_sessions.empty();
     }
 };
 
