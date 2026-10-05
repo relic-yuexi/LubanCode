@@ -19,6 +19,7 @@
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "trajectory/safety.hpp"
+#include "trajectory/managed_session_ownership.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "trajectory/v3/session_switch.hpp"
 #include "workspace/identity.hpp"
@@ -27,6 +28,35 @@
 
 namespace lubancode::trajectory {
 namespace {
+
+// LocalTrusted callers may supply a relative storage root. Resolve only the
+// path spelling here; marked/bad metadata never becomes an absent capture.
+std::expected<ManagedSessionOwnershipCapture, std::string> CaptureLocalSession(
+    const std::filesystem::path& directory) {
+    std::error_code error;
+    auto path = std::filesystem::absolute(directory, error).lexically_normal();
+    if (error) return std::unexpected("managed.ownership.invalid_directory");
+    auto capture = CaptureManagedSessionOwnership(path);
+    if (!capture) return std::unexpected(capture.error());
+    auto local = CheckLocalTrustedSessionOwnership(*capture);
+    if (!local) return std::unexpected(local.error());
+    return capture;
+}
+
+std::expected<SessionLock, std::string> AcquireLocalSessionLock(
+    const std::filesystem::path& directory, const SessionLockOwner& owner) {
+    auto before = CaptureLocalSession(directory);
+    if (!before) return std::unexpected(before.error());
+    auto lock = SessionLock::Acquire(before->session_dir, owner);
+    if (!lock) return std::unexpected(lock.error());
+    auto captured = CaptureManagedSessionOwnershipLocked(before->session_dir, *lock);
+    if (!captured) return std::unexpected(captured.error());
+    auto local = CheckLocalTrustedSessionOwnership(*captured);
+    if (!local) return std::unexpected(local.error());
+    auto same = CheckManagedSessionOwnershipCaptureUnchanged(*before, *captured);
+    if (!same) return std::unexpected(same.error());
+    return std::move(*lock);
+}
 
 std::expected<MemoryCapabilityLease, std::string> OpenLockedMemory(
     const SessionManagerOptions& options, const std::string& workspace_key,
@@ -733,6 +763,7 @@ std::string SessionManager::NextMainRunId() const {
     const std::filesystem::path sessions = workspace_dir_ / "sessions";
     if (std::filesystem::exists(sessions, ec)) {
         for (const auto& entry : std::filesystem::directory_iterator(sessions, ec)) {
+            if (!CaptureLocalSession(entry.path())) continue;
             const auto manifest = ReadSessionJson(entry.path());
             if (!manifest.has_value() || manifest->main_run_id.rfind("main-", 0) != 0) {
                 continue;
@@ -828,7 +859,7 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     if (!directory.has_value()) {
         return std::unexpected("session.create_failed: " + directory.error());
     }
-    auto lock_file = SessionLock::Acquire(directory->session_dir(), clock_->LockOwner());
+    auto lock_file = AcquireLocalSessionLock(directory->session_dir(), clock_->LockOwner());
     if (!lock_file.has_value()) {
         return std::unexpected("session.lock_failed: " + lock_file.error());
     }
@@ -1068,7 +1099,7 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
         // 第 1 步失败:旧 session 仍可用,clear 返回失败(§3.3.1)。
         return fail("clear.step1_failed", new_directory.error());
     }
-    auto new_lock = SessionLock::Acquire(new_directory->session_dir(), clock_->LockOwner());
+    auto new_lock = AcquireLocalSessionLock(new_directory->session_dir(), clock_->LockOwner());
     if (!new_lock.has_value()) {
         return fail("clear.step1_failed", new_lock.error());
     }
@@ -1775,8 +1806,27 @@ void AppendConversationText(const nlohmann::json& content, ReplayMessage* out) {
 // 键已带场名,原样沿用。
 std::expected<V3ResumeFold, V3FoldError> FoldV3ResumeChain(
     const v3::V3Ledger& own, const std::filesystem::path& own_stream) {
-    (void)own_stream; // Ancestor resolver remains a path reader; this own volume does not reopen.
-    auto projection = v3::ProjectResume(own);
+    struct RefusedLocalSource { std::string error; };
+    auto projection = [&]() -> std::expected<v3::ResumeProjection, std::string> {
+        try {
+            return v3::ProjectResume(own, [&](const std::string& session_id) {
+                if (!IsSafeSingleSegment(session_id))
+                    throw RefusedLocalSource{"managed.ownership.invalid_source"};
+                const auto directory = own_stream.parent_path().parent_path() /
+                    platform::Utf8ToPath(session_id);
+                std::error_code error;
+                const auto status = std::filesystem::symlink_status(directory, error);
+                if (error == std::errc::no_such_file_or_directory ||
+                    (!error && status.type() == std::filesystem::file_type::not_found))
+                    return directory / platform::Utf8ToPath(session_id + ".jsonl");
+                auto local = CaptureLocalSession(directory);
+                if (!local) throw RefusedLocalSource{local.error()};
+                return directory / platform::Utf8ToPath(session_id + ".jsonl");
+            });
+        } catch (const RefusedLocalSource& refused) {
+            return std::unexpected(refused.error);
+        }
+    }();
     if (!projection.has_value()) {
         return std::unexpected(V3FoldError{"corrupt", projection.error()});
     }
@@ -1973,6 +2023,7 @@ std::string SessionManager::LatestResumableSessionIdLocked() {
         if (active_.has_value() && id == active_->session_id()) {
             continue;  // 自己这场不作为 resume 源
         }
+        if (!CaptureLocalSession(entry.path())) continue;
         const auto manifest = ReadSessionJson(entry.path());
         if (!manifest.has_value()) {
             // v3 会话(session_switch 接线点 2):无 manifest,认
@@ -2047,6 +2098,8 @@ SessionManager::ResumeSourceProbe SessionManager::ProbeResumeSource(
     if (!std::filesystem::is_directory(source_dir)) {
         return fail("resume.source_not_found", "source session 目录不存在");
     }
+    const auto local = CaptureLocalSession(source_dir);
+    if (!local) return fail(local.error(), "LocalTrusted source ownership refused");
     // one_shot 两路认:先 v2 manifest,再 v3 session.started 的 runKind。
     if (const auto manifest = ReadSessionJson(source_dir); manifest.has_value()) {
         if (manifest->run_kind == RunKindName(RunKind::OneShot)) {
@@ -2159,6 +2212,8 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     if (!std::filesystem::is_directory(source_dir)) {
         return fail("resume.source_not_found", "source session 目录不存在");
     }
+    const auto local = CaptureLocalSession(source_dir);
+    if (!local) return fail(local.error(), "LocalTrusted source ownership refused");
     // 单发场不可 resume(单发轨迹断档单):单发语义不续,审计可读——/resume
     // <id> 指名要续也明拒,不折叠成新交互场。manifest 读不动照旧往下走,
     // 由后面的验账说话。
@@ -2638,7 +2693,7 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
         active_->lock.Release();
         active_.reset();
     }
-    auto lock_file = SessionLock::Acquire(source_dir, clock_->LockOwner());
+    auto lock_file = AcquireLocalSessionLock(source_dir, clock_->LockOwner());
     if (!lock_file.has_value()) {
         return fail("resume.step5_failed", "源场独占锁拿不下: " + lock_file.error());
     }
@@ -3016,7 +3071,7 @@ void SessionManager::ContinueNewSide(const std::filesystem::path& next_dir,
     next_entry.session_id = next_id;
     next_entry.clear_continued = true;
 
-    auto next_lock = SessionLock::Acquire(next_dir, clock_->LockOwner());
+    auto next_lock = AcquireLocalSessionLock(next_dir, clock_->LockOwner());
     if (!next_lock.has_value()) {
         next_entry.status = SessionStatus::Incomplete;
         next_entry.notes.push_back("新账锁拿不到: " + next_lock.error());
@@ -3166,6 +3221,11 @@ SessionRecoveryEntry SessionManager::AbortEmptyPreparing(const std::filesystem::
                                                          const std::string& session_id) {
     SessionRecoveryEntry entry;
     entry.session_id = session_id;
+    const auto local = CaptureLocalSession(session_dir);
+    if (!local) {
+        entry.notes.push_back(local.error());
+        return entry;
+    }
     entry.aborted_before_start = true;
     const auto operation = RunLifecycleOp(
         LifecycleOperation::DeleteSession, session_id,
@@ -3223,6 +3283,7 @@ WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy pol
                 continue;
             }
             const std::string id = platform::PathToUtf8(entry.path().filename());
+            if (!CaptureLocalSession(entry.path())) continue;
             scanned.emplace(id, Scanned{entry.path(), ScanStreamFacts(entry.path() / "main.jsonl")});
         }
     }
@@ -3240,6 +3301,7 @@ WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy pol
         const Scanned& scan = scanned.at(session_id);
         const std::filesystem::path& session_dir = scan.dir;
         MainJournalFacts facts = scan.facts;
+        if (!CaptureLocalSession(session_dir)) return;
 
         SessionRecoveryEntry entry;
         entry.session_id = session_id;
@@ -3302,7 +3364,7 @@ WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy pol
 
         // ---- 换账旧侧续办:clear_requested 已 durable、账未封 ----
         if (facts.clear_requested && !facts.session_ended && entry.status != SessionStatus::Corrupt) {
-            auto stale_lock = SessionLock::Acquire(session_dir, clock_->LockOwner());
+            auto stale_lock = AcquireLocalSessionLock(session_dir, clock_->LockOwner());
             if (!stale_lock.has_value()) {
                 entry.notes.push_back("旧账锁拿不到: " + stale_lock.error());
             } else {
@@ -3346,7 +3408,7 @@ WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy pol
             !facts.clear_requested_next_session_id.empty()) {
             const std::string next_id = facts.clear_requested_next_session_id;
             const auto next_it = scanned.find(next_id);
-            if (next_it != scanned.end()) {
+            if (next_it != scanned.end() && CaptureLocalSession(next_it->second.dir)) {
                 const MainJournalFacts& next_facts = next_it->second.facts;
                 if (next_facts.truncated_tail ||
                     (next_facts.journal_exists && !next_facts.verify_ok)) {
@@ -3474,10 +3536,14 @@ std::expected<void, std::string> SessionManager::DeleteSession(const std::string
 std::expected<void, std::string> SessionManager::RecordResumeReference(
     const std::string& source_session_id, const std::string& note) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!IsSafeSingleSegment(source_session_id))
+        return std::unexpected("session.invalid_ref");
     const std::filesystem::path source_dir = SessionDirOf(source_session_id);
     if (!std::filesystem::exists(source_dir)) {
         return std::unexpected("session.not_found: " + source_session_id);
     }
+    const auto local = CaptureLocalSession(source_dir);
+    if (!local) return std::unexpected(local.error());
     // resume source 通常须 closed/archived;无活 writer 的 incomplete 也可按
     // 已验证前缀 resume-as-new(§3.3.2)。这里只记引用,不校验投影。
     nlohmann::json parameters;
@@ -3603,6 +3669,12 @@ SessionAdminOutcome GuardAdminTargetPath(const std::filesystem::path& workspace_
         return SessionAdminOutcome{"session.path_escape",
                                    "规范化路径越出 workspace sessions 根: " +
                                        platform::PathToUtf8(canonical_session)};
+    }
+    const bool exists = std::filesystem::exists(session_dir, ec);
+    if (ec) return SessionAdminOutcome{"managed.ownership.invalid_directory", ec.message()};
+    if (exists) {
+        const auto local = CaptureLocalSession(session_dir);
+        if (!local) return SessionAdminOutcome{local.error(), "LocalTrusted target ownership refused"};
     }
     *session_dir_out = session_dir;
     return SessionAdminOutcome{};
@@ -3757,6 +3829,9 @@ SessionAdminOutcome DeleteV3SessionDir(const std::filesystem::path& workspace_di
     }
     // 勾四:incoming refs 核验(同 workspace 扫别场账 + memory 条目)。
     const IncomingSessionRefs refs = ScanIncomingSessionRefs(workspace_dir, session_id);
+    if (!refs.ownership_unreadable_sessions.empty())
+        return SessionAdminOutcome{"session.delete_references_unknown",
+                                   "LocalTrusted cannot read all peer session ownership"};
     if (!refs.empty()) {
         std::string detail;
         for (const std::string& id : refs.resume_referrers) {
@@ -4212,6 +4287,12 @@ IncomingSessionRefs ScanIncomingSessionRefs(const std::filesystem::path& workspa
             if (other_id == session_id) {
                 continue;  // 目标自己目录内的子账随整场删除,不算跨场引用
             }
+            if (!CaptureLocalSession(entry.path())) {
+                // Its body is outside LocalTrusted authority. Conservatively
+                // retain the target instead of declaring that no reference exists.
+                refs.ownership_unreadable_sessions.push_back(other_id);
+                continue;
+            }
             // 主账两形状都扫(v3 <id>.jsonl 与 v2 main.jsonl);resume 链可
             // 跨格式存在(v2 场 resume v3 源,反之亦然)。
             const auto v3_probe = v3::ProbeV3SessionStream(entry.path());
@@ -4295,9 +4376,11 @@ std::vector<DeleteRecoveryEntry> RecoverPendingDeletes(const std::filesystem::pa
         }
         const std::filesystem::path session_dir =
             workspace_dir / "sessions" / platform::Utf8ToPath(intent->session_id);
+        if (!IsSafeSingleSegment(intent->session_id)) continue;
+        const bool dir_exists = std::filesystem::exists(session_dir, ec);
+        if (ec || (dir_exists && !CaptureLocalSession(session_dir))) continue;
         const auto tombstone =
             ReadSessionTombstone(workspace_dir / "tombstones", intent->session_id);
-        const bool dir_exists = std::filesystem::exists(session_dir, ec);
 
         DeleteRecoveryEntry record;
         record.operation_id = intent->operation_id;

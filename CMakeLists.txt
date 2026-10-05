@@ -784,6 +784,8 @@ add_library(lubancode_engine STATIC
   # clear 八步换账、生命周期状态机、workspace lifecycle/tombstone 账、
   # 启动恢复器(Journal 可证事实为准)。
   src/trajectory/session_lock.cpp
+  src/trajectory/managed_session_ownership.cpp
+  src/trajectory/managed_session_reservation.cpp
   src/trajectory/session_manager.cpp
   src/trajectory/session_index.cpp
   # P0-3:ReplayState 折叠/exact replay/state hash/checkpoint/session
