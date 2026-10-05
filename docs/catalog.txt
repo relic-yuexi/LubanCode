@@ -227,3 +227,4 @@ DOC development/sdk-asan-compile-profile.md
 DOC development/windows-command-entry-observation.md
 DOC development/sdk-command-jobs.md
 DOC development/workspace-racer-ready-evidence.md
+DOC development/sdk-lua-child-precheck-repair.md
