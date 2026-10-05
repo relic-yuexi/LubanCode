@@ -12,6 +12,7 @@
 
 namespace lubancode::tools {
 class IRipgrepRunner;
+struct WebFetchOptions;
 }
 
 namespace lubancode::runtime::assembly {
@@ -21,7 +22,8 @@ namespace lubancode::runtime::assembly {
 // Search requires a caller-owned runner. Its preparation belongs to the caller,
 // before session startup; the default does not discover ambient rg for the SDK.
 std::unique_ptr<tools::Tool> CreateLocalTool(
-    const std::string& name, std::shared_ptr<tools::IRipgrepRunner> search_runner = {});
+    const std::string& name, std::shared_ptr<tools::IRipgrepRunner> search_runner = {},
+    const tools::WebFetchOptions* web_fetch_options = nullptr);
 
 // user_agent 由宿主显式传入,本层不依赖发行版本头。
 // skills 是已解析清单,不在此处扫描个人目录或项目目录。

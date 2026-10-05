@@ -21,6 +21,7 @@
 #include <lubancore/memory.hpp>
 #include <lubancore/memory_blobs.hpp>
 #include <lubancore/lua.hpp>
+#include <lubancore/web_fetch.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
@@ -122,7 +123,8 @@ struct SessionOptions {
     std::optional<Connection> connection;
     // Empty creates a new V3 session. Nonempty strictly resumes that same V3 ID.
     std::string resume_session_id;
-    // Explicit admission. read_file/write_file/edit_file/run_command/search.
+    // Explicit admission. read_file/write_file/edit_file/run_command/search,
+    // todo_write and web_fetch (bounded HTTP(S), no implicit credentials).
     // Search defaults to this session's cwd; null/empty paths do the same.
     // run_command is foreground-only; detached jobs and CLI parity are not claimed.
     std::vector<std::string> builtin_tools;
@@ -159,6 +161,9 @@ struct SessionOptions {
     std::unique_ptr<events::v1::EventSink> event_sink;
     // Memory-fragment CAS only; null keeps File. Does not enable recall/save.
     std::unique_ptr<memory_blobs::v1::Provider> memory_blob_provider;
+    // Limits only: builtin_tools must explicitly select web_fetch. Omitted
+    // uses bounded defaults. Resume selects tools/limits afresh, as other builtins.
+    std::optional<web_fetch::v1::Options> web_fetch;
 };
 // operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };

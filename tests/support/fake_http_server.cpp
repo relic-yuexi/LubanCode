@@ -3,6 +3,9 @@
 #include "fake_http_server.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <condition_variable>
+#include <set>
 #include <thread>
 
 #ifdef _WIN32
@@ -11,6 +14,7 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -41,6 +45,38 @@ void EnsureSocketsReady() {
 #endif
 }
 
+bool SetBlocking(socket_t socket, bool blocking) {
+#ifdef _WIN32
+    u_long mode = blocking ? 0 : 1;
+    return ::ioctlsocket(socket, FIONBIO, &mode) == 0;
+#else
+    const int flags = ::fcntl(socket, F_GETFL, 0);
+    return flags >= 0 && ::fcntl(socket, F_SETFL, blocking ? flags & ~O_NONBLOCK : flags | O_NONBLOCK) == 0;
+#endif
+}
+bool PrepareOwnedClient(socket_t socket) {
+    if (!SetBlocking(socket, true)) return false;
+#ifdef SO_NOSIGPIPE
+    int enabled = 1;
+    if (::setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) != 0) return false;
+#endif
+    return true;
+}
+void StopSocket(socket_t socket) {
+#ifdef _WIN32
+    ::shutdown(socket, SD_BOTH);
+#else
+    ::shutdown(socket, SHUT_RDWR);
+#endif
+}
+bool RetryAcceptError() {
+#ifdef _WIN32
+    return ::WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+#endif
+}
+
 std::string ReasonPhrase(int status) {
     switch (status) {
         case 200:
@@ -64,10 +100,10 @@ std::string ReasonPhrase(int status) {
     }
 }
 
-bool SendAll(socket_t s, const char* data, std::size_t size) {
+bool SendAll(socket_t s, const char* data, std::size_t size, int flags = 0) {
     std::size_t sent = 0;
     while (sent < size) {
-        const int chunk = ::send(s, data + sent, static_cast<int>(size - sent), 0);
+        const int chunk = ::send(s, data + sent, static_cast<int>(size - sent), flags);
         if (chunk <= 0) {
             return false;
         }
@@ -75,8 +111,6 @@ bool SendAll(socket_t s, const char* data, std::size_t size) {
     }
     return true;
 }
-
-bool SendAll(socket_t s, const std::string& data) { return SendAll(s, data.data(), data.size()); }
 
 // 收到 "\r\n\r\n" 为止;返回读到的全部字节(含可能多读进来的体前缀)。
 bool ReadUntilHeaderEnd(socket_t s, std::string& buffer) {
@@ -112,6 +146,39 @@ struct FakeHttpServer::State {
     mutable std::mutex mutex;
     std::vector<FakeHttpResponse> scripts;
     std::vector<FakeHttpRequest> log;
+    bool owned = false;
+    std::atomic<bool> worker_failed{false};
+    std::mutex clients_mutex;
+    std::set<socket_t> clients;
+    std::vector<std::thread> workers; // Only listener writes; owner reads after joining it.
+    std::mutex delay_mutex;
+    std::condition_variable delay_cv;
+
+    void RequestStop() {
+        {
+            const std::lock_guard<std::mutex> lock(delay_mutex);
+            stopping.store(true);
+        }
+        delay_cv.notify_all();
+    }
+    void CloseClient(socket_t client) {
+        if (!owned) { CloseSocket(client); return; }
+        const std::lock_guard<std::mutex> lock(clients_mutex);
+        if (clients.erase(client)) CloseSocket(client);
+    }
+    bool Delay(std::chrono::milliseconds amount) {
+        if (!owned) { std::this_thread::sleep_for(amount); return false; }
+        std::unique_lock<std::mutex> lock(delay_mutex);
+        return delay_cv.wait_for(lock, amount, [&] { return stopping.load(); });
+    }
+    bool SendClient(socket_t client, const char* data, std::size_t size) {
+        int flags = 0;
+#ifdef MSG_NOSIGNAL
+        if (owned) flags = MSG_NOSIGNAL;
+#endif
+        return SendAll(client, data, size, flags);
+    }
+    bool SendClient(socket_t client, const std::string& text) { return SendClient(client, text.data(), text.size()); }
 
     FakeHttpResponse NextScript() {
         const std::lock_guard<std::mutex> lock(mutex);
@@ -145,7 +212,7 @@ struct FakeHttpServer::State {
 
         std::string buffer;
         if (!ReadUntilHeaderEnd(client, buffer)) {
-            CloseSocket(client);
+            CloseClient(client);
             return;
         }
         const std::size_t header_end = buffer.find("\r\n\r\n") + 4;
@@ -196,11 +263,11 @@ struct FakeHttpServer::State {
 
         // 大体 POST:curl 会先发 Expect: 100-continue 等确认,先回 100 再收体。
         if (expect_continue) {
-            SendAll(client, "HTTP/1.1 100 Continue\r\n\r\n");
+            SendClient(client, "HTTP/1.1 100 Continue\r\n\r\n");
         }
         if (content_length > 0) {
             if (!ReadMore(client, buffer, header_end + content_length)) {
-                CloseSocket(client);
+                CloseClient(client);
                 return;
             }
             request.body = buffer.substr(header_end, content_length);
@@ -210,7 +277,7 @@ struct FakeHttpServer::State {
         // 按脚本回响应。
         const FakeHttpResponse script = NextScript();
         if (script.delay_before_response.count() > 0) {
-            std::this_thread::sleep_for(script.delay_before_response);
+            if (Delay(script.delay_before_response)) { CloseClient(client); return; }
         }
         // (std::min):防 windows.h 的 min 宏。
         const std::size_t send_bytes = (std::min)(script.stall_after_body_bytes, script.body.size());
@@ -226,23 +293,26 @@ struct FakeHttpServer::State {
             head += "Content-Length: " + std::to_string(script.body.size()) + "\r\n";
         }
         head += "Connection: close\r\n\r\n";
-        if (!SendAll(client, head)) {
-            CloseSocket(client);
+        if (!SendClient(client, head)) {
+            CloseClient(client);
             return;
         }
-        if (send_bytes > 0 && !SendAll(client, script.body.data(), send_bytes)) {
-            CloseSocket(client);
+        if (send_bytes > 0 && !SendClient(client, script.body.data(), send_bytes)) {
+            CloseClient(client);
             return;
         }
         if (send_bytes < script.body.size()) {
             // 发半截后挂死:客户端的取消/墙钟来收场。
-            std::this_thread::sleep_for(std::chrono::seconds(10));
+            (void)Delay(std::chrono::seconds(10));
         }
-        CloseSocket(client);
+        CloseClient(client);
     }
 };
 
-FakeHttpServer::FakeHttpServer() : state_(std::make_shared<State>()) {
+FakeHttpServer::FakeHttpServer() : FakeHttpServer(ThreadMode::Detached) {}
+
+FakeHttpServer::FakeHttpServer(ThreadMode mode) : state_(std::make_shared<State>()) {
+    state_->owned = mode == ThreadMode::Owned;
     EnsureSocketsReady();
 
     const socket_t listener = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -269,28 +339,93 @@ FakeHttpServer::FakeHttpServer() : state_(std::make_shared<State>()) {
     }
     port_ = ntohs(bound.sin_port);
     state_->listener = listener;
+    if (state_->owned && !SetBlocking(listener, false)) {
+        CloseSocket(listener); state_->listener = kInvalidSocket; port_ = 0; return;
+    }
 
-    std::thread([state = state_]() {
+    if (!state_->owned) {
+        // Keep the old detached path unchanged; only explicit Owned fixtures
+        // opt into nonblocking accept, connection tracking and joining.
+        std::thread([state = state_]() {
+            while (!state->stopping.load()) {
+                sockaddr_in client_addr{};
+                socklen_t client_len = sizeof(client_addr);
+                const socket_t client =
+                    ::accept(state->listener, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+                if (client == kInvalidSocket) return;
+                state->connections.fetch_add(1);
+                std::thread([state, client]() { state->ServeConnection(client); }).detach();
+            }
+        }).detach();
+        return;
+    }
+    auto serve = [state = state_, listener]() {
         while (!state->stopping.load()) {
             sockaddr_in client_addr{};
             socklen_t client_len = sizeof(client_addr);
             const socket_t client =
-                ::accept(state->listener, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+                ::accept(listener, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
             if (client == kInvalidSocket) {
-                return;  // 监听 socket 关了,收工
+                const bool retry = RetryAcceptError();
+                if (state->stopping.load()) return;
+                if (retry) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); continue; }
+                state->worker_failed.store(true); state->RequestStop(); return;
             }
-            state->connections.fetch_add(1);
-            std::thread([state, client]() { state->ServeConnection(client); }).detach();
+            {
+                if (state->stopping.load()) { CloseSocket(client); return; }
+                if (!PrepareOwnedClient(client)) {
+                    CloseSocket(client); state->worker_failed.store(true); state->RequestStop(); return;
+                }
+                bool registered = false;
+                try {
+                    { const std::lock_guard<std::mutex> lock(state->clients_mutex); registered = state->clients.insert(client).second; }
+                    state->workers.emplace_back(); // Allocate before a joinable thread exists.
+                    try {
+                        state->workers.back() = std::thread([state, client] {
+                            try { state->ServeConnection(client); }
+                            catch (...) { state->worker_failed.store(true); state->CloseClient(client); }
+                        });
+                    } catch (...) { state->workers.pop_back(); throw; }
+                    state->connections.fetch_add(1);
+                } catch (...) {
+                    if (registered) state->CloseClient(client); else CloseSocket(client);
+                    state->worker_failed.store(true); state->RequestStop(); return;
+                }
+                continue;
+            }
         }
-    }).detach();
+    };
+    try { listener_thread_ = std::thread(std::move(serve)); }
+    catch (...) { CloseSocket(listener); state_->listener = kInvalidSocket; throw; }
 }
 
 FakeHttpServer::~FakeHttpServer() {
+    if (state_->owned) { StopAndJoin(); return; }
     state_->stopping.store(true);
     if (state_->listener != kInvalidSocket) {
         CloseSocket(state_->listener);
         state_->listener = kInvalidSocket;
     }
+}
+
+void FakeHttpServer::StopAndJoin() {
+    if (!state_->owned) return;
+    state_->RequestStop();
+    if (listener_thread_.joinable()) listener_thread_.join();
+    if (state_->listener != kInvalidSocket) { CloseSocket(state_->listener); state_->listener = kInvalidSocket; }
+    {
+        const std::lock_guard<std::mutex> lock(state_->clients_mutex);
+        for (const auto client : state_->clients) StopSocket(client);
+    }
+    for (auto& worker : state_->workers) if (worker.joinable()) worker.join();
+    state_->workers.clear();
+}
+
+bool FakeHttpServer::owned_threads_quiescent() const {
+    if (!state_->owned || state_->worker_failed.load() || !state_->stopping.load() ||
+        listener_thread_.joinable() || !state_->workers.empty()) return false;
+    const std::lock_guard<std::mutex> lock(state_->clients_mutex);
+    return state_->clients.empty();
 }
 
 void FakeHttpServer::Enqueue(FakeHttpResponse response) {

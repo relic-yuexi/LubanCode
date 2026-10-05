@@ -1,11 +1,20 @@
 #include "tools/web_fetch.hpp"
 
+#include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <memory>
+#include <set>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <cpr/cpr.h>
+#include <curl/curl.h>
 
 #include "platform/text_encoding.hpp"  // SanitizeExternalText/Utf8PrefixBoundary:外来文本公共关口
 #include "tools/tool_text.hpp"         // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
@@ -215,7 +224,107 @@ PreparedBody PrepareFetchedBody(const std::string& content_type, const std::stri
     return prepared;
 }
 
-WebFetchTool::WebFetchTool(std::string user_agent) : user_agent_(std::move(user_agent)) {}
+namespace {
+bool HeaderText(const std::string& value) {
+    if (value.empty() || value.size() > 256 || !platform::IsValidUtf8(value)) return false;
+    return std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 0x20 || c == 0x7f; });
+}
+bool UrlText(const std::string& value) {
+    if (value.empty() || value.size() > 8192 || !platform::IsValidUtf8(value)) return false;
+    return std::none_of(value.begin(), value.end(), [](unsigned char c) { return c <= 0x20 || c == 0x7f; });
+}
+struct HttpUrl { std::string text, scheme; };
+std::expected<HttpUrl, std::string> ResolveHttpUrl(const std::string& value, const std::string& base = {}) {
+    if (!UrlText(value)) return std::unexpected("invalid_url");
+    // CPR owns libcurl global initialization. Keep its local handle alive until
+    // the pure URL handle has retired; this opens no connection or worker.
+    cpr::Session initialized;
+    if (!initialized.GetCurlHolder() || !initialized.GetCurlHolder()->handle)
+        throw std::runtime_error("web_fetch.transport_initialization_failed");
+    std::unique_ptr<CURLU, decltype(&curl_url_cleanup)> url(curl_url(), curl_url_cleanup);
+    if (!url) return std::unexpected("invalid_url");
+    if ((!base.empty() && curl_url_set(url.get(), CURLUPART_URL, base.c_str(), CURLU_DISALLOW_USER) != CURLUE_OK) ||
+        curl_url_set(url.get(), CURLUPART_URL, value.c_str(), CURLU_DISALLOW_USER) != CURLUE_OK)
+        return std::unexpected("invalid_url");
+    const auto part = [&](CURLUPart kind) -> std::string {
+        char* raw = nullptr;
+        const auto status = curl_url_get(url.get(), kind, &raw, 0);
+        std::unique_ptr<char, decltype(&curl_free)> held(raw, curl_free);
+        return status == CURLUE_OK && raw ? std::string(raw) : std::string();
+    };
+    auto scheme = part(CURLUPART_SCHEME);
+    if (scheme != "http" && scheme != "https") return std::unexpected("invalid_url");
+    if (curl_url_set(url.get(), CURLUPART_FRAGMENT, nullptr, 0) != CURLUE_OK)
+        return std::unexpected("invalid_url");
+    auto text = part(CURLUPART_URL);
+    if (!UrlText(text)) return std::unexpected("invalid_url");
+    return HttpUrl{std::move(text), std::move(scheme)};
+}
+bool SameHeader(std::string_view left, std::string_view right) {
+    if (left.size() != right.size()) return false;
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        const char c = left[i] >= 'A' && left[i] <= 'Z' ? static_cast<char>(left[i] + ('a' - 'A')) : left[i];
+        if (c != right[i]) return false;
+    }
+    return true;
+}
+class DefaultWebFetchTransport final : public WebFetchTransport {
+public:
+    std::expected<net::FullHttpResponse, net::FullHttpError> Get(const net::FullHttpRequest& request,
+        const net::FullHttpLimits& limits, const std::atomic<bool>* cancel) override {
+        return net::PerformFullHttpRequest(request, limits, cancel, nullptr);
+    }
+};
+Tool::Result FetchError(const std::string& code, const std::string& text) {
+    Tool::Result result{"web_fetch." + code + ": " + text, true};
+    result.error_code = "web_fetch." + code;
+    result.outcome = code == "cancelled" ? "cancelled_during_run" : code == "timeout" ? "timed_out" : "tool_error";
+    return result;
+}
+Tool::Result TransportError(const net::FullHttpError& error) {
+    using Kind = net::FullHttpErrorKind;
+    // The existing transport stores cpr::ErrorCode here (despite the historical
+    // field name), not the numeric CURLcode; CPR maps CURLE_BAD_CONTENT_ENCODING.
+    if (error.kind == Kind::NetworkFailed &&
+        error.curl_code == static_cast<long>(cpr::ErrorCode::BAD_CONTENT_ENCODING))
+        return FetchError("unsupported_encoding", "响应编码无法由当前传输解码");
+    switch (error.kind) {
+        case Kind::Cancelled: return FetchError("cancelled", "请求已取消");
+        case Kind::Timeout: return FetchError("timeout", "请求超过宿主时限");
+        case Kind::ResponseHeaderTooLarge: return FetchError("header_limit", "累计响应头超过宿主上限");
+        case Kind::ResponseBodyTooLarge: return FetchError("download_limit", "累计下载超过宿主上限");
+        case Kind::DnsFailed: return FetchError("dns_failed", "网络请求失败: DNS 解析失败");
+        case Kind::TlsFailed: return FetchError("tls_failed", "网络请求失败: TLS 校验失败");
+        case Kind::NetworkFailed: return FetchError("network_failed", "网络请求失败");
+    }
+    return FetchError("network_failed", "网络请求失败");
+}
+} // namespace
+
+bool WebFetchSupportsGzip() {
+    cpr::Session initialized;
+    if (!initialized.GetCurlHolder() || !initialized.GetCurlHolder()->handle)
+        throw std::runtime_error("web_fetch.capabilities_unavailable");
+    const auto* version = curl_version_info(CURLVERSION_NOW);
+    if (!version) throw std::runtime_error("web_fetch.capabilities_unavailable");
+    return (version->features & CURL_VERSION_LIBZ) != 0;
+}
+
+std::expected<void, std::string> ValidateWebFetchOptions(const WebFetchOptions& options) {
+    if (!HeaderText(options.user_agent) || options.connect_timeout_ms <= 0 || options.connect_timeout_ms > 30'000 ||
+        options.total_timeout_ms <= 0 || options.total_timeout_ms > 120'000 ||
+        options.connect_timeout_ms > options.total_timeout_ms || options.max_header_bytes == 0 ||
+        options.max_header_bytes > 512 * 1024 || options.max_download_bytes == 0 ||
+        options.max_download_bytes > 8 * 1024 * 1024 || options.max_output_bytes < 256 ||
+        options.max_output_bytes > 1024 * 1024 || options.max_redirects > 10)
+        return std::unexpected("web_fetch.invalid_options");
+    return {};
+}
+
+WebFetchTool::WebFetchTool(std::string user_agent)
+    : WebFetchTool([&] { WebFetchOptions options; options.user_agent = std::move(user_agent); return options; }()) {}
+WebFetchTool::WebFetchTool(WebFetchOptions options, std::shared_ptr<WebFetchTransport> transport)
+    : options_(std::move(options)), transport_(transport ? std::move(transport) : std::make_shared<DefaultWebFetchTransport>()) {}
 
 std::string WebFetchTool::name() const {
     return "web_fetch";
@@ -253,64 +362,93 @@ nlohmann::json WebFetchTool::input_schema() const {
     return schema;
 }
 
-Tool::Result WebFetchTool::execute(const nlohmann::json& input) {
-    if (!input.contains("url") || !input.at("url").is_string()) {
-        return {"缺少必填参数 url(字符串)", true};
-    }
-    const std::string url = input.at("url").get<std::string>();
-    if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
-        return {"url 必须以 http:// 或 https:// 开头,拿到的是: " + url, true};
-    }
+Tool::Result WebFetchTool::execute(const nlohmann::json& input) { return execute(input, {}); }
 
-    std::size_t max_bytes = kDefaultMaxBytes;
-    if (auto it = input.find("max_bytes"); it != input.end() && !it->is_null()) {
-        const long long raw = it->get<long long>();
-        if (raw <= 0) {
-            return {"max_bytes 必须是正整数,拿到的是: " + std::to_string(raw), true};
+Tool::Result WebFetchTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
+    try {
+        if (!ValidateWebFetchOptions(options_)) return FetchError("invalid_options", "宿主配置不合规");
+        const auto cancelled = [&] { return context.cancel && context.cancel->load(); };
+        if (cancelled()) return FetchError("cancelled", "请求已取消");
+        if (!input.is_object() || !input.contains("url") || !input.at("url").is_string())
+            return FetchError("invalid_input", "缺少必填参数 url(字符串)");
+        std::uint64_t requested_output = kDefaultMaxBytes;
+        if (const auto value = input.find("max_bytes"); value != input.end() && !value->is_null()) {
+            if (!value->is_number_integer() || (!value->is_number_unsigned() && value->get<std::int64_t>() <= 0))
+                return FetchError("invalid_input", "max_bytes 必须是正整数");
+            requested_output = value->get<std::uint64_t>();
+            if (requested_output == 0) return FetchError("invalid_input", "max_bytes 必须是正整数");
         }
-        max_bytes = static_cast<std::size_t>(raw);
-    }
-
-    cpr::Response response = cpr::Get(cpr::Url{url},
-                                       cpr::Header{{"User-Agent", user_agent_}},
-                                       cpr::Timeout{30000},
-                                       cpr::Redirect{});
-
-    if (response.error) {
-        return {"网络请求失败: " + response.error.message, true};
-    }
-
-    const int status = static_cast<int>(response.status_code);
-    if (status < 200 || status >= 300) {
-        return {"服务端返回 HTTP " + std::to_string(status) + ": " + url, true};
-    }
-
-    // Content-Type(cpr 的 header map 是大小写不敏感的)。
-    std::string content_type;
-    if (auto it = response.header.find("Content-Type"); it != response.header.end()) {
-        content_type = it->second;
-    }
-
-    // 二进制拒收:正文里出现 NUL 字节,基本可断定不是文本(图片/压缩包/
-    // 可执行文件……),剥不出正文,给模型也没用。
-    if (response.text.find('\0') != std::string::npos) {
-        return {"这个 URL 返回的是二进制内容(" + (content_type.empty() ? std::string("未知类型") : content_type) +
-                    "),web_fetch 只支持文本",
-                true};
-    }
-
-    // 剥标签 -> 外来文本清洗(公共关口)-> UTF-8 边界截断,纯函数管线。
-    const PreparedBody prepared = PrepareFetchedBody(content_type, response.text, max_bytes);
-    const std::string& body = prepared.text;
-    const bool truncated = prepared.truncated;
-
-    // 开头一行元信息。URL 用 response.url(跟随重定向后的最终地址)。
-    const std::string final_url = response.url.str().empty() ? url : response.url.str();
-    std::string head = "URL: " + final_url + " (HTTP " + std::to_string(status) + ", " +
-                       (content_type.empty() ? std::string("未知类型") : content_type) +
-                       (truncated ? ", 已截断至 " + std::to_string(max_bytes) + " 字节" : ", 未截断") + ")\n\n";
-
-    return {head + body, false};
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(options_.total_timeout_ms);
+        auto url = ResolveHttpUrl(input.at("url").get<std::string>());
+        if (!url) return FetchError("invalid_url", "URL 须为有界 HTTP(S) 地址且不含凭据");
+        std::uint64_t header_left = options_.max_header_bytes, body_left = options_.max_download_bytes;
+        std::set<std::string> visited;
+        for (std::uint32_t hop = 0;; ++hop) {
+            if (cancelled()) return FetchError("cancelled", "请求已取消");
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0) return FetchError("timeout", "请求超过宿主时限");
+            if (!visited.insert(url->text).second) return FetchError("redirect_loop", "重定向形成循环");
+            if (header_left == 0) return FetchError("header_limit", "累计响应头超过宿主上限");
+            if (body_left == 0) return FetchError("download_limit", "累计下载超过宿主上限");
+            net::FullHttpRequest request{"GET", url->text, {{"User-Agent", options_.user_agent}}, {}};
+            net::FullHttpLimits limits;
+            limits.connect_timeout_ms = (std::min)(options_.connect_timeout_ms, remaining);
+            limits.hard_timeout_ms = remaining;
+            limits.response_header_bytes = static_cast<std::int64_t>(header_left);
+            limits.response_body_bytes = static_cast<std::int64_t>(body_left);
+            auto response = transport_->Get(request, limits, context.cancel);
+            if (cancelled()) return FetchError("cancelled", "请求已取消");
+            if (!response) return TransportError(response.error());
+            if (std::chrono::steady_clock::now() >= deadline) return FetchError("timeout", "请求超过宿主时限");
+            if (response->received_header_bytes > header_left) return FetchError("header_limit", "累计响应头超过宿主上限");
+            if (response->body.size() > body_left) return FetchError("download_limit", "累计下载超过宿主上限");
+            header_left -= response->received_header_bytes;
+            body_left -= response->body.size();
+            const int status = response->status;
+            if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+                if (hop >= options_.max_redirects) return FetchError("redirect_limit", "重定向超过宿主次数上限");
+                std::string location;
+                unsigned count = 0;
+                for (const auto& [name, value] : response->headers) if (SameHeader(name, "location")) { location = value; ++count; }
+                if (count != 1) return FetchError("redirect_invalid", "重定向缺少唯一 Location");
+                auto next = ResolveHttpUrl(location, url->text);
+                if (!next) return FetchError("redirect_invalid", "Location 不是允许的 HTTP(S) 地址");
+                if (url->scheme == "https" && next->scheme != "https")
+                    return FetchError("redirect_downgrade", "拒绝 HTTPS 降级重定向");
+                url = std::move(next);
+                continue;
+            }
+            if (status < 200 || status >= 300) return FetchError("http_status", "服务端返回 HTTP " + std::to_string(status));
+            if (response->body.find('\0') != std::string::npos)
+                return FetchError("binary_body", "web_fetch 只支持文本，不接二进制内容");
+            std::string content_type;
+            for (const auto& [name, value] : response->headers)
+                if (SameHeader(name, "content-type")) content_type = value;
+            content_type = TruncateUtf8(platform::SanitizeExternalText(content_type), 128);
+            const auto available = static_cast<std::size_t>((std::min)(requested_output, options_.max_output_bytes));
+            auto prepared = PrepareFetchedBody(content_type, response->body, available);
+            // Keep enough space for the longer truncation label before deciding
+            // how much body fits. The entire successful text obeys the host cap.
+            const std::string prefix = "URL: " + url->text + " (HTTP " + std::to_string(status) + ", " +
+                (content_type.empty() ? std::string("未知类型") : content_type);
+            const std::string truncated_suffix = ", 已截断)\n\n";
+            if (prefix.size() + truncated_suffix.size() >= options_.max_output_bytes)
+                return FetchError("output_limit", "响应元信息超过宿主返回上限");
+            const auto body_budget = static_cast<std::size_t>(options_.max_output_bytes - prefix.size() - truncated_suffix.size());
+            if (prepared.text.size() > body_budget) {
+                prepared.text = TruncateUtf8(prepared.text, body_budget);
+                prepared.truncated = true;
+            }
+            if (cancelled()) return FetchError("cancelled", "请求已取消");
+            if (std::chrono::steady_clock::now() >= deadline) return FetchError("timeout", "请求超过宿主时限");
+            Tool::Result result{prefix + (prepared.truncated ? truncated_suffix : ", 未截断)\n\n") + prepared.text, false};
+            result.outcome = "succeeded";
+            result.details = {{"http_status", status}, {"redirects", hop},
+                {"downloaded_bytes", options_.max_download_bytes - body_left},
+                {"response_header_bytes", options_.max_header_bytes - header_left}, {"truncated", prepared.truncated}};
+            return result;
+        }
+    } catch (...) { return FetchError("internal_error", "请求处理失败"); }
 }
 
 }  // namespace lubancode::tools
