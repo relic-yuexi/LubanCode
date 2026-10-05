@@ -154,7 +154,12 @@ class ClosureTests(unittest.TestCase):
             probe = root / "probe"; probe.write_bytes(b"pure fixture, never executable")
             context = {"copy": {"path": str(probe), "bytes": probe.stat().st_size, "sha256": gate.digest(probe)},
                        "original": {"sha256": gate.digest(probe)}}
-            gate.check_copies(source, prefix, seal, context)
+            evidence = root / "evidence"
+            copied = gate.check_copies(source, prefix, seal, context, evidence=evidence)
+            self.assertEqual(set(copied), {gate.HELPER, gate.HEADER})
+            for relative in copied:
+                self.assertEqual((evidence / relative).read_bytes(), (REPO / relative).read_bytes())
+                self.assertEqual(copied[relative]["sha256"], seal[relative]["sha256"])
             probe.write_bytes(b"other")
             with self.assertRaises(RuntimeError):
                 gate.check_copies(source, prefix, seal, context)
@@ -198,7 +203,7 @@ class ClosureTests(unittest.TestCase):
 
     def test_probe_copy_comes_from_real_target_artifact_shape(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); repo = root / "source"; build = root / "build"; scratch = root / "scratch"
+            root = Path(directory).resolve(); repo = root / "source"; build = root / "build"; scratch = root / "scratch"
             (repo / gate.PROBE_SOURCE).parent.mkdir(parents=True)
             (repo / gate.PROBE_SOURCE).write_text("// pure source fixture, never compiled")
             binary = build / "tests" / gate.PROBE_TARGET
@@ -208,14 +213,54 @@ class ClosureTests(unittest.TestCase):
             target = {**reference, "type": "EXECUTABLE", "dependencies": [],
                       "sources": [{"path": gate.PROBE_SOURCE, "compileGroupIndex": 0}],
                       "artifacts": [{"path": "tests/" + gate.PROBE_TARGET}]}
+            other = {"id": "other-id", "name": "other-owner", "jsonFile": "other.json"}
             model = {"kind": "codemodel", "version": {"major": 2}, "paths": {"source": str(repo), "build": str(build)},
-                     "configurations": [{"name": "Release", "targets": [reference]}]}
+                     "configurations": [{"name": "Release", "targets": [reference, other],
+                                         "directories": [{"jsonFile": "directory.json"}]}]}
             (reply / "index-1.json").write_text(json.dumps({"reply": {"client-lubancore-boundary": {"codemodel-v2": {"jsonFile": "model.json"}}}}))
             (reply / "model.json").write_text(json.dumps(model))
             (reply / "target.json").write_text(json.dumps(target))
-            copied = gate.copy_probe(repo, build, scratch)
+            (reply / "other.json").write_text(json.dumps({**other, "type": "UTILITY", "sources": []}))
+            (reply / "directory.json").write_bytes(b'{ "kind": "directory", "unknown": "retain me" }\n')
+            raw = root / "raw-evidence"
+            copied = gate.copy_probe(repo, build, scratch, evidence=raw)
             self.assertEqual(copied["copy"]["sha256"], copied["original"]["sha256"])
             self.assertTrue(Path(copied["copy"]["path"]).is_relative_to(scratch.resolve()))
+            self.assertEqual(copied["fileApiRawAcceptance"]["rawFiles"], 5)
+            for item in copied["fileApiRaw"]["files"]:
+                self.assertEqual((raw / item["name"]).read_bytes(), (reply / item["name"]).read_bytes())
+            # Verify uploaded originals in an unrelated directory, with the
+            # producer paths retained only as logical evidence identities.
+            import shutil
+            relocated = root / "relocated-raw"
+            shutil.copytree(raw, relocated)
+            self.assertEqual(gate.check_probe_file_api(relocated, copied)["status"], "passed")
+            for mutation in ("missing", "tampered", "unindexed", "duplicate-receipt"):
+                changed = deepcopy(copied)
+                directory = root / mutation
+                shutil.copytree(raw, directory)
+                if mutation == "missing": (directory / "other.json").unlink()
+                elif mutation == "tampered": (directory / "target.json").write_bytes(b'{}')
+                elif mutation == "unindexed": (directory / "foreign.json").write_bytes(b'{}')
+                else: changed["fileApiRaw"]["files"].append(changed["fileApiRaw"]["files"][0])
+                with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
+                    gate.check_probe_file_api(directory, changed)
+            # A matching receipt hash cannot make a foreign compiled source,
+            # native artifact or owner identity acceptable.
+            for key, value in (("sources", [{"path": "tests/support/other.cpp", "compileGroupIndex": 0}]),
+                               ("artifacts", [{"path": "tests/other-probe"}]), ("id", "foreign-id")):
+                changed = deepcopy(copied)
+                directory = root / ("rehashed-" + key)
+                shutil.copytree(raw, directory)
+                bad_target = deepcopy(target); bad_target[key] = value
+                path = directory / "target.json"
+                path.write_text(json.dumps(bad_target))
+                sha = gate.digest(path)
+                changed["fileApiTarget"]["sha256"] = sha
+                member = next(item for item in changed["fileApiRaw"]["files"] if item["name"] == "target.json")
+                member.update(bytes=path.stat().st_size, sha256=sha)
+                with self.subTest(rehashed=key), self.assertRaises(RuntimeError):
+                    gate.check_probe_file_api(directory, changed)
             for key, value in (("dependencies", [{"id": "sdk"}]), ("type", "SHARED_LIBRARY"),
                                ("sources", [{"path": "tests/support/other.cpp", "compileGroupIndex": 0}]),
                                ("artifacts", [{"path": "tests/" + gate.PROBE_TARGET}] * 2)):

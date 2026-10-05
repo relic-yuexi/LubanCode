@@ -266,7 +266,8 @@ def main() -> None:
     demo_build = scratch / "rag-build"
     evidence = producer_build / "test-evidence" / "sdk-consumer"
     evidence.mkdir(parents=True, exist_ok=True)
-    job_probe = command_jobs.copy_probe(repo, producer_build, scratch)
+    job_probe = command_jobs.copy_probe(repo, producer_build, scratch,
+                                       evidence=evidence / "command-jobs-file-api")
     (evidence / "command-jobs-probe.json").write_text(json.dumps(job_probe, indent=2) + "\n", encoding="utf-8")
     (evidence / "consumer-context.json").write_text(json.dumps({
         "github_sha": os.environ.get("GITHUB_SHA"),
@@ -345,7 +346,10 @@ def main() -> None:
         json.dumps(rag.check_copy(consumer_source, rag_source, consumer=True), indent=2) + "\n", encoding="utf-8")
     (evidence / "web-fetch-consumer-source.json").write_text(
         json.dumps(web_fixture.check_helper_copy(consumer_source, web_source), indent=2) + "\n", encoding="utf-8")
-    command_jobs.check_copies(consumer_source, prefix, job_sources, job_probe)
+    job_source_copies = command_jobs.check_copies(consumer_source, prefix, job_sources, job_probe,
+                                                 evidence=evidence / "command-jobs-source-copies")
+    (evidence / "command-jobs-source-copies.json").write_text(
+        json.dumps(job_source_copies, indent=2) + "\n", encoding="utf-8")
     # Neither inherited loader variables nor a producer PATH may rescue a
     # broken installed package. Ordinary system compiler/tool directories stay.
     blocked = (repo, producer_build, staging)
