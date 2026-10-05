@@ -87,7 +87,7 @@ void Write(const fs::path& path, const std::string& value) {
 }
 v3::V3Ledger Ledger(const fs::path& path) {
     auto result = v3::ReadV3Ledger(path);
-    REQUIRE_MESSAGE(result.has_value(), result ? std::string() : result.error()); return std::move(*result);
+    REQUIRE_MESSAGE(result.has_value(), (result ? std::string() : result.error())); return std::move(*result);
 }
 void Committed(const v3::WriteReceipt& receipt) {
     REQUIRE_MESSAGE(receipt.status == v3::WriteReceipt::Status::Committed, receipt.error_message);
@@ -248,7 +248,7 @@ struct Rig {
             rt::PermissionVerdict result; result.action = rt::PermissionVerdict::Action::Allow; return result;
         };
         const auto prepared = agent::PrepareOwnedToolInput(registry, ticket.call, wiring, {});
-        REQUIRE_MESSAGE(prepared.has_value(), prepared ? std::string() : prepared.error().content);
+        REQUIRE_MESSAGE(prepared.has_value(), (prepared ? std::string() : prepared.error().content));
         const auto owner = coordinator->PreparedOwner(); REQUIRE(owner);
         auto& request = ticket.request;
         request.owner = *owner; request.provider_tool_call_id = ticket.call.id; request.assistant_message_ref = written.id;

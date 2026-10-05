@@ -50,7 +50,7 @@ struct Fixture {
         options.v3_system_content = "local original system";
         auto created = traj::TrajectoryDirectory::CreateWorkspace(
             options.workspaces_root, options.identity, 1759000000000LL);
-        REQUIRE_MESSAGE(created.has_value(), created ? "" : created.error());
+        REQUIRE_MESSAGE(created.has_value(), (created ? "" : created.error()));
         workspace = std::move(*created);
     }
     ~Fixture() {
@@ -68,7 +68,7 @@ struct Fixture {
     std::unique_ptr<traj::ManagedSessionReservation> Reserve(const std::string& id = "20261005-120000-MAN001") const {
         const auto owner = traj::SessionManagerClock{}.LockOwner();
         auto result = traj::ManagedSessionReservation::Reserve(options.workspaces_root, Owner(id), owner);
-        REQUIRE_MESSAGE(result.has_value(), result ? "" : result.error());
+        REQUIRE_MESSAGE(result.has_value(), (result ? "" : result.error()));
         return std::move(*result);
     }
 };
@@ -119,7 +119,7 @@ struct OpeningClock : traj::SessionManagerClock {
 std::string ClosedLocal(Fixture& fixture) {
     traj::SessionManager manager(fixture.options);
     auto launched = manager.LaunchSession();
-    REQUIRE_MESSAGE(launched.has_value(), launched ? "" : launched.error());
+    REQUIRE_MESSAGE(launched.has_value(), (launched ? "" : launched.error()));
     REQUIRE((*launched)->v3_main.has_value());
     const auto id = (*launched)->session_id();
     const auto closed = manager.Close({}, nullptr);
@@ -145,7 +145,7 @@ TEST_CASE("managed reservation: owned durable publication precedes directories a
     NoBody(directory);
     REQUIRE(pending->PublishOwnership().publication_bytes == published.publication_bytes);
     auto finished = pending->Finish();
-    REQUIRE_MESSAGE(finished.has_value(), finished ? "" : finished.error());
+    REQUIRE_MESSAGE(finished.has_value(), (finished ? "" : finished.error()));
     REQUIRE(finished->lock().holds());
     REQUIRE(Read(directory / "session.lock") == lock_bytes);
     REQUIRE(fs::is_directory(directory / "artifacts"));
@@ -157,10 +157,10 @@ TEST_CASE("managed reservation: owned durable publication precedes directories a
     REQUIRE_FALSE(traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()).has_value());
     auto writer = v3::V3Writer::Start(finished->directory().v3_stream_path(), fixture.Owner().session_id,
         "main-0001", "managed original system");
-    REQUIRE_MESSAGE(writer.has_value(), writer ? "" : writer.error());
+    REQUIRE_MESSAGE(writer.has_value(), (writer ? "" : writer.error()));
     REQUIRE(writer->Close().has_value());
     auto ledger = v3::ReadV3Ledger(finished->directory().v3_stream_path());
-    REQUIRE_MESSAGE(ledger.has_value(), ledger ? "" : ledger.error());
+    REQUIRE_MESSAGE(ledger.has_value(), (ledger ? "" : ledger.error()));
     REQUIRE(ledger->session_id == fixture.Owner().session_id);
     REQUIRE(ledger->run_id == "main-0001");
     REQUIRE(ledger->lines == 2);

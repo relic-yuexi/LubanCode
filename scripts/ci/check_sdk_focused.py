@@ -13,6 +13,14 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 try:
+    from .sdk_managed_opening import SOURCES as MANAGED_OPENING_SOURCES, check_managed_opening_registration, check_managed_opening_native
+except ImportError:
+    try:
+        from sdk_managed_opening import SOURCES as MANAGED_OPENING_SOURCES, check_managed_opening_registration, check_managed_opening_native
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_managed_opening import SOURCES as MANAGED_OPENING_SOURCES, check_managed_opening_registration, check_managed_opening_native
+
+try:
     from .sdk_owned_job_deadline import check_owned_job_deadline_registration, check_owned_job_deadline_native
 except ImportError:
     try:
@@ -31,6 +39,8 @@ except ImportError:
 
 
 REQUIRED = {
+    "sdk.focused.managed_session_ownership",
+    "sdk.focused.managed_session_reservation",
     "sdk.focused.lubancore_owned_job_deadline",
     "sdk.focused.lubancore_web_fetch",
     "sdk.focused.lubancore_authorization",
@@ -1273,6 +1283,8 @@ def main():
             check_package_inventory_registration(test.get("command", []))
         if test["name"] == "sdk.focused.lubancore_job_operations":
             check_job_operation_registration(test.get("command", []))
+        if test["name"].removeprefix("sdk.focused.") in MANAGED_OPENING_SOURCES:
+            check_managed_opening_registration(test.get("command", []), test["name"].removeprefix("sdk.focused."))
         if test["name"] == "sdk.focused.lubancore_owned_job_deadline":
             check_owned_job_deadline_registration(test.get("command", []))
         if test["name"] == "sdk.focused.v3_journal_receipts":
@@ -1380,6 +1392,8 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_job_operations":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_job_operation_native(sections[0], registered["command"])
+        if case.attrib["name"].removeprefix("sdk.focused.") in MANAGED_OPENING_SOURCES:
+            check_managed_opening_native(sections[0], commands[0], case.attrib["name"].removeprefix("sdk.focused."))
         if case.attrib["name"] == "sdk.focused.lubancore_owned_job_deadline":
             check_owned_job_deadline_native(sections[0], commands[0])
         if case.attrib["name"] == "sdk.focused.v3_journal_receipts":

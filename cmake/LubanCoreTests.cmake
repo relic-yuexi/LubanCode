@@ -32,6 +32,8 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/tools/test_run_command_execution_limits.cpp"
   "${_lubancore_tests_root}/unit/trajectory/test_session_recovery_view.cpp"
   "${_lubancore_tests_root}/unit/trajectory/test_journal_native_receipts.cpp"
+  "${_lubancore_tests_root}/unit/trajectory/test_managed_session_ownership.cpp"
+  "${_lubancore_tests_root}/unit/trajectory/test_managed_session_reservation.cpp"
   "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_journal_receipts.cpp"
   "${_lubancore_tests_root}/unit/platform/test_atomic_write.cpp"
   "${_lubancore_tests_root}/unit/tools/test_lua_protected.cpp"
@@ -151,6 +153,13 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     set(sdk_original_test "unit.packages.package_manifest")
   elseif(sdk_basename STREQUAL "test_session_recovery_view.cpp")
     set(sdk_original_test "unit.trajectory.session_recovery_view")
+  elseif(sdk_basename STREQUAL "test_managed_session_ownership.cpp" OR
+         sdk_basename STREQUAL "test_managed_session_reservation.cpp")
+    set(sdk_original_test "unit.trajectory.${sdk_stem}")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "managed-session-opening")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "managed-session-opening")
+    endif()
   elseif(sdk_basename STREQUAL "test_v3_result_store.cpp")
     set(sdk_original_test "unit.trajectory_v3.v3_result_store")
     set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-result-store")
