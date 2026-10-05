@@ -8,7 +8,7 @@
 
 | 阶段 | 已合范围 | 接下来补什么 |
 | --- | --- | --- |
-| 收口当前批 | Worker #245、Runner #246、SDK #325 已合功能分支；旧子 PR 已收口 | 修 #332 Windows SDK 超时，审查与本源 CI 全过再合 |
+| 收口当前批 | Worker #245、Runner #246、SDK #325 已合功能分支；旧子 PR 已收口 | #332 窄修复已推，审查与本源 CI 全过再合 |
 | SDK 完整化 | 五件内置工具；显式 Skills；项目 Memory Recall/Save 和片段 CAS；前台深度一子 Agent；主 Action；strict standalone Lua；Package 清单分析 | 其余 CLI 工具、自动 Memory、Skills 管理、Package 挂载、后台与嵌套子任务、公开 Job、CLI 主入口迁移 |
 | 四口 SPI | Session 真接 EventSink；召回片段真接 Memory Blob provider；公开 PolicyProvider 原语 | 完整 JournalStore/BlobStore，替换结果与恢复读写，接真实 Session 授权；本阶段不引数据库 |
 | 依赖瘦身 | updater、Release 查询、渠道、Gateway 留宿主；Package 只带中立 parser | 可关闭 Lua 的编译画像已在私有候选通过，仍待合入；继续检查依赖闭包 |
@@ -27,9 +27,11 @@
 
 ## 当前实施批：#332
 
-[#332](https://github.com/relic-yuexi/LubanCode/pull/332) 源 `52fa7d6d` 仍为 Draft，尚未合入。它补[真实 Job 来源绑定](sdk-job-operation-binding-v1.md)与 [V3 日志回执](v3-journal-witness.md)，并同步 main `3b973ffe`。Job 历史只读 PassiveHold；首次未确认追加和首次 checked Close 持值，不靠重复 Close 改口。这批仍属内部前置，尚未开放后台 Job 或完整 JournalStore。
+[#332](https://github.com/relic-yuexi/LubanCode/pull/332) 源 `0066ac3e` 仍为 Draft，尚未合入。它补[真实 Job 来源绑定](sdk-job-operation-binding-v1.md)与 [V3 日志回执](v3-journal-witness.md)，并同步 main `3b973ffe`。Job 历史只读 PassiveHold；首次未确认追加和首次 checked Close 持值，不靠重复 Close 改口。这批仍属内部前置，尚未开放后台 Job 或完整 JournalStore。
 
-本源[原生 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37250651084) 已结束，整轮失败；[文档 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37250651072) 通过。
+本源[原生 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37276915212)和[文档 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37276915234)已触发。scoped PowerShell 包装器三枚 cmdlet 改用模块限定名，原管道、格式、错误流和退出码保住；原第六案末补 legacy/scoped 对象表格逐字对照。尚待本源验收。
+
+前源 `52fa7d6d` 的[原生 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37250651084)整轮失败；[文档 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37250651072)通过。它留下这些实际结果：
 
 - 三平台全量 Linux 748、Windows 750、macOS 751 与 ASan 149/56 均过。新 Job/V3 两册各六案保实际 argv、非零断言与原始日志。
 - 五套 SDK focused 通过；Windows SDK-only 50 册中 49 过、一册失败。六套安装移位消费各 28 项通过。
