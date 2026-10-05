@@ -86,6 +86,31 @@ class BoundaryTests(unittest.TestCase):
         self.flags["BUILD_TESTING"] = "ON"
         self.assertEqual(self.check(testing=True)["status"], "passed")
 
+    def test_managed_and_memory_reference_sources_require_exact_testing_owner(self):
+        sources = (
+            "tests/unit/trajectory/test_managed_session_ownership.cpp",
+            "tests/unit/trajectory/test_managed_session_reservation.cpp",
+            "tests/unit/memory/test_memory_project_commit_handoff.cpp",
+        )
+        for source in sources:
+            self.source_file(source, "int reference_fixture;\n")
+        target = {"id": "managed_memory_reference", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": source, "compileGroupIndex": 0} for source in sources],
+                  "compileGroups": [{}]}
+        self.targets.append(target)
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "unrelated_reference"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        self.flags["BUILD_TESTING"] = "OFF"
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        extra = "tests/unit/trajectory/test_managed_session_ownership_extra.cpp"
+        self.source_file(extra, "int unrelated_reference_fixture;\n")
+        target["sources"].append({"path": extra, "compileGroupIndex": 0})
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
     def deferred_action_reference(self, private=False):
         reference = "src/sdk/action_dispatch.cpp"
         self.source_file(reference, '#include "runtime/middleware_deferred_effects.hpp"\n')
