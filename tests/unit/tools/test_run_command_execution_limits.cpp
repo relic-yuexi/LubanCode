@@ -709,6 +709,26 @@ TEST_CASE("RunCommand execution limits: absent image preserves legacy fields and
         if (!script.output.empty()) CHECK(result.content.find(script.output) != std::string::npos);
         CHECK(result.content.find("#< CLIXML") == std::string::npos);
     }
+    // Qualifying the wrapper's cmdlets must retain PowerShell object/table
+    // formatting, not merely native text or a replacement ToString path. These
+    // actual calls follow the original boundary/error/exit/streaming cases.
+    const nlohmann::json table_input = {
+        {"command", "[pscustomobject][ordered]@{Name='first';Count=17}; "
+                    "[pscustomobject][ordered]@{Name='second';Count=29}"},
+        {"shell", "powershell"}, {"cwd", Utf8(directory.path)}, {"timeout_ms", 15000}};
+    const auto legacy_table = ExecuteRecorded(tool, table_input, directory.path, "legacy-wrapper-table");
+    const auto scoped_table = ExecuteRecorded(tool, table_input, Context(15000, 4096),
+        directory.path, "scoped-wrapper-table");
+    REQUIRE_FALSE(legacy_table.is_error);
+    REQUIRE_FALSE(scoped_table.is_error);
+    CHECK(legacy_table.outcome == "succeeded");
+    CHECK(scoped_table.outcome == "succeeded");
+    CHECK(scoped_table.content == legacy_table.content);
+    for (const auto* value : {"Name", "Count", "first", "second", "17", "29"})
+        CHECK(scoped_table.content.find(value) != std::string::npos);
+    CHECK(scoped_table.content.find("#< CLIXML") == std::string::npos);
+    CHECK_FALSE(legacy_table.details.contains("max_output_bytes"));
+    Limits(scoped_table, 15000, 4096);
 #endif
     probe.CheckReleased();
     Mark("legacy");
