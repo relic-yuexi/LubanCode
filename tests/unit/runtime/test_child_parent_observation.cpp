@@ -150,7 +150,7 @@ TEST_CASE("child unknown stops summary calls while healthy large-sibling summari
     else {
         rig.backend.large_first = true;
         rig.parent->SetContextWindowTokens(32768);
-        if (path == 1) rig.failure = Failure::CaptureTempDirectory;
+        if (path == 1) rig.failure = Failure::CaptureFinalDirectory;
     }
     const auto result = rig.Run();
     INFO("parent result: ", (result ? result->side_effect_error : result.error()));
