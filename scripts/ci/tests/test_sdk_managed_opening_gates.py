@@ -19,6 +19,18 @@ def receipt(stem, executable='/tmp/build/lubancore_sdk_tests'):
 
 
 class ManagedOpeningGateTests(unittest.TestCase):
+    def test_large_classifier_keeps_github_inputs_outside_its_literal_script(self):
+        workflow = (Path(__file__).resolve().parents[3] / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+        blocks = re.findall(r'^      - name: Classify changed files\n(.*?)^      - name: Report selected coverage\n', workflow, re.M | re.S)
+        self.assertEqual(len(blocks), 1)
+        before, script = blocks[0].split('        run: |\n', 1)
+        self.assertIn('        id: c\n', before)
+        self.assertNotIn('${{', script)
+        self.assertIn('          CLASSIFY_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}\n', before)
+        self.assertIn('          CLASSIFY_BEFORE_SHA: ${{ github.event.before }}\n', before)
+        self.assertIn('BASE="$CLASSIFY_PR_BASE_SHA"', script)
+        self.assertIn('BASE="$CLASSIFY_BEFORE_SHA"', script)
+
     def test_both_real_classifiers_cover_shared_owner_sources(self):
         workflow = (Path(__file__).resolve().parents[3] / '.github/workflows/ci.yml').read_text(encoding='utf-8')
         patterns = re.findall(r'^\s*([^\n]*scripts/ci/sdk_managed_opening\.py[^\n]*)\)\s*$', workflow, re.M)

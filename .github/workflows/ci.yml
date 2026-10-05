@@ -52,6 +52,11 @@ jobs:
       - name: Classify changed files
         id: c
         shell: bash
+        # Keep the growing classifier literal: interpolation here turns the
+        # whole script into a GitHub template expression with a 21k limit.
+        env:
+          CLASSIFY_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CLASSIFY_BEFORE_SHA: ${{ github.event.before }}
         run: |
           # 只认提交里的实现或测试，不把空目录/schema 草稿算成已接线。
           remote_present=false
@@ -92,12 +97,12 @@ jobs:
             exit 0
           fi
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
+            BASE="$CLASSIFY_PR_BASE_SHA"
           elif [ "$GITHUB_REF" != "refs/heads/main" ]; then
             # Shared push/PR concurrency needs the same code-change scope.
             BASE="$(git merge-base origin/main "$GITHUB_SHA" 2>/dev/null || true)"
           else
-            BASE="${{ github.event.before }}"
+            BASE="$CLASSIFY_BEFORE_SHA"
           fi
           if ! git cat-file -e "$BASE" 2>/dev/null; then
             echo 'memory_worker=true' >> "$GITHUB_OUTPUT"
