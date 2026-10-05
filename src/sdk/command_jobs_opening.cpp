@@ -7,6 +7,7 @@
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "platform/sha256.hpp"
+#include "platform/secure_file.hpp"
 #include "sdk/plan_write.hpp"
 #include "trajectory/safety.hpp"
 #include "trajectory/v3/session_switch.hpp"
