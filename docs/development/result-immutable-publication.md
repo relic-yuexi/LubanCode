@@ -10,6 +10,8 @@
 
 ResultStore的Persist/PersistListing真实接此口，保原结果ID、capture-/res-命名、编号扫描和JSON／预览算法。Persist尾添owned publication报告；Listing增Detailed入口，旧expected<string,string>薄转接。旧ok只在整笔所有文件都确认后为true；error含首稳定码和真实阶段，不把未知称NotCommitted。多文件已发布一部分而后失败，整笔按Indeterminate留残件，并逐枚保实际outcome，不宣称回滚。
 
-同一Store在首次失败后封新发布，后续写请求只返回首失败报告，不重做、不读回升级；报告在首个native调用前已有owner，异常无返回receipt时照实留未知。成功仍按原编号递增。新Store重开可沿原扫描续号，但既有logical名／孤件依旧不可覆盖。析构没有待刷写句柄，不补确认；原子写每次先收实际file/dir句柄再返回。
+同一Store在首次未知或多文件部分已发布失败后封新发布，后续写请求只返回首失败报告，不重做、不读回升级；已确定整笔零发布的NotCommitted（包括listing名冲突）照实报错，仍允许后续新请求。报告在首个native调用前已有owner，异常无返回receipt时照实留未知。成功仍按原编号递增。新Store重开可沿原扫描续号，但既有logical名／孤件依旧不可覆盖。析构没有待刷写句柄，不补确认；原子写每次先收实际file/dir句柄再返回。
 
 旧调用者仍见ok/error，至少不会把未确认文件宣称结果持久化成功；各业务层的Unknown分类完整化后续接，不在这里改其他作者文件。所有原CASE、输入／超时／路径长度断言不改。新增一册test_v3_result_immutable_publication.cpp，真实文件及并发no-replace，核各阶段回执、受控文件/目录刷盘失败、首次未知留件与零重写、多文件部分发布、listing与重开拒覆写。文件操作只在远端native跑；本地仅文本、源码守卫、纯数据。
+
+新册固定八CASE／八标记 `[result-immutable-publication-path]`：`actual`、`race`、`exclusive-temp`、`file-failure`、`directory-unknown`、`store`、`partial`、`listing`。flush故障只沿已有同platform实例测试旗；不会把受控拒绝写成自然OS失败。原子写、结果仓旧册仍须原样跑；新源共享平台故障口的CI资源锁由集成者接。
