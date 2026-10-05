@@ -124,3 +124,7 @@ ASan 真跑了 161 册，其中 159 过、两册失败；1827 CASE 中两案败�
 probe 后源改用独立、标准库私有夹具，复制原源码，在 CI 临时目录单独配置和编译，再从真实 File API 取实际可执行件并移位。产品测试开关、SDK 闭包和原 CMake 图照旧。配置或编译失败也保有界原 reply；成功后仍严核源码、目标与 artifact 归属。上传的原图先记 `not_evaluated`，不能拿“已保存”充作“已通过”。安装消费还留真实 helper 与 jobs 头文件原字节。
 
 旧 Windows ready 首读失败另补[原件与清场诊断](workspace-racer-ready-evidence.md)：保存首次字节、真实句柄与 argv，失败前收同一只 helper。六 CASE、原前缀断言、锁状态和预算照留；没有重读求绿，也未断言根因。这些后源改动只过源码与纯门，仍须新一轮远端验证。
+
+`a9d3f16e` 的[后源 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37320718673) 又抓到两处错误，不能算通过。四条 Linux/macOS 安装消费者实际各 35 项中 34 项过；四场隔离已关场，随后的缺会话恢复错报 `sdk.job.plan_invalid`，违背旧 `sdk.session.open_failed`。Windows 独立探针配置与编译均成功，原始图同时列指定 EXE 和同目录 PDB，旧门把总产物数当可执行件数而拒绝。两份首次失败原件分别冻结 69 件与 29 件；没有补造未生成的消费总验收。
+
+新候选只补[缺失分类](sdk-command-job-missing-resume.md)与[真实产物选择](sdk-command-probe-artifacts.md)。缺 workspace 或明确缺 session 沿旧错误码拒开，已有坏材料仍严查；原 private 案追加八次真实 Runtime 准入反例，旧七 CASE、消费者原断言与预算保留。Windows 精确选指定 EXE，可附同目录同名 PDB，POSIX 保单无后缀产物；生产与上传后复核共用同一门，原图字节不动。新的原生结果仍须独立交远端 CI。
