@@ -87,7 +87,7 @@ ON 六套各 54 册 focused、452 条原生 CASE、33 项安装消费；OFF 三�
 
 `532ed159` 随后在启动前失败。GitHub 报分类步骤“表达式超过 21000 字符”，作业、附件与原生执行均为零。新修把 PR base、push before 两枚提交参数搬至 step 环境变量；分类脚本只读变量，整段不再含 GitHub 插值。路径、选择器、预算与原生案数照旧，另加纯门拦住把模板插值搬回长脚本。须等修正源真正启动并完成三平台验收。
 
-修正源 `a7165eec` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37297587597)已启动。三套 SDK-only 又停在 Todo 纯门：这册仍写 ON 55／OFF 53，实际名册已到 59／57；RAG 同类旧数也须改齐。下一源只改这两处预期，消费仍 34／31；整套 SDK 纯门本地 282 项通过，没有配置、编译或执行原生程序。combined 与 ASan 仍待实际结果，这笔失败不能替它们记过关。
+修正源 `a7165eec` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37297587597)已启动。三套 SDK-only 又停在 Todo 纯门：这册仍写 ON 55／OFF 53，实际名册已到 59／57；RAG 同类旧数也须改齐。macOS combined 随后在开场预留两行消息报编译错，字符串拼接也须整段加括号；新增 Managed／Memory／截止案仍未执行。Linux 和 macOS 的安装消费各 34 项与独立 RAG 示例实际通过，不能替 focused 记过关。下一源只改两处名册数和两行消息括号，消费、CASE、生产逻辑与预算不变；整套 SDK 纯门本地 282 项通过，没有配置、编译或执行原生程序。其余作业继续收实际结果。
 
 ## 后续装配规矩
 

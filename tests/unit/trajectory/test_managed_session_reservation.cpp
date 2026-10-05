@@ -123,7 +123,7 @@ std::string ClosedLocal(Fixture& fixture) {
     REQUIRE((*launched)->v3_main.has_value());
     const auto id = (*launched)->session_id();
     const auto closed = manager.Close({}, nullptr);
-    REQUIRE_MESSAGE(closed.error_code.empty(), closed.error_code + ": " + closed.message);
+    REQUIRE_MESSAGE(closed.error_code.empty(), (closed.error_code + ": " + closed.message));
     return id;
 }
 } // namespace
@@ -320,7 +320,7 @@ TEST_CASE("managed reservation: LocalTrusted old create and same-session resume 
     REQUIRE(manager.LatestResumableSessionId() == id);
     traj::ResumeRequest request; request.source_session_id = id;
     const auto resumed = manager.ResumeAsNew(request);
-    REQUIRE_MESSAGE(resumed.error_code.empty(), resumed.error_code + ": " + resumed.message);
+    REQUIRE_MESSAGE(resumed.error_code.empty(), (resumed.error_code + ": " + resumed.message));
     REQUIRE(resumed.active_switched);
     REQUIRE(manager.active()->session_id() == id);
     REQUIRE(manager.active()->lock.holds());
