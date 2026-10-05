@@ -3,6 +3,7 @@ from copy import deepcopy
 import fnmatch
 import hashlib
 import json
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -239,7 +240,13 @@ class WebFetchWorkflowTests(unittest.TestCase):
             upload = job.split('      - name: Upload actual full web-fetch source pair\n', 1)[1].split('      - name: ', 1)[0]
             self.assertIn('path: build/test-evidence/web-fetch-full/', upload); self.assertIn('if-no-files-found: error', upload)
         asan = text.split('  linux-asan:\n', 1)[1]
-        self.assertEqual(asan.count('|lubancore_agentic_rag|lubancore_web_fetch)'), 2)
+        from scripts.ci.check_asan_profile import selectors_from_workflow
+        # Check actual selector membership rather than requiring WebFetch to
+        # remain the last alternative whenever another SDK module is added.
+        for selector in selectors_from_workflow(text):
+            for name in ('integration.sdk.lubancore_agentic_rag', 'integration.sdk.lubancore_web_fetch'):
+                self.assertIsNotNone(re.search(selector['include'], name))
+                self.assertFalse(selector['exclude'] and re.search(selector['exclude'], name))
         self.assertIn("'integration.sdk.lubancore_web_fetch',", asan)
         self.assertIn('check_web_fetch_native(sections[0], commands[0])', asan)
         self.assertIn("check_web_fetch_environment(test.get('properties', []))", asan)

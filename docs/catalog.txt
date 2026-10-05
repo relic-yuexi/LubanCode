@@ -211,6 +211,7 @@ DOC development/agent-transcript-stable-fixture.md
 DOC development/sdk-pr-consolidation.md
 DOC development/sdk-stage-status.md
 DOC development/sdk-background-jobs.md
+DOC development/sdk-owned-job-deadline.md
 DOC development/sdk-web-fetch.md
 DOC development/sdk-job-operation-binding-v1.md
 DOC development/v3-journal-witness.md
