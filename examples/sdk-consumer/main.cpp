@@ -35,6 +35,8 @@ void EventSink(const std::filesystem::path& base);
 void MemoryBlobs(const std::filesystem::path& base);
 void TodoWrite(const std::filesystem::path& base);
 void AgenticRag(const std::filesystem::path& base);
+void WebFetch(const std::filesystem::path& base, const std::string& base_url,
+              const std::filesystem::path& requests_file);
 void Actions(const std::filesystem::path& base);
 void BuiltinSearch(const std::filesystem::path& base, const std::filesystem::path& resource_root);
 void MemorySeed(const std::filesystem::path& base);
@@ -1688,7 +1690,8 @@ int main(int argc, char** argv) {
     try {
         Check(argc >= 2, "usage: lubancore_consumer MODE ABSOLUTE_STATE_DIRECTORY [ABSOLUTE_INSTALLED_RESOURCE_ROOT]");
         const std::string mode = argv[1];
-        Check(argc == (mode == "builtin-search" ? 4 : 3), "builtin-search requires STATE and installed ROOT; other modes require STATE only");
+        Check(argc == (mode == "builtin-search" ? 4 : mode == "web-fetch" ? 5 : 3),
+              "builtin-search requires STATE and installed ROOT; web-fetch requires STATE, explicit URL and request ledger; other modes require STATE only");
         const fs::path base = Path(argv[2]);
         Check(base.is_absolute(), "state directory must be absolute");
         fs::create_directories(base);
@@ -1711,6 +1714,7 @@ int main(int argc, char** argv) {
         else if (mode == "memory-blobs") lubancore_consumer::MemoryBlobs(base);
         else if (mode == "todo-write") lubancore_consumer::TodoWrite(base);
         else if (mode == "agentic-rag") lubancore_consumer::AgenticRag(base);
+        else if (mode == "web-fetch") lubancore_consumer::WebFetch(base, argv[3], Path(argv[4]));
         else if (mode == "actions") lubancore_consumer::Actions(base);
         else if (mode == "results") PublicResults(base);
         else if (mode == "skills-seed") SkillsSeed(base);

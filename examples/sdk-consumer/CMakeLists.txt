@@ -6,7 +6,7 @@ project(lubancore_installed_consumer LANGUAGES CXX)
 find_package(LubanCore CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp lua_build_profile.cpp actions.cpp event_sink.cpp memory_blobs.cpp todo_write.cpp agentic_rag.cpp)
+add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp lua_build_profile.cpp actions.cpp event_sink.cpp memory_blobs.cpp todo_write.cpp agentic_rag.cpp web_fetch.cpp)
 if(NOT DEFINED LubanCore_WITH_LUA OR NOT LubanCore_WITH_LUA MATCHES "^(ON|OFF)$")
   message(FATAL_ERROR "Installed LubanCore must declare its Lua build profile")
 endif()
@@ -69,6 +69,27 @@ set_tests_properties(sdk.consumer.todo_write PROPERTIES TIMEOUT 120)
 add_test(NAME sdk.consumer.agentic_rag
   COMMAND lubancore_consumer agentic-rag "${CMAKE_CURRENT_BINARY_DIR}/state-agentic-rag")
 set_tests_properties(sdk.consumer.agentic_rag PROPERTIES TIMEOUT 120)
+# CI owns the real loopback fixture and supplies these two values explicitly.
+# A copied manual consumer can still build before an HTTP fixture is started.
+set(LUBANCORE_CONSUMER_WEB_FETCH_BASE_URL "" CACHE STRING "Explicit loopback HTTP fixture URL for installed WebFetch acceptance")
+set(LUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE "" CACHE FILEPATH "Explicit owned fixture request ledger for WebFetch acceptance")
+if(LUBANCORE_CONSUMER_WEB_FETCH_BASE_URL OR LUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE)
+  if(NOT LUBANCORE_CONSUMER_WEB_FETCH_BASE_URL MATCHES "^http://127\\.0\\.0\\.1:([0-9]+)$")
+    message(FATAL_ERROR "WebFetch acceptance requires the explicit loopback fixture URL")
+  endif()
+  if(CMAKE_MATCH_1 LESS 1 OR CMAKE_MATCH_1 GREATER 65535)
+    message(FATAL_ERROR "WebFetch acceptance fixture port is invalid")
+  endif()
+  if(NOT IS_ABSOLUTE "${LUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE}" OR
+      NOT EXISTS "${LUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE}" OR
+      IS_DIRECTORY "${LUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE}")
+    message(FATAL_ERROR "WebFetch acceptance requires an existing absolute request ledger")
+  endif()
+  add_test(NAME sdk.consumer.web_fetch
+    COMMAND lubancore_consumer web-fetch "${CMAKE_CURRENT_BINARY_DIR}/state-web-fetch"
+      "${LUBANCORE_CONSUMER_WEB_FETCH_BASE_URL}" "${LUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE}")
+  set_tests_properties(sdk.consumer.web_fetch PROPERTIES TIMEOUT 120)
+endif()
 # Remote CI builds this example as a separate project before configuring this
 # consumer. With no option this directory still builds and runs independently.
 set(LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE "" CACHE FILEPATH "Explicit independently built installed-SDK RAG example for CI")

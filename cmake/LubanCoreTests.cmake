@@ -83,6 +83,7 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/actions.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/todo_write.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/agentic_rag.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/web_fetch.cpp"
   ${LUBANCORE_FOCUSED_TEST_SOURCES})
 if(LUBANCORE_WITH_LUA)
   target_sources(lubancore_sdk_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua.cpp")
@@ -132,6 +133,9 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
   set_tests_properties("${sdk_test}" PROPERTIES
     LABELS "sdk-focused" TIMEOUT 300
     ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
+  if(sdk_basename STREQUAL "test_lubancore_web_fetch.cpp")
+    set_property(TEST "${sdk_test}" APPEND PROPERTY ENVIRONMENT "NO_PROXY=127.0.0.1" "no_proxy=127.0.0.1")
+  endif()
   # SDK-only and combined builds keep this fixed-duration shell fixture isolated
   # from other CTest processes, while its own four concurrent contexts still run.
   if(WIN32 AND sdk_basename STREQUAL "test_run_command_execution_limits.cpp")

@@ -27,6 +27,7 @@ except ImportError:
 
 
 REQUIRED_TESTS = {
+    "sdk.consumer.web_fetch",
     "sdk.consumer.authorization",
     "sdk.consumer.packages",
     "sdk.consumer.package_inventory",
@@ -49,6 +50,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
 REQUIRED_PUBLIC_HEADERS = {
+    "include/lubancore/web_fetch.hpp",
     "include/lubancore/authorization.hpp",
     "include/lubancore/packages.hpp",
     "include/lubancore/api.hpp", "include/lubancore/core.hpp", "include/lubancore/extensions.hpp",
@@ -218,6 +220,11 @@ def main() -> None:
     except ImportError:
         import sdk_rag_demo as rag
     rag_source = rag.seal_sources(repo)
+    try:
+        from . import sdk_web_fetch_fixture as web_fixture
+    except ImportError:
+        import sdk_web_fetch_fixture as web_fixture
+    web_source = web_fixture.seal_helper(repo)
     producer_build = args.build_dir.resolve()
     profile_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
     profile_entries = {line.split(":", 1)[0]: line.split("=", 1)[1] for line in profile_cache.splitlines()
@@ -263,6 +270,7 @@ def main() -> None:
         "install_mode": args.install_mode,
         "todo_consumer_source": todo_source,
         "rag_source": rag_source, "rag_demo": None,
+        "web_fetch_source": web_source, "web_fetch_fixture": None,
     }, indent=2) + "\n", encoding="utf-8")
     print(f"SDK consumer evidence directory: {scratch}", flush=True)
 
@@ -289,6 +297,7 @@ def main() -> None:
                              if path.is_file() or path.is_symlink())
     (evidence / "installed-files.json").write_text(json.dumps(installed_files, indent=2) + "\n", encoding="utf-8")
     public_headers = check_public_headers(repo, installed_files, args.install_mode)
+    web_header = web_fixture.check_installed_header(repo, prefix)
     producer_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
     staged_entries = [line.split("=", 1)[1] for line in producer_cache.splitlines()
                       if line.startswith("LUBANCODE_BUNDLED_RG_DIR:PATH=")]
@@ -324,6 +333,8 @@ def main() -> None:
         json.dumps(check_todo_consumer_copy(consumer_source, todo_source), indent=2) + "\n", encoding="utf-8")
     (evidence / "rag-consumer-source.json").write_text(
         json.dumps(rag.check_copy(consumer_source, rag_source, consumer=True), indent=2) + "\n", encoding="utf-8")
+    (evidence / "web-fetch-consumer-source.json").write_text(
+        json.dumps(web_fixture.check_helper_copy(consumer_source, web_source), indent=2) + "\n", encoding="utf-8")
     # Neither inherited loader variables nor a producer PATH may rescue a
     # broken installed package. Ordinary system compiler/tool directories stay.
     blocked = (repo, producer_build, staging)
@@ -375,48 +386,55 @@ def main() -> None:
     demo_evidence.update(demo_context)
     rag.preserve_demo(evidence, demo_build, demo_source, demo_evidence)
 
-    run(["cmake", "-S", str(consumer_source), "-B", str(consumer_build),
-         "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON",
-         f"-DCMAKE_PREFIX_PATH={prefix}",
-         f"-DLUBANCORE_CONSUMER_RESOURCE_ROOT={prefix / 'share/lubancore'}",
-         f"-DLUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE={demo_context['executable']}",
-         "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF",
-         "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF"], env)
-    cache = (consumer_build / "CMakeCache.txt").read_text(encoding="utf-8")
-    package_values = [line.split("=", 1)[1] for line in cache.splitlines()
-                      if line.startswith("LubanCore_DIR:PATH=")]
-    if len(package_values) != 1:
-        raise RuntimeError("consumer did not resolve a LubanCore package directory")
-    package_dir = Path(package_values[0]).resolve()
-    if package_dir != prefix and prefix not in package_dir.parents:
-        raise RuntimeError(f"consumer resolved LubanCore outside the installed prefix: {package_dir}")
-    print(f"consumer resolved installed package: {package_dir}", flush=True)
-    run(["cmake", "--build", str(consumer_build), "--config", "Release", "--parallel", "4"], env)
-    test_listing = run(["ctest", "--test-dir", str(consumer_build), "-C", "Release",
-                        "--show-only=json-v1"], env, capture=True)
-    (evidence / "consumer-tests.json").write_text(test_listing, encoding="utf-8")
-    listing = json.loads(test_listing)
-    enabled = {test["name"] for test in listing["tests"] if not any(
-        prop["name"] == "DISABLED" and prop["value"]
-        for prop in test.get("properties", []))}
-    if len(listing["tests"]) != len(required_tests) or {test["name"] for test in listing["tests"]} != required_tests:
-        raise RuntimeError("installed consumer registration differs from its exact Lua profile roster")
-    missing = required_tests - enabled
-    if missing:
-        raise RuntimeError("installed consumer is missing enabled tests: " + ", ".join(sorted(missing)))
-    print("installed consumer tests: " + ", ".join(sorted(enabled)), flush=True)
-    try:
-        run(["ctest", "--test-dir", str(consumer_build), "-C", "Release",
-             "--output-on-failure", "--no-tests=error",
-             "--output-junit", str(evidence / "consumer-results.xml")], env)
-    finally:
-        # The consumer lives outside the checkout; keep its diagnostic logs in
-        # the producer's artifact directory even when one of its tests fails.
-        # Session data stays in scratch and is not part of the CI artifact.
-        for name in ("LastTest.log", "LastTestsFailed.log"):
-            log = consumer_build / "Testing" / "Temporary" / name
-            if log.is_file():
-                shutil.copy2(log, evidence / name)
+    with web_fixture.FixtureOwner(repo, scratch, evidence / "web-fetch-fixture", env) as fixture:
+        run(["cmake", "-S", str(consumer_source), "-B", str(consumer_build),
+             "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON",
+             f"-DCMAKE_PREFIX_PATH={prefix}",
+             f"-DLUBANCORE_CONSUMER_RESOURCE_ROOT={prefix / 'share/lubancore'}",
+             f"-DLUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE={demo_context['executable']}",
+             f"-DLUBANCORE_CONSUMER_WEB_FETCH_BASE_URL={fixture.context['ready']['base_url']}",
+             f"-DLUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE={fixture.context['requests_file']}",
+             "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF",
+             "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF"], fixture.env)
+        cache = (consumer_build / "CMakeCache.txt").read_text(encoding="utf-8")
+        package_values = [line.split("=", 1)[1] for line in cache.splitlines()
+                          if line.startswith("LubanCore_DIR:PATH=")]
+        if len(package_values) != 1:
+            raise RuntimeError("consumer did not resolve a LubanCore package directory")
+        package_dir = Path(package_values[0]).resolve()
+        if package_dir != prefix and prefix not in package_dir.parents:
+            raise RuntimeError(f"consumer resolved LubanCore outside the installed prefix: {package_dir}")
+        print(f"consumer resolved installed package: {package_dir}", flush=True)
+        run(["cmake", "--build", str(consumer_build), "--config", "Release", "--parallel", "4"], fixture.env)
+        test_listing = fixture.caller("registration", ["ctest", "--test-dir", str(consumer_build), "-C", "Release",
+                            "--show-only=json-v1"], consumer_build, evidence / "consumer-results.xml")
+        (evidence / "consumer-tests.json").write_text(test_listing, encoding="utf-8")
+        listing = json.loads(test_listing)
+        enabled = {test["name"] for test in listing["tests"] if not any(
+            prop["name"] == "DISABLED" and prop["value"]
+            for prop in test.get("properties", []))}
+        if len(listing["tests"]) != len(required_tests) or {test["name"] for test in listing["tests"]} != required_tests:
+            raise RuntimeError("installed consumer registration differs from its exact Lua profile roster")
+        missing = required_tests - enabled
+        if missing:
+            raise RuntimeError("installed consumer is missing enabled tests: " + ", ".join(sorted(missing)))
+        print("installed consumer tests: " + ", ".join(sorted(enabled)), flush=True)
+        web_test = next(test for test in listing["tests"] if test["name"] == "sdk.consumer.web_fetch")
+        smoke_test = next(test for test in listing["tests"] if test["name"] == "sdk.consumer.smoke")
+        fixture.context.update(registration=web_test, consumer_executable=smoke_test["command"][0])
+        fixture.save()
+        try:
+            fixture.caller("execute", ["ctest", "--test-dir", str(consumer_build), "-C", "Release",
+                 "--output-on-failure", "--no-tests=error",
+                 "--output-junit", str(evidence / "consumer-results.xml")], consumer_build, evidence / "consumer-results.xml")
+        finally:
+            # The consumer lives outside the checkout; keep its diagnostic logs in
+            # the producer's artifact directory even when one of its tests fails.
+            # Session data stays in scratch and is not part of the CI artifact.
+            for name in ("LastTest.log", "LastTestsFailed.log"):
+                log = consumer_build / "Testing" / "Temporary" / name
+                if log.is_file():
+                    shutil.copy2(log, evidence / name)
     results = ET.parse(evidence / "consumer-results.xml").getroot().findall(".//testcase")
     executed = {case.attrib.get("name") for case in results}
     if not results or executed != required_tests:
@@ -429,6 +447,18 @@ def main() -> None:
     sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
                         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
     check_rag_consumer_evidence(listing, sections, demo_context, scratch, prefix, consumer_build)
+    from check_sdk_focused import check_web_fetch_consumer
+    web_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                    if sections[index] == "sdk.consumer.web_fetch"]
+    if len(web_sections) != 1:
+        raise RuntimeError("consumer native log must identify exactly one WebFetch invocation")
+    check_web_fetch_consumer(web_sections[0], web_test["command"], fixture.context)
+    request_receipt = web_fixture.check_requests((evidence / "web-fetch-fixture/requests.tsv").read_bytes())
+    web_fixture.check_helper_copy(consumer_source, web_source)
+    (evidence / "web-fetch-acceptance.json").write_text(json.dumps({
+        "status": "passed", "registration": web_test, "requests": request_receipt,
+        "fixture_context": fixture.context, "source_seal": web_source, "public_header": web_header,
+    }, indent=2) + "\n", encoding="utf-8")
     rag.check_copy(consumer_source, rag_source, consumer=True)
     after_demo = rag.inspect_demo(scratch, demo_source, demo_build, prefix, repo, rag_source,
                                   producer_build=producer_build)
@@ -484,7 +514,8 @@ def main() -> None:
         raise RuntimeError("installed Lua profile differs from the actual producer")
     context_path = evidence / "consumer-context.json"
     context = json.loads(context_path.read_text(encoding="utf-8"))
-    context.update(status="passed", consumer_executable=profile_command[0], rag_demo=demo_evidence)
+    context.update(status="passed", consumer_executable=profile_command[0], rag_demo=demo_evidence,
+                   web_fetch_fixture=fixture.context)
     context_path.write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
     if not with_lua:
         from check_sdk_lua_cross_profile import run_cross_images

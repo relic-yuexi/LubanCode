@@ -23,6 +23,7 @@ except ImportError:
 
 
 REQUIRED = {
+    "sdk.focused.lubancore_web_fetch",
     "sdk.focused.lubancore_authorization",
     "sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest",
     "sdk.focused.tool_job_coordinator",
@@ -770,6 +771,107 @@ def check_todo_write_consumer(section, command):
 
 AGENTIC_RAG_PATHS = ('retrieval', 'sources', 'preview', 'isolation', 'recovery', 'lifetime')
 
+WEB_FETCH_REQUEST_COUNTS = {'admission': 1, 'content': 4, 'limits': 9, 'redirects': 7, 'cancel': 4, 'isolation': 5}
+
+
+def check_web_fetch_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) and value for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_lubancore_web_fetch.cpp"):
+        raise RuntimeError("WebFetch registration must run one absolute native source with its full filter")
+
+
+def check_web_fetch_environment(properties):
+    environments = [item.get("value") for item in properties if item.get("name") == "ENVIRONMENT"]
+    if len(environments) != 1 or not isinstance(environments[0], list) or not all(isinstance(item, str) for item in environments[0]):
+        raise RuntimeError("WebFetch native registration lacks its explicit fixture environment")
+    for name in ("NO_PROXY", "no_proxy"):
+        if [value for value in environments[0] if value.startswith(name + "=")] != [name + "=127.0.0.1"]:
+            raise RuntimeError("WebFetch native loopback proxy exception is missing, duplicated or changed")
+
+
+def check_web_fetch_paths(section):
+    for path in WEB_FETCH_REQUEST_COUNTS:
+        if section.splitlines().count("[sdk-web-fetch-path] " + path) != 1:
+            raise RuntimeError("WebFetch actual path did not finish once: " + path)
+
+
+def check_web_fetch_decoder(section):
+    lines = [line.removeprefix("[sdk-web-fetch-decoder] ") for line in section.splitlines()
+             if line.startswith("[sdk-web-fetch-decoder] ")]
+    if len(lines) != 1:
+        raise RuntimeError("WebFetch must retain one actual owned decoder capability/result receipt")
+    try:
+        value = json.loads(lines[0])
+    except (ValueError, UnicodeError) as error:
+        raise RuntimeError("WebFetch decoder receipt is not JSON") from error
+    if (not isinstance(value, dict) or set(value) != {"gzip_decoding", "outcome"} or
+            type(value.get("gzip_decoding")) is not bool or
+            value["outcome"] != ("download_limit" if value["gzip_decoding"] else "unsupported_encoding")):
+        raise RuntimeError("WebFetch gzip result does not match its actual decoder capability")
+
+
+def check_web_fetch_native(section, command):
+    if not isinstance(command, list) or len(command) != 2 or not all(isinstance(value, str) for value in command):
+        raise RuntimeError("WebFetch native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("WebFetch executable is not the actual native fixture")
+    check_web_fetch_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(cases) != 1 or tuple(map(int, cases[0])) != (6, 6, 0) or len(assertions) != 1 or
+            int(assertions[0][0]) <= 0 or int(assertions[0][0]) != int(assertions[0][1]) or
+            int(assertions[0][2]) != 0 or section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("WebFetch native source must finish six nonempty successful cases")
+    check_web_fetch_paths(section)
+    check_web_fetch_decoder(section)
+    lines = [line for line in section.splitlines() if line.startswith("[sdk-web-fetch-fixture] ")]
+    if len(lines) != len(WEB_FETCH_REQUEST_COUNTS):
+        raise RuntimeError("WebFetch must retain six actual owned HTTP fixture retirement receipts")
+    seen = set()
+    for line in lines:
+        try:
+            value = json.loads(line.removeprefix("[sdk-web-fetch-fixture] "))
+        except (ValueError, UnicodeError) as error:
+            raise RuntimeError("WebFetch HTTP fixture receipt is not JSON") from error
+        if (not isinstance(value, dict) or set(value) != {"path", "quiescent", "requests", "stop_elapsed_ms"} or
+                not isinstance(value.get("path"), str) or value["path"] not in WEB_FETCH_REQUEST_COUNTS or value["path"] in seen or
+                value.get("quiescent") is not True or type(value.get("requests")) is not int or
+                value["requests"] != WEB_FETCH_REQUEST_COUNTS[value["path"]] or
+                type(value.get("stop_elapsed_ms")) is not int or not 0 <= value["stop_elapsed_ms"] < 3000):
+            raise RuntimeError("WebFetch HTTP fixture did not prove its exact requests and completed retirement")
+        seen.add(value["path"])
+
+
+def check_web_fetch_consumer(section, command, context):
+    if (not isinstance(command, list) or len(command) != 5 or
+            not all(isinstance(value, str) and value for value in command) or command[1] != "web-fetch" or
+            any(not (value.startswith("/") or (ntpath.isabs(value) and bool(ntpath.splitdrive(value)[0])))
+                for value in (command[0], command[2], command[4])) or
+            command[0].replace("\\", "/").split("/")[-1] not in ("lubancore_consumer", "lubancore_consumer.exe")):
+        raise RuntimeError("WebFetch consumer must run its actual relocated five-argument command")
+    try:
+        from .sdk_web_fetch_fixture import check_caller_receipts
+    except ImportError:
+        from sdk_web_fetch_fixture import check_caller_receipts
+    check_caller_receipts(context)
+    normalize = lambda value: value.replace("\\", "/")
+    if (command[3] != context["ready"]["base_url"] or normalize(command[4]) != normalize(context["requests_file"]) or
+            normalize(command[0]) != normalize(context.get("consumer_executable", "")) or
+            normalize(command[2]) != normalize(context["consumer_build"].rstrip("/\\") + "/state-web-fetch")):
+        raise RuntimeError("WebFetch consumer argv is not bound to its owned actual fixture and installed target")
+    check_native_command(section, command)
+    if (section.splitlines().count("[sdk-web-fetch-consumer] complete") != 1 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("WebFetch installed consumer did not finish its actual calls")
+    check_web_fetch_paths(section)
+    check_web_fetch_decoder(section)
+
 
 def check_agentic_rag_registration(command, executable="lubancore_sdk_tests"):
     if (not isinstance(command, list) or len(command) != 2 or
@@ -1149,6 +1251,9 @@ def main():
             check_todo_write_registration(test.get("command", []))
         if test["name"] == "sdk.focused.lubancore_agentic_rag":
             check_agentic_rag_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_web_fetch":
+            check_web_fetch_registration(test.get("command", []))
+            check_web_fetch_environment(test.get("properties", []))
         if test["name"] == "sdk.focused.lubancore_operation_turn_binding":
             check_operation_turn_binding_registration(test.get("command", []))
         if test["name"] == "sdk.focused.journal_native_receipts":
@@ -1248,6 +1353,8 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_agentic_rag":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_agentic_rag_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_web_fetch":
+            check_web_fetch_native(sections[0], commands[0])
         if case.attrib["name"] == "sdk.focused.lubancore_operation_turn_binding":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_operation_turn_binding_native(sections[0], registered["command"])

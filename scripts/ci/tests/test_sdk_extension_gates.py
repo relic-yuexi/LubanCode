@@ -971,6 +971,7 @@ class InstalledHeadersTests(unittest.TestCase):
         self.addCleanup(self.scratch.cleanup)
         self.repo = Path(self.scratch.name)
         self.headers = {
+            "include/lubancore/web_fetch.hpp",
             "include/lubancore/packages.hpp",
             "include/lubancore/api.hpp", "include/lubancore/core.hpp",
             "include/lubancore/extensions.hpp", "include/lubancore/detail/types.hpp",

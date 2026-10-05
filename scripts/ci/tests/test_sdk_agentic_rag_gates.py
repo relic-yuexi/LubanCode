@@ -553,7 +553,7 @@ class RagActualGraphOwnershipTests(unittest.TestCase):
 
 class RagProfilesAndRemoteRoutesTests(unittest.TestCase):
     def test_exact_on_off_rosters_keep_all_old_members(self):
-        for enabled, count, consumer in ((True, 54, 33), (False, 52, 30)):
+        for enabled, count, consumer in ((True, 55, 34), (False, 53, 31)):
             native = profile.focused_roster(focused.REQUIRED, enabled)
             installed_names = profile.consumer_roster(installed.REQUIRED_TESTS, enabled)
             self.assertEqual(len(native), count)

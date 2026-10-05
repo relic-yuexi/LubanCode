@@ -173,6 +173,20 @@ def inspect_graph(targets: dict, with_lua: bool | None = None) -> dict:
             "status": "failed" if violations else "passed", "violations": violations}
 
 
+def web_fetch_reference_ownership_violations(targets: dict, testing: bool, with_cli: bool) -> list[str]:
+    helper = "examples/sdk-consumer/web_fetch.cpp"
+    owners = [(target["name"], target["type"]) for target in targets.values()
+              for source in target.get("luaSources", target.get("projectSources", [])) if source == helper]
+    expected = []
+    if testing:
+        expected.append(("lubancore_sdk_tests", "EXECUTABLE"))
+        if with_cli:
+            expected.append(("lubancode_tests", "EXECUTABLE"))
+    if sorted(owners) != sorted(expected):
+        return ["WebFetch public helper must belong exactly to the selected native reference executables"]
+    return []
+
+
 def inspect(source: Path, build: Path, config: str, lua_profile: str | None = None) -> dict:
     source, build = source.resolve(), build.resolve()
     reply = build / ".cmake/api/v1/reply"
@@ -211,6 +225,11 @@ def inspect(source: Path, build: Path, config: str, lua_profile: str | None = No
     entries = {entry["name"]: entry["value"] for entry in cache["entries"]}
     with_lua = read_lua_profile(entries, lua_profile)
     result = inspect_graph(targets)
+    if (source / "examples/sdk-consumer/web_fetch.cpp").is_file():
+        testing = str(entries.get("BUILD_TESTING", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        with_cli = str(entries.get("LUBANCODE_BUILD_CLI", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        result["violations"].extend(web_fetch_reference_ownership_violations(targets, testing, with_cli))
+        result["status"] = "failed" if result["violations"] else "passed"
     if "LUBANCORE_WITH_LUA" in entries or lua_profile is not None:
         violations = lua_graph_violations({key: {**target, "projectSources": target["luaSources"]}
                                            for key, target in targets.items()}, with_lua)
