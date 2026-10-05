@@ -13,6 +13,14 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 try:
+    from .sdk_result_immutable import check_result_immutable_registration, check_result_immutable_native
+except ImportError:
+    try:
+        from sdk_result_immutable import check_result_immutable_registration, check_result_immutable_native
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_result_immutable import check_result_immutable_registration, check_result_immutable_native
+
+try:
     from .sdk_memory_handoff import check_memory_handoff_registration, check_memory_handoff_native
 except ImportError:
     try:
@@ -47,6 +55,7 @@ except ImportError:
 
 
 REQUIRED = {
+    "sdk.focused.v3_result_immutable_publication",
     "sdk.focused.memory_project_commit_handoff",
     "sdk.focused.managed_session_ownership",
     "sdk.focused.managed_session_reservation",
@@ -1294,6 +1303,8 @@ def main():
             check_job_operation_registration(test.get("command", []))
         if test["name"] == "sdk.focused.memory_project_commit_handoff":
             check_memory_handoff_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.v3_result_immutable_publication":
+            check_result_immutable_registration(test.get("command", []))
         if test["name"].removeprefix("sdk.focused.") in MANAGED_OPENING_SOURCES:
             check_managed_opening_registration(test.get("command", []), test["name"].removeprefix("sdk.focused."))
         if test["name"] == "sdk.focused.lubancore_owned_job_deadline":
@@ -1405,6 +1416,8 @@ def main():
             check_job_operation_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.memory_project_commit_handoff":
             check_memory_handoff_native(sections[0], commands[0])
+        if case.attrib["name"] == "sdk.focused.v3_result_immutable_publication":
+            check_result_immutable_native(sections[0], commands[0])
         if case.attrib["name"].removeprefix("sdk.focused.") in MANAGED_OPENING_SOURCES:
             check_managed_opening_native(sections[0], commands[0], case.attrib["name"].removeprefix("sdk.focused."))
         if case.attrib["name"] == "sdk.focused.lubancore_owned_job_deadline":

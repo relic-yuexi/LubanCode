@@ -143,6 +143,7 @@ SHARED_SDK_TEST_SOURCES = {
     "tests/unit/trajectory/test_journal_native_receipts.cpp",
     "tests/unit/trajectory_v3/test_v3_journal_receipts.cpp",
     "tests/unit/trajectory_v3/test_v3_result_store.cpp",
+    "tests/unit/trajectory_v3/test_v3_result_immutable_publication.cpp",
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",
     "tests/unit/runtime/test_session_execution.cpp",

@@ -91,6 +91,7 @@ class BoundaryTests(unittest.TestCase):
             "tests/unit/trajectory/test_managed_session_ownership.cpp",
             "tests/unit/trajectory/test_managed_session_reservation.cpp",
             "tests/unit/memory/test_memory_project_commit_handoff.cpp",
+            "tests/unit/trajectory_v3/test_v3_result_immutable_publication.cpp",
         )
         for source in sources:
             self.source_file(source, "int reference_fixture;\n")

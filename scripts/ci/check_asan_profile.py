@@ -19,9 +19,11 @@ import xml.etree.ElementTree as ET
 try:
     from .check_sdk_only_boundary import CLIENT, prepare, read_reply
     from .check_sdk_focused import check_native_command
+    from .sdk_result_immutable import check_result_immutable_native
 except ImportError:
     from check_sdk_only_boundary import CLIENT, prepare, read_reply
     from check_sdk_focused import check_native_command
+    from sdk_result_immutable import check_result_immutable_native
 
 
 def require(condition, message):
@@ -280,6 +282,8 @@ def check_execution(manifest, registrations, executable, junit, last_test):
                 'ASan source failed or skipped: ' + name)
         section = sections[name]
         check_native_command(section, commands[name])
+        if name == 'unit.trajectory_v3.v3_result_immutable_publication':
+            check_result_immutable_native(section, commands[name])
         require(len(re.findall(r'^Test Passed\.\s*$', section, re.M)) == 1, 'native test did not pass: ' + name)
         for label, total_key in (('test cases', 'cases'), ('assertions', 'assertions')):
             counts = re.findall(r'\[doctest\] ' + label + r':\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed', section)
