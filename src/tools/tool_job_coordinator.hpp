@@ -318,6 +318,9 @@ struct OwnedJobStatusView {
     bool preview_truncated = false, worker_finished = false;
     std::optional<trajectory::v3::WriteReceipt> adopted_receipt, dispatched_receipt, started_receipt;
     std::optional<trajectory::v3::WriteReceipt> terminal_receipt, persisted_receipt, post_receipt, observed_receipt;
+    // True is an owned fact that this command was not invoked. False makes no
+    // claim about OS process startup or a still-running invocation.
+    bool command_not_invoked = false;
 };
 struct OwnedJobWaitResult {
     bool satisfied = false, timed_out = false;
@@ -347,6 +350,7 @@ struct JobRecoveryFacts {
     std::string execution_state;  // Actual business attempt status, if present.
     std::string execution_terminal_event;
     bool admission_complete = false;
+    bool command_not_invoked = false; // Strictly verified deadline fact; never an execution lease.
 };
 
 struct JobStatusView {

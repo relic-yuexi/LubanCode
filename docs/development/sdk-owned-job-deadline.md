@@ -6,9 +6,11 @@
 
 Adopt 接走同一截止，不重开预算。排队与 scope_gate 复核均扣时间；每次派发前再查。已到期的已采用任务沿现有 `before_started` Cancel/Observed 收场：零 Started、零 command、零进程、无业务 raw/Post。实际调用前取 `min(登记剩余毫秒, 模型合法收窄值, 宿主 command 帽)`；不足一毫秒按已到期处理，绝不把 0 交进“不限时”路径。模型坏参数仍由真实命令入口拒绝，不借预算代码改写参数或伪造命令回执。
 
-Started 是已落账的执行意图，线程工厂之后仍可能迟迟不进入 worker。若到真正 command 调用边界已过期，则保留这份 Started，明确记录 command 未调用；不调用 RunCommand 来制造一份“取消结果”，不倒删意图、不编 raw 或成功 Post。完成泵写真实 `ToolExecutionCancelled`（phase=`before_command`、reason=`registration_deadline_elapsed`）及 `ToolJobObserved(cancelled)`，后者带 `commandNotInvoked={version:1,reason:"registration_deadline_elapsed"}`。这是版本化的未调用证据，不是父交付完成凭证。
+这笔在进入真实 RunCommand 前扣出剩余值，再收窄既有相对 process timeout。平台创建子进程后才起原相对计时；启动、取消、输出捕获和 join 清理仍沿原规矩。登记截止不等于硬实时整执行墙钟，也不承诺那一刻已 kill 或 join。后续公开 Job 若要贯穿绝对截止，须另接绝对 deadline transport 或 Owned 监督器；这笔不扩平台 API 或工具 context。
 
-schema 核标记闭合形状与版本；严格 reader 另核 Owned 采用、正预算、既有 Started/dispatch、真实父交付引用、对应 Cancel 及无 raw/Post。旧记录缺标记仍走原规则；未知版本或矛盾事实拒绝。新 reader 读旧账不变；旧 reader 遇新跳过事实会因无 raw/Post 拒绝，不能装成兼容执行。`ReadJobOperations` 同过这条关系门；恢复 Hold 可显示已确认取消与 command 未调用，绝不重建单调截止、续跑或补造交付。
+Started 是已落账的执行意图，线程工厂之后仍可能迟迟不进入 worker。若到真正 command 调用边界已过期，则保留这份 Started，明确记录 command 未调用；不调用 RunCommand 来制造一份“取消结果”，不倒删意图、不编 raw 或成功 Post。完成泵沿现有枚举写 `ToolExecutionCancelled`（phase=`during_execution`、reason=`registration_deadline_elapsed`）及 `ToolJobObserved(cancelled)`，后者带 `commandNotInvoked={version:1,reason:"registration_deadline_elapsed"}`，准确补明“已有 Started 意图、尚未调用命令”。这份版本化证据不代替父交付完成，也不新增通用 Cancel phase。
+
+schema 核标记闭合形状与版本；严格 reader 另核 Owned 采用、正预算、既有 Started/dispatch、真实父交付引用、对应 Cancel 及无 raw/Post。到期 Observed 同带已确认的五枚 `parentAdmission` 原生引用；未派发便到期时，Hold 也能核回真实 Confirm。引用须齐全、同场同链、先于观察；与 Dispatch 引用冲突、伪造或错 seq 均拒。没有 Confirm 的旧挂起账仍不报 `admission_complete`。旧记录缺标记仍走原规则；未知版本或矛盾事实拒绝。新 reader 读旧账不变；旧 reader 遇新跳过事实会因无 raw/Post 拒绝，不能装成兼容执行。`ReadJobOperations` 同过这条关系门；恢复 Hold 可显示已确认取消与 command 未调用，绝不重建单调截止、续跑或补造交付。
 
 实际线程与资源仍归协调器。Deadline 不绕过原线程发布／抛错清理；Shutdown 真 join 后才落完成事实、释放配额、退 callback，再交还 writer。已发布线程即使工厂随后抛错，也等它真实退出。查询、取消、Close 重入门不放宽。
 
