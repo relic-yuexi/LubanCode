@@ -27,6 +27,7 @@ except ImportError:
 
 
 REQUIRED_TESTS = {
+    "sdk.consumer.command_jobs",
     "sdk.consumer.web_fetch",
     "sdk.consumer.authorization",
     "sdk.consumer.packages",
@@ -50,6 +51,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
 REQUIRED_PUBLIC_HEADERS = {
+    "include/lubancore/jobs.hpp",
     "include/lubancore/web_fetch.hpp",
     "include/lubancore/authorization.hpp",
     "include/lubancore/packages.hpp",
@@ -225,6 +227,11 @@ def main() -> None:
     except ImportError:
         import sdk_web_fetch_fixture as web_fixture
     web_source = web_fixture.seal_helper(repo)
+    try:
+        from . import sdk_command_jobs as command_jobs
+    except ImportError:
+        import sdk_command_jobs as command_jobs
+    job_sources = command_jobs.seal_sources(repo)
     producer_build = args.build_dir.resolve()
     profile_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
     profile_entries = {line.split(":", 1)[0]: line.split("=", 1)[1] for line in profile_cache.splitlines()
@@ -259,6 +266,8 @@ def main() -> None:
     demo_build = scratch / "rag-build"
     evidence = producer_build / "test-evidence" / "sdk-consumer"
     evidence.mkdir(parents=True, exist_ok=True)
+    job_probe = command_jobs.copy_probe(repo, producer_build, scratch)
+    (evidence / "command-jobs-probe.json").write_text(json.dumps(job_probe, indent=2) + "\n", encoding="utf-8")
     (evidence / "consumer-context.json").write_text(json.dumps({
         "github_sha": os.environ.get("GITHUB_SHA"),
         "producer_source": str(repo),
@@ -271,6 +280,7 @@ def main() -> None:
         "todo_consumer_source": todo_source,
         "rag_source": rag_source, "rag_demo": None,
         "web_fetch_source": web_source, "web_fetch_fixture": None,
+        "command_jobs_sources": job_sources, "command_jobs_probe": job_probe,
     }, indent=2) + "\n", encoding="utf-8")
     print(f"SDK consumer evidence directory: {scratch}", flush=True)
 
@@ -335,6 +345,7 @@ def main() -> None:
         json.dumps(rag.check_copy(consumer_source, rag_source, consumer=True), indent=2) + "\n", encoding="utf-8")
     (evidence / "web-fetch-consumer-source.json").write_text(
         json.dumps(web_fixture.check_helper_copy(consumer_source, web_source), indent=2) + "\n", encoding="utf-8")
+    command_jobs.check_copies(consumer_source, prefix, job_sources, job_probe)
     # Neither inherited loader variables nor a producer PATH may rescue a
     # broken installed package. Ordinary system compiler/tool directories stay.
     blocked = (repo, producer_build, staging)
@@ -392,6 +403,7 @@ def main() -> None:
              f"-DCMAKE_PREFIX_PATH={prefix}",
              f"-DLUBANCORE_CONSUMER_RESOURCE_ROOT={prefix / 'share/lubancore'}",
              f"-DLUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE={demo_context['executable']}",
+             f"-DLUBANCORE_CONSUMER_COMMAND_PROBE={job_probe['copy']['path']}",
              f"-DLUBANCORE_CONSUMER_WEB_FETCH_BASE_URL={fixture.context['ready']['base_url']}",
              f"-DLUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE={fixture.context['requests_file']}",
              "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF",
@@ -421,6 +433,16 @@ def main() -> None:
         print("installed consumer tests: " + ", ".join(sorted(enabled)), flush=True)
         web_test = next(test for test in listing["tests"] if test["name"] == "sdk.consumer.web_fetch")
         smoke_test = next(test for test in listing["tests"] if test["name"] == "sdk.consumer.smoke")
+        job_tests = [test for test in listing["tests"] if test["name"] == "sdk.consumer.command_jobs"]
+        if len(job_tests) != 1 or len(job_tests[0].get("command", [])) != 4:
+            raise RuntimeError("Command Jobs consumer registration is missing or malformed")
+        job_test = job_tests[0]
+        if (job_test["command"][0] != smoke_test["command"][0] or
+                not Path(job_test["command"][0]).resolve().is_relative_to(consumer_build.resolve()) or
+                Path(job_test["command"][2]).resolve() != (consumer_build / "state-command-jobs").resolve() or
+                Path(job_test["command"][3]).resolve() != Path(job_probe["copy"]["path"]).resolve()):
+            raise RuntimeError("Command Jobs consumer/probe/state borrowed a foreign path")
+        (evidence / "command-jobs-registration.json").write_text(json.dumps(job_test, indent=2) + "\n", encoding="utf-8")
         fixture.context.update(registration=web_test, consumer_executable=smoke_test["command"][0])
         fixture.save()
         try:
@@ -447,6 +469,18 @@ def main() -> None:
     sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
                         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
     check_rag_consumer_evidence(listing, sections, demo_context, scratch, prefix, consumer_build)
+    job_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                    if sections[index] == "sdk.consumer.command_jobs"]
+    if len(job_sections) != 1:
+        raise RuntimeError("Command Jobs native consumer section missing or duplicated")
+    job_receipt = command_jobs.check_consumer(job_sections[0], job_test["command"], job_probe)
+    command_jobs.check_copies(consumer_source, prefix, job_sources, job_probe)
+    (evidence / "command-jobs-acceptance.json").write_text(json.dumps({
+        "status": "passed", "registration": job_test, "receipt": job_receipt,
+        "probe": job_probe, "sources": job_sources,
+        "callers": fixture.context.get("callers", []),
+        "scope": "actual registration/JUnit/LastTest plus sealed relocated probe; source assertions check child entry and retirement",
+    }, indent=2) + "\n", encoding="utf-8")
     from check_sdk_focused import check_web_fetch_consumer
     web_sections = [sections[index + 1] for index in range(1, len(sections), 2)
                     if sections[index] == "sdk.consumer.web_fetch"]

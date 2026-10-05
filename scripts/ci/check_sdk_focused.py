@@ -46,7 +46,18 @@ except ImportError:
         from scripts.ci.sdk_lua_profile import focused_roster, read_lua_profile
 
 
+
+try:
+    from . import sdk_command_jobs as command_jobs
+except ImportError:
+    try:
+        import sdk_command_jobs as command_jobs
+    except ModuleNotFoundError:
+        from scripts.ci import sdk_command_jobs as command_jobs
+
 REQUIRED = {
+    "sdk.focused.lubancore_command_jobs",
+    "sdk.focused.lubancore_command_job_guards",
     "sdk.focused.memory_project_commit_handoff",
     "sdk.focused.managed_session_ownership",
     "sdk.focused.managed_session_reservation",
@@ -1250,6 +1261,9 @@ def main():
     if len(tests) != len(required) or {t["name"] for t in tests} != required:
         raise RuntimeError("SDK test files are missing, duplicated or unexpected")
     for test in tests:
+        job_stem = test["name"].removeprefix("sdk.focused.")
+        if job_stem in command_jobs.SOURCES:
+            command_jobs.check_registration(test.get("command"), job_stem)
         props = {p["name"]: p["value"] for p in test.get("properties", [])}
         if (props.get("DISABLED") or "sdk-focused" not in props.get("LABELS", [])
                 or not 0 < float(props.get("TIMEOUT", 0)) <= 300):
@@ -1326,6 +1340,7 @@ def main():
     # Successful JUnit output can be truncated before the doctest summary.
     native_sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
+    command_job_reports = {}
     for case in cases:
         if case.attrib.get("status") != "run" or any(case.find(k) is not None for k in
                 ("failure", "error", "skipped")):
@@ -1338,6 +1353,10 @@ def main():
         if len(commands) != 1:
             raise RuntimeError("SDK source has no unique registered command: " + case.attrib["name"])
         check_native_command(sections[0], commands[0])
+        job_stem = case.attrib["name"].removeprefix("sdk.focused.")
+        if job_stem in command_jobs.SOURCES:
+            command_job_reports[case.attrib["name"]] = command_jobs.check_native(sections[0], commands[0], job_stem, os.name)
+            (evidence / "command-jobs.json").write_text(json.dumps(command_job_reports, indent=2) + "\n", encoding="utf-8")
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])

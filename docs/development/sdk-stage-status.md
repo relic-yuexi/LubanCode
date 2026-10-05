@@ -102,3 +102,11 @@ ON 六套各 54 册 focused、452 条原生 CASE、33 项安装消费；OFF 三�
 默认只出 preview。Full 须 Node 许可和每场参数同时开启。子 Agent 默认关闭，宿主显式给预算，许可只管当前子场。
 
 保持一张实施 PR，收完再开下一笔；功能分支到 main 继续走 Draft [#234](https://github.com/relic-yuexi/LubanCode/pull/234)。用户已授权自行收口，仍须逐源审查和远端三平台 CI。源码、Git、纯数据和文档可本地检查；配置、编译、CTest 与原生执行全交远端。
+
+## Command Jobs 接线候选
+
+公开源码封于 `2d582d03`，这批从 `c522a51c` 合入并补 CI 接线，尚未合功能分支，也没有本组合远端通过证据。默认不开 Job；显式预算与真正 run_command 声明接到同一 Session owner。已接原父调用五引用、真实 Job Operation binding、只管本 Job 的审批、唯一 host worker 完成泵、取消与 Close 真 join，以及同 ID、同 run 的 Hold 只读恢复。ReadJobPreview 是可信本地缓存，不能当出站投影。
+
+候选新增两册、17 CASE。静态名册为 SDK Lua ON/OFF 61/59 册、503/488 CASE，安装消费 35/32 场；全量 Linux/Windows/macOS 770/772/773。ASan 的当前真实选择式选出重点 67 册、实跑 160 册，wildcard 编译正文 160 份，附件 23 份；这些数字只说明接线范围，不冒充实跑。后续 SPI 候选未混入这份名册。
+
+CI 会留安装/移位消费者原 argv、显式真实 probe 的 File API 归属与字节指纹、公开十路径、私有七路径，以及四份写后未知 typed 原件。注册、JUnit、LastTest 三者须相符，失败也留原件。原 deadline 六 CASE 和 CLI 命令路径不改；本地仅跑纯数据、AST、脚本语法与文档检查。详见 [Command Jobs 合同](sdk-command-jobs.md)。
