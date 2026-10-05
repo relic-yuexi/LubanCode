@@ -221,18 +221,46 @@ class ClosureTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 gate.prepare_probe_fixture(REPO, root / "scratch", root / "second-evidence")
 
+    def test_probe_artifact_selection_accepts_only_native_runtime_and_exact_pdb(self):
+        runtime = "Release/" + gate.PROBE_TARGET + ".exe"
+        pdb = "Release/" + gate.PROBE_TARGET + ".pdb"
+        target = {"artifacts": [{"path": runtime}, {"path": pdb}]}
+        # Actual MSVC shape, including a different order, on every test host.
+        for paths in ([runtime, pdb], [pdb, runtime], [runtime]):
+            self.assertEqual(gate.select_probe_artifact({"artifacts": [{"path": path} for path in paths]}, "windows"),
+                             {"runtime": runtime, "auxiliary": [pdb] if pdb in paths else []})
+        posix = "tests/" + gate.PROBE_TARGET
+        self.assertEqual(gate.select_probe_artifact({"artifacts": [{"path": posix}]}, "posix"),
+                         {"runtime": posix, "auxiliary": []})
+        bad_shapes = ([pdb], [], [runtime, runtime], [runtime, runtime.upper()],
+                      [runtime, "Debug/" + gate.PROBE_TARGET + ".exe"],
+                      [runtime, "Debug/" + gate.PROBE_TARGET + ".pdb"],
+                      [runtime, "Release/other.pdb"], [runtime, pdb, pdb],
+                      [runtime, "Release/unknown.lib"], [runtime, "Release/../Release/" + gate.PROBE_TARGET + ".exe"],
+                      [runtime, "\0"], [posix, pdb])
+        for paths in bad_shapes:
+            with self.subTest(paths=paths), self.assertRaises(RuntimeError):
+                gate.select_probe_artifact({"artifacts": [{"path": path} for path in paths]}, "windows")
+        for platform in ("posix", "foreign", None):
+            with self.subTest(platform=platform), self.assertRaises(RuntimeError):
+                gate.select_probe_artifact(target, platform)
+        with self.assertRaises(RuntimeError):
+            gate.select_probe_artifact({"artifacts": [{"path": posix}, {"path": posix + ".pdb"}]}, "posix")
+
     def test_probe_copy_comes_from_real_target_artifact_shape(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve(); repo = root / "source"; build = root / "build"; scratch = root / "scratch"
             (repo / gate.PROBE_SOURCE).parent.mkdir(parents=True)
             (repo / gate.PROBE_SOURCE).write_text("// pure source fixture, never compiled")
-            binary = build / "tests" / gate.PROBE_TARGET
+            binary = build / "tests" / (gate.PROBE_TARGET + (".exe" if os.name == "nt" else ""))
             binary.parent.mkdir(parents=True); binary.write_bytes(b"pure binary fixture, never executed"); binary.chmod(0o755)
             reply = build / ".cmake/api/v1/reply"; reply.mkdir(parents=True)
             reference = {"id": "probe-id", "name": gate.PROBE_TARGET, "jsonFile": "target.json"}
             target = {**reference, "type": "EXECUTABLE", "dependencies": [],
                       "sources": [{"path": gate.PROBE_SOURCE, "compileGroupIndex": 0}],
-                      "artifacts": [{"path": "tests/" + gate.PROBE_TARGET}]}
+                      "artifacts": [{"path": "tests/" + binary.name}]}
+            if os.name == "nt":
+                target["artifacts"].append({"path": "tests/" + gate.PROBE_TARGET + ".pdb"})
             other = {"id": "other-id", "name": "other-owner", "jsonFile": "other.json"}
             model = {"kind": "codemodel", "version": {"major": 2}, "paths": {"source": str(repo), "build": str(build)},
                      "configurations": [{"name": "Release", "targets": [reference, other],
@@ -255,6 +283,11 @@ class ClosureTests(unittest.TestCase):
             relocated = root / "relocated-raw"
             shutil.copytree(raw, relocated)
             self.assertEqual(gate.check_probe_file_api(relocated, copied)["status"], "passed")
+            for key, value in (("nativePlatform", "posix" if os.name == "nt" else "windows"),
+                               ("artifactSelection", {"runtime": "invented", "auxiliary": []})):
+                changed = deepcopy(copied); changed[key] = value
+                with self.subTest(context=key), self.assertRaises(RuntimeError):
+                    gate.check_probe_file_api(relocated, changed)
             for mutation in ("missing", "tampered", "unindexed", "duplicate-receipt"):
                 changed = deepcopy(copied)
                 directory = root / mutation

@@ -309,6 +309,39 @@ def preserve_probe_file_api(reply, index_path, index, model_ref, model, target_r
             "codemodel": model_ref["jsonFile"], "target": target_ref["jsonFile"], "files": files}
 
 
+def select_probe_artifact(target, native_platform):
+    """Select one declared runtime artifact; MSVC may also declare its PDB.
+
+    This rule also runs on uploaded originals, independently of the verifier's
+    operating system. It never searches the build tree or guesses a binary path.
+    """
+    require(native_platform in ("windows", "posix"), "probe native platform invalid")
+    artifacts = target.get("artifacts", [])
+    require(isinstance(artifacts, list) and 1 <= len(artifacts) <= 2,
+            "probe executable artifact missing or ambiguous")
+    paths = []
+    normalized = []
+    for artifact in artifacts:
+        path = artifact.get("path") if isinstance(artifact, dict) else None
+        require(isinstance(path, str) and path and not any(ch in path for ch in "\0\r\n"),
+                "probe artifact path invalid")
+        paths.append(path)
+        value = path.replace("\\", "/")
+        normalized.append(ntpath.normcase(ntpath.normpath(value)) if native_platform == "windows"
+                          else posixpath.normpath(value))
+    require(len(set(normalized)) == len(normalized), "probe duplicate artifact path")
+    runtime_name = PROBE_TARGET + (".exe" if native_platform == "windows" else "")
+    runtime = [path for path in paths if posixpath.basename(path.replace("\\", "/")) == runtime_name]
+    require(len(runtime) == 1, "probe executable artifact missing or ambiguous")
+    companions = [path for path in paths if path != runtime[0]]
+    if companions:
+        require(native_platform == "windows" and len(companions) == 1 and
+                companions[0].replace("\\", "/") ==
+                posixpath.join(posixpath.dirname(runtime[0].replace("\\", "/")), PROBE_TARGET + ".pdb"),
+                "probe foreign auxiliary artifact")
+    return {"runtime": runtime[0], "auxiliary": companions}
+
+
 def check_probe_file_api(directory, context):
     """Recheck uploaded originals without needing the producer's filesystem."""
     try:
@@ -356,9 +389,9 @@ def check_probe_file_api(directory, context):
     source_root = model["paths"]["source"].replace("\\", "/")
     actual_sources = [normalized(path if absolute(path) else source_root + "/" + path) for path in sources]
     require(actual_sources == [normalized(source_root + "/" + PROBE_SOURCE)], "probe raw compiled source differs")
-    artifacts = target.get("artifacts", [])
-    require(len(artifacts) == 1, "probe raw executable artifact missing or ambiguous")
-    artifact = artifacts[0]["path"]
+    selection = select_probe_artifact(target, context.get("nativePlatform"))
+    require(selection == context.get("artifactSelection"), "probe raw artifact selection differs")
+    artifact = selection["runtime"]
     require(normalized(artifact if absolute(artifact) else model["paths"]["build"] + "/" + artifact) ==
             normalized(context["original"]["path"]), "probe raw native artifact differs")
     referenced = {raw["index"], raw["codemodel"]}
@@ -406,9 +439,9 @@ def copy_probe(repo, build, scratch, config="Release", evidence=None):
         path = Path(entry["path"])
         sources.append((path if path.is_absolute() else repo / path).resolve())
     require(sources == [(repo / PROBE_SOURCE).resolve()], "probe compiled a different source body")
-    artifacts = target.get("artifacts", [])
-    require(len(artifacts) == 1, "probe executable artifact missing or ambiguous")
-    original = Path(artifacts[0]["path"])
+    native_platform = "windows" if os.name == "nt" else "posix"
+    selection = select_probe_artifact(target, native_platform)
+    original = Path(selection["runtime"])
     original = original if original.is_absolute() else build / original
     require(not original.is_symlink(), "probe artifact is linked")
     original = original.resolve()
@@ -422,6 +455,7 @@ def copy_probe(repo, build, scratch, config="Release", evidence=None):
     require(digest(destination) == digest(original) and
             (os.name == "nt" or os.access(destination, os.X_OK)), "copied probe bytes/permissions differ")
     context = {"schemaVersion": 1, "githubSha": os.environ.get("GITHUB_SHA"), "configuration": config,
+            "nativePlatform": native_platform, "artifactSelection": selection,
             "producerBuild": str(build), "producerSource": str(repo),
             "source": {"path": PROBE_SOURCE, "sha256": digest(repo / PROBE_SOURCE)},
             "fileApiTarget": {"path": str(reply / refs[0]["jsonFile"]), "sha256": digest(reply / refs[0]["jsonFile"]),
