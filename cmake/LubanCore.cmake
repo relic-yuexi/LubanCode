@@ -2,6 +2,10 @@
 # Internal archives and third-party headers remain private to this shared library.
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+set(_lubancore_lua_profile OFF)
+if(LUBANCORE_WITH_LUA)
+  set(_lubancore_lua_profile ON)
+endif()
 
 add_library(lubancore_sdk SHARED
   src/sdk/core.cpp
@@ -23,6 +27,11 @@ add_library(lubancore_sdk SHARED
   src/sdk/results.cpp
   src/sdk/result_projection.cpp
   src/sdk/adapters.cpp)
+if(LUBANCORE_WITH_LUA)
+  target_sources(lubancore_sdk PRIVATE src/sdk/lua_load.cpp)
+else()
+  target_sources(lubancore_sdk PRIVATE src/sdk/lua_unavailable.cpp)
+endif()
 add_library(LubanCore::Core ALIAS lubancore_sdk)
 set_target_properties(lubancore_sdk PROPERTIES
   EXPORT_NAME Core

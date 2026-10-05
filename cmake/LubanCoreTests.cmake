@@ -32,6 +32,9 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/tools/test_run_command_execution_limits.cpp"
   "${_lubancore_tests_root}/unit/trajectory/test_session_recovery_view.cpp"
   "${_lubancore_tests_root}/unit/trajectory/test_journal_native_receipts.cpp"
+  "${_lubancore_tests_root}/unit/trajectory/test_managed_session_ownership.cpp"
+  "${_lubancore_tests_root}/unit/trajectory/test_managed_session_reservation.cpp"
+  "${_lubancore_tests_root}/unit/memory/test_memory_project_commit_handoff.cpp"
   "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_journal_receipts.cpp"
   "${_lubancore_tests_root}/unit/platform/test_atomic_write.cpp"
   "${_lubancore_tests_root}/unit/tools/test_lua_protected.cpp"
@@ -49,6 +52,9 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/runtime/test_middleware_native_receipts.cpp"
   "${_lubancore_tests_root}/unit/hooks/test_middleware_dispatch_cause.cpp"
   "${_lubancore_tests_root}/unit/hooks/test_middleware_job_post_contract.cpp")
+if(NOT LUBANCORE_WITH_LUA)
+  list(FILTER LUBANCORE_FOCUSED_TEST_SOURCES EXCLUDE REGEX "/test_(lubancore_lua|lua_protected)\\.cpp$")
+endif()
 set(_lubancore_tests_exclude)
 if(LUBANCODE_BUILD_CLI)
   set(_lubancore_tests_exclude EXCLUDE_FROM_ALL)
@@ -76,13 +82,20 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   # The public-only child acceptance source is also built after relocation. It
   # belongs to these fixture executables, never the SDK library closure.
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/subagents.cpp"
-  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua_build_profile.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/actions.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/todo_write.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/agentic_rag.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/web_fetch.cpp"
   ${LUBANCORE_FOCUSED_TEST_SOURCES})
+if(LUBANCORE_WITH_LUA)
+  target_sources(lubancore_sdk_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua.cpp")
+endif()
 target_link_libraries(lubancore_sdk_tests PRIVATE
   lubancode_runtime lubancore_sdk doctest::doctest)
 target_include_directories(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}/support")
 target_compile_definitions(lubancore_sdk_tests PRIVATE
+  LUBANCORE_CONSUMER_WITH_LUA=$<BOOL:${LUBANCORE_WITH_LUA}>
   LUBANCORE_TEST_JOB_POST_SDK=1
   LUBANCODE_TEST_FIXTURES_DIR="${_lubancore_tests_root}/fixtures"
   LUBANCORE_TEST_SEARCH_PROBE="$<TARGET_FILE:lubancore_sdk_search_probe>"
@@ -123,6 +136,9 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
   set_tests_properties("${sdk_test}" PROPERTIES
     LABELS "sdk-focused" TIMEOUT 300
     ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
+  if(sdk_basename STREQUAL "test_lubancore_web_fetch.cpp")
+    set_property(TEST "${sdk_test}" APPEND PROPERTY ENVIRONMENT "NO_PROXY=127.0.0.1" "no_proxy=127.0.0.1")
+  endif()
   # SDK-only and combined builds keep this fixed-duration shell fixture isolated
   # from other CTest processes, while its own four concurrent contexts still run.
   if(WIN32 AND sdk_basename STREQUAL "test_run_command_execution_limits.cpp")
@@ -138,6 +154,19 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     set(sdk_original_test "unit.packages.package_manifest")
   elseif(sdk_basename STREQUAL "test_session_recovery_view.cpp")
     set(sdk_original_test "unit.trajectory.session_recovery_view")
+  elseif(sdk_basename STREQUAL "test_memory_project_commit_handoff.cpp")
+    set(sdk_original_test "unit.memory.memory_project_commit_handoff")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "memory-project-handoff")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "memory-project-handoff")
+    endif()
+  elseif(sdk_basename STREQUAL "test_managed_session_ownership.cpp" OR
+         sdk_basename STREQUAL "test_managed_session_reservation.cpp")
+    set(sdk_original_test "unit.trajectory.${sdk_stem}")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "managed-session-opening")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "managed-session-opening")
+    endif()
   elseif(sdk_basename STREQUAL "test_v3_result_store.cpp")
     set(sdk_original_test "unit.trajectory_v3.v3_result_store")
     set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-result-store")
@@ -150,11 +179,29 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     if(TEST "${sdk_original_test}")
       set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-journal-receipts")
     endif()
+  elseif(sdk_basename STREQUAL "test_lubancore_owned_job_deadline.cpp")
+    set(sdk_original_test "integration.sdk.lubancore_owned_job_deadline")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "sdk-owned-job-deadline")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "sdk-owned-job-deadline")
+    endif()
   elseif(sdk_basename STREQUAL "test_lubancore_job_operations.cpp")
     set(sdk_original_test "integration.sdk.lubancore_job_operations")
     set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "sdk-job-operations")
     if(TEST "${sdk_original_test}")
       set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "sdk-job-operations")
+    endif()
+  elseif(sdk_basename STREQUAL "test_lubancore_package_inventory.cpp")
+    set(sdk_original_test "integration.sdk.lubancore_package_inventory")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "sdk-package-inventory")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "sdk-package-inventory")
+    endif()
+  elseif(sdk_basename STREQUAL "test_lubancore_lua_build_profile.cpp")
+    set(sdk_original_test "integration.sdk.lubancore_lua_build_profile")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "sdk-lua-build-profile")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "sdk-lua-build-profile")
     endif()
   elseif(sdk_basename STREQUAL "test_lua_protected.cpp")
     set(sdk_original_test "unit.tools.lua_protected")

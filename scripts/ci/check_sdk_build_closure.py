@@ -23,6 +23,15 @@ except ImportError:
                                         prepare, read_reply, relative, sdk_host_only_source)
 
 
+try:
+    from .sdk_lua_profile import lua_graph_violations, read_lua_profile
+except ImportError:
+    try:
+        from sdk_lua_profile import lua_graph_violations, read_lua_profile
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_lua_profile import lua_graph_violations, read_lua_profile
+
+
 FORBIDDEN_TARGETS = {"lubancode_core", "lubancode_updater", "miniz",
                      *CHANNEL_HOST_TARGETS, *MBEDTLS_TARGETS}
 
@@ -97,7 +106,7 @@ def channel_ownership_violations(targets: dict) -> list[str]:
     return violations
 
 
-def inspect_graph(targets: dict) -> dict:
+def inspect_graph(targets: dict, with_lua: bool | None = None) -> dict:
     sdk = [key for key, target in targets.items() if target["name"] == "lubancore_sdk"]
     if len(sdk) != 1 or targets[sdk[0]]["type"] != "SHARED_LIBRARY":
         raise ValueError("expected exactly one shared SDK target")
@@ -158,11 +167,27 @@ def inspect_graph(targets: dict) -> dict:
                 targets[loop_owners[0]]["type"] != "STATIC_LIBRARY" or
                 lease_owners != loop_owners):
             violations.append("Agent loop lease implementation must belong once to lubancode_engine")
+    if with_lua is not None:
+        violations.extend(lua_graph_violations(targets, with_lua))
     return {"sdkBuildClosure": sorted(closure), "sdkProjectSources": sources,
             "status": "failed" if violations else "passed", "violations": violations}
 
 
-def inspect(source: Path, build: Path, config: str) -> dict:
+def web_fetch_reference_ownership_violations(targets: dict, testing: bool, with_cli: bool) -> list[str]:
+    helper = "examples/sdk-consumer/web_fetch.cpp"
+    owners = [(target["name"], target["type"]) for target in targets.values()
+              for source in target.get("luaSources", target.get("projectSources", [])) if source == helper]
+    expected = []
+    if testing:
+        expected.append(("lubancore_sdk_tests", "EXECUTABLE"))
+        if with_cli:
+            expected.append(("lubancode_tests", "EXECUTABLE"))
+    if sorted(owners) != sorted(expected):
+        return ["WebFetch public helper must belong exactly to the selected native reference executables"]
+    return []
+
+
+def inspect(source: Path, build: Path, config: str, lua_profile: str | None = None) -> dict:
     source, build = source.resolve(), build.resolve()
     reply = build / ".cmake/api/v1/reply"
     indices = sorted(reply.glob("index-*.json"))
@@ -183,17 +208,34 @@ def inspect(source: Path, build: Path, config: str) -> dict:
         target = read_reply(reply, entry)
         if target["id"] in targets or target["id"] != entry["id"]:
             raise ValueError("duplicate or mismatched target identity")
-        names = []
+        names, lua_sources = [], []
         for item in target.get("sources", []):
             path = Path(item["path"])
             name = relative(path if path.is_absolute() else source / path, source)
             if name and name.startswith(("src/", "include/")):
                 names.append(name)
+            if "compileGroupIndex" in item:
+                lua_sources.append(name or str(path if path.is_absolute() else source / path))
         targets[target["id"]] = {
             "name": target["name"], "type": target["type"], "projectSources": names,
             "dependencies": [item["id"] for item in target.get("dependencies", [])],
+            "luaSources": lua_sources,
         }
+    cache = read_reply(reply, index.get("reply", {}).get(CLIENT, {})["cache-v2"])
+    entries = {entry["name"]: entry["value"] for entry in cache["entries"]}
+    with_lua = read_lua_profile(entries, lua_profile)
     result = inspect_graph(targets)
+    if (source / "examples/sdk-consumer/web_fetch.cpp").is_file():
+        testing = str(entries.get("BUILD_TESTING", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        with_cli = str(entries.get("LUBANCODE_BUILD_CLI", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        result["violations"].extend(web_fetch_reference_ownership_violations(targets, testing, with_cli))
+        result["status"] = "failed" if result["violations"] else "passed"
+    if "LUBANCORE_WITH_LUA" in entries or lua_profile is not None:
+        violations = lua_graph_violations({key: {**target, "projectSources": target["luaSources"]}
+                                           for key, target in targets.items()}, with_lua)
+        result["violations"].extend(violations)
+        result["status"] = "failed" if result["violations"] else "passed"
+    result["luaProfile"] = "on" if with_lua else "off"
     return {"schemaVersion": 1, "githubSha": os.environ.get("GITHUB_SHA", ""),
             "sourceDir": str(source), "buildDir": str(build), "configuration": config,
             "fileApiIndex": str(indices[-1]), "targets": targets, **result}
@@ -205,13 +247,14 @@ def main() -> int:
     parser.add_argument("--source-dir", type=Path, default=Path.cwd())
     parser.add_argument("--build-dir", type=Path, required=True)
     parser.add_argument("--config", default="Release")
+    parser.add_argument("--lua-profile", choices=("on", "off"), default="on")
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     if args.prepare:
         prepare(args.build_dir)
         return 0
     try:
-        report = inspect(args.source_dir, args.build_dir, args.config)
+        report = inspect(args.source_dir, args.build_dir, args.config, args.lua_profile)
     except (KeyError, OSError, TypeError, ValueError) as error:
         report = {"status": "failed", "violations": [str(error)]}
     if args.report:

@@ -12,8 +12,46 @@ import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 
+try:
+    from .sdk_memory_handoff import check_memory_handoff_registration, check_memory_handoff_native
+except ImportError:
+    try:
+        from sdk_memory_handoff import check_memory_handoff_registration, check_memory_handoff_native
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_memory_handoff import check_memory_handoff_registration, check_memory_handoff_native
+
+try:
+    from .sdk_managed_opening import SOURCES as MANAGED_OPENING_SOURCES, check_managed_opening_registration, check_managed_opening_native
+except ImportError:
+    try:
+        from sdk_managed_opening import SOURCES as MANAGED_OPENING_SOURCES, check_managed_opening_registration, check_managed_opening_native
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_managed_opening import SOURCES as MANAGED_OPENING_SOURCES, check_managed_opening_registration, check_managed_opening_native
+
+try:
+    from .sdk_owned_job_deadline import check_owned_job_deadline_registration, check_owned_job_deadline_native
+except ImportError:
+    try:
+        from sdk_owned_job_deadline import check_owned_job_deadline_registration, check_owned_job_deadline_native
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_owned_job_deadline import check_owned_job_deadline_registration, check_owned_job_deadline_native
+
+
+try:
+    from .sdk_lua_profile import focused_roster, read_lua_profile
+except ImportError:
+    try:
+        from sdk_lua_profile import focused_roster, read_lua_profile
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_lua_profile import focused_roster, read_lua_profile
+
 
 REQUIRED = {
+    "sdk.focused.memory_project_commit_handoff",
+    "sdk.focused.managed_session_ownership",
+    "sdk.focused.managed_session_reservation",
+    "sdk.focused.lubancore_owned_job_deadline",
+    "sdk.focused.lubancore_web_fetch",
     "sdk.focused.lubancore_authorization",
     "sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest",
     "sdk.focused.tool_job_coordinator",
@@ -27,10 +65,14 @@ REQUIRED = {
     "sdk.focused.middleware_dispatch_cause",
     "sdk.focused.middleware_job_post_contract",
     "sdk.focused.lubancore_memory_blob_spi",
+    "sdk.focused.lubancore_todo_write",
+    "sdk.focused.lubancore_agentic_rag",
     "sdk.focused.lubancore_operation_turn_binding",
     "sdk.focused.journal_native_receipts",
     "sdk.focused.v3_journal_receipts",
     "sdk.focused.lubancore_job_operations",
+    "sdk.focused.lubancore_package_inventory",
+    "sdk.focused.lubancore_lua_build_profile",
     "sdk.focused.run_command_execution_limits",
     "sdk.focused.session_recovery_view",
     "sdk.focused.lubancore_recovery_view",
@@ -701,6 +743,240 @@ def check_memory_blob_consumer(section, command):
         raise RuntimeError("Memory blob relocated consumer did not finish its actual owned queue")
 
 
+TODO_WRITE_PATHS = ('admission', 'replacement', 'validation', 'isolation', 'recovery', 'lifetime')
+
+
+def check_todo_write_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_lubancore_todo_write.cpp"):
+        raise RuntimeError("Todo write registration must run the single absolute native source")
+
+
+def check_todo_write_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("Todo write native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Todo write executable is not the actual native fixture")
+    check_todo_write_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (6, 6, 0):
+        raise RuntimeError("Todo write native roster differs from six successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Todo write native assertions did not actually pass")
+    for path in TODO_WRITE_PATHS:
+        if section.splitlines().count("[sdk-todo-write-path] " + path) != 1:
+            raise RuntimeError("Todo write actual path did not finish once: " + path)
+
+
+def check_todo_write_consumer(section, command):
+    if (not isinstance(command, list) or len(command) != 3 or
+            not all(isinstance(value, str) and value for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in ("lubancore_consumer", "lubancore_consumer.exe") or
+            command[1] != "todo-write" or
+            not (command[2].startswith("/") or
+                 (ntpath.isabs(command[2]) and bool(ntpath.splitdrive(command[2])[0])))):
+        raise RuntimeError("Todo write consumer must run its actual relocated command")
+    check_native_command(section, command)
+    if (section.splitlines().count("[sdk-todo-write-consumer] complete") != 1 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Todo write relocated consumer did not finish its actual rounds")
+    for path in TODO_WRITE_PATHS:
+        if section.splitlines().count("[sdk-todo-write-path] " + path) != 1:
+            raise RuntimeError("Todo write relocated path did not finish once: " + path)
+
+
+AGENTIC_RAG_PATHS = ('retrieval', 'sources', 'preview', 'isolation', 'recovery', 'lifetime')
+
+WEB_FETCH_REQUEST_COUNTS = {'admission': 1, 'content': 4, 'limits': 9, 'redirects': 7, 'cancel': 4, 'isolation': 5}
+
+
+def check_web_fetch_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) and value for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_lubancore_web_fetch.cpp"):
+        raise RuntimeError("WebFetch registration must run one absolute native source with its full filter")
+
+
+def check_web_fetch_environment(properties):
+    environments = [item.get("value") for item in properties if item.get("name") == "ENVIRONMENT"]
+    if len(environments) != 1 or not isinstance(environments[0], list) or not all(isinstance(item, str) for item in environments[0]):
+        raise RuntimeError("WebFetch native registration lacks its explicit fixture environment")
+    for name in ("NO_PROXY", "no_proxy"):
+        if [value for value in environments[0] if value.startswith(name + "=")] != [name + "=127.0.0.1"]:
+            raise RuntimeError("WebFetch native loopback proxy exception is missing, duplicated or changed")
+
+
+def check_web_fetch_paths(section):
+    for path in WEB_FETCH_REQUEST_COUNTS:
+        if section.splitlines().count("[sdk-web-fetch-path] " + path) != 1:
+            raise RuntimeError("WebFetch actual path did not finish once: " + path)
+
+
+def check_web_fetch_decoder(section):
+    lines = [line.removeprefix("[sdk-web-fetch-decoder] ") for line in section.splitlines()
+             if line.startswith("[sdk-web-fetch-decoder] ")]
+    if len(lines) != 1:
+        raise RuntimeError("WebFetch must retain one actual owned decoder capability/result receipt")
+    try:
+        value = json.loads(lines[0])
+    except (ValueError, UnicodeError) as error:
+        raise RuntimeError("WebFetch decoder receipt is not JSON") from error
+    if (not isinstance(value, dict) or set(value) != {"gzip_decoding", "outcome"} or
+            type(value.get("gzip_decoding")) is not bool or
+            value["outcome"] != ("download_limit" if value["gzip_decoding"] else "unsupported_encoding")):
+        raise RuntimeError("WebFetch gzip result does not match its actual decoder capability")
+
+
+def check_web_fetch_native(section, command):
+    if not isinstance(command, list) or len(command) != 2 or not all(isinstance(value, str) for value in command):
+        raise RuntimeError("WebFetch native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("WebFetch executable is not the actual native fixture")
+    check_web_fetch_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(cases) != 1 or tuple(map(int, cases[0])) != (6, 6, 0) or len(assertions) != 1 or
+            int(assertions[0][0]) <= 0 or int(assertions[0][0]) != int(assertions[0][1]) or
+            int(assertions[0][2]) != 0 or section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("WebFetch native source must finish six nonempty successful cases")
+    check_web_fetch_paths(section)
+    check_web_fetch_decoder(section)
+    lines = [line for line in section.splitlines() if line.startswith("[sdk-web-fetch-fixture] ")]
+    if len(lines) != len(WEB_FETCH_REQUEST_COUNTS):
+        raise RuntimeError("WebFetch must retain six actual owned HTTP fixture retirement receipts")
+    seen = set()
+    for line in lines:
+        try:
+            value = json.loads(line.removeprefix("[sdk-web-fetch-fixture] "))
+        except (ValueError, UnicodeError) as error:
+            raise RuntimeError("WebFetch HTTP fixture receipt is not JSON") from error
+        if (not isinstance(value, dict) or set(value) != {"path", "quiescent", "requests", "stop_elapsed_ms"} or
+                not isinstance(value.get("path"), str) or value["path"] not in WEB_FETCH_REQUEST_COUNTS or value["path"] in seen or
+                value.get("quiescent") is not True or type(value.get("requests")) is not int or
+                value["requests"] != WEB_FETCH_REQUEST_COUNTS[value["path"]] or
+                type(value.get("stop_elapsed_ms")) is not int or not 0 <= value["stop_elapsed_ms"] < 3000):
+            raise RuntimeError("WebFetch HTTP fixture did not prove its exact requests and completed retirement")
+        seen.add(value["path"])
+
+
+def check_web_fetch_consumer(section, command, context):
+    if (not isinstance(command, list) or len(command) != 5 or
+            not all(isinstance(value, str) and value for value in command) or command[1] != "web-fetch" or
+            any(not (value.startswith("/") or (ntpath.isabs(value) and bool(ntpath.splitdrive(value)[0])))
+                for value in (command[0], command[2], command[4])) or
+            command[0].replace("\\", "/").split("/")[-1] not in ("lubancore_consumer", "lubancore_consumer.exe")):
+        raise RuntimeError("WebFetch consumer must run its actual relocated five-argument command")
+    try:
+        from .sdk_web_fetch_fixture import check_caller_receipts
+    except ImportError:
+        from sdk_web_fetch_fixture import check_caller_receipts
+    check_caller_receipts(context)
+    normalize = lambda value: value.replace("\\", "/")
+    if (command[3] != context["ready"]["base_url"] or normalize(command[4]) != normalize(context["requests_file"]) or
+            normalize(command[0]) != normalize(context.get("consumer_executable", "")) or
+            normalize(command[2]) != normalize(context["consumer_build"].rstrip("/\\") + "/state-web-fetch")):
+        raise RuntimeError("WebFetch consumer argv is not bound to its owned actual fixture and installed target")
+    check_native_command(section, command)
+    if (section.splitlines().count("[sdk-web-fetch-consumer] complete") != 1 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("WebFetch installed consumer did not finish its actual calls")
+    check_web_fetch_paths(section)
+    check_web_fetch_decoder(section)
+
+
+def check_agentic_rag_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_lubancore_agentic_rag.cpp"):
+        raise RuntimeError("Agentic RAG registration must run the single absolute native source")
+
+
+def check_agentic_rag_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("Agentic RAG native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Agentic RAG executable is not the actual native fixture")
+    check_agentic_rag_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (6, 6, 0):
+        raise RuntimeError("Agentic RAG native roster differs from six successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Agentic RAG native assertions did not actually pass")
+    for path in AGENTIC_RAG_PATHS:
+        if section.splitlines().count("[sdk-agentic-rag-path] " + path) != 1:
+            raise RuntimeError("Agentic RAG actual path did not finish once: " + path)
+
+
+def check_agentic_rag_consumer(section, command):
+    if (not isinstance(command, list) or len(command) != 3 or
+            not all(isinstance(value, str) and value for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in ("lubancore_consumer", "lubancore_consumer.exe") or
+            command[1] != "agentic-rag" or
+            not (command[2].startswith("/") or
+                 (ntpath.isabs(command[2]) and bool(ntpath.splitdrive(command[2])[0])))):
+        raise RuntimeError("Agentic RAG consumer must run its actual relocated command")
+    check_native_command(section, command)
+    if (section.splitlines().count("[sdk-agentic-rag-consumer] complete") != 1 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Agentic RAG relocated consumer did not finish its actual rounds")
+    for path in AGENTIC_RAG_PATHS:
+        if section.splitlines().count("[sdk-agentic-rag-path] " + path) != 1:
+            raise RuntimeError("Agentic RAG relocated path did not finish once: " + path)
+
+
+def check_agentic_rag_demo(section, command, context, scratch: Path, prefix: Path):
+    try:
+        from .sdk_rag_demo import check_demo_context, inside
+    except ImportError:
+        try:
+            from sdk_rag_demo import check_demo_context, inside
+        except ModuleNotFoundError:
+            from scripts.ci.sdk_rag_demo import check_demo_context, inside
+    check_demo_context(context, scratch, prefix)
+    if (not isinstance(command, list) or len(command) != 3 or
+            not all(isinstance(value, str) and value for value in command) or
+            not Path(command[0]).is_absolute() or Path(command[0]).resolve() != Path(context["executable"]).resolve() or
+            command[1] != "--fixture" or not Path(command[2]).is_absolute() or
+            not inside(Path(command[2]).resolve(), scratch.resolve()) or
+            any(inside(Path(command[2]).resolve(), Path(context[key]).resolve()) for key in ("source", "installed_prefix"))):
+        raise RuntimeError("Agentic RAG demo must run its actual independent binary and an absolute scratch state root")
+    check_native_command(section, command)
+    if (section.splitlines().count("[sdk-agentic-rag-consumer] complete") != 1 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Agentic RAG standalone example did not finish its actual rounds")
+    for path in AGENTIC_RAG_PATHS:
+        if section.splitlines().count("[sdk-agentic-rag-path] " + path) != 1:
+            raise RuntimeError("Agentic RAG standalone path did not finish once: " + path)
+
+
 OPERATION_TURN_BINDING_PATHS = ("actual", "source", "gap", "history", "relation", "isolation")
 
 
@@ -841,11 +1117,113 @@ def check_job_operation_native(section, command):
             raise RuntimeError("Job operation actual path did not finish once: " + path)
 
 
+PACKAGE_INVENTORY_PATHS = ('owned', 'fingerprint', 'manifest', 'input', 'limits', 'links', 'changed', 'isolation')
+
+
+def check_package_inventory_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_lubancore_package_inventory.cpp"):
+        raise RuntimeError("Package inventory must register the single absolute native source")
+
+
+def check_package_inventory_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("Package inventory native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Package inventory executable is not the actual native fixture")
+    check_package_inventory_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (8, 8, 0):
+        raise RuntimeError("Package inventory roster differs from eight successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Package inventory native assertions did not actually pass")
+    for path in PACKAGE_INVENTORY_PATHS:
+        if section.splitlines().count("[sdk-package-inventory-path] " + path) != 1:
+            raise RuntimeError("Package inventory actual path did not finish once: " + path)
+
+
+def check_package_inventory_consumer(section, command):
+    def absolute(value):
+        return (isinstance(value, str) and bool(value) and "\0" not in value and
+                (value.startswith("/") or (ntpath.isabs(value) and bool(ntpath.splitdrive(value)[0]))))
+    if (not isinstance(command, list) or len(command) != 3 or
+            not all(isinstance(value, str) and value for value in command) or
+            not absolute(command[0]) or not absolute(command[2]) or
+            command[0].replace("\\", "/").split("/")[-1] not in ("lubancore_consumer", "lubancore_consumer.exe") or
+            command[1] != "package-inventory"):
+        raise RuntimeError("Package inventory consumer must run its absolute relocated command and state")
+    check_native_command(section, command)
+    if (section.splitlines().count("[sdk-package-inventory-consumer] complete") != 1 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Package inventory consumer did not finish the actual owned capture")
+
+
+LUA_BUILD_PATHS = ("default-off", "selection", "disabled-resume", "frozen-plan", "isolation", "lifetime")
+
+def check_lua_build_registration(command, executable="lubancore_sdk_tests"):
+    absolute = lambda value: isinstance(value, str) and bool(value) and "\0" not in value and (
+        value.startswith("/") or (ntpath.isabs(value) and bool(ntpath.splitdrive(value)[0])))
+    if (not isinstance(command, list) or len(command) != 2 or not absolute(command[0]) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_lubancore_lua_build_profile.cpp"):
+        raise RuntimeError("Lua build profile must register its actual absolute native source")
+
+def check_lua_build_native(section, command, enabled=True):
+    if not isinstance(command, list) or not command or not isinstance(command[0], str):
+        raise RuntimeError("Lua build native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Lua build profile ran a foreign native executable")
+    check_lua_build_registration(command, executable)
+    check_native_command(section, command)
+    summaries = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if summaries != [("6", "6", "0")]:
+        raise RuntimeError("Lua build native roster differs from six actual cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or assertions[0][0] != assertions[0][1] or
+            int(assertions[0][2]) != 0 or section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Lua build native assertions did not pass")
+    profile = "on" if enabled else "off"
+    observed = [line for line in section.splitlines() if line.startswith("[sdk-lua-build-case-profile] ")]
+    if sorted(observed) != sorted("[sdk-lua-build-case-profile] " + path + " " + profile for path in LUA_BUILD_PATHS):
+        raise RuntimeError("Lua native evidence contains a different or duplicate configured profile")
+    for path in LUA_BUILD_PATHS:
+        if (section.splitlines().count("[sdk-lua-build-path] " + path) != 1 or
+                section.splitlines().count("[sdk-lua-build-case-profile] " + path + " " + profile) != 1):
+            raise RuntimeError("Lua actual case/profile did not finish once: " + path)
+
+def check_lua_build_consumer(section, command, enabled=True):
+    absolute = lambda value: isinstance(value, str) and bool(value) and "\0" not in value and (
+        value.startswith("/") or (ntpath.isabs(value) and bool(ntpath.splitdrive(value)[0])))
+    if (not isinstance(command, list) or len(command) != 3 or not absolute(command[0]) or not absolute(command[2]) or
+            command[0].replace("\\", "/").split("/")[-1] not in ("lubancore_consumer", "lubancore_consumer.exe") or
+            command[1] != "lua-build-profile"):
+        raise RuntimeError("Lua build consumer must run its actual absolute relocated command")
+    check_native_command(section, command)
+    profile = "on" if enabled else "off"
+    if [line for line in section.splitlines() if line.startswith("[sdk-lua-build-profile] ")] != ["[sdk-lua-build-profile] " + profile]:
+        raise RuntimeError("Lua consumer evidence contains a different or duplicate configured profile")
+    if any(section.splitlines().count(marker) != 1 for marker in (
+            "[sdk-lua-build-profile] " + profile, "[sdk-lua-build-consumer] complete", "Test Passed.")):
+        raise RuntimeError("Lua actual installed profile did not finish once")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
     parser.add_argument("--config", default="Release")
     parser.add_argument("--sdk-only", action="store_true")
+    parser.add_argument("--lua-profile", choices=("on", "off"), default="on")
     args = parser.parse_args()
     build = args.build_dir.resolve()
     evidence = build / "test-evidence" / "sdk-focused"
@@ -863,8 +1241,13 @@ def main():
     }, indent=2) + "\n", encoding="utf-8")
     (evidence / "tests.json").write_bytes(listed.stdout)
     listed.check_returncode()
+    cache = (build / "CMakeCache.txt").read_text(encoding="utf-8")
+    entries = {line.split(":", 1)[0]: line.split("=", 1)[1] for line in cache.splitlines()
+               if ":" in line and "=" in line and not line.startswith(("#", "//"))}
+    with_lua = read_lua_profile(entries, args.lua_profile)
+    required = focused_roster(REQUIRED, with_lua)
     tests = json.loads(listed.stdout)["tests"]
-    if len(tests) != len(REQUIRED) or {t["name"] for t in tests} != REQUIRED:
+    if len(tests) != len(required) or {t["name"] for t in tests} != required:
         raise RuntimeError("SDK test files are missing, duplicated or unexpected")
     for test in tests:
         props = {p["name"]: p["value"] for p in test.get("properties", [])}
@@ -892,12 +1275,29 @@ def main():
             check_event_sink_registration(test.get("command", []))
         if test["name"] == "sdk.focused.lubancore_memory_blob_spi":
             check_memory_blob_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_todo_write":
+            check_todo_write_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_agentic_rag":
+            check_agentic_rag_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_web_fetch":
+            check_web_fetch_registration(test.get("command", []))
+            check_web_fetch_environment(test.get("properties", []))
         if test["name"] == "sdk.focused.lubancore_operation_turn_binding":
             check_operation_turn_binding_registration(test.get("command", []))
         if test["name"] == "sdk.focused.journal_native_receipts":
             check_journal_receipt_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_lua_build_profile":
+            check_lua_build_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_package_inventory":
+            check_package_inventory_registration(test.get("command", []))
         if test["name"] == "sdk.focused.lubancore_job_operations":
             check_job_operation_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.memory_project_commit_handoff":
+            check_memory_handoff_registration(test.get("command", []))
+        if test["name"].removeprefix("sdk.focused.") in MANAGED_OPENING_SOURCES:
+            check_managed_opening_registration(test.get("command", []), test["name"].removeprefix("sdk.focused."))
+        if test["name"] == "sdk.focused.lubancore_owned_job_deadline":
+            check_owned_job_deadline_registration(test.get("command", []))
         if test["name"] == "sdk.focused.v3_journal_receipts":
             check_v3_journal_witness_registration(test.get("command", []))
         if test["name"] == "sdk.focused.run_command_execution_limits":
@@ -909,8 +1309,8 @@ def main():
             check_package_registration(test.get("command", []), source, "lubancore_sdk_tests")
     (evidence / "context.json").write_text(json.dumps({
         "githubSha": os.environ.get("GITHUB_SHA"), "buildDir": str(build),
-        "configuration": args.config, "sdkOnly": args.sdk_only,
-        "requiredTests": sorted(REQUIRED),
+        "configuration": args.config, "sdkOnly": args.sdk_only, "luaProfile": args.lua_profile,
+        "requiredTests": sorted(required),
     }, indent=2), encoding="utf-8")
     results = evidence / "results.xml"
     try:
@@ -921,7 +1321,7 @@ def main():
         if native_log.exists():
             shutil.copyfile(native_log, evidence / "LastTest.log")
     cases = ET.parse(results).getroot().findall(".//testcase")
-    if len(cases) != len(REQUIRED) or {c.attrib["name"] for c in cases} != REQUIRED:
+    if len(cases) != len(required) or {c.attrib["name"] for c in cases} != required:
         raise RuntimeError("JUnit does not cover every SDK test file")
     # Successful JUnit output can be truncated before the doctest summary.
     native_sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
@@ -981,15 +1381,34 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_memory_blob_spi":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_memory_blob_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_todo_write":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_todo_write_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_agentic_rag":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_agentic_rag_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_web_fetch":
+            check_web_fetch_native(sections[0], commands[0])
         if case.attrib["name"] == "sdk.focused.lubancore_operation_turn_binding":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_operation_turn_binding_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.journal_native_receipts":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_journal_receipt_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_lua_build_profile":
+            check_lua_build_native(sections[0], commands[0], with_lua)
+        if case.attrib["name"] == "sdk.focused.lubancore_package_inventory":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_package_inventory_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.lubancore_job_operations":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_job_operation_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.memory_project_commit_handoff":
+            check_memory_handoff_native(sections[0], commands[0])
+        if case.attrib["name"].removeprefix("sdk.focused.") in MANAGED_OPENING_SOURCES:
+            check_managed_opening_native(sections[0], commands[0], case.attrib["name"].removeprefix("sdk.focused."))
+        if case.attrib["name"] == "sdk.focused.lubancore_owned_job_deadline":
+            check_owned_job_deadline_native(sections[0], commands[0])
         if case.attrib["name"] == "sdk.focused.v3_journal_receipts":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_v3_journal_witness_native(sections[0], registered["command"])
@@ -1052,7 +1471,7 @@ def main():
                 marker = "[child-adoption-path] " + path
                 if sections[0].splitlines().count(marker) != 1:
                     raise RuntimeError("Child adoption actual path did not finish once: " + path)
-    print(f"SDK focused: all {len(REQUIRED)} registered test files executed nonempty native test cases")
+    print(f"SDK focused: all {len(required)} registered test files executed nonempty native test cases")
 
 
 if __name__ == "__main__":

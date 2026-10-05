@@ -24,3 +24,4 @@ ctest --test-dir /path/to/consumer-build -C Release --output-on-failure
 测试数据放在消费工程构建目录下，每轮用新子目录，不清理调用方已有目录。
 
 - `memory-blobs`：只调公开 SDK，宿主显式提供本场独占 Memory 片段存储。实际提交、采用大片段，再关场、同ID恢复；核原引用、模型正文和旧片段不重写。数据帽与 SHA 校验不当宿主堆内存硬帽。具体承诺见 [Memory 片段 CAS SPI](../../docs/development/sdk-memory-blob-spi.md)。远端原生仍须按当前提交验收。
+- `agentic-rag`：宿主持检索器，公开 SDK 跑模型、工具往返、历史、恢复与关场。来源与答案从真实检索结果取；另验 preview、两场隔离与取消。迁位验收另复制四件 [独立示例](../sdk-rag/README.md)，单独配置、构建，再跑 `--fixture`。fixture 不验真实模型效果，不当核心 RAG 或 ACL。

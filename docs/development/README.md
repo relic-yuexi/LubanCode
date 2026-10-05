@@ -83,6 +83,7 @@ git diff --check
 - [Windows 命令 Job 实际观测](windows-command-job-observation.md)
 - [终态面板夹具与重复渲染](agent-transcript-stable-fixture.md)
 - [SDK 私有组合与 PR 收口](sdk-pr-consolidation.md)
+- [公开 SDK Agentic RAG 宿主参考例](sdk-agentic-rag-example.md)
 - [私有 ASan 编译画像](sdk-asan-compile-profile.md)
 - [Managed 会话身份合同](lubancore-managed-identity.md)
 - [LubanCore 模块边界](lubancore-module-boundaries.md)

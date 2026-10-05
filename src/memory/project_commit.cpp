@@ -3,11 +3,17 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <iomanip>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -43,6 +49,151 @@ bool Absent(const fs::path& path, std::error_code& ec) {
     return ec == std::errc::no_such_file_or_directory ||
            (!ec && status.type() == fs::file_type::not_found);
 }
+
+// Local handoff supplements, never replaces, the on-disk OwnerLock. Weak slots
+// retain neither Sessions nor cancellation/write callbacks. Separate copies of
+// this implementation (e.g. another DSO) still synchronize via OwnerLock.
+struct ProjectHandoffTarget { fs::path memory, workspace; };
+struct ProjectHandoffWaiter { std::thread::id thread = std::this_thread::get_id(); };
+struct ProjectHandoffSlot {
+    explicit ProjectHandoffSlot(ProjectHandoffTarget value) : target(std::move(value)) {}
+    const ProjectHandoffTarget target;
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::deque<std::shared_ptr<ProjectHandoffWaiter>> waiting;
+    std::thread::id holder;
+    bool held = false;
+};
+struct ProjectHandoffRegistry {
+    std::mutex mutex;
+    std::vector<std::weak_ptr<ProjectHandoffSlot>> slots;
+    // A snapshot pins its epoch, so address reuse cannot pass the publication
+    // check. Pruning dead weak slots needs no epoch: none can have live waiters.
+    std::shared_ptr<const unsigned char> epoch = std::make_shared<const unsigned char>(0);
+};
+
+std::expected<ProjectHandoffTarget, std::string> HandoffTarget(const fs::path& memory,
+                                                             const fs::path& workspace) {
+    std::error_code error;
+    if (Absent(memory, error)) return ProjectHandoffTarget{workspace / "memory", workspace};
+    if (error || !fs::is_directory(fs::symlink_status(memory, error)) || error)
+        return std::unexpected("memory.commit.invalid_directory");
+    auto real = fs::canonical(memory, error);
+    if (error || !IsWithin(real, workspace)) return std::unexpected("memory.commit.path_escape");
+    return ProjectHandoffTarget{std::move(real), workspace};
+}
+
+std::expected<bool, std::string> SameHandoffTarget(const ProjectHandoffTarget& a,
+                                                 const ProjectHandoffTarget& b) {
+    if (a.memory == b.memory) return true;
+    const auto present = [](const fs::path& path) -> std::expected<bool, std::string> {
+        std::error_code status_error;
+        const auto status = fs::symlink_status(path, status_error);
+        if (status_error == std::errc::no_such_file_or_directory ||
+            (!status_error && status.type() == fs::file_type::not_found)) return false;
+        if (status_error || !fs::is_directory(status))
+            return std::unexpected("memory.commit.handoff_identity_failed");
+        return true;
+    };
+    const auto a_present = present(a.memory), b_present = present(b.memory);
+    if (!a_present || !b_present)
+        return std::unexpected("memory.commit.handoff_identity_failed");
+    std::error_code error;
+    // equivalent() requires existing paths; libc++ need not report ENOENT for
+    // an absent leaf. Detect absence through status, never an arbitrary error.
+    if (*a_present && *b_present) {
+        const bool same = fs::equivalent(a.memory, b.memory, error);
+        if (error) return std::unexpected("memory.commit.handoff_identity_failed");
+        return same;
+    }
+    // Before mkdir, canonical parents are the actual existing identity. This
+    // also joins Windows case/short-path aliases without guessing a case fold.
+    if (a.memory.filename() != "memory" || b.memory.filename() != "memory")
+        return std::unexpected("memory.commit.handoff_identity_failed");
+    const bool parents = fs::equivalent(a.workspace, b.workspace, error);
+    if (error) return std::unexpected("memory.commit.handoff_identity_failed");
+    return parents;
+}
+
+std::expected<std::shared_ptr<ProjectHandoffSlot>, std::string> HandoffSlot(ProjectHandoffTarget target) {
+    static ProjectHandoffRegistry registry;
+    for (;;) {
+        std::vector<std::shared_ptr<ProjectHandoffSlot>> snapshot;
+        std::shared_ptr<const unsigned char> epoch;
+        {
+            std::lock_guard lock(registry.mutex);
+            std::erase_if(registry.slots, [](const auto& weak) { return weak.expired(); });
+            snapshot.reserve(registry.slots.size());
+            for (const auto& weak : registry.slots) if (auto live = weak.lock()) snapshot.push_back(std::move(live));
+            epoch = registry.epoch;
+        }
+        for (const auto& slot : snapshot) {
+            auto same = SameHandoffTarget(target, slot->target); // filesystem outside registry lock
+            if (!same) return std::unexpected(same.error());
+            if (*same) return slot;
+        }
+        auto candidate = std::make_shared<ProjectHandoffSlot>(target);
+        auto next_epoch = std::make_shared<const unsigned char>(0);
+        {
+            std::lock_guard lock(registry.mutex);
+            if (registry.epoch != epoch) continue; // another publisher may have used an equivalent spelling
+            registry.slots.push_back(candidate);
+            registry.epoch = std::move(next_epoch);
+        }
+        return candidate;
+    }
+}
+
+class ProjectHandoffLease final {
+public:
+    ProjectHandoffLease(ProjectHandoffLease&& other) noexcept
+        : slot_(std::move(other.slot_)), waiter_(std::move(other.waiter_)), held_(std::exchange(other.held_, false)) {}
+    ProjectHandoffLease(const ProjectHandoffLease&) = delete;
+    ProjectHandoffLease& operator=(const ProjectHandoffLease&) = delete;
+    ~ProjectHandoffLease() {
+        if (!slot_) return;
+        {
+            std::lock_guard lock(slot_->mutex);
+            if (held_) { slot_->held = false; slot_->holder = {}; }
+            else std::erase(slot_->waiting, waiter_);
+        }
+        slot_->changed.notify_all();
+    }
+    static std::expected<ProjectHandoffLease, std::string> Acquire(
+        ProjectHandoffTarget target, const ProjectCommitCancellation& cancelled) {
+        auto found = HandoffSlot(std::move(target));
+        if (!found) return std::unexpected(found.error());
+        auto slot = std::move(*found);
+        auto waiter = std::make_shared<ProjectHandoffWaiter>();
+        {
+            std::lock_guard lock(slot->mutex);
+            if ((slot->held && slot->holder == waiter->thread) ||
+                std::any_of(slot->waiting.begin(), slot->waiting.end(), [&](const auto& item) { return item->thread == waiter->thread; }))
+                return std::unexpected("memory.commit.reentrant");
+            slot->waiting.push_back(waiter);
+        }
+        ProjectHandoffLease lease(std::move(slot), std::move(waiter));
+        for (;;) {
+            // The queued ticket already exists when arbitrary cancellation code
+            // runs, so a same-thread reentry is refused instead of waiting on us.
+            if (cancelled && cancelled()) return std::unexpected("memory.commit.cancelled");
+            std::unique_lock lock(lease.slot_->mutex);
+            if (!lease.slot_->held && lease.slot_->waiting.front() == lease.waiter_) {
+                lease.slot_->waiting.pop_front();
+                lease.slot_->held = true; lease.slot_->holder = lease.waiter_->thread; lease.held_ = true;
+                return lease;
+            }
+            lease.slot_->changed.wait_for(lock, std::chrono::milliseconds(10));
+        }
+    }
+private:
+    ProjectHandoffLease(std::shared_ptr<ProjectHandoffSlot> slot, std::shared_ptr<ProjectHandoffWaiter> waiter) noexcept
+        : slot_(std::move(slot)), waiter_(std::move(waiter)) {}
+    std::shared_ptr<ProjectHandoffSlot> slot_;
+    std::shared_ptr<ProjectHandoffWaiter> waiter_;
+    bool held_ = false;
+};
+
 std::expected<void, std::string> Directory(const fs::path& path, const fs::path& root) {
     std::error_code ec;
     if (Absent(path, ec)) {
@@ -209,6 +360,12 @@ ProjectCommitReceipt Run(const ProjectCommitContext& context, const SaveRequest&
         const auto identity = SaveIdentity(context, request);
         if (!SafeText(identity.dump(), 64 * 1024)) { fail("memory.commit.invalid_text"); return receipt; }
         receipt.request_sha256 = hooks::Sha256Hex(identity.dump());
+        auto target = HandoffTarget(memory, workspace);
+        if (!target) { fail(target.error()); return receipt; }
+        // Declared before OwnerLock: its actual on-disk Release finishes before
+        // the next local ticket may enter TryAcquire. All mutations stay inside.
+        auto handoff = ProjectHandoffLease::Acquire(std::move(*target), cancelled);
+        if (!handoff) { fail(handoff.error()); return receipt; }
         for (const auto& directory : {memory, memory / ".state", lifecycle}) {
             if (inspect_only) {
                 const auto status = fs::symlink_status(directory, ec);

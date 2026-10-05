@@ -121,14 +121,14 @@ class OptionalHostClosureTests(unittest.TestCase):
     def test_package_may_remain_in_cli_without_entering_the_sdk_closure(self):
         complete_channel_hosts(self.targets)
         self.targets["cli"] = {"name": "lubancode_core", "type": "STATIC_LIBRARY",
-                               "projectSources": ["src/package/inventory.cpp"],
+                               "projectSources": ["src/package/catalog.cpp"],
                                "dependencies": ["host", "channel_runtime"]}
         self.assertEqual(closure.inspect_graph(self.targets)["status"], "passed")
         self.targets["sdk"]["dependencies"].append("cli")
         report = closure.inspect_graph(self.targets)
         self.assertEqual(report["status"], "failed")
         self.assertTrue(any("lubancode_core" in v for v in report["violations"]))
-        self.assertTrue(any("src/package/inventory.cpp" in v for v in report["violations"]))
+        self.assertTrue(any("src/package/catalog.cpp" in v for v in report["violations"]))
         self.targets["sdk"]["dependencies"].remove("cli")
         self.targets["engine"]["projectSources"].append("src/package/semver.cpp")
         self.assertEqual(closure.inspect_graph(self.targets)["status"], "failed")

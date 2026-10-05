@@ -30,8 +30,13 @@
 
 namespace lubancore_consumer {
 void Packages();
+void PackageInventory(const std::filesystem::path& base);
 void EventSink(const std::filesystem::path& base);
 void MemoryBlobs(const std::filesystem::path& base);
+void TodoWrite(const std::filesystem::path& base);
+void AgenticRag(const std::filesystem::path& base);
+void WebFetch(const std::filesystem::path& base, const std::string& base_url,
+              const std::filesystem::path& requests_file);
 void Actions(const std::filesystem::path& base);
 void BuiltinSearch(const std::filesystem::path& base, const std::filesystem::path& resource_root);
 void MemorySeed(const std::filesystem::path& base);
@@ -44,6 +49,8 @@ void SubagentResume(const std::filesystem::path& base);
 void Lua(const std::filesystem::path& base);
 void LuaSeed(const std::filesystem::path& base);
 void LuaResume(const std::filesystem::path& base);
+void LuaBuildProfile(const std::filesystem::path& base);
+void LuaBuildCross(const std::string& mode, const std::filesystem::path& base);
 }
 
 // Deliberately only installed public headers and the C++ standard library.
@@ -1683,7 +1690,8 @@ int main(int argc, char** argv) {
     try {
         Check(argc >= 2, "usage: lubancore_consumer MODE ABSOLUTE_STATE_DIRECTORY [ABSOLUTE_INSTALLED_RESOURCE_ROOT]");
         const std::string mode = argv[1];
-        Check(argc == (mode == "builtin-search" ? 4 : 3), "builtin-search requires STATE and installed ROOT; other modes require STATE only");
+        Check(argc == (mode == "builtin-search" ? 4 : mode == "web-fetch" ? 5 : 3),
+              "builtin-search requires STATE and installed ROOT; web-fetch requires STATE, explicit URL and request ledger; other modes require STATE only");
         const fs::path base = Path(argv[2]);
         Check(base.is_absolute(), "state directory must be absolute");
         fs::create_directories(base);
@@ -1696,6 +1704,7 @@ int main(int argc, char** argv) {
             ReentryAndOverflow(base);
             InvalidOptions(base);
         } else if (mode == "packages") { lubancore_consumer::Packages();
+        } else if (mode == "package-inventory") { lubancore_consumer::PackageInventory(base);
         } else if (mode == "isolation") {
             FourSessionIsolation(base);
             SmallToolCaptureLifetime(base);
@@ -1703,6 +1712,9 @@ int main(int argc, char** argv) {
         else if (mode == "extensions") PublicExtensions(base);
         else if (mode == "event-sink") lubancore_consumer::EventSink(base);
         else if (mode == "memory-blobs") lubancore_consumer::MemoryBlobs(base);
+        else if (mode == "todo-write") lubancore_consumer::TodoWrite(base);
+        else if (mode == "agentic-rag") lubancore_consumer::AgenticRag(base);
+        else if (mode == "web-fetch") lubancore_consumer::WebFetch(base, argv[3], Path(argv[4]));
         else if (mode == "actions") lubancore_consumer::Actions(base);
         else if (mode == "results") PublicResults(base);
         else if (mode == "skills-seed") SkillsSeed(base);
@@ -1717,6 +1729,9 @@ int main(int argc, char** argv) {
         else if (mode == "lua") lubancore_consumer::Lua(base);
         else if (mode == "lua-seed") lubancore_consumer::LuaSeed(base);
         else if (mode == "lua-resume") lubancore_consumer::LuaResume(base);
+        else if (mode == "lua-build-profile") lubancore_consumer::LuaBuildProfile(base);
+        else if (mode == "lua-build-seed-off" || mode == "lua-build-resume-off" ||
+                 mode == "lua-build-seed-on" || mode == "lua-build-reject-on") lubancore_consumer::LuaBuildCross(mode, base);
         else if (mode == "builtin-search") lubancore_consumer::BuiltinSearch(base, Path(argv[3]));
         else if (mode == "result-seed") ResultSeed(base);
         else if (mode == "result-resume") ResultResume(base);

@@ -17,6 +17,15 @@ import re
 import sys
 
 
+try:
+    from .sdk_lua_profile import lua_graph_violations, read_lua_profile
+except ImportError:
+    try:
+        from sdk_lua_profile import lua_graph_violations, read_lua_profile
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_lua_profile import lua_graph_violations, read_lua_profile
+
+
 CLIENT = "client-lubancore-boundary"
 # Freeze host ownership independently from the current CMake source lists.
 # File API reports must prove every implementation's actual sole target owner.
@@ -26,9 +35,13 @@ SDK_NEUTRAL_CHANNEL_FILES = {
     "src/channel/types.cpp", "src/channel/types.hpp",
     "src/channel/channel_config.cpp", "src/channel/channel_config.hpp",
 }
-SDK_NEUTRAL_PACKAGE_SOURCES = frozenset({"src/package/semver.cpp", "src/package/manifest.cpp"})
+SDK_NEUTRAL_PACKAGE_SOURCES = frozenset({
+    "src/package/semver.cpp", "src/package/manifest.cpp",
+    "src/package/inventory.cpp", "src/package/inventory_snapshot.cpp",
+})
 SDK_NEUTRAL_PACKAGE_FILES = SDK_NEUTRAL_PACKAGE_SOURCES | {
     "src/package/semver.hpp", "src/package/manifest.hpp",
+    "src/package/inventory.hpp", "src/package/inventory_snapshot.hpp",
 }
 CHANNEL_HOST_SOURCES = frozenset({
     "src/channel/account_lock.cpp",
@@ -124,6 +137,9 @@ SHARED_SDK_TEST_SOURCES = {
     "tests/unit/tools/test_tool_job_post_live_invocation.cpp",
     "tests/unit/tools/test_run_command_execution_limits.cpp",
     "tests/unit/trajectory/test_session_recovery_view.cpp",
+    "tests/unit/trajectory/test_managed_session_ownership.cpp",
+    "tests/unit/trajectory/test_managed_session_reservation.cpp",
+    "tests/unit/memory/test_memory_project_commit_handoff.cpp",
     "tests/unit/trajectory/test_journal_native_receipts.cpp",
     "tests/unit/trajectory_v3/test_v3_journal_receipts.cpp",
     "tests/unit/trajectory_v3/test_v3_result_store.cpp",
@@ -153,6 +169,40 @@ PRIVATE_TEST_PROBES = {
 # rather than exposed as additional DLL ABI. No other SDK implementation gets
 # this testing-only exception.
 PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp", "src/sdk/memory.cpp", "src/sdk/action_dispatch.cpp", "src/sdk/operation_ledger.cpp", "src/sdk/job_operations.cpp"}
+TODO_CONSUMER_SOURCE = "examples/sdk-consumer/todo_write.cpp"
+RAG_CONSUMER_SOURCE = "examples/sdk-consumer/agentic_rag.cpp"
+WEB_FETCH_CONSUMER_SOURCE = "examples/sdk-consumer/web_fetch.cpp"
+
+
+def todo_consumer_ownership_violations(targets, testing):
+    owners = [(target["name"], target["type"]) for target in targets.values()
+              for entry in target["sources"]
+              if entry.get("compiled") and entry.get("projectPath") == TODO_CONSUMER_SOURCE]
+    expected = [("lubancore_sdk_tests", "EXECUTABLE")] if testing else []
+    if sorted(owners) != expected:
+        return ["Todo consumer helper requires exactly the selected reference-test owner when testing is ON"]
+    return []
+
+def rag_consumer_ownership_violations(targets, testing):
+    owners = [(target["name"], target["type"]) for target in targets.values()
+              for entry in target["sources"]
+              if entry.get("compiled") and entry.get("projectPath") == RAG_CONSUMER_SOURCE]
+    expected = [("lubancore_sdk_tests", "EXECUTABLE")] if testing else []
+    if sorted(owners) != expected:
+        return ["RAG consumer helper requires exactly the selected reference-test owner when testing is ON"]
+    return []
+
+
+def web_fetch_consumer_ownership_violations(targets, testing):
+    owners = [(target["name"], target["type"]) for target in targets.values()
+              for entry in target["sources"]
+              if entry.get("compiled") and entry.get("projectPath") == WEB_FETCH_CONSUMER_SOURCE]
+    expected = [("lubancore_sdk_tests", "EXECUTABLE")] if testing else []
+    if sorted(owners) != expected:
+        return ["WebFetch consumer helper requires exactly the selected reference-test owner when testing is ON"]
+    return []
+
+
 # Preserve the SDK state/stdio guard when this implementation moves into a
 # shared internal header. Other runtime process code keeps its existing scope.
 SDK_STATE_BOUNDARY_FILES = {"src/runtime/middleware_deferred_effects.hpp",
@@ -261,7 +311,7 @@ def read_reply(reply: Path, reference: dict) -> dict:
     return json.loads((reply / filename).read_text(encoding="utf-8"))
 
 
-def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dict:
+def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_profile: str | None = None) -> dict:
     source, build = source.resolve(), build.resolve()
     reply = build / ".cmake/api/v1/reply"
     indices = sorted(reply.glob("index-*.json"))
@@ -295,12 +345,20 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         if value.upper() not in accepted:
             violations.append(f"cache {name} must be {'ON' if expected else 'OFF'}, got {value}")
 
+    with_lua = read_lua_profile(entries, lua_profile)
+    flags["LUBANCORE_WITH_LUA"] = "ON" if with_lua else "OFF"
     targets = {}
     source_contexts: list[tuple[Path, tuple[Path, ...]]] = []
 
     def check_project_path(name: str, owner: str) -> None:
         if host_path(name):
             violations.append(f"target {owner} includes host source {name}")
+        if name == TODO_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
+            violations.append("Todo consumer helper is not a selected testing-only source: " + owner)
+        if name == RAG_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
+            violations.append("RAG consumer helper is not a selected testing-only source: " + owner)
+        if name == WEB_FETCH_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
+            violations.append("WebFetch consumer helper is not a selected testing-only source: " + owner)
         if name in {"src/sdk/memory.cpp", "src/sdk/operation_ledger.cpp", "src/sdk/job_operations.cpp"} and owner not in {"lubancore_sdk", "lubancore_sdk_tests"}:
             violations.append(f"unregistered private SDK reference owner: {owner} includes {name}")
         if owner == "lubancore_sdk_tests" and name.startswith("src/sdk/") and name.endswith(".cpp"):
@@ -346,7 +404,7 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
             source_facts.append({"path": str(path), "projectPath": name,
                                  "compiled": "compileGroupIndex" in entry,
                                  "generated": entry.get("isGenerated", False)})
-            if name and name.startswith(("src/", "include/", "tests/")):
+            if name and (name.startswith(("src/", "include/", "tests/")) or name in {TODO_CONSUMER_SOURCE, RAG_CONSUMER_SOURCE, WEB_FETCH_CONSUMER_SOURCE}):
                 check_project_path(name, target["name"])
                 group_index = entry.get("compileGroupIndex")
                 include_dirs = include_groups[group_index] if group_index is not None else ()
@@ -370,6 +428,11 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         "name": target["name"], "type": target["type"],
         "projectSources": [entry["projectPath"] for entry in target["sources"] if entry["compiled"]],
     } for key, target in targets.items()}))
+    if "LUBANCORE_WITH_LUA" in entries or lua_profile is not None:
+        violations.extend(lua_graph_violations({key: {
+            "name": target["name"], "type": target["type"],
+            "projectSources": [entry["projectPath"] or entry["path"] for entry in target["sources"] if entry["compiled"]],
+        } for key, target in targets.items()}, with_lua))
     for target in targets.values():
         if target["name"] in PRIVATE_TEST_PROBES:
             label = "search probe" if target["name"] == SEARCH_PROBE_TARGET else "command limits probe"
@@ -379,6 +442,12 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
                 linked = targets.get(dependency, {})
                 if linked.get("name") != "ZERO_CHECK" or linked.get("type") != "UTILITY":
                     violations.append(label + " must not depend on a project library or host target")
+    if (source / TODO_CONSUMER_SOURCE).is_file():
+        violations.extend(todo_consumer_ownership_violations(targets, expect_testing))
+    if (source / RAG_CONSUMER_SOURCE).is_file():
+        violations.extend(rag_consumer_ownership_violations(targets, expect_testing))
+    if (source / WEB_FETCH_CONSUMER_SOURCE).is_file():
+        violations.extend(web_fetch_consumer_ownership_violations(targets, expect_testing))
     sdk = [target_id for target_id, target in targets.items() if target["name"] == "lubancore_sdk"]
     if len(sdk) != 1 or targets[sdk[0]]["type"] != "SHARED_LIBRARY":
         violations.append("expected exactly one shared lubancore_sdk target")
@@ -439,6 +508,8 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool) -> dic
         public = relative(path, public_root) is not None
         for match in includes_in(text):
             include = match.group(1)
+            if not with_lua and include.replace("\\", "/").split("/")[-1] in {"lua.h", "lauxlib.h", "lualib.h"}:
+                violations.append("Lua OFF includes native Lua header: " + name + " -> " + include)
             if name == COMMAND_LIMITS_PROBE_SOURCE and include not in STANDARD_HEADERS:
                 violations.append("command limits probe must use only standard-library headers: " + include)
             resolved = next((candidate.resolve() for candidate in
@@ -486,6 +557,7 @@ def main() -> int:
     parser.add_argument("--build-dir", required=True, type=Path)
     parser.add_argument("--source-dir", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--config", default="Release")
+    parser.add_argument("--lua-profile", choices=("on", "off"), default="on")
     parser.add_argument("--expect-testing", choices=("on", "off"))
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
@@ -495,7 +567,7 @@ def main() -> int:
     if args.expect_testing is None or args.report is None:
         parser.error("checking requires --expect-testing and --report")
     try:
-        report = inspect(args.source_dir, args.build_dir, args.config, args.expect_testing == "on")
+        report = inspect(args.source_dir, args.build_dir, args.config, args.expect_testing == "on", args.lua_profile)
     except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
         report = {"schemaVersion": 1, "githubSha": os.environ.get("GITHUB_SHA"),
                   "status": "failed", "violations": [str(error)]}

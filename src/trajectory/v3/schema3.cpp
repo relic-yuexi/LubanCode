@@ -1817,6 +1817,28 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (auto error = CheckObservedStatus(kind_name, line.payload)) {
             return error;
         }
+        if (line.payload.contains("parentAdmission")) {
+            const auto& admission = line.payload.at("parentAdmission");
+            if (!admission.is_object() || admission.size() != 5)
+                return Err("schema3.bad_owned_job", "observed parentAdmission requires five native references");
+            for (const char* key : {"terminalEventRef", "persistedEventRef", "selectedEventRef", "toolMessageRef", "admissionEventRef"}) {
+                if (auto error = CheckRefField(kind_name, admission, key, true)) return error;
+                if (!admission.at(key).is_object())
+                    return Err("schema3.bad_owned_job", "observed parentAdmission requires native provenance objects");
+            }
+        }
+        if (line.payload.contains("commandNotInvoked")) {
+            const auto& witness = line.payload.at("commandNotInvoked");
+            if (!witness.is_object() || witness.size() != 2 ||
+                !witness.contains("version") || !witness.at("version").is_number_integer() ||
+                witness.at("version") != 1 || !witness.contains("reason") ||
+                !witness.at("reason").is_string() || witness.at("reason") != "registration_deadline_elapsed" ||
+                line.payload.at("observedStatus") != "cancelled" || line.payload.contains("startupFailed") ||
+                !line.payload.contains("parentAdmission") ||
+                line.payload.contains("resultRef") || line.payload.contains("resultVersion") ||
+                line.payload.contains("postEventRef"))
+                return Err("schema3.bad_owned_job", "commandNotInvoked v1 requires deadline cancellation without raw/Post");
+        }
         if (line.payload.contains("startupFailed")) {
             if (!line.payload.at("startupFailed").is_boolean())
                 return Err("schema3.bad_owned_job", "startupFailed must be boolean");

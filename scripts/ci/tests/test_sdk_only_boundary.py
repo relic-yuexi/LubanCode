@@ -86,6 +86,31 @@ class BoundaryTests(unittest.TestCase):
         self.flags["BUILD_TESTING"] = "ON"
         self.assertEqual(self.check(testing=True)["status"], "passed")
 
+    def test_managed_and_memory_reference_sources_require_exact_testing_owner(self):
+        sources = (
+            "tests/unit/trajectory/test_managed_session_ownership.cpp",
+            "tests/unit/trajectory/test_managed_session_reservation.cpp",
+            "tests/unit/memory/test_memory_project_commit_handoff.cpp",
+        )
+        for source in sources:
+            self.source_file(source, "int reference_fixture;\n")
+        target = {"id": "managed_memory_reference", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": source, "compileGroupIndex": 0} for source in sources],
+                  "compileGroups": [{}]}
+        self.targets.append(target)
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "unrelated_reference"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        self.flags["BUILD_TESTING"] = "OFF"
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        extra = "tests/unit/trajectory/test_managed_session_ownership_extra.cpp"
+        self.source_file(extra, "int unrelated_reference_fixture;\n")
+        target["sources"].append({"path": extra, "compileGroupIndex": 0})
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
     def deferred_action_reference(self, private=False):
         reference = "src/sdk/action_dispatch.cpp"
         self.source_file(reference, '#include "runtime/middleware_deferred_effects.hpp"\n')
@@ -785,7 +810,7 @@ class BoundaryTests(unittest.TestCase):
 
     def test_release_query_and_package_sources_cannot_hide_in_sdk_only_targets(self):
         for path in ("src/config/update_checker.cpp", "src/config/update_checker.hpp",
-                     "src/package/inventory.cpp", "src/package/inventory.hpp"):
+                     "src/package/catalog.cpp", "src/package/catalog.hpp"):
             with self.subTest(path=path):
                 self.source_file(path, "int host_material;\n")
                 self.targets.append({"id": "hidden", "name": "neutral_name", "type": "STATIC_LIBRARY",
@@ -803,14 +828,14 @@ class BoundaryTests(unittest.TestCase):
     def add_package_parsers(self):
         self.targets[1]["name"] = "lubancode_engine"
         for name in sorted(boundary.SDK_NEUTRAL_PACKAGE_FILES):
-            contents = '#include "package/semver.hpp"\n' if name.endswith(".cpp") else "#pragma once\n"
+            contents = ('#include "package/' + Path(name).stem + '.hpp"\n') if name.endswith(".cpp") else "#pragma once\n"
             self.source_file(name, contents)
         self.source_file("src/package/manifest.hpp", '#include "package/semver.hpp"\n')
         self.source_file("src/sdk/core.cpp", '#include "package/manifest.hpp"\n')
         self.targets[1]["sources"].extend({"path": name, "compileGroupIndex": 0}
                                          for name in sorted(boundary.SDK_NEUTRAL_PACKAGE_SOURCES))
 
-    def test_package_exact_two_parsers_and_recursive_headers_are_neutral(self):
+    def test_package_exact_neutral_implementations_and_recursive_headers(self):
         self.add_package_parsers()
         for testing in (False, True):
             self.flags["BUILD_TESTING"] = "ON" if testing else "OFF"
@@ -842,15 +867,20 @@ class BoundaryTests(unittest.TestCase):
 
     def test_package_exceptions_do_not_cover_nearby_sources_or_recursive_host_headers(self):
         self.add_package_parsers()
-        for name in ("src/package/manifest_extra.cpp", "src/package/semver_extra.cpp", "src/package/component.cpp"):
+        for name in ("src/package/manifest_extra.cpp", "src/package/semver_extra.cpp", "src/package/component.cpp",
+                     "src/package/inventory_extra.cpp", "src/package/inventory_snapshot_extra.cpp"):
             with self.subTest(name=name):
                 self.source_file(name, "int only_fixture;\n")
                 self.targets[1]["sources"].append({"path": name, "compileGroupIndex": 0})
                 self.assert_rejected(self.check(), "includes host source " + name)
                 self.targets[1]["sources"].pop()
         self.source_file("src/package/component.hpp", "#pragma once\n")
-        self.source_file("src/package/semver.hpp", '#include "package/component.hpp"\n')
-        self.assert_rejected(self.check(), "reverse host include")
+        for header in sorted(boundary.SDK_NEUTRAL_PACKAGE_FILES - boundary.SDK_NEUTRAL_PACKAGE_SOURCES):
+            with self.subTest(header=header):
+                original = (self.source / header).read_text(encoding="utf-8")
+                self.source_file(header, '#include "package/component.hpp"\n')
+                self.assert_rejected(self.check(), "reverse host include")
+                self.source_file(header, original)
 
     def test_original_package_test_exception_is_exact_and_testing_only(self):
         source = "tests/unit/packages/test_package_manifest.cpp"

@@ -43,10 +43,16 @@
 #include "sdk/operation_ledger.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/search_ripgrep.hpp"
+#include "tools/web_fetch.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
 
 namespace lubancore {
+Result<web_fetch::v1::Capabilities> web_fetch::v1::DescribeCapabilities() {
+    try { return web_fetch::v1::Capabilities{lubancode::tools::WebFetchSupportsGzip()}; }
+    catch (...) { return std::unexpected(Error{"sdk.web_fetch.capabilities_unavailable", "cannot query the built-in transport"}); }
+}
+
 namespace detail {
 thread_local bool in_session_worker = false;
 }
@@ -261,6 +267,18 @@ struct Session::Impl final : rt::InteractionBroker {
         if (!options.resume_session_id.empty() && !ValidId(options.resume_session_id)) {
             return std::unexpected(Failure("sdk.resume.invalid_id"));
         }
+        std::optional<lubancode::tools::WebFetchOptions> web_fetch_options;
+        const bool has_web_fetch = std::find(options.builtin_tools.begin(), options.builtin_tools.end(), "web_fetch") != options.builtin_tools.end();
+        if (options.web_fetch && !has_web_fetch)
+            return std::unexpected(Failure("sdk.web_fetch.not_selected"));
+        if (has_web_fetch) {
+            const auto selected = options.web_fetch.value_or(web_fetch::v1::Options{});
+            web_fetch_options = lubancode::tools::WebFetchOptions{selected.user_agent, selected.connect_timeout_ms,
+                selected.total_timeout_ms, selected.max_header_bytes, selected.max_download_bytes,
+                selected.max_output_bytes, selected.max_redirects};
+            if (!lubancode::tools::ValidateWebFetchOptions(*web_fetch_options))
+                return std::unexpected(Failure("sdk.web_fetch.invalid_options"));
+        }
         struct InitCleanupScope {
             bool previous = in_session_worker;
             InitCleanupScope() { in_session_worker = true; }
@@ -322,7 +340,7 @@ struct Session::Impl final : rt::InteractionBroker {
                 // local tool declaration and server spec has been validated.
                 search_runner = std::make_shared<lubancode::tools::BundledRipgrepRunner>(std::move(executable));
             }
-            auto tool = rt::assembly::CreateLocalTool(name, search_runner);
+            auto tool = rt::assembly::CreateLocalTool(name, search_runner, web_fetch_options ? &*web_fetch_options : nullptr);
             if (!tool || prepared_registry->Find(name)) return std::unexpected(Failure("sdk.tool.unsupported_or_duplicate", name));
             prepared_registry->Register(detail::BindLocalTool(std::move(tool), options.cwd));
         }
