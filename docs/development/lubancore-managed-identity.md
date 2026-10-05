@@ -24,7 +24,7 @@ C++ 宿主、Policy 实现与原生扩展属于可信代码。协议客户端不
 
 SDK 与 Worker 只接一份中立 `PolicyProvider`。首批收最小裁决与变更通知合同，后续 SPI 扩充同一接口；不并排造 ManagedAuthorizer、Worker ACL 和另一套 PolicyProvider。首批参考实现须支持显式默认管理员、tenant/project 绑定与可撤销授权，不接数据库、登录界面或 OIDC。
 
-接口基础批 [#261](https://github.com/relic-yuexi/LubanCode/pull/261) 尚为 Draft。它只裁动作，核主体、资源、能力和绑定版本；尚未接 Managed 会话。工具名、有效参数和模型目标不在这份裁决输入中。按目录、命令或模型参数设策略，须扩充同一 PolicyProvider，不能借动作级验收报参数策略已交付。
+接口基础批 [#261](https://github.com/relic-yuexi/LubanCode/pull/261) 已随组合 [#325](https://github.com/relic-yuexi/LubanCode/pull/325) 收入功能分支；原子 PR 已收口，不再独立待合。它只裁动作，核主体、资源、能力和绑定版本；尚未接 Managed 会话。工具名、有效参数和模型目标不在这份裁决输入中。按目录、命令或模型参数设策略，须扩充同一 PolicyProvider，不能借动作级验收报参数策略已交付。
 
 配置按全局 → 租户 → 项目 → Session 收快照。首批只预留租户层，允许为空；下层配置不能抬高上层身份与能力许可，不在这批接配置管理服务。
 

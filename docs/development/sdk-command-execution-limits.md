@@ -61,3 +61,13 @@ Windows 首轮运行验收发现：旧前台 PowerShell wrapper 把整段输出�
 只改前台 `RunProcess(wstring)`：冻结缓冲给 caller/reader，记实际 CreateProcess、建 Job、配置与绑定、ResumeThread、首次 Wait 及终结、首次取消/超时/超额、CloseJob 或 TerminateProcess、原 5 秒等待、读线程退出和真实 join。此入口靠 `CloseHandle(job)` 的 KILL_ON_JOB_CLOSE 收树，不冒称调用了 TerminateJobObject。每枚 API 返回后立即存返回码和 GetLastError；记录包住诊断时钟，再还原 LastError 与 errno。默认空指针不多查 GetProcessId、不读诊断时钟或原子。
 
 不改 API 短路、原失败出口、CloseJob/fallback 条件、ResumeThread 原返回码判断或任何预算。只记首个 Wait/read 与终结，不让轮询冲满 128 槽。读线程仍按值借同一缓冲，等真实 join 才读资料；原六场、断言、帽、probe、PowerShell、注册与门逐字核对。输出注明平台和错误域，不添加子进程输出标记。本地仍只查文本、纯数据和文档。
+
+## Windows scoped wrapper 的模块限定调用
+
+`52fa7d6d` 的 Windows SDK-only 原件再次超时：`powershell-exact` 用了 15054ms，宿主帽仍为 15000ms，实际 CTest 登记已有 `RUN_SERIAL=true`。同一 PID 的 shell-entry、wrapper-ready 已确认，user-block-entry 文件为空，probe 的 started/done 均缺；创建进程、挂 Job 和恢复线程成功。这把排查范围收进包装准备与用户块入口之间。空观测不能独自证明某条指令未执行，现有材料也未指认某只 cmdlet、模块或系统检查为唯一起因。
+
+这笔只限定有执行画像时 wrapper 自带的三只命令：`Microsoft.PowerShell.Core\ForEach-Object`、`Microsoft.PowerShell.Utility\Out-String -Stream`、`Microsoft.PowerShell.Utility\Write-Output`。保留同一管道、ErrorRecord 识别、对象格式化与逐行输出，不改用户正文。显式 `exit N`、末次 native `$LASTEXITCODE` 优先、cmdlet-only 错误码仍沿原约定。普通前台、后台、Hook、cmd、POSIX 与进程执行器均不改。
+
+[Windows PowerShell 5.1 命令优先级文档](https://github.com/MicrosoftDocs/PowerShell-Docs/blob/main/reference/5.1/Microsoft.PowerShell.Core/About/about_Command_Precedence.md) 明列模块限定调用；[5.1 Out-String 文档](https://github.com/MicrosoftDocs/PowerShell-Docs/blob/main/reference/5.1/Microsoft.PowerShell.Utility/Out-String.md) 说明 `-Stream` 沿对象格式器逐行返回。[PowerShell 7.4 CommandDiscovery 实现](https://github.com/PowerShell/PowerShell/blob/v7.4.0/src/System.Management.Automation/engine/CommandDiscovery.cs) 将限定名送指定模块加载，非限定名才遍查可用模块导出的命令。这份公开实现说明机制，不代替 5.1 本轮现场栈。指定模块本身仍可加载，超时是否收住须远端新头验。
+
+不预先 Import、不另跑空命令、不改自动加载偏好、执行策略、环境或时限。六 CASE、旧调用与旧断言保留；在第六 CASE 末加两对象表格式验收，让同一正文实际经过旧前台与 scoped 两路，逐字核输出，再核表头、两行值和无 CLIXML。原恰到帽、超额即收树、取消、四场并发、错误与退出码验收继续执行。格式对照在这些调用之后，不给首笔边界案预热。新脚本只交远端 CI，本地只核文本、纯数据与源码守卫。

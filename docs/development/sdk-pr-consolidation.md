@@ -1,6 +1,6 @@
 # SDK 私有组合与 PR 收口
 
-这批改动统一送入 #325，目标仍为 `feature/distributed-support-roadmap`。#234 继续承载功能分支到 main；子 PR 不再充当平行合入入口。
+这批改动已通过 #325 合入 `feature/distributed-support-roadmap`，合入头 `756bf02a` 与已验源 `2c376020` 同树。#234 继续承载功能分支到 main；子 PR 不再充当平行合入入口。后续范围与未完事项见 [SDK 阶段进度](sdk-stage-status.md)。
 
 ## 已收入组合
 
@@ -23,6 +23,6 @@
 
 ## 验收边界
 
-最终组合重算 SDK focused、安装消费和 ASan 清单，再交远程三平台 CI。旧支线部分通过，不能代新组合验收。本地只查 Git、源码、Python 数据门、YAML、文档与链接；不配置、编译或运行原生测试。
+源 `2c376020` 的三平台完整 CI 已通过，证据见 [SDK 阶段进度](sdk-stage-status.md)。新增模块与最终 main 组合重算 SDK focused、安装消费和 ASan 清单，再交远程三平台 CI。旧支线部分通过，不能代新组合验收。本地只查 Git、源码、Python 数据门、YAML、文档与链接；不配置、编译或运行原生测试。
 
-EventSink 与 Memory 片段可由宿主替换；完整 JournalStore、Managed 授权接线、公开 Detached job 和网络 Node/Control 尚未交付。先前架构合同中的“当前状态”属于各自基线，不能当作最终组合已合入功能分支。
+EventSink 与 Memory 片段可由宿主替换；完整 JournalStore、Managed 授权接线、公开 Detached job 和网络 Node/Control 尚未交付。先前架构合同中的“当前状态”属于各自基线，后续进度以已合源码与对应 CI 为准。

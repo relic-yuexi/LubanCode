@@ -498,6 +498,18 @@ struct OperationTurnBindingFacts {
 std::expected<std::vector<OperationTurnBindingFacts>, std::string>
 ReadOperationTurnBindings(const V3Ledger& ledger);
 
+inline constexpr std::string_view kSdkJobOperationLayout = "session_owned_job_operation_v1";
+struct JobOperationBindingFacts {
+    std::string session_id, run_id, turn_id, step_id, action_id, job_id;
+    std::uint64_t attempt = 1, seq = 0;
+    std::string operation_id, parent_operation_id, parent_input_id, parent_payload_hash;
+    std::string event_id, line_hash, parent_operation_event_id, adopted_event_id;
+    std::string original_input_sha256, effective_input_sha256;
+};
+// Material only. No coordinator, writer, permission, repair or dispatch.
+std::expected<std::vector<JobOperationBindingFacts>, std::string>
+ReadJobOperationBindings(const V3Ledger& ledger);
+
 // Verified, owned provenance for the versioned internal business-attempt-1
 // layout. No field grants a live capability or authorizes historical dispatch.
 struct OwnedJobAdoptionFacts {

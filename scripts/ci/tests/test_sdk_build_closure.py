@@ -30,7 +30,7 @@ class OptionalHostClosureTests(unittest.TestCase):
     def setUp(self):
         self.targets = {
             "sdk": {"name": "lubancore_sdk", "type": "SHARED_LIBRARY",
-                    "projectSources": ["src/sdk/core.cpp"], "dependencies": ["engine"]},
+                    "projectSources": ["src/sdk/core.cpp", "src/sdk/job_operations.cpp"], "dependencies": ["engine"]},
             "engine": {"name": "engine", "type": "STATIC_LIBRARY",
                        "projectSources": ["src/neutral/core.cpp"], "dependencies": []},
             "host": {"name": "lubancode_updater", "type": "STATIC_LIBRARY",
@@ -44,6 +44,50 @@ class OptionalHostClosureTests(unittest.TestCase):
         report = closure.inspect_graph(self.targets)
         self.assertEqual(report["status"], "passed")
         self.assertEqual(set(report["sdkBuildClosure"]), {"sdk", "engine"})
+
+    def test_job_binding_is_sdk_owned_with_only_real_reference_executable_copies(self):
+        source = "src/sdk/job_operations.cpp"
+        for name in ("lubancore_sdk_tests", "lubancode_tests"):
+            self.targets[name] = {"name": name, "type": "EXECUTABLE",
+                                  "projectSources": [source], "dependencies": ["sdk"]}
+        self.assertEqual(closure.inspect_graph(self.targets)["status"], "passed")
+        for name in ("engine", "disconnected_archive", "another_test"):
+            with self.subTest(name=name):
+                targets = deepcopy(self.targets)
+                targets[name] = {"name": name, "type": "STATIC_LIBRARY",
+                                 "projectSources": [source], "dependencies": []}
+                report = closure.inspect_graph(targets)
+                self.assertEqual(report["status"], "failed")
+                self.assertTrue(any("unregistered reference owner" in v for v in report["violations"]))
+        self.targets["sdk"]["projectSources"].remove(source)
+        self.assertTrue(any("must belong exactly once to the shared SDK" in v
+                            for v in closure.inspect_graph(self.targets)["violations"]))
+
+    def test_job_binding_reference_name_cannot_hide_a_library(self):
+        source = "src/sdk/job_operations.cpp"
+        self.targets["reference"] = {"name": "lubancore_sdk_tests", "type": "STATIC_LIBRARY",
+                                     "projectSources": [source], "dependencies": []}
+        self.assertTrue(any("unregistered reference owner" in v
+                            for v in closure.inspect_graph(self.targets)["violations"]))
+
+    def test_job_binding_cannot_be_missing_or_duplicated_within_any_owner(self):
+        source = "src/sdk/job_operations.cpp"
+        missing = deepcopy(self.targets)
+        missing["sdk"]["projectSources"].remove(source)
+        report = closure.inspect_graph(missing)
+        self.assertEqual(report["status"], "failed")
+        self.assertTrue(any("must belong exactly once" in v for v in report["violations"]))
+        for name in ("sdk", "lubancore_sdk_tests", "lubancode_tests"):
+            with self.subTest(owner=name):
+                targets = deepcopy(self.targets)
+                if name == "sdk":
+                    targets[name]["projectSources"].append(source)
+                else:
+                    targets[name] = {"name": name, "type": "EXECUTABLE",
+                                     "projectSources": [source, source], "dependencies": ["sdk"]}
+                report = closure.inspect_graph(targets)
+                self.assertEqual(report["status"], "failed")
+                self.assertTrue(any("duplicate source occurrences" in v for v in report["violations"]))
 
     def test_direct_and_transitive_host_dependency_are_rejected(self):
         for owner in ("sdk", "engine"):
@@ -290,7 +334,24 @@ class FileApiClosureTests(unittest.TestCase):
     def setUp(self):
         self.fixture = file_api_fixtures.BoundaryTests()
         self.fixture.setUp()
+        self.fixture.source_file("src/sdk/job_operations.cpp", "int private_binding;\n")
+        self.fixture.targets[0]["sources"].append({"path": "src/sdk/job_operations.cpp", "compileGroupIndex": 0})
         self.addCleanup(self.fixture.doCleanups)
+
+    def test_actual_file_api_keeps_missing_and_duplicate_job_occurrences(self):
+        original = deepcopy(self.fixture.targets)
+        for variant in ("missing", "duplicate"):
+            with self.subTest(variant=variant):
+                self.fixture.targets = deepcopy(original)
+                sources = self.fixture.targets[0]["sources"]
+                if variant == "missing":
+                    sources[:] = [item for item in sources if item["path"] != "src/sdk/job_operations.cpp"]
+                else:
+                    sources.append({"path": str(self.fixture.source / "src/sdk/job_operations.cpp"), "compileGroupIndex": 0})
+                self.fixture.write_model()
+                report = closure.inspect(self.fixture.source, self.fixture.build, "Release")
+                self.assertEqual(report["status"], "failed")
+                self.assertTrue(any("Job binding" in v for v in report["violations"]))
 
     def test_report_reads_actual_target_references_and_source_identity(self):
         self.fixture.write_model()

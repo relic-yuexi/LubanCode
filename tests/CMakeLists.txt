@@ -83,6 +83,11 @@ endforeach()
 list(LENGTH LUBANCODE_TEST_SOURCES LUBANCODE_TEST_SOURCE_COUNT)
 message(STATUS "lubancode: 收录 ${LUBANCODE_TEST_SOURCE_COUNT} 册测试")
 
+set(LUBANCODE_TEST_COMPILE_SOURCES "${LUBANCODE_TEST_SOURCES}")
+if(LUBANCODE_ASAN_TEST_PROFILE)
+  include("${CMAKE_SOURCE_DIR}/cmake/LubanCodeAsanTests.cmake")
+endif()
+
 add_executable(lubancode_tests
   support/main.cpp
   support/api_fixture.cpp
@@ -98,7 +103,7 @@ add_executable(lubancode_tests
   # 多渠道消息接入单阶段 1:纯内存 Channel Bridge v1 假 sidecar,供
   # tests/unit/channel 冒烟测试与未来真渠道适配器 conformance suite 复用。
   support/fake_channel_sidecar.cpp
-  ${LUBANCODE_TEST_SOURCES}
+  ${LUBANCODE_TEST_COMPILE_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
 target_compile_definitions(lubancode_tests PRIVATE
@@ -126,6 +131,7 @@ if(LUBANCODE_BUILD_SDK)
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/memory.cpp")
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/action_dispatch.cpp")
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/operation_ledger.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/job_operations.cpp")
   if(WIN32)
     add_custom_command(TARGET lubancode_tests POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -459,6 +465,11 @@ foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)
     set_tests_properties("${test_name}" PROPERTIES
       LABELS "${test_kind};${test_domain};${test_kind}.${test_domain};v3-default"
       TIMEOUT "${test_timeout}")
+  endif()
+  # Keep external CTest load out of the fixed shell-start/timeout measurement.
+  # This also applies to CLI-only builds; the source's four-context case stays concurrent.
+  if(WIN32 AND test_name STREQUAL "unit.tools.run_command_execution_limits")
+    set_tests_properties("${test_name}" PROPERTIES RUN_SERIAL TRUE)
   endif()
 endforeach()
 

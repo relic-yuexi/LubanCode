@@ -490,6 +490,9 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
     const bool todo_on = caps == nullptr || caps->todo;
     if (files_on) {
         append_module("features/files.md");
+        // A separate module reaches existing installations whose scaffolded
+        // files.md remains a user override; never overwrite their custom text.
+        append_module("features/file-tool-policy.md");
     }
     if (shell_on) {
         append_module("features/shell.md");

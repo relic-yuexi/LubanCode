@@ -32,6 +32,7 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/tools/test_run_command_execution_limits.cpp"
   "${_lubancore_tests_root}/unit/trajectory/test_session_recovery_view.cpp"
   "${_lubancore_tests_root}/unit/trajectory/test_journal_native_receipts.cpp"
+  "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_journal_receipts.cpp"
   "${_lubancore_tests_root}/unit/platform/test_atomic_write.cpp"
   "${_lubancore_tests_root}/unit/tools/test_lua_protected.cpp"
   "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_result_store.cpp"
@@ -70,6 +71,8 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   # The internal turn-binding fixture calls the same producer/strict reader;
   # it grants no extra shared-library ABI or alternate execution stack.
   "${CMAKE_SOURCE_DIR}/src/sdk/operation_ledger.cpp"
+  # The same private Job producer is used by reference fixtures, not exported.
+  "${CMAKE_SOURCE_DIR}/src/sdk/job_operations.cpp"
   # The public-only child acceptance source is also built after relocation. It
   # belongs to these fixture executables, never the SDK library closure.
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/subagents.cpp"
@@ -99,7 +102,11 @@ if(MSVC)
   target_compile_options(lubancore_sdk_tests PRIVATE /MP /FS)
 endif()
 if(TARGET lubancode_tests)
-  add_dependencies(lubancode_tests lubancore_sdk_tests)
+  if(LUBANCODE_ASAN_TEST_PROFILE)
+    add_dependencies(lubancode_tests lubancore_sdk_search_probe)
+  else()
+    add_dependencies(lubancode_tests lubancore_sdk_tests)
+  endif()
   target_compile_definitions(lubancode_tests PRIVATE
     LUBANCORE_TEST_JOB_POST_SDK=1
     LUBANCORE_TEST_SEARCH_PROBE="$<TARGET_FILE:lubancore_sdk_search_probe>")
@@ -116,6 +123,11 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
   set_tests_properties("${sdk_test}" PROPERTIES
     LABELS "sdk-focused" TIMEOUT 300
     ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
+  # SDK-only and combined builds keep this fixed-duration shell fixture isolated
+  # from other CTest processes, while its own four concurrent contexts still run.
+  if(WIN32 AND sdk_basename STREQUAL "test_run_command_execution_limits.cpp")
+    set_tests_properties("${sdk_test}" PROPERTIES RUN_SERIAL TRUE)
+  endif()
   if(sdk_basename STREQUAL "test_atomic_write.cpp")
     set(sdk_original_test "unit.platform.atomic_write")
     set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "platform-atomic-write")
@@ -131,6 +143,18 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-result-store")
     if(TEST "${sdk_original_test}")
       set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-result-store")
+    endif()
+  elseif(sdk_basename STREQUAL "test_v3_journal_receipts.cpp")
+    set(sdk_original_test "unit.trajectory_v3.v3_journal_receipts")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-journal-receipts")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-journal-receipts")
+    endif()
+  elseif(sdk_basename STREQUAL "test_lubancore_job_operations.cpp")
+    set(sdk_original_test "integration.sdk.lubancore_job_operations")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "sdk-job-operations")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "sdk-job-operations")
     endif()
   elseif(sdk_basename STREQUAL "test_lua_protected.cpp")
     set(sdk_original_test "unit.tools.lua_protected")

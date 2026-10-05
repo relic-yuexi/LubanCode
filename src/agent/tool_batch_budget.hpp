@@ -11,6 +11,11 @@
 
 namespace lubancode::agent {
 
+// The bridge may frame even a short body with native payload source paths,
+// capture status and retrieval instructions. Reserve the smallest standard
+// preview tier for that framing; it still competes for the batch's capacity.
+inline constexpr std::size_t kToolPreviewMetadataReserveBytes = 4096;
+
 // First-use byte budgets only. The caller serializes the selected adapter input,
 // subtracts fixed JSON bytes and separately reserved output/protocol capacity.
 // JSON escaping is budgeted explicitly by the caller, never hidden in an online
@@ -36,12 +41,12 @@ inline ToolBatchBudgetPlan PlanToolBatchBudget(const api::Message& results,
         // A separate raw_payload requires source/channel metadata even when the
         // compatibility body is tiny. Ask for the existing cap, then water-fill
         // within available; the bridge still checks the actual representation.
-        // Plain text keeps its old desired budget, including empty success.
+        // Plain text also reserves the framing introduced by the bridge. Cap
+        // the body before adding that reserve to avoid size_t overflow.
         const auto desired = tools::HasNativePayloadBeyondProjection(result->content, result->blocks)
                                  ? std::size_t{32768}
-                                 : std::min<std::size_t>(32768,
-                                       std::max<std::size_t>(result->capture_complete ? 1 : 1024,
-                                                             result->content.size()));
+                                 : std::min<std::size_t>(32768 - kToolPreviewMetadataReserveBytes,
+                                                        result->content.size()) + kToolPreviewMetadataReserveBytes;
         plan.preview_bytes.push_back(desired);
     }
     if (plan.preview_bytes.empty()) return plan;

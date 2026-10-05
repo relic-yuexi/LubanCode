@@ -1675,6 +1675,28 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (auto error = CheckExecutionPolicy(kind_name, line.payload)) {
             return error;
         }
+    } else if (line.kind == K::SdkJobOperationBound) {
+        if (auto error = CheckToolPayload(kind_name, line, true)) return error;
+        if (!line.turn_id || !line.step_id || line.payload.at("attempt") != 1 ||
+            line.request_id || line.parent_turn_id || line.compact_id || line.command_id ||
+            line.hook_dispatch_id || line.task_id || line.title_generation_id || line.effects || line.effect_refs)
+            return Err("schema3.bad_job_operation", "Job binding requires only business turn/step/action, attempt 1");
+        if (line.payload.size() != 14 || line.payload.value("layout", nlohmann::json()) != "session_owned_job_operation_v1" ||
+            !line.payload.contains("version") || !line.payload.at("version").is_number_integer() || line.payload.at("version") != 1)
+            return Err("schema3.bad_job_operation", "unknown Job operation layout/version");
+        if (auto error = CheckStringField(kind_name, line.payload, "jobId")) return error;
+        for (const char* key : {"parentOperationRef", "assistantMessageRef", "sourcePendingEventRef", "sourceAdmissionEventRef",
+                                "preparedPendingEventRef", "registeredEventRef", "adoptionEventRef"}) {
+            const auto ref = line.payload.find(key);
+            if (ref == line.payload.end() || !ref->is_object() || ref->size() != 5 || !IsValidRef(*ref) ||
+                !ref->at("seq").is_number_integer() || ref->at("seq") <= 0 ||
+                ref->at("sessionId") == "" || ref->at("runId") == "" || ref->at("id") == "")
+                return Err("schema3.bad_job_operation", "Job binding requires canonical native five-key references");
+        }
+        for (const char* key : {"originalInputSha256", "effectiveInputSha256"})
+            if (!line.payload.contains(key) || !line.payload.at(key).is_string() ||
+                !IsHex64(line.payload.at(key).get<std::string>()))
+                return Err("schema3.bad_job_operation", "Job binding requires original/effective SHA256");
     } else if (line.kind == K::SdkOperationTurnBound) {
         if (!line.turn_id || line.step_id || line.action_id || line.request_id || line.parent_turn_id ||
             line.compact_id || line.command_id || line.hook_dispatch_id || line.task_id || line.title_generation_id ||

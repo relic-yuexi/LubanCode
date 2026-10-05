@@ -26,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/loop.hpp"  // RequestPreparedContext(桥口同形,只引不改)
+#include "agent/tool_batch_budget.hpp"
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 #include "api/gemini/request.hpp"
@@ -149,7 +150,8 @@ agent::ToolTraceEvent TraceEvent(agent::ToolTraceEventKind kind, const std::stri
 std::string DriveFatToolTurn(TrajectoryTurnBridge& bridge, const std::string& system,
                              const std::string& call_id, const std::string& result_content,
                              bool use_history_hook = false, bool capture_complete = true,
-                             std::size_t preview_budget = 32768, bool structured = false, bool with_rich = false) {
+                             std::size_t preview_budget = 32768, bool structured = false, bool with_rich = false,
+                             bool small_native = false) {
     bridge.BeginTurn("turn-1", "external_user");
     bridge.RecordInput(UserMessage("列出全部文件"));
     const std::string request_id =
@@ -174,6 +176,10 @@ std::string DriveFatToolTurn(TrajectoryTurnBridge& bridge, const std::string& sy
     result.capture_complete = capture_complete;
     result.capture_reason = capture_complete ? "" : "quota";
     result.preview_budget_bytes = preview_budget;
+    if (small_native) {
+        result.blocks.push_back(tools::TextContent{result_content});
+        result.blocks.push_back(tools::TextContent{"native-success"});
+    }
     if (with_rich) {
         tools::EmbeddedTextResourceContent resource;
         resource.uri = "file:///source-a.txt";
@@ -343,6 +349,42 @@ TEST_CASE("超帽结果(全链):入史前钩子归仓换预览,运行时历史�
     const auto context = lubancode::trajectory::v3::ProjectModelContext(*read);
     REQUIRE(context.inputs.size() == 3);
     CHECK(context.inputs[2].message.at("content").get<std::string>() == history_content);
+}
+
+TEST_CASE("75-byte body with native payload commits within the planned batch budget") {
+    EnvGuard v3on("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    const auto root = FreshRoot("short-native-budget");
+    auto ledger = TrajectorySessionLedger::Open(LedgerOptions(root));
+    REQUIRE(ledger.has_value());
+    auto bridge = ledger->NewTurnBridge({"moonshot", "openai-chat-completions", "terminal"});
+    REQUIRE(bridge != nullptr);
+
+    const std::string body = "adopted-preview" + std::string(60, 'x');
+    REQUIRE(body.size() == 75);
+    const auto plan = agent::PlanToolBatchBudget(ToolResultMessage("call_short_native", body), 8192);
+    REQUIRE(plan.error.empty());
+    REQUIRE(plan.preview_bytes.size() == 1);
+    const auto history = DriveFatToolTurn(*bridge, "SYSTEM-PREVIEW", "call_short_native", body,
+                                         true, true, plan.preview_bytes[0], true, false, true);
+    const auto closed = ledger->CloseSession("exit");
+    CHECK(closed.error_code.empty());
+    CHECK(history.size() <= plan.preview_bytes[0]);
+    CHECK(history.find("output_bytes[combined]: 75") != std::string::npos);
+    CHECK(history.find("raw_payload") != std::string::npos);
+    CHECK(history.find("capture_complete: true") != std::string::npos);
+    CHECK(history.find("adopted-preview") != std::string::npos);
+
+    const auto stream = ledger->session_dir() / platform::Utf8ToPath(
+        platform::PathToUtf8(ledger->session_dir().filename()) + ".jsonl");
+    const auto rows = ReadLines(stream);
+    const auto* message = FindToolMessage(rows);
+    REQUIRE(message != nullptr);
+    CHECK(message->at("message").at("content").get<std::string>() == history);
+    const auto metadata = nlohmann::json::parse(std::ifstream(
+        ledger->session_dir() / "artifacts" / "res-000001.json"));
+    CHECK(metadata.at("content") == body);
+    CHECK(metadata.at("outputs").size() == 2);
+    CHECK(lubancode::trajectory::v3::VerifyV3File(stream).ok);
 }
 
 TEST_CASE("线内结果(全链):钩子原样穿透,不硬套预览壳;原文照旧归仓") {

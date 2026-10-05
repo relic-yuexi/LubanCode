@@ -46,6 +46,9 @@ struct WriteReceipt {
     std::string line_hash;
     std::string error_code;     // 稳定错误码
     std::string error_message;  // 人话(io 细节/缺哪个字段)
+    // Owned mechanical witness only when this V3 call reached Journal I/O.
+    // Other producers sharing WriteReceipt leave it empty until wired.
+    std::optional<trajectory::JournalAppendReceipt> journal_append;
 };
 
 // 时间注入(单测喂固定钟)。
@@ -69,6 +72,9 @@ struct V3WriterOptions {
     std::function<std::optional<std::string>()> inject_io_failure;
     // Test-only checked Close failure after the real journal handle is closed.
     std::function<std::optional<std::string>()> inject_close_failure;
+    // Internal Start-only after-native test seam; empty retains original Open.
+    // Continue entry points reject it before reading or opening the old stream.
+    std::shared_ptr<trajectory::JournalNativeIoProbe> journal_native_io_probe;
 };
 
 // 链节点(schema 文档 §2.4)。
@@ -187,7 +193,8 @@ public:
         const V3Clock* clock = nullptr);
 
     // 只关写句柄,不代写 session.ended。封口事实须由领域先落稳。
-    // 可重复调用;保留身份、路径与上下文查询,此后提交拒绝。
+    // 可重复调用,保第一次 checked 结果;保留身份、路径与上下文查询,
+    // 此后提交拒绝。重复调用不再执行 native close 或外层测试注入。
     std::expected<void, std::string> Close();
 
     // ---- 底层两类行 ----
@@ -339,6 +346,9 @@ public:
     std::string last_line_hash() const;
     bool broken() const;
     bool closed() const;
+    // Copy the first native uncertainty under the original Impl mutex. No I/O,
+    // writer borrow or retroactive success after Close/recovery verification.
+    std::optional<trajectory::JournalAppendReceipt> first_unconfirmed_journal_append() const;
     const ContextView& context() const;  // 当前内存视图(链/版本/当前 system)
     // 本账上是否已有该 messageId(PrepareRequest 引用先落稳的判据)。
     bool HasMessageId(std::string_view message_id) const;

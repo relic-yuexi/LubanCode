@@ -51,6 +51,7 @@ EVENT_KEYS = COMMON_KEYS | {
 KINDS = {
     "session.started", "session.ended", "system.change",
     "sdk.operation.turn.bound",
+    "sdk.job.operation.bound",
     "context.system.applied", "context.input.applied", "context.tool_previews.reduced",
     "model.request.prepared", "model.request.sent", "model.request.failed",
     "model.response.started", "model.response.delta", "model.response.completed",
@@ -126,6 +127,7 @@ KIND_STATUS = {
 }
 STATUSLESS_KINDS = {
     "sdk.operation.turn.bound",
+    "sdk.job.operation.bound",
     "tool.job.adopted",
     "session.started", "system.change", "model.request.prepared",
     "model.response.started", "model.response.delta", "compact.requested",
@@ -456,6 +458,26 @@ def validate_line(obj: object, expect_seq: int) -> dict:
                     raise ValidationError("invalid main operation anchor identity: " + key)
             if not is_hex64(payload["payloadHash"]):
                 raise ValidationError("main operation anchor payloadHash must be lowercase SHA-256")
+        elif kind == "sdk.job.operation.bound":
+            check_tool_payload(obj, kind, payload, True)
+            if not all(isinstance(obj.get(key), str) and obj[key] for key in ("turnId", "stepId", "actionId")) or \
+                    any(key in obj for key in ("parentTurnId", "requestId", "compactId", "commandId", "hookDispatchId",
+                                             "taskId", "titleGenerationId", "effects", "effectRefs")) or payload["attempt"] != 1:
+                raise ValidationError("Job binding requires business turn/step/action, attempt 1")
+            refs = {"parentOperationRef", "assistantMessageRef", "sourcePendingEventRef", "sourceAdmissionEventRef",
+                    "preparedPendingEventRef", "registeredEventRef", "adoptionEventRef"}
+            keys = refs | {"layout", "version", "jobId", "tool_call_id", "attempt", "originalInputSha256", "effectiveInputSha256"}
+            if set(payload) != keys or type(payload.get("version")) is not int or payload["version"] != 1 or \
+                    payload.get("layout") != "session_owned_job_operation_v1" or not isinstance(payload["jobId"], str) or not payload["jobId"]:
+                raise ValidationError("unknown Job operation layout/version")
+            for key in refs:
+                ref = payload[key]
+                if not isinstance(ref, dict) or set(ref) != {"sessionId", "runId", "id", "seq", "hash"} or \
+                        not all(isinstance(ref[k], str) and ref[k] for k in ("sessionId", "runId", "id")) or \
+                        type(ref["seq"]) is not int or ref["seq"] <= 0 or not is_hex64(ref["hash"]):
+                    raise ValidationError("Job binding requires canonical five-key reference")
+            if not all(is_hex64(payload[key]) for key in ("originalInputSha256", "effectiveInputSha256")):
+                raise ValidationError("Job binding requires original/effective SHA256")
         elif kind.startswith(("tool.execution.", "tool.result.")):
             # 工具族载荷合同(§4.14-4.16/§4.19;与 C++ schema3 同口径)。
             if kind == "tool.execution.pending":
@@ -1364,6 +1386,32 @@ def self_test() -> int:
                                 "done" if key == "status" else "foreign-1"})
     for bad_anchor in invalid_anchors:
         if not expect_fail(lambda: validate_line(bad_anchor, 4), "main operation anchor exact shape"):
+            failures += 1
+    # Only the native single-line shape; cross-row adoption is the C++ reader's job.
+    native_ref = {"sessionId": "fixture", "runId": "run-1", "id": "event-1", "seq": 1, "hash": "a" * 64}
+    job_binding = {**anchor, "kind": "sdk.job.operation.bound", "stepId": "step-1", "actionId": "action-1",
+                   "payload": {"layout": "session_owned_job_operation_v1", "version": 1,
+                               "jobId": "job-owned-action-1", "tool_call_id": "action-1", "attempt": 1,
+                               "originalInputSha256": "a" * 64, "effectiveInputSha256": "b" * 64,
+                               **{key: dict(native_ref) for key in ("parentOperationRef", "assistantMessageRef",
+                                    "sourcePendingEventRef", "sourceAdmissionEventRef", "preparedPendingEventRef",
+                                    "registeredEventRef", "adoptionEventRef")}}}
+    try:
+        validate_line(job_binding, 4)
+    except ValidationError as error:
+        failures += 1
+        print(f"self-test Job operation binding rejected: {error}")
+    for key, value in (("version", True), ("version", 2), ("layout", "foreign"), ("attempt", 2),
+                       ("jobId", ""), ("adoptionEventRef", "event-1"),
+                       ("adoptionEventRef", {**native_ref, "seq": True}),
+                       ("adoptionEventRef", {**native_ref, "extra": "unbounded"}),
+                       ("originalInputSha256", "A" * 64), ("effectiveInputSha256", "x"), ("extra", 1)):
+        bad_job = {**job_binding, "payload": {**job_binding["payload"], key: value}}
+        if not expect_fail(lambda: validate_line(bad_job, 4), "Job operation exact shape"):
+            failures += 1
+    for key in ("status", "requestId", "effects"):
+        bad_job = {**job_binding, key: [] if key == "effects" else "done" if key == "status" else "request-1"}
+        if not expect_fail(lambda: validate_line(bad_job, 4), "Job operation owner/status shape"):
             failures += 1
     bad = dict(goal_applied)
     bad["payload"] = {**bad["payload"], "toStateRevision": 2}

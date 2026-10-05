@@ -29,6 +29,8 @@ REQUIRED = {
     "sdk.focused.lubancore_memory_blob_spi",
     "sdk.focused.lubancore_operation_turn_binding",
     "sdk.focused.journal_native_receipts",
+    "sdk.focused.v3_journal_receipts",
+    "sdk.focused.lubancore_job_operations",
     "sdk.focused.run_command_execution_limits",
     "sdk.focused.session_recovery_view",
     "sdk.focused.lubancore_recovery_view",
@@ -769,6 +771,76 @@ def check_journal_receipt_native(section, command):
             raise RuntimeError("Journal receipt actual path did not finish once: " + path)
 
 
+V3_JOURNAL_WITNESS_PATHS = ('committed', 'before-io', 'append-gap', 'flush-gap', 'cache', 'lifetime')
+
+
+def check_v3_journal_witness_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_v3_journal_receipts.cpp"):
+        raise RuntimeError("V3 journal witness must register the single absolute native source")
+
+
+def check_v3_journal_witness_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("V3 journal witness native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("V3 journal witness executable is not the actual native fixture")
+    check_v3_journal_witness_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (6, 6, 0):
+        raise RuntimeError("V3 journal witness roster differs from six successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("V3 journal witness native assertions did not actually pass")
+    for path in V3_JOURNAL_WITNESS_PATHS:
+        if section.splitlines().count("[v3-journal-witness-path] " + path) != 1:
+            raise RuntimeError("V3 journal witness actual path did not finish once: " + path)
+
+
+JOB_OPERATION_PATHS = ('source', 'gap', 'history', 'relation', 'isolation', 'lifetime')
+
+
+def check_job_operation_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_lubancore_job_operations.cpp"):
+        raise RuntimeError("Job operation must register the single absolute native source")
+
+
+def check_job_operation_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command)):
+        raise RuntimeError("Job operation native argv is malformed")
+    executable = command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe")
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Job operation executable is not the actual native fixture")
+    check_job_operation_registration(command, executable)
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (6, 6, 0):
+        raise RuntimeError("Job operation roster differs from six successful cases")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Job operation native assertions did not actually pass")
+    for path in JOB_OPERATION_PATHS:
+        if section.splitlines().count("[sdk-job-operations-path] " + path) != 1:
+            raise RuntimeError("Job operation actual path did not finish once: " + path)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, required=True)
@@ -824,6 +896,10 @@ def main():
             check_operation_turn_binding_registration(test.get("command", []))
         if test["name"] == "sdk.focused.journal_native_receipts":
             check_journal_receipt_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.lubancore_job_operations":
+            check_job_operation_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.v3_journal_receipts":
+            check_v3_journal_witness_registration(test.get("command", []))
         if test["name"] == "sdk.focused.run_command_execution_limits":
             check_command_limits_registration(test.get("command", []))
         if test["name"] == "sdk.focused.atomic_write":
@@ -911,6 +987,12 @@ def main():
         if case.attrib["name"] == "sdk.focused.journal_native_receipts":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_journal_receipt_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_job_operations":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_job_operation_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.v3_journal_receipts":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_v3_journal_witness_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.run_command_execution_limits":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_command_limits_native(sections[0], registered["command"])

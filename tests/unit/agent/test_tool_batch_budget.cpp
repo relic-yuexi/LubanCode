@@ -31,11 +31,53 @@ TEST_CASE("new tool batch shares the remaining 20K without changing source") {
     CHECK(std::get<api::ToolResultBlock>(source.content.front()).content.size() == 16000);
 }
 
-TEST_CASE("batch allocator keeps small results whole and redistributes space") {
-    const auto plan = agent::PlanToolBatchBudget(Batch({10, 30000, 30000}), 12010);
+TEST_CASE("batch allocator reserves preview metadata and redistributes space") {
+    const auto plan = agent::PlanToolBatchBudget(Batch({10, 30000, 30000}), 16106);
     REQUIRE(plan.error.empty());
-    CHECK(plan.preview_bytes == std::vector<std::size_t>{10, 6000, 6000});
-    CHECK(plan.total_preview_bytes == 12010);
+    CHECK(plan.preview_bytes == std::vector<std::size_t>{4106, 6000, 6000});
+    CHECK(plan.total_preview_bytes == 16106);
+}
+
+TEST_CASE("short and empty tool bodies have room for source metadata") {
+    const auto source = Batch({0, 75, 1000});
+    const auto plan = agent::PlanToolBatchBudget(source, 20000);
+    REQUIRE(plan.error.empty());
+    CHECK_FALSE(plan.reduced);
+    CHECK(plan.preview_bytes == std::vector<std::size_t>{4096, 4171, 5096});
+    CHECK(plan.total_preview_bytes == 13363);
+    CHECK(std::get<api::ToolResultBlock>(source.content[1]).content.size() == 75);
+}
+
+TEST_CASE("metadata reservations obey batch capacity and the per-result ceiling") {
+    const auto source = Batch({75, 75});
+    const auto plan = agent::PlanToolBatchBudget(source, 2048);
+    REQUIRE(plan.error.empty());
+    CHECK(plan.reduced);
+    CHECK(plan.preview_bytes == std::vector<std::size_t>{1024, 1024});
+    CHECK(plan.total_preview_bytes == 2048);
+    CHECK_FALSE(agent::PlanToolBatchBudget(source, 2047).error.empty());
+    const auto large = agent::PlanToolBatchBudget(Batch({65536}), 100000);
+    REQUIRE(large.error.empty());
+    CHECK(large.preview_bytes == std::vector<std::size_t>{32768});
+}
+
+TEST_CASE("short framing and separate native payload share the actual batch capacity") {
+    auto source = Batch({10, 10});
+    auto& native = std::get<api::ToolResultBlock>(source.content[1]);
+    native.blocks.push_back(tools::TextContent{"separate original payload"});
+    const auto complete = agent::PlanToolBatchBudget(source, 40000);
+    REQUIRE(complete.error.empty());
+    CHECK_FALSE(complete.reduced);
+    CHECK(complete.preview_bytes == std::vector<std::size_t>{4106, 32768});
+    CHECK(complete.total_preview_bytes == 36874);
+    const auto bounded = agent::PlanToolBatchBudget(source, 10000);
+    REQUIRE(bounded.error.empty());
+    CHECK(bounded.reduced);
+    CHECK(bounded.preview_bytes == std::vector<std::size_t>{4106, 5894});
+    CHECK(bounded.total_preview_bytes == 10000);
+    CHECK(native.content == std::string(10, 'x'));
+    REQUIRE(native.blocks.size() == 1);
+    CHECK(std::get<tools::TextContent>(native.blocks.front()).text == "separate original payload");
 }
 
 TEST_CASE("batch allocation has an explicit minimum failure") {

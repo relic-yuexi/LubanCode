@@ -11,6 +11,8 @@
   - [远端 Agent 部署、登记与两端存储](../docs/architecture/remote-agent-deployment.md)、[LubanCore SDK 页](../docs/development/lubancore-sdk.md)。
 - 口径：下文"已有"只指代码已在功能分支并有 CI 证据；"部分"指有内部实现但未进公开 SDK 或只覆盖本地；"无"指未开工。构建与执行验证全部走远端 CI。
 
+2026-10-05 补记：#325 已合入功能分支 `756bf02a`，与已验源 `2c376020` 同树。身份原语也已收入；真实 Session 授权仍未接管。下文表格保原 `02eda80a` 架构核查基线，最新已交窄范围、CI 与未完事项见 [SDK 阶段进度](../docs/development/sdk-stage-status.md)。SDK 尚未与 CLI 全部对齐，后续阶段不能按接口类名勾完。
+
 ---
 
 ## 一、为什么拆（目的）

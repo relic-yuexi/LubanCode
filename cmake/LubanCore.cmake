@@ -9,6 +9,7 @@ add_library(lubancore_sdk SHARED
   src/sdk/event_queue.cpp
   src/sdk/approval.cpp
   src/sdk/operation_ledger.cpp
+  src/sdk/job_operations.cpp
   src/sdk/skills.cpp
   src/sdk/subagents.cpp
   src/sdk/memory.cpp

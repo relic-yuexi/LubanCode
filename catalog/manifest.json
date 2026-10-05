@@ -1,6 +1,6 @@
 {
   "source_schema_version": 2,
-  "revision": "2026-09-18",
+  "revision": "2026-10-04",
   "shards": [
     "providers/openai.json",
     "providers/anthropic.json",
