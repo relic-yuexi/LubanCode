@@ -268,6 +268,78 @@ Result<OperationToolResultIndex> IndexToolResults(const v3::V3Ledger& ledger,
     }
 }
 
+Result<ToolResultIndexEntry> IndexCommandJobResult(const v3::V3Ledger& ledger,
+    const v3::JobOperationBindingFacts& binding) {
+    try {
+        const auto bindings = v3::ReadJobOperationBindings(ledger);
+        const auto adoptions = v3::ReadOwnedJobAdoptions(ledger);
+        if (!bindings || !adoptions || ledger.session_id != binding.session_id || ledger.run_id != binding.run_id)
+            return std::unexpected(Failure("sdk.job.result_invalid", "Job source is invalid"));
+        const auto found = std::find_if(bindings->begin(), bindings->end(), [&](const auto& actual) {
+            return actual.event_id == binding.event_id && actual.line_hash == binding.line_hash &&
+                actual.job_id == binding.job_id && actual.operation_id == binding.operation_id &&
+                actual.parent_operation_id == binding.parent_operation_id && actual.action_id == binding.action_id &&
+                actual.turn_id == binding.turn_id && actual.attempt == binding.attempt;
+        });
+        const auto* adoption = v3::FindOwnedJobAdoption(*adoptions, binding.job_id);
+        if (found == bindings->end() || !adoption || adoption->action_id != binding.action_id ||
+            adoption->adopted_event_id != binding.adopted_event_id)
+            return std::unexpected(Failure("sdk.job.result_invalid", "Job binding differs from actual adoption"));
+        const v3::EventLine* observed = nullptr;
+        for (const auto& event : ledger.events) {
+            if (event.kind != v3::EventKindV3::ToolJobObserved || event.action_id != binding.action_id ||
+                event.payload.value("jobId", std::string()) != binding.job_id) continue;
+            if (observed) return std::unexpected(Failure("sdk.job.result_invalid", "duplicate Job observation"));
+            observed = &event;
+        }
+        if (!observed || !observed->payload.contains("resultRef"))
+            return std::unexpected(Failure("sdk.job.result_unavailable", "no observed command result"));
+        const auto* persisted = ledger.FindEvent(observed->payload.at("resultRef").get<std::string>());
+        if (!persisted || persisted->kind != v3::EventKindV3::ToolResultPersisted ||
+            persisted->action_id != binding.action_id || persisted->turn_id != binding.turn_id ||
+            persisted->seq <= binding.seq || persisted->seq >= observed->seq ||
+            Uint(persisted->payload.at("attempt")) != binding.attempt)
+            return std::unexpected(Failure("sdk.job.result_invalid", "Job persisted scope or order differs"));
+        const auto terminal_id = persisted->payload.at("executionEventRef").get<std::string>();
+        const auto* terminal = ledger.FindEvent(terminal_id);
+        if (!terminal || !IsTerminal(terminal->kind) || terminal->action_id != binding.action_id ||
+            terminal->turn_id != binding.turn_id || terminal->seq <= binding.seq || terminal->seq >= persisted->seq ||
+            Uint(terminal->payload.at("attempt")) != binding.attempt || !observed->payload.contains("postEventRef") ||
+            !v3::CheckOwnedJobPost(ledger, *adoption, terminal_id, persisted->event_id, observed->payload.at("postEventRef")))
+            return std::unexpected(Failure("sdk.job.result_invalid", "Job completion/Post references differ"));
+        ToolResultIndexEntry entry;
+        entry.execution_event_id = terminal_id;
+        entry.summary.identity = {binding.session_id, binding.operation_id, binding.turn_id,
+            binding.action_id, persisted->event_id, {}};
+        entry.summary.attempt = binding.attempt;
+        entry.summary.tool_name = "run_command";
+        const auto& refs = persisted->payload.at("result_ref");
+        if (!refs.is_array() || refs.size() > kMaxChannels + 1)
+            return std::unexpected(Failure("sdk.job.result_invalid", "Job result references exceed the bound"));
+        std::set<std::string> ids, paths;
+        std::size_t metadata_count = 0;
+        for (const auto& ref : refs) {
+            auto artifact = Artifact(ref);
+            if (!ValidId(artifact.id) || !ids.insert(artifact.id).second || !paths.insert(artifact.path).second)
+                return std::unexpected(Failure("sdk.job.result_invalid", "duplicate Job artifact"));
+            if (artifact.kind == "result_metadata") {
+                ++metadata_count; entry.summary.identity.result_id = artifact.id;
+                if (artifact.media_type != "application/json" || artifact.path != "artifacts/" + artifact.id + ".json")
+                    return std::unexpected(Failure("sdk.job.result_invalid", "Job metadata path differs"));
+            }
+            entry.artifacts.push_back(std::move(artifact));
+        }
+        if (metadata_count != 1) return std::unexpected(Failure("sdk.job.result_invalid", "Job metadata is not unique"));
+        for (const auto& ref : entry.artifacts) {
+            if (ref.kind == "result_metadata") continue;
+            const auto& id = entry.summary.identity.result_id;
+            if (ref.id != id + "-" + ref.kind || ref.path != "artifacts/" + id + "." + ref.kind + "." + ExtensionFor(ref.media_type))
+                return std::unexpected(Failure("sdk.job.result_invalid", "Job channel path differs"));
+        }
+        return entry;
+    } catch (...) { return std::unexpected(Failure("sdk.job.result_invalid", "malformed Job result")); }
+}
+
 Result<out::SavedSnapshot> ReadIndexedToolResult(const fs::path& session_dir, const ToolResultIndexEntry& entry,
     const out::SessionResultPolicy& policy, out::ToolResultReadOptions options) {
     try {

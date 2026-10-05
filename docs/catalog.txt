@@ -225,3 +225,4 @@ DOC development/sdk-todo-write.md
 DOC development/sdk-agentic-rag-example.md
 DOC development/sdk-asan-compile-profile.md
 DOC development/windows-command-entry-observation.md
+DOC development/sdk-command-jobs.md

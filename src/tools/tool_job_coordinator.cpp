@@ -232,6 +232,7 @@ struct OwnedRecord {
     std::optional<WriteReceipt> adopted, dispatched, started, terminal, persisted, post, observed, cancelled;
     nlohmann::json parent_admission;
     std::string execution_state, gap;
+    std::string requested_cancel_reason; // jobs_mutex; first non-writing request only
     bool settled = false;
     bool settlement_started = false;
     bool post_invoked = false;
@@ -2122,7 +2123,7 @@ OwnedJobAdoption ToolJobCoordinator::AdoptPreparedJob(
 }
 
 OwnedJobAdmission ToolJobCoordinator::ConfirmParentAdmission(
-    const PreparedJobOwner& owner, const std::string& id, const ParentJobAdmissionRefs& refs) {
+    const PreparedJobOwner& owner, const std::string& id, const ParentJobAdmissionRefs& refs, bool confirm_cancelled_delivery) {
     OwnedJobAdmission out;
     auto reject = [&](const std::string& code) { out.error_code = out.error = code; return out; };
     if (!impl_->prepared_context || current_owned_callback == impl_.get()) return reject("job.owned.disabled");
@@ -2131,11 +2132,13 @@ OwnedJobAdmission ToolJobCoordinator::ConfirmParentAdmission(
     trajectory::v3::V3Writer* writer;
     {
         std::lock_guard lock(impl_->jobs_mutex);
-        if (impl_->closing || impl_->prepared_revoked || !impl_->writer || impl_->writer->closed()) return reject("job.owned.closed");
+        if (!impl_->writer || impl_->writer->closed()) return reject("job.owned.closed");
         if (owner != impl_->prepared_owner) return reject("job.owned.foreign_owner");
         const auto found = impl_->owned.find(id);
         if (found == impl_->owned.end()) return reject("job.owned.not_adopted");
         record = found->second; writer = impl_->writer;
+        const bool cancelled_delivery = confirm_cancelled_delivery && record->job.cancel_requested && record->job.cancel_flag->load();
+        if ((impl_->closing || impl_->prepared_revoked) && !cancelled_delivery) return reject("job.owned.closed");
         if (!record->gap.empty()) return reject(record->gap);
         if (record->job.admission_complete) { out.confirmed = true; return out; }
     }
@@ -2173,22 +2176,35 @@ OwnedJobAdmission ToolJobCoordinator::ConfirmParentAdmission(
         found_text = true;
     }
     if (!found_text) return reject("job.owned.parent_material_missing");
-    JobAuthDecision permission;
-    try {
-        JobThreadScope callback(current_owned_callback, impl_.get());
-        permission = record->capability->scope_gate(record->scope, record->job.tool_input,
-                                                    record->job.identity, record->job.policy);
-    } catch (...) { return reject("job.owned.scope_failed"); }
-    if (!permission.allowed || permission.needs_approval) return reject("job.owned.scope_denied");
+    const auto cancelled_delivery = [&] {
+        std::lock_guard lock(impl_->jobs_mutex);
+        return confirm_cancelled_delivery && record->job.cancel_requested && record->job.cancel_flag->load();
+    };
+    if (!cancelled_delivery()) {
+        JobAuthDecision permission;
+        try {
+            JobThreadScope callback(current_owned_callback, impl_.get());
+            permission = record->capability->scope_gate(record->scope, record->job.tool_input,
+                                                        record->job.identity, record->job.policy);
+        } catch (...) { return reject("job.owned.scope_failed"); }
+        if ((!permission.allowed || permission.needs_approval) && !cancelled_delivery())
+            return reject("job.owned.scope_denied");
+    }
+    // This opt-in confirms only the already verified parent delivery. The
+    // actual private cancel latch remains set; Pump closes before dispatch.
+
     {
         std::lock_guard lock(impl_->jobs_mutex);
-        if (impl_->closing || impl_->prepared_revoked || writer != impl_->writer || writer->closed()) return reject("job.owned.closed");
-        if (record->job.cancel_requested || record->job.cancel_flag->load()) return reject("job.owned.cancelled");
+        const bool cancelled = record->job.cancel_requested || record->job.cancel_flag->load();
+        const bool can_confirm_cancelled = confirm_cancelled_delivery && record->job.cancel_requested && record->job.cancel_flag->load();
+        if (writer != impl_->writer || writer->closed() ||
+            ((impl_->closing || impl_->prepared_revoked) && !can_confirm_cancelled)) return reject("job.owned.closed");
+        if (cancelled && !can_confirm_cancelled) return reject("job.owned.cancelled");
         // Capacity counted when registered. Do not count one ticket twice.
-        impl_->owned_queue.push_back(id);
+        if (!record->settled) impl_->owned_queue.push_back(id);
         record->parent_admission = std::move(parent);
         record->job.admission_complete = true;
-        record->job.state = "queued";
+        if (!record->settled) record->job.state = "queued";
         out.confirmed = true;
     }
     serial.unlock();
@@ -2203,10 +2219,16 @@ std::size_t ToolJobCoordinator::PumpOwnedJobs() {
     std::lock_guard serial(*impl_->prepared_context->writer_serial);
     trajectory::v3::V3Writer* writer;
     std::vector<std::shared_ptr<OwnedRecord>> completions, queued;
+    std::vector<std::pair<std::shared_ptr<OwnedRecord>, std::string>> cancellations;
     {
         std::lock_guard lock(impl_->jobs_mutex);
         if (!impl_->writer || impl_->writer->closed() || impl_->shutdown_complete) return 0;
         writer = impl_->writer;
+        for (const auto& [id, record] : impl_->owned) {
+            (void)id;
+            if (!record->requested_cancel_reason.empty() && !record->cancelled && !record->settled)
+                cancellations.emplace_back(record, record->requested_cancel_reason);
+        }
         for (const auto& worker : impl_->owned_workers) {
             if (!worker.finished || !worker.finished->load(std::memory_order_acquire) || !worker.launch ||
                 !worker.launch->completion_ready.load(std::memory_order_acquire)) continue;
@@ -2229,6 +2251,16 @@ std::size_t ToolJobCoordinator::PumpOwnedJobs() {
         }
     }
     std::size_t settled = 0;
+    for (const auto& [record, reason] : cancellations) {
+        try {
+            record->cancelled = impl_->EmitCancelRequestedLocked(record->job, reason);
+            if (!ReceiptOk(*record->cancelled)) impl_->FreezeOwned(*record, "job.owned.cancel_unconfirmed");
+            else if (!record->job.dispatched) {
+                impl_->CloseOwnedBeforeStart(*record, true, "cancelled_before_dispatch");
+                ++settled;
+            }
+        } catch (...) { impl_->FreezeOwned(*record, "job.owned.cancel_unconfirmed"); }
+    }
     for (const auto& record : completions) {
         std::shared_ptr<Impl::WorkerLaunch> launch;
         {
@@ -2571,6 +2603,32 @@ OwnedJobWaitResult ToolJobCoordinator::WaitOwnedJobs(const PreparedJobOwner& own
         std::unique_lock lock(impl_->jobs_mutex);
         impl_->state_cv.wait_for(lock, std::chrono::milliseconds(10));
     }
+}
+
+JobCancelResult ToolJobCoordinator::RequestOwnedCancellation(const PreparedJobOwner& owner,
+    const std::string& id, const std::string& reason) {
+    JobCancelResult out;
+    if (!impl_->prepared_context) { out.error = "job.owned.disabled"; return out; }
+    {
+        std::lock_guard lock(impl_->jobs_mutex);
+        const auto found = impl_->owned.find(id);
+        if (owner != impl_->prepared_owner || found == impl_->owned.end()) {
+            out.error = "job.owned.foreign_owner"; return out;
+        }
+        auto& record = *found->second;
+        if (record.settled && record.job.state != "unknown") {
+            out.ok = true; out.status = "already_terminal"; out.terminal = record.job.state; return out;
+        }
+        // Unknown may still own an executing process. Retain that knowledge and
+        // the first gap while signalling its real cancellation flag.
+        if (record.requested_cancel_reason.empty())
+            record.requested_cancel_reason = reason.empty() ? "cancel_requested" : reason;
+        record.job.cancel_requested = true;
+        record.job.cancel_flag->store(true, std::memory_order_release);
+        out.ok = true; out.status = "cancel_requested";
+    }
+    impl_->state_cv.notify_all();
+    return out;
 }
 
 JobCancelResult ToolJobCoordinator::CancelOwnedJob(const PreparedJobOwner& owner,

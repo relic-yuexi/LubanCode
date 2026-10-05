@@ -97,7 +97,7 @@ ON 六套各 54 册 focused、452 条原生 CASE、33 项安装消费；OFF 三�
 
 存储 SPI 前先补[结果仓不可变发布](result-immutable-publication.md)。File 默认实现用独占临时件和原生 no-replace 发布，正式名碰撞便拒，不能先查 exists 再 rename。逐枚保文件与直接父目录的实际确认；祖先链未确认、部分发布及未知回执照实留账。首次未知封 Store 后续写入，不读回升级；确定零发布的失败可继续。只交内部 File 前置，没有公开 JournalStore／BlobStore 或数据库。旧 AtomicWriteFile、预览／编号算法和原 CASE 保留，另添八案；三平台 focused／全量与 ASan 须在新组合实跑。
 
-这份存储前置组合预期 ON 60 源／494 CASE，OFF 58／479；安装消费仍34／31。新册同时注册 original 与 focused，全量预期 Linux768、Windows770、macOS771；ASan159实际源／66重点门／19支持件。边界名单只准这一册精确来源，故障注入册共用平台资源锁；两条分类分支、两份 ASan 选择器与实际路径／argv／CASE门均接齐。名册只作预期，本地纯门和源码复核不能替原生验收。
+结果仓前置现与 Command Jobs 合成同一候选，复用已有 CI 分支验收，不添子 PR。新结果册同时注册 original 与 focused；边界名单只准精确来源，故障注入册共用平台资源锁。两条分类分支、两份 ASan 选择器、首轮内联名册及实际路径／argv／CASE门一并核对；旧结果仓资源锁仍在原分支，新锁不遭后一次赋值覆盖。源码与纯门通过，原生尚待这份组合实跑。
 
 每项先写短合同：公开什么，谁持资源，取消怎样传，关场怎样等借用退出，恢复依据哪份事实。只交实际接通的一段，不先铺一排空接口。
 
@@ -106,3 +106,11 @@ ON 六套各 54 册 focused、452 条原生 CASE、33 项安装消费；OFF 三�
 默认只出 preview。Full 须 Node 许可和每场参数同时开启。子 Agent 默认关闭，宿主显式给预算，许可只管当前子场。
 
 保持一张实施 PR，收完再开下一笔；功能分支到 main 继续走 Draft [#234](https://github.com/relic-yuexi/LubanCode/pull/234)。用户已授权自行收口，仍须逐源审查和远端三平台 CI。源码、Git、纯数据和文档可本地检查；配置、编译、CTest 与原生执行全交远端。
+
+## Command Jobs 接线候选
+
+公开源码封于 `2d582d03`，这批从 `c522a51c` 合入并补 CI 接线，尚未合功能分支，也没有本组合远端通过证据。默认不开 Job；显式预算与真正 run_command 声明接到同一 Session owner。已接原父调用五引用、真实 Job Operation binding、只管本 Job 的审批、唯一 host worker 完成泵、取消与 Close 真 join，以及同 ID、同 run 的 Hold 只读恢复。ReadJobPreview 是可信本地缓存，不能当出站投影。
+
+Jobs 两册17 CASE 加结果仓八案，共增三册25 CASE。合树静态名册为 SDK Lua ON/OFF 62/60 册、511/496 CASE，安装消费35/32场；全量预期 Linux/Windows/macOS 772/774/775。ASan 当前选择式选出重点68册、执行来源161册、wildcard编译正文161份、附件23份；这里列接线范围，不冒充实跑。公开 Blob／Journal SPI 尚未接入。
+
+CI 会留安装/移位消费者原 argv、显式真实 probe 的 File API 归属与字节指纹、公开十路径、私有七路径，以及四份写后未知 typed 原件。注册、JUnit、LastTest 三者须相符，失败也留原件。原 deadline 六 CASE 和 CLI 命令路径不改；本地仅跑纯数据、AST、脚本语法与文档检查。详见 [Command Jobs 合同](sdk-command-jobs.md)。

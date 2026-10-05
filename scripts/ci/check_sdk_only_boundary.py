@@ -169,10 +169,11 @@ PRIVATE_TEST_PROBES = {
 # Real private implementations compiled into the SDK reference-test executable,
 # rather than exposed as additional DLL ABI. No other SDK implementation gets
 # this testing-only exception.
-PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp", "src/sdk/memory.cpp", "src/sdk/action_dispatch.cpp", "src/sdk/operation_ledger.cpp", "src/sdk/job_operations.cpp"}
+PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp", "src/sdk/memory.cpp", "src/sdk/action_dispatch.cpp", "src/sdk/operation_ledger.cpp", "src/sdk/job_operations.cpp", "src/sdk/adapters.cpp", "src/sdk/command_jobs.cpp", "src/sdk/command_jobs_opening.cpp"}
 TODO_CONSUMER_SOURCE = "examples/sdk-consumer/todo_write.cpp"
 RAG_CONSUMER_SOURCE = "examples/sdk-consumer/agentic_rag.cpp"
 WEB_FETCH_CONSUMER_SOURCE = "examples/sdk-consumer/web_fetch.cpp"
+COMMAND_JOBS_CONSUMER_SOURCE = "examples/sdk-consumer/command_jobs.cpp"
 
 
 def todo_consumer_ownership_violations(targets, testing):
@@ -360,7 +361,9 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
             violations.append("RAG consumer helper is not a selected testing-only source: " + owner)
         if name == WEB_FETCH_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
             violations.append("WebFetch consumer helper is not a selected testing-only source: " + owner)
-        if name in {"src/sdk/memory.cpp", "src/sdk/operation_ledger.cpp", "src/sdk/job_operations.cpp"} and owner not in {"lubancore_sdk", "lubancore_sdk_tests"}:
+        if name == COMMAND_JOBS_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
+            violations.append("Command Jobs helper is not a selected testing-only source: " + owner)
+        if name in {"src/sdk/memory.cpp", "src/sdk/operation_ledger.cpp", "src/sdk/job_operations.cpp", "src/sdk/adapters.cpp", "src/sdk/command_jobs.cpp", "src/sdk/command_jobs_opening.cpp"} and owner not in {"lubancore_sdk", "lubancore_sdk_tests"}:
             violations.append(f"unregistered private SDK reference owner: {owner} includes {name}")
         if owner == "lubancore_sdk_tests" and name.startswith("src/sdk/") and name.endswith(".cpp"):
             if not expect_testing:
@@ -405,7 +408,7 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
             source_facts.append({"path": str(path), "projectPath": name,
                                  "compiled": "compileGroupIndex" in entry,
                                  "generated": entry.get("isGenerated", False)})
-            if name and (name.startswith(("src/", "include/", "tests/")) or name in {TODO_CONSUMER_SOURCE, RAG_CONSUMER_SOURCE, WEB_FETCH_CONSUMER_SOURCE}):
+            if name and (name.startswith(("src/", "include/", "tests/")) or name in {TODO_CONSUMER_SOURCE, RAG_CONSUMER_SOURCE, WEB_FETCH_CONSUMER_SOURCE, COMMAND_JOBS_CONSUMER_SOURCE}):
                 check_project_path(name, target["name"])
                 group_index = entry.get("compileGroupIndex")
                 include_dirs = include_groups[group_index] if group_index is not None else ()
@@ -449,6 +452,15 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
         violations.extend(rag_consumer_ownership_violations(targets, expect_testing))
     if (source / WEB_FETCH_CONSUMER_SOURCE).is_file():
         violations.extend(web_fetch_consumer_ownership_violations(targets, expect_testing))
+    if (source / COMMAND_JOBS_CONSUMER_SOURCE).is_file():
+        try:
+            from .sdk_command_jobs import ownership_violations
+        except ImportError:
+            try:
+                from sdk_command_jobs import ownership_violations
+            except ModuleNotFoundError:
+                from scripts.ci.sdk_command_jobs import ownership_violations
+        violations.extend(ownership_violations(targets, expect_testing))
     sdk = [target_id for target_id, target in targets.items() if target["name"] == "lubancore_sdk"]
     if len(sdk) != 1 or targets[sdk[0]]["type"] != "SHARED_LIBRARY":
         violations.append("expected exactly one shared lubancore_sdk target")

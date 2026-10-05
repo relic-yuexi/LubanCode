@@ -298,6 +298,7 @@ SessionRuntime::Options SessionService::BuildRuntimeOptions(const SessionLaunchR
     options.trajectory_memory_capability_factory = request.memory_capability_factory;
     options.trajectory_recovery_capture = request.recovery_capture;
     options.trajectory_recovery_factory = request.recovery_factory;
+    options.trajectory_journal_native_io_probe = request.journal_native_io_probe;
     // 身份:显式递的整份吃;否则按 cwd 四级裁决(commondir→marker→
     // config→cwd),home 递进去做全局件止步——与三端被收编前的原装配
     // 逐句对应(终端/one-shot:current_path;app-server:前端指定 cwd)。
@@ -341,6 +342,10 @@ trajectory::CloseOutcome SessionService::CloseRuntime(SessionRuntime& runtime, c
 // ---------------------------------------------------------------------------
 
 SessionService::SessionService(SessionLaunchRequest request) {
+    if (request.resume_at_launch && request.journal_native_io_probe) {
+        launch_error_ = "session.native_probe_resume_unsupported";
+        return;
+    }
     auto runtime = std::make_unique<SessionRuntime>(BuildRuntimeOptions(request));
     if (runtime->trajectory() == nullptr) {
         // 开不出账:错误说明原样透传(ledger Open 的错误串,与三端旧装配

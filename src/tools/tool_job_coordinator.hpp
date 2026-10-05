@@ -478,11 +478,13 @@ public:
         const PreparedJobOwner& owner, const std::string& job_id) const;
     std::size_t prepared_count() const;
 
-    // Internal, registration-domain only. No public SDK Accepted/Job API.
+    // Internal registration-domain producers. A public host must preserve the
+    // real source, binding and parent-admission chain before reporting Accepted.
     OwnedJobAdoption AdoptPreparedJob(const PreparedJobOwner& owner, const std::string& job_id,
                                      OwnedJobCapability capability);
     OwnedJobAdmission ConfirmParentAdmission(const PreparedJobOwner& owner, const std::string& job_id,
-                                             const ParentJobAdmissionRefs& refs);
+                                             const ParentJobAdmissionRefs& refs,
+                                             bool confirm_cancelled_delivery = false);
     OwnedJobStatusView GetOwnedJob(const PreparedJobOwner& owner, const std::string& job_id);
     // Host-safe serial -> jobs projection only: no Pump/Reap/clock/writer I/O.
     // Do not call from an observer whose callback owner is joining that thread.
@@ -501,6 +503,10 @@ public:
                                      std::uint64_t timeout_ms, bool wait_all);
     JobCancelResult CancelOwnedJob(const PreparedJobOwner& owner, const std::string& job_id,
                                    const std::string& reason);
+    // No writer/serial/scope callback. Real cancellation must still reach an
+    // owned command when its journal is broken. The host pump records intent.
+    JobCancelResult RequestOwnedCancellation(const PreparedJobOwner& owner,
+        const std::string& job_id, const std::string& reason);
     std::size_t PumpOwnedJobs();
 
     // ---- 四接口(单 §8)----

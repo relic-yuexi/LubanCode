@@ -10,6 +10,8 @@
 #include <utility>
 
 #include "platform/text_encoding.hpp"
+#include "platform/sha256.hpp"
+#include "trajectory/canonical_json.hpp"
 #include "tools/path_utils.hpp"
 #include "approval_mode.hpp"
 
@@ -60,6 +62,19 @@ bool ValidChildScope(const rt::ChildApprovalScope& scope) {
         lubancode::tools::Utf8ToPath(scope.effective_cwd).is_absolute() &&
         (scope.permission_floor == "inherit" ||
          (floor && scope.permission_floor == lubancode::ApprovalModeMachineName(*floor)));
+}
+using JobKey = std::tuple<std::string, std::string, std::string, std::string, std::string, std::string, std::string>;
+JobKey JobKeyOf(const jobs::v1::ApprovalScope& scope) {
+    return {scope.session_id, scope.run_id, scope.parent_operation_id, scope.turn_id,
+        scope.parent_action_id, scope.provider_call_id, scope.assistant_message_id};
+}
+bool ValidJobScope(const jobs::v1::ApprovalScope& scope) {
+    for (const auto* value : {&scope.session_id, &scope.run_id, &scope.parent_operation_id,
+        &scope.turn_id, &scope.parent_action_id, &scope.provider_call_id,
+        &scope.assistant_message_id, &scope.cwd, &scope.effective_input_sha256})
+        if (!ValidFact(*value)) return false;
+    return lubancode::tools::Utf8ToPath(scope.cwd).is_absolute() && scope.effective_input_sha256.size() == 64 &&
+        scope.effective_input_sha256.find_first_not_of("0123456789abcdef") == std::string::npos;
 }
 } // namespace
 
@@ -143,6 +158,7 @@ struct SessionApprovals::State {
         std::shared_ptr<Future> future;
         std::optional<ScopedApprovalOwner> scope;
         std::optional<rt::ChildApprovalScope> child;
+        std::optional<jobs::v1::ApprovalScope> job;
     };
     mutable std::mutex mutex;
     std::map<std::string, Entry> pending;
@@ -150,6 +166,9 @@ struct SessionApprovals::State {
     std::set<std::string> scoped_ids;
     std::map<ChildKey, std::set<std::string>> child_grants;
     std::map<ChildKey, bool> child_scopes;
+    struct JobScope { jobs::v1::ApprovalScope scope; bool open = true; std::optional<jobs::v1::Identity> bound; };
+    std::map<JobKey, JobScope> job_scopes;
+    bool job_admission_stopped = false;
     bool child_admission_stopped = false;
     std::string session_id, run_id;
     std::string operation_id;
@@ -177,6 +196,7 @@ struct SessionApprovals::State {
             child_grants.clear();
             child_scopes.clear();
             child_admission_stopped = false;
+            for (auto& [scope, job] : job_scopes) { (void)scope; if (close || !job.bound) job.open = false; }
             session_id.clear();
             run_id.clear();
             operation_id.clear();
@@ -243,7 +263,8 @@ Result<rt::ApprovalLease> SessionApprovals::RegisterChildScoped(
 
 Result<rt::ApprovalLease> SessionApprovals::RegisterScopedImpl(
     ScopedApprovalOwner owner, Approval approval, std::chrono::milliseconds timeout,
-    Publisher publish, std::optional<rt::ChildApprovalScope> child) {
+    Publisher publish, std::optional<rt::ChildApprovalScope> child,
+    std::optional<jobs::v1::ApprovalScope> job) {
     if (!ValidScope(owner, approval) || timeout.count() <= 0 || !publish)
         return std::unexpected(Error{"sdk.approval.invalid_scope", "scoped approval requires an owned scope and publisher"});
     const auto request_id = approval.request_id;
@@ -265,10 +286,19 @@ Result<rt::ApprovalLease> SessionApprovals::RegisterScopedImpl(
                 return std::unexpected(Error{"sdk.approval.owner_mismatch", "child scope is closed or belongs to another host run"});
             state_->child_scopes.try_emplace(key, true);
         }
+        if (job) {
+            if (state_->run_id != job->run_id) return std::unexpected(Error{"sdk.approval.owner_mismatch", "Job run differs"});
+            if (state_->job_admission_stopped)
+                return std::unexpected(Error{"sdk.approval.owner_mismatch", "Job admission is retired"});
+            const auto [entry, inserted] = state_->job_scopes.try_emplace(JobKeyOf(*job), State::JobScope{*job});
+            (void)inserted;
+            if (entry->second.scope != *job || !entry->second.open || entry->second.bound)
+                return std::unexpected(Error{"sdk.approval.owner_mismatch", "Job candidate is retired or already bound"});
+        }
         if (state_->pending.contains(request_id) || state_->scoped_ids.contains(request_id))
             return std::unexpected(Error{"sdk.approval.duplicate_request_id", "request ID is already pending"});
         state_->scoped_ids.insert(request_id);
-        state_->pending.emplace(request_id, State::Entry{approval, future, owner, std::move(child)});
+        state_->pending.emplace(request_id, State::Entry{approval, future, owner, std::move(child), std::move(job)});
     }
     try {
         publish(approval, owner); // Never hold either pending/future lock in user code.
@@ -276,6 +306,80 @@ Result<rt::ApprovalLease> SessionApprovals::RegisterScopedImpl(
         return std::unexpected(Error{"sdk.approval.publish_failed", "approval publisher failed; ticket retired"});
     }
     return std::move(lease);
+}
+
+Result<rt::ApprovalLease> SessionApprovals::RegisterJobScoped(
+    jobs::v1::ApprovalScope scope, Approval approval, std::chrono::milliseconds timeout,
+    std::function<void(const Approval&)> publish) {
+    const auto arguments = nlohmann::json::parse(approval.input_json, nullptr, false);
+    const auto canonical = arguments.is_object() ? lubancode::trajectory::CanonicalJsonDump(arguments)
+        : std::expected<std::string, std::string>(std::unexpected("invalid Job arguments"));
+    if (!canonical || lubancode::platform::Sha256Hex(*canonical) != scope.effective_input_sha256 ||
+        !ValidJobScope(scope) || !publish || approval.tool_call_id != scope.provider_call_id ||
+        approval.tool_name != "run_command" || !approval.job || *approval.job != scope)
+        return std::unexpected(Error{"sdk.approval.invalid_scope", "Job ticket requires its original main declaration"});
+    ScopedApprovalOwner owner{scope.session_id, scope.parent_operation_id, scope.session_id,
+        scope.run_id, scope.turn_id, scope.parent_action_id, scope.cwd};
+    return RegisterScopedImpl(std::move(owner), std::move(approval), timeout,
+        [publish = std::move(publish)](const Approval& ticket, const ScopedApprovalOwner&) { publish(ticket); },
+        std::nullopt, std::move(scope));
+}
+
+bool SessionApprovals::BindJobScope(const jobs::v1::ApprovalScope& scope, const jobs::v1::Identity& identity) {
+    if (!ValidJobScope(scope) || identity.session_id != scope.session_id || identity.run_id != scope.run_id ||
+        identity.parent_operation_id != scope.parent_operation_id || identity.turn_id != scope.turn_id ||
+        identity.job_id.empty() || identity.operation_id.empty() || identity.action_id.empty() || identity.attempt != 1) return false;
+    std::lock_guard lock(state_->mutex);
+    if (state_->closed || state_->job_admission_stopped || state_->session_id != scope.session_id || state_->run_id != scope.run_id ||
+        state_->operation_id != scope.parent_operation_id) return false;
+    const auto key = JobKeyOf(scope);
+    for (const auto& [other_key, entry] : state_->job_scopes) {
+        if (other_key == key || !entry.bound) continue;
+        const auto& bound = *entry.bound;
+        if (bound.session_id == identity.session_id && bound.run_id == identity.run_id &&
+            (bound.job_id == identity.job_id || bound.operation_id == identity.operation_id || bound.action_id == identity.action_id))
+            return false;
+    }
+    auto [found, inserted] = state_->job_scopes.try_emplace(key, State::JobScope{scope});
+    (void)inserted;
+    if (!found->second.open || found->second.scope != scope) return false;
+    if (found->second.bound) return *found->second.bound == identity;
+    found->second.bound = identity;
+    return true;
+}
+
+bool SessionApprovals::JobAllowed(const jobs::v1::ApprovalScope& scope, const jobs::v1::Identity& identity) const {
+    std::lock_guard lock(state_->mutex);
+    const auto found = state_->job_scopes.find(JobKeyOf(scope));
+    return !state_->closed && !state_->job_admission_stopped && found != state_->job_scopes.end() &&
+        found->second.scope == scope && found->second.open &&
+        found->second.bound && *found->second.bound == identity;
+}
+
+void SessionApprovals::CloseJobScope(const jobs::v1::ApprovalScope& scope) noexcept {
+    decltype(state_->pending) retired;
+    {
+        std::lock_guard lock(state_->mutex);
+        if (state_->closed) return;
+        try {
+            if (!ValidJobScope(scope)) return;
+            auto [found, inserted] = state_->job_scopes.try_emplace(JobKeyOf(scope), State::JobScope{scope, false, {}});
+            (void)inserted;
+            if (found->second.scope != scope) return;
+            found->second.open = false;
+        } catch (...) {
+            // A failed tombstone allocation must never reopen a retired Job.
+            // Ordinary parent and child grants keep their existing lifetime.
+            state_->job_admission_stopped = true;
+        }
+        for (auto it = state_->pending.begin(); it != state_->pending.end();) {
+            auto current = it++;
+            if (current->second.job && (*current->second.job == scope || state_->job_admission_stopped)) {
+                current->second.future->Resolve(std::nullopt);
+                retired.insert(state_->pending.extract(current));
+            }
+        }
+    }
 }
 
 bool SessionApprovals::Resolve(const std::string& request_id, const rt::ApprovalResponse& response) {
@@ -287,14 +391,16 @@ bool SessionApprovals::Resolve(const std::string& request_id, const rt::Approval
         if (it == state_->pending.end()) return false;
         if (it->second.future->expired()) {
             it->second.future->Resolve(std::nullopt);
-        } else if (it->second.scope && !it->second.child && response.decision == rt::InteractionDecision::AcceptForSession) {
+        } else if (it->second.scope && !it->second.child && !it->second.job && response.decision == rt::InteractionDecision::AcceptForSession) {
             return false; // Explicitly unsupported; the live ticket remains answerable.
         } else {
             resolved = it->second.future->Resolve(response);
             if (resolved && response.decision == rt::InteractionDecision::AcceptForSession) {
                 if (it->second.child)
                     state_->child_grants[KeyOf(*it->second.child)].insert(it->second.approval.tool_name);
-                else state_->allowed.insert(it->second.approval.tool_name);
+                else if (!it->second.job) state_->allowed.insert(it->second.approval.tool_name);
+                // Job acceptance is consumed once by synchronous Prepare. Bind
+                // retains only that Job's fixed effective input, never a tool-name grant.
             }
         }
         retired = state_->pending.extract(it);

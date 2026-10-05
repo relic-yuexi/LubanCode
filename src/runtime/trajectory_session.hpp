@@ -178,6 +178,8 @@ public:
         std::shared_ptr<trajectory::MemoryCapabilityFactory> memory_capability_factory;
         trajectory::RecoveryCaptureRequest recovery_capture;
         trajectory::SessionRecoveryFactory recovery_factory;
+        // Internal test-only, one fresh journal: observes actual native IO. Never public SDK input.
+        std::shared_ptr<trajectory::JournalNativeIoProbe> journal_native_io_probe;
         // 故障注入(测试专用;生产恒空 = 零行为):子账首枚 run.started
         // 提交前问一次,返回稳定码即按该码注入一次失败(子代理空轨迹单
         // 5.1 的 fault injection)。只作用于子账,不影响 main。

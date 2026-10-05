@@ -35,6 +35,12 @@ Result<OperationToolResultIndex> IndexToolResults(
     const std::string& session_id, const std::string& operation_id,
     const std::string& turn_id);
 
+// A Job result is indexed by its own verified native operation binding. It is
+// never smuggled through the main operation's deliberately excluding index.
+Result<ToolResultIndexEntry> IndexCommandJobResult(
+    const lubancode::trajectory::v3::V3Ledger&,
+    const lubancode::trajectory::v3::JobOperationBindingFacts&);
+
 Result<results::v1::SavedSnapshot> ReadIndexedToolResult(
     const std::filesystem::path& session_dir, const ToolResultIndexEntry& entry,
     const results::v1::SessionResultPolicy& policy,
