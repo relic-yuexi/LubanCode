@@ -186,7 +186,8 @@ def run(args: list[str], env: dict[str, str], *, capture: bool = False) -> str:
     return result.stdout if capture else ""
 
 
-def run_demo_command(args: list[str], env: dict[str, str], receipt: Path) -> None:
+def run_demo_command(args: list[str], env: dict[str, str], receipt: Path,
+                     *, label: str = "RAG independent") -> None:
     """Retain the actual independent configure/ALL result even when it fails."""
     report = {"argv": args, "status": "running", "returncode": None,
               "output": str(receipt.with_suffix(".log")), "output_encoding": "raw_bytes"}
@@ -205,7 +206,7 @@ def run_demo_command(args: list[str], env: dict[str, str], receipt: Path) -> Non
     report.update(status="passed" if result.returncode == 0 else "failed", returncode=result.returncode)
     receipt.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     if result.returncode:
-        raise RuntimeError(f"RAG independent command exited with {result.returncode}: {args[0]}")
+        raise RuntimeError(f"{label} command exited with {result.returncode}: {args[0]}")
 
 
 def main() -> None:
@@ -266,8 +267,23 @@ def main() -> None:
     demo_build = scratch / "rag-build"
     evidence = producer_build / "test-evidence" / "sdk-consumer"
     evidence.mkdir(parents=True, exist_ok=True)
-    job_probe = command_jobs.copy_probe(repo, producer_build, scratch,
+    env = os.environ.copy()
+    for name in ("LubanCore_DIR", "LubanCore_ROOT", "CMAKE_PREFIX_PATH", "CMAKE_TOOLCHAIN_FILE"):
+        env.pop(name, None)
+    job_fixture = command_jobs.prepare_probe_fixture(repo, scratch,
+                                                     evidence / "command-jobs-probe-source")
+    (evidence / "command-jobs-probe-fixture.json").write_text(
+        json.dumps(job_fixture, indent=2) + "\n", encoding="utf-8")
+    # The SDK-only product graph intentionally has no testing targets. Build
+    # this independent, standard-only fixture on the remote CI runner, then
+    # relocate its actual File API artifact. Never enable producer tests here.
+    run_demo_command(job_fixture["configure"], env, evidence / "command-jobs-probe-configure.json",
+                     label="Command Jobs private probe configure")
+    run_demo_command(job_fixture["buildCommand"], env, evidence / "command-jobs-probe-build.json",
+                     label="Command Jobs private probe build")
+    job_probe = command_jobs.copy_probe(job_fixture["source"], job_fixture["build"], scratch,
                                        evidence=evidence / "command-jobs-file-api")
+    job_probe["fixture"] = job_fixture
     (evidence / "command-jobs-probe.json").write_text(json.dumps(job_probe, indent=2) + "\n", encoding="utf-8")
     (evidence / "consumer-context.json").write_text(json.dumps({
         "github_sha": os.environ.get("GITHUB_SHA"),
@@ -285,9 +301,6 @@ def main() -> None:
     }, indent=2) + "\n", encoding="utf-8")
     print(f"SDK consumer evidence directory: {scratch}", flush=True)
 
-    env = os.environ.copy()
-    for name in ("LubanCore_DIR", "LubanCore_ROOT", "CMAKE_PREFIX_PATH", "CMAKE_TOOLCHAIN_FILE"):
-        env.pop(name, None)
     install = ["cmake", "--install", str(producer_build), "--config", "Release", "--prefix", str(staging)]
     if args.install_mode == "component":
         install.extend(["--component", "LubanCore"])

@@ -26,6 +26,7 @@ HELPER = "examples/sdk-consumer/command_jobs.cpp"
 HEADER = "include/lubancore/jobs.hpp"
 PROBE_TARGET = "lubancore_command_limits_probe"
 PROBE_SOURCE = "tests/support/command_limits_probe.cpp"
+PROBE_PROJECT = "scripts/ci/fixtures/command-jobs-probe/CMakeLists.txt"
 FAULT_KINDS = {1: "tool.job.registered", 3: "sdk.job.operation.bound",
                6: "tool.result.persisted", 14: "hook.completed"}
 FAULT_KEYS = {"sync", "row_kind", "row_seq", "journal_status", "native_stage", "platform",
@@ -193,6 +194,41 @@ def seal_sources(repo):
                 "private/nonstandard public include in " + relative)
         result[relative] = {"sha256": digest(path), "includes": names}
     return result
+
+
+def prepare_probe_fixture(repo, scratch, evidence):
+    """Copy a standalone fixture and declare remote commands; never run them."""
+    try:
+        from .check_sdk_only_boundary import CLIENT
+    except ImportError:
+        from check_sdk_only_boundary import CLIENT
+    repo, scratch, evidence = Path(repo).resolve(), Path(scratch).resolve(), Path(evidence).resolve()
+    require(not scratch.is_relative_to(repo), "private probe must leave the product source tree")
+    source, build = scratch / "command-jobs-probe-source", scratch / "command-jobs-probe-build"
+    require(not source.exists() and not build.exists() and not evidence.exists(),
+            "private probe fixture destination already exists")
+    source.mkdir(parents=True)
+    copies = {}
+    for original, relative in ((PROBE_PROJECT, "CMakeLists.txt"), (PROBE_SOURCE, PROBE_SOURCE)):
+        path = repo / original
+        require(path.is_file() and not path.is_symlink(), "private probe fixture source missing or linked")
+        destination = source / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination)
+        saved = evidence / relative
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(destination, saved)
+        require(digest(path) == digest(destination) == digest(saved), "private probe fixture source copy differs")
+        copies[original] = {"projectPath": relative, "bytes": destination.stat().st_size, "sha256": digest(destination)}
+    query = build / ".cmake/api/v1/query" / CLIENT
+    query.mkdir(parents=True)
+    (query / "codemodel-v2").write_text("", encoding="utf-8")
+    return {"schemaVersion": 1, "originalSource": str(repo), "source": str(source), "build": str(build),
+            "sourceCopies": copies,
+            "configure": ["cmake", "-S", str(source), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
+                          "-DCMAKE_SUPPRESS_REGENERATION=ON"],
+            "buildCommand": ["cmake", "--build", str(build), "--config", "Release",
+                             "--target", PROBE_TARGET, "--parallel", "4"]}
 
 
 def preserve_probe_file_api(reply, index_path, index, model_ref, model, target_ref, target, output):

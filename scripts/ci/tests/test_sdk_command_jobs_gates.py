@@ -195,11 +195,31 @@ class ClosureTests(unittest.TestCase):
             "src/runtime/async_tool_runtime.cpp", "src/runtime/async_tool_runtime.hpp",
             "src/runtime/trajectory_turn_bridge.cpp", "src/runtime/trajectory_turn_bridge.hpp",
             *gate.IMPLEMENTATIONS, "src/sdk/command_jobs.hpp", "src/sdk/command_jobs_opening.hpp",
-            gate.HEADER, "src/tools/tool_job_coordinator.cpp", "src/tools/tool_job_coordinator.hpp")
+            gate.HEADER, gate.PROBE_PROJECT,
+            "src/tools/tool_job_coordinator.cpp", "src/tools/tool_job_coordinator.hpp")
         for pattern in patterns:
             for source in dependencies:
                 self.assertTrue(any(fnmatch.fnmatchcase(source, part) for part in pattern.strip().split('|')), source)
             self.assertFalse(any(fnmatch.fnmatchcase("docs/readme.md", part) for part in pattern.strip().split('|')))
+
+    def test_private_fixture_is_fresh_and_has_no_product_graph_dependency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            receipt = gate.prepare_probe_fixture(REPO, root / "scratch", root / "evidence")
+            self.assertEqual(set(receipt["sourceCopies"]), {gate.PROBE_PROJECT, gate.PROBE_SOURCE})
+            source, build = Path(receipt["source"]), Path(receipt["build"])
+            self.assertFalse(source.is_relative_to(REPO))
+            self.assertFalse(build.is_relative_to(REPO))
+            self.assertEqual(receipt["configure"], ["cmake", "-S", str(source), "-B", str(build),
+                "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_SUPPRESS_REGENERATION=ON"])
+            self.assertEqual(receipt["buildCommand"], ["cmake", "--build", str(build), "--config", "Release",
+                "--target", gate.PROBE_TARGET, "--parallel", "4"])
+            self.assertTrue((build / ".cmake/api/v1/query/client-lubancore-boundary/codemodel-v2").is_file())
+            for original, copy in receipt["sourceCopies"].items():
+                self.assertEqual((source / copy["projectPath"]).read_bytes(), (REPO / original).read_bytes())
+                self.assertEqual((root / "evidence" / copy["projectPath"]).read_bytes(), (REPO / original).read_bytes())
+            with self.assertRaises(RuntimeError):
+                gate.prepare_probe_fixture(REPO, root / "scratch", root / "second-evidence")
 
     def test_probe_copy_comes_from_real_target_artifact_shape(self):
         with tempfile.TemporaryDirectory() as directory:
