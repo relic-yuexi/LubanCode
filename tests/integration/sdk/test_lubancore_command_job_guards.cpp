@@ -1,4 +1,5 @@
 #include <doctest/doctest.h>
+#include <lubancore/core.hpp>
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,7 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -244,6 +246,111 @@ sdk::Approval Ticket(const sdk::jobs::v1::ApprovalScope& scope, const std::strin
     sdk::Approval value; value.request_id = id; value.operation_id = scope.parent_operation_id;
     value.tool_call_id = scope.provider_call_id; value.tool_name = "run_command"; value.input_json = "{}";
     value.cwd = scope.cwd; value.job = scope; return value;
+}
+struct OpeningCalls {
+    std::atomic<unsigned> models{0}, tools{0}, live_backends{0};
+};
+class OpeningBackend final : public sdk::Backend {
+public:
+    explicit OpeningBackend(std::shared_ptr<OpeningCalls> calls) : calls_(std::move(calls)) { ++calls_->live_backends; }
+    ~OpeningBackend() override { --calls_->live_backends; }
+    sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest&, sdk::Cancellation) override {
+        ++calls_->models;
+        return sdk::ModelReply{};
+    }
+private:
+    std::shared_ptr<OpeningCalls> calls_;
+};
+std::map<std::string, std::string> OpeningTree(const fs::path& root) {
+    std::map<std::string, std::string> snapshot;
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+        const auto name = Utf8(entry.path().lexically_relative(root));
+        if (entry.is_directory()) snapshot.emplace("directory:" + name, std::string{});
+        else {
+            REQUIRE(entry.is_regular_file());
+            snapshot.emplace("file:" + name, Bytes(entry.path()));
+        }
+    }
+    return snapshot;
+}
+void OpeningWrite(const fs::path& path, const std::string& bytes) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    REQUIRE(output.is_open());
+    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    output.close(); REQUIRE_FALSE(output.fail());
+}
+void CheckMissingResumeBoundary() {
+    Directory directory;
+    const auto data = directory.root / "opening-data", resources = directory.root / "opening-resources";
+    REQUIRE(fs::create_directory(data)); REQUIRE(fs::create_directory(resources));
+    auto runtime = sdk::Runtime::Create({Utf8(data), Utf8(resources)});
+    REQUIRE_MESSAGE(runtime.has_value(), (runtime ? std::string{} : runtime.error().message));
+    auto calls = std::make_shared<OpeningCalls>();
+    const auto options = [&](const std::string& resume, bool jobs) {
+        sdk::SessionOptions value;
+        value.cwd = Utf8(directory.cwd); value.model = "opening-boundary";
+        value.system_prompt = "No model or tool work during explicit resume admission.";
+        value.backend = std::make_unique<OpeningBackend>(calls);
+        value.resume_session_id = resume; value.builtin_tools = {"run_command"};
+        if (jobs) value.command_jobs = sdk::jobs::v1::CommandOptions{30000, 20000, 4096, 1, 4};
+        sdk::Tool tool; tool.name = "opening_probe"; tool.description = "Must not execute during admission.";
+        tool.input_schema_json = R"({"type":"object","properties":{}})";
+        tool.requires_approval = false;
+        tool.execute = [calls](const std::string&, const sdk::ToolContext&) -> sdk::Result<sdk::ToolResult> {
+            ++calls->tools; return sdk::ToolResult{};
+        };
+        value.custom_tools.push_back(std::move(tool));
+        return value;
+    };
+    const auto rejected = [&](const std::string& id, const std::string& code) {
+        for (const bool jobs : {false, true}) {
+            INFO("resume_id=", id, ", command_jobs=", jobs, ", expected=", code);
+            const auto before = OpeningTree(data);
+            const auto opened = (*runtime)->OpenSession(options(id, jobs));
+            REQUIRE_FALSE(opened.has_value());
+            REQUIRE_MESSAGE(opened.error().code == code, (opened.error().code + ": " + opened.error().message));
+            REQUIRE(OpeningTree(data) == before);
+            REQUIRE(calls->models.load() == 0); REQUIRE(calls->tools.load() == 0);
+            REQUIRE(calls->live_backends.load() == 0);
+        }
+    };
+    REQUIRE_FALSE(fs::exists(data / "workspaces"));
+    rejected("missing-before-workspace", "sdk.session.open_failed");
+    REQUIRE_FALSE(fs::exists(data / "workspaces"));
+
+    auto seed = (*runtime)->OpenSession(options({}, false)); REQUIRE(seed.has_value());
+    const auto id = (*seed)->id();
+    REQUIRE(calls->live_backends.load() == 1);
+    REQUIRE((*seed)->Close().has_value()); seed->reset();
+    REQUIRE(calls->live_backends.load() == 0);
+    std::vector<fs::path> sessions;
+    for (const auto& entry : fs::recursive_directory_iterator(data / "workspaces"))
+        if (entry.is_regular_file() && entry.path().filename() == id + ".jsonl" &&
+            entry.path().parent_path().filename() == id) sessions.push_back(entry.path().parent_path());
+    REQUIRE(sessions.size() == 1);
+    const auto& session = sessions.front();
+    const auto missing = session.parent_path() / "missing-in-existing-workspace";
+    REQUIRE_FALSE(fs::exists(missing));
+    rejected("missing-in-existing-workspace", "sdk.session.open_failed");
+    REQUIRE_FALSE(fs::exists(missing));
+
+    const auto not_directory = session.parent_path() / "not-a-session-directory";
+    OpeningWrite(not_directory, "existing foreign bytes\n");
+    rejected("not-a-session-directory", "sdk.job.plan_invalid");
+    REQUIRE(Bytes(not_directory) == "existing foreign bytes\n");
+    const auto plan = session / "sdk-command-jobs-plan.json";
+    const auto saved_plan = Bytes(plan);
+    OpeningWrite(plan, "{bad frozen plan");
+    rejected(id, "sdk.job.plan_invalid");
+    REQUIRE(Bytes(plan) == "{bad frozen plan");
+    OpeningWrite(plan, saved_plan);
+    auto resumed = (*runtime)->OpenSession(options(id, false)); REQUIRE(resumed.has_value());
+    REQUIRE((*resumed)->id() == id);
+    REQUIRE((*resumed)->Close().has_value()); resumed->reset();
+    REQUIRE(Bytes(plan) == saved_plan);
+    REQUIRE(calls->models.load() == 0); REQUIRE(calls->tools.load() == 0);
+    REQUIRE(calls->live_backends.load() == 0);
+    REQUIRE((*runtime)->Shutdown().has_value());
 }
 }
 
@@ -484,6 +591,7 @@ TEST_CASE("SDK Command Job guards: public completion has one actual binding pare
         ++observations;
     });
     REQUIRE(observations == 1);
+    CheckMissingResumeBoundary();
     Mark("actual-public-source");
 }
 
