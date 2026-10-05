@@ -282,4 +282,38 @@ TEST_CASE("WebFetchTool: HTTPS downgrade and redirect cancellation issue no seco
         REQUIRE(tool.execute({{"url", "https://example.test/one"}}).error_code == "web_fetch." + expected);
         REQUIRE(transport->requests.size() == 1);
     }
+    for (const int status : {0, 200, 301, 302, 303, 304, 307, 308, 404}) {
+        auto transport = std::make_shared<ScriptedWebFetchTransport>();
+        transport->error = lubancode::net::FullHttpError{};
+        transport->error->kind = Kind::NetworkFailed;
+        transport->error->curl_code = static_cast<long>(cpr::ErrorCode::WEIRD_SERVER_REPLY);
+        transport->error->response_status = status;
+        WebFetchTool tool(lubancode::tools::WebFetchOptions{}, transport);
+        const bool redirect = status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+        REQUIRE(tool.execute({{"url", "https://example.test/one"}}).error_code ==
+            (redirect ? "web_fetch.redirect_invalid" : "web_fetch.network_failed"));
+        REQUIRE(transport->requests.size() == 1);
+    }
+    for (const auto& [kind, expected] : std::vector<std::pair<Kind, std::string>>{
+             {Kind::Cancelled, "cancelled"}, {Kind::Timeout, "timeout"},
+             {Kind::ResponseHeaderTooLarge, "header_limit"}, {Kind::ResponseBodyTooLarge, "download_limit"}}) {
+        auto transport = std::make_shared<ScriptedWebFetchTransport>();
+        transport->error = lubancode::net::FullHttpError{};
+        transport->error->kind = kind;
+        transport->error->curl_code = static_cast<long>(cpr::ErrorCode::WEIRD_SERVER_REPLY);
+        transport->error->response_status = 302;
+        WebFetchTool tool(lubancode::tools::WebFetchOptions{}, transport);
+        REQUIRE(tool.execute({{"url", "https://example.test/one"}}).error_code == "web_fetch." + expected);
+        REQUIRE(transport->requests.size() == 1);
+    }
+    {
+        auto transport = std::make_shared<ScriptedWebFetchTransport>();
+        transport->error = lubancode::net::FullHttpError{};
+        transport->error->kind = Kind::NetworkFailed;
+        transport->error->curl_code = static_cast<long>(cpr::ErrorCode::RECV_ERROR);
+        transport->error->response_status = 302;
+        WebFetchTool tool(lubancode::tools::WebFetchOptions{}, transport);
+        REQUIRE(tool.execute({{"url", "https://example.test/one"}}).error_code == "web_fetch.network_failed");
+        REQUIRE(transport->requests.size() == 1);
+    }
 }

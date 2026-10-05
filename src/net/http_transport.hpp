@@ -83,6 +83,9 @@ struct FullHttpError {
     long curl_code = 0;    // Historical name: cpr::ErrorCode ordinal, not raw CURLcode; 0 = none.
     std::string curl_message;
     bool received_any_bytes = false;  // 收到过响应体字节(超时分型旁证)
+    // Actual status reported by the failed transfer; 0 means absent/unknown here.
+    // This is bounded protocol evidence, never a successful/complete response.
+    int response_status = 0;
 };
 
 // 执行一笔完整请求。同步阻塞;cancel 非空且置位时在连接/上传/等首字节/

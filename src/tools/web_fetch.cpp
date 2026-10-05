@@ -283,6 +283,15 @@ Tool::Result FetchError(const std::string& code, const std::string& text) {
 }
 Tool::Result TransportError(const net::FullHttpError& error) {
     using Kind = net::FullHttpErrorKind;
+    // Newer libcurl rejects differing Location headers before delivering the
+    // second header callback. Preserve a stable rejection for an actually
+    // received redirect status; do not infer it from an arbitrary error string
+    // or treat a failed response as successful redirect material.
+    if (error.kind == Kind::NetworkFailed &&
+        error.curl_code == static_cast<long>(cpr::ErrorCode::WEIRD_SERVER_REPLY) &&
+        (error.response_status == 301 || error.response_status == 302 || error.response_status == 303 ||
+         error.response_status == 307 || error.response_status == 308))
+        return FetchError("redirect_invalid", "重定向响应不合规");
     // The existing transport stores cpr::ErrorCode here (despite the historical
     // field name), not the numeric CURLcode; CPR maps CURLE_BAD_CONTENT_ENCODING.
     if (error.kind == Kind::NetworkFailed &&

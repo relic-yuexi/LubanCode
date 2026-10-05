@@ -8,6 +8,8 @@
 
 每场工具持自己的配置与内部 Transport。Transport 仅收一跳 GET、剩余预算、借用取消旗，返回 owned 状态／头／体及计数；默认实现复用现有 CPR 底座。本笔不公开任意网络回调，不引新网络库、数据库、会话线程或后台 Job。这个窄接口可供后续替换传输，不替宿主提供网络隔离或鉴权。
 
+首轮组合 `92f93572` 的 macOS 与 SDK-only 安装消费在重复 Location 案失败，回执报普通网络错。三十四场中三十三场过，HTTP 记录走到第二十一笔；服务正常收到 stop 并退出。原日志未记底层错误码。查 curl 源码，新版会在第二枚不同 Location 进入回调前返回协议错误，旧版会把两枚头交给调用方；这条差异能解释现象，新源仍须远端实跑验证。底座错误值现保实际响应状态；Web 只将 `NetworkFailed`、CPR `WEIRD_SERVER_REPLY` 和真实跳转状态同时成立时归为 `redirect_invalid`。这条码指重定向响应不合规，不专指重复 Location。没有状态、普通 HTTP 状态或其它网络码不套这条规则；取消、时限和字节帽仍先判。失败状态只作拒绝依据，不拿残留材料跟随跳转，不解析错误文案，也不回传响应头。原六案、三十笔请求和时限照留，新源另跑远端 CI。分支行为见 [curl 的 Location 解析](https://github.com/curl/curl/blob/master/lib/http.c)。
+
 `web_fetch::v1::DescribeCapabilities()` 不发请求，只从本 SDK 内置传输实际链接并已初始化的 libcurl 读取 gzip 解码能力，返回 owned 值；读取失败仍报错，不降成 false。现 FetchContent 明关 `CURL_ZLIB`，不为这笔添解压库。有实际 decoder 时，下载帽计解压后 callback 字节；没有 decoder 时，原生 `CURLE_BAD_CONTENT_ENCODING` 明报 `web_fetch.unsupported_encoding`，不把压缩字节交成成功文本。gzip 炸弹案按实际能力锁定唯一码：支持则必须撞下载帽，不支持则必须报编码拒绝。
 
 CLI 同用这套有界执行与取消路径，保留现有 User-Agent、HTML 清洗及 HTTP 错误口径。网络地址范围仍由部署环境、宿主策略决定，不移植 Lua 的公网 allowlist。该工具仍声明 `ReadOnlyRemote`、沿 CLI 免确认规则；SDK 宿主显式选工具即开放此能力，已有 Action 可在调用前裁决。

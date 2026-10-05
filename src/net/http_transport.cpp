@@ -574,6 +574,7 @@ std::expected<FullHttpResponse, FullHttpError> PerformFullHttpRequest(const Full
         error.curl_code = static_cast<long>(raw.error.code);
         error.curl_message = raw.error.message;
         error.received_any_bytes = received_any_bytes;
+        error.response_status = response.status;
         error.kind = ClassifyCurlErrorCode(error.curl_code);
         switch (error.kind) {
             case FullHttpErrorKind::DnsFailed:
