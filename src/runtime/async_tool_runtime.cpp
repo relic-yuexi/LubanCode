@@ -218,6 +218,14 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
         for (std::size_t i = 0; i < calls.size(); ++i) {
             const api::ToolUseBlock& call = calls[i];
             ToolCallAdjudication& adjudication = adjudications[i];
+            if (admission_mode() != agent::JobAdmissionMode::Legacy && hooks.owned_selected) {
+                if (hooks.owned_selected(call)) {
+                    adjudication.mode = ToolProtocolMode::JobHandle;
+                    adjudication.dispatch_point = ToolDispatchPoint::OnAssistantComplete;
+                    adjudication.basis = "owned_session_host";
+                }
+                continue;
+            }
             const auto policy_it = options.tools.find(call.name);
             if (policy_it == options.tools.end()) {
                 continue;  // 缺省 inline
@@ -247,8 +255,22 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
                     "fail-closed,单 §4),按 job_handle 伪异步接单配对";
             }
         }
-        RecordCapabilitySnapshotLocked(saw_async_call);
+        if (!(admission_mode() == agent::JobAdmissionMode::OwnedRequired && hooks.owned_selected))
+            RecordCapabilitySnapshotLocked(saw_async_call);
         return adjudications;
+    }
+
+    agent::OwnedJobAdmissionReceipt TakeOwnedJobOrder(const api::ToolUseBlock& call,
+        const agent::OwnedToolAdmissionContext& context) override {
+        if (admission_mode() != agent::JobAdmissionMode::OwnedRequired ||
+            shutdown_requested.load() || !hooks.owned_admission)
+            return agent::MissingOwnedJobAdmission();
+        TrajectoryTurnBridge* bridge = nullptr;
+        { std::lock_guard lock(book_mutex); bridge = current_bridge; }
+        if (!bridge) return agent::MissingOwnedJobAdmission();
+        // The host owns the bridge through this synchronous turn. Never hold
+        // book_mutex across preparation, approval publication or waiting.
+        return hooks.owned_admission(*bridge, call, context);
     }
 
     // ---- agent::ToolBatchGate:接单 --------------------------------------
@@ -349,6 +371,10 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
     // ---- agent::ToolBatchGate:完成信封回灌口 ----------------------------
     void PumpBatchBoundary() override {
         if (shutdown_requested.load()) return;
+        if (admission_mode() != agent::JobAdmissionMode::Legacy && hooks.owned_pump) {
+            hooks.owned_pump();
+            return;
+        }
         coordinator_->PumpCompletions();
         std::vector<KnownJob> jobs_to_check;
         {
@@ -535,6 +561,8 @@ bool AsyncToolRuntime::quiescent() const {
 agent::ToolBatchGate* AsyncToolRuntime::gate() { return impl_.get(); }
 
 agent::ResultDeliveryPlanner* AsyncToolRuntime::planner() {
+    if (impl_->options.admission_mode == agent::JobAdmissionMode::OwnedRequired && impl_->hooks.owned_admission)
+        return nullptr; // owned parent delivery has its own verified single bridge transaction
     return impl_->shutdown_requested.load() ? nullptr : impl_->planner_.get();
 }
 

@@ -852,6 +852,7 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     writer_options.run_kind = manifest.run_kind;
     // 测试专用的提交故障注入(生产恒空):armed 才点火,与 P0-C 同款纪律。
     writer_options.inject_io_failure = options_.v3_main_io_fault;
+    writer_options.journal_native_io_probe = std::move(options_.journal_native_io_probe);
     auto writer = v3::V3Writer::Start(directory->v3_stream_path(), manifest.session_id,
                                       manifest.main_run_id, options_.v3_system_content,
                                       std::move(system_extra), std::move(writer_options));
@@ -2111,6 +2112,10 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     }
     std::lock_guard<std::mutex> lock(mutex_);
     ResumeOutcome outcome;
+    if (options_.journal_native_io_probe) {
+        outcome.error_code = "resume.native_probe_unsupported";
+        return outcome;
+    }
     const auto fail = [&outcome](std::string code, std::string message) {
         outcome.error_code = std::move(code);
         outcome.message = std::move(message);

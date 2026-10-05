@@ -87,6 +87,8 @@ void HardenLedgerDirectories(const trajectory::TrajectoryDirectory& directory,
 }
 
 std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Open(Options options) {
+    if (options.resume_at_launch && options.journal_native_io_probe)
+        return std::unexpected("session.native_probe_resume_unsupported");
     std::filesystem::path home_dir;
     if (options.workspaces_root.empty()) {
         // 会话账是运行数据,落状态根(应用Worker接入单 §4.2):应用根语义
@@ -144,6 +146,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.memory_capability_factory = options.memory_capability_factory;
     manager_options.recovery_capture = options.recovery_capture;
     manager_options.recovery_factory = options.recovery_factory;
+    manager_options.journal_native_io_probe = std::move(options.journal_native_io_probe);
     // T08:主账写者的提交故障注入(测试专用;生产恒空)。
     manager_options.v3_main_io_fault = options.v3_main_io_fault;
     // 子代理空轨迹单 P0-C:main stream 同样走延迟开卷——正式 .jsonl 由

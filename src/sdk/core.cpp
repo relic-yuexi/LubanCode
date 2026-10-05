@@ -41,6 +41,7 @@
 #include "sdk/memory_write.hpp"
 #include "sdk/lua.hpp"
 #include "sdk/operation_ledger.hpp"
+#include "sdk/command_jobs.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/search_ripgrep.hpp"
 #include "tools/web_fetch.hpp"
@@ -199,6 +200,10 @@ struct Session::Impl final : rt::InteractionBroker {
     std::atomic<bool> interrupt{false};
     std::thread worker;
     detail::SessionApprovals approvals;
+    std::shared_ptr<detail::SessionCommandJobs> command_jobs;
+    // Successful bindings are durable facts; retain only the first failed
+    // producer witness, rather than another unbounded copy of every input.
+    std::optional<detail::MainOperationTurnStart> command_parent_start_failure;
 
     ~Impl() { (void)Close(); }
 
@@ -279,6 +284,13 @@ struct Session::Impl final : rt::InteractionBroker {
             if (!lubancode::tools::ValidateWebFetchOptions(*web_fetch_options))
                 return std::unexpected(Failure("sdk.web_fetch.invalid_options"));
         }
+        if (options.command_jobs) {
+            const auto valid = detail::ValidateCommandJobOptions(*options.command_jobs);
+            if (!valid) return std::unexpected(valid.error());
+            for (const auto& registration : options.extensions) for (const auto& handler : registration.manifest.handlers)
+                if (handler.point == extensions::v1::Point::PreAction || handler.point == extensions::v1::Point::PostAction)
+                    return std::unexpected(Failure("sdk.job.action_combination_unsupported"));
+        }
         struct InitCleanupScope {
             bool previous = in_session_worker;
             InitCleanupScope() { in_session_worker = true; }
@@ -304,6 +316,14 @@ struct Session::Impl final : rt::InteractionBroker {
         auto action_opening = detail::SessionActionOpening::Prepare(options.extensions,
             lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key, options.resume_session_id);
         if (!action_opening) return std::unexpected(action_opening.error());
+        auto job_plan = detail::SessionCommandJobPlan::Prepare(options.command_jobs,
+            lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key, options.resume_session_id, options.cwd);
+        if (!job_plan) return std::unexpected(job_plan.error());
+        if ((*job_plan)->enabled()) {
+            if (std::find(options.builtin_tools.begin(), options.builtin_tools.end(), "run_command") == options.builtin_tools.end())
+                return std::unexpected(Failure("sdk.job.run_command_not_selected"));
+            if ((*action_opening)->enabled()) return std::unexpected(Failure("sdk.job.action_combination_unsupported"));
+        }
         auto child_plan = detail::SessionSubagentPlan::Prepare(options.subagents,
             lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key,
             options.resume_session_id, options.cwd, options.model,
@@ -342,7 +362,16 @@ struct Session::Impl final : rt::InteractionBroker {
             }
             auto tool = rt::assembly::CreateLocalTool(name, search_runner, web_fetch_options ? &*web_fetch_options : nullptr);
             if (!tool || prepared_registry->Find(name)) return std::unexpected(Failure("sdk.tool.unsupported_or_duplicate", name));
-            prepared_registry->Register(detail::BindLocalTool(std::move(tool), options.cwd));
+            if (name == "run_command" && (*job_plan)->enabled()) {
+                lubancode::tools::ToolRegistration registration;
+                registration.source_kind = lubancode::tools::ToolSourceKind::Builtin;
+                registration.source_instance = "sdk.builtin.run_command";
+                registration.version_or_digest = Version();
+                registration.effect_class = tool->effect_class(); registration.idempotency = tool->idempotency();
+                registration.recovery = tool->recovery_capability();
+                registration.tool = detail::BindLocalTool(std::move(tool), options.cwd, true);
+                prepared_registry->Register(std::move(registration));
+            } else prepared_registry->Register(detail::BindLocalTool(std::move(tool), options.cwd));
         }
         for (auto& tool : options.custom_tools) {
             if (prepared_registry->Find(tool.name)) return std::unexpected(Failure("sdk.tool.duplicate", tool.name));
@@ -499,14 +528,18 @@ struct Session::Impl final : rt::InteractionBroker {
         auto child_opening = (*child_plan)->OpeningParticipant();
         auto lua_opening = (*lua_module)->OpeningParticipant();
         auto action_gate = (*action_opening)->OpeningParticipant();
+        auto jobs_opening = (*job_plan)->OpeningParticipant();
         launch.v3_opening_participant = [skills_opening = std::move(skills_opening), memory_opening = std::move(memory_opening),
                                        write_opening = std::move(write_opening), child_opening = std::move(child_opening),
-                                       lua_opening = std::move(lua_opening), action_gate = std::move(action_gate)]
+                                       lua_opening = std::move(lua_opening), action_gate = std::move(action_gate),
+                                       jobs_opening = std::move(jobs_opening)]
             (const lubancode::trajectory::V3OpeningContext& context) -> std::expected<Json, std::string> {
                 // Recheck the strict Action declaration before another opening
                 // participant can publish metadata or transfer an old system.
                 auto actions = action_gate(context);
                 if (!actions) return std::unexpected(actions.error());
+                auto jobs = jobs_opening(context);
+                if (!jobs) return std::unexpected(jobs.error());
                 auto skills = skills_opening(context);
                 if (!skills) return std::unexpected(skills.error());
                 auto memory = memory_opening(context);
@@ -517,7 +550,7 @@ struct Session::Impl final : rt::InteractionBroker {
                 if (!children) return std::unexpected(children.error());
                 auto scripts = lua_opening(context);
                 if (!scripts) return std::unexpected(scripts.error());
-                for (const auto* part : {&*memory, &*writes, &*children, &*scripts, &*actions}) if (part->contains("hostBindings")) {
+                for (const auto* part : {&*memory, &*writes, &*children, &*scripts, &*actions, &*jobs}) if (part->contains("hostBindings")) {
                     if (!skills->contains("hostBindings")) (*skills)["hostBindings"] = Json::object();
                     for (auto it = (*part)["hostBindings"].begin(); it != (*part)["hostBindings"].end(); ++it)
                         (*skills)["hostBindings"][it.key()] = it.value();
@@ -534,7 +567,8 @@ struct Session::Impl final : rt::InteractionBroker {
             service->launch_error().find("sdk.memory_write.") != std::string::npos ? "sdk.memory_write.open_failed" :
             service->launch_error().find("sdk.subagent.") != std::string::npos ? "sdk.subagent.open_failed" :
             service->launch_error().find("sdk.action.") != std::string::npos ? "sdk.action.open_failed" :
-            service->launch_error().find("sdk.lua.") != std::string::npos ? "sdk.lua.open_failed" : "sdk.session.open_failed",
+            service->launch_error().find("sdk.lua.") != std::string::npos ? "sdk.lua.open_failed" :
+            service->launch_error().find("sdk.job.") != std::string::npos ? "sdk.job.open_failed" : "sdk.session.open_failed",
             service->launch_error()));
         session_id = service->trajectory()->session_id();
         session_dir = service->trajectory()->session_dir();
@@ -603,6 +637,13 @@ struct Session::Impl final : rt::InteractionBroker {
             (*assembled)->Attach(std::move(*children));
         }
         subagent_snapshot = (*child_plan)->Describe();
+        if ((*job_plan)->enabled()) {
+            auto jobs = detail::SessionCommandJobs::Build(*job_plan, *service, approvals, options.approval_mode,
+                options.approval_timeout, [this](Event event) { Emit(std::move(event)); });
+            if (!jobs) return std::unexpected(jobs.error());
+            command_jobs = std::move(*jobs);
+            (*assembled)->Attach(command_jobs->Attachment());
+        }
         std::optional<std::vector<api::Message>> restored_history;
         if (!options.resume_session_id.empty()) restored_history = service->trajectory()->LaunchResumeHistory();
         service->InitializeExecution(std::move(*assembled), std::move(profile), std::move(restored_history));
@@ -810,6 +851,11 @@ struct Session::Impl final : rt::InteractionBroker {
         return SaveMemoryReport(std::move(report));
     }
     Operation Complete(Operation operation, const std::vector<std::string>& refs, bool usage_reported, bool ledger_ok = true) {
+        if (command_jobs) {
+            if (!ledger_ok || operation.state != OperationState::Succeeded)
+                command_jobs->StopParent(operation.operation_id, "parent_not_succeeded");
+            command_jobs->PumpAndPublish();
+        }
         if (!ledger_ok) {
             operation.state = OperationState::Indeterminate;
             operation.error += " sdk.trajectory.persistence_failed";
@@ -920,6 +966,11 @@ struct Session::Impl final : rt::InteractionBroker {
             operation.error += " sdk.result.persistence_failed";
             operation.state = OperationState::Indeterminate;
         }
+        if (command_jobs) {
+            if (operation.state != OperationState::Succeeded)
+                command_jobs->StopParent(operation.operation_id, "parent_final_failed");
+            command_jobs->PumpAndPublish();
+        }
         // EndTurn and scoped-binding teardown have drained every writer borrower.
         // Freeze identities before making the terminal operation visible. Readers
         // use this snapshot, so another turn may append V3 without a read race.
@@ -933,6 +984,7 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         Event event;
         event.kind = "operation_completed";
+        if (command_jobs) command_jobs->EndParent(operation.operation_id);
         event.operation_id = operation.operation_id;
         event.turn_id = operation.turn_id;
         event.text = operation.final_text;
@@ -941,14 +993,15 @@ struct Session::Impl final : rt::InteractionBroker {
         return operation;
     }
 
-    void Run(const rt::SessionService::QueuedInput& input, bool skip) {
+    void Run(const rt::SessionService::QueuedInput& input, bool skip, const std::string& bound_turn = {}) {
         live_child_receipts.clear();
         Operation operation;
         operation.operation_id = input.operation_id;
+        operation.turn_id = bound_turn;
         if (skip) { operation.state = OperationState::Cancelled; Complete(std::move(operation), {}, false); return; }
         // Writer seeds this counter from durable V3 facts, including after a
         // process restart. Process-local counters would reuse turn-1 on resume.
-        operation.turn_id = service->trajectory()->v3_main_writer()->NewTurnId();
+        operation.turn_id = bound_turn.empty() ? service->trajectory()->v3_main_writer()->NewTurnId() : bound_turn;
         active_turn_id = operation.turn_id;
         rt::TurnEventAdapter events(session_id, rt::ProcessIdAuthority());
         bool usage_reported = false;
@@ -985,8 +1038,10 @@ struct Session::Impl final : rt::InteractionBroker {
             operation.error = pre.blocked ? pre.block_code + ": " + pre.block_reason : "sdk.extension.trajectory_failed";
             // A reserved identity is not a formal admitted turn. No user or
             // TurnStarted event has been committed on a PreUser rejection.
-            operation.turn_id.clear();
-            active_turn_id.clear();
+            if (!command_jobs) {
+                operation.turn_id.clear();
+                active_turn_id.clear();
+            }
             Complete(std::move(operation), {}, false, middleware_healthy());
             return;
         }
@@ -1040,7 +1095,9 @@ struct Session::Impl final : rt::InteractionBroker {
         rt::ToolTraceHub hub(service->runtime()->ids());
         auto& agent = service->execution()->agent();
         rt::ScopedTurnBindings turn_bindings(agent);
+        if (command_jobs) command_jobs->SetParent(input.operation_id, operation.turn_id);
         turn_bindings.Bind(wiring, {.hub = &hub, .trajectory = bridge.get(),
+                                   .async_runtime = command_jobs ? service->runtime()->async_tool_runtime() : nullptr,
                                    .thread_id = session_id, .turn_id = operation.turn_id});
         // Installed after the scoped snapshot, so Reset revokes this live
         // bridge borrow before the bridge or any writer can close.
@@ -1350,12 +1407,38 @@ struct Session::Impl final : rt::InteractionBroker {
         } worker_scope;
         for (;;) {
             rt::SessionService::PendingPop pop;
+            std::string bound_turn;
             bool skip = false;
             {
                 std::unique_lock lock(mutex);
-                cv.wait(lock, [&] { return closing || broken || memory_write_indeterminate || service->pending_input_count() > 0; });
-                if (broken || memory_write_indeterminate || (closing && service->pending_input_count() == 0)) break;
-                pop = service->PopPendingInput();
+                const auto ready = [&] { return closing || broken || memory_write_indeterminate ||
+                    (command_jobs && command_jobs->indeterminate()) || service->pending_input_count() > 0; };
+                if (command_jobs && command_jobs->HasPending()) cv.wait_for(lock, std::chrono::milliseconds(10), ready);
+                else cv.wait(lock, ready);
+                if (broken || memory_write_indeterminate || (command_jobs && command_jobs->indeterminate()) ||
+                    (closing && service->pending_input_count() == 0)) break;
+                if (service->pending_input_count() == 0 && command_jobs) {
+                    lock.unlock(); command_jobs->PumpAndPublish(); continue;
+                }
+                if (command_jobs) {
+                    lock.unlock();
+                    auto begun = detail::BeginMainOperationTurn(*service);
+                    lock.lock();
+                    if (begun.input) {
+                        pop.input = *begun.input;
+                    }
+                    if (!begun.ready() || !begun.input) {
+                        if (!command_parent_start_failure) command_parent_start_failure = begun;
+                        broken = true;
+                        if (begun.input) {
+                            auto& failed = operations[begun.input->operation_id];
+                            failed.state = OperationState::Indeterminate; failed.error = begun.error.code;
+                        }
+                        cv.notify_all(); break;
+                    }
+                    bound_turn = begun.turn_id;
+                    pop.status = rt::SessionService::PendingPop::Status::Ok;
+                } else pop = service->PopPendingInput();
                 if (pop.status == rt::SessionService::PendingPop::Status::WriteFailed) { broken = true; cv.notify_all(); break; }
                 if (pop.status != rt::SessionService::PendingPop::Status::Ok) continue;
                 active_operation = pop.input.operation_id;
@@ -1366,7 +1449,7 @@ struct Session::Impl final : rt::InteractionBroker {
                 interrupt.store(skip);
                 operations[active_operation].state = OperationState::Running;
             }
-            try { Run(pop.input, skip); }
+            try { Run(pop.input, skip, bound_turn); }
             catch (const std::exception& error) {
                 Operation failed{pop.input.operation_id, active_turn_id, OperationState::Failed, {}, error.what(), false};
                 Complete(std::move(failed), {}, false);
@@ -1376,15 +1459,21 @@ struct Session::Impl final : rt::InteractionBroker {
             }
             CancelApprovals();
         }
-        std::lock_guard lock(mutex);
-        if (broken || memory_write_indeterminate) for (auto& [id, operation] : operations) {
-            (void)id;
-            if (!Terminal(operation.state)) {
-                operation.state = OperationState::Indeterminate;
-                operation.error = memory_write_indeterminate ? "sdk.memory_write.indeterminate" : "sdk.storage.broken";
+        bool stop_jobs = false;
+        {
+            std::lock_guard lock(mutex);
+            stop_jobs = broken || memory_write_indeterminate || (command_jobs && command_jobs->indeterminate());
+            if (stop_jobs) for (auto& [id, operation] : operations) {
+                (void)id;
+                if (!Terminal(operation.state)) {
+                    operation.state = OperationState::Indeterminate;
+                    operation.error = memory_write_indeterminate ? "sdk.memory_write.indeterminate" :
+                        (command_jobs && command_jobs->indeterminate()) ? "sdk.job.indeterminate" : "sdk.storage.broken";
+                }
             }
+            cv.notify_all();
         }
-        cv.notify_all();
+        if (stop_jobs && command_jobs) command_jobs->RequestClose();
     }
 
     void RequestClose() {
@@ -1395,6 +1484,7 @@ struct Session::Impl final : rt::InteractionBroker {
             interrupt.store(true);
             cv.notify_all();
         }
+        if (command_jobs) command_jobs->RequestClose();
         approvals.Close();
         if (event_delivery) event_delivery->BeginClose();
     }
@@ -1437,10 +1527,18 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         RequestClose();
         RequestExecutionShutdown();
+        if (command_jobs) {
+            const auto retired = command_jobs->RetireBindings();
+            if (!retired && !close_error) close_error = retired.error();
+        }
         if (worker.joinable()) worker.join();
+        if (command_jobs) {
+            const auto joined = command_jobs->Finalize();
+            if (!joined && !close_error) close_error = joined.error();
+        }
         if (service && service->runtime()) {
             const auto outcome = service->Close("sdk_close");
-            if (!outcome.error_code.empty()) close_error = Failure(outcome.error_code, outcome.message);
+            if (!outcome.error_code.empty() && !close_error) close_error = Failure(outcome.error_code, outcome.message);
         }
         // SessionService destruction also releases operations.jsonl. Keep query
         // projections, not the live writer, after Close (Windows delete/rename).
@@ -1557,6 +1655,8 @@ Result<Receipt> Session::Submit(std::string key, std::string text) {
     if (impl_->memory_write_indeterminate) return std::unexpected(Failure("sdk.memory_write.indeterminate",
         "A previous project write needs explicit inspection; this Session cannot continue automatically"));
     if (impl_->broken) return std::unexpected(Failure("sdk.storage.broken"));
+    if (impl_->command_jobs && impl_->command_jobs->indeterminate())
+        return std::unexpected(Failure("sdk.job.indeterminate"));
     auto receipt = impl_->service->SubmitInput({std::move(key), std::move(text), {}});
     if (!receipt.accepted && !receipt.duplicate) return std::unexpected(Failure(receipt.error_code));
     if (receipt.accepted) impl_->operations.emplace(receipt.operation_id, Operation{receipt.operation_id});
@@ -1601,13 +1701,34 @@ Result<void> Session::Cancel(std::string id) {
         if (it == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
         if (Terminal(it->second.state)) return std::unexpected(Failure("sdk.operation.already_terminal"));
         impl_->cancelled.insert(id);
-        if (impl_->active_operation != id) return {};
+        if (impl_->active_operation != id) {
+            if (impl_->command_jobs) impl_->command_jobs->StopParent(id, "parent_cancelled_before_start");
+            return {};
+        }
         impl_->interrupt.store(true);
         // Keep the operation gate until its approvals are cancelled, so the
         // next turn cannot register a request in the cancellation window.
         impl_->CancelApprovals();
     }
+    if (impl_->command_jobs) impl_->command_jobs->StopParent(id, "parent_cancelled");
     return {};
+}
+Result<std::vector<jobs::v1::JobView>> Session::ListJobs(std::optional<std::string> parent) const {
+    return impl_->command_jobs ? impl_->command_jobs->List(std::move(parent)) : std::vector<jobs::v1::JobView>{};
+}
+Result<jobs::v1::JobView> Session::ReadJob(jobs::v1::Identity identity) const {
+    return impl_->command_jobs ? impl_->command_jobs->Read(identity) : Result<jobs::v1::JobView>(std::unexpected(Failure("sdk.job.disabled")));
+}
+Result<jobs::v1::JobView> Session::WaitJob(jobs::v1::Identity identity, std::chrono::milliseconds timeout) const {
+    if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider())
+        return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    return impl_->command_jobs ? impl_->command_jobs->Wait(identity, timeout) : Result<jobs::v1::JobView>(std::unexpected(Failure("sdk.job.disabled")));
+}
+Result<void> Session::CancelJob(jobs::v1::Identity identity) {
+    return impl_->command_jobs ? impl_->command_jobs->Cancel(identity) : Result<void>(std::unexpected(Failure("sdk.job.disabled")));
+}
+Result<jobs::v1::Preview> Session::ReadJobPreview(jobs::v1::Identity identity, std::size_t max_bytes) const {
+    return impl_->command_jobs ? impl_->command_jobs->Preview(identity, max_bytes) : Result<jobs::v1::Preview>(std::unexpected(Failure("sdk.job.disabled")));
 }
 Result<Operation> Session::ReadOperation(std::string id) const {
     std::lock_guard lock(impl_->mutex);

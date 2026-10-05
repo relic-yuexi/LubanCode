@@ -2844,8 +2844,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         if (gate_armed) {
             adjudications = wiring.tool_batch_gate->AdjudicateBatch(batch_calls);
         }
-        // Explicit owned admission is unavailable in this slice. Reject the
-        // selected non-inline calls before consuming Prepare/Action receipts.
+        // Owned calls keep the actual parent declaration/Pending in this
+        // bridge. Only an explicit typed adapter can register and adopt them.
         const bool owned_admission = gate_armed &&
             wiring.tool_batch_gate->admission_mode() != JobAdmissionMode::Legacy;
         const auto call_is_inline = [&adjudications](std::size_t index) {
@@ -2935,7 +2935,6 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 }
                 const api::ToolUseBlock& call = batch_calls[i];
                 if (owned_admission) {
-                    auto receipt = MissingOwnedJobAdmission();
                     ToolTraceContext rejection_trace;
                     const ToolTraceContext* rejection_context = nullptr;
                     if (trace_armed && scheduled_slot[i] < scheduled_ids.size()) {
@@ -2954,10 +2953,23 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         frame.effect_class = registration->effect_class;
                     }
                     if (wiring.events != nullptr) wiring.events->OnToolStart(call.id, call.name, call.input, wiring.subordinate_stream);
-                    // These are the parent declaration's rejection events,
-                    // never coordinator admission or business Started/Finished.
-                    FinishTrace(frame, receipt.result);
-                    receipt.result = DispatchDone(frame, std::move(receipt.result));
+                    const OwnedToolAdmissionContext admission_context{registry_, wiring, rejection_context,
+                        cancel, tool_filter_, tool_filter_denial_, tool_execution_policy_, tool_filter_denial_};
+                    auto receipt = wiring.tool_batch_gate->TakeOwnedJobOrder(call, admission_context);
+                    if (receipt.state == OwnedJobAdmissionState::Rejected && !receipt.parent_retired) {
+                        FinishTrace(frame, receipt.result);
+                        receipt.result = DispatchDone(frame, std::move(receipt.result));
+                    } else if (!receipt.parent_retired && wiring.events != nullptr) {
+                        // Accepted receipt was persisted by the original bridge;
+                        // Unconfirmed must not append a second parent terminal.
+                        wiring.events->OnToolDone(call.id, call.name, receipt.result, wiring.subordinate_stream);
+                    }
+                    if (receipt.state == OwnedJobAdmissionState::Unconfirmed ||
+                        receipt.result.execution_control == tools::ExecutionControl::StopIndeterminate) {
+                        side_effect_indeterminate = true;
+                        if (side_effect_error.empty()) side_effect_error = receipt.result.error_code.empty()
+                            ? "job.admission.unconfirmed" : receipt.result.error_code;
+                    }
                     if (wiring.action_receipt_failure_reason) {
                         const auto error = wiring.action_receipt_failure_reason();
                         if (!error.empty()) {
@@ -2970,7 +2982,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     }
                     api::ToolResultBlock block{call.id, receipt.result.content, receipt.result.is_error,
                                                receipt.result.payload.content, receipt.result.payload.structured_content};
-                    ordered_results[i] = std::move(block); // job_admission remains false.
+                    block.job_admission = receipt.state == OwnedJobAdmissionState::Accepted;
+                    ordered_results[i] = std::move(block);
                     continue;
                 }
                 const std::optional<tools::Tool::Result> admission =

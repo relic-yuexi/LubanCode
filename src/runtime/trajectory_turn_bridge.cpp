@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <limits>
 #include <utility>
 
 #include "accounting/purpose.hpp"   // PurposeName(Token 账本单 A1)
@@ -131,6 +132,9 @@ struct V3TurnBooks {
         std::uint64_t child_attempt = 0;
         std::optional<ToolResultsCommitReceipt> child_capture_receipt;
         std::optional<v3::WriteReceipt> child_observation_receipt;
+        std::optional<OwnedJobParentCommit> owned_admission;
+        std::string owned_job_id;
+        std::string owned_admission_fingerprint;
     };
     struct Request {
         std::string step_id;
@@ -1699,6 +1703,142 @@ void TrajectoryTurnBridge::V3OutputCancelled(const std::string& request_id,
     if (receipt.status != v3::WriteReceipt::Status::Committed) {
         NoteV3Error(receipt, "model.response.cancelled");
     }
+}
+
+OwnedJobParentCommit TrajectoryTurnBridge::CommitOwnedJobAdmission(
+    const std::string& provider_call_id, const tools::OwnedJobAdoption& adopted,
+    const v3::JobOperationBindingFacts& binding) {
+    const auto reject = [](std::string error) {
+        OwnedJobParentCommit result; result.error = std::move(error); return result;
+    };
+    if (!V3Mode() || !v3_books_ || !v3_turn_ || !v3_writer_ || !adopted.facts ||
+        adopted.state != tools::OwnedJobAdoptionState::Adopted || !adopted.receipt ||
+        adopted.admission_content.empty()) return reject("job.parent.invalid_adoption");
+    std::lock_guard lock(*v3_books_->tool_results_mutex);
+    const auto found = v3_turn_->calls.find(provider_call_id);
+    if (found == v3_turn_->calls.end()) return reject("job.parent.undeclared");
+    auto& book = found->second;
+    const auto& facts = *adopted.facts;
+    const auto binding_json = [](const v3::JobOperationBindingFacts& value) {
+        return nlohmann::json{{"session", value.session_id}, {"run", value.run_id}, {"turn", value.turn_id},
+            {"step", value.step_id}, {"action", value.action_id}, {"job", value.job_id}, {"attempt", value.attempt},
+            {"seq", value.seq}, {"operation", value.operation_id}, {"parentOperation", value.parent_operation_id},
+            {"parentInput", value.parent_input_id}, {"parentPayloadHash", value.parent_payload_hash},
+            {"event", value.event_id}, {"lineHash", value.line_hash}, {"parentOperationEvent", value.parent_operation_event_id},
+            {"adoptedEvent", value.adopted_event_id}, {"originalHash", value.original_input_sha256},
+            {"effectiveHash", value.effective_input_sha256}};
+    };
+    const nlohmann::json owner_json{{"sessionId", facts.owner.session_id}, {"runId", facts.owner.run_id},
+        {"coordinatorId", facts.owner.coordinator_id}, {"epoch", facts.owner.epoch},
+        {"projectId", facts.owner.project_id}, {"cwd", platform::PathToUtf8(facts.owner.cwd)}};
+    const auto fingerprint = nlohmann::json{{"owner", owner_json},
+        {"job", facts.job_id}, {"action", facts.action_id}, {"parent", facts.parent_action_id}, {"attempt", facts.attempt},
+        {"turn", facts.turn_id}, {"step", facts.step_id}, {"assistant", facts.assistant_message_ref},
+        {"providerCall", facts.provider_tool_call_id}, {"toolName", facts.tool_name},
+        {"pending", facts.source_pending_event_id}, {"sourceAdmission", facts.source_admission_event_id},
+        {"original", facts.original_input}, {"effective", facts.effective_input}, {"tool", facts.tool_identity.ToJson()},
+        {"policy", facts.policy.ToJson()}, {"binding", binding_json(binding)},
+        {"adopted", adopted.receipt->id}, {"adoptedSeq", adopted.receipt->seq}, {"adoptedHash", adopted.receipt->line_hash},
+        {"adoptedStatus", static_cast<int>(adopted.receipt->status)},
+        {"originalHash", facts.original_input_sha256}, {"effectiveHash", facts.effective_input_sha256},
+        {"handle", adopted.admission_content}}.dump();
+    if (book.owned_admission) return book.owned_job_id == facts.job_id && book.owned_admission_fingerprint == fingerprint
+        ? *book.owned_admission : reject("job.parent.already_attempted");
+    if (!book.action || !book.action->last_event_id() || book.started || book.terminal || book.tool_message_done ||
+        book.action_id != facts.parent_action_id || book.assistant_message_ref != facts.assistant_message_ref ||
+        provider_call_id != facts.provider_tool_call_id || book.step_id != facts.step_id ||
+        turn_id_ != facts.turn_id || v3_writer_->session_id() != facts.owner.session_id ||
+        v3_writer_->run_id() != facts.owner.run_id || binding.job_id != facts.job_id ||
+        binding.action_id != facts.action_id || binding.turn_id != facts.turn_id ||
+        binding.adopted_event_id != adopted.receipt->id)
+        return reject("job.parent.source_mismatch");
+    const auto ledger = v3::ReadV3Ledger(v3_writer_->path());
+    if (!ledger) return reject("job.parent.invalid_ledger:" + ledger.error());
+    const auto tail = ledger->LastEntry();
+    if (!tail || tail->seq == std::numeric_limits<std::uint64_t>::max() || tail->seq + 1 != v3_writer_->next_seq() || v3_writer_->last_line_hash() !=
+        (tail->is_message ? ledger->messages[tail->index].line_hash : ledger->events[tail->index].line_hash))
+        return reject("job.parent.prefix_mismatch");
+    const auto bindings = v3::ReadJobOperationBindings(*ledger);
+    const auto adoptions = v3::ReadOwnedJobAdoptions(*ledger);
+    if (!bindings || !adoptions) return reject("job.parent.binding_invalid");
+    const auto actual_binding = std::find_if(bindings->begin(), bindings->end(), [&](const auto& actual) {
+        return binding_json(actual) == binding_json(binding) && actual.job_id == facts.job_id &&
+            actual.action_id == facts.action_id && actual.attempt == facts.attempt &&
+            actual.adopted_event_id == adopted.receipt->id;
+    });
+    const auto* actual_adoption = v3::FindOwnedJobAdoption(*adoptions, facts.job_id);
+    if (actual_binding == bindings->end() || !actual_adoption ||
+        actual_adoption->parent_action_id != book.action_id ||
+        actual_adoption->source_pending_event_id != *book.action->last_event_id() ||
+        actual_adoption->source_pending_event_id != facts.source_pending_event_id ||
+        actual_adoption->source_admission_event_id != facts.source_admission_event_id ||
+        actual_adoption->prepared_owner != owner_json ||
+        actual_adoption->attempt != facts.attempt || actual_adoption->original_input != facts.original_input ||
+        actual_adoption->effective_input != facts.effective_input ||
+        actual_adoption->original_input_sha256 != facts.original_input_sha256 ||
+        actual_adoption->effective_input_sha256 != facts.effective_input_sha256 ||
+        actual_adoption->execution_policy != facts.policy.ToJson() ||
+        actual_adoption->tool_identity != facts.tool_identity.ToJson())
+        return reject("job.parent.binding_mismatch");
+    const auto* actual_adopted = ledger->FindEvent(actual_adoption->adopted_event_id);
+    if (!actual_adopted || adopted.receipt->status != v3::WriteReceipt::Status::Committed ||
+        adopted.receipt->seq != actual_adopted->seq || adopted.receipt->line_hash != actual_adopted->line_hash)
+        return reject("job.parent.adoption_receipt_mismatch");
+    const nlohmann::json expected_handle{{"jobId", facts.job_id}, {"status", "parent_delivery_pending"},
+        {"adoptionEventRef", actual_adoption->adopted_event_id}, {"layout", v3::kOwnedJobLayout}};
+    if (adopted.admission_content != expected_handle.dump()) return reject("job.parent.handle_mismatch");
+    book.owned_job_id = facts.job_id;
+    book.owned_admission_fingerprint = fingerprint;
+    book.owned_admission.emplace(); // Stable first-attempt owner before any native append.
+    auto& out = *book.owned_admission;
+    const auto record = [&](v3::WriteReceipt receipt, const char* stage) {
+        out.receipts.push_back(std::move(receipt));
+        const auto& actual = out.receipts.back();
+        V3NotifyCommitted(actual);
+        if (actual.status == v3::WriteReceipt::Status::Committed) return true;
+        out.error = std::string("job.parent.") + stage + ":" + actual.error_code;
+        NoteV3Error(actual, stage);
+        return false;
+    };
+    try {
+        out.receipts.reserve(6);
+        if (!record(book.action->Start(*v3_writer_, "args-" + book.action_id + "-" + facts.effective_input_sha256,
+            facts.tool_identity, std::nullopt, {{"toolName", facts.tool_name}}, trajectory::Durability::PowerLoss), "started")) return out;
+        book.started = true;
+        if (!record(book.action->Finish(*v3_writer_, std::nullopt, 0), "terminal")) return out;
+        book.terminal = true; book.terminal_event_id = out.receipts.back().id;
+        out.refs.terminal_event_id = book.terminal_event_id;
+        auto store = v3::ResultStore::Open(v3_writer_->path().parent_path(), "job-admission-");
+        if (!store) { out.error = "job.parent.result_store_failed:" + store.error(); return out; }
+        v3::ResultStore::PersistRequest request;
+        request.result_kind = "text"; request.tool_call_id = book.action_id; request.attempt = 1;
+        request.execution_event_ref = book.terminal_event_id;
+        v3::ResultStore::ChannelOutput output;
+        output.channel = "combined"; output.data = adopted.admission_content; output.output_bytes = output.data.size();
+        request.outputs.push_back(std::move(output));
+        request.capture_limits = {{"max_output_bytes", 65536}};
+        request.preview_policy = {{"policy", "sdk-command-job-admission"}, {"maxPreviewBytes", 4096}};
+        const auto material = store->Persist(request);
+        if (!material.ok) { out.error = "job.parent.material_failed:" + material.error; return out; }
+        if (!record(book.action->PersistedResult(*v3_writer_, material.result_ref, book.terminal_event_id, 1), "persisted")) return out;
+        out.refs.persisted_event_id = out.receipts.back().id;
+        if (!record(book.action->SelectResult(*v3_writer_, {out.refs.persisted_event_id}, {}, "done", 1), "selected")) return out;
+        out.refs.selected_event_id = out.receipts.back().id;
+        v3::MessageDraft message;
+        message.turn_id = turn_id_; message.step_id = book.step_id; message.action_id = book.action_id;
+        message.origin = v3::MessageOrigin::SessionRuntime; message.purpose = v3::MessagePurpose::Conversation;
+        message.result_selection_ref = out.refs.selected_event_id;
+        message.message = {{"role", "tool"}, {"tool_call_id", book.action_id}, {"content", adopted.admission_content}};
+        if (!record(v3_writer_->AppendMessage(std::move(message), trajectory::Durability::PowerLoss), "message")) return out;
+        out.refs.tool_message_id = out.receipts.back().id;
+        if (!record(v3_writer_->AdmitMessages({out.refs.tool_message_id}, trajectory::Durability::PowerLoss), "admission")) return out;
+        out.refs.admission_event_id = out.receipts.back().id;
+        book.tool_message_done = true;
+        out.committed = true;
+    } catch (...) {
+        if (out.error.empty()) out.error = "job.parent.publication_unconfirmed";
+    }
+    return out;
 }
 
 void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {

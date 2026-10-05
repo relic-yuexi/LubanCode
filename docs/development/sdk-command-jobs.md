@@ -79,3 +79,25 @@ Close 次序：封 Submit／Job准入 →立全部 Job 取消旗、醒审批与 
 - Close 后与 same-ID Hold 读回真实结果；旧非终态零新进程，缺／伪／冲突／错序绑定拒；preview截断与损坏附件分别报，不退成任意同文本匹配。
 
 此整片只交 Session-owned Command Jobs。Detached、递归子Agent、后台 SDK Action、跨节点 owner 交接另留后笔。实现与 CI 验收沿同一份合同，不降格为私有模拟通路。本地只查文本与纯数据；configure、编译、CTest、原生及 HTTP 全交远端 CI。
+
+## 内部原生故障缝与本地 preview 边界
+
+这笔仅在启用 Command Jobs 时接 `BeginMainOperationTurn`：由它独占 pop，真实 turn ID 贯穿 Run 与原桥。首原生绑定失败就停场，保回执；不再 pop，不另发 ID。默认关闭仍沿原 SDK 前台开场，不能说全部 SDK 已迁同一 producer。
+
+内部 `SessionLaunchRequest::journal_native_io_probe` 顺原 SessionRuntime、TrajectorySessionLedger、SessionManager 传到既有 `V3WriterOptions::journal_native_io_probe`。只供一场新账受控验收，沿真实 Journal 写入后观察；不拦截公开 SDK 参数，不设全局开关，不替 native 返回值。开场逐层转移 shared owner，Writer 持到其自身资源退场。probe 只存 owned 观察值，不能借 Writer、阻塞、抛错或重入；恢复入口拒绝带 probe，后续换场不续用。验收按实际 FileSync 边界注入未知，并核实际末行类别、首 native witness 与零重派；写前 Rejected 不冒称 after-native。
+
+`ReadJobPreview` 只交可信本地宿主缓存，4096 字节帽不等于脱敏或出站许可。内部 artifact reader 临时使用 Preview/v1 值核 Session 范围，不把它冒充这场真实出站 policy；不向外提供那份 SavedSnapshot。未来 Worker 须接现有 ResultProjector，再过 Node 许可与每场参数双门。`job_updated` 只发身份、状态和缺口，不带命令正文或 preview。首批没有 Full Job 接口。
+
+## 本笔源码与远端接线
+
+新增公开头 `include/lubancore/jobs.hpp`；SDK 实现新增 `src/sdk/command_jobs.cpp`、`src/sdk/command_jobs_opening.cpp` 及各自私有头。普通 SDK 依赖不用额外库。私有原生参考册须再编同源 `adapters.cpp`、`command_jobs.cpp`、`command_jobs_opening.cpp`，与既有 results、approval、operation_ledger、job_operations 等参考源同属测试实例；不导出私有 DLL 符号。
+
+公开消费者为 `examples/sdk-consumer/command_jobs.cpp`，只含安装公头与 STL。入口 `lubancore_consumer::CommandJobs(state_root, probe_path)`；驱动命令拟为 `consumer command-jobs ABS_STATE ABS_PROBE`，参数共四项。复用真实 `command_limits_probe`，显式传其绝对路径，再复制到本场临时根。内部 probe 七参数仍是 started 文件、done 文件、输出字节数、延迟毫秒、tag、单字节填充、release 文件或横杠，原 probe 不改。Windows 用 cmd，POSIX 用 sh；两个平台均核真实 started 内容与 cwd，取消/关闭后核 done 未落及原资源退场。
+
+`test_lubancore_command_jobs.cpp` 固定十 CASE，共用同份公开消费者路径：admission、completion、queue、blocked-parent、failed-parent、isolation、close、approvals、parent-cancel、step-limit。每路径最后一枚 `[sdk-command-jobs-path]` 在断言后打印；安装消费者另打印 `[sdk-command-jobs-consumer] complete`。blocked-parent/failed-parent 先等真实第二次 Backend 调用进入握手，再放进程或父场，不凭短暂睡眠猜调度。close 同验 Runtime 关闭与最后 public handle 销毁。
+
+`test_lubancore_command_job_guards.cpp` 固定七 CASE：approval-retirement、bridge-provenance、native-faults、cancel-confirm、writer-cancel、actual-public-source、passive-hold。各有 `[sdk-command-job-guards-path]` 尾标。native-faults 另输出四枚 typed `[sdk-command-job-native-fault]`：FileSync 序号 1/3/6/14 分别核 Registered/JobOperationBound/原父 Persisted/Post Completed，实际末行 kind 和 action 必须相符。Pending 与 Hook Dispatch/Started 沿 ProcessCrash，只 flush，不误计作 FileSync。Windows 核实际 FlushFileBuffers 非零返回；POSIX 核 fsync 返回零。四案都保真实 native success 与 injected_unconfirmed 两份事实，首 line_count 不变；前三级零 command，Post 案必须真有 command done，Close 后 running 为零。
+
+取消后确认另为内部显式选项：先核真实五引用和 handle 物料，只在真实 cancel latch 已立时确认交付事实，再由原泵收 before_started。false scope gate 自身不能当取消或执行许可；默认旧确认入口仍拒取消票。恢复七册中按真实 same-ID 入口开新 coordinator，沿原 run；原 Registered/Adopt-unbound 身份取自原记录，旧票不写、不复活，不承诺换 run 恢复。
+
+这份作者提交不改 CMake、安装驱动、workflow、CI 脚本或 catalog。集成须把两册、公开 helper、jobs 公头和上述测试私有源接入 SDK-only/组合/Lua ON/OFF、安装移位、focused/全量/ASan 与实际 argv/注册/JUnit/LastTest 原件门。原 owned deadline 六 CASE、旧 CLI run_command、reader/schema3 均保原 blob。源码与纯检查不代原生结果；本源远端结果尚待集成后实跑。

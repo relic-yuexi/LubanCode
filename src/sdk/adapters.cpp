@@ -101,11 +101,13 @@ private:
 
 class LocalTool final : public tools::Tool {
 public:
-    LocalTool(std::unique_ptr<tools::Tool> inner, std::string cwd)
-        : inner_(std::move(inner)), cwd_(std::move(cwd)) {}
+    LocalTool(std::unique_ptr<tools::Tool> inner, std::string cwd, bool command_jobs)
+        : inner_(std::move(inner)), cwd_(std::move(cwd)), command_jobs_(command_jobs) {}
     std::string name() const override { return inner_->name(); }
     std::string description() const override {
-        return name() == "run_command" ? "Run a foreground command in the session cwd. Background jobs are unavailable."
+        return name() == "run_command" ? (command_jobs_
+            ? "Run a command in the session cwd. execution_mode=session_job explicitly requests an owned Job; foreground is the default."
+            : "Run a foreground command in the session cwd. Background jobs are unavailable.")
                                        : inner_->description();
     }
     Json input_schema() const override {
@@ -113,6 +115,10 @@ public:
         if (name() == "run_command" && schema.contains("properties")) {
             schema["properties"].erase("run_in_background");
             schema["properties"].erase("max_runtime_ms");
+            if (command_jobs_) {
+                schema["properties"]["execution_mode"] = {{"type", "string"}, {"enum", Json::array({"foreground", "session_job"})}};
+                schema["properties"]["job_budget_ms"] = {{"type", "integer"}, {"minimum", 1}, {"maximum", 86400000}};
+            }
         }
         return schema;
     }
@@ -148,8 +154,13 @@ public:
             }
             if (path == input.end() || path->is_null() || *path == "") effective["path"] = cwd_;
         }
-        if (command && input.contains("run_in_background") && input.at("run_in_background") != false) {
-            return Result::Error("sdk.tool.unsupported: background command jobs are not enabled");
+        if (command) {
+            if (!input.is_object()) return Result::Error("sdk.job.invalid_input");
+            if (input.contains("run_in_background") || input.contains("max_runtime_ms"))
+                return Result::Error("sdk.job.detached_unsupported");
+            if ((!command_jobs_ && (input.contains("execution_mode") || input.contains("job_budget_ms"))) ||
+                (input.contains("execution_mode") && input.at("execution_mode") != "foreground") || input.contains("job_budget_ms"))
+                return Result::Error("sdk.job.main_admission_required: command Jobs require the actual main declaration");
         }
         const char* key = command ? "cwd" : "path";
         if (effective.contains(key) && effective.at(key).is_string()) {
@@ -170,6 +181,7 @@ public:
 private:
     std::unique_ptr<tools::Tool> inner_;
     std::string cwd_;
+    bool command_jobs_ = false;
 };
 
 class CustomTool final : public tools::Tool {
@@ -203,8 +215,8 @@ private:
 std::unique_ptr<lubancode::api::Backend> AdaptBackend(std::shared_ptr<Backend> backend) {
     return std::make_unique<BackendAdapter>(std::move(backend));
 }
-std::unique_ptr<lubancode::tools::Tool> BindLocalTool(std::unique_ptr<lubancode::tools::Tool> tool, std::string cwd) {
-    return std::make_unique<LocalTool>(std::move(tool), std::move(cwd));
+std::unique_ptr<lubancode::tools::Tool> BindLocalTool(std::unique_ptr<lubancode::tools::Tool> tool, std::string cwd, bool command_jobs) {
+    return std::make_unique<LocalTool>(std::move(tool), std::move(cwd), command_jobs);
 }
 Result<std::unique_ptr<lubancode::tools::Tool>> AdaptTool(Tool tool, std::string cwd) {
     auto schema = Json::parse(tool.input_schema_json, nullptr, false);

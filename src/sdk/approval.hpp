@@ -52,6 +52,14 @@ public:
         std::chrono::milliseconds timeout, ChildPublisher publish);
     bool ChildAllowed(const lubancode::runtime::ChildApprovalScope& scope, const std::string& tool) const;
     void CloseChildScope(const lubancode::runtime::ChildApprovalScope& scope) noexcept;
+    Result<lubancode::runtime::ApprovalLease> RegisterJobScoped(
+        jobs::v1::ApprovalScope scope, Approval approval, std::chrono::milliseconds timeout,
+        std::function<void(const Approval&)> publish);
+    // Called by the trusted synchronous adapter only after real Prepare succeeds
+    // and the native JobOperation binding is known. No inherited parent grants.
+    bool BindJobScope(const jobs::v1::ApprovalScope&, const jobs::v1::Identity&);
+    bool JobAllowed(const jobs::v1::ApprovalScope&, const jobs::v1::Identity&) const;
+    void CloseJobScope(const jobs::v1::ApprovalScope&) noexcept;
     bool Resolve(const std::string& request_id, const lubancode::runtime::ApprovalResponse& response);
     void Retire(const std::string& request_id) noexcept;
     void CancelAll() noexcept;
@@ -62,7 +70,8 @@ public:
 private:
     Result<lubancode::runtime::ApprovalLease> RegisterScopedImpl(
         ScopedApprovalOwner owner, Approval approval, std::chrono::milliseconds timeout,
-        Publisher publish, std::optional<lubancode::runtime::ChildApprovalScope> child);
+        Publisher publish, std::optional<lubancode::runtime::ChildApprovalScope> child,
+        std::optional<jobs::v1::ApprovalScope> job = std::nullopt);
     struct State;
     std::shared_ptr<State> state_;
 };
