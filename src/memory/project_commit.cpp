@@ -86,11 +86,26 @@ std::expected<ProjectHandoffTarget, std::string> HandoffTarget(const fs::path& m
 std::expected<bool, std::string> SameHandoffTarget(const ProjectHandoffTarget& a,
                                                  const ProjectHandoffTarget& b) {
     if (a.memory == b.memory) return true;
-    std::error_code error;
-    const bool same = fs::equivalent(a.memory, b.memory, error);
-    if (!error) return same;
-    if (error != std::errc::no_such_file_or_directory)
+    const auto present = [](const fs::path& path) -> std::expected<bool, std::string> {
+        std::error_code status_error;
+        const auto status = fs::symlink_status(path, status_error);
+        if (status_error == std::errc::no_such_file_or_directory ||
+            (!status_error && status.type() == fs::file_type::not_found)) return false;
+        if (status_error || !fs::is_directory(status))
+            return std::unexpected("memory.commit.handoff_identity_failed");
+        return true;
+    };
+    const auto a_present = present(a.memory), b_present = present(b.memory);
+    if (!a_present || !b_present)
         return std::unexpected("memory.commit.handoff_identity_failed");
+    std::error_code error;
+    // equivalent() requires existing paths; libc++ need not report ENOENT for
+    // an absent leaf. Detect absence through status, never an arbitrary error.
+    if (*a_present && *b_present) {
+        const bool same = fs::equivalent(a.memory, b.memory, error);
+        if (error) return std::unexpected("memory.commit.handoff_identity_failed");
+        return same;
+    }
     // Before mkdir, canonical parents are the actual existing identity. This
     // also joins Windows case/short-path aliases without guessing a case fold.
     if (a.memory.filename() != "memory" || b.memory.filename() != "memory")

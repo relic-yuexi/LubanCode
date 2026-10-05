@@ -89,7 +89,9 @@ ON 六套各 54 册 focused、452 条原生 CASE、33 项安装消费；OFF 三�
 
 修正源 `a7165eec` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37297587597)已失败。三套 SDK-only 又停在 Todo 纯门：这册仍写 ON 55／OFF 53，实际名册已到 59／57；RAG 同类旧数也须改齐。三套 combined、ASan 与 TSan 均在开场预留两行消息报编译错，字符串拼接也须整段加括号；focused／全量／ASan／TSan 原生均未执行。三平台安装消费各 34 项与独立 RAG 示例实际通过，不能替 focused 记过关。下一源只改两处名册数和两行消息括号，消费、CASE、生产逻辑与预算不变；整套 SDK 纯门本地 282 项通过，没有配置、编译或执行原生程序。
 
-`80c8cd5a` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37299684343)已越过三套 SDK-only 数据门。macOS 编出 SDK 测试程序后，编译来源边界门拒绝三册新 shared 测试：CMake 已接入，独立白名单仍缺 Managed ownership、开场预留与 Memory 交接。下一源只补这三条精确路径；测试核 testing ON 且唯属 SDK reference target 才放行，testing OFF、其它 target 和近名新增来源照拒。边界、依赖闭包及开场／交接纯门 116 项通过。原生 focused 尚未执行，其它作业仍按本源收原件；这份边界修正须另跑远端。
+`80c8cd5a` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37299684343)已越过三套 SDK-only 数据门。macOS 编出 SDK 测试程序后，编译来源边界门拒绝三册新 shared 测试：CMake 已接入，独立白名单仍缺 Managed ownership、开场预留与 Memory 交接。`81ed65f2` 补这三条精确路径并[重跑远端](https://github.com/relic-yuexi/LubanCode/actions/runs/37302239817)；testing ON 且唯属 SDK reference target 才放行，testing OFF、其它 target 和近名新增来源照拒。边界、依赖闭包及开场／交接纯门 116 项通过。
+
+同源 `80c8cd5a` Linux combined focused 59 源／486 CASE 实际通过；macOS 59 源中57源通过，Memory 交接与 SDK memory_save 两源失败。Managed 归属六案、开场预留十案和后台 deadline 六案在这两平台均实过。macOS 新项目的 memory 末段尚未建，旧 equivalent 错误分类令异项目两场及新交接两案报身份失败，归属未串场。下一源先核叶目录是否存在，再比 memory 或 workspace 身份，权限与未知错误仍拒；原24案、新六案、预算与磁盘锁不改。六份 ON 安装消费各34项和独立 RAG 示例已过，不能替失败 focused 记全绿；OFF、全量及消毒器继续按本源收原件。这处生产修正须另跑远端。
 
 ## 后续装配规矩
 
