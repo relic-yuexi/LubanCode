@@ -231,6 +231,18 @@ void Admission(const fs::path& base, const fs::path& probe) {
     auto session = Take(runtime->OpenSession(Options(fixture.project, script)), "foreground");
     Check(Parent(session, "foreground").state == sdk::OperationState::Succeeded, "foreground regressed");
     Check(Read(fixture.project / "foreground.done") == "foreground" && Take(session->ListJobs(), "foreground jobs").empty(), "foreground became a Job");
+    for (const bool enabled : {false, true}) {
+        const auto tag = enabled ? "foreground-false-on" : "foreground-false-off";
+        auto legacy = std::make_shared<Script>();
+        auto input = fixture.Input(tag, false);
+        input.insert(input.size() - 1, ",\"run_in_background\":false,\"max_runtime_ms\":0");
+        legacy->calls = {input};
+        auto foreground = Take(runtime->OpenSession(Options(fixture.project, legacy, enabled)), "legacy foreground");
+        Check(Parent(foreground, tag).state == sdk::OperationState::Succeeded, "explicit false foreground was rejected");
+        Check(Read(fixture.project / (std::string(tag) + ".done")) == tag, "legacy foreground command did not execute");
+        Check(Take(foreground->ListJobs(), "legacy foreground list").empty(), "legacy false request acquired Job ownership");
+        Take(foreground->Close(), "close legacy foreground");
+    }
     auto invalid = Options(fixture.project, std::make_shared<Script>()); invalid.command_jobs->max_running = 0;
     Check(!runtime->OpenSession(std::move(invalid)), "zero host budget accepted");
     unsigned factories = 0;

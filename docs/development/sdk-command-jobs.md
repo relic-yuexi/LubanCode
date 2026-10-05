@@ -14,7 +14,7 @@
 {"command":"...","execution_mode":"session_job","job_budget_ms":30000}
 ```
 
-`execution_mode` 只收 `foreground`／`session_job`；缺省 `foreground`。`job_budget_ms` 只准用于 session_job，缺省取宿主登记预算；给出则须正整数且不大于宿主帽。模型已有 `timeout_ms` 继续只收窄实际命令帽。off 时收到这两个后台字段、未知 mode、超帽、空值或错类型，明确拒绝，零命令调用；绝不 inline 兜底。现 `run_in_background`／`max_runtime_ms` 仍属 CLI Detached，SDK 不换义、不放行。
+`execution_mode` 只收 `foreground`／`session_job`；缺省 `foreground`。`job_budget_ms` 只准用于 session_job，缺省取宿主登记预算；给出则须正整数且不大于宿主帽。模型已有 `timeout_ms` 继续只收窄实际命令帽。off 时收到这两个后台字段、未知 mode、超帽、空值或错类型，明确拒绝，零命令调用；绝不 inline 兜底。`session_job` 明拒 `run_in_background`／`max_runtime_ms`，不把 CLI Detached 参数换义。普通前台保原解析：显式 `run_in_background:false` 仍跑前台；`max_runtime_ms` 沿原校验，在前台不生效；true／非 false 仍拒后台入口。两字段不进入 SDK 工具 schema。
 
 首批提交沿既有 `Session::Submit` →真实 Backend tool call；不添可凭 caller 提供的 parent_operation_id 造来源的裸 `StartJob` API。拟加 Session 查询：`ListJobs(optional parent_operation_id)`、`ReadJob(JobIdentity)`、`WaitJob(JobIdentity, timeout)`、`CancelJob(JobIdentity)`、`ReadJobPreview(JobIdentity, max_bytes)`。身份持 session/run、Job ID、真实 Job Operation ID、parent Operation、turn、action、attempt；列表只出本 Session 值。`JobView` 分开 execution state、cancel_requested、owner_available、recovery knowledge、原回执缺口；“已接单”不写成后台成功。
 

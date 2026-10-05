@@ -156,7 +156,10 @@ public:
         }
         if (command) {
             if (!input.is_object()) return Result::Error("sdk.job.invalid_input");
-            if (input.contains("run_in_background") || input.contains("max_runtime_ms"))
+            // Preserve the old foreground parser, including explicit false
+            // and its ignored-but-validated max_runtime_ms. The owned Job
+            // normalizer rejects either CLI field instead of changing its meaning.
+            if (input.contains("run_in_background") && input.at("run_in_background") != false)
                 return Result::Error("sdk.job.detached_unsupported");
             if ((!command_jobs_ && (input.contains("execution_mode") || input.contains("job_budget_ms"))) ||
                 (input.contains("execution_mode") && input.at("execution_mode") != "foreground") || input.contains("job_budget_ms"))
