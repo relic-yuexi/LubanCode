@@ -73,6 +73,9 @@ class ImmutableResultGateTests(unittest.TestCase):
         part = cmake.split('elseif(sdk_basename STREQUAL "test_v3_result_immutable_publication.cpp")', 1)[1].split('elseif(', 1)[0]
         self.assertIn('unit.trajectory_v3.v3_result_immutable_publication', part)
         self.assertEqual(part.count('RESOURCE_LOCK "platform-atomic-write"'), 2)
+        self.assertEqual(part.count('RESOURCE_LOCK'), 2, 'A later assignment must not replace the actual atomic-write lock')
+        original = cmake.split('elseif(sdk_basename STREQUAL "test_v3_result_store.cpp")', 1)[1].split('elseif(', 1)[0]
+        self.assertEqual(original.count('RESOURCE_LOCK "trajectory-v3-result-store"'), 2)
 
     def test_asan_execution_cannot_accept_green_counts_without_publication_paths(self):
         name = 'unit.trajectory_v3.v3_result_immutable_publication'
