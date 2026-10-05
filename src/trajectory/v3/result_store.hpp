@@ -19,9 +19,12 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "platform/atomic_write.hpp"
 
 namespace lubancode::trajectory::v3 {
 
@@ -106,6 +109,20 @@ public:
         std::vector<nlohmann::json> result_ref;  // 六键 artifactRef 数组(含 metadata)
         bool ok = false;
         std::string error;
+        enum class Knowledge { NotCommitted, Committed, Indeterminate };
+        struct FilePublication {
+            std::string logical_name;
+            bool called = false;
+            std::optional<platform::ImmutableWriteReceipt> native;
+            bool operator==(const FilePublication&) const = default;
+        };
+        struct Publication {
+            Knowledge knowledge = Knowledge::NotCommitted;
+            std::vector<FilePublication> files;
+            std::string error_code, error;
+            bool operator==(const Publication&) const = default;
+        };
+        std::optional<Publication> publication;
     };
 
     // 先临时文件 -> 落稳 -> 发布不可变名;返回 result_ref 供
@@ -116,6 +133,17 @@ public:
     // 完整清单 artifact(§4.17 极端情况):清单自身超限时由调用方先存。
     std::expected<std::string, std::string> PersistListing(const std::string& listing_name,
                                                            const std::string& text);
+    struct ListingPublication {
+        bool ok = false;
+        std::string logical_path;
+        PersistedResult::Publication publication;
+    };
+    ListingPublication PersistListingDetailed(const std::string& listing_name, const std::string& text);
+    // First unknown/partial publication remains owned even after a repeated call
+    // or an external readback. Known zero-publication failures do not seal Store.
+    std::optional<PersistedResult::Publication> FirstUnconfirmedPublication() const {
+        return publication_sealed_ ? publication_ : std::nullopt;
+    }
 
     const std::filesystem::path& artifacts_dir() const { return artifacts_dir_; }
 
@@ -125,6 +153,12 @@ private:
     std::string result_prefix_;
     // 下一枚 result 号:开仓时扫已有 res-*.json 取最大 +1。
     std::uint64_t next_result_number_ = 1;
+    std::optional<PersistedResult::Publication> publication_;
+    bool publication_sealed_ = false;
+    void BeginPublication(std::size_t files);
+    bool WriteImmutable(const std::string& logical_name, std::string_view bytes);
+    void ClassifyPublicationFailure() noexcept;
+    PersistedResult FailedPublication() const;
 };
 
 // Pure material-to-preview projection shared by the live producer and strict
