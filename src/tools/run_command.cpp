@@ -430,15 +430,17 @@ std::string BuildEncodedCommand(const std::string& user_command_utf8) {
 // This pipeline checks actual ErrorRecords before formatting them as plain
 // text, without retaining an array. Preserve native LASTEXITCODE precedence
 // and explicit exit N; cmdlet-only errors still return a nonzero exit code.
+// Bind the wrapper's own cmdlets to their built-in modules. Keep the same
+// formatting pipeline while avoiding unqualified cross-module discovery.
 std::string BuildScopedEncodedCommand(const std::string& user_command_utf8) {
     const std::string script_utf8 =
         "$ProgressPreference='SilentlyContinue'\r\n"
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\r\n"
         "$LASTEXITCODE = $null\r\n"
         "$script:lubanCommandErrorSeen = $false\r\n"
-        "& { " + user_command_utf8 + " } 2>&1 | ForEach-Object { "
+        "& { " + user_command_utf8 + " } 2>&1 | Microsoft.PowerShell.Core\\ForEach-Object { "
         "if ($_ -is [System.Management.Automation.ErrorRecord]) { $script:lubanCommandErrorSeen = $true }; $_ "
-        "} | Out-String -Stream | Write-Output\r\n"
+        "} | Microsoft.PowerShell.Utility\\Out-String -Stream | Microsoft.PowerShell.Utility\\Write-Output\r\n"
         "$lec = $LASTEXITCODE\r\n"
         "if ($lec -ne $null) { exit $lec }\r\n"
         "if ($script:lubanCommandErrorSeen) { exit 1 } else { exit 0 }\r\n";
