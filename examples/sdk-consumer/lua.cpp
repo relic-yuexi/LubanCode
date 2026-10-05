@@ -371,7 +371,8 @@ void LuaAdoptSystem(const fs::path& base, const std::string& id) {
     Check(session->id() == id && observed->requests == 0, "system replacement changed identity or ran the model");
     Take(session->Close(), "close system replacement"); Take(runtime->Shutdown(), "shutdown replacement");
 }
-void LuaRestoreBad(const fs::path& base, const std::string& id) {
+namespace {
+void RestoreRejected(const fs::path& base, const std::string& id, const char* expected_code) {
     auto runtime = Runtime(base); auto observed = std::make_shared<Observed>();
     auto options = Options(base, observed, true, id); options.lua.reset();
     const auto failed = runtime->OpenSession(std::move(options));
@@ -379,8 +380,15 @@ void LuaRestoreBad(const fs::path& base, const std::string& id) {
               << " code=" << (failed ? std::string{} : failed.error().code)
               << " models=" << observed->requests.load() << '\n';
     Check(!failed, "bad owned Lua declaration opened a Session");
-    Check(failed.error().code == "sdk.lua.plan_invalid", "bad declaration returned the wrong precheck phase");
+    Check(failed.error().code == expected_code, "bad declaration returned the wrong precheck phase");
     Check(observed->requests == 0, "bad declaration ran a model");
     Take(runtime->Shutdown(), "shutdown rejected restore");
+}
+} // namespace
+void LuaRestoreBad(const fs::path& base, const std::string& id) {
+    RestoreRejected(base, id, "sdk.lua.plan_invalid");
+}
+void LuaRestoreForeignSystem(const fs::path& base, const std::string& id) {
+    RestoreRejected(base, id, "sdk.job.plan_invalid");
 }
 } // namespace lubancore_consumer
