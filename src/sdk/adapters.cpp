@@ -123,6 +123,9 @@ public:
     tools::RecoveryCapability recovery_capability() const override { return inner_->recovery_capability(); }
     Result execute(const Json& input) override { return execute(input, {}); }
     Result execute(const Json& input, const tools::ToolExecutionContext& context) override {
+        // Remote fetch has no filesystem path binding. Preserve its own URL
+        // validation and the invocation's cancellation/identity context exactly.
+        if (name() == "web_fetch") return inner_->execute(input, context);
         auto effective = input;
         const bool command = name() == "run_command";
         const bool search = name() == "search";

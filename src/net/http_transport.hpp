@@ -59,6 +59,9 @@ struct FullHttpResponse {
     // 原样大小写——过滤/小写化是调用方(runtime 层)的合同。
     std::vector<std::pair<std::string, std::string>> headers;
     std::string body;
+    // Actual callback bytes, including status lines/CRLF/interim headers.
+    // Callers composing redirects can debit a single cumulative header budget.
+    std::uint64_t received_header_bytes = 0;
 };
 
 // 传输错误分型。Cancelled/Timeout/Response*TooLarge 是我们自己掐的流
@@ -77,7 +80,7 @@ enum class FullHttpErrorKind {
 struct FullHttpError {
     FullHttpErrorKind kind = FullHttpErrorKind::NetworkFailed;
     std::string message;   // 人话;不含请求头/体(§11 文案禁令)
-    long curl_code = 0;    // CURLE_*(cpr::ErrorCode 的底层值);0 = 无
+    long curl_code = 0;    // Historical name: cpr::ErrorCode ordinal, not raw CURLcode; 0 = none.
     std::string curl_message;
     bool received_any_bytes = false;  // 收到过响应体字节(超时分型旁证)
 };
@@ -89,8 +92,8 @@ std::expected<FullHttpResponse, FullHttpError> PerformFullHttpRequest(
     const FullHttpRequest& request, const FullHttpLimits& limits, const std::atomic<bool>* cancel,
     const PinnedDnsResolve* pinned);
 
-// cpr/libcurl 错误码 -> 传输错误分型(纯函数,单测直钉全表)。curl_code
-// 是 cpr::ErrorCode 的底层值(CURLE_*)。OPERATION_TIMEDOUT 归 Timeout;
+// CPR 错误分类 -> 传输错误分型(纯函数,单测直钉全表)。历史参数名
+// curl_code 收 cpr::ErrorCode 的底层值，不收原始 CURLcode。OPERATION_TIMEDOUT 归 Timeout;
 // 我们自己掐的流(取消/帽)不走这里。
 FullHttpErrorKind ClassifyCurlErrorCode(long curl_code);
 
