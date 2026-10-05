@@ -1845,7 +1845,12 @@ ReadOwnedJobAdoptions(const V3Ledger& ledger) {
     using K = EventKindV3;
     std::vector<OwnedJobAdoptionFacts> facts;
     const auto business_actions = OwnedBusinessActions(ledger);
-    if (business_actions.empty()) return facts;  // Old ledgers keep their read path.
+    if (business_actions.empty()) {
+        if (std::any_of(ledger.events.begin(), ledger.events.end(), [](const auto& event) {
+                return event.kind == K::ToolJobObserved && event.payload.contains("commandNotInvoked");
+            })) return std::unexpected("job.owned.unbound_command_not_invoked");
+        return facts; // Old ledgers keep their read path.
+    }
     std::unordered_set<std::string> job_ids, action_ids;
     for (const auto& event : ledger.events) {
         if (event.kind != K::ToolJobAdopted) continue;
@@ -1883,12 +1888,15 @@ ReadOwnedJobAdoptions(const V3Ledger& ledger) {
     std::unordered_set<std::string> dispatched;
     std::unordered_set<std::string> business_started, observed_terminal;
     std::map<std::string, const EventLine*> business_terminal;
+    std::map<std::string, nlohmann::json> parent_admissions;
     for (const auto& event : ledger.events) {
         const bool job_event = event.kind == K::ToolJobDispatched || event.kind == K::ToolJobObserved ||
                                event.kind == K::ToolJobCancelRequested;
         const auto found = std::find_if(facts.begin(), facts.end(), [&](const auto& fact) {
             return job_event ? JsonString(event.payload, "jobId") == fact.job_id : event.action_id == fact.action_id;
         });
+        if (event.kind == K::ToolJobObserved && event.payload.contains("commandNotInvoked") && found == facts.end())
+            return std::unexpected("job.owned.unbound_command_not_invoked");
         if ((!event.action_id || !business_actions.contains(*event.action_id)) && found == facts.end()) continue;
         const auto* fact = found == facts.end() ? nullptr : &*found;
         const bool execution = event.kind == K::ToolExecutionStarted || event.kind == K::ToolExecutionWaiting ||
@@ -1913,6 +1921,7 @@ ReadOwnedJobAdoptions(const V3Ledger& ledger) {
                 return std::unexpected(checked.error());
             const auto admitted = ParseCrossSessionRef(admission->at("admissionEventRef"));
             if (!admitted || admitted->seq >= event.seq) return std::unexpected("job.owned.dispatch_before_parent_delivery");
+            parent_admissions[fact->action_id] = *admission;
         } else if (event.kind == K::ToolExecutionStarted) {
             if (!dispatched.contains(fact->action_id) || business_terminal.contains(fact->action_id) ||
                 !business_started.insert(fact->action_id).second ||
@@ -1933,6 +1942,18 @@ ReadOwnedJobAdoptions(const V3Ledger& ledger) {
         } else if (event.kind == K::ToolJobObserved) {
             if (JsonString(event.payload, "jobId") != fact->job_id)
                 return std::unexpected("job.owned.foreign_observation");
+            if (const auto admission = event.payload.find("parentAdmission"); admission != event.payload.end()) {
+                if (const auto error = ValidateEventLine(event))
+                    return std::unexpected("job.owned.invalid_observed_parent: " + error->code);
+                if (auto checked = CheckOwnedJobParentAdmission(ledger, *fact, *admission); !checked)
+                    return std::unexpected(checked.error());
+                const auto admitted = ParseCrossSessionRef(admission->at("admissionEventRef"));
+                if (!admitted || admitted->seq >= event.seq)
+                    return std::unexpected("job.owned.observation_before_parent_delivery");
+                const auto dispatched_parent = parent_admissions.find(fact->action_id);
+                if (dispatched_parent != parent_admissions.end() && dispatched_parent->second != *admission)
+                    return std::unexpected("job.owned.observed_parent_changed");
+            }
             const auto state = JsonString(event.payload, "observedStatus").value_or("");
             if ((state == "succeeded" || state == "failed" || state == "cancelled" || state == "unknown") &&
                 !observed_terminal.insert(fact->action_id).second)
@@ -1949,11 +1970,35 @@ ReadOwnedJobAdoptions(const V3Ledger& ledger) {
                 if (startup_flag != event.payload.end() && !startup_flag->is_boolean())
                     return std::unexpected("job.owned.invalid_startup_observation");
                 const bool startup_failed = startup_flag != event.payload.end() && startup_flag->get<bool>();
+                const bool command_not_invoked = event.payload.contains("commandNotInvoked");
+                const auto deadline = fact->execution_policy.find("deadline_ms");
+                const bool positive_deadline = deadline != fact->execution_policy.end() &&
+                    deadline->is_number_unsigned() && deadline->get<std::uint64_t>() > 0;
+                if (!started && kind == K::ToolExecutionCancelled &&
+                    JsonString(terminal->second->payload, "reason") == "registration_deadline_elapsed" &&
+                    (!event.payload.contains("parentAdmission") || !positive_deadline))
+                    return std::unexpected("job.owned.deadline_without_parent_delivery");
+                if (command_not_invoked) {
+                    if (const auto error = ValidateEventLine(event))
+                        return std::unexpected("job.owned.invalid_command_not_invoked: " + error->code);
+                    if (!started || startup_flag != event.payload.end() || kind != K::ToolExecutionCancelled ||
+                        state != "cancelled" || JsonString(terminal->second->payload, "phase") != "during_execution" ||
+                        JsonString(terminal->second->payload, "reason") != "registration_deadline_elapsed" ||
+                        !positive_deadline ||
+                        std::any_of(ledger.events.begin(), ledger.events.end(), [&](const auto& material) {
+                            return material.action_id == fact->action_id &&
+                                (material.kind == K::ToolResultPersisted || material.kind == K::ToolResultPersistFailed ||
+                                 material.kind == K::ToolResultSelected ||
+                                 (material.kind == K::HookDispatchRequested &&
+                                  JsonString(material.payload, "hookPoint") == "PostAction"));
+                        })) return std::unexpected("job.owned.invalid_command_not_invoked");
+                }
                 if (startup_failed && (!started || kind != K::ToolExecutionFailed || state != "failed" ||
                     JsonString(terminal->second->payload, "error_code") != "tool.job.thread_start_failed" ||
                     event.payload.contains("resultRef") || event.payload.contains("postEventRef")))
                     return std::unexpected("job.owned.invalid_startup_observation");
-                if (started && !startup_failed && (!event.payload.contains("resultRef") || !event.payload.contains("postEventRef")))
+                if (started && !startup_failed && !command_not_invoked &&
+                    (!event.payload.contains("resultRef") || !event.payload.contains("postEventRef")))
                     return std::unexpected("job.owned.observation_without_raw_or_post");
                 if (!started && (event.payload.contains("resultRef") || event.payload.contains("postEventRef") ||
                     (kind != K::ToolExecutionCancelled && kind != K::ToolExecutionRejected)))
