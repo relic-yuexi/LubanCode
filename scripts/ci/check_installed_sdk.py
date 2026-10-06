@@ -28,6 +28,7 @@ except ImportError:
 
 REQUIRED_TESTS = {
     "sdk.consumer.named_results",
+    "sdk.consumer.journal_owner",
     "sdk.consumer.command_jobs",
     "sdk.consumer.web_fetch",
     "sdk.consumer.authorization",
@@ -240,6 +241,11 @@ def main() -> None:
     except ImportError:
         import sdk_named_results as named_results
     named_sources = named_results.seal_sources(repo)
+    try:
+        from . import sdk_journal_owner as journal_owner
+    except ImportError:
+        import sdk_journal_owner as journal_owner
+    journal_sources = journal_owner.seal_sources(repo)
     producer_build = args.build_dir.resolve()
     profile_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
     profile_entries = {line.split(":", 1)[0]: line.split("=", 1)[1] for line in profile_cache.splitlines()
@@ -322,6 +328,7 @@ def main() -> None:
         "web_fetch_source": web_source, "web_fetch_fixture": None,
         "command_jobs_sources": job_sources, "command_jobs_probe": job_probe,
         "named_results_sources": named_sources,
+        "journal_owner_sources": journal_sources,
     }, indent=2) + "\n", encoding="utf-8")
     print(f"SDK consumer evidence directory: {scratch}", flush=True)
 
@@ -391,6 +398,10 @@ def main() -> None:
                                                     evidence=evidence / "named-results-source-copies")
     (evidence / "named-results-source-copies.json").write_text(
         json.dumps(named_source_copies, indent=2) + "\n", encoding="utf-8")
+    journal_source_copies = journal_owner.check_copies(consumer_source, prefix, journal_sources, repo,
+                                                     evidence=evidence / "journal-owner-source-copies")
+    (evidence / "journal-owner-source-copies.json").write_text(
+        json.dumps(journal_source_copies, indent=2) + "\n", encoding="utf-8")
     # Neither inherited loader variables nor a producer PATH may rescue a
     # broken installed package. Ordinary system compiler/tool directories stay.
     blocked = (repo, producer_build, staging)
@@ -499,8 +510,20 @@ def main() -> None:
                 Path(named_test["command"][3]).resolve() != Path(job_probe["copy"]["path"]).resolve()):
             raise RuntimeError("Named results consumer/probe/state borrowed a foreign path")
         (evidence / "named-results-registration.json").write_text(json.dumps(named_test, indent=2) + "\n", encoding="utf-8")
+        journal_tests = [test for test in listing["tests"] if test["name"] == "sdk.consumer.journal_owner"]
+        if len(journal_tests) != 1 or len(journal_tests[0].get("command", [])) != 3:
+            raise RuntimeError("Journal owner consumer registration is missing or malformed")
+        journal_test = journal_tests[0]
+        if (journal_test["command"][0] != smoke_test["command"][0] or
+                not Path(journal_test["command"][0]).resolve().is_relative_to(consumer_build.resolve()) or
+                journal_test["command"][1] != "journal-owner" or
+                Path(journal_test["command"][2]).resolve() != (consumer_build / "state-journal-owner").resolve()):
+            raise RuntimeError("Journal owner consumer/state borrowed a foreign path")
+        (evidence / "journal-owner-registration.json").write_text(json.dumps(journal_test, indent=2) + "\n", encoding="utf-8")
         fixture.context.update(registration=web_test, consumer_executable=smoke_test["command"][0])
         fixture.save()
+        journal_capture = None
+        journal_capture_error = None
         try:
             fixture.caller("execute", ["ctest", "--test-dir", str(consumer_build), "-C", "Release",
                  "--output-on-failure", "--no-tests=error",
@@ -508,11 +531,23 @@ def main() -> None:
         finally:
             # The consumer lives outside the checkout; keep its diagnostic logs in
             # the producer's artifact directory even when one of its tests fails.
-            # Session data stays in scratch and is not part of the CI artifact.
+            # The controlled Journal acceptance retains its actual main/result
+            # materials separately. Other consumer Session data stays in scratch.
             for name in ("LastTest.log", "LastTestsFailed.log"):
                 log = consumer_build / "Testing" / "Temporary" / name
                 if log.is_file():
                     shutil.copy2(log, evidence / name)
+            try:
+                journal_capture = journal_owner.capture_materials(
+                    consumer_build / "state-journal-owner", evidence / "journal-owner-materials")
+            except Exception as error:
+                # Preserve the failure of evidence collection without masking an
+                # earlier CTest exception or claiming a successful acceptance.
+                journal_capture_error = str(error)
+                (evidence / "journal-owner-materials-error.json").write_text(json.dumps({
+                    "status": "not_evaluated", "error": journal_capture_error,
+                    "source": str(consumer_build / "state-journal-owner"),
+                }, indent=2) + "\n", encoding="utf-8")
     results = ET.parse(evidence / "consumer-results.xml").getroot().findall(".//testcase")
     executed = {case.attrib.get("name") for case in results}
     if not results or executed != required_tests:
@@ -548,6 +583,21 @@ def main() -> None:
         "status": "passed", "registration": named_test, "receipt": named_receipt,
         "probe": job_probe, "sources": named_sources, "copies": named_source_copies,
         "scope": "actual installed registration/JUnit/LastTest and SDK/STL source/header copies; internal V3 summary witness belongs to original native source",
+    }, indent=2) + "\n", encoding="utf-8")
+    journal_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                        if sections[index] == "sdk.consumer.journal_owner"]
+    if len(journal_sections) != 1:
+        raise RuntimeError("Journal owner installed section is missing or duplicated")
+    if journal_capture_error is not None or journal_capture is None:
+        raise RuntimeError("Journal owner actual materials were not captured: " + str(journal_capture_error))
+    journal_receipt = journal_owner.check_consumer(journal_sections[0], journal_test["command"])
+    journal_materials = journal_owner.check_materials(journal_capture, journal_receipt)
+    journal_owner.check_copies(consumer_source, prefix, journal_sources, repo)
+    (evidence / "journal-owner-acceptance.json").write_text(json.dumps({
+        "status": "passed", "registration": journal_test, "receipt": journal_receipt,
+        "sources": journal_sources, "copies": journal_source_copies,
+        "capture": journal_capture, "materials": journal_materials,
+        "scope": "actual installed SDK/STL caller and retained main/raw/formal materials; original native guards verify the complete V3 canonical chain",
     }, indent=2) + "\n", encoding="utf-8")
     web_sections = [sections[index + 1] for index in range(1, len(sections), 2)
                     if sections[index] == "sdk.consumer.web_fetch"]

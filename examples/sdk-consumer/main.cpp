@@ -37,6 +37,7 @@ void TodoWrite(const std::filesystem::path& base);
 void AgenticRag(const std::filesystem::path& base);
 void CommandJobs(const std::filesystem::path& base, const std::filesystem::path& probe);
 void NamedResults(const std::filesystem::path& base, const std::filesystem::path& probe);
+void JournalOwner(const std::filesystem::path& base);
 void WebFetch(const std::filesystem::path& base, const std::string& base_url,
               const std::filesystem::path& requests_file);
 void Actions(const std::filesystem::path& base);
@@ -1718,6 +1719,7 @@ int main(int argc, char** argv) {
         else if (mode == "agentic-rag") lubancore_consumer::AgenticRag(base);
         else if (mode == "command-jobs") lubancore_consumer::CommandJobs(base, Path(argv[3]));
         else if (mode == "named-results") lubancore_consumer::NamedResults(base, Path(argv[3]));
+        else if (mode == "journal-owner") lubancore_consumer::JournalOwner(base);
         else if (mode == "web-fetch") lubancore_consumer::WebFetch(base, argv[3], Path(argv[4]));
         else if (mode == "actions") lubancore_consumer::Actions(base);
         else if (mode == "results") PublicResults(base);

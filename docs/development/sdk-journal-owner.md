@@ -150,3 +150,26 @@ case roster, model/tool counts, zero-replay, old JSONL prefix and weak-owner
 checks remain. The retained host receipt additionally records both OLD/NEW
 raw/formal identity and digest/byte witnesses. This correction is source-only;
 no earlier CI run establishes its execution result.
+
+## Integration acceptance wiring
+
+The actual engine compiles JournalOwner once. SDK reference and full CLI test
+targets compile the same public SDK/STL helper. The installed and relocated
+consumer takes only its explicit state root. Lua ON/OFF keeps this acceptance
+available; no internal Writer header enters the installed helper.
+
+The source roster adds three focused registrations and eleven CASE: seven
+internal owner cases, three public host cases and one actual-main guard. The
+same full run retains these three original registrations and their focused
+counterparts. Its existing unit timeout stays 180 seconds; the other five
+registrations stay at 300 seconds. The installed consumer stays at 120 seconds.
+
+Even a failed consumer retains bounded real fixture materials before parsing
+acceptance. Collection starts as not_evaluated. Successful checks bind the
+original host argv, Session and operation identities, old main prefix and
+raw/formal file digests. The Python checker does not claim C++ canonical hashing;
+the original native guard owns that check. ASan retains the old source roster
+and PCH checks and adds these three sources plus the actual public helper.
+
+Only source, pure-data and document checks have run locally. Remote execution
+of this combined source is still pending.

@@ -243,6 +243,15 @@ def inspect(source: Path, build: Path, config: str, lua_profile: str | None = No
         with_cli = str(entries.get("LUBANCODE_BUILD_CLI", "")).upper() in {"ON", "TRUE", "YES", "1"}
         result["violations"].extend(ownership_violations(targets, testing, with_cli))
         result["status"] = "failed" if result["violations"] else "passed"
+    if (source / "examples/sdk-consumer/journal_owner.cpp").is_file():
+        try:
+            from .sdk_journal_owner import ownership_violations
+        except ImportError:
+            from sdk_journal_owner import ownership_violations
+        testing = str(entries.get("BUILD_TESTING", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        with_cli = str(entries.get("LUBANCODE_BUILD_CLI", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        result["violations"].extend(ownership_violations(targets, testing, with_cli))
+        result["status"] = "failed" if result["violations"] else "passed"
     if (source / "examples/sdk-consumer/web_fetch.cpp").is_file():
         testing = str(entries.get("BUILD_TESTING", "")).upper() in {"ON", "TRUE", "YES", "1"}
         with_cli = str(entries.get("LUBANCODE_BUILD_CLI", "")).upper() in {"ON", "TRUE", "YES", "1"}

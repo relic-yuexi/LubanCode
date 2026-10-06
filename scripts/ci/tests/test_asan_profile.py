@@ -307,6 +307,40 @@ class ProfileTests(unittest.TestCase):
             with self.subTest(changed=changed[-80:]), self.assertRaises((ValueError, RuntimeError)):
                 gate.check_execution(self.manifest, registrations, self.executable, junit, changed)
 
+    def test_journal_sources_reach_module_guards_with_original_unit_timeout(self):
+        from scripts.ci.tests.test_journal_owner_full_gate import native_section, full
+        names = sorted(full.ORIGINALS)
+        self.manifest['selected'] = [list(names), list(names)]
+        self.manifest['roster'].update({name: ('tests/unit/trajectory_v3/' if name.startswith('unit.')
+                                              else 'tests/integration/sdk/') + 'test_' + stem + '.cpp'
+                                       for name, stem in full.ORIGINALS.items()})
+        registrations = self.registrations()
+        for registration in registrations:
+            for test in registration['tests']:
+                test['properties'][0]['value'] = full.source_timeout(test['name'])
+        junit = ET.Element('testsuite'); sections = []
+        for index, name in enumerate(names, 1):
+            ET.SubElement(junit, 'testcase', name=name, status='run')
+            command = registrations[1]['tests'][index - 1]['command']
+            sections.append(f'{index}/3 Testing: {name}\n' + native_section(full.ORIGINALS[name], command))
+        native = ''.join(sections)
+        self.assertEqual(gate.check_execution(self.manifest, registrations, self.executable, junit, native),
+                         {'status': 'passed', 'sources': 3, 'cases': 11, 'assertions': 303})
+        for changed in (native.replace('7 | 7 passed', '6 | 6 passed', 1),
+                        native.replace('[v3-journal-owner-path] lease-owner-lifetime', 'missing', 1),
+                        native.replace('[v3-journal-owner-path] lease-close-thread', 'missing', 1),
+                        native.replace('models=4 tools=2', 'models=3 tools=2', 1),
+                        native.replace('[sdk-journal-owner-guard] actual-public-source', 'missing', 1)):
+            with self.subTest(changed=changed[-80:]), self.assertRaises((ValueError, RuntimeError)):
+                gate.check_execution(self.manifest, registrations, self.executable, junit, changed)
+        increased = deepcopy(registrations)
+        for registration in increased:
+            for test in registration['tests']:
+                if test['name'].startswith('unit.'):
+                    test['properties'][0]['value'] = 300
+        with self.assertRaises(ValueError):
+            gate.check_execution(self.manifest, increased, self.executable, junit, native)
+
 
 if __name__ == '__main__':
     unittest.main()

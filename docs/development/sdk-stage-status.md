@@ -131,7 +131,7 @@ probe 后源改用独立、标准库私有夹具，复制原源码，在 CI 临�
 
 新候选只补[缺失分类](sdk-command-job-missing-resume.md)与[真实产物选择](sdk-command-probe-artifacts.md)。缺 workspace 或明确缺 session 沿旧错误码拒开，已有坏材料仍严查；原 private 案追加八次真实 Runtime 准入反例，旧七 CASE、消费者原断言与预算保留。Windows 精确选指定 EXE，可附同目录同名 PDB，POSIX 保单无后缀产物；生产与上传后复核共用同一门，原图字节不动。新的原生结果仍须独立交远端 CI。
 
-`7a5321c8` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37421453525)已核三平台 combined focused 各 62 源／511 CASE。Windows SDK-only 安装消费 35／35 过，focused 62 源中 61 过；Owned deadline 六案五过，438 行排队快照想读 `queued`，实际已为 `cancelled`。原六份终态事实仍齐。首次失败 15 件原件冻结，摘要 `e48f85c030b8904c61850ec654d9f7a5773afc3b5709cf5de1e1988761c45b05`；其它同源结果不能替这一项验收。
+`7a5321c8` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37421453525)整轮失败。唯一失败在 Windows SDK-only ON：focused 62 源中 61 过；Owned deadline 六案五过，438 行想读 `queued`，实际已为 `cancelled`。原六份终态事实仍齐；Windows OFF 未执行。其它五套 ON 各 62 源／511 CASE、两套 OFF 各 60／496、八套安装消费 35／32、三平台全量 772／774／775、ASan 161 来源／1827 CASE／71878 断言及 TSan 十四场 workflow 均过，不能替失败通道验收。1257 件原件共 49246151 字节，逐件复核后冻结，摘要 `6f1a67089a5b601af8b890867ac8db5137d597c787ea30d6c346431be1ab7faa`。首次失败 15 件与原封条 `e48f85c030b8904c61850ec654d9f7a5773afc3b5709cf5de1e1988761c45b05` 继续保留。
 
 后源按[排队观察合同](sdk-owned-queue-observation.md)保住原 2000ms 正预算和全部截止、零调用、父引用、恢复与退场检查。另加零注册预算真票，硬查堵在活进程后排队，再取消退场。正票快照若已取消，还须核 Register 前实际时钟已过最早截止；其它状态照拒。生产、原六 CASE 和预算不变。纯数据门已核，原生仍交新源远端 CI。
 
@@ -144,3 +144,17 @@ probe 后源改用独立、标准库私有夹具，复制原源码，在 CI 临�
 独立源码审查已核 37 条变更与 767 份旧原生测试锚，未查出阻塞项；File 旧流读、预览、编号与异常语义保留。公开十案用安装 SDK/STL 与真实第二根字节，私有八案再核原生回执、开场身份、未知持值和退场。自动摘要另保真实 V3 证据与后续模型请求确认；安装消费者没有内部主账读面，不能冒称同样检查。
 
 这份接线合入 `5498f954` 排队观察修正，旧预算与终态断言保留。安装消费多一场 named-results，SDK focused 多两册、18 CASE；新名册须逐项核 actual argv、JUnit、LastTest、公开头／helper 原字节和编译归属。此处只记源码候选，尚未合功能分支；整套三平台和 ASan 要在新源远端 CI 实跑，旧绿灯不借给它。
+
+集成源 `bb9fb3f1` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37429745834)整轮失败。八条原生构建均停在 `named_result_blobs.cpp:26`：`string_view` 不能隐式转给只收 `const string&` 的 UTF-8 检查。消费者、focused、全量、NamedResults、ASan 和 TSan 均未执行；ASan 名册 163／70／25 只是计划。219 件失败原件共 4713248 字节已封，摘要 `9076087630e461d7643b96e53fc4516ef8e268a11f76f371d8f45787401a9776`。
+
+窄修 `68e1fcf2` 只加显式 `std::string(value)`，其余 3036 份文件未动，源码与实际接口逐字核过。[新源 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37431764520)复用原分支，旧轮结束并封账后正常快进。原生结论待本源结果，未添实施 PR，未在本地编译。
+
+## Journal 所有权接线候选
+
+[主场 Journal 合同](sdk-journal-owner.md)先于实现封存。当前先归拢真实 V3 File 账，保旧 JournalWriter 和 File anchor。AppendLease 独持共享状态，原生追加与内存更新共守写门；首次未知先封、再解锁、最后退引用。原生已提交而内存更新抛错，另记 semantic unknown，不改称尚未写入。读句柄只持捕获字节和原生文件锚，不能吊住 Session 或 Writer。
+
+同 ID 恢复在真实 SessionLock 内只捕获一份材料，投影与 continuation 共用它，严核原对象、完整前缀与 EOF。旧 RecoveryView 字符串接口尚多留一份主账字节；原 128MiB 帽管逐份读取，没冒称总驻留上限。SDK 各项 Prepare/restore 尚未全归这处读面，公开 JournalProvider 要等这条线收齐。本阶段不引数据库。
+
+源码 `9093af67` 已闭合独审抓出的两处夹具错误：doctest 消息三元式加括号；一次真实工具调用按 action/attempt 分组，恰核 raw capture 与 formal 两份，恢复和关场后逐原身份、元数据与字节比对。原七案内部验收、三场 SDK/STL 宿主验收、一场私有主账核验留着。独审只算源码通过，尚无远端原生结论。
+
+这批正接编译归属、安装移位、ASan 与同次全量原件。宿主先开场、跑完整回环、Close，再换 Runtime 恢复同一 ID，核零重放，再跑一回；同项目另开一场核历史与执行不串。受控验收账、原 raw/formal 文件随失败也保存，保存不等于通过。公开 SDK 不添内部 Writer ABI，完整 canonical/hash/Prepared chain 仍交实际原生 guard 验证。

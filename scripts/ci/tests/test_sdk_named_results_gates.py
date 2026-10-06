@@ -165,8 +165,8 @@ class OwnershipTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): gate.check_copies(consumer, prefix, changed, REPO)
 
     def test_current_source_rosters_preserve_every_old_member(self):
-        self.assertEqual((len(focused.REQUIRED), len(focused_roster(focused.REQUIRED, False))), (64, 62))
-        self.assertEqual((len(installed.REQUIRED_TESTS), len(consumer_roster(installed.REQUIRED_TESTS, False))), (36, 33))
+        self.assertEqual((len(focused.REQUIRED), len(focused_roster(focused.REQUIRED, False))), (67, 65))
+        self.assertEqual((len(installed.REQUIRED_TESTS), len(consumer_roster(installed.REQUIRED_TESTS, False))), (37, 34))
         self.assertIn(gate.HEADER, installed.REQUIRED_PUBLIC_HEADERS)
         for stem in gate.SOURCES: self.assertIn("sdk.focused." + stem, focused.REQUIRED)
         for script in ("check_sdk_focused.py", "check_installed_sdk.py", "check_sdk_only_boundary.py", "check_sdk_build_closure.py"):

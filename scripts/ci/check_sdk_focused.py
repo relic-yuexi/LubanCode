@@ -71,7 +71,18 @@ except ImportError:
     except ModuleNotFoundError:
         from scripts.ci import sdk_named_results as named_results
 
+try:
+    from . import sdk_journal_owner as journal_owner
+except ImportError:
+    try:
+        import sdk_journal_owner as journal_owner
+    except ModuleNotFoundError:
+        from scripts.ci import sdk_journal_owner as journal_owner
+
 REQUIRED = {
+    "sdk.focused.v3_journal_owner",
+    "sdk.focused.lubancore_journal_owner",
+    "sdk.focused.lubancore_journal_owner_guards",
     "sdk.focused.lubancore_named_results",
     "sdk.focused.lubancore_named_result_guards",
     "sdk.focused.v3_result_immutable_publication",
@@ -1285,6 +1296,8 @@ def main():
             command_jobs.check_registration(test.get("command"), job_stem)
         if job_stem in named_results.SOURCES:
             named_results.check_registration(test.get("command"), job_stem)
+        if job_stem in journal_owner.SOURCES:
+            journal_owner.check_registration(test.get("command"), job_stem)
         props = {p["name"]: p["value"] for p in test.get("properties", [])}
         if (props.get("DISABLED") or "sdk-focused" not in props.get("LABELS", [])
                 or not 0 < float(props.get("TIMEOUT", 0)) <= 300):
@@ -1365,6 +1378,7 @@ def main():
         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
     command_job_reports = {}
     named_result_reports = {}
+    journal_owner_reports = {}
     for case in cases:
         if case.attrib.get("status") != "run" or any(case.find(k) is not None for k in
                 ("failure", "error", "skipped")):
@@ -1384,6 +1398,9 @@ def main():
         if job_stem in named_results.SOURCES:
             named_result_reports[case.attrib["name"]] = named_results.check_native(sections[0], commands[0], job_stem)
             (evidence / "named-results.json").write_text(json.dumps(named_result_reports, indent=2) + "\n", encoding="utf-8")
+        if job_stem in journal_owner.SOURCES:
+            journal_owner_reports[case.attrib["name"]] = journal_owner.check_native(sections[0], commands[0], job_stem)
+            (evidence / "journal-owner.json").write_text(json.dumps(journal_owner_reports, indent=2) + "\n", encoding="utf-8")
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])

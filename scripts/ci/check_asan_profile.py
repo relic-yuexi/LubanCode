@@ -21,11 +21,13 @@ try:
     from .check_sdk_focused import check_native_command
     from .sdk_result_immutable import check_result_immutable_native
     from . import sdk_named_results as named_results
+    from . import sdk_journal_owner as journal_owner
 except ImportError:
     from check_sdk_only_boundary import CLIENT, prepare, read_reply
     from check_sdk_focused import check_native_command
     from sdk_result_immutable import check_result_immutable_native
     import sdk_named_results as named_results
+    import sdk_journal_owner as journal_owner
 
 
 def require(condition, message):
@@ -265,6 +267,9 @@ def check_registration(manifest, registration, index, executable):
         stem = name.removeprefix('integration.sdk.')
         if name.startswith('integration.sdk.') and stem in named_results.SOURCES:
             named_results.check_registration(expected, stem, 'lubancode_tests')
+        journal_stem = name.removeprefix('unit.trajectory_v3.').removeprefix('integration.sdk.')
+        if journal_stem in journal_owner.SOURCES:
+            journal_owner.check_registration(expected, journal_stem, 'lubancode_tests')
         commands[name] = expected
     return commands
 
@@ -290,6 +295,9 @@ def check_execution(manifest, registrations, executable, junit, last_test):
         stem = name.removeprefix('integration.sdk.')
         if name.startswith('integration.sdk.') and stem in named_results.SOURCES:
             named_results.check_native(section, commands[name], stem)
+        journal_stem = name.removeprefix('unit.trajectory_v3.').removeprefix('integration.sdk.')
+        if journal_stem in journal_owner.SOURCES:
+            journal_owner.check_native(section, commands[name], journal_stem)
         if name == 'unit.trajectory_v3.v3_result_immutable_publication':
             check_result_immutable_native(section, commands[name])
         require(len(re.findall(r'^Test Passed\.\s*$', section, re.M)) == 1, 'native test did not pass: ' + name)
