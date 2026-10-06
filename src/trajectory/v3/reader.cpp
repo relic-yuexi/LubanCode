@@ -268,6 +268,23 @@ std::expected<V3Ledger, std::string> ReadV3LedgerCaptured(
     return ReadV3LedgerOwned(capture.path(), *lines);
 }
 
+std::expected<V3Ledger, std::string> ReadV3LedgerLive(const V3Writer& writer) {
+    auto capture = writer.CaptureJournal();
+    if (!capture) return std::unexpected(capture.error());
+    try {
+        auto ledger = ReadV3LedgerCaptured(*capture);
+        const auto closed = capture->Close();
+        if (!ledger) return ledger; // Keep the original verification failure.
+        if (!closed) return std::unexpected(closed.error());
+        return ledger;
+    } catch (...) {
+        // Release the actual anchor on exceptional projection too, preserving
+        // the original exception if Close itself cannot allocate its error.
+        try { (void)capture->Close(); } catch (...) {}
+        throw;
+    }
+}
+
 std::expected<V3Ledger, std::string> ReadV3LedgerBounded(
     const std::filesystem::path& jsonl, std::size_t max_bytes,
     std::size_t max_lines, std::size_t max_line_bytes) {

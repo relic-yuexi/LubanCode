@@ -360,7 +360,13 @@ TEST_CASE("Journal owner: same captured File bytes restore original run sequence
     auto continued = v3::V3Writer::ContinueCaptured(capture->main_journal); REQUIRE(continued.has_value());
     REQUIRE(capture->main_journal.Close().has_value()); CHECK(continued->run_id() == "same-run"); CHECK(continued->session_id() == "same-id");
     CHECK(continued->context().revision == source->context.revision); CHECK(continued->next_seq() == source->lines + 1);
+    const auto live_before = v3::ReadV3LedgerLive(*continued); REQUIRE(live_before.has_value());
+    CHECK(live_before->lines == source->lines); CHECK(live_before->run_id == source->run_id);
     const auto next = continued->AppendMessage(User("new-history"), Durability::PowerLoss); REQUIRE(next.status == v3::WriteReceipt::Status::Committed);
+    const auto live_after = v3::ReadV3LedgerLive(*continued); REQUIRE(live_after.has_value());
+    CHECK(live_after->lines == source->lines + 1); REQUIRE(live_after->FindMessage(next.id));
+    CHECK(live_after->FindMessage(next.id)->line_hash == next.line_hash);
+    CHECK(live_before->lines == source->lines); CHECK(capture->main_journal.bytes() == prefix);
     CHECK(next.seq == source->lines + 1); CHECK(next.line_hash != first.line_hash); REQUIRE(continued->Close().has_value());
     CHECK(Bytes(path).starts_with(prefix)); const auto ledger = v3::ReadV3Ledger(path); REQUIRE(ledger.has_value());
     CHECK(ledger->session_id == source->session_id); CHECK(ledger->run_id == source->run_id); CHECK(ledger->lines == source->lines + 1);
@@ -368,6 +374,17 @@ TEST_CASE("Journal owner: same captured File bytes restore original run sequence
     REQUIRE(ledger->FindMessage(next.id)); CHECK(ledger->FindMessage(next.id)->seq == next.seq);
     CHECK(capture->main_journal.bytes() == prefix); const auto still_owned = v3::ReadV3LedgerCaptured(capture->main_journal);
     REQUIRE(still_owned.has_value()); CHECK(still_owned->lines == source->lines);
+    const auto valid_bytes = Bytes(path);
+    Write(path, valid_bytes + "{\"broken-live-row\":true}\n");
+    CHECK_FALSE(v3::ReadV3LedgerLive(*continued).has_value());
+    REQUIRE(v3::ReadV3LedgerCaptured(capture->main_journal).has_value());
+    Write(path, valid_bytes);
+    const auto moved = folder / "temporarily-moved.jsonl";
+    fs::rename(path, moved);
+    CHECK_FALSE(v3::ReadV3LedgerLive(*continued).has_value());
+    fs::rename(moved, path);
+    const auto valid_again = v3::ReadV3LedgerLive(*continued); REQUIRE(valid_again.has_value());
+    CHECK(valid_again->lines == ledger->lines); CHECK(valid_again->run_id == ledger->run_id);
     Marker("same-id");
 }
 

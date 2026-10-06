@@ -84,6 +84,10 @@ std::expected<V3Ledger, std::string> ReadV3LedgerOwned(
 // before the original verification/projection consumes these exact lines.
 std::expected<V3Ledger, std::string> ReadV3LedgerCaptured(
     const JournalReadHandle&, const std::optional<RecoveryStreamReadLimits>& limits = {});
+// One actual current-writer capture at the caller's original read phase.
+// Unlimited like the existing live File reader. The checked anchor Close
+// completes before a value escapes; no returned ledger retains the writer.
+std::expected<V3Ledger, std::string> ReadV3LedgerLive(const V3Writer&);
 // Opened-regular byte bound; newline/line/count checks precede JSON parsing.
 // Verification and projection consume the same owned lines without reopening.
 std::expected<V3Ledger, std::string> ReadV3LedgerBounded(

@@ -598,7 +598,7 @@ struct Session::Impl final : rt::InteractionBroker {
             (*assembled)->registry().Register(memory_write_module->BuildTool(*service->trajectory()));
         options.system_prompt = (*skill_module)->EffectiveSystem();
         if (!options.resume_session_id.empty() && options.system_prompt.empty()) {
-            auto saved = lubancode::trajectory::v3::ReadV3Ledger(service->trajectory()->v3_main_writer()->path());
+            auto saved = lubancode::trajectory::v3::ReadV3LedgerLive(*service->trajectory()->v3_main_writer());
             if (!saved) return std::unexpected(Failure("sdk.resume.context_unavailable", saved.error()));
             options.system_prompt = lubancode::trajectory::v3::ProjectModelContext(*saved).system_content;
         }
@@ -746,8 +746,7 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         // No worker has started. Read the verified ledger once for all restored
         // terminal operations; a failed read is retained as a query error.
-        const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(
-            session_dir / (session_id + ".jsonl"));
+        const auto ledger = lubancode::trajectory::v3::ReadV3LedgerLive(*service->trajectory()->v3_main_writer());
         if (memory_snapshot.enabled) {
             if (!ledger) return std::unexpected(Failure("sdk.memory.report_invalid", "verified input is unavailable"));
             for (auto& [id, report] : memory_reports) {
@@ -830,7 +829,7 @@ struct Session::Impl final : rt::InteractionBroker {
             };
             if (restored) capture(*restored);
             else {
-                const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(session_dir / (session_id + ".jsonl"));
+                const auto ledger = lubancode::trajectory::v3::ReadV3LedgerLive(*service->trajectory()->v3_main_writer());
                 if (ledger) capture(*ledger);
             }
         }
@@ -877,7 +876,7 @@ struct Session::Impl final : rt::InteractionBroker {
         bool memory_saved = EnsureMemoryReport(operation);
         std::optional<lubancode::trajectory::v3::V3Ledger> verified_memory;
         if (memory_snapshot.enabled && memory_saved) {
-            auto source = lubancode::trajectory::v3::ReadV3Ledger(session_dir / (session_id + ".jsonl"));
+            auto source = lubancode::trajectory::v3::ReadV3LedgerLive(*service->trajectory()->v3_main_writer());
             auto report = memory_module->ReadReport(operation.operation_id);
             auto valid = source && report ? memory_module->ValidateReport(*report, *source) :
                 Result<void>(std::unexpected(Failure("sdk.memory.report_invalid", "owned report or verified input is unavailable")));
@@ -905,7 +904,7 @@ struct Session::Impl final : rt::InteractionBroker {
             : Result<std::vector<memory::v1::SaveReport>>(std::unexpected(finalized_writes.error()));
         if (writes && memory_write_snapshot.enabled) {
             if (!verified_memory) {
-                auto source = lubancode::trajectory::v3::ReadV3Ledger(session_dir / (session_id + ".jsonl"));
+                auto source = lubancode::trajectory::v3::ReadV3LedgerLive(*service->trajectory()->v3_main_writer());
                 if (source) verified_memory = std::move(*source);
             }
             auto valid = verified_memory ? memory_write_module->ValidateReports(
@@ -931,7 +930,7 @@ struct Session::Impl final : rt::InteractionBroker {
         Result<std::vector<subagents::v1::Report>> children = std::vector<subagents::v1::Report>{};
         if (subagent_snapshot.enabled && !operation.turn_id.empty()) {
             if (!verified_memory) {
-                auto source = lubancode::trajectory::v3::ReadV3Ledger(session_dir / (session_id + ".jsonl"));
+                auto source = lubancode::trajectory::v3::ReadV3LedgerLive(*service->trajectory()->v3_main_writer());
                 if (source) verified_memory = std::move(*source);
             }
             children = verified_memory ? detail::ReadSubagentReports(*verified_memory, session_dir,

@@ -405,7 +405,7 @@ v3::WriteReceipt SessionCommandJobs::Post(const tools::OwnedJobCompletion& compl
         binding.job_id != scope.job_id || binding.attempt != scope.attempt ||
         binding.adopted_event_id != actual->adopted_receipt.id)
         return fail("sdk.job.post_binding_mismatch");
-    const auto ledger = v3::ReadV3Ledger(writer->path());
+    const auto ledger = v3::ReadV3LedgerLive(*writer);
     if (!ledger) return fail("sdk.job.post_invalid_ledger");
     const auto bindings = v3::ReadJobOperationBindings(*ledger);
     if (!bindings || std::none_of(bindings->begin(), bindings->end(), [&](const auto& saved) {
@@ -430,7 +430,7 @@ v3::WriteReceipt SessionCommandJobs::Post(const tools::OwnedJobCompletion& compl
 }
 
 Result<void> SessionCommandJobs::Restore() {
-    const auto ledger = v3::ReadV3Ledger(service_->trajectory()->v3_main_writer()->path());
+    const auto ledger = v3::ReadV3LedgerLive(*service_->trajectory()->v3_main_writer());
     if (!ledger) return std::unexpected(Failure("sdk.job.recovery_invalid", ledger.error()));
     const auto bindings = ReadJobOperations(service_->trajectory()->session_dir(), *ledger);
     if (bindings.state == JobOperationRecoveryState::Rejected) return std::unexpected(bindings.error);
@@ -516,7 +516,7 @@ void SessionCommandJobs::PumpAndPublish() {
             pending |= !value.terminal;
             if (value.terminal && need_preview && record->binding) {
                 if (!ledger) {
-                    auto read = v3::ReadV3Ledger(service_->trajectory()->v3_main_writer()->path());
+                    auto read = v3::ReadV3LedgerLive(*service_->trajectory()->v3_main_writer());
                     if (read) ledger = std::move(*read);
                 }
                 preview = ledger ? ReadPreview(service_->trajectory()->session_dir(), *ledger, *record->binding, service_->trajectory()->named_result_capability())
