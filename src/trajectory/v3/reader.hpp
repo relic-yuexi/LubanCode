@@ -32,6 +32,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "trajectory/session_recovery_view.hpp"
 #include "trajectory/v3/envelope.hpp"
 #include "trajectory/v3/hooks.hpp"
 #include "trajectory/v3/writer.hpp"
@@ -78,6 +79,11 @@ std::expected<V3Ledger, std::string> ReadV3Ledger(const std::filesystem::path& j
 // Internal owned prefix: verify and project precisely these lines, no reopen.
 std::expected<V3Ledger, std::string> ReadV3LedgerOwned(
     const std::filesystem::path& jsonl, const std::vector<std::string>& lines);
+// Actual immutable File owner capture: no path reopen and no live Writer
+// reference. The source bytes and complete newline/line budgets are checked
+// before the original verification/projection consumes these exact lines.
+std::expected<V3Ledger, std::string> ReadV3LedgerCaptured(
+    const JournalReadHandle&, const std::optional<RecoveryStreamReadLimits>& limits = {});
 // Opened-regular byte bound; newline/line/count checks precede JSON parsing.
 // Verification and projection consume the same owned lines without reopening.
 std::expected<V3Ledger, std::string> ReadV3LedgerBounded(

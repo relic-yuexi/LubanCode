@@ -260,6 +260,14 @@ std::expected<V3Ledger, std::string> ReadV3LedgerOwned(
     return ReadVerifiedV3Lines(jsonl, lines, VerifyV3Lines(lines), true);
 }
 
+std::expected<V3Ledger, std::string> ReadV3LedgerCaptured(
+    const JournalReadHandle& capture, const std::optional<RecoveryStreamReadLimits>& limits) {
+    if (!capture) return std::unexpected("recovery.anchor_missing");
+    auto lines = RecoveryStreamLines(capture.bytes(), limits, true);
+    if (!lines) return std::unexpected(lines.error());
+    return ReadV3LedgerOwned(capture.path(), *lines);
+}
+
 std::expected<V3Ledger, std::string> ReadV3LedgerBounded(
     const std::filesystem::path& jsonl, std::size_t max_bytes,
     std::size_t max_lines, std::size_t max_line_bytes) {

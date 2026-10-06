@@ -26,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include "trajectory/journal.hpp"
+#include "trajectory/journal_owner.hpp"
 #include "trajectory/v3/envelope.hpp"
 #include "trajectory/v3/schema3.hpp"
 
@@ -75,6 +76,10 @@ struct V3WriterOptions {
     // Internal Start-only after-native test seam; empty retains original Open.
     // Continue entry points reject it before reading or opening the old stream.
     std::shared_ptr<trajectory::JournalNativeIoProbe> journal_native_io_probe;
+    // Internal completion-boundary test seam. Runs after actual committed
+    // Journal I/O and before V3 in-memory completion; a throw freezes the owner.
+    // Never exposed by public SDK SessionOptions; no fake native observation.
+    std::function<void()> after_native_append;
 };
 
 // 链节点(schema 文档 §2.4)。
@@ -191,6 +196,13 @@ public:
         const std::filesystem::path& jsonl_path, std::string_view prefix,
         const JournalFileAnchor& anchor, V3WriterOptions options = V3WriterOptions{},
         const V3Clock* clock = nullptr);
+
+    // Immutable owned bytes/native anchor, independent of this live writer.
+    static std::expected<V3Writer, std::string> ContinueCaptured(
+        const JournalReadHandle&, V3WriterOptions options = V3WriterOptions{},
+        const V3Clock* clock = nullptr);
+    std::expected<JournalReadHandle, std::string> CaptureJournal(
+        std::optional<std::size_t> max_bytes = {}) const;
 
     // 只关写句柄,不代写 session.ended。封口事实须由领域先落稳。
     // 可重复调用,保第一次 checked 结果;保留身份、路径与上下文查询,
@@ -349,6 +361,9 @@ public:
     // Copy the first native uncertainty under the original Impl mutex. No I/O,
     // writer borrow or retroactive success after Close/recovery verification.
     std::optional<trajectory::JournalAppendReceipt> first_unconfirmed_journal_append() const;
+    // Separate Core completion uncertainty. Its native field may truthfully be
+    // Committed; it never masquerades as an unconfirmed native append.
+    std::optional<trajectory::JournalOwnerUnconfirmed> first_unconfirmed_journal_completion() const;
     const ContextView& context() const;  // 当前内存视图(链/版本/当前 system)
     // 本账上是否已有该 messageId(PrepareRequest 引用先落稳的判据)。
     bool HasMessageId(std::string_view message_id) const;
@@ -359,6 +374,9 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     explicit V3Writer(std::unique_ptr<Impl> impl);
+    static std::expected<V3Writer, std::string> ContinueOwnedMaterial(
+        const std::filesystem::path&, std::string_view, const JournalFileAnchor&,
+        const JournalReadHandle*, V3WriterOptions, const V3Clock*);
 };
 
 // ---------------------------------------------------------------------------
