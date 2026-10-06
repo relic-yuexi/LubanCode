@@ -90,3 +90,4 @@ git diff --check
 - [Managed 会话身份合同](lubancore-managed-identity.md)
 - [LubanCore 模块边界](lubancore-module-boundaries.md)
 - [SDK 授权原语](lubancore-authorization-primitives.md)
+- [Owned Job 排队与截止实际观察](sdk-owned-queue-observation.md)

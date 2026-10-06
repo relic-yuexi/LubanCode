@@ -130,3 +130,7 @@ probe 后源改用独立、标准库私有夹具，复制原源码，在 CI 临�
 `a9d3f16e` 的[后源 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37320718673) 又抓到两处错误，不能算通过。四条 Linux/macOS 安装消费者实际各 35 项中 34 项过；四场隔离已关场，随后的缺会话恢复错报 `sdk.job.plan_invalid`，违背旧 `sdk.session.open_failed`。Windows 独立探针配置与编译均成功，原始图同时列指定 EXE 和同目录 PDB，旧门把总产物数当可执行件数而拒绝。两份首次失败原件分别冻结 69 件与 29 件；没有补造未生成的消费总验收。
 
 新候选只补[缺失分类](sdk-command-job-missing-resume.md)与[真实产物选择](sdk-command-probe-artifacts.md)。缺 workspace 或明确缺 session 沿旧错误码拒开，已有坏材料仍严查；原 private 案追加八次真实 Runtime 准入反例，旧七 CASE、消费者原断言与预算保留。Windows 精确选指定 EXE，可附同目录同名 PDB，POSIX 保单无后缀产物；生产与上传后复核共用同一门，原图字节不动。新的原生结果仍须独立交远端 CI。
+
+`7a5321c8` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37421453525)已核三平台 combined focused 各 62 源／511 CASE。Windows SDK-only 安装消费 35／35 过，focused 62 源中 61 过；Owned deadline 六案五过，438 行排队快照想读 `queued`，实际已为 `cancelled`。原六份终态事实仍齐。首次失败 15 件原件冻结，摘要 `e48f85c030b8904c61850ec654d9f7a5773afc3b5709cf5de1e1988761c45b05`；其它同源结果不能替这一项验收。
+
+后源按[排队观察合同](sdk-owned-queue-observation.md)保住原 2000ms 正预算和全部截止、零调用、父引用、恢复与退场检查。另加零注册预算真票，硬查堵在活进程后排队，再取消退场。正票快照若已取消，还须核 Register 前实际时钟已过最早截止；其它状态照拒。生产、原六 CASE 和预算不变。纯数据门已核，原生仍交新源远端 CI。

@@ -230,3 +230,4 @@ DOC development/workspace-racer-ready-evidence.md
 DOC development/sdk-lua-child-precheck-repair.md
 DOC development/sdk-command-job-missing-resume.md
 DOC development/sdk-command-probe-artifacts.md
+DOC development/sdk-owned-queue-observation.md
