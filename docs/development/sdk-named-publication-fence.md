@@ -25,6 +25,29 @@ counts and a publishing callback that submits through the public Session. The
 callback must not deadlock or grant later execution after the owner becomes
 unknown. Reads of already saved material and owner retirement remain available.
 
+An admitted command Job may continue after its parent operation has durably
+succeeded. If that Job first encounters unknown publication later, the unknown
+belongs to the Job and the live storage owner. It must not rewrite the already
+confirmed parent final, its complete result or its public query value. New Submit
+and queued work still stop, and Close retires the actual command process.
+
+The installed Jobs path proves that ordering with the existing process probe's
+release-file argument. It first waits for the real parent Succeeded/complete
+result while the command cannot finish. Only then does it arm an after-publication
+exception for the next real named write and create the release file. It checks
+the resulting Job unknown, unchanged parent facts, refusal of new input, no extra
+Generate call, and checked process retirement. No sleep establishes this order;
+CASE counts, markers, provider receipt semantics and existing budgets stay fixed.
+
+The same coordinator pump can settle one command and then start an already
+queued command. Its scope gate must observe the retained named capability's
+atomic unknown flag before dispatch, without waiting for Session module Freeze
+after the pump returns. The late fixture therefore holds one running command
+and one admitted queued command under the existing single-running limit. After
+the first command's publication becomes unknown, the second must be rejected
+before process start; its started/done files must remain absent. The successful
+parent remains successful throughout.
+
 This first fix is a live-owner fence. A new process reconstructs a new capability;
 durably carrying an unknown publication across a crash requires a separately
 verified persistent source and recovery contract. This patch must not imply that
