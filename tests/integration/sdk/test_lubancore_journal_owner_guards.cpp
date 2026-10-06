@@ -87,7 +87,7 @@ void CheckPrepareCapture(const fs::path& base) {
     auto continuation = v3::V3Writer::Continue(path); REQUIRE(continuation);
     v3::MessageDraft extra; extra.turn_id = continuation->NewTurnId();
     extra.message = {{"role", "user"}, {"content", "ACTUAL_PREPARE_DRIFT"}};
-    REQUIRE(continuation->AppendMessage(std::move(extra)).status == v3::WriteReceipt::Status::Committed);
+    REQUIRE(continuation->AppendMessage(std::move(extra), tr::Durability::PowerLoss).status == v3::WriteReceipt::Status::Committed);
     REQUIRE(continuation->Close());
     unsigned factories = 0;
     const auto drift = tr::CaptureSessionRecovery(folder, "prepare-workspace", "prepare-source", request,
@@ -156,7 +156,7 @@ public:
             auto writer = v3::V3Writer::Continue(state_->source); REQUIRE(writer);
             v3::MessageDraft extra; extra.turn_id = writer->NewTurnId();
             extra.message = {{"role", "user"}, {"content", "ACTUAL_LOCKED_OPENING_DRIFT"}};
-            REQUIRE(writer->AppendMessage(std::move(extra)).status == v3::WriteReceipt::Status::Committed);
+            REQUIRE(writer->AppendMessage(std::move(extra), tr::Durability::PowerLoss).status == v3::WriteReceipt::Status::Committed);
             REQUIRE(writer->Close()); state_->drift_committed = true;
         }
         return std::unique_ptr<blob::Store>(std::make_unique<UnusedMemory>(state_));
