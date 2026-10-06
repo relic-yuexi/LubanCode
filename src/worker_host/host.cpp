@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <iomanip>
 #include <map>
@@ -31,6 +32,13 @@ std::string BootNonce() {
 }
 struct Rejected { std::string code; std::string sdk_code; };
 [[noreturn]] void Reject(std::string code) { throw Rejected{std::move(code), {}}; }
+constexpr std::uint64_t kProtocolVersion = 1;
+void CheckProtocolVersion(const Json& request) {
+    const auto version = request.find("protocol_version");
+    if (version == request.end()) return; // Existing private parents speak v1.
+    if (!version->is_number_integer()) Reject("worker.invalid_protocol_version");
+    if (*version != kProtocolVersion) Reject("worker.unsupported_protocol_version");
+}
 void Fields(const Json& object, std::initializer_list<std::string_view> allowed) {
     if (!object.is_object()) Reject("worker.invalid_object");
     for (const auto& [key, value] : object.items()) {
@@ -200,7 +208,8 @@ struct Host::Impl {
     Json Execute(const std::string& method, const Json& params, const Json& request) {
         if (method == "worker.status") {
             Fields(params, {});
-            return {{"protocol_version", 1}, {"worker_instance_id", instance_id}, {"sdk_version", sdk::Version()}, {"initialized", !!runtime},
+            return {{"protocol_version", kProtocolVersion}, {"supported_protocol_versions", Json::array({kProtocolVersion})},
+                    {"worker_instance_id", instance_id}, {"sdk_version", sdk::Version()}, {"initialized", !!runtime},
                     {"attached", !attachment.empty()}, {"stopping", stop}, {"session_count", sessions.size()},
                     {"capabilities", {{"transport", "private-parent-stdio"}, {"assistant_text", "complete-paged"},
                      {"tool_results", "persisted-selected-pull"}, {"tool_result_default", "preview"},
@@ -522,8 +531,9 @@ bool Host::stopping() const { return impl_->stop; }
 Json Host::Handle(const Json& request) {
     Json id = nullptr;
     try {
-        Fields(request, {"id", "method", "params", "attachment"});
+        Fields(request, {"id", "method", "params", "attachment", "protocol_version"});
         id = Id(request, "id");
+        CheckProtocolVersion(request);
         const auto method = Text(request, "method", 100);
         const Json params = request.contains("params") ? request.at("params") : Json::object();
         if (!params.is_object()) Reject("worker.invalid_object");

@@ -18,6 +18,7 @@ import traceback
 KEY = "worker-fixture-model-key-never-log"
 LONG_TEXT = "完整回答🙂" * 5000
 TOOL_MARKER = "PRIVATE_TOOL_RESULT_MUST_NOT_ENTER_IPC"
+ABSENT_PROTOCOL_VERSION = object()
 SCENARIOS = (
     "health", "same_cwd_sessions", "operation_idempotency", "approval_routing",
     "cancel_routing", "detach_reattach", "stale_attachment", "eof_cleanup",
@@ -133,7 +134,7 @@ class Model:
 
 
 class Worker:
-    def __init__(self, exe, resource, root, model, policy=None, key=KEY):
+    def __init__(self, exe, resource, root, model, policy=None, key=KEY, before_initialize=None):
         self.root, self.model = root, model
         (root / "project").mkdir(parents=True, exist_ok=True)
         self.attachment = None
@@ -159,6 +160,8 @@ class Worker:
         self.error_reader = threading.Thread(target=lambda: self.stderr.extend(self.process.stderr.readlines()), daemon=True)
         self.error_reader.start()
         try:
+            if before_initialize is not None:
+                before_initialize(self, resource)
             params = dict(data_root=str(root / "data"), resource_root=str(resource))
             if policy is not None:
                 params["result_policy"] = policy
@@ -168,9 +171,11 @@ class Worker:
             self.finish()
             raise
 
-    def raw(self, method, params=None, attachment=None):
+    def raw(self, method, params=None, attachment=None, *, protocol_version=ABSENT_PROTOCOL_VERSION):
         self.serial += 1
         request = {"id": str(self.serial), "method": method, "params": params or {}}
+        if protocol_version is not ABSENT_PROTOCOL_VERSION:
+            request["protocol_version"] = protocol_version
         token = self.attachment if attachment is None else attachment
         if token:
             request["attachment"] = token
@@ -253,11 +258,53 @@ class Worker:
             pipe.close()
 
 
+def check_protocol_before_initialize(worker, resource):
+    legacy = worker.call("worker.status")
+    explicit = worker.raw("worker.status", protocol_version=1)
+    require(explicit["result"] == legacy, "explicit v1 changed legacy health semantics")
+    require(not legacy["initialized"] and legacy["supported_protocol_versions"] == [1],
+        "initial Worker protocol capability is incorrect")
+    params = dict(data_root=str(worker.root / "data"), resource_root=str(resource))
+    for value in (None, True, False, 1.0, "1", [], {}):
+        denied = worker.raw("worker.initialize", params, protocol_version=value)
+        require(denied["error"]["code"] == "worker.invalid_protocol_version", "invalid version type reached initialization")
+    for value in (-1, 0, 2, 18446744073709551615):
+        denied = worker.raw("worker.initialize", params, protocol_version=value)
+        require(denied["error"]["code"] == "worker.unsupported_protocol_version", "unsupported version reached initialization")
+    denied = worker.raw("worker.initialize", dict(params, unsupported_body=True), protocol_version=2)
+    require(denied["error"]["code"] == "worker.unsupported_protocol_version", "body decoder ran before version gate")
+    require(not (worker.root / "data").exists(), "rejected protocol created the data root")
+    require(not worker.call("worker.status")["initialized"], "rejected protocol initialized the SDK")
+
+
+def check_protocol_after_initialize(worker):
+    legacy = worker.call("worker.status")
+    require(worker.raw("worker.status", protocol_version=1)["result"] == legacy,
+        "explicit v1 changed initialized health semantics")
+    require(legacy["supported_protocol_versions"] == [1], "Worker advertised an unimplemented protocol")
+    with worker.model.lock:
+        before_calls = len(worker.model.calls)
+    denied = worker.raw("session.open", worker.open_params(client="future-version"), protocol_version=2)
+    require(denied["error"]["code"] == "worker.unsupported_protocol_version", "future protocol opened a Session")
+    denied = worker.raw("operation.submit", {"unsupported_body": True}, protocol_version=2)
+    require(denied["error"]["code"] == "worker.unsupported_protocol_version", "operation body bypassed protocol gate")
+    denied = worker.raw("client.attach", {"client_id": "future-client"}, protocol_version=2)
+    require(denied["error"]["code"] == "worker.unsupported_protocol_version", "future protocol changed attachment")
+    require("result" in worker.raw("session.list"), "rejected attach invalidated the current attachment")
+    denied = worker.raw("worker.shutdown", protocol_version=2)
+    require(denied["error"]["code"] == "worker.unsupported_protocol_version", "future protocol stopped the Worker")
+    require(worker.process.poll() is None and worker.call("worker.status") == legacy,
+        "rejected protocol changed live Worker state")
+    with worker.model.lock:
+        require(len(worker.model.calls) == before_calls, "rejected protocol sent a model request")
+
+
 def scenarios(exe, resource, scratch, model):
     def run(name, function):
         root = scratch / name
         root.mkdir()
-        worker = Worker(exe, resource, root, model)
+        worker = Worker(exe, resource, root, model,
+            before_initialize=check_protocol_before_initialize if name == "health" else None)
         try:
             function(worker)
         finally:
@@ -265,6 +312,7 @@ def scenarios(exe, resource, scratch, model):
         require(KEY not in "".join(worker.frames + worker.stderr), "resolved model credential entered IPC or logs")
 
     def health(w):
+        check_protocol_after_initialize(w)
         info = w.call("worker.status")
         require(info["protocol_version"] == 1 and info["initialized"], "worker not healthy")
         require(info["capabilities"]["tool_results"] == "persisted-selected-pull" and
