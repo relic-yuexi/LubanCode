@@ -37,7 +37,7 @@ std::string Bytes(const fs::path& path) {
 TEST_CASE("SDK Journal owner guards: actual installed-host path preserves canonical run chain and old prefix") {
     Directory directory; const auto path = fs::u8path(lubancore_consumer::JournalOwnerCase("close-read", directory.root));
     REQUIRE(fs::is_regular_file(path)); CHECK_FALSE(tr::SessionLock::Inspect(path.parent_path()).has_value());
-    const auto ledger = v3::ReadV3Ledger(path); REQUIRE_MESSAGE(ledger.has_value(), ledger ? "" : ledger.error());
+    const auto ledger = v3::ReadV3Ledger(path); REQUIRE_MESSAGE(ledger.has_value(), (ledger ? "" : ledger.error()));
     const auto state = path.parent_path().parent_path().parent_path().parent_path().parent_path();
     const auto receipt_file = state.parent_path() / "journal-owner-host-receipt.txt";
     std::ifstream input(receipt_file, std::ios::binary); REQUIRE(input.is_open());
