@@ -1,6 +1,6 @@
 # SDK 阶段进度与验收边界
 
-核查日期：2026-10-05。已合基线为功能分支 `6e2702b2`；[#332](https://github.com/relic-yuexi/LubanCode/pull/332) 的已验源 `0066ac3e` 与合入头同树。
+核查日期：2026-10-06。已合基线为功能分支 `fd76b6a5`；[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 的已验源 `c522a51c` 与合入头同树。
 
 目标：新宿主只调用公开 SDK，便能运行完整会话，不必复制内部运行栈。CLI 逐项迁入，原功能保住。现已能嵌入；CLI 主入口和 one-shot 仍用内部装配，尚未全部对齐。
 
@@ -8,10 +8,10 @@
 
 | 阶段 | 已合范围 | 接下来补什么 |
 | --- | --- | --- |
-| 收口当前批 | Worker #245、Runner #246、SDK #325、Job 日志 #332 已合功能分支；旧子 PR 已收口 | 下一笔 Web／可选 Lua 等组合在已有 CI 分支验收，未添实施 PR |
-| SDK 完整化 | 五件内置工具；显式 Skills；项目 Memory Recall/Save 和片段 CAS；前台深度一子 Agent；主 Action；strict standalone Lua；Package 清单分析 | 其余 CLI 工具、自动 Memory、Skills 管理、Package 挂载、后台与嵌套子任务、公开 Job、CLI 主入口迁移 |
+| 收口当前批 | Worker #245、Runner #246、SDK #325、Job 日志 #332、Web／可选 Lua 等组合 #333 已合功能分支；旧子 PR 已收口 | Jobs／不可变结果组合在已有 CI 分支验收；当前只留总 Draft #234 |
+| SDK 完整化 | 五件原内置工具、有界 web_fetch 和 Todo；显式 Skills；项目 Memory Recall/Save 和片段 CAS；前台深度一子 Agent；主 Action；strict standalone Lua；Package 清单分析与根 inventory；公开 RAG 参考例 | 其余 CLI 工具、自动 Memory、Skills 管理、Package 挂载、后台与嵌套子任务、公开 Job、CLI 主入口迁移 |
 | 四口 SPI | Session 真接 EventSink；召回片段真接 Memory Blob provider；公开 PolicyProvider 原语 | 完整 JournalStore/BlobStore，替换结果与恢复读写，接真实 Session 授权；本阶段不引数据库 |
-| 依赖瘦身 | updater、Release 查询、渠道、Gateway 留宿主；Package 只带中立 parser | 可关闭 Lua 的编译画像已在私有候选通过，仍待合入；继续检查依赖闭包 |
+| 依赖瘦身 | updater、Release 查询、渠道、Gateway 留宿主；Package 只带中立 parser；Lua 可从 SDK 依赖闭包关闭，ON/OFF 三平台均已验收并合入 | 继续检查依赖闭包与端侧最小装配 |
 | 身份与治理 | 身份值、授权 action、可撤销 PolicyProvider 和订阅合同 | 新托管会话 ownership、执行前重查、恢复归属、查询与审批隔离；旧账迁入另批 |
 | 公开服务 | AppServer 内部网页、WebSocket；本地可信 Worker IPC | 正式 Worker 协议、HTTP/SSE、持久 outbox/ACK 和游标；gRPC 按需 |
 | 分布式与存储 | 本地 Worker；独立实验 Runner；两端部署合同 | 网络登记、心跳、鉴权、存储与队列适配；池化和 Sandbox 池各守前置门 |
@@ -41,14 +41,16 @@
 
 入口观测只收窄待查区间，尚不能断唯一起因。全量较后通过不能盖掉这次失败。新源修复已单独验收，失败原件继续封存。
 
-## 下一笔候选
+## 已收口：#333
 
-当前组合已保留 #332 的 `0066ac3e` 窄修复，接入
+这批保留 #332 的 `0066ac3e` 窄修复，接入
 [有界 web_fetch](sdk-web-fetch.md)。宿主显式选择工具并冻结每场上限；默认不开放。
 公开配置与能力快照只含 SDK／标准库值，内部单次请求 Transport 留替换口。
 模型只能收窄预算，Close 等请求真退出；不支持 gzip 时明确拒绝编码，不添解压依赖。
 原 CLI 19 案保住，另补两案；SDK 六案和安装消费核实际 HTTP、预算、取消与四场隔离，
-HTTP 夹具另核线程退净。源码和纯数据已查，这份新组合仍待自己的远程 CI。
+HTTP 夹具另核线程退净。公开 Todo、Package 根 inventory、可关闭 Lua 与安装后的 RAG 参考例同批收口。
+
+源 `c522a51c` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37309659950) 15 项全过，[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 已正常合成 `fd76b6a5`，合入树精确相同。六套 Lua ON 各 59 来源／486 CASE／34 场安装消费；三套 OFF 各 57 来源／471 CASE／31 场消费。全量 Linux 766、Windows 768、macOS 769；ASan 实跑 158 来源、65 重点门、1802 CASE／69955 断言；TSan 十四场 workflow。九套 Web、RAG 与原始图均核过实际执行，三份跨镜像包各跑五笔命令。1061 件原件逐大小、来源与 SHA256 复核，摘要 `c0ac5d8b6cde2c1c8441e13629aed29f2bf77733ac253c2ede6d52227d851b53`。LSan 关闭；Linux/macOS 全量以真实 job 完成日志为据，没有逐来源完整 JUnit。这批绿灯不借给新 Jobs／不可变结果／SPI。
 
 首组合 `92f93572` 的[远程 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37284807084)在重复 Location 安装消费报普通网络错，macOS 33／34 通过；HTTP 第 21 笔后停止，服务正常退净。原日志未记底层 CPR 错误码。查 curl 源码，部分版本会在第二枚头进入回调前拒绝协议；这条差异能解释现象，不能据此断定唯一成因。
 
