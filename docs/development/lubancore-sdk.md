@@ -26,8 +26,9 @@ updater、Release 查询、渠道与 Gateway 已归宿主，组合构建也核 S
 候选；已合范围和逐源证据仍以阶段进度为准。
 
 后端、基础工具与 MCP 已共用 `runtime/assembly`。SDK 与 AppServer 共用执行对象，
-各自保留受理与排队；CLI、one-shot 仍用原会话栈。完整工具、插件、Hook 和记忆等
-能力尚未统一迁入公开 SDK。
+各自保留受理与排队。当前私有候选把 CLI 与 one-shot 的 Agent 装配也交给共用
+ExecutionOwner，宿主工具、后端和原会话栈仍保留；[阶段进度](sdk-stage-status.md)
+列源码与远端验收范围。完整工具、插件、Hook 和记忆等能力尚未统一迁入公开 SDK。
 新增宿主可用下文 API，现有 CLI 迁移须保留原功能，不能靠删去功能来完成拆分。
 验收清单见 [SDK 拆分计划](../../todos/LubanCore与CLI分离_核心库独立成宿主底座设计.todo)。
 

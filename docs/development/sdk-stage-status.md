@@ -9,9 +9,16 @@
 当前只留总 Draft [#234](https://github.com/relic-yuexi/LubanCode/pull/234)。
 功能分支停在已验 `fd76b6a5`。候选沿原 CI 分支收齐，不添实施 PR。
 
-修复源 `a23f98e6` 已推到原 `ci/sdk-lua-profile`，
-[本源 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37452164239) 正在运行。
-实际三平台、全量与消毒器原件须收齐再验，不能把局部通过写成整轮通过。
+修复源 `a23f98e6` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37452164239)
+已自然结束，整轮失败。原生全量 Linux 787、Windows 789、macOS 790 项均过；
+九套 SDK、ASan 与 TSan 也过。Windows 三道后置纯数据检查读取 UTF-8 YAML 时
+误用 cp1252，统一在字节 27 报解码错误。三份 extractor 已生成通过原件，不能
+据此抹掉后续失败。首失败 19 件／5617043 字节已逐件复核、封存；摘要
+`c0db4433643b849fe8ee4d7a335b09574b06650c081df20fbb4099d4250130ab`。
+
+下一候选合入[显式 UTF-8 读取](ci-evidence-utf8.md)：只改三份纯测试的九处文本
+读取，原字节、失败门、CASE 与预算保留。原十五项纯测试及 cp1252 默认读取
+重放均过；C++ 新组合仍待本源远端 CI。未合功能分支，未添 PR。
 
 上一源 `e79eea52` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37439210845)
 已自然结束，整轮失败。1048 件原件逐大小与 SHA256 复核后封账；共
@@ -48,10 +55,10 @@
 POSIX 造文件和目录 symlink，不能据此声称 Windows 文件 symlink 也已验。
 原 Named 10／8、workflow 五案、所有原预算和案例保住。
 
-组合名册预计 Lua ON／OFF 各 69／67 册 focused、552／537 CASE；安装消费
-仍为 37／34 项。ASan 预计 76 册重点来源、169 册实跑与 26 份编译支持件。
-这些数从源码推得，不能代替实际登记、JUnit、LastTest 或远端通过。
-修复组合尚未合入功能分支，须重跑三平台和消毒器。
+`a23f98e6` 实际六套 Lua ON 各 69 册 focused／552 CASE／37 项安装消费；
+三套 OFF 各 67 册／537 CASE／34 项消费。ASan 实跑 169 册，76 册重点来源
+与 26 份编译支持件已核；1869 CASE／75185 断言通过。TSan 十四册通过。
+这些事实只属该失败源，下一份 C++ 组合仍须重跑三平台与消毒器。
 
 下一片已在同一私有候选合并，源码交叉审查通过，尚待本源远端验收：
 [十处场内 live 读取](sdk-journal-live-read-capture.md)取真正 Writer 捕获；
@@ -72,6 +79,21 @@ AskOnce 借用原 Spinner 与 ToolRuntime，Agent 改由共用 ExecutionOwner �
 原请求、权限、工具、RunTurn、受理与关账照留；源码独审通过，原生尚待远端验收。
 完整 JournalStore、托管授权和 CLI 主入口迁移仍未完成。完整 AskOnce 端到端
 证据须另补，当前 owner 案不能代替整条命令验收。
+
+[交互 CLI owner](cli-interactive-execution-owner.md)也已收入私有组合。独审拦下
+首版重建后命令表仍借旧 Agent 指针的漏口；[稳定槽修复](cli-stable-execution-owner.md)
+已过独审。owner 只创建一次，后续在原槽重建；旧命令借用成功重建后仍同址。
+复制或恢复失败则留空，宿主仍须守原串行与空槽纪律。原七 CASE 全部保留，
+新增实际旧指针、引用和闭包调用验收；这份新源码尚待远端执行。
+
+[逐次模型发送门](sdk-model-send-gate.md)位于真实 AgentLoop，每次首发、恢复重试
+和后续模型步都在提交 sent 预算前检查。拒绝、异常和取消保原账，机密失败串不外泄。
+它尚未绑定 Policy 或原发起者；摘要、Compact、采样与后端内部网络重试仍不受此门管。
+
+[Managed 新场底层准入](sdk-managed-session-admission.md)把真正锁和原持久回执
+整束交给 Manager，首条 V3 写完整创建身份。失败和 Close 后均禁 Local 回落；
+候选先收 Writer 和附属写帽，再放锁，非空残账继续保留。现有 Local 场拒隐式转换。
+这笔只完成内部存储链；公开 Managed SDK、执行授权、同 ID 恢复与旧账迁入仍未交付。
 
 ## 八阶段现状
 
