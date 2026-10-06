@@ -21,8 +21,10 @@
 #include "platform/atomic_write.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
+#include "platform/sha256.hpp"
 #include "api/backend.hpp"
 #include "runtime/session_service.hpp"
+#include "trajectory/canonical_json.hpp"
 #include "trajectory/managed_session_reservation.hpp"
 #include "trajectory/session_manager.hpp"
 #include "trajectory/v3/reader.hpp"
@@ -577,6 +579,325 @@ void CheckManagedRuntimeOpeningStack() {
         auto free = traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()); REQUIRE(free);
     }
 }
+// All fixtures below exercise the real move-only admission, native writers and
+// strict owned consumer. They extend an existing CASE, without another runtime.
+struct OperationFixture {
+    Fixture fixture;
+    std::unique_ptr<lubancode::runtime::SessionService> service;
+    fs::path directory, stream;
+    OperationFixture() {
+        auto reserved = fixture.Reserve();
+        const auto published = reserved->PublishOwnership();
+        REQUIRE(published.knowledge == Knowledge::Committed);
+        REQUIRE(published.native); REQUIRE(published.native->has_value());
+        REQUIRE(published.native->value().outcome == platform::WriteOutcome::CommittedDurable);
+        auto finished = reserved->Finish(); REQUIRE(finished);
+        directory = finished->directory().session_dir(); stream = finished->directory().v3_stream_path();
+        service = std::make_unique<lubancode::runtime::SessionService>(
+            ManagedStackRequest(fixture), std::move(*finished), Creator());
+        REQUIRE_MESSAGE(service->launch_error().empty(), service->launch_error());
+        REQUIRE(service->runtime()); REQUIRE_FALSE(service->execution());
+        REQUIRE_FALSE(traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()));
+    }
+    ~OperationFixture() {
+        platform::SetFileFlushFailureForTest(false); platform::SetDirectoryFlushFailureForTest(false);
+        try { if (service) (void)service->Close("exit"); } catch (...) {}
+    }
+    lubancode::runtime::ManagedOperationAdmission Admission() const {
+        // The actual input initiator differs from the session's creator.
+        return {fixture.Owner(), {"tenant-a", "operator-b", "agent", "credential-b"}, 41, {"RequestModel"}};
+    }
+    void Unlocked() const {
+        auto lock = traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner());
+        REQUIRE_MESSAGE(lock.has_value(), (lock ? "" : lock.error()));
+    }
+};
+
+std::string OperationJson(const nlohmann::json& value) {
+    auto bytes = traj::CanonicalJsonDump(value); REQUIRE(bytes);
+    return *bytes;
+}
+std::vector<nlohmann::json> OperationRows(const std::string& bytes) {
+    std::vector<nlohmann::json> rows;
+    std::size_t start = 0;
+    while (start != bytes.size()) {
+        const auto end = bytes.find('\n', start); REQUIRE(end != std::string::npos);
+        auto row = nlohmann::json::parse(bytes.substr(start, end - start), nullptr, false);
+        REQUIRE(row.is_object()); rows.push_back(std::move(row)); start = end + 1;
+    }
+    return rows;
+}
+std::string OperationLines(const std::vector<nlohmann::json>& rows) {
+    std::string bytes;
+    for (const auto& row : rows) bytes += OperationJson(row) + "\n";
+    return bytes;
+}
+void CheckManagedOperationMaterials(const lubancode::runtime::ManagedOperationMaterials& actual) {
+    namespace rt = lubancode::runtime;
+    const auto source_rows = OperationRows(actual.operations);
+    REQUIRE(source_rows.size() == 4);
+    REQUIRE(rt::ReadManagedOperationsOwned(actual));
+    auto bad = actual; bad.inputs.erase("op-1"); REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    bad = actual; bad.inputs.emplace("foreign", actual.inputs.at("op-1")); REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    bad = actual; std::swap(bad.inputs.at("op-1"), bad.inputs.at("op-2")); REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    bad = actual; bad.inputs.at("op-1")[0] = '['; REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    bad = actual; ++bad.owner.binding_version; REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    bad = actual; bad.owner.tenant_id = "foreign-tenant"; REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    bad = actual; bad.run_id = "foreign-run"; REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    for (unsigned variant = 0; variant != 11; ++variant) {
+        auto rows = source_rows;
+        switch (variant) {
+        case 0: rows[0].erase("provenance"); break;
+        case 1: rows[0]["schemaVersion"] = 2; break; // Local cannot silently become Managed.
+        case 2: rows[0]["provenance"]["initiatingSubject"].erase("credentialId"); break;
+        case 3: rows[0]["provenance"]["admissionPolicyRevision"] = 0; break;
+        case 4: rows[0]["provenance"]["allowedCapabilities"] = nlohmann::json::array({"RequestModel", "RunTool"}); break;
+        case 5: rows[0]["provenance"]["intentKind"] = "managed.text_submit.v2"; break;
+        case 6: rows[2]["decisionPolicyRevision"] = 0; break; // Not a confirmed denial.
+        case 7: rows[2]["provenanceHash"] = source_rows[1]["provenanceHash"]; break;
+        case 8: rows[2]["kind"] = "operation.dispatched"; break;
+        case 9: rows[2]["kind"] = "operation.final"; break;
+        case 10: rows[2]["rejectedAtMs"] = -1; break;
+        }
+        bad = actual; bad.operations = OperationLines(rows); REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    }
+    bad = actual; bad.operations += OperationJson(source_rows[0]) + "\n"; REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    bad = actual; bad.operations += OperationJson(source_rows[2]) + "\n"; REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    bad = actual; bad.operations.pop_back(); REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    bad = actual; bad.operations.insert(1, " "); REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    // Even a new input SHA/length cannot adopt a different original text or ID.
+    for (unsigned variant = 0; variant != 3; ++variant) {
+        bad = actual;
+        auto input = nlohmann::json::parse(bad.inputs.at("op-1"));
+        if (variant == 0) input["text"] = "rehashed foreign text";
+        if (variant == 1) input["inputId"] = "foreign-input";
+        if (variant == 2) input["provenance"]["initiatingSubject"]["userId"] = Creator().user_id;
+        bad.inputs.at("op-1") = OperationJson(input);
+        auto rows = source_rows;
+        rows[0]["inputSha256"] = platform::Sha256Hex(bad.inputs.at("op-1"));
+        rows[0]["inputBytes"] = bad.inputs.at("op-1").size();
+        bad.operations = OperationLines(rows); REQUIRE_FALSE(rt::ReadManagedOperationsOwned(bad));
+    }
+    REQUIRE_FALSE(rt::SessionService::ReadOperationFactsOwned(actual.operations));
+}
+
+struct OperationNativeProbe final : traj::JournalNativeIoProbe {
+    traj::JournalNativeStage stage = traj::JournalNativeStage::FileSync;
+    unsigned observations = 0;
+    bool After(const traj::JournalNativeIoResult& actual) noexcept override {
+        if (actual.stage != stage || !actual.attempted || !actual.succeeded) return false;
+        ++observations;
+        return true; // Uncertainty after an actual native success, not a fake IO.
+    }
+};
+
+void CheckManagedOperationProvenance() {
+    namespace rt = lubancode::runtime;
+    using Receipt = rt::SessionService::ManagedWriteReceipt;
+    using State = rt::ManagedStoredOperation::State;
+    {
+        Fixture fixture;
+        rt::SessionService local(ManagedStackRequest(fixture));
+        REQUIRE(local.runtime()); REQUIRE(local.admission_mode() == rt::SessionAdmissionMode::LocalTrusted);
+        const auto input = local.SubmitManagedInput({"must-not-promote-local", "text", {}},
+            {fixture.Owner(), {"tenant-a", "operator-b", "agent", "credential-b"}, 41, {"RequestModel"}});
+        REQUIRE(input->input.error_code == "managed.operation.not_admitted");
+        REQUIRE_FALSE(input->artifact); REQUIRE_FALSE(input->append); REQUIRE_FALSE(input->operation);
+        const auto capture = local.CaptureManagedOperationMaterials(); REQUIRE_FALSE(capture);
+        REQUIRE(capture.error() == "managed.operation.not_admitted");
+        REQUIRE(local.pending_input_count() == 0); REQUIRE(local.Close("exit").error_code.empty());
+    }
+    {
+        OperationFixture fixture; auto& service = *fixture.service;
+        auto empty = service.CaptureManagedOperationMaterials(); REQUIRE(empty);
+        REQUIRE(empty->completion_known); REQUIRE(empty->operations.empty()); REQUIRE(empty->inputs.empty());
+        const auto empty_operations = rt::ReadManagedOperationsOwned(*empty);
+        REQUIRE(empty_operations); REQUIRE(empty_operations->empty());
+        REQUIRE_FALSE(fs::exists(fixture.directory / "operations.jsonl"));
+        const auto original_main = Read(fixture.stream);
+        const auto ownership_path = fixture.directory / traj::kManagedSessionOwnershipFile;
+        const auto original_owner = Read(ownership_path);
+        Write(ownership_path, "malformed-owner");
+        const auto changed = service.SubmitManagedInput({"key-a", "first text", {}}, fixture.Admission());
+        REQUIRE(changed->input.error_code == "managed.operation.owner_changed"); REQUIRE_FALSE(changed->artifact);
+        Write(ownership_path, original_owner);
+        const auto first = service.SubmitManagedInput({"key-a", "first text", {}}, fixture.Admission());
+        REQUIRE(first->knowledge == Receipt::Knowledge::Committed); REQUIRE(first->input.accepted);
+        REQUIRE(first->operation); REQUIRE(first->artifact); REQUIRE(first->append);
+        REQUIRE(first->artifact->outcome == platform::WriteOutcome::CommittedDurable);
+        REQUIRE(first->artifact->body.succeeded); REQUIRE(first->artifact->file_sync.succeeded);
+        REQUIRE(first->artifact->publish.succeeded); REQUIRE(first->artifact->parent_sync.succeeded);
+        REQUIRE_FALSE(first->artifact->ancestor_chain_confirmed);
+        REQUIRE(first->append->status == traj::JournalAppendStatus::Committed);
+        REQUIRE(first->append->confirmed_durability == traj::Durability::PowerLoss);
+        REQUIRE(first->append->body.succeeded); REQUIRE(first->append->newline.succeeded);
+        REQUIRE(first->append->flush.succeeded); REQUIRE(first->append->file_sync.succeeded); REQUIRE_FALSE(first->append->failure);
+        REQUIRE(first->operation->provenance.admission.subject == fixture.Admission().subject);
+        REQUIRE(first->operation->provenance.admission.subject.user_id != Creator().user_id);
+        REQUIRE(first->input.operation_id == "op-1"); REQUIRE(first->input.input_id == "in-1");
+        REQUIRE(first->operation->provenance.execution_id == "op-1");
+        const auto accepted_bytes = Read(fixture.directory / "operations.jsonl");
+        const auto original_input = Read(fixture.directory / "operations-inputs" / "op-1.json");
+        REQUIRE(platform::Sha256Hex(original_input) == first->operation->input_sha256);
+        auto current = fixture.Admission(); current.policy_revision = 99;
+        const auto duplicate = service.SubmitManagedInput({"key-a", "first text", {}}, current);
+        REQUIRE(duplicate->input.duplicate); REQUIRE_FALSE(duplicate->input.accepted);
+        REQUIRE(duplicate->operation == first->operation); REQUIRE(duplicate->operation->provenance.admission.policy_revision == 41);
+        REQUIRE_FALSE(duplicate->artifact); REQUIRE_FALSE(duplicate->append);
+        for (unsigned variant = 0; variant != 8; ++variant) {
+            auto foreign = fixture.Admission(); std::string text = "first text";
+            if (variant == 0) foreign.subject.user_id = "foreign-user";
+            if (variant == 1) foreign.subject.credential_id = "foreign-credential";
+            if (variant == 2) foreign.owner.project_id = "foreign-project";
+            if (variant == 3) ++foreign.owner.binding_version;
+            if (variant == 4) foreign.allowed_capabilities.push_back("RunTool");
+            if (variant == 5) text = "different text";
+            if (variant == 6) foreign.policy_revision = 0;
+            if (variant == 7) foreign.subject.actor_kind = "foreign-actor-kind";
+            const auto denied = service.SubmitManagedInput({"key-a", text, {}}, foreign);
+            REQUIRE_FALSE(denied->input.accepted); REQUIRE_FALSE(denied->input.duplicate);
+            REQUIRE(denied->input.operation_id.empty()); REQUIRE(denied->input.input_id.empty());
+            REQUIRE(denied->input.payload_hash.empty()); REQUIRE_FALSE(denied->operation);
+            REQUIRE_FALSE(denied->artifact); REQUIRE_FALSE(denied->append);
+        }
+        REQUIRE_FALSE(service.SubmitManagedInput({"", "no key", {}}, fixture.Admission())->input.accepted);
+        rt::SessionService::InputRequest image_input{"with-image", "text", {}};
+        image_input.images.emplace_back();
+        REQUIRE_FALSE(service.SubmitManagedInput(image_input, fixture.Admission())->input.accepted);
+        REQUIRE(Read(fixture.directory / "operations.jsonl") == accepted_bytes);
+        REQUIRE(service.pending_input_count() == 1); REQUIRE(service.ManagedPendingFront() == first->operation);
+        const auto second = service.SubmitManagedInput({"key-b", "second text", {}}, fixture.Admission());
+        REQUIRE(second->input.accepted); REQUIRE(second->input.operation_id == "op-2");
+        auto wrong_front = first->operation->provenance; wrong_front.input_id = "foreign-input";
+        REQUIRE_FALSE(service.RejectManagedPendingInput(wrong_front, "rejected", "policy.denied", 42)->append);
+        REQUIRE_FALSE(service.RejectManagedPendingInput(first->operation->provenance, "rejected", "policy.denied", 0)->append);
+        REQUIRE(service.pending_input_count() == 2);
+        const auto rejected = service.RejectManagedPendingInput(first->operation->provenance, "rejected", "policy.denied", 42);
+        REQUIRE(rejected->knowledge == Receipt::Knowledge::Committed); REQUIRE(rejected->append);
+        REQUIRE(rejected->operation->state == State::RejectedBeforeDispatch);
+        REQUIRE(service.pending_input_count() == 1); REQUIRE(service.ManagedPendingFront() == second->operation);
+        REQUIRE(service.PopPendingInput().status == rt::SessionService::PendingPop::Status::NotAdmitted);
+        REQUIRE_FALSE(service.RecordTurnFinal({"op-2", "fake-turn", "success", {}, false}));
+        REQUIRE_FALSE(service.execution()); REQUIRE(Read(fixture.stream) == original_main);
+        const auto closed = service.Close("exit"); REQUIRE_MESSAGE(closed.error_code.empty(), closed.error_code);
+        REQUIRE(service.pending_input_count() == 0); REQUIRE(service.ManagedOperationCloseReceipt());
+        const auto operation_close = service.ManagedOperationCloseReceipt(); REQUIRE(operation_close);
+        REQUIRE(operation_close->status == traj::JournalCloseReceipt::Status::Closed);
+        const auto main_close = service.ManagedMainCloseOutcome(); REQUIRE(main_close);
+        REQUIRE(main_close->error_code.empty()); fixture.Unlocked();
+        const auto captured = service.CaptureManagedOperationMaterials(); REQUIRE(captured); REQUIRE(captured->completion_known);
+        REQUIRE(captured->operations == Read(fixture.directory / "operations.jsonl"));
+        REQUIRE(captured->inputs.at("op-1") == original_input);
+        const auto stored = rt::ReadManagedOperationsOwned(*captured); REQUIRE(stored); REQUIRE(stored->size() == 2);
+        REQUIRE((*stored)[0].terminal_status == "rejected"); REQUIRE((*stored)[0].terminal_policy_revision == 42);
+        REQUIRE((*stored)[1].terminal_status == "cancelled"); REQUIRE((*stored)[1].terminal_policy_revision == 0);
+        REQUIRE((*stored)[1].reason_code == "session.closed");
+        CheckManagedOperationMaterials(*captured);
+        const auto main = v3::ReadV3Ledger(fixture.stream); REQUIRE(main); REQUIRE(main->messages.size() == 1);
+        for (const auto& event : main->events) {
+            const std::string kind = v3::EventKindV3Name(event.kind);
+            REQUIRE_FALSE(kind.starts_with("turn.")); REQUIRE_FALSE(kind.starts_with("model."));
+            REQUIRE_FALSE(kind.starts_with("action.")); REQUIRE(kind != "sdk.operation.turn.bound");
+        }
+        REQUIRE_FALSE(fs::exists(fixture.directory / "sdk-results"));
+        const auto final_bytes = captured->operations;
+        REQUIRE(service.Close("exit").error_code == closed.error_code);
+        REQUIRE(service.SubmitManagedInput({"late-key", "late text", {}}, current)->input.error_code == "session.stopping");
+        fixture.service.reset(); REQUIRE(rt::ReadManagedOperationsOwned(*captured));
+        REQUIRE(Read(fixture.directory / "operations.jsonl") == final_bytes);
+    }
+    for (const bool after_publish : {false, true}) {
+        OperationFixture fixture; auto& service = *fixture.service;
+        if (after_publish) platform::SetDirectoryFlushFailureForTest(true);
+        else platform::SetFileFlushFailureForTest(true);
+        const auto failed = service.SubmitManagedInput({"native-key", "real artifact write", {}}, fixture.Admission());
+        platform::SetFileFlushFailureForTest(false); platform::SetDirectoryFlushFailureForTest(false);
+        REQUIRE_FALSE(failed->input.accepted); REQUIRE(failed->artifact); REQUIRE_FALSE(failed->append);
+        REQUIRE(failed->artifact->outcome == (after_publish ? platform::WriteOutcome::CommittedDurabilityUnconfirmed : platform::WriteOutcome::NotCommitted));
+        REQUIRE(service.FirstManagedWriteFailure() == failed); REQUIRE(service.pending_input_count() == 0);
+        REQUIRE(fs::exists(fixture.directory / "operations-inputs" / "op-1.json") == after_publish);
+        const auto late = service.SubmitManagedInput({"native-key", "real artifact write", {}}, fixture.Admission());
+        REQUIRE(late->input.error_code == "managed.operation.storage_unconfirmed"); REQUIRE_FALSE(late->artifact);
+        REQUIRE_FALSE(service.Close("exit").error_code.empty()); fixture.Unlocked();
+        const auto operation_close = service.ManagedOperationCloseReceipt(); REQUIRE(operation_close);
+        REQUIRE(operation_close->status == traj::JournalCloseReceipt::Status::NoOpenHandle);
+        const auto main_close = service.ManagedMainCloseOutcome(); REQUIRE(main_close);
+        REQUIRE(main_close->error_code.empty()); REQUIRE(service.FirstManagedWriteFailure() == failed);
+        const auto captured = service.CaptureManagedOperationMaterials();
+        if (after_publish) REQUIRE_FALSE(captured); // The orphan does not become a fabricated acceptance.
+        else { REQUIRE(captured); REQUIRE_FALSE(captured->completion_known); REQUIRE(captured->operations.empty()); }
+    }
+    {
+        OperationFixture fixture; auto& service = *fixture.service;
+        auto probe = std::make_shared<OperationNativeProbe>(); service.SetManagedOperationProbesForTest(probe);
+        const auto failed = service.SubmitManagedInput({"append-key", "real committed bytes", {}}, fixture.Admission());
+        REQUIRE(failed->knowledge == Receipt::Knowledge::Unconfirmed); REQUIRE(failed->append); REQUIRE(failed->artifact);
+        REQUIRE(failed->artifact->outcome == platform::WriteOutcome::CommittedDurable);
+        REQUIRE(failed->append->status == traj::JournalAppendStatus::Unconfirmed); REQUIRE(failed->append->failure);
+        REQUIRE(failed->append->failure->stage == traj::JournalNativeStage::FileSync);
+        REQUIRE(failed->append->file_sync.succeeded); REQUIRE(failed->append->file_sync.injected_unconfirmed);
+        REQUIRE(probe->observations == 1); REQUIRE(service.FirstManagedWriteFailure() == failed);
+        const auto captured = service.CaptureManagedOperationMaterials(); REQUIRE(captured); REQUIRE_FALSE(captured->completion_known);
+        const auto stored = rt::ReadManagedOperationsOwned(*captured); REQUIRE(stored);
+        REQUIRE(stored->size() == 1); // Reading never upgrades the native witness.
+        REQUIRE_FALSE(service.Close("exit").error_code.empty()); fixture.Unlocked();
+        const auto operation_close = service.ManagedOperationCloseReceipt(); REQUIRE(operation_close);
+        REQUIRE_FALSE(operation_close->ok()); REQUIRE(service.FirstManagedWriteFailure() == failed);
+        REQUIRE(failed->append->status == traj::JournalAppendStatus::Unconfirmed);
+    }
+    for (const bool rejection_gap : {false, true}) {
+        OperationFixture fixture; auto& service = *fixture.service;
+        auto publications = std::make_shared<unsigned>(0);
+        service.SetManagedOperationProbesForTest({}, [publications, rejection_gap] {
+            ++*publications;
+            if (*publications == (rejection_gap ? 2u : 1u)) throw std::runtime_error("private semantic failure must not escape");
+        });
+        const auto accepted = service.SubmitManagedInput({"semantic-key", "real successful native append", {}}, fixture.Admission());
+        REQUIRE(accepted->operation);
+        if (rejection_gap) REQUIRE(accepted->input.accepted);
+        const auto failed = rejection_gap ? service.RejectManagedPendingInput(
+            accepted->operation->provenance, "rejected", "policy.denied", 42) : accepted;
+        REQUIRE(failed->knowledge == Receipt::Knowledge::NativeCommittedPublicationGap); REQUIRE(failed->append);
+        REQUIRE(failed->append->status == traj::JournalAppendStatus::Committed); REQUIRE_FALSE(failed->append->failure);
+        REQUIRE(failed->append->confirmed_durability == traj::Durability::PowerLoss);
+        REQUIRE(service.FirstManagedWriteFailure() == failed); REQUIRE_FALSE(service.ManagedPendingFront());
+        REQUIRE(service.pending_input_count() == (rejection_gap ? 1u : 0u));
+        REQUIRE(failed->input.error_code == "managed.operation.publication_unconfirmed");
+        const auto captured = service.CaptureManagedOperationMaterials(); REQUIRE(captured); REQUIRE_FALSE(captured->completion_known);
+        const auto read = rt::ReadManagedOperationsOwned(*captured); REQUIRE(read); REQUIRE(read->size() == 1);
+        REQUIRE(read->front().state == (rejection_gap ? State::RejectedBeforeDispatch : State::Accepted));
+        REQUIRE(service.SubmitManagedInput({"semantic-key", "real successful native append", {}}, fixture.Admission())->input.error_code == "managed.operation.storage_unconfirmed");
+        const auto first_bytes = Read(fixture.directory / "operations.jsonl");
+        const auto close = service.Close("exit"); REQUIRE_FALSE(close.error_code.empty()); REQUIRE(close.close_quality == "incomplete");
+        REQUIRE(Read(fixture.directory / "operations.jsonl") == first_bytes); REQUIRE(service.FirstManagedWriteFailure() == failed);
+        const auto operation_close = service.ManagedOperationCloseReceipt(); REQUIRE(operation_close);
+        const auto main_close = service.ManagedMainCloseOutcome(); REQUIRE(main_close);
+        REQUIRE(operation_close->ok()); REQUIRE(main_close->error_code.empty());
+        REQUIRE(service.Close("exit").error_code == close.error_code); fixture.Unlocked();
+        const auto closed_materials = service.CaptureManagedOperationMaterials(); REQUIRE(closed_materials);
+        REQUIRE_FALSE(closed_materials->completion_known);
+        fixture.service.reset();
+        REQUIRE_FALSE(captured->completion_known); REQUIRE_FALSE(closed_materials->completion_known);
+        REQUIRE(rt::ReadManagedOperationsOwned(*captured));
+        REQUIRE(failed->append->status == traj::JournalAppendStatus::Committed); REQUIRE_FALSE(failed->append->failure);
+    }
+    {
+        OperationFixture fixture; auto& service = *fixture.service;
+        auto probe = std::make_shared<OperationNativeProbe>(); probe->stage = traj::JournalNativeStage::Close;
+        service.SetManagedOperationProbesForTest(probe);
+        REQUIRE(service.SubmitManagedInput({"close-key", "real accepted input", {}}, fixture.Admission())->input.accepted);
+        const auto close = service.Close("exit"); REQUIRE_FALSE(close.error_code.empty());
+        const auto receipt = service.ManagedOperationCloseReceipt(); REQUIRE(receipt); REQUIRE(receipt->native);
+        REQUIRE(receipt->status == traj::JournalCloseReceipt::Status::Unconfirmed);
+        REQUIRE(receipt->native->succeeded); REQUIRE(receipt->native->injected_unconfirmed); REQUIRE(probe->observations == 1);
+        const auto main_close = service.ManagedMainCloseOutcome(); REQUIRE(main_close);
+        const auto closed_materials = service.CaptureManagedOperationMaterials(); REQUIRE(closed_materials);
+        REQUIRE(main_close->error_code.empty()); REQUIRE_FALSE(closed_materials->completion_known);
+        REQUIRE(service.Close("exit").error_code == close.error_code); REQUIRE(probe->observations == 1);
+        fixture.Unlocked();
+    }
+}
+
 } // namespace
 
 TEST_CASE("managed reservation: owned durable publication precedes directories and real V3 writer") {
@@ -948,5 +1269,6 @@ TEST_CASE("managed reservation: pending local delete cannot erase an unknown own
     REQUIRE_FALSE(traj::WorkspaceLifecycle::ReadResult(*intent_dir).has_value());
     REQUIRE(Read(directory / traj::kManagedSessionOwnershipFile) == receipt.publication_bytes);
     NoBody(directory);
+    CheckManagedOperationProvenance();
     Marker("delete-residue");
 }

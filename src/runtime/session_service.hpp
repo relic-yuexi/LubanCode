@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -39,6 +40,8 @@
 #include "api/types.hpp"
 #include "approval_mode.hpp"
 #include "runtime/command.hpp"
+#include "runtime/managed_operation_provenance.hpp"
+#include "platform/atomic_write.hpp"
 #include "runtime/session_execution.hpp"
 #include "runtime/session_runtime.hpp"
 #include "workspace/identity.hpp"
@@ -186,6 +189,35 @@ public:
     // 成功。崩溃窗口里账已落而回执未达时,同键重发命中台账,不重复接纳。
     InputReceipt SubmitInput(const InputRequest& input);
 
+    // Internal storage-only producer. The trusted host supplies observations;
+    // this does not authenticate or authorize, and never admits execution.
+    struct ManagedWriteReceipt {
+        enum class Phase { Acceptance, Rejection };
+        enum class Knowledge { Rejected, Unconfirmed, NativeCommittedPublicationGap, Committed };
+        Phase phase = Phase::Acceptance;
+        Knowledge knowledge = Knowledge::Rejected;
+        InputReceipt input;
+        std::shared_ptr<const ManagedStoredOperation> operation;
+        std::optional<platform::ImmutableWriteReceipt> artifact;
+        std::optional<trajectory::JournalAppendReceipt> append;
+    };
+    std::shared_ptr<const ManagedWriteReceipt> SubmitManagedInput(
+        const InputRequest&, const ManagedOperationAdmission&);
+    // An immutable front witness; no Service/Writer borrow escapes.
+    std::shared_ptr<const ManagedStoredOperation> ManagedPendingFront() const;
+    std::shared_ptr<const ManagedWriteReceipt> RejectManagedPendingInput(
+        const ManagedOperationProvenance& expected_front, const std::string& terminal_status,
+        const std::string& reason_code, std::uint64_t decision_revision = 0);
+    std::expected<ManagedOperationMaterials, std::string> CaptureManagedOperationMaterials() const;
+    std::shared_ptr<const ManagedWriteReceipt> FirstManagedWriteFailure() const;
+    std::optional<trajectory::JournalCloseReceipt> ManagedOperationCloseReceipt() const;
+    std::optional<trajectory::CloseOutcome> ManagedMainCloseOutcome() const;
+    // Test-only internal native/semantic boundaries, not public SDK options.
+    // Trusted probes must not reenter or block. The second may throw only after
+    // the real committed append, before mechanical in-memory publication.
+    void SetManagedOperationProbesForTest(std::shared_ptr<trajectory::JournalNativeIoProbe>,
+        std::function<void()> after_native_commit = {});
+
     // 泵侧消费:队首取出(FIFO;每端自己的回合泵调)。三态:
     //   Ok          取到一笔(dispatched 事实已按 PowerLoss 档落稳,先账
     //               后取——重启重建只重排"accepted 未 dispatched"的输入);
@@ -196,6 +228,7 @@ public:
         std::string text;
         std::vector<api::ImageBlock> images;
         std::string operation_id;  // 接纳时的操作号(与台账对账)
+        std::shared_ptr<const ManagedStoredOperation> managed = {};
     };
     struct PendingPop {
         enum class Status { Ok, Empty, WriteFailed, NotAdmitted };
@@ -308,6 +341,7 @@ private:
         // v2 行:输入原件相对会话目录的路径(operations-inputs/<op>.json);
         // v1 旧行无原件可指,留空(去重照旧,重建不排)。
         std::string input_ref;
+        std::shared_ptr<const ManagedStoredOperation> managed = {};
     };
 
     // 开张成功后装载(总装单 V0 受理底线):
@@ -322,6 +356,11 @@ private:
     //   v1 旧行(无 inputRef)只种去重表,不重建 pending(正文不可恢复,
     //      如实降级,不凭空造正文)。
     void SeedOperationLedger();
+    std::expected<ManagedOperationMaterials, std::string> ManagedScopeLocked() const;
+    std::expected<ManagedOperationMaterials, std::string> CaptureManagedOperationMaterialsLocked() const;
+    std::shared_ptr<const ManagedWriteReceipt> RejectManagedPendingInputLocked(
+        const ManagedOperationProvenance&, const std::string&, const std::string&, std::uint64_t);
+    trajectory::CloseOutcome CloseManaged(const std::string& reason);
 
     std::unique_ptr<SessionRuntime> runtime_;
     // Runtime/ledger outlive execution. Explicit shutdown drains tool jobs
@@ -338,6 +377,18 @@ private:
     std::unordered_map<std::string, AcceptedOperation> operations_;
     std::deque<QueuedInput> pending_inputs_;
     std::uint64_t operation_counter_ = 0;
+    // Same commit mutex/counter/dedupe/queue as Local, with a distinct schema.
+    // No policy callbacks or live owners occur in immutable operation values.
+    std::size_t managed_input_bytes_ = 0, managed_ledger_bytes_ = 0;
+    bool managed_closing_ = false, managed_closed_ = false;
+    std::shared_ptr<const ManagedWriteReceipt> managed_first_failure_;
+    std::optional<std::expected<ManagedOperationMaterials, std::string>> managed_closed_materials_;
+    std::optional<trajectory::JournalCloseReceipt> managed_operation_close_;
+    std::optional<trajectory::CloseOutcome> managed_close_outcome_;
+    std::optional<trajectory::CloseOutcome> managed_main_close_;
+    std::mutex managed_close_mutex_;
+    std::shared_ptr<trajectory::JournalNativeIoProbe> managed_native_probe_;
+    std::function<void()> managed_publication_probe_;
     // 台账文件句柄(开张成功即持,Close 后拒写)。
     std::optional<std::filesystem::path> operations_path_;
     class OperationsFile;
