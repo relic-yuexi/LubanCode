@@ -106,6 +106,7 @@ DOC development/lubancore-builtin-search.md
 DOC development/lubancore-authorization-primitives.md
 DOC development/sdk-policy-callback-lifecycle.md
 DOC development/sdk-model-send-gate.md
+DOC development/sdk-managed-session-admission.md
 DOC development/worker-host.md
 DOC development/naming.md
 DOC development/search-ripgrep-migration.md
