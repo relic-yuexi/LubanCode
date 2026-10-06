@@ -216,6 +216,7 @@ DOC development/journal-native-receipts.md
 DOC development/windows-command-job-observation.md
 DOC development/agent-transcript-stable-fixture.md
 DOC development/sdk-pr-consolidation.md
+DOC development/ci-evidence-utf8.md
 DOC development/sdk-stage-status.md
 DOC development/sdk-background-jobs.md
 DOC development/sdk-owned-job-deadline.md

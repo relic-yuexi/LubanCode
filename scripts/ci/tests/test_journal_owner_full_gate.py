@@ -111,7 +111,7 @@ class FullJournalEvidenceTests(unittest.TestCase):
                 self.write(build, raw)
                 with self.assertRaises((RuntimeError, ValueError)): full.extract(build, 'posix')
                 output = build / 'test-evidence/journal-owner-full'
-                self.assertEqual(json.loads((output / 'context.json').read_text())['status'], 'failed')
+                self.assertEqual(json.loads((output / 'context.json').read_text(encoding='utf-8'))['status'], 'failed')
                 self.assertEqual((output / 'LastTest.log').read_bytes(), raw['LastTest.log'])
 
     def test_missing_or_aborted_originals_never_reuse_a_stale_pass(self):
@@ -124,14 +124,14 @@ class FullJournalEvidenceTests(unittest.TestCase):
             self.assertEqual((output / 'LastTest.log').read_bytes(), corrupt)
             inputs['results.xml'].unlink()
             with self.assertRaises(RuntimeError): full.extract(build, 'posix')
-            result = json.loads((output / 'context.json').read_text())
+            result = json.loads((output / 'context.json').read_text(encoding='utf-8'))
             self.assertEqual(result['status'], 'failed'); self.assertNotIn('details', result)
             self.assertFalse((output / 'results.xml').exists())
             self.assertEqual((output / 'registration.json').read_bytes(), raw['registration.json'])
             self.assertIn('error', result['inputs']['results.xml'])
 
     def test_workflow_routes_both_asan_selectors_and_literal_use_real_sources(self):
-        text = (REPO / '.github/workflows/ci.yml').read_text()
+        text = (REPO / '.github/workflows/ci.yml').read_text(encoding='utf-8')
         patterns = re.findall(r'^\s*([^\n]*scripts/ci/sdk_journal_owner\.py[^\n]*)\)\s*$', text, re.M)
         self.assertEqual(len(patterns), 2)
         for pattern in patterns:
