@@ -225,6 +225,42 @@ def inspect(source: Path, build: Path, config: str, lua_profile: str | None = No
     entries = {entry["name"]: entry["value"] for entry in cache["entries"]}
     with_lua = read_lua_profile(entries, lua_profile)
     result = inspect_graph(targets)
+    if (source / "examples/sdk-consumer/command_jobs.cpp").is_file():
+        try:
+            from .sdk_command_jobs import ownership_violations
+        except ImportError:
+            from sdk_command_jobs import ownership_violations
+        testing = str(entries.get("BUILD_TESTING", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        with_cli = str(entries.get("LUBANCODE_BUILD_CLI", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        result["violations"].extend(ownership_violations(targets, testing, with_cli))
+        result["status"] = "failed" if result["violations"] else "passed"
+    if (source / "examples/sdk-consumer/named_results.cpp").is_file():
+        try:
+            from .sdk_named_results import ownership_violations
+        except ImportError:
+            from sdk_named_results import ownership_violations
+        testing = str(entries.get("BUILD_TESTING", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        with_cli = str(entries.get("LUBANCODE_BUILD_CLI", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        result["violations"].extend(ownership_violations(targets, testing, with_cli))
+        result["status"] = "failed" if result["violations"] else "passed"
+    if (source / "examples/sdk-consumer/journal_owner.cpp").is_file():
+        try:
+            from .sdk_journal_owner import ownership_violations
+        except ImportError:
+            from sdk_journal_owner import ownership_violations
+        testing = str(entries.get("BUILD_TESTING", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        with_cli = str(entries.get("LUBANCODE_BUILD_CLI", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        result["violations"].extend(ownership_violations(targets, testing, with_cli))
+        result["status"] = "failed" if result["violations"] else "passed"
+    if (source / "tests/integration/sdk/test_lubancore_owned_file_paths.cpp").is_file():
+        try:
+            from .sdk_owned_file_paths import ownership_violations
+        except ImportError:
+            from sdk_owned_file_paths import ownership_violations
+        testing = str(entries.get("BUILD_TESTING", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        with_cli = str(entries.get("LUBANCODE_BUILD_CLI", "")).upper() in {"ON", "TRUE", "YES", "1"}
+        result["violations"].extend(ownership_violations(targets, testing, with_cli))
+        result["status"] = "failed" if result["violations"] else "passed"
     if (source / "examples/sdk-consumer/web_fetch.cpp").is_file():
         testing = str(entries.get("BUILD_TESTING", "")).upper() in {"ON", "TRUE", "YES", "1"}
         with_cli = str(entries.get("LUBANCODE_BUILD_CLI", "")).upper() in {"ON", "TRUE", "YES", "1"}

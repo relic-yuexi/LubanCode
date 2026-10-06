@@ -182,7 +182,7 @@ struct Ticket {
     PreparedJobRegistration registered;
     OwnedJobAdoption adopted;
     ParentJobAdmissionRefs parent_refs;
-    Clock::time_point after_register;
+    Clock::time_point before_register, after_register;
     std::shared_ptr<Trace> trace = std::make_shared<Trace>();
 };
 struct Rig {
@@ -260,6 +260,7 @@ struct Rig {
         return ticket;
     }
     void Register(Ticket& ticket) {
+        ticket.before_register = Clock::now();
         ticket.registered = coordinator->RegisterPreparedJob(ticket.request); ticket.after_register = Clock::now();
         REQUIRE_MESSAGE(ticket.registered.state == PreparedJobRegistrationState::Registered, ticket.registered.error);
         REQUIRE(ticket.registered.facts); Committed(*ticket.registered.facts->registered_receipt);
@@ -433,9 +434,30 @@ TEST_CASE("Owned registration budget expires before adoption and while queued" *
     // Zero keeps its old registration semantics; a real process owns the single slot.
     auto blocker = rig.Declare(probe.Input(rig.cwd, "blocker", true), 0);
     rig.Register(blocker); rig.Adopt(blocker, 15000); rig.Confirm(blocker); REQUIRE(AwaitStarted(rig.cwd, "blocker"));
+    // Prove the queue itself with an actual unlimited-registration ticket. The
+    // original positive ticket below can expire during its real native delivery.
+    auto unlimited = rig.Declare(probe.Input(rig.cwd, "unlimited-queue"), 0);
+    rig.Register(unlimited); rig.Adopt(unlimited, 15000); rig.Confirm(unlimited);
+    const auto unlimited_queued = rig.coordinator->SnapshotOwnedJob(unlimited.request.owner, unlimited.registered.facts->job_id);
+    REQUIRE(unlimited_queued.state == "queued"); REQUIRE_FALSE(unlimited_queued.started_receipt);
+    REQUIRE(rig.quota->running.load() == 1); CHECK_FALSE(fs::exists(rig.cwd / "unlimited-queue.started"));
+    rig.Cancel(unlimited); const auto unlimited_closed = rig.Finish(unlimited);
+    REQUIRE(unlimited_closed.state == "cancelled"); REQUIRE_FALSE(unlimited_closed.started_receipt);
+    { std::lock_guard lock(unlimited.trace->mutex); REQUIRE(unlimited.trace->command_calls == 0); }
     auto queued = rig.Declare(probe.Input(rig.cwd, "queued"), 2000);
     rig.Register(queued); rig.Adopt(queued, 2000); rig.Confirm(queued);
-    CHECK(rig.coordinator->SnapshotOwnedJob(queued.request.owner, queued.registered.facts->job_id).state == "queued");
+    const auto queued_view = rig.coordinator->SnapshotOwnedJob(queued.request.owner, queued.registered.facts->job_id);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - queued.before_register).count();
+    REQUIRE((queued_view.state == "queued" || queued_view.state == "cancelled"));
+    REQUIRE(elapsed >= 0);
+    // Register begins before FreezeOwnedDeadline. The production floor treats
+    // the final sub-millisecond as expired; an earlier cancellation is an error.
+    if (queued_view.state == "cancelled") REQUIRE(elapsed >= 1999);
+    const Json observation = {{"unlimited_budget_ms", unlimited.request.policy.deadline_ms},
+        {"unlimited_queued", unlimited_queued.state == "queued"}, {"unlimited_started", unlimited_queued.started_receipt.has_value()},
+        {"unlimited_final_state", unlimited_closed.state}, {"registration_budget_ms", queued.request.policy.deadline_ms},
+        {"immediate_state", queued_view.state}, {"elapsed_before_register_ms", elapsed}, {"global_running", rig.quota->running.load()}};
+    std::fprintf(stderr, "[owned-job-deadline-queue-observation] %s\n", observation.dump().c_str()); std::fflush(stderr);
     Expire(queued); rig.coordinator->PumpOwnedJobs(); NotInvoked(rig, queued, false);
     CHECK_FALSE(fs::exists(rig.cwd / "queued.started")); CHECK(rig.quota->running.load() == 1);
     rig.Cancel(blocker); const auto cancelled = rig.Finish(blocker); REQUIRE(cancelled.worker_finished);

@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <fstream>
 #include <set>
+#include <type_traits>
+#include <utility>
 
 #include "hooks/hash.hpp"
 #include "platform/paths.hpp"
@@ -191,7 +193,9 @@ PreviewResult BuildToolPreview(const PreviewRequest& request) {
         // 无需指路。路径由生产链给绝对值(PreviewFromPersistedMaterials 按
         // session_dir 拼);sha256 真值在账(tool.result.persisted 的
         // result_ref 六键),读回端不重复校验,文件缺失由 read_file 明报。
-        if (truncated) {
+        if (truncated && request.host_result_references) {
+            header += "retrieval_hint: full_output/captured_output 是宿主结果引用，完整内容须由宿主读取\n";
+        } else if (truncated) {
             header += "retrieval_hint: 未展示的原文按 full_output/captured_output 所列绝对路径"
                       "用 read_file 读回(大文件用 offset/limit 分段);各文件 sha256 记录在"
                       "会话账 tool.result.persisted 事件\n";
@@ -354,8 +358,9 @@ PreviewResult BuildToolPreview(const PreviewRequest& request) {
 
 PreviewRequest PreviewFromPersistedMaterials(const ResultStore::PersistRequest& material,
     const ResultStore::PersistedResult& persisted, std::uint64_t budget,
-    const std::filesystem::path& session_dir) {
+    const std::filesystem::path& session_dir, const NamedResultCapability* named_results) {
     PreviewRequest request;
+    request.host_result_references = named_results && named_results->external();
     request.max_preview_bytes = budget;
     for (const auto& output : material.outputs) {
         PreviewChannel channel;
@@ -368,7 +373,7 @@ PreviewRequest PreviewFromPersistedMaterials(const ResultStore::PersistRequest& 
         for (const auto& ref : persisted.result_ref) {
             if (ref.value("kind", std::string()) == output.channel) {
                 const std::string relative = ref.value("path", std::string());
-                channel.display_path = relative.empty() ? std::string() : platform::PathToUtf8(
+                channel.display_path = relative.empty() ? std::string() : named_results ? named_results->DisplayPath(relative) : platform::PathToUtf8(
                     (session_dir / platform::Utf8ToPath(relative)).lexically_normal());
                 break;
             }
@@ -379,41 +384,6 @@ PreviewRequest PreviewFromPersistedMaterials(const ResultStore::PersistRequest& 
 }
 
 namespace {
-
-// 落稳次序(§4.16):临时文件 -> 落稳 -> 改不可变名。不可变名撞车
-// (POSIX rename 会静默覆盖)先显式查存在性:已存在即冲突,不覆盖。
-bool WriteImmutable(const std::filesystem::path& final_path, const std::string& data,
-                    std::string* error) {
-    std::error_code ec;
-    const auto native_final = platform::FileIoPath(final_path);
-    if (std::filesystem::exists(native_final, ec)) {
-        *error = "结果仓不可变名已存在(结果不许覆盖): " + final_path.string();
-        return false;
-    }
-    std::filesystem::path temp = final_path;
-    temp += ".tmp";
-    const auto native_temp = platform::FileIoPath(temp);
-    {
-        std::ofstream file(native_temp, std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) {
-            *error = "结果仓开不了临时文件: " + temp.string();
-            return false;
-        }
-        file.write(data.data(), static_cast<std::streamsize>(data.size()));
-        file.flush();
-        if (!file.good()) {
-            *error = "结果仓写临时文件失败: " + temp.string();
-            return false;
-        }
-    }
-    std::filesystem::rename(native_temp, native_final, ec);
-    if (ec) {
-        std::filesystem::remove(native_temp, ec);
-        *error = "结果仓发布不可变名失败: " + final_path.string();
-        return false;
-    }
-    return true;
-}
 
 std::string ExtensionFor(const std::string& media_type) {
     if (media_type == "application/json") {
@@ -447,47 +417,99 @@ std::expected<ResultStore, std::string> ResultStore::Open(
     const std::filesystem::path& session_dir, std::string result_prefix,
     std::size_t max_directory_entries) {
     if (result_prefix.empty() || result_prefix.size() > 32 ||
-        result_prefix.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos) {
+        result_prefix.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos)
         return std::unexpected("invalid result prefix");
-    }
-    std::filesystem::path artifacts = session_dir / "artifacts";
-    const auto native_artifacts = platform::FileIoPath(artifacts);
-    std::error_code ec;
-    std::filesystem::create_directories(native_artifacts, ec);
-    if (ec) {
-        return std::unexpected("结果仓建目录失败: " + artifacts.string());
-    }
-    std::uint64_t next = 1;
-    std::size_t entries = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(native_artifacts, ec)) {
-        if (max_directory_entries && ++entries > max_directory_entries)
-            return std::unexpected("result directory entry limit exceeded");
-        const std::string name = entry.path().filename().string();
-        if (name.rfind(result_prefix, 0) != 0) {
-            continue;
-        }
-        auto dot = name.find('.');
-        std::string number =
-            name.substr(result_prefix.size(), dot == std::string::npos ? std::string::npos : dot - result_prefix.size());
-        if (number.empty() ||
-            !std::all_of(number.begin(), number.end(), [](char c) { return c >= '0' && c <= '9'; })) {
-            continue;
-        }
-        std::uint64_t value = std::stoull(number);
-        if (value >= next) {
-            next = value + 1;
-        }
-    }
-    if (max_directory_entries && ec) return std::unexpected("result directory read failed");
-    return ResultStore(std::move(artifacts), next, std::move(result_prefix));
+    std::error_code error;
+    const auto directory = std::filesystem::absolute(session_dir, error).lexically_normal();
+    if (error) return std::unexpected("invalid result directory");
+    auto lease = OpenNamedResultCapability({platform::PathToUtf8(directory.parent_path()),
+        platform::PathToUtf8(directory.filename())}, directory);
+    if (!lease) return std::unexpected(lease.error().code);
+    auto store = Open(lease->share(), std::move(result_prefix), max_directory_entries);
+    if (!store) return store;
+    store->artifacts_dir_ = directory / "artifacts";
+    store->standalone_lease_.emplace(std::move(*lease));
+    return store;
 }
 
-ResultStore::ResultStore(std::filesystem::path artifacts_dir, std::uint64_t next_result_number, std::string result_prefix)
-    : artifacts_dir_(std::move(artifacts_dir)), result_prefix_(std::move(result_prefix)), next_result_number_(next_result_number) {}
+std::expected<ResultStore, std::string> ResultStore::Open(
+    std::shared_ptr<NamedResultCapability> capability, std::string prefix, std::size_t directory_cap) {
+    if (!capability || prefix.empty()) return std::unexpected("invalid result capability");
+    { auto checked = capability->BeginMaterial(prefix, directory_cap, true);
+      if (!checked) return std::unexpected(!capability->external() && !checked.error().message.empty()
+          ? checked.error().message : checked.error().code); }
+    return ResultStore(std::move(capability), std::move(prefix), directory_cap);
+}
+ResultStore::ResultStore(std::shared_ptr<NamedResultCapability> capability, std::string prefix,
+    std::size_t directory_cap)
+    : result_prefix_(std::move(prefix)), capability_(std::move(capability)), max_directory_entries_(directory_cap) {}
+
+void ResultStore::BeginPublication(std::size_t files) {
+    publication_ = std::make_shared<PersistedResult::Publication>();
+    // Allocate the fallback and receipt slots before calling the native writer.
+    publication_->error_code = "result_store.publication_exception";
+    publication_->error = "结果仓发布异常，原生回执未全部返回";
+    publication_->files.reserve(files);
+}
+
+void ResultStore::ClassifyPublicationFailure() noexcept {
+    using Knowledge = PersistedResult::Knowledge;
+    const bool possible = std::any_of(publication_->files.begin(), publication_->files.end(), [](const auto& file) {
+        return file.called && (!file.receipt || !file.receipt->validated || file.receipt->state != CasCommitState::NotCommitted);
+    });
+    publication_->knowledge = possible ? Knowledge::Indeterminate : Knowledge::NotCommitted;
+    publication_sealed_ = possible;
+    if (possible && material_) material_->PreserveUnknown(publication_);
+}
+
+bool ResultStore::WriteImmutable(const std::string& name, std::string_view bytes, std::string media_type) {
+    static_assert(std::is_nothrow_move_constructible_v<NamedResultWriteReceipt>);
+    publication_->files.push_back({name, false, std::nullopt, std::nullopt});
+    auto& file = publication_->files.back();
+    auto receipt = material_->Publish(name, bytes, std::move(media_type), file.called);
+    file.native = std::move(receipt.native);
+    file.receipt.emplace(std::move(receipt));
+    const auto& actual = *file.receipt;
+    const bool confirmed = actual.confirmed_durability == CasDurability::ProcessCrash ||
+        (actual.confirmed_durability == CasDurability::PowerLoss && actual.ancestors_confirmed);
+    if (!actual.validated || actual.state != CasCommitState::Committed || !confirmed || !actual.error.code.empty()) {
+        publication_->error_code = file.native && !file.native->error_code.empty() ? file.native->error_code :
+            !actual.validated ? "named_result.receipt_invalid" :
+            actual.error.code.empty() ? "result_store.durability_unconfirmed" : actual.error.code;
+        publication_->error = publication_->error_code + ": " + (file.native ? file.native->message : actual.error.message);
+        ClassifyPublicationFailure();
+        return false;
+    }
+    return true;
+}
+
+ResultStore::PersistedResult ResultStore::FailedPublication() const {
+    PersistedResult result;
+    result.error = publication_->error;
+    result.publication = *publication_;
+    return result;
+}
 
 ResultStore::PersistedResult ResultStore::Persist(const PersistRequest& request) {
+    static_assert(std::is_nothrow_move_constructible_v<PersistedResult>);
+    if (publication_sealed_) return FailedPublication();
+    if (auto unknown = capability_->FirstUnconfirmedPublication()) {
+        publication_ = std::make_shared<PersistedResult::Publication>(std::move(*unknown));
+        publication_sealed_ = true; return FailedPublication();
+    }
+    BeginPublication(request.outputs.size() + 1);
+    auto material = capability_->BeginMaterial(result_prefix_, max_directory_entries_);
+    if (!material) {
+        if (auto unknown = capability_->FirstUnconfirmedPublication()) {
+            publication_ = std::make_shared<PersistedResult::Publication>(std::move(*unknown)); publication_sealed_ = true;
+        } else { publication_->error_code = material.error().code; publication_->error = material.error().code; }
+        return FailedPublication();
+    }
+    material_ = &*material;
+    struct Reset { NamedResultMaterial*& slot; ~Reset() { slot = nullptr; } } reset{material_};
+    try {
     PersistedResult outcome;
-    const std::string result_id = result_prefix_ + ZeroPad6(next_result_number_);
+    const std::string result_id = result_prefix_ + ZeroPad6(material->number());
     nlohmann::json outputs = nlohmann::json::array();
     std::vector<nlohmann::json> result_ref;
     for (const auto& output : request.outputs) {
@@ -497,12 +519,7 @@ ResultStore::PersistedResult ResultStore::Persist(const PersistRequest& request)
             const std::string extension = ExtensionFor(output.media_type);
             const std::string file_name =
                 result_id + "." + output.channel + "." + extension;
-            const std::filesystem::path final_path = artifacts_dir_ / file_name;
-            std::string error;
-            if (!WriteImmutable(final_path, output.data, &error)) {
-                outcome.error = error;
-                return outcome;
-            }
+            if (!WriteImmutable(file_name, output.data, output.media_type)) return FailedPublication();
             const std::string sha = hooks::Sha256Hex(output.data);
             entry["ref"] = nlohmann::json::object(
                 {{"artifact_id", result_id + "-" + output.channel},
@@ -545,31 +562,67 @@ ResultStore::PersistedResult ResultStore::Persist(const PersistRequest& request)
     }
     const std::string metadata_text = metadata.dump(2);
     const std::string metadata_name = result_id + ".json";
-    std::string error;
-    if (!WriteImmutable(artifacts_dir_ / metadata_name, metadata_text, &error)) {
-        outcome.error = error;
-        return outcome;
-    }
+    if (!WriteImmutable(metadata_name, metadata_text, "application/json")) return FailedPublication();
     result_ref.insert(
         result_ref.begin(),
         MakeArtifactRef(result_id, "result_metadata", "artifacts/" + metadata_name,
                         hooks::Sha256Hex(metadata_text), metadata_text.size(),
                         "application/json"));
-    ++next_result_number_;
+    material->Commit();
     outcome.result_id = result_id;
     outcome.result_ref = std::move(result_ref);
+    publication_->knowledge = PersistedResult::Knowledge::Committed;
+    publication_->error_code.clear(); publication_->error.clear();
+    outcome.publication.emplace(std::move(*publication_));
+    publication_.reset(); publication_sealed_ = false;
     outcome.ok = true;
     return outcome;
+    } catch (...) {
+        ClassifyPublicationFailure();
+        return FailedPublication();
+    }
 }
 
 std::expected<std::string, std::string> ResultStore::PersistListing(const std::string& listing_name,
                                                                     const std::string& text) {
-    const std::filesystem::path final_path = artifacts_dir_ / listing_name;
-    std::string error;
-    if (!WriteImmutable(final_path, text, &error)) {
-        return std::unexpected(error);
+    auto result = PersistListingDetailed(listing_name, text);
+    if (!result.ok) return std::unexpected(result.publication.error);
+    return std::move(result.logical_path);
+}
+
+ResultStore::ListingPublication ResultStore::PersistListingDetailed(const std::string& listing_name,
+                                                                    const std::string& text) {
+    static_assert(std::is_nothrow_move_constructible_v<ListingPublication>);
+    static_assert(std::is_nothrow_move_assignable_v<PersistedResult::Publication>);
+    if (publication_sealed_) return {false, {}, *publication_};
+    if (auto unknown = capability_->FirstUnconfirmedPublication()) {
+        publication_ = std::make_shared<PersistedResult::Publication>(std::move(*unknown));
+        publication_sealed_ = true; return {false, {}, *publication_};
     }
-    return "artifacts/" + listing_name;
+    BeginPublication(1);
+    auto material = capability_->BeginMaterial({}, max_directory_entries_);
+    if (!material) {
+        if (auto unknown = capability_->FirstUnconfirmedPublication()) {
+            publication_ = std::make_shared<PersistedResult::Publication>(std::move(*unknown)); publication_sealed_ = true;
+        } else { publication_->error_code = material.error().code; publication_->error = material.error().code; }
+        return {false, {}, *publication_};
+    }
+    material_ = &*material;
+    struct Reset { NamedResultMaterial*& slot; ~Reset() { slot = nullptr; } } reset{material_};
+    try {
+        if (!WriteImmutable(listing_name, text)) return {false, {}, *publication_};
+        ListingPublication result;
+        result.logical_path = "artifacts/" + listing_name;
+        publication_->knowledge = PersistedResult::Knowledge::Committed;
+        publication_->error_code.clear(); publication_->error.clear();
+        result.publication = std::move(*publication_);
+        publication_.reset(); publication_sealed_ = false;
+        result.ok = true;
+        return result;
+    } catch (...) {
+        ClassifyPublicationFailure();
+        return {false, {}, *publication_};
+    }
 }
 
 }  // namespace lubancode::trajectory::v3

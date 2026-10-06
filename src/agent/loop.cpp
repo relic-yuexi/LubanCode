@@ -1584,8 +1584,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 每轮现拼:tool_search 可能刚在上一拍挂载新工具。压力预估与最终
         // 发送必须吃同一份定义，免得先估旧表、后发新表。
         request.tools = BuildToolDefinitions();
-        const bool adapter_budget = wiring.rewrite_tool_results_for_history &&
-                                    !backend_.SerializeForDiagnostics(request).empty();
+        bool adapter_budget = false;
+        if (wiring.rewrite_tool_results_for_history) {
+            const auto input = backend_.PrepareModelInput(request);
+            if (!input) return std::unexpected(input.error());
+            adapter_budget = input->has_value();
+        }
         // token 估算校准(真实 usage 反推 byte 比率单):本步全部估算(固定
         // 账预检、A/B 双闸、preflight 三项账)乘当前系数——(provider,model)
         // 桶内最近 8 对 (默认尺估算, 实报完整输入) 样本的中位 real/est。
@@ -1733,10 +1737,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 auto candidate = request;
                 candidate.messages = working_view.messages;
                 candidate.max_tokens = profile_.max_output_tokens;
-                const auto snapshot = api::ModelInputSnapshotFromWire(backend_.SerializeForDiagnostics(candidate));
+                const auto snapshot = backend_.PrepareModelInput(candidate);
                 if (!snapshot) return std::unexpected(snapshot.error());
-                if (!api::HasUnestimatedInput(*snapshot)) {
-                    const auto estimate = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*snapshot);
+                if (!*snapshot) return std::unexpected("tool_batch.adapter_snapshot_unavailable");
+                if (!api::HasUnestimatedInput((**snapshot).input)) {
+                    const auto estimate = hooks::middleware::ComputeUtf8BytesDiv4Estimate((**snapshot).input);
                     working_view_tokens = estimate.at("estimatedInputTokens").get<std::size_t>();
                     const auto limit = backend_.GetEffectiveOutputLimit(candidate);
                     const auto reserve = limit.tokens && *limit.tokens > 0
@@ -1970,13 +1975,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 留绕开 hook 的估算路径。没配回调一处不调,行为与从前逐字节一致;
         // 拦下即整步明败(与预检未通过同款收口),mutate 采用改写时报
         // reprepare——本批不重建请求,明拦不暗发。
-        std::optional<nlohmann::json> adapter_input_snapshot;
+        std::optional<api::ModelInputSnapshot> adapter_input_snapshot;
         if (wiring.rewrite_tool_results_for_history) {
-            const auto wire = backend_.SerializeForDiagnostics(request);
-            if (!wire.empty()) {
-                auto snapshot = api::ModelInputSnapshotFromWire(wire);
-                if (!snapshot) return std::unexpected(snapshot.error());
-                const auto unestimated = api::DiagnoseUnestimatedInput(*snapshot);
+            auto snapshot = backend_.PrepareModelInput(request);
+            if (!snapshot) return std::unexpected(snapshot.error());
+            if (*snapshot) {
+                const auto unestimated = api::DiagnoseUnestimatedInput((**snapshot).input);
                 if (unestimated.refused()) {
                     // 安全诊断(QQBot 静默失败单 P0 刀一):适配器协议、触发
                     // 字段路径、块类型、预算策略名、计数——不记字段值、原始
@@ -1992,7 +1996,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         ")。本轮请求含无法按文本预算的内容(图片等媒体或加密思考),已拦下未发往模型;"
                         "请改发纯文字内容;确需发送,请为该类内容配置明确的预算策略。");
                 }
-                const auto estimate = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*snapshot);
+                const auto estimate = hooks::middleware::ComputeUtf8BytesDiv4Estimate((**snapshot).input);
                 const auto tokens = estimate.at("estimatedInputTokens").get<std::size_t>();
                 const auto limit = backend_.GetEffectiveOutputLimit(request);
                 const auto reserve = limit.tokens && *limit.tokens > 0
@@ -2014,7 +2018,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 if (limit.overridden) {
                     pre_request_budget.output_limit_overridden = true;
                 }
-                adapter_input_snapshot = std::move(*snapshot);
+                pre_request_budget.model_input_snapshot_scope = (**snapshot).scope;
+                pre_request_budget.output_limit_scope = (**snapshot).output_limit_scope;
+                adapter_input_snapshot = std::move(**snapshot);
             }
         }
         // 实发生效的输出上限(冻结预算快照的最后一笔):请求已定形,降级/
@@ -2033,7 +2039,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         agent.last_request_budget_set_ = true;
         if (wiring.on_pre_request_hooks) {
             const nlohmann::json frozen_snapshot = adapter_input_snapshot
-                                                       ? *adapter_input_snapshot
+                                                       ? adapter_input_snapshot->input
                                                        : runtime::BuildRequestSnapshotJson(request);
             const std::string pre_request_blocked = wiring.on_pre_request_hooks(
                 step_id, wiring.turn_id, frozen_snapshot, pre_request_budget);
@@ -2215,6 +2221,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 // 对照随请求快照递给边界账(四家真后端提供,桩后端 nullopt),
                 // v3 账 prepared 事件的 inputMessageRefs 对 wire 消息序靠它。
                 prepared_ctx.wire_message_map = backend_.BuildWireMessageMap(request);
+                prepared_ctx.model_input_snapshot = adapter_input_snapshot;
                 trajectory_request_id = wiring.boundary_recorder->OnRequestPrepared(request, prepared_ctx);
                 if (trajectory_request_id.empty()) {
                     // 轨迹账写盘失败,本枚请求不出门:归还预算 permit 名额
@@ -2231,6 +2238,31 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 // 另立条目,P1 定案 5)。没装规划器/本次无投递是空操作。
                 if (wiring.delivery_planner != nullptr) {
                     wiring.delivery_planner->NoteRequestPrepared(trajectory_request_id);
+                }
+            }
+            if (wiring_.on_model_send_gate) {
+                std::expected<void, std::string> admission;
+                bool gate_threw = false;
+                // Only the host gate call belongs to this catch. Recorder,
+                // budget and error construction failures keep their own path.
+                try {
+                    admission = wiring_.on_model_send_gate(request, recovery_attempt);
+                } catch (...) {
+                    gate_threw = true;
+                }
+                const bool cancelled_before_send = cancel != nullptr && cancel->load();
+                if (cancelled_before_send || gate_threw || !admission.has_value()) {
+                    if (turn_permit.has_value() && !turn_committed &&
+                        wiring.turn_budget->abort_before_send) {
+                        wiring.turn_budget->abort_before_send(*turn_permit);
+                        turn_permit.reset();
+                    }
+                    if (cancelled_before_send) {
+                        return std::unexpected(api::Error{api::ErrorKind::Cancelled,
+                                                          "请求发送前被取消", 0});
+                    }
+                    const char* code = gate_threw ? "model.send.gate_exception" : "model.send.denied";
+                    return std::unexpected(api::Error{api::ErrorKind::Api, code, 0, code});
                 }
             }
             // permit 从"占额"翻"已发"(reserved-=1,attempted+=1,turn 预算单
@@ -2844,8 +2876,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         if (gate_armed) {
             adjudications = wiring.tool_batch_gate->AdjudicateBatch(batch_calls);
         }
-        // Explicit owned admission is unavailable in this slice. Reject the
-        // selected non-inline calls before consuming Prepare/Action receipts.
+        // Owned calls keep the actual parent declaration/Pending in this
+        // bridge. Only an explicit typed adapter can register and adopt them.
         const bool owned_admission = gate_armed &&
             wiring.tool_batch_gate->admission_mode() != JobAdmissionMode::Legacy;
         const auto call_is_inline = [&adjudications](std::size_t index) {
@@ -2935,7 +2967,6 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 }
                 const api::ToolUseBlock& call = batch_calls[i];
                 if (owned_admission) {
-                    auto receipt = MissingOwnedJobAdmission();
                     ToolTraceContext rejection_trace;
                     const ToolTraceContext* rejection_context = nullptr;
                     if (trace_armed && scheduled_slot[i] < scheduled_ids.size()) {
@@ -2954,10 +2985,23 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         frame.effect_class = registration->effect_class;
                     }
                     if (wiring.events != nullptr) wiring.events->OnToolStart(call.id, call.name, call.input, wiring.subordinate_stream);
-                    // These are the parent declaration's rejection events,
-                    // never coordinator admission or business Started/Finished.
-                    FinishTrace(frame, receipt.result);
-                    receipt.result = DispatchDone(frame, std::move(receipt.result));
+                    const OwnedToolAdmissionContext admission_context{registry_, wiring, rejection_context,
+                        cancel, tool_filter_, tool_filter_denial_, tool_execution_policy_, tool_filter_denial_};
+                    auto receipt = wiring.tool_batch_gate->TakeOwnedJobOrder(call, admission_context);
+                    if (receipt.state == OwnedJobAdmissionState::Rejected && !receipt.parent_retired) {
+                        FinishTrace(frame, receipt.result);
+                        receipt.result = DispatchDone(frame, std::move(receipt.result));
+                    } else if (!receipt.parent_retired && wiring.events != nullptr) {
+                        // Accepted receipt was persisted by the original bridge;
+                        // Unconfirmed must not append a second parent terminal.
+                        wiring.events->OnToolDone(call.id, call.name, receipt.result, wiring.subordinate_stream);
+                    }
+                    if (receipt.state == OwnedJobAdmissionState::Unconfirmed ||
+                        receipt.result.execution_control == tools::ExecutionControl::StopIndeterminate) {
+                        side_effect_indeterminate = true;
+                        if (side_effect_error.empty()) side_effect_error = receipt.result.error_code.empty()
+                            ? "job.admission.unconfirmed" : receipt.result.error_code;
+                    }
                     if (wiring.action_receipt_failure_reason) {
                         const auto error = wiring.action_receipt_failure_reason();
                         if (!error.empty()) {
@@ -2970,7 +3014,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     }
                     api::ToolResultBlock block{call.id, receipt.result.content, receipt.result.is_error,
                                                receipt.result.payload.content, receipt.result.payload.structured_content};
-                    ordered_results[i] = std::move(block); // job_admission remains false.
+                    block.job_admission = receipt.state == OwnedJobAdmissionState::Accepted;
+                    ordered_results[i] = std::move(block);
                     continue;
                 }
                 const std::optional<tools::Tool::Result> admission =
@@ -3276,20 +3321,19 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 }
             }
             batch_request.messages.push_back(std::move(shell));
-            const auto wire = backend_.SerializeForDiagnostics(batch_request);
-            // All four production adapters supply the same serialization used by
-            // send_stream. Legacy test/trace backends without it retain their own
-            // preflight; they do not claim an adapter-level batch measurement.
-            batch_measured = !wire.empty();
+            // Providers measure final wire input; SDK measures actual Generate
+            // arguments. Unavailable legacy backends keep their own preflight.
+            // A preparation error still traverses persistence: tools ran already.
+            const auto input = backend_.PrepareModelInput(batch_request);
+            if (!input) batch_capacity_error = input.error();
+            batch_measured = input && input->has_value();
             if (batch_measured) {
-                const auto input = api::ModelInputSnapshotFromWire(wire);
-                if (!input) batch_capacity_error = input.error();
-                else if (unestimated_result_media || api::HasUnestimatedInput(*input)) {
+                if (unestimated_result_media || api::HasUnestimatedInput((**input).input)) {
                     // 安全诊断同最终闸:结构与计数,不带字段值。
                     batch_capacity_error = "tool_batch.unestimated_media_or_reasoning (" +
-                                           api::DiagnoseUnestimatedInput(*input).Summary() + ")";
+                                           api::DiagnoseUnestimatedInput((**input).input).Summary() + ")";
                 } else {
-                    const auto measured = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*input);
+                    const auto measured = hooks::middleware::ComputeUtf8BytesDiv4Estimate((**input).input);
                     const auto fixed_bytes = measured.at("inputUtf8Bytes").get<std::size_t>();
                     const auto limit = backend_.GetEffectiveOutputLimit(batch_request);
                     const auto reserve = limit.tokens && *limit.tokens > 0
@@ -3337,13 +3381,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     batch_capacity_error = "tool_batch.preview_pairing_changed";
                 }
                 batch_request.messages.back() = tool_result_message;
-                const auto input = api::ModelInputSnapshotFromWire(backend_.SerializeForDiagnostics(batch_request));
+                const auto input = backend_.PrepareModelInput(batch_request);
                 if (!input) batch_capacity_error = input.error();
-                else if (api::HasUnestimatedInput(*input)) {
+                else if (!*input) batch_capacity_error = "tool_batch.adapter_snapshot_unavailable";
+                else if (api::HasUnestimatedInput((**input).input)) {
                     batch_capacity_error = "tool_batch.unestimated_media_or_reasoning (" +
-                                           api::DiagnoseUnestimatedInput(*input).Summary() + ")";
+                                           api::DiagnoseUnestimatedInput((**input).input).Summary() + ")";
                 } else {
-                    const auto measured = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*input);
+                    const auto measured = hooks::middleware::ComputeUtf8BytesDiv4Estimate((**input).input);
                     const auto tokens = measured.at("estimatedInputTokens").get<std::size_t>();
                     const auto limit = backend_.GetEffectiveOutputLimit(batch_request);
                     const auto reserve = limit.tokens && *limit.tokens > 0

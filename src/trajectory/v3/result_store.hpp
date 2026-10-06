@@ -17,11 +17,16 @@
 #include <cstddef>
 #include <expected>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "platform/atomic_write.hpp"
+#include "trajectory/named_result_blobs.hpp"
 
 namespace lubancode::trajectory::v3 {
 
@@ -46,6 +51,7 @@ struct PreviewRequest {
     // 清单自身超限时,调用方先把完整清单存成 artifact 再把路径传入,
     // 预览只列容纳得下的路径 + omitted_output_count。
     std::optional<std::string> output_index_path;
+    bool host_result_references = false;
 };
 
 struct PreviewResult {
@@ -77,6 +83,9 @@ public:
     static std::expected<ResultStore, std::string> Open(
         const std::filesystem::path& session_dir, std::string result_prefix = "res-",
         std::size_t max_directory_entries = 0);
+    static std::expected<ResultStore, std::string> Open(
+        std::shared_ptr<NamedResultCapability> capability, std::string result_prefix = "res-",
+        std::size_t max_directory_entries = 0);
 
     struct ChannelOutput {
         std::string channel;                // stdout/stderr/combined/report/...
@@ -106,6 +115,10 @@ public:
         std::vector<nlohmann::json> result_ref;  // 六键 artifactRef 数组(含 metadata)
         bool ok = false;
         std::string error;
+        using Knowledge = NamedPublicationKnowledge;
+        using FilePublication = NamedFilePublication;
+        using Publication = NamedPublication;
+        std::optional<Publication> publication;
     };
 
     // 先临时文件 -> 落稳 -> 发布不可变名;返回 result_ref 供
@@ -116,15 +129,37 @@ public:
     // 完整清单 artifact(§4.17 极端情况):清单自身超限时由调用方先存。
     std::expected<std::string, std::string> PersistListing(const std::string& listing_name,
                                                            const std::string& text);
+    struct ListingPublication {
+        bool ok = false;
+        std::string logical_path;
+        PersistedResult::Publication publication;
+    };
+    ListingPublication PersistListingDetailed(const std::string& listing_name, const std::string& text);
+    // First unknown/partial publication remains owned even after a repeated call
+    // or an external readback. Known zero-publication failures do not seal Store.
+    std::optional<PersistedResult::Publication> FirstUnconfirmedPublication() const {
+        return capability_->FirstUnconfirmedPublication();
+    }
 
     const std::filesystem::path& artifacts_dir() const { return artifacts_dir_; }
 
 private:
-    ResultStore(std::filesystem::path artifacts_dir, std::uint64_t next_result_number, std::string result_prefix);
+    ResultStore(std::shared_ptr<NamedResultCapability> capability, std::string result_prefix,
+                std::size_t max_directory_entries);
     std::filesystem::path artifacts_dir_;
     std::string result_prefix_;
     // 下一枚 result 号:开仓时扫已有 res-*.json 取最大 +1。
-    std::uint64_t next_result_number_ = 1;
+    std::shared_ptr<NamedResultCapability> capability_;
+    std::optional<NamedResultLease> standalone_lease_;
+    std::size_t max_directory_entries_ = 0;
+    NamedResultMaterial* material_ = nullptr;
+    std::shared_ptr<PersistedResult::Publication> publication_;
+    bool publication_sealed_ = false;
+    void BeginPublication(std::size_t files);
+    bool WriteImmutable(const std::string& logical_name, std::string_view bytes,
+                        std::string media_type = "text/plain");
+    void ClassifyPublicationFailure() noexcept;
+    PersistedResult FailedPublication() const;
 };
 
 // Pure material-to-preview projection shared by the live producer and strict
@@ -133,7 +168,8 @@ private:
 PreviewRequest PreviewFromPersistedMaterials(
     const ResultStore::PersistRequest& material,
     const ResultStore::PersistedResult& persisted,
-    std::uint64_t budget, const std::filesystem::path& session_dir);
+    std::uint64_t budget, const std::filesystem::path& session_dir,
+    const NamedResultCapability* named_results = nullptr);
 
 // 六键 artifactRef 组装(§3.1)。
 nlohmann::json MakeArtifactRef(std::string artifact_id, std::string kind, std::string path,

@@ -8,6 +8,7 @@
 
 #include <lubancore/api.hpp>
 #include <lubancore/subagents.hpp>
+#include <lubancore/jobs.hpp>
 
 namespace lubancore {
 
@@ -24,6 +25,7 @@ struct Approval {
     // Present only for a real main-foreground child ticket. Session acceptance
     // then grants this child only; the ordinary parent allowed account is separate.
     std::optional<subagents::v1::ApprovalScope> child;
+    std::optional<jobs::v1::ApprovalScope> job;
 };
 struct Event {
     // Runtime event names plus approval_requested and operation_completed.

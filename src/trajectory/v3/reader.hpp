@@ -16,6 +16,8 @@
 // replay 零调用零重跑");验卷复用 VerifyV3File(哈希链+语义)。
 #pragma once
 
+#include "trajectory/named_result_blobs.hpp"
+
 #include <cstdint>
 #include <cstddef>
 #include <expected>
@@ -30,6 +32,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "trajectory/session_recovery_view.hpp"
 #include "trajectory/v3/envelope.hpp"
 #include "trajectory/v3/hooks.hpp"
 #include "trajectory/v3/writer.hpp"
@@ -76,6 +79,15 @@ std::expected<V3Ledger, std::string> ReadV3Ledger(const std::filesystem::path& j
 // Internal owned prefix: verify and project precisely these lines, no reopen.
 std::expected<V3Ledger, std::string> ReadV3LedgerOwned(
     const std::filesystem::path& jsonl, const std::vector<std::string>& lines);
+// Actual immutable File owner capture: no path reopen and no live Writer
+// reference. The source bytes and complete newline/line budgets are checked
+// before the original verification/projection consumes these exact lines.
+std::expected<V3Ledger, std::string> ReadV3LedgerCaptured(
+    const JournalReadHandle&, const std::optional<RecoveryStreamReadLimits>& limits = {});
+// One actual current-writer capture at the caller's original read phase.
+// Unlimited like the existing live File reader. The checked anchor Close
+// completes before a value escapes; no returned ledger retains the writer.
+std::expected<V3Ledger, std::string> ReadV3LedgerLive(const V3Writer&);
 // Opened-regular byte bound; newline/line/count checks precede JSON parsing.
 // Verification and projection consume the same owned lines without reopening.
 std::expected<V3Ledger, std::string> ReadV3LedgerBounded(
@@ -358,7 +370,8 @@ struct ResultPreviewProjection {
 // session_dir 为空 → 只做引用链展开,artifacts 全部标 missing_blob。
 ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
                                             const std::filesystem::path& session_dir,
-                                            std::string_view tool_message_id);
+                                            std::string_view tool_message_id,
+                                            const NamedResultCapability* named_results = nullptr);
 // Ledger-only selection/summary provenance; never probes an artifact path.
 // Its complete flag covers only this line projection, not external blob health;
 // artifacts stays empty. Use ExpandResultPreview to verify blob completeness.

@@ -220,11 +220,11 @@ std::expected<SessionRecoveryCapture, std::string> CaptureSessionRecovery(
     const RecoveryCaptureRequest& request, const SessionRecoveryFactory& factory) {
     if (request.limits && !ValidRecoveryReadLimits(*request.limits)) return std::unexpected("recovery.invalid_limits");
     if (workspace_key.empty() || !SafeId(session_id)) return std::unexpected("recovery.invalid_scope_or_limits");
-    auto main = JournalFileAnchor::ReadExisting(session_dir / (session_id + ".jsonl"),
+    auto main = JournalOwner::CaptureExisting(session_dir / (session_id + ".jsonl"),
         request.limits ? std::optional((std::min)(request.limits->journal.max_bytes, request.limits->view_total_bytes)) : std::nullopt);
     if (!main) return std::unexpected(main.error());
     const auto fail = [&](std::string error) -> std::expected<SessionRecoveryCapture, std::string> {
-        auto closed = main->anchor->Close();
+        auto closed = main->Close();
         if (!closed) error += "; " + closed.error();
         return std::unexpected(std::move(error));
     };
@@ -232,10 +232,12 @@ std::expected<SessionRecoveryCapture, std::string> CaptureSessionRecovery(
         SessionRecoveryView view;
         view.workspace_key = std::move(workspace_key);
         view.session_id = std::move(session_id);
-        view.snapshot_token = hooks::Sha256Hex(main->bytes);
+        view.snapshot_token = hooks::Sha256Hex(main->bytes());
         Accounting accounting;
-        accounting.bytes = main->bytes.size();
-        view.values.emplace(RecoveryKey{RecoveryKeyKind::MainV3, {}}, RecoveryValue{RecoveryReadState::Value, std::move(main->bytes), {}});
+        accounting.bytes = main->bytes().size();
+        // The domain factory sees owned values, never the native handle. It
+        // cannot replace the actual captured main bytes or its native identity.
+        view.values.emplace(RecoveryKey{RecoveryKeyKind::MainV3, {}}, RecoveryValue{RecoveryReadState::Value, main->bytes(), {}});
         if (request.memory_metadata) {
             std::error_code ec;
             const auto root = CanonicalLogical(session_dir, ec);
@@ -274,6 +276,15 @@ std::expected<SessionRecoveryCapture, std::string> CaptureSessionRecovery(
         }
         auto valid = CheckRecoveryView(view, request);
         if (!valid) return fail(valid.error());
+        if (request.expected_main) {
+            const auto& expected = *request.expected_main;
+            const auto* actual = view.Find(RecoveryKeyKind::MainV3);
+            if (expected.workspace_key != view.workspace_key || expected.session_id != view.session_id ||
+                expected.stream != view.stream || !actual || actual->state != RecoveryReadState::Value ||
+                !actual->error.empty() || actual->bytes.size() != expected.bytes ||
+                hooks::Sha256Hex(actual->bytes) != expected.sha256)
+                return fail("recovery.prepare_source_changed");
+        }
         if (factory) {
             auto adapted = factory(view);
             if (!adapted) return fail(adapted.error());
@@ -293,7 +304,8 @@ std::expected<SessionRecoveryCapture, std::string> CaptureSessionRecovery(
             if (!valid) return fail(valid.error());
             view = std::move(*adapted);
         }
-        return SessionRecoveryCapture{std::move(view), std::move(main->anchor)};
+        auto anchor = main->native_anchor();
+        return SessionRecoveryCapture{std::move(view), std::move(anchor), std::move(*main)};
     } catch (const std::exception& error) {
         return fail(std::string("recovery.capture_exception:") + error.what());
     } catch (...) {

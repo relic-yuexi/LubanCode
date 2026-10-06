@@ -38,8 +38,10 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
     ledger_options.v3_system_content = options_.trajectory_v3_system_content;
     ledger_options.v3_opening_participant = options_.trajectory_v3_opening_participant;
     ledger_options.memory_capability_factory = options_.trajectory_memory_capability_factory;
+    ledger_options.named_result_factory = options_.trajectory_named_result_factory;
     ledger_options.recovery_capture = options_.trajectory_recovery_capture;
     ledger_options.recovery_factory = options_.trajectory_recovery_factory;
+    ledger_options.journal_native_io_probe = std::move(options_.trajectory_journal_native_io_probe);
     auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
     if (ledger.has_value()) {
         trajectory_.emplace(std::move(*ledger));
@@ -124,6 +126,7 @@ std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::p
         ledger_options.launch_cwd = platform::PathToUtf8(ledger_options.workspace_identity.launch_cwd);
         ledger_options.v3_opening_participant = options_.trajectory_v3_opening_participant;
         ledger_options.memory_capability_factory = options_.trajectory_memory_capability_factory;
+        ledger_options.named_result_factory = options_.trajectory_named_result_factory;
         ledger_options.recovery_capture = options_.trajectory_recovery_capture;
         ledger_options.recovery_factory = options_.trajectory_recovery_factory;
         if (ledger_options.v3_opening_participant) {
@@ -144,6 +147,7 @@ std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::p
     ledger_options.launch_cwd = platform::PathToUtf8(ledger_options.workspace_identity.launch_cwd);
     ledger_options.v3_opening_participant = options_.trajectory_v3_opening_participant;
     ledger_options.memory_capability_factory = options_.trajectory_memory_capability_factory;
+    ledger_options.named_result_factory = options_.trajectory_named_result_factory;
     ledger_options.recovery_capture = options_.trajectory_recovery_capture;
     ledger_options.recovery_factory = options_.trajectory_recovery_factory;
     if (ledger_options.v3_opening_participant) {

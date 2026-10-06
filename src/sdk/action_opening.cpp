@@ -1,4 +1,5 @@
 #include "sdk/action_opening.hpp"
+#include "sdk/prepare_journal.hpp"
 
 #include <algorithm>
 #include <system_error>
@@ -70,12 +71,12 @@ bool DeclaresAction(const std::vector<extensions::v1::Registration>& registratio
 
 Result<std::shared_ptr<SessionActionOpening>> SessionActionOpening::Prepare(
     const std::vector<extensions::v1::Registration>& registrations, fs::path root,
-    const std::string& workspace_key, std::string resume_id) {
+    const std::string& workspace_key, std::string resume_id, std::shared_ptr<SessionPrepareJournal> journal) {
     auto owner = std::shared_ptr<SessionActionOpening>(new SessionActionOpening);
     owner->owned_root_ = std::move(root);
     owner->resume_id_ = std::move(resume_id);
     owner->enabled_ = DeclaresAction(registrations);
-    std::optional<v3::V3Ledger> ledger;
+    std::shared_ptr<const v3::V3Ledger> ledger;
     if (!owner->resume_id_.empty()) {
         auto workspace = lubancode::workspace::index::ResolveDirByWorkspaceKey(owner->owned_root_ / "workspaces", workspace_key);
         if (!workspace) {
@@ -93,7 +94,7 @@ Result<std::shared_ptr<SessionActionOpening>> SessionActionOpening::Prepare(
         }
         auto stream = v3::FindV3SessionStream(owner->resume_dir_);
         if (stream) {
-            auto read = v3::ReadV3Ledger(*stream);
+            auto read = ReadPrepareJournal(*stream, journal.get());
             if (read) {
                 ledger = std::move(*read);
                 for (const auto& message : ledger->messages) if (Binding(message)) owner->enabled_ = true;

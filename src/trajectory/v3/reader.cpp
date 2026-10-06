@@ -1,6 +1,7 @@
 // v3 读取侧实现(P2)。纯读:不开写柄、不调模型、不重跑工具、不发外部
 // 消息(§5.1"只读 replay 零调用零重跑")。验卷复用 VerifyV3File。
 #include "trajectory/v3/reader.hpp"
+#include "trajectory/named_result_opening.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -257,6 +258,36 @@ std::expected<V3Ledger, std::string> ReadV3Ledger(const std::filesystem::path& j
 std::expected<V3Ledger, std::string> ReadV3LedgerOwned(
     const std::filesystem::path& jsonl, const std::vector<std::string>& lines) {
     return ReadVerifiedV3Lines(jsonl, lines, VerifyV3Lines(lines), true);
+}
+
+std::expected<V3Ledger, std::string> ReadV3LedgerCaptured(
+    const JournalReadHandle& capture, const std::optional<RecoveryStreamReadLimits>& limits) {
+    if (!capture) return std::unexpected("recovery.anchor_missing");
+    auto lines = RecoveryStreamLines(capture.bytes(), limits, true);
+    if (!lines) return std::unexpected(lines.error());
+    return ReadV3LedgerOwned(capture.path(), *lines);
+}
+
+std::expected<V3Ledger, std::string> ReadV3LedgerLive(const V3Writer& writer) {
+    auto capture = writer.CaptureJournal();
+    if (!capture) return std::unexpected(capture.error());
+    try {
+        auto ledger = ReadV3LedgerCaptured(*capture);
+        if (!ledger) {
+            // A failed projection owns the original failure. Checked cleanup
+            // must still run, but cannot replace it with a Close exception.
+            try { (void)capture->Close(); } catch (...) {}
+            return ledger;
+        }
+        const auto closed = capture->Close();
+        if (!closed) return std::unexpected(closed.error());
+        return ledger;
+    } catch (...) {
+        // Release the actual anchor on exceptional projection too, preserving
+        // the original exception if Close itself cannot allocate its error.
+        try { (void)capture->Close(); } catch (...) {}
+        throw;
+    }
 }
 
 std::expected<V3Ledger, std::string> ReadV3LedgerBounded(
@@ -1104,8 +1135,13 @@ ResultPreviewProjection ProjectResultPreview(const V3Ledger& ledger,
 
 ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
                                             const std::filesystem::path& session_dir,
-                                            std::string_view tool_message_id) {
+                                            std::string_view tool_message_id, const NamedResultCapability* named_results) {
     auto projection = ProjectResultPreview(ledger, tool_message_id);
+    std::uint64_t remaining_bytes = 64u * 1024u * 1024u;
+    const bool use_provider = named_results && named_results->external();
+    const bool unavailable_store = (!use_provider && HasExternalNamedResultBinding(ledger)) ||
+        (named_results && named_results->scope().session_id != ledger.session_id);
+    const auto& file_root = named_results && !use_provider ? named_results->FileSessionDirectory() : session_dir;
     // 逐枚 artifact 实探:存在 + sha256(§4.16"任何对正文的查阅均校验身份
     // 和 hash");缺件标缺口,不冒称完整(§4.10)。
     bool complete = projection.complete && projection.summary_valid;
@@ -1115,13 +1151,27 @@ ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
         probe.path = JsonString(ref, "path").value_or("");
         const std::string expect_hash = JsonString(ref, "sha256").value_or("");
         const std::uint64_t expect_bytes = JsonUint(ref, "bytes").value_or(0);
-        if (session_dir.empty() || probe.path.empty()) {
+        if (use_provider || unavailable_store) {
+            if (unavailable_store || named_results->scope().session_id != ledger.session_id) {
+                probe.gap_reason = "named_store_unavailable"; complete = false;
+            } else if (expect_bytes > remaining_bytes) {
+                probe.gap_reason = "blob_read_limit"; complete = false;
+            } else {
+                remaining_bytes -= expect_bytes;
+                auto bytes = named_results->Read(probe.path, expect_hash, expect_bytes,
+                    JsonString(ref, "mediaType").value_or(""), static_cast<std::size_t>(expect_bytes));
+                if (bytes) { probe.exists = true; probe.hash_ok = true; probe.bytes = bytes->size(); }
+                else { probe.gap_reason = bytes.error().code; complete = false; }
+            }
+            projection.artifacts.push_back(std::move(probe)); continue;
+        }
+        if (file_root.empty() || probe.path.empty()) {
             probe.gap_reason = "missing_blob";
             complete = false;
             projection.artifacts.push_back(std::move(probe));
             continue;
         }
-        std::filesystem::path file = session_dir / probe.path;
+        std::filesystem::path file = file_root / probe.path;
         std::error_code ec;
         if (!std::filesystem::exists(file, ec) || ec) {
             probe.gap_reason = "missing_blob";

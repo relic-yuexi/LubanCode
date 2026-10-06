@@ -176,8 +176,11 @@ public:
         std::string v3_system_content;
         trajectory::V3OpeningParticipant v3_opening_participant;
         std::shared_ptr<trajectory::MemoryCapabilityFactory> memory_capability_factory;
+        std::shared_ptr<trajectory::NamedResultFactory> named_result_factory;
         trajectory::RecoveryCaptureRequest recovery_capture;
         trajectory::SessionRecoveryFactory recovery_factory;
+        // Internal test-only, one fresh journal: observes actual native IO. Never public SDK input.
+        std::shared_ptr<trajectory::JournalNativeIoProbe> journal_native_io_probe;
         // 故障注入(测试专用;生产恒空 = 零行为):子账首枚 run.started
         // 提交前问一次,返回稳定码即按该码注入一次失败(子代理空轨迹单
         // 5.1 的 fault injection)。只作用于子账,不影响 main。
@@ -210,6 +213,7 @@ public:
     // main stream(轮次桥从这只造)。
     trajectory::TrajectoryRecorder* main();
     std::shared_ptr<trajectory::MemoryCapability> memory_capability() const;
+    std::shared_ptr<trajectory::NamedResultCapability> named_result_capability() const;
     // v3 主账写者(v2 场 nullptr)。异步工具 P2 的会话级运行时从这取
     // 共享写者;互斥锁见 v3_tool_results_mutex。
     trajectory::v3::V3Writer* v3_main_writer();

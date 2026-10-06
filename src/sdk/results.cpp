@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "platform/atomic_write.hpp"
+#include "platform/owned_file_path.hpp"
 #include "platform/secure_file.hpp"
 #include "platform/sha256.hpp"
 #include "platform/text_encoding.hpp"
@@ -44,17 +45,6 @@ bool IsTerminal(v3::EventKindV3 kind) {
     return kind == K::ToolExecutionFinished || kind == K::ToolExecutionFailed ||
         kind == K::ToolExecutionCancelled || kind == K::ToolExecutionRejected || kind == K::ToolExecutionUnknown;
 }
-bool SafePath(const fs::path& file) {
-    // Include every ancestor: checking only the leaf misses symlink/junction
-    // directories. The owned persistence root is not a hostile-filesystem sandbox.
-    for (auto path = file; !path.empty();) {
-        if (!lubancode::platform::RejectReparsePoint(path)) return false;
-        const auto parent = path.parent_path();
-        if (parent == path) break;
-        path = parent;
-    }
-    return true;
-}
 std::string ExtensionFor(std::string_view media) {
     if (media == "application/json") return "json";
     if (media.starts_with("text/")) return "txt";
@@ -81,10 +71,33 @@ struct ReadArtifactResult {
     bool verified = false;
 };
 ReadArtifactResult ReadArtifact(const fs::path& root, const ToolResultArtifact& ref,
-    bool retain, std::uint64_t& verification_remaining, std::uint64_t retain_limit) {
+    bool retain, std::uint64_t& verification_remaining, std::uint64_t retain_limit,
+    const std::shared_ptr<lubancode::trajectory::NamedResultCapability>& named_results) {
     ReadArtifactResult result;
-    const auto file = root / lubancode::tools::Utf8ToPath(ref.path);
-    if (!SafePath(file)) { result.state = State::Corrupt; result.issue = "sdk.result.path_rejected"; return result; }
+    if (named_results && named_results->external()) {
+        if (ref.bytes > verification_remaining || (retain && ref.bytes > retain_limit)) {
+            result.state = State::TooLarge; result.issue = "sdk.result.too_large"; return result;
+        }
+        verification_remaining -= ref.bytes;
+        auto bytes = named_results->Read(ref.path, ref.sha256, ref.bytes, ref.media_type,
+            static_cast<std::size_t>(ref.bytes));
+        if (!bytes) {
+            result.issue = bytes.error().code;
+            if (result.issue == "named_result.missing") result.state = State::Missing;
+            else if (result.issue == "named_result.read_mismatch" || result.issue == "named_result.path_rejected") result.state = State::Corrupt;
+            return result;
+        }
+        result.state = State::Verified; result.verified = true;
+        if (retain) result.data = std::move(*bytes);
+        return result;
+    }
+    // File retains its original streaming verification and exact SDK diagnostics.
+    // Its root still comes from this Session's bound capability when provided.
+    const auto& file_root = named_results ? named_results->FileSessionDirectory() : root;
+    const auto file = file_root / lubancode::tools::Utf8ToPath(ref.path);
+    if (!lubancode::platform::IsUnlinkedOwnedPath(file_root, file)) {
+        result.state = State::Corrupt; result.issue = "sdk.result.path_rejected"; return result;
+    }
     std::error_code ec;
     const auto status = fs::symlink_status(file, ec);
     if (status.type() == fs::file_type::not_found) {
@@ -117,7 +130,7 @@ ReadArtifactResult ReadArtifact(const fs::path& root, const ToolResultArtifact& 
     char extra = 0;
     input.read(&extra, 1);
     if (input.bad()) { result.data.clear(); result.issue = "sdk.result.unreadable"; return result; }
-    if (read != ref.bytes || input.gcount() != 0 || !SafePath(file)) {
+    if (read != ref.bytes || input.gcount() != 0 || !lubancode::platform::IsUnlinkedOwnedPath(file_root, file)) {
         result.data.clear(); result.state = State::Corrupt; result.issue = "sdk.result.bytes_mismatch"; return result;
     }
     if (hash.FinalHex() != ref.sha256) {
@@ -128,8 +141,10 @@ ReadArtifactResult ReadArtifact(const fs::path& root, const ToolResultArtifact& 
     return result;
 }
 
-Result<out::SessionResultPolicy> ReadPolicy(const fs::path& path, const std::string& session_id) {
-    if (!SafePath(path)) return std::unexpected(Failure("sdk.result.policy_invalid", "result policy path is a link"));
+Result<out::SessionResultPolicy> ReadPolicy(const fs::path& session_dir, const fs::path& path,
+    const std::string& session_id) {
+    if (!lubancode::platform::IsUnlinkedOwnedPath(session_dir, path))
+        return std::unexpected(Failure("sdk.result.policy_invalid", "result policy path is a link"));
     std::error_code ec;
     if (!fs::is_regular_file(path, ec) || ec || fs::file_size(path, ec) > 1024 || ec)
         return std::unexpected(Failure("sdk.result.policy_invalid", "result policy is not a bounded regular file"));
@@ -137,7 +152,7 @@ Result<out::SessionResultPolicy> ReadPolicy(const fs::path& path, const std::str
     if (!input) return std::unexpected(Failure("sdk.result.policy_invalid", "cannot read result policy"));
     std::array<char, 1025> buffer{};
     input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-    if (input.bad() || input.gcount() > 1024 || !SafePath(path))
+    if (input.bad() || input.gcount() > 1024 || !lubancode::platform::IsUnlinkedOwnedPath(session_dir, path))
         return std::unexpected(Failure("sdk.result.policy_invalid", "result policy exceeded its read bound"));
     const auto json = Json::parse(std::string_view(buffer.data(), static_cast<std::size_t>(input.gcount())), nullptr, false);
     if (!json.is_object() || json.size() != 4 || !json.contains("schemaVersion") ||
@@ -159,13 +174,14 @@ Result<out::SessionResultPolicy> FreezeResultPolicy(const fs::path& session_dir,
             (requested->mode != out::Mode::Preview && requested->mode != out::Mode::Full)))
             return std::unexpected(Failure("sdk.result.policy_invalid", "invalid requested result policy"));
         const auto path = session_dir / "sdk-result-policy.json";
-        if (!SafePath(path)) return std::unexpected(Failure("sdk.result.policy_invalid", "result policy path is a link"));
+        if (!lubancode::platform::IsUnlinkedOwnedPath(session_dir, path))
+            return std::unexpected(Failure("sdk.result.policy_invalid", "result policy path is a link"));
         std::error_code ec;
         const bool exists = fs::exists(path, ec);
         if (ec) return std::unexpected(Failure("sdk.result.policy_invalid", "cannot inspect result policy"));
         out::SessionResultPolicy frozen{session_id, out::Mode::Preview, 1};
         if (exists) {
-            auto saved = ReadPolicy(path, session_id);
+            auto saved = ReadPolicy(session_dir, path, session_id);
             if (!saved) return std::unexpected(saved.error());
             frozen = std::move(*saved);
         } else if (!resume && requested) {
@@ -268,11 +284,86 @@ Result<OperationToolResultIndex> IndexToolResults(const v3::V3Ledger& ledger,
     }
 }
 
+Result<ToolResultIndexEntry> IndexCommandJobResult(const v3::V3Ledger& ledger,
+    const v3::JobOperationBindingFacts& binding) {
+    try {
+        const auto bindings = v3::ReadJobOperationBindings(ledger);
+        const auto adoptions = v3::ReadOwnedJobAdoptions(ledger);
+        if (!bindings || !adoptions || ledger.session_id != binding.session_id || ledger.run_id != binding.run_id)
+            return std::unexpected(Failure("sdk.job.result_invalid", "Job source is invalid"));
+        const auto found = std::find_if(bindings->begin(), bindings->end(), [&](const auto& actual) {
+            return actual.event_id == binding.event_id && actual.line_hash == binding.line_hash &&
+                actual.job_id == binding.job_id && actual.operation_id == binding.operation_id &&
+                actual.parent_operation_id == binding.parent_operation_id && actual.action_id == binding.action_id &&
+                actual.turn_id == binding.turn_id && actual.attempt == binding.attempt;
+        });
+        const auto* adoption = v3::FindOwnedJobAdoption(*adoptions, binding.job_id);
+        if (found == bindings->end() || !adoption || adoption->action_id != binding.action_id ||
+            adoption->adopted_event_id != binding.adopted_event_id)
+            return std::unexpected(Failure("sdk.job.result_invalid", "Job binding differs from actual adoption"));
+        const v3::EventLine* observed = nullptr;
+        for (const auto& event : ledger.events) {
+            if (event.kind != v3::EventKindV3::ToolJobObserved || event.action_id != binding.action_id ||
+                event.payload.value("jobId", std::string()) != binding.job_id) continue;
+            if (observed) return std::unexpected(Failure("sdk.job.result_invalid", "duplicate Job observation"));
+            observed = &event;
+        }
+        if (!observed || !observed->payload.contains("resultRef"))
+            return std::unexpected(Failure("sdk.job.result_unavailable", "no observed command result"));
+        const auto* persisted = ledger.FindEvent(observed->payload.at("resultRef").get<std::string>());
+        if (!persisted || persisted->kind != v3::EventKindV3::ToolResultPersisted ||
+            persisted->action_id != binding.action_id || persisted->turn_id != binding.turn_id ||
+            persisted->seq <= binding.seq || persisted->seq >= observed->seq ||
+            Uint(persisted->payload.at("attempt")) != binding.attempt)
+            return std::unexpected(Failure("sdk.job.result_invalid", "Job persisted scope or order differs"));
+        const auto terminal_id = persisted->payload.at("executionEventRef").get<std::string>();
+        const auto* terminal = ledger.FindEvent(terminal_id);
+        if (!terminal || !IsTerminal(terminal->kind) || terminal->action_id != binding.action_id ||
+            terminal->turn_id != binding.turn_id || terminal->seq <= binding.seq || terminal->seq >= persisted->seq ||
+            Uint(terminal->payload.at("attempt")) != binding.attempt || !observed->payload.contains("postEventRef") ||
+            !v3::CheckOwnedJobPost(ledger, *adoption, terminal_id, persisted->event_id, observed->payload.at("postEventRef")))
+            return std::unexpected(Failure("sdk.job.result_invalid", "Job completion/Post references differ"));
+        ToolResultIndexEntry entry;
+        entry.execution_event_id = terminal_id;
+        entry.summary.identity = {binding.session_id, binding.operation_id, binding.turn_id,
+            binding.action_id, persisted->event_id, {}};
+        entry.summary.attempt = binding.attempt;
+        entry.summary.tool_name = "run_command";
+        const auto& refs = persisted->payload.at("result_ref");
+        if (!refs.is_array() || refs.size() > kMaxChannels + 1)
+            return std::unexpected(Failure("sdk.job.result_invalid", "Job result references exceed the bound"));
+        std::set<std::string> ids, paths;
+        std::size_t metadata_count = 0;
+        for (const auto& ref : refs) {
+            auto artifact = Artifact(ref);
+            if (!ValidId(artifact.id) || !ids.insert(artifact.id).second || !paths.insert(artifact.path).second)
+                return std::unexpected(Failure("sdk.job.result_invalid", "duplicate Job artifact"));
+            if (artifact.kind == "result_metadata") {
+                ++metadata_count; entry.summary.identity.result_id = artifact.id;
+                if (artifact.media_type != "application/json" || artifact.path != "artifacts/" + artifact.id + ".json")
+                    return std::unexpected(Failure("sdk.job.result_invalid", "Job metadata path differs"));
+            }
+            entry.artifacts.push_back(std::move(artifact));
+        }
+        if (metadata_count != 1) return std::unexpected(Failure("sdk.job.result_invalid", "Job metadata is not unique"));
+        for (const auto& ref : entry.artifacts) {
+            if (ref.kind == "result_metadata") continue;
+            const auto& id = entry.summary.identity.result_id;
+            if (ref.id != id + "-" + ref.kind || ref.path != "artifacts/" + id + "." + ref.kind + "." + ExtensionFor(ref.media_type))
+                return std::unexpected(Failure("sdk.job.result_invalid", "Job channel path differs"));
+        }
+        return entry;
+    } catch (...) { return std::unexpected(Failure("sdk.job.result_invalid", "malformed Job result")); }
+}
+
 Result<out::SavedSnapshot> ReadIndexedToolResult(const fs::path& session_dir, const ToolResultIndexEntry& entry,
-    const out::SessionResultPolicy& policy, out::ToolResultReadOptions options) {
+    const out::SessionResultPolicy& policy, out::ToolResultReadOptions options,
+    std::shared_ptr<lubancode::trajectory::NamedResultCapability> named_results) {
     try {
         if (options.max_total_text_bytes == 0 || options.max_total_text_bytes > kMaxTextBytes)
             return std::unexpected(Failure("sdk.result.read_limit_invalid", "text budget must be between 1 byte and 8 MiB"));
+        if (named_results && named_results->scope().session_id != entry.summary.identity.session_id)
+            return std::unexpected(Failure("sdk.result.identity_mismatch"));
         if (policy.session_id != entry.summary.identity.session_id)
             return std::unexpected(Failure("sdk.result.identity_mismatch", "snapshot policy belongs to another session"));
         const auto& identity = entry.summary.identity;
@@ -308,7 +399,7 @@ Result<out::SavedSnapshot> ReadIndexedToolResult(const fs::path& session_dir, co
         data.metadata_sha256 = metadata->sha256;
         data.metadata_bytes = metadata->bytes;
         std::uint64_t verification_remaining = kMaxVerificationBytes;
-        auto material = ReadArtifact(session_dir, *metadata, true, verification_remaining, kMaxMetadataBytes);
+        auto material = ReadArtifact(session_dir, *metadata, true, verification_remaining, kMaxMetadataBytes, named_results);
         data.metadata_state = material.state;
         if (!material.verified) return results::detail::SnapshotAccess::Make(std::move(data), policy);
         const auto json = Json::parse(material.data, nullptr, false);
@@ -371,7 +462,7 @@ Result<out::SavedSnapshot> ReadIndexedToolResult(const fs::path& session_dir, co
             channel.sha256 = ref->sha256;
             channel.captured_bytes = ref->bytes;
             const bool textual = TextChannel(channel.channel) && channel.media_type == "text/plain" && channel.encoding == "utf-8";
-            auto captured = ReadArtifact(session_dir, *ref, textual, verification_remaining, text_remaining);
+            auto captured = ReadArtifact(session_dir, *ref, textual, verification_remaining, text_remaining, named_results);
             channel.state = captured.state;
             channel.artifact_verified = captured.verified;
             channel.issue_code = std::move(captured.issue);

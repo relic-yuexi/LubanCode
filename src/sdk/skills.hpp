@@ -13,6 +13,7 @@
 #include "trajectory/opening.hpp"
 
 namespace lubancore::detail {
+class SessionPrepareJournal;
 
 // Initialization-only value owner. The opening callback owns this value; tools
 // own independent metadata copies. No Agent, writer or callback is borrowed.
@@ -21,7 +22,7 @@ public:
     static Result<std::shared_ptr<SessionSkills>> Prepare(
         const std::optional<skills::v1::Selection>& selection,
         std::filesystem::path owned_root, std::string workspace_key,
-        std::string resume_id, std::string user_system);
+        std::string resume_id, std::string user_system, std::shared_ptr<SessionPrepareJournal> journal = {});
     Result<void> BindToolSurface(std::set<std::string> names);
     bool enabled() const { return snapshot_.enabled; }
     std::unique_ptr<lubancode::tools::Tool> BuildTool() const;

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "trajectory/journal.hpp"
+#include "trajectory/journal_owner.hpp"
 
 namespace lubancode::trajectory {
 
@@ -61,9 +62,17 @@ struct SessionRecoveryView {
     RecoveryDirectory results, reports;
     const RecoveryValue* Find(RecoveryKeyKind kind, const std::string& operation_id = {}) const;
 };
+// Internal successful SDK preflight evidence. It only restricts a later actual
+// locked capture; it supplies no bytes, native anchor, provider or permission.
+struct RecoveryMainExpectation {
+    std::string workspace_key, session_id, stream;
+    std::size_t bytes = 0;
+    std::string sha256;
+};
 struct RecoveryCaptureRequest {
     std::optional<RecoveryReadLimits> limits; // CLI unset preserves its total-size policy.
     bool memory_metadata = false;
+    std::optional<RecoveryMainExpectation> expected_main;
 };
 
 // Internal read adapter. It receives owned File reference values inside the real
@@ -72,7 +81,8 @@ using SessionRecoveryFactory = std::function<std::expected<SessionRecoveryView, 
     const SessionRecoveryView& reference)>;
 struct SessionRecoveryCapture {
     SessionRecoveryView view;
-    std::shared_ptr<JournalFileAnchor> anchor;
+    std::shared_ptr<JournalFileAnchor> anchor; // Existing File-only compatibility.
+    JournalReadHandle main_journal; // Actual immutable main capture, no Writer owner.
 };
 std::expected<SessionRecoveryCapture, std::string> CaptureSessionRecovery(
     const std::filesystem::path& session_dir, std::string workspace_key, std::string session_id,

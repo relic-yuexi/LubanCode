@@ -10,14 +10,27 @@
 #include <tuple>
 #include <utility>
 
+#include "sdk/policy_callback_scope.hpp"
+
 namespace lubancore::authorization::v1 {
 namespace {
+using lubancore::detail::PolicyCallbackScope;
 Error Failure(const char* code) { return {code, {}}; }
 thread_local unsigned notification_depth = 0;
 struct NotificationScope {
     NotificationScope() { ++notification_depth; }
     ~NotificationScope() { --notification_depth; }
 };
+template<class Function>
+struct OwnedPolicyCallable {
+    Function function;
+    ~OwnedPolicyCallable() {
+        PolicyCallbackScope callback_scope;
+        function = nullptr; // Includes final retirement on a provider's own thread.
+    }
+};
+using ChangeOwner = OwnedPolicyCallable<PolicyChangeCallback>;
+using CleanupOwner = OwnedPolicyCallable<std::function<void()>>;
 bool ValidId(const std::string& value) {
     return !value.empty() && value.size() <= 512 &&
         std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; });
@@ -103,17 +116,18 @@ struct ChangedScope {
     }
 };
 struct Observer {
-    explicit Observer(ResourceScope resource, std::shared_ptr<PolicyChangeCallback> function)
+    explicit Observer(ResourceScope resource, std::shared_ptr<ChangeOwner> function)
         : scope(std::move(resource)), callback(std::move(function)) {}
     const ResourceScope scope;
     std::mutex mutex;
     std::condition_variable cv;
-    std::shared_ptr<PolicyChangeCallback> callback;
+    std::shared_ptr<ChangeOwner> callback;
     bool enabled = true, dispatching = false;
     std::uint64_t pending = 0, delivered = 0;
 
     void Stop() noexcept {
-        std::shared_ptr<PolicyChangeCallback> retired;
+        PolicyCallbackScope callback_scope;
+        std::shared_ptr<ChangeOwner> retired;
         {
             std::unique_lock lock(mutex);
             enabled = false;
@@ -126,6 +140,7 @@ struct Observer {
         retired.reset(); // User-owned captures must be destroyed outside locks.
     }
     void Notify(std::uint64_t revision) noexcept {
+        PolicyCallbackScope callback_scope;
         {
             std::lock_guard lock(mutex);
             if (!enabled || revision <= delivered) return;
@@ -134,7 +149,7 @@ struct Observer {
             dispatching = true;
         }
         for (;;) {
-            std::shared_ptr<PolicyChangeCallback> invocation;
+            std::shared_ptr<ChangeOwner> invocation;
             std::uint64_t current = 0;
             {
                 std::lock_guard lock(mutex);
@@ -150,7 +165,7 @@ struct Observer {
             }
             {
                 NotificationScope notification;
-                try { (*invocation)(PolicyChange{scope, current}); } catch (...) {}
+                try { invocation->function(PolicyChange{this->scope, current}); } catch (...) {}
                 invocation.reset(); // Includes reentrant capture destructors.
             }
         }
@@ -171,23 +186,27 @@ Result<void> ValidateGrant(const AuthenticatedSubject& subject, const ResourceSc
 struct PolicySubscription::Impl {
     std::mutex mutex;
     std::condition_variable cv;
-    std::shared_ptr<std::function<void()>> close;
+    std::shared_ptr<CleanupOwner> close;
     bool closing = false, closed = false;
     std::thread::id closing_thread;
 };
 PolicySubscription::PolicySubscription(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
 Result<std::unique_ptr<PolicySubscription>> PolicySubscription::Create(std::function<void()> unsubscribe) {
-    if (!unsubscribe) return std::unexpected(Failure("sdk.authorization.subscription_invalid"));
+    PolicyCallbackScope callback_scope;
+    std::function<void()> source;
+    source.swap(unsubscribe); // Parameter destruction occurs after local scopes.
+    if (!source) return std::unexpected(Failure("sdk.authorization.subscription_invalid"));
     auto impl = std::make_shared<Impl>();
-    auto close = std::make_shared<std::function<void()>>();
-    close->swap(unsubscribe); // SBO capture retirement happens without state locks.
+    auto close = std::make_shared<CleanupOwner>();
+    close->function.swap(source); // SBO retirement is guarded and outside state locks.
     impl->close = std::move(close);
     return std::unique_ptr<PolicySubscription>(new PolicySubscription(std::move(impl)));
 }
 PolicySubscription::~PolicySubscription() { Unsubscribe(); }
 void PolicySubscription::Unsubscribe() noexcept {
+    PolicyCallbackScope callback_scope;
     const auto state = impl_;
-    std::shared_ptr<std::function<void()>> close;
+    std::shared_ptr<CleanupOwner> close;
     {
         std::unique_lock lock(state->mutex);
         while (state->closing) {
@@ -199,7 +218,7 @@ void PolicySubscription::Unsubscribe() noexcept {
         state->closing_thread = std::this_thread::get_id();
         close = state->close; // A pointer lease cannot run a functor destructor.
     }
-    try { (*close)(); } catch (...) {} // A trusted provider's cleanup cannot throw from RAII.
+    try { close->function(); } catch (...) {} // A trusted provider's cleanup cannot throw from RAII.
     if (notification_depth) {
         // Observer::Stop only disarmed this invocation. Preserve the idempotent
         // closer so a later external call can still wait for its real exit.
@@ -207,7 +226,7 @@ void PolicySubscription::Unsubscribe() noexcept {
         state->closing = false;
         state->cv.notify_all();
     } else {
-        std::shared_ptr<std::function<void()>> retired;
+        std::shared_ptr<CleanupOwner> retired;
         {
             std::lock_guard lock(state->mutex);
             state->close.swap(retired);
@@ -223,11 +242,13 @@ void PolicySubscription::Unsubscribe() noexcept {
 PolicyProvider::~PolicyProvider() = default;
 
 Result<Decision> Authorize(std::shared_ptr<PolicyProvider> provider, const ExecutionContext& context, Action action) {
+    PolicyCallbackScope callback_scope;
+    auto owned_provider = std::move(provider);
     auto valid = Validate(context, action);
     if (!valid) return std::unexpected(valid.error());
-    if (!provider) return std::unexpected(Failure("sdk.authorization.policy_missing"));
+    if (!owned_provider) return std::unexpected(Failure("sdk.authorization.policy_missing"));
     try {
-        auto result = provider->Authorize(context, action);
+        auto result = owned_provider->Authorize(context, action);
         if (!result) return std::unexpected(Failure("sdk.authorization.provider_failure"));
         if (!result->revision || !ValidReason(result->reason_code))
             return std::unexpected(Failure("sdk.authorization.decision_invalid"));
@@ -236,17 +257,22 @@ Result<Decision> Authorize(std::shared_ptr<PolicyProvider> provider, const Execu
 }
 Result<std::unique_ptr<PolicySubscription>> SubscribeChanges(std::shared_ptr<PolicyProvider> provider,
     const ResourceScope& scope, PolicyChangeCallback callback) {
+    PolicyCallbackScope callback_scope;
+    auto owned_provider = std::move(provider);
+    PolicyChangeCallback source;
+    source.swap(callback); // Empty even a retained SBO parameter before any early return.
     if (!ValidScope(scope)) return std::unexpected(Failure("sdk.authorization.scope_invalid"));
-    if (!callback) return std::unexpected(Failure("sdk.authorization.subscription_invalid"));
-    if (!provider) return std::unexpected(Failure("sdk.authorization.policy_missing"));
+    if (!source) return std::unexpected(Failure("sdk.authorization.subscription_invalid"));
+    if (!owned_provider) return std::unexpected(Failure("sdk.authorization.policy_missing"));
     try {
-        auto owned = std::make_shared<PolicyChangeCallback>();
-        owned->swap(callback);
+        auto owned = std::make_shared<ChangeOwner>();
+        owned->function.swap(source);
         PolicyChangeCallback guarded = [owned, subscribed = scope](const PolicyChange& change) {
+            PolicyCallbackScope notification_callback;
             NotificationScope notification;
-            (*owned)(PolicyChange{subscribed, change.scope == subscribed ? change.revision : 0});
+            owned->function(PolicyChange{subscribed, change.scope == subscribed ? change.revision : 0});
         };
-        auto result = provider->SubscribeChanges(scope, std::move(guarded));
+        auto result = owned_provider->SubscribeChanges(scope, std::move(guarded));
         guarded = nullptr; // Explicitly clear std::function sources, including SBO.
         if (!result || !*result) return std::unexpected(Failure("sdk.authorization.subscription_invalid"));
         return result;
@@ -289,6 +315,7 @@ struct RevocablePolicy::Impl {
         observers.erase(observer); // The subscription's close lease still owns it.
     }
     void Close() noexcept {
+        PolicyCallbackScope callback_scope;
         std::map<Observer*, std::shared_ptr<Observer>> retired;
         {
             std::lock_guard lock(mutex);
@@ -332,11 +359,14 @@ Result<Decision> RevocablePolicy::Authorize(const ExecutionContext& context, Act
 }
 Result<std::unique_ptr<PolicySubscription>> RevocablePolicy::SubscribeChanges(
     const ResourceScope& scope, PolicyChangeCallback callback) {
+    PolicyCallbackScope callback_scope;
+    PolicyChangeCallback source;
+    source.swap(callback);
     if (!ValidScope(scope)) return std::unexpected(Failure("sdk.authorization.scope_invalid"));
-    if (!callback) return std::unexpected(Failure("sdk.authorization.subscription_invalid"));
+    if (!source) return std::unexpected(Failure("sdk.authorization.subscription_invalid"));
     const auto state = impl_;
-    auto owned = std::make_shared<PolicyChangeCallback>();
-    owned->swap(callback);
+    auto owned = std::make_shared<ChangeOwner>();
+    owned->function.swap(source);
     auto observer = std::make_shared<Observer>(scope, std::move(owned));
     auto handle = PolicySubscription::Create([weak = std::weak_ptr<Impl>(state), observer] {
         if (auto owner = weak.lock()) owner->Remove(observer.get());

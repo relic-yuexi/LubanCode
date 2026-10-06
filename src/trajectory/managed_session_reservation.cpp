@@ -34,8 +34,9 @@ std::expected<void, std::string> OnlyPublishedEntries(const std::filesystem::pat
 
 } // namespace
 
-ManagedSessionDirectory::ManagedSessionDirectory(TrajectoryDirectory directory, SessionLock lock)
-    : directory_(std::move(directory)), lock_(std::move(lock)) {}
+ManagedSessionDirectory::ManagedSessionDirectory(TrajectoryDirectory directory, SessionLock lock,
+    ManagedSessionOwnershipPublication publication)
+    : directory_(std::move(directory)), lock_(std::move(lock)), publication_(std::move(publication)) {}
 
 ManagedSessionReservation::ManagedSessionReservation(TrajectoryDirectory directory)
     : directory_(std::move(directory)) {}
@@ -139,7 +140,8 @@ std::expected<ManagedSessionDirectory, std::string> ManagedSessionReservation::F
         // Construct all potentially throwing path values before transferring the
         // lock. Failure retains the ownership marker and retires this instance.
         auto directory = directory_;
-        ManagedSessionDirectory finished(std::move(directory), std::move(lock_));
+        auto publication = *publication_;
+        ManagedSessionDirectory finished(std::move(directory), std::move(lock_), std::move(publication));
         terminal_ = true;
         return finished;
     } catch (...) {

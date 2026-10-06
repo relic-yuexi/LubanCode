@@ -102,6 +102,10 @@ public:
 // request_actor == initiating_subject; its capabilities only narrow permission.
 // A saved revision is provenance, never a cached permit. Recheck before dispatch
 // and publication; changes outside this process are not atomically revoked here.
+// SDK-owned policy callbacks and capture retirement reject blocking SDK lifecycle
+// calls. Do not destroy the last Runtime/Session owner or an in-use EventStream
+// owner inside them, or unload the SDK with live callbacks. A rejected blocking
+// call does not defer object destruction.
 // SubscribeChanges does not authorize data access. It freezes the requested
 // scope; malformed provider notices become that scope/revision=0 invalidations.
 // There is no initial replay or atomic subscribe+authorize. A future Managed

@@ -26,8 +26,9 @@ updater、Release 查询、渠道与 Gateway 已归宿主，组合构建也核 S
 候选；已合范围和逐源证据仍以阶段进度为准。
 
 后端、基础工具与 MCP 已共用 `runtime/assembly`。SDK 与 AppServer 共用执行对象，
-各自保留受理与排队；CLI、one-shot 仍用原会话栈。完整工具、插件、Hook 和记忆等
-能力尚未统一迁入公开 SDK。
+各自保留受理与排队。当前私有候选把 CLI 与 one-shot 的 Agent 装配也交给共用
+ExecutionOwner，宿主工具、后端和原会话栈仍保留；[阶段进度](sdk-stage-status.md)
+列源码与远端验收范围。完整工具、插件、Hook 和记忆等能力尚未统一迁入公开 SDK。
 新增宿主可用下文 API，现有 CLI 迁移须保留原功能，不能靠删去功能来完成拆分。
 验收清单见 [SDK 拆分计划](../../todos/LubanCore与CLI分离_核心库独立成宿主底座设计.todo)。
 
@@ -359,3 +360,11 @@ full 超限整份拒绝，不裁成 preview；这批未提供 full 分页或附�
 操作终态由 `SessionService` 写入原操作账。最终正文另存会话目录下 `sdk-results`，
 其对应终态事实写稳后才发完成事件。工具完整原件仍走现有 V3 结果仓；SDK 不套远端
 preview 同步策略。写盘失败会标明结果未可靠保存并停止继续执行，不回报假成功。
+
+## Session-owned Command Jobs（候选）
+
+这段接口尚待本组合远端 CI。选择内置 `run_command` 后，可用 `SessionOptions::command_jobs` 显式给登记时长、命令时限、输出上限、并发与登记总量；缺省关闭。模型参数 `execution_mode="session_job"` 才请求后台 Job，普通前台不变。Job 只活在这场 Session 内，不能替代 Detached Runner。
+
+宿主经 `ListJobs` 取得真实身份，再调用 `ReadJob`、`WaitJob`、`CancelJob` 和 `ReadJobPreview`。查询只读 owned 缓存；主后台完成互不冒称成功。取消父回合、父失败或预算耗尽会停其未完 Job，正常父完成保留后台执行；Close 等真线程退出。同 ID 恢复沿原 run，只读旧票，不重建执行权。
+
+preview 至多 4096 字节，属于可信本地宿主值。截短不等于脱敏或出站许可，Worker 仍须接 ResultProjector 与 Node/Session 双门；首批没有 Full Job API。安装例子可用 `lubancore_consumer command-jobs ABS_STATE ABS_PROBE` 验收，probe 由 CI 从真实私有 target 移位提供，库本身不安装这件夹具。开场及失败合同见 [Command Jobs](sdk-command-jobs.md)，交付状态以 [阶段进度](sdk-stage-status.md) 为准。

@@ -13,6 +13,7 @@
 #include "trajectory/opening.hpp"
 
 namespace lubancore::detail {
+class SessionPrepareJournal;
 
 // Initialization-only owner. Each tool/VM moves exactly once into the existing
 // Session registry. The opening participant owns only declaration metadata.
@@ -20,7 +21,8 @@ class SessionLua final : public std::enable_shared_from_this<SessionLua> {
 public:
     static Result<std::shared_ptr<SessionLua>> Prepare(
         const std::optional<lua::v1::Selection>& selection,
-        std::filesystem::path owned_root, std::string workspace_key, std::string resume_id);
+        std::filesystem::path owned_root, std::string workspace_key, std::string resume_id,
+        std::shared_ptr<SessionPrepareJournal> journal = {});
     std::vector<std::string> Names() const;
     Result<std::vector<std::unique_ptr<lubancode::tools::Tool>>> TakeTools();
     lubancode::trajectory::V3OpeningParticipant OpeningParticipant();

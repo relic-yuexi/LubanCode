@@ -10,7 +10,9 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -126,6 +128,234 @@ std::string ClosedLocal(Fixture& fixture) {
     REQUIRE_MESSAGE(closed.error_code.empty(), (closed.error_code + ": " + closed.message));
     return id;
 }
+
+traj::ManagedSessionCreationAudit Creator() { return {"tenant-a", "user-a", "user", "credential-a", 7}; }
+static_assert(!std::is_constructible_v<traj::ManagedSessionDirectory, traj::TrajectoryDirectory,
+    traj::SessionLock, traj::ManagedSessionOwnershipPublication>);
+
+void SameDurablePublication(const traj::ManagedSessionOwnershipPublication& actual,
+                            const traj::ManagedSessionOwnershipPublication& expected) {
+    REQUIRE(actual.knowledge == expected.knowledge);
+    REQUIRE(actual.expected == expected.expected);
+    REQUIRE(actual.captured_bytes == expected.captured_bytes);
+    REQUIRE(actual.publication_bytes == expected.publication_bytes);
+    REQUIRE(actual.requested == expected.requested);
+    REQUIRE(actual.native.has_value());
+    REQUIRE(actual.native->has_value());
+    REQUIRE(expected.native.has_value());
+    REQUIRE(expected.native->has_value());
+    REQUIRE(actual.native->value().outcome == expected.native->value().outcome);
+    REQUIRE(actual.error_code == expected.error_code);
+    REQUIRE(actual.message == expected.message);
+}
+
+void ManagedOnly(traj::SessionManager& manager, const Fixture& fixture, const std::string& id) {
+    const std::string unavailable = "managed.manager.operation_unavailable";
+    const auto local = manager.LaunchSession(); REQUIRE_FALSE(local); REQUIRE(local.error() == unavailable);
+    REQUIRE(manager.Clear({}, nullptr).error_code == unavailable);
+    traj::ResumeRequest resume; resume.source_session_id = id;
+    REQUIRE(manager.ResumeAsNew(resume).error_code == unavailable);
+    REQUIRE(manager.ProbeResumeSource(id).error_code == unavailable);
+    REQUIRE(manager.LatestResumableSessionId().empty());
+    const auto recovery = manager.RecoverWorkspace();
+    REQUIRE(recovery.sessions.empty()); REQUIRE(recovery.adopted_session_id.empty());
+    REQUIRE(recovery.notes == std::vector<std::string>{unavailable});
+    const auto archive = manager.ArchiveSession(id); REQUIRE_FALSE(archive); REQUIRE(archive.error() == unavailable);
+    const auto unarchive = manager.UnarchiveSession(id); REQUIRE_FALSE(unarchive); REQUIRE(unarchive.error() == unavailable);
+    const auto remove = manager.DeleteSession(id, "must not mutate"); REQUIRE_FALSE(remove); REQUIRE(remove.error() == unavailable);
+    const auto reference = manager.RecordResumeReference(id, "must not mutate"); REQUIRE_FALSE(reference); REQUIRE(reference.error() == unavailable);
+    const auto registration = manager.RegisterCheckout(fixture.options.identity); REQUIRE_FALSE(registration); REQUIRE(registration.error() == unavailable);
+    const auto approval = manager.UpdateApprovalMode(lubancode::ApprovalMode::Default); REQUIRE_FALSE(approval); REQUIRE(approval.error() == unavailable);
+}
+
+void CheckManagedManagerOpening(Fixture& fixture) {
+    const std::string id = "20261006-120000-MAN101";
+    auto pending = fixture.Reserve(id);
+    const auto published = pending->PublishOwnership();
+    REQUIRE(published.knowledge == Knowledge::Committed);
+    auto finished = pending->Finish(); REQUIRE(finished);
+    const auto directory = finished->directory().session_dir();
+    const auto stream = finished->directory().v3_stream_path();
+    const auto lock_bytes = Read(directory / "session.lock");
+    auto options = fixture.options;
+    unsigned callbacks = 0;
+    std::shared_ptr<traj::MemoryCapability> retained_memory;
+    std::shared_ptr<traj::NamedResultCapability> retained_named;
+    options.v3_opening_participant = [&](const traj::V3OpeningContext& context)
+        -> std::expected<nlohmann::json, std::string> {
+        ++callbacks;
+        retained_memory = context.memory_capability; retained_named = context.named_result_capability;
+        REQUIRE(context.session_id == id);
+        REQUIRE(context.session_dir == directory);
+        REQUIRE(Read(directory / "session.lock") == lock_bytes);
+        REQUIRE_FALSE(traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()));
+        return nlohmann::json{{"hostBindings", {{"managedFixture", true}}}};
+    };
+    traj::SessionManager manager(options);
+    auto opened = manager.LaunchManagedSession(std::move(*finished), Creator());
+    REQUIRE_MESSAGE(opened.has_value(), (opened ? "" : opened.error()));
+    REQUIRE(callbacks == 1);
+    REQUIRE_FALSE(finished->lock().holds());
+    pending.reset(); finished = std::unexpected(std::string("consumed real opening"));
+    REQUIRE((*opened)->lock.holds());
+    REQUIRE((*opened)->lock.path() == directory / "session.lock");
+    REQUIRE(Read(directory / "session.lock") == lock_bytes);
+    REQUIRE_FALSE(traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()));
+    REQUIRE((*opened)->session_id() == id);
+    REQUIRE((*opened)->managed_publication);
+    SameDurablePublication(*(*opened)->managed_publication, published);
+    REQUIRE_FALSE(fs::exists(directory / "session.json"));
+    REQUIRE_FALSE(fs::exists(directory / "main.jsonl"));
+    auto ledger = v3::ReadV3Ledger(stream); REQUIRE(ledger);
+    REQUIRE(ledger->session_id == id); REQUIRE(ledger->run_id == "main-0001"); REQUIRE(ledger->lines == 3);
+    const auto initial_bytes = Read(stream);
+    const auto first_line = nlohmann::json::parse(initial_bytes.substr(0, initial_bytes.find('\n')));
+    REQUIRE(first_line.at("schemaVersion") == 3); REQUIRE(first_line.at("seq") == 1);
+    REQUIRE(first_line.at("sessionId") == id); REQUIRE(first_line.at("runId") == "main-0001");
+    const auto metadata = first_line.at("systemMeta").at("managedSession");
+    REQUIRE(metadata.size() == 9);
+    REQUIRE(metadata.at("schemaVersion") == 1); REQUIRE(metadata.at("mode") == "Managed");
+    REQUIRE(metadata.at("tenantId") == fixture.Owner(id).tenant_id);
+    REQUIRE(metadata.at("projectId") == fixture.Owner(id).project_id);
+    REQUIRE(metadata.at("workspaceKey") == fixture.Owner(id).workspace_key);
+    REQUIRE(metadata.at("sessionId") == id); REQUIRE(metadata.at("bindingVersion") == 1);
+    const nlohmann::json subject{{"tenantId", "tenant-a"}, {"userId", "user-a"},
+        {"actorKind", "user"}, {"credentialId", "credential-a"}};
+    REQUIRE(metadata.at("creationSubject") == subject); REQUIRE(metadata.at("openingPolicyRevision") == 7);
+    ManagedOnly(manager, fixture, id);
+    REQUIRE(Read(stream) == initial_bytes);
+    REQUIRE(Read(directory / traj::kManagedSessionOwnershipFile) == published.publication_bytes);
+    const auto closed = manager.Close({}, nullptr); REQUIRE(closed.error_code.empty());
+    REQUIRE(manager.active()->status == traj::SessionStatus::Closed);
+    REQUIRE_FALSE(manager.active()->lock.holds()); REQUIRE_FALSE(fs::exists(directory / "session.lock"));
+    REQUIRE(retained_memory); REQUIRE(retained_named);
+    REQUIRE(retained_memory->Store("after real Close", "text/plain").error.code == "cas.owner_closed");
+    const auto late_material = retained_named->BeginMaterial("managed-cleanup");
+    REQUIRE_FALSE(late_material); REQUIRE(late_material.error().code == "named_result.owner_closed");
+    SameDurablePublication(*manager.active()->managed_publication, published);
+    auto closed_ledger = v3::ReadV3Ledger(stream); REQUIRE(closed_ledger);
+    REQUIRE(closed_ledger->lines == 4);
+    const auto closed_bytes = Read(stream); REQUIRE(closed_bytes.starts_with(initial_bytes));
+    ManagedOnly(manager, fixture, id); REQUIRE(Read(stream) == closed_bytes);
+    auto replacement = traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()); REQUIRE(replacement);
+    replacement->Release();
+    traj::SessionManager local(fixture.options);
+    REQUIRE(local.ProbeResumeSource(id).error_code == "managed.ownership.local_trusted_rejected");
+    REQUIRE(Read(stream) == closed_bytes);
+}
+
+void CheckManagedOpeningFailures(Fixture& fixture) {
+    for (unsigned mode = 0; mode != 10; ++mode) {
+        const auto id = "20261006-120000-FAIL" + std::to_string(mode);
+        auto pending = fixture.Reserve(id);
+        const auto published = pending->PublishOwnership(); REQUIRE(published.knowledge == Knowledge::Committed);
+        auto finished = pending->Finish(); REQUIRE(finished);
+        const auto directory = finished->directory().session_dir(); const auto stream = finished->directory().v3_stream_path();
+        auto creation = Creator();
+        if (mode == 0) creation.tenant_id = "foreign-tenant";
+        if (mode == 1) creation.user_id.clear();
+        if (mode == 2) creation.actor_kind = "administrator";
+        if (mode == 3) creation.credential_id.clear();
+        if (mode == 4) creation.opening_policy_revision = 0;
+        if (mode == 5) creation.user_id = std::string(513, 'x');
+        if (mode == 6) creation.user_id = std::string(1, static_cast<char>(0xff));
+        if (mode == 7) creation.credential_id = "bad\ncredential";
+        auto options = fixture.options;
+        unsigned callbacks = 0;
+        options.v3_opening_participant = [&](const traj::V3OpeningContext&)
+            -> std::expected<nlohmann::json, std::string> { ++callbacks; return nlohmann::json::object(); };
+        if (mode == 8) Write(directory / traj::kManagedSessionOwnershipFile, "changed owned marker");
+        std::unique_ptr<Fixture> foreign;
+        if (mode == 9) { foreign = std::make_unique<Fixture>(); options = foreign->options; }
+        traj::SessionManager manager(options);
+        auto rejected = manager.LaunchManagedSession(std::move(*finished), creation);
+        REQUIRE_FALSE(rejected);
+        if (mode < 8) REQUIRE(rejected.error() == "managed.session.creation_invalid");
+        if (mode == 8) REQUIRE(rejected.error() == "managed.ownership.invalid_metadata");
+        if (mode == 9) REQUIRE(rejected.error() == "managed.session.workspace_mismatch");
+        REQUIRE(callbacks == 0); REQUIRE_FALSE(manager.active());
+        REQUIRE_FALSE(fs::exists(directory / "session.lock")); REQUIRE_FALSE(fs::exists(stream));
+        REQUIRE(Read(directory / traj::kManagedSessionOwnershipFile) ==
+            (mode == 8 ? "changed owned marker" : published.publication_bytes));
+        SameDurablePublication(pending->PublishOwnership(), published);
+        const auto entries = Entries(directory);
+        ManagedOnly(manager, fixture, id); REQUIRE(Entries(directory) == entries);
+    }
+    for (unsigned mode = 0; mode != 5; ++mode) {
+        const auto id = "20261006-120000-CB" + std::to_string(mode);
+        auto pending = fixture.Reserve(id);
+        const auto published = pending->PublishOwnership(); REQUIRE(published.knowledge == Knowledge::Committed);
+        auto finished = pending->Finish(); REQUIRE(finished);
+        const auto directory = finished->directory().session_dir(); const auto stream = finished->directory().v3_stream_path();
+        auto options = fixture.options;
+        unsigned callbacks = 0, append_checks = 0;
+        std::shared_ptr<traj::MemoryCapability> retained_memory;
+        std::shared_ptr<traj::NamedResultCapability> retained_named;
+        options.v3_opening_participant = [&](const traj::V3OpeningContext& context)
+            -> std::expected<nlohmann::json, std::string> {
+            ++callbacks; REQUIRE(context.session_id == id);
+            retained_memory = context.memory_capability; retained_named = context.named_result_capability;
+            REQUIRE_FALSE(traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()));
+            if (mode == 0) { Write(directory / traj::kManagedSessionOwnershipFile, "drift during actual callback"); return nlohmann::json::object(); }
+            if (mode == 1) throw std::runtime_error("PRIVATE_OPENING_FAILURE");
+            if (mode == 2) return nlohmann::json{{"managedSession", {{"tenantId", "foreign"}}}};
+            return nlohmann::json::object();
+        };
+        if (mode >= 3) options.v3_main_io_fault = [&]() -> std::optional<std::string> {
+            if (++append_checks == (mode == 3 ? 2u : 3u)) return "fixture.initial_append_failed";
+            return std::nullopt;
+        };
+        traj::SessionManager manager(options);
+        auto rejected = manager.LaunchManagedSession(std::move(*finished), Creator()); REQUIRE_FALSE(rejected);
+        REQUIRE(callbacks == 1); REQUIRE_FALSE(manager.active()); REQUIRE_FALSE(fs::exists(directory / "session.lock"));
+        REQUIRE(retained_memory); REQUIRE(retained_named);
+        const auto after_failure = retained_memory->Store("after failed opening", "text/plain");
+        REQUIRE(after_failure.state == traj::CasCommitState::NotCommitted);
+        REQUIRE(after_failure.error.code == "cas.owner_closed");
+        const auto late_material = retained_named->BeginMaterial("managed-cleanup");
+        REQUIRE_FALSE(late_material); REQUIRE(late_material.error().code == "named_result.owner_closed");
+        if (mode == 0) REQUIRE(rejected.error() == "managed.ownership.invalid_metadata");
+        if (mode == 1) REQUIRE(rejected.error() == "session.opening_failed: opening.participant_exception");
+        if (mode == 2) REQUIRE(rejected.error() == "session.opening_failed: opening.reserved_metadata");
+        if (mode >= 3) {
+            if (mode == 3) REQUIRE(rejected.error().starts_with("session.v3_start_failed: v3writer.start_event_failed:"));
+            else REQUIRE(rejected.error() == "managed.session.approval_baseline_failed: v3writer.injected");
+            REQUIRE(append_checks == (mode == 3 ? 2u : 3u));
+            const auto partial_bytes = Read(stream); REQUIRE_FALSE(partial_bytes.empty());
+            const auto partial = nlohmann::json::parse(partial_bytes.substr(0, partial_bytes.find('\n')));
+            REQUIRE(partial.at("systemMeta").at("managedSession").at("sessionId") == id);
+            REQUIRE(partial.at("systemMeta").at("managedSession").at("creationSubject").at("userId") == Creator().user_id);
+        } else REQUIRE_FALSE(fs::exists(stream));
+        SameDurablePublication(pending->PublishOwnership(), published);
+        REQUIRE(Read(directory / traj::kManagedSessionOwnershipFile) ==
+            (mode == 0 ? "drift during actual callback" : published.publication_bytes));
+        const auto entries = Entries(directory);
+        ManagedOnly(manager, fixture, id); REQUIRE(Entries(directory) == entries);
+        REQUIRE_FALSE(traj::ManagedSessionReservation::Reserve(fixture.options.workspaces_root,
+            fixture.Owner(id), traj::SessionManagerClock{}.LockOwner()));
+        auto free_lock = traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()); REQUIRE(free_lock);
+    }
+}
+
+void CheckManagedRejectsActiveLocal(Fixture& fixture) {
+    traj::SessionManager manager(fixture.options);
+    auto local = manager.LaunchSession(); REQUIRE(local);
+    const auto local_id = (*local)->session_id(); const auto local_stream = (*local)->directory.v3_stream_path();
+    const auto local_bytes = Read(local_stream);
+    const auto id = "20261006-120000-ACTIVE";
+    auto pending = fixture.Reserve(id); const auto published = pending->PublishOwnership();
+    REQUIRE(published.knowledge == Knowledge::Committed);
+    auto finished = pending->Finish(); REQUIRE(finished); const auto directory = finished->directory().session_dir();
+    auto rejected = manager.LaunchManagedSession(std::move(*finished), Creator()); REQUIRE_FALSE(rejected);
+    REQUIRE(rejected.error() == "managed.session.active_exists");
+    REQUIRE(manager.active()->session_id() == local_id); REQUIRE(manager.active()->lock.holds());
+    REQUIRE(Read(local_stream) == local_bytes); REQUIRE_FALSE(fs::exists(directory / "session.lock"));
+    REQUIRE_FALSE(fs::exists(traj::TrajectoryDirectory::OpenExisting(directory).v3_stream_path()));
+    REQUIRE(Read(directory / traj::kManagedSessionOwnershipFile) == published.publication_bytes);
+    // Rejecting conversion did not put the existing Local owner into Managed mode.
+    REQUIRE(manager.UpdateApprovalMode(lubancode::ApprovalMode::Default));
+    REQUIRE(manager.Close({}, nullptr).error_code.empty());
+}
 } // namespace
 
 TEST_CASE("managed reservation: owned durable publication precedes directories and real V3 writer") {
@@ -168,6 +398,7 @@ TEST_CASE("managed reservation: owned durable publication precedes directories a
     finished = std::unexpected(std::string("test releases finished owner"));
     REQUIRE_FALSE(fs::exists(directory / "session.lock"));
     REQUIRE(Read(directory / traj::kManagedSessionOwnershipFile) == published.publication_bytes);
+    CheckManagedManagerOpening(fixture);
     Marker("actual");
 }
 
@@ -296,6 +527,8 @@ TEST_CASE("managed reservation: Finish rechecks metadata and late entries withou
     abandoned.reset();
     REQUIRE_FALSE(fs::exists(abandoned_dir / "session.lock"));
     REQUIRE(Read(abandoned_dir / "late-entry") == "retain before publication");
+    CheckManagedOpeningFailures(fixture);
+    CheckManagedRejectsActiveLocal(fixture);
     Marker("finish");
 }
 

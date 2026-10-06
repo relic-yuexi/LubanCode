@@ -36,9 +36,11 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/trajectory/test_managed_session_reservation.cpp"
   "${_lubancore_tests_root}/unit/memory/test_memory_project_commit_handoff.cpp"
   "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_journal_receipts.cpp"
+  "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_journal_owner.cpp"
   "${_lubancore_tests_root}/unit/platform/test_atomic_write.cpp"
   "${_lubancore_tests_root}/unit/tools/test_lua_protected.cpp"
   "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_result_store.cpp"
+  "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_result_immutable_publication.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_session_resources.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_session_execution.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_execution_owner.cpp"
@@ -79,6 +81,12 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   "${CMAKE_SOURCE_DIR}/src/sdk/operation_ledger.cpp"
   # The same private Job producer is used by reference fixtures, not exported.
   "${CMAKE_SOURCE_DIR}/src/sdk/job_operations.cpp"
+  "${CMAKE_SOURCE_DIR}/src/sdk/adapters.cpp"
+  "${CMAKE_SOURCE_DIR}/src/sdk/command_jobs.cpp"
+  "${CMAKE_SOURCE_DIR}/src/sdk/command_jobs_opening.cpp"
+  # The private storage guards exercise the real adapter without exporting it
+  # from the shared SDK. Public Session fixtures still call the shared library.
+  "${CMAKE_SOURCE_DIR}/src/sdk/named_results.cpp"
   # The public-only child acceptance source is also built after relocation. It
   # belongs to these fixture executables, never the SDK library closure.
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/subagents.cpp"
@@ -87,6 +95,9 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/todo_write.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/agentic_rag.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/web_fetch.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/command_jobs.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/named_results.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/journal_owner.cpp"
   ${LUBANCORE_FOCUSED_TEST_SOURCES})
 if(LUBANCORE_WITH_LUA)
   target_sources(lubancore_sdk_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua.cpp")
@@ -172,6 +183,18 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-result-store")
     if(TEST "${sdk_original_test}")
       set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "trajectory-v3-result-store")
+    endif()
+  elseif(sdk_basename STREQUAL "test_v3_result_immutable_publication.cpp")
+    set(sdk_original_test "unit.trajectory_v3.v3_result_immutable_publication")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "platform-atomic-write")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "platform-atomic-write")
+    endif()
+  elseif(sdk_basename STREQUAL "test_lubancore_named_result_guards.cpp")
+    set(sdk_original_test "integration.sdk.lubancore_named_result_guards")
+    set_tests_properties("${sdk_test}" PROPERTIES RESOURCE_LOCK "platform-atomic-write")
+    if(TEST "${sdk_original_test}")
+      set_tests_properties("${sdk_original_test}" PROPERTIES RESOURCE_LOCK "platform-atomic-write")
     endif()
   elseif(sdk_basename STREQUAL "test_v3_journal_receipts.cpp")
     set(sdk_original_test "unit.trajectory_v3.v3_journal_receipts")

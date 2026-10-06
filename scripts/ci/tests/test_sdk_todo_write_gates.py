@@ -231,7 +231,7 @@ class TodoProfilesAndClassificationTests(unittest.TestCase):
     def test_on_off_rosters_both_require_todo_actual_routes(self):
         installed = load_gate("todo_profile_installed", SCRIPT.parent / "check_installed_sdk.py")
         profile = load_gate("todo_lua_profile", SCRIPT.parent / "sdk_lua_profile.py")
-        for enabled, native_count, consumer_count in ((True, 59, 34), (False, 57, 31)):
+        for enabled, native_count, consumer_count in ((True, 69, 37), (False, 67, 34)):
             self.assertEqual(len(profile.focused_roster(focused.REQUIRED, enabled)), native_count)
             self.assertEqual(len(profile.consumer_roster(installed.REQUIRED_TESTS, enabled)), consumer_count)
             self.assertIn("sdk.focused.lubancore_todo_write", profile.focused_roster(focused.REQUIRED, enabled))

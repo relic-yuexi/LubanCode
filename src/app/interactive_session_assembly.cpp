@@ -660,7 +660,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         plan_host.theme = &theme;
         plan_host.session_runtime = &session_runtime_;
         plan_host.prompt_options = &prompt_options;
-        plan_host.main_agent = [this]() { return main_agent.has_value() ? &*main_agent : nullptr; };
+        plan_host.main_agent = [this]() { return MainAgent(); };
         plan_host.registry = [this]() { return &registry(); };
         plan_host.agent_tool = [this]() { return session_agent_tool(); };
         plan_host.rebuild_preserving = [this]() { RebuildLoop(/*preserve_history=*/true); };
@@ -933,7 +933,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         // 续跑 /loop resume <id>。停了的账落档(FlushLoopEvents)。
         transcript_hooks.stop_active_loops = [this]() -> int { return loop_wiring_.StopAllForEsc(); };
         transcript_hooks.history = [this]() -> const std::vector<lubancode::api::Message>* {
-            return main_agent.has_value() ? &main_agent->History() : nullptr;
+            return MainAgent() != nullptr ? &MainAgent()->History() : nullptr;
         };
         transcript_hooks.turn_views = [this]() -> const std::vector<lubancode::runtime::TurnView>* {
             return &turn_views_;
@@ -1033,7 +1033,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             // 动态工具 P1:恢复走 RestoreSessionHistory——历史进账的同时从
             // 正式 discovery event 重建 DiscoveryLedger(单子 §9.2);compact
             // 那一路仍走 ReplaceHistory,引用账不丢(§9.3)。
-            main_agent->RestoreSessionHistory(resumed);
+            MainAgent()->RestoreSessionHistory(resumed);
             // 旧史重放(P3 显示侧):与 /resume 同一颗 formatter,一次性铺
             // 进终端滚动缓冲,不进 TranscriptUiController 的 live 条目账。
             // v3 源吃 RestoredHistoryView(压缩分界线带 applied 持久 token
@@ -1145,7 +1145,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     //     钉死的正是这个次序。危险工具执行中途没有任何调用点,天然插不进话。
     reapply_peer_inbox = [this, peer_inbox_poll]() {
         // 批四·病十二:inbox 是接线,进 AgentWiring(其余接线照原样带上)。
-        lubancode::agent::AgentWiring wiring = main_agent->wiring();
+        lubancode::agent::AgentWiring wiring = MainAgent()->wiring();
         wiring.inbox = [this, peer_inbox_poll]() -> std::optional<lubancode::api::Message> {
             PumpSteeringToSubagents();
             // 前缀缓存守恒单 §五 B:worktree enter/exit 在工具执行中途挂账的
@@ -1202,7 +1202,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             }
             return std::nullopt;
         };
-        main_agent->SetWiring(std::move(wiring));
+        MainAgent()->SetWiring(std::move(wiring));
     };
     reapply_peer_inbox();
     // P0-4 排队账(§5.5):队列的终态安全变化(enqueue/用户删除)从队列
@@ -1271,10 +1271,10 @@ TerminalSessionController::~TerminalSessionController() {
     // 跨会话传话收尾:摘掉收件点(别让重建钩子再碰已停的 runtime),写
     // closing、摘名片、停 pipe——此后递来的信连不上,发送方拿 unavailable。
     reapply_peer_inbox = nullptr;
-    if (main_agent.has_value()) {
-        lubancode::agent::AgentWiring wiring = main_agent->wiring();
+    if (MainAgent() != nullptr) {
+        lubancode::agent::AgentWiring wiring = MainAgent()->wiring();
         wiring.inbox = nullptr;
-        main_agent->SetWiring(std::move(wiring));
+        MainAgent()->SetWiring(std::move(wiring));
     }
     peer_wiring_.Stop();
     // UI 回调清挂(原先的 UiHandlerGuard):回调抓着 this,析构前必须摘掉,
@@ -1332,8 +1332,8 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
         agent_tool->SetProjectInstructions(project_instructions);
     }
     std::vector<lubancode::api::Message> old_history;
-    if (preserve_history && main_agent.has_value()) {
-        old_history = main_agent->History();
+    if (preserve_history && MainAgent() != nullptr) {
+        old_history = MainAgent()->History();
     }
     // 运行策略走统一 profile(规格根因一):输出上限三级解析(config >
     // provider > 模型目录),unset 交服务端默认,不再有写死的 4096;步数、
@@ -1473,13 +1473,22 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     main_agent_profile.prompt_sections.web = prompt_options.web;
     main_agent_profile.prompt_sections.lsp = prompt_options.lsp;
     main_agent_profile.prompt_sections.wire = prompt_options.wire;
-    main_agent.emplace(wrapped_backend, registry(), main_agent_profile);
+    // Commands borrow the Agent address. Retain the original stable slot across
+    // successful rebuilds; never replace the owner after its first creation.
+    if (main_execution_) {
+        main_execution_->RebuildHostAgent(main_agent_profile);
+    } else {
+        auto execution_profile = main_agent_profile;
+        main_execution_ = std::make_unique<lubancode::runtime::ExecutionOwner>(
+            lubancode::runtime::HostBorrowedExecutionResources{wrapped_backend, registry()},
+            std::move(execution_profile));
+    }
     // Soul 会话冻结单 P0:同会话重建(preserve_history)继承锁定态——已锁
     // 快照的会话重建后依旧锁定(回调幂等:宿主账已置位,只是给新 Agent
     // 挂上同一道闸)。/clear 的重建前已由 ResetSoulSessionForNewSession
     // 把快照重置成未锁定新草稿,这里自然是未锁。
     if (soul_session->locked) {
-        main_agent->LockSessionSoul();
+        MainAgent()->LockSessionSoul();
     }
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry().Find("agent"));
         agent_tool != nullptr) {
@@ -1505,7 +1514,7 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     }
     // mid-turn 上下文安全点(0.27.x):窗口与压力通报随 loop 重建重灌;窗口
     // 的后续变化(/context、/model)由 RunUserTurn 发轮前再同步。
-    main_agent->SetContextWindowTokens(context_tracker.window_tokens());
+    MainAgent()->SetContextWindowTokens(context_tracker.window_tokens());
     // 接线(批四·病十二):压力钩进 AgentWiring;inbox 由 peer 钩在底下重灌。
     lubancode::agent::AgentWiring main_wiring;
     main_wiring.on_context_pressure = [this](const lubancode::agent::ContextPressure& pressure) {
@@ -1519,12 +1528,12 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     // 在轮次收口后处理,看到的已是锁定态(§5.1"排队命令按此边界判定,
     // 不能靠 response 是否返回判断")。
     main_wiring.on_session_soul_locked = [this]() { OnSessionSoulLocked(); };
-    main_agent->SetWiring(std::move(main_wiring));
+    MainAgent()->SetWiring(std::move(main_wiring));
     if (reapply_peer_inbox) {
         reapply_peer_inbox();  // 跨会话收件点:重建的 loop 也要能收信
     }
     if (preserve_history) {
-        main_agent->ReplaceHistory(std::move(old_history));
+        MainAgent()->ReplaceHistory(std::move(old_history));
     }
 }
 
@@ -1537,7 +1546,7 @@ void TerminalSessionController::SyncAgentRequestPolicy() {
     // Soul 会话冻结单 P0:魂的同步加锁定闸——已锁定的会话跳过
     // SetSoul/SetSoulName,configured 默认值的后续变更不许覆盖已锁快照
     //(§5.1 越界禁令;Agent::SetSoul 自身也挡,这里是双保险)。
-    if (!main_agent.has_value()) {
+    if (MainAgent() == nullptr) {
         return;
     }
     lubancode::api::RequestProfile request;
@@ -1561,21 +1570,21 @@ void TerminalSessionController::SyncAgentRequestPolicy() {
         if (capability.declared && capability.tool_reference) {
             request.server_tool_search =
                 capability.server_tool_search.empty() ? native_server_tool_search : capability.server_tool_search;
-            main_agent->SetNativeDeferredTools(true);
+            MainAgent()->SetNativeDeferredTools(true);
         } else {
             request.server_tool_search.clear();
-            main_agent->SetNativeDeferredTools(false);
+            MainAgent()->SetNativeDeferredTools(false);
             TermOut() << theme.error
                       << "[tool_search] 当前模型未声明 deferred_tools 能力,已停发 defer_loading/服务端"
                          "工具搜索声明(延迟工具定义照常全量发送);切回有声明的模型自动恢复。"
                       << theme.reset << "\n";
         }
     }
-    main_agent->SetRequestProfile(std::move(request));
-    main_agent->SetModelInstructions(*current_model_instructions);
-    if (!main_agent->soul_locked()) {
-        main_agent->SetSoulName(soul_session->name);
-        main_agent->SetSoul(soul_session->content);
+    MainAgent()->SetRequestProfile(std::move(request));
+    MainAgent()->SetModelInstructions(*current_model_instructions);
+    if (!MainAgent()->soul_locked()) {
+        MainAgent()->SetSoulName(soul_session->name);
+        MainAgent()->SetSoul(soul_session->content);
     }
 }
 
@@ -1626,8 +1635,8 @@ void TerminalSessionController::AdoptResumedSessionSoul(
     }
     // main_agent 可能已按开场默认建好:整份重灌(换场即换魂,不受旧锁挡);
     // resume 后本会话从快照继续,锁定态照源场。
-    if (main_agent.has_value()) {
-        main_agent->AdoptSessionSoul(soul_session->name, soul_session->content, soul_session->locked);
+    if (MainAgent() != nullptr) {
+        MainAgent()->AdoptSessionSoul(soul_session->name, soul_session->content, soul_session->locked);
     }
 }
 
@@ -1872,7 +1881,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     materials.session_query.main_deferral = main_deferral;
     materials.session_query.main_proxy_reference = main_proxy;
     materials.session_query.main_native_reference = main_native;
-    materials.session_query.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
+    materials.session_query.main_agent = MainAgent();
     materials.session_query.last_compact_line = &last_compact_line;
     materials.session_query.prompt_options = &prompt_options;
     materials.session_query.trajectory = session_runtime_.trajectory();
@@ -1889,7 +1898,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     materials.session_lifecycle.spinner_enabled = spinner_enabled;
     materials.session_lifecycle.active_provider = &active_provider;
     materials.session_lifecycle.current_model = current_model;
-    materials.session_lifecycle.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
+    materials.session_lifecycle.main_agent = MainAgent();
     materials.session_lifecycle.agent_tool = session_agent_tool();
     materials.session_lifecycle.context_tracker = &context_tracker;
     materials.session_lifecycle.model_router = model_router.get();
@@ -1934,7 +1943,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     materials.settings.current_think_history = current_think_history;
     materials.settings.current_model_instructions = current_model_instructions;
     materials.settings.context_tracker = &context_tracker;
-    materials.settings.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
+    materials.settings.main_agent = MainAgent();
     materials.settings.session_runtime = &session_runtime_;
     materials.settings.trajectory = session_runtime_.trajectory();
     materials.settings.prompt_options = &prompt_options;
@@ -1978,7 +1987,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     materials.doctor.registry = &registry();
     materials.doctor.sub_registry = &sub_registry();
     materials.doctor.tool_runtime = tool_runtime_.has_value() ? &*tool_runtime_ : nullptr;
-    materials.doctor.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
+    materials.doctor.main_agent = MainAgent();
     materials.doctor.session_runtime = &session_runtime_;
     materials.doctor.trajectory = session_runtime_.trajectory();
     materials.doctor.telemetry_service = telemetry_service_.get();
@@ -2029,7 +2038,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     materials.workflow.model_router = model_router.get();
     materials.workflow.registry = &registry();
     materials.workflow.agent_tool = session_agent_tool();
-    materials.workflow.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
+    materials.workflow.main_agent = MainAgent();
     materials.workflow.session_runtime = &session_runtime_;
     materials.workflow.trajectory = session_runtime_.trajectory();
     materials.workflow.session_events = &session_events_;
@@ -2043,7 +2052,7 @@ void TerminalSessionController::AssembleDispatchContext() {
 SessionCommandState TerminalSessionController::MakeSessionCommandState() {
     SessionCommandState state{
         [this](bool preserve_history) { RebuildLoop(preserve_history); },
-        *main_agent,
+        *MainAgent(),
         session_compact_epoch,
         session_title,
         session_start_ts,
@@ -2056,8 +2065,8 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             // 在此回调之前已把新 Agent 建起来(可能带着旧快照),这里整份
             // 重灌换掉。
             ResetSoulSessionForNewSession();
-            if (main_agent.has_value()) {
-                main_agent->AdoptSessionSoul(soul_session->name, soul_session->content,
+            if (MainAgent() != nullptr) {
+                MainAgent()->AdoptSessionSoul(soul_session->name, soul_session->content,
                                              soul_session->locked);
             }
             EmitSessionHook(lubancode::hooks::HookEvent::SessionEnd, nlohmann::json{{"reason", "clear"}}, "clear");

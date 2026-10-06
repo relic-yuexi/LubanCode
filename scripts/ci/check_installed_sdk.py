@@ -27,6 +27,9 @@ except ImportError:
 
 
 REQUIRED_TESTS = {
+    "sdk.consumer.named_results",
+    "sdk.consumer.journal_owner",
+    "sdk.consumer.command_jobs",
     "sdk.consumer.web_fetch",
     "sdk.consumer.authorization",
     "sdk.consumer.packages",
@@ -50,6 +53,8 @@ REQUIRED_TESTS = {
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
 REQUIRED_PUBLIC_HEADERS = {
+    "include/lubancore/named_results.hpp",
+    "include/lubancore/jobs.hpp",
     "include/lubancore/web_fetch.hpp",
     "include/lubancore/authorization.hpp",
     "include/lubancore/packages.hpp",
@@ -184,7 +189,8 @@ def run(args: list[str], env: dict[str, str], *, capture: bool = False) -> str:
     return result.stdout if capture else ""
 
 
-def run_demo_command(args: list[str], env: dict[str, str], receipt: Path) -> None:
+def run_demo_command(args: list[str], env: dict[str, str], receipt: Path,
+                     *, label: str = "RAG independent") -> None:
     """Retain the actual independent configure/ALL result even when it fails."""
     report = {"argv": args, "status": "running", "returncode": None,
               "output": str(receipt.with_suffix(".log")), "output_encoding": "raw_bytes"}
@@ -203,7 +209,7 @@ def run_demo_command(args: list[str], env: dict[str, str], receipt: Path) -> Non
     report.update(status="passed" if result.returncode == 0 else "failed", returncode=result.returncode)
     receipt.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     if result.returncode:
-        raise RuntimeError(f"RAG independent command exited with {result.returncode}: {args[0]}")
+        raise RuntimeError(f"{label} command exited with {result.returncode}: {args[0]}")
 
 
 def main() -> None:
@@ -225,6 +231,21 @@ def main() -> None:
     except ImportError:
         import sdk_web_fetch_fixture as web_fixture
     web_source = web_fixture.seal_helper(repo)
+    try:
+        from . import sdk_command_jobs as command_jobs
+    except ImportError:
+        import sdk_command_jobs as command_jobs
+    job_sources = command_jobs.seal_sources(repo)
+    try:
+        from . import sdk_named_results as named_results
+    except ImportError:
+        import sdk_named_results as named_results
+    named_sources = named_results.seal_sources(repo)
+    try:
+        from . import sdk_journal_owner as journal_owner
+    except ImportError:
+        import sdk_journal_owner as journal_owner
+    journal_sources = journal_owner.seal_sources(repo)
     producer_build = args.build_dir.resolve()
     profile_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
     profile_entries = {line.split(":", 1)[0]: line.split("=", 1)[1] for line in profile_cache.splitlines()
@@ -259,6 +280,40 @@ def main() -> None:
     demo_build = scratch / "rag-build"
     evidence = producer_build / "test-evidence" / "sdk-consumer"
     evidence.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    for name in ("LubanCore_DIR", "LubanCore_ROOT", "CMAKE_PREFIX_PATH", "CMAKE_TOOLCHAIN_FILE"):
+        env.pop(name, None)
+    job_fixture = command_jobs.prepare_probe_fixture(repo, scratch,
+                                                     evidence / "command-jobs-probe-source")
+    (evidence / "command-jobs-probe-fixture.json").write_text(
+        json.dumps(job_fixture, indent=2) + "\n", encoding="utf-8")
+    # The SDK-only product graph intentionally has no testing targets. Build
+    # this independent, standard-only fixture on the remote CI runner, then
+    # relocate its actual File API artifact. Never enable producer tests here.
+    try:
+        run_demo_command(job_fixture["configure"], env, evidence / "command-jobs-probe-configure.json",
+                         label="Command Jobs private probe configure")
+        run_demo_command(job_fixture["buildCommand"], env, evidence / "command-jobs-probe-build.json",
+                         label="Command Jobs private probe build")
+    finally:
+        # Preserve the actual reply before source/target/artifact eligibility.
+        # Capture failure must not replace the original configure/build error.
+        try:
+            observed = command_jobs.preserve_probe_reply(job_fixture["build"],
+                                                         evidence / "command-jobs-file-api-observed")
+        except Exception as error:
+            observed = {"schemaVersion": 1, "githubSha": os.environ.get("GITHUB_SHA"),
+                        "producerBuild": job_fixture["build"], "status": "capture_failed",
+                        "acceptance": "not_evaluated", "error": str(error)}
+        (evidence / "command-jobs-file-api-observed.json").write_text(
+            json.dumps(observed, indent=2) + "\n", encoding="utf-8")
+    if observed["status"] != "copied":
+        raise RuntimeError("Command Jobs private probe original File API evidence unavailable")
+    job_probe = command_jobs.copy_probe(job_fixture["source"], job_fixture["build"], scratch,
+                                       evidence=evidence / "command-jobs-file-api")
+    job_probe["fixture"] = job_fixture
+    job_probe["fileApiObserved"] = observed
+    (evidence / "command-jobs-probe.json").write_text(json.dumps(job_probe, indent=2) + "\n", encoding="utf-8")
     (evidence / "consumer-context.json").write_text(json.dumps({
         "github_sha": os.environ.get("GITHUB_SHA"),
         "producer_source": str(repo),
@@ -271,12 +326,12 @@ def main() -> None:
         "todo_consumer_source": todo_source,
         "rag_source": rag_source, "rag_demo": None,
         "web_fetch_source": web_source, "web_fetch_fixture": None,
+        "command_jobs_sources": job_sources, "command_jobs_probe": job_probe,
+        "named_results_sources": named_sources,
+        "journal_owner_sources": journal_sources,
     }, indent=2) + "\n", encoding="utf-8")
     print(f"SDK consumer evidence directory: {scratch}", flush=True)
 
-    env = os.environ.copy()
-    for name in ("LubanCore_DIR", "LubanCore_ROOT", "CMAKE_PREFIX_PATH", "CMAKE_TOOLCHAIN_FILE"):
-        env.pop(name, None)
     install = ["cmake", "--install", str(producer_build), "--config", "Release", "--prefix", str(staging)]
     if args.install_mode == "component":
         install.extend(["--component", "LubanCore"])
@@ -335,6 +390,18 @@ def main() -> None:
         json.dumps(rag.check_copy(consumer_source, rag_source, consumer=True), indent=2) + "\n", encoding="utf-8")
     (evidence / "web-fetch-consumer-source.json").write_text(
         json.dumps(web_fixture.check_helper_copy(consumer_source, web_source), indent=2) + "\n", encoding="utf-8")
+    job_source_copies = command_jobs.check_copies(consumer_source, prefix, job_sources, job_probe,
+                                                 evidence=evidence / "command-jobs-source-copies")
+    (evidence / "command-jobs-source-copies.json").write_text(
+        json.dumps(job_source_copies, indent=2) + "\n", encoding="utf-8")
+    named_source_copies = named_results.check_copies(consumer_source, prefix, named_sources, repo,
+                                                    evidence=evidence / "named-results-source-copies")
+    (evidence / "named-results-source-copies.json").write_text(
+        json.dumps(named_source_copies, indent=2) + "\n", encoding="utf-8")
+    journal_source_copies = journal_owner.check_copies(consumer_source, prefix, journal_sources, repo,
+                                                     evidence=evidence / "journal-owner-source-copies")
+    (evidence / "journal-owner-source-copies.json").write_text(
+        json.dumps(journal_source_copies, indent=2) + "\n", encoding="utf-8")
     # Neither inherited loader variables nor a producer PATH may rescue a
     # broken installed package. Ordinary system compiler/tool directories stay.
     blocked = (repo, producer_build, staging)
@@ -392,6 +459,7 @@ def main() -> None:
              f"-DCMAKE_PREFIX_PATH={prefix}",
              f"-DLUBANCORE_CONSUMER_RESOURCE_ROOT={prefix / 'share/lubancore'}",
              f"-DLUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE={demo_context['executable']}",
+             f"-DLUBANCORE_CONSUMER_COMMAND_PROBE={job_probe['copy']['path']}",
              f"-DLUBANCORE_CONSUMER_WEB_FETCH_BASE_URL={fixture.context['ready']['base_url']}",
              f"-DLUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE={fixture.context['requests_file']}",
              "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF",
@@ -421,8 +489,41 @@ def main() -> None:
         print("installed consumer tests: " + ", ".join(sorted(enabled)), flush=True)
         web_test = next(test for test in listing["tests"] if test["name"] == "sdk.consumer.web_fetch")
         smoke_test = next(test for test in listing["tests"] if test["name"] == "sdk.consumer.smoke")
+        job_tests = [test for test in listing["tests"] if test["name"] == "sdk.consumer.command_jobs"]
+        if len(job_tests) != 1 or len(job_tests[0].get("command", [])) != 4:
+            raise RuntimeError("Command Jobs consumer registration is missing or malformed")
+        job_test = job_tests[0]
+        if (job_test["command"][0] != smoke_test["command"][0] or
+                not Path(job_test["command"][0]).resolve().is_relative_to(consumer_build.resolve()) or
+                Path(job_test["command"][2]).resolve() != (consumer_build / "state-command-jobs").resolve() or
+                Path(job_test["command"][3]).resolve() != Path(job_probe["copy"]["path"]).resolve()):
+            raise RuntimeError("Command Jobs consumer/probe/state borrowed a foreign path")
+        (evidence / "command-jobs-registration.json").write_text(json.dumps(job_test, indent=2) + "\n", encoding="utf-8")
+        named_tests = [test for test in listing["tests"] if test["name"] == "sdk.consumer.named_results"]
+        if len(named_tests) != 1 or len(named_tests[0].get("command", [])) != 4:
+            raise RuntimeError("Named results consumer registration is missing or malformed")
+        named_test = named_tests[0]
+        if (named_test["command"][0] != smoke_test["command"][0] or
+                not Path(named_test["command"][0]).resolve().is_relative_to(consumer_build.resolve()) or
+                named_test["command"][1] != "named-results" or
+                Path(named_test["command"][2]).resolve() != (consumer_build / "state-named-results").resolve() or
+                Path(named_test["command"][3]).resolve() != Path(job_probe["copy"]["path"]).resolve()):
+            raise RuntimeError("Named results consumer/probe/state borrowed a foreign path")
+        (evidence / "named-results-registration.json").write_text(json.dumps(named_test, indent=2) + "\n", encoding="utf-8")
+        journal_tests = [test for test in listing["tests"] if test["name"] == "sdk.consumer.journal_owner"]
+        if len(journal_tests) != 1 or len(journal_tests[0].get("command", [])) != 3:
+            raise RuntimeError("Journal owner consumer registration is missing or malformed")
+        journal_test = journal_tests[0]
+        if (journal_test["command"][0] != smoke_test["command"][0] or
+                not Path(journal_test["command"][0]).resolve().is_relative_to(consumer_build.resolve()) or
+                journal_test["command"][1] != "journal-owner" or
+                Path(journal_test["command"][2]).resolve() != (consumer_build / "state-journal-owner").resolve()):
+            raise RuntimeError("Journal owner consumer/state borrowed a foreign path")
+        (evidence / "journal-owner-registration.json").write_text(json.dumps(journal_test, indent=2) + "\n", encoding="utf-8")
         fixture.context.update(registration=web_test, consumer_executable=smoke_test["command"][0])
         fixture.save()
+        journal_capture = None
+        journal_capture_error = None
         try:
             fixture.caller("execute", ["ctest", "--test-dir", str(consumer_build), "-C", "Release",
                  "--output-on-failure", "--no-tests=error",
@@ -430,11 +531,23 @@ def main() -> None:
         finally:
             # The consumer lives outside the checkout; keep its diagnostic logs in
             # the producer's artifact directory even when one of its tests fails.
-            # Session data stays in scratch and is not part of the CI artifact.
+            # The controlled Journal acceptance retains its actual main/result
+            # materials separately. Other consumer Session data stays in scratch.
             for name in ("LastTest.log", "LastTestsFailed.log"):
                 log = consumer_build / "Testing" / "Temporary" / name
                 if log.is_file():
                     shutil.copy2(log, evidence / name)
+            try:
+                journal_capture = journal_owner.capture_materials(
+                    consumer_build / "state-journal-owner", evidence / "journal-owner-materials")
+            except Exception as error:
+                # Preserve the failure of evidence collection without masking an
+                # earlier CTest exception or claiming a successful acceptance.
+                journal_capture_error = str(error)
+                (evidence / "journal-owner-materials-error.json").write_text(json.dumps({
+                    "status": "not_evaluated", "error": journal_capture_error,
+                    "source": str(consumer_build / "state-journal-owner"),
+                }, indent=2) + "\n", encoding="utf-8")
     results = ET.parse(evidence / "consumer-results.xml").getroot().findall(".//testcase")
     executed = {case.attrib.get("name") for case in results}
     if not results or executed != required_tests:
@@ -447,7 +560,45 @@ def main() -> None:
     sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
                         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
     check_rag_consumer_evidence(listing, sections, demo_context, scratch, prefix, consumer_build)
+    job_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                    if sections[index] == "sdk.consumer.command_jobs"]
+    if len(job_sections) != 1:
+        raise RuntimeError("Command Jobs native consumer section missing or duplicated")
+    job_receipt = command_jobs.check_consumer(job_sections[0], job_test["command"], job_probe)
+    command_jobs.check_copies(consumer_source, prefix, job_sources, job_probe)
+    (evidence / "command-jobs-acceptance.json").write_text(json.dumps({
+        "status": "passed", "registration": job_test, "receipt": job_receipt,
+        "probe": job_probe, "sources": job_sources,
+        "callers": fixture.context.get("callers", []),
+        "scope": "actual registration/JUnit/LastTest plus sealed relocated probe; source assertions check child entry and retirement",
+    }, indent=2) + "\n", encoding="utf-8")
     from check_sdk_focused import check_web_fetch_consumer
+    named_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                      if sections[index] == "sdk.consumer.named_results"]
+    if len(named_sections) != 1:
+        raise RuntimeError("Named results native consumer section missing or duplicated")
+    named_receipt = named_results.check_consumer(named_sections[0], named_test["command"], job_probe)
+    named_results.check_copies(consumer_source, prefix, named_sources, repo)
+    (evidence / "named-results-acceptance.json").write_text(json.dumps({
+        "status": "passed", "registration": named_test, "receipt": named_receipt,
+        "probe": job_probe, "sources": named_sources, "copies": named_source_copies,
+        "scope": "actual installed registration/JUnit/LastTest and SDK/STL source/header copies; internal V3 summary witness belongs to original native source",
+    }, indent=2) + "\n", encoding="utf-8")
+    journal_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                        if sections[index] == "sdk.consumer.journal_owner"]
+    if len(journal_sections) != 1:
+        raise RuntimeError("Journal owner installed section is missing or duplicated")
+    if journal_capture_error is not None or journal_capture is None:
+        raise RuntimeError("Journal owner actual materials were not captured: " + str(journal_capture_error))
+    journal_receipt = journal_owner.check_consumer(journal_sections[0], journal_test["command"])
+    journal_materials = journal_owner.check_materials(journal_capture, journal_receipt)
+    journal_owner.check_copies(consumer_source, prefix, journal_sources, repo)
+    (evidence / "journal-owner-acceptance.json").write_text(json.dumps({
+        "status": "passed", "registration": journal_test, "receipt": journal_receipt,
+        "sources": journal_sources, "copies": journal_source_copies,
+        "capture": journal_capture, "materials": journal_materials,
+        "scope": "actual installed SDK/STL caller and retained main/raw/formal materials; original native guards verify the complete V3 canonical chain",
+    }, indent=2) + "\n", encoding="utf-8")
     web_sections = [sections[index + 1] for index in range(1, len(sections), 2)
                     if sections[index] == "sdk.consumer.web_fetch"]
     if len(web_sections) != 1:

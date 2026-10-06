@@ -142,7 +142,9 @@ SHARED_SDK_TEST_SOURCES = {
     "tests/unit/memory/test_memory_project_commit_handoff.cpp",
     "tests/unit/trajectory/test_journal_native_receipts.cpp",
     "tests/unit/trajectory_v3/test_v3_journal_receipts.cpp",
+    "tests/unit/trajectory_v3/test_v3_journal_owner.cpp",
     "tests/unit/trajectory_v3/test_v3_result_store.cpp",
+    "tests/unit/trajectory_v3/test_v3_result_immutable_publication.cpp",
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",
     "tests/unit/runtime/test_session_execution.cpp",
@@ -168,10 +170,13 @@ PRIVATE_TEST_PROBES = {
 # Real private implementations compiled into the SDK reference-test executable,
 # rather than exposed as additional DLL ABI. No other SDK implementation gets
 # this testing-only exception.
-PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp", "src/sdk/memory.cpp", "src/sdk/action_dispatch.cpp", "src/sdk/operation_ledger.cpp", "src/sdk/job_operations.cpp"}
+PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp", "src/sdk/memory.cpp", "src/sdk/action_dispatch.cpp", "src/sdk/operation_ledger.cpp", "src/sdk/job_operations.cpp", "src/sdk/adapters.cpp", "src/sdk/command_jobs.cpp", "src/sdk/command_jobs_opening.cpp", "src/sdk/named_results.cpp"}
 TODO_CONSUMER_SOURCE = "examples/sdk-consumer/todo_write.cpp"
 RAG_CONSUMER_SOURCE = "examples/sdk-consumer/agentic_rag.cpp"
 WEB_FETCH_CONSUMER_SOURCE = "examples/sdk-consumer/web_fetch.cpp"
+COMMAND_JOBS_CONSUMER_SOURCE = "examples/sdk-consumer/command_jobs.cpp"
+NAMED_RESULTS_CONSUMER_SOURCE = "examples/sdk-consumer/named_results.cpp"
+JOURNAL_OWNER_CONSUMER_SOURCE = "examples/sdk-consumer/journal_owner.cpp"
 
 
 def todo_consumer_ownership_violations(targets, testing):
@@ -359,7 +364,13 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
             violations.append("RAG consumer helper is not a selected testing-only source: " + owner)
         if name == WEB_FETCH_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
             violations.append("WebFetch consumer helper is not a selected testing-only source: " + owner)
-        if name in {"src/sdk/memory.cpp", "src/sdk/operation_ledger.cpp", "src/sdk/job_operations.cpp"} and owner not in {"lubancore_sdk", "lubancore_sdk_tests"}:
+        if name == COMMAND_JOBS_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
+            violations.append("Command Jobs helper is not a selected testing-only source: " + owner)
+        if name == NAMED_RESULTS_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
+            violations.append("Named results helper is not a selected testing-only source: " + owner)
+        if name == JOURNAL_OWNER_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
+            violations.append("Journal owner helper is not a selected testing-only source: " + owner)
+        if name in {"src/sdk/memory.cpp", "src/sdk/operation_ledger.cpp", "src/sdk/job_operations.cpp", "src/sdk/adapters.cpp", "src/sdk/command_jobs.cpp", "src/sdk/command_jobs_opening.cpp", "src/sdk/named_results.cpp"} and owner not in {"lubancore_sdk", "lubancore_sdk_tests"}:
             violations.append(f"unregistered private SDK reference owner: {owner} includes {name}")
         if owner == "lubancore_sdk_tests" and name.startswith("src/sdk/") and name.endswith(".cpp"):
             if not expect_testing:
@@ -404,7 +415,7 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
             source_facts.append({"path": str(path), "projectPath": name,
                                  "compiled": "compileGroupIndex" in entry,
                                  "generated": entry.get("isGenerated", False)})
-            if name and (name.startswith(("src/", "include/", "tests/")) or name in {TODO_CONSUMER_SOURCE, RAG_CONSUMER_SOURCE, WEB_FETCH_CONSUMER_SOURCE}):
+            if name and (name.startswith(("src/", "include/", "tests/")) or name in {TODO_CONSUMER_SOURCE, RAG_CONSUMER_SOURCE, WEB_FETCH_CONSUMER_SOURCE, COMMAND_JOBS_CONSUMER_SOURCE, NAMED_RESULTS_CONSUMER_SOURCE, JOURNAL_OWNER_CONSUMER_SOURCE}):
                 check_project_path(name, target["name"])
                 group_index = entry.get("compileGroupIndex")
                 include_dirs = include_groups[group_index] if group_index is not None else ()
@@ -448,6 +459,42 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
         violations.extend(rag_consumer_ownership_violations(targets, expect_testing))
     if (source / WEB_FETCH_CONSUMER_SOURCE).is_file():
         violations.extend(web_fetch_consumer_ownership_violations(targets, expect_testing))
+    if (source / COMMAND_JOBS_CONSUMER_SOURCE).is_file():
+        try:
+            from .sdk_command_jobs import ownership_violations
+        except ImportError:
+            try:
+                from sdk_command_jobs import ownership_violations
+            except ModuleNotFoundError:
+                from scripts.ci.sdk_command_jobs import ownership_violations
+        violations.extend(ownership_violations(targets, expect_testing))
+    if (source / NAMED_RESULTS_CONSUMER_SOURCE).is_file():
+        try:
+            from .sdk_named_results import ownership_violations
+        except ImportError:
+            try:
+                from sdk_named_results import ownership_violations
+            except ModuleNotFoundError:
+                from scripts.ci.sdk_named_results import ownership_violations
+        violations.extend(ownership_violations(targets, expect_testing))
+    if (source / JOURNAL_OWNER_CONSUMER_SOURCE).is_file():
+        try:
+            from .sdk_journal_owner import ownership_violations
+        except ImportError:
+            try:
+                from sdk_journal_owner import ownership_violations
+            except ModuleNotFoundError:
+                from scripts.ci.sdk_journal_owner import ownership_violations
+        violations.extend(ownership_violations(targets, expect_testing))
+    if (source / "tests/integration/sdk/test_lubancore_owned_file_paths.cpp").is_file():
+        try:
+            from .sdk_owned_file_paths import ownership_violations
+        except ImportError:
+            try:
+                from sdk_owned_file_paths import ownership_violations
+            except ModuleNotFoundError:
+                from scripts.ci.sdk_owned_file_paths import ownership_violations
+        violations.extend(ownership_violations(targets, expect_testing))
     sdk = [target_id for target_id, target in targets.items() if target["name"] == "lubancore_sdk"]
     if len(sdk) != 1 or targets[sdk[0]]["type"] != "SHARED_LIBRARY":
         violations.append("expected exactly one shared lubancore_sdk target")

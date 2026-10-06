@@ -19,6 +19,10 @@
 - [子结果严格历史采用合同](child-history-adoption.md)
 - [Runner 就绪探针与失败原件](runner-probe-evidence.md)
 - [SDK 存储、事件与策略 SPI 合同](sdk-storage-spi.md)：场束与独占租约、CAS/named 映射、有界事件流、策略归属及逐口交付门。
+- [Session named 结果存储](sdk-named-result-blobs.md)：真实结果读写、同 ID 恢复、写 lease 与独立只读句柄；保留默认 File。
+- [主场 V3 Journal 所有权](sdk-journal-owner.md)：归拢真实 File 账、追加借用、首次未知与捕获恢复；公开存储替换口尚待后批。
+- [Command Jobs 缺会话预检补正](sdk-command-job-missing-resume.md)
+- [Command Jobs 探针产物选择](sdk-command-probe-artifacts.md)
 - [后台子代理线程启动收口](agent-thread-start-cleanup.md)
 - [线程 capture 收尾夹具](thread-capture-owner-fixture.md)
 - [前台子 Agent 本次调用上下文](child-foreground-context.md)
@@ -88,3 +92,4 @@ git diff --check
 - [Managed 会话身份合同](lubancore-managed-identity.md)
 - [LubanCore 模块边界](lubancore-module-boundaries.md)
 - [SDK 授权原语](lubancore-authorization-primitives.md)
+- [Owned Job 排队与截止实际观察](sdk-owned-queue-observation.md)

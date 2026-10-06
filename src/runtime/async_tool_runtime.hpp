@@ -57,8 +57,8 @@ struct AsyncToolRuntimeOptions {
     bool job_handle_disabled = false;
     tools::ToolJobCoordinator::Options coordinator;
     tools::JobRecoveryPolicy recovery_policy = tools::JobRecoveryPolicy::Legacy;
-    // Internal only. The first owned slice rejects before dispatch because Job
-    // scope and completion adapters are not available; SDK defaults remain off.
+    // Internal host choice. OwnedRequired needs explicit typed callbacks;
+    // an absent capability rejects before dispatch. SDK Jobs default off.
     agent::JobAdmissionMode admission_mode = agent::JobAdmissionMode::Legacy;
 };
 
@@ -81,6 +81,13 @@ public:
         // worker 执行体(宿主从工具注册表桥:解析工具+execute);空 = 不
         // 派发(入队的 job 等宿主补 executor——P2 装配必给)。
         tools::JobExecutor executor;
+        // Explicit owned route; callbacks run only on the bound host stack.
+        // Absent callbacks retain the fail-closed OwnedRequired behavior.
+        std::function<bool(const api::ToolUseBlock&)> owned_selected;
+        std::function<agent::OwnedJobAdmissionReceipt(TrajectoryTurnBridge&,
+            const api::ToolUseBlock&, const agent::OwnedToolAdmissionContext&)> owned_admission;
+        std::function<void()> owned_pump;
+        std::shared_ptr<trajectory::NamedResultCapability> named_results;
     };
 
     static std::unique_ptr<AsyncToolRuntime> Create(Hooks hooks, AsyncToolRuntimeOptions options);

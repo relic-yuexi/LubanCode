@@ -27,6 +27,7 @@
 #include "trajectory/recorder.hpp"
 #include "trajectory/v3/result_store.hpp"
 #include "trajectory/v3/writer.hpp"
+#include "tools/tool_job_coordinator.hpp"
 
 namespace lubancode::runtime {
 
@@ -43,6 +44,8 @@ struct V3SessionBooks {
     std::string system_content;              // 当前根 system 正文(§4.3 切换后更新)
     std::uint64_t settings_version = 1;      // systemMeta.settingsVersion 序列
     std::optional<trajectory::v3::ResultStore> captures;
+    std::shared_ptr<trajectory::NamedResultCapability> named_results;
+    bool requires_named_owner = false; // Standalone private fixtures retain File compatibility.
     std::shared_ptr<std::recursive_mutex> tool_results_mutex = std::make_shared<std::recursive_mutex>();
     std::optional<trajectory::v3::ResultStore> results;  // 惰性开:session 目录 artifacts/
     // ---- T12-A(V3-GAP-07 P0,SessionV3 旧设计清理单):执行阻断 ------------
@@ -90,6 +93,13 @@ struct V3SessionBooks {
 
 // v3 模式轮桥的回合簿(定义在 trajectory_session.cpp;此处只占位)。
 struct V3TurnBooks;
+
+struct OwnedJobParentCommit {
+    bool committed = false;
+    tools::ParentJobAdmissionRefs refs;
+    std::vector<trajectory::v3::WriteReceipt> receipts;
+    std::string error;
+};
 
 class TrajectoryTurnBridge : public agent::LoopBoundaryRecorder, public ToolTrajectorySink {
 public:
@@ -251,6 +261,11 @@ public:
         std::string step_id;
     };
     std::optional<V3CallOrigin> V3DeclaredCallOrigin(const std::string& provider_call_id) const;
+    // Completes only this bridge's original pending parent action. No reopened
+    // action or worker borrow; caches the first attempt including partial writes.
+    OwnedJobParentCommit CommitOwnedJobAdmission(const std::string& provider_call_id,
+        const tools::OwnedJobAdoption& adopted,
+        const trajectory::v3::JobOperationBindingFacts& binding);
     // Only a started active action yields this identity; it is borrowed from no
     // mutable last-call slot and copied for the current Tool::execute invocation.
     std::optional<std::pair<std::string, std::uint64_t>> V3ExecutingCallIdentity(

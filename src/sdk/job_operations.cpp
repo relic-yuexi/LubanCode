@@ -60,7 +60,7 @@ JobOperationRegistration JobOperations::Bind(lubancode::runtime::SessionService&
         auto* writer = trajectory ? trajectory->v3_main_writer() : nullptr;
         if (!writer) { out.error = Failure("sdk.job_operation.writer_unavailable"); return out; }
         const auto consumed = coordinator.WithOwnedJobBindingSource(*writer, job_id, [&](const auto& source) {
-            auto ledger = v3::ReadV3Ledger(writer->path());
+            auto ledger = v3::ReadV3LedgerLive(*writer);
             if (!ledger || !SamePrefix(*ledger, *writer)) {
                 out.error = Failure("sdk.job_operation.invalid_prefix"); return;
             }

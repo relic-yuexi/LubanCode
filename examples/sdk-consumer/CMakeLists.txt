@@ -6,7 +6,7 @@ project(lubancore_installed_consumer LANGUAGES CXX)
 find_package(LubanCore CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp lua_build_profile.cpp actions.cpp event_sink.cpp memory_blobs.cpp todo_write.cpp agentic_rag.cpp web_fetch.cpp)
+add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp lua_build_profile.cpp actions.cpp event_sink.cpp memory_blobs.cpp todo_write.cpp agentic_rag.cpp web_fetch.cpp command_jobs.cpp named_results.cpp journal_owner.cpp)
 if(NOT DEFINED LubanCore_WITH_LUA OR NOT LubanCore_WITH_LUA MATCHES "^(ON|OFF)$")
   message(FATAL_ERROR "Installed LubanCore must declare its Lua build profile")
 endif()
@@ -158,3 +158,28 @@ set_tests_properties(sdk.consumer.authorization sdk.consumer.packages sdk.consum
   sdk.consumer.skills_seed sdk.consumer.skills_resume sdk.consumer.memory_seed sdk.consumer.memory_resume
   sdk.consumer.memory_save_seed sdk.consumer.memory_save_resume
   sdk.consumer.subagents sdk.consumer.subagent_seed sdk.consumer.subagent_resume PROPERTIES TIMEOUT 120)
+
+# Journal acceptance needs only the installed SDK and explicit retained state.
+add_test(NAME sdk.consumer.journal_owner
+  COMMAND lubancore_consumer journal-owner "${CMAKE_CURRENT_BINARY_DIR}/state-journal-owner")
+set_tests_properties(sdk.consumer.journal_owner PROPERTIES TIMEOUT 120)
+
+# CI supplies a relocated copy of the real producer-built private probe. This
+# helper is not installed as part of LubanCore and is never found through PATH.
+set(LUBANCORE_CONSUMER_COMMAND_PROBE "" CACHE FILEPATH "Explicit copied command_limits_probe for installed Command Jobs acceptance")
+if(LUBANCORE_CONSUMER_COMMAND_PROBE)
+  if(NOT IS_ABSOLUTE "${LUBANCORE_CONSUMER_COMMAND_PROBE}" OR
+      NOT EXISTS "${LUBANCORE_CONSUMER_COMMAND_PROBE}" OR IS_DIRECTORY "${LUBANCORE_CONSUMER_COMMAND_PROBE}")
+    message(FATAL_ERROR "Command Jobs requires an absolute existing private command probe")
+  endif()
+  get_filename_component(_command_probe_name "${LUBANCORE_CONSUMER_COMMAND_PROBE}" NAME)
+  if(NOT _command_probe_name MATCHES "^lubancore_command_limits_probe(\\.exe)?$")
+    message(FATAL_ERROR "Command Jobs requires the actual command_limits_probe target")
+  endif()
+  add_test(NAME sdk.consumer.command_jobs
+    COMMAND lubancore_consumer command-jobs "${CMAKE_CURRENT_BINARY_DIR}/state-command-jobs" "${LUBANCORE_CONSUMER_COMMAND_PROBE}")
+  set_tests_properties(sdk.consumer.command_jobs PROPERTIES TIMEOUT 120)
+  add_test(NAME sdk.consumer.named_results
+    COMMAND lubancore_consumer named-results "${CMAKE_CURRENT_BINARY_DIR}/state-named-results" "${LUBANCORE_CONSUMER_COMMAND_PROBE}")
+  set_tests_properties(sdk.consumer.named_results PROPERTIES TIMEOUT 120)
+endif()

@@ -10,6 +10,7 @@
 
 namespace lubancode::trajectory {
 class MemoryCapability;
+class NamedResultCapability;
 struct SessionRecoveryView;
 namespace v3 {
 struct V3Ledger;
@@ -26,6 +27,7 @@ struct V3OpeningContext {
     std::shared_ptr<MemoryCapability> memory_capability;
     // Only the locked same-ID recovery invocation supplies this borrowed view.
     const SessionRecoveryView* recovery_view = nullptr;
+    std::shared_ptr<NamedResultCapability> named_result_capability;
 };
 
 // Internal, synchronous pre-publication gate. It may commit owned host metadata,

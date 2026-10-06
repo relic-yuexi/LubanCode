@@ -433,6 +433,8 @@ void ParentStepBudget(const fs::path& base) {
 void Successful(const fs::path& base, bool parent_first = false) {
     Rig rig(base); auto state = std::make_shared<State>(); state->parent_grant_first = parent_first;
     auto session = rig.Open(rig.Options(state)); auto result = Execute(session, parent_first);
+    if (result.operation.state != sdk::OperationState::Succeeded || !result.operation.result_persisted)
+        DiagnoseChildFailure(parent_first ? "parent-grant-completion" : "success-completion", session, result.operation, state.get());
     Check(result.operation.state == sdk::OperationState::Succeeded && result.operation.result_persisted, "child operation failed");
     Check(state->tools == (parent_first ? 3 : 2) && result.tickets.size() == (parent_first ? 2 : 1), "child grant did not stay within this child");
     Check(state->max_active == 1, "parent and child concurrently used the shared backend");
@@ -736,7 +738,10 @@ void Subagents(const fs::path& base) {
 }
 void SubagentSeed(const fs::path& base) {
     Rig rig(base); auto state = std::make_shared<State>(); auto session = rig.Open(rig.Options(state));
-    const auto result = Execute(session); Check(result.operation.result_persisted, "restart seed incomplete");
+    const auto result = Execute(session);
+    if (!result.operation.result_persisted)
+        DiagnoseChildFailure("restart-seed-completion", session, result.operation, state.get());
+    Check(result.operation.result_persisted, "restart seed incomplete");
     Reports(session, result.operation); auto plan = session->DescribeSubagents(); Check(plan.has_value(), "restart plan missing");
     Write(rig.base / "owned-child.state", session->id() + "\n" + result.operation.operation_id + "\n" +
         result.operation.turn_id + "\n" + plan->plan_sha256 + "\n");

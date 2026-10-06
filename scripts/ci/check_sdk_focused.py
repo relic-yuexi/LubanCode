@@ -13,6 +13,14 @@ import subprocess
 import xml.etree.ElementTree as ET
 
 try:
+    from .sdk_result_immutable import check_result_immutable_registration, check_result_immutable_native
+except ImportError:
+    try:
+        from sdk_result_immutable import check_result_immutable_registration, check_result_immutable_native
+    except ModuleNotFoundError:
+        from scripts.ci.sdk_result_immutable import check_result_immutable_registration, check_result_immutable_native
+
+try:
     from .sdk_memory_handoff import check_memory_handoff_registration, check_memory_handoff_native
 except ImportError:
     try:
@@ -46,7 +54,58 @@ except ImportError:
         from scripts.ci.sdk_lua_profile import focused_roster, read_lua_profile
 
 
+
+try:
+    from . import sdk_command_jobs as command_jobs
+except ImportError:
+    try:
+        import sdk_command_jobs as command_jobs
+    except ModuleNotFoundError:
+        from scripts.ci import sdk_command_jobs as command_jobs
+
+try:
+    from . import sdk_named_results as named_results
+except ImportError:
+    try:
+        import sdk_named_results as named_results
+    except ModuleNotFoundError:
+        from scripts.ci import sdk_named_results as named_results
+
+try:
+    from . import sdk_journal_owner as journal_owner
+except ImportError:
+    try:
+        import sdk_journal_owner as journal_owner
+    except ModuleNotFoundError:
+        from scripts.ci import sdk_journal_owner as journal_owner
+
+try:
+    from . import sdk_model_input as model_input
+except ImportError:
+    try:
+        import sdk_model_input as model_input
+    except ModuleNotFoundError:
+        from scripts.ci import sdk_model_input as model_input
+
+try:
+    from . import sdk_owned_file_paths as owned_file_paths
+except ImportError:
+    try:
+        import sdk_owned_file_paths as owned_file_paths
+    except ModuleNotFoundError:
+        from scripts.ci import sdk_owned_file_paths as owned_file_paths
+
 REQUIRED = {
+    "sdk.focused.lubancore_owned_file_paths",
+    "sdk.focused.lubancore_model_input",
+    "sdk.focused.v3_journal_owner",
+    "sdk.focused.lubancore_journal_owner",
+    "sdk.focused.lubancore_journal_owner_guards",
+    "sdk.focused.lubancore_named_results",
+    "sdk.focused.lubancore_named_result_guards",
+    "sdk.focused.v3_result_immutable_publication",
+    "sdk.focused.lubancore_command_jobs",
+    "sdk.focused.lubancore_command_job_guards",
     "sdk.focused.memory_project_commit_handoff",
     "sdk.focused.managed_session_ownership",
     "sdk.focused.managed_session_reservation",
@@ -1228,6 +1287,9 @@ def main():
     build = args.build_dir.resolve()
     evidence = build / "test-evidence" / "sdk-focused"
     evidence.mkdir(parents=True, exist_ok=True)
+    source_root = Path(__file__).resolve().parents[2]
+    owned_file_paths.capture_source(source_root, evidence)
+    owned_source = owned_file_paths.read_source_evidence(source_root, evidence)
     command = ["ctest", "--test-dir", str(build), "-C", args.config]
     if not args.sdk_only:
         command += ["-L", "^sdk-focused$"]
@@ -1250,7 +1312,20 @@ def main():
     if len(tests) != len(required) or {t["name"] for t in tests} != required:
         raise RuntimeError("SDK test files are missing, duplicated or unexpected")
     for test in tests:
+        job_stem = test["name"].removeprefix("sdk.focused.")
+        if job_stem in command_jobs.SOURCES:
+            command_jobs.check_registration(test.get("command"), job_stem)
+        if job_stem in named_results.SOURCES:
+            named_results.check_registration(test.get("command"), job_stem)
+        if job_stem in journal_owner.SOURCES:
+            journal_owner.check_registration(test.get("command"), job_stem)
+        if job_stem in model_input.SOURCES:
+            model_input.check_registration(test.get("command"), job_stem)
+        if job_stem == owned_file_paths.STEM:
+            owned_file_paths.check_registration(test.get("command"))
         props = {p["name"]: p["value"] for p in test.get("properties", [])}
+        if job_stem == owned_file_paths.STEM and (type(props.get("TIMEOUT")) not in (int, float) or props["TIMEOUT"] != 300):
+            raise RuntimeError("Owned file paths source must retain its original300s timeout")
         if (props.get("DISABLED") or "sdk-focused" not in props.get("LABELS", [])
                 or not 0 < float(props.get("TIMEOUT", 0)) <= 300):
             raise RuntimeError("SDK test is disabled, mislabeled or unbounded: " + test["name"])
@@ -1294,6 +1369,8 @@ def main():
             check_job_operation_registration(test.get("command", []))
         if test["name"] == "sdk.focused.memory_project_commit_handoff":
             check_memory_handoff_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.v3_result_immutable_publication":
+            check_result_immutable_registration(test.get("command", []))
         if test["name"].removeprefix("sdk.focused.") in MANAGED_OPENING_SOURCES:
             check_managed_opening_registration(test.get("command", []), test["name"].removeprefix("sdk.focused."))
         if test["name"] == "sdk.focused.lubancore_owned_job_deadline":
@@ -1326,6 +1403,11 @@ def main():
     # Successful JUnit output can be truncated before the doctest summary.
     native_sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
+    command_job_reports = {}
+    named_result_reports = {}
+    journal_owner_reports = {}
+    model_input_reports = {}
+    owned_file_path_reports = {}
     for case in cases:
         if case.attrib.get("status") != "run" or any(case.find(k) is not None for k in
                 ("failure", "error", "skipped")):
@@ -1338,6 +1420,23 @@ def main():
         if len(commands) != 1:
             raise RuntimeError("SDK source has no unique registered command: " + case.attrib["name"])
         check_native_command(sections[0], commands[0])
+        job_stem = case.attrib["name"].removeprefix("sdk.focused.")
+        if job_stem in command_jobs.SOURCES:
+            command_job_reports[case.attrib["name"]] = command_jobs.check_native(sections[0], commands[0], job_stem, os.name)
+            (evidence / "command-jobs.json").write_text(json.dumps(command_job_reports, indent=2) + "\n", encoding="utf-8")
+        if job_stem in named_results.SOURCES:
+            named_result_reports[case.attrib["name"]] = named_results.check_native(sections[0], commands[0], job_stem)
+            (evidence / "named-results.json").write_text(json.dumps(named_result_reports, indent=2) + "\n", encoding="utf-8")
+        if job_stem in journal_owner.SOURCES:
+            journal_owner_reports[case.attrib["name"]] = journal_owner.check_native(sections[0], commands[0], job_stem)
+            (evidence / "journal-owner.json").write_text(json.dumps(journal_owner_reports, indent=2) + "\n", encoding="utf-8")
+        if job_stem in model_input.SOURCES:
+            model_input_reports[case.attrib["name"]] = model_input.check_native(sections[0], commands[0], job_stem)
+            (evidence / "model-input.json").write_text(json.dumps(model_input_reports, indent=2) + "\n", encoding="utf-8")
+        if job_stem == owned_file_paths.STEM:
+            owned_file_path_reports[case.attrib["name"]] = owned_file_paths.check_native(
+                sections[0], commands[0], owned_source['record'], owned_source['bytes'], owned_source['head'])
+            (evidence / "owned-file-paths.json").write_text(json.dumps(owned_file_path_reports, indent=2) + "\n", encoding="utf-8")
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])
@@ -1405,6 +1504,8 @@ def main():
             check_job_operation_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.memory_project_commit_handoff":
             check_memory_handoff_native(sections[0], commands[0])
+        if case.attrib["name"] == "sdk.focused.v3_result_immutable_publication":
+            check_result_immutable_native(sections[0], commands[0])
         if case.attrib["name"].removeprefix("sdk.focused.") in MANAGED_OPENING_SOURCES:
             check_managed_opening_native(sections[0], commands[0], case.attrib["name"].removeprefix("sdk.focused."))
         if case.attrib["name"] == "sdk.focused.lubancore_owned_job_deadline":

@@ -1,4 +1,5 @@
 #include "sdk/subagents.hpp"
+#include "sdk/prepare_journal.hpp"
 #include "sdk/operation_ledger.hpp"
 #include "sdk/plan_write.hpp"
 
@@ -230,7 +231,7 @@ Result<std::vector<subagents::v1::Report>> ReadSubagentReports(
 Result<std::shared_ptr<SessionSubagentPlan>> SessionSubagentPlan::Prepare(
     const std::optional<subagents::v1::Options>& options, fs::path root, std::string workspace_key,
     std::string resume_id, std::string cwd, std::string parent_model, std::string permission_floor,
-    int parent_max_steps, int parent_max_wall_seconds) {
+    int parent_max_steps, int parent_max_wall_seconds, std::shared_ptr<SessionPrepareJournal> journal) {
     auto owner = std::shared_ptr<SessionSubagentPlan>(new SessionSubagentPlan);
     owner->root_ = std::move(root); owner->resume_id_ = std::move(resume_id);
     owner->parent_max_steps_ = parent_max_steps; owner->parent_max_wall_seconds_ = parent_max_wall_seconds;
@@ -283,11 +284,11 @@ Result<std::shared_ptr<SessionSubagentPlan>> SessionSubagentPlan::Prepare(
         }
         auto stream = v3::FindV3SessionStream(owner->resume_dir_);
         if (!stream) return std::unexpected(Fail("sdk.subagent.plan_invalid", "saved V3 journal is unavailable"));
-        auto ledger = v3::ReadV3Ledger(*stream);
+        auto ledger = ReadPrepareJournal(*stream, journal.get());
         if (!ledger) return std::unexpected(Fail("sdk.subagent.plan_invalid", ledger.error()));
-        auto checked = owner->CheckBinding(*ledger);
+        auto checked = owner->CheckBinding(**ledger);
         if (!checked) return std::unexpected(checked.error());
-        checked = owner->CheckRecoveredChildren(*ledger);
+        checked = owner->CheckRecoveredChildren(**ledger);
         if (!checked) return std::unexpected(checked.error());
     }
     if (effective) {

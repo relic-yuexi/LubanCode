@@ -14,10 +14,13 @@ add_library(lubancore_sdk SHARED
   src/sdk/approval.cpp
   src/sdk/operation_ledger.cpp
   src/sdk/job_operations.cpp
+  src/sdk/command_jobs.cpp
+  src/sdk/command_jobs_opening.cpp
   src/sdk/skills.cpp
   src/sdk/subagents.cpp
   src/sdk/memory.cpp
   src/sdk/memory_blobs.cpp
+  src/sdk/named_results.cpp
   src/sdk/memory_write.cpp
   src/sdk/packages.cpp
   src/sdk/lua.cpp

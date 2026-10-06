@@ -21,6 +21,8 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -29,7 +31,10 @@
 #include "api/types.hpp"
 #include "tools/tool.hpp"
 
+namespace lubancode::tools { class ToolRegistry; }
 namespace lubancode::agent {
+struct TurnWiring;
+struct ToolTraceContext;
 
 // 协议模式(单 §4 三种):
 //   Inline         —— 宿主等待,本批实际结果齐后配对(所有普通客户端工具)。
@@ -44,17 +49,33 @@ enum class ToolProtocolMode { Inline, JobHandle, NativeDeferred };
 enum class ToolDispatchPoint { OnAssistantComplete, OnCallItemComplete };
 
 // Explicit internal host choice. Legacy retains its existing optional admission
-// contract. OwnedRequired cannot dispatch through that legacy handoff; the
-// owned Job scope/completion adapter is not implemented in this first slice.
+// contract. OwnedRequired cannot dispatch through that legacy handoff; it
+// requires an explicit typed owner adapter and otherwise refuses the call.
 enum class JobAdmissionMode { Legacy, OwnedRequired };
 enum class OwnedJobAdmissionState { Rejected, Accepted, Unconfirmed };
 struct OwnedJobAdmissionReceipt {
     OwnedJobAdmissionState state = OwnedJobAdmissionState::Rejected;
     tools::Tool::Result result;
+    // The synchronous Prepare refusal already retired the parent trace/UI.
+    // Accepted and Unconfirmed never ask AgentLoop to finish that action again.
+    bool parent_retired = false;
 };
 
-// This first slice has no owned Job scope or completion adapter. An explicit
-// request for that route must not reach the legacy registration/worker path.
+// Borrowed only for one call on the actual AgentLoop host stack. No reference
+// here may be retained by a Job worker or a completion callback.
+struct OwnedToolAdmissionContext {
+    tools::ToolRegistry& registry;
+    const TurnWiring& wiring;
+    const ToolTraceContext* trace;
+    const std::atomic<bool>* cancel;
+    const std::function<bool(const tools::Tool&)>& tool_filter;
+    const std::string& filter_denial;
+    const std::function<bool(const tools::Tool&)>& turn_gate;
+    const std::string& turn_gate_denial;
+};
+
+// A host without an owned Job adapter must not fall through to the legacy
+// registration/worker path.
 inline OwnedJobAdmissionReceipt MissingOwnedJobAdmission() {
     tools::Tool::Result result{"Owned Job scope and completion capability are unavailable; this call was not dispatched.", true};
     result.outcome = "unavailable";
@@ -118,6 +139,11 @@ public:
     // inline 兜底真执行,不许留悬空。
     virtual std::optional<tools::Tool::Result> TakeJobOrder(
         const api::ToolUseBlock& call, const ToolCallAdjudication& adjudication) = 0;
+
+    virtual OwnedJobAdmissionReceipt TakeOwnedJobOrder(
+        const api::ToolUseBlock&, const OwnedToolAdmissionContext&) {
+        return MissingOwnedJobAdmission();
+    }
 
     // 完成信封回灌口:批次收口时泵一把协调器(收割 worker 完成信封落
     // 账),新终态翻完成通知入规划器 mailbox(单 §7"完成通知只入

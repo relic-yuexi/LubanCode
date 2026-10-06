@@ -22,6 +22,8 @@
 #include <lubancore/memory_blobs.hpp>
 #include <lubancore/lua.hpp>
 #include <lubancore/web_fetch.hpp>
+#include <lubancore/jobs.hpp>
+#include <lubancore/named_results.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
@@ -126,9 +128,11 @@ struct SessionOptions {
     // Explicit admission. read_file/write_file/edit_file/run_command/search,
     // todo_write and web_fetch (bounded HTTP(S), no implicit credentials).
     // Search defaults to this session's cwd; null/empty paths do the same.
-    // run_command is foreground-only; detached jobs and CLI parity are not claimed.
+    // run_command is foreground unless command_jobs and execution_mode explicitly opt in.
     std::vector<std::string> builtin_tools;
     std::vector<Tool> custom_tools;
+    // Omitted is off for a new Session; resume inherits its frozen declaration.
+    std::optional<jobs::v1::CommandOptions> command_jobs;
     std::vector<McpServer> mcp_servers;
     // Explicit local selection, frozen per session. SKILL.md drift is rejected;
     // ordinary attachments are read live on demand. Never discovers HOME/cwd.
@@ -164,6 +168,9 @@ struct SessionOptions {
     // Limits only: builtin_tools must explicitly select web_fetch. Omitted
     // uses bounded defaults. Resume selects tools/limits afresh, as other builtins.
     std::optional<web_fetch::v1::Options> web_fetch;
+    // Complete named tool-result storage bundle. Null keeps File; same-ID
+    // external resume requires the matching provider and frozen binding.
+    std::optional<named_results::v1::Options> named_results;
 };
 // operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };
@@ -212,6 +219,13 @@ public:
     std::vector<Approval> PendingApprovals() const;
     Result<void> ResolveApproval(std::string request_id, ApprovalDecision, std::string reason = {});
     Result<void> Cancel(std::string operation_id);
+    Result<std::vector<jobs::v1::JobView>> ListJobs(std::optional<std::string> parent_operation_id = std::nullopt) const;
+    Result<jobs::v1::JobView> ReadJob(jobs::v1::Identity) const;
+    Result<jobs::v1::JobView> WaitJob(jobs::v1::Identity, std::chrono::milliseconds timeout) const;
+    Result<void> CancelJob(jobs::v1::Identity);
+    // Trusted local cached preview, max_bytes in 1..4096. Not an outbound policy
+    // seal; a Worker must use ResultProjector before transport. No Full Job API.
+    Result<jobs::v1::Preview> ReadJobPreview(jobs::v1::Identity, std::size_t max_bytes = 4096) const;
     Result<Operation> ReadOperation(std::string operation_id) const;
     Result<Operation> WaitResult(std::string operation_id, std::chrono::milliseconds timeout) const;
     // Completed operations only. The frozen V3 result index survives event

@@ -2,11 +2,13 @@
 #include "platform/atomic_write.hpp"
 
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <string>
 #include <system_error>
+#include <utility>
 
 #include "platform/paths.hpp"  // PathToUtf8/ReplaceFileAtomically;Windows 另有 Utf8ToWide
 
@@ -14,6 +16,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <io.h>  // _fileno/_commit
+#include <share.h>
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -53,22 +56,45 @@ std::FILE* OpenTempFile(const std::filesystem::path& path) {
 #endif
 }
 
+void Observe(ImmutableIoObservation& out, std::int64_t result, bool succeeded,
+             ImmutableErrorDomain domain, std::int64_t error) noexcept {
+    out.attempted = true;
+    out.succeeded = succeeded;
+    out.result = result;
+    out.error_domain = succeeded ? ImmutableErrorDomain::None : domain;
+    out.native_error = succeeded ? 0 : error;
+}
+
 // 文件数据落盘(ProcessCrashDurability 档):fsync/_commit 已写出的数据。
 // 返回空 = 成功;否则人话错误。失败注入旗只替代刷盘本身(测试分阶段用,
 // 见头文件测试注入面),不开不关文件。
-std::string FlushFileToDisk(std::FILE* file, const std::filesystem::path& path) {
+std::string FlushFileToDisk(std::FILE* file, const std::filesystem::path& path,
+                           ImmutableWriteReceipt* witness = nullptr) {
     if (g_file_flush_fail.load(std::memory_order_relaxed)) {
+        if (witness) witness->file_sync.injected_failure = true;
         return "文件刷盘失败(测试注入): " + PathToUtf8(path);
     }
-    if (std::fflush(file) != 0) {
+    if (witness) errno = 0;
+    const int flushed = std::fflush(file);
+    const int flush_error = errno;
+    if (witness) Observe(witness->flush, flushed, flushed == 0, ImmutableErrorDomain::Errno, flush_error);
+    if (flushed != 0) {
         return "flush 失败: " + PathToUtf8(path);
     }
 #ifdef _WIN32
-    if (_commit(_fileno(file)) != 0) {
+    if (witness) errno = 0;
+    const int synced = _commit(_fileno(file));
+    const int sync_error = errno;
+    if (witness) Observe(witness->file_sync, synced, synced == 0, ImmutableErrorDomain::Errno, sync_error);
+    if (synced != 0) {
         return "commit 失败: " + PathToUtf8(path);
     }
 #else
-    if (fsync(fileno(file)) != 0) {
+    if (witness) errno = 0;
+    const int synced = fsync(fileno(file));
+    const int sync_error = errno;
+    if (witness) Observe(witness->file_sync, synced, synced == 0, ImmutableErrorDomain::Errno, sync_error);
+    if (synced != 0) {
         return "fsync 失败: " + PathToUtf8(path);
     }
 #endif
@@ -81,35 +107,65 @@ std::string FlushFileToDisk(std::FILE* file, const std::filesystem::path& path) 
 // 句柄带写访问。失败不推翻已完成的替换(数据已可见),只如实报错。
 // 空路径(裸文件名,无父段)没有可开的目录句柄:这一步按合同直接算过
 // (FD-04 钉死的现行行为)。失败注入旗只替代真实刷盘(测试分阶段用)。
-std::string FlushParentDirectory(const std::filesystem::path& dir) {
+std::string FlushParentDirectory(const std::filesystem::path& dir,
+                                 ImmutableWriteReceipt* witness = nullptr) {
     if (dir.empty()) {
         return std::string();
     }
     if (g_dir_flush_fail.load(std::memory_order_relaxed)) {
+        if (witness) witness->parent_sync.injected_failure = true;
         return "目录 flush 失败(测试注入): " + PathToUtf8(dir);
     }
 #ifdef _WIN32
     HANDLE handle = CreateFileW(dir.c_str(), GENERIC_WRITE,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                                 FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    const auto open_error = GetLastError();
+    if (witness) {
+        witness->parent_open.attempted = true;
+        witness->parent_open.succeeded = handle != INVALID_HANDLE_VALUE;
+        if (handle == INVALID_HANDLE_VALUE) {
+            witness->parent_open.error_domain = ImmutableErrorDomain::Win32;
+            witness->parent_open.native_error = open_error;
+        }
+    }
     if (handle == INVALID_HANDLE_VALUE) {
         return "目录句柄打不开: " + PathToUtf8(dir);
     }
     const BOOL flushed = FlushFileBuffers(handle);
-    CloseHandle(handle);
+    const auto flush_error = GetLastError();
+    const BOOL closed = CloseHandle(handle);
+    const auto close_error = GetLastError();
+    if (witness) {
+        Observe(witness->parent_sync, flushed, flushed != FALSE, ImmutableErrorDomain::Win32, flush_error);
+        Observe(witness->parent_close, closed, closed != FALSE, ImmutableErrorDomain::Win32, close_error);
+    }
     if (!flushed) {
         return "目录 flush 失败: " + PathToUtf8(dir);
     }
+    if (witness && !closed) return "目录 close 失败: " + PathToUtf8(dir);
 #else
+    if (witness) errno = 0;
     const int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
+    const int open_error = errno;
+    if (witness) Observe(witness->parent_open, fd, fd >= 0, ImmutableErrorDomain::Errno, open_error);
     if (fd < 0) {
         return "目录打不开: " + PathToUtf8(dir);
     }
+    if (witness) errno = 0;
     const int synced = ::fsync(fd);
-    ::close(fd);
+    const int sync_error = errno;
+    if (witness) errno = 0;
+    const int closed = ::close(fd);
+    const int close_error = errno;
+    if (witness) {
+        Observe(witness->parent_sync, synced, synced == 0, ImmutableErrorDomain::Errno, sync_error);
+        Observe(witness->parent_close, closed, closed == 0, ImmutableErrorDomain::Errno, close_error);
+    }
     if (synced != 0) {
         return "目录 fsync 失败: " + PathToUtf8(dir);
     }
+    if (witness && closed != 0) return "目录 close 失败: " + PathToUtf8(dir);
 #endif
     return std::string();
 }
@@ -221,6 +277,143 @@ std::expected<AtomicWriteReceipt, AtomicWriteError> AtomicWriteFile(const std::f
         return AtomicWriteReceipt{WriteOutcome::CommittedDurable};
     }
     return AtomicWriteReceipt{WriteOutcome::CommittedDurabilityNotRequested};
+}
+
+ImmutableWriteReceipt CreateImmutableFileDetailed(const std::filesystem::path& requested_target,
+    std::string_view bytes, WriteDurability durability) {
+    ImmutableWriteReceipt out;
+    out.requested = durability;
+    const auto error = [&](const char* code, std::string message) {
+        if (out.error_code.empty()) { out.error_code = code; out.message = std::move(message); }
+    };
+    if (durability != WriteDurability::AtomicVisibility && durability != WriteDurability::ProcessCrashDurability) {
+        error("immutable.invalid_durability", "unsupported immutable publication durability"); return out;
+    }
+    if (requested_target.empty() || PathToUtf8(requested_target).find('\0') != std::string::npos) {
+        error("immutable.invalid_path", "immutable target is empty or contains NUL"); return out;
+    }
+    std::error_code ec;
+    out.target = std::filesystem::absolute(requested_target, ec).lexically_normal();
+    if (ec || out.target.filename().empty()) {
+        error("immutable.invalid_path", "immutable target cannot be resolved"); return out;
+    }
+    const auto parent = out.target.parent_path();
+    const auto native_parent = FileIoPath(parent);
+    if (!std::filesystem::is_directory(native_parent, ec) || ec) {
+        error("immutable.parent_unavailable", "immutable publication requires an existing parent directory"); return out;
+    }
+    const auto native_target = FileIoPath(out.target);
+    out.temporary = out.target;
+    out.temporary += "." + std::to_string(CurrentPid()) + "-" + std::to_string(NextTempSequence()) + ".tmp";
+    const auto native_temp = FileIoPath(out.temporary); // normalize after adding the suffix
+
+    struct TempOwner {
+        const std::filesystem::path& path;
+        ImmutableWriteReceipt& receipt;
+        std::FILE* file = nullptr;
+        bool owned = false;
+        void Close() noexcept {
+            if (!file) return;
+            errno = 0;
+            const int result = std::fclose(file);
+            const int saved = errno;
+            file = nullptr; // Never retry fclose after a native close error.
+            Observe(receipt.file_close, result, result == 0, ImmutableErrorDomain::Errno, saved);
+        }
+        void Cleanup() noexcept {
+            if (!owned) return;
+#ifdef _WIN32
+            const BOOL result = DeleteFileW(path.c_str());
+            const auto saved = GetLastError();
+            Observe(receipt.cleanup, result, result != FALSE, ImmutableErrorDomain::Win32, saved);
+#else
+            errno = 0;
+            const int result = ::unlink(path.c_str());
+            const int saved = errno;
+            Observe(receipt.cleanup, result, result == 0, ImmutableErrorDomain::Errno, saved);
+#endif
+            owned = false; // Keep an unremoved orphan; do not retry or broaden deletion.
+        }
+        ~TempOwner() { Close(); Cleanup(); }
+    } temp{native_temp, out};
+    out.temp_open.attempted = true;
+    errno = 0;
+#ifdef _WIN32
+    temp.file = _wfsopen(native_temp.c_str(), L"wbx", _SH_DENYNO);
+#else
+    temp.file = std::fopen(native_temp.c_str(), "wbx");
+#endif
+    const int open_error = errno;
+    out.temp_open.succeeded = temp.file != nullptr;
+    if (!temp.file) {
+        out.temp_open.error_domain = ImmutableErrorDomain::Errno;
+        out.temp_open.native_error = open_error;
+        error("immutable.temp_open_failed", "exclusive temporary creation failed: " + PathToUtf8(out.temporary));
+        return out; // Not ours: never remove a preexisting temp or symlink.
+    }
+    temp.owned = true;
+    if (!bytes.empty()) {
+        out.body.attempted = true; out.body.requested_bytes = bytes.size();
+        errno = 0;
+        out.body.written_bytes = std::fwrite(bytes.data(), 1, bytes.size(), temp.file);
+        const int saved = errno;
+        out.body.succeeded = out.body.written_bytes == bytes.size();
+        if (!out.body.succeeded) {
+            out.body.error_domain = ImmutableErrorDomain::Errno; out.body.native_error = saved;
+            error("immutable.temp_write_failed", "temporary body write was incomplete");
+        }
+    }
+    if (out.error_code.empty()) {
+        if (durability == WriteDurability::ProcessCrashDurability) {
+            const auto detail = FlushFileToDisk(temp.file, native_temp, &out);
+            if (!detail.empty()) error("immutable.file_flush_failed", detail);
+        } else {
+            errno = 0;
+            const int flushed = std::fflush(temp.file);
+            const int saved = errno;
+            Observe(out.flush, flushed, flushed == 0, ImmutableErrorDomain::Errno, saved);
+            if (flushed != 0) error("immutable.file_flush_failed", "temporary stdio flush failed");
+        }
+    }
+    temp.Close();
+    if (!out.file_close.succeeded) error("immutable.file_close_failed", "temporary file close failed");
+    if (!out.error_code.empty()) { temp.Cleanup(); return out; }
+
+#ifdef _WIN32
+    const BOOL published = MoveFileExW(native_temp.c_str(), native_target.c_str(), 0);
+    const auto publish_error = GetLastError();
+    Observe(out.publish, published, published != FALSE, ImmutableErrorDomain::Win32, publish_error);
+    const bool exists = publish_error == ERROR_ALREADY_EXISTS || publish_error == ERROR_FILE_EXISTS;
+#else
+    errno = 0;
+    const int published = ::link(native_temp.c_str(), native_target.c_str());
+    const int publish_error = errno;
+    Observe(out.publish, published, published == 0, ImmutableErrorDomain::Errno, publish_error);
+    const bool exists = publish_error == EEXIST;
+#endif
+    if (!out.publish.succeeded) {
+        error(exists ? "immutable.target_exists" : "immutable.publish_failed",
+              exists ? "结果仓不可变名已存在，不允许覆盖" : "结果仓不可变名原生发布失败");
+        temp.Cleanup(); return out;
+    }
+    // Set visibility before any fallible diagnostic/string operation.
+    out.outcome = durability == WriteDurability::ProcessCrashDurability
+        ? WriteOutcome::CommittedDurabilityUnconfirmed : WriteOutcome::CommittedDurabilityNotRequested;
+#ifdef _WIN32
+    temp.owned = false; // The successful no-replace move consumed this name.
+#else
+    temp.Cleanup(); // link published target; cleanup can only remove our temp name.
+    if (!out.cleanup.succeeded) error("immutable.cleanup_failed", "published target retained; temporary unlink failed");
+#endif
+    if (durability == WriteDurability::ProcessCrashDurability) {
+        const auto detail = FlushParentDirectory(native_parent, &out);
+        if (!detail.empty()) error("immutable.directory_flush_failed", detail);
+        else {
+            out.confirmed_parent = parent;
+            out.outcome = WriteOutcome::CommittedDurable;
+        }
+    }
+    return out;
 }
 
 }  // namespace lubancode::platform
