@@ -131,6 +131,25 @@ struct Fixture {
         REQUIRE_MESSAGE(false, "actual Session main journal was not created"); return {};
     }
 };
+struct RelativeFixture {
+    fs::path cwd, relative, root;
+    bool created = false;
+    RelativeFixture() {
+        static std::atomic<unsigned> serial{0};
+        cwd = fs::current_path(); REQUIRE(cwd.is_absolute());
+        relative = "owned-relative-" + std::to_string(platform::CurrentProcessId()) + "-" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(++serial);
+        REQUIRE(relative.is_relative()); REQUIRE(relative.parent_path().empty());
+        root = cwd / relative;
+        REQUIRE(root.is_absolute()); REQUIRE(root.parent_path() == cwd); REQUIRE(root.filename() == relative);
+        created = fs::create_directory(platform::FileIoPath(root)); REQUIRE(created);
+    }
+    ~RelativeFixture() {
+        if (!created || relative.empty() || !relative.parent_path().empty() ||
+            root.parent_path() != cwd || root != cwd / relative) return;
+        std::error_code error; fs::remove_all(platform::FileIoPath(root), error);
+    }
+};
 class Backend final : public sdk::Backend {
 public:
     explicit Backend(std::shared_ptr<std::atomic<unsigned>> calls) : calls_(std::move(calls)) {}
@@ -274,10 +293,36 @@ TEST_CASE("SDK owned File paths: real File capability reads after Close and rela
     REQUIRE(CombinedRef(saved).at("sha256") == platform::Sha256Hex(*bytes));
     REQUIRE(CombinedRef(saved).at("bytes") == bytes->size());
     opening->lease.CloseWrites(); auto closed = ReadNative(cap, CombinedRef(saved)); REQUIRE(closed); REQUIRE(*closed == *bytes);
-    const auto relative = directory.lexically_relative(fs::current_path()); REQUIRE_FALSE(relative.empty()); REQUIRE(relative.is_relative());
-    auto standalone = v3::ResultStore::Open(relative, "relative-"); REQUIRE(standalone);
+    RelativeFixture working;
+    auto standalone = v3::ResultStore::Open(working.relative, "relative-"); REQUIRE(standalone);
     const auto other = standalone->Persist(Material()); REQUIRE(other.ok); REQUIRE(other.result_id.starts_with("relative-"));
-    REQUIRE(Read(directory / CombinedRef(other).at("path").get<std::string>()) == *bytes);
+    const auto relative_file = working.relative / CombinedRef(other).at("path").get<std::string>();
+    REQUIRE(relative_file.is_relative()); REQUIRE(Read(working.root / CombinedRef(other).at("path").get<std::string>()) == *bytes);
+    REQUIRE(platform::IsUnlinkedOwnedPath(working.relative, relative_file));
+    REQUIRE(platform::IsUnlinkedOwnedPath(working.relative / ".", relative_file));
+    REQUIRE(platform::IsUnlinkedOwnedPath(working.relative / "", relative_file));
+    REQUIRE(platform::IsUnlinkedOwnedPath(".", relative_file));
+    REQUIRE_FALSE(platform::IsUnlinkedOwnedPath(working.relative, working.relative / "artifacts" / ".." / "foreign"));
+    REQUIRE_FALSE(platform::IsUnlinkedOwnedPath(working.relative, working.relative / "artifacts" / ".." / "artifacts" / "foreign"));
+#ifdef _WIN32
+    // Exercise a drive-relative spelling only for an actual drive cwd. An UNC
+    // cwd is not a drive name, and must not be replaced with an invented C: base.
+    const auto drive_name = working.cwd.root_name().native();
+    if (drive_name.size() == 2 && drive_name[1] == L':') {
+        const auto drive_root = working.cwd.root_name() / working.relative;
+        const auto drive_file = working.cwd.root_name() / relative_file;
+        REQUIRE(drive_root.is_relative()); REQUIRE(drive_file.is_relative());
+        REQUIRE(platform::IsUnlinkedOwnedPath(drive_root, drive_file));
+        REQUIRE_FALSE(platform::IsUnlinkedOwnedPath(drive_root, drive_root / "artifacts" / ".." / "foreign"));
+        std::cout << "[sdk-owned-file-raw-base] actual-current-drive-relative\n";
+    }
+    const auto rooted = fs::path(L"\\") / working.root.relative_path();
+    const auto rooted_file = fs::path(L"\\") / (working.root / CombinedRef(other).at("path").get<std::string>()).relative_path();
+    REQUIRE(rooted.has_root_directory()); REQUIRE_FALSE(rooted.has_root_name()); REQUIRE(rooted.is_relative());
+    REQUIRE(platform::IsUnlinkedOwnedPath(rooted, rooted_file));
+    REQUIRE_FALSE(platform::IsUnlinkedOwnedPath(rooted, rooted / "artifacts" / ".." / "foreign"));
+    std::cout << "[sdk-owned-file-raw-base] actual-current-root-relative\n";
+#endif
     REQUIRE_FALSE(platform::IsUnlinkedOwnedPath(directory, directory / "artifacts" / ".." / "foreign"));
     REQUIRE_FALSE(platform::IsUnlinkedOwnedPath(directory, fixture.host / "foreign")); Mark("file-relative");
 }
