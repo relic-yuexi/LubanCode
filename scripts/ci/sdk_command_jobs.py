@@ -10,6 +10,7 @@ import json
 import ntpath
 import os
 from pathlib import Path
+import posixpath
 import re
 import shlex
 import shutil
@@ -25,6 +26,7 @@ HELPER = "examples/sdk-consumer/command_jobs.cpp"
 HEADER = "include/lubancore/jobs.hpp"
 PROBE_TARGET = "lubancore_command_limits_probe"
 PROBE_SOURCE = "tests/support/command_limits_probe.cpp"
+PROBE_PROJECT = "scripts/ci/fixtures/command-jobs-probe/CMakeLists.txt"
 FAULT_KINDS = {1: "tool.job.registered", 3: "sdk.job.operation.bound",
                6: "tool.result.persisted", 14: "hook.completed"}
 FAULT_KEYS = {"sync", "row_kind", "row_seq", "journal_status", "native_stage", "platform",
@@ -194,7 +196,219 @@ def seal_sources(repo):
     return result
 
 
-def copy_probe(repo, build, scratch, config="Release"):
+def prepare_probe_fixture(repo, scratch, evidence):
+    """Copy a standalone fixture and declare remote commands; never run them."""
+    try:
+        from .check_sdk_only_boundary import CLIENT
+    except ImportError:
+        from check_sdk_only_boundary import CLIENT
+    repo, scratch, evidence = Path(repo).resolve(), Path(scratch).resolve(), Path(evidence).resolve()
+    require(not scratch.is_relative_to(repo), "private probe must leave the product source tree")
+    source, build = scratch / "command-jobs-probe-source", scratch / "command-jobs-probe-build"
+    require(not source.exists() and not build.exists() and not evidence.exists(),
+            "private probe fixture destination already exists")
+    source.mkdir(parents=True)
+    copies = {}
+    for original, relative in ((PROBE_PROJECT, "CMakeLists.txt"), (PROBE_SOURCE, PROBE_SOURCE)):
+        path = repo / original
+        require(path.is_file() and not path.is_symlink(), "private probe fixture source missing or linked")
+        destination = source / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, destination)
+        saved = evidence / relative
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(destination, saved)
+        require(digest(path) == digest(destination) == digest(saved), "private probe fixture source copy differs")
+        copies[original] = {"projectPath": relative, "bytes": destination.stat().st_size, "sha256": digest(destination)}
+    query = build / ".cmake/api/v1/query" / CLIENT
+    query.mkdir(parents=True)
+    (query / "codemodel-v2").write_text("", encoding="utf-8")
+    return {"schemaVersion": 1, "originalSource": str(repo), "source": str(source), "build": str(build),
+            "sourceCopies": copies,
+            "configure": ["cmake", "-S", str(source), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
+                          "-DCMAKE_SUPPRESS_REGENERATION=ON"],
+            "buildCommand": ["cmake", "--build", str(build), "--config", "Release",
+                             "--target", PROBE_TARGET, "--parallel", "4"]}
+
+
+def preserve_probe_reply(build, output):
+    """Save bounded observed originals before any target eligibility check.
+
+    A copied graph is evidence, never an acceptance result. Even malformed JSON
+    or a missing executable must remain inspectable after the scratch is gone.
+    """
+    build, output = Path(build).resolve(), Path(output)
+    reply = build / ".cmake/api/v1/reply"
+    require(not output.exists(), "probe observed File API destination already exists")
+    require(not reply.is_symlink(), "probe observed File API directory is linked")
+    paths = sorted(reply.glob("*.json")) if reply.is_dir() else []
+    require(len(paths) <= 4096, "probe observed File API exceeds file cap")
+    originals = []
+    total = 0
+    for path in paths:
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 16 * 1024 * 1024,
+                "probe observed File API member linked or oversized")
+        data = path.read_bytes()
+        require(len(data) <= 16 * 1024 * 1024, "probe observed File API member grew beyond cap")
+        total += len(data)
+        require(total <= 256 * 1024 * 1024, "probe observed File API exceeds byte cap")
+        originals.append((path.name, data))
+    output.mkdir(parents=True)
+    files = []
+    for name, data in originals:
+        saved = output / name
+        saved.write_bytes(data)
+        require(saved.read_bytes() == data, "probe observed File API copy differs")
+        files.append({"name": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    return {"schemaVersion": 1, "githubSha": os.environ.get("GITHUB_SHA"),
+            "producerBuild": str(build), "directory": str(output),
+            "status": "copied" if files else "no_reply_json", "acceptance": "not_evaluated",
+            "files": files}
+
+
+def preserve_probe_file_api(reply, index_path, index, model_ref, model, target_ref, target, output):
+    """Keep original JSON bytes, including every codemodel target/directory.
+
+    These files allow independent source ownership checks after the runner is
+    gone. The producer's live CMake objects remain the authority; no JSON graph
+    is manufactured from the acceptance receipt.
+    """
+    reply, output = Path(reply), Path(output)
+    require(not output.exists(), "probe raw File API destination already exists")
+    names = {index_path.name, model_ref["jsonFile"], target_ref["jsonFile"]}
+    for configuration in model["configurations"]:
+        for entry in (*configuration.get("targets", []), *configuration.get("directories", [])):
+            if "jsonFile" in entry:
+                names.add(entry["jsonFile"])
+    require(len(names) <= 4096 and all(isinstance(name, str) and Path(name).name == name and
+            name.endswith(".json") and not any(c in name for c in "\0/\\") for name in names),
+            "probe File API graph references invalid or excessive files")
+    # Read bounded originals before creating the evidence directory. Retain
+    # formatting, unknown fields and native artifact paths byte for byte.
+    originals = {}
+    total = 0
+    for name in sorted(names):
+        path = reply / name
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 16 * 1024 * 1024,
+                "probe File API original missing, linked or oversized")
+        originals[name] = path.read_bytes()
+        total += len(originals[name])
+        require(total <= 256 * 1024 * 1024, "probe File API graph exceeds evidence byte cap")
+    for name, expected in ((index_path.name, index), (model_ref["jsonFile"], model),
+                           (target_ref["jsonFile"], target)):
+        require(json.loads(originals[name], object_pairs_hook=unique_object) == expected,
+                "probe File API changed after its actual validation")
+    output.mkdir(parents=True)
+    files = []
+    for name, data in originals.items():
+        path = output / name
+        path.write_bytes(data)
+        require(path.read_bytes() == data, "probe raw File API evidence copy differs")
+        files.append({"name": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    return {"schemaVersion": 1, "directory": str(output), "index": index_path.name,
+            "codemodel": model_ref["jsonFile"], "target": target_ref["jsonFile"], "files": files}
+
+
+def select_probe_artifact(target, native_platform):
+    """Select one declared runtime artifact; MSVC may also declare its PDB.
+
+    This rule also runs on uploaded originals, independently of the verifier's
+    operating system. It never searches the build tree or guesses a binary path.
+    """
+    require(native_platform in ("windows", "posix"), "probe native platform invalid")
+    artifacts = target.get("artifacts", [])
+    require(isinstance(artifacts, list) and 1 <= len(artifacts) <= 2,
+            "probe executable artifact missing or ambiguous")
+    paths = []
+    normalized = []
+    for artifact in artifacts:
+        path = artifact.get("path") if isinstance(artifact, dict) else None
+        require(isinstance(path, str) and path and not any(ch in path for ch in "\0\r\n"),
+                "probe artifact path invalid")
+        paths.append(path)
+        value = path.replace("\\", "/")
+        normalized.append(ntpath.normcase(ntpath.normpath(value)) if native_platform == "windows"
+                          else posixpath.normpath(value))
+    require(len(set(normalized)) == len(normalized), "probe duplicate artifact path")
+    runtime_name = PROBE_TARGET + (".exe" if native_platform == "windows" else "")
+    runtime = [path for path in paths if posixpath.basename(path.replace("\\", "/")) == runtime_name]
+    require(len(runtime) == 1, "probe executable artifact missing or ambiguous")
+    companions = [path for path in paths if path != runtime[0]]
+    if companions:
+        require(native_platform == "windows" and len(companions) == 1 and
+                companions[0].replace("\\", "/") ==
+                posixpath.join(posixpath.dirname(runtime[0].replace("\\", "/")), PROBE_TARGET + ".pdb"),
+                "probe foreign auxiliary artifact")
+    return {"runtime": runtime[0], "auxiliary": companions}
+
+
+def check_probe_file_api(directory, context):
+    """Recheck uploaded originals without needing the producer's filesystem."""
+    try:
+        from .check_sdk_only_boundary import CLIENT
+    except ImportError:
+        from check_sdk_only_boundary import CLIENT
+    directory = Path(directory)
+    raw = context["fileApiRaw"]
+    require(raw.get("schemaVersion") == 1 and isinstance(raw.get("files"), list) and
+            0 < len(raw["files"]) <= 4096, "probe raw File API receipt absent or malformed")
+    objects = {}
+    total = 0
+    for item in raw["files"]:
+        name = item["name"]
+        require(isinstance(name, str) and Path(name).name == name and name.endswith(".json") and
+                not any(c in name for c in "\0/\\") and name not in objects,
+                "probe raw File API duplicate or unsafe member")
+        path = directory / name
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size == item["bytes"] and
+                path.stat().st_size <= 16 * 1024 * 1024 and digest(path) == item["sha256"],
+                "probe raw File API missing, changed or oversized member")
+        data = path.read_bytes()
+        total += len(data)
+        require(total <= 256 * 1024 * 1024, "probe raw File API graph exceeds evidence byte cap")
+        objects[name] = json.loads(data, object_pairs_hook=unique_object)
+    require(set(objects) == {path.name for path in directory.iterdir()}, "probe raw File API unindexed member")
+    require(all(raw[key] in objects for key in ("index", "codemodel", "target")), "probe raw File API root missing")
+    index, model, target = (objects[raw[key]] for key in ("index", "codemodel", "target"))
+    def normalized(value):
+        value = value.replace("\\", "/")
+        return ntpath.normcase(ntpath.normpath(value)) if ntpath.splitdrive(value)[0] else posixpath.normpath(value)
+    require(index["reply"][CLIENT]["codemodel-v2"]["jsonFile"] == raw["codemodel"] and
+            model.get("kind") == "codemodel" and model.get("version", {}).get("major") == 2 and
+            normalized(model["paths"]["build"]) == normalized(context["producerBuild"]) and
+            normalized(model["paths"]["source"]) == normalized(context["producerSource"]),
+            "probe raw index/codemodel identity differs")
+    configs = [entry for entry in model["configurations"] if entry["name"] == context["configuration"]]
+    require(len(configs) == 1, "probe raw configuration missing or duplicated")
+    refs = [entry for entry in configs[0]["targets"] if entry["name"] == PROBE_TARGET]
+    require(len(refs) == 1 and refs[0]["jsonFile"] == raw["target"] and refs[0]["id"] == target["id"] ==
+            context["fileApiTarget"]["id"] and target["name"] == PROBE_TARGET and
+            target["type"] == "EXECUTABLE" and not target.get("dependencies"), "probe raw target identity differs")
+    require(digest(directory / raw["target"]) == context["fileApiTarget"]["sha256"], "probe raw target fingerprint differs")
+    sources = [entry["path"] for entry in target["sources"] if "compileGroupIndex" in entry]
+    source_root = model["paths"]["source"].replace("\\", "/")
+    actual_sources = [normalized(path if absolute(path) else source_root + "/" + path) for path in sources]
+    require(actual_sources == [normalized(source_root + "/" + PROBE_SOURCE)], "probe raw compiled source differs")
+    selection = select_probe_artifact(target, context.get("nativePlatform"))
+    require(selection == context.get("artifactSelection"), "probe raw artifact selection differs")
+    artifact = selection["runtime"]
+    require(normalized(artifact if absolute(artifact) else model["paths"]["build"] + "/" + artifact) ==
+            normalized(context["original"]["path"]), "probe raw native artifact differs")
+    referenced = {raw["index"], raw["codemodel"]}
+    for configuration in model["configurations"]:
+        for entry in (*configuration.get("targets", []), *configuration.get("directories", [])):
+            if "jsonFile" in entry:
+                require(entry["jsonFile"] in objects, "probe raw graph reference missing")
+                referenced.add(entry["jsonFile"])
+        for entry in configuration.get("targets", []):
+            require(objects[entry["jsonFile"]].get("id") == entry["id"] and
+                    objects[entry["jsonFile"]].get("name") == entry["name"], "probe raw owner target differs")
+    require(set(objects) == referenced, "probe raw File API graph incomplete or foreign")
+    return {"status": "passed", "rawFiles": len(objects), "rawBytes": total,
+            "index": raw["index"], "codemodel": raw["codemodel"], "target": raw["target"]}
+
+
+def copy_probe(repo, build, scratch, config="Release", evidence=None):
     """Resolve the actual compiled private executable through the original File API."""
     try:
         from .check_sdk_only_boundary import CLIENT, read_reply
@@ -206,7 +420,8 @@ def copy_probe(repo, build, scratch, config="Release"):
     indices = sorted(reply.glob("index-*.json"))
     require(bool(indices), "actual File API index missing")
     index = json.loads(indices[-1].read_text(encoding="utf-8"))
-    model = read_reply(reply, index["reply"][CLIENT]["codemodel-v2"])
+    model_ref = index["reply"][CLIENT]["codemodel-v2"]
+    model = read_reply(reply, model_ref)
     require(model.get("kind") == "codemodel" and model.get("version", {}).get("major") == 2 and
             Path(model["paths"]["source"]).resolve() == repo and Path(model["paths"]["build"]).resolve() == build,
             "probe File API source/build differs")
@@ -224,9 +439,9 @@ def copy_probe(repo, build, scratch, config="Release"):
         path = Path(entry["path"])
         sources.append((path if path.is_absolute() else repo / path).resolve())
     require(sources == [(repo / PROBE_SOURCE).resolve()], "probe compiled a different source body")
-    artifacts = target.get("artifacts", [])
-    require(len(artifacts) == 1, "probe executable artifact missing or ambiguous")
-    original = Path(artifacts[0]["path"])
+    native_platform = "windows" if os.name == "nt" else "posix"
+    selection = select_probe_artifact(target, native_platform)
+    original = Path(selection["runtime"])
     original = original if original.is_absolute() else build / original
     require(not original.is_symlink(), "probe artifact is linked")
     original = original.resolve()
@@ -239,18 +454,35 @@ def copy_probe(repo, build, scratch, config="Release"):
     shutil.copy2(original, destination)
     require(digest(destination) == digest(original) and
             (os.name == "nt" or os.access(destination, os.X_OK)), "copied probe bytes/permissions differ")
-    return {"schemaVersion": 1, "githubSha": os.environ.get("GITHUB_SHA"), "configuration": config,
-            "producerBuild": str(build), "source": {"path": PROBE_SOURCE, "sha256": digest(repo / PROBE_SOURCE)},
+    context = {"schemaVersion": 1, "githubSha": os.environ.get("GITHUB_SHA"), "configuration": config,
+            "nativePlatform": native_platform, "artifactSelection": selection,
+            "producerBuild": str(build), "producerSource": str(repo),
+            "source": {"path": PROBE_SOURCE, "sha256": digest(repo / PROBE_SOURCE)},
             "fileApiTarget": {"path": str(reply / refs[0]["jsonFile"]), "sha256": digest(reply / refs[0]["jsonFile"]),
                               "id": target["id"], "name": target["name"]},
             "original": {"path": str(original), "sha256": digest(original), "bytes": original.stat().st_size},
             "copy": {"path": str(destination), "sha256": digest(destination), "bytes": destination.stat().st_size}}
+    if evidence is not None:
+        context["fileApiRaw"] = preserve_probe_file_api(reply, indices[-1], index, model_ref, model,
+                                                      refs[0], target, evidence)
+        context["fileApiRawAcceptance"] = check_probe_file_api(evidence, context)
+    return context
 
 
-def check_copies(source, prefix, seal, probe):
+def check_copies(source, prefix, seal, probe, evidence=None):
+    copies = {}
     for relative, actual in ((HELPER, Path(source) / "command_jobs.cpp"), (HEADER, Path(prefix) / HEADER)):
         require(actual.is_file() and not actual.is_symlink() and digest(actual) == seal[relative]["sha256"],
                 "relocated helper/header drifted: " + relative)
+        if evidence is not None:
+            destination = Path(evidence) / relative
+            require(not destination.exists(), "relocated source evidence destination already exists")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(actual, destination)
+            require(digest(destination) == seal[relative]["sha256"], "relocated source evidence differs")
+            copies[relative] = {"actualPath": str(actual), "evidencePath": relative,
+                                "bytes": destination.stat().st_size, "sha256": digest(destination)}
     actual = Path(probe["copy"]["path"])
     require(actual.is_file() and not actual.is_symlink() and actual.stat().st_size == probe["copy"]["bytes"] and
             digest(actual) == probe["copy"]["sha256"] == probe["original"]["sha256"], "relocated probe changed")
+    return copies

@@ -71,8 +71,15 @@ Result<std::shared_ptr<SessionCommandJobPlan>> SessionCommandJobPlan::Prepare(
     owner->options_ = requested;
     if (!owner->resume_id_.empty()) {
         auto workspace = lubancode::workspace::index::ResolveDirByWorkspaceKey(owner->root_ / "workspaces", workspace_key);
-        if (!workspace) return std::unexpected(Invalid("resume workspace is unavailable"));
+        if (!workspace) return std::unexpected(Error{"sdk.session.open_failed", "resume session is unavailable"});
         owner->resume_dir_ = *workspace / "sessions" / lubancode::platform::Utf8ToPath(owner->resume_id_);
+        std::error_code error;
+        const auto status = fs::symlink_status(owner->resume_dir_, error);
+        if (error == std::errc::no_such_file_or_directory ||
+            (!error && status.type() == fs::file_type::not_found))
+            return std::unexpected(Error{"sdk.session.open_failed", "resume session is unavailable"});
+        // True absence keeps the established Session error. Existing linked,
+        // non-directory or unreadable material still passes through strict Job validation.
         auto saved = ReadPlan(owner->root_, owner->resume_dir_);
         if (!saved) return std::unexpected(saved.error());
         if (!*saved) {

@@ -17,11 +17,17 @@ class OwnedDeadlineEvidenceTests(unittest.TestCase):
             effective_timeout_ms=150 if path in ('runtime-budget', 'startup-close') else None)
             for path in gate.PATHS]
 
+    def queue_observation(self, state='queued', elapsed=100):
+        return dict(unlimited_budget_ms=0, unlimited_queued=True, unlimited_started=False,
+                    unlimited_final_state='cancelled', registration_budget_ms=2000,
+                    immediate_state=state, elapsed_before_register_ms=elapsed, global_running=1)
+
     def body(self, facts=None, command=None):
         command = self.command if command is None else command
         return '\n'.join(('Command: ' + ' '.join('"' + value + '"' for value in command),
             '[doctest] test cases: 6 | 6 passed | 0 failed',
             '[doctest] assertions: 100 | 100 passed | 0 failed', 'Test Passed.',
+            '[owned-job-deadline-queue-observation] ' + json.dumps(self.queue_observation()),
             *('[owned-job-deadline-path] ' + path for path in gate.PATHS),
             *('[owned-job-deadline-fact] ' + json.dumps(fact) for fact in (self.facts() if facts is None else facts))))
 
@@ -135,6 +141,36 @@ class OwnedDeadlineEvidenceTests(unittest.TestCase):
         cmake = (root / 'cmake/LubanCoreTests.cmake').read_text(encoding='utf-8')
         self.assertIn('set(sdk_original_test "integration.sdk.lubancore_owned_job_deadline")', cmake)
         self.assertEqual(cmake.count('PROPERTIES RESOURCE_LOCK "sdk-owned-job-deadline"'), 2)
+
+    def test_queue_observation_accepts_elapsed_deadline_without_fabricating_a_queue(self):
+        for state, elapsed in (('queued', 0), ('queued', 1999), ('cancelled', 1999), ('cancelled', 8000)):
+            value = self.queue_observation(state, elapsed)
+            section = '[owned-job-deadline-queue-observation] ' + json.dumps(value)
+            self.assertEqual(gate.check_queue_observation(section), value)
+        self.reject(self.body().replace('"immediate_state": "queued"', '"immediate_state": "cancelled"'))
+
+    def test_queue_observation_rejects_missing_duplicate_and_changed_claims(self):
+        prefix = '[owned-job-deadline-queue-observation] '
+        original = self.queue_observation()
+        raw = prefix + json.dumps(original)
+        self.reject(self.body().replace(raw, ''))
+        self.reject(self.body() + '\n' + raw)
+        for key, replacement in (('unlimited_budget_ms', False), ('unlimited_budget_ms', 1),
+                ('registration_budget_ms', 2001), ('registration_budget_ms', True),
+                ('global_running', 0), ('global_running', True), ('unlimited_queued', False),
+                ('unlimited_queued', 1), ('unlimited_started', True), ('unlimited_started', 0),
+                ('unlimited_final_state', 'succeeded'), ('immediate_state', 'running'),
+                ('immediate_state', []), ('elapsed_before_register_ms', True),
+                ('elapsed_before_register_ms', -1), ('elapsed_before_register_ms', 1999.5)):
+            value = dict(original); value[key] = replacement
+            with self.subTest(key=key, replacement=replacement):
+                self.reject(self.body().replace(raw, prefix + json.dumps(value)))
+        for value in (None, [], 'text', dict(original, foreign=True)):
+            self.reject(self.body().replace(raw, prefix + json.dumps(value)))
+        incomplete = dict(original); del incomplete['unlimited_queued']
+        self.reject(self.body().replace(raw, prefix + json.dumps(incomplete)))
+        self.reject(self.body().replace('"unlimited_budget_ms": 0', '"unlimited_budget_ms": 0, "unlimited_budget_ms": 0'))
+        self.reject(self.body().replace('"elapsed_before_register_ms": 100', '"elapsed_before_register_ms": NaN'))
 
 
 if __name__ == '__main__':

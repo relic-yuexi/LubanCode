@@ -226,3 +226,8 @@ DOC development/sdk-agentic-rag-example.md
 DOC development/sdk-asan-compile-profile.md
 DOC development/windows-command-entry-observation.md
 DOC development/sdk-command-jobs.md
+DOC development/workspace-racer-ready-evidence.md
+DOC development/sdk-lua-child-precheck-repair.md
+DOC development/sdk-command-job-missing-resume.md
+DOC development/sdk-command-probe-artifacts.md
+DOC development/sdk-owned-queue-observation.md

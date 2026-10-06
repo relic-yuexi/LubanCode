@@ -154,7 +154,12 @@ class ClosureTests(unittest.TestCase):
             probe = root / "probe"; probe.write_bytes(b"pure fixture, never executable")
             context = {"copy": {"path": str(probe), "bytes": probe.stat().st_size, "sha256": gate.digest(probe)},
                        "original": {"sha256": gate.digest(probe)}}
-            gate.check_copies(source, prefix, seal, context)
+            evidence = root / "evidence"
+            copied = gate.check_copies(source, prefix, seal, context, evidence=evidence)
+            self.assertEqual(set(copied), {gate.HELPER, gate.HEADER})
+            for relative in copied:
+                self.assertEqual((evidence / relative).read_bytes(), (REPO / relative).read_bytes())
+                self.assertEqual(copied[relative]["sha256"], seal[relative]["sha256"])
             probe.write_bytes(b"other")
             with self.assertRaises(RuntimeError):
                 gate.check_copies(source, prefix, seal, context)
@@ -190,32 +195,125 @@ class ClosureTests(unittest.TestCase):
             "src/runtime/async_tool_runtime.cpp", "src/runtime/async_tool_runtime.hpp",
             "src/runtime/trajectory_turn_bridge.cpp", "src/runtime/trajectory_turn_bridge.hpp",
             *gate.IMPLEMENTATIONS, "src/sdk/command_jobs.hpp", "src/sdk/command_jobs_opening.hpp",
-            gate.HEADER, "src/tools/tool_job_coordinator.cpp", "src/tools/tool_job_coordinator.hpp")
+            gate.HEADER, gate.PROBE_PROJECT,
+            "src/tools/tool_job_coordinator.cpp", "src/tools/tool_job_coordinator.hpp")
         for pattern in patterns:
             for source in dependencies:
                 self.assertTrue(any(fnmatch.fnmatchcase(source, part) for part in pattern.strip().split('|')), source)
             self.assertFalse(any(fnmatch.fnmatchcase("docs/readme.md", part) for part in pattern.strip().split('|')))
 
+    def test_private_fixture_is_fresh_and_has_no_product_graph_dependency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            receipt = gate.prepare_probe_fixture(REPO, root / "scratch", root / "evidence")
+            self.assertEqual(set(receipt["sourceCopies"]), {gate.PROBE_PROJECT, gate.PROBE_SOURCE})
+            source, build = Path(receipt["source"]), Path(receipt["build"])
+            self.assertFalse(source.is_relative_to(REPO))
+            self.assertFalse(build.is_relative_to(REPO))
+            self.assertEqual(receipt["configure"], ["cmake", "-S", str(source), "-B", str(build),
+                "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_SUPPRESS_REGENERATION=ON"])
+            self.assertEqual(receipt["buildCommand"], ["cmake", "--build", str(build), "--config", "Release",
+                "--target", gate.PROBE_TARGET, "--parallel", "4"])
+            self.assertTrue((build / ".cmake/api/v1/query/client-lubancore-boundary/codemodel-v2").is_file())
+            for original, copy in receipt["sourceCopies"].items():
+                self.assertEqual((source / copy["projectPath"]).read_bytes(), (REPO / original).read_bytes())
+                self.assertEqual((root / "evidence" / copy["projectPath"]).read_bytes(), (REPO / original).read_bytes())
+            with self.assertRaises(RuntimeError):
+                gate.prepare_probe_fixture(REPO, root / "scratch", root / "second-evidence")
+
+    def test_probe_artifact_selection_accepts_only_native_runtime_and_exact_pdb(self):
+        runtime = "Release/" + gate.PROBE_TARGET + ".exe"
+        pdb = "Release/" + gate.PROBE_TARGET + ".pdb"
+        target = {"artifacts": [{"path": runtime}, {"path": pdb}]}
+        # Actual MSVC shape, including a different order, on every test host.
+        for paths in ([runtime, pdb], [pdb, runtime], [runtime]):
+            self.assertEqual(gate.select_probe_artifact({"artifacts": [{"path": path} for path in paths]}, "windows"),
+                             {"runtime": runtime, "auxiliary": [pdb] if pdb in paths else []})
+        posix = "tests/" + gate.PROBE_TARGET
+        self.assertEqual(gate.select_probe_artifact({"artifacts": [{"path": posix}]}, "posix"),
+                         {"runtime": posix, "auxiliary": []})
+        bad_shapes = ([pdb], [], [runtime, runtime], [runtime, runtime.upper()],
+                      [runtime, "Debug/" + gate.PROBE_TARGET + ".exe"],
+                      [runtime, "Debug/" + gate.PROBE_TARGET + ".pdb"],
+                      [runtime, "Release/other.pdb"], [runtime, pdb, pdb],
+                      [runtime, "Release/unknown.lib"], [runtime, "Release/../Release/" + gate.PROBE_TARGET + ".exe"],
+                      [runtime, "\0"], [posix, pdb])
+        for paths in bad_shapes:
+            with self.subTest(paths=paths), self.assertRaises(RuntimeError):
+                gate.select_probe_artifact({"artifacts": [{"path": path} for path in paths]}, "windows")
+        for platform in ("posix", "foreign", None):
+            with self.subTest(platform=platform), self.assertRaises(RuntimeError):
+                gate.select_probe_artifact(target, platform)
+        with self.assertRaises(RuntimeError):
+            gate.select_probe_artifact({"artifacts": [{"path": posix}, {"path": posix + ".pdb"}]}, "posix")
+
     def test_probe_copy_comes_from_real_target_artifact_shape(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); repo = root / "source"; build = root / "build"; scratch = root / "scratch"
+            root = Path(directory).resolve(); repo = root / "source"; build = root / "build"; scratch = root / "scratch"
             (repo / gate.PROBE_SOURCE).parent.mkdir(parents=True)
             (repo / gate.PROBE_SOURCE).write_text("// pure source fixture, never compiled")
-            binary = build / "tests" / gate.PROBE_TARGET
+            binary = build / "tests" / (gate.PROBE_TARGET + (".exe" if os.name == "nt" else ""))
             binary.parent.mkdir(parents=True); binary.write_bytes(b"pure binary fixture, never executed"); binary.chmod(0o755)
             reply = build / ".cmake/api/v1/reply"; reply.mkdir(parents=True)
             reference = {"id": "probe-id", "name": gate.PROBE_TARGET, "jsonFile": "target.json"}
             target = {**reference, "type": "EXECUTABLE", "dependencies": [],
                       "sources": [{"path": gate.PROBE_SOURCE, "compileGroupIndex": 0}],
-                      "artifacts": [{"path": "tests/" + gate.PROBE_TARGET}]}
+                      "artifacts": [{"path": "tests/" + binary.name}]}
+            if os.name == "nt":
+                target["artifacts"].append({"path": "tests/" + gate.PROBE_TARGET + ".pdb"})
+            other = {"id": "other-id", "name": "other-owner", "jsonFile": "other.json"}
             model = {"kind": "codemodel", "version": {"major": 2}, "paths": {"source": str(repo), "build": str(build)},
-                     "configurations": [{"name": "Release", "targets": [reference]}]}
+                     "configurations": [{"name": "Release", "targets": [reference, other],
+                                         "directories": [{"jsonFile": "directory.json"}]}]}
             (reply / "index-1.json").write_text(json.dumps({"reply": {"client-lubancore-boundary": {"codemodel-v2": {"jsonFile": "model.json"}}}}))
             (reply / "model.json").write_text(json.dumps(model))
             (reply / "target.json").write_text(json.dumps(target))
-            copied = gate.copy_probe(repo, build, scratch)
+            (reply / "other.json").write_text(json.dumps({**other, "type": "UTILITY", "sources": []}))
+            (reply / "directory.json").write_bytes(b'{ "kind": "directory", "unknown": "retain me" }\n')
+            raw = root / "raw-evidence"
+            copied = gate.copy_probe(repo, build, scratch, evidence=raw)
             self.assertEqual(copied["copy"]["sha256"], copied["original"]["sha256"])
             self.assertTrue(Path(copied["copy"]["path"]).is_relative_to(scratch.resolve()))
+            self.assertEqual(copied["fileApiRawAcceptance"]["rawFiles"], 5)
+            for item in copied["fileApiRaw"]["files"]:
+                self.assertEqual((raw / item["name"]).read_bytes(), (reply / item["name"]).read_bytes())
+            # Verify uploaded originals in an unrelated directory, with the
+            # producer paths retained only as logical evidence identities.
+            import shutil
+            relocated = root / "relocated-raw"
+            shutil.copytree(raw, relocated)
+            self.assertEqual(gate.check_probe_file_api(relocated, copied)["status"], "passed")
+            for key, value in (("nativePlatform", "posix" if os.name == "nt" else "windows"),
+                               ("artifactSelection", {"runtime": "invented", "auxiliary": []})):
+                changed = deepcopy(copied); changed[key] = value
+                with self.subTest(context=key), self.assertRaises(RuntimeError):
+                    gate.check_probe_file_api(relocated, changed)
+            for mutation in ("missing", "tampered", "unindexed", "duplicate-receipt"):
+                changed = deepcopy(copied)
+                directory = root / mutation
+                shutil.copytree(raw, directory)
+                if mutation == "missing": (directory / "other.json").unlink()
+                elif mutation == "tampered": (directory / "target.json").write_bytes(b'{}')
+                elif mutation == "unindexed": (directory / "foreign.json").write_bytes(b'{}')
+                else: changed["fileApiRaw"]["files"].append(changed["fileApiRaw"]["files"][0])
+                with self.subTest(mutation=mutation), self.assertRaises(RuntimeError):
+                    gate.check_probe_file_api(directory, changed)
+            # A matching receipt hash cannot make a foreign compiled source,
+            # native artifact or owner identity acceptable.
+            for key, value in (("sources", [{"path": "tests/support/other.cpp", "compileGroupIndex": 0}]),
+                               ("artifacts", [{"path": "tests/other-probe"}]), ("id", "foreign-id")):
+                changed = deepcopy(copied)
+                directory = root / ("rehashed-" + key)
+                shutil.copytree(raw, directory)
+                bad_target = deepcopy(target); bad_target[key] = value
+                path = directory / "target.json"
+                path.write_text(json.dumps(bad_target))
+                sha = gate.digest(path)
+                changed["fileApiTarget"]["sha256"] = sha
+                member = next(item for item in changed["fileApiRaw"]["files"] if item["name"] == "target.json")
+                member.update(bytes=path.stat().st_size, sha256=sha)
+                with self.subTest(rehashed=key), self.assertRaises(RuntimeError):
+                    gate.check_probe_file_api(directory, changed)
             for key, value in (("dependencies", [{"id": "sdk"}]), ("type", "SHARED_LIBRARY"),
                                ("sources", [{"path": "tests/support/other.cpp", "compileGroupIndex": 0}]),
                                ("artifacts", [{"path": "tests/" + gate.PROBE_TARGET}] * 2)):
@@ -223,6 +321,30 @@ class ClosureTests(unittest.TestCase):
                 (reply / "target.json").write_text(json.dumps(bad))
                 with self.subTest(key=key), self.assertRaises(RuntimeError):
                     gate.copy_probe(repo, build, scratch / key)
+            # A failed eligibility check must leave the actual original graph;
+            # preserving it never converts the rejection into acceptance.
+            (reply / "target.json").write_text(json.dumps(target))
+            binary.unlink()
+            observed = gate.preserve_probe_reply(build, root / "observed-missing-artifact")
+            self.assertEqual(observed["acceptance"], "not_evaluated")
+            self.assertEqual(observed["status"], "copied")
+            with self.assertRaisesRegex(RuntimeError, "artifact unavailable"):
+                gate.copy_probe(repo, build, scratch / "missing-artifact", evidence=root / "rejected-raw")
+            self.assertFalse((root / "rejected-raw").exists())
+            for item in observed["files"]:
+                saved = root / "observed-missing-artifact" / item["name"]
+                self.assertEqual(saved.read_bytes(), (reply / item["name"]).read_bytes())
+                self.assertEqual(gate.digest(saved), item["sha256"])
+            # Malformed originals remain bytes, not a manufactured graph.
+            (reply / "target.json").write_bytes(b'{ broken original')
+            malformed = gate.preserve_probe_reply(build, root / "observed-malformed")
+            self.assertEqual(malformed["status"], "copied")
+            self.assertEqual((root / "observed-malformed/target.json").read_bytes(), b'{ broken original')
+            with self.assertRaises(RuntimeError):
+                gate.preserve_probe_reply(build, root / "observed-malformed")
+            absent = gate.preserve_probe_reply(root / "unconfigured", root / "observed-empty")
+            self.assertEqual(absent["status"], "no_reply_json")
+            self.assertEqual(absent["files"], [])
 
 
 class FullRunTests(unittest.TestCase):

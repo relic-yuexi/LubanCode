@@ -1,6 +1,6 @@
 # SDK 阶段进度与验收边界
 
-核查日期：2026-10-05。已合基线为功能分支 `6e2702b2`；[#332](https://github.com/relic-yuexi/LubanCode/pull/332) 的已验源 `0066ac3e` 与合入头同树。
+核查日期：2026-10-06。已合基线为功能分支 `fd76b6a5`；[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 的已验源 `c522a51c` 与合入头同树。
 
 目标：新宿主只调用公开 SDK，便能运行完整会话，不必复制内部运行栈。CLI 逐项迁入，原功能保住。现已能嵌入；CLI 主入口和 one-shot 仍用内部装配，尚未全部对齐。
 
@@ -8,10 +8,10 @@
 
 | 阶段 | 已合范围 | 接下来补什么 |
 | --- | --- | --- |
-| 收口当前批 | Worker #245、Runner #246、SDK #325、Job 日志 #332 已合功能分支；旧子 PR 已收口 | 下一笔 Web／可选 Lua 等组合在已有 CI 分支验收，未添实施 PR |
-| SDK 完整化 | 五件内置工具；显式 Skills；项目 Memory Recall/Save 和片段 CAS；前台深度一子 Agent；主 Action；strict standalone Lua；Package 清单分析 | 其余 CLI 工具、自动 Memory、Skills 管理、Package 挂载、后台与嵌套子任务、公开 Job、CLI 主入口迁移 |
+| 收口当前批 | Worker #245、Runner #246、SDK #325、Job 日志 #332、Web／可选 Lua 等组合 #333 已合功能分支；旧子 PR 已收口 | Jobs／不可变结果组合在已有 CI 分支验收；当前只留总 Draft #234 |
+| SDK 完整化 | 五件原内置工具、有界 web_fetch 和 Todo；显式 Skills；项目 Memory Recall/Save 和片段 CAS；前台深度一子 Agent；主 Action；strict standalone Lua；Package 清单分析与根 inventory；公开 RAG 参考例 | 其余 CLI 工具、自动 Memory、Skills 管理、Package 挂载、后台与嵌套子任务、公开 Job、CLI 主入口迁移 |
 | 四口 SPI | Session 真接 EventSink；召回片段真接 Memory Blob provider；公开 PolicyProvider 原语 | 完整 JournalStore/BlobStore，替换结果与恢复读写，接真实 Session 授权；本阶段不引数据库 |
-| 依赖瘦身 | updater、Release 查询、渠道、Gateway 留宿主；Package 只带中立 parser | 可关闭 Lua 的编译画像已在私有候选通过，仍待合入；继续检查依赖闭包 |
+| 依赖瘦身 | updater、Release 查询、渠道、Gateway 留宿主；Package 只带中立 parser；Lua 可从 SDK 依赖闭包关闭，ON/OFF 三平台均已验收并合入 | 继续检查依赖闭包与端侧最小装配 |
 | 身份与治理 | 身份值、授权 action、可撤销 PolicyProvider 和订阅合同 | 新托管会话 ownership、执行前重查、恢复归属、查询与审批隔离；旧账迁入另批 |
 | 公开服务 | AppServer 内部网页、WebSocket；本地可信 Worker IPC | 正式 Worker 协议、HTTP/SSE、持久 outbox/ACK 和游标；gRPC 按需 |
 | 分布式与存储 | 本地 Worker；独立实验 Runner；两端部署合同 | 网络登记、心跳、鉴权、存储与队列适配；池化和 Sandbox 池各守前置门 |
@@ -41,14 +41,16 @@
 
 入口观测只收窄待查区间，尚不能断唯一起因。全量较后通过不能盖掉这次失败。新源修复已单独验收，失败原件继续封存。
 
-## 下一笔候选
+## 已收口：#333
 
-当前组合已保留 #332 的 `0066ac3e` 窄修复，接入
+这批保留 #332 的 `0066ac3e` 窄修复，接入
 [有界 web_fetch](sdk-web-fetch.md)。宿主显式选择工具并冻结每场上限；默认不开放。
 公开配置与能力快照只含 SDK／标准库值，内部单次请求 Transport 留替换口。
 模型只能收窄预算，Close 等请求真退出；不支持 gzip 时明确拒绝编码，不添解压依赖。
 原 CLI 19 案保住，另补两案；SDK 六案和安装消费核实际 HTTP、预算、取消与四场隔离，
-HTTP 夹具另核线程退净。源码和纯数据已查，这份新组合仍待自己的远程 CI。
+HTTP 夹具另核线程退净。公开 Todo、Package 根 inventory、可关闭 Lua 与安装后的 RAG 参考例同批收口。
+
+源 `c522a51c` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37309659950) 15 项全过，[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 已正常合成 `fd76b6a5`，合入树精确相同。六套 Lua ON 各 59 来源／486 CASE／34 场安装消费；三套 OFF 各 57 来源／471 CASE／31 场消费。全量 Linux 766、Windows 768、macOS 769；ASan 实跑 158 来源、65 重点门、1802 CASE／69955 断言；TSan 十四场 workflow。九套 Web、RAG 与原始图均核过实际执行，三份跨镜像包各跑五笔命令。1061 件原件逐大小、来源与 SHA256 复核，摘要 `c0ac5d8b6cde2c1c8441e13629aed29f2bf77733ac253c2ede6d52227d851b53`。LSan 关闭；Linux/macOS 全量以真实 job 完成日志为据，没有逐来源完整 JUnit。这批绿灯不借给新 Jobs／不可变结果／SPI。
 
 首组合 `92f93572` 的[远程 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37284807084)在重复 Location 安装消费报普通网络错，macOS 33／34 通过；HTTP 第 21 笔后停止，服务正常退净。原日志未记底层 CPR 错误码。查 curl 源码，部分版本会在第二枚头进入回调前拒绝协议；这条差异能解释现象，不能据此断定唯一成因。
 
@@ -114,3 +116,21 @@ ON 六套各 54 册 focused、452 条原生 CASE、33 项安装消费；OFF 三�
 Jobs 两册17 CASE 加结果仓八案，共增三册25 CASE。合树静态名册为 SDK Lua ON/OFF 62/60 册、511/496 CASE，安装消费35/32场；全量预期 Linux/Windows/macOS 772/774/775。ASan 当前选择式选出重点68册、执行来源161册、wildcard编译正文161份、附件23份；这里列接线范围，不冒充实跑。公开 Blob／Journal SPI 尚未接入。
 
 CI 会留安装/移位消费者原 argv、显式真实 probe 的 File API 归属与字节指纹、公开十路径、私有七路径，以及四份写后未知 typed 原件。注册、JUnit、LastTest 三者须相符，失败也留原件。原 deadline 六 CASE 和 CLI 命令路径不改；本地仅跑纯数据、AST、脚本语法与文档检查。详见 [Command Jobs 合同](sdk-command-jobs.md)。
+
+### 首轮组合实测与窄修
+
+`605d200f` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37312694121)整轮失败，241 件原证冻结，摘要 `defb4ccbc2f70540f1301e21ab4b20f2ceb26184d443db0496e3e8baac9f037b`。六套安装消费停在私有 probe 准备：SDK-only 原本关闭测试，图内没有该 target；Linux/macOS combined 只编 SDK 库，没有 probe 可执行件；Windows combined 图带真实 ZERO_CHECK 再生依赖，遭旧“零依赖”门拒。消费、focused、全量与 OFF 本轮均未执行。
+
+ASan 真跑了 161 册，其中 159 过、两册失败；1827 CASE 中两案败，71195 断言中 11 条败。新 Jobs 公开十案、私有七案和不可变结果八案均实过，四份写后未知回执逐字段保住；TSan 十四册实过。这些局部结果不能验收整树。Lua 恢复坏声明仍遭拒绝，但会话身份先过 Jobs 绑定门，旧夹具硬认 Lua 错误码；子会话捕获夹具堵着旧固定临时名，独占临时件改名后未再触发故障。后源只修[明确预检期待和真实 no-replace 拒绝点](sdk-lua-child-precheck-repair.md)，保原硬断言，不改生产顺序。
+
+probe 后源改用独立、标准库私有夹具，复制原源码，在 CI 临时目录单独配置和编译，再从真实 File API 取实际可执行件并移位。产品测试开关、SDK 闭包和原 CMake 图照旧。配置或编译失败也保有界原 reply；成功后仍严核源码、目标与 artifact 归属。上传的原图先记 `not_evaluated`，不能拿“已保存”充作“已通过”。安装消费还留真实 helper 与 jobs 头文件原字节。
+
+旧 Windows ready 首读失败另补[原件与清场诊断](workspace-racer-ready-evidence.md)：保存首次字节、真实句柄与 argv，失败前收同一只 helper。六 CASE、原前缀断言、锁状态和预算照留；没有重读求绿，也未断言根因。这些后源改动只过源码与纯门，仍须新一轮远端验证。
+
+`a9d3f16e` 的[后源 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37320718673) 又抓到两处错误，不能算通过。四条 Linux/macOS 安装消费者实际各 35 项中 34 项过；四场隔离已关场，随后的缺会话恢复错报 `sdk.job.plan_invalid`，违背旧 `sdk.session.open_failed`。Windows 独立探针配置与编译均成功，原始图同时列指定 EXE 和同目录 PDB，旧门把总产物数当可执行件数而拒绝。两份首次失败原件分别冻结 69 件与 29 件；没有补造未生成的消费总验收。
+
+新候选只补[缺失分类](sdk-command-job-missing-resume.md)与[真实产物选择](sdk-command-probe-artifacts.md)。缺 workspace 或明确缺 session 沿旧错误码拒开，已有坏材料仍严查；原 private 案追加八次真实 Runtime 准入反例，旧七 CASE、消费者原断言与预算保留。Windows 精确选指定 EXE，可附同目录同名 PDB，POSIX 保单无后缀产物；生产与上传后复核共用同一门，原图字节不动。新的原生结果仍须独立交远端 CI。
+
+`7a5321c8` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37421453525)已核三平台 combined focused 各 62 源／511 CASE。Windows SDK-only 安装消费 35／35 过，focused 62 源中 61 过；Owned deadline 六案五过，438 行排队快照想读 `queued`，实际已为 `cancelled`。原六份终态事实仍齐。首次失败 15 件原件冻结，摘要 `e48f85c030b8904c61850ec654d9f7a5773afc3b5709cf5de1e1988761c45b05`；其它同源结果不能替这一项验收。
+
+后源按[排队观察合同](sdk-owned-queue-observation.md)保住原 2000ms 正预算和全部截止、零调用、父引用、恢复与退场检查。另加零注册预算真票，硬查堵在活进程后排队，再取消退场。正票快照若已取消，还须核 Register 前实际时钟已过最早截止；其它状态照拒。生产、原六 CASE 和预算不变。纯数据门已核，原生仍交新源远端 CI。

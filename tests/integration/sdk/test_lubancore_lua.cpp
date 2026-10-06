@@ -20,6 +20,7 @@ void LuaSeed(const std::filesystem::path&);
 void LuaResume(const std::filesystem::path&);
 void LuaAdoptSystem(const std::filesystem::path&, const std::string&);
 void LuaRestoreBad(const std::filesystem::path&, const std::string&);
+void LuaRestoreForeignSystem(const std::filesystem::path&, const std::string&);
 }
 namespace {
 struct OwnedDirectory {
@@ -73,7 +74,7 @@ std::string Rehash(const std::string& bytes, const std::string& message_id, unsi
         if (row.value("messageId", std::string{}) != message_id) continue;
         REQUIRE(row.contains("systemMeta"));
         if (variant == 0) row["systemMeta"]["hostBindings"].erase("lua");
-        if (variant == 1) row["systemMeta"]["hostBindings"]["lua"]["sha256"] = std::string(64, 'a');
+        if (variant == 1 || variant == 4) row["systemMeta"]["hostBindings"]["lua"]["sha256"] = std::string(64, 'a');
         if (variant == 2) row["sessionId"] = "foreign-lua-session";
         ++modified;
     }
@@ -130,8 +131,8 @@ TEST_CASE("SDK Lua validates the actual adopted systems and owned plan before re
         owned_start = true; break;
     }
     REQUIRE(owned_start);
-    for (unsigned variant = 0; variant != 4; ++variant) {
-        const auto changed = Rehash(original, variant == 2 ? adopted_id : initial_id, variant);
+    for (unsigned variant = 0; variant != 5; ++variant) {
+        const auto changed = Rehash(original, (variant == 2 || variant == 4) ? adopted_id : initial_id, variant);
         Write(journal, changed);
         const auto readable = v3::ReadV3Ledger(journal);
         REQUIRE_MESSAGE(readable.has_value(), (readable ? std::string{} : readable.error()));
@@ -139,6 +140,18 @@ TEST_CASE("SDK Lua validates the actual adopted systems and owned plan before re
         const auto* actual_system = readable->FindMessage(adopted_id);
         REQUIRE(actual_system != nullptr);
         if (variant == 2) REQUIRE(actual_system->session_id == "foreign-lua-session");
+        if (variant == 4) {
+            // Keep shared ownership and Jobs binding valid, so this refusal
+            // must come from the adopted system's Lua binding itself.
+            REQUIRE(actual_system->session_id == id);
+            REQUIRE(actual_system->system_meta.has_value());
+            REQUIRE(adopted->system_meta.has_value());
+            const auto& actual_hosts = actual_system->system_meta->at("hostBindings");
+            const auto& saved_hosts = adopted->system_meta->at("hostBindings");
+            REQUIRE(actual_hosts.at("commandJobs") == saved_hosts.at("commandJobs"));
+            REQUIRE(actual_hosts.at("lua").at("sha256") == std::string(64, 'a'));
+            REQUIRE(actual_hosts.at("lua") != saved_hosts.at("lua"));
+        }
         if (variant == 3) {
             bool foreign_start = false;
             for (const auto& event : readable->events) {
@@ -148,7 +161,8 @@ TEST_CASE("SDK Lua validates the actual adopted systems and owned plan before re
             }
             REQUIRE(foreign_start);
         }
-        CHECK_NOTHROW(lubancore_consumer::LuaRestoreBad(directory.path, id));
+        if (variant == 2) CHECK_NOTHROW(lubancore_consumer::LuaRestoreForeignSystem(directory.path, id));
+        else CHECK_NOTHROW(lubancore_consumer::LuaRestoreBad(directory.path, id));
         CHECK(Read(journal) == changed); CHECK(Read(plan) == saved_plan);
     }
     Write(journal, original);

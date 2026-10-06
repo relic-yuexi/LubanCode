@@ -159,7 +159,7 @@ public:
     }
 };
 
-enum class Failure { None, ObservationIo, CaptureFile, CaptureTempDirectory, BadResultName, MissingChild, ChildRootAlias };
+enum class Failure { None, ObservationIo, CaptureFile, CaptureFinalDirectory, BadResultName, MissingChild, ChildRootAlias };
 
 enum class HistoryDiagnosticCase {
     Complete, PostHook, HistoricalChain, ObservationGap,
@@ -391,16 +391,22 @@ struct Rig {
         wiring.boundary_recorder = bridge.get(); wiring.turn_id = turn_id;
         const auto capture = wiring.capture_tool_result;
         wiring.capture_tool_result = [this, capture](const api::ToolResultBlock& result) {
+            std::string sibling_channel, sibling_metadata;
             if (result.tool_use_id == "reused-provider") {
                 raw_child_text = result.content;
                 if (failure == Failure::ObservationIo) io_armed->store(true);
                 if (failure == Failure::CaptureFile) Write(directory.root / "artifacts", "not a directory");
-                if (failure == Failure::CaptureTempDirectory) {
-                    // The large sibling already owns capture-000001. Refuse
-                    // the child's actual immutable-file temporary open, while
-                    // keeping the parent writer and sibling artifacts healthy.
-                    REQUIRE(std::filesystem::create_directory(directory.root / "artifacts" /
-                        "capture-000002.combined.txt.tmp"));
+                if (failure == Failure::CaptureFinalDirectory) {
+                    // The open store already captured sibling 000001. Occupy
+                    // the child's final name; its real no-replace publication
+                    // must fail regardless of the private temporary suffix.
+                    REQUIRE(books.captures.has_value());
+                    const auto artifacts = directory.root / "artifacts";
+                    sibling_channel = Read(artifacts / "capture-000001.combined.txt");
+                    sibling_metadata = Read(artifacts / "capture-000001.json");
+                    REQUIRE(sibling_channel == std::string(200000, 'L'));
+                    REQUIRE_FALSE(sibling_metadata.empty());
+                    REQUIRE(std::filesystem::create_directory(artifacts / "capture-000002.combined.txt"));
                 }
                 if (failure == Failure::BadResultName) {
                     const bool artifact_dir_ready = std::filesystem::create_directories(directory.root / "artifacts") ||
@@ -429,6 +435,15 @@ struct Rig {
                 const auto before = writer->next_seq();
                 repeated_captures.push_back(capture(result));
                 CHECK(writer->next_seq() == before);
+                if (failure == Failure::CaptureFinalDirectory) {
+                    const auto artifacts = directory.root / "artifacts";
+                    CHECK(std::filesystem::is_directory(artifacts / "capture-000002.combined.txt"));
+                    CHECK_FALSE(std::filesystem::exists(artifacts / "capture-000002.json"));
+                    CHECK(Read(artifacts / "capture-000001.combined.txt") == sibling_channel);
+                    CHECK(Read(artifacts / "capture-000001.json") == sibling_metadata);
+                    for (const auto& entry : std::filesystem::directory_iterator(artifacts))
+                        CHECK(entry.path().extension() != ".tmp");
+                }
             }
             return receipt;
         };

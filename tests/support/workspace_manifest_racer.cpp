@@ -32,7 +32,12 @@
 #include <fstream>
 #include <string>
 #include <thread>
+#include <utility>
 
+#include <nlohmann/json.hpp>
+
+#include "platform/paths.hpp"
+#include "platform/process.hpp"
 #include "workspace/identity.hpp"
 #include "workspace/manifest.hpp"
 #include "workspace/manifest_lock.hpp"
@@ -41,11 +46,47 @@ namespace {
 
 namespace fs = std::filesystem;
 
+template<class MakeRecord>
+void Evidence(MakeRecord make_record) noexcept {
+    try {
+        const std::string line = make_record().dump(-1, ' ', true,
+            nlohmann::json::error_handler_t::replace);
+        std::fprintf(stderr, "[workspace-racer-evidence] %s\n", line.c_str());
+        std::fflush(stderr); // diagnostic stream only; never flush/retry the ready file
+    } catch (...) {
+        std::fputs("[workspace-racer-evidence-unavailable]\n", stderr);
+        std::fflush(stderr);
+    }
+}
+
+std::string Hex(const std::string& bytes) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (const unsigned char ch : bytes) {
+        result.push_back(digits[ch >> 4]);
+        result.push_back(digits[ch & 15]);
+    }
+    return result;
+}
+
 void WriteText(const fs::path& path, const std::string& text) {
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    const bool opened = file.is_open();
     file << text;
+    const bool write_good = file.good(), write_fail = file.fail(), write_bad = file.bad();
+    if (opened) file.close(); // original scope-exit close, made explicit to retain its result
+    const bool still_open = file.is_open(), close_fail = file.fail(), close_bad = file.bad();
+    Evidence([&] {
+        return nlohmann::json{{"phase", "ready_write"}, {"pid", lubancode::platform::CurrentProcessId()},
+            {"path", lubancode::platform::PathToUtf8(path)}, {"parent_error", ec.value()},
+            {"requested_bytes", text.size()}, {"requested_hex", Hex(text)}, {"opened", opened},
+            {"write_good", write_good}, {"write_fail", write_fail}, {"write_bad", write_bad},
+            {"close_attempted", opened}, {"still_open", still_open},
+            {"fail_after_close", close_fail}, {"bad_after_close", close_bad}};
+    });
 }
 
 bool WaitForFile(const fs::path& path, int timeout_ms) {
@@ -103,13 +144,35 @@ int main(int argc, char** argv) {
     const fs::path ready = argv[3];
     lubancode::workspace::ManifestLock lock;
     // 磨档占锁(60×100ms,与生产开房路同配):单发撞在建窗即刻死,见头注。
+    const auto acquire_started = std::chrono::steady_clock::now();
     const auto result = lubancode::workspace::ManifestLock::Acquire(
         workspace_dir, &lock, /*attempts=*/60, /*interval_ms=*/100);
+    const auto acquire_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - acquire_started).count();
+    const auto report_acquire = [&] {
+        Evidence([&] {
+            auto arguments = nlohmann::json::array();
+            auto argument_bytes = nlohmann::json::array();
+            for (int index = 0; index < argc; ++index) {
+                arguments.push_back(argv[index]);
+                argument_bytes.push_back(Hex(argv[index]));
+            }
+            return nlohmann::json{{"phase", "acquire"}, {"mode", mode},
+                {"pid", lubancode::platform::CurrentProcessId()},
+                {"argv", std::move(arguments)}, {"argv_hex", std::move(argument_bytes)},
+                {"workspace_dir", lubancode::platform::PathToUtf8(workspace_dir)},
+                {"status", static_cast<int>(result.status)}, {"detail", result.detail},
+                {"detail_hex", Hex(result.detail)}, {"holds", lock.holds()},
+                {"elapsed_ms", acquire_elapsed}, {"attempts", 60}, {"interval_ms", 100}};
+        });
+    };
     if (result.status != lubancode::workspace::ManifestLock::Status::Acquired) {
         WriteText(ready, "fail: " + result.detail + "\n");
+        report_acquire();
         return 3;
     }
     WriteText(ready, "ok\n");
+    report_acquire();
     if (mode == "crash") {
         std::_Exit(9);  // 暴毙:不析构、不放锁,owner 账留在盘上
     }

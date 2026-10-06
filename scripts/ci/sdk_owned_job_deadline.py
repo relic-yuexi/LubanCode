@@ -8,6 +8,9 @@ PATHS = ('registered-queue', 'authorization', 'runtime-budget', 'late-worker',
          'startup-close', 'strict-recovery')
 FACT_KEYS = {'path', 'quiescent', 'global_running', 'started_intent',
              'command_not_invoked', 'command_calls', 'effective_timeout_ms'}
+QUEUE_OBSERVATION_KEYS = {'unlimited_budget_ms', 'unlimited_queued', 'unlimited_started',
+                          'unlimited_final_state', 'registration_budget_ms', 'immediate_state',
+                          'elapsed_before_register_ms', 'global_running'}
 
 
 def check_owned_job_deadline_registration(command, executable='lubancore_sdk_tests'):
@@ -25,6 +28,33 @@ def unique_object(pairs):
         if key in value:
             raise ValueError('duplicate fact field: ' + key)
         value[key] = item
+    return value
+
+
+def check_queue_observation(section):
+    prefix = '[owned-job-deadline-queue-observation] '
+    raw = [line.removeprefix(prefix) for line in section.splitlines() if line.startswith(prefix)]
+    if len(raw) != 1:
+        raise RuntimeError('Owned Job deadline requires exactly one actual queue observation')
+    try:
+        value = json.loads(raw[0], object_pairs_hook=unique_object,
+                           parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token)))
+    except (ValueError, TypeError) as error:
+        raise RuntimeError('Owned Job deadline queue observation is not strict JSON') from error
+    if not isinstance(value, dict) or set(value) != QUEUE_OBSERVATION_KEYS:
+        raise RuntimeError('Owned Job deadline queue observation shape differs')
+    for key, expected in (('unlimited_budget_ms', 0), ('registration_budget_ms', 2000), ('global_running', 1)):
+        if type(value[key]) is not int or value[key] != expected:
+            raise RuntimeError('Owned Job deadline changed its actual queue budget or live blocker')
+    if (value['unlimited_queued'] is not True or value['unlimited_started'] is not False or
+            value['unlimited_final_state'] != 'cancelled'):
+        raise RuntimeError('Owned Job deadline did not observe and retire a real unstarted queue ticket')
+    elapsed = value['elapsed_before_register_ms']
+    state = value['immediate_state']
+    if type(elapsed) is not int or elapsed < 0 or state not in ('queued', 'cancelled'):
+        raise RuntimeError('Owned Job deadline immediate state or elapsed observation is invalid')
+    if state == 'cancelled' and elapsed < 1999:
+        raise RuntimeError('Owned Job deadline cancellation preceded its earliest possible registration expiry')
     return value
 
 
@@ -54,6 +84,7 @@ def check_owned_job_deadline_native(section, command):
              if line.startswith('[owned-job-deadline-path] ')]
     if sorted(paths) != sorted(PATHS):
         raise RuntimeError('Owned Job deadline has absent, duplicate or foreign paths')
+    check_queue_observation(section)
     raw = [line.removeprefix('[owned-job-deadline-fact] ') for line in section.splitlines()
            if line.startswith('[owned-job-deadline-fact] ')]
     try:
