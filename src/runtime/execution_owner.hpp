@@ -14,6 +14,13 @@ namespace lubancode::runtime {
 // profile is consumed even if copying it into the owned Agent fails.
 void ClearExecutionProfileBorrowers(agent::AgentProfile& profile) noexcept;
 
+// A synchronous host keeps its original backend and registry alive. This owner
+// creates only the Agent; no child overlay or owned SessionResources is implied.
+struct HostBorrowedExecutionResources {
+    api::Backend& backend;
+    tools::ToolRegistry& registry;
+};
+
 // Only the wrapper and overlay are owned here. They can forward to the parent's
 // original backend/tools (including MCP tools); those caller-owned resources
 // must outlive this entire synchronous child execution. Nothing clones them.
@@ -28,11 +35,14 @@ class ExecutionTurnScope;
 
 // The shared Agent construction, optional restore and destruction boundary.
 // A root owns its SessionResources; a child owns only its wrapper/overlay while
-// explicitly borrowing the parent's resources. Hosts still assemble each plan.
+// explicitly borrowing the parent's resources. A synchronous host borrows both
+// original resources. Hosts still assemble each plan.
 class ExecutionOwner final {
 public:
     ExecutionOwner(std::unique_ptr<assembly::SessionResources> resources,
                    agent::AgentProfile&& profile,
+                   std::optional<std::vector<api::Message>> restored_history = std::nullopt);
+    ExecutionOwner(HostBorrowedExecutionResources resources, agent::AgentProfile&& profile,
                    std::optional<std::vector<api::Message>> restored_history = std::nullopt);
     ExecutionOwner(ChildExecutionResources&& resources, agent::AgentProfile&& profile,
                    std::optional<std::vector<api::Message>> restored_history = std::nullopt);
@@ -45,8 +55,8 @@ public:
     agent::Agent& agent() const { return *agent_; }
     api::Backend& backend() const { return *backend_; }
     tools::ToolRegistry& registry() const { return *registry_; }
-    // Non-null only for the full root graph. Child borrows are never presented
-    // as an owned SessionResources graph.
+    // Non-null only for the full root graph. Child and host borrows are never
+    // presented as an owned SessionResources graph.
     assembly::SessionResources* session_resources() const { return session_resources_.get(); }
 
 private:

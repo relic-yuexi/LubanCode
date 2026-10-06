@@ -25,6 +25,12 @@ ExecutionOwner::ExecutionOwner(std::unique_ptr<assembly::SessionResources> resou
     Construct(profile, std::move(restored_history));
 }
 
+ExecutionOwner::ExecutionOwner(HostBorrowedExecutionResources resources, agent::AgentProfile&& profile,
+                               std::optional<std::vector<api::Message>> restored_history)
+    : backend_(&resources.backend), registry_(&resources.registry) {
+    Construct(profile, std::move(restored_history));
+}
+
 ExecutionOwner::ExecutionOwner(ChildExecutionResources&& resources, agent::AgentProfile&& profile,
                                std::optional<std::vector<api::Message>> restored_history)
     : backend_wrapper_(std::move(resources.backend_wrapper)),
