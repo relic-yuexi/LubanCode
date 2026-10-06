@@ -99,9 +99,11 @@ public:
         // No allocations/native calls. Freeze before releasing the same gate.
         void UnconfirmSemantic() noexcept;
     private:
-        AppendLease(State*, std::unique_lock<std::mutex>, JournalOwnerUnconfirmed);
+        AppendLease(std::shared_ptr<State>, std::unique_lock<std::mutex>, JournalOwnerUnconfirmed);
         void Retire() noexcept;
-        State* state_ = nullptr;
+        // The write lease independently keeps its actual State/mutex/native
+        // handle alive when the owner facade is moved, replaced or destroyed.
+        std::shared_ptr<State> state_;
         std::unique_lock<std::mutex> lock_;
         JournalOwnerUnconfirmed receipt_;
         bool complete_ = false;
@@ -133,7 +135,7 @@ public:
     std::expected<JournalReadHandle, std::string> Capture(std::optional<std::size_t> = {}) const;
 private:
     explicit JournalOwner(FileJournalAdapter);
-    std::unique_ptr<State> state_;
+    std::shared_ptr<State> state_;
 };
 
 } // namespace lubancode::trajectory

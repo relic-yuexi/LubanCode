@@ -73,7 +73,7 @@ struct JournalOwner::State {
     std::optional<JournalCloseReceipt> first_close;
 };
 JournalOwner::JournalOwner() = default;
-JournalOwner::JournalOwner(FileJournalAdapter file) : state_(std::make_unique<State>(std::move(file))) {}
+JournalOwner::JournalOwner(FileJournalAdapter file) : state_(std::make_shared<State>(std::move(file))) {}
 JournalOwner::JournalOwner(JournalOwner&&) noexcept = default;
 JournalOwner& JournalOwner::operator=(JournalOwner&&) noexcept = default;
 JournalOwner::~JournalOwner() = default;
@@ -109,15 +109,15 @@ std::expected<JournalReadHandle, std::string> JournalOwner::CaptureExisting(
     const std::filesystem::path& path, std::optional<std::size_t> max_bytes, bool follow_path) {
     return FileJournalAdapter::CaptureExisting(path, max_bytes, follow_path);
 }
-JournalOwner::AppendLease::AppendLease(State* state, std::unique_lock<std::mutex> lock,
-    JournalOwnerUnconfirmed receipt) : state_(state), lock_(std::move(lock)), receipt_(std::move(receipt)) {}
+JournalOwner::AppendLease::AppendLease(std::shared_ptr<State> state, std::unique_lock<std::mutex> lock,
+    JournalOwnerUnconfirmed receipt) : state_(std::move(state)), lock_(std::move(lock)), receipt_(std::move(receipt)) {}
 JournalOwner::AppendLease::AppendLease(AppendLease&& other) noexcept
-    : state_(std::exchange(other.state_, nullptr)), lock_(std::move(other.lock_)),
+    : state_(std::move(other.state_)), lock_(std::move(other.lock_)),
       receipt_(std::move(other.receipt_)), complete_(other.complete_) {}
 JournalOwner::AppendLease& JournalOwner::AppendLease::operator=(AppendLease&& other) noexcept {
     if (this != &other) {
         Retire();
-        state_ = std::exchange(other.state_, nullptr);
+        state_ = std::move(other.state_);
         lock_ = std::move(other.lock_);
         receipt_ = std::move(other.receipt_);
         complete_ = other.complete_;
@@ -134,8 +134,11 @@ void JournalOwner::AppendLease::UnconfirmSemantic() noexcept {
 void JournalOwner::AppendLease::Complete() noexcept { complete_ = true; }
 void JournalOwner::AppendLease::Retire() noexcept {
     if (state_ && !complete_) UnconfirmSemantic();
-    state_ = nullptr;
+    // Seal while this lease still owns the gate, unlock the live mutex, then
+    // release the strong State reference. Its final File destructor cannot
+    // retire a locked mutex or perform native Close before this lease exits.
     if (lock_.owns_lock()) lock_.unlock();
+    state_.reset();
 }
 JournalOwner::AppendLease JournalOwner::AppendLine(
     std::string_view line, Durability durability, JournalAppendIdentity identity) {
@@ -160,7 +163,7 @@ JournalOwner::AppendLease JournalOwner::AppendLine(
         // Read the frozen fixed native receipt, without copying request strings.
         if (state_->first_unconfirmed) receipt.native = state_->first_unconfirmed->native;
     }
-    return AppendLease(state_.get(), std::move(lock), std::move(receipt));
+    return AppendLease(state_, std::move(lock), std::move(receipt));
 }
 JournalCloseReceipt JournalOwner::CloseDetailed() noexcept {
     if (!state_) return {};

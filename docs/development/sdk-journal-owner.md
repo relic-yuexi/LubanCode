@@ -102,3 +102,23 @@ Only source/data checks have run locally. CMake, install-consumer routing,
 workflow classifiers, native source rosters and artifact collection remain for
 the integration owner to wire. No local configuration, compilation, native test
 or HTTP execution has occurred. These source counts are not remote pass counts.
+
+
+## Active write lease lifetime correction
+
+An issued AppendLease now independently holds the actual shared owner State,
+locked mutex and File adapter. Moving, replacing or destroying the facade cannot
+retire that native stream while its lease is active. The lease freezes its first
+semantic uncertainty while still holding the gate, unlocks the live mutex, then
+releases its State reference. Final File retirement closes the original native
+handle once. Repeated explicit Close retains its first fixed native receipt.
+There is no State-to-lease reference or owner/read-handle cycle; independent read
+handles continue to own only captured bytes and their native File anchor.
+
+The existing seven-case native roster additionally exercises an issued lease
+outliving its owner scope, moved and replaced owners with an active lease, and
+actual concurrent Close waiting for that lease to exit. The concurrent case
+keeps actual Committed native append separate from SemanticCompletion unknown,
+then preserves the first real injected-unconfirmed fclose observation. It uses
+zero-duration future polls, adds no timeout allowance and does not relax any old
+native case. These additions remain source-only pending remote CI.

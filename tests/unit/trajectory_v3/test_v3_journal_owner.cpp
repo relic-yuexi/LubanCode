@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -198,6 +199,68 @@ TEST_CASE("Journal owner: dropped completion lease seals committed native write 
     const auto closed = owner->CloseDetailed(); REQUIRE(closed.native); CHECK(closed.ok()); CHECK(closed.native->succeeded);
     const auto close_count = state->count; REQUIRE(owner->CloseDetailed().native); CHECK(state->count == close_count);
     CHECK(state->closes == 1); Same(*owner->first_unconfirmed(), *first); CHECK(Bytes(path) == "real-row\n");
+    // The facade can disappear while an issued write lease still owns the
+    // actual native stream and locked mutex. Final lease retirement seals
+    // semantic uncertainty, unlocks, then closes the original File once.
+    auto departed_state = std::make_shared<State>(); std::weak_ptr<Probe> departed_probe;
+    std::optional<tr::JournalOwner::AppendLease> departed;
+    tr::JournalAppendReceipt departed_native;
+    const auto departed_path = directory.root / "owner-departed.jsonl";
+    {
+        auto probe = std::make_shared<Probe>(departed_state); departed_probe = probe;
+        auto departing = tr::JournalOwner::CreateNew(departed_path, std::move(probe)); REQUIRE(departing.has_value());
+        departed.emplace(departing->AppendLine("owner-departed", Durability::PowerLoss,
+            {"departed-row", 1, std::string(64, 'f'), 14}));
+        departed_native = departed->native(); REQUIRE(departed_native.status == NativeStatus::Committed);
+    }
+    CHECK_FALSE(departed_probe.expired()); CHECK(departed_state->closes == 0); CHECK(departed_state->live == 1);
+    CHECK(departed->native().status == NativeStatus::Committed); departed.reset();
+    CHECK(departed_probe.expired()); CHECK(departed_state->closes == 1); CHECK(departed_state->live == 0);
+    CHECK(departed_state->destroyed == 1); CHECK(departed_native.status == NativeStatus::Committed);
+    CHECK(Bytes(departed_path) == "owner-departed\n");
+
+    // Moving the facade preserves the same first semantic/native facts. No
+    // close is allowed to retire the stream merely because the old facade moved.
+    auto moving_state = std::make_shared<State>();
+    auto moving = tr::JournalOwner::CreateNew(directory.root / "owner-moved.jsonl", std::make_shared<Probe>(moving_state)); REQUIRE(moving.has_value());
+    std::optional<tr::JournalOwner::AppendLease> moving_lease;
+    moving_lease.emplace(moving->AppendLine("owner-moved", Durability::PowerLoss,
+        {"moved-row", 1, std::string(64, '1'), 11}));
+    tr::JournalOwner moved_owner = std::move(*moving);
+    CHECK(moving->CloseDetailed().status == tr::JournalCloseReceipt::Status::NoOpenHandle);
+    CHECK(moving_state->closes == 0); moving_lease.reset();
+    const auto moved_first = moved_owner.first_unconfirmed(); REQUIRE(moved_first);
+    CHECK(moved_first->phase == tr::JournalOwnerUnconfirmed::Phase::SemanticCompletion);
+    CHECK(moved_first->native.status == NativeStatus::Committed); CHECK(moved_first->identity.id == "moved-row");
+    CHECK_FALSE(moved_owner.first_unconfirmed_append()); CHECK(moving_state->closes == 0);
+    REQUIRE(moved_owner.CloseDetailed().native); CHECK(moving_state->closes == 1);
+    const auto moved_count = moving_state->count; REQUIRE(moved_owner.CloseDetailed().native);
+    CHECK(moving_state->count == moved_count); Same(*moved_owner.first_unconfirmed(), *moved_first);
+
+    // Replacing an owner with a different native File must keep the in-flight
+    // old write lease alive, and must not mix that old uncertainty into the new
+    // stream. Destruction of the last old lease owns its one actual Close.
+    auto replaced_state = std::make_shared<State>(); auto replacement_state = std::make_shared<State>();
+    std::weak_ptr<Probe> replaced_probe;
+    auto probe = std::make_shared<Probe>(replaced_state); replaced_probe = probe;
+    auto replaced = tr::JournalOwner::CreateNew(directory.root / "owner-replaced.jsonl", std::move(probe)); REQUIRE(replaced.has_value());
+    auto replacement = tr::JournalOwner::CreateNew(directory.root / "replacement.jsonl", std::make_shared<Probe>(replacement_state)); REQUIRE(replacement.has_value());
+    std::optional<tr::JournalOwner::AppendLease> replaced_lease;
+    replaced_lease.emplace(replaced->AppendLine("owner-replaced", Durability::PowerLoss,
+        {"replaced-row", 1, std::string(64, '2'), 14}));
+    const auto replaced_native = replaced_lease->native(); REQUIRE(replaced_native.status == NativeStatus::Committed);
+    *replaced = std::move(*replacement);
+    CHECK_FALSE(replaced_probe.expired()); CHECK(replaced_state->closes == 0); CHECK(replacement_state->closes == 0);
+    CHECK(replaced->path() == directory.root / "replacement.jsonl"); CHECK_FALSE(replaced->first_unconfirmed());
+    replaced_lease.reset(); CHECK(replaced_probe.expired()); CHECK(replaced_state->closes == 1);
+    CHECK(replaced_state->destroyed == 1); CHECK(replaced_native.status == NativeStatus::Committed);
+    CHECK_FALSE(replaced->first_unconfirmed()); CHECK_FALSE(replaced->first_unconfirmed_append());
+    REQUIRE(replaced->CloseDetailed().native); CHECK(replacement_state->closes == 1);
+    const auto replacement_count = replacement_state->count; REQUIRE(replaced->CloseDetailed().native);
+    CHECK(replacement_state->count == replacement_count); CHECK(Bytes(directory.root / "owner-replaced.jsonl") == "owner-replaced\n");
+    CHECK_FALSE(departed_state->overflow); CHECK_FALSE(moving_state->overflow); CHECK_FALSE(replaced_state->overflow);
+    CHECK_FALSE(replacement_state->overflow);
+    Marker("lease-owner-lifetime");
     Marker("dropped-lease");
 }
 
@@ -219,6 +282,37 @@ TEST_CASE("Journal owner: Close uncertainty caches actual first fclose while rea
     CHECK(weak.expired()); CHECK(state->live == 0); CHECK(state->destroyed == 1); CHECK(state->closes == 1);
     fs::rename(path, directory.root / "moved.jsonl"); CHECK(captured.bytes() == "owned-close\n");
     REQUIRE(captured.Close().has_value()); REQUIRE(captured.Close().has_value()); CHECK(captured.bytes() == "owned-close\n");
+    // Real concurrent Close is issued while the committed lease still holds
+    // the stream gate. It can only complete after the lease seals semantic
+    // uncertainty and leaves. Polling zero duration adds no timeout allowance.
+    auto waiting_state = std::make_shared<State>();
+    auto waiting = tr::JournalOwner::CreateNew(directory.root / "waiting-close.jsonl", std::make_shared<Probe>(waiting_state)); REQUIRE(waiting.has_value());
+    std::optional<tr::JournalOwner::AppendLease> in_flight;
+    in_flight.emplace(waiting->AppendLine("waiting-close", Durability::PowerLoss,
+        {"waiting-row", 1, std::string(64, '3'), 13}));
+    REQUIRE(in_flight->native().status == NativeStatus::Committed);
+    waiting_state->inject = Stage::Close; waiting_state->armed = true;
+    std::promise<void> started; auto issued = started.get_future();
+    auto closing = std::async(std::launch::async, [&] {
+        started.set_value(); return waiting->CloseDetailed();
+    });
+    issued.wait(); CHECK(closing.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
+    in_flight->UnconfirmSemantic();
+    CHECK(closing.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
+    in_flight.reset(); // Freeze -> actual unlock -> last lease reference release.
+    const auto first_close = closing.get(); REQUIRE(first_close.native);
+    CHECK(first_close.status == tr::JournalCloseReceipt::Status::Unconfirmed);
+    CHECK(first_close.native->succeeded); CHECK(first_close.native->injected_unconfirmed); CHECK(waiting_state->closes == 1);
+    const auto semantic = waiting->first_unconfirmed(); REQUIRE(semantic);
+    CHECK(semantic->phase == tr::JournalOwnerUnconfirmed::Phase::SemanticCompletion);
+    CHECK(semantic->native.status == NativeStatus::Committed); CHECK(semantic->identity.id == "waiting-row");
+    CHECK_FALSE(waiting->first_unconfirmed_append());
+    const auto close_count = waiting_state->count; const auto again = waiting->CloseDetailed(); REQUIRE(again.native);
+    SameNative(*again.native, *first_close.native); CHECK(again.status == first_close.status);
+    CHECK(again.broken_before == first_close.broken_before); CHECK(again.broken_after == first_close.broken_after);
+    CHECK(waiting_state->count == close_count); Same(*waiting->first_unconfirmed(), *semantic);
+    CHECK_FALSE(waiting->first_unconfirmed_append()); CHECK_FALSE(waiting_state->overflow);
+    Marker("lease-close-thread");
     Marker("closed-reader");
 }
 
