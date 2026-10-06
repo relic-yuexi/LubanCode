@@ -233,3 +233,4 @@ DOC development/sdk-command-probe-artifacts.md
 DOC development/sdk-owned-queue-observation.md
 DOC development/sdk-named-result-blobs.md
 DOC development/sdk-journal-owner.md
+DOC development/sdk-child-terminal-diagnostic.md
