@@ -273,8 +273,13 @@ std::expected<V3Ledger, std::string> ReadV3LedgerLive(const V3Writer& writer) {
     if (!capture) return std::unexpected(capture.error());
     try {
         auto ledger = ReadV3LedgerCaptured(*capture);
+        if (!ledger) {
+            // A failed projection owns the original failure. Checked cleanup
+            // must still run, but cannot replace it with a Close exception.
+            try { (void)capture->Close(); } catch (...) {}
+            return ledger;
+        }
         const auto closed = capture->Close();
-        if (!ledger) return ledger; // Keep the original verification failure.
         if (!closed) return std::unexpected(closed.error());
         return ledger;
     } catch (...) {
