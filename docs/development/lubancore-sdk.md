@@ -2,6 +2,8 @@
 
 本页介绍这条分支的接口。哪些已合入、哪轮 CI 已过，见
 [SDK 阶段进度](sdk-stage-status.md)。新候选不能借旧源绿灯算交付。
+本轮 `80bb443c` 已验同源三平台并合功能分支 `5aaad8b5`；
+后续 Managed 存储视图与文本执行仍留本地，未算交付。
 
 本批提供真实会话闭环。`Runtime` 协调活会话关场，`Session` 句柄持执行资源，经现有
 `SessionService` 接纳输入，再用 `Agent`、轨迹桥和工具表跑回合。
@@ -26,7 +28,7 @@ updater、Release 查询、渠道与 Gateway 已归宿主，组合构建也核 S
 候选；已合范围和逐源证据仍以阶段进度为准。
 
 后端、基础工具与 MCP 已共用 `runtime/assembly`。SDK 与 AppServer 共用执行对象，
-各自保留受理与排队。当前私有候选把 CLI 与 one-shot 的 Agent 装配也交给共用
+各自保留受理与排队。已合组合 `80bb443c` 把 CLI 与 one-shot 的 Agent 装配交给共用
 ExecutionOwner，宿主工具、后端和原会话栈仍保留；[阶段进度](sdk-stage-status.md)
 列源码与远端验收范围。完整工具、插件、Hook 和记忆等能力尚未统一迁入公开 SDK。
 新增宿主可用下文 API，现有 CLI 迁移须保留原功能，不能靠删去功能来完成拆分。
