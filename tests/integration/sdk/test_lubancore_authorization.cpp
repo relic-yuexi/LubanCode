@@ -1,16 +1,21 @@
 #include <doctest/doctest.h>
 
 #include "lubancore/authorization.hpp"
+#include "lubancore/core.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
+#include <filesystem>
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -571,6 +576,241 @@ struct SmallCleanup {
     void operator()() const { ++state->calls; }
 };
 static_assert(sizeof(SmallCleanup) == sizeof(std::shared_ptr<CleanupCaptureState>));
+
+struct LivePolicyState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool model_entered = false, release_model = false, queue_entered = false, queue_closed = false;
+    unsigned queue_next = 0;
+    std::size_t queue_bytes = 0;
+    std::deque<lubancore::Event> events;
+};
+class LivePolicyBackend final : public lubancore::Backend {
+public:
+    explicit LivePolicyBackend(std::shared_ptr<LivePolicyState> state) : state_(std::move(state)) {}
+    lubancore::Result<lubancore::ModelReply> Generate(const lubancore::ModelRequest&, lubancore::Cancellation cancel) override {
+        std::unique_lock lock(state_->mutex); state_->model_entered = true; state_->cv.notify_all();
+        const auto end = std::chrono::steady_clock::now() + 5s;
+        while (!state_->release_model && !cancel.requested() && std::chrono::steady_clock::now() < end)
+            state_->cv.wait_for(lock, 5ms);
+        if (!state_->release_model) return std::unexpected(lubancore::Error{"fixture.model_cancelled", {}});
+        return lubancore::ModelReply{"policy callback completed", {}, {}};
+    }
+private: std::shared_ptr<LivePolicyState> state_;
+};
+class LivePolicyQueue final : public lubancore::events::v1::EventQueue {
+public:
+    LivePolicyQueue(std::shared_ptr<LivePolicyState> state, std::size_t capacity) : state_(std::move(state)), capacity_(capacity) {}
+    lubancore::Result<void> Push(lubancore::Event event) override {
+        std::lock_guard lock(state_->mutex);
+        if (state_->queue_closed) return std::unexpected(lubancore::Error{"fixture.queue_closed", {}});
+        const auto bytes = Bytes(event);
+        if (state_->events.size() >= capacity_ || bytes > 16u * 1024u * 1024u - state_->queue_bytes)
+            return std::unexpected(lubancore::Error{"fixture.queue_full", {}});
+        state_->queue_bytes += bytes;
+        state_->events.push_back(std::move(event)); state_->cv.notify_all(); return {};
+    }
+    lubancore::Result<std::optional<lubancore::Event>> Next(std::chrono::milliseconds timeout) override {
+        std::unique_lock lock(state_->mutex); ++state_->queue_next; state_->queue_entered = true; state_->cv.notify_all();
+        state_->cv.wait_for(lock, timeout, [&] { return state_->queue_closed || !state_->events.empty(); });
+        if (state_->queue_closed) return std::unexpected(lubancore::Error{"fixture.queue_closed", {}});
+        if (state_->events.empty()) return std::optional<lubancore::Event>{};
+        auto event = std::move(state_->events.front()); state_->events.pop_front(); state_->queue_bytes -= Bytes(event);
+        return std::optional<lubancore::Event>{std::move(event)};
+    }
+    lubancore::Result<void> Close() override {
+        std::lock_guard lock(state_->mutex); state_->queue_closed = true; state_->cv.notify_all(); return {};
+    }
+private:
+    static std::size_t Bytes(const lubancore::Event& event) {
+        return event.kind.size() + event.session_id.size() + event.operation_id.size() + event.turn_id.size() +
+            event.text.size() + event.payload_json.size(); // This fixture has no approval/tool events.
+    }
+    std::shared_ptr<LivePolicyState> state_;
+    std::size_t capacity_;
+};
+class LivePolicySink final : public lubancore::events::v1::EventSink {
+public:
+    explicit LivePolicySink(std::shared_ptr<LivePolicyState> state) : state_(std::move(state)) {}
+    lubancore::Result<std::unique_ptr<lubancore::events::v1::EventQueue>> CreateQueue(std::size_t capacity) override {
+        return std::unique_ptr<lubancore::events::v1::EventQueue>(std::make_unique<LivePolicyQueue>(state_, capacity));
+    }
+private: std::shared_ptr<LivePolicyState> state_;
+};
+struct LivePolicyProbe {
+    std::filesystem::path root;
+    std::shared_ptr<LivePolicyState> state = std::make_shared<LivePolicyState>();
+    std::unique_ptr<lubancore::Runtime> runtime;
+    std::shared_ptr<lubancore::Session> session;
+    std::shared_ptr<lubancore::EventStream> stream;
+    std::string operation;
+    std::mutex records_mutex;
+    std::vector<std::pair<std::string, std::vector<std::string>>> records;
+    static std::string Utf8(const std::filesystem::path& path) {
+        const auto text = path.u8string(); return {reinterpret_cast<const char*>(text.data()), text.size()};
+    }
+    lubancore::SessionOptions Options(bool events = false) const {
+        lubancore::SessionOptions options; options.cwd = Utf8(root / "project"); options.model = "policy-lifecycle";
+        options.backend = std::make_unique<LivePolicyBackend>(state); options.max_steps_per_turn = 4;
+        if (events) options.event_sink = std::make_unique<LivePolicySink>(state);
+        return options;
+    }
+    LivePolicyProbe() {
+        static std::atomic<unsigned> serial{0};
+        for (unsigned attempt = 0; attempt < 64; ++attempt) {
+            auto candidate = std::filesystem::temp_directory_path() / ("sdk-policy-lifecycle-" +
+                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(++serial));
+            if (std::filesystem::create_directory(candidate)) { root = std::move(candidate); break; }
+        }
+        REQUIRE_FALSE(root.empty());
+        std::filesystem::create_directory(root / "project"); std::filesystem::create_directory(root / "resources");
+        auto created = lubancore::Runtime::Create({Utf8(root / "state"), Utf8(root / "resources")}); REQUIRE(created);
+        runtime = std::move(*created); auto opened = runtime->OpenSession(Options(true)); REQUIRE(opened); session = *opened;
+        auto accepted = session->Submit("policy-live", "hold actual model"); REQUIRE(accepted); operation = accepted->operation_id;
+        { std::unique_lock lock(state->mutex); REQUIRE(state->cv.wait_for(lock, 3s, [&] { return state->model_entered; })); }
+        auto subscribed = session->Subscribe(4096); REQUIRE(subscribed); stream = *subscribed;
+    }
+    ~LivePolicyProbe() {
+        { std::lock_guard lock(state->mutex); state->release_model = true; state->cv.notify_all(); }
+        if (runtime) (void)runtime->Shutdown();
+        stream.reset(); session.reset(); runtime.reset();
+        std::error_code ignored; if (!root.empty()) std::filesystem::remove_all(root, ignored);
+    }
+    template<class T> static std::string Code(const lubancore::Result<T>& value) { return value ? "allowed" : value.error().code; }
+    void Record(const char* phase) {
+        std::vector<std::string> codes;
+        codes.push_back(Code(runtime->OpenSession(Options())));
+        codes.push_back(Code(session->WaitResult(operation, 0ms)));
+        // Even a disabled Job wait must refuse the blocking callback boundary,
+        // before consulting the module; this does not claim a command was run.
+        codes.push_back(Code(session->WaitJob({}, 0ms)));
+        codes.push_back(Code(stream->Next(0ms)));
+        codes.push_back(Code(stream->CloseChecked()));
+        codes.push_back(Code(session->Close()));
+        codes.push_back(Code(runtime->Shutdown()));
+        std::lock_guard lock(records_mutex); records.emplace_back(phase, std::move(codes));
+    }
+    void Verify() {
+        std::lock_guard lock(records_mutex); REQUIRE_FALSE(records.empty());
+        for (const auto& [phase, codes] : records) {
+            INFO(phase); REQUIRE(codes.size() == 7);
+            for (const auto& code : codes) CHECK(code == "sdk.lifecycle.reentrant");
+        }
+    }
+};
+struct DestructionProbe {
+    LivePolicyProbe* live = nullptr;
+    std::atomic<bool> armed{false};
+    std::atomic<unsigned> destructions{0};
+};
+struct PolicyNoticeCapture {
+    std::shared_ptr<DestructionProbe> state;
+    explicit PolicyNoticeCapture(std::shared_ptr<DestructionProbe> value) : state(std::move(value)) {}
+    PolicyNoticeCapture(const PolicyNoticeCapture&) noexcept = default;
+    PolicyNoticeCapture(PolicyNoticeCapture&&) noexcept = default;
+    ~PolicyNoticeCapture() {
+        if (state && state->armed.load()) { state->live->Record("callback-capture-destruction"); ++state->destructions; }
+    }
+    void operator()(const auth::PolicyChange&) const { state->live->Record("notification"); }
+};
+struct PolicyCleanupCapture {
+    std::shared_ptr<DestructionProbe> state;
+    explicit PolicyCleanupCapture(std::shared_ptr<DestructionProbe> value) : state(std::move(value)) {}
+    PolicyCleanupCapture(const PolicyCleanupCapture&) noexcept = default;
+    PolicyCleanupCapture(PolicyCleanupCapture&&) noexcept = default;
+    ~PolicyCleanupCapture() {
+        if (state && state->armed.load()) { state->live->Record("closer-capture-destruction"); ++state->destructions; }
+    }
+    void operator()() const { state->live->Record("closer-call"); }
+};
+static_assert(sizeof(PolicyNoticeCapture) == sizeof(std::shared_ptr<DestructionProbe>));
+static_assert(sizeof(PolicyCleanupCapture) == sizeof(std::shared_ptr<DestructionProbe>));
+class LifecyclePolicy final : public auth::PolicyProvider {
+public:
+    LivePolicyProbe* live;
+    struct Slot { auth::PolicyChangeCallback callback; };
+    std::shared_ptr<Slot> slot = std::make_shared<Slot>();
+    bool fail = false, destruction = false;
+    explicit LifecyclePolicy(LivePolicyProbe& value) : live(&value) {}
+    ~LifecyclePolicy() override { if (destruction) live->Record("last-provider-destruction"); }
+    lubancore::Result<auth::Decision> Authorize(const auth::ExecutionContext&, auth::Action) const override {
+        live->Record("authorize"); if (fail) throw std::runtime_error("private policy failure");
+        return auth::Decision{true, 1, "allowed"};
+    }
+    lubancore::Result<std::unique_ptr<auth::PolicySubscription>> SubscribeChanges(
+        const auth::ResourceScope& scope, auth::PolicyChangeCallback callback) override {
+        live->Record("subscribe"); if (fail) throw std::runtime_error("private policy subscribe failure");
+        callback({scope, 1}); slot->callback.swap(callback);
+        return auth::PolicySubscription::Create([owned = slot, target = live] {
+            target->Record("provider-closer"); owned->callback = nullptr;
+        });
+    }
+};
+void CheckPolicySdkLifecycle() {
+    LivePolicyProbe live;
+    auto waiting = std::async(std::launch::async, [&] { return live.stream->Next(3s); });
+    { std::unique_lock lock(live.state->mutex); REQUIRE(live.state->cv.wait_for(lock, 3s, [&] { return live.state->queue_entered; })); }
+    for (const bool invalid : {false, true}) for (const bool throwing : {false, true}) {
+        auto provider = std::make_shared<LifecyclePolicy>(live); provider->destruction = true; provider->fail = throwing;
+        auto context = Context(); if (invalid) context.request_actor.user_id.clear();
+        const auto result = auth::Authorize(std::move(provider), context, auth::Action::ReadOperation);
+        CHECK(result.has_value() == (!invalid && !throwing)); CHECK_FALSE(provider);
+    }
+    for (unsigned mode = 0; mode != 4; ++mode) {
+        auto last_provider = std::make_shared<LifecyclePolicy>(live); last_provider->destruction = true;
+        last_provider->fail = mode == 1;
+        auto scope = first; if (mode == 2) scope.session_id.clear();
+        auth::PolicyChangeCallback notice = [](const auth::PolicyChange&) {};
+        if (mode == 3) notice = nullptr;
+        auto result = auth::SubscribeChanges(std::move(last_provider), scope, std::move(notice));
+        CHECK(result.has_value() == (mode == 0)); CHECK_FALSE(last_provider);
+        if (result) (*result)->Unsubscribe();
+    }
+    auto capture = std::make_shared<DestructionProbe>(); capture->live = &live;
+    auto provider = std::make_shared<LifecyclePolicy>(live);
+    auth::PolicyChangeCallback callback = PolicyNoticeCapture{capture};
+    for (const bool invalid : {false, true}) {
+        capture->armed = true; provider->fail = !invalid;
+        auto scope = first; if (invalid) scope.session_id.clear();
+        const auto before = capture->destructions.load();
+        const auto refused = auth::SubscribeChanges(provider, scope, callback); REQUIRE_FALSE(refused);
+        REQUIRE(capture->destructions.load() > before); capture->armed = false;
+    }
+    provider->fail = false;
+    auto watch = auth::SubscribeChanges(provider, first, callback); REQUIRE(watch);
+    callback = nullptr; capture->armed = true;
+    auto notified = std::async(std::launch::async, [&] { provider->slot->callback({first, 2}); }); notified.get();
+    const auto before = capture->destructions.load();
+    auto dropped = std::async(std::launch::async, [&] { provider->slot->callback = nullptr; }); dropped.get();
+    REQUIRE(capture->destructions.load() > before); (*watch)->Unsubscribe(); capture->armed = false;
+    auto cleanup_state = std::make_shared<DestructionProbe>(); cleanup_state->live = &live;
+    std::function<void()> cleanup = PolicyCleanupCapture{cleanup_state};
+    auto closer = auth::PolicySubscription::Create(cleanup); REQUIRE(closer);
+    cleanup = nullptr; cleanup_state->armed = true; (*closer)->Unsubscribe();
+    REQUIRE(cleanup_state->destructions > 0); cleanup_state->armed = false;
+    auto reference = Policy();
+    callback = PolicyNoticeCapture{capture}; capture->armed = true;
+    auto invalid_scope = first; invalid_scope.session_id.clear();
+    const auto previous = capture->destructions.load();
+    auto invalid = reference->SubscribeChanges(invalid_scope, callback); REQUIRE_FALSE(invalid);
+    REQUIRE(capture->destructions > previous); capture->armed = false;
+    auto direct = reference->SubscribeChanges(first, callback); REQUIRE(direct); callback = nullptr; capture->armed = true;
+    REQUIRE(reference->Grant(alice, first, {auth::Action::ReadOperation}));
+    const auto before_reference_close = capture->destructions.load();
+    reference.reset(); REQUIRE(capture->destructions > before_reference_close); capture->armed = false; (*direct)->Unsubscribe();
+    live.Verify();
+    { std::lock_guard lock(live.state->mutex); CHECK(live.state->queue_next == 1); CHECK_FALSE(live.state->queue_closed); }
+    const auto still_waiting = live.session->WaitResult(live.operation, 0ms); REQUIRE_FALSE(still_waiting);
+    CHECK(still_waiting.error().code == "sdk.wait.timeout");
+    const auto no_job = live.session->WaitJob({}, 0ms); REQUIRE_FALSE(no_job); CHECK(no_job.error().code == "sdk.job.disabled");
+    { std::lock_guard lock(live.state->mutex); live.state->release_model = true; live.state->cv.notify_all(); }
+    const auto completed = live.session->WaitResult(live.operation, 3s); REQUIRE(completed);
+    REQUIRE(completed->state == lubancore::OperationState::Succeeded);
+    REQUIRE(waiting.wait_for(3s) == std::future_status::ready);
+    const auto event = waiting.get(); REQUIRE(event); REQUIRE(event->has_value());
+    auto outside = live.runtime->OpenSession(live.Options()); REQUIRE(outside); REQUIRE((*outside)->Close());
+    REQUIRE(live.stream->CloseChecked()); REQUIRE(live.session->Close()); REQUIRE(live.runtime->Shutdown());
+}
 } // namespace
 
 TEST_CASE("SDK authorization: public cleanup captures retire unlocked before concurrent unsubscribe returns") {
@@ -607,4 +847,5 @@ TEST_CASE("SDK authorization: public cleanup captures retire unlocked before con
     state.reset();
     CHECK(weak.expired());
     subscription->Unsubscribe();
+    CheckPolicySdkLifecycle();
 }
