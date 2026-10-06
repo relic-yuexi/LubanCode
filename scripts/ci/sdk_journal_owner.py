@@ -235,12 +235,13 @@ def _selected(relative):
     parts = relative.parts
     if len(parts) == 2 and parts[1] in ('journal-owner-before.jsonl', 'journal-owner-host-receipt.txt'):
         return True
-    # Real fixture/state/workspaces/key/sessions/sid/sid.jsonl and artifacts.
+    # Actual main/operation ledgers and the referenced host input/result files.
     if len(parts) not in (7, 8) or parts[1:3] != ('state', 'workspaces') or parts[4] != 'sessions':
         return False
     if len(parts) == 7:
-        return parts[6] == parts[5] + '.jsonl'
-    return parts[6] == 'artifacts' and parts[7].startswith(('capture-', 'res-'))
+        return parts[6] in (parts[5] + '.jsonl', 'operations.jsonl')
+    return ((parts[6] == 'artifacts' and parts[7].startswith(('capture-', 'res-'))) or
+            (parts[6] in ('operations-inputs', 'sdk-results') and parts[7].endswith('.json')))
 
 
 def capture_materials(base, evidence):
@@ -520,25 +521,96 @@ def _invocation(rows, session_dir, files, turn, operation, tag, witness=None):
     return materials, used
 
 
-def _bindings(rows, count):
-    bindings = _events(rows, 'sdk.operation.turn.bound')
-    require(len(bindings) == count, 'extra or missing actual operation/turn binding')
-    result, turns, inputs = {}, set(), set()
+def _operations(rows, session_dir, files, expected):
+    """Ordinary SDK producer: operation facts, original input and final material.
+
+    Jobs' explicit main binding producer is not enabled by this public host.
+    Hashing the no-image input text follows CanonicalInputPayload's raw text
+    rule; it never claims to reproduce C++ canonical JSON from Python objects.
+    """
+    path = session_dir + '/operations.jsonl'
+    require(path in files, 'missing actual ordinary operation ledger')
+    data = files[path]
+    require(data and data.endswith(b'\n'), 'actual operation ledger incomplete')
+    physical = data.splitlines()
+    require(0 < len(physical) <= MAX_LINES and all(line.strip() and len(line) <= MAX_LINE_BYTES for line in physical),
+            'actual operation ledger empty, blank or oversized')
+    facts = [_json(line) for line in physical]
+    require(len(facts) == 3 * len(expected) and not _events(rows, 'sdk.operation.turn.bound'),
+            'extra or missing ordinary operation facts or foreign Jobs binding')
+    shapes = {
+        'operation.accepted': {'schemaVersion', 'kind', 'operationId', 'inputId', 'clientOperationId',
+                               'payloadHash', 'inputRef', 'receivedAtMs'},
+        'operation.dispatched': {'schemaVersion', 'kind', 'operationId', 'dispatchedAtMs'},
+        'operation.final': {'schemaVersion', 'kind', 'operationId', 'turnId', 'executionStatus',
+                            'finalMessageRefs', 'usageReported', 'finalizedAtMs'},
+    }
+    stages, grouped = {}, {}
+    for fact in facts:
+        require(isinstance(fact, dict) and isinstance(fact.get('kind'), str) and fact['kind'] in shapes and set(fact) == shapes[fact['kind']] and
+                type(fact.get('schemaVersion')) is int and fact['schemaVersion'] == 2 and
+                isinstance(fact.get('operationId'), str) and IDENTITY.fullmatch(fact['operationId']),
+                'actual ordinary operation schema or identity differs')
+        operation, kind = fact['operationId'], fact['kind']
+        stage = ('operation.accepted', 'operation.dispatched', 'operation.final').index(kind)
+        time_key = ('receivedAtMs', 'dispatchedAtMs', 'finalizedAtMs')[stage]
+        require(type(fact.get(time_key)) is int and 0 < fact[time_key] <= (1 << 63) - 1 and
+                stage == stages.get(operation, -1) + 1,
+                'duplicate, reordered or invalid ordinary operation stage')
+        stages[operation] = stage; grouped.setdefault(operation, {})[kind] = fact
+    # OTHER has no separate host receipt; its sole actual accepted operation is
+    # resolved from these retained facts, then checked against the same sources.
+    if expected == {'OTHER': None}:
+        require(len(grouped) == 1, 'isolated Session has extra ordinary operations')
+        expected = {'OTHER': next(iter(grouped))}
+    require(set(grouped) == set(expected.values()) and all(stage == 2 for stage in stages.values()),
+            'foreign, missing or unfinished ordinary operation')
+    require([fact['operationId'] for fact in facts] == [operation for operation in expected.values() for _ in range(3)],
+            'actual sequential host operations were reordered or interleaved')
+    result, turns, inputs, used = {}, set(), set(), {path}
     starts = _events(rows, 'session.started')
-    for event in bindings:
-        payload = event['payload']; operation = payload.get('operationId'); turn = event.get('turnId')
-        require(set(payload) == {'layout', 'version', 'operationId', 'inputId', 'payloadHash'} and
-                payload['layout'] == 'sdk_main_operation_turn_v1' and type(payload['version']) is int and payload['version'] == 1 and
-                isinstance(operation, str) and IDENTITY.fullmatch(operation) and isinstance(turn, str) and IDENTITY.fullmatch(turn) and
-                isinstance(payload['inputId'], str) and IDENTITY.fullmatch(payload['inputId']) and
-                isinstance(payload['payloadHash'], str) and HEX.fullmatch(payload['payloadHash']) and
-                operation not in result and turn not in turns and payload['inputId'] not in inputs and
-                not any(key in event for key in ('stepId', 'actionId', 'requestId', 'parentTurnId', 'compactId',
-                                                 'commandId', 'hookDispatchId', 'taskId', 'titleGenerationId', 'effects', 'effectRefs')) and
-                min(row['seq'] for row in rows if row.get('turnId') == turn) == event['seq'] and
-                len(starts) == 1 and starts[0]['seq'] < event['seq'], 'actual operation binding identity differs')
-        result[operation] = event; turns.add(turn); inputs.add(payload['inputId'])
-    return result
+    require(len(starts) == 1, 'ordinary operation lacks one Session opening')
+    for tag, operation in expected.items():
+        accepted = grouped[operation]['operation.accepted']; final = grouped[operation]['operation.final']
+        input_id, turn = accepted.get('inputId'), final.get('turnId')
+        require(isinstance(input_id, str) and IDENTITY.fullmatch(input_id) and input_id not in inputs and
+                isinstance(turn, str) and IDENTITY.fullmatch(turn) and turn not in turns and
+                accepted.get('clientOperationId') == 'journal-key-' + tag and
+                accepted.get('inputRef') == 'operations-inputs/' + operation + '.json' and
+                accepted.get('payloadHash') == hashlib.sha256(('JOURNAL_USER_' + tag).encode('utf-8')).hexdigest() and
+                final.get('executionStatus') == 'success' and type(final.get('usageReported')) is bool,
+                'actual ordinary input/turn/final binding differs')
+        input_path = session_dir + '/' + accepted['inputRef']; result_path = session_dir + '/sdk-results/' + operation + '.json'
+        require(input_path in files and result_path in files, 'missing actual ordinary input or SDK result artifact')
+        source, saved = _json(files[input_path]), _json(files[result_path])
+        require(isinstance(source, dict) and set(source) == {'schemaVersion', 'operationId', 'text', 'images'} and
+                type(source.get('schemaVersion')) is int and source['schemaVersion'] == 1 and
+                source.get('operationId') == operation and source.get('text') == 'JOURNAL_USER_' + tag and source.get('images') == [],
+                'actual ordinary input artifact differs')
+        require(isinstance(saved, dict) and set(saved) == {'operationId', 'turnId', 'finalText', 'error', 'complete'} and
+                saved.get('operationId') == operation and saved.get('turnId') == turn and saved.get('complete') is True and
+                saved.get('error') == '' and saved.get('finalText') == 'JOURNAL_ANSWER_' + tag,
+                'actual ordinary SDK final artifact differs')
+        received = [row for row in _events(rows, 'input.received') if row.get('turnId') == turn]
+        users = [row for row in rows if row['type'] == 'message' and row.get('turnId') == turn and row['message'].get('role') == 'user']
+        final_refs = final.get('finalMessageRefs')
+        answers = [row for row in rows if row['type'] == 'message' and row.get('turnId') == turn and
+                   row['message'].get('role') == 'assistant' and row['message'].get('content') ==
+                   [{'type': 'text', 'text': 'JOURNAL_ANSWER_' + tag}] and not row['message'].get('tool_calls')]
+        require(len(received) == len(users) == len(answers) == 1 and
+                received[0]['payload'] == {'senderKind': 'local_user', 'source': 'sdk'} and
+                users[0]['message'] == {'role': 'user', 'content': 'JOURNAL_USER_' + tag} and
+                users[0].get('origin') == 'human' and users[0].get('purpose') == 'conversation' and
+                final_refs == [answers[0]['messageId']] and
+                starts[0]['seq'] < received[0]['seq'] < users[0]['seq'] < answers[0]['seq'] and
+                min(row['seq'] for row in rows if row.get('turnId') == turn) == received[0]['seq'],
+                'actual ordinary V3 input/final reference or sender differs')
+        result[operation] = {'turnId': turn, 'seq': received[0]['seq'], 'inputId': input_id,
+                             'finalMessageRef': answers[0]['messageId']}
+        turns.add(turn); inputs.add(input_id); used |= {input_path, result_path}
+    require({row['turnId'] for row in rows if row.get('turnId') is not None} == turns and
+            len(_events(rows, 'input.received')) == len(expected), 'extra or foreign ordinary V3 turn/input')
+    return result, used
 
 
 def _norm(value):
@@ -588,7 +660,8 @@ def check_materials(capture, consumer_receipt):
         require(rows[:cutoff] == old_rows and len(rows) > cutoff and
                 len(_events(rows, 'session.started')) == 1 and len(_events(rows, 'session.ended')) == 2 and
                 len(_events(old_rows, 'session.ended')) == 1, 'actual Close/recovery lifecycle differs')
-        bindings = _bindings(rows, 2)
+        bindings, operation_files = _operations(rows, session_dir, files,
+                                               {'OLD': receipt['old_operation'], 'NEW': receipt['new_operation']})
         require(set(bindings) == {receipt['old_operation'], receipt['new_operation']} and
                 len(_events(rows, 'model.request.prepared')) == 4 and len(_events(rows, 'tool.execution.started')) == 2 and
                 len(_events(rows, 'tool.execution.pending')) == 2 and
@@ -597,7 +670,7 @@ def check_materials(capture, consumer_receipt):
         require(not any(row['kind'].startswith('tool.execution.') and row['kind'] not in
                         ('tool.execution.pending', 'tool.execution.started', 'tool.execution.finished') for row in rows if row['type'] == 'event'),
                 'plain callback has extra cancelled/failed/waiting execution records')
-        used = {receipt_path, before_path, main}; invocations = {}
+        used = {receipt_path, before_path, main} | operation_files; invocations = {}
         for tag, operation_key in (('OLD', 'old_operation'), ('NEW', 'new_operation')):
             binding = bindings[receipt[operation_key]]; turn = binding['turnId']
             prepared = [event for event in _events(rows, 'model.request.prepared') if event.get('turnId') == turn]
@@ -608,24 +681,28 @@ def check_materials(capture, consumer_receipt):
             pair, artifacts = _invocation(rows, session_dir, files, turn, receipt[operation_key], tag, receipt)
             require(all((item['seq'] <= cutoff) == (tag == 'OLD') for item in pair.values()), 'raw/formal source crossed original prefix')
             used |= artifacts; invocations[tag.lower()] = pair
-        other_ledgers = [name for name in files if name.startswith(fixture + '/state/workspaces/') and name.endswith('.jsonl') and name != main]
+        other_ledgers = [name for name in files if name.startswith(fixture + '/state/workspaces/') and name.endswith('.jsonl') and
+                        PurePosixPath(name).name != 'operations.jsonl' and name != main]
         require(len(other_ledgers) == (1 if fact['path'] == 'isolation' else 0), 'extra or missing same-project Session ledger')
         for other in other_ledgers:
             other_sid = PurePosixPath(other).stem
             require(other_sid != sid and PurePosixPath(other).parent.name == other_sid, 'isolated Session identity differs')
-            other_rows = _ledger(files[other], other_sid); other_bindings = _bindings(other_rows, 1)
+            other_rows = _ledger(files[other], other_sid)
+            other_bindings, operation_files = _operations(other_rows, other.rsplit('/', 1)[0], files, {'OTHER': None})
             require(len(_events(other_rows, 'model.request.prepared')) == 2 and len(_events(other_rows, 'tool.execution.started')) == 1 and
                     len(_events(other_rows, 'tool.execution.pending')) == 1 and len(_events(other_rows, 'tool.execution.finished')) == 1 and
                     len(_events(other_rows, 'tool.result.persisted')) == 2 and len(_events(other_rows, 'tool.result.selected')) == 1,
                     'same-project isolated actual invocation differs')
             operation, binding = next(iter(other_bindings.items()))
             _, artifacts = _invocation(other_rows, other.rsplit('/', 1)[0], files, binding['turnId'], operation, 'OTHER')
-            used |= artifacts | {other}
+            used |= artifacts | operation_files | {other}
         unused -= used
         reports.append({'path': fact['path'], 'fixture': fixture, 'session_id': sid, 'run_id': rows[0]['runId'],
                         'main': main, 'prefix_bytes': len(prefix), 'after_bytes': len(data), 'prefix_rows': cutoff,
-                        'main_rows': len(rows), 'model_prepared_records': 4, 'tool_started_records': 2, 'invocations': invocations})
+                        'main_rows': len(rows), 'model_prepared_records': 4, 'tool_started_records': 2,
+                        'operation_ledger': session_dir + '/operations.jsonl', 'ordinary_operation_records': 6,
+                        'operation_turns': bindings, 'invocations': invocations})
     require(not unused, 'extra or unbound captured main/result files: ' + ', '.join(sorted(unused)))
     return {'status': 'verified_materials', 'command': command, 'fixtures': reports,
             'canonical_hash_recomputed': False, 'native_canonical_guard_required': True,
-            'scope': 'actual preserved bytes/digests/record scope/seq/hash linkage/prefix/raw/formal source bindings; C++ owns canonical and prepared-chain authority'}
+            'scope': 'actual preserved bytes/digests/ordinary accepted-dispatched-final/input and SDK result/record scope/seq/hash linkage/prefix/raw/formal source bindings; C++ owns canonical and prepared-chain authority'}
