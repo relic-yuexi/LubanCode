@@ -2240,6 +2240,31 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     wiring.delivery_planner->NoteRequestPrepared(trajectory_request_id);
                 }
             }
+            if (wiring_.on_model_send_gate) {
+                std::expected<void, std::string> admission;
+                bool gate_threw = false;
+                // Only the host gate call belongs to this catch. Recorder,
+                // budget and error construction failures keep their own path.
+                try {
+                    admission = wiring_.on_model_send_gate(request, recovery_attempt);
+                } catch (...) {
+                    gate_threw = true;
+                }
+                const bool cancelled_before_send = cancel != nullptr && cancel->load();
+                if (cancelled_before_send || gate_threw || !admission.has_value()) {
+                    if (turn_permit.has_value() && !turn_committed &&
+                        wiring.turn_budget->abort_before_send) {
+                        wiring.turn_budget->abort_before_send(*turn_permit);
+                        turn_permit.reset();
+                    }
+                    if (cancelled_before_send) {
+                        return std::unexpected(api::Error{api::ErrorKind::Cancelled,
+                                                          "请求发送前被取消", 0});
+                    }
+                    const char* code = gate_threw ? "model.send.gate_exception" : "model.send.denied";
+                    return std::unexpected(api::Error{api::ErrorKind::Api, code, 0, code});
+                }
+            }
             // permit 从"占额"翻"已发"(reserved-=1,attempted+=1,turn 预算单
             // §3.2)——与轨迹解耦:没接 boundary_recorder 的会话照样提交(纯预
             // 算门单测即此形状);只在本请求首枚尝试提交,恢复重试不重复扣
