@@ -972,6 +972,7 @@ add_library(lubancode_runtime STATIC
   # AppServer 接入 Session v3 第一棒:三端共用的会话服务入口(开张/
   # 恢复/输入接纳与操作去重/域命令/收口;§十.1 统一服务入口)。
   src/runtime/session_service.cpp
+  src/runtime/managed_operation_provenance.cpp
   # 第七步:CommandService(typed API:/model、/resume、审批回答)。
   src/runtime/command_service.cpp
   # plugins 本地 Tool 运行时(冻结合同 + process v1):manifest 强校验、
