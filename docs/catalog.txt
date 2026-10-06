@@ -236,3 +236,5 @@ DOC development/sdk-journal-owner.md
 DOC development/sdk-child-terminal-diagnostic.md
 DOC development/sdk-file-result-display-path.md
 DOC development/sdk-owned-deadline-doctest.md
+DOC development/sdk-model-input-projection.md
+DOC development/workflow-session-open-diagnostic.md
