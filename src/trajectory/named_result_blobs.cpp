@@ -23,7 +23,7 @@ thread_local bool in_provider = false;
 CasError Error(std::string code, std::string message = {}) { return {std::move(code), std::move(message)}; }
 bool Text(std::string_view value) {
     return !value.empty() && value.find_first_of("\r\n") == std::string_view::npos &&
-        value.find('\0') == std::string_view::npos && platform::IsValidUtf8(value);
+        value.find('\0') == std::string_view::npos && platform::IsValidUtf8(std::string(value));
 }
 bool Name(std::string_view value) {
     return Text(value) && value != "." && value != ".." &&
