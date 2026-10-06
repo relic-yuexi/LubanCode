@@ -29,6 +29,7 @@
 #include "sdk/adapters.hpp"
 #include "sdk/approval.hpp"
 #include "sdk/callback_scope.hpp"
+#include "sdk/policy_callback_scope.hpp"
 #include "sdk/extensions.hpp"
 #include "sdk/event_queue.hpp"
 #include "sdk/action_opening.hpp"
@@ -144,11 +145,11 @@ EventStream::EventStream(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
 EventStream::~EventStream() { Close(); }
 void EventStream::Close() { (void)CloseChecked(); }
 Result<void> EventStream::CloseChecked() {
-    if (lubancode::trajectory::InNamedResultProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    if (detail::InPolicyCallback() || lubancode::trajectory::InNamedResultProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
     auto state = impl_; return state->CloseChecked();
 }
 Result<std::optional<Event>> EventStream::Next(std::chrono::milliseconds timeout) {
-    if (lubancode::trajectory::InNamedResultProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    if (detail::InPolicyCallback() || lubancode::trajectory::InNamedResultProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
     auto state = impl_;
     return state->queue->Next(timeout);
 }

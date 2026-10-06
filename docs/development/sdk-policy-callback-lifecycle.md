@@ -32,8 +32,10 @@ their original rules. This is not permission caching or a replacement for the
 notification protocol.
 
 Callbacks and destructors remain trusted/cooperative. Calling a guarded SDK API
-does not permit destroying the last Runtime/Session owner from within its own
-callback or unloading the SDK while its callbacks remain alive.
+does not permit destroying the last Runtime/Session owner, or the last EventStream
+owner still in use, from within the callback. A rejected CloseChecked call does
+not defer the later Impl/EventQueue destructor. Do not unload the SDK while its
+callbacks remain alive. Deferred destruction is outside this slice.
 
 Existing authorization cases gain real Runtime/Session, event and waiting-call
 counterexamples, synchronous/asynchronous notifications, closer/capture retirement
