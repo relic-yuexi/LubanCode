@@ -52,3 +52,26 @@ Windows file-symlink coverage. POSIX terminal cases create actual file symlinks,
 including dangling links. The source prints the actual terminal-link kind, and
 all six cases remain mandatory. Hard links are not substituted, and no failed
 link construction is skipped or counted as a pass.
+
+The independent a803 review found two source blockers. MSVC absolute(path) calls
+GetFullPathNameW even for absolute input, so it can erase an owned descendant `..`
+before the guard sees it. Also a temp directory can live on a different drive
+from CTest's working directory; lexically_relative then correctly returns empty.
+The a803 source and blocked review remain retained, not upgraded by this repair.
+
+The repair keeps absolute inputs verbatim. Ordinary relative inputs share one
+captured current_path. On Windows only a drive root_name is passed to absolute
+to resolve that drive's current directory; repeated use of the same drive shares
+that result. The raw relative_path is appended afterward. Root-relative input
+uses the chosen base.root_path. UNC/device absolute input is never split by hand.
+No complete user path is passed through absolute/canonical/lexical normalization
+before the domain check. Relative dot and trailing separators retain their old
+meaning, and raw owned-descendant `..` remains visible and rejected.
+
+The relative standalone test gets its own uniquely named ordinary directory
+under the actual CTest working root. It verifies that exact absolute child before
+creating or cleaning it, passes a genuinely relative path to ResultStore and
+reads the actual native bytes. It neither switches cwd nor substitutes an
+absolute call or skip. The six case/marker roster and original alias/native
+counterexamples remain. The source adds real same-drive drive-relative and
+root-relative checks on Windows; it does not claim I/O on invented UNC hosts.
