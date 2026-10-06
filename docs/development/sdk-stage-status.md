@@ -19,10 +19,18 @@
 下一候选合入[显式 UTF-8 读取](ci-evidence-utf8.md)：只改三份纯测试的九处文本
 读取，原字节、失败门、CASE 与预算保留。原十五项纯测试及 cp1252 默认读取
 重放均过。新组合 `80bb443c` 已推回原 CI 分支；[本源远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37468467971)
-仍在跑。Windows 常规腿先后下载 zlib、curl 均报 SSL 连接错误，配置退出，
-尚未编译产品或跑原生验收。后续七处缺件上传另记连带失败，不能算七处产品错误。
-Linux、macOS 的 focused 与安装消费已有通过材料；全量、消毒器及余腿继续收齐。
-这轮没有整批验收，功能分支仍留在已验头。未添 PR。
+首轮已自然结束，十五项十四过，整轮失败。Windows 常规腿先后下载 zlib、curl
+均报 SSL 连接错误，配置退出，尚未编译产品或跑原生验收。后续七处缺件上传
+另记连带失败，不能算七处产品错误；原日志尚未判明网络根因。
+五套 Lua ON 各 69 来源／552 CASE／37 项安装消费，三套 OFF 各 67／537／34。
+三平台 SDK-only 跨镜像各五笔命令通过。全量 Linux 787、macOS 790 项通过，
+Windows 常规全量未运行。ASan 实跑 169 来源、76 重点门、1869 CASE／77029
+断言；TSan 十四册通过。原 owner、Managed 与恢复册实际来源均已核。
+1896 件／67265988 字节原件逐件复核、封存；摘要
+`1c5b4d44cd6e766fcc205df13422e6a1260ab7a8f096c38a8307d5b54e77ed9e`。
+同一 SHA 仅[重跑失败项一次](https://github.com/relic-yuexi/LubanCode/actions/runs/37468467971/attempts/2)，
+新材料另收。首轮十四项成功属沿用结果，不能算第二轮重新执行。
+这轮尚无整批验收，功能分支仍留在已验头。未添 PR。
 
 上一源 `e79eea52` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37439210845)
 已自然结束，整轮失败。1048 件原件逐大小与 SHA256 复核后封账；共
@@ -104,6 +112,14 @@ AskOnce 借用原 Spinner 与 ToolRuntime，Agent 改由共用 ExecutionOwner �
 没有另起执行栈。场处于存储阶段，普通提交、执行装配、换场与模型桥均拒绝。
 原十 CASE 保留，补两场同项目真实持锁、首行身份、独立关场和失败收尾源码。
 源码独审与纯检查已过，原生尚未验；当前 `80bb443c` CI 不含这枚后续叶。
+
+后续叶 `fef978ce` 接[Managed 操作来源账](sdk-managed-operation-provenance.md)。
+原 Service 真写输入原件、受理、拒绝和未派发取消；同一原生追加确认后才
+发布内存。记录原发起者、owner、绑定版本、能力与首次许可版本。
+未知写入和提交后内存发布失败各保原事实，挡住后续受理；Close 不补造缺失终态。
+严格读回只吃自持字节，核原件 roster、来源与摘要。`completion_known` 只记
+本 owner 观察，不能充跨进程提交证据。新 CPP 已登记真实 runtime 编译清单。
+源码独审通过，本源尚未跑原生；公开授权、执行与同 ID 恢复仍另接。
 
 ## 八阶段现状
 
