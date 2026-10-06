@@ -6,42 +6,53 @@
 
 ## 当前批：收口后再推进
 
-当前仍只留总 Draft [#234](https://github.com/relic-yuexi/LubanCode/pull/234)。
-功能分支停在已验 `fd76b6a5`。未验候选先在原 CI 分支收齐，不添实施 PR。
+当前只留总 Draft [#234](https://github.com/relic-yuexi/LubanCode/pull/234)。
+功能分支停在已验 `fd76b6a5`。候选沿原 CI 分支收齐，不添实施 PR。
 
-`68e1fcf2` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37431764520)
-已失败并封账：725 件，14181170 字节，摘要
-`b9bde0eac41c03920e22074a553675c250fe09cd25ab77f51420f633bcd846b7`。
-四套 Linux/macOS 安装消费各 36 项中 35 过；两套 Windows 各 32 过、
-3 败、1 跳过。摘要采用未达成；Windows 子会话与恢复种子另失败。
-ASan 停在 doctest 裸 `||` 编译错，原生执行为零。TSan 实跑 14 册，
-13 过、1 败；失败册五案都未开场，日志没带底层错误，不能断为 race。
-focused、OFF 和全量均未执行，局部成功不作整批验收。
+上一源 `e79eea52` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37439210845)
+已自然结束，整轮失败。1048 件原件逐大小与 SHA256 复核后封账；共
+20707282 字节，摘要为
+`c35878f0b1a59a536e19b7a1d8b426cb420e14776706bc606dea7b38cf1aba54`。
+六套安装消费各 37 项中 36 过。不可变结果写入已报未知，后续新操作仍成功，
+原验收拦住这条漏口；focused、OFF 与全量随后跳过。ASan 实跑 168 册，
+167 过，同一公开结果案失败。TSan 实跑 14 册，13 过；workflow 五案开场
+均报 `named_result.plan_path_rejected`，保留实际路径，未采宿主别名指向。
+不能断唯一起因，也不能把开场失败写成 race。Windows 两套子场与恢复种子
+当次实际通过；局部通过不算整批验收。
 
-`e79eea52` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37439210845)
-已自然结束，整轮失败。六套安装消费各 37 项中 36 过；不可变结果写入已报
-未知，后续新操作仍成功，旧验收拦住了这条漏口。focused、OFF 和全量随后跳过。
-ASan 实跑 168 册，167 过；同一公开结果案失败。TSan 实跑 14 册，13 过；
-workflow 五案开场均报 `named_result.plan_path_rejected`，日志保留实际路径。
-当次未采宿主别名指向，不能断定唯一起因，也不能把这次失败写成 race。
-首批失败原件已封，整轮原件仍在逐项核查。Windows 两套子场与恢复种子本次
-实际通过；这不证明上一轮失败只有一种成因。
-
-这份组合已收入 [SDK 入参测算](sdk-model-input-projection.md)、
+本候选保留 [SDK 入参测算](sdk-model-input-projection.md)、
 [File 预览路径兼容](sdk-file-result-display-path.md)、
 [原截止断言分组](sdk-owned-deadline-doctest.md)，以及失败时才输出的
 [子会话终态](sdk-child-terminal-diagnostic.md)和
 [workflow 开场诊断](workflow-session-open-diagnostic.md)。
-测算共用实际 `Generate` 转换；SDK 输入、provider wire、请求输出帽分开记范围。
+测算共用实际 `Generate` 转换；SDK 输入、provider wire、请求输出帽分别记范围。
 主请求只留指纹，摘要保真实材料。旧预算、断言和公开后端 ABI 照留。
 
-下一源补[未知发布执行门](sdk-named-publication-fence.md)，同时查新输入、
-已排队输入和后台命令实际启动处。晚 Job 报未知，只记 Job 原事实，保住父场
-已确认终态。Journal 普通宿主三条消费路径本次已通过；独立材料门错用了
-Jobs 专属绑定事件，现改核[实际操作账与输入、结果文件](sdk-journal-owner-operation-material-gate.md)。
-旧档缺少这些文件仍拒，须由新 CI 留齐原件。路径门另收在自持会话根内，
-根和场内链接继续拒，宿主祖先沿既有 LocalTrusted 合同。
-源码与纯门通过不等于原生通过。修复组合须重跑三平台与消毒器，尚未合功能分支。
+这轮收三处窄修：
+
+- [未知发布执行门](sdk-named-publication-fence.md)同时守新输入、已排队输入和后台命令启动。
+  晚 Job 报未知，仍保父场已确认终态；同轮排队命令不得越过许可再启动。
+  这条门只管当前 owner，尚未交付跨进程未知发布恢复。
+- [Journal 材料门](sdk-journal-owner-operation-material-gate.md)改核实际操作账、输入与结果文件。
+  原独立读回错用了 Jobs 专属绑定事件。旧档缺材料仍拒；新 CI 须留下实际生产文件。
+- [File 路径门](sdk-named-owned-paths.md)收在自持会话根内，根和场内链接继续拒。
+  宿主祖先沿既有 LocalTrusted 合同。Windows 原路径先留住 `..` 再查边界；
+  真正相对路径验收在当前测试目录另建独立目录，不要求 Temp 与测试目录同盘。
+
+路径补六场原生验收源码，核真实 SDK 会话、同 ID 恢复、File 材料与政策、
+关闭后读取，以及根、内部目录、叶和悬空链接。Windows 造真实目录 junction；
+POSIX 造文件和目录 symlink，不能据此声称 Windows 文件 symlink 也已验。
+原 Named 10／8、workflow 五案、所有原预算和案例保住。
+
+组合名册预计 Lua ON／OFF 各 69／67 册 focused、552／537 CASE；安装消费
+仍为 37／34 项。ASan 预计 76 册重点来源、169 册实跑与 26 份编译支持件。
+这些数从源码推得，不能代替实际登记、JUnit、LastTest 或远端通过。
+修复组合尚未合入功能分支，须重跑三平台和消毒器。
+
+下一片只在私有候选推进：统一实际 SDK 主账读取，先收十处场内 live 读点，
+再让开场五模块共用本次惰性 File 捕获。模块首错与原装配顺序照留，锁后仍
+另取真实材料、验来源再续写。完整 JournalStore、托管授权和 CLI 主入口迁移
+尚未完成。
 
 ## 八阶段现状
 
