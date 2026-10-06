@@ -288,8 +288,10 @@ void NamedResultMaterial::Commit() {
     if (!prefix_.empty()) owner_->next_.at(prefix_) = number_ + 1;
 }
 void NamedResultMaterial::PreserveUnknown(const std::shared_ptr<NamedPublication>& publication) noexcept {
-    if (!owner_->first_unknown_ && publication && publication->knowledge == NamedPublicationKnowledge::Indeterminate)
+    if (!owner_->first_unknown_ && publication && publication->knowledge == NamedPublicationKnowledge::Indeterminate) {
         owner_->first_unknown_ = publication;
+        owner_->publication_unconfirmed_.store(true, std::memory_order_release);
+    }
 }
 
 std::expected<std::string, CasError> NamedResultCapability::Read(std::string_view artifact_path,
