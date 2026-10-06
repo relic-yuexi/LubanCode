@@ -79,7 +79,16 @@ except ImportError:
     except ModuleNotFoundError:
         from scripts.ci import sdk_journal_owner as journal_owner
 
+try:
+    from . import sdk_model_input as model_input
+except ImportError:
+    try:
+        import sdk_model_input as model_input
+    except ModuleNotFoundError:
+        from scripts.ci import sdk_model_input as model_input
+
 REQUIRED = {
+    "sdk.focused.lubancore_model_input",
     "sdk.focused.v3_journal_owner",
     "sdk.focused.lubancore_journal_owner",
     "sdk.focused.lubancore_journal_owner_guards",
@@ -1298,6 +1307,8 @@ def main():
             named_results.check_registration(test.get("command"), job_stem)
         if job_stem in journal_owner.SOURCES:
             journal_owner.check_registration(test.get("command"), job_stem)
+        if job_stem in model_input.SOURCES:
+            model_input.check_registration(test.get("command"), job_stem)
         props = {p["name"]: p["value"] for p in test.get("properties", [])}
         if (props.get("DISABLED") or "sdk-focused" not in props.get("LABELS", [])
                 or not 0 < float(props.get("TIMEOUT", 0)) <= 300):
@@ -1379,6 +1390,7 @@ def main():
     command_job_reports = {}
     named_result_reports = {}
     journal_owner_reports = {}
+    model_input_reports = {}
     for case in cases:
         if case.attrib.get("status") != "run" or any(case.find(k) is not None for k in
                 ("failure", "error", "skipped")):
@@ -1401,6 +1413,9 @@ def main():
         if job_stem in journal_owner.SOURCES:
             journal_owner_reports[case.attrib["name"]] = journal_owner.check_native(sections[0], commands[0], job_stem)
             (evidence / "journal-owner.json").write_text(json.dumps(journal_owner_reports, indent=2) + "\n", encoding="utf-8")
+        if job_stem in model_input.SOURCES:
+            model_input_reports[case.attrib["name"]] = model_input.check_native(sections[0], commands[0], job_stem)
+            (evidence / "model-input.json").write_text(json.dumps(model_input_reports, indent=2) + "\n", encoding="utf-8")
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])

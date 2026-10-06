@@ -4,6 +4,30 @@
 
 目标：新宿主只调用公开 SDK，便能运行完整会话，不必复制内部运行栈。CLI 逐项迁入，原功能保住。现已能嵌入；CLI 主入口和 one-shot 仍用内部装配，尚未全部对齐。
 
+## 当前批：收口后再推进
+
+当前仍只留总 Draft [#234](https://github.com/relic-yuexi/LubanCode/pull/234)。
+功能分支停在已验 `fd76b6a5`。未验候选先在原 CI 分支收齐，不添实施 PR。
+
+`68e1fcf2` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37431764520)
+已失败并封账：725 件，14181170 字节，摘要
+`b9bde0eac41c03920e22074a553675c250fe09cd25ab77f51420f633bcd846b7`。
+四套 Linux/macOS 安装消费各 36 项中 35 过；两套 Windows 各 32 过、
+3 败、1 跳过。摘要采用未达成；Windows 子会话与恢复种子另失败。
+ASan 停在 doctest 裸 `||` 编译错，原生执行为零。TSan 实跑 14 册，
+13 过、1 败；失败册五案都未开场，日志没带底层错误，不能断为 race。
+focused、OFF 和全量均未执行，局部成功不作整批验收。
+
+下一组合已收入 [SDK 入参测算](sdk-model-input-projection.md)、
+[File 预览路径兼容](sdk-file-result-display-path.md)、
+[原截止断言分组](sdk-owned-deadline-doctest.md)，以及失败时才输出的
+[子会话终态](sdk-child-terminal-diagnostic.md)和
+[workflow 开场诊断](workflow-session-open-diagnostic.md)。
+测算共用实际 `Generate` 转换；SDK 输入、provider wire、请求输出帽分开记范围。
+主请求只留指纹，摘要保真实材料。旧预算、断言和公开后端 ABI 照留。
+源码独审通过不等于远端通过；六场新增 SDK 验收、一场 CLI 转发验收和
+Journal 所有权验收正接远端，尚未合功能分支。
+
 ## 八阶段现状
 
 | 阶段 | 已合范围 | 接下来补什么 |
@@ -147,7 +171,7 @@ probe 后源改用独立、标准库私有夹具，复制原源码，在 CI 临�
 
 集成源 `bb9fb3f1` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37429745834)整轮失败。八条原生构建均停在 `named_result_blobs.cpp:26`：`string_view` 不能隐式转给只收 `const string&` 的 UTF-8 检查。消费者、focused、全量、NamedResults、ASan 和 TSan 均未执行；ASan 名册 163／70／25 只是计划。219 件失败原件共 4713248 字节已封，摘要 `9076087630e461d7643b96e53fc4516ef8e268a11f76f371d8f45787401a9776`。
 
-窄修 `68e1fcf2` 只加显式 `std::string(value)`，其余 3036 份文件未动，源码与实际接口逐字核过。[新源 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37431764520)复用原分支，旧轮结束并封账后正常快进。原生结论待本源结果，未添实施 PR，未在本地编译。
+窄修 `68e1fcf2` 只加显式 `std::string(value)`，其余 3036 份文件未动，源码与实际接口逐字核过。[新源 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37431764520)复用原分支，旧轮结束并封账后正常快进。它已越过这处编译错误，整轮仍失败；实际范围见本页“当前批”。未添实施 PR，未在本地编译。
 
 ## Journal 所有权接线候选
 

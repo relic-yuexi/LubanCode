@@ -105,9 +105,9 @@ class ProfileGraphTests(unittest.TestCase):
                 self.assertEqual(closure.inspect_graph(targets, False)['status'], 'failed')
 
     def test_exact_rosters_keep_old_on_cases_and_define_off_separately(self):
-        self.assertEqual(len(focused.REQUIRED), 67)
+        self.assertEqual(len(focused.REQUIRED), 68)
         self.assertEqual(len(installed.REQUIRED_TESTS), 37)
-        self.assertEqual(len(profile.focused_roster(focused.REQUIRED, False)), 65)
+        self.assertEqual(len(profile.focused_roster(focused.REQUIRED, False)), 66)
         self.assertEqual(len(profile.consumer_roster(installed.REQUIRED_TESTS, False)), 34)
         self.assertEqual(profile.focused_roster(focused.REQUIRED, True), focused.REQUIRED)
         self.assertEqual(profile.consumer_roster(installed.REQUIRED_TESTS, True), installed.REQUIRED_TESTS)

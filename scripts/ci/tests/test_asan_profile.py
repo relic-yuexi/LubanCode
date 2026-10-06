@@ -341,6 +341,40 @@ class ProfileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             gate.check_execution(self.manifest, increased, self.executable, junit, native)
 
+    def test_model_sources_reach_module_guards_with_original_app_timeout(self):
+        from scripts.ci.tests.test_model_input_full_gate import native_section, full
+        names = sorted(full.ORIGINALS)
+        self.manifest['selected'] = [list(names), list(names)]
+        self.manifest['roster'].update({name: ('tests/unit/app/' if name.startswith('unit.')
+                                              else 'tests/integration/sdk/') + 'test_' + stem + '.cpp'
+                                       for name, stem in full.ORIGINALS.items()})
+        registrations = self.registrations()
+        for registration in registrations:
+            for test in registration['tests']:
+                test['properties'][0]['value'] = full.source_timeout(test['name'])
+        junit = ET.Element('testsuite'); sections = []
+        for index, name in enumerate(names, 1):
+            ET.SubElement(junit, 'testcase', name=name, status='run')
+            command = registrations[1]['tests'][index - 1]['command']
+            sections.append(f'{index}/2 Testing: {name}\n' + native_section(full.ORIGINALS[name], command))
+        native = ''.join(sections)
+        self.assertEqual(gate.check_execution(self.manifest, registrations, self.executable, junit, native),
+                         {'status': 'passed', 'sources': 2, 'cases': 7, 'assertions': 202})
+        for changed in (native.replace('6 | 6 passed', '5 | 5 passed', 1),
+                        native.replace('[sdk-model-input-path] exact-generate', 'missing', 1),
+                        native.replace('[sdk-model-input-path] summary-fail-closed', 'missing', 1),
+                        native.replace('[model-input-wrappers-path] spinner-three-state', 'missing', 1),
+                        native.replace('[sdk-model-input-path] exact-generate', '[sdk-model-input-path] exact-generate\n[model-input-wrappers-path] spinner-three-state', 1)):
+            with self.subTest(changed=changed[-80:]), self.assertRaises((ValueError, RuntimeError)):
+                gate.check_execution(self.manifest, registrations, self.executable, junit, changed)
+        increased = deepcopy(registrations)
+        for registration in increased:
+            for test in registration['tests']:
+                if test['name'].startswith('unit.'):
+                    test['properties'][0]['value'] = 300
+        with self.assertRaises(ValueError):
+            gate.check_execution(self.manifest, increased, self.executable, junit, native)
+
 
 if __name__ == '__main__':
     unittest.main()
