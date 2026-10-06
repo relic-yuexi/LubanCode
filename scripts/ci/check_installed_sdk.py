@@ -27,6 +27,7 @@ except ImportError:
 
 
 REQUIRED_TESTS = {
+    "sdk.consumer.named_results",
     "sdk.consumer.command_jobs",
     "sdk.consumer.web_fetch",
     "sdk.consumer.authorization",
@@ -51,6 +52,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
 REQUIRED_PUBLIC_HEADERS = {
+    "include/lubancore/named_results.hpp",
     "include/lubancore/jobs.hpp",
     "include/lubancore/web_fetch.hpp",
     "include/lubancore/authorization.hpp",
@@ -233,6 +235,11 @@ def main() -> None:
     except ImportError:
         import sdk_command_jobs as command_jobs
     job_sources = command_jobs.seal_sources(repo)
+    try:
+        from . import sdk_named_results as named_results
+    except ImportError:
+        import sdk_named_results as named_results
+    named_sources = named_results.seal_sources(repo)
     producer_build = args.build_dir.resolve()
     profile_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
     profile_entries = {line.split(":", 1)[0]: line.split("=", 1)[1] for line in profile_cache.splitlines()
@@ -314,6 +321,7 @@ def main() -> None:
         "rag_source": rag_source, "rag_demo": None,
         "web_fetch_source": web_source, "web_fetch_fixture": None,
         "command_jobs_sources": job_sources, "command_jobs_probe": job_probe,
+        "named_results_sources": named_sources,
     }, indent=2) + "\n", encoding="utf-8")
     print(f"SDK consumer evidence directory: {scratch}", flush=True)
 
@@ -379,6 +387,10 @@ def main() -> None:
                                                  evidence=evidence / "command-jobs-source-copies")
     (evidence / "command-jobs-source-copies.json").write_text(
         json.dumps(job_source_copies, indent=2) + "\n", encoding="utf-8")
+    named_source_copies = named_results.check_copies(consumer_source, prefix, named_sources, repo,
+                                                    evidence=evidence / "named-results-source-copies")
+    (evidence / "named-results-source-copies.json").write_text(
+        json.dumps(named_source_copies, indent=2) + "\n", encoding="utf-8")
     # Neither inherited loader variables nor a producer PATH may rescue a
     # broken installed package. Ordinary system compiler/tool directories stay.
     blocked = (repo, producer_build, staging)
@@ -476,6 +488,17 @@ def main() -> None:
                 Path(job_test["command"][3]).resolve() != Path(job_probe["copy"]["path"]).resolve()):
             raise RuntimeError("Command Jobs consumer/probe/state borrowed a foreign path")
         (evidence / "command-jobs-registration.json").write_text(json.dumps(job_test, indent=2) + "\n", encoding="utf-8")
+        named_tests = [test for test in listing["tests"] if test["name"] == "sdk.consumer.named_results"]
+        if len(named_tests) != 1 or len(named_tests[0].get("command", [])) != 4:
+            raise RuntimeError("Named results consumer registration is missing or malformed")
+        named_test = named_tests[0]
+        if (named_test["command"][0] != smoke_test["command"][0] or
+                not Path(named_test["command"][0]).resolve().is_relative_to(consumer_build.resolve()) or
+                named_test["command"][1] != "named-results" or
+                Path(named_test["command"][2]).resolve() != (consumer_build / "state-named-results").resolve() or
+                Path(named_test["command"][3]).resolve() != Path(job_probe["copy"]["path"]).resolve()):
+            raise RuntimeError("Named results consumer/probe/state borrowed a foreign path")
+        (evidence / "named-results-registration.json").write_text(json.dumps(named_test, indent=2) + "\n", encoding="utf-8")
         fixture.context.update(registration=web_test, consumer_executable=smoke_test["command"][0])
         fixture.save()
         try:
@@ -515,6 +538,17 @@ def main() -> None:
         "scope": "actual registration/JUnit/LastTest plus sealed relocated probe; source assertions check child entry and retirement",
     }, indent=2) + "\n", encoding="utf-8")
     from check_sdk_focused import check_web_fetch_consumer
+    named_sections = [sections[index + 1] for index in range(1, len(sections), 2)
+                      if sections[index] == "sdk.consumer.named_results"]
+    if len(named_sections) != 1:
+        raise RuntimeError("Named results native consumer section missing or duplicated")
+    named_receipt = named_results.check_consumer(named_sections[0], named_test["command"], job_probe)
+    named_results.check_copies(consumer_source, prefix, named_sources, repo)
+    (evidence / "named-results-acceptance.json").write_text(json.dumps({
+        "status": "passed", "registration": named_test, "receipt": named_receipt,
+        "probe": job_probe, "sources": named_sources, "copies": named_source_copies,
+        "scope": "actual installed registration/JUnit/LastTest and SDK/STL source/header copies; internal V3 summary witness belongs to original native source",
+    }, indent=2) + "\n", encoding="utf-8")
     web_sections = [sections[index + 1] for index in range(1, len(sections), 2)
                     if sections[index] == "sdk.consumer.web_fetch"]
     if len(web_sections) != 1:

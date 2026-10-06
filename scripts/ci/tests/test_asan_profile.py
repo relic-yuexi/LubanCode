@@ -280,6 +280,33 @@ class ProfileTests(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises((ValueError, RuntimeError)):
                 gate.check_execution(self.manifest, self.registrations(), self.executable, junit, native)
 
+    def test_named_sources_need_their_whole_module_evidence_not_only_nonzero_cases(self):
+        from scripts.ci.tests.test_named_results_full_gate import native_section
+        stems = ('lubancore_named_result_guards', 'lubancore_named_results')
+        names = ['integration.sdk.' + stem for stem in stems]
+        self.manifest['selected'] = [list(names), list(names)]
+        self.manifest['roster'].update({name: 'tests/integration/sdk/test_' + stem + '.cpp'
+                                       for name, stem in zip(names, stems)})
+        registrations = self.registrations()
+        for registration in registrations:
+            for test in registration['tests']:
+                test['properties'][0]['value'] = 300
+        junit = ET.Element('testsuite')
+        sections = []
+        for index, (name, stem) in enumerate(zip(names, stems), 1):
+            ET.SubElement(junit, 'testcase', name=name, status='run')
+            command = registrations[1]['tests'][index - 1]['command']
+            sections.append(f'{index}/2 Testing: {name}\n' + native_section(stem, command))
+        native = ''.join(sections)
+        result = gate.check_execution(self.manifest, registrations, self.executable, junit, native)
+        self.assertEqual(result, {'status': 'passed', 'sources': 2, 'cases': 18, 'assertions': 182})
+        for changed in (native.replace('10 | 10 passed', '9 | 9 passed', 1),
+                        native.replace('[sdk-named-result-guards-path] inventory', 'missing', 1),
+                        native.replace('"subsequent_request_verified": true', '"subsequent_request_verified": false', 1),
+                        native.replace('[sdk-named-results-summary] ', '[unrelated-summary] ', 1)):
+            with self.subTest(changed=changed[-80:]), self.assertRaises((ValueError, RuntimeError)):
+                gate.check_execution(self.manifest, registrations, self.executable, junit, changed)
+
 
 if __name__ == '__main__':
     unittest.main()

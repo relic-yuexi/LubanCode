@@ -63,7 +63,17 @@ except ImportError:
     except ModuleNotFoundError:
         from scripts.ci import sdk_command_jobs as command_jobs
 
+try:
+    from . import sdk_named_results as named_results
+except ImportError:
+    try:
+        import sdk_named_results as named_results
+    except ModuleNotFoundError:
+        from scripts.ci import sdk_named_results as named_results
+
 REQUIRED = {
+    "sdk.focused.lubancore_named_results",
+    "sdk.focused.lubancore_named_result_guards",
     "sdk.focused.v3_result_immutable_publication",
     "sdk.focused.lubancore_command_jobs",
     "sdk.focused.lubancore_command_job_guards",
@@ -1273,6 +1283,8 @@ def main():
         job_stem = test["name"].removeprefix("sdk.focused.")
         if job_stem in command_jobs.SOURCES:
             command_jobs.check_registration(test.get("command"), job_stem)
+        if job_stem in named_results.SOURCES:
+            named_results.check_registration(test.get("command"), job_stem)
         props = {p["name"]: p["value"] for p in test.get("properties", [])}
         if (props.get("DISABLED") or "sdk-focused" not in props.get("LABELS", [])
                 or not 0 < float(props.get("TIMEOUT", 0)) <= 300):
@@ -1352,6 +1364,7 @@ def main():
     native_sections = re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',
         (evidence / "LastTest.log").read_text(encoding="utf-8"), flags=re.M)
     command_job_reports = {}
+    named_result_reports = {}
     for case in cases:
         if case.attrib.get("status") != "run" or any(case.find(k) is not None for k in
                 ("failure", "error", "skipped")):
@@ -1368,6 +1381,9 @@ def main():
         if job_stem in command_jobs.SOURCES:
             command_job_reports[case.attrib["name"]] = command_jobs.check_native(sections[0], commands[0], job_stem, os.name)
             (evidence / "command-jobs.json").write_text(json.dumps(command_job_reports, indent=2) + "\n", encoding="utf-8")
+        if job_stem in named_results.SOURCES:
+            named_result_reports[case.attrib["name"]] = named_results.check_native(sections[0], commands[0], job_stem)
+            (evidence / "named-results.json").write_text(json.dumps(named_result_reports, indent=2) + "\n", encoding="utf-8")
         counts = re.findall(r"\[doctest\] test cases:\s+(\d+)", sections[0])
         if len(counts) != 1 or int(counts[0]) == 0:
             raise RuntimeError("SDK source filter ran no native test cases: " + case.attrib["name"])

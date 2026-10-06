@@ -20,10 +20,12 @@ try:
     from .check_sdk_only_boundary import CLIENT, prepare, read_reply
     from .check_sdk_focused import check_native_command
     from .sdk_result_immutable import check_result_immutable_native
+    from . import sdk_named_results as named_results
 except ImportError:
     from check_sdk_only_boundary import CLIENT, prepare, read_reply
     from check_sdk_focused import check_native_command
     from sdk_result_immutable import check_result_immutable_native
+    import sdk_named_results as named_results
 
 
 def require(condition, message):
@@ -260,6 +262,9 @@ def check_registration(manifest, registration, index, executable):
         require(not properties.get('DISABLED'), 'selected ASan source disabled: ' + name)
         require(properties.get('TIMEOUT') == (300 if name.startswith('integration.') else 180),
                 'original per-source timeout differs: ' + name)
+        stem = name.removeprefix('integration.sdk.')
+        if name.startswith('integration.sdk.') and stem in named_results.SOURCES:
+            named_results.check_registration(expected, stem, 'lubancode_tests')
         commands[name] = expected
     return commands
 
@@ -282,6 +287,9 @@ def check_execution(manifest, registrations, executable, junit, last_test):
                 'ASan source failed or skipped: ' + name)
         section = sections[name]
         check_native_command(section, commands[name])
+        stem = name.removeprefix('integration.sdk.')
+        if name.startswith('integration.sdk.') and stem in named_results.SOURCES:
+            named_results.check_native(section, commands[name], stem)
         if name == 'unit.trajectory_v3.v3_result_immutable_publication':
             check_result_immutable_native(section, commands[name])
         require(len(re.findall(r'^Test Passed\.\s*$', section, re.M)) == 1, 'native test did not pass: ' + name)

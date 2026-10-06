@@ -776,6 +776,8 @@ add_library(lubancode_engine STATIC
   src/trajectory/schema.cpp
   src/trajectory/blob_store.cpp
   src/trajectory/cas_store.cpp
+  src/trajectory/named_result_blobs.cpp
+  src/trajectory/named_result_opening.cpp
   src/trajectory/journal.cpp
   src/trajectory/session_recovery_view.cpp
   src/trajectory/recorder.cpp

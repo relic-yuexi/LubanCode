@@ -134,3 +134,13 @@ probe 后源改用独立、标准库私有夹具，复制原源码，在 CI 临�
 `7a5321c8` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37421453525)已核三平台 combined focused 各 62 源／511 CASE。Windows SDK-only 安装消费 35／35 过，focused 62 源中 61 过；Owned deadline 六案五过，438 行排队快照想读 `queued`，实际已为 `cancelled`。原六份终态事实仍齐。首次失败 15 件原件冻结，摘要 `e48f85c030b8904c61850ec654d9f7a5773afc3b5709cf5de1e1988761c45b05`；其它同源结果不能替这一项验收。
 
 后源按[排队观察合同](sdk-owned-queue-observation.md)保住原 2000ms 正预算和全部截止、零调用、父引用、恢复与退场检查。另加零注册预算真票，硬查堵在活进程后排队，再取消退场。正票快照若已取消，还须核 Register 前实际时钟已过最早截止；其它状态照拒。生产、原六 CASE 和预算不变。纯数据门已核，原生仍交新源远端 CI。
+
+## NamedResults 接线候选
+
+[named 结果合同](sdk-named-result-blobs.md)先于实现封存。源码 `1a92b2ca` 接通一个 Session 所有 named 结果入口：原始捕获、正式结果、Job 准入、Job 完成和列表材料共用 Store、编号与整份写 lease。宿主显式提供 Provider；默认仍用 File。结果投影、读面与同 ID 恢复沿真实句柄取材料，不造本地镜像。外部仓只认本场冻结 namespace，不能替 Session 授权，也不能兼任 Memory CAS 或 Journal。
+
+写入首次未知便封后续写。确定尚未调用 Provider 的失败另记；原生 File 确认和宿主声明分开留值。Close 等在途执行和写借用退出，只读句柄仍可存活，不能拉住 Writer 或 SessionService。Runtime 开场离开注册锁，Shutdown 等所有已准入开场完成或退场；Provider 回调递归读和阻塞生命周期调用在拿锁前拒绝。
+
+独立源码审查已核 37 条变更与 767 份旧原生测试锚，未查出阻塞项；File 旧流读、预览、编号与异常语义保留。公开十案用安装 SDK/STL 与真实第二根字节，私有八案再核原生回执、开场身份、未知持值和退场。自动摘要另保真实 V3 证据与后续模型请求确认；安装消费者没有内部主账读面，不能冒称同样检查。
+
+这份接线合入 `5498f954` 排队观察修正，旧预算与终态断言保留。安装消费多一场 named-results，SDK focused 多两册、18 CASE；新名册须逐项核 actual argv、JUnit、LastTest、公开头／helper 原字节和编译归属。此处只记源码候选，尚未合功能分支；整套三平台和 ASan 要在新源远端 CI 实跑，旧绿灯不借给它。

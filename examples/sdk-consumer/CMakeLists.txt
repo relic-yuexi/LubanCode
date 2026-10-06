@@ -6,7 +6,7 @@ project(lubancore_installed_consumer LANGUAGES CXX)
 find_package(LubanCore CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp lua_build_profile.cpp actions.cpp event_sink.cpp memory_blobs.cpp todo_write.cpp agentic_rag.cpp web_fetch.cpp command_jobs.cpp)
+add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp lua_build_profile.cpp actions.cpp event_sink.cpp memory_blobs.cpp todo_write.cpp agentic_rag.cpp web_fetch.cpp command_jobs.cpp named_results.cpp)
 if(NOT DEFINED LubanCore_WITH_LUA OR NOT LubanCore_WITH_LUA MATCHES "^(ON|OFF)$")
   message(FATAL_ERROR "Installed LubanCore must declare its Lua build profile")
 endif()
@@ -174,4 +174,7 @@ if(LUBANCORE_CONSUMER_COMMAND_PROBE)
   add_test(NAME sdk.consumer.command_jobs
     COMMAND lubancore_consumer command-jobs "${CMAKE_CURRENT_BINARY_DIR}/state-command-jobs" "${LUBANCORE_CONSUMER_COMMAND_PROBE}")
   set_tests_properties(sdk.consumer.command_jobs PROPERTIES TIMEOUT 120)
+  add_test(NAME sdk.consumer.named_results
+    COMMAND lubancore_consumer named-results "${CMAKE_CURRENT_BINARY_DIR}/state-named-results" "${LUBANCORE_CONSUMER_COMMAND_PROBE}")
+  set_tests_properties(sdk.consumer.named_results PROPERTIES TIMEOUT 120)
 endif()
