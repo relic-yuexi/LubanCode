@@ -29,6 +29,7 @@
 #include "trajectory/directory.hpp"
 #include "trajectory/cas_store.hpp"
 #include "trajectory/named_result_blobs.hpp"
+#include "trajectory/managed_session_reservation.hpp"
 #include "trajectory/opening.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/replay.hpp"
@@ -241,6 +242,9 @@ struct EventRef {
 struct ActiveSession {
     TrajectoryDirectory directory;
     SessionManifest manifest;
+    // Immutable original native publication; contains no Writer, lock or Policy.
+    // Its lifetime also covers a failed candidate and the post-Close read view.
+    std::shared_ptr<const ManagedSessionOwnershipPublication> managed_publication;
     SessionLock lock;
     MemoryCapabilityLease memory_capability;
     NamedResultLease named_result_capability;
@@ -557,6 +561,13 @@ public:
     //   → session.json(running) → lifecycle result。
     std::expected<ActiveSession*, std::string> LaunchSession();
 
+    // Internal new-only Managed admission. Takes the real Finish-owned directory,
+    // lock and original durable publication together. No active Local session may
+    // be converted. Once admitted to this mode, failures/Close never fall back to
+    // LocalTrusted launch/resume/clear/recovery/admin. This is storage, not ACL.
+    std::expected<ActiveSession*, std::string> LaunchManagedSession(
+        ManagedSessionDirectory admitted, ManagedSessionCreationAudit creation);
+
     // clear 八步换账(§3.3.1 逐字)。串行掌管;重复请求回 clear.busy。
     ClearOutcome Clear(const ClearRequest& request, ClearParticipant* participant);
 
@@ -652,6 +663,13 @@ private:
     // session.started)。lifecycle 账与 active 指针归调用方。
     std::expected<ActiveSession, std::string> OpenV3SessionLocked(
         const std::string& start_reason, const std::optional<std::string>& previous_session_id);
+    // One actual resource/writer assembly, with each caller owning the same real
+    // lock through the call. Managed metadata is immutable initial provenance.
+    std::expected<ActiveSession, std::string> AssembleV3SessionLocked(
+        const TrajectoryDirectory& directory, const SessionManifest& manifest,
+        SessionLock& lock_file,
+        std::shared_ptr<const ManagedSessionOwnershipPublication> managed_publication = {},
+        std::optional<nlohmann::json> managed_metadata = std::nullopt);
     // Close 的 v3 分支(active 已验 running;调用方已持 mutex_):session.ended
     // 封账,无 run terminal/session.json 可写。
     CloseOutcome CloseV3Locked(const CloseRequest& request, ClearParticipant* participant);
@@ -717,6 +735,7 @@ private:
     std::string workspace_key_;
     std::filesystem::path workspace_dir_;
     std::optional<ActiveSession> active_;
+    bool managed_mode_ = false; // Immutable transition, under the Manager mutex.
     // clear/close 同一把串行闸:换账掌管期间,并发请求回 clear/close.busy
     // (§3.3.1"重复请求要排队或回 clear_in_progress",这里选回忙)。
     std::atomic<bool> boundary_in_progress_{false};

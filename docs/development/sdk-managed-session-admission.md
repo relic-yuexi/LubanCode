@@ -39,6 +39,18 @@ second session directory/lock and does not call LocalTrusted new opening first.
 The V3 resource/writer assembly is one common private path used by both modes;
 the original Local directory creation, ownership gate and failure codes stay in
 front of that path. The existing V3 Close seals the writer before releasing lock.
+Entering Managed mode first requires no active session; an existing Local owner
+is never implicitly closed. The first run is `main-0001`, qualified by this new
+session ID, without reading unrelated Local manifests. Checkout registration also
+uses the Manager mutex so it cannot cross the Managed transition. Original Local
+validation/error order stays fixed. Enumeration's original value-only APIs return
+no candidate and recovery records the unsupported-mode note; they are internal
+values, not new authorized SDK content/query endpoints.
+
+Ownership is rechecked after trusted callbacks. This detects drift at that
+boundary, not malicious concurrent OS changes. The existing soft approval-mode
+baseline remains soft for Local; Managed refuses publication of an active owner
+if that extra real append is unconfirmed. Its partial V3 is retained.
 
 Any failed opening closes candidate writers and subordinate write leases before
 releasing the one real lock. Original ownership publication remains immutable;
