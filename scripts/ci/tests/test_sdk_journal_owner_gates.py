@@ -167,7 +167,7 @@ class PureLedger:
     """Data fixture only: hashes are labels, not claims of C++ canonical output."""
     def __init__(self, session_dir, sid):
         self.session_dir, self.sid, self.rows = session_dir, sid, []
-        self.materials = {}
+        self.materials, self.operations = {}, []
         self.add('message', messageId='msg-system', turnId=None, message={'role': 'system', 'content': 'pure'}, purpose='conversation', origin='session-runtime')
         self.event('session.started', 'event-start', payload={'context': {'fixture_float': 0.0000001}})
 
@@ -183,8 +183,9 @@ class PureLedger:
 
     def turn(self, tag, number):
         turn, action, operation = 'turn-' + tag, 'action-' + tag, 'operation-' + tag
-        self.event('sdk.operation.turn.bound', 'bound-' + tag, {'layout': 'sdk_main_operation_turn_v1', 'version': 1,
-                   'operationId': operation, 'inputId': 'input-' + tag, 'payloadHash': 'a' * 64}, turnId=turn)
+        self.event('input.received', 'input-' + tag, {'senderKind': 'local_user', 'source': 'sdk'}, turnId=turn)
+        self.add('message', messageId='user-' + tag, turnId=turn, origin='human', purpose='conversation',
+                 message={'role': 'user', 'content': 'JOURNAL_USER_' + tag})
         self.event('model.request.prepared', 'prepared-' + tag + '-1', turnId=turn, requestId='request-' + tag + '-1')
         payload = {'tool_call_id': action, 'attempt': 1}
         self.event('tool.execution.pending', 'pending-' + tag, {**payload, 'provider_tool_call_id': 'host-call-' + tag, 'reason': 'queued'}, turnId=turn, actionId=action)
@@ -219,7 +220,24 @@ class PureLedger:
         self.add('message', messageId='tool-message-' + tag, turnId=turn, actionId=action, resultSelectionRef=selected,
                  message={'role': 'tool', 'tool_call_id': action, 'content': 'JOURNAL_TOOL_' + tag})
         self.event('model.request.prepared', 'prepared-' + tag + '-2', turnId=turn, requestId='request-' + tag + '-2')
+        answer = 'answer-' + tag
+        self.add('message', messageId=answer, turnId=turn,
+                 message={'role': 'assistant', 'content': [{'type': 'text', 'text': 'JOURNAL_ANSWER_' + tag}]})
         self.event('session.ended', 'ended-' + tag)
+        self.operations.extend([
+            {'schemaVersion': 2, 'kind': 'operation.accepted', 'operationId': operation, 'inputId': 'input-' + tag,
+             'clientOperationId': 'journal-key-' + tag, 'payloadHash': hashlib.sha256(('JOURNAL_USER_' + tag).encode()).hexdigest(),
+             'inputRef': 'operations-inputs/' + operation + '.json', 'receivedAtMs': 1},
+            {'schemaVersion': 2, 'kind': 'operation.dispatched', 'operationId': operation, 'dispatchedAtMs': 2},
+            {'schemaVersion': 2, 'kind': 'operation.final', 'operationId': operation, 'turnId': turn, 'executionStatus': 'success',
+             'finalMessageRefs': [answer], 'usageReported': True, 'finalizedAtMs': 3},
+        ])
+        for directory, artifact in (
+            ('operations-inputs', {'schemaVersion': 1, 'operationId': operation, 'text': 'JOURNAL_USER_' + tag, 'images': []}),
+            ('sdk-results', {'operationId': operation, 'turnId': turn, 'finalText': 'JOURNAL_ANSWER_' + tag, 'error': '', 'complete': True}),
+        ):
+            target = self.session_dir / directory / (operation + '.json'); target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(encoded(artifact))
         self.materials[tag] = witnesses
         return operation
 
@@ -229,6 +247,7 @@ class PureLedger:
     def save(self):
         self.session_dir.mkdir(parents=True, exist_ok=True)
         (self.session_dir / (self.sid + '.jsonl')).write_bytes(self.bytes())
+        (self.session_dir / 'operations.jsonl').write_bytes(b'\n'.join(encoded(row) for row in self.operations) + b'\n')
 
 
 class PureHosts:
@@ -279,6 +298,105 @@ class SavedMaterialTests(unittest.TestCase):
         self.assertFalse(report['canonical_hash_recomputed']); self.assertTrue(report['native_canonical_guard_required'])
         for item in capture['files']:
             self.assertEqual((self.world.base / item['relative']).read_bytes(), (Path(capture['evidence']) / item['saved']).read_bytes())
+        self.assertEqual(sum(item['relative'].endswith('/operations.jsonl') for item in capture['files']), 4)
+        for directory in ('operations-inputs', 'sdk-results'):
+            self.assertEqual(sum('/' + directory + '/' in item['relative'] for item in capture['files']), 7)
+        self.assertTrue(all(item['ordinary_operation_records'] == 6 for item in report['fixtures']))
+        self.assertFalse(any(row.get('kind') == 'sdk.operation.turn.bound' for _, ledger, _ in self.world.fixtures for row in ledger.rows))
+
+    def operation_files(self, ledger):
+        return {ledger.session_dir.as_posix() + '/' + path.relative_to(ledger.session_dir).as_posix(): path.read_bytes()
+                for path in ledger.session_dir.rglob('*') if path.is_file()}
+
+    def test_missing_old_capture_operation_input_and_result_sources_cannot_be_laundered(self):
+        _, ledger, _ = self.world.fixtures[0]
+        files = self.operation_files(ledger); session_dir = ledger.session_dir.as_posix()
+        for suffix in ('/operations.jsonl', '/operations-inputs/operation-OLD.json', '/sdk-results/operation-NEW.json'):
+            missing = dict(files); del missing[session_dir + suffix]
+            with self.subTest(suffix=suffix), self.assertRaisesRegex(RuntimeError, 'missing actual ordinary'):
+                gate._operations(ledger.rows, session_dir, missing, {'OLD': 'operation-OLD', 'NEW': 'operation-NEW'})
+        # The old selector retained none of these facts. No host stdout mirror
+        # or a Jobs-only main event can replace the actual side ledger.
+        (ledger.session_dir / 'operations.jsonl').unlink()
+        with self.assertRaisesRegex(RuntimeError, 'missing actual ordinary operation ledger'):
+            self.check(self.capture('old-no-operations'))
+
+    def test_ordinary_operation_stage_schema_and_identity_counterexamples(self):
+        _, ledger, _ = self.world.fixtures[0]
+        session_dir = ledger.session_dir.as_posix(); files = self.operation_files(ledger)
+        path = session_dir + '/operations.jsonl'; original = deepcopy(ledger.operations)
+        changes = []
+        for index, field, value in (
+            (0, 'schemaVersion', True), (0, 'receivedAtMs', 0), (1, 'dispatchedAtMs', True),
+            (2, 'finalizedAtMs', -1), (0, 'inputId', ''), (3, 'inputId', 'input-OLD'),
+            (0, 'payloadHash', 'f' * 64), (0, 'inputRef', 'operations-inputs/../../outside.json'),
+            (0, 'clientOperationId', 'journal-key-NEW'), (2, 'executionStatus', 'cancelled'),
+            (2, 'turnId', 'foreign-turn'), (5, 'turnId', 'turn-OLD'),
+            (2, 'usageReported', 1), (2, 'finalMessageRefs', ['tool-message-OLD']),
+            (2, 'finalMessageRefs', ['answer-OLD', 'answer-OLD']), (0, 'actorId', 'foreign-actor'),
+        ):
+            changed = deepcopy(original); changed[index][field] = value; changes.append((field + str(index), changed))
+        changes.extend([
+            ('missing', original[:-1]), ('duplicate', [*original, original[-1]]),
+            ('reordered', [original[1], original[0], *original[2:]]),
+            ('interleaved', [original[0], original[3], *original[1:3], *original[4:]]),
+        ])
+        foreign = deepcopy(original)
+        for row in foreign[:3]: row['operationId'] = 'foreign-operation'
+        changes.append(('foreign', foreign))
+        for label, changed in changes:
+            files[path] = b'\n'.join(encoded(row) for row in changed) + b'\n'
+            with self.subTest(label=label), self.assertRaises(RuntimeError):
+                gate._operations(ledger.rows, session_dir, files, {'OLD': 'operation-OLD', 'NEW': 'operation-NEW'})
+        for bad in (b'', files[path].rstrip(b'\n'), b'\n' + files[path]):
+            files[path] = bad
+            with self.subTest(raw=bad[:20]), self.assertRaises(RuntimeError):
+                gate._operations(ledger.rows, session_dir, files, {'OLD': 'operation-OLD', 'NEW': 'operation-NEW'})
+
+    def test_actual_input_and_sdk_final_artifact_counterexamples(self):
+        _, ledger, _ = self.world.fixtures[0]
+        session_dir = ledger.session_dir.as_posix(); original = self.operation_files(ledger)
+        for directory, field, value in (
+            ('operations-inputs', 'operationId', 'foreign-operation'), ('operations-inputs', 'schemaVersion', True),
+            ('operations-inputs', 'text', 'JOURNAL_USER_NEW'), ('operations-inputs', 'images', [{'data': 'foreign'}]),
+            ('sdk-results', 'operationId', 'foreign-operation'), ('sdk-results', 'turnId', 'foreign-turn'),
+            ('sdk-results', 'finalText', 'JOURNAL_ANSWER_NEW'), ('sdk-results', 'error', 'failed'),
+            ('sdk-results', 'complete', False), ('sdk-results', 'complete', 1), ('sdk-results', 'actorId', 'foreign-actor'),
+        ):
+            files = dict(original); path = session_dir + '/' + directory + '/operation-OLD.json'
+            data = json.loads(files[path]); data[field] = value; files[path] = encoded(data)
+            with self.subTest(directory=directory, field=field, value=value), self.assertRaises(RuntimeError):
+                gate._operations(ledger.rows, session_dir, files, {'OLD': 'operation-OLD', 'NEW': 'operation-NEW'})
+
+    def test_ordinary_v3_sender_input_answer_and_foreign_jobs_binding_reject(self):
+        _, ledger, _ = self.world.fixtures[0]
+        session_dir = ledger.session_dir.as_posix(); files = self.operation_files(ledger)
+        for label in ('sender', 'source', 'user-content', 'user-origin', 'answer-content', 'extra-user', 'jobs-binding'):
+            rows = deepcopy(ledger.rows)
+            received = next(row for row in rows if row.get('kind') == 'input.received')
+            user = next(row for row in rows if row.get('messageId') == 'user-OLD')
+            answer = next(row for row in rows if row.get('messageId') == 'answer-OLD')
+            if label == 'sender': received['payload']['senderKind'] = 'remote_actor'
+            elif label == 'source': received['payload']['source'] = 'foreign-host'
+            elif label == 'user-content': user['message']['content'] = 'foreign-input'
+            elif label == 'user-origin': user['origin'] = 'foreign-actor'
+            elif label == 'answer-content': answer['message']['content'][0]['text'] = 'foreign-answer'
+            elif label == 'extra-user': rows.append(deepcopy(user))
+            else: received['kind'] = 'sdk.operation.turn.bound'
+            with self.subTest(label=label), self.assertRaises(RuntimeError):
+                gate._operations(rows, session_dir, files, {'OLD': 'operation-OLD', 'NEW': 'operation-NEW'})
+
+    def test_extra_ordinary_files_and_foreign_isolated_operation_reject(self):
+        _, ledger, _ = self.world.fixtures[0]
+        extra = ledger.session_dir / 'sdk-results' / 'foreign-operation.json'; extra.write_bytes(b'{}')
+        with self.assertRaisesRegex(RuntimeError, 'extra or unbound captured'):
+            self.check(self.capture('extra-ordinary-result'))
+        extra.unlink()
+        fixture, _, _ = self.world.fixtures[2]
+        other_dir = fixture / 'state' / 'workspaces' / 'workspace' / 'sessions' / 'other-scene'
+        operations = other_dir / 'operations.jsonl'; facts = [json.loads(row) for row in operations.read_bytes().splitlines()]
+        facts[-1]['turnId'] = 'turn-OLD'; operations.write_bytes(b'\n'.join(encoded(row) for row in facts) + b'\n')
+        with self.assertRaises(RuntimeError): self.check(self.capture('foreign-isolation-turn'))
 
     def test_saved_artifact_or_main_tampering_is_rejected_without_rereading_source(self):
         for category in ('.combined.txt', '.jsonl', '.json'):
