@@ -114,6 +114,11 @@ public:
     // runtime() 为空、launch_error() 有说明——调用方须让会话启动失败,
     // 不回退旧写口(§十七失败合同)。
     explicit SessionService(SessionLaunchRequest request);
+    // Internal storage-only entry: consumes Finish's actual lock/publication.
+    // It does not admit inputs, execution, commands or a Local fallback.
+    SessionService(SessionLaunchRequest request, trajectory::ManagedSessionDirectory admitted,
+                   trajectory::ManagedSessionCreationAudit creation);
+    SessionAdmissionMode admission_mode() const noexcept { return admission_mode_; }
     // 不自动封口:各端显式 Close(reason)(terminal "exit"/app-server
     // "thread_stop"/单发 "exit",reason 是现行口径的合同)。
     ~SessionService();
@@ -193,9 +198,10 @@ public:
         std::string operation_id;  // 接纳时的操作号(与台账对账)
     };
     struct PendingPop {
-        enum class Status { Ok, Empty, WriteFailed };
+        enum class Status { Ok, Empty, WriteFailed, NotAdmitted };
         Status status = Status::Empty;
         QueuedInput input;  // status == Ok 时有效
+        std::string error_code; // Internal NotAdmitted, not a fabricated IO failure.
     };
     PendingPop PopPendingInput();
     std::size_t pending_input_count() const;
@@ -293,6 +299,7 @@ public:
     static constexpr std::size_t kMaxPendingInputs = 64;
 
 private:
+    const SessionAdmissionMode admission_mode_ = SessionAdmissionMode::LocalTrusted;
     // 操作台账(operations.jsonl)的内存镜像:clientOperationId -> 首发回执。
     struct AcceptedOperation {
         std::string operation_id;

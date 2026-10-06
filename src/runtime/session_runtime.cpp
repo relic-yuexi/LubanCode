@@ -18,6 +18,17 @@
 namespace lubancode::runtime {
 
 SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
+    InitializeLedger();
+}
+
+SessionRuntime::SessionRuntime(Options options, trajectory::ManagedSessionDirectory admitted,
+                               trajectory::ManagedSessionCreationAudit creation)
+    : admission_mode_(SessionAdmissionMode::ManagedStorageOnly), options_(std::move(options)) {
+    InitializeLedger(&admitted, &creation);
+}
+
+void SessionRuntime::InitializeLedger(trajectory::ManagedSessionDirectory* admitted,
+                                      trajectory::ManagedSessionCreationAudit* creation) {
     thread_id_ = ids_.NextThreadId();
     // P0-2(Trajectory 升为唯一 Session):恒开一场(进程一场,
     // LaunchSession/resume-as-new)。开不出来记 error,由装配层让会话启动
@@ -42,7 +53,9 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
     ledger_options.recovery_capture = options_.trajectory_recovery_capture;
     ledger_options.recovery_factory = options_.trajectory_recovery_factory;
     ledger_options.journal_native_io_probe = std::move(options_.trajectory_journal_native_io_probe);
-    auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
+    auto ledger = admitted ? TrajectorySessionLedger::OpenManaged(std::move(ledger_options),
+                                 std::move(*admitted), std::move(*creation))
+                           : TrajectorySessionLedger::Open(std::move(ledger_options));
     if (ledger.has_value()) {
         trajectory_.emplace(std::move(*ledger));
     } else {
@@ -96,6 +109,7 @@ bool SessionRuntime::ShutdownAsyncTools() {
 }
 
 std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::path& new_cwd) {
+    if (admission_mode_ == SessionAdmissionMode::ManagedStorageOnly) return kManagedStorageOnlyError;
     std::filesystem::path home_dir;
     // 身份裁决的 home 是 workspaces 树宿主根:跟状态根走(应用Worker
     // 接入单 §4.2),个人模式与从前同一处。

@@ -367,6 +367,26 @@ SessionService::SessionService(SessionLaunchRequest request) {
     SeedOperationLedger();
 }
 
+SessionService::SessionService(SessionLaunchRequest request, trajectory::ManagedSessionDirectory admitted,
+                               trajectory::ManagedSessionCreationAudit creation)
+    : admission_mode_(SessionAdmissionMode::ManagedStorageOnly) {
+    // BuildRuntimeOptions must not take its legacy identity/home fallback.
+    if (!request.workspace_identity || !request.workspace_identity->valid() ||
+        request.workspaces_root.empty() || !request.workspaces_root.is_absolute()) {
+        launch_error_ = "managed.session.invalid_launch_options";
+        return;
+    }
+    auto runtime = std::make_unique<SessionRuntime>(BuildRuntimeOptions(request),
+                                                   std::move(admitted), std::move(creation));
+    if (runtime->trajectory() == nullptr) {
+        launch_error_ = runtime->trajectory_open_error();
+        return;
+    }
+    v3_format_ = runtime->trajectory()->v3_main_writer() != nullptr;
+    runtime_ = std::move(runtime);
+    // No operations file, SeedOperationLedger, input or execution admission here.
+}
+
 SessionService::~SessionService() {
     (void)ShutdownExecution();
     if (runtime_ != nullptr && runtime_->async_tool_runtime() != nullptr &&
@@ -386,6 +406,8 @@ void SessionService::InitializeExecution(std::unique_ptr<assembly::SessionResour
         agent::AgentProfile& profile;
         ~SourceProfileScope() { ClearExecutionProfileBorrowers(profile); }
     } source_profile_scope{profile};
+    if (admission_mode_ == SessionAdmissionMode::ManagedStorageOnly)
+        throw std::logic_error(kManagedStorageOnlyError);
     {
         std::lock_guard lock(commit_mutex_);
         if (runtime_ == nullptr) throw std::logic_error("session.execution.session_unavailable");
@@ -624,6 +646,10 @@ std::string SessionService::CanonicalInputPayload(const InputRequest& input) {
 
 SessionService::InputReceipt SessionService::SubmitInput(const InputRequest& input) {
     InputReceipt receipt;
+    if (admission_mode_ == SessionAdmissionMode::ManagedStorageOnly) {
+        receipt.error_code = kManagedStorageOnlyError;
+        return receipt;
+    }
     if (runtime_ == nullptr || trajectory() == nullptr) {
         receipt.error_code = "trajectory.open_failed";
         return receipt;
@@ -710,6 +736,11 @@ SessionService::InputReceipt SessionService::SubmitInput(const InputRequest& inp
 
 SessionService::PendingPop SessionService::PopPendingInput() {
     PendingPop pop;
+    if (admission_mode_ == SessionAdmissionMode::ManagedStorageOnly) {
+        pop.status = PendingPop::Status::NotAdmitted;
+        pop.error_code = kManagedStorageOnlyError;
+        return pop;
+    }
     std::lock_guard<std::mutex> lock(commit_mutex_);
     if (pending_inputs_.empty()) {
         pop.status = PendingPop::Status::Empty;
@@ -743,6 +774,7 @@ std::vector<SessionService::QueuedInput> SessionService::PendingInputsSnapshot()
 }
 
 bool SessionService::RecordTurnFinal(const TurnFinalRecord& record) {
+    if (admission_mode_ == SessionAdmissionMode::ManagedStorageOnly) return false;
     if (runtime_ == nullptr || trajectory() == nullptr) {
         return false;
     }
@@ -926,6 +958,12 @@ ClientReceipt SessionService::ExecuteDomainCommand(const std::string& command_la
                                                    loop::LoopScheduler* loop_scheduler,
                                                    const std::string& cwd_identity,
                                                    std::int64_t now_ms) {
+    if (admission_mode_ == SessionAdmissionMode::ManagedStorageOnly) {
+        ClientReceipt rejected;
+        rejected.accepted = false;
+        rejected.error_code = kManagedStorageOnlyError;
+        return rejected;
+    }
     // 与 app-server 旧实现同一只进程级静态(CommandService 的 Handle* 是
     // 非常方法;无状态,静置安全)。
     static CommandService kDomainService(CommandService::Options{});
