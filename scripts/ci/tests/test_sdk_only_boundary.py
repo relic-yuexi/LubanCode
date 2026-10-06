@@ -112,6 +112,29 @@ class BoundaryTests(unittest.TestCase):
         target["sources"].append({"path": extra, "compileGroupIndex": 0})
         self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
 
+    def test_owned_file_paths_requires_its_exact_testing_reference_owner(self):
+        from scripts.ci import sdk_owned_file_paths as owned
+        self.source_file(owned.SOURCE, "int synthetic_source_data;\n")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assert_rejected(self.check(testing=True), "Owned file paths source")
+        target = {"id": "owned_paths", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "sources": [{"path": owned.SOURCE, "compileGroupIndex": 0}], "compileGroups": [{}]}
+        self.targets.append(target)
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        for field, value in (("name", "foreign_tests"), ("type", "STATIC_LIBRARY")):
+            old = target[field]; target[field] = value
+            self.assert_rejected(self.check(testing=True), "Owned file paths source")
+            target[field] = old
+        target["sources"].append(dict(target["sources"][0]))
+        self.assert_rejected(self.check(testing=True), "Owned file paths source")
+        target["sources"].pop()
+        near = owned.SOURCE.replace(".cpp", "_other.cpp"); self.source_file(near, "int near_name;\n")
+        target["sources"][0]["path"] = near
+        self.assert_rejected(self.check(testing=True), "Owned file paths source")
+        target["sources"][0]["path"] = owned.SOURCE; self.flags["BUILD_TESTING"] = "OFF"
+        self.assert_rejected(self.check(), "Owned file paths source")
+        self.targets.pop(); self.assertEqual(self.check()["status"], "passed")
+
     def deferred_action_reference(self, private=False):
         reference = "src/sdk/action_dispatch.cpp"
         self.source_file(reference, '#include "runtime/middleware_deferred_effects.hpp"\n')

@@ -65,6 +65,7 @@ namespace api = lubancode::api;
 namespace fs = std::filesystem;
 using Json = nlohmann::json;
 using detail::in_session_worker;
+constexpr const char* kNamedPublicationUnconfirmed = "sdk.named_results.publication_unconfirmed";
 
 // Keep shutdown diagnostics after a public session handle is dropped without
 // retaining its result text, connection material or execution resources.
@@ -214,6 +215,19 @@ struct Session::Impl final : rt::InteractionBroker {
     std::optional<detail::MainOperationTurnStart> command_parent_start_failure;
 
     ~Impl() { (void)Close(); }
+
+    bool NamedPublicationUnconfirmed() const noexcept {
+        return named_result_reader && named_result_reader->HasUnconfirmedPublication();
+    }
+    void CheckNamedPublication(Operation& operation) const {
+        if (!NamedPublicationUnconfirmed()) return;
+        operation.state = OperationState::Indeterminate;
+        operation.result_persisted = false;
+        if (operation.error.find(kNamedPublicationUnconfirmed) == std::string::npos) {
+            if (!operation.error.empty()) operation.error += " ";
+            operation.error += kNamedPublicationUnconfirmed;
+        }
+    }
 
     void Emit(Event event) {
         event.session_id = session_id;
@@ -871,6 +885,7 @@ struct Session::Impl final : rt::InteractionBroker {
                 command_jobs->StopParent(operation.operation_id, "parent_not_succeeded");
             command_jobs->PumpAndPublish();
         }
+        CheckNamedPublication(operation);
         if (!ledger_ok) {
             operation.state = OperationState::Indeterminate;
             operation.error += " sdk.trajectory.persistence_failed";
@@ -957,6 +972,9 @@ struct Session::Impl final : rt::InteractionBroker {
             std::lock_guard lock(mutex);
             subagent_reports.insert_or_assign(operation.operation_id, std::move(children));
         }
+        // Reads/Job publication above may have observed the first unknown after
+        // Run returned. Freeze the truthful state before saving the SDK final.
+        CheckNamedPublication(operation);
         const bool complete = ledger_ok && memory_saved && writes_saved && children_saved && operation.state != OperationState::Indeterminate;
         const auto directory = session_dir / "sdk-results";
         std::error_code ec;
@@ -1013,6 +1031,11 @@ struct Session::Impl final : rt::InteractionBroker {
         Operation operation;
         operation.operation_id = input.operation_id;
         operation.turn_id = bound_turn;
+        if (NamedPublicationUnconfirmed()) {
+            CheckNamedPublication(operation);
+            Complete(std::move(operation), {}, false);
+            return;
+        }
         if (skip) { operation.state = OperationState::Cancelled; Complete(std::move(operation), {}, false); return; }
         // Writer seeds this counter from durable V3 facts, including after a
         // process restart. Process-local counters would reuse turn-1 on resume.
@@ -1382,8 +1405,10 @@ struct Session::Impl final : rt::InteractionBroker {
         const bool turn_cancelled = (outcome && outcome->cancelled) || (!outcome && interrupt.load());
         const bool write_uncertain = memory_write_module->HasIndeterminate();
         const bool effect_uncertain = (outcome && outcome->side_effect_indeterminate) || !action_receipt_error.empty();
-        const bool uncertain = write_uncertain || effect_uncertain;
-        std::string uncertain_error = write_uncertain ? "sdk.memory_write.indeterminate" : "sdk.side_effect.indeterminate";
+        const bool named_uncertain = NamedPublicationUnconfirmed();
+        const bool uncertain = write_uncertain || effect_uncertain || named_uncertain;
+        std::string uncertain_error = write_uncertain ? "sdk.memory_write.indeterminate" :
+            named_uncertain ? kNamedPublicationUnconfirmed : "sdk.side_effect.indeterminate";
         if (effect_uncertain && outcome && !outcome->side_effect_error.empty()) uncertain_error += ": " + outcome->side_effect_error;
         else if (!action_receipt_error.empty()) uncertain_error += ": " + action_receipt_error;
         bridge->EndTurn(outcome.has_value() && !uncertain, turn_cancelled && !uncertain,
@@ -1426,11 +1451,11 @@ struct Session::Impl final : rt::InteractionBroker {
             bool skip = false;
             {
                 std::unique_lock lock(mutex);
-                const auto ready = [&] { return closing || broken || memory_write_indeterminate ||
+                const auto ready = [&] { return closing || broken || memory_write_indeterminate || NamedPublicationUnconfirmed() ||
                     (command_jobs && command_jobs->indeterminate()) || service->pending_input_count() > 0; };
                 if (command_jobs && command_jobs->HasPending()) cv.wait_for(lock, std::chrono::milliseconds(10), ready);
                 else cv.wait(lock, ready);
-                if (broken || memory_write_indeterminate || (command_jobs && command_jobs->indeterminate()) ||
+                if (broken || memory_write_indeterminate || NamedPublicationUnconfirmed() || (command_jobs && command_jobs->indeterminate()) ||
                     (closing && service->pending_input_count() == 0)) break;
                 if (service->pending_input_count() == 0 && command_jobs) {
                     lock.unlock(); command_jobs->PumpAndPublish(); continue;
@@ -1477,12 +1502,13 @@ struct Session::Impl final : rt::InteractionBroker {
         bool stop_jobs = false;
         {
             std::lock_guard lock(mutex);
-            stop_jobs = broken || memory_write_indeterminate || (command_jobs && command_jobs->indeterminate());
+            stop_jobs = broken || memory_write_indeterminate || NamedPublicationUnconfirmed() || (command_jobs && command_jobs->indeterminate());
             if (stop_jobs) for (auto& [id, operation] : operations) {
                 (void)id;
                 if (!Terminal(operation.state)) {
                     operation.state = OperationState::Indeterminate;
                     operation.error = memory_write_indeterminate ? "sdk.memory_write.indeterminate" :
+                        NamedPublicationUnconfirmed() ? kNamedPublicationUnconfirmed :
                         (command_jobs && command_jobs->indeterminate()) ? "sdk.job.indeterminate" : "sdk.storage.broken";
                 }
             }
@@ -1668,6 +1694,7 @@ Result<Receipt> Session::Submit(std::string key, std::string text) {
     }
     std::lock_guard lock(impl_->mutex);
     if (impl_->closing || impl_->closed || impl_->runtime_stopping->load()) return std::unexpected(Failure("sdk.session.closed"));
+    if (impl_->NamedPublicationUnconfirmed()) return std::unexpected(Failure(kNamedPublicationUnconfirmed));
     if (impl_->memory_write_indeterminate) return std::unexpected(Failure("sdk.memory_write.indeterminate",
         "A previous project write needs explicit inspection; this Session cannot continue automatically"));
     if (impl_->broken) return std::unexpected(Failure("sdk.storage.broken"));

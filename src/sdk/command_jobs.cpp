@@ -316,7 +316,8 @@ Receipt SessionCommandJobs::Admit(rt::TrajectoryTurnBridge& bridge,
     capability.command_limits = {std::min(plan_->options()->command_timeout_ms, request.policy.deadline_ms),
         plan_->options()->max_output_bytes};
     const auto weak = weak_from_this();
-    capability.scope_gate = [weak, record, facts = record->facts](const auto& scope, const Json& input,
+    const auto named_results = service_->trajectory()->named_result_capability();
+    capability.scope_gate = [weak, record, facts = record->facts, named_results](const auto& scope, const Json& input,
         const auto& identity, const auto& policy) {
         auto module = weak.lock();
         const bool matching = module && record->prepared.load(std::memory_order_acquire) &&
@@ -326,6 +327,10 @@ Receipt SessionCommandJobs::Admit(rt::TrajectoryTurnBridge& bridge,
             scope.parent_action_id == facts->parent_action_id && scope.provider_tool_call_id == facts->provider_tool_call_id &&
             input == facts->effective_input && identity.ToJson() == facts->tool_identity.ToJson() && policy.ToJson() == facts->policy.ToJson();
         if (!matching) return tools::JobAuthDecision{false, false, "sdk.job.scope_revoked"};
+        // Settlement can seal this shared owner earlier in the same pump, before
+        // the module sees its terminal view. Do not start the next queued command.
+        if (named_results && named_results->HasUnconfirmedPublication())
+            return tools::JobAuthDecision{false, false, "sdk.named_results.publication_unconfirmed"};
         if (record->bound.load(std::memory_order_acquire) &&
             !module->approvals_->JobAllowed(record->approval, Identity(*record->binding)))
             return tools::JobAuthDecision{false, false, "sdk.job.approval_scope_closed"};

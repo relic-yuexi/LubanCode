@@ -376,5 +376,33 @@ class ProfileTests(unittest.TestCase):
             gate.check_execution(self.manifest, increased, self.executable, junit, native)
 
 
+    def test_owned_file_source_requires_original_bytes_head_and_whole_six_cases(self):
+        import os
+        from scripts.ci import sdk_owned_file_paths as owned
+        from scripts.ci.tests.test_sdk_owned_file_paths_gates import HEAD, section, source_bytes, source_record
+        name = 'integration.sdk.' + owned.STEM
+        self.manifest['selected'] = [[name], [name]]; self.manifest['roster'][name] = owned.SOURCE
+        registrations = self.registrations()
+        for registration in registrations: registration['tests'][0]['properties'][0]['value'] = 300
+        command = registrations[0]['tests'][0]['command']
+        native = '1/1 Testing: ' + name + '\n' + section(command, os.name)
+        junit = ET.Element('testsuite'); ET.SubElement(junit, 'testcase', name=name, status='run')
+        evidence = {'record': source_record(), 'bytes': source_bytes(), 'head': HEAD}
+        self.assertEqual(gate.check_execution(self.manifest, registrations, self.executable, junit, native, evidence),
+                         {'status': 'passed', 'sources': 1, 'cases': 6, 'assertions': 101})
+        with self.assertRaises(ValueError): gate.check_execution(self.manifest, registrations, self.executable, junit, native)
+        for key, value in [('head', 'b' * 40), ('bytes', source_bytes() + b'// drift\n')]:
+            changed = {**evidence, key: value}
+            with self.assertRaises(RuntimeError): gate.check_execution(self.manifest, registrations, self.executable, junit, native, changed)
+        for changed in (native.replace('6 | 6 passed', '5 | 5 passed'), native.replace('101 | 101 passed', '0 | 0 passed'),
+                        native.replace(owned.PREFIX + owned.PATHS[0], 'missing'), native + owned.PREFIX + 'foreign\n',
+                        native.replace('[doctest] test cases:', 'proof: [doctest] test cases:'),
+                        native.replace(owned.LINK_KINDS[os.name], 'foreign-platform-link')):
+            with self.assertRaises((RuntimeError, ValueError)):
+                gate.check_execution(self.manifest, registrations, self.executable, junit, changed, evidence)
+        for registration in registrations: registration['tests'][0]['properties'][0]['value'] = 180
+        with self.assertRaises(ValueError): gate.check_execution(self.manifest, registrations, self.executable, junit, native, evidence)
+
+
 if __name__ == '__main__':
     unittest.main()

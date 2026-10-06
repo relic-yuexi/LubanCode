@@ -70,7 +70,7 @@ void Write(const fs::path& path, const std::string& bytes) {
     output.flush(); Check(output.good(), "file flush failed"); output.close(); Check(!output.fail(), "file close failed");
 }
 std::string Key(const blob::Scope& scope) { return scope.workspace_key + "\n" + scope.session_id; }
-enum class Fault { None, AfterPublish, SecondReject, WrongScope, OversizeReceipt, OpenThrow };
+enum class Fault { None, AfterPublish, SecondReject, WrongScope, OversizeReceipt, OpenThrow, FirstReject };
 struct State {
     std::mutex mutex;
     std::condition_variable cv;
@@ -78,6 +78,7 @@ struct State {
     std::map<std::string, fs::path> directories;
     std::vector<blob::Reference> publications, reads;
     std::size_t opens = 0, calls = 0, stores_destroyed = 0, providers_destroyed = 0;
+    std::size_t after_publish_call = 1;
     bool hold_open = false, hold_read = false, hold_write = false;
     bool open_entered = false, read_entered = false, write_entered = false;
     bool release_open = false, release_read = false, release_write = false;
@@ -109,15 +110,17 @@ public:
         Check(request.bytes.size() == request.reference.bytes && !request.request_key.empty(), "publish bytes/key changed");
         Check(request.reference.logical_name.find_first_of("/\\:") == std::string::npos, "nonlogical publish name");
         blob::WriteReceipt result; result.reference = request.reference; result.request_key = request.request_key;
-        Fault fault; std::size_t call; std::function<void()> callback;
+        Fault fault; std::size_t call, after_publish_call; std::function<void()> callback;
         {
             std::unique_lock lock(state_->mutex); call = ++state_->calls; fault = state_->fault; callback = state_->on_write;
+            after_publish_call = state_->after_publish_call;
             if (state_->hold_write && call == 1) {
                 state_->write_entered = true; state_->cv.notify_all();
                 state_->cv.wait(lock, [&] { return state_->release_write; });
             }
         }
         if (callback) callback();
+        if (fault == Fault::FirstReject && call == 1) { result.error = {"fixture.known_rejection", {}}; return result; }
         if (fault == Fault::SecondReject && call == 2) { result.error = {"fixture.known_rejection", {}}; return result; }
         // A newly created private directory exclusively reserves this temporary
         // name. Hard-link publication is create-new on both native platforms.
@@ -136,7 +139,7 @@ public:
             std::lock_guard lock(state_->mutex); state_->publications.push_back(request.reference);
         }
         Check(Bytes(directory_ / request.reference.logical_name) == request.bytes, "published bytes differ");
-        if (fault == Fault::AfterPublish && call == 1) throw std::runtime_error("actual host publication completed before exception");
+        if (fault == Fault::AfterPublish && call == after_publish_call) throw std::runtime_error("actual host publication completed before exception");
         result.state = blob::CommitState::Committed;
         // Closed streams and an acknowledged namespace link survive this process
         // exiting; this fixture does not claim machine/power-loss confirmation.
@@ -210,7 +213,7 @@ struct Script {
     std::mutex mutex;
     unsigned turns = 0, summary_calls = 0;
     bool summary_material_seen = false, summary_adopted = false, historical_reply_seen = false;
-    std::string command, expected_history, prefix;
+    std::string command, queued_command, expected_history, prefix;
 };
 class Backend final : public sdk::Backend {
 public:
@@ -240,7 +243,11 @@ public:
         for (auto it = request.messages.rbegin(); it != request.messages.rend(); ++it)
             if (it->role == "user" && !it->text.empty()) { text = it->text; break; }
         const auto id = script_->prefix + std::to_string(step);
-        if (text == "job") return sdk::ModelReply{{}, {{id, "run_command", script_->command}}, {}};
+        if (text == "job") {
+            std::vector<sdk::ToolCall> calls{{id, "run_command", script_->command}};
+            if (!script_->queued_command.empty()) calls.push_back({id + "-queued", "run_command", script_->queued_command});
+            return sdk::ModelReply{{}, std::move(calls), {}};
+        }
         if (text == "summary") return sdk::ModelReply{{}, {{id, "large_evidence", "{}"}}, {}};
         return sdk::ModelReply{{}, {{id, "read_file", R"({"path":"input.txt"})"}}, {}};
     }
@@ -316,10 +323,10 @@ struct World {
             Check(!name.starts_with("res-") && !name.starts_with("capture-") && !name.starts_with("job-admission-"), "named bytes mirrored into Session tree");
         }
     }
-    std::string Command() const {
+    std::string Command(const std::string& tag = "named", bool gated = false) const {
         Check(!probe.empty(), "Job acceptance needs explicit real probe");
         std::string command = Quote(Utf8(probe));
-        for (const auto& arg : std::vector<std::string>{"named.started", "named.done", "8194", "0", "named-job", "J", "-"}) command += " " + Quote(arg);
+        for (const auto& arg : std::vector<std::string>{tag + ".started", tag + ".done", "8194", "0", tag + "-job", "J", gated ? tag + ".release" : "-"}) command += " " + Quote(arg);
         return "{\"command\":" + JsonString(command) + ",\"execution_mode\":\"session_job\",\"shell\":" +
 #ifdef _WIN32
             "\"cmd\"}";
@@ -374,6 +381,113 @@ void Roundtrip(World& world) {
     world.NoMirrors(); Take(resumed->Close(), "close restored scene");
 }
 
+void LateJobPublication(const fs::path& base, const fs::path& probe) {
+    World world(base, probe);
+    auto script = std::make_shared<Script>(); script->command = world.Command("late-first", true);
+    script->queued_command = world.Command("late-second", true);
+    auto session = world.Open(world.Options(script, true)); // max_running remains one
+    const auto parent = Run(session, "late-job-parent", "job");
+    Check(parent.state == sdk::OperationState::Succeeded && parent.result_persisted && parent.final_text == "done",
+          "release-gated parent did not actually finish successfully");
+    sdk::jobs::v1::JobView running, queued;
+    bool ready = false;
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto jobs = Take(session->ListJobs(), "late actual Job states");
+        if (jobs.size() == 2) {
+            running = {}; queued = {};
+            for (const auto& job : jobs) {
+                if (job.state == "running") running = job;
+                if (job.state == "queued") queued = job;
+            }
+            if (!running.identity.operation_id.empty() && !queued.identity.operation_id.empty() &&
+                fs::is_regular_file(world.project / "late-first.started")) {
+                const auto started = Bytes(world.project / "late-first.started"); const auto newline = started.find('\n');
+                std::error_code error;
+                if (newline != std::string::npos && started.substr(0, newline) == "late-first-job" &&
+                    fs::equivalent(fs::u8path(started.substr(newline + 1)), world.project, error) && !error) {
+                    ready = true; break;
+                }
+            }
+        }
+        std::this_thread::sleep_for(5ms); // observe the real handshake, never infer parent completion
+    }
+    Check(ready, "late fixture did not observe one actual running and one queued command");
+    Check(running.identity.job_id != queued.identity.job_id && running.identity.operation_id != queued.identity.operation_id &&
+          running.identity.parent_operation_id == parent.operation_id && queued.identity.parent_operation_id == parent.operation_id &&
+          running.identity.turn_id == parent.turn_id && queued.identity.turn_id == parent.turn_id,
+          "late Job identities did not belong to the confirmed parent");
+    Check(!fs::exists(world.project / "late-first.done") && !fs::exists(world.project / "late-second.started"),
+          "late process gates did not hold the running and queued commands");
+    const auto directory = world.SessionDirectory(session->id());
+    const auto result_path = directory / "sdk-results" / (parent.operation_id + ".json");
+    const auto confirmed_result = Bytes(result_path);
+    struct Reentry {
+        std::mutex mutex;
+        std::atomic<unsigned> calls{0};
+        std::unique_ptr<sdk::Result<sdk::Receipt>> submitted;
+    };
+    auto reentry = std::make_shared<Reentry>();
+    std::size_t before_calls, before_writes;
+    {
+        std::lock_guard lock(world.state->mutex);
+        before_calls = world.state->calls; before_writes = world.state->publications.size();
+        world.state->fault = Fault::AfterPublish; world.state->after_publish_call = before_calls + 1;
+        world.state->on_write = [weak = std::weak_ptr<sdk::Session>(session), reentry] {
+            if (reentry->calls.fetch_add(1) != 0) return;
+            auto current = weak.lock(); Check(current != nullptr, "late publishing callback lost its Session");
+            auto submitted = current->Submit("queued-in-late-publication", "read");
+            std::lock_guard saved(reentry->mutex);
+            reentry->submitted = std::make_unique<sdk::Result<sdk::Receipt>>(std::move(submitted));
+        };
+    }
+    Write(world.project / "late-first.release", "release");
+    const auto unknown = Take(session->WaitJob(running.identity, 20s), "late first Job unknown");
+    Check(unknown.state == "unknown" && unknown.terminal && unknown.execution_state == "succeeded" &&
+          unknown.gap == "job.owned.raw_unconfirmed", "late Job lost its actual execution or publication gap");
+    const auto rejected = Take(session->WaitJob(queued.identity, 20s), "late queued Job rejection");
+    Check(rejected.state == "failed" && rejected.terminal && rejected.execution_state == "rejected",
+          "same-pump queued Job was not rejected before dispatch");
+    Check(Bytes(world.project / "late-first.done") == "late-first-job" &&
+          !fs::exists(world.project / "late-second.started") && !fs::exists(world.project / "late-second.done"),
+          "the queued command ran after its storage owner became unknown");
+    const auto queued_input = [&] {
+        std::lock_guard lock(reentry->mutex); Check(reentry->submitted != nullptr, "late publication did not submit actual queued input");
+        return Take(*reentry->submitted, "late callback Submit");
+    }();
+    const auto stopped = Take(session->WaitResult(queued_input.operation_id, 20s), "late queued input fence");
+    Check(stopped.state == sdk::OperationState::Indeterminate && !stopped.result_persisted && stopped.turn_id.empty() &&
+          stopped.error == "sdk.named_results.publication_unconfirmed", "late queued input reached a new model turn");
+    const auto unchanged_parent = [&] {
+        const auto read = Take(session->ReadOperation(parent.operation_id), "read confirmed late parent");
+        const auto waited = Take(session->WaitResult(parent.operation_id, 20s), "wait confirmed late parent");
+        for (const auto* actual : {&read, &waited})
+            Check(actual->operation_id == parent.operation_id && actual->turn_id == parent.turn_id && actual->state == parent.state &&
+                  actual->final_text == parent.final_text && actual->error == parent.error && actual->result_persisted == parent.result_persisted,
+                  "late Job uncertainty rewrote the confirmed parent");
+        Check(Bytes(result_path) == confirmed_result, "late Job rewrote the durable parent result");
+    };
+    unchanged_parent();
+    auto fresh = session->Submit("fresh-after-late-unknown", "read");
+    Check(!fresh && fresh.error().code == "sdk.named_results.publication_unconfirmed", "late unknown owner accepted fresh input");
+    { std::lock_guard lock(script->mutex); Check(script->turns == 2, "late unknown dispatched another Generate"); }
+    {
+        std::lock_guard lock(world.state->mutex);
+        Check(world.state->calls == before_calls + 1 && world.state->publications.size() == before_writes + 1,
+              "late unknown did not retain exactly its actual first Job publication");
+    }
+    Check(!session->ReadJobPreview(running.identity), "unknown Job invented a confirmed preview");
+    const auto closed = session->Close();
+    Check(!closed && closed.error().code == unknown.gap, "Close replaced the first actual Job uncertainty");
+    Check(!Take(session->ReadJob(running.identity), "closed first Job").owner_available &&
+          !Take(session->ReadJob(queued.identity), "closed queued Job").owner_available, "Close retained a live Job owner");
+    unchanged_parent();
+    Check(fs::remove(world.probe), "closed Job still held the relocated command executable");
+    Check(!fs::exists(world.project / "late-second.started") && !fs::exists(world.project / "late-second.done"),
+          "Close let the rejected command start");
+    world.NoMirrors();
+}
+
 void Jobs(World& world) {
     auto script = std::make_shared<Script>(); script->command = world.Command();
     auto session = world.Open(world.Options(script, true));
@@ -410,6 +524,7 @@ void Jobs(World& world) {
     Check(Take(resumed->ReadJobPreview(id), "restored Job preview").text == preview.text, "restored Job bytes changed");
     { std::lock_guard lock(world.state->mutex); Check(world.state->calls == writes, "Hold restoration published new material"); }
     Check(!resumed->CancelJob(id), "historical Job fabricated a live cancellation"); Take(resumed->Close(), "close Job restore");
+    LateJobPublication(world.root, world.probe);
 }
 
 void Summary(World& world, const std::function<void(const fs::path&, const std::string&)>& inspect) {
@@ -441,18 +556,75 @@ void Summary(World& world, const std::function<void(const fs::path&, const std::
 void Publication(const fs::path& base, const fs::path& probe) {
     for (const auto fault : {Fault::AfterPublish, Fault::SecondReject, Fault::WrongScope, Fault::OversizeReceipt}) {
         World world(base, probe); world.state->fault = fault;
-        auto session = world.Open(world.Options(std::make_shared<Script>()));
+        auto script = std::make_shared<Script>(); auto session = world.Open(world.Options(script));
+        struct Reentry {
+            std::mutex mutex;
+            std::atomic<unsigned> callbacks{0};
+            std::unique_ptr<sdk::Result<sdk::Receipt>> submitted;
+        };
+        auto reentry = std::make_shared<Reentry>();
+        // This is the actual publishing callback, while the capability owns its
+        // material/write gate. API admission must neither borrow that gate nor
+        // allow this accepted item to execute once the first unknown is known.
+        world.state->on_write = [weak = std::weak_ptr<sdk::Session>(session), reentry] {
+            if (reentry->callbacks.fetch_add(1) != 0) return;
+            auto current = weak.lock(); Check(current != nullptr, "publishing callback lost its Session");
+            auto submitted = current->Submit("queued-before-unknown", "read");
+            std::lock_guard lock(reentry->mutex);
+            reentry->submitted = std::make_unique<sdk::Result<sdk::Receipt>>(std::move(submitted));
+        };
         const auto operation = Run(session, "uncertain-publish");
         Check(operation.state != sdk::OperationState::Succeeded, "unknown publication was reported successful");
+        Check(operation.state == sdk::OperationState::Indeterminate && !operation.result_persisted &&
+              operation.error.find("sdk.named_results.publication_unconfirmed") != std::string::npos,
+              "current operation lost its actual unknown publication state");
+        const auto reread = Take(session->ReadOperation(operation.operation_id), "read current unknown");
+        Check(reread.state == operation.state && reread.error == operation.error && !reread.result_persisted,
+              "ReadOperation disagreed with the actual unknown final");
+        const auto queued = [&] {
+            std::lock_guard lock(reentry->mutex);
+            Check(reentry->submitted != nullptr, "provider callback never returned from public Submit");
+            return Take(*reentry->submitted, "accept actual queued callback input");
+        }();
+        Check(!queued.duplicate, "queued callback did not create its own actual operation");
+        const auto stopped = Take(session->WaitResult(queued.operation_id, 20s), "wait queued owner fence");
+        Check(stopped.state == sdk::OperationState::Indeterminate && !stopped.result_persisted && stopped.turn_id.empty() &&
+              stopped.error == "sdk.named_results.publication_unconfirmed",
+              "queued work crossed the unknown owner or claimed a dispatched turn");
         std::size_t calls, writes;
         { std::lock_guard lock(world.state->mutex); calls = world.state->calls; writes = world.state->publications.size(); }
         Check(calls == (fault == Fault::SecondReject ? 2u : 1u) && writes == 1, "fault did not follow a real first publication");
         auto retry = session->Submit("no-retry", "read");
         if (retry) Check(Take(session->WaitResult(retry->operation_id, 20s), "wait refused retry").state != sdk::OperationState::Succeeded,
                          "a fresh operation ignored the unknown storage owner");
+        Check(!retry && retry.error().code == "sdk.named_results.publication_unconfirmed",
+              "fresh Submit did not refuse the retained unknown owner");
+        { std::lock_guard lock(script->mutex); Check(script->turns == 1, "queued or fresh work called Generate after unknown publication"); }
         (void)session->Close();
         { std::lock_guard lock(world.state->mutex); Check(world.state->calls == calls, "first unknown was retried or overwritten"); }
         world.NoMirrors();
+    }
+    {
+        World world(base, probe); world.state->fault = Fault::FirstReject;
+        auto session = world.Open(world.Options(std::make_shared<Script>()));
+        const auto rejected = Run(session, "known-zero-publication");
+        Check(rejected.state != sdk::OperationState::Succeeded && rejected.state != sdk::OperationState::Indeterminate,
+              "known zero-publication rejection was confused with unknown");
+        { std::lock_guard lock(world.state->mutex); Check(world.state->calls == 1 && world.state->publications.empty(), "known rejection published material"); }
+        Check(Run(session, "text-after-known-rejection").state == sdk::OperationState::Succeeded,
+              "known rejection poisoned a text-only operation");
+        (void)Saved(session, Run(session, "tool-after-known-rejection"));
+        { std::lock_guard lock(world.state->mutex); Check(world.state->calls > 1 && !world.state->publications.empty(), "known rejection sealed the live named owner"); }
+        Take(session->Close(), "close known rejection"); world.NoMirrors();
+    }
+    {
+        World world(base, probe); auto options = world.Options(std::make_shared<Script>()); options.named_results.reset();
+        auto session = world.Open(std::move(options));
+        (void)Saved(session, Run(session, "ordinary-file-first"));
+        (void)Saved(session, Run(session, "ordinary-file-second"));
+        Take(session->Close(), "close ordinary File");
+        std::lock_guard lock(world.state->mutex); Check(world.state->opens == 0 && world.state->calls == 0,
+              "ordinary File unexpectedly entered the external named provider");
     }
 }
 

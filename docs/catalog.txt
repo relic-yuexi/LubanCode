@@ -240,3 +240,6 @@ DOC development/sdk-file-result-display-path.md
 DOC development/sdk-owned-deadline-doctest.md
 DOC development/sdk-model-input-projection.md
 DOC development/workflow-session-open-diagnostic.md
+DOC development/sdk-named-publication-fence.md
+DOC development/sdk-journal-owner-operation-material-gate.md
+DOC development/sdk-named-owned-paths.md
