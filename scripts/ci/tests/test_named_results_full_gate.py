@@ -109,7 +109,7 @@ class FullEvidenceTests(unittest.TestCase):
                 with self.assertRaises((RuntimeError, ValueError)):
                     full.extract(build, 'posix')
                 output = build / 'test-evidence/named-results-full'
-                self.assertEqual(json.loads((output / 'context.json').read_text())['status'], 'failed')
+                self.assertEqual(json.loads((output / 'context.json').read_text(encoding='utf-8'))['status'], 'failed')
                 self.assertEqual((output / 'LastTest.log').read_bytes(), raw['LastTest.log'])
 
     def test_abort_and_invalid_utf8_preserve_originals_and_remove_stale_success(self):
@@ -122,7 +122,7 @@ class FullEvidenceTests(unittest.TestCase):
             self.assertEqual((output / 'LastTest.log').read_bytes(), broken)
             files['results.xml'].unlink()
             with self.assertRaises(RuntimeError): full.extract(build, 'posix')
-            report = json.loads((output / 'context.json').read_text())
+            report = json.loads((output / 'context.json').read_text(encoding='utf-8'))
             self.assertEqual(report['status'], 'failed')
             self.assertNotIn('details', report)
             self.assertFalse((output / 'results.xml').exists())
@@ -130,7 +130,7 @@ class FullEvidenceTests(unittest.TestCase):
             self.assertEqual((output / 'registration.json').read_bytes(), raw['registration.json'])
 
     def test_actual_workflow_routes_and_asan_literal_cover_both_sources(self):
-        text = (REPO / '.github/workflows/ci.yml').read_text()
+        text = (REPO / '.github/workflows/ci.yml').read_text(encoding='utf-8')
         classifiers = re.findall(r'^\s*([^\n]*scripts/ci/sdk_named_results\.py[^\n]*)\)\s*$', text, re.M)
         self.assertEqual(len(classifiers), 2)
         dependencies = ('scripts/ci/sdk_named_results.py', 'scripts/ci/extract_named_results_full.py',
