@@ -292,6 +292,95 @@ void CheckHostBorrowedExecution() {
     REQUIRE(failed_backend.send_stream(next, [](const auto&) {}, nullptr).has_value());
     CHECK(failed_audit->requests.size() == 1);
 }
+void CheckStableHostAgentBorrows() {
+    auto audit = std::make_shared<Audit>();
+    ParentBackend backend(audit);
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<OriginalTool>(audit));
+    {
+        auto first = CapturedProfile(audit, backend, registry, false);
+        first.request.model = "stable-host-first";
+        const auto first_capture = audit->agent_capture;
+        runtime::ExecutionOwner host(runtime::HostBorrowedExecutionResources{backend, registry}, std::move(first));
+        REQUIRE(host.has_agent());
+        auto* cached_command_agent = &host.agent();
+        auto& cached_state_agent = host.agent();
+        const auto stored_command = [cached_command_agent](const std::string& text) {
+            return cached_command_agent->Run(text, {});
+        };
+        REQUIRE(stored_command("first stable request").has_value());
+        REQUIRE(audit->requests.size() == 2);
+        CHECK(HasOriginalResult(audit->requests.back()));
+
+        auto replacement = CapturedProfile(audit, backend, registry, false);
+        replacement.request.model = "stable-host-rebuilt";
+        replacement.system_prompt = "stable rebuilt system";
+        const auto second_capture = audit->agent_capture;
+        host.RebuildHostAgent(replacement);
+        REQUIRE(host.has_agent());
+        CHECK(first_capture.expired());
+        CHECK(&host.agent() == cached_command_agent);
+        CHECK(&host.agent() == &cached_state_agent);
+        CHECK(replacement.tool_filter);
+        CHECK(replacement.deferred_index_provider);
+        CHECK(replacement.request.model == "stable-host-rebuilt");
+        runtime::ClearExecutionProfileBorrowers(replacement);
+        CHECK_FALSE(second_capture.expired());
+        audit->requests.clear();
+        REQUIRE(stored_command("rebuilt stable request").has_value());
+        REQUIRE(audit->requests.size() == 2);
+        CHECK(audit->requests.front().model == "stable-host-rebuilt");
+        CHECK(audit->requests.front().system == "stable rebuilt system");
+        CHECK(HasOriginalResult(audit->requests.back()));
+        CHECK(audit->tool_calls == 2);
+        CHECK(&cached_state_agent.History() == &host.agent().History());
+
+        auto broken = Profile();
+        auto armed = std::make_shared<std::atomic<bool>>(false);
+        broken.tool_filter = ThrowingCopy(armed);
+        armed->store(true);
+        CHECK_THROWS_WITH(host.RebuildHostAgent(broken), "child profile copy failure");
+        CHECK_FALSE(host.has_agent());
+        CHECK(second_capture.expired());
+        CHECK(broken.tool_filter); // The const caller source is never consumed.
+        CHECK(audit->parent_alive);
+        CHECK(audit->original_tool_alive);
+        CHECK(registry.Find("owner_probe") != nullptr);
+
+        auto resumed = Profile();
+        resumed.request.model = "stable-host-after-failure";
+        host.RebuildHostAgent(resumed, std::vector<api::Message>{User("actual restored stable history")});
+        REQUIRE(host.has_agent());
+        CHECK(&host.agent() == cached_command_agent);
+        cached_state_agent.SetSystemPrompt("stored reference after rebuild");
+        audit->requests.clear();
+        REQUIRE(stored_command("stable after failure").has_value());
+        REQUIRE(audit->requests.size() == 2);
+        CHECK(audit->requests.front().model == "stable-host-after-failure");
+        CHECK(audit->requests.front().system == "stored reference after rebuild");
+        CHECK(HasText(audit->requests.front(), "actual restored stable history"));
+        CHECK(HasOriginalResult(audit->requests.back()));
+        {
+            runtime::ExecutionTurnScope active(host, {}, {});
+            CHECK_THROWS_WITH(host.RebuildHostAgent(resumed), "execution.turn_already_active");
+            CHECK(host.has_agent());
+            CHECK(&host.agent() == cached_command_agent);
+        }
+    }
+    CHECK(audit->agent_capture.expired());
+    CHECK(audit->correct_teardown);
+    CHECK(audit->parent_alive);
+    CHECK(audit->original_tool_alive);
+    {
+        runtime::ExecutionOwner child(runtime::ChildExecutionResources{backend, registry, {}, {}}, Profile());
+        auto* child_agent = &child.agent();
+        CHECK_THROWS_WITH(child.RebuildHostAgent(Profile()), "execution.host_borrow_required");
+        CHECK(child.has_agent());
+        CHECK(&child.agent() == child_agent);
+        REQUIRE(child.agent().Run("child still runs after host-only rejection", {}).has_value());
+        CHECK(audit->requests.back().model == "child-model");
+    }
+}
 }  // namespace
 
 TEST_CASE("execution owner: owned child wrapper and overlay retire after Agent before parent borrows") {
@@ -333,6 +422,7 @@ TEST_CASE("execution owner: owned child wrapper and overlay retire after Agent b
 
 TEST_CASE("execution owner: unwrapped child borrows the original backend and registry without owning either") {
     CheckHostBorrowedExecution();
+    CheckStableHostAgentBorrows();
     auto audit = std::make_shared<Audit>();
     ParentBackend parent(audit);
     tools::ToolRegistry original;

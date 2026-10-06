@@ -52,7 +52,12 @@ public:
     ExecutionOwner(ExecutionOwner&&) = delete;
     ExecutionOwner& operator=(ExecutionOwner&&) = delete;
 
-    agent::Agent& agent() const { return *agent_; }
+    agent::Agent& agent() const;
+    bool has_agent() const noexcept;
+    // Only a synchronous host can replace the Agent in its stable slot. All
+    // old borrows are invalid during replacement or after a failed replacement.
+    void RebuildHostAgent(const agent::AgentProfile& profile,
+                          std::optional<std::vector<api::Message>> restored_history = std::nullopt);
     api::Backend& backend() const { return *backend_; }
     tools::ToolRegistry& registry() const { return *registry_; }
     // Non-null only for the full root graph. Child and host borrows are never
@@ -72,6 +77,11 @@ private:
     api::Backend* backend_ = nullptr;
     tools::ToolRegistry* registry_ = nullptr;
     std::unique_ptr<agent::Agent> agent_;
+    struct HostAgentSlot;
+    // One host-only allocation retains the Agent address across rebuilds.
+    // Root/Child do not allocate this slot or move their original Agent graph.
+    std::unique_ptr<HostAgentSlot> host_agent_;
+    bool host_borrowed_ = false;
     bool turn_active_ = false;
 };
 
