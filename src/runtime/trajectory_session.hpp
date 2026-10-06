@@ -67,6 +67,10 @@
 
 namespace lubancode::runtime {
 
+// Internal admission state, never an authorization decision or public SDK mode.
+enum class SessionAdmissionMode { LocalTrusted, ManagedStorageOnly };
+inline constexpr const char* kManagedStorageOnlyError = "managed.session.storage_only";
+
 // ---------------------------------------------------------------------------
 // /record 选段器(§14.3:从"第二只录音笔"改成"轨迹选段器")
 // ---------------------------------------------------------------------------
@@ -205,6 +209,12 @@ public:
     // resume_at_launch:先按 §10.4 七步 resume-as-new;源场验不过按
     // options 的回落策略(见上)。
     static std::expected<TrajectorySessionLedger, std::string> Open(Options options);
+    static std::expected<TrajectorySessionLedger, std::string> OpenManaged(
+        Options options, trajectory::ManagedSessionDirectory admitted,
+        trajectory::ManagedSessionCreationAudit creation);
+    SessionAdmissionMode admission_mode() const noexcept;
+    // Original native ownership publication. No Writer, lock or Policy permit.
+    std::shared_ptr<const trajectory::ManagedSessionOwnershipPublication> managed_publication() const;
 
     TrajectorySessionLedger(TrajectorySessionLedger&&) noexcept;
     TrajectorySessionLedger& operator=(TrajectorySessionLedger&&) = delete;
@@ -588,6 +598,9 @@ public:
 
 private:
     TrajectorySessionLedger() = default;
+    static std::expected<TrajectorySessionLedger, std::string> OpenInternal(
+        Options& options, trajectory::ManagedSessionDirectory* admitted,
+        trajectory::ManagedSessionCreationAudit* creation);
     struct Impl;
     std::unique_ptr<Impl> impl_;
     std::unique_ptr<RecordSelectionController> record_selection_;

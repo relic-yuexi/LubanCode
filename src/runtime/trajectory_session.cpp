@@ -87,6 +87,23 @@ void HardenLedgerDirectories(const trajectory::TrajectoryDirectory& directory,
 }
 
 std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Open(Options options) {
+    return OpenInternal(options, nullptr, nullptr);
+}
+
+std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::OpenManaged(
+    Options options, trajectory::ManagedSessionDirectory admitted,
+    trajectory::ManagedSessionCreationAudit creation) {
+    return OpenInternal(options, &admitted, &creation);
+}
+
+std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::OpenInternal(
+    Options& options, trajectory::ManagedSessionDirectory* admitted,
+    trajectory::ManagedSessionCreationAudit* creation) {
+    if (admitted && (!creation || options.workspaces_root.empty() || !options.workspaces_root.is_absolute() ||
+                     !options.workspace_identity.valid() || options.resume_at_launch || options.require_v3_resume ||
+                     !options.resume_source_session_id.empty() || options.one_shot || options.recovery_factory ||
+                     options.recovery_capture.expected_main))
+        return std::unexpected("managed.session.invalid_launch_options");
     if (options.resume_at_launch && options.journal_native_io_probe)
         return std::unexpected("session.native_probe_resume_unsupported");
     std::filesystem::path home_dir;
@@ -155,6 +172,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.recorder.defer_stream_create = true;
 
     Impl impl;
+    if (admitted) impl.admission_mode = SessionAdmissionMode::ManagedStorageOnly;
     impl.workspaces_root = options.workspaces_root;
     impl.v3_system_content = options.v3_system_content;
     impl.recorder_options.event_schema_version = options.event_schema_version;
@@ -302,7 +320,8 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     if (options.require_v3_resume) {
         return std::unexpected("resume.failed: " + impl.launch_resume_soul_error);
     }
-    auto active = impl.manager->LaunchSession();
+    auto active = admitted ? impl.manager->LaunchManagedSession(std::move(*admitted), std::move(*creation))
+                           : impl.manager->LaunchSession();
     if (!active.has_value()) {
         return std::unexpected("trajectory.launch_failed: " + active.error());
     }
@@ -318,6 +337,15 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
 
 TrajectorySessionLedger::TrajectorySessionLedger(TrajectorySessionLedger&&) noexcept = default;
 TrajectorySessionLedger::~TrajectorySessionLedger() = default;
+
+SessionAdmissionMode TrajectorySessionLedger::admission_mode() const noexcept {
+    return impl_ ? impl_->admission_mode : SessionAdmissionMode::LocalTrusted;
+}
+
+std::shared_ptr<const trajectory::ManagedSessionOwnershipPublication>
+TrajectorySessionLedger::managed_publication() const {
+    return impl_ && impl_->active ? impl_->active->managed_publication : nullptr;
+}
 
 void TrajectorySessionLedger::BindV3Books_() {
     if (impl_ == nullptr) {
@@ -394,6 +422,7 @@ std::shared_ptr<trajectory::NamedResultCapability> TrajectorySessionLedger::name
 
 std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
     TrajectoryTurnBridge::Identity identity) {
+    if (admission_mode() == SessionAdmissionMode::ManagedStorageOnly) return nullptr;
     // 接线点 1:v3 场造 v3 模式桥(绑 V3Writer + 会话共享账)。
     if (impl_ != nullptr && impl_->active != nullptr && impl_->active->is_v3()) {
         trajectory::EventScope identity_scope;
@@ -430,6 +459,7 @@ std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
 
 std::unique_ptr<TrajectoryBypassBridge> TrajectorySessionLedger::NewBypassBridge(
     TrajectoryTurnBridge::Identity identity, accounting::RequestPurpose purpose) {
+    if (admission_mode() == SessionAdmissionMode::ManagedStorageOnly) return nullptr;
     // 接线点 1 分期边界(取消误报 ESC 单 Bug 2 收窄一格 + T11-A 扩一格):
     // v3 场给用途有消息合同落点的请求接 v3 旁路桥——memory_extract(内部
     // 回合号/消息 purpose/prepared 合同齐备)与 title_refine(T11-A 起自动
@@ -503,6 +533,10 @@ trajectory::CloseOutcome TrajectorySessionLedger::CloseSession(const std::string
 TrajectorySessionLedger::CwdChangeResult TrajectorySessionLedger::HandleCwdChange(
     const workspace::WorkspaceIdentity& new_identity) {
     CwdChangeResult result;
+    if (admission_mode() == SessionAdmissionMode::ManagedStorageOnly) {
+        result.error = kManagedStorageOnlyError;
+        return result;
+    }
     result.workspace_key = new_identity.workspace_key;
     if (impl_ == nullptr || impl_->manager == nullptr || impl_->active == nullptr) {
         result.error = "trajectory.open_failed: 会话账未开,cwd 变化无处对账";
@@ -642,6 +676,11 @@ std::vector<api::Message> ProjectHistoryFromReplay(const trajectory::ReplayState
 
 trajectory::ClearOutcome TrajectorySessionLedger::ClearSession(
     const trajectory::ClearRequest& request, trajectory::ClearParticipant* participant) {
+    if (admission_mode() == SessionAdmissionMode::ManagedStorageOnly) {
+        trajectory::ClearOutcome rejected;
+        rejected.error_code = kManagedStorageOnlyError;
+        return rejected;
+    }
     if (impl_ == nullptr || impl_->manager == nullptr) {
         trajectory::ClearOutcome outcome;
         outcome.error_code = "clear.no_active_session";
@@ -666,6 +705,10 @@ trajectory::ClearOutcome TrajectorySessionLedger::ClearSession(
 TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::string& source_session_id,
                                                                    const std::string& command_name) {
     TrajectoryResumeSummary summary;
+    if (admission_mode() == SessionAdmissionMode::ManagedStorageOnly) {
+        summary.outcome.error_code = kManagedStorageOnlyError;
+        return summary;
+    }
     if (impl_ == nullptr || impl_->manager == nullptr) {
         summary.outcome.error_code = "resume.no_ledger";
         summary.outcome.message = "轨迹账本没开";

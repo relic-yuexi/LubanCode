@@ -26,6 +26,7 @@
 namespace lubancode::runtime {
 
 struct TrajectorySessionLedger::Impl {
+    SessionAdmissionMode admission_mode = SessionAdmissionMode::LocalTrusted;
     std::unique_ptr<trajectory::SessionManager> manager;
     std::filesystem::path workspaces_root;  // P0-2:唯一持久化根(查询/管理面用)
     trajectory::ActiveSession* active = nullptr;
