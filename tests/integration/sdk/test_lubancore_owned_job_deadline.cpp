@@ -448,7 +448,7 @@ TEST_CASE("Owned registration budget expires before adoption and while queued" *
     rig.Register(queued); rig.Adopt(queued, 2000); rig.Confirm(queued);
     const auto queued_view = rig.coordinator->SnapshotOwnedJob(queued.request.owner, queued.registered.facts->job_id);
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - queued.before_register).count();
-    REQUIRE(queued_view.state == "queued" || queued_view.state == "cancelled");
+    REQUIRE((queued_view.state == "queued" || queued_view.state == "cancelled"));
     REQUIRE(elapsed >= 0);
     // Register begins before FreezeOwnedDeadline. The production floor treats
     // the final sub-millisecond as expired; an earlier cancellation is an error.
