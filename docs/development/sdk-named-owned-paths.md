@@ -37,3 +37,18 @@ original five workflow cases, named 10/8 roster, result cases and timeouts remai
 unchanged. New native cases supplement them. No fixture may canonicalize its
 input to hide the production path behavior. Validation runs in remote native CI;
 local work is source inspection and pure checks only.
+
+Runtime::Create retains its existing canonicalization of Runtime roots. The new
+acceptance also takes that actual closed Session's verified V3 result index and
+same-scope File capability, then calls the real SDK material and policy readers
+with the preserved alias spelling. A real TrajectorySessionLedger opening also
+uses the alias unchanged. This tests the affected paths without changing Runtime
+semantics. Relative roots, a final dot and trailing separators remain usable.
+
+Windows acceptance creates actual directory junctions without symlink privilege.
+Root and artifacts cases check junctions. Terminal plan/policy/artifact cases
+check a directory reparse object, including a missing target; they do not claim
+Windows file-symlink coverage. POSIX terminal cases create actual file symlinks,
+including dangling links. The source prints the actual terminal-link kind, and
+all six cases remain mandatory. Hard links are not substituted, and no failed
+link construction is skipped or counted as a pass.

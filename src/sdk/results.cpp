@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include "platform/atomic_write.hpp"
+#include "platform/owned_file_path.hpp"
 #include "platform/secure_file.hpp"
 #include "platform/sha256.hpp"
 #include "platform/text_encoding.hpp"
@@ -43,17 +44,6 @@ bool IsTerminal(v3::EventKindV3 kind) {
     using K = v3::EventKindV3;
     return kind == K::ToolExecutionFinished || kind == K::ToolExecutionFailed ||
         kind == K::ToolExecutionCancelled || kind == K::ToolExecutionRejected || kind == K::ToolExecutionUnknown;
-}
-bool SafePath(const fs::path& file) {
-    // Include every ancestor: checking only the leaf misses symlink/junction
-    // directories. The owned persistence root is not a hostile-filesystem sandbox.
-    for (auto path = file; !path.empty();) {
-        if (!lubancode::platform::RejectReparsePoint(path)) return false;
-        const auto parent = path.parent_path();
-        if (parent == path) break;
-        path = parent;
-    }
-    return true;
 }
 std::string ExtensionFor(std::string_view media) {
     if (media == "application/json") return "json";
@@ -105,7 +95,9 @@ ReadArtifactResult ReadArtifact(const fs::path& root, const ToolResultArtifact& 
     // Its root still comes from this Session's bound capability when provided.
     const auto& file_root = named_results ? named_results->FileSessionDirectory() : root;
     const auto file = file_root / lubancode::tools::Utf8ToPath(ref.path);
-    if (!SafePath(file)) { result.state = State::Corrupt; result.issue = "sdk.result.path_rejected"; return result; }
+    if (!lubancode::platform::IsUnlinkedOwnedPath(file_root, file)) {
+        result.state = State::Corrupt; result.issue = "sdk.result.path_rejected"; return result;
+    }
     std::error_code ec;
     const auto status = fs::symlink_status(file, ec);
     if (status.type() == fs::file_type::not_found) {
@@ -138,7 +130,7 @@ ReadArtifactResult ReadArtifact(const fs::path& root, const ToolResultArtifact& 
     char extra = 0;
     input.read(&extra, 1);
     if (input.bad()) { result.data.clear(); result.issue = "sdk.result.unreadable"; return result; }
-    if (read != ref.bytes || input.gcount() != 0 || !SafePath(file)) {
+    if (read != ref.bytes || input.gcount() != 0 || !lubancode::platform::IsUnlinkedOwnedPath(file_root, file)) {
         result.data.clear(); result.state = State::Corrupt; result.issue = "sdk.result.bytes_mismatch"; return result;
     }
     if (hash.FinalHex() != ref.sha256) {
@@ -149,8 +141,10 @@ ReadArtifactResult ReadArtifact(const fs::path& root, const ToolResultArtifact& 
     return result;
 }
 
-Result<out::SessionResultPolicy> ReadPolicy(const fs::path& path, const std::string& session_id) {
-    if (!SafePath(path)) return std::unexpected(Failure("sdk.result.policy_invalid", "result policy path is a link"));
+Result<out::SessionResultPolicy> ReadPolicy(const fs::path& session_dir, const fs::path& path,
+    const std::string& session_id) {
+    if (!lubancode::platform::IsUnlinkedOwnedPath(session_dir, path))
+        return std::unexpected(Failure("sdk.result.policy_invalid", "result policy path is a link"));
     std::error_code ec;
     if (!fs::is_regular_file(path, ec) || ec || fs::file_size(path, ec) > 1024 || ec)
         return std::unexpected(Failure("sdk.result.policy_invalid", "result policy is not a bounded regular file"));
@@ -158,7 +152,7 @@ Result<out::SessionResultPolicy> ReadPolicy(const fs::path& path, const std::str
     if (!input) return std::unexpected(Failure("sdk.result.policy_invalid", "cannot read result policy"));
     std::array<char, 1025> buffer{};
     input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-    if (input.bad() || input.gcount() > 1024 || !SafePath(path))
+    if (input.bad() || input.gcount() > 1024 || !lubancode::platform::IsUnlinkedOwnedPath(session_dir, path))
         return std::unexpected(Failure("sdk.result.policy_invalid", "result policy exceeded its read bound"));
     const auto json = Json::parse(std::string_view(buffer.data(), static_cast<std::size_t>(input.gcount())), nullptr, false);
     if (!json.is_object() || json.size() != 4 || !json.contains("schemaVersion") ||
@@ -180,13 +174,14 @@ Result<out::SessionResultPolicy> FreezeResultPolicy(const fs::path& session_dir,
             (requested->mode != out::Mode::Preview && requested->mode != out::Mode::Full)))
             return std::unexpected(Failure("sdk.result.policy_invalid", "invalid requested result policy"));
         const auto path = session_dir / "sdk-result-policy.json";
-        if (!SafePath(path)) return std::unexpected(Failure("sdk.result.policy_invalid", "result policy path is a link"));
+        if (!lubancode::platform::IsUnlinkedOwnedPath(session_dir, path))
+            return std::unexpected(Failure("sdk.result.policy_invalid", "result policy path is a link"));
         std::error_code ec;
         const bool exists = fs::exists(path, ec);
         if (ec) return std::unexpected(Failure("sdk.result.policy_invalid", "cannot inspect result policy"));
         out::SessionResultPolicy frozen{session_id, out::Mode::Preview, 1};
         if (exists) {
-            auto saved = ReadPolicy(path, session_id);
+            auto saved = ReadPolicy(session_dir, path, session_id);
             if (!saved) return std::unexpected(saved.error());
             frozen = std::move(*saved);
         } else if (!resume && requested) {
