@@ -425,62 +425,63 @@ struct Session::Impl final : rt::InteractionBroker {
         return {};
     }
 
-    Result<void> Initialize() {
-        const auto recovery_limits = InternalRecoveryLimits(options.recovery_read_limits);
-        if (!lubancode::trajectory::ValidRecoveryReadLimits(recovery_limits))
-            return std::unexpected(Failure("sdk.recovery.invalid_limits"));
-        auto cwd = AbsoluteDirectory(options.cwd, false);
-        if (!cwd) return std::unexpected(cwd.error());
-        options.cwd = lubancode::tools::PathToUtf8(*cwd);
-        if (options.model.empty() || !lubancode::platform::IsValidUtf8(options.model) ||
-            !lubancode::platform::IsValidUtf8(options.system_prompt) || options.approval_timeout.count() <= 0 || options.max_steps_per_turn < 0 ||
-            options.context_window_tokens == 0 || (!!options.backend == options.connection.has_value())) {
-            return std::unexpected(Failure("sdk.session.invalid_options"));
-        }
-        if (!options.resume_session_id.empty() && !ValidId(options.resume_session_id)) {
-            return std::unexpected(Failure("sdk.resume.invalid_id"));
-        }
-        std::optional<lubancode::tools::WebFetchOptions> web_fetch_options;
-        const bool has_web_fetch = std::find(options.builtin_tools.begin(), options.builtin_tools.end(), "web_fetch") != options.builtin_tools.end();
-        if (options.web_fetch && !has_web_fetch)
-            return std::unexpected(Failure("sdk.web_fetch.not_selected"));
-        if (has_web_fetch) {
-            const auto selected = options.web_fetch.value_or(web_fetch::v1::Options{});
-            web_fetch_options = lubancode::tools::WebFetchOptions{selected.user_agent, selected.connect_timeout_ms,
-                selected.total_timeout_ms, selected.max_header_bytes, selected.max_download_bytes,
-                selected.max_output_bytes, selected.max_redirects};
-            if (!lubancode::tools::ValidateWebFetchOptions(*web_fetch_options))
-                return std::unexpected(Failure("sdk.web_fetch.invalid_options"));
-        }
-        if (options.command_jobs) {
-            const auto valid = detail::ValidateCommandJobOptions(*options.command_jobs);
-            if (!valid) return std::unexpected(valid.error());
-            for (const auto& registration : options.extensions) for (const auto& handler : registration.manifest.handlers)
-                if (handler.point == extensions::v1::Point::PreAction || handler.point == extensions::v1::Point::PostAction)
-                    return std::unexpected(Failure("sdk.job.action_combination_unsupported"));
-        }
-        struct InitCleanupScope {
-            bool previous = in_session_worker;
-            InitCleanupScope() { in_session_worker = true; }
-            ~InitCleanupScope() { in_session_worker = previous; }
-        } cleanup_scope;
-        // Keep the public backend alive across every initialization rollback.
-        // MCP launch can fail before registry_factory consumes prepared_registry;
-        // later identity/ledger/Agent failures can likewise release the candidate
-        // resources before the SDK-owned inline tool callback sources retire.
-        std::shared_ptr<Backend> initialization_backend(std::move(options.backend));
-        struct SourceScope {
-            SessionOptions& options;
-            ~SourceScope() {
-                // Other initialization locals retire first, under the same TLS
-                // lifecycle guard. Clear the actual sources before the backend
-                // anchor declared above, including std::function SBO copies.
-                options.custom_tools.clear();
-                options.extensions.clear();
-            }
-        } source_scope{options};
-        auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
-        if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
+    // These views borrow one live preparation call frame. They cannot be
+    // copied/moved or retained; consumers run synchronously before that frame
+    // unwinds. Actual resources and module results remain the original locals.
+    using WorkspacePreparation = std::expected<lubancode::workspace::WorkspaceIdentity, std::string>;
+    template<class Module> using PreparedModule = Result<std::shared_ptr<Module>>;
+    struct PreparedExecution {
+        WorkspacePreparation& identity;
+        std::shared_ptr<detail::SessionPrepareJournal>& prepare_journal;
+        PreparedModule<detail::SessionActionOpening>& action_opening;
+        PreparedModule<detail::SessionCommandJobPlan>& job_plan;
+        PreparedModule<detail::SessionSubagentPlan>& child_plan;
+        PreparedModule<detail::SessionSkills>& skill_module;
+        PreparedModule<detail::SessionLua>& lua_module;
+        rt::assembly::SessionResourcesResult& assembled;
+        const std::string& wire;
+        PreparedExecution(WorkspacePreparation& identity_source,
+            std::shared_ptr<detail::SessionPrepareJournal>& journal_source,
+            PreparedModule<detail::SessionActionOpening>& action_source,
+            PreparedModule<detail::SessionCommandJobPlan>& job_source,
+            PreparedModule<detail::SessionSubagentPlan>& child_source,
+            PreparedModule<detail::SessionSkills>& skill_source,
+            PreparedModule<detail::SessionLua>& lua_source,
+            rt::assembly::SessionResourcesResult& resources_source, const std::string& wire_source)
+            : identity(identity_source), prepare_journal(journal_source), action_opening(action_source),
+              job_plan(job_source), child_plan(child_source), skill_module(skill_source),
+              lua_module(lua_source), assembled(resources_source), wire(wire_source) {}
+        PreparedExecution(const PreparedExecution&) = delete;
+        PreparedExecution& operator=(const PreparedExecution&) = delete;
+        PreparedExecution(PreparedExecution&&) = delete;
+        PreparedExecution& operator=(PreparedExecution&&) = delete;
+    };
+    struct PreparedExecutionBinding {
+        rt::assembly::SessionResourcesResult& assembled;
+        lubancode::agent::AgentProfile& profile;
+        std::optional<std::vector<api::Message>>& restored_history;
+        detail::SessionExtensions* module_ptr;
+        detail::SessionSubagents* child_module_ptr;
+        PreparedModule<detail::SessionSkills>& skill_module;
+        PreparedExecutionBinding(rt::assembly::SessionResourcesResult& resources_source,
+            lubancode::agent::AgentProfile& profile_source,
+            std::optional<std::vector<api::Message>>& history_source,
+            detail::SessionExtensions* extension_source, detail::SessionSubagents* child_source,
+            PreparedModule<detail::SessionSkills>& skill_source)
+            : assembled(resources_source), profile(profile_source), restored_history(history_source),
+              module_ptr(extension_source), child_module_ptr(child_source), skill_module(skill_source) {}
+        PreparedExecutionBinding(const PreparedExecutionBinding&) = delete;
+        PreparedExecutionBinding& operator=(const PreparedExecutionBinding&) = delete;
+        PreparedExecutionBinding(PreparedExecutionBinding&&) = delete;
+        PreparedExecutionBinding& operator=(PreparedExecutionBinding&&) = delete;
+    };
+
+    // Module/registry/backend/MCP preparation owns its locals through the
+    // entire synchronous launch and binding consumer. No candidate escapes.
+    template<class Consume>
+    Result<void> WithPreparedExecution(Result<fs::path>& cwd, WorkspacePreparation& identity,
+        std::optional<lubancode::tools::WebFetchOptions>& web_fetch_options,
+        std::shared_ptr<Backend>& initialization_backend, Consume&& consume) {
         auto prepare_journal = std::make_shared<detail::SessionPrepareJournal>(identity->workspace_key, options.resume_session_id);
         auto action_opening = detail::SessionActionOpening::Prepare(options.extensions,
             lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key, options.resume_session_id, prepare_journal);
@@ -682,6 +683,24 @@ struct Session::Impl final : rt::InteractionBroker {
                 return std::unexpected(Failure(error.code, error.message));
             return std::unexpected(Failure("sdk.session.open_failed", error.message));
         }
+        PreparedExecution prepared(identity, prepare_journal, action_opening, job_plan, child_plan,
+            skill_module, lua_module, assembled, wire);
+        return std::forward<Consume>(consume)(prepared);
+    }
+
+    // Participant sources and the moved-from launch callbacks retire only
+    // after the real Service consumer and all execution binding have returned.
+    template<class Consume>
+    Result<void> WithPreparedLaunch(PreparedExecution& prepared,
+        const lubancode::trajectory::RecoveryReadLimits& recovery_limits, Consume&& consume) {
+        auto& identity = prepared.identity;
+        auto& prepare_journal = prepared.prepare_journal;
+        auto& action_opening = prepared.action_opening;
+        auto& job_plan = prepared.job_plan;
+        auto& child_plan = prepared.child_plan;
+        auto& skill_module = prepared.skill_module;
+        auto& lua_module = prepared.lua_module;
+        const auto& wire = prepared.wire;
         rt::SessionLaunchRequest launch;
         launch.cwd_utf8 = options.cwd;
         launch.workspace_identity = std::move(*identity);
@@ -734,6 +753,10 @@ struct Session::Impl final : rt::InteractionBroker {
         launch.resume_at_launch = !options.resume_session_id.empty();
         launch.require_v3_resume = launch.resume_at_launch;
         launch.resume_source_session_id = options.resume_session_id;
+        return std::forward<Consume>(consume)(launch);
+    }
+
+    Result<void> OpenLocalPreparedStorage(rt::SessionLaunchRequest& launch) {
         service = std::make_shared<rt::SessionService>(std::move(launch));
         if (!service->runtime()) return std::unexpected(Failure(
             service->launch_error().find("sdk.skill.") != std::string::npos ? "sdk.skill.open_failed" :
@@ -744,6 +767,19 @@ struct Session::Impl final : rt::InteractionBroker {
             service->launch_error().find("sdk.lua.") != std::string::npos ? "sdk.lua.open_failed" :
             service->launch_error().find("sdk.job.") != std::string::npos ? "sdk.job.open_failed" : "sdk.session.open_failed",
             service->launch_error()));
+        return {};
+    }
+
+    // Real post-open policy, attachments, profile and history. Their source
+    // locals stay live until the one execution adopter finishes or fails.
+    template<class Consume>
+    Result<void> WithPreparedBinding(PreparedExecution& prepared, Consume&& consume) {
+        auto& action_opening = prepared.action_opening;
+        auto& job_plan = prepared.job_plan;
+        auto& child_plan = prepared.child_plan;
+        auto& skill_module = prepared.skill_module;
+        auto& lua_module = prepared.lua_module;
+        auto& assembled = prepared.assembled;
         session_id = service->trajectory()->session_id();
         session_dir = service->trajectory()->session_dir();
         named_result_reader = service->trajectory()->named_result_capability();
@@ -822,6 +858,18 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         std::optional<std::vector<api::Message>> restored_history;
         if (!options.resume_session_id.empty()) restored_history = service->trajectory()->LaunchResumeHistory();
+        PreparedExecutionBinding binding(assembled, profile, restored_history,
+            module_ptr, child_module_ptr, skill_module);
+        return std::forward<Consume>(consume)(binding);
+    }
+
+    Result<void> AdoptLocalExecution(PreparedExecutionBinding& binding) {
+        auto& assembled = binding.assembled;
+        auto& profile = binding.profile;
+        auto& restored_history = binding.restored_history;
+        auto* module_ptr = binding.module_ptr;
+        auto* child_module_ptr = binding.child_module_ptr;
+        auto& skill_module = binding.skill_module;
         service->InitializeExecution(std::move(*assembled), std::move(profile), std::move(restored_history));
         auto loaded = LoadOperations();
         if (!loaded) return loaded;
@@ -829,6 +877,76 @@ struct Session::Impl final : rt::InteractionBroker {
         subagent_module = child_module_ptr;
         skills_snapshot = (*skill_module)->Describe();
         return {};
+    }
+
+    Result<void> Initialize() {
+        const auto recovery_limits = InternalRecoveryLimits(options.recovery_read_limits);
+        if (!lubancode::trajectory::ValidRecoveryReadLimits(recovery_limits))
+            return std::unexpected(Failure("sdk.recovery.invalid_limits"));
+        auto cwd = AbsoluteDirectory(options.cwd, false);
+        if (!cwd) return std::unexpected(cwd.error());
+        options.cwd = lubancode::tools::PathToUtf8(*cwd);
+        if (options.model.empty() || !lubancode::platform::IsValidUtf8(options.model) ||
+            !lubancode::platform::IsValidUtf8(options.system_prompt) || options.approval_timeout.count() <= 0 || options.max_steps_per_turn < 0 ||
+            options.context_window_tokens == 0 || (!!options.backend == options.connection.has_value())) {
+            return std::unexpected(Failure("sdk.session.invalid_options"));
+        }
+        if (!options.resume_session_id.empty() && !ValidId(options.resume_session_id)) {
+            return std::unexpected(Failure("sdk.resume.invalid_id"));
+        }
+        std::optional<lubancode::tools::WebFetchOptions> web_fetch_options;
+        const bool has_web_fetch = std::find(options.builtin_tools.begin(), options.builtin_tools.end(), "web_fetch") != options.builtin_tools.end();
+        if (options.web_fetch && !has_web_fetch)
+            return std::unexpected(Failure("sdk.web_fetch.not_selected"));
+        if (has_web_fetch) {
+            const auto selected = options.web_fetch.value_or(web_fetch::v1::Options{});
+            web_fetch_options = lubancode::tools::WebFetchOptions{selected.user_agent, selected.connect_timeout_ms,
+                selected.total_timeout_ms, selected.max_header_bytes, selected.max_download_bytes,
+                selected.max_output_bytes, selected.max_redirects};
+            if (!lubancode::tools::ValidateWebFetchOptions(*web_fetch_options))
+                return std::unexpected(Failure("sdk.web_fetch.invalid_options"));
+        }
+        if (options.command_jobs) {
+            const auto valid = detail::ValidateCommandJobOptions(*options.command_jobs);
+            if (!valid) return std::unexpected(valid.error());
+            for (const auto& registration : options.extensions) for (const auto& handler : registration.manifest.handlers)
+                if (handler.point == extensions::v1::Point::PreAction || handler.point == extensions::v1::Point::PostAction)
+                    return std::unexpected(Failure("sdk.job.action_combination_unsupported"));
+        }
+        struct InitCleanupScope {
+            bool previous = in_session_worker;
+            InitCleanupScope() { in_session_worker = true; }
+            ~InitCleanupScope() { in_session_worker = previous; }
+        } cleanup_scope;
+        // Keep the public backend alive across every initialization rollback.
+        // MCP launch can fail before registry_factory consumes prepared_registry;
+        // later identity/ledger/Agent failures can likewise release the candidate
+        // resources before the SDK-owned inline tool callback sources retire.
+        std::shared_ptr<Backend> initialization_backend(std::move(options.backend));
+        struct SourceScope {
+            SessionOptions& options;
+            ~SourceScope() {
+                // Other initialization locals retire first, under the same TLS
+                // lifecycle guard. Clear the actual sources before the backend
+                // anchor declared above, including std::function SBO copies.
+                options.custom_tools.clear();
+                options.extensions.clear();
+            }
+        } source_scope{options};
+        auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
+        if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
+        return WithPreparedExecution(cwd, identity, web_fetch_options, initialization_backend,
+            [&](PreparedExecution& prepared) -> Result<void> {
+                return WithPreparedLaunch(prepared, recovery_limits,
+                    [&](rt::SessionLaunchRequest& launch) -> Result<void> {
+                        auto opened = OpenLocalPreparedStorage(launch);
+                        if (!opened) return opened;
+                        return WithPreparedBinding(prepared,
+                            [&](PreparedExecutionBinding& binding) -> Result<void> {
+                                return AdoptLocalExecution(binding);
+                            });
+                    });
+            });
     }
 
     void Start() {
