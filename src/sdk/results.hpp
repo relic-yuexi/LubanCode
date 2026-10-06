@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -8,6 +9,7 @@
 #include <lubancore/results.hpp>
 
 #include "trajectory/v3/reader.hpp"
+#include "trajectory/named_result_blobs.hpp"
 
 namespace lubancore::detail {
 
@@ -44,7 +46,8 @@ Result<ToolResultIndexEntry> IndexCommandJobResult(
 Result<results::v1::SavedSnapshot> ReadIndexedToolResult(
     const std::filesystem::path& session_dir, const ToolResultIndexEntry& entry,
     const results::v1::SessionResultPolicy& policy,
-    results::v1::ToolResultReadOptions options);
+    results::v1::ToolResultReadOptions options,
+    std::shared_ptr<lubancode::trajectory::NamedResultCapability> named_results = {});
 
 Result<results::v1::SessionResultPolicy> FreezeResultPolicy(
     const std::filesystem::path& session_dir, const std::string& session_id,

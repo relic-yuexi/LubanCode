@@ -80,6 +80,7 @@ public:
         std::string trajectory_v3_system_content;
         trajectory::V3OpeningParticipant trajectory_v3_opening_participant;
         std::shared_ptr<trajectory::MemoryCapabilityFactory> trajectory_memory_capability_factory;
+        std::shared_ptr<trajectory::NamedResultFactory> trajectory_named_result_factory;
         trajectory::RecoveryCaptureRequest trajectory_recovery_capture;
         trajectory::SessionRecoveryFactory trajectory_recovery_factory;
         // Internal test-only, one fresh journal: observes actual native IO. Never public SDK input.

@@ -144,6 +144,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.v3_system_content = options.v3_system_content;
     manager_options.v3_opening_participant = options.v3_opening_participant;
     manager_options.memory_capability_factory = options.memory_capability_factory;
+    manager_options.named_result_factory = options.named_result_factory;
     manager_options.recovery_capture = options.recovery_capture;
     manager_options.recovery_factory = options.recovery_factory;
     manager_options.journal_native_io_probe = std::move(options.journal_native_io_probe);
@@ -337,6 +338,8 @@ void TrajectorySessionLedger::BindV3Books_() {
             impl_->v3_books->settings_version = 1;
         }
         impl_->v3_books->writer = writer;
+        impl_->v3_books->named_results = impl_->active->named_result_capability.share();
+        impl_->v3_books->requires_named_owner = true;
     } else {
         impl_->v3_books.reset();
     }
@@ -383,6 +386,10 @@ trajectory::TrajectoryRecorder* TrajectorySessionLedger::main() {
 
 std::shared_ptr<trajectory::MemoryCapability> TrajectorySessionLedger::memory_capability() const {
     return impl_ && impl_->active ? impl_->active->memory_capability.share() : nullptr;
+}
+
+std::shared_ptr<trajectory::NamedResultCapability> TrajectorySessionLedger::named_result_capability() const {
+    return impl_ && impl_->active ? impl_->active->named_result_capability.share() : nullptr;
 }
 
 std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
@@ -1003,6 +1010,9 @@ std::optional<TrajectorySessionLedger::V3ResultStoreStats> TrajectorySessionLedg
     const {
     if (impl_ == nullptr || impl_->active == nullptr || !impl_->active->is_v3()) {
         return std::nullopt;  // 非 v3 场:调用方走旧 artifact 口径
+    }
+    if (auto cap = named_result_capability(); cap && cap->external()) {
+        return std::nullopt; // File-only statistics cannot report a remote namespace as zero.
     }
     V3ResultStoreStats stats;
     std::error_code ec;

@@ -28,6 +28,7 @@
 
 #include "trajectory/directory.hpp"
 #include "trajectory/cas_store.hpp"
+#include "trajectory/named_result_blobs.hpp"
 #include "trajectory/opening.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/replay.hpp"
@@ -242,6 +243,7 @@ struct ActiveSession {
     SessionManifest manifest;
     SessionLock lock;
     MemoryCapabilityLease memory_capability;
+    NamedResultLease named_result_capability;
     std::shared_ptr<const SessionRecoveryView> recovery_view;
     // Member order also closes native writers before sealing CAS writes and
     // releasing the lock on a failed opening or owner's destruction.
@@ -530,6 +532,7 @@ struct SessionManagerOptions {
     std::string v3_system_content;
     V3OpeningParticipant v3_opening_participant;
     std::shared_ptr<MemoryCapabilityFactory> memory_capability_factory;
+    std::shared_ptr<NamedResultFactory> named_result_factory;
     RecoveryCaptureRequest recovery_capture;
     SessionRecoveryFactory recovery_factory;
     // Internal test-only, one fresh journal: observes actual native IO. Never public SDK input.

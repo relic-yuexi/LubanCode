@@ -81,9 +81,30 @@ struct ReadArtifactResult {
     bool verified = false;
 };
 ReadArtifactResult ReadArtifact(const fs::path& root, const ToolResultArtifact& ref,
-    bool retain, std::uint64_t& verification_remaining, std::uint64_t retain_limit) {
+    bool retain, std::uint64_t& verification_remaining, std::uint64_t retain_limit,
+    const std::shared_ptr<lubancode::trajectory::NamedResultCapability>& named_results) {
     ReadArtifactResult result;
-    const auto file = root / lubancode::tools::Utf8ToPath(ref.path);
+    if (named_results && named_results->external()) {
+        if (ref.bytes > verification_remaining || (retain && ref.bytes > retain_limit)) {
+            result.state = State::TooLarge; result.issue = "sdk.result.too_large"; return result;
+        }
+        verification_remaining -= ref.bytes;
+        auto bytes = named_results->Read(ref.path, ref.sha256, ref.bytes, ref.media_type,
+            static_cast<std::size_t>(ref.bytes));
+        if (!bytes) {
+            result.issue = bytes.error().code;
+            if (result.issue == "named_result.missing") result.state = State::Missing;
+            else if (result.issue == "named_result.read_mismatch" || result.issue == "named_result.path_rejected") result.state = State::Corrupt;
+            return result;
+        }
+        result.state = State::Verified; result.verified = true;
+        if (retain) result.data = std::move(*bytes);
+        return result;
+    }
+    // File retains its original streaming verification and exact SDK diagnostics.
+    // Its root still comes from this Session's bound capability when provided.
+    const auto& file_root = named_results ? named_results->FileSessionDirectory() : root;
+    const auto file = file_root / lubancode::tools::Utf8ToPath(ref.path);
     if (!SafePath(file)) { result.state = State::Corrupt; result.issue = "sdk.result.path_rejected"; return result; }
     std::error_code ec;
     const auto status = fs::symlink_status(file, ec);
@@ -341,10 +362,13 @@ Result<ToolResultIndexEntry> IndexCommandJobResult(const v3::V3Ledger& ledger,
 }
 
 Result<out::SavedSnapshot> ReadIndexedToolResult(const fs::path& session_dir, const ToolResultIndexEntry& entry,
-    const out::SessionResultPolicy& policy, out::ToolResultReadOptions options) {
+    const out::SessionResultPolicy& policy, out::ToolResultReadOptions options,
+    std::shared_ptr<lubancode::trajectory::NamedResultCapability> named_results) {
     try {
         if (options.max_total_text_bytes == 0 || options.max_total_text_bytes > kMaxTextBytes)
             return std::unexpected(Failure("sdk.result.read_limit_invalid", "text budget must be between 1 byte and 8 MiB"));
+        if (named_results && named_results->scope().session_id != entry.summary.identity.session_id)
+            return std::unexpected(Failure("sdk.result.identity_mismatch"));
         if (policy.session_id != entry.summary.identity.session_id)
             return std::unexpected(Failure("sdk.result.identity_mismatch", "snapshot policy belongs to another session"));
         const auto& identity = entry.summary.identity;
@@ -380,7 +404,7 @@ Result<out::SavedSnapshot> ReadIndexedToolResult(const fs::path& session_dir, co
         data.metadata_sha256 = metadata->sha256;
         data.metadata_bytes = metadata->bytes;
         std::uint64_t verification_remaining = kMaxVerificationBytes;
-        auto material = ReadArtifact(session_dir, *metadata, true, verification_remaining, kMaxMetadataBytes);
+        auto material = ReadArtifact(session_dir, *metadata, true, verification_remaining, kMaxMetadataBytes, named_results);
         data.metadata_state = material.state;
         if (!material.verified) return results::detail::SnapshotAccess::Make(std::move(data), policy);
         const auto json = Json::parse(material.data, nullptr, false);
@@ -443,7 +467,7 @@ Result<out::SavedSnapshot> ReadIndexedToolResult(const fs::path& session_dir, co
             channel.sha256 = ref->sha256;
             channel.captured_bytes = ref->bytes;
             const bool textual = TextChannel(channel.channel) && channel.media_type == "text/plain" && channel.encoding == "utf-8";
-            auto captured = ReadArtifact(session_dir, *ref, textual, verification_remaining, text_remaining);
+            auto captured = ReadArtifact(session_dir, *ref, textual, verification_remaining, text_remaining, named_results);
             channel.state = captured.state;
             channel.artifact_verified = captured.verified;
             channel.issue_code = std::move(captured.issue);

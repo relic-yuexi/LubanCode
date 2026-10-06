@@ -95,6 +95,14 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
     bool matched_source = false;
     for (const auto& ref : source.result_refs) {
         if (ref.value("kind", "") != "combined" || ref.value("sha256", "") != platform::Sha256Hex(source.text)) continue;
+        if (source.named_results) {
+            if (source.named_results->scope().session_id != writer.session_id())
+                return finish("rejected", "source_scope_mismatch");
+            auto saved = source.named_results->Read(ref.value("path", std::string()), ref.value("sha256", std::string()),
+                ref.value("bytes", std::uint64_t{}), ref.value("mediaType", std::string()), source.text.size());
+            if (saved && *saved == source.text) matched_source = true;
+            continue;
+        }
         std::error_code error;
         const auto path = writer.path().parent_path() / ref.value("path", "");
         if (std::filesystem::file_size(path, error) != source.text.size() || error) continue;
@@ -322,8 +330,11 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
             ref.value("path", "").empty()) {
             return finish("rejected", "source_ref_missing_path");
         }
-        candidate["evidence_paths"].push_back(ref.value("path", ""));
+        candidate["evidence_paths"].push_back(source.named_results && source.named_results->external()
+            ? source.named_results->DisplayPath(ref.value("path", std::string())) : ref.value("path", std::string()));
     }
+    if (source.named_results && source.named_results->external())
+        candidate["retrieval_hint"] = "host-result 引用须由宿主读取";
     result.text = candidate.dump();
     if (writer.context().revision != source_revision) return finish("rejected", "source_context_conflict");
     if (result.text.size() > source.budget_bytes || result.text.size() >= source.text.size()) {

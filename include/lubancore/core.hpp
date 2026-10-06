@@ -23,6 +23,7 @@
 #include <lubancore/lua.hpp>
 #include <lubancore/web_fetch.hpp>
 #include <lubancore/jobs.hpp>
+#include <lubancore/named_results.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
@@ -167,6 +168,9 @@ struct SessionOptions {
     // Limits only: builtin_tools must explicitly select web_fetch. Omitted
     // uses bounded defaults. Resume selects tools/limits afresh, as other builtins.
     std::optional<web_fetch::v1::Options> web_fetch;
+    // Complete named tool-result storage bundle. Null keeps File; same-ID
+    // external resume requires the matching provider and frozen binding.
+    std::optional<named_results::v1::Options> named_results;
 };
 // operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };

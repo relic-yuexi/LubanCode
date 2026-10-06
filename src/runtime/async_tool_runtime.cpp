@@ -478,6 +478,7 @@ std::unique_ptr<AsyncToolRuntime> AsyncToolRuntime::Create(Hooks hooks,
             };
     }
     // 协调器与规划器共享会话写者(P1"与主循环共享写者的装配归 P2"落地)。
+    runtime->impl_->options.coordinator.named_results = runtime->impl_->hooks.named_results;
     runtime->impl_->coordinator_ = std::make_shared<ToolJobCoordinator>(
         *runtime->impl_->hooks.writer, runtime->impl_->hooks.auth,
         runtime->impl_->hooks.executor, runtime->impl_->options.coordinator);
@@ -609,6 +610,7 @@ bool AttachDefaultAsyncToolRuntime(SessionRuntime& session, const std::string& w
     AsyncToolRuntime::Hooks hooks;
     hooks.writer = ledger->v3_main_writer();
     hooks.writer_mutex = ledger->v3_tool_results_mutex();
+    hooks.named_results = ledger->named_result_capability();
     AsyncToolRuntimeOptions options;
     options.wire = wire_name;
     auto runtime = AsyncToolRuntime::Create(std::move(hooks), std::move(options));

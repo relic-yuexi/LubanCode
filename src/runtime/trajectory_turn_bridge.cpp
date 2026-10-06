@@ -43,6 +43,17 @@ constexpr std::size_t kV3StreamBatchBytes = 4096;
 
 namespace {
 
+std::expected<v3::ResultStore, std::string> OpenNamedStore(v3::V3Writer& writer,
+    V3SessionBooks& books, std::string prefix, std::size_t entries = 0) {
+    if (books.named_results) {
+        if (books.named_results->scope().session_id != writer.session_id())
+            return std::unexpected("named_result.owner_mismatch");
+        return v3::ResultStore::Open(books.named_results, std::move(prefix), entries);
+    }
+    if (books.requires_named_owner) return std::unexpected("named_result.owner_missing");
+    return v3::ResultStore::Open(writer.path().parent_path(), std::move(prefix), entries);
+}
+
 using trajectory::Actor;
 using trajectory::Durability;
 using trajectory::EventKind;
@@ -1808,7 +1819,7 @@ OwnedJobParentCommit TrajectoryTurnBridge::CommitOwnedJobAdmission(
         if (!record(book.action->Finish(*v3_writer_, std::nullopt, 0), "terminal")) return out;
         book.terminal = true; book.terminal_event_id = out.receipts.back().id;
         out.refs.terminal_event_id = book.terminal_event_id;
-        auto store = v3::ResultStore::Open(v3_writer_->path().parent_path(), "job-admission-");
+        auto store = OpenNamedStore(*v3_writer_, *v3_books_, "job-admission-");
         if (!store) { out.error = "job.parent.result_store_failed:" + store.error(); return out; }
         v3::ResultStore::PersistRequest request;
         request.result_kind = "text"; request.tool_call_id = book.action_id; request.attempt = 1;
@@ -2223,7 +2234,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::CaptureToolResult(const api::Tool
     book.capture_complete = result.capture_complete;
     book.capture_reason = result.capture_reason;
     if (!v3_books_->captures.has_value()) {
-        auto store = v3::ResultStore::Open(v3_writer_->path().parent_path(), "capture-",
+        auto store = OpenNamedStore(*v3_writer_, *v3_books_, "capture-",
                                          book.child ? kChildResultEntries : 0);
         if (!store.has_value()) {
             book.capture_failed = true;
@@ -2386,7 +2397,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
         };
         // 结果仓:原文按 artifact 不可变落档(§4.16)。
         if (!v3_books_->results.has_value()) {
-            if (auto store = v3::ResultStore::Open(v3_writer_->path().parent_path(), "res-",
+            if (auto store = OpenNamedStore(*v3_writer_, *v3_books_, "res-",
                                                   book.child ? kChildResultEntries : 0);
                 store.has_value()) {
                 v3_books_->results = std::move(*store);
@@ -2428,6 +2439,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                         source.attempt = book.action->attempt();
                         source.execution_started = book.action->started();
                         source.result_refs = persisted.result_ref;
+                        source.named_results = v3_books_->named_results;
                         source.text = result->content;
                         switch (book.action->terminal()) {
                             case v3::ToolActionSession::Terminal::Finished: source.execution_state = "done"; break;
@@ -2475,7 +2487,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                         }
                     }
                     auto request = PreviewFromPersistedMaterials(persist, persisted, budget,
-                                                                 v3_writer_->path().parent_path());
+                                                                 v3_writer_->path().parent_path(), v3_books_->named_results.get());
                     if (!summary_event_ref && (result->content.size() > budget || !result->capture_complete || persist.outputs.size() > 1)) {
                         auto preview = v3::BuildToolPreview(request);
                         if (preview.listing_overflow) {
@@ -2486,7 +2498,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                             }
                             // output_index 与 full_output 同一追回口径:给模型
                             // 绝对路径,相对账留 result_ref(T17)。
-                            request.output_index_path = platform::PathToUtf8(
+                            request.output_index_path = v3_books_->named_results ? v3_books_->named_results->DisplayPath(*index) : platform::PathToUtf8(
                                 v3_writer_->path().parent_path() / platform::Utf8ToPath(*index));
                             preview = v3::BuildToolPreview(request);
                         }

@@ -16,6 +16,8 @@
 // replay 零调用零重跑");验卷复用 VerifyV3File(哈希链+语义)。
 #pragma once
 
+#include "trajectory/named_result_blobs.hpp"
+
 #include <cstdint>
 #include <cstddef>
 #include <expected>
@@ -358,7 +360,8 @@ struct ResultPreviewProjection {
 // session_dir 为空 → 只做引用链展开,artifacts 全部标 missing_blob。
 ResultPreviewProjection ExpandResultPreview(const V3Ledger& ledger,
                                             const std::filesystem::path& session_dir,
-                                            std::string_view tool_message_id);
+                                            std::string_view tool_message_id,
+                                            const NamedResultCapability* named_results = nullptr);
 // Ledger-only selection/summary provenance; never probes an artifact path.
 // Its complete flag covers only this line projection, not external blob health;
 // artifacts stays empty. Use ExpandResultPreview to verify blob completeness.

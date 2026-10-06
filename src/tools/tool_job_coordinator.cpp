@@ -261,7 +261,8 @@ bool SameWriterPrefix(const trajectory::v3::V3Ledger& ledger,
 }
 
 std::expected<std::string, std::string> ReadOwnedAdmissionArtifact(
-    const std::filesystem::path& session_dir, const nlohmann::json& ref) {
+    const std::filesystem::path& session_dir, const nlohmann::json& ref,
+    const std::shared_ptr<trajectory::NamedResultCapability>& named_results) {
     const auto fail = [] { return std::unexpected(std::string("job.owned.parent_material_invalid")); };
     const auto relative = platform::Utf8ToPath(JsonStr(ref, "path"));
     if (relative.empty() || relative.has_root_path() || relative.parent_path() != "artifacts") return fail();
@@ -269,6 +270,12 @@ std::expected<std::string, std::string> ReadOwnedAdmissionArtifact(
     const auto expected_bytes = ref.find("bytes");
     if (expected_bytes == ref.end() || !expected_bytes->is_number_unsigned() ||
         expected_bytes->get<std::uint64_t>() > 65536) return fail();
+    if (named_results) {
+        auto bytes = named_results->Read(JsonStr(ref, "path"), JsonStr(ref, "sha256"),
+            expected_bytes->get<std::uint64_t>(), JsonStr(ref, "mediaType"), 65536);
+        if (!bytes) return fail();
+        return std::move(*bytes);
+    }
     std::error_code error;
     const auto real_root = std::filesystem::canonical(platform::FileIoPath(session_dir), error);
     if (error) return fail();
@@ -434,6 +441,7 @@ struct ToolJobCoordinator::Impl {
     std::function<std::int64_t()> clock_ms;
     std::weak_ptr<Impl> self_lock;  // worker 闭包经它拿稳定引用
     std::optional<PreparedRegistrationContext> prepared_context;
+    std::shared_ptr<trajectory::NamedResultCapability> named_results;
     PreparedJobOwner prepared_owner;
     bool prepared_revoked = false;
     OwnedJobPostPhase owned_post_phase = OwnedJobPostPhase::Open;
@@ -793,7 +801,8 @@ struct ToolJobCoordinator::Impl {
 
     // 结果仓:每次临时开(扫目录续号),防两只实例号池错位撞不可变名。
     std::optional<trajectory::v3::ResultStore> OpenStore() {
-        auto store = trajectory::v3::ResultStore::Open(writer->path().parent_path());
+        auto store = named_results ? trajectory::v3::ResultStore::Open(named_results) :
+            trajectory::v3::ResultStore::Open(writer->path().parent_path());
         if (!store.has_value()) {
             platform::LogSink::Instance().Error("job coordinator",
                                                 "结果仓开不了: " + store.error_or(""));
@@ -862,10 +871,13 @@ struct ToolJobCoordinator::Impl {
             }
         }
         trajectory::v3::PreviewRequest preview_request;
+        preview_request.host_result_references = named_results && named_results->external();
         trajectory::v3::PreviewChannel preview_channel;
         preview_channel.display_path = outcome.text_artifact_path.empty()
                                            ? "artifacts/" + persisted.result_id
                                            : outcome.text_artifact_path;
+        if (named_results && named_results->external())
+            preview_channel.display_path = named_results->DisplayPath(preview_channel.display_path);
         preview_channel.channel = channel;
         preview_channel.text = captured_text;
         preview_channel.capture_complete = capture_complete;
@@ -1607,6 +1619,9 @@ ToolJobCoordinator::ToolJobCoordinator(trajectory::v3::V3Writer& writer,
                                        Options options)
     : impl_(std::make_shared<Impl>()) {
     impl_->writer = &writer;
+    impl_->named_results = std::move(options.named_results);
+    if (impl_->named_results && impl_->named_results->scope().session_id != writer.session_id())
+        throw std::invalid_argument("named_result.owner_mismatch");
     impl_->gate = std::move(gate);
     impl_->executor = std::move(executor);
     impl_->thread_starter = std::move(options.thread_starter);
@@ -2167,7 +2182,7 @@ OwnedJobAdmission ToolJobCoordinator::ConfirmParentAdmission(
     // not proof that the selected artifact contained this registration result.
     bool found_text = false;
     for (const auto& ref : expanded.result_refs) {
-        const auto bytes = ReadOwnedAdmissionArtifact(writer->path().parent_path(), ref);
+        const auto bytes = ReadOwnedAdmissionArtifact(writer->path().parent_path(), ref, impl_->named_results);
         if (!bytes) return reject(bytes.error());
         if (JsonStr(ref, "mediaType") != "text/plain") continue;
         if (*bytes != record->job.admission_text)

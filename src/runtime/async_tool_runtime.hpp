@@ -87,6 +87,7 @@ public:
         std::function<agent::OwnedJobAdmissionReceipt(TrajectoryTurnBridge&,
             const api::ToolUseBlock&, const agent::OwnedToolAdmissionContext&)> owned_admission;
         std::function<void()> owned_pump;
+        std::shared_ptr<trajectory::NamedResultCapability> named_results;
     };
 
     static std::unique_ptr<AsyncToolRuntime> Create(Hooks hooks, AsyncToolRuntimeOptions options);

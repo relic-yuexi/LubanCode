@@ -91,13 +91,13 @@ Result<Json> Normalize(const Json& input, const SessionCommandJobPlan& plan) {
 }
 
 Result<jobs::v1::Preview> ReadPreview(const fs::path& directory, const v3::V3Ledger& ledger,
-    const v3::JobOperationBindingFacts& binding) {
+    const v3::JobOperationBindingFacts& binding, std::shared_ptr<lubancode::trajectory::NamedResultCapability> named_results) {
     auto index = IndexCommandJobResult(ledger, binding);
     if (!index) return std::unexpected(index.error());
     // This local artifact reader needs a session identity, not an outbound
     // permission. Its temporary Snapshot is consumed here; no policy seal is
     // exported, and jobs::Preview may not be sent without ResultProjector.
-    auto saved = ReadIndexedToolResult(directory, *index, {binding.session_id, results::v1::Mode::Preview, 1}, {8 * 1024 * 1024});
+    auto saved = ReadIndexedToolResult(directory, *index, {binding.session_id, results::v1::Mode::Preview, 1}, {8 * 1024 * 1024}, std::move(named_results));
     if (!saved) return std::unexpected(saved.error());
     jobs::v1::Preview value;
     value.identity = Identity(binding); value.persisted_event_id = index->summary.identity.persisted_event_id;
@@ -157,6 +157,7 @@ Result<std::shared_ptr<SessionCommandJobs>> SessionCommandJobs::Build(
     module->approval_timeout_ = approval_timeout; module->publisher_ = std::move(publish);
     rt::AsyncToolRuntime::Hooks hooks;
     hooks.writer = service.trajectory()->v3_main_writer(); hooks.writer_mutex = service.trajectory()->v3_tool_results_mutex();
+    hooks.named_results = service.trajectory()->named_result_capability();
     const auto weak = std::weak_ptr<SessionCommandJobs>(module);
     hooks.owned_selected = [](const auto& call) {
         return call.name == "run_command" && call.input.is_object() && call.input.value("execution_mode", Json()) == "session_job";
@@ -468,7 +469,7 @@ Result<void> SessionCommandJobs::Restore() {
         if (!record->binding && record->view.gap.empty()) record->view.gap = "sdk.job.binding_unavailable";
         record->view.terminal = Terminal(record->view.state);
         if (record->binding && record->view.terminal)
-            record->preview = ReadPreview(service_->trajectory()->session_dir(), *ledger, *record->binding);
+            record->preview = ReadPreview(service_->trajectory()->session_dir(), *ledger, *record->binding, service_->trajectory()->named_result_capability());
         record->preview_frozen = record->view.terminal;
         if (!records_.emplace(item.job_id, std::move(record)).second)
             return std::unexpected(Failure("sdk.job.recovery_invalid", "duplicate historical Job identity"));
@@ -518,7 +519,7 @@ void SessionCommandJobs::PumpAndPublish() {
                     auto read = v3::ReadV3Ledger(service_->trajectory()->v3_main_writer()->path());
                     if (read) ledger = std::move(*read);
                 }
-                preview = ledger ? ReadPreview(service_->trajectory()->session_dir(), *ledger, *record->binding)
+                preview = ledger ? ReadPreview(service_->trajectory()->session_dir(), *ledger, *record->binding, service_->trajectory()->named_result_capability())
                     : Result<jobs::v1::Preview>(std::unexpected(Failure("sdk.job.result_invalid", "Job journal is unavailable")));
             }
             {

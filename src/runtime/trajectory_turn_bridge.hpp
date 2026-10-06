@@ -44,6 +44,8 @@ struct V3SessionBooks {
     std::string system_content;              // 当前根 system 正文(§4.3 切换后更新)
     std::uint64_t settings_version = 1;      // systemMeta.settingsVersion 序列
     std::optional<trajectory::v3::ResultStore> captures;
+    std::shared_ptr<trajectory::NamedResultCapability> named_results;
+    bool requires_named_owner = false; // Standalone private fixtures retain File compatibility.
     std::shared_ptr<std::recursive_mutex> tool_results_mutex = std::make_shared<std::recursive_mutex>();
     std::optional<trajectory::v3::ResultStore> results;  // 惰性开:session 目录 artifacts/
     // ---- T12-A(V3-GAP-07 P0,SessionV3 旧设计清理单):执行阻断 ------------

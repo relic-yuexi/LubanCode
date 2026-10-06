@@ -61,6 +61,14 @@ SessionService or a strong public Session cycle. Provider callbacks/destruction
 are cooperative; recursive provider reads and blocking lifecycle/Wait calls fail
 before locks. Cancellation latches do not wait for provider serialization.
 
+Runtime counts admitted openings before initialization leaves its registry lock.
+Shutdown closes admission, cancels live sessions and waits for every such opening
+to finish or clean up. One scope guard retires each count exactly once on success,
+rejection or exception, after resource owners finish destruction. An opening that
+loses the race to Shutdown closes its actual Session and returns an error instead
+of a runnable handle. Same-Runtime Open/Shutdown and blocking Wait from provider
+callbacks fail before any lock; no new public asynchronous lifecycle API is added.
+
 ## Acceptance
 
 Installed-header-only consumers store actual bytes in a second root, with no

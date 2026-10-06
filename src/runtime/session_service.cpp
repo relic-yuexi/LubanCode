@@ -296,6 +296,7 @@ SessionRuntime::Options SessionService::BuildRuntimeOptions(const SessionLaunchR
     options.trajectory_v3_system_content = request.v3_system_content;
     options.trajectory_v3_opening_participant = request.v3_opening_participant;
     options.trajectory_memory_capability_factory = request.memory_capability_factory;
+    options.trajectory_named_result_factory = request.named_result_factory;
     options.trajectory_recovery_capture = request.recovery_capture;
     options.trajectory_recovery_factory = request.recovery_factory;
     options.trajectory_journal_native_io_probe = request.journal_native_io_probe;

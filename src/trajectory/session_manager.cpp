@@ -19,6 +19,7 @@
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "trajectory/safety.hpp"
+#include "trajectory/named_result_opening.hpp"
 #include "trajectory/managed_session_ownership.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "trajectory/v3/session_switch.hpp"
@@ -866,16 +867,20 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     auto memory_capability = OpenLockedMemory(options_, workspace_key_, directory->session_dir(),
                                               manifest.session_id);
     if (!memory_capability) return std::unexpected("session.memory_open_failed: " + memory_capability.error());
+    auto named = OpenLockedNamedResults({workspace_key_, manifest.session_id}, directory->session_dir(), options_.named_result_factory);
+    if (!named) return std::unexpected(named.error());
     // 首行 system(§1.2/§4.3):正文是"建场此刻已知"的基础版,宿主递进
     // 完整拼装结果;settingsVersion 从 1 起,后续切换逐次 +1。开张失败按
     // P0-C 同款纪律清 0 字节残留(先放句柄,再按所有权凭据删目标名空文件)。
     nlohmann::json system_extra = nlohmann::json::object({{"settingsVersion", 1}});
     if (options_.v3_opening_participant) {
         auto opening = InvokeOpeningParticipant(options_.v3_opening_participant,
-            {directory->session_dir(), manifest.session_id, nullptr, memory_capability->share()});
+            {directory->session_dir(), manifest.session_id, nullptr, memory_capability->share(), nullptr, named->lease.share()});
         if (!opening) return std::unexpected("session.opening_failed: " + opening.error());
         system_extra.update(*opening);
     }
+    if (auto bound = MergeNamedResultBinding(system_extra, named->binding); !bound)
+        return std::unexpected(bound.error());
     v3::V3WriterOptions writer_options;
     // 会话级事实随 session.started 落账(R2):列表投影的 cwd/run_kind
     // 以此为权威来源,v2 manifest 不再是唯一出处。
@@ -888,6 +893,7 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
                                       manifest.main_run_id, options_.v3_system_content,
                                       std::move(system_extra), std::move(writer_options));
     if (!writer.has_value()) {
+        named->lease.CloseWrites();
         { auto drop_lock = std::move(lock_file); }
         (void)DiscardUncommittedStream(directory->v3_stream_path());
         return std::unexpected("session.v3_start_failed: " + writer.error());
@@ -898,6 +904,7 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     session.manifest = manifest;
     session.lock = std::move(*lock_file);
     session.memory_capability = std::move(*memory_capability);
+    session.named_result_capability = std::move(named->lease);
     // v3 没有 session.json 可翻:状态只住内存,封口/恢复按账面事实。
     session.status = SessionStatus::Running;
     // T11-B:建场基线——起手审批档落 approval.mode.applied(source=launch),
@@ -1055,6 +1062,7 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
     if (!active_.has_value() || active_->status != SessionStatus::Running) {
         return fail("clear.no_active_session", "没有可换的 active running session");
     }
+    if (options_.named_result_factory) return fail("named_result.cross_session_unsupported", "external named storage does not support clear");
     NullClearParticipant null_participant;
     if (participant == nullptr) {
         participant = &null_participant;
@@ -1290,6 +1298,7 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
         outcome.old_journal_sha256 = *sha;
     }
     old.memory_capability.CloseWrites();
+    old.named_result_capability.CloseWrites();
     old.lock.Release();
     active_ = std::move(new_session);
     outcome.active_switched = true;
@@ -1453,6 +1462,7 @@ ClearOutcome SessionManager::ClearV3Locked(const ClearRequest& request,
 
     // ---- 第 7 步:切 active,放旧锁;旧写者随换值自然关柄。
     old.memory_capability.CloseWrites();
+    old.named_result_capability.CloseWrites();
     old.lock.Release();
     active_ = std::move(*session);
     outcome.new_session_running = true;
@@ -1509,6 +1519,7 @@ CloseOutcome SessionManager::CloseV3Locked(const CloseRequest& request,
     session.status = SessionStatus::Closed;
     // 封口即放锁(§3.3.2 同一口径:没有活 writer 的场不攥独占锁)。
     session.memory_capability.CloseWrites();
+    session.named_result_capability.CloseWrites();
     session.lock.Release();
     return outcome;
 }
@@ -1585,6 +1596,7 @@ CloseOutcome SessionManager::Close(const CloseRequest& request, ClearParticipant
     }
     // 封口即放锁:没有活 writer 的 session 不许再攥独占锁(§3.3.2)。
     session.memory_capability.CloseWrites();
+    session.named_result_capability.CloseWrites();
     session.lock.Release();
     return outcome;
 }
@@ -2298,6 +2310,8 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
         if (!ledger.has_value()) {
             return fail("resume.source_corrupt", ledger.error());
         }
+        if (HasExternalNamedResultBinding(*ledger) && !options_.named_result_factory)
+            return fail("named_result.provider_required", "external named result provider is required");
         // v3 源的 one_shot(R2 写读接通后的真闸):session.started 的
         // runKind 是权威;老档没写该键 = 未知,放行走验卷(未知不等于单发)。
         // run_kind 顺路留底——续接源场时内存 manifest 的 run_kind 以此为
@@ -2496,6 +2510,8 @@ ResumeOutcome SessionManager::ResumeAsNewV3Locked(const ResumeRequest& request,
         outcome.message = std::move(message);
         return outcome;
     };
+    if (options_.named_result_factory)
+        return fail("named_result.cross_session_unsupported", "external named storage requires same-ID continuation");
     // 第 5 步(v3):开新 v3 场(首行 system + session.started)。
     auto session = OpenV3SessionLocked(
         "resume", previous_session_id.empty() ? std::optional<std::string>{}
@@ -2695,6 +2711,7 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     const std::filesystem::path source_dir = SessionDirOf(source_id);
     if (active_.has_value() && active_->session_id() == source_id) {
         active_->memory_capability.CloseWrites();
+        active_->named_result_capability.CloseWrites();
         active_->lock.Release();
         active_.reset();
     }
@@ -2727,6 +2744,8 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
         source->lines != outcome.source_event_count || tail->seq != outcome.source_event_count ||
         captured_tail_hash != outcome.source_main_last_event_hash))
         return fail("resume.source_changed", "source changed before the locked opening");
+    auto named = OpenLockedNamedResults({workspace_key_, source_id}, source_dir, options_.named_result_factory, &*source);
+    if (!named) return fail("resume.opening_failed", named.error());
     const std::string locked_run_id = source->run_id;
     std::string locked_run_kind;
     for (const auto& event : source->events) {
@@ -2809,10 +2828,12 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
             }
         }
         auto opening = InvokeOpeningParticipant(options_.v3_opening_participant,
-            {source_dir, source_id, &*source, memory_capability->share(), &capture->view});
+            {source_dir, source_id, &*source, memory_capability->share(), &capture->view, named->lease.share()});
         if (!opening) return fail("resume.opening_failed", opening.error());
         const auto saved_bindings = root->system_meta && root->system_meta->contains("hostBindings")
             ? root->system_meta->at("hostBindings") : nlohmann::json::object();
+        if (auto bound = MergeNamedResultBinding(*opening, named->binding); !bound)
+            return fail("resume.opening_failed", bound.error());
         const auto expected_bindings = opening->contains("hostBindings")
             ? opening->at("hostBindings") : nlohmann::json::object();
         if (saved_bindings != expected_bindings) {
@@ -2851,6 +2872,7 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     session.manifest.event_schema_version = options_.recorder.event_schema_version;
     session.lock = std::move(*lock_file);
     session.memory_capability = std::move(*memory_capability);
+    session.named_result_capability = std::move(named->lease);
     session.recovery_view = std::make_shared<const SessionRecoveryView>(std::move(capture->view));
     session.status = SessionStatus::Running;
 

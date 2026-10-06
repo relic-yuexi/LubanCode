@@ -45,6 +45,8 @@
 #include "trajectory/v3/tool_action.hpp"
 #include "trajectory/v3/writer.hpp"
 
+namespace lubancode::trajectory { class NamedResultCapability; }
+
 namespace lubancode::tools {
 
 // ---------------------------------------------------------------------------
@@ -447,6 +449,7 @@ public:
         std::function<std::int64_t()> clock_ms;      // 缺省墙钟;测试注固定钟
         ThreadStarter thread_starter;  // Empty uses a real std::thread.
         std::optional<PreparedRegistrationContext> prepared_registration;
+        std::shared_ptr<trajectory::NamedResultCapability> named_results;
     };
 
     // writer:本会话 v3 单写者(引用,寿命由调用方保证,协调器不收柄);

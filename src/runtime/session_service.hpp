@@ -97,6 +97,7 @@ struct SessionLaunchRequest {
     std::string v3_system_content;
     trajectory::V3OpeningParticipant v3_opening_participant;
     std::shared_ptr<trajectory::MemoryCapabilityFactory> memory_capability_factory;
+    std::shared_ptr<trajectory::NamedResultFactory> named_result_factory;
     trajectory::RecoveryCaptureRequest recovery_capture;
     trajectory::SessionRecoveryFactory recovery_factory;
     // Internal test-only, one fresh journal: observes actual native IO. Never public SDK input.
