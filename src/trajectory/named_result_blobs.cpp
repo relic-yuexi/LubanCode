@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "platform/bounded_read.hpp"
+#include "platform/owned_file_path.hpp"
 #include "platform/paths.hpp"
 #include "platform/secure_file.hpp"
 #include "platform/sha256.hpp"
@@ -36,15 +37,6 @@ bool BoundedError(const CasError& error) {
     return error.code.size() <= 200 && error.message.size() <= 4096 &&
         (error.code.empty() || Text(error.code)) && platform::IsValidUtf8(error.message) &&
         error.message.find('\0') == std::string::npos;
-}
-bool SafePath(const fs::path& path) {
-    for (auto part = path; !part.empty();) {
-        if (!platform::RejectReparsePoint(part)) return false;
-        const auto parent = part.parent_path();
-        if (parent == part) break;
-        part = parent;
-    }
-    return true;
 }
 bool Confirms(CasDurability actual, CasDurability requested) {
     const auto rank = [](CasDurability value) {
@@ -101,14 +93,16 @@ public:
     }
     std::expected<std::string, CasError> Read(const NamedResultReference& reference, std::size_t cap) override {
         const auto path = root_ / platform::Utf8ToPath(reference.logical_name);
-        if (!SafePath(path)) return std::unexpected(Error("named_result.path_rejected"));
+        if (!platform::IsUnlinkedOwnedPath(root_.parent_path(), path))
+            return std::unexpected(Error("named_result.path_rejected"));
         std::error_code error;
         const auto status = fs::symlink_status(platform::FileIoPath(path), error);
         if (error == std::errc::no_such_file_or_directory || (!error && status.type() == fs::file_type::not_found))
             return std::unexpected(Error("named_result.missing"));
         if (error || !fs::is_regular_file(status)) return std::unexpected(Error("named_result.unreadable"));
         auto data = platform::ReadBoundedRegularFile(path, cap);
-        if (!data || !SafePath(path)) return std::unexpected(Error("named_result.unreadable"));
+        if (!data || !platform::IsUnlinkedOwnedPath(root_.parent_path(), path))
+            return std::unexpected(Error("named_result.unreadable"));
         return std::move(*data);
     }
     std::expected<NamedResultNames, CasError> SnapshotNames(NamedResultListLimits limits) override {

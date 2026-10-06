@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "platform/bounded_read.hpp"
+#include "platform/owned_file_path.hpp"
 #include "platform/paths.hpp"
 #include "platform/secure_file.hpp"
 #include "platform/sha256.hpp"
@@ -23,10 +24,8 @@ const Json* Binding(const v3::MessageLine& message) {
 }
 std::expected<std::optional<std::string>, std::string> ReadPlan(const std::filesystem::path& directory) {
     const auto path = directory / kPlan;
-    for (auto part = path; !part.empty();) {
-        if (!platform::RejectReparsePoint(part)) return std::unexpected("named_result.plan_path_rejected");
-        const auto parent = part.parent_path(); if (parent == part) break; part = parent;
-    }
+    if (!platform::IsUnlinkedOwnedPath(directory, path))
+        return std::unexpected("named_result.plan_path_rejected");
     std::error_code error;
     const auto status = std::filesystem::symlink_status(platform::FileIoPath(path), error);
     if (error == std::errc::no_such_file_or_directory || (!error && status.type() == std::filesystem::file_type::not_found))
