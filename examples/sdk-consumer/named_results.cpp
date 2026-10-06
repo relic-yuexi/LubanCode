@@ -221,6 +221,10 @@ public:
         std::lock_guard lock(script_->mutex);
         if (request.system.find("Summarize already-executed tool evidence") != std::string::npos) {
             ++script_->summary_calls; Check(request.tools.empty(), "summary was allowed to execute tools");
+            Check(request.max_output_tokens == 1024, "summary lost its actual requested output budget");
+            Check(request.messages.size() == 1 && request.messages.front().role == "user" &&
+                  request.messages.front().tool_calls.empty() && request.messages.front().tool_replies.empty(),
+                  "summary Generate arguments changed the exact material-only request");
             for (const auto& message : request.messages)
                 script_->summary_material_seen |= message.text.find("SUMMARY-EVIDENCE") != std::string::npos;
             return sdk::ModelReply{R"({"summary":"named summary accepted","side_effects":[],"open_items":[],"evidence":["SUMMARY-EVIDENCE"]})", {}, {}};

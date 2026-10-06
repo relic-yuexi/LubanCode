@@ -58,6 +58,8 @@ public:
     // 未装配(快照为空)按各口接口合同返回错误/不可得——即基类默认
     // 形态,不冒充实数。
     std::string SerializeForDiagnostics(const lubancode::api::Request& request) const override;
+    std::expected<std::optional<lubancode::api::ModelInputSnapshot>, std::string>
+    PrepareModelInput(const lubancode::api::Request& request) const override;
     lubancode::api::PreparedWireRequest PrepareWireRequest(
         const lubancode::api::Request& request) const override;
     std::optional<lubancode::api::WireMessageMap> BuildWireMessageMap(

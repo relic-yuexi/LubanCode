@@ -36,12 +36,51 @@ without raising its host turn budget or replacing the material sent to Generate.
   providers continue through their existing final serialization and extra_body
   selectors. SDK SerializeForDiagnostics, PreparedWireRequest and wire-message
   map remain unavailable. No provider-message mapping is fabricated.
-- Request preparation records include `modelInputSnapshotScope` and
-  `modelInputSnapshot`, plus `outputLimitScope` when a measurement is available.
-  The owned snapshot passed to the recorder is the one used by final preflight.
-  Action-summary preparation records the same scope and exact measured input.
+- Main request preparation records include `modelInputSnapshotScope`, snapshot
+  SHA256/UTF-8 bytes and the explicit `sha256-compact_json_utf8_v1` fingerprint
+  algorithm, plus `outputLimitScope` when a measurement is available. The owned
+  snapshot passed to the recorder is the one used by final preflight. This digest
+  is evidence only; it does not reconstruct input or replace the original
+  system/inputMessageRefs/tool sources. Full history is not copied into each
+  main prepared event. Action-summary preparation retains its existing
+  `modelInputSnapshot` and records the same scope and exact measured input.
 - Snapshots are values. No pending Generate, writer or Session references are
   held by them. Failed preparation spends no model call and executes no tool.
+
+## Boundaries
+
+This input view does not certify a custom backend's provider transformations or
+its compliance with a requested output cap. Such transport facts need a later
+optional provider capability; this slice neither adds one nor infers it.
+Rebuildable snapshots one inner backend per capability call, as before. It does
+not pin one generation across measurement and later sending; this slice does not
+claim to close the existing cross-call configuration-generation contract.
+The SDK's per-Session adapter holds its backend throughout the session.
+
+The input JSON schema is `system`, ordered `messages` and `tools`. Every message
+has `role`, concatenated `text`, ordered `tool_calls` (`id`, `name`, `input_json`)
+and ordered `tool_replies` (`call_id`, `text`, `is_error`). Every tool has `name`,
+`description`, `input_schema_json`. Empty vectors are arrays. The two JSON-valued
+SDK string fields remain strings; input counting includes their actual escaping.
+Main prepared adds `modelInputSnapshotSha256`, `modelInputSnapshotUtf8Bytes` and
+`modelInputSnapshotFingerprintAlgorithm`; the scope fields sit beside them.
+
+## Source validation inventory
+
+- `test_lubancore_model_input.cpp`: six native cases and six distinct markers.
+  Exact Generate values; unsupported/cancelled inputs; legacy/four-provider
+  selection; Rebuildable plus the real loop's Hook/prepared frozen view; real
+  summary preparation/adoption; fail-closed summary counterexamples.
+- `test_model_input_wrappers.cpp`: one CLI native case and one marker. Single
+  Spinner and nested Spinner/Rebuildable each forward all three outcomes.
+- Existing named-results public helper keeps its ten cases and original host
+  budget. Its Generate fixture now checks the requested 1024-token cap and exact
+  tool-free single-user shape. Native inspection independently reads committed
+  summary system/prompt sources, recomputes input bytes, checks measurement scope
+  and the subsequent main prepared evidence fingerprint.
+
+These are source assertions awaiting remote CI. No native result is inferred
+from their existence or from a Python fixture.
 
 ## Verification plan
 
