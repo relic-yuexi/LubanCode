@@ -70,7 +70,7 @@ void Write(const fs::path& path, const std::string& bytes) {
     output.flush(); Check(output.good(), "file flush failed"); output.close(); Check(!output.fail(), "file close failed");
 }
 std::string Key(const blob::Scope& scope) { return scope.workspace_key + "\n" + scope.session_id; }
-enum class Fault { None, AfterPublish, SecondReject, WrongScope, OversizeReceipt, OpenThrow };
+enum class Fault { None, AfterPublish, SecondReject, WrongScope, OversizeReceipt, OpenThrow, FirstReject };
 struct State {
     std::mutex mutex;
     std::condition_variable cv;
@@ -118,6 +118,7 @@ public:
             }
         }
         if (callback) callback();
+        if (fault == Fault::FirstReject && call == 1) { result.error = {"fixture.known_rejection", {}}; return result; }
         if (fault == Fault::SecondReject && call == 2) { result.error = {"fixture.known_rejection", {}}; return result; }
         // A newly created private directory exclusively reserves this temporary
         // name. Hard-link publication is create-new on both native platforms.
@@ -441,18 +442,75 @@ void Summary(World& world, const std::function<void(const fs::path&, const std::
 void Publication(const fs::path& base, const fs::path& probe) {
     for (const auto fault : {Fault::AfterPublish, Fault::SecondReject, Fault::WrongScope, Fault::OversizeReceipt}) {
         World world(base, probe); world.state->fault = fault;
-        auto session = world.Open(world.Options(std::make_shared<Script>()));
+        auto script = std::make_shared<Script>(); auto session = world.Open(world.Options(script));
+        struct Reentry {
+            std::mutex mutex;
+            std::atomic<unsigned> callbacks{0};
+            std::unique_ptr<sdk::Result<sdk::Receipt>> submitted;
+        };
+        auto reentry = std::make_shared<Reentry>();
+        // This is the actual publishing callback, while the capability owns its
+        // material/write gate. API admission must neither borrow that gate nor
+        // allow this accepted item to execute once the first unknown is known.
+        world.state->on_write = [weak = std::weak_ptr<sdk::Session>(session), reentry] {
+            if (reentry->callbacks.fetch_add(1) != 0) return;
+            auto current = weak.lock(); Check(current != nullptr, "publishing callback lost its Session");
+            auto submitted = current->Submit("queued-before-unknown", "read");
+            std::lock_guard lock(reentry->mutex);
+            reentry->submitted = std::make_unique<sdk::Result<sdk::Receipt>>(std::move(submitted));
+        };
         const auto operation = Run(session, "uncertain-publish");
         Check(operation.state != sdk::OperationState::Succeeded, "unknown publication was reported successful");
+        Check(operation.state == sdk::OperationState::Indeterminate && !operation.result_persisted &&
+              operation.error.find("sdk.named_results.publication_unconfirmed") != std::string::npos,
+              "current operation lost its actual unknown publication state");
+        const auto reread = Take(session->ReadOperation(operation.operation_id), "read current unknown");
+        Check(reread.state == operation.state && reread.error == operation.error && !reread.result_persisted,
+              "ReadOperation disagreed with the actual unknown final");
+        const auto queued = [&] {
+            std::lock_guard lock(reentry->mutex);
+            Check(reentry->submitted != nullptr, "provider callback never returned from public Submit");
+            return Take(*reentry->submitted, "accept actual queued callback input");
+        }();
+        Check(!queued.duplicate, "queued callback did not create its own actual operation");
+        const auto stopped = Take(session->WaitResult(queued.operation_id, 20s), "wait queued owner fence");
+        Check(stopped.state == sdk::OperationState::Indeterminate && !stopped.result_persisted && stopped.turn_id.empty() &&
+              stopped.error == "sdk.named_results.publication_unconfirmed",
+              "queued work crossed the unknown owner or claimed a dispatched turn");
         std::size_t calls, writes;
         { std::lock_guard lock(world.state->mutex); calls = world.state->calls; writes = world.state->publications.size(); }
         Check(calls == (fault == Fault::SecondReject ? 2u : 1u) && writes == 1, "fault did not follow a real first publication");
         auto retry = session->Submit("no-retry", "read");
         if (retry) Check(Take(session->WaitResult(retry->operation_id, 20s), "wait refused retry").state != sdk::OperationState::Succeeded,
                          "a fresh operation ignored the unknown storage owner");
+        Check(!retry && retry.error().code == "sdk.named_results.publication_unconfirmed",
+              "fresh Submit did not refuse the retained unknown owner");
+        { std::lock_guard lock(script->mutex); Check(script->turns == 1, "queued or fresh work called Generate after unknown publication"); }
         (void)session->Close();
         { std::lock_guard lock(world.state->mutex); Check(world.state->calls == calls, "first unknown was retried or overwritten"); }
         world.NoMirrors();
+    }
+    {
+        World world(base, probe); world.state->fault = Fault::FirstReject;
+        auto session = world.Open(world.Options(std::make_shared<Script>()));
+        const auto rejected = Run(session, "known-zero-publication");
+        Check(rejected.state != sdk::OperationState::Succeeded && rejected.state != sdk::OperationState::Indeterminate,
+              "known zero-publication rejection was confused with unknown");
+        { std::lock_guard lock(world.state->mutex); Check(world.state->calls == 1 && world.state->publications.empty(), "known rejection published material"); }
+        Check(Run(session, "text-after-known-rejection").state == sdk::OperationState::Succeeded,
+              "known rejection poisoned a text-only operation");
+        (void)Saved(session, Run(session, "tool-after-known-rejection"));
+        { std::lock_guard lock(world.state->mutex); Check(world.state->calls > 1 && !world.state->publications.empty(), "known rejection sealed the live named owner"); }
+        Take(session->Close(), "close known rejection"); world.NoMirrors();
+    }
+    {
+        World world(base, probe); auto options = world.Options(std::make_shared<Script>()); options.named_results.reset();
+        auto session = world.Open(std::move(options));
+        (void)Saved(session, Run(session, "ordinary-file-first"));
+        (void)Saved(session, Run(session, "ordinary-file-second"));
+        Take(session->Close(), "close ordinary File");
+        std::lock_guard lock(world.state->mutex); Check(world.state->opens == 0 && world.state->calls == 0,
+              "ordinary File unexpectedly entered the external named provider");
     }
 }
 

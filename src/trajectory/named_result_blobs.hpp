@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -154,6 +155,12 @@ public:
     std::expected<std::string, CasError> Read(std::string_view artifact_path, std::string sha256,
         std::uint64_t bytes, std::string media_type, std::size_t cap) const;
     std::optional<NamedPublication> FirstUnconfirmedPublication() const;
+    // Admission may run under a host API lock or inside a provider callback.
+    // Observe the retained first unknown without waiting for the material gate
+    // or allocating/copying the receipt. This never confirms or clears it.
+    bool HasUnconfirmedPublication() const noexcept {
+        return publication_unconfirmed_.load(std::memory_order_acquire);
+    }
     void CloseWrites() noexcept;
 private:
     friend class NamedResultMaterial;
@@ -166,6 +173,7 @@ private:
     std::optional<NamedResultNames> names_;
     bool writes_closed_ = false;
     std::shared_ptr<NamedPublication> first_unknown_;
+    std::atomic<bool> publication_unconfirmed_{false};
 };
 
 class NamedResultLease {

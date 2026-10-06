@@ -174,12 +174,14 @@ std::string MutateEnvelope(const std::string& source, bool role) {
 TEST_CASE("named result guards: a real partial material seals every facade before releasing its owner") {
     Directory directory; auto control = std::make_shared<Control>(); control->root = directory.root / "external";
     auto service = Open(directory, Factory(control)); auto cap = Capability(*service);
+    REQUIRE_FALSE(cap->HasUnconfirmedPublication());
     auto captures = v3::ResultStore::Open(cap, "capture-"); auto results = v3::ResultStore::Open(cap); REQUIRE(captures); REQUIRE(results);
     control->reject_write = 2; const auto partial = captures->Persist(Material());
     REQUIRE_FALSE(partial.ok); REQUIRE(partial.publication); REQUIRE(partial.publication->knowledge == Knowledge::Indeterminate);
     REQUIRE(control->writes == 2); REQUIRE(control->native.size() == 1);
     REQUIRE(control->native.front().outcome == platform::WriteOutcome::CommittedDurable);
     const auto first = cap->FirstUnconfirmedPublication(); REQUIRE(first); REQUIRE(*first == *partial.publication);
+    REQUIRE(cap->HasUnconfirmedPublication());
     const auto refused = results->Persist(Material("different formal material")); REQUIRE_FALSE(refused.ok);
     REQUIRE(refused.publication); REQUIRE(*refused.publication == *first); REQUIRE(control->writes == 2);
     REQUIRE_FALSE(v3::ResultStore::Open(cap, "job-admission-"));
@@ -188,7 +190,7 @@ TEST_CASE("named result guards: a real partial material seals every facade befor
         "host-result://" + cap->scope().session_id + "/artifacts/" + ref.logical_name);
     auto read = cap->Read("artifacts/" + ref.logical_name, ref.sha256, ref.bytes, ref.media_type, 4096); REQUIRE(read);
     REQUIRE(*read == "actual named native bytes"); REQUIRE(*cap->FirstUnconfirmedPublication() == *first);
-    (void)service->Close("partial_guard"); REQUIRE(control->writes == 2); Mark("shared-partial");
+    (void)service->Close("partial_guard"); REQUIRE(control->writes == 2); REQUIRE(cap->HasUnconfirmedPublication()); Mark("shared-partial");
 }
 
 TEST_CASE("named result guards: File preserves actual native uncertainty and known before-publish failure") {
@@ -205,6 +207,7 @@ TEST_CASE("named result guards: File preserves actual native uncertainty and kno
             REQUIRE(native.outcome == platform::WriteOutcome::CommittedDurabilityUnconfirmed);
             REQUIRE(native.file_sync.succeeded); REQUIRE(native.publish.succeeded); REQUIRE(native.parent_sync.injected_failure);
             REQUIRE(failure.publication->knowledge == Knowledge::Indeterminate);
+            REQUIRE(cap->HasUnconfirmedPublication());
             REQUIRE(*cap->FirstUnconfirmedPublication() == *failure.publication); REQUIRE_FALSE(v3::ResultStore::Open(cap));
             const auto& ref = file.receipt->reference;
             REQUIRE(cap->Read("artifacts/" + ref.logical_name, ref.sha256, ref.bytes, ref.media_type, 4096));
@@ -212,7 +215,9 @@ TEST_CASE("named result guards: File preserves actual native uncertainty and kno
         } else {
             REQUIRE(native.outcome == platform::WriteOutcome::NotCommitted); REQUIRE(native.file_sync.injected_failure);
             REQUIRE_FALSE(native.publish.attempted); REQUIRE_FALSE(cap->FirstUnconfirmedPublication());
+            REQUIRE_FALSE(cap->HasUnconfirmedPublication());
             const auto next = store->Persist(Material("next real bytes")); REQUIRE(next.ok); REQUIRE(next.result_id == "res-000001");
+            REQUIRE_FALSE(cap->HasUnconfirmedPublication());
         }
         (void)service->Close("native_receipt_guard");
     }
