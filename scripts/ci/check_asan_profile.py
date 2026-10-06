@@ -23,6 +23,7 @@ try:
     from . import sdk_named_results as named_results
     from . import sdk_journal_owner as journal_owner
     from . import sdk_model_input as model_input
+    from . import sdk_owned_file_paths as owned_file_paths
 except ImportError:
     from check_sdk_only_boundary import CLIENT, prepare, read_reply
     from check_sdk_focused import check_native_command
@@ -30,6 +31,7 @@ except ImportError:
     import sdk_named_results as named_results
     import sdk_journal_owner as journal_owner
     import sdk_model_input as model_input
+    import sdk_owned_file_paths as owned_file_paths
 
 
 def require(condition, message):
@@ -274,11 +276,13 @@ def check_registration(manifest, registration, index, executable):
             journal_owner.check_registration(expected, journal_stem, 'lubancode_tests')
         if name in ('integration.sdk.lubancore_model_input', 'unit.app.model_input_wrappers'):
             model_input.check_registration(expected, name.rsplit('.', 1)[-1], 'lubancode_tests')
+        if name == 'integration.sdk.' + owned_file_paths.STEM:
+            owned_file_paths.check_registration(expected, 'lubancode_tests')
         commands[name] = expected
     return commands
 
 
-def check_execution(manifest, registrations, executable, junit, last_test):
+def check_execution(manifest, registrations, executable, junit, last_test, owned_source=None):
     commands = {}
     for index, registration in enumerate(registrations):
         commands.update(check_registration(manifest, registration, index, executable))
@@ -304,6 +308,10 @@ def check_execution(manifest, registrations, executable, junit, last_test):
             journal_owner.check_native(section, commands[name], journal_stem)
         if name in ('integration.sdk.lubancore_model_input', 'unit.app.model_input_wrappers'):
             model_input.check_native(section, commands[name], name.rsplit('.', 1)[-1])
+        if name == 'integration.sdk.' + owned_file_paths.STEM:
+            require(isinstance(owned_source, dict) and set(owned_source) == {'record', 'bytes', 'head'},
+                    'Owned file paths actual source evidence missing')
+            owned_file_paths.check_native(section, commands[name], owned_source['record'], owned_source['bytes'], owned_source['head'])
         if name == 'unit.trajectory_v3.v3_result_immutable_publication':
             check_result_immutable_native(section, commands[name])
         require(len(re.findall(r'^Test Passed\.\s*$', section, re.M)) == 1, 'native test did not pass: ' + name)
@@ -331,6 +339,7 @@ def main():
     folder = build / 'asan-profile'
     manifest_path = folder / 'manifest.json'
     if args.mode == 'prepare':
+        owned_file_paths.capture_source(source, folder)
         manifest = make_manifest(source)
         write_json(manifest_path, manifest)
         prepare(build)
@@ -364,7 +373,8 @@ def main():
                              (build / 'asan-host-registration.json', folder / 'execution-registration.json')]
             report = check_execution(manifest, registrations, executable,
                                      ET.parse(build / 'asan-results.xml').getroot(),
-                                     (build / 'Testing/Temporary/LastTest.log').read_text(encoding='utf-8'))
+                                     (build / 'Testing/Temporary/LastTest.log').read_text(encoding='utf-8'),
+                                     owned_file_paths.read_source_evidence(source, folder))
         except Exception as error:
             write_json(report_path, {'status': 'failed', 'error': str(error)})
             raise

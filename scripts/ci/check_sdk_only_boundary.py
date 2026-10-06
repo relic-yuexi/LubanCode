@@ -486,6 +486,15 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
             except ModuleNotFoundError:
                 from scripts.ci.sdk_journal_owner import ownership_violations
         violations.extend(ownership_violations(targets, expect_testing))
+    if (source / "tests/integration/sdk/test_lubancore_owned_file_paths.cpp").is_file():
+        try:
+            from .sdk_owned_file_paths import ownership_violations
+        except ImportError:
+            try:
+                from sdk_owned_file_paths import ownership_violations
+            except ModuleNotFoundError:
+                from scripts.ci.sdk_owned_file_paths import ownership_violations
+        violations.extend(ownership_violations(targets, expect_testing))
     sdk = [target_id for target_id, target in targets.items() if target["name"] == "lubancore_sdk"]
     if len(sdk) != 1 or targets[sdk[0]]["type"] != "SHARED_LIBRARY":
         violations.append("expected exactly one shared lubancore_sdk target")

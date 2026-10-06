@@ -338,6 +338,33 @@ class FileApiClosureTests(unittest.TestCase):
         self.fixture.targets[0]["sources"].append({"path": "src/sdk/job_operations.cpp", "compileGroupIndex": 0})
         self.addCleanup(self.fixture.doCleanups)
 
+    def test_owned_file_paths_combined_reference_owners_are_exact(self):
+        from scripts.ci import sdk_owned_file_paths as owned
+        fixture = self.fixture
+        fixture.source_file(owned.SOURCE, "int synthetic_owned_path_data;\n")
+        fixture.flags.update(BUILD_TESTING="ON", LUBANCODE_BUILD_CLI="ON")
+
+        def check():
+            fixture.write_model()
+            return closure.inspect(fixture.source, fixture.build, "Release")
+
+        self.assertEqual(check()["status"], "failed")
+        for index, name in enumerate(("lubancore_sdk_tests", "lubancode_tests")):
+            fixture.targets.append({"id": "owned" + str(index), "name": name, "type": "EXECUTABLE",
+                                    "sources": [{"path": owned.SOURCE, "compileGroupIndex": 0}], "compileGroups": [{}]})
+        self.assertEqual(check()["status"], "passed")
+        target = fixture.targets[-1]
+        for field, value in (("name", "foreign_tests"), ("type", "STATIC_LIBRARY")):
+            old = target[field]; target[field] = value
+            self.assertTrue(any("Owned file paths source" in v for v in check()["violations"]))
+            target[field] = old
+        target["sources"].append(dict(target["sources"][0]))
+        self.assertTrue(any("Owned file paths source" in v for v in check()["violations"]))
+        target["sources"].pop(); fixture.flags["BUILD_TESTING"] = "OFF"
+        self.assertTrue(any("Owned file paths source" in v for v in check()["violations"]))
+        fixture.targets = fixture.targets[:-2]
+        self.assertEqual(check()["status"], "passed")
+
     def test_actual_file_api_keeps_missing_and_duplicate_job_occurrences(self):
         original = deepcopy(self.fixture.targets)
         for variant in ("missing", "duplicate"):
