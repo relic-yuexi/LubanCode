@@ -966,6 +966,54 @@ struct ManagedStorageFixture {
 };
 
 void CheckManagedStorageLifecycle() {
+    // A binding/version cannot replace its Policy after all public project and
+    // closed View handles have gone. Registration lasts until real Shutdown.
+    {
+        ManagedStorageFixture registration;
+        auto registered = registration.Project();
+        const auto binding = registered->binding();
+        registered.reset();
+        const auto replacement = [&](const std::shared_ptr<auth::PolicyProvider>& policy) {
+            return registration.runtime->RegisterManagedProject(
+                {binding, ManagedUtf8(registration.root / "project"), policy});
+        };
+        auto conflict = replacement(auth::RevocablePolicy::Create());
+        REQUIRE_FALSE(conflict);
+        REQUIRE(conflict.error().code == "sdk.managed.project_conflict");
+        auto same = replacement(registration.policy); REQUIRE(same);
+        registered = std::move(*same);
+        REQUIRE(registered->binding() == binding);
+        const auto id = registration.Open(registered);
+        auto closed_view = registration.View(registered, id);
+        REQUIRE(closed_view->Close());
+        closed_view.reset(); registered.reset();
+        conflict = replacement(auth::RevocablePolicy::Create());
+        REQUIRE_FALSE(conflict);
+        REQUIRE(conflict.error().code == "sdk.managed.project_conflict");
+        same = replacement(registration.policy); REQUIRE(same);
+        REQUIRE((*same)->binding() == binding);
+        REQUIRE(registration.runtime->Shutdown());
+    }
+    {
+        ManagedStorageFixture retirement;
+        std::string retired_code;
+        auto retained_policy = std::make_shared<ManagedProbePolicy>();
+        const std::weak_ptr<ManagedProbePolicy> weak_policy = retained_policy;
+        retained_policy->on_destroy = [&] {
+            const auto closed = retirement.runtime->Shutdown();
+            retired_code = closed ? "unexpected" : closed.error().code;
+        };
+        auto registered = retirement.runtime->RegisterManagedProject({
+            {"tenant-a", "retained-project", {}, 1},
+            ManagedUtf8(retirement.root / "project"), retained_policy});
+        REQUIRE(registered);
+        registered = std::unexpected(lubancore::Error{"released", {}});
+        retained_policy.reset();
+        REQUIRE_FALSE(weak_policy.expired());
+        REQUIRE(retirement.runtime->Shutdown());
+        REQUIRE(weak_policy.expired());
+        REQUIRE(retired_code == "sdk.lifecycle.reentrant");
+    }
     ManagedStorageFixture fixture;
     auto project = fixture.Project();
     const auto before = ManagedFiles(fixture.root / "state");
@@ -1105,7 +1153,7 @@ void CheckManagedStorageLifecycle() {
     Gate authorization;
     std::atomic<unsigned> openings{0};
     race.policy->before = [&](const auth::ExecutionContext&, auth::Action action) {
-        if (action == auth::Action::OpenSession && ++openings == 2) authorization.EnterAndWait();
+        if (action == auth::Action::OpenSession && ++openings == 2) authorization.Hold();
     };
     auto opening = std::async(std::launch::async, [&] { return race.runtime->OpenManagedSession(race_project, alice); });
     REQUIRE(authorization.WaitEntered());

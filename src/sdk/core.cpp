@@ -1984,7 +1984,9 @@ struct Runtime::Impl {
     struct ManagedRegistry {
         std::mutex mutex;
         std::shared_ptr<const int> tag = std::make_shared<const int>(0);
-        std::map<ManagedProjectKey, std::weak_ptr<const ManagedProjectState>> projects;
+        // Registration is immutable for this Runtime lifetime. Dropping public
+        // handles must not let the same binding/version replace its Policy.
+        std::map<ManagedProjectKey, std::shared_ptr<const ManagedProjectState>> projects;
         std::map<ManagedSessionKey, std::shared_ptr<Session::Impl>> sessions;
     };
     struct ManagedOpening {
@@ -2126,7 +2128,7 @@ Result<std::shared_ptr<managed::v1::Project>> Runtime::RegisterManagedProject(ma
             if (impl_->closed) return std::unexpected(Failure("sdk.runtime.closed"));
             std::lock_guard registry_lock(registry->mutex);
             auto& existing = registry->projects[ProjectKey(candidate->binding)];
-            selected = existing.lock();
+            selected = existing;
             if (selected && (selected->policy != candidate->policy || selected->cwd != candidate->cwd ||
                              selected->roots.data_root != candidate->roots.data_root))
                 return std::unexpected(Failure("sdk.managed.project_conflict"));
@@ -2345,10 +2347,11 @@ Result<void> Runtime::Shutdown() {
     }
     if (managed_registry) {
         std::map<ManagedSessionKey, std::shared_ptr<Session::Impl>> retired;
+        std::map<ManagedProjectKey, std::shared_ptr<const ManagedProjectState>> retired_projects;
         {
             std::lock_guard lock(managed_registry->mutex);
             retired.swap(managed_registry->sessions);
-            managed_registry->projects.clear();
+            retired_projects.swap(managed_registry->projects);
         }
         // Provider/subscription captures retire outside both registry locks.
     }

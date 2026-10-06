@@ -15,6 +15,8 @@ workspace_key 为空只在这一步取真实值；非空须完全匹配。返回
 同份 binding/version 不许换 Policy 或 cwd 后冒充原项目。普通请求只拿
 已登记 Project 与认证后主体，不任选路径。主体、tenant、project、workspace、
 session、bindingVersion 每口对账。同 cwd 可开多场，项目目录不加排他锁。
+项目配置由 Runtime 强持到 Shutdown；Project、关闭后 View 全退尽也不撤登记。
+补片合同见[项目登记寿命](sdk-managed-project-registration.md)。
 
 OpenManagedSession 先查项目范围 OpenSession，取得真实 session ID；先订阅
 完整范围，再查当下权限与失效代次，才 Reserve/Publish/Finish。
