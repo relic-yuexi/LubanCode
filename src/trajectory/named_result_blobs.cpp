@@ -150,7 +150,8 @@ NamedResultCapability::NamedResultCapability(CasScope scope, std::string binding
       file_session_directory_(std::move(directory)) {}
 
 std::string NamedResultCapability::DisplayPath(std::string_view artifact_path) const {
-    if (!external()) return platform::PathToUtf8(file_session_directory_ / platform::Utf8ToPath(std::string(artifact_path)));
+    if (!external()) return platform::PathToUtf8(
+        (file_session_directory_ / platform::Utf8ToPath(std::string(artifact_path))).lexically_normal());
     return "host-result://" + scope_.session_id + "/" + std::string(artifact_path);
 }
 

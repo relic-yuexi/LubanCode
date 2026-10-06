@@ -184,6 +184,8 @@ TEST_CASE("named result guards: a real partial material seals every facade befor
     REQUIRE(refused.publication); REQUIRE(*refused.publication == *first); REQUIRE(control->writes == 2);
     REQUIRE_FALSE(v3::ResultStore::Open(cap, "job-admission-"));
     const auto& ref = partial.publication->files.front().receipt->reference;
+    REQUIRE(cap->DisplayPath("artifacts/" + ref.logical_name) ==
+        "host-result://" + cap->scope().session_id + "/artifacts/" + ref.logical_name);
     auto read = cap->Read("artifacts/" + ref.logical_name, ref.sha256, ref.bytes, ref.media_type, 4096); REQUIRE(read);
     REQUIRE(*read == "actual named native bytes"); REQUIRE(*cap->FirstUnconfirmedPublication() == *first);
     (void)service->Close("partial_guard"); REQUIRE(control->writes == 2); Mark("shared-partial");
@@ -245,6 +247,25 @@ TEST_CASE("named result guards: File opens lazily preserves prefix skips caps an
     CHECK_THROWS_AS(v3::ResultStore::Open(overflow), std::out_of_range);
     fs::remove(overflow / "artifacts" / "res-999999999999999999999999999999.json");
     auto after = v3::ResultStore::Open(overflow); REQUIRE(after); REQUIRE(after->Persist(Material()).ok);
+    {
+        // A live File capability and historical reconstruction must render the
+        // same real truncated material, including Windows path separators.
+        Directory preview_directory; auto service = Open(preview_directory); auto cap = Capability(*service);
+        auto preview_store = v3::ResultStore::Open(cap); REQUIRE(preview_store);
+        const auto material = Material(std::string(4096, 'P'));
+        const auto persisted = preview_store->Persist(material); REQUIRE(persisted.ok);
+        const auto live_channels = v3::PreviewFromPersistedMaterials(material, persisted, 1024,
+            service->trajectory()->session_dir(), cap.get());
+        const auto historical_channels = v3::PreviewFromPersistedMaterials(material, persisted, 1024,
+            service->trajectory()->session_dir());
+        REQUIRE(live_channels.channels.size() == 1); REQUIRE(historical_channels.channels.size() == 1);
+        REQUIRE(live_channels.channels.front().display_path == historical_channels.channels.front().display_path);
+        const auto live = v3::BuildToolPreview(live_channels); const auto historical = v3::BuildToolPreview(historical_channels);
+        REQUIRE(live.truncated); REQUIRE(historical.truncated);
+        REQUIRE_FALSE(live.preview_unrepresentable); REQUIRE_FALSE(historical.preview_unrepresentable);
+        REQUIRE(live.text == historical.text); REQUIRE(live.text.size() <= 1024);
+        (void)service->Close("file_preview_compatibility_guard");
+    }
     Mark("file-compatibility");
 }
 
