@@ -62,6 +62,7 @@
 #include "cli/live_transcript.hpp"
 #include "runtime/worktree.hpp"
 #include "runtime/async_tool_runtime.hpp"  // 异步工具 P2:one-shot 宿主接线(dormant)
+#include "runtime/execution_owner.hpp"
 #include "runtime/id_authority.hpp"      // ProcessIdAuthority:单发工具栅栏的发号局
 #include "runtime/tool_trace_hub.hpp"    // ToolTraceHub:单发工具事件进轨迹的栅栏
 #include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger:单发一场的账本
@@ -404,7 +405,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     }
     // 环境快照要在皮 move 进 loop 前留一份系统提示(§9.1 的真值取材)。
     const std::string oneshot_system_prompt = once_agent_profile.system_prompt;
-    lubancode::agent::Agent loop(wrapped_backend, registry, std::move(once_agent_profile));
+    lubancode::runtime::ExecutionOwner execution(
+        lubancode::runtime::HostBorrowedExecutionResources{wrapped_backend, registry},
+        std::move(once_agent_profile));
+    auto& loop = execution.agent();
     std::string turn_context;
     if (project_memory != nullptr) {
         // 单发模式的问题就是用户提问,query_origin=user 才跑检索。

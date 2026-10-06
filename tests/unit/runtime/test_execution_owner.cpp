@@ -228,6 +228,70 @@ struct ThrowingCopy {
     }
     bool operator()(const tools::Tool&) const { return true; }
 };
+
+void CheckHostBorrowedExecution() {
+    auto audit = std::make_shared<Audit>();
+    ParentBackend backend(audit);
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<OriginalTool>(audit));
+    auto* original_tool = registry.Find("owner_probe");
+    {
+        auto profile = CapturedProfile(audit, backend, registry, false);
+        profile.request.model = "host-model";
+        profile.system_prompt = "host original system";
+        runtime::ExecutionOwner host(runtime::HostBorrowedExecutionResources{backend, registry},
+                                     std::move(profile));
+        CHECK(host.session_resources() == nullptr);
+        CHECK(&host.backend() == &backend);
+        CHECK(&host.registry() == &registry);
+        CHECK_FALSE(profile.tool_filter);
+        CHECK_FALSE(profile.deferred_index_provider);
+        REQUIRE(host.agent().Run("host borrowed request", {}).has_value());
+        REQUIRE(audit->requests.size() == 2);
+        CHECK(audit->requests[0].model == "host-model");
+        CHECK(audit->requests[0].system == "host original system");
+        CHECK(HasOriginalResult(audit->requests[1]));
+        CHECK(audit->tool_calls == 1);
+        CHECK(audit->wrapper_calls == 0);
+        CHECK_FALSE(audit->agent_capture.expired());
+    }
+    CHECK(audit->agent_capture.expired());
+    CHECK(audit->destruction == std::vector<std::string>{"agent"});
+    CHECK(audit->correct_teardown);
+    CHECK(audit->parent_alive);
+    CHECK(audit->original_tool_alive);
+    CHECK(registry.Find("owner_probe") == original_tool);
+    REQUIRE(original_tool->execute(nlohmann::json::object()).content == "original tool answer");
+    api::Request next;
+    next.model = "host after Agent retirement";
+    REQUIRE(backend.send_stream(next, [](const auto&) {}, nullptr).has_value());
+    REQUIRE(audit->requests.size() == 3);
+    CHECK(audit->correct_teardown);
+
+    auto failed_audit = std::make_shared<Audit>();
+    ParentBackend failed_backend(failed_audit);
+    tools::ToolRegistry failed_registry;
+    failed_registry.Register(std::make_unique<OriginalTool>(failed_audit));
+    auto profile = CapturedProfile(failed_audit, failed_backend, failed_registry, false);
+    auto armed = std::make_shared<std::atomic<bool>>(false);
+    profile.tool_filter = ThrowingCopy(armed);
+    armed->store(true);
+    CHECK_THROWS_WITH(([&] {
+        runtime::ExecutionOwner rejected(
+            runtime::HostBorrowedExecutionResources{failed_backend, failed_registry}, std::move(profile));
+    })(), "child profile copy failure");
+    CHECK_FALSE(profile.tool_filter);
+    CHECK_FALSE(profile.deferred_index_provider);
+    CHECK(failed_audit->agent_capture.expired());
+    CHECK(failed_audit->destruction == std::vector<std::string>{"agent"});
+    CHECK(failed_audit->correct_teardown);
+    CHECK(failed_audit->parent_alive);
+    CHECK(failed_audit->original_tool_alive);
+    CHECK(failed_audit->requests.empty());
+    REQUIRE(failed_registry.Find("owner_probe")->execute(nlohmann::json::object()).content == "original tool answer");
+    REQUIRE(failed_backend.send_stream(next, [](const auto&) {}, nullptr).has_value());
+    CHECK(failed_audit->requests.size() == 1);
+}
 }  // namespace
 
 TEST_CASE("execution owner: owned child wrapper and overlay retire after Agent before parent borrows") {
@@ -268,6 +332,7 @@ TEST_CASE("execution owner: owned child wrapper and overlay retire after Agent b
 }
 
 TEST_CASE("execution owner: unwrapped child borrows the original backend and registry without owning either") {
+    CheckHostBorrowedExecution();
     auto audit = std::make_shared<Audit>();
     ParentBackend parent(audit);
     tools::ToolRegistry original;

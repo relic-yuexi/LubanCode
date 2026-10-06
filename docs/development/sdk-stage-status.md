@@ -62,6 +62,12 @@ POSIX 造文件和目录 symlink，不能据此声称 Windows 文件 symlink 也
 原私有模块调用未带共享 owner 时，仍用原 File 读取。完整 JournalStore、托管授权
 和 CLI 主入口迁移尚未完成。
 
+[CLI 单次提问 owner](cli-oneshot-execution-owner.md)另在私有候选接线。
+AskOnce 借用原 Spinner 与 ToolRuntime，Agent 改由共用 ExecutionOwner 创建和退场。
+它没有把借用资源冒充自持 SessionResources，也没有将 CLI 后端折成文本 SDK DTO。
+原请求、权限、工具、RunTurn、受理与关账照留；新源码尚待审查和远端原生验收。
+本笔还不是完整 CLI 迁入公开 SDK，完整 AskOnce 端到端证据须另补。
+
 ## 八阶段现状
 
 | 阶段 | 已合范围 | 接下来补什么 |
