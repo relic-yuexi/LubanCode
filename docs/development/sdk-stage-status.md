@@ -18,7 +18,11 @@
 
 下一候选合入[显式 UTF-8 读取](ci-evidence-utf8.md)：只改三份纯测试的九处文本
 读取，原字节、失败门、CASE 与预算保留。原十五项纯测试及 cp1252 默认读取
-重放均过；C++ 新组合仍待本源远端 CI。未合功能分支，未添 PR。
+重放均过。新组合 `80bb443c` 已推回原 CI 分支；[本源远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37468467971)
+仍在跑。Windows 常规腿先后下载 zlib、curl 均报 SSL 连接错误，配置退出，
+尚未编译产品或跑原生验收。后续七处缺件上传另记连带失败，不能算七处产品错误。
+Linux、macOS 的 focused 与安装消费已有通过材料；全量、消毒器及余腿继续收齐。
+这轮没有整批验收，功能分支仍留在已验头。未添 PR。
 
 上一源 `e79eea52` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37439210845)
 已自然结束，整轮失败。1048 件原件逐大小与 SHA256 复核后封账；共
@@ -94,6 +98,12 @@ AskOnce 借用原 Spinner 与 ToolRuntime，Agent 改由共用 ExecutionOwner �
 整束交给 Manager，首条 V3 写完整创建身份。失败和 Close 后均禁 Local 回落；
 候选先收 Writer 和附属写帽，再放锁，非空残账继续保留。现有 Local 场拒隐式转换。
 这笔只完成内部存储链；公开 Managed SDK、执行授权、同 ID 恢复与旧账迁入仍未交付。
+
+后续私有叶 `c66f96c6` 接[内部 Managed 开场链](sdk-managed-opening-stack.md)。
+同一份目录、锁与原发布回执经 Service、Runtime、Ledger 交回 Manager，
+没有另起执行栈。场处于存储阶段，普通提交、执行装配、换场与模型桥均拒绝。
+原十 CASE 保留，补两场同项目真实持锁、首行身份、独立关场和失败收尾源码。
+源码独审与纯检查已过，原生尚未验；当前 `80bb443c` CI 不含这枚后续叶。
 
 ## 八阶段现状
 
