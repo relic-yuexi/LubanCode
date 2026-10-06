@@ -1,4 +1,5 @@
 #include "sdk/lua.hpp"
+#include "sdk/prepare_journal.hpp"
 #include "sdk/plan_write.hpp"
 
 #include <algorithm>
@@ -111,7 +112,7 @@ const Json* Binding(const v3::MessageLine& message) {
 
 Result<std::shared_ptr<SessionLua>> SessionLua::Prepare(
     const std::optional<lua::v1::Selection>& selection, fs::path owned_root,
-    std::string workspace_key, std::string resume_id) {
+    std::string workspace_key, std::string resume_id, std::shared_ptr<SessionPrepareJournal> journal) {
     auto owner = std::shared_ptr<SessionLua>(new SessionLua);
     owner->owned_root_ = std::move(owned_root);
     owner->resume_id_ = std::move(resume_id);
@@ -165,9 +166,9 @@ Result<std::shared_ptr<SessionLua>> SessionLua::Prepare(
         }
         auto stream = v3::FindV3SessionStream(owner->resume_dir_);
         if (!stream) return std::unexpected(Fail("sdk.lua.plan_invalid", "saved V3 stream is unavailable"));
-        auto ledger = v3::ReadV3Ledger(*stream);
+        auto ledger = ReadPrepareJournal(*stream, journal.get());
         if (!ledger) return std::unexpected(Fail("sdk.lua.plan_invalid", ledger.error()));
-        auto binding = owner->CheckBinding(*ledger);
+        auto binding = owner->CheckBinding(**ledger);
         if (!binding) return std::unexpected(binding.error());
     }
     owner->snapshot_.enabled = effective.has_value();

@@ -1,4 +1,5 @@
 #include "sdk/command_jobs_opening.hpp"
+#include "sdk/prepare_journal.hpp"
 
 #include <system_error>
 #include <utility>
@@ -64,7 +65,7 @@ Result<void> ValidateCommandJobOptions(const jobs::v1::CommandOptions& value) {
 
 Result<std::shared_ptr<SessionCommandJobPlan>> SessionCommandJobPlan::Prepare(
     const std::optional<jobs::v1::CommandOptions>& requested, fs::path root,
-    std::string workspace_key, std::string resume_id, std::string cwd) {
+    std::string workspace_key, std::string resume_id, std::string cwd, std::shared_ptr<SessionPrepareJournal> journal) {
     if (requested) { auto valid = ValidateCommandJobOptions(*requested); if (!valid) return std::unexpected(valid.error()); }
     auto owner = std::shared_ptr<SessionCommandJobPlan>(new SessionCommandJobPlan);
     owner->root_ = std::move(root); owner->resume_id_ = std::move(resume_id); owner->cwd_ = std::move(cwd);
@@ -111,11 +112,11 @@ Result<std::shared_ptr<SessionCommandJobPlan>> SessionCommandJobPlan::Prepare(
         }
         auto stream = v3::FindV3SessionStream(owner->resume_dir_);
         if (!stream) return std::unexpected(Invalid("saved V3 journal is unavailable"));
-        auto ledger = v3::ReadV3Ledger(*stream);
+        auto ledger = ReadPrepareJournal(*stream, journal.get());
         if (!ledger) return std::unexpected(Invalid(ledger.error()));
         owner->plan_ = Encode(owner->options_, owner->cwd_).dump();
         owner->hash_ = lubancode::platform::Sha256Hex(owner->plan_);
-        auto bound = owner->CheckBinding(*ledger); if (!bound) return std::unexpected(bound.error());
+        auto bound = owner->CheckBinding(**ledger); if (!bound) return std::unexpected(bound.error());
     } else {
         owner->plan_ = Encode(requested, owner->cwd_).dump();
         owner->hash_ = lubancode::platform::Sha256Hex(owner->plan_);

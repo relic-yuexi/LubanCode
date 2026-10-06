@@ -2724,7 +2724,8 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     (void)source_run_kind; // Lock-preflight values never become adopted facts.
     auto capture = CaptureSessionRecovery(source_dir, workspace_key_, source_id,
         options_.recovery_capture, options_.recovery_factory);
-    if (!capture) return fail("resume.source_corrupt", capture.error());
+    if (!capture) return fail(capture.error() == "recovery.prepare_source_changed"
+        ? "resume.source_changed" : "resume.source_corrupt", capture.error());
     opening_journal = capture->main_journal;
     auto source = v3::ReadV3LedgerCaptured(capture->main_journal, options_.recovery_capture.limits
         ? std::optional(options_.recovery_capture.limits->journal) : std::nullopt);

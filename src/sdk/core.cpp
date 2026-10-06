@@ -42,6 +42,7 @@
 #include "sdk/memory_write.hpp"
 #include "sdk/lua.hpp"
 #include "sdk/operation_ledger.hpp"
+#include "sdk/prepare_journal.hpp"
 #include "sdk/command_jobs.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/search_ripgrep.hpp"
@@ -320,11 +321,12 @@ struct Session::Impl final : rt::InteractionBroker {
         } source_scope{options};
         auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
         if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
+        auto prepare_journal = std::make_shared<detail::SessionPrepareJournal>(identity->workspace_key, options.resume_session_id);
         auto action_opening = detail::SessionActionOpening::Prepare(options.extensions,
-            lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key, options.resume_session_id);
+            lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key, options.resume_session_id, prepare_journal);
         if (!action_opening) return std::unexpected(action_opening.error());
         auto job_plan = detail::SessionCommandJobPlan::Prepare(options.command_jobs,
-            lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key, options.resume_session_id, options.cwd);
+            lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key, options.resume_session_id, options.cwd, prepare_journal);
         if (!job_plan) return std::unexpected(job_plan.error());
         if ((*job_plan)->enabled()) {
             if (std::find(options.builtin_tools.begin(), options.builtin_tools.end(), "run_command") == options.builtin_tools.end())
@@ -334,13 +336,13 @@ struct Session::Impl final : rt::InteractionBroker {
         auto child_plan = detail::SessionSubagentPlan::Prepare(options.subagents,
             lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key,
             options.resume_session_id, options.cwd, options.model,
-            lubancode::ApprovalModeMachineName(Mode(options.approval_mode)), options.max_steps_per_turn);
+            lubancode::ApprovalModeMachineName(Mode(options.approval_mode)), options.max_steps_per_turn, 0, prepare_journal);
         if (!child_plan) return std::unexpected(child_plan.error());
         if (named_result_factory && (*child_plan)->enabled())
             return std::unexpected(Failure("sdk.named_results.cross_session_unsupported", "named result provider does not yet support child Sessions"));
         auto skill_module = detail::SessionSkills::Prepare(options.skills,
             lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key,
-            options.resume_session_id, options.system_prompt);
+            options.resume_session_id, options.system_prompt, prepare_journal);
         if (!skill_module) return std::unexpected(skill_module.error());
         auto memory_candidate = detail::SessionMemory::Prepare(options.memory,
             lubancode::tools::Utf8ToPath(roots.data_root), *identity, options.resume_session_id, *cwd);
@@ -352,7 +354,7 @@ struct Session::Impl final : rt::InteractionBroker {
         memory_write_module = std::move(*write_candidate);
         auto lua_module = detail::SessionLua::Prepare(options.lua,
             lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key,
-            options.resume_session_id);
+            options.resume_session_id, prepare_journal);
         if (!lua_module) return std::unexpected(lua_module.error());
         auto prepared_registry = std::make_unique<lubancode::tools::ToolRegistry>();
         std::shared_ptr<lubancode::tools::BundledRipgrepRunner> search_runner;
@@ -530,6 +532,8 @@ struct Session::Impl final : rt::InteractionBroker {
         launch.v3_system_content = (*skill_module)->EffectiveSystem();
         launch.recovery_capture.limits = recovery_limits;
         launch.recovery_capture.memory_metadata = memory_module->RequiresRecoveryMetadata();
+        launch.recovery_capture.expected_main = prepare_journal->expectation();
+        prepare_journal.reset(); // Only the small witness crosses into runtime options.
         launch.memory_capability_factory = memory_blob_factory;
         launch.named_result_factory = named_result_factory;
         auto skills_opening = (*skill_module)->OpeningParticipant();

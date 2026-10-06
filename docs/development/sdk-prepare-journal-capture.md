@@ -19,11 +19,15 @@ verification failure wins over cleanup exceptions; successful verification still
 requires checked Close. Capture/verification errors stay cached for this opening,
 without converting an ignored soft probe into a fabricated successful witness.
 The original unbounded preflight File policy remains; later locked recovery keeps
-its existing finite limits. Owned ledger values/copies can coexist; no aggregate
+its existing finite limits. Five modules share a const ledger view, but captured
+bytes, parsed lines and the later locked ledger can coexist; no aggregate
 resident-memory guarantee is claimed.
 
 Only a successfully verified capture produces an internal witness: actual
-workspace/session/main scope, captured byte count and SHA256. It is carried by
+expected workspace/session/main resource scope, captured byte count and SHA256.
+The witness does not certify that the ledger claims this Session: the original
+module and locked-manager scope checks retain that responsibility and error
+priority, including a valid foreign main stream. It is carried by
 the existing private recovery request. CaptureSessionRecovery compares it against
 its own actual MainV3 reference bytes after original reference validation and
 before any existing recovery factory. The factory cannot replace those bytes.

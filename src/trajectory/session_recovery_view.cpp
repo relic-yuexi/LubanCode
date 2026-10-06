@@ -276,6 +276,15 @@ std::expected<SessionRecoveryCapture, std::string> CaptureSessionRecovery(
         }
         auto valid = CheckRecoveryView(view, request);
         if (!valid) return fail(valid.error());
+        if (request.expected_main) {
+            const auto& expected = *request.expected_main;
+            const auto* actual = view.Find(RecoveryKeyKind::MainV3);
+            if (expected.workspace_key != view.workspace_key || expected.session_id != view.session_id ||
+                expected.stream != view.stream || !actual || actual->state != RecoveryReadState::Value ||
+                !actual->error.empty() || actual->bytes.size() != expected.bytes ||
+                hooks::Sha256Hex(actual->bytes) != expected.sha256)
+                return fail("recovery.prepare_source_changed");
+        }
         if (factory) {
             auto adapted = factory(view);
             if (!adapted) return fail(adapted.error());

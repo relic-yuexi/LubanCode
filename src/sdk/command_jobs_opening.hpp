@@ -10,13 +10,14 @@
 #include "trajectory/v3/reader.hpp"
 
 namespace lubancore::detail {
+class SessionPrepareJournal;
 
 class SessionCommandJobPlan final : public std::enable_shared_from_this<SessionCommandJobPlan> {
 public:
     static Result<std::shared_ptr<SessionCommandJobPlan>> Prepare(
         const std::optional<jobs::v1::CommandOptions>& requested,
         std::filesystem::path root, std::string workspace_key, std::string resume_id,
-        std::string cwd);
+        std::string cwd, std::shared_ptr<SessionPrepareJournal> journal = {});
     bool enabled() const { return options_.has_value(); }
     const std::optional<jobs::v1::CommandOptions>& options() const { return options_; }
     const std::string& cwd() const { return cwd_; }

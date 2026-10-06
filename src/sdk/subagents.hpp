@@ -15,6 +15,7 @@
 #include "trajectory/opening.hpp"
 
 namespace lubancore::detail {
+class SessionPrepareJournal;
 
 // No writer/backend borrow. The strict inspector owns its bounded historical
 // check; SDK adds only the accepted operation/session envelope.
@@ -32,7 +33,7 @@ public:
         const std::optional<subagents::v1::Options>& options,
         std::filesystem::path root, std::string workspace_key, std::string resume_id,
         std::string cwd, std::string parent_model, std::string permission_floor,
-        int parent_max_steps, int parent_max_wall_seconds = 0);
+        int parent_max_steps, int parent_max_wall_seconds = 0, std::shared_ptr<SessionPrepareJournal> journal = {});
     Result<void> BindTools(const lubancode::tools::ToolRegistry& registry);
     bool enabled() const { return snapshot_.enabled; }
     subagents::v1::Snapshot Describe() const { return snapshot_; }

@@ -1,4 +1,5 @@
 #include "sdk/skills.hpp"
+#include "sdk/prepare_journal.hpp"
 #include "sdk/plan_write.hpp"
 
 #include <algorithm>
@@ -95,7 +96,7 @@ const Json* SkillsBinding(const v3::MessageLine& message) {
 
 Result<std::shared_ptr<SessionSkills>> SessionSkills::Prepare(
     const std::optional<skills::v1::Selection>& selection, fs::path owned_root,
-    std::string workspace_key, std::string resume_id, std::string user_system) {
+    std::string workspace_key, std::string resume_id, std::string user_system, std::shared_ptr<SessionPrepareJournal> journal) {
     auto result = std::shared_ptr<SessionSkills>(new SessionSkills);
     result->owned_root_ = std::move(owned_root);
     result->resume_id_ = std::move(resume_id);
@@ -139,9 +140,9 @@ Result<std::shared_ptr<SessionSkills>> SessionSkills::Prepare(
         }
         auto stream = v3::FindV3SessionStream(result->expected_resume_dir_);
         if (!stream) return std::unexpected(Fail("sdk.skill.plan_invalid", "saved V3 journal is unavailable"));
-        auto ledger = v3::ReadV3Ledger(*stream);
+        auto ledger = ReadPrepareJournal(*stream, journal.get());
         if (!ledger) return std::unexpected(Fail("sdk.skill.plan_invalid", ledger.error()));
-        auto bound = result->CheckBinding(*ledger);
+        auto bound = result->CheckBinding(**ledger);
         if (!bound) return std::unexpected(bound.error());
     }
     if (selection) {
