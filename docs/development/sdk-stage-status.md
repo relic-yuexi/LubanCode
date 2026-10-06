@@ -121,6 +121,21 @@ AskOnce 借用原 Spinner 与 ToolRuntime，Agent 改由共用 ExecutionOwner �
 本 owner 观察，不能充跨进程提交证据。新 CPP 已登记真实 runtime 编译清单。
 源码独审通过，本源尚未跑原生；公开授权、执行与同 ID 恢复仍另接。
 
+下一组合接[公开 Managed 存储视图](sdk-managed-storage-views.md)：宿主登记
+Project，按原 Policy 建场，再按实际完整 scope 取得 View、读身份和关场。
+仍复用原 Impl、Service 与 V3；监督登记强持活场，View 退出不关场。
+每口查当前权限，通知只使代次失效；关闭锁等待后也核当次代次。
+独审拦下弱项目登记过期后可换 Policy，以及验收误用 Gate 方法两处漏口。
+[项目登记寿命补片](sdk-managed-project-registration.md)强持配置到 Shutdown，
+项目和场登记均锁外退休，补真实句柄退尽后原版本仍拒换 Policy 的验收。
+原十三 CASE、预算与安装命令保留；消费者实际开三场并保存 ownership、
+V3 首行和锁原件。本源原生尚未执行；没有开放 Submit、Run、恢复或结果查询。
+
+[Worker 版本门](worker-protocol-compatibility.md)也收入下一组合。旧请求不带
+版本仍按 v1；显式版本须为整数 1，未知版本在方法、附件和 SDK 调用前拒绝。
+健康信息补支持版本列表。原十八场进程名单与时限保留，补实际未初始化、
+现有附件和 Shutdown 请求的隔离验收；本源仍待远端真实进程结果。
+
 ## 八阶段现状
 
 | 阶段 | 已合范围 | 接下来补什么 |

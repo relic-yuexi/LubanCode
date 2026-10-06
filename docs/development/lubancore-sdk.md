@@ -15,6 +15,9 @@ SDK 与 AppServer 共用会话执行对象，多会话隔离与寿命验收也�
 可信 C++ 扩展已由 [PR #255](https://github.com/relic-yuexi/LubanCode/pull/255) 交付，
 沿用现有中间件核；每场实例、冻结装配、真实上下文接纳和整场卸载均已验收。
 公开安装入口为 `core.hpp`；各模块另供公开头，均只依赖 SDK 和标准库。
+当前候选另供 `managed.hpp`，合同见[Managed 存储视图](sdk-managed-storage-views.md)。
+它开放项目登记、授权建场、身份读取与关场，沿原会话栈监督存储寿命；
+提交、执行和恢复尚未开放。本源状态与远端验收仍见阶段进度。
 持久工具结果查询与双层投影已由 [#257](https://github.com/relic-yuexi/LubanCode/pull/257)
 合入功能分支，本批远端 CI 已过。Worker [#245](https://github.com/relic-yuexi/LubanCode/pull/245)
 已接公开接口，三平台各验真实搬迁进程 18 场，已合入功能分支 `a151d8b4`。
