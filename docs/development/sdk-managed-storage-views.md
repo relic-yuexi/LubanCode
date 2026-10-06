@@ -21,12 +21,14 @@ OpenManagedSession 先查项目范围 OpenSession，取得真实 session ID；�
 Session::Impl::InitializeStorageManaged 消费 c66 真 bundle，沿原 SessionService
 开 V3，不调用原执行 Initialize、Start 或 Resources/Agent。实际 publication、
 V3首行身份与 run核对后，留一份纯值快照。发表前再查授权、代次与 Shutdown。
+首行另记并回核 SDK managed-storage layout/version，不把这间存储场冒充已准入执行场。
 通知只使代次失效，不代表 Allow，也不在通知栈调用 Close 或外部 Policy。
 
 成功 Open 只交实际 session_id 回执，证明建场，不授读或关场权。宿主拿
 这枚 ID为完整场范围 Grant，再 AcquireManagedView。取 View 查 AcquireView；
 ReadIdentity 每次前后查 ReadSession，Close 每次查 CloseSession。拒绝返回
 稳定错误，不回空数据，不带异常正文或内部根路径。已经交出的 ID无法追回。
+Close 等到原串行锁后再核当次代次，才允许停接单或关账；Policy仍在锁外调用。
 外部 Policy与文件写入不原子化，候选在晚拒绝时真关闭，保原归属/账残留。
 
 Runtime 的 Managed 监督登记强持现有 Session::Impl，并进入原 weak session
@@ -50,3 +52,5 @@ Policy与 capture析构不在 Runtime/Impl状态锁下运行。公共 Managed授
 与开场竞态、关闭后读权及回调重入。原 CASE/断言/时限不删不松。
 新头须真实安装、能由新宿主仅用 SDK/STL消费。本地只查文本、文档与纯数据；
 原生、编译与 HTTP只走远端 CI。
+等待 close_mutex 期间通知这一分支目前只核源码；公开面没有受控慢关闭口，
+本片不伪造辅助函数调用或时序碰运气，原生覆盖仍待后续真实接点。

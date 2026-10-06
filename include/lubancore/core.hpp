@@ -24,6 +24,7 @@
 #include <lubancore/web_fetch.hpp>
 #include <lubancore/jobs.hpp>
 #include <lubancore/named_results.hpp>
+#include <lubancore/managed.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
@@ -266,6 +267,7 @@ private:
     explicit Session(std::shared_ptr<Impl>);
     std::shared_ptr<Impl> impl_;
     friend class Runtime;
+    friend class managed::v1::View;
 };
 
 class LUBANCORE_API Runtime {
@@ -275,6 +277,14 @@ public:
     Runtime(const Runtime&) = delete;
     Runtime& operator=(const Runtime&) = delete;
     Result<std::shared_ptr<Session>> OpenSession(SessionOptions);
+    // Trusted configuration only. Returned binding is ready for the host's
+    // existing PolicyProvider; registration never authenticates or grants access.
+    Result<std::shared_ptr<managed::v1::Project>> RegisterManagedProject(managed::v1::ProjectOptions);
+    Result<managed::v1::OpenReceipt> OpenManagedSession(
+        std::shared_ptr<managed::v1::Project>, authorization::v1::AuthenticatedSubject);
+    Result<std::shared_ptr<managed::v1::View>> AcquireManagedView(
+        std::shared_ptr<managed::v1::Project>, authorization::v1::AuthenticatedSubject,
+        std::string session_id);
     // Closes all live sessions and preserves the first close error, including
     // errors from sessions whose final public handle has already been dropped.
     Result<void> Shutdown();

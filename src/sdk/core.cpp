@@ -6,15 +6,18 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
 
 #include "agent/agent.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "platform/atomic_write.hpp"
 #include "platform/sha256.hpp"
+#include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"
 #include "runtime/assembly/backend.hpp"
 #include "runtime/assembly/builtin_tools.hpp"
@@ -46,6 +49,7 @@
 #include "sdk/prepare_journal.hpp"
 #include "sdk/command_jobs.hpp"
 #include "tools/path_utils.hpp"
+#include "tools/session_utils.hpp"
 #include "tools/search_ripgrep.hpp"
 #include "tools/web_fetch.hpp"
 #include "trajectory/v3/reader.hpp"
@@ -133,7 +137,78 @@ std::string Status(OperationState state) {
     }
 }
 
+namespace auth = authorization::v1;
+using ManagedProjectKey = std::tuple<std::string, std::string, std::string, std::uint64_t>;
+using ManagedSessionKey = std::pair<ManagedProjectKey, std::string>;
+ManagedProjectKey ProjectKey(const auth::ProjectBinding& binding) {
+    return {binding.tenant_id, binding.project_id, binding.workspace_key, binding.version};
+}
+auth::ResourceScope ManagedScope(const auth::ProjectBinding& binding, const std::string& id = {}) {
+    return {binding.tenant_id, binding.project_id, binding.workspace_key, id};
+}
+bool ManagedOpaqueId(const std::string& value) {
+    return !value.empty() && value.size() <= 512 && lubancode::platform::IsValidUtf8(value) &&
+        std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; });
+}
+struct ManagedPolicySource {
+    std::shared_ptr<auth::PolicyProvider>& source;
+    ~ManagedPolicySource() { detail::PolicyCallbackScope scope; source.reset(); }
+};
+struct ManagedProjectState {
+    auth::ProjectBinding binding;
+    RuntimeOptions roots;
+    fs::path cwd;
+    lubancode::workspace::WorkspaceIdentity workspace;
+    std::shared_ptr<auth::PolicyProvider> policy;
+    std::shared_ptr<const int> runtime_tag;
+    ~ManagedProjectState() { detail::PolicyCallbackScope scope; policy.reset(); }
+};
+struct ManagedControl {
+    std::shared_ptr<const ManagedProjectState> project;
+    auth::ResourceScope resource;
+    std::atomic<std::uint64_t> generation{1};
+    std::atomic<bool> invalid{false};
+    std::unique_ptr<auth::PolicySubscription> subscription;
+    void Invalidate() noexcept {
+        if (generation.fetch_add(1, std::memory_order_acq_rel) == std::numeric_limits<std::uint64_t>::max())
+            invalid.store(true, std::memory_order_release);
+    }
+    bool SameGeneration(std::uint64_t value) const noexcept {
+        return !invalid.load(std::memory_order_acquire) && generation.load(std::memory_order_acquire) == value;
+    }
+};
+struct ManagedDecision { auth::Decision decision; std::uint64_t generation = 0; };
+Result<auth::Decision> CheckManagedPermission(const ManagedProjectState& project,
+    const auth::AuthenticatedSubject& subject, const auth::ResourceScope& resource, auth::Action action) {
+    if (!lubancode::platform::IsValidUtf8(subject.tenant_id) || !lubancode::platform::IsValidUtf8(subject.user_id) ||
+        !lubancode::platform::IsValidUtf8(subject.credential_id))
+        return std::unexpected(Failure("sdk.authorization.subject_invalid"));
+    auto decision = auth::Authorize(project.policy, {subject, resource, std::nullopt, project.binding.version}, action);
+    if (!decision) return std::unexpected(decision.error());
+    if (!decision->allowed) return std::unexpected(Failure("sdk.authorization.denied"));
+    return *decision;
+}
+Result<ManagedDecision> CheckManagedControl(const ManagedControl& control,
+    const auth::AuthenticatedSubject& subject, auth::Action action, bool project_scope = false) {
+    const auto generation = control.generation.load(std::memory_order_acquire);
+    if (!control.SameGeneration(generation))
+        return std::unexpected(Failure("sdk.managed.authorization_changed"));
+    auto checked = CheckManagedPermission(*control.project, subject,
+        project_scope ? ManagedScope(control.project->binding) : control.resource, action);
+    if (!checked) return std::unexpected(checked.error());
+    if (!control.SameGeneration(generation))
+        return std::unexpected(Failure("sdk.managed.authorization_changed"));
+    return ManagedDecision{*checked, generation};
+}
+
 } // namespace
+
+struct managed::v1::Project::Impl {
+    std::shared_ptr<const ManagedProjectState> state;
+};
+managed::v1::Project::Project(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
+managed::v1::Project::~Project() = default;
+auth::ProjectBinding managed::v1::Project::binding() const { return impl_->state->binding; }
 
 struct EventStream::Impl {
     explicit Impl(std::shared_ptr<detail::EventQueueState> value) : queue(std::move(value)) {}
@@ -163,6 +238,10 @@ struct Session::Impl final : rt::InteractionBroker {
     std::shared_ptr<std::atomic<bool>> runtime_stopping;
     std::string session_id;
     fs::path session_dir;
+    // Managed storage uses this same owner/Close machinery, without an Agent or
+    // worker. Views retain owned identity values, never a borrowed Service.
+    std::shared_ptr<ManagedControl> managed_control;
+    std::optional<managed::v1::Identity> managed_identity;
     // RequestClose may race a different caller finishing Close. A short mutex
     // snapshot keeps the service alive while cancellation is signalled.
     std::shared_ptr<rt::SessionService> service;
@@ -278,6 +357,72 @@ struct Session::Impl final : rt::InteractionBroker {
     bool AnswerQuestion(const rt::InteractionRequestId&, const rt::QuestionResponse&) override { return false; }
     void CancelApprovals() {
         approvals.CancelAll();
+    }
+
+    Result<void> InitializeStorageManaged(std::shared_ptr<ManagedControl> control,
+        lubancode::trajectory::ManagedSessionDirectory admitted,
+        const auth::AuthenticatedSubject& creator, std::uint64_t opening_revision) {
+        managed_control = std::move(control);
+        const auto& project = *managed_control->project;
+        roots = project.roots;
+        options.cwd = lubancode::tools::PathToUtf8(project.cwd);
+        rt::SessionLaunchRequest launch;
+        launch.workspace_identity = project.workspace;
+        launch.workspaces_root = lubancode::tools::Utf8ToPath(project.roots.data_root) / "workspaces";
+        launch.cwd_utf8 = options.cwd;
+        launch.launch_cwd = options.cwd;
+        launch.lubancode_version = Version();
+        launch.wire_name = "managed-storage";
+        launch.v3_opening_participant = [](const lubancode::trajectory::V3OpeningContext&)
+            -> std::expected<Json, std::string> {
+            return Json{{"hostBindings", {{"managedStorage", {{"layout", "lubancore.sdk.managed-storage"}, {"version", 1}}}}}};
+        };
+        lubancode::trajectory::ManagedSessionCreationAudit audit;
+        audit.tenant_id = creator.tenant_id; audit.user_id = creator.user_id;
+        audit.credential_id = creator.credential_id;
+        audit.actor_kind = creator.actor_kind == auth::ActorKind::User ? "user" :
+                          creator.actor_kind == auth::ActorKind::Agent ? "agent" : "service";
+        audit.opening_policy_revision = opening_revision;
+        service = std::make_shared<rt::SessionService>(std::move(launch), std::move(admitted), audit);
+        if (!service->runtime() || service->admission_mode() != rt::SessionAdmissionMode::ManagedStorageOnly)
+            return std::unexpected(Failure("sdk.managed.storage_open_failed"));
+        auto* trajectory = service->trajectory();
+        auto* writer = trajectory->v3_main_writer();
+        const auto publication = trajectory->managed_publication();
+        const auto& scope = managed_control->resource;
+        const lubancode::trajectory::ManagedSessionOwnership expected{
+            scope.tenant_id, scope.project_id, scope.workspace_key, scope.session_id, project.binding.version};
+        if (!writer || !publication || publication->expected != expected ||
+            publication->knowledge != lubancode::trajectory::ManagedSessionOwnershipPublication::Knowledge::Committed ||
+            !publication->native || !publication->native->has_value() ||
+            publication->native->value().outcome != lubancode::platform::WriteOutcome::CommittedDurable)
+            return std::unexpected(Failure("sdk.managed.identity_invalid"));
+        const auto ledger = lubancode::trajectory::v3::ReadV3LedgerLive(*writer);
+        if (!ledger || ledger->session_id != scope.session_id || ledger->run_id != writer->run_id())
+            return std::unexpected(Failure("sdk.managed.identity_invalid"));
+        const auto* system = ledger->messages.empty() ? nullptr : &ledger->messages.front();
+        const Json expected_metadata{{"schemaVersion", 1}, {"mode", "Managed"},
+            {"tenantId", scope.tenant_id}, {"projectId", scope.project_id},
+            {"workspaceKey", scope.workspace_key}, {"sessionId", scope.session_id},
+            {"bindingVersion", project.binding.version},
+            {"creationSubject", {{"tenantId", creator.tenant_id}, {"userId", creator.user_id},
+                {"actorKind", audit.actor_kind}, {"credentialId", creator.credential_id}}},
+            {"openingPolicyRevision", opening_revision}};
+        if (!system || system->seq != 1 || system->message.value("role", std::string()) != "system" ||
+            !system->system_meta || !system->system_meta->contains("managedSession") ||
+            system->system_meta->at("managedSession") != expected_metadata)
+            return std::unexpected(Failure("sdk.managed.identity_invalid"));
+        const Json storage_profile{{"layout", "lubancore.sdk.managed-storage"}, {"version", 1}};
+        if (!system->system_meta->contains("hostBindings") ||
+            !system->system_meta->at("hostBindings").is_object() ||
+            !system->system_meta->at("hostBindings").contains("managedStorage") ||
+            system->system_meta->at("hostBindings").at("managedStorage") != storage_profile)
+            return std::unexpected(Failure("sdk.managed.identity_invalid"));
+        session_id = ledger->session_id;
+        session_dir = trajectory->session_dir();
+        managed_identity = managed::v1::Identity{scope, project.binding.version, ledger->run_id,
+            creator, opening_revision, managed::v1::StorageState::Open};
+        return {};
     }
 
     Result<void> Initialize() {
@@ -1560,9 +1705,11 @@ struct Session::Impl final : rt::InteractionBroker {
             service_to_stop->RequestExecutionShutdown();
         }
     }
-    Result<void> Close() {
+    Result<void> Close(const ManagedControl* managed_guard = nullptr, std::uint64_t permission_generation = 0) {
         if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider() || lubancode::trajectory::InNamedResultProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
         std::lock_guard close_lock(close_mutex);
+        if (managed_guard && (managed_control.get() != managed_guard || !managed_guard->SameGeneration(permission_generation)))
+            return std::unexpected(Failure("sdk.managed.authorization_changed"));
         {
             std::lock_guard lock(mutex);
             if (closed) return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
@@ -1834,6 +1981,29 @@ Result<results::v1::SavedSnapshot> Session::ReadToolResult(
 }
 
 struct Runtime::Impl {
+    struct ManagedRegistry {
+        std::mutex mutex;
+        std::shared_ptr<const int> tag = std::make_shared<const int>(0);
+        std::map<ManagedProjectKey, std::weak_ptr<const ManagedProjectState>> projects;
+        std::map<ManagedSessionKey, std::shared_ptr<Session::Impl>> sessions;
+    };
+    struct ManagedOpening {
+        Impl* runtime;
+        bool admitted = false;
+        ~ManagedOpening() {
+            if (!admitted) return;
+            std::lock_guard lock(runtime->mutex);
+            --runtime->openings;
+            runtime->opening_cv.notify_all();
+        }
+    };
+    Result<std::shared_ptr<ManagedRegistry>> EnterManaged(ManagedOpening& opening) {
+        std::lock_guard lock(mutex);
+        if (closed) return std::unexpected(Failure("sdk.runtime.closed"));
+        if (!managed_registry) managed_registry = std::make_shared<ManagedRegistry>();
+        ++openings; opening.admitted = true;
+        return managed_registry;
+    }
     RuntimeOptions options;
     std::mutex mutex;
     std::condition_variable opening_cv;
@@ -1842,7 +2012,62 @@ struct Runtime::Impl {
     std::shared_ptr<std::atomic<bool>> stopping = std::make_shared<std::atomic<bool>>(false);
     std::vector<std::weak_ptr<Session::Impl>> sessions;
     std::shared_ptr<CloseErrors> close_errors = std::make_shared<CloseErrors>();
+    std::shared_ptr<ManagedRegistry> managed_registry; // Lazy; Local Runtime is unchanged.
 };
+
+struct managed::v1::View::Impl {
+    std::shared_ptr<Session::Impl> owner;
+    std::shared_ptr<ManagedControl> control;
+    auth::AuthenticatedSubject subject;
+    std::function<void()> retire_closed_owner; // Weak registry/owner; never a Runtime borrow.
+};
+managed::v1::View::View(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
+managed::v1::View::~View() = default;
+Result<managed::v1::Identity> managed::v1::View::ReadIdentity() const {
+    if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider() ||
+        lubancode::trajectory::InNamedResultProvider())
+        return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    try {
+        const auto view = impl_;
+        auto allowed = CheckManagedControl(*view->control, view->subject, auth::Action::ReadSession);
+        if (!allowed) return std::unexpected(allowed.error());
+        Identity result;
+        {
+            std::lock_guard lock(view->owner->mutex);
+            if (!view->owner->managed_identity) return std::unexpected(Failure("sdk.managed.identity_invalid"));
+            result = *view->owner->managed_identity;
+        }
+        allowed = CheckManagedControl(*view->control, view->subject, auth::Action::ReadSession);
+        if (!allowed) return std::unexpected(allowed.error());
+        {
+            std::lock_guard lock(view->owner->mutex);
+            if (!view->control->SameGeneration(allowed->generation))
+                return std::unexpected(Failure("sdk.managed.authorization_changed"));
+            result.state = view->owner->closed ? StorageState::Closed :
+                           view->owner->closing ? StorageState::Closing : StorageState::Open;
+        }
+        return result;
+    } catch (...) { return std::unexpected(Failure("sdk.managed.read_failed")); }
+}
+Result<void> managed::v1::View::Close() {
+    if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider() ||
+        lubancode::trajectory::InNamedResultProvider())
+        return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    try {
+        const auto view = impl_;
+        const auto allowed = CheckManagedControl(*view->control, view->subject, auth::Action::CloseSession);
+        if (!allowed) return std::unexpected(allowed.error());
+        if (!view->control->SameGeneration(allowed->generation))
+            return std::unexpected(Failure("sdk.managed.authorization_changed"));
+        const auto closed = view->owner->Close(view->control.get(), allowed->generation);
+        bool retired = false;
+        { std::lock_guard lock(view->owner->mutex); retired = view->owner->closed; }
+        if (retired) view->retire_closed_owner();
+        if (!closed) return std::unexpected(Failure(closed.error().code == "sdk.managed.authorization_changed"
+            ? "sdk.managed.authorization_changed" : "sdk.managed.close_failed"));
+        return {};
+    } catch (...) { return std::unexpected(Failure("sdk.managed.close_failed")); }
+}
 Runtime::Runtime(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 Runtime::~Runtime() { (void)Shutdown(); }
 Result<std::unique_ptr<Runtime>> Runtime::Create(RuntimeOptions options) {
@@ -1857,6 +2082,184 @@ Result<std::unique_ptr<Runtime>> Runtime::Create(RuntimeOptions options) {
         impl->options = std::move(options);
         return std::unique_ptr<Runtime>(new Runtime(std::move(impl)));
     } catch (const std::exception& error) { return std::unexpected(Failure("sdk.runtime.create_failed", error.what())); }
+}
+
+Result<std::shared_ptr<managed::v1::Project>> Runtime::RegisterManagedProject(managed::v1::ProjectOptions options) {
+    Impl::ManagedOpening opening{impl_.get()};
+    ManagedPolicySource policy_source{options.policy};
+    if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider() ||
+        lubancode::trajectory::InNamedResultProvider())
+        return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    try {
+        if (!ManagedOpaqueId(options.binding.tenant_id) || !ManagedOpaqueId(options.binding.project_id) ||
+            (!options.binding.workspace_key.empty() && !ManagedOpaqueId(options.binding.workspace_key)) ||
+            options.binding.version == 0 || !options.policy)
+            return std::unexpected(Failure("sdk.managed.project_invalid"));
+        auto entered = impl_->EnterManaged(opening);
+        if (!entered) return std::unexpected(entered.error());
+        auto registry = *entered;
+        const auto cwd = AbsoluteDirectory(options.cwd, false);
+        if (!cwd) return std::unexpected(Failure("sdk.managed.project_invalid"));
+        const auto configured_root = lubancode::tools::Utf8ToPath(impl_->options.data_root) / "managed" /
+            lubancode::platform::Sha256Hex(options.binding.tenant_id) / "projects" /
+            lubancode::platform::Sha256Hex(options.binding.project_id);
+        const auto data = AbsoluteDirectory(lubancode::tools::PathToUtf8(lubancode::platform::FileIoPath(configured_root)), true);
+        if (!data) return std::unexpected(Failure("sdk.managed.project_invalid"));
+        const auto workspace = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, *data);
+        if (!workspace || !workspace->valid()) return std::unexpected(Failure("sdk.managed.project_invalid"));
+        if (!options.binding.workspace_key.empty() && options.binding.workspace_key != workspace->workspace_key)
+            return std::unexpected(Failure("sdk.managed.workspace_mismatch"));
+        options.binding.workspace_key = workspace->workspace_key;
+        if (!ManagedOpaqueId(options.binding.workspace_key)) return std::unexpected(Failure("sdk.managed.project_invalid"));
+        auto registered = lubancode::trajectory::TrajectoryDirectory::CreateWorkspace(
+            *data / "workspaces", *workspace, lubancode::trajectory::SessionManagerClock{}.WallMs());
+        if (!registered) return std::unexpected(Failure("sdk.managed.project_registration_failed"));
+        auto candidate = std::make_shared<ManagedProjectState>();
+        candidate->binding = options.binding;
+        candidate->cwd = *cwd; candidate->workspace = *workspace;
+        candidate->roots = {lubancode::tools::PathToUtf8(*data), impl_->options.resource_root};
+        candidate->policy = std::move(options.policy);
+        candidate->runtime_tag = registry->tag;
+        std::shared_ptr<const ManagedProjectState> selected;
+        {
+            std::lock_guard runtime_lock(impl_->mutex);
+            if (impl_->closed) return std::unexpected(Failure("sdk.runtime.closed"));
+            std::lock_guard registry_lock(registry->mutex);
+            auto& existing = registry->projects[ProjectKey(candidate->binding)];
+            selected = existing.lock();
+            if (selected && (selected->policy != candidate->policy || selected->cwd != candidate->cwd ||
+                             selected->roots.data_root != candidate->roots.data_root))
+                return std::unexpected(Failure("sdk.managed.project_conflict"));
+            if (!selected) { selected = candidate; existing = selected; }
+        }
+        auto value = std::make_shared<managed::v1::Project::Impl>();
+        value->state = std::move(selected);
+        return std::shared_ptr<managed::v1::Project>(new managed::v1::Project(std::move(value)));
+    } catch (...) { return std::unexpected(Failure("sdk.managed.project_registration_failed")); }
+}
+
+Result<managed::v1::OpenReceipt> Runtime::OpenManagedSession(
+    std::shared_ptr<managed::v1::Project> project, auth::AuthenticatedSubject subject) {
+    Impl::ManagedOpening opening{impl_.get()};
+    auto owned_project = std::move(project);
+    if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider() ||
+        lubancode::trajectory::InNamedResultProvider())
+        return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    try {
+        auto entered = impl_->EnterManaged(opening);
+        if (!entered) return std::unexpected(entered.error());
+        const auto registry = *entered;
+        if (!owned_project || owned_project->impl_->state->runtime_tag != registry->tag)
+            return std::unexpected(Failure("sdk.managed.project_foreign"));
+        const auto configured = owned_project->impl_->state;
+        auto allowed = CheckManagedPermission(*configured, subject, ManagedScope(configured->binding), auth::Action::OpenSession);
+        if (!allowed) return std::unexpected(allowed.error());
+        const std::string id = lubancode::tools::NowIdTimestamp() + "-" + lubancode::trajectory::SessionManagerClock{}.Random6();
+        auto control = std::make_shared<ManagedControl>();
+        control->project = configured;
+        control->resource = ManagedScope(configured->binding, id);
+        const std::weak_ptr<ManagedControl> weak = control;
+        auto subscription = auth::SubscribeChanges(configured->policy, control->resource,
+            [weak](const auth::PolicyChange&) { if (const auto live = weak.lock()) live->Invalidate(); });
+        if (!subscription) return std::unexpected(subscription.error());
+        control->subscription = std::move(*subscription);
+        auto checked = CheckManagedControl(*control, subject, auth::Action::OpenSession, true);
+        if (!checked) return std::unexpected(checked.error());
+        if (impl_->stopping->load()) return std::unexpected(Failure("sdk.runtime.closed"));
+        const lubancode::trajectory::ManagedSessionOwnership ownership{control->resource.tenant_id,
+            control->resource.project_id, control->resource.workspace_key, id, configured->binding.version};
+        if (!control->SameGeneration(checked->generation))
+            return std::unexpected(Failure("sdk.managed.authorization_changed"));
+        auto pending = lubancode::trajectory::ManagedSessionReservation::Reserve(
+            lubancode::tools::Utf8ToPath(configured->roots.data_root) / "workspaces", ownership,
+            lubancode::trajectory::SessionManagerClock{}.LockOwner());
+        if (!pending) return std::unexpected(Failure("sdk.managed.storage_open_failed"));
+        const auto publication = (*pending)->PublishOwnership();
+        if (publication.knowledge != lubancode::trajectory::ManagedSessionOwnershipPublication::Knowledge::Committed)
+            return std::unexpected(Failure("sdk.managed.ownership_unconfirmed"));
+        auto directory = (*pending)->Finish();
+        if (!directory) return std::unexpected(Failure("sdk.managed.storage_open_failed"));
+        auto execution = std::make_shared<Session::Impl>();
+        execution->close_errors = impl_->close_errors;
+        execution->runtime_stopping = impl_->stopping;
+        auto initialized = execution->InitializeStorageManaged(control, std::move(*directory), subject, checked->decision.revision);
+        if (!initialized) return std::unexpected(initialized.error());
+        checked = CheckManagedControl(*control, subject, auth::Action::OpenSession, true);
+        if (!checked) return std::unexpected(checked.error());
+        managed::v1::OpenReceipt receipt{execution->session_id};
+        const ManagedSessionKey key{ProjectKey(configured->binding), execution->session_id};
+        {
+            std::lock_guard runtime_lock(impl_->mutex);
+            if (impl_->closed) return std::unexpected(Failure("sdk.runtime.closed"));
+            if (!control->SameGeneration(checked->generation))
+                return std::unexpected(Failure("sdk.managed.authorization_changed"));
+            std::erase_if(impl_->sessions, [](const auto& old) { return old.expired(); });
+            impl_->sessions.push_back(execution);
+            std::lock_guard registry_lock(registry->mutex);
+            if (!registry->sessions.emplace(key, execution).second)
+                return std::unexpected(Failure("sdk.managed.session_conflict"));
+        }
+        return receipt;
+    } catch (...) { return std::unexpected(Failure("sdk.managed.open_failed")); }
+}
+
+Result<std::shared_ptr<managed::v1::View>> Runtime::AcquireManagedView(
+    std::shared_ptr<managed::v1::Project> project, auth::AuthenticatedSubject subject, std::string id) {
+    Impl::ManagedOpening opening{impl_.get()};
+    auto owned_project = std::move(project);
+    if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider() ||
+        lubancode::trajectory::InNamedResultProvider())
+        return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+    try {
+        auto entered = impl_->EnterManaged(opening);
+        if (!entered) return std::unexpected(entered.error());
+        const auto registry = *entered;
+        if (!owned_project || owned_project->impl_->state->runtime_tag != registry->tag)
+            return std::unexpected(Failure("sdk.managed.project_foreign"));
+        if (!ValidId(id)) return std::unexpected(Failure("sdk.managed.session_invalid"));
+        const auto configured = owned_project->impl_->state;
+        const auto first = CheckManagedPermission(*configured, subject, ManagedScope(configured->binding, id), auth::Action::AcquireView);
+        if (!first) return std::unexpected(first.error());
+        const ManagedSessionKey key{ProjectKey(configured->binding), id};
+        std::shared_ptr<Session::Impl> owner;
+        {
+            std::lock_guard lock(registry->mutex);
+            const auto found = registry->sessions.find(key);
+            if (found != registry->sessions.end()) owner = found->second;
+        }
+        if (!owner || !owner->managed_control || owner->managed_control->project != configured)
+            return std::unexpected(Failure("sdk.managed.session_not_found"));
+        const auto checked = CheckManagedControl(*owner->managed_control, subject, auth::Action::AcquireView);
+        if (!checked) return std::unexpected(checked.error());
+        auto observation = std::make_shared<managed::v1::View::Impl>();
+        observation->owner = owner; observation->control = owner->managed_control;
+        observation->subject = std::move(subject);
+        const std::weak_ptr<Impl::ManagedRegistry> weak_registry = registry;
+        const std::weak_ptr<Session::Impl> weak_owner = owner;
+        observation->retire_closed_owner = [weak_registry, weak_owner, key] {
+            const auto registry = weak_registry.lock();
+            const auto expected = weak_owner.lock();
+            if (!registry || !expected) return;
+            std::shared_ptr<Session::Impl> retired;
+            {
+                std::lock_guard lock(registry->mutex);
+                const auto found = registry->sessions.find(key);
+                if (found != registry->sessions.end() && found->second == expected) {
+                    retired = std::move(found->second); registry->sessions.erase(found);
+                }
+            }
+        };
+        auto view = std::shared_ptr<managed::v1::View>(new managed::v1::View(std::move(observation)));
+        {
+            std::lock_guard runtime_lock(impl_->mutex);
+            if (impl_->closed) return std::unexpected(Failure("sdk.runtime.closed"));
+            std::lock_guard owner_lock(owner->mutex);
+            if (owner->closed || owner->closing) return std::unexpected(Failure("sdk.managed.session_closed"));
+            if (!owner->managed_control->SameGeneration(checked->generation))
+                return std::unexpected(Failure("sdk.managed.authorization_changed"));
+        }
+        return view;
+    } catch (...) { return std::unexpected(Failure("sdk.managed.view_failed")); }
 }
 Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
     if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider() || lubancode::trajectory::InNamedResultProvider())
@@ -1933,10 +2336,21 @@ Result<void> Runtime::Shutdown() {
     for (const auto& session : sessions) (void)session->Close();
     // Keep the registry until every join finishes. A concurrent Shutdown must
     // take the same live snapshot, rather than return while workers still run.
+    std::shared_ptr<Impl::ManagedRegistry> managed_registry;
     {
         std::unique_lock lock(impl_->mutex);
         impl_->opening_cv.wait(lock, [&] { return impl_->openings == 0; });
         impl_->sessions.clear();
+        managed_registry = impl_->managed_registry;
+    }
+    if (managed_registry) {
+        std::map<ManagedSessionKey, std::shared_ptr<Session::Impl>> retired;
+        {
+            std::lock_guard lock(managed_registry->mutex);
+            retired.swap(managed_registry->sessions);
+            managed_registry->projects.clear();
+        }
+        // Provider/subscription captures retire outside both registry locks.
     }
     return impl_->close_errors->Read();
 }

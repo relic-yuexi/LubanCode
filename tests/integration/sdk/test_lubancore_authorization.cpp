@@ -2,6 +2,7 @@
 
 #include "lubancore/authorization.hpp"
 #include "lubancore/core.hpp"
+#include "lubancore/managed.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -12,7 +13,11 @@
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <map>
 #include <future>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -87,6 +92,7 @@ private:
     bool done_ = false;
     std::jthread thread_;
 };
+void CheckManagedStorageLifecycle();
 class Gate {
 public:
     ~Gate() { Release(); }
@@ -113,6 +119,7 @@ private:
 } // namespace
 
 TEST_CASE("SDK authorization: malformed and cross-tenant requests never reach a permissive provider") {
+    CheckManagedStorageLifecycle();
     auto provider = std::make_shared<FakePolicy>();
     CHECK(Allowed(provider, Context()));
     const auto calls = provider->calls;
@@ -849,3 +856,280 @@ TEST_CASE("SDK authorization: public cleanup captures retire unlocked before con
     subscription->Unsubscribe();
     CheckPolicySdkLifecycle();
 }
+
+namespace {
+namespace managed = lubancore::managed::v1;
+namespace fs = std::filesystem;
+fs::path ManagedNativePath(const fs::path& path) {
+#ifdef _WIN32
+    const auto text = fs::absolute(path).native();
+    if (text.starts_with(L"\\\\?\\")) return path;
+    if (text.starts_with(L"\\\\")) return fs::path(L"\\\\?\\UNC\\" + text.substr(2));
+    return fs::path(L"\\\\?\\" + text);
+#else
+    return path;
+#endif
+}
+std::string ManagedUtf8(const fs::path& path) {
+    const auto text = path.u8string(); return {reinterpret_cast<const char*>(text.data()), text.size()};
+}
+std::map<std::string, std::string> ManagedFiles(const fs::path& root) {
+    std::map<std::string, std::string> result;
+    const auto native = ManagedNativePath(root);
+    if (!fs::exists(native)) return result;
+    for (const auto& entry : fs::recursive_directory_iterator(native)) {
+        const auto name = ManagedUtf8(entry.path().lexically_relative(native));
+        if (entry.is_directory()) result[name + "/"] = {};
+        else if (entry.is_regular_file()) {
+            std::ifstream file(entry.path(), std::ios::binary); REQUIRE(file.is_open());
+            result[name] = std::string{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+            REQUIRE_FALSE(file.bad());
+        }
+    }
+    return result;
+}
+fs::path ManagedSessionDirectory(const fs::path& root, const std::string& id) {
+    fs::path found;
+    for (const auto& entry : fs::recursive_directory_iterator(ManagedNativePath(root))) {
+        if (!entry.is_directory() || entry.path().filename() != fs::path(id)) continue;
+        REQUIRE(found.empty()); found = entry.path();
+    }
+    REQUIRE_FALSE(found.empty());
+    REQUIRE(fs::is_regular_file(found / "managed-session-ownership.json"));
+    REQUIRE(fs::is_regular_file(found / (id + ".jsonl")));
+    return found;
+}
+class ManagedProbePolicy final : public auth::PolicyProvider {
+public:
+    std::shared_ptr<auth::RevocablePolicy> rules = auth::RevocablePolicy::Create();
+    std::function<void(const auth::ExecutionContext&, auth::Action)> before;
+    std::function<void()> on_destroy;
+    mutable std::atomic<unsigned> calls{0};
+    bool throwing = false, bad_revision = false, null_subscription = false;
+    ~ManagedProbePolicy() override { if (on_destroy) on_destroy(); }
+    lubancore::Result<auth::Decision> Authorize(const auth::ExecutionContext& context, auth::Action action) const override {
+        ++calls;
+        const auto hook = before;
+        if (hook) hook(context, action);
+        if (throwing) throw std::runtime_error("PRIVATE_MANAGED_POLICY_SECRET");
+        if (bad_revision) return auth::Decision{true, 0, "allow"};
+        return rules->Authorize(context, action);
+    }
+    lubancore::Result<std::unique_ptr<auth::PolicySubscription>> SubscribeChanges(
+        const auth::ResourceScope& scope, auth::PolicyChangeCallback callback) override {
+        if (null_subscription) return std::unique_ptr<auth::PolicySubscription>{};
+        return rules->SubscribeChanges(scope, std::move(callback));
+    }
+};
+struct ManagedStorageFixture {
+    fs::path root;
+    std::unique_ptr<lubancore::Runtime> runtime;
+    std::shared_ptr<ManagedProbePolicy> policy = std::make_shared<ManagedProbePolicy>();
+    ManagedStorageFixture() {
+        static std::atomic<unsigned> serial{0};
+        root = fs::temp_directory_path() / ("sdk-mg-" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(++serial));
+        REQUIRE(fs::create_directory(root));
+        fs::create_directory(root / "project"); fs::create_directory(root / "resources");
+        auto made = lubancore::Runtime::Create({ManagedUtf8(root / "state"), ManagedUtf8(root / "resources")}); REQUIRE(made);
+        runtime = std::move(*made);
+    }
+    ~ManagedStorageFixture() {
+        policy->before = {}; policy->on_destroy = {};
+        if (runtime) { (void)runtime->Shutdown(); runtime.reset(); }
+        std::error_code ignored; fs::remove_all(ManagedNativePath(root), ignored);
+    }
+    std::shared_ptr<managed::Project> Project(std::string tenant = "tenant-a", std::string name = "same-project") {
+        managed::ProjectOptions options;
+        options.binding = {std::move(tenant), std::move(name), {}, 1};
+        options.cwd = ManagedUtf8(root / "project"); options.policy = policy;
+        auto made = runtime->RegisterManagedProject(std::move(options)); REQUIRE(made);
+        REQUIRE(policy->rules->BindProject((*made)->binding()));
+        return *made;
+    }
+    auth::ResourceScope Scope(const std::shared_ptr<managed::Project>& project, std::string id = {}) const {
+        const auto binding = project->binding();
+        return {binding.tenant_id, binding.project_id, binding.workspace_key, std::move(id)};
+    }
+    std::string Open(const std::shared_ptr<managed::Project>& project, auth::AuthenticatedSubject subject = alice) {
+        REQUIRE(policy->rules->Grant(subject, Scope(project), {auth::Action::OpenSession}));
+        const auto opened = runtime->OpenManagedSession(project, subject);
+        REQUIRE_MESSAGE(opened.has_value(), (opened ? "" : opened.error().code));
+        return opened->session_id;
+    }
+    std::shared_ptr<managed::View> View(const std::shared_ptr<managed::Project>& project, const std::string& id) {
+        REQUIRE(policy->rules->Grant(alice, Scope(project, id),
+            {auth::Action::AcquireView, auth::Action::ReadSession, auth::Action::CloseSession}));
+        auto view = runtime->AcquireManagedView(project, alice, id); REQUIRE(view);
+        return *view;
+    }
+};
+
+void CheckManagedStorageLifecycle() {
+    ManagedStorageFixture fixture;
+    auto project = fixture.Project();
+    const auto before = ManagedFiles(fixture.root / "state");
+    const auto denied = fixture.runtime->OpenManagedSession(project, alice);
+    REQUIRE_FALSE(denied); REQUIRE(denied.error().code == "sdk.authorization.denied");
+    REQUIRE(ManagedFiles(fixture.root / "state") == before);
+    managed::ProjectOptions malformed_project{{"tenant-a", std::string(1, static_cast<char>(0xff)), {}, 1},
+        ManagedUtf8(fixture.root / "project"), fixture.policy};
+    const auto bad_project = fixture.runtime->RegisterManagedProject(std::move(malformed_project));
+    REQUIRE_FALSE(bad_project); REQUIRE(bad_project.error().code == "sdk.managed.project_invalid");
+    REQUIRE(ManagedFiles(fixture.root / "state") == before);
+    auto bad = alice; bad.credential_id = std::string(1, static_cast<char>(0xff));
+    const auto calls = fixture.policy->calls.load();
+    const auto invalid = fixture.runtime->OpenManagedSession(project, bad);
+    REQUIRE_FALSE(invalid); REQUIRE(invalid.error().code == "sdk.authorization.subject_invalid");
+    REQUIRE(fixture.policy->calls.load() == calls);
+    auto foreign = alice; foreign.tenant_id = "tenant-b";
+    REQUIRE_FALSE(fixture.runtime->OpenManagedSession(project, foreign));
+    REQUIRE(ManagedFiles(fixture.root / "state") == before);
+
+    REQUIRE(fixture.policy->rules->Grant(alice, fixture.Scope(project), {auth::Action::OpenSession}));
+    for (unsigned fault = 0; fault != 3; ++fault) {
+        fixture.policy->throwing = fault == 0;
+        fixture.policy->bad_revision = fault == 1;
+        fixture.policy->null_subscription = fault == 2;
+        const auto failed = fixture.runtime->OpenManagedSession(project, alice);
+        REQUIRE_FALSE(failed);
+        REQUIRE(failed.error().message.find("PRIVATE_MANAGED_POLICY_SECRET") == std::string::npos);
+        REQUIRE(ManagedFiles(fixture.root / "state") == before);
+    }
+    fixture.policy->throwing = false; fixture.policy->bad_revision = false; fixture.policy->null_subscription = false;
+    const auto id = fixture.Open(project);
+    const auto directory = ManagedSessionDirectory(fixture.root / "state", id);
+    REQUIRE(fs::exists(directory / "session.lock"));
+    REQUIRE_FALSE(fixture.runtime->AcquireManagedView(project, alice, id));
+    REQUIRE(fixture.policy->rules->Grant(alice, fixture.Scope(project, id), {auth::Action::AcquireView}));
+    auto acquired = fixture.runtime->AcquireManagedView(project, alice, id); REQUIRE(acquired);
+    auto view = *acquired;
+    REQUIRE_FALSE(view->ReadIdentity()); REQUIRE_FALSE(view->Close());
+    REQUIRE(fixture.policy->rules->Grant(alice, fixture.Scope(project, id), {auth::Action::ReadSession, auth::Action::CloseSession}));
+    auto identity = view->ReadIdentity(); REQUIRE(identity);
+    REQUIRE(identity->resource == fixture.Scope(project, id));
+    REQUIRE(identity->project_binding_version == project->binding().version);
+    REQUIRE(identity->creation_subject == alice);
+    REQUIRE(identity->opening_policy_revision != 0); REQUIRE(identity->run_id == "main-0001");
+    REQUIRE(identity->state == managed::StorageState::Open);
+    const auto opening_revision = identity->opening_policy_revision;
+    acquired = std::unexpected(lubancore::Error{"released", {}}); view.reset();
+    REQUIRE(fs::exists(directory / "session.lock")); // Runtime, not a View, holds the actual storage owner.
+    auto again = fixture.runtime->AcquireManagedView(project, alice, id); REQUIRE(again); view = *again;
+
+    const auto other_id = fixture.Open(project);
+    auto other_view = fixture.View(project, other_id);
+    const auto other_directory = ManagedSessionDirectory(fixture.root / "state", other_id);
+    auto other_project = fixture.Project("tenant-a", "other-project");
+    const auto project_id = fixture.Open(other_project);
+    auto project_view = fixture.View(other_project, project_id);
+    const auto project_directory = ManagedSessionDirectory(fixture.root / "state", project_id);
+    REQUIRE(other_directory.parent_path() == directory.parent_path());
+    REQUIRE(project_directory.parent_path() != directory.parent_path());
+    REQUIRE(fixture.policy->rules->Grant(alice, fixture.Scope(other_project, id), {auth::Action::AcquireView}));
+    const auto wrong_project = fixture.runtime->AcquireManagedView(other_project, alice, id);
+    REQUIRE_FALSE(wrong_project); REQUIRE(wrong_project.error().code == "sdk.managed.session_not_found");
+    auto tenant_project = fixture.Project("tenant-b");
+    const auth::AuthenticatedSubject tenant_actor{"tenant-b", "alice", auth::ActorKind::User, "credential-a"};
+    const auto tenant_id = fixture.Open(tenant_project, tenant_actor);
+    const auto tenant_directory = ManagedSessionDirectory(fixture.root / "state", tenant_id);
+    REQUIRE(tenant_directory.parent_path() != directory.parent_path());
+    REQUIRE_FALSE(fixture.runtime->AcquireManagedView(tenant_project, alice, tenant_id));
+
+    auto other_runtime = lubancore::Runtime::Create({ManagedUtf8(fixture.root / "other-state"), ManagedUtf8(fixture.root / "resources")});
+    REQUIRE(other_runtime);
+    const auto wrong_runtime = (*other_runtime)->OpenManagedSession(project, alice);
+    REQUIRE_FALSE(wrong_runtime); REQUIRE(wrong_runtime.error().code == "sdk.managed.project_foreign");
+    REQUIRE((*other_runtime)->Shutdown());
+    managed::ProjectOptions conflicting{project->binding(), ManagedUtf8(fixture.root / "project"), auth::RevocablePolicy::Create()};
+    const auto conflict = fixture.runtime->RegisterManagedProject(std::move(conflicting));
+    REQUIRE_FALSE(conflict); REQUIRE(conflict.error().code == "sdk.managed.project_conflict");
+
+    std::vector<std::string> reentry;
+    fixture.policy->before = [&](const auth::ExecutionContext&, auth::Action action) {
+        if (action != auth::Action::ReadSession) return;
+        const auto nested_read = view->ReadIdentity(); const auto nested_close = view->Close();
+        const auto shutdown = fixture.runtime->Shutdown();
+        reentry.push_back(nested_read ? "unexpected" : nested_read.error().code);
+        reentry.push_back(nested_close ? "unexpected" : nested_close.error().code);
+        reentry.push_back(shutdown ? "unexpected" : shutdown.error().code);
+    };
+    REQUIRE(view->ReadIdentity());
+    fixture.policy->before = {};
+    REQUIRE(reentry.size() == 6);
+    REQUIRE(std::all_of(reentry.begin(), reentry.end(), [](const auto& code) { return code == "sdk.lifecycle.reentrant"; }));
+    unsigned reads = 0;
+    fixture.policy->before = [&](const auth::ExecutionContext&, auth::Action action) {
+        if (action == auth::Action::ReadSession && ++reads == 2)
+            (void)fixture.policy->rules->Revoke(alice, fixture.Scope(project, id), {auth::Action::ReadSession});
+    };
+    REQUIRE_FALSE(view->ReadIdentity()); // Permission withdrawn after candidate snapshot, before publication.
+    fixture.policy->before = {};
+    REQUIRE(fixture.policy->rules->Revoke(alice, fixture.Scope(project, id), {auth::Action::CloseSession}));
+    REQUIRE_FALSE(view->Close()); REQUIRE(fs::exists(directory / "session.lock"));
+    REQUIRE(fixture.policy->rules->Grant(alice, fixture.Scope(project, id), {auth::Action::ReadSession, auth::Action::CloseSession}));
+    REQUIRE(view->Close()); REQUIRE_FALSE(fs::exists(directory / "session.lock"));
+    REQUIRE(fs::exists(other_directory / "session.lock"));
+    REQUIRE(fs::exists(project_directory / "session.lock"));
+    identity = view->ReadIdentity(); REQUIRE(identity);
+    REQUIRE(identity->state == managed::StorageState::Closed);
+    REQUIRE(identity->opening_policy_revision == opening_revision);
+    REQUIRE(identity->creation_subject == alice);
+    REQUIRE_FALSE(fixture.runtime->AcquireManagedView(project, alice, id)); // Closed supervisor entry retired.
+    REQUIRE(fixture.policy->rules->Revoke(alice, fixture.Scope(project, id), {auth::Action::ReadSession, auth::Action::CloseSession}));
+    REQUIRE_FALSE(view->ReadIdentity()); REQUIRE_FALSE(view->Close());
+    REQUIRE(fixture.runtime->Shutdown());
+    REQUIRE_FALSE(fs::exists(other_directory / "session.lock"));
+    REQUIRE_FALSE(fs::exists(project_directory / "session.lock"));
+    REQUIRE_FALSE(fs::exists(tenant_directory / "session.lock"));
+    auto after_shutdown = other_view->ReadIdentity(); REQUIRE(after_shutdown);
+    REQUIRE(after_shutdown->state == managed::StorageState::Closed);
+
+    // Parameter/provider cleanup on an invalid bootstrap remains in Policy scope.
+    ManagedStorageFixture cleanup;
+    std::string retired_code;
+    auto retiring = std::make_shared<ManagedProbePolicy>();
+    retiring->on_destroy = [&] {
+        const auto closed = cleanup.runtime->Shutdown();
+        retired_code = closed ? "unexpected" : closed.error().code;
+    };
+    managed::ProjectOptions rejected_options{{"", "project", {}, 1}, ManagedUtf8(cleanup.root / "project"), retiring};
+    retiring.reset();
+    REQUIRE_FALSE(cleanup.runtime->RegisterManagedProject(std::move(rejected_options)));
+    REQUIRE(retired_code == "sdk.lifecycle.reentrant");
+
+    // A real pending authorization/opening pins Runtime cleanup until it exits.
+    ManagedStorageFixture race;
+    auto race_project = race.Project();
+    REQUIRE(race.policy->rules->Grant(alice, race.Scope(race_project), {auth::Action::OpenSession}));
+    Gate authorization;
+    std::atomic<unsigned> openings{0};
+    race.policy->before = [&](const auth::ExecutionContext&, auth::Action action) {
+        if (action == auth::Action::OpenSession && ++openings == 2) authorization.EnterAndWait();
+    };
+    auto opening = std::async(std::launch::async, [&] { return race.runtime->OpenManagedSession(race_project, alice); });
+    REQUIRE(authorization.WaitEntered());
+    auto shutting_down = std::async(std::launch::async, [&] { return race.runtime->Shutdown(); });
+    // Observe the actual Runtime closed gate, not a sleep that merely assumes
+    // the Shutdown thread has already run. The probe cannot reach paths/Policy.
+    bool shutdown_admitted = false;
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (!shutdown_admitted && std::chrono::steady_clock::now() < deadline) {
+        const auto probe = race.runtime->OpenManagedSession({}, alice);
+        shutdown_admitted = !probe && probe.error().code == "sdk.runtime.closed";
+        if (!shutdown_admitted) std::this_thread::yield();
+    }
+    const auto waiting = shutting_down.wait_for(0ms);
+    authorization.Release();
+    REQUIRE(shutdown_admitted);
+    REQUIRE(waiting == std::future_status::timeout);
+    REQUIRE(opening.wait_for(3s) == std::future_status::ready);
+    REQUIRE_FALSE(opening.get());
+    REQUIRE(shutting_down.wait_for(3s) == std::future_status::ready); REQUIRE(shutting_down.get());
+    REQUIRE_FALSE(authorization.timed_out.load());
+    race.policy->before = {};
+    REQUIRE(ManagedFiles(race.root / "state").size() > 0); // Trusted bootstrap exists, no Session was published.
+    for (const auto& entry : fs::recursive_directory_iterator(ManagedNativePath(race.root / "state")))
+        REQUIRE(entry.path().filename() != fs::path("managed-session-ownership.json"));
+}
+} // namespace
