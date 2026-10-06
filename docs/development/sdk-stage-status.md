@@ -53,20 +53,25 @@ POSIX 造文件和目录 symlink，不能据此声称 Windows 文件 symlink 也
 这些数从源码推得，不能代替实际登记、JUnit、LastTest 或远端通过。
 修复组合尚未合入功能分支，须重跑三平台和消毒器。
 
-下一片已在私有候选合并，两道源码审查通过，尚待独立远端验收：
+下一片已在同一私有候选合并，源码交叉审查通过，尚待本源远端验收：
 [十处场内 live 读取](sdk-journal-live-read-capture.md)取真正 Writer 捕获；
 [开场五模块](sdk-prepare-journal-capture.md)共用本次惰性 File 捕获与同一只读视图。
 模块首错与原装配顺序照留。小份来源指纹随原恢复请求入锁，锁后另取真实材料，
 先核原引用，再比指纹，末后交原恢复适配器与续写接口；指纹不代替原生锚和 EOF 检查。
 有效却归属别场的主账保原模块首错；真实账在两次捕获间变动，则拒绝续写。
-原私有模块调用未带共享 owner 时，仍用原 File 读取。完整 JournalStore、托管授权
-和 CLI 主入口迁移尚未完成。
+原私有模块调用未带共享 owner 时，仍用原 File 读取。
 
-[CLI 单次提问 owner](cli-oneshot-execution-owner.md)另在私有候选接线。
+[Policy 回调退场](sdk-policy-callback-lifecycle.md)复用 SDK 原阻塞门。
+提供者调用、通知、退订和最后一份捕获销毁均入门；异步线程退捕获也照办。
+通知只负责失效，原跨订阅与外部排空次序照留。公开声明未扩，只补四行寿命说明。
+阻塞调用报重入并不会延后对象析构；宿主须留住仍在使用的场、Runtime 和事件流。
+
+[CLI 单次提问 owner](cli-oneshot-execution-owner.md)已接入这批私有组合。
 AskOnce 借用原 Spinner 与 ToolRuntime，Agent 改由共用 ExecutionOwner 创建和退场。
 它没有把借用资源冒充自持 SessionResources，也没有将 CLI 后端折成文本 SDK DTO。
-原请求、权限、工具、RunTurn、受理与关账照留；新源码尚待审查和远端原生验收。
-本笔还不是完整 CLI 迁入公开 SDK，完整 AskOnce 端到端证据须另补。
+原请求、权限、工具、RunTurn、受理与关账照留；源码独审通过，原生尚待远端验收。
+完整 JournalStore、托管授权和 CLI 主入口迁移仍未完成。完整 AskOnce 端到端
+证据须另补，当前 owner 案不能代替整条命令验收。
 
 ## 八阶段现状
 

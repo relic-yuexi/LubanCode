@@ -13,6 +13,10 @@ AskOnce 继续持实际 SpinnerBackend 与 ToolRuntime，只把直接构造 Agen
 Agent 先销毁，宿主工具、Spinner 与真实后端随后退场。同步调用未退出时，
 宿主不能先销毁这些资源。这笔不增加线程、取消协议或后台借用。
 
+原 AskOnce 在栈上 move profile。这条共用 Construct 会复制 profile，再在堆上
+创建 Agent，故多一次分配，复制也可能失败。两条路不承诺同样的分配成本；
+失败时沿已有 owner 合同先清捕获，再退宿主资源。
+
 模型配置、prompt、Memory、Package、权限、RunTurn 与 ScopedTurnBindings
 沿原路走。SessionService 受理、派发、异步工具、关账和 harness 导出也沿原路走。
 主交互入口、公开 SDK 的 CLI 后端适配与完整 CLI parity 仍待下一笔。
