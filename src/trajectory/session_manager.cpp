@@ -2677,10 +2677,10 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
                                                     const std::string& source_run_id,
                                                     const std::string& source_run_kind,
                                                     ResumeOutcome outcome) {
-    std::shared_ptr<JournalFileAnchor> opening_anchor;
-    const auto fail = [&outcome, &opening_anchor](std::string code, std::string message) {
-        if (opening_anchor) {
-            const auto closed = opening_anchor->Close();
+    JournalReadHandle opening_journal;
+    const auto fail = [&outcome, &opening_journal](std::string code, std::string message) {
+        if (opening_journal) {
+            const auto closed = opening_journal.Close();
             if (!closed) message += ";" + closed.error();
         }
         outcome.error_code = std::move(code);
@@ -2708,12 +2708,9 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     auto capture = CaptureSessionRecovery(source_dir, workspace_key_, source_id,
         options_.recovery_capture, options_.recovery_factory);
     if (!capture) return fail("resume.source_corrupt", capture.error());
-    opening_anchor = capture->anchor;
-    const auto* main_value = capture->view.Find(RecoveryKeyKind::MainV3);
-    auto raw = RecoveryStreamLines(main_value->bytes, options_.recovery_capture.limits
-        ? std::optional(options_.recovery_capture.limits->journal) : std::nullopt, true);
-    if (!raw) return fail("resume.source_corrupt", raw.error());
-    auto source = v3::ReadV3LedgerOwned(outcome.source_v3_stream, *raw);
+    opening_journal = capture->main_journal;
+    auto source = v3::ReadV3LedgerCaptured(capture->main_journal, options_.recovery_capture.limits
+        ? std::optional(options_.recovery_capture.limits->journal) : std::nullopt);
     if (!source) return fail("resume.source_corrupt", source.error());
     if (source->session_id != source_id || source->run_id.empty())
         return fail("resume.source_corrupt", "recovery.source_scope_mismatch");
@@ -2823,12 +2820,12 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     // launch_cwd/run_kind 是 Start 时写 session.started 用的,续卷不写;
     // 故障注入照递(测试专用,生产恒空)。
     writer_options.inject_io_failure = options_.v3_main_io_fault;
-    auto writer = v3::V3Writer::ContinueOwnedPrefix(outcome.source_v3_stream, main_value->bytes, *capture->anchor, std::move(writer_options));
+    auto writer = v3::V3Writer::ContinueCaptured(capture->main_journal, std::move(writer_options));
     if (!writer.has_value()) {
         return fail("resume.step5_failed", "源账续卷验不过: " + writer.error());
     }
 
-    auto anchor_closed = capture->anchor->Close();
+    auto anchor_closed = capture->main_journal.Close();
     if (!anchor_closed) return fail("resume.step5_failed", anchor_closed.error());
 
     ActiveSession session;

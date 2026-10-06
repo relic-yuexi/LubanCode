@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "trajectory/journal.hpp"
+#include "trajectory/journal_owner.hpp"
 
 namespace lubancode::trajectory {
 
@@ -72,7 +73,8 @@ using SessionRecoveryFactory = std::function<std::expected<SessionRecoveryView, 
     const SessionRecoveryView& reference)>;
 struct SessionRecoveryCapture {
     SessionRecoveryView view;
-    std::shared_ptr<JournalFileAnchor> anchor;
+    std::shared_ptr<JournalFileAnchor> anchor; // Existing File-only compatibility.
+    JournalReadHandle main_journal; // Actual immutable main capture, no Writer owner.
 };
 std::expected<SessionRecoveryCapture, std::string> CaptureSessionRecovery(
     const std::filesystem::path& session_dir, std::string workspace_key, std::string session_id,

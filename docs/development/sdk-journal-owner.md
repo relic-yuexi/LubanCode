@@ -57,3 +57,48 @@ ASan runs remotely too. Local checks inspect source and pure data only.
 
 This contract precedes implementation. It promises main V3 File ownership, not
 complete public JournalStore, external storage support or Managed authorization.
+
+
+## Implemented source boundary, pending remote execution
+
+The main V3 implementation now owns a JournalOwner/FileJournalAdapter rather
+than a bare JournalWriter. An AppendLease holds the same stream gate across
+actual native append and V3 in-memory completion. Its first NativeAppend or
+SemanticCompletion receipt owns row identity, actual canonical-byte length and
+the original native observations. A successful native append followed by an
+allocation/other exception returns completion-unconfirmed with the real
+Committed native receipt, freezes the owner and does not retry. The original
+native-only uncertainty accessor remains empty for that semantic failure.
+
+CaptureSessionRecovery takes its main bytes and actual File anchor through the
+owner read capability. The locked Manager consumes that same immutable capture
+for V3 projection and same-ID continuation. Factories cannot change its main
+bytes; continuation retains the original same-object, full-prefix and EOF
+checks. Compatibility prefix/anchor entry points and legacy File append remain
+available; they do not enable external Journal storage. The active preview
+reducer also reads one owner capture instead of its direct path reader.
+
+RecoveryView retains its existing owned-string value interface. The new main
+read handle separately owns the same captured bytes. This intentionally retains
+one additional main-journal byte copy during opening. Each original SDK
+journal/view byte budget still applies to the captured material; it is not a
+total resident-memory limit. CLI unset limits retain their original total-size
+policy. This slice does not migrate every RecoveryValue caller to shared bytes.
+The read handle owns no live Writer, Runtime, SessionService or public Session.
+
+Acceptance source currently contains seven native owner cases, three SDK/STL
+host paths and one private actual-public-source guard. The host closes one
+Runtime, creates another, restores the same Session and operation identities,
+checks zero model/tool replay, and completes another real tool/model turn.
+Close-read and same-project multi-session paths exercise separate ownership.
+It retains an independently captured old JSONL prefix and a host receipt so CI
+can verify those actual artifacts; the running SDK never reads that evidence
+copy. Native cases cover all four real append boundaries, semantic completion
+exceptions, dropped completion leases, cached actual fclose, native object/
+prefix/EOF refusal and actual SessionLock opening. The private guard validates
+schema/seq/hash/run and actual prepared-chain projection over the public host.
+
+Only source/data checks have run locally. CMake, install-consumer routing,
+workflow classifiers, native source rosters and artifact collection remain for
+the integration owner to wire. No local configuration, compilation, native test
+or HTTP execution has occurred. These source counts are not remote pass counts.
