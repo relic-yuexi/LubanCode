@@ -30,6 +30,7 @@ V3首行身份与 run核对后，留一份纯值快照。发表前再查授权�
 这枚 ID为完整场范围 Grant，再 AcquireManagedView。取 View 查 AcquireView；
 ReadIdentity 每次前后查 ReadSession，Close 每次查 CloseSession。拒绝返回
 稳定错误，不回空数据，不带异常正文或内部根路径。已经交出的 ID无法追回。
+Managed 关场首错进入 Runtime 保留通道前也收成固定码；内部原始回执照留。
 Close 等到原串行锁后再核当次代次，才允许停接单或关账；Policy仍在锁外调用。
 外部 Policy与文件写入不原子化，候选在晚拒绝时真关闭，保原归属/账残留。
 

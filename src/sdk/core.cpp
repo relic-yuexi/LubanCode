@@ -1775,6 +1775,10 @@ struct Session::Impl final : rt::InteractionBroker {
             auto closed_delivery = event_delivery->CloseAndWait();
             if (!closed_delivery && !close_error) close_error = closed_delivery.error();
         }
+        // Managed public diagnostics do not expose internal writer messages,
+        // including through the Runtime's retained first-close-error channel.
+        // The actual Service/native receipts retain their original facts.
+        if (managed_control && close_error) close_error = Failure("sdk.managed.close_failed");
         if (close_error && close_errors) close_errors->Remember(*close_error);
         return close_error ? Result<void>(std::unexpected(*close_error)) : Result<void>{};
     }

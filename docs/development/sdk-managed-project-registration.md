@@ -10,6 +10,8 @@ binding/version 却换 Policy 或 cwd，返回 `sdk.managed.project_conflict`。
 
 沿原监督登记与关闭次序收场。Shutdown 在锁内移出项目和场登记，在锁外
 释放；Policy 最后退出仍守原回调门，不增一套拥有图或注销接口。
+Managed 关场错误在交公共回执、存入 Runtime 首错前转为稳定码；内部原生
+回执仍保原事实。Local 原诊断照留，混合 Runtime 不替 Local 改写错误正文。
 
 原十三场授权验收保住。补实际项目句柄退尽、原配置重新登记、换 Policy
 仍拒绝；再核实际场关闭、所有 View 退尽后，旧版本仍不能换权限源。
