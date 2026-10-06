@@ -1336,6 +1336,16 @@ std::string TrajectoryTurnBridge::V3RequestPrepared(const api::Request& request,
     nlohmann::json provider_snapshot = nlohmann::json{{"provider", identity_.provider},
                                                       {"wire", identity_.wire},
                                                       {"model", request.model}};
+    if (ctx.model_input_snapshot) {
+        // Evidence fingerprint only. It does not reconstruct this input, prove
+        // a provider wire, or replace the original system/message/tool sources.
+        const auto compact = ctx.model_input_snapshot->input.dump();
+        provider_snapshot["modelInputSnapshotScope"] = ctx.model_input_snapshot->scope;
+        provider_snapshot["modelInputSnapshotSha256"] = hooks::Sha256Hex(compact);
+        provider_snapshot["modelInputSnapshotUtf8Bytes"] = compact.size();
+        provider_snapshot["modelInputSnapshotFingerprintAlgorithm"] = "sha256-compact_json_utf8_v1";
+        provider_snapshot["outputLimitScope"] = ctx.model_input_snapshot->output_limit_scope;
+    }
     // 应用Worker接入单 §八:连接快照的冻结局,与 v2 BuildPreparedPayload
     // 同一份合同(见那边的注释);identity 没带整块不落。
     if (identity_.connection.is_object() && !identity_.connection.empty()) {

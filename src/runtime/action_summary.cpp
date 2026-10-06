@@ -167,14 +167,18 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
         user.role = api::Role::User;
         user.content.push_back(api::TextBlock{prompt.dump()});
         request.messages.push_back(user);
-        const auto snapshot = api::ModelInputSnapshotFromWire(backend.SerializeForDiagnostics(request));
-        if (!snapshot) return std::unexpected(snapshot.error());
-        if (api::HasUnestimatedInput(*snapshot)) return std::unexpected("unestimated_summary_input");
-        if (snapshot->contains("tools") && !snapshot->at("tools").empty()) return std::unexpected("summary_tools_not_allowed");
-        if (!ContainsExactString(*snapshot, system) || !ContainsExactString(*snapshot, prompt.dump())) {
+        const auto prepared_input = backend.PrepareModelInput(request);
+        if (!prepared_input) return std::unexpected(prepared_input.error());
+        if (!*prepared_input) return std::unexpected("tool_batch.adapter_snapshot_unavailable");
+        const auto& snapshot = (**prepared_input).input;
+        if (api::HasUnestimatedInput(snapshot)) return std::unexpected("unestimated_summary_input");
+        if (snapshot.contains("tools") && !snapshot.at("tools").empty()) return std::unexpected("summary_tools_not_allowed");
+        if (!ContainsExactString(snapshot, system) || !ContainsExactString(snapshot, prompt.dump())) {
             return std::unexpected("summary_adapter_replaced_material");
         }
-        const auto estimate = hooks::middleware::ComputeUtf8BytesDiv4Estimate(*snapshot);
+        auto estimate = hooks::middleware::ComputeUtf8BytesDiv4Estimate(snapshot);
+        estimate["modelInputSnapshotScope"] = (**prepared_input).scope;
+        estimate["outputLimitScope"] = (**prepared_input).output_limit_scope;
         const auto input_tokens = estimate.at("estimatedInputTokens").get<std::size_t>();
         const auto effective = backend.GetEffectiveOutputLimit(request);
         if (!effective.tokens || *effective.tokens <= 0) return std::unexpected("summary_output_limit_unknown");
@@ -201,7 +205,9 @@ ActionSummaryResult SummarizeActionResult(v3::V3Writer& writer, api::Backend& ba
             {{"provider", profile.provider}, {"wire", profile.wire}, {"model", profile.model},
              {"sourceActionId", source.action_id}, {"sourceResultEventRefs", source_events},
              {"tokenEstimate", estimate}, {"outputReserveTokens", output_tokens},
-             {"modelInputSnapshot", *snapshot},
+             {"modelInputSnapshot", snapshot},
+             {"modelInputSnapshotScope", (**prepared_input).scope},
+             {"outputLimitScope", (**prepared_input).output_limit_scope},
              {"summaryWindowTokens", profile.window_tokens}, {"sourceByteOffset", offset},
              {"sourceByteLength", material.size()}, {"depth", depth}}, std::nullopt, kDurability);
         if (!Committed(prepared)) {

@@ -12,53 +12,94 @@ namespace api = lubancode::api;
 namespace tools = lubancode::tools;
 using Json = nlohmann::json;
 
+// Both projection and Generate consume this conversion. In particular, these
+// JSON-valued public fields are strings: never parse them back into a guessed
+// provider shape, or invent content that the public backend never receives.
+std::expected<ModelRequest, api::Error> ConvertRequest(const api::Request& request) {
+    ModelRequest in;
+    in.model = request.model;
+    in.system = request.system;
+    in.max_output_tokens = request.max_tokens;
+    for (const auto& source : request.messages) {
+        Message message;
+        switch (source.role) {
+            case api::Role::User: message.role = "user"; break;
+            case api::Role::Assistant: message.role = "assistant"; break;
+            case api::Role::System: message.role = "system"; break;
+            case api::Role::Tool: message.role = "tool"; break;
+        }
+        for (const auto& block : source.content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block)) message.text += text->text;
+            else if (const auto* call = std::get_if<api::ToolUseBlock>(&block)) {
+                message.tool_calls.push_back({call->id, call->name, call->input.dump()});
+            } else if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+                for (const auto& rich : result->blocks) {
+                    if (!std::holds_alternative<tools::TextContent>(rich)) {
+                        return std::unexpected(api::Error{api::ErrorKind::Api,
+                            "sdk.backend.unsupported_content: custom backend accepts text only"});
+                    }
+                }
+                if (result->structured_content.has_value()) {
+                    return std::unexpected(api::Error{api::ErrorKind::Api,
+                        "sdk.backend.unsupported_content: structured tool result"});
+                }
+                message.tool_replies.push_back({result->tool_use_id, result->content, result->is_error});
+            } else {
+                return std::unexpected(api::Error{api::ErrorKind::Api,
+                    "sdk.backend.unsupported_content: custom backend accepts text/tool history only"});
+            }
+        }
+        in.messages.push_back(std::move(message));
+    }
+    for (const auto& tool : request.tools) {
+        in.tools.push_back({tool.name, tool.description, tool.input_schema.dump()});
+    }
+    return in;
+}
+
+api::ModelInputSnapshot ProjectModelInput(const ModelRequest& request) {
+    Json input = {{"system", request.system}, {"messages", Json::array()}, {"tools", Json::array()}};
+    for (const auto& message : request.messages) {
+        Json out = {{"role", message.role}, {"text", message.text},
+                    {"tool_calls", Json::array()}, {"tool_replies", Json::array()}};
+        for (const auto& call : message.tool_calls) {
+            out["tool_calls"].push_back({{"id", call.id}, {"name", call.name}, {"input_json", call.input_json}});
+        }
+        for (const auto& reply : message.tool_replies) {
+            out["tool_replies"].push_back({{"call_id", reply.call_id}, {"text", reply.text}, {"is_error", reply.is_error}});
+        }
+        input["messages"].push_back(std::move(out));
+    }
+    for (const auto& tool : request.tools) {
+        input["tools"].push_back({{"name", tool.name}, {"description", tool.description},
+                                 {"input_schema_json", tool.input_schema_json}});
+    }
+    return {std::move(input), api::kSdkModelRequestInputScope, api::kSdkGenerateOutputLimitScope};
+}
+
 class BackendAdapter final : public api::Backend {
 public:
     explicit BackendAdapter(std::shared_ptr<lubancore::Backend> backend) : backend_(std::move(backend)) {}
+    std::expected<std::optional<api::ModelInputSnapshot>, std::string>
+    PrepareModelInput(const api::Request& request) const override {
+        try {
+            auto converted = ConvertRequest(request);
+            if (!converted) return std::unexpected(converted.error().message);
+            return std::optional<api::ModelInputSnapshot>{ProjectModelInput(*converted)};
+        } catch (const std::exception& error) {
+            return std::unexpected(std::string("sdk.backend.exception: ") + error.what());
+        } catch (...) {
+            return std::unexpected("sdk.backend.exception");
+        }
+    }
     std::expected<void, api::Error> send_stream(
         const api::Request& request, const std::function<void(const api::StreamEvent&)>& emit,
         const std::atomic<bool>* cancel) override {
         try {
-            ModelRequest in;
-            in.model = request.model;
-            in.system = request.system;
-            in.max_output_tokens = request.max_tokens;
-            for (const auto& source : request.messages) {
-                Message message;
-                switch (source.role) {
-                    case api::Role::User: message.role = "user"; break;
-                    case api::Role::Assistant: message.role = "assistant"; break;
-                    case api::Role::System: message.role = "system"; break;
-                    case api::Role::Tool: message.role = "tool"; break;
-                }
-                for (const auto& block : source.content) {
-                    if (const auto* text = std::get_if<api::TextBlock>(&block)) message.text += text->text;
-                    else if (const auto* call = std::get_if<api::ToolUseBlock>(&block)) {
-                        message.tool_calls.push_back({call->id, call->name, call->input.dump()});
-                    } else if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
-                        for (const auto& rich : result->blocks) {
-                            if (!std::holds_alternative<tools::TextContent>(rich)) {
-                                return std::unexpected(api::Error{api::ErrorKind::Api,
-                                    "sdk.backend.unsupported_content: custom backend accepts text only"});
-                            }
-                        }
-                        if (result->structured_content.has_value()) {
-                            return std::unexpected(api::Error{api::ErrorKind::Api,
-                                "sdk.backend.unsupported_content: structured tool result"});
-                        }
-                        message.tool_replies.push_back({result->tool_use_id, result->content, result->is_error});
-                    } else {
-                        return std::unexpected(api::Error{api::ErrorKind::Api,
-                            "sdk.backend.unsupported_content: custom backend accepts text/tool history only"});
-                    }
-                }
-                in.messages.push_back(std::move(message));
-            }
-            for (const auto& tool : request.tools) {
-                in.tools.push_back({tool.name, tool.description, tool.input_schema.dump()});
-            }
+            auto in = ConvertRequest(request);
+            if (!in) return std::unexpected(in.error());
             if (cancel && cancel->load()) return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled"});
-            auto reply = backend_->Generate(in, Cancellation{cancel});
+            auto reply = backend_->Generate(*in, Cancellation{cancel});
             if (cancel && cancel->load()) return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled"});
             if (!reply) return std::unexpected(api::Error{api::ErrorKind::Api, reply.error().code + ": " + reply.error().message});
             if (!lubancode::platform::IsValidUtf8(reply->text)) {

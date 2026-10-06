@@ -7,6 +7,8 @@
 #include <string>
 
 #include "trajectory/v3/reader.hpp"
+#include "api/model_input_snapshot.hpp"
+#include "hooks/middleware_builtins.hpp"
 
 namespace lubancore_consumer {
 void NamedResultsCase(const std::filesystem::path&, const std::filesystem::path&, const std::string&,
@@ -40,6 +42,7 @@ void InspectSummary(const fs::path& directory, const std::string& action) {
     REQUIRE(ledger->revision_chains.contains(revision));
     REQUIRE(summary->payload.at("modelCalls").get<unsigned>() > 0);
     bool selected = false, subsequent_request = false;
+    unsigned summary_prepared = 0;
     std::size_t candidates = 0;
     for (const auto& message : ledger->messages) {
         if (message.action_id != action || message.message.value("role", "") != "tool") continue;
@@ -52,9 +55,31 @@ void InspectSummary(const fs::path& directory, const std::string& action) {
         selected = true; candidates = projection.summary_candidate_refs.size();
     }
     for (const auto& event : ledger->events) {
-        if (event.kind != v3::EventKindV3::ModelRequestPrepared || event.seq <= summary->seq) continue;
+        if (event.kind != v3::EventKindV3::ModelRequestPrepared) continue;
+        if (event.payload.value("purpose", "") == "action_summary" && event.payload.value("sourceActionId", "") == action) {
+            ++summary_prepared; const auto& input = event.payload.at("modelInputSnapshot");
+            REQUIRE(event.payload.at("modelInputSnapshotScope") == lubancode::api::kSdkModelRequestInputScope);
+            REQUIRE(event.payload.at("outputLimitScope") == lubancode::api::kSdkGenerateOutputLimitScope);
+            REQUIRE(input.at("tools").empty()); REQUIRE(input.at("messages").size() == 1);
+            const auto* system = ledger->FindMessage(event.payload.at("systemMessageRef").get<std::string>());
+            REQUIRE(system != nullptr); REQUIRE(input.at("system") == system->message.at("content"));
+            REQUIRE(event.payload.at("inputMessageRefs").size() == 1);
+            const auto* prompt = ledger->FindMessage(event.payload.at("inputMessageRefs")[0].get<std::string>());
+            REQUIRE(prompt != nullptr); REQUIRE(input.at("messages")[0].at("text") == prompt->message.at("content"));
+            const auto estimate = lubancode::hooks::middleware::ComputeUtf8BytesDiv4Estimate(input);
+            REQUIRE(event.payload.at("tokenEstimate").at("inputUtf8Bytes") == estimate.at("inputUtf8Bytes"));
+            REQUIRE(event.payload.at("tokenEstimate").at("estimatedInputTokens") == estimate.at("estimatedInputTokens"));
+            REQUIRE(event.payload.at("outputReserveTokens") == 1024);
+        }
+        if (event.seq <= summary->seq) continue;
+        REQUIRE(event.payload.at("modelInputSnapshotScope") == lubancode::api::kSdkModelRequestInputScope);
+        REQUIRE(event.payload.at("outputLimitScope") == lubancode::api::kSdkGenerateOutputLimitScope);
+        REQUIRE(event.payload.at("modelInputSnapshotSha256").get<std::string>().size() == 64);
+        REQUIRE(event.payload.at("modelInputSnapshotUtf8Bytes").get<std::size_t>() > 0);
+        REQUIRE(event.payload.at("modelInputSnapshotFingerprintAlgorithm") == "sha256-compact_json_utf8_v1");
         REQUIRE(v3::CheckPreparedAgainstChain(*ledger, event.event_id).empty()); subsequent_request = true;
     }
+    REQUIRE(summary_prepared == summary->payload.at("modelCalls").get<unsigned>());
     REQUIRE(selected); REQUIRE(subsequent_request);
     std::cout << "[sdk-named-results-summary] " << nlohmann::json{
         {"session_id", ledger->session_id}, {"tool_call_id", action}, {"summary_event_id", summary->event_id},

@@ -92,6 +92,13 @@ std::string RebuildableBackend::SerializeForDiagnostics(const lubancode::api::Re
     return inner->SerializeForDiagnostics(request);
 }
 
+std::expected<std::optional<lubancode::api::ModelInputSnapshot>, std::string>
+RebuildableBackend::PrepareModelInput(const lubancode::api::Request& request) const {
+    const auto inner = SnapshotInner();
+    if (!inner) return Backend::PrepareModelInput(request);
+    return inner->PrepareModelInput(request);
+}
+
 lubancode::api::PreparedWireRequest RebuildableBackend::PrepareWireRequest(
     const lubancode::api::Request& request) const {
     const std::shared_ptr<lubancode::api::Backend> inner = SnapshotInner();
