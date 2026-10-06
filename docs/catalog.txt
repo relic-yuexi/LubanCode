@@ -237,6 +237,7 @@ DOC development/sdk-journal-owner.md
 DOC development/sdk-journal-live-read-capture.md
 DOC development/sdk-prepare-journal-capture.md
 DOC development/cli-oneshot-execution-owner.md
+DOC development/cli-interactive-execution-owner.md
 DOC development/sdk-child-terminal-diagnostic.md
 DOC development/sdk-file-result-display-path.md
 DOC development/sdk-owned-deadline-doctest.md

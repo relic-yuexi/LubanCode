@@ -60,6 +60,7 @@
 #include "memory/project_memory.hpp"
 #include "peers/peer_session.hpp"
 #include "runtime/event_sinks.hpp"
+#include "runtime/execution_owner.hpp"
 #include "runtime/idle_wake.hpp"
 #include "runtime/session_runtime.hpp"
 #include "runtime/session_soul.hpp"  // SessionSoulSnapshot:Soul 会话冻结单 P0
@@ -283,7 +284,7 @@ private:
     lubancode::agent::CompactOptions BuildCompactOptions();
     lubancode::app::CompactSessionInputs MakeCompactInputs() {
         lubancode::app::CompactSessionInputs in;
-        in.agent = &*main_agent;
+        in.agent = MainAgent();
         in.theme = &theme;
         in.spinner_enabled = spinner_enabled;
         in.session_compact_epoch = &session_compact_epoch;
@@ -352,7 +353,7 @@ private:
     lubancode::app::SessionTailContext MakeTailContext() {
         lubancode::app::SessionTailContext tail;
         tail.project_memory = project_memory.get();
-        tail.agent = &*main_agent;
+        tail.agent = MainAgent();
         tail.model_router = model_router.get();
         tail.prompts_dir = &prompts_dir;
         tail.theme = &theme;
@@ -545,8 +546,15 @@ private:
     // stack_.package_snapshot 原子槽同折同换,由 ReloadPackages 维护)。
     std::shared_ptr<const lubancode::package::PackageSnapshot> package_snapshot_view_;
     std::function<void()> reapply_peer_inbox;  // loop 重建后重灌收件点
-    // loop 持 registry 引用,声明在后 = 先死,引用不悬垂。
-    std::optional<lubancode::agent::Agent> main_agent;
+    // The owner borrows the original stack. Keep the old Agent member position
+    // so the controller still retires execution before the host resources.
+    std::unique_ptr<lubancode::runtime::ExecutionOwner> main_execution_;
+    lubancode::agent::Agent* MainAgent() noexcept {
+        return main_execution_ ? &main_execution_->agent() : nullptr;
+    }
+    const lubancode::agent::Agent* MainAgent() const noexcept {
+        return main_execution_ ? &main_execution_->agent() : nullptr;
+    }
     std::optional<std::string> config_file_path;  // /model、/language 可写回配置文件路径
 
     // ---- 会话存档与权限账(P6:本体在 runtime::SessionRuntime,这里引用) ----
