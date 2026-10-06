@@ -1473,13 +1473,16 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     main_agent_profile.prompt_sections.web = prompt_options.web;
     main_agent_profile.prompt_sections.lsp = prompt_options.lsp;
     main_agent_profile.prompt_sections.wire = prompt_options.wire;
-    // Consume a separate profile: the original still supplies the child below.
-    // Like optional::emplace, failed construction leaves this slot empty.
-    main_execution_.reset();
-    auto execution_profile = main_agent_profile;
-    main_execution_ = std::make_unique<lubancode::runtime::ExecutionOwner>(
-        lubancode::runtime::HostBorrowedExecutionResources{wrapped_backend, registry()},
-        std::move(execution_profile));
+    // Commands borrow the Agent address. Retain the original stable slot across
+    // successful rebuilds; never replace the owner after its first creation.
+    if (main_execution_) {
+        main_execution_->RebuildHostAgent(main_agent_profile);
+    } else {
+        auto execution_profile = main_agent_profile;
+        main_execution_ = std::make_unique<lubancode::runtime::ExecutionOwner>(
+            lubancode::runtime::HostBorrowedExecutionResources{wrapped_backend, registry()},
+            std::move(execution_profile));
+    }
     // Soul 会话冻结单 P0:同会话重建(preserve_history)继承锁定态——已锁
     // 快照的会话重建后依旧锁定(回调幂等:宿主账已置位,只是给新 Agent
     // 挂上同一道闸)。/clear 的重建前已由 ResetSoulSessionForNewSession

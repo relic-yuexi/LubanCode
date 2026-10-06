@@ -550,10 +550,10 @@ private:
     // so the controller still retires execution before the host resources.
     std::unique_ptr<lubancode::runtime::ExecutionOwner> main_execution_;
     lubancode::agent::Agent* MainAgent() noexcept {
-        return main_execution_ ? &main_execution_->agent() : nullptr;
+        return main_execution_ && main_execution_->has_agent() ? &main_execution_->agent() : nullptr;
     }
     const lubancode::agent::Agent* MainAgent() const noexcept {
-        return main_execution_ ? &main_execution_->agent() : nullptr;
+        return main_execution_ && main_execution_->has_agent() ? &main_execution_->agent() : nullptr;
     }
     std::optional<std::string> config_file_path;  // /model、/language 可写回配置文件路径
 
