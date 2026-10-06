@@ -57,6 +57,10 @@ struct ManagedOperationMaterials {
     trajectory::ManagedSessionOwnership owner;
     std::string run_id;
     std::string operations;
+    // A readable valid row never upgrades a first unknown publication/close.
+    // This live owner's owned observation is not a persistent commit boundary,
+    // cross-process completion receipt or durable authorization.
+    bool completion_known = true;
     // Only accepted inputRef roster, keyed by the actual operation ID.
     std::map<std::string, std::string> inputs;
 };

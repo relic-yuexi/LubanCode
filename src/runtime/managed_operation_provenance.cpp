@@ -178,6 +178,7 @@ std::expected<PreparedManagedOperation, std::string> PrepareManagedOperation(con
 std::expected<std::string, std::string> PrepareManagedOperationRejection(const ManagedStoredOperation& operation,
     const std::string& status, const std::string& reason, std::uint64_t revision, std::int64_t rejected_at_ms) {
     if (operation.state != ManagedStoredOperation::State::Accepted || !ValidRejection(status, reason) ||
+        (status == "rejected" && revision == 0) ||
         rejected_at_ms < operation.received_at_ms || !Hash(operation.provenance.provenance_hash))
         return std::unexpected("managed.operation.invalid_rejection");
     return Canonical({{"schemaVersion", 3}, {"kind", "operation.rejected"},
@@ -237,6 +238,7 @@ std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOpera
             if (op.state != ManagedStoredOperation::State::Accepted || row["provenanceHash"] != op.provenance.provenance_hash ||
                 !ValidRejection(row["terminalStatus"].get<std::string>(), row["reasonCode"].get<std::string>()) ||
                 !Unsigned(row, "decisionPolicyRevision", op.terminal_policy_revision) ||
+                (row["terminalStatus"] == "rejected" && op.terminal_policy_revision == 0) ||
                 !Timestamp(row, "rejectedAtMs", op.rejected_at_ms) || op.rejected_at_ms < op.received_at_ms)
                 return std::unexpected(kInvalid);
             op.state = ManagedStoredOperation::State::RejectedBeforeDispatch;
