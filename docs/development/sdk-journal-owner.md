@@ -122,3 +122,31 @@ keeps actual Committed native append separate from SemanticCompletion unknown,
 then preserves the first real injected-unconfirmed fclose observation. It uses
 zero-duration future polls, adds no timeout allowance and does not relax any old
 native case. These additions remain source-only pending remote CI.
+
+## Public host raw/formal acceptance correction
+
+One plain host tool invocation persists two selected SDK records: its raw
+`capture-*` material and formal `res-*` result. The installed SDK/STL host now
+groups every indexed record by the actual `(tool_call_id, attempt)`, requires one
+group with exactly one raw and one formal record, and uses that formal material
+as the representative result. It never assumes a one-record list or takes an
+unclassified first/last result.
+
+Both records must match the actual Session, completed operation, turn and first
+attempt; persisted-event/result identities must be distinct. Their verified
+metadata, execution event and one verified UTF-8 combined channel must retain
+the host callback's exact text, byte counts, capture facts and artifact identity.
+The default Preview/v1 policy must remain bound to that Session. Raw and formal
+records share the actual execution and output digest; they remain two durable
+records for one callback.
+
+Same-ID recovery lists and verifies both records again, then compares each
+original six-part identity, metadata digest/bytes, execution event, result kind,
+policy and every combined-channel field. Closed readback checks both original
+records before and after the new Runtime closes. The new turn verifies its own
+raw/formal pair and fresh turn/action/execution identities. All three public
+paths and the private actual-public guard invoke this same helper; the 7/3/1
+case roster, model/tool counts, zero-replay, old JSONL prefix and weak-owner
+checks remain. The retained host receipt additionally records both OLD/NEW
+raw/formal identity and digest/byte witnesses. This correction is source-only;
+no earlier CI run establishes its execution result.
