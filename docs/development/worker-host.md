@@ -36,6 +36,10 @@
 SDK 明确失败时，另附 `sdk_code`；不回 provider 原始错误正文。未知字段、类型、方法
 和能力均明确拒绝，不能拿这条 wire 代替已有 AppServer wire。
 
+顶层可带整数 `protocol_version=1`；省略仍沿旧 v1。Worker 在读业务参数前
+拒绝坏类型和未支持版本。`worker.status` 另回 `supported_protocol_versions`，
+供父进程先查再选；[版本合同](worker-protocol-compatibility.md)列明检查次序与边界。
+
 | 方法 | params 与用途 |
 | --- | --- |
 | `worker.status` | 空对象；版本、初始化/连接状态、能力清单和本次实例号 |
