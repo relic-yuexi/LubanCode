@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <expected>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -10,6 +11,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -19,6 +21,8 @@
 #include "platform/atomic_write.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
+#include "api/backend.hpp"
+#include "runtime/session_service.hpp"
 #include "trajectory/managed_session_reservation.hpp"
 #include "trajectory/session_manager.hpp"
 #include "trajectory/v3/reader.hpp"
@@ -356,9 +360,227 @@ void CheckManagedRejectsActiveLocal(Fixture& fixture) {
     REQUIRE(manager.UpdateApprovalMode(lubancode::ApprovalMode::Default));
     REQUIRE(manager.Close({}, nullptr).error_code.empty());
 }
+lubancode::runtime::SessionLaunchRequest ManagedStackRequest(const Fixture& fixture) {
+    lubancode::runtime::SessionLaunchRequest request;
+    request.workspace_identity = fixture.options.identity;
+    request.workspaces_root = fixture.options.workspaces_root;
+    request.cwd_utf8 = fixture.options.launch_cwd;
+    request.launch_cwd = fixture.options.launch_cwd;
+    request.v3_system_content = "managed storage stack system";
+    request.wire_name = "fixture";
+    return request;
+}
+
+struct StackResourceAudit {
+    bool backend_alive = false, capture_retired_with_backend = false;
+    unsigned sends = 0, capture_retirements = 0;
+};
+class StackNeverBackend final : public lubancode::api::Backend {
+public:
+    explicit StackNeverBackend(std::shared_ptr<StackResourceAudit> audit) : audit_(std::move(audit)) {
+        audit_->backend_alive = true;
+    }
+    ~StackNeverBackend() override { audit_->backend_alive = false; }
+    std::expected<void, lubancode::api::Error> send_stream(const lubancode::api::Request&,
+        const std::function<void(const lubancode::api::StreamEvent&)>&, const std::atomic<bool>*) override {
+        ++audit_->sends;
+        return std::unexpected(lubancode::api::Error{lubancode::api::ErrorKind::Api, "must not execute"});
+    }
+private:
+    std::shared_ptr<StackResourceAudit> audit_;
+};
+struct StackBorrowCapture {
+    explicit StackBorrowCapture(std::shared_ptr<StackResourceAudit> value) : audit(std::move(value)) {}
+    std::shared_ptr<StackResourceAudit> audit;
+    ~StackBorrowCapture() { ++audit->capture_retirements; audit->capture_retired_with_backend = audit->backend_alive; }
+};
+
+void ManagedStorageOnly(lubancode::runtime::SessionService& service, const Fixture& fixture) {
+    namespace rt = lubancode::runtime;
+    REQUIRE(service.admission_mode() == rt::SessionAdmissionMode::ManagedStorageOnly);
+    REQUIRE(service.runtime());
+    REQUIRE(service.runtime()->admission_mode() == rt::SessionAdmissionMode::ManagedStorageOnly);
+    auto* ledger = service.trajectory(); REQUIRE(ledger);
+    REQUIRE(ledger->admission_mode() == rt::SessionAdmissionMode::ManagedStorageOnly);
+    const auto stream = traj::TrajectoryDirectory::OpenExisting(ledger->session_dir()).v3_stream_path();
+    const auto before = Read(stream);
+    const auto input = service.SubmitInput({"must-not-admit", "private user input", {}});
+    REQUIRE_FALSE(input.accepted); REQUIRE_FALSE(input.duplicate);
+    REQUIRE(input.error_code == rt::kManagedStorageOnlyError);
+    const auto pop = service.PopPendingInput();
+    REQUIRE(pop.status == rt::SessionService::PendingPop::Status::NotAdmitted);
+    REQUIRE(pop.error_code == rt::kManagedStorageOnlyError);
+    REQUIRE(pop.input.operation_id.empty()); REQUIRE(service.pending_input_count() == 0);
+    REQUIRE(service.PendingInputsSnapshot().empty());
+    REQUIRE_FALSE(service.RecordTurnFinal({"fake-op", "fake-turn", "success", {}, false}));
+    const auto command = service.ExecuteDomainCommand("must-not-run", {}, nullptr, nullptr, "", 0);
+    REQUIRE_FALSE(command.accepted); REQUIRE(command.error_code == rt::kManagedStorageOnlyError);
+    REQUIRE(service.runtime()->NoteWorkingDirectoryChanged(fixture.root / "must-not-resolve") == rt::kManagedStorageOnlyError);
+    REQUIRE(ledger->HandleCwdChange(fixture.options.identity).error == rt::kManagedStorageOnlyError);
+    REQUIRE(ledger->ClearSession({}, nullptr).error_code == rt::kManagedStorageOnlyError);
+    REQUIRE(ledger->ResumeInteractive("missing-source", "fixture").outcome.error_code == rt::kManagedStorageOnlyError);
+    REQUIRE_FALSE(ledger->NewTurnBridge({}));
+    REQUIRE_FALSE(ledger->NewBypassBridge({}, lubancode::accounting::RequestPurpose::MemoryExtract));
+
+    auto audit = std::make_shared<StackResourceAudit>();
+    rt::assembly::SessionResourcesRequest resources;
+    resources.backend_factory = [audit] { return std::make_unique<StackNeverBackend>(audit); };
+    resources.registry_factory = [](std::span<const rt::assembly::McpServerRuntime>) -> rt::assembly::SessionRegistryResult {
+        return std::make_unique<lubancode::tools::ToolRegistry>();
+    };
+    auto built = rt::assembly::BuildSessionResources(std::move(resources)); REQUIRE(built);
+    auto capture = std::make_shared<StackBorrowCapture>(audit);
+    std::weak_ptr<StackBorrowCapture> weak = capture;
+    lubancode::agent::AgentProfile profile;
+    profile.deferred_index_provider = [capture] { return std::string(); };
+    capture.reset();
+    REQUIRE_THROWS_WITH(service.InitializeExecution(std::move(*built), std::move(profile)), rt::kManagedStorageOnlyError);
+    REQUIRE(weak.expired()); REQUIRE_FALSE(profile.deferred_index_provider);
+    REQUIRE(audit->capture_retirements == 1); REQUIRE(audit->capture_retired_with_backend);
+    REQUIRE_FALSE(audit->backend_alive); REQUIRE(audit->sends == 0);
+    REQUIRE_FALSE(service.execution());
+    REQUIRE(Read(stream) == before);
+    REQUIRE_FALSE(fs::exists(ledger->session_dir() / "operations.jsonl"));
+    REQUIRE_FALSE(fs::exists(ledger->session_dir() / "operations-inputs"));
+    REQUIRE_FALSE(fs::exists(fixture.root / "must-not-resolve"));
+}
+
+void CheckManagedRuntimeOpeningStack() {
+    namespace rt = lubancode::runtime;
+    Fixture fixture;
+    std::vector<std::unique_ptr<rt::SessionService>> services;
+    std::vector<std::shared_ptr<const traj::ManagedSessionOwnershipPublication>> publications;
+    for (unsigned i = 0; i != 2; ++i) {
+        const auto id = "20261006-150000-STACK" + std::to_string(i);
+        auto pending = fixture.Reserve(id);
+        const auto published = pending->PublishOwnership(); REQUIRE(published.knowledge == Knowledge::Committed);
+        auto finished = pending->Finish(); REQUIRE(finished);
+        const auto directory = finished->directory().session_dir();
+        const auto stream = finished->directory().v3_stream_path();
+        const auto lock_bytes = Read(directory / "session.lock");
+        auto request = ManagedStackRequest(fixture);
+        unsigned callback_calls = 0;
+        request.v3_opening_participant = [&](const traj::V3OpeningContext& context)
+            -> std::expected<nlohmann::json, std::string> {
+            ++callback_calls;
+            REQUIRE(context.session_id == id); REQUIRE(context.session_dir == directory);
+            REQUIRE(Read(directory / "session.lock") == lock_bytes);
+            REQUIRE_FALSE(traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()));
+            return nlohmann::json::object();
+        };
+        auto service = std::make_unique<rt::SessionService>(std::move(request), std::move(*finished), Creator());
+        REQUIRE_MESSAGE(service->runtime() != nullptr, service->launch_error());
+        REQUIRE(service->v3_format()); REQUIRE(callback_calls == 1);
+        REQUIRE_FALSE(finished->lock().holds());
+        pending.reset(); finished = std::unexpected(std::string("consumed stack opening"));
+        REQUIRE(Read(directory / "session.lock") == lock_bytes);
+        REQUIRE_FALSE(traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()));
+        auto publication = service->trajectory()->managed_publication(); REQUIRE(publication);
+        SameDurablePublication(*publication, published);
+        REQUIRE(service->trajectory()->session_id() == id);
+        auto ledger = v3::ReadV3Ledger(stream); REQUIRE(ledger);
+        REQUIRE(ledger->session_id == id); REQUIRE(ledger->run_id == "main-0001");
+        const auto bytes = Read(stream);
+        const auto first = nlohmann::json::parse(bytes.substr(0, bytes.find('\n')));
+        const auto managed = first.at("systemMeta").at("managedSession");
+        REQUIRE(managed.at("sessionId") == id);
+        REQUIRE(managed.at("tenantId") == published.expected.tenant_id);
+        REQUIRE(managed.at("projectId") == published.expected.project_id);
+        REQUIRE(managed.at("workspaceKey") == published.expected.workspace_key);
+        REQUIRE(managed.at("bindingVersion") == published.expected.binding_version);
+        REQUIRE(managed.at("creationSubject").at("userId") == Creator().user_id);
+        REQUIRE(managed.at("openingPolicyRevision") == Creator().opening_policy_revision);
+        ManagedStorageOnly(*service, fixture);
+        publications.push_back(std::move(publication)); services.push_back(std::move(service));
+    }
+    const auto second_dir = services[1]->trajectory()->session_dir();
+    const auto second_stream = traj::TrajectoryDirectory::OpenExisting(second_dir).v3_stream_path();
+    const auto second_before = Read(second_stream);
+    REQUIRE(services[0]->Close("managed-storage-only-test").error_code.empty());
+    REQUIRE(Read(second_stream) == second_before);
+    REQUIRE_FALSE(traj::SessionLock::Acquire(second_dir, traj::SessionManagerClock{}.LockOwner()));
+    REQUIRE(services[1]->Close("managed-storage-only-test").error_code.empty());
+    for (unsigned i = 0; i != 2; ++i) {
+        const auto directory = services[i]->trajectory()->session_dir();
+        REQUIRE(services[i]->trajectory()->managed_publication() == publications[i]);
+        REQUIRE_FALSE(fs::exists(directory / "session.lock"));
+        auto free = traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()); REQUIRE(free);
+        free->Release();
+        REQUIRE(Read(directory / traj::kManagedSessionOwnershipFile) == publications[i]->publication_bytes);
+    }
+    services.clear();
+    REQUIRE(publications[0]->expected.session_id != publications[1]->expected.session_id);
+    REQUIRE(publications[0]->expected.workspace_key == publications[1]->expected.workspace_key);
+
+    for (unsigned mode = 0; mode != 6; ++mode) {
+        const auto id = "20261006-150000-STACKFAIL" + std::to_string(mode);
+        auto pending = fixture.Reserve(id);
+        const auto published = pending->PublishOwnership(); REQUIRE(published.knowledge == Knowledge::Committed);
+        auto finished = pending->Finish(); REQUIRE(finished);
+        const auto directory = finished->directory().session_dir(); const auto stream = finished->directory().v3_stream_path();
+        auto request = ManagedStackRequest(fixture); auto creation = Creator();
+        unsigned callback_calls = 0;
+        if (mode == 0) request.workspace_identity.reset();
+        if (mode == 1) { request.resume_at_launch = true; request.resume_source_session_id = "must-not-read"; }
+        if (mode == 2) creation.tenant_id = "foreign";
+        if (mode == 3) Write(directory / traj::kManagedSessionOwnershipFile, "changed before transfer");
+        request.v3_opening_participant = [&](const traj::V3OpeningContext&) -> std::expected<nlohmann::json, std::string> {
+            ++callback_calls;
+            REQUIRE_FALSE(traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()));
+            if (mode == 4) throw std::runtime_error("PRIVATE_STACK_FAILURE");
+            if (mode == 5) Write(directory / traj::kManagedSessionOwnershipFile, "changed during transfer callback");
+            return nlohmann::json::object();
+        };
+        rt::SessionService failed(std::move(request), std::move(*finished), creation);
+        REQUIRE_FALSE(failed.runtime()); REQUIRE_FALSE(failed.launch_error().empty());
+        REQUIRE(failed.launch_error().find("PRIVATE_STACK_FAILURE") == std::string::npos);
+        REQUIRE(failed.admission_mode() == rt::SessionAdmissionMode::ManagedStorageOnly);
+        REQUIRE(callback_calls == (mode >= 4 ? 1 : 0));
+        REQUIRE_FALSE(fs::exists(directory / "session.lock")); REQUIRE_FALSE(fs::exists(stream));
+        REQUIRE(failed.SubmitInput({"key", "must not start", {}}).error_code == rt::kManagedStorageOnlyError);
+        REQUIRE(failed.PopPendingInput().status == rt::SessionService::PendingPop::Status::NotAdmitted);
+        REQUIRE_FALSE(fs::exists(directory / "operations.jsonl"));
+        SameDurablePublication(pending->PublishOwnership(), published);
+        REQUIRE(Read(directory / traj::kManagedSessionOwnershipFile) ==
+            (mode == 3 ? "changed before transfer" : mode == 5 ? "changed during transfer callback" : published.publication_bytes));
+        auto free = traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()); REQUIRE(free);
+    }
+
+    // The lower explicit entry points cannot turn an invalid Managed opening
+    // into Local launch/resume or a later cwd-triggered opening.
+    for (unsigned layer = 0; layer != 2; ++layer) {
+        const auto id = "20261006-150000-STACKLAYER" + std::to_string(layer);
+        auto pending = fixture.Reserve(id);
+        const auto published = pending->PublishOwnership(); REQUIRE(published.knowledge == Knowledge::Committed);
+        auto finished = pending->Finish(); REQUIRE(finished);
+        const auto directory = finished->directory().session_dir(); const auto stream = finished->directory().v3_stream_path();
+        if (layer == 0) {
+            auto options = rt::SessionService::BuildRuntimeOptions(ManagedStackRequest(fixture));
+            options.trajectory_resume_at_launch = true;
+            rt::SessionRuntime rejected(std::move(options), std::move(*finished), Creator());
+            REQUIRE_FALSE(rejected.trajectory());
+            REQUIRE(rejected.trajectory_open_error() == "managed.session.invalid_launch_options");
+            REQUIRE(rejected.admission_mode() == rt::SessionAdmissionMode::ManagedStorageOnly);
+            REQUIRE(rejected.NoteWorkingDirectoryChanged(fixture.root / "unopened-cwd") == rt::kManagedStorageOnlyError);
+        } else {
+            rt::TrajectorySessionLedger::Options options;
+            options.workspaces_root = fixture.options.workspaces_root;
+            options.workspace_identity = fixture.options.identity;
+            options.resume_at_launch = true;
+            const auto rejected = rt::TrajectorySessionLedger::OpenManaged(std::move(options), std::move(*finished), Creator());
+            REQUIRE_FALSE(rejected); REQUIRE(rejected.error() == "managed.session.invalid_launch_options");
+        }
+        REQUIRE_FALSE(fs::exists(directory / "session.lock")); REQUIRE_FALSE(fs::exists(stream));
+        REQUIRE_FALSE(fs::exists(fixture.root / "unopened-cwd"));
+        REQUIRE(Read(directory / traj::kManagedSessionOwnershipFile) == published.publication_bytes);
+        SameDurablePublication(pending->PublishOwnership(), published);
+        auto free = traj::SessionLock::Acquire(directory, traj::SessionManagerClock{}.LockOwner()); REQUIRE(free);
+    }
+}
 } // namespace
 
 TEST_CASE("managed reservation: owned durable publication precedes directories and real V3 writer") {
+    CheckManagedRuntimeOpeningStack();
     Fixture fixture;
     auto pending = fixture.Reserve();
     const auto directory = pending->session_dir();

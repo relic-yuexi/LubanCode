@@ -88,6 +88,9 @@ public:
     };
 
     explicit SessionRuntime(Options options);
+    SessionRuntime(Options options, trajectory::ManagedSessionDirectory admitted,
+                   trajectory::ManagedSessionCreationAudit creation);
+    SessionAdmissionMode admission_mode() const noexcept { return admission_mode_; }
     ~SessionRuntime();
 
     SessionRuntime(const SessionRuntime&) = delete;
@@ -184,6 +187,9 @@ public:
                                  bool approve);
 
 private:
+    void InitializeLedger(trajectory::ManagedSessionDirectory* admitted = nullptr,
+                          trajectory::ManagedSessionCreationAudit* creation = nullptr);
+    const SessionAdmissionMode admission_mode_ = SessionAdmissionMode::LocalTrusted;
     Options options_;
     IdAuthority ids_;
     std::string thread_id_;
