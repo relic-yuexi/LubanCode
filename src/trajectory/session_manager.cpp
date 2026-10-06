@@ -992,6 +992,16 @@ std::expected<ActiveSession, std::string> SessionManager::AssembleV3SessionLocke
 
 std::expected<ActiveSession*, std::string> SessionManager::LaunchManagedSession(
     ManagedSessionDirectory admitted, ManagedSessionCreationAudit creation) {
+    return LaunchManagedSessionInternal(std::move(admitted), std::move(creation), false);
+}
+
+std::expected<ActiveSession*, std::string> SessionManager::LaunchManagedTextSession(
+    ManagedSessionDirectory admitted, ManagedSessionCreationAudit creation, ManagedTextSessionLaunch) {
+    return LaunchManagedSessionInternal(std::move(admitted), std::move(creation), true);
+}
+
+std::expected<ActiveSession*, std::string> SessionManager::LaunchManagedSessionInternal(
+    ManagedSessionDirectory admitted, ManagedSessionCreationAudit creation, bool text) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (boundary_in_progress_) return std::unexpected("session.boundary_in_progress: clear/close 未收完");
     if (active_) return std::unexpected("managed.session.active_exists");
@@ -1027,6 +1037,7 @@ std::expected<ActiveSession*, std::string> SessionManager::LaunchManagedSession(
         manifest.approval_mode = options_.approval_mode;
         manifest.event_schema_version = options_.recorder.event_schema_version;
         auto metadata = ManagedCreationMetadata(ownership, creation);
+        if (text) metadata["executionProfile"] = ManagedTextSessionProfile();
         auto publication = std::make_shared<const ManagedSessionOwnershipPublication>(std::move(admitted.publication_));
         auto session = AssembleV3SessionLocked(admitted.directory_, manifest, admitted.lock_,
                                                std::move(publication), std::move(metadata));
@@ -1601,7 +1612,7 @@ CloseOutcome SessionManager::CloseV3Locked(const CloseRequest& request,
     // 运行侧收口照做(停 turn/收队列/报子代),但 v2 的事件账没有落处——
     // 这些事实的 v3 对应物(turn 收口靠悬空调用 Cancel/queue 的 input.*
     // 事件族)属后续棒,这里如实以 unknown 标记,不冒充写过。
-    bool unknown_present = false;
+    bool unknown_present = managed_mode_ && request.managed_operation_unconfirmed;
     if (participant != nullptr) {
         if (!participant->CancelActiveTurn().empty()) {
             unknown_present = true;  // 活动 turn 被掐:v3 turn 收口账未接,如实标
@@ -1637,6 +1648,26 @@ CloseOutcome SessionManager::CloseV3Locked(const CloseRequest& request,
     session.named_result_capability.CloseWrites();
     session.lock.Release();
     return outcome;
+}
+
+ManagedCloseRetirement SessionManager::RetireManagedAfterCloseFailure(
+    const ManagedSessionOwnership& expected, const v3::V3Writer* writer) noexcept {
+    ManagedCloseRetirement out;
+    try {
+        std::lock_guard lock(mutex_);
+        if (!managed_mode_ || !active_ || !active_->managed_publication ||
+            active_->managed_publication->expected != expected || !active_->v3_main || &*active_->v3_main != writer)
+            return out;
+        out.attempted = true;
+        // Try every retirement step even when an earlier checked result or its
+        // diagnostic allocation throws. No diagnostics are allocated here.
+        try { out.checked_close.emplace(active_->v3_main->Close()); } catch (...) {}
+        try { active_->memory_capability.CloseWrites(); } catch (...) {}
+        try { active_->named_result_capability.CloseWrites(); } catch (...) {}
+        try { active_->lock.Release(); } catch (...) { try { active_->lock.Release(); } catch (...) {} }
+        out.writer_closed = active_->v3_main->closed(); out.lock_released = !active_->lock.holds();
+    } catch (...) {}
+    return out;
 }
 
 CloseOutcome SessionManager::Close(const CloseRequest& request, ClearParticipant* participant) {

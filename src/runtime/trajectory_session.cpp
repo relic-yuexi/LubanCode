@@ -96,9 +96,15 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     return OpenInternal(options, &admitted, &creation);
 }
 
+std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::OpenManagedText(
+    Options options, trajectory::ManagedSessionDirectory admitted,
+    trajectory::ManagedSessionCreationAudit creation, trajectory::ManagedTextSessionLaunch) {
+    return OpenInternal(options, &admitted, &creation, true);
+}
+
 std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::OpenInternal(
     Options& options, trajectory::ManagedSessionDirectory* admitted,
-    trajectory::ManagedSessionCreationAudit* creation) {
+    trajectory::ManagedSessionCreationAudit* creation, bool text) {
     if (admitted && (!creation || options.workspaces_root.empty() || !options.workspaces_root.is_absolute() ||
                      !options.workspace_identity.valid() || options.resume_at_launch || options.require_v3_resume ||
                      !options.resume_source_session_id.empty() || options.one_shot || options.recovery_factory ||
@@ -172,7 +178,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.recorder.defer_stream_create = true;
 
     Impl impl;
-    if (admitted) impl.admission_mode = SessionAdmissionMode::ManagedStorageOnly;
+    if (admitted) impl.admission_mode = text ? SessionAdmissionMode::ManagedText : SessionAdmissionMode::ManagedStorageOnly;
     impl.workspaces_root = options.workspaces_root;
     impl.v3_system_content = options.v3_system_content;
     impl.recorder_options.event_schema_version = options.event_schema_version;
@@ -320,7 +326,9 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     if (options.require_v3_resume) {
         return std::unexpected("resume.failed: " + impl.launch_resume_soul_error);
     }
-    auto active = admitted ? impl.manager->LaunchManagedSession(std::move(*admitted), std::move(*creation))
+    auto active = admitted ? (text
+        ? impl.manager->LaunchManagedTextSession(std::move(*admitted), std::move(*creation), trajectory::ManagedTextSessionLaunch{})
+        : impl.manager->LaunchManagedSession(std::move(*admitted), std::move(*creation)))
                            : impl.manager->LaunchSession();
     if (!active.has_value()) {
         return std::unexpected("trajectory.launch_failed: " + active.error());
@@ -422,7 +430,12 @@ std::shared_ptr<trajectory::NamedResultCapability> TrajectorySessionLedger::name
 
 std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
     TrajectoryTurnBridge::Identity identity) {
-    if (admission_mode() == SessionAdmissionMode::ManagedStorageOnly) return nullptr;
+    if (admission_mode() != SessionAdmissionMode::LocalTrusted) return nullptr;
+    return NewTurnBridgeOwned(std::move(identity));
+}
+
+std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridgeOwned(
+    TrajectoryTurnBridge::Identity identity) {
     // 接线点 1:v3 场造 v3 模式桥(绑 V3Writer + 会话共享账)。
     if (impl_ != nullptr && impl_->active != nullptr && impl_->active->is_v3()) {
         trajectory::EventScope identity_scope;
@@ -459,7 +472,7 @@ std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
 
 std::unique_ptr<TrajectoryBypassBridge> TrajectorySessionLedger::NewBypassBridge(
     TrajectoryTurnBridge::Identity identity, accounting::RequestPurpose purpose) {
-    if (admission_mode() == SessionAdmissionMode::ManagedStorageOnly) return nullptr;
+    if (admission_mode() != SessionAdmissionMode::LocalTrusted) return nullptr;
     // 接线点 1 分期边界(取消误报 ESC 单 Bug 2 收窄一格 + T11-A 扩一格):
     // v3 场给用途有消息合同落点的请求接 v3 旁路桥——memory_extract(内部
     // 回合号/消息 purpose/prepared 合同齐备)与 title_refine(T11-A 起自动
@@ -530,10 +543,22 @@ trajectory::CloseOutcome TrajectorySessionLedger::CloseSession(const std::string
     return impl_->manager->Close(request, &participant);
 }
 
+trajectory::CloseOutcome TrajectorySessionLedger::CloseManagedSession(const std::string& reason, bool unconfirmed,
+                                                                    trajectory::ManagedCloseRetirement& retirement) {
+    trajectory::CloseRequest request; request.reason = reason;
+    request.managed_operation_unconfirmed = unconfirmed;
+    trajectory::NullClearParticipant participant;
+    trajectory::CloseOutcome result; result.error_code = "managed.session.close_unconfirmed";
+    try { result = impl_->manager->Close(request, &participant); } catch (...) {}
+    if (!result.error_code.empty()) retirement = impl_->manager->RetireManagedAfterCloseFailure(
+        impl_->active->managed_publication->expected, &*impl_->active->v3_main);
+    return result;
+}
+
 TrajectorySessionLedger::CwdChangeResult TrajectorySessionLedger::HandleCwdChange(
     const workspace::WorkspaceIdentity& new_identity) {
     CwdChangeResult result;
-    if (admission_mode() == SessionAdmissionMode::ManagedStorageOnly) {
+    if (admission_mode() != SessionAdmissionMode::LocalTrusted) {
         result.error = kManagedStorageOnlyError;
         return result;
     }
@@ -676,7 +701,7 @@ std::vector<api::Message> ProjectHistoryFromReplay(const trajectory::ReplayState
 
 trajectory::ClearOutcome TrajectorySessionLedger::ClearSession(
     const trajectory::ClearRequest& request, trajectory::ClearParticipant* participant) {
-    if (admission_mode() == SessionAdmissionMode::ManagedStorageOnly) {
+    if (admission_mode() != SessionAdmissionMode::LocalTrusted) {
         trajectory::ClearOutcome rejected;
         rejected.error_code = kManagedStorageOnlyError;
         return rejected;
@@ -705,7 +730,7 @@ trajectory::ClearOutcome TrajectorySessionLedger::ClearSession(
 TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::string& source_session_id,
                                                                    const std::string& command_name) {
     TrajectoryResumeSummary summary;
-    if (admission_mode() == SessionAdmissionMode::ManagedStorageOnly) {
+    if (admission_mode() != SessionAdmissionMode::LocalTrusted) {
         summary.outcome.error_code = kManagedStorageOnlyError;
         return summary;
     }

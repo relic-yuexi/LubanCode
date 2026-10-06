@@ -1705,9 +1705,10 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (line.turn_id->empty() || line.turn_id->size() > 200 || line.turn_id->find_first_not_of(
                 "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos)
             return Err("schema3.bad_operation_turn", "invalid main operation turn ID");
-        if (line.payload.size() != 5 || !line.payload.contains("version") ||
+        const bool managed = line.payload.contains("layout") && line.payload.at("layout") == "managed_main_operation_turn_v1";
+        if (line.payload.size() != (managed ? 6u : 5u) || !line.payload.contains("version") ||
             !line.payload.at("version").is_number_integer() || line.payload.at("version") != 1 ||
-            !line.payload.contains("layout") || line.payload.at("layout") != "sdk_main_operation_turn_v1")
+            !line.payload.contains("layout") || (!managed && line.payload.at("layout") != "sdk_main_operation_turn_v1"))
             return Err("schema3.bad_operation_turn", "unknown main operation anchor layout or version");
         for (const char* key : {"operationId", "inputId"}) {
             if (auto error = CheckStringField(kind_name, line.payload, key)) return error;
@@ -1719,6 +1720,9 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (!line.payload.contains("payloadHash") || !line.payload.at("payloadHash").is_string() ||
             !IsHex64(line.payload.at("payloadHash").get<std::string>()))
             return Err("schema3.bad_operation_turn", "main operation anchor requires payload SHA256");
+        if (managed && (!line.payload.contains("provenanceHash") || !line.payload.at("provenanceHash").is_string() ||
+            !IsHex64(line.payload.at("provenanceHash").get<std::string>())))
+            return Err("schema3.bad_operation_turn", "managed operation anchor requires provenance SHA256");
     } else if (line.kind == K::ToolJobAdopted) {
         if (auto error = CheckToolPayload(kind_name, line, true)) return error;
         if (line.payload.at("attempt") != 1 || !line.turn_id || !line.step_id)

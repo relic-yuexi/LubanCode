@@ -27,6 +27,7 @@
 #include "runtime/middleware_runtime.hpp"
 #include "runtime/middleware_v3_sink.hpp"
 #include "runtime/session_service.hpp"
+#include "runtime/operation_result.hpp"
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "sdk/adapters.hpp"
@@ -1125,8 +1126,8 @@ struct Session::Impl final : rt::InteractionBroker {
         const auto directory = session_dir / "sdk-results";
         std::error_code ec;
         fs::create_directories(directory, ec);
-        const Json result{{"operationId", operation.operation_id}, {"turnId", operation.turn_id},
-                          {"finalText", operation.final_text}, {"error", operation.error}, {"complete", complete}};
+        const Json result = rt::MakeSdkOperationResultPayload(operation.operation_id, operation.turn_id,
+            operation.final_text, operation.error, complete);
         const auto written = lubancode::platform::AtomicWriteFile(directory / (operation.operation_id + ".json"), result.dump(),
             lubancode::platform::WriteDurability::ProcessCrashDurability);
         if (!written) {

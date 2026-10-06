@@ -11,6 +11,7 @@
 #include "platform/bounded_read.hpp"
 #include "platform/sha256.hpp"
 #include "runtime/trajectory_session.hpp"
+#include "trajectory/v3/operation_turn_append.hpp"
 
 namespace lubancore::detail {
 namespace {
@@ -172,13 +173,9 @@ MainOperationTurnStart BeginMainOperationTurn(rt::SessionService& service,
         facts.session_id = writer->session_id(); facts.run_id = writer->run_id(); facts.turn_id = out.turn_id;
         facts.operation_id = accepted->operation_id; facts.input_id = accepted->input_id;
         facts.payload_hash = accepted->payload_hash;
-        v3::EventDraft event;
-        event.kind = v3::EventKindV3::SdkOperationTurnBound;
-        event.turn_id = out.turn_id;
-        event.payload = {{"layout", std::string(v3::kSdkMainOperationTurnLayout)}, {"version", 1},
-            {"operationId", facts.operation_id}, {"inputId", facts.input_id}, {"payloadHash", facts.payload_hash}};
+        auto event = v3::PrepareMainOperationTurnBinding(facts);
         out.knowledge = OperationTurnKnowledge::AppendUnconfirmed;
-        out.receipt = writer->AppendEvent(std::move(event), v3::Durability::PowerLoss);
+        out.receipt = v3::AppendMainOperationTurnBinding(*writer, std::move(event));
         if (out.receipt->status != v3::WriteReceipt::Status::Committed || writer->broken()) {
             out.error = Failure(out.receipt->error_code.empty() ? "sdk.operation_turn.append_unconfirmed" : out.receipt->error_code,
                                 out.receipt->error_message);

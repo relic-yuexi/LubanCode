@@ -37,6 +37,7 @@
 #include "trajectory/v3/reader.hpp"   // EffectiveConversationFromV3 的链投影入参
 #include "trajectory/v3/writer.hpp"   // ActiveSession 的 v3 主账写者(接线点 1)
 
+namespace lubancode::runtime { class TrajectorySessionLedger; }
 namespace lubancode::trajectory {
 
 // ---------------------------------------------------------------------------
@@ -313,6 +314,9 @@ struct ClearOutcome {
 
 struct CloseRequest {
     std::string reason = "exit";  // exit | eof | shutdown | switch_to_resume
+    // Internal live-owner observation only. Applied solely in Managed V3 close;
+    // not a durable receipt, a reconstructed failure or a Local behavior change.
+    bool managed_operation_unconfirmed = false;
 };
 
 struct CloseOutcome {
@@ -323,6 +327,13 @@ struct CloseOutcome {
     std::string run_terminal_kind;
     std::string close_quality;  // clean | incomplete
     std::string journal_sha256;
+};
+
+struct ManagedCloseRetirement {
+    bool attempted = false, writer_closed = false, lock_released = false;
+    // Original V3 checked Close result, separate from failed SessionEnded/Close.
+    // Empty after an exception is unobserved, never a fabricated native success.
+    std::optional<std::expected<void, std::string>> checked_close;
 };
 
 // ---------------------------------------------------------------------------
@@ -567,6 +578,8 @@ public:
     // LocalTrusted launch/resume/clear/recovery/admin. This is storage, not ACL.
     std::expected<ActiveSession*, std::string> LaunchManagedSession(
         ManagedSessionDirectory admitted, ManagedSessionCreationAudit creation);
+    std::expected<ActiveSession*, std::string> LaunchManagedTextSession(
+        ManagedSessionDirectory admitted, ManagedSessionCreationAudit creation, ManagedTextSessionLaunch);
 
     // clear 八步换账(§3.3.1 逐字)。串行掌管;重复请求回 clear.busy。
     ClearOutcome Clear(const ClearRequest& request, ClearParticipant* participant);
@@ -649,6 +662,11 @@ public:
         const std::filesystem::path& session_dir);
 
 private:
+    friend class lubancode::runtime::TrajectorySessionLedger;
+    ManagedCloseRetirement RetireManagedAfterCloseFailure(
+        const ManagedSessionOwnership&, const v3::V3Writer*) noexcept;
+    std::expected<ActiveSession*, std::string> LaunchManagedSessionInternal(
+        ManagedSessionDirectory admitted, ManagedSessionCreationAudit creation, bool text);
     bool EnsureWorkspace(std::string* error);
     std::string NextMainRunId() const;
     std::string NewStampId() const;  // session_id/operation_id 同形状

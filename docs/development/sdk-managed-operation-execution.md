@@ -59,6 +59,21 @@ dispatched operation without a confirmed final keeps an incomplete close and
 its original facts. Close drains execution before capturing/closing operation
 and main writers and releasing the real SessionLock.
 
+V3 has no turn-terminal event. The final reader does not invent one: it validates
+the actual anchor, subsequent message references and the SDK result/final facts.
+An internal CloseRequest observation forwards unresolved dispatch, first write
+failure, failed material capture or failed checked operation close to the existing
+Managed V3 SessionEnded close-quality decision. Local defaults false. This makes
+the actual ended row incomplete; no invented turn/child cancellation receipt is
+used, and this live observation does not become a durable failure proof.
+
+If Managed main Close cannot write its ended row, a private Ledger → Manager
+retirement checks the same active publication and writer under the Manager mutex.
+After execution and operation writes stop, it attempts the original writer Close,
+both capability write closures and original lock release. These retirement facts
+stay separate from the failed main Close. It adds no ended/final row and never
+changes a first unknown into success. Local failed-Close behavior stays unchanged.
+
 `completion_known` reports only this live owner's observation. It is not a
 cross-process durable confirmation. Same-ID Managed recovery remains closed.
 
@@ -73,3 +88,11 @@ unknown and committed-then-semantic-gap fences, and Close cleanup. Old Local
 schema1/2, storage schema3, original CASE assertions and time limits stay intact.
 No native tests, configure or compilation run locally. Remote CI will provide
 the first native execution evidence after source review.
+
+At this source handoff, the six new whole CASEs live in
+`tests/unit/runtime/test_managed_operation_execution.cpp`. Their once-only markers
+are `roundtrip`, `admission`, `strict`, `dispatch-first`, `binding-close` and
+`final-first`, under `[managed-operation-execution-path]`. CMake/CI registration,
+independent source review, compilation and native execution remain pending.
+This is an internal WIP candidate, not an accepted public Managed execution path.
+No existing test source, CASE roster, timeout or CI workflow changes in this slice.

@@ -31,7 +31,7 @@ struct ManagedOperationProvenance {
     bool operator==(const ManagedOperationProvenance&) const = default;
 };
 struct ManagedStoredOperation {
-    enum class State { Accepted, RejectedBeforeDispatch };
+    enum class State { Accepted, RejectedBeforeDispatch, Dispatched, Final };
     ManagedOperationProvenance provenance;
     std::string client_operation_id, text, input_ref, input_sha256;
     std::size_t input_bytes = 0;
@@ -39,6 +39,22 @@ struct ManagedStoredOperation {
     std::string terminal_status, reason_code;
     std::uint64_t terminal_policy_revision = 0;
     std::int64_t received_at_ms = 0, rejected_at_ms = 0;
+    std::string turn_id, binding_event_id, binding_hash;
+    std::uint64_t dispatch_policy_revision = 0, binding_seq = 0;
+    std::int64_t dispatched_at_ms = 0, finalized_at_ms = 0;
+    std::string execution_status, result_ref, result_sha256;
+    std::size_t result_bytes = 0;
+    std::vector<std::string> final_message_refs;
+    bool usage_reported = false, complete = false;
+};
+struct ManagedOperationResult {
+    std::string execution_status, final_text, error;
+    std::vector<std::string> final_message_refs;
+    bool usage_reported = false, complete = false;
+};
+struct PreparedManagedFinal {
+    ManagedStoredOperation operation;
+    std::string result_bytes, final_line;
 };
 struct PreparedManagedOperation {
     ManagedStoredOperation operation;
@@ -52,6 +68,9 @@ inline constexpr std::size_t kManagedOperationLedgerBytes = 16 * 1024 * 1024;
 inline constexpr std::size_t kManagedOperationLedgerLines = 65536;
 inline constexpr std::size_t kManagedOperationLedgerLineBytes = 256 * 1024;
 inline constexpr std::size_t kManagedOperationViewBytes = 384 * 1024 * 1024;
+inline constexpr std::size_t kManagedOperationMainBytes = 128 * 1024 * 1024;
+inline constexpr std::size_t kManagedOperationResultBytes = 8 * 1024 * 1024;
+inline constexpr std::size_t kManagedOperationResultsTotalBytes = 128 * 1024 * 1024;
 
 struct ManagedOperationMaterials {
     trajectory::ManagedSessionOwnership owner;
@@ -63,6 +82,10 @@ struct ManagedOperationMaterials {
     bool completion_known = true;
     // Only accepted inputRef roster, keyed by the actual operation ID.
     std::map<std::string, std::string> inputs;
+    // Only the fresh-text capture fills these actual originals. The storage-only
+    // strict reader continues to reject schema4, independent of their presence.
+    std::string main;
+    std::map<std::string, std::string> results;
 };
 
 std::expected<std::string, std::string> ManagedOperationIntentHash(
@@ -75,6 +98,11 @@ std::expected<PreparedManagedOperation, std::string> PrepareManagedOperation(
 std::expected<std::string, std::string> PrepareManagedOperationRejection(
     const ManagedStoredOperation&, const std::string& terminal_status,
     const std::string& reason_code, std::uint64_t decision_revision, std::int64_t rejected_at_ms);
+std::expected<std::string, std::string> PrepareManagedOperationDispatch(
+    const ManagedStoredOperation&, const std::string& turn_id, std::uint64_t decision_revision,
+    std::int64_t dispatched_at_ms);
+std::expected<PreparedManagedFinal, std::string> PrepareManagedOperationFinal(
+    const ManagedStoredOperation& bound, const ManagedOperationResult&, std::int64_t finalized_at_ms);
 
 // Roster stage used by a real locked capture. Does not read input paths.
 std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOperationLedgerOwned(
@@ -82,6 +110,12 @@ std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOpera
     const std::string& run_id);
 // Full strict consumer. All input bytes are owned; no path fallback or actor default.
 std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOperationsOwned(
+    const ManagedOperationMaterials&);
+// Explicit mixed schema3 acceptance/rejection + schema4 dispatch/final roster.
+std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedExecutionLedgerOwned(
+    const std::string&, const trajectory::ManagedSessionOwnership&, const std::string& run_id);
+// Strict actual main/input/result relationship, no path or live owner fallback.
+std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedExecutionOwned(
     const ManagedOperationMaterials&);
 
 } // namespace lubancode::runtime

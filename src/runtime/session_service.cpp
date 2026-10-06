@@ -13,6 +13,7 @@
 #include "platform/bounded_read.hpp"
 #include "platform/owned_file_path.hpp"
 #include "trajectory/v3/reader.hpp"
+#include "trajectory/v3/operation_turn_append.hpp"
 
 #include <limits>
 #include <map>
@@ -414,6 +415,20 @@ SessionService::SessionService(SessionLaunchRequest request, trajectory::Managed
     // No operations file, SeedOperationLedger, input or execution admission here.
 }
 
+SessionService::SessionService(SessionLaunchRequest request, trajectory::ManagedSessionDirectory admitted,
+                              trajectory::ManagedSessionCreationAudit creation, trajectory::ManagedTextSessionLaunch)
+    : admission_mode_(SessionAdmissionMode::ManagedText) {
+    if (!request.workspace_identity || !request.workspace_identity->valid() || request.workspaces_root.empty() ||
+        !request.workspaces_root.is_absolute()) {
+        launch_error_ = "managed.session.invalid_launch_options"; return;
+    }
+    auto runtime = std::make_unique<SessionRuntime>(BuildRuntimeOptions(request), std::move(admitted),
+        std::move(creation), trajectory::ManagedTextSessionLaunch{});
+    if (!runtime->trajectory()) { launch_error_ = runtime->trajectory_open_error(); return; }
+    v3_format_ = runtime->trajectory()->v3_main_writer() != nullptr;
+    runtime_ = std::move(runtime);
+}
+
 SessionService::~SessionService() {
     (void)ShutdownExecution();
     if (runtime_ != nullptr && runtime_->async_tool_runtime() != nullptr &&
@@ -433,8 +448,32 @@ void SessionService::InitializeExecution(std::unique_ptr<assembly::SessionResour
         agent::AgentProfile& profile;
         ~SourceProfileScope() { ClearExecutionProfileBorrowers(profile); }
     } source_profile_scope{profile};
-    if (admission_mode_ == SessionAdmissionMode::ManagedStorageOnly)
+    if (admission_mode_ != SessionAdmissionMode::LocalTrusted)
         throw std::logic_error(kManagedStorageOnlyError);
+    InitializeExecutionOwned(std::move(resources), std::move(profile), std::move(restored_history));
+}
+
+void SessionService::InitializeManagedTextExecution(std::unique_ptr<assembly::SessionResources> resources,
+                                                  agent::AgentProfile&& profile) {
+    struct SourceProfileScope {
+        agent::AgentProfile& profile;
+        ~SourceProfileScope() { ClearExecutionProfileBorrowers(profile); }
+    } source_profile_scope{profile};
+    {
+        std::lock_guard lock(commit_mutex_);
+        if (admission_mode_ != SessionAdmissionMode::ManagedText || managed_closing_ || managed_closed_ || managed_first_failure_)
+            throw std::logic_error("managed.execution.not_admitted");
+        auto scope = ManagedScopeLocked();
+        if (!scope) throw std::logic_error(scope.error());
+        if (!resources || !resources->registry().All().empty() || !resources->mcp_servers().empty() ||
+            profile.tool_ref_resolver || !profile.request.tools.empty()) throw std::logic_error("managed.execution.text_profile_required");
+    }
+    InitializeExecutionOwned(std::move(resources), std::move(profile), std::nullopt);
+}
+
+void SessionService::InitializeExecutionOwned(std::unique_ptr<assembly::SessionResources> resources,
+                                            agent::AgentProfile&& profile,
+                                            std::optional<std::vector<api::Message>> restored_history) {
     {
         std::lock_guard lock(commit_mutex_);
         if (runtime_ == nullptr) throw std::logic_error("session.execution.session_unavailable");
@@ -450,6 +489,12 @@ void SessionService::InitializeExecution(std::unique_ptr<assembly::SessionResour
         std::lock_guard lock(commit_mutex_);
         if (execution_ != nullptr) throw std::logic_error("session.execution.already_initialized");
         if (execution_shutdown_requested_.load()) throw std::logic_error("session.execution.stopping");
+        if (admission_mode_ == SessionAdmissionMode::ManagedText) {
+            if (managed_closing_ || managed_closed_ || managed_first_failure_)
+                throw std::logic_error("managed.execution.not_admitted");
+            auto scope = ManagedScopeLocked();
+            if (!scope) throw std::logic_error(scope.error());
+        }
         execution_ = std::move(candidate);
     }
 }
@@ -673,7 +718,7 @@ std::string SessionService::CanonicalInputPayload(const InputRequest& input) {
 
 SessionService::InputReceipt SessionService::SubmitInput(const InputRequest& input) {
     InputReceipt receipt;
-    if (admission_mode_ == SessionAdmissionMode::ManagedStorageOnly) {
+    if (admission_mode_ != SessionAdmissionMode::LocalTrusted) {
         receipt.error_code = kManagedStorageOnlyError;
         return receipt;
     }
@@ -763,7 +808,7 @@ SessionService::InputReceipt SessionService::SubmitInput(const InputRequest& inp
 
 SessionService::PendingPop SessionService::PopPendingInput() {
     PendingPop pop;
-    if (admission_mode_ == SessionAdmissionMode::ManagedStorageOnly) {
+    if (admission_mode_ != SessionAdmissionMode::LocalTrusted) {
         pop.status = PendingPop::Status::NotAdmitted;
         pop.error_code = kManagedStorageOnlyError;
         return pop;
@@ -801,7 +846,7 @@ std::vector<SessionService::QueuedInput> SessionService::PendingInputsSnapshot()
 }
 
 bool SessionService::RecordTurnFinal(const TurnFinalRecord& record) {
-    if (admission_mode_ == SessionAdmissionMode::ManagedStorageOnly) return false;
+    if (admission_mode_ != SessionAdmissionMode::LocalTrusted) return false;
     if (runtime_ == nullptr || trajectory() == nullptr) {
         return false;
     }
@@ -975,11 +1020,12 @@ SessionService::OperationLookup SessionService::LookupClientOperation(
 }
 
 std::expected<ManagedOperationMaterials, std::string> SessionService::ManagedScopeLocked() const {
-    if (admission_mode_ != SessionAdmissionMode::ManagedStorageOnly || !trajectory())
+    if (admission_mode_ == SessionAdmissionMode::LocalTrusted || !trajectory())
         return std::unexpected("managed.operation.not_admitted");
+    const bool text = admission_mode_ == SessionAdmissionMode::ManagedText;
     auto publication = trajectory()->managed_publication();
     auto* writer = runtime_->trajectory()->v3_main_writer(); // Const capture of the same owned writer.
-    if (!publication || !writer || writer->closed() || writer->broken() ||
+    if (!publication || !writer || writer->closed() || (writer->broken() && !(text && managed_first_failure_)) ||
         publication->knowledge != trajectory::ManagedSessionOwnershipPublication::Knowledge::Committed ||
         !publication->native || !publication->native->has_value() ||
         publication->native->value().outcome != platform::WriteOutcome::CommittedDurable)
@@ -1003,7 +1049,7 @@ std::expected<ManagedOperationMaterials, std::string> SessionService::ManagedSco
     const auto matches = [&](const char* key, const std::string& value) {
         return managed.contains(key) && managed[key].is_string() && managed[key] == value;
     };
-    if (managed.size() != 9 || !managed.contains("schemaVersion") || !managed["schemaVersion"].is_number_integer() || managed["schemaVersion"] != 1 ||
+    if (managed.size() != (text ? 10u : 9u) || !managed.contains("schemaVersion") || !managed["schemaVersion"].is_number_integer() || managed["schemaVersion"] != 1 ||
         !matches("mode", "Managed") || !matches("tenantId", owner.tenant_id) ||
         !matches("projectId", owner.project_id) || !matches("workspaceKey", owner.workspace_key) ||
         !matches("sessionId", owner.session_id) || !managed.contains("bindingVersion") ||
@@ -1026,6 +1072,11 @@ std::expected<ManagedOperationMaterials, std::string> SessionService::ManagedSco
         (creator["actorKind"] != "user" && creator["actorKind"] != "agent" && creator["actorKind"] != "service"))
         return std::unexpected("managed.operation.owner_changed");
     ManagedOperationMaterials result; result.owner = owner; result.run_id = ledger->run_id;
+    if (text) {
+        if (!managed.contains("executionProfile") || !trajectory::IsManagedTextSessionProfile(managed["executionProfile"]))
+            return std::unexpected("managed.operation.profile_changed");
+        result.main = captured->bytes();
+    }
     return result;
 }
 
@@ -1034,7 +1085,7 @@ std::shared_ptr<const SessionService::ManagedWriteReceipt> SessionService::Submi
     auto receipt = std::make_shared<ManagedWriteReceipt>();
     receipt->input.error_code = "managed.operation.publication_unconfirmed";
     std::lock_guard lock(commit_mutex_);
-    if (admission_mode_ != SessionAdmissionMode::ManagedStorageOnly) {
+    if (admission_mode_ == SessionAdmissionMode::LocalTrusted) {
         receipt->input.error_code = "managed.operation.not_admitted"; return receipt;
     }
     if (managed_closing_ || managed_closed_ || execution_shutdown_requested_.load()) {
@@ -1138,7 +1189,7 @@ std::shared_ptr<const SessionService::ManagedWriteReceipt> SessionService::Submi
 
 std::shared_ptr<const ManagedStoredOperation> SessionService::ManagedPendingFront() const {
     std::lock_guard lock(commit_mutex_);
-    if (admission_mode_ != SessionAdmissionMode::ManagedStorageOnly || managed_closing_ || managed_closed_ ||
+    if (admission_mode_ == SessionAdmissionMode::LocalTrusted || managed_closing_ || managed_closed_ ||
         managed_first_failure_ || pending_inputs_.empty()) return {};
     return pending_inputs_.front().managed;
 }
@@ -1148,7 +1199,7 @@ std::shared_ptr<const SessionService::ManagedWriteReceipt> SessionService::Rejec
     auto receipt = std::make_shared<ManagedWriteReceipt>();
     receipt->phase = ManagedWriteReceipt::Phase::Rejection;
     receipt->input.error_code = "managed.operation.publication_unconfirmed";
-    if (admission_mode_ != SessionAdmissionMode::ManagedStorageOnly || managed_closed_ || managed_first_failure_ ||
+    if (admission_mode_ == SessionAdmissionMode::LocalTrusted || managed_closed_ || managed_first_failure_ ||
         pending_inputs_.empty() || !pending_inputs_.front().managed ||
         pending_inputs_.front().managed->provenance != expected) {
         receipt->input.error_code = "managed.operation.front_changed"; return receipt;
@@ -1204,6 +1255,158 @@ std::shared_ptr<const SessionService::ManagedWriteReceipt> SessionService::Rejec
     return RejectManagedPendingInputLocked(expected, status, reason, revision);
 }
 
+bool SessionService::ManagedTextReadyLocked() const {
+    return admission_mode_ == SessionAdmissionMode::ManagedText && execution_ && runtime_ && trajectory() &&
+        !managed_closing_ && !managed_closed_ && !managed_first_failure_ && !execution_shutdown_requested_.load() &&
+        execution_->resources().registry().All().empty() && execution_->resources().mcp_servers().empty() &&
+        runtime_->trajectory()->v3_main_writer() && !runtime_->trajectory()->v3_main_writer()->closed() &&
+        !runtime_->trajectory()->v3_main_writer()->broken();
+}
+
+std::shared_ptr<const SessionService::ManagedWriteReceipt> SessionService::DispatchManagedPendingInput(
+    const ManagedOperationProvenance& expected, std::uint64_t revision) {
+    auto receipt = std::make_shared<ManagedWriteReceipt>(); receipt->phase = ManagedWriteReceipt::Phase::Dispatch;
+    receipt->input.error_code = "managed.operation.dispatch_unconfirmed";
+    std::lock_guard lock(commit_mutex_);
+    if (!ManagedTextReadyLocked() || !revision) { receipt->input.error_code = "managed.operation.execution_not_admitted"; return receipt; }
+    if (pending_inputs_.empty() || !pending_inputs_.front().managed || pending_inputs_.front().managed->provenance != expected) {
+        receipt->input.error_code = "managed.operation.front_changed"; return receipt;
+    }
+    bool native_entered = false;
+    try {
+        auto material = CaptureManagedOperationMaterialsLocked();
+        if (!material) { receipt->input.error_code = material.error(); return receipt; }
+        auto source = ReadManagedExecutionOwned(*material);
+        if (!source) { receipt->input.error_code = source.error(); return receipt; }
+        for (const auto& op : *source) if (op.state == ManagedStoredOperation::State::Dispatched) {
+            receipt->input.error_code = "managed.operation.turn_active"; return receipt;
+        }
+        const auto front = pending_inputs_.front().managed;
+        const auto key = operations_.find(front->client_operation_id);
+        if (key == operations_.end() || key->second.managed != front ||
+            std::none_of(source->begin(), source->end(), [&](const auto& op) {
+                return op.provenance == expected && op.state == ManagedStoredOperation::State::Accepted && op.text == front->text;
+            })) { receipt->input.error_code = "managed.operation.front_changed"; return receipt; }
+        auto dispatched = std::make_shared<ManagedStoredOperation>(*front);
+        auto* writer = trajectory()->v3_main_writer();
+        dispatched->turn_id = writer->NewTurnId();
+        dispatched->dispatched_at_ms = (std::max)(NowMs(), front->received_at_ms);
+        dispatched->dispatch_policy_revision = revision;
+        auto line = PrepareManagedOperationDispatch(*front, dispatched->turn_id, revision, dispatched->dispatched_at_ms);
+        if (!line || line->size() + 1 > kManagedOperationLedgerBytes - managed_ledger_bytes_) {
+            receipt->input.error_code = line ? "managed.operation.storage_limit" : line.error(); return receipt;
+        }
+        trajectory::v3::OperationTurnBindingFacts facts;
+        facts.session_id = expected.admission.owner.session_id; facts.run_id = expected.run_id;
+        facts.turn_id = dispatched->turn_id; facts.operation_id = expected.operation_id; facts.input_id = expected.input_id;
+        facts.payload_hash = expected.input_hash; facts.provenance_hash = expected.provenance_hash;
+        auto event = trajectory::v3::PrepareMainOperationTurnBinding(facts);
+        receipt->operation = dispatched;
+        receipt->input.operation_id = expected.operation_id; receipt->input.input_id = expected.input_id;
+        receipt->input.payload_hash = expected.input_hash;
+        native_entered = true; receipt->knowledge = ManagedWriteReceipt::Knowledge::Unconfirmed;
+        auto appended = operations_file_->AppendManaged(*line, managed_native_probe_);
+        if (!appended) { receipt->knowledge = ManagedWriteReceipt::Knowledge::Rejected; managed_first_failure_ = receipt; return receipt; }
+        receipt->append = *appended;
+        if (appended->status != trajectory::JournalAppendStatus::Committed ||
+            appended->confirmed_durability != trajectory::Durability::PowerLoss) {
+            if (appended->status == trajectory::JournalAppendStatus::RejectedBeforeIO)
+                receipt->knowledge = ManagedWriteReceipt::Knowledge::Rejected;
+            managed_first_failure_ = receipt; return receipt;
+        }
+        receipt->knowledge = ManagedWriteReceipt::Knowledge::NativeCommittedPublicationGap;
+        if (managed_publication_probe_) managed_publication_probe_();
+        dispatched->state = ManagedStoredOperation::State::Dispatched;
+        key->second.managed = dispatched; pending_inputs_.pop_front(); managed_ledger_bytes_ += line->size() + 1;
+        receipt->binding_append = trajectory::v3::AppendMainOperationTurnBinding(*writer, std::move(event));
+        if (receipt->binding_append->status != trajectory::v3::WriteReceipt::Status::Committed || writer->broken()) {
+            // The earlier native dispatch remains Committed. The V3 receipt has
+            // its own optional actual Journal append; never relabel either fact.
+            receipt->knowledge = ManagedWriteReceipt::Knowledge::Unconfirmed; managed_first_failure_ = receipt; return receipt;
+        }
+        facts.event_id = receipt->binding_append->id; facts.seq = receipt->binding_append->seq;
+        facts.line_hash = receipt->binding_append->line_hash;
+        dispatched->binding_event_id = facts.event_id; dispatched->binding_seq = facts.seq; dispatched->binding_hash = facts.line_hash;
+        receipt->binding = std::move(facts);
+        receipt->input.error_code.clear(); receipt->knowledge = ManagedWriteReceipt::Knowledge::Committed;
+    } catch (...) { if (native_entered) managed_first_failure_ = receipt; }
+    return receipt;
+}
+
+std::unique_ptr<TrajectoryTurnBridge> SessionService::NewManagedTextTurnBridge(
+    const ManagedOperationProvenance& expected, TrajectoryTurnBridge::Identity identity) {
+    std::lock_guard lock(commit_mutex_);
+    if (!ManagedTextReadyLocked()) return {};
+    auto material = CaptureManagedOperationMaterialsLocked();
+    if (!material) return {};
+    auto source = ReadManagedExecutionOwned(*material);
+    if (!source || std::none_of(source->begin(), source->end(), [&](const auto& op) {
+        return op.provenance == expected && op.state == ManagedStoredOperation::State::Dispatched && !op.binding_event_id.empty();
+    })) return {};
+    return trajectory()->NewTurnBridgeOwned(std::move(identity));
+}
+
+std::shared_ptr<const SessionService::ManagedWriteReceipt> SessionService::RecordManagedTurnFinal(
+    const ManagedOperationProvenance& expected, const ManagedOperationResult& result) {
+    auto receipt = std::make_shared<ManagedWriteReceipt>(); receipt->phase = ManagedWriteReceipt::Phase::Final;
+    receipt->input.error_code = "managed.operation.final_unconfirmed";
+    std::lock_guard lock(commit_mutex_);
+    if (!ManagedTextReadyLocked()) { receipt->input.error_code = "managed.operation.execution_not_admitted"; return receipt; }
+    bool native_entered = false;
+    try {
+        auto material = CaptureManagedOperationMaterialsLocked();
+        if (!material) { receipt->input.error_code = material.error(); return receipt; }
+        auto source = ReadManagedExecutionOwned(*material);
+        if (!source) { receipt->input.error_code = source.error(); return receipt; }
+        const auto live = std::find_if(source->begin(), source->end(), [&](const auto& op) { return op.provenance == expected; });
+        if (live == source->end() || live->state != ManagedStoredOperation::State::Dispatched || live->binding_event_id.empty()) {
+            receipt->input.error_code = "managed.operation.final_not_admitted"; return receipt;
+        }
+        const auto key = operations_.find(live->client_operation_id);
+        if (key == operations_.end() || !key->second.managed || key->second.managed->provenance != expected ||
+            key->second.managed->state != ManagedStoredOperation::State::Dispatched) {
+            receipt->input.error_code = "managed.operation.final_not_admitted"; return receipt;
+        }
+        auto prepared = PrepareManagedOperationFinal(*live, result, (std::max)(NowMs(), live->dispatched_at_ms));
+        if (!prepared) { receipt->input.error_code = prepared.error(); return receipt; }
+        if (prepared->result_bytes.size() > kManagedOperationResultsTotalBytes - managed_result_bytes_ ||
+            prepared->final_line.size() + 1 > kManagedOperationLedgerBytes - managed_ledger_bytes_) {
+            receipt->input.error_code = "managed.operation.storage_limit"; return receipt;
+        }
+        // Validate proposed final references against this actual captured main.
+        // This is a pre-I/O guard, never a replacement for a native receipt.
+        material->operations += prepared->final_line + "\n";
+        material->results.emplace(expected.operation_id, prepared->result_bytes);
+        if (!ReadManagedExecutionOwned(*material)) { receipt->input.error_code = "managed.operation.invalid_final"; return receipt; }
+        auto stored = std::make_shared<const ManagedStoredOperation>(std::move(prepared->operation));
+        receipt->operation = stored; receipt->input.operation_id = expected.operation_id;
+        receipt->input.input_id = expected.input_id; receipt->input.payload_hash = expected.input_hash;
+        const auto directory = trajectory()->session_dir(); const auto path = directory / tools::Utf8ToPath(stored->result_ref);
+        if (!platform::IsUnlinkedOwnedPath(directory, path)) { receipt->input.error_code = "managed.operation.path_rejected"; return receipt; }
+        std::error_code error; std::filesystem::create_directory(platform::FileIoPath(directory / "sdk-results"), error);
+        if (error || !platform::IsUnlinkedOwnedPath(directory, path)) { receipt->input.error_code = "managed.operation.path_rejected"; return receipt; }
+        native_entered = true; receipt->knowledge = ManagedWriteReceipt::Knowledge::Unconfirmed;
+        receipt->artifact = platform::CreateImmutableFileDetailed(path, prepared->result_bytes, platform::WriteDurability::ProcessCrashDurability);
+        if (!receipt->artifact->ok() || receipt->artifact->outcome != platform::WriteOutcome::CommittedDurable) {
+            if (receipt->artifact->outcome == platform::WriteOutcome::NotCommitted) receipt->knowledge = ManagedWriteReceipt::Knowledge::Rejected;
+            managed_first_failure_ = receipt; return receipt;
+        }
+        auto appended = operations_file_->AppendManaged(prepared->final_line, managed_native_probe_);
+        if (!appended) { receipt->knowledge = ManagedWriteReceipt::Knowledge::Rejected; managed_first_failure_ = receipt; return receipt; }
+        receipt->append = *appended;
+        if (appended->status != trajectory::JournalAppendStatus::Committed || appended->confirmed_durability != trajectory::Durability::PowerLoss) {
+            if (appended->status == trajectory::JournalAppendStatus::RejectedBeforeIO) receipt->knowledge = ManagedWriteReceipt::Knowledge::Rejected;
+            managed_first_failure_ = receipt; return receipt;
+        }
+        receipt->knowledge = ManagedWriteReceipt::Knowledge::NativeCommittedPublicationGap;
+        if (managed_publication_probe_) managed_publication_probe_();
+        key->second.managed = stored; managed_result_bytes_ += stored->result_bytes;
+        managed_ledger_bytes_ += prepared->final_line.size() + 1;
+        receipt->input.error_code.clear(); receipt->knowledge = ManagedWriteReceipt::Knowledge::Committed;
+    } catch (...) { if (native_entered) managed_first_failure_ = receipt; }
+    return receipt;
+}
+
 std::expected<ManagedOperationMaterials, std::string> SessionService::CaptureManagedOperationMaterialsLocked() const {
     auto materials = ManagedScopeLocked();
     if (!materials) return std::unexpected(materials.error());
@@ -1219,7 +1422,9 @@ std::expected<ManagedOperationMaterials, std::string> SessionService::CaptureMan
         if (!bytes) return std::unexpected("managed.operation.read_failed");
         materials->operations = std::move(*bytes);
     }
-    auto roster = ReadManagedOperationLedgerOwned(materials->operations, materials->owner, materials->run_id);
+    const bool text = admission_mode_ == SessionAdmissionMode::ManagedText;
+    auto roster = text ? ReadManagedExecutionLedgerOwned(materials->operations, materials->owner, materials->run_id)
+                       : ReadManagedOperationLedgerOwned(materials->operations, materials->owner, materials->run_id);
     if (!roster) return std::unexpected(roster.error());
     std::set<std::string> names;
     for (const auto& operation : *roster) {
@@ -1245,7 +1450,34 @@ std::expected<ManagedOperationMaterials, std::string> SessionService::CaptureMan
         }
         if (error || !names.empty()) return std::unexpected("managed.operation.invalid_materials");
     } else if (!names.empty()) return std::unexpected("managed.operation.invalid_materials");
-    auto verified = ReadManagedOperationsOwned(*materials);
+    if (text) {
+        const auto results_directory = directory / "sdk-results";
+        if (!platform::IsUnlinkedOwnedPath(directory, results_directory)) return std::unexpected("managed.operation.path_rejected");
+        const bool result_exists = std::filesystem::exists(platform::FileIoPath(results_directory), error);
+        if (error) return std::unexpected("managed.operation.read_failed");
+        if (result_exists) {
+            std::filesystem::directory_iterator iterator(platform::FileIoPath(results_directory), error), end;
+            if (error) return std::unexpected("managed.operation.read_failed");
+            std::size_t count = 0, total = 0;
+            for (; iterator != end; iterator.increment(error)) {
+                if (error || ++count > kManagedOperationInputEntries) return std::unexpected("managed.operation.invalid_materials");
+                const auto name = platform::PathToUtf8(iterator->path().filename());
+                const auto match = std::find_if(roster->begin(), roster->end(), [&](const auto& op) {
+                    return (op.state == ManagedStoredOperation::State::Dispatched || op.state == ManagedStoredOperation::State::Final) &&
+                        name == op.provenance.operation_id + ".json";
+                });
+                if (match == roster->end() || !platform::IsUnlinkedOwnedPath(directory, iterator->path()))
+                    return std::unexpected("managed.operation.invalid_materials");
+                auto bytes = platform::ReadBoundedRegularFile(platform::FileIoPath(iterator->path()), kManagedOperationResultBytes);
+                if (!bytes || bytes->size() > kManagedOperationResultsTotalBytes - total) return std::unexpected("managed.operation.read_failed");
+                total += bytes->size();
+                if (!materials->results.emplace(match->provenance.operation_id, std::move(*bytes)).second)
+                    return std::unexpected("managed.operation.invalid_materials");
+            }
+            if (error) return std::unexpected("managed.operation.read_failed");
+        }
+    }
+    auto verified = text ? ReadManagedExecutionOwned(*materials) : ReadManagedOperationsOwned(*materials);
     if (!verified) return std::unexpected(verified.error());
     return materials;
 }
@@ -1264,11 +1496,14 @@ std::optional<trajectory::JournalCloseReceipt> SessionService::ManagedOperationC
 std::optional<trajectory::CloseOutcome> SessionService::ManagedMainCloseOutcome() const {
     std::lock_guard lock(commit_mutex_); return managed_main_close_;
 }
+std::optional<trajectory::ManagedCloseRetirement> SessionService::ManagedMainRetirement() const {
+    std::lock_guard lock(commit_mutex_); return managed_main_retirement_;
+}
 void SessionService::SetManagedOperationProbesForTest(std::shared_ptr<trajectory::JournalNativeIoProbe> native,
     std::function<void()> publication) {
     {
         std::lock_guard lock(commit_mutex_);
-        if (admission_mode_ != SessionAdmissionMode::ManagedStorageOnly || operation_counter_ || managed_closing_ || managed_closed_)
+        if (admission_mode_ == SessionAdmissionMode::LocalTrusted || operation_counter_ || managed_closing_ || managed_closed_)
             throw std::logic_error("managed.operation.probe_not_admitted");
         managed_native_probe_.swap(native); managed_publication_probe_.swap(publication);
     } // Replaced probe/capture destructors stay outside the commit mutex.
@@ -1301,6 +1536,15 @@ trajectory::CloseOutcome SessionService::CloseManaged(const std::string& reason)
                 }
             }
             managed_closed_materials_.emplace(CaptureManagedOperationMaterialsLocked());
+            if (admission_mode_ == SessionAdmissionMode::ManagedText && managed_closed_materials_->has_value()) {
+                auto operations = ReadManagedExecutionOwned(managed_closed_materials_->value());
+                if (!operations || std::any_of(operations->begin(), operations->end(), [](const auto& op) {
+                    return op.state == ManagedStoredOperation::State::Dispatched;
+                })) {
+                    managed_closed_materials_->value().completion_known = false;
+                    if (outcome.error_code.empty()) outcome.error_code = "managed.operation.execution_incomplete";
+                }
+            }
             if (managed_closed_materials_->has_value() && !managed_closed_materials_->value().completion_known && outcome.error_code.empty())
                 outcome.error_code = "managed.operation.close_unconfirmed";
             if (!managed_closed_materials_->has_value() && outcome.error_code.empty())
@@ -1317,9 +1561,11 @@ trajectory::CloseOutcome SessionService::CloseManaged(const std::string& reason)
     }
     // Always close main/retire the actual lock, even when a rejected append was
     // unknown. Preserve both failures rather than pretending a clean queue.
-    auto main = CloseRuntime(*runtime_, reason);
+    trajectory::ManagedCloseRetirement retirement;
+    auto main = runtime_->trajectory()->CloseManagedSession(reason, !outcome.error_code.empty(), retirement);
     {
         std::lock_guard lock(commit_mutex_); managed_main_close_ = main;
+        if (retirement.attempted) managed_main_retirement_.emplace(std::move(retirement));
         if (!main.error_code.empty() && managed_closed_materials_ && managed_closed_materials_->has_value())
             managed_closed_materials_->value().completion_known = false;
     }
@@ -1344,7 +1590,7 @@ ClientReceipt SessionService::ExecuteDomainCommand(const std::string& command_la
                                                    loop::LoopScheduler* loop_scheduler,
                                                    const std::string& cwd_identity,
                                                    std::int64_t now_ms) {
-    if (admission_mode_ == SessionAdmissionMode::ManagedStorageOnly) {
+    if (admission_mode_ != SessionAdmissionMode::LocalTrusted) {
         ClientReceipt rejected;
         rejected.accepted = false;
         rejected.error_code = kManagedStorageOnlyError;
@@ -1387,7 +1633,7 @@ ClientReceipt SessionService::ExecuteDomainCommand(const std::string& command_la
 // ---------------------------------------------------------------------------
 
 trajectory::CloseOutcome SessionService::Close(const std::string& reason) {
-    if (admission_mode_ == SessionAdmissionMode::ManagedStorageOnly) return CloseManaged(reason);
+    if (admission_mode_ != SessionAdmissionMode::LocalTrusted) return CloseManaged(reason);
     if (!ShutdownExecution()) {
         trajectory::CloseOutcome outcome;
         outcome.error_code = "close.async_shutdown_failed";

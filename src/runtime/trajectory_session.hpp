@@ -68,7 +68,7 @@
 namespace lubancode::runtime {
 
 // Internal admission state, never an authorization decision or public SDK mode.
-enum class SessionAdmissionMode { LocalTrusted, ManagedStorageOnly };
+enum class SessionAdmissionMode { LocalTrusted, ManagedStorageOnly, ManagedText };
 inline constexpr const char* kManagedStorageOnlyError = "managed.session.storage_only";
 
 // ---------------------------------------------------------------------------
@@ -212,6 +212,9 @@ public:
     static std::expected<TrajectorySessionLedger, std::string> OpenManaged(
         Options options, trajectory::ManagedSessionDirectory admitted,
         trajectory::ManagedSessionCreationAudit creation);
+    static std::expected<TrajectorySessionLedger, std::string> OpenManagedText(
+        Options options, trajectory::ManagedSessionDirectory admitted,
+        trajectory::ManagedSessionCreationAudit creation, trajectory::ManagedTextSessionLaunch);
     SessionAdmissionMode admission_mode() const noexcept;
     // Original native ownership publication. No Writer, lock or Policy permit.
     std::shared_ptr<const trajectory::ManagedSessionOwnershipPublication> managed_publication() const;
@@ -597,10 +600,14 @@ public:
     void SetTelemetryWake(telemetry::CommitObserver* wake);
 
 private:
+    friend class SessionService;
+    std::unique_ptr<TrajectoryTurnBridge> NewTurnBridgeOwned(TrajectoryTurnBridge::Identity identity);
+    trajectory::CloseOutcome CloseManagedSession(const std::string& reason, bool operation_unconfirmed,
+        trajectory::ManagedCloseRetirement&);
     TrajectorySessionLedger() = default;
     static std::expected<TrajectorySessionLedger, std::string> OpenInternal(
         Options& options, trajectory::ManagedSessionDirectory* admitted,
-        trajectory::ManagedSessionCreationAudit* creation);
+        trajectory::ManagedSessionCreationAudit* creation, bool text = false);
     struct Impl;
     std::unique_ptr<Impl> impl_;
     std::unique_ptr<RecordSelectionController> record_selection_;
