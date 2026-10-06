@@ -18,15 +18,30 @@ ASan 停在 doctest 裸 `||` 编译错，原生执行为零。TSan 实跑 14 册
 13 过、1 败；失败册五案都未开场，日志没带底层错误，不能断为 race。
 focused、OFF 和全量均未执行，局部成功不作整批验收。
 
-下一组合已收入 [SDK 入参测算](sdk-model-input-projection.md)、
+`e79eea52` 的[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37439210845)
+已自然结束，整轮失败。六套安装消费各 37 项中 36 过；不可变结果写入已报
+未知，后续新操作仍成功，旧验收拦住了这条漏口。focused、OFF 和全量随后跳过。
+ASan 实跑 168 册，167 过；同一公开结果案失败。TSan 实跑 14 册，13 过；
+workflow 五案开场均报 `named_result.plan_path_rejected`，日志保留实际路径。
+当次未采宿主别名指向，不能断定唯一起因，也不能把这次失败写成 race。
+首批失败原件已封，整轮原件仍在逐项核查。Windows 两套子场与恢复种子本次
+实际通过；这不证明上一轮失败只有一种成因。
+
+这份组合已收入 [SDK 入参测算](sdk-model-input-projection.md)、
 [File 预览路径兼容](sdk-file-result-display-path.md)、
 [原截止断言分组](sdk-owned-deadline-doctest.md)，以及失败时才输出的
 [子会话终态](sdk-child-terminal-diagnostic.md)和
 [workflow 开场诊断](workflow-session-open-diagnostic.md)。
 测算共用实际 `Generate` 转换；SDK 输入、provider wire、请求输出帽分开记范围。
 主请求只留指纹，摘要保真实材料。旧预算、断言和公开后端 ABI 照留。
-源码独审通过不等于远端通过；六场新增 SDK 验收、一场 CLI 转发验收和
-Journal 所有权验收正接远端，尚未合功能分支。
+
+下一源补[未知发布执行门](sdk-named-publication-fence.md)，同时查新输入、
+已排队输入和后台命令实际启动处。晚 Job 报未知，只记 Job 原事实，保住父场
+已确认终态。Journal 普通宿主三条消费路径本次已通过；独立材料门错用了
+Jobs 专属绑定事件，现改核[实际操作账与输入、结果文件](sdk-journal-owner-operation-material-gate.md)。
+旧档缺少这些文件仍拒，须由新 CI 留齐原件。路径门另收在自持会话根内，
+根和场内链接继续拒，宿主祖先沿既有 LocalTrusted 合同。
+源码与纯门通过不等于原生通过。修复组合须重跑三平台与消毒器，尚未合功能分支。
 
 ## 八阶段现状
 
