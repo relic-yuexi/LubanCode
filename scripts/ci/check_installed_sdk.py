@@ -186,27 +186,38 @@ def capture_public_headers(repo: Path, prefix: Path, headers: set[str], evidence
     manifest = {"schemaVersion": 1, **context, "installedPrefix": str(prefix),
                 "producerSource": str(repo), "status": "failed", "headers": []}
     failures = []
-    for relative in sorted(headers):
-        installed, source = prefix / relative, repo / relative
-        record = {"relative": relative, "installed": str(installed), "source": str(source)}
-        manifest["headers"].append(record)
-        if not installed.is_file() or not source.is_file():
-            record["status"] = "missing"
-            failures.append(relative)
-            continue
-        raw, original = installed.read_bytes(), source.read_bytes()
-        copied = capture / relative
-        copied.parent.mkdir(parents=True, exist_ok=True)
-        copied.write_bytes(raw)
-        record.update(bytes=len(raw), sourceBytes=len(original), capture=str(copied),
-                      installedSha256=hashlib.sha256(raw).hexdigest(),
-                      sourceSha256=hashlib.sha256(original).hexdigest(),
-                      status="matched" if raw == original else "mismatched")
-        if raw != original:
-            failures.append(relative)
-    if not failures:
-        manifest["status"] = "matched"
-    (evidence / "public-headers.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    completed = False
+    try:
+        for relative in sorted(headers):
+            installed, source = prefix / relative, repo / relative
+            record = {"relative": relative, "installed": str(installed), "source": str(source),
+                      "status": "not_evaluated"}
+            manifest["headers"].append(record)
+            phase = "installed_read"
+            try:
+                raw = installed.read_bytes()
+                record.update(bytes=len(raw), installedSha256=hashlib.sha256(raw).hexdigest())
+                phase = "installed_capture"
+                copied = capture / relative
+                copied.parent.mkdir(parents=True, exist_ok=True)
+                copied.write_bytes(raw)
+                record["capture"] = str(copied)
+                phase = "source_read"
+                original = source.read_bytes()
+                record.update(sourceBytes=len(original), sourceSha256=hashlib.sha256(original).hexdigest(),
+                              status="matched" if raw == original else "mismatched")
+                if raw != original:
+                    failures.append(relative)
+            except OSError as error:
+                record.update(status="capture_failed", failedPhase=phase, error=str(error))
+                failures.append(relative)
+        completed = True
+    finally:
+        # Preserve available bytes and a failed inventory on read/copy errors.
+        # An unavailable evidence destination can still prevent this write; that
+        # error fails the CI command, never becomes a successful capture.
+        manifest["status"] = "matched" if completed and not failures else "failed"
+        (evidence / "public-headers.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     if failures:
         raise RuntimeError("SDK relocated public headers differ from this checkout: " + ", ".join(failures))
     return manifest
@@ -387,12 +398,16 @@ def main() -> None:
     installed_files = sorted(path.relative_to(prefix).as_posix() for path in prefix.rglob("*")
                              if path.is_file() or path.is_symlink())
     (evidence / "installed-files.json").write_text(json.dumps(installed_files, indent=2) + "\n", encoding="utf-8")
-    public_headers = check_public_headers(repo, installed_files, args.install_mode)
-    capture_public_headers(repo, prefix, public_headers, evidence, {
+    # Include required-but-missing declarations so a failed install still keeps
+    # every available original before the existing presence check runs.
+    source_headers = {"include/" + path.relative_to(repo / "include").as_posix()
+                      for path in (repo / "include" / "lubancore").rglob("*.hpp")}
+    capture_public_headers(repo, prefix, source_headers | REQUIRED_PUBLIC_HEADERS, evidence, {
         "githubSha": os.environ.get("GITHUB_SHA"),
         "checkoutHead": run(["git", "-C", str(repo), "rev-parse", "HEAD"], env, capture=True).strip(),
         "installMode": args.install_mode, "luaProfile": args.lua_profile,
     })
+    public_headers = check_public_headers(repo, installed_files, args.install_mode)
     web_header = web_fixture.check_installed_header(repo, prefix)
     producer_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
     staged_entries = [line.split("=", 1)[1] for line in producer_cache.splitlines()
