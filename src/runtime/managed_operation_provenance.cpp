@@ -460,7 +460,9 @@ std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedExecu
             !String(payload, "operationId") || !String(payload, "turnId") || !String(payload, "finalText") || !String(payload, "error") ||
             !payload["complete"].is_boolean() || payload["operationId"] != op.provenance.operation_id || payload["turnId"] != op.turn_id ||
             payload.dump() != result->second || !platform::IsValidUtf8(payload["finalText"].get<std::string>()) ||
-            !platform::IsValidUtf8(payload["error"].get<std::string>())) return std::unexpected(kInvalid);
+            !platform::IsValidUtf8(payload["error"].get<std::string>()) ||
+            payload["finalText"].get<std::string>().find('\0') != std::string::npos ||
+            payload["error"].get<std::string>().find('\0') != std::string::npos) return std::unexpected(kInvalid);
         if (op.state == ManagedStoredOperation::State::Final) {
             if (op.result_bytes != result->second.size() || platform::Sha256Hex(result->second) != op.result_sha256 ||
                 payload["complete"] != op.complete) return std::unexpected(kInvalid);

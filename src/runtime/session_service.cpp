@@ -24,6 +24,7 @@
 #include <exception>
 #include <fstream>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 
@@ -44,6 +45,22 @@
 namespace lubancode::runtime {
 
 namespace {
+
+struct ManagedCloseFrame;
+thread_local ManagedCloseFrame* current_managed_close = nullptr;
+struct ManagedCloseFrame {
+    const SessionService* owner;
+    ManagedCloseFrame* previous;
+    explicit ManagedCloseFrame(const SessionService* value) noexcept
+        : owner(value), previous(current_managed_close) { current_managed_close = this; }
+    ~ManagedCloseFrame() noexcept { current_managed_close = previous; }
+    ManagedCloseFrame(const ManagedCloseFrame&) = delete;
+};
+bool ManagedCloseReentered(const SessionService* service) noexcept {
+    for (auto* frame = current_managed_close; frame; frame = frame->previous)
+        if (frame->owner == service) return true;
+    return false;
+}
 
 constexpr const char* kOperationsFileName = "operations.jsonl";
 constexpr const char* kInputArtifactsDir = "operations-inputs";
@@ -1256,8 +1273,12 @@ std::shared_ptr<const SessionService::ManagedWriteReceipt> SessionService::Rejec
 }
 
 bool SessionService::ManagedTextReadyLocked() const {
+    return !execution_shutdown_requested_.load() && ManagedTextFinalReadyLocked();
+}
+
+bool SessionService::ManagedTextFinalReadyLocked() const {
     return admission_mode_ == SessionAdmissionMode::ManagedText && execution_ && runtime_ && trajectory() &&
-        !managed_closing_ && !managed_closed_ && !managed_first_failure_ && !execution_shutdown_requested_.load() &&
+        !managed_closing_ && !managed_closed_ && !managed_first_failure_ &&
         execution_->resources().registry().All().empty() && execution_->resources().mcp_servers().empty() &&
         runtime_->trajectory()->v3_main_writer() && !runtime_->trajectory()->v3_main_writer()->closed() &&
         !runtime_->trajectory()->v3_main_writer()->broken();
@@ -1351,7 +1372,7 @@ std::shared_ptr<const SessionService::ManagedWriteReceipt> SessionService::Recor
     auto receipt = std::make_shared<ManagedWriteReceipt>(); receipt->phase = ManagedWriteReceipt::Phase::Final;
     receipt->input.error_code = "managed.operation.final_unconfirmed";
     std::lock_guard lock(commit_mutex_);
-    if (!ManagedTextReadyLocked()) { receipt->input.error_code = "managed.operation.execution_not_admitted"; return receipt; }
+    if (!ManagedTextFinalReadyLocked()) { receipt->input.error_code = "managed.operation.execution_not_admitted"; return receipt; }
     bool native_entered = false;
     try {
         auto material = CaptureManagedOperationMaterialsLocked();
@@ -1509,21 +1530,88 @@ void SessionService::SetManagedOperationProbesForTest(std::shared_ptr<trajectory
     } // Replaced probe/capture destructors stay outside the commit mutex.
 }
 
+void SessionService::SetManagedCloseAllocationProbeForTest(std::shared_ptr<ManagedCloseAllocationProbe> probe) {
+    {
+        std::lock_guard lock(commit_mutex_);
+        if (admission_mode_ == SessionAdmissionMode::LocalTrusted || managed_closing_ || managed_closed_)
+            throw std::logic_error("managed.close.probe_not_admitted");
+        managed_close_allocation_probe_.swap(probe);
+    } // Replaced probe/capture destruction is outside the commit mutex.
+}
+
+void SessionService::RetireInterruptedManagedClose() noexcept {
+    static_assert(std::is_nothrow_move_constructible_v<trajectory::ManagedCloseRetirement>);
+    if (admission_mode_ == SessionAdmissionMode::LocalTrusted) return;
+    execution_shutdown_requested_.store(true);
+    try {
+        std::lock_guard lock(commit_mutex_);
+        managed_closing_ = true;
+        managed_close_interrupted_ = true;
+        if (managed_closed_materials_ && managed_closed_materials_->has_value())
+            managed_closed_materials_->value().completion_known = false;
+    } catch (...) { return; }
+    bool drained = false;
+    try { drained = ShutdownExecution(); } catch (...) {}
+    try {
+        if (!drained || (runtime_ && runtime_->async_tool_runtime() && !runtime_->async_tool_runtime()->quiescent()))
+            return; // No confirmed drain: keep writers and the real lock owned.
+    } catch (...) { return; }
+    try {
+        std::lock_guard lock(commit_mutex_);
+        if (!managed_operation_close_)
+            managed_operation_close_.emplace(operations_file_ ? operations_file_->CloseManagedDetailed()
+                                                              : trajectory::JournalCloseReceipt{});
+        managed_closed_ = true;
+    } catch (...) { return; } // Never retire main while operation writes remain possible.
+    if (!trajectory()) return;
+    auto retirement = trajectory()->RetireManagedSession();
+    try {
+        std::lock_guard lock(commit_mutex_);
+        if (retirement.attempted && !managed_main_retirement_)
+            managed_main_retirement_.emplace(std::move(retirement));
+    } catch (...) {} // Actual final attempts precede observation publication.
+}
+
 trajectory::CloseOutcome SessionService::CloseManaged(const std::string& reason) {
+    if (ManagedCloseReentered(this)) {
+        trajectory::CloseOutcome rejected;
+        rejected.error_code = "close.reentrant";
+        rejected.close_quality = "incomplete";
+        return rejected; // The outer owner is still draining; do not acquire its lock or retire it.
+    }
     std::lock_guard close_lock(managed_close_mutex_);
+    ManagedCloseFrame close_frame{this}; // Also covers the exceptional retirement/drain path.
+    struct RetirementScope {
+        SessionService& service;
+        bool armed = true;
+        ~RetirementScope() noexcept { if (armed) service.RetireInterruptedManagedClose(); }
+    } retirement_scope{*this}; // Installed before any diagnostic or result copy.
     trajectory::CloseOutcome outcome;
     {
         std::lock_guard lock(commit_mutex_);
-        if (managed_close_outcome_) return *managed_close_outcome_;
+        if (managed_close_interrupted_) {
+            outcome.error_code = "managed.operation.close_unconfirmed";
+            outcome.close_quality = "incomplete";
+            return outcome; // Scope retries only retirement, never another Ended.
+        }
+        if (managed_close_outcome_) {
+            auto retained = *managed_close_outcome_; // Copy can still throw under the installed scope.
+            retirement_scope.armed = false;
+            return retained;
+        }
         managed_closing_ = true;
         if (!runtime_) {
             outcome.error_code = "close.no_active_session";
             outcome.message = "会话账未开,无处封口";
             managed_closed_ = true; managed_close_outcome_ = outcome;
+            retirement_scope.armed = false;
             return outcome;
         }
     }
-    if (!ShutdownExecution()) outcome.error_code = "close.async_shutdown_failed";
+    if (!ShutdownExecution()) {
+        outcome.error_code = "close.async_shutdown_failed";
+        return outcome; // Scope may retry drain; it never closes live resources.
+    }
     {
         std::lock_guard lock(commit_mutex_);
         try {
@@ -1535,6 +1623,8 @@ trajectory::CloseOutcome SessionService::CloseManaged(const std::string& reason)
                     outcome.error_code = "managed.operation.close_unconfirmed"; break;
                 }
             }
+            if (managed_close_allocation_probe_)
+                managed_close_allocation_probe_->Before(ManagedCloseAllocationStage::BeforeMaterialCapture);
             managed_closed_materials_.emplace(CaptureManagedOperationMaterialsLocked());
             if (admission_mode_ == SessionAdmissionMode::ManagedText && managed_closed_materials_->has_value()) {
                 auto operations = ReadManagedExecutionOwned(managed_closed_materials_->value());
@@ -1550,6 +1640,8 @@ trajectory::CloseOutcome SessionService::CloseManaged(const std::string& reason)
             if (!managed_closed_materials_->has_value() && outcome.error_code.empty())
                 outcome.error_code = "managed.operation.close_materials_unconfirmed";
         } catch (...) {
+            if (managed_close_allocation_probe_)
+                managed_close_allocation_probe_->Before(ManagedCloseAllocationStage::BeforeFailureDiagnostic);
             outcome.error_code = "managed.operation.close_unconfirmed";
         }
         if (managed_first_failure_ && outcome.error_code.empty()) outcome.error_code = "managed.operation.close_unconfirmed";
@@ -1562,7 +1654,8 @@ trajectory::CloseOutcome SessionService::CloseManaged(const std::string& reason)
     // Always close main/retire the actual lock, even when a rejected append was
     // unknown. Preserve both failures rather than pretending a clean queue.
     trajectory::ManagedCloseRetirement retirement;
-    auto main = runtime_->trajectory()->CloseManagedSession(reason, !outcome.error_code.empty(), retirement);
+    auto main = runtime_->trajectory()->CloseManagedSession(reason, !outcome.error_code.empty(), retirement,
+                                                          managed_close_allocation_probe_.get());
     {
         std::lock_guard lock(commit_mutex_); managed_main_close_ = main;
         if (retirement.attempted) managed_main_retirement_.emplace(std::move(retirement));
@@ -1575,7 +1668,13 @@ trajectory::CloseOutcome SessionService::CloseManaged(const std::string& reason)
         main.error_code = std::move(outcome.error_code); main.close_quality = "incomplete";
         outcome = std::move(main);
     }
-    { std::lock_guard lock(commit_mutex_); managed_close_outcome_ = outcome; }
+    {
+        std::lock_guard lock(commit_mutex_);
+        if (managed_close_allocation_probe_)
+            managed_close_allocation_probe_->Before(ManagedCloseAllocationStage::BeforeOutcomePublication);
+        managed_close_outcome_ = outcome;
+    }
+    retirement_scope.armed = false;
     return outcome;
 }
 

@@ -231,6 +231,7 @@ public:
     // the real committed append, before mechanical in-memory publication.
     void SetManagedOperationProbesForTest(std::shared_ptr<trajectory::JournalNativeIoProbe>,
         std::function<void()> after_native_commit = {});
+    void SetManagedCloseAllocationProbeForTest(std::shared_ptr<ManagedCloseAllocationProbe>);
 
     // 泵侧消费:队首取出(FIFO;每端自己的回合泵调)。三态:
     //   Ok          取到一笔(dispatched 事实已按 PowerLoss 档落稳,先账
@@ -349,6 +350,7 @@ private:
     void InitializeExecutionOwned(std::unique_ptr<assembly::SessionResources>, agent::AgentProfile&&,
         std::optional<std::vector<api::Message>> restored_history);
     bool ManagedTextReadyLocked() const;
+    bool ManagedTextFinalReadyLocked() const;
     const SessionAdmissionMode admission_mode_ = SessionAdmissionMode::LocalTrusted;
     // 操作台账(operations.jsonl)的内存镜像:clientOperationId -> 首发回执。
     struct AcceptedOperation {
@@ -378,6 +380,7 @@ private:
     std::shared_ptr<const ManagedWriteReceipt> RejectManagedPendingInputLocked(
         const ManagedOperationProvenance&, const std::string&, const std::string&, std::uint64_t);
     trajectory::CloseOutcome CloseManaged(const std::string& reason);
+    void RetireInterruptedManagedClose() noexcept;
 
     std::unique_ptr<SessionRuntime> runtime_;
     // Runtime/ledger outlive execution. Explicit shutdown drains tool jobs
@@ -399,6 +402,7 @@ private:
     std::size_t managed_input_bytes_ = 0, managed_ledger_bytes_ = 0;
     std::size_t managed_result_bytes_ = 0;
     bool managed_closing_ = false, managed_closed_ = false;
+    bool managed_close_interrupted_ = false;
     std::shared_ptr<const ManagedWriteReceipt> managed_first_failure_;
     std::optional<std::expected<ManagedOperationMaterials, std::string>> managed_closed_materials_;
     std::optional<trajectory::JournalCloseReceipt> managed_operation_close_;
@@ -408,6 +412,7 @@ private:
     std::mutex managed_close_mutex_;
     std::shared_ptr<trajectory::JournalNativeIoProbe> managed_native_probe_;
     std::function<void()> managed_publication_probe_;
+    std::shared_ptr<ManagedCloseAllocationProbe> managed_close_allocation_probe_;
     // 台账文件句柄(开张成功即持,Close 后拒写)。
     std::optional<std::filesystem::path> operations_path_;
     class OperationsFile;

@@ -16,6 +16,7 @@
 #include <ctime>
 #include <limits>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include "accounting/purpose.hpp"   // PurposeName(Token 账本单 A1)
@@ -544,15 +545,35 @@ trajectory::CloseOutcome TrajectorySessionLedger::CloseSession(const std::string
 }
 
 trajectory::CloseOutcome TrajectorySessionLedger::CloseManagedSession(const std::string& reason, bool unconfirmed,
-                                                                    trajectory::ManagedCloseRetirement& retirement) {
-    trajectory::CloseRequest request; request.reason = reason;
+                                                                    trajectory::ManagedCloseRetirement& retirement,
+                                                                    ManagedCloseAllocationProbe* probe) {
+    static_assert(std::is_nothrow_move_assignable_v<trajectory::ManagedCloseRetirement>);
+    struct RetirementScope {
+        TrajectorySessionLedger& ledger;
+        trajectory::ManagedCloseRetirement& observation;
+        bool armed = true;
+        ~RetirementScope() noexcept { if (armed) observation = ledger.RetireManagedSession(); }
+    } scope{*this, retirement}; // Installed before any request/diagnostic string.
+    trajectory::CloseRequest request;
+    if (probe) probe->Before(ManagedCloseAllocationStage::BeforeReasonCopy);
+    request.reason = reason;
     request.managed_operation_unconfirmed = unconfirmed;
     trajectory::NullClearParticipant participant;
-    trajectory::CloseOutcome result; result.error_code = "managed.session.close_unconfirmed";
+    trajectory::CloseOutcome result;
+    if (probe) probe->Before(ManagedCloseAllocationStage::BeforeFallbackDiagnostic);
+    result.error_code = "managed.session.close_unconfirmed";
     try { result = impl_->manager->Close(request, &participant); } catch (...) {}
-    if (!result.error_code.empty()) retirement = impl_->manager->RetireManagedAfterCloseFailure(
-        impl_->active->managed_publication->expected, &*impl_->active->v3_main);
+    if (result.error_code.empty()) scope.armed = false;
     return result;
+}
+
+trajectory::ManagedCloseRetirement TrajectorySessionLedger::RetireManagedSession() noexcept {
+    if (!impl_ || impl_->admission_mode == SessionAdmissionMode::LocalTrusted || !impl_->manager ||
+        !impl_->active || !impl_->active->managed_publication || !impl_->active->v3_main) return {};
+    // Borrow the actual active owner in place. No owner/string copy precedes the
+    // Manager mutex's same-publication/same-writer check or final attempts.
+    return impl_->manager->RetireManagedAfterCloseFailure(
+        impl_->active->managed_publication->expected, &*impl_->active->v3_main);
 }
 
 TrajectorySessionLedger::CwdChangeResult TrajectorySessionLedger::HandleCwdChange(

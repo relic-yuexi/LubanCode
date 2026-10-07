@@ -4,9 +4,11 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <new>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -19,11 +21,14 @@
 #include "platform/process.hpp"
 #include "platform/sha256.hpp"
 #include "runtime/assembly/session_resources.hpp"
+#include "runtime/async_tool_runtime.hpp"
 #include "runtime/scoped_turn_bindings.hpp"
 #include "runtime/session_service.hpp"
 #include "runtime/tool_trace_hub.hpp"
 #include "trajectory/canonical_json.hpp"
+#include "trajectory/cas_store.hpp"
 #include "trajectory/managed_session_reservation.hpp"
+#include "trajectory/named_result_blobs.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
 
@@ -48,15 +53,57 @@ std::string Read(const fs::path& path) {
 void Mark(const char* path) { std::cout << "[managed-operation-execution-path] " << path << '\n'; }
 struct NativeProbe final : traj::JournalNativeIoProbe {
     bool arm = false, fired = false, close_seen = false;
+    unsigned close_count = 0;
     bool After(const traj::JournalNativeIoResult& actual) noexcept override {
-        if (actual.stage == traj::JournalNativeStage::Close) close_seen = actual.attempted && actual.succeeded;
+        if (actual.stage == traj::JournalNativeStage::Close) {
+            close_seen = actual.attempted && actual.succeeded;
+            if (actual.attempted) ++close_count;
+        }
         if (arm && actual.stage == traj::JournalNativeStage::FileSync && actual.attempted && actual.succeeded) {
             arm = false; fired = true; return true;
         }
         return false;
     }
 };
-struct ModelState { unsigned calls = 0; bool alive = false; std::vector<api::Request> requests; };
+struct AllocationProbe final : rt::ManagedCloseAllocationProbe {
+    rt::ManagedCloseAllocationStage target;
+    bool capture_thrown = false, target_thrown = false;
+    explicit AllocationProbe(rt::ManagedCloseAllocationStage stage) : target(stage) {}
+    void Before(rt::ManagedCloseAllocationStage stage) override {
+        if (target == rt::ManagedCloseAllocationStage::BeforeFailureDiagnostic &&
+            stage == rt::ManagedCloseAllocationStage::BeforeMaterialCapture && !capture_thrown) {
+            capture_thrown = true; throw std::bad_alloc();
+        }
+        if (stage == target && !target_thrown) { target_thrown = true; throw std::bad_alloc(); }
+    }
+};
+struct ReentrantCloseState {
+    bool called = false, shutdown_rejected = false, close_rejected = false;
+    bool writer_still_open = false, lock_still_owned = false, failed = false;
+};
+struct ReentrantCloseCapture {
+    rt::SessionService* service;
+    fs::path lock_path;
+    std::shared_ptr<ReentrantCloseState> state;
+    ReentrantCloseCapture(rt::SessionService* value, fs::path path, std::shared_ptr<ReentrantCloseState> observed)
+        : service(value), lock_path(std::move(path)), state(std::move(observed)) {}
+    ~ReentrantCloseCapture() noexcept {
+        state->called = true;
+        try {
+            state->shutdown_rejected = !service->ShutdownExecution();
+            const auto rejected = service->Close("async-capture-close-reentry");
+            state->close_rejected = rejected.error_code == "close.reentrant";
+            state->writer_still_open = !service->trajectory()->v3_main_writer()->closed();
+            std::error_code error; state->lock_still_owned = fs::exists(platform::FileIoPath(lock_path), error) && !error;
+        } catch (...) { state->failed = true; }
+    }
+};
+struct ModelState {
+    unsigned calls = 0;
+    bool alive = false, fail = false;
+    std::vector<api::Request> requests;
+    std::function<void()> on_send;
+};
 struct Backend final : api::Backend {
     std::shared_ptr<ModelState> state;
     explicit Backend(std::shared_ptr<ModelState> value) : state(std::move(value)) { state->alive = true; }
@@ -64,6 +111,8 @@ struct Backend final : api::Backend {
     std::expected<void, api::Error> send_stream(const api::Request& request,
         const std::function<void(const api::StreamEvent&)>& emit, const std::atomic<bool>*) override {
         ++state->calls; state->requests.push_back(request);
+        if (state->on_send) state->on_send();
+        if (state->fail) return std::unexpected(api::Error{api::ErrorKind::HttpStatus, "actual managed model failure", 400});
         emit(api::MessageStart{"managed-answer", request.model}); emit(api::TextDelta{"actual managed answer"});
         emit(api::ContentBlockDone{0}); emit(api::MessageDone{"end_turn", api::Usage{9, 3, 0, 0, 0}, true}); return {};
     }
@@ -325,4 +374,167 @@ TEST_CASE("managed execution: result artifact and final first failures retain or
         REQUIRE(Read(fixture.directory / "operations.jsonl") == ledger_bytes);
     }
     Mark("final-first");
+}
+
+TEST_CASE("managed execution: allocation faults retire owned writers before escaping close") {
+    using Stage = rt::ManagedCloseAllocationStage;
+    for (const auto stage : {Stage::BeforeReasonCopy, Stage::BeforeFallbackDiagnostic,
+                            Stage::BeforeFailureDiagnostic, Stage::BeforeOutcomePublication}) {
+        auto main_native = std::make_shared<NativeProbe>(); Fixture fixture(true, main_native); fixture.Assemble();
+        auto operation_native = std::make_shared<NativeProbe>();
+        fixture.service->SetManagedOperationProbesForTest(operation_native);
+        auto accepted = fixture.Accept(); auto dispatched = fixture.Dispatch(accepted); const auto result = fixture.Run(dispatched);
+        operation_native->arm = true;
+        const auto first_failure = fixture.service->RecordManagedTurnFinal(accepted->operation->provenance, result);
+        REQUIRE(first_failure->knowledge == Knowledge::Unconfirmed);
+        REQUIRE(first_failure->artifact->outcome == platform::WriteOutcome::CommittedDurable);
+        REQUIRE(first_failure->append->status == traj::JournalAppendStatus::Unconfirmed);
+        REQUIRE(first_failure->append->file_sync.succeeded); REQUIRE(first_failure->append->file_sync.injected_unconfirmed);
+        const auto operation_bytes = Read(fixture.directory / "operations.jsonl");
+        const auto result_bytes = Read(fixture.directory / "sdk-results" / (accepted->input.operation_id + ".json"));
+        const auto main_before = Read(fixture.Main());
+        auto memory = fixture.service->trajectory()->memory_capability();
+        auto named = fixture.service->trajectory()->named_result_capability();
+        REQUIRE(memory != nullptr); REQUIRE(named != nullptr);
+        auto allocation = std::make_shared<AllocationProbe>(stage);
+        fixture.service->SetManagedCloseAllocationProbeForTest(allocation);
+        const std::string reason(256, 'r'); // The real request copy cannot rely on SSO.
+        REQUIRE_THROWS_AS(fixture.service->Close(reason), std::bad_alloc);
+        REQUIRE(allocation->target_thrown);
+        REQUIRE(allocation->capture_thrown == (stage == Stage::BeforeFailureDiagnostic));
+        REQUIRE(fixture.service->trajectory()->v3_main_writer()->closed());
+        const auto retired = fixture.service->ManagedMainRetirement(); REQUIRE(retired.has_value());
+        REQUIRE(retired->attempted); REQUIRE(retired->writer_closed); REQUIRE(retired->lock_released);
+        REQUIRE(retired->checked_close.has_value()); REQUIRE(retired->checked_close->has_value());
+        REQUIRE(main_native->close_count == 1); REQUIRE(operation_native->close_count == 1);
+        const auto closed_operation = fixture.service->ManagedOperationCloseReceipt(); REQUIRE(closed_operation.has_value());
+        REQUIRE(closed_operation->native.has_value()); REQUIRE(closed_operation->native->attempted);
+        REQUIRE(closed_operation->native->succeeded); REQUIRE(closed_operation->broken_before);
+        REQUIRE(memory->Store("must not write", "text/plain").error.code == "cas.owner_closed");
+        const auto closed_named = named->BeginMaterial("must-not-write");
+        REQUIRE_FALSE(closed_named.has_value()); REQUIRE(closed_named.error().code == "named_result.owner_closed");
+        REQUIRE_FALSE(fs::exists(fixture.directory / "session.lock"));
+        auto lock = traj::SessionLock::Acquire(fixture.directory, traj::SessionManagerClock{}.LockOwner());
+        REQUIRE_MESSAGE(lock.has_value(), (lock ? "" : lock.error())); REQUIRE(lock->holds()); lock->Release();
+        REQUIRE(fixture.service->FirstManagedWriteFailure() == first_failure);
+        REQUIRE(first_failure->append->status == traj::JournalAppendStatus::Unconfirmed);
+        REQUIRE(first_failure->append->file_sync.injected_unconfirmed);
+        REQUIRE(Read(fixture.directory / "operations.jsonl") == operation_bytes);
+        REQUIRE(Read(fixture.directory / "sdk-results" / (accepted->input.operation_id + ".json")) == result_bytes);
+        const auto main_after = Read(fixture.Main());
+        if (stage == Stage::BeforeOutcomePublication) {
+            REQUIRE(main_after.size() > main_before.size()); REQUIRE(main_after.starts_with(main_before));
+            CheckIncompleteEnded(fixture);
+            const auto main_fact = fixture.service->ManagedMainCloseOutcome(); REQUIRE(main_fact.has_value());
+            REQUIRE(main_fact->error_code.empty()); REQUIRE(main_fact->close_quality == "incomplete");
+        } else {
+            REQUIRE(main_after == main_before); REQUIRE_FALSE(fixture.service->ManagedMainCloseOutcome().has_value());
+        }
+        const auto repeat = fixture.service->Close("must-not-rewrite-ended");
+        REQUIRE(repeat.error_code == "managed.operation.close_unconfirmed"); REQUIRE(repeat.close_quality == "incomplete");
+        REQUIRE(Read(fixture.Main()) == main_after);
+        REQUIRE(Read(fixture.directory / "operations.jsonl") == operation_bytes);
+        REQUIRE(main_native->close_count == 1); REQUIRE(operation_native->close_count == 1);
+        REQUIRE(fixture.model->calls == 1);
+        REQUIRE_FALSE(fixture.service->SubmitManagedInput({"after-close", "must not admit", {}}, fixture.Admission())->input.accepted);
+    }
+    {
+        Fixture fixture; fixture.Assemble();
+        auto state = std::make_shared<ReentrantCloseState>();
+        auto capture = std::make_shared<ReentrantCloseCapture>(fixture.service.get(), fixture.directory / "session.lock", state);
+        std::weak_ptr<ReentrantCloseCapture> retained = capture;
+        rt::AsyncToolRuntime::Hooks hooks;
+        hooks.writer = fixture.service->trajectory()->v3_main_writer();
+        hooks.writer_mutex = fixture.service->trajectory()->v3_tool_results_mutex();
+        hooks.current_turn_id = [capture] { return std::string{}; };
+        auto asynchronous = rt::AsyncToolRuntime::Create(std::move(hooks), {}); REQUIRE(asynchronous != nullptr);
+        hooks = {}; capture.reset(); // The real runtime retains the final capture.
+        REQUIRE_FALSE(retained.expired());
+        fixture.service->runtime()->AttachAsyncToolRuntime(std::move(asynchronous));
+        REQUIRE(fixture.service->Close("outer-real-drain").error_code.empty());
+        REQUIRE(retained.expired()); REQUIRE(state->called); REQUIRE_FALSE(state->failed);
+        REQUIRE(state->shutdown_rejected); REQUIRE(state->close_rejected);
+        REQUIRE(state->writer_still_open); REQUIRE(state->lock_still_owned);
+        REQUIRE(fixture.service->runtime()->async_tool_runtime()->quiescent());
+        REQUIRE(fixture.service->trajectory()->v3_main_writer()->closed());
+        REQUIRE_FALSE(fs::exists(fixture.directory / "session.lock"));
+        REQUIRE(fixture.service->Close("repeat-regular-close").error_code.empty());
+    }
+    {
+        Fixture fixture; fixture.Assemble(); auto accepted = fixture.Accept(); auto dispatched = fixture.Dispatch(accepted);
+        auto bridge = fixture.service->NewManagedTextTurnBridge(dispatched->operation->provenance, {});
+        REQUIRE(bridge != nullptr);
+        rt::ToolTraceHub hub(fixture.service->runtime()->ids()); agent::TurnWiring wiring; wiring.turn_id = dispatched->operation->turn_id;
+        rt::ScopedTurnBindings bindings(fixture.service->execution()->agent());
+        bindings.Bind(wiring, {&hub, bridge.get(), nullptr, fixture.owner.session_id, wiring.turn_id, std::nullopt});
+        bridge->BeginTurn(wiring.turn_id, "external_user");
+        api::Message user{api::Role::User, {api::TextBlock{dispatched->operation->text}}}; bridge->RecordInput(user);
+        fixture.service->RequestExecutionShutdown();
+        REQUIRE(fixture.service->DispatchManagedPendingInput(accepted->operation->provenance, 12)->knowledge == Knowledge::Rejected);
+        REQUIRE(fixture.service->NewManagedTextTurnBridge(accepted->operation->provenance, {}) == nullptr);
+        std::atomic<bool> cancel{true};
+        const auto outcome = fixture.service->execution()->agent().Run(std::move(user), wiring, &cancel);
+        REQUIRE_MESSAGE(outcome.has_value(), (outcome ? "" : outcome.error())); REQUIRE(outcome->cancelled);
+        bridge->EndTurn(false, true, "actual-shutdown-cancellation"); bindings.Reset(); REQUIRE(fixture.model->calls == 0);
+        rt::ManagedOperationResult cancelled{"cancelled", {}, {}, {}, false, false};
+        const auto final = fixture.service->RecordManagedTurnFinal(accepted->operation->provenance, cancelled);
+        REQUIRE(final->knowledge == Knowledge::Committed); REQUIRE(final->append->status == traj::JournalAppendStatus::Committed);
+        const auto materials = fixture.Capture(); const auto source = rt::ReadManagedExecutionOwned(materials);
+        REQUIRE(source.has_value()); REQUIRE(source->front().state == State::Final); REQUIRE(source->front().execution_status == "cancelled");
+        const auto closed = fixture.service->Close("joined-real-cancelled-turn");
+        REQUIRE(closed.error_code.empty()); REQUIRE(closed.close_quality == "clean");
+        REQUIRE_FALSE(fs::exists(fixture.directory / "session.lock"));
+    }
+    {
+        Fixture fixture; fixture.Assemble(); auto accepted = fixture.Accept(); auto dispatched = fixture.Dispatch(accepted);
+        auto bridge = fixture.service->NewManagedTextTurnBridge(dispatched->operation->provenance, {});
+        REQUIRE(bridge != nullptr);
+        rt::ToolTraceHub hub(fixture.service->runtime()->ids()); agent::TurnWiring wiring; wiring.turn_id = dispatched->operation->turn_id;
+        rt::ScopedTurnBindings bindings(fixture.service->execution()->agent());
+        bindings.Bind(wiring, {&hub, bridge.get(), nullptr, fixture.owner.session_id, wiring.turn_id, std::nullopt});
+        bridge->BeginTurn(wiring.turn_id, "external_user");
+        api::Message user{api::Role::User, {api::TextBlock{dispatched->operation->text}}}; bridge->RecordInput(user);
+        fixture.model->fail = true;
+        fixture.model->on_send = [&fixture] { fixture.service->RequestExecutionShutdown(); };
+        const auto outcome = fixture.service->execution()->agent().Run(std::move(user), wiring);
+        fixture.model->on_send = {};
+        REQUIRE_FALSE(outcome.has_value()); REQUIRE_FALSE(outcome.error().empty()); REQUIRE(fixture.model->calls == 1);
+        bridge->EndTurn(false, false, outcome.error()); bindings.Reset();
+        REQUIRE(fixture.service->DispatchManagedPendingInput(accepted->operation->provenance, 12)->knowledge == Knowledge::Rejected);
+        REQUIRE(fixture.service->NewManagedTextTurnBridge(accepted->operation->provenance, {}) == nullptr);
+        rt::ManagedOperationResult failed{"error", {}, outcome.error(), {}, false, false};
+        const auto final = fixture.service->RecordManagedTurnFinal(accepted->operation->provenance, failed);
+        REQUIRE(final->knowledge == Knowledge::Committed); REQUIRE(final->append->status == traj::JournalAppendStatus::Committed);
+        const auto materials = fixture.Capture(); const auto source = rt::ReadManagedExecutionOwned(materials);
+        REQUIRE(source.has_value()); REQUIRE(source->front().state == State::Final); REQUIRE(source->front().execution_status == "error");
+        const auto result = Json::parse(materials.results.at(accepted->input.operation_id));
+        REQUIRE(result["error"] == outcome.error()); REQUIRE(result["finalText"] == "");
+        const auto closed = fixture.service->Close("joined-real-failed-turn");
+        REQUIRE(closed.error_code.empty()); REQUIRE(closed.close_quality == "clean");
+        REQUIRE_FALSE(fs::exists(fixture.directory / "session.lock"));
+    }
+    Mark("close-allocation");
+}
+
+TEST_CASE("managed execution: strict final text and error reject escaped NUL after matching hashes") {
+    Fixture fixture; fixture.Assemble(); auto accepted = fixture.Accept(); auto dispatched = fixture.Dispatch(accepted);
+    const auto result = fixture.Run(dispatched);
+    REQUIRE(fixture.service->RecordManagedTurnFinal(accepted->operation->provenance, result)->knowledge == Knowledge::Committed);
+    const auto original = fixture.Capture(); REQUIRE(rt::ReadManagedExecutionOwned(original).has_value());
+    for (const char* field : {"finalText", "error"}) {
+        auto changed = original;
+        auto payload = Json::parse(changed.results.at(accepted->input.operation_id));
+        std::string text = "matched"; text.push_back('\0'); text += "suffix"; payload[field] = text;
+        auto& bytes = changed.results.at(accepted->input.operation_id); bytes = payload.dump();
+        REQUIRE(bytes.find("\\u0000") != std::string::npos);
+        auto rows = Rows(changed.operations);
+        rows.back()["resultSha256"] = platform::Sha256Hex(bytes); rows.back()["resultBytes"] = bytes.size();
+        changed.operations = Encode(rows);
+        const auto roster = rt::ReadManagedExecutionLedgerOwned(changed.operations, changed.owner, changed.run_id);
+        REQUIRE(roster.has_value()); REQUIRE(roster->size() == 1); REQUIRE(roster->front().state == State::Final);
+        REQUIRE(roster->front().result_sha256 == platform::Sha256Hex(bytes)); REQUIRE(roster->front().result_bytes == bytes.size());
+        REQUIRE_FALSE(rt::ReadManagedExecutionOwned(changed).has_value());
+    }
+    REQUIRE(fixture.service->Close("nul-reader-test").error_code.empty());
+    Mark("result-nul");
 }
