@@ -971,6 +971,9 @@ class InstalledHeadersTests(unittest.TestCase):
         self.addCleanup(self.scratch.cleanup)
         self.repo = Path(self.scratch.name)
         self.headers = {
+            "include/lubancore/model.hpp",
+            "include/lubancore/operations.hpp",
+            "include/lubancore/managed.hpp",
             "include/lubancore/named_results.hpp",
             "include/lubancore/jobs.hpp",
             "include/lubancore/web_fetch.hpp",
@@ -1018,6 +1021,41 @@ class InstalledHeadersTests(unittest.TestCase):
                         self.assertIn(missing, str(error.exception))
             finally:
                 path.write_text(contents, encoding="utf-8")
+
+    def test_relocated_header_originals_match_source_bytes_in_both_install_modes(self):
+        for mode in ("component", "full"):
+            prefix, evidence = self.repo / ("installed-" + mode), self.repo / ("evidence-" + mode)
+            evidence.mkdir()
+            for relative in self.headers:
+                target = prefix / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((self.repo / relative).read_bytes())
+            report = installed.capture_public_headers(self.repo, prefix, self.headers, evidence,
+                                                      {"installMode": mode, "checkoutHead": "fixture"})
+            self.assertEqual(report["status"], "matched")
+            self.assertEqual({r["relative"] for r in report["headers"]}, self.headers)
+            for record in report["headers"]:
+                self.assertEqual(Path(record["capture"]).read_bytes(), (self.repo / record["relative"]).read_bytes())
+                self.assertEqual(record["installedSha256"], record["sourceSha256"])
+
+    def test_stale_installed_header_is_retained_and_rejected_even_when_names_match(self):
+        prefix, evidence = self.repo / "installed", self.repo / "evidence"
+        evidence.mkdir()
+        for relative in self.headers:
+            target = prefix / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((self.repo / relative).read_bytes())
+        relative = "include/lubancore/managed.hpp"
+        stale = b"#pragma once\n// older installed declaration\n"
+        (prefix / relative).write_bytes(stale)
+        with self.assertRaisesRegex(RuntimeError, "relocated public headers differ"):
+            installed.capture_public_headers(self.repo, prefix, self.headers, evidence, {})
+        report = json.loads((evidence / "public-headers.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["status"], "failed")
+        record = next(r for r in report["headers"] if r["relative"] == relative)
+        self.assertEqual(record["status"], "mismatched")
+        self.assertEqual(Path(record["capture"]).read_bytes(), stale)
+        self.assertNotEqual(record["installedSha256"], record["sourceSha256"])
 
 
 class InstalledSearchResourcesTests(unittest.TestCase):

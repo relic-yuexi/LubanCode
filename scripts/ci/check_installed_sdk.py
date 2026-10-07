@@ -53,6 +53,8 @@ REQUIRED_TESTS = {
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
 REQUIRED_PUBLIC_HEADERS = {
+    "include/lubancore/model.hpp",
+    "include/lubancore/operations.hpp",
     "include/lubancore/managed.hpp",
     "include/lubancore/named_results.hpp",
     "include/lubancore/jobs.hpp",
@@ -175,6 +177,39 @@ def check_public_headers(repo: Path, installed_files: list[str], install_mode: s
         raise RuntimeError(f"{install_mode} SDK install is missing public headers: " +
                            ", ".join(sorted(missing_headers)))
     return public_headers
+
+
+def capture_public_headers(repo: Path, prefix: Path, headers: set[str], evidence: Path,
+                           context: dict) -> dict:
+    """Retain actual relocated bytes before checking them against this checkout."""
+    capture = evidence / "public-headers"
+    manifest = {"schemaVersion": 1, **context, "installedPrefix": str(prefix),
+                "producerSource": str(repo), "status": "failed", "headers": []}
+    failures = []
+    for relative in sorted(headers):
+        installed, source = prefix / relative, repo / relative
+        record = {"relative": relative, "installed": str(installed), "source": str(source)}
+        manifest["headers"].append(record)
+        if not installed.is_file() or not source.is_file():
+            record["status"] = "missing"
+            failures.append(relative)
+            continue
+        raw, original = installed.read_bytes(), source.read_bytes()
+        copied = capture / relative
+        copied.parent.mkdir(parents=True, exist_ok=True)
+        copied.write_bytes(raw)
+        record.update(bytes=len(raw), sourceBytes=len(original), capture=str(copied),
+                      installedSha256=hashlib.sha256(raw).hexdigest(),
+                      sourceSha256=hashlib.sha256(original).hexdigest(),
+                      status="matched" if raw == original else "mismatched")
+        if raw != original:
+            failures.append(relative)
+    if not failures:
+        manifest["status"] = "matched"
+    (evidence / "public-headers.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    if failures:
+        raise RuntimeError("SDK relocated public headers differ from this checkout: " + ", ".join(failures))
+    return manifest
 
 
 def run(args: list[str], env: dict[str, str], *, capture: bool = False) -> str:
@@ -353,6 +388,11 @@ def main() -> None:
                              if path.is_file() or path.is_symlink())
     (evidence / "installed-files.json").write_text(json.dumps(installed_files, indent=2) + "\n", encoding="utf-8")
     public_headers = check_public_headers(repo, installed_files, args.install_mode)
+    capture_public_headers(repo, prefix, public_headers, evidence, {
+        "githubSha": os.environ.get("GITHUB_SHA"),
+        "checkoutHead": run(["git", "-C", str(repo), "rev-parse", "HEAD"], env, capture=True).strip(),
+        "installMode": args.install_mode, "luaProfile": args.lua_profile,
+    })
     web_header = web_fixture.check_installed_header(repo, prefix)
     producer_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
     staged_entries = [line.split("=", 1)[1] for line in producer_cache.splitlines()
