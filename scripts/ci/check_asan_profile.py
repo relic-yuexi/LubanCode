@@ -18,7 +18,7 @@ import xml.etree.ElementTree as ET
 
 try:
     from .check_sdk_only_boundary import CLIENT, prepare, read_reply
-    from .check_sdk_focused import check_native_command
+    from .check_sdk_focused import check_native_command, check_managed_execution_native
     from .sdk_result_immutable import check_result_immutable_native
     from . import sdk_named_results as named_results
     from . import sdk_journal_owner as journal_owner
@@ -26,7 +26,7 @@ try:
     from . import sdk_owned_file_paths as owned_file_paths
 except ImportError:
     from check_sdk_only_boundary import CLIENT, prepare, read_reply
-    from check_sdk_focused import check_native_command
+    from check_sdk_focused import check_native_command, check_managed_execution_native
     from sdk_result_immutable import check_result_immutable_native
     import sdk_named_results as named_results
     import sdk_journal_owner as journal_owner
@@ -300,6 +300,8 @@ def check_execution(manifest, registrations, executable, junit, last_test, owned
                 'ASan source failed or skipped: ' + name)
         section = sections[name]
         check_native_command(section, commands[name])
+        if name == 'unit.runtime.managed_operation_execution':
+            check_managed_execution_native(section, commands[name])
         stem = name.removeprefix('integration.sdk.')
         if name.startswith('integration.sdk.') and stem in named_results.SOURCES:
             named_results.check_native(section, commands[name], stem)

@@ -43,6 +43,7 @@ list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
   "${_lubancore_tests_root}/unit/trajectory_v3/test_v3_result_immutable_publication.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_session_resources.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_session_execution.cpp"
+  "${_lubancore_tests_root}/unit/runtime/test_managed_operation_execution.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_execution_owner.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_subagent_terminal_receipt.cpp"
   "${_lubancore_tests_root}/unit/runtime/test_child_foreground_integration.cpp"
@@ -245,6 +246,7 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
     set(sdk_original_test "unit.hooks.${sdk_stem}")
   elseif(sdk_basename STREQUAL "test_session_resources.cpp" OR
          sdk_basename STREQUAL "test_session_execution.cpp" OR
+         sdk_basename STREQUAL "test_managed_operation_execution.cpp" OR
          sdk_basename STREQUAL "test_execution_owner.cpp" OR
          sdk_basename STREQUAL "test_subagent_terminal_receipt.cpp" OR
          sdk_basename STREQUAL "test_child_foreground_integration.cpp" OR

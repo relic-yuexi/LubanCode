@@ -109,6 +109,7 @@ REQUIRED = {
     "sdk.focused.memory_project_commit_handoff",
     "sdk.focused.managed_session_ownership",
     "sdk.focused.managed_session_reservation",
+    "sdk.focused.managed_operation_execution",
     "sdk.focused.lubancore_owned_job_deadline",
     "sdk.focused.lubancore_web_fetch",
     "sdk.focused.lubancore_authorization",
@@ -168,6 +169,36 @@ REQUIRED = {
 
 LUA_PATHS = ("off-and-visible", "four-sessions", "approval", "cancel-and-close",
              "invalid-budget", "bad-declarations", "resume-fresh-vm", "resume-drift", "owned-opening")
+
+MANAGED_EXECUTION_PATHS = ("roundtrip", "admission", "strict", "dispatch-first",
+                           "binding-close", "final-first", "close-allocation", "result-nul")
+
+
+def check_managed_execution_registration(command, executable="lubancore_sdk_tests"):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not isinstance(command[0], str) or
+            command[0].replace("\\", "/").rsplit("/", 1)[-1] not in (executable, executable + ".exe") or
+            command[1] != "--source-file=*test_managed_operation_execution.cpp"):
+        raise RuntimeError("Managed execution must select its actual native source and binary")
+
+
+def check_managed_execution_native(section, command):
+    executable = command[0].replace("\\", "/").rsplit("/", 1)[-1].removesuffix(".exe") if command else ""
+    if executable not in ("lubancore_sdk_tests", "lubancode_tests"):
+        raise RuntimeError("Managed execution uses a foreign native binary")
+    check_managed_execution_registration(command, executable)
+    check_native_command(section, command)
+    expected = str(len(MANAGED_EXECUTION_PATHS))
+    counts = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if counts != [(expected, expected, "0")] or len(assertions) != 1:
+        raise RuntimeError("Managed execution native roster is missing, skipped or failing")
+    total, passed, failed = map(int, assertions[0])
+    if not total or total != passed or failed or len(re.findall(r"^Test Passed\.\s*$", section, re.M)) != 1:
+        raise RuntimeError("Managed execution native assertions did not pass")
+    paths = re.findall(r"^\[managed-operation-execution-path\] ([^\r\n]+)\r?$", section, re.M)
+    if len(paths) != len(MANAGED_EXECUTION_PATHS) or set(paths) != set(MANAGED_EXECUTION_PATHS):
+        raise RuntimeError("Managed execution actual paths are missing, duplicated or foreign")
 
 
 def check_native_command(section: str, registered: list[str]):
@@ -1379,6 +1410,8 @@ def main():
             check_v3_journal_witness_registration(test.get("command", []))
         if test["name"] == "sdk.focused.run_command_execution_limits":
             check_command_limits_registration(test.get("command", []))
+        if test["name"] == "sdk.focused.managed_operation_execution":
+            check_managed_execution_registration(test.get("command", []))
         if test["name"] == "sdk.focused.atomic_write":
             check_plan_retry_registration(test.get("command", []))
         if test["name"] in ("sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest"):
@@ -1420,6 +1453,8 @@ def main():
         if len(commands) != 1:
             raise RuntimeError("SDK source has no unique registered command: " + case.attrib["name"])
         check_native_command(sections[0], commands[0])
+        if case.attrib["name"] == "sdk.focused.managed_operation_execution":
+            check_managed_execution_native(sections[0], commands[0])
         job_stem = case.attrib["name"].removeprefix("sdk.focused.")
         if job_stem in command_jobs.SOURCES:
             command_job_reports[case.attrib["name"]] = command_jobs.check_native(sections[0], commands[0], job_stem, os.name)

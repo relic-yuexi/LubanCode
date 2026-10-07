@@ -148,6 +148,7 @@ SHARED_SDK_TEST_SOURCES = {
     "tests/unit/platform/test_atomic_write.cpp",
     "tests/unit/runtime/test_session_resources.cpp",
     "tests/unit/runtime/test_session_execution.cpp",
+    "tests/unit/runtime/test_managed_operation_execution.cpp",
     "tests/unit/runtime/test_execution_owner.cpp",
     "tests/unit/runtime/test_subagent_terminal_receipt.cpp",
     "tests/unit/runtime/test_child_foreground_integration.cpp",

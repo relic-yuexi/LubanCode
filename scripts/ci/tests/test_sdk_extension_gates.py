@@ -965,6 +965,46 @@ class PlanRetryEvidenceTests(unittest.TestCase):
             focused.check_plan_retry_native(self.body() + "\n[sdk-plan-retry] windows-sharing-recovery", "posix")
 
 
+class ManagedExecutionNativeEvidenceTests(unittest.TestCase):
+    def body(self, binary="lubancore_sdk_tests"):
+        command = ["/actual/build/" + binary, "--source-file=*test_managed_operation_execution.cpp"]
+        text = f'Command: "{command[0]}" "{command[1]}"\n'
+        text += "\n".join("[managed-operation-execution-path] " + path for path in focused.MANAGED_EXECUTION_PATHS)
+        text += "\n[doctest] test cases: 8 | 8 passed | 0 failed\n"
+        text += "[doctest] assertions: 100 | 100 passed | 0 failed\nTest Passed.\n"
+        return text, command
+
+    def test_actual_sdk_and_full_argument_lists_accept_complete_nonempty_native_summary(self):
+        for binary in ("lubancore_sdk_tests", "lubancode_tests"):
+            body, command = self.body(binary)
+            focused.check_managed_execution_native(body, command)
+
+    def test_markers_alone_or_wrong_native_source_cannot_supply_execution(self):
+        body, command = self.body()
+        with self.assertRaises(RuntimeError):
+            focused.check_managed_execution_native("\n".join(body.splitlines()[1:9]), command)
+        with self.assertRaises(RuntimeError):
+            focused.check_managed_execution_native(body, [command[0], "--source-file=*test_other.cpp"])
+        with self.assertRaises(RuntimeError):
+            focused.check_managed_execution_native(body.replace("/actual/build/", "/other/build/"), command)
+
+    def test_missing_duplicate_or_foreign_path_cannot_borrow_passing_summary(self):
+        body, command = self.body()
+        marker = "[managed-operation-execution-path] result-nul"
+        for changed in (body.replace(marker, ""), body + marker + "\n", body.replace(marker, marker + "-foreign")):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                focused.check_managed_execution_native(changed, command)
+
+    def test_empty_failed_or_incomplete_native_summary_is_rejected(self):
+        body, command = self.body()
+        for changed in (body.replace("8 | 8 passed", "7 | 7 passed"),
+                        body.replace("100 | 100 passed", "0 | 0 passed"),
+                        body.replace("100 passed | 0 failed", "99 passed | 1 failed"),
+                        body.replace("Test Passed.", "Test Failed.")):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                focused.check_managed_execution_native(changed, command)
+
+
 class InstalledHeadersTests(unittest.TestCase):
     def setUp(self):
         self.scratch = tempfile.TemporaryDirectory(prefix="sdk-extension-gate-data-")
