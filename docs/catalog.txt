@@ -256,3 +256,4 @@ DOC development/workflow-session-open-diagnostic.md
 DOC development/sdk-named-publication-fence.md
 DOC development/sdk-journal-owner-operation-material-gate.md
 DOC development/sdk-named-owned-paths.md
+DOC development/sdk-public-model-values.md
