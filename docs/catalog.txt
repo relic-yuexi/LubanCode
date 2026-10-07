@@ -111,6 +111,7 @@ DOC development/sdk-managed-opening-stack.md
 DOC development/sdk-managed-project-registration.md
 DOC development/sdk-managed-operation-provenance.md
 DOC development/sdk-managed-operation-execution.md
+DOC development/sdk-managed-close-retirement.md
 DOC development/sdk-managed-storage-views.md
 DOC development/worker-host.md
 DOC development/worker-protocol-compatibility.md
