@@ -281,7 +281,7 @@ P1 的流程闭环不自动证明可向恶意代码开放。所选后端须先�
 
 执行 Node 保存完整 Session、工具 raw/formal 结果与 provider 原件；Control 保存授权后的目录、状态与 preview。VM/sandbox adapter 回给本 Node 的完整输出，不等于已准许上传 Control；不借 Boxed exec JSON、NVX stdout 或诊断日志绕门。
 
-沿 [Worker 现合同](../development/worker-host.md) 的 `ResultProjector`：Node 先准许 full，每场再显式开启；任一门未开就只传受限 preview。冻结策略版本，查询再核身份与内容范围。Job 本地 4096 字节截断也不是出站许可，必须走同一投影。助手答复与工具结果分开：助手答复沿已授权分页接口；原工具结果默认不回完整正文。日志、错误、重连和重放同样守门。
+沿 [Worker 现合同](../development/worker-host.md) 的 `ResultProjector`：Node 先准许 full，每场再显式开启；任一门未开就只传受限 preview。冻结策略版本，查询再核身份与内容范围。Job 本地 4096 字节截断也不是出站许可，必须走同一投影。助手答复与工具结果分开：助手答复查询后续另接当前主体授权口，具体分页等真实接口实现时冻结；现 Worker 分页仍是可信 IPC，不能当托管授权已交。原工具结果默认不回完整正文。日志、错误、重连和重放同样守门。
 
 执行 world/工作区绑定、源/镜像 digest、能力握手、原发起者、当前策略修订、provider 接单号和退出/清理证据留节点账。上传只含最小身份与状态；凭据、宿主路径、原始异常和工具全文不混入健康上报。Node/Control 部署位置可换，存储与投影边界不随 UI 位置漂移。
 

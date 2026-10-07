@@ -250,7 +250,7 @@ Requested
 
 浏览器 detach 不等于 Node/guest 控制链 reset。NVX reset 会终止旧 workload；适配器须让 Node 持住控制链，按现 Worker 合同保已受理操作。真的 owner 失联记 Unknown，不拿请求超时当进程没开，更不自动重投有副作用命令。
 
-完整 Session 与工具原件留执行 Node。Control 默认只收受限 preview；full 必须 Node 许可且每场显式开启，仍走现 ResultProjector。后端原始 stdout/artifact、Job 截断预览、错误与重连日志都不能绕过这道门。助手终态答复沿单独授权分页接口，不和工具全文混为一谈。
+完整 Session 与工具原件留执行 Node。Control 默认只收受限 preview；full 必须 Node 许可且每场显式开启，仍走现 ResultProjector。后端原始 stdout/artifact、Job 截断预览、错误与重连日志都不能绕过这道门。助手答复查询后续另接当前主体授权口，具体分页等真实接口实现时冻结；现 Worker 可信 IPC 不等于托管读取授权。助手答复不和工具全文混为一谈。
 
 ## 十一、接入范围
 
