@@ -1057,6 +1057,39 @@ class InstalledHeadersTests(unittest.TestCase):
         self.assertEqual(Path(record["capture"]).read_bytes(), stale)
         self.assertNotEqual(record["installedSha256"], record["sourceSha256"])
 
+    def test_missing_installed_header_retains_other_available_originals(self):
+        prefix, evidence = self.repo / "installed", self.repo / "evidence"
+        evidence.mkdir()
+        missing = "include/lubancore/managed.hpp"
+        for relative in self.headers - {missing}:
+            target = prefix / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((self.repo / relative).read_bytes())
+        with self.assertRaisesRegex(RuntimeError, "relocated public headers differ"):
+            installed.capture_public_headers(self.repo, prefix, self.headers, evidence, {})
+        report = json.loads((evidence / "public-headers.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["status"], "failed")
+        records = {r["relative"]: r for r in report["headers"]}
+        self.assertEqual(records[missing]["failedPhase"], "installed_read")
+        for relative in self.headers - {missing}:
+            self.assertEqual(Path(records[relative]["capture"]).read_bytes(), (self.repo / relative).read_bytes())
+
+    def test_source_read_error_retains_relocated_bytes_and_failed_manifest(self):
+        prefix, evidence = self.repo / "installed", self.repo / "evidence"
+        evidence.mkdir()
+        relative = "include/lubancore/model.hpp"
+        target = prefix / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        raw = (self.repo / relative).read_bytes()
+        target.write_bytes(raw)
+        (self.repo / relative).unlink()
+        with self.assertRaisesRegex(RuntimeError, "relocated public headers differ"):
+            installed.capture_public_headers(self.repo, prefix, {relative}, evidence, {})
+        report = json.loads((evidence / "public-headers.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["headers"][0]["failedPhase"], "source_read")
+        self.assertEqual(Path(report["headers"][0]["capture"]).read_bytes(), raw)
+
 
 class InstalledSearchResourcesTests(unittest.TestCase):
     def setUp(self):
