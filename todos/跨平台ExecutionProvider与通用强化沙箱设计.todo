@@ -1,11 +1,13 @@
 # 跨平台 ExecutionProvider 与通用强化沙箱设计
 
 - 状态：待实现（2026-09-02 立单）
-- 日期：2026-09-02
+- 日期：2026-09-02；2026-10-08 按功能分支 `5aaad8b5`/文档 `d9d616e9` 与 Boxed/NVX 源码补订
 - 级别：P0（边界可信、策略强制、降级可见）
 - 范围：拟新增 `src/execution/`；改造 `src/platform/process.*`、`src/tools/`、`src/runtime/plugin_*`、`src/mcp/`、`src/hooks/`、`src/ptc/`、Package/Agent/Workflow 接线、测试与安全文档
 - 关联：`轻量可塑ExtensionRuntime与动态扩展API设计.todo`、`多AgentEngine统一Runtime与适配层设计.todo`、`后台命令PTY会话与可附着终端设计.todo`、`分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo`（原集群畅想单已并入其第二十九章）
 - 不在本单：自造容器内核、声称任一平台绝对安全、把 worktree 当 sandbox、远程执行市场、静默降级到裸进程
+
+本次只改设计。Boxed 采用 `akshayaggarwal99/boxed@0909a954` 为候选研究对象；用户未给 owner，不替用户认定同名项目。Microsoft `nvx@9c5fc7ea` 身份已核准，名字无误。版本、一手源码、已实现/Proposed 差别与接入次序见 [沙箱平台设计第 9、11 节](../docs/architecture/sandbox-platform-design.md)。未部署、未编译、未做沙箱原生验收。
 
 ## 一、先下断语
 
@@ -13,7 +15,9 @@
 
 当前 `IsolationScope` 主要守工作区路径；Job Object/进程组主要守寿命与资源；MCP/process Plugin 的进程边界主要隔崩溃。它们都不是通用文件、网络、Secret 与子进程隔离。
 
-本单立 `ExecutionProvider`。所有会执行外部代码的能力，先交一份 `ExecutionSpec`，由策略解析器选出满足要求的 provider。没有合格 provider，明拒。绝不因“先跑起来”便退成宿主权限。
+本单收统一执行合同。所有会执行外部代码的能力，最终由实际消费者提交 `ExecutionSpec`，选满足要求的 provider。没有合格 provider，明拒。开工时先接原 run_command/owned Job 的真进程 owner，不先加只有 fake 能调用的公共 `ExecutionProvider` 空头。后续每迁一条真实入口，补该条所需能力与回执。
+
+网页/Control 和 Node/Worker 均可部署本机或服务器，用户负责连通；端点鉴权与沙箱出口限制仍须实现。GPU 占用、分配与调度不在本工程，不随这张单重开。
 
 ## 二、威胁模型
 
@@ -39,25 +43,16 @@
 
 ## 三、核心对象
 
-```cpp
-struct ExecutionSpec;
-struct ExecutionPolicy;
-struct ExecutionCapabilities;
-struct ExecutionReceipt;
-struct ExecutionArtifact;
+| 对象/动作 | 真实接点与归属 |
+| --- | --- |
+| world | 同一文件系统、进程空间和生命周期；文件工具、rg、shell 必须一致，模型服务可留受信 Worker |
+| WorkspaceBinding | 可信 Project 登记已有目录/卷；完整资源身份与绑定代次，目录名不作 ACL |
+| ExecutionSpec/Policy | 原工具准入、原发起者、有效参数、目标 world 与实际能力；只收窄许可 |
+| Prepare/Start/Cancel/Collect | 原 run_command 前台与 Command Job 首批消费；复用当前 Agent/SessionResources/协调器 |
+| ExecutionReceipt/Artifact | 原 operation/action/attempt 连到实际 provider 接单号；首未知、退出、收树、产物与回收各留事实 |
+| instance owner | Node/Worker 监督器持 VM/容器与借用；Session/授权 View 只退自己的引用，不能误关共享环境 |
 
-class ExecutionProvider {
-public:
-    virtual ProviderDescriptor Describe() const = 0;
-    virtual ExecutionCapabilities Probe() = 0;
-    virtual expected<ExecutionHandle, ExecutionError> Prepare(const ExecutionSpec&) = 0;
-    virtual expected<void, ExecutionError> Start(ExecutionHandle, ExecutionEventSink&) = 0;
-    virtual expected<void, ExecutionError> WriteInput(ExecutionHandle, bytes) = 0;
-    virtual expected<void, ExecutionError> Cancel(ExecutionHandle, CancelReason) = 0;
-    virtual expected<ExecutionReceipt, ExecutionError> Collect(ExecutionHandle) = 0;
-    virtual expected<void, ExecutionError> Destroy(ExecutionHandle) = 0;
-};
-```
+这些是设计名称，不是已经安装的 SDK 类型。公共面只在真链交付时加 STL/API 值；不把 VMM、Docker、私有 JSON 或 raw Session 指针塞给宿主。
 
 `Prepare` 只建隔离环境，不执行用户代码。`Start` 之后任何失败都须有 execution 终态与资源收尾账。
 
@@ -69,6 +64,8 @@ identity:
   execution_id: exec-...
   session_id: session-...
   run_id: run-...
+  world_id: world-...
+  workspace_binding: binding-...
 purpose: tool | plugin | mcp | hook | skill | engine | workflow
 command:
   executable_ref: {sha256: ...}
@@ -134,7 +131,7 @@ remote_execution
 | `isolated` | 再加默认断网、受控挂载、Secret 最小注入 | 不可信 process/MCP/Engine 首选 |
 | `hardened` | 再加 syscall/内核隔离、只读根、不可提权 | 高风险代码与云端多租户 |
 
-等级由宿主根据探针算，不由 provider 自报字符串决定。报告同时列 enforcement 明细，免得同名等级跨平台偷换。
+上述等级只是策略画像简称，不构成线性安全分数。容器、用户态内核、VM 各有威胁模型与兼容边界；须逐项核要求。等级由宿主根据实际探针算，不由 provider 自报字符串决定。报告同时列 enforcement 明细、guest/宿主版本、镜像与能力代次。NVX 的 Ready 不能代替 FEATURES；有 layers 与无 layers 的能力也不能混算。
 
 ## 六、策略裁决
 
@@ -169,7 +166,7 @@ remote_execution
 
 - `WindowsContainedProvider`：Job Object、受限 token、环境过滤、资源帽、整树收尾；
 - `WindowsAppContainerProvider`：AppContainer capability、受控目录、默认网络策略；
-- `WindowsVmProvider`：Hyper-V/WSL2/容器一类强化后端，按安装与管理员条件显式启用。
+- VM 候选：NVX/WHP 可在 Windows 宿主跑 Linux guest；Windows 原生工作负载另验 Windows VM/适用容器。WSL2 只是承载环境，不能把整份发行版当每任务沙箱。
 
 Restricted Token 不自动等于文件系统隔离。AppContainer ACL、网络 capability 与挂载路径须逐项实测。
 
@@ -177,7 +174,7 @@ Restricted Token 不自动等于文件系统隔离。AppContainer ACL、网络 c
 
 - `LinuxContainedProvider`：进程组 + rlimit/cgroup；
 - `LinuxBwrapProvider`：user namespace、mount namespace、只读根、tmpfs、默认断网；
-- 可选 OCI/VM provider：只有策略要求 hardened 时启用。
+- 可选 OCI/VM provider：Docker/Boxed、NVX/KVM；NVX/MSHV 仅在其要求的宿主条件具备时启用。按需求选，不拿后端名替能力实测。
 
 `bwrap` 不存在、user namespace 被禁、发行版策略不同，都须落稳定探针结果。不得悄悄退裸跑。
 
@@ -187,6 +184,8 @@ Restricted Token 不自动等于文件系统隔离。AppContainer ACL、网络 c
 - 受支持的 native sandbox/provider 要钉 OS 版本与公开能力；
 - Linux OCI 工作负载可走 VM/container provider，但不能冒充原生 Xcode/codesign 环境。
 
+NVX 当前官方入口未列 macOS backend。可另验 Apple container 等 Mac 上的 Linux VM 后端；三端客户端可用，不等于三端原生程序都能塞进同一镜像。
+
 平台没有可靠文件/网络隔离时，grade 如实停在 `contained` 或 `workspace`。
 
 ### 7.4 Remote
@@ -194,6 +193,10 @@ Restricted Token 不自动等于文件系统隔离。AppContainer ACL、网络 c
 远端 provider 另带：endpoint 身份、TLS、租约、上传清单、数据驻留、排队、取消、回收、结果签名。远端不是天然更安全，只是把执行边界挪了地方。
 
 ## 八、文件系统与工作区
+
+Project、Workspace、Session、world、SandboxInstance 分开编号。一份已有 Workspace 可开多场，不强制 worktree，也不因 shell 写集未知便锁住整目录。共享目录就共享文件事实；冲突靠版本检查、patch 基线与明确动作锁处理。强隔离任务可显式选副本；池化卷接管需独占 fencing，但不能把它扩大成所有项目默认规则。
+
+长期绑定可多对多：一场可有多个命名目标/素材挂载，一份 Workspace 可供多场；首片每场只实现一个主执行绑定。没有消费者的多 world 路由先不落公共 API。主绑定切换须先停旧调用并记录新代次，不在每条命令里暗换本地与远端。
 
 首选过滤快照，不把整仓直接可写挂进去：
 
@@ -241,9 +244,13 @@ Requested
  -> Destroyed
 ```
 
-`Destroyed` 是资源收尾，不覆盖业务终态。若业务成功、清理失败，receipt 同时保留 `outcome=succeeded` 与 `cleanup=failed`，并升告警。
+`Destroyed` 是资源收尾，不覆盖业务终态。若业务成功、清理失败，receipt 同时保留 `outcome=succeeded` 与 `cleanup=failed`，并升告警。进程 exit、全部后代退净、VM/容器销毁各记一笔；缺任一必要事实不能归池。Session.Close 不删已有项目，也不销毁还有别场借用的 world。
 
 宿主崩溃后，启动盘点 orphan marker。能证明属于本实例且租约失效的才清；身份不清的列 `needs_review`，不凭目录名猛删。
+
+浏览器 detach 不等于 Node/guest 控制链 reset。NVX reset 会终止旧 workload；适配器须让 Node 持住控制链，按现 Worker 合同保已受理操作。真的 owner 失联记 Unknown，不拿请求超时当进程没开，更不自动重投有副作用命令。
+
+完整 Session 与工具原件留执行 Node。Control 默认只收受限 preview；full 必须 Node 许可且每场显式开启，仍走现 ResultProjector。后端原始 stdout/artifact、Job 截断预览、错误与重连日志都不能绕过这道门。助手答复查询后续另接当前主体授权口，具体分页等真实接口实现时冻结；现 Worker 可信 IPC 不等于托管读取授权。助手答复不和工具全文混为一谈。
 
 ## 十一、接入范围
 
@@ -297,25 +304,25 @@ doctor 只跑无副作用探针：文件越界、网络拒绝、环境过滤、�
 
 ## 十四、分期落地
 
-### P0-0：合同与假 provider
+### P0-0：合同随第一条实际调用收口
 
 - [ ] 冻结 Spec、Policy、Capabilities、Receipt、事件与错误码。
 - [ ] 把策略合并和 provider 选择写成纯函数。
-- [ ] 建 fake provider 与越权矩阵。
+- [ ] 以原 run_command 前台/owned Job 作首个真实消费者，保 action/attempt/owner/首未知回执；fake 只补反例。
 
-验收：能力不足、降级、拒绝、迟到终态与清理失败都有确定结果。
+验收：能力不足、降级、拒绝、迟到终态与清理失败都有确定结果；真实 spawn/wait/cancel/Close 闭环能在远端 CI 对账，不能只验接口声明。
 
 ### P0-1：现有进程归一
 
 - [ ] 以 `ContainedProvider` 包住现有 `platform::Process`。
-- [ ] 先迁 PTC、process Plugin、MCP 三路。
+- [ ] 先迁原 run_command 与 owned Command Job；再迁 PTC、process Plugin、MCP，逐项保其业务合同。
 - [ ] 保持旧行为，明标现有 enforcement grade。
 
-验收：旧测试全绿；三路执行都有 execution_id、receipt 与 Trajectory 边。
+验收：旧测试全绿；本片已迁入口都有 execution_id、真实 receipt 与 Trajectory 边，未迁项清楚列出。当前本地资源限制不能冒称恶意代码已隔离。
 
 ### P0-2：三平台 workspace/isolated
 
-- [ ] Windows 落可验证后端；Linux 落 bwrap 后端；macOS 落当时可用的最强明确后端。
+- [ ] 先锁定一套容器工作区闭环；文件/编辑/搜索与命令同 world，其余未接旁路拒绝。三端逐个核宿主与 guest 能力，不许“最强”口号代替证据。
 - [ ] 落快照输入、输出收集、patch 回写。
 - [ ] 落网络默认拒绝与 SecretRef 注入。
 
@@ -331,11 +338,20 @@ doctor 只跑无副作用探针：文件越界、网络拒绝、环境过滤、�
 
 ### P1-1：远端 provider
 
+- [ ] 先完成 Managed 真受理/执行/读取授权和网络 Node 身份门；仅有 Policy 原语或 Worker 私有管道不能开放多租户服务。
 - [ ] 冻结远端协议、租约、上传清单与结果签名。
 - [ ] 接一只开发用远端后端。
 - [ ] 测断线、取消、重复回执、过期租约和数据驻留。
 
 验收：本地与远端吃同一 Spec；差异只在 capability/receipt，不爬进工具业务层。
+
+### P1-2：NVX 与快照另过门
+
+- [ ] 先验固定 NVX guest/VMM 的 FEATURES、实际命令、文件可达范围、取消、pids 退净与冷启动，不先承诺热池。
+- [ ] Linux/KVM、Windows/WHP 各出真实结果；MSHV 按部署条件另验；macOS 不能借其 Windows 结果报通过。
+- [ ] 快照绑定 backend/CPU/镜像/策略/工作区材料，分 clone 与 resume；失配或仍带旧凭据就拒绝。
+
+验收：上游 Proposed 能力不算本项目已交付；SDK 同 ID 恢复、VM 恢复与外部副作用三者分别对账。数据库、对象存储、池调度仍守各自前置门。
 
 ## 十五、最终验收门
 

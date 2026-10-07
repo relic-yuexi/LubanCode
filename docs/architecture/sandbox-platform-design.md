@@ -1,36 +1,39 @@
 # LubanCode 沙箱平台接入设计
 
-日期：2026-09-23。状态：设计稿，尚未实现。
+日期：2026-10-08。状态：设计稿，尚未实现沙箱适配器。
 
-本次按工作区源码核查，HEAD 为 `efcb0e18`；工作区另有既存改动，不能把 HEAD 当作整份工作区快照。外部依据来自当日打开的官方仓库与文档。没有部署后端，没有跑隔离、性能或三端验收。文中接口、配置、目录和错误码均为提案。
+本次源码基线为功能分支 `5aaad8b5` 与其文档提交 `d9d616e9`。补查 Boxed、Microsoft NVX 一手源码，版本见第 9 节。旧 `efcb0e18` 调研不再充当当前源码锚。没有部署后端，没有跑隔离、性能或三端验收；文中新增类型、配置与错误码仍为提案。
 
 ## 1. 先定边界
 
 LubanCode 管 Agent 循环、授权、工具调用、轨迹和结果采纳。沙箱平台管执行环境、租约、资源、网络、快照和回收。两边通过版本化协议相接。
 
-推荐先接 OpenSandbox，完成一条端到端路径；再接 CubeSandbox，验证 MicroVM 与快照分叉；训练批任务通过 ROCK/Harbor 适配，不另造训练调度平台。选型仍须锁版本、验能力，不能把平台名称当作隔离证明。
+先沿现 SDK/Worker 做一条有真实 owner、进程回执和关场证据的路径，再选具体沙箱后端。Boxed 供参考控制面与 guest 执行面拆分；NVX 供参考 MicroVM、能力握手和收树。两者层次不同，不能把项目合并便算完成。OpenSandbox、CubeSandbox 与 ROCK 保留为后续候选，不再把接入顺序写死。选型须锁版本、验能力，平台名称不能代替隔离证明。
 
 场景分两路：
 
-- 日常编程：一次会话绑定一份沙箱工作区。Agent 在宿主运行，工作区相关工具进入沙箱。用户查看 diff 后采纳。
+- 日常编程：用户登记已有项目，再在其中开多场。首片每场固定一个主要执行 world 和工作区绑定；多场可以共用目录，也可显式选独立快照。Agent 在受信宿主运行，项目相关工具进入选定 world；不强制 worktree。
 - 评测与自改进：每次 attempt 分配独立环境。可以把整个 LubanCode worker 放进去，再由外侧收轨迹、计成本、评分。此路也能先验证现有 CLI，但不替代日常编程那条工具接入路径。
 
 “客户端支持 Windows/Linux/macOS”与“后端能运行 Windows/Linux/macOS 程序”分开写。Linux 镜像不能顶替 Windows API 或 Xcode。
+
+网页与 Control 可在本机或服务器运行，Node/Worker 也可独立部署。用户负责让端点连通；本设计只规定端点身份、协议与取消语义，不承诺打洞、VPN 或组网。沙箱内出口限制仍归执行策略，不能用“网络由用户接通”免掉这道门。GPU 占用、分配与调度不在本工程内；不在这里加 GPU 调度器或通用透传承诺。
 
 ## 2. 当前源码与缺口
 
 | 入口 | 当前证据 | 接入要求 |
 | --- | --- | --- |
-| `src/agent/loop.cpp:745` | 执行工具时传 `ToolExecutionContext` | 保留既有授权、Hook、轨迹关口，增加可信执行目标 |
-| `src/tools/tool.hpp:45` | 上下文含取消旗和 artifact 目录 | 增加不可变绑定，不向共享工具实例塞可变 sandbox ID |
-| `src/tools/run_command.cpp:408` | 前台和后台调用平台进程 API | 两条路径一起迁移；shell 按目标环境选 |
-| `src/tools/read_file.cpp:90` | 直接 `std::ifstream` 打开路径 | 绑定沙箱后改走远端文件服务 |
+| `src/agent/loop.cpp` / `RunOneTool` | 执行工具时传 `ToolExecutionContext` | 保留既有授权、Hook、轨迹关口，增加可信执行目标 |
+| `src/tools/tool.hpp` / `ToolExecutionContext` | 上下文含取消旗和 artifact 目录 | 增加不可变绑定，不向共享工具实例塞可变 sandbox ID |
+| `src/tools/run_command.cpp` / `RunCommandTool::execute` | 前台和后台调用平台进程 API | 两条路径一起迁移；shell 按目标环境选 |
+| `src/tools/read_file.cpp` | 直接 `std::ifstream` 打开路径 | 绑定沙箱后改走目标 world 文件服务 |
 | `src/tools/write_file.cpp` | 直接操作宿主文件系统 | 写、编辑、撤销、预览统一归属工作区后端 |
-| `src/tools/search_ripgrep_run.cpp:523` | 用 `ChildProcess` 跑 rg | 搜索不能留在宿主；rg 在目标环境执行 |
-| `src/tools/skill_tool.cpp:191` | 加载技能说明，另有相对资源读取路径 | 加载不触发脚本执行；资源进入受控包，执行再走沙箱 |
-| `src/platform/process.hpp:292` | `SpawnConstraints` 注明只限资源，未隔离文件和网络 | Job/rlimit/import 白名单不能当作任意恶意代码隔离 |
-| `src/platform/process.hpp:343` | 限额设置失败允许继续启动 | 强隔离路径必须失败即停，不能复用静默降级语义 |
+| `src/tools/search_ripgrep_run.cpp` | 用 `ChildProcess` 跑 rg | 搜索不能留在宿主；rg 在目标环境执行 |
+| `src/tools/skill_tool.cpp` | 加载技能说明，另有相对资源读取路径 | 加载不触发脚本执行；资源按当前 CLI 语义按需读，执行另走授权目标 |
+| `src/platform/process.hpp` / `SpawnConstraints` | 只限资源，未隔离文件和网络；另有 best-effort 行为 | Job/rlimit 不算文件/网络隔离，强策略不能静默降级 |
 | `src/runtime/async_tool_runtime.hpp`、`src/tools/tool_job_coordinator.hpp` | 已有后台任务、ownerEpoch、完成信封、单写者机制 | 复用任务身份和结果投递；远端执行句柄另存映射 |
+| `src/sdk/core.cpp` / `Session::Impl`、`src/runtime/session_execution.*` | SDK 已有资源装配、单场 worker 与 Close 顺序 | world 句柄随原 owner 退场，不复制第二套 Agent/线程/队列 |
+| `src/worker_host/host.cpp`、`src/sdk/result_projection.cpp`、`src/remote/result_sync.*` | Worker 只调公开 SDK；工具内容已过 ResultProjector | 沙箱原件仍留执行端；执行协议不绕开原投影门 |
 
 `cwd`、worktree 和用户点过“允许”，都不能建立系统隔离。只改 shell 入口会留下文件、搜索、LSP、插件等旁路。
 
@@ -40,12 +43,13 @@ LubanCode 管 Agent 循环、授权、工具调用、轨迹和结果采纳。沙
 flowchart TD
     UI[终端 / AppServer / 评测客户端] --> LC[LubanCode Agent 与授权轨迹]
     LC --> B[会话 ExecutionBinding]
-    B --> E[ExecutionBackend：命令 文件 搜索 后台任务]
+    B --> W[执行 world 与 WorkspaceBinding]
+    W --> E[ExecutionBackend：命令 文件 搜索 后台任务]
     E --> LOCAL[显式本地执行]
     E --> REMOTE[沙箱协议适配器]
     REMOTE --> CP[生命周期 API：创建 租约 快照 删除]
     REMOTE --> DP[执行 API：exec files logs cancel]
-    CP --> RT[OpenSandbox / CubeSandbox / 原生 VM 后端]
+    CP --> RT[经验证的容器 / NVX 等 VM / 原生后端]
     DP --> G[沙箱内执行服务与工作区]
     RT --> G
     G --> OUT[受控 artifact / patch]
@@ -54,49 +58,40 @@ flowchart TD
 
 本地模式保留现有使用习惯。创建会话时显式选沙箱，随后全部工作区操作固定走该环境。不要在每条命令上偷偷切本地/远端；确需切换时，先停写、同步、重新绑定并记录新代次。
 
+world 表示同一文件系统、进程空间与生命周期，不只是 endpoint。模型服务可留受信 Worker 一侧，不要求搬进 guest。Project 是业务归属；Workspace 是已有目录或卷；SandboxInstance 是实际容器/VM；Session 是上下文、审批与账。四者不能拿同一个 ID 代替。
+
+关系按绑定记录表达：同一 Workspace 可给多场 Session；一场以后可挂多个明确命名的只读素材或执行目标；同一 world 也可承载多份许可工作区。因此长期关系可多对多，首片只实现每场一个主绑定，不提前添加无调用者的多 world API。同目录多场默认共享文件事实，不声称文件隔离。隔离副本是宿主选项，不能作为开场硬门。
+
+Session.Close 只收本场调用、挂载引用与执行借用。已有项目不删；共享 world 还有使用者就不销毁。隔离要求禁止共享时，创建独立实例或明确拒绝。独占卷 fencing 只用于明确选择的池化接管，不拿它锁住全部日常共享项目。
+
 执行服务只负责操作；不能持有宿主 Session writer、管理员凭据或任意宿主路径访问权。生命周期 API 与沙箱内执行服务分开鉴权。guest 内服务视作可能遭攻破，不能靠它自报“安全”来证明隔离。
+
+此处“宿主”指持 SDK 场的受信执行端，不必是用户电脑或 Control。真实账、模型凭据与 guest 工作目录分开归属。远端租约只是资源围栏，不等于动作授权；当前 PolicyProvider 只裁动作，模型目标与工具有效参数策略仍须扩充同一裁决口，不能另起第二身份表。
+
+Provider 的准备、执行、取消、销毁回调放在 SDK/registry 锁外；owner 在调用前持生命 pin，返回后核绑定代次再发布。Close 先停接单、取消、drain/join，再退挂载与实例引用，最后关账；provider 抛错或 native 首回执未知仍按原事实收口。授权 View 析构不触发共享执行环境销毁。
 
 ## 4. 建议接口
 
-以下只是接口草案，不是已存在的 C++ 定义。
+以下是需交付的合同，不是现有公共 C++ 接口。每项在迁入真实消费者时再落码；不先建立只被 fake 调用的完整 provider 类。
 
-```cpp
-struct ExecutionBinding {
-    std::string backend_id;
-    std::string sandbox_id;
-    std::string workspace_id;
-    std::string policy_digest;
-    uint64_t generation;
-};
+| 合同 | 首个真实消费者 | 必须留下的事实 |
+| --- | --- | --- |
+| ExecutionBinding | 原 Session 装配 → ToolExecutionContext | 原主体与资源、world/实例/工作区身份、策略摘要、绑定代次；不能由模型改写 |
+| Prepare/Start/Cancel/Collect | run_command 前台与 owned Command Job | 原 operation/action/attempt、实际后端接单号、是否已启动、首不确定回执、退出与收树结果 |
+| Read/Write/Search | 原文件工具与 rg | 与 command 相同 world、目标路径与版本；不能从宿主补读 |
+| Instance owner | Node/Worker 监督器 | 显式借用计数、租约、停止新调用、drain、一次销毁；失败也保回收事实 |
 
-// 注入到 ToolExecutionContext；具体类型放中立执行层，避免依赖倒置。
-// shared_ptr<const ExecutionBinding> binding;
-// shared_ptr<IExecutionBackend> backend;
-
-class IExecutionBackend {
-    // DescribeCapabilities();
-    // Exec(binding, request, cancellation) -> ExecutionHandle;
-    // InspectExec(handle); StreamEvents(handle, after_sequence);
-    // CancelExec(handle); ReadFile(...); WriteFile(...);
-    // Search(...); ExportArtifact(...);
-};
-
-class ISandboxProvider {
-    // Create(spec, idempotency_key); Inspect(id);
-    // RenewLease(id, generation, deadline); Destroy(id, generation);
-    // Snapshot(id, kind); Restore(snapshot, requirements); Fork(snapshot);
-};
-```
+SDK 公共层只收已实现的 STL 值与 owner，不外露 Docker client、VMM 句柄、guest PID 或私有 JSON。执行端适配器消费同一身份与结果合同，不另造 Worker ACL 表。
 
 命令接口共用 `ExecRequest`：`argv` 或 `shell_script + shell_kind` 二选一，加上 guest cwd、环境白名单、墙钟、输出限额、stdin/PTY 选项。不要把 Windows 命令文本原样塞给 Linux shell。不要继承宿主完整环境。
 
 创建请求至少携带：租户/项目身份、目标 OS/arch、工具链与镜像 digest、隔离要求、资源配额、网络策略、输入 manifest、TTL 和策略版本。租户身份由认证会话确定，不能只信请求里填写的 tenant ID。
 
-能力返回按字段描述：`guest_os`、`guest_arch`、`isolation_mechanism`、`per_sandbox_kernel`、网络约束、资源约束、PTY、快照种类、跨节点恢复、GPU、实际版本。区分 `declared`、`observed`、`verified`；验证记录带版本、环境、时间和测试编号。
+能力返回按字段描述：`guest_os`、`guest_arch`、`isolation_mechanism`、`per_sandbox_kernel`、网络约束、资源约束、PTY、快照种类、跨节点恢复、实际版本。区分 `declared`、`observed`、`verified`；验证记录带版本、环境、时间和测试编号。硬件标签只供宿主显式选择目标，不在本工程判断 GPU 是否空闲。
 
 别用单一 `sandbox=true` 或线性“安全分数”。用户态内核与 MicroVM 各有兼容范围；先匹配必要能力，再比较成本。严格策略不满足，返回 `sandbox.capability_unsatisfied`，不得改跑本机。
 
-建议提供的稳定 REST 面：
+以后网络适配所需操作如下；路径尚未冻结，当前不据此开 REST 服务：
 
 | 操作 | 路径草案 | 合同 |
 | --- | --- | --- |
@@ -127,16 +122,18 @@ class ISandboxProvider {
 
 在工具注册元数据中声明执行域；执行闸门拒绝未知域。重点核对 PTC 调回工具、Workflow、子代理、AppServer 与 one-shot，不能只修交互终端。
 
-子代理默认继承策略。只读任务可共享同一 workspace；并行写任务优先 fork 独立工作区，再合并 patch。文件工具与 shell 共享写入锁；shell 写集未知时锁整个工作区。代码生成器不会可靠声明全部副作用。
+子代理策略只能收窄，审批“本场以后同意”仍限当前子会话。同项目多场可并行工作；文件版本检查与 patch 冲突保护不能扩大成全 workspace 长锁。shell 写集未知就如实记录，不假称可事务回滚。强隔离任务可显式 fork 工作副本；需独占发布或卷接管时，才拿该动作的窄锁/租约。此处取代旧稿“shell 一律锁整个工作区”。
+
+版本 CAS 与统一文件锁是待交能力：当前 write_file 原子替换、edit_file 片段匹配不等于这两项已实现。沿 [共享项目合同](remote-agent-deployment.md)，先允许原同目录多场，再单独验冲突保护，不能用全回合排他遮掉缺口。
 
 ## 6. 三端安排
 
 | 客户端/工作负载 | 首期安排 | 后续本地后端 | 不能混淆的边界 |
 | --- | --- | --- | --- |
-| Windows 客户端跑 Linux 代码 | HTTPS 接远端 Linux 沙箱 | WSL2/独立 Linux VM 作为承载层，再在里面建立每任务隔离 | 整个 WSL2 发行版不能直接当作每任务独立沙箱 |
+| Windows 客户端跑 Linux 代码 | 用户配置可达的执行端；先核身份与能力 | NVX/WHP 候选；或 WSL2/独立 Linux VM 内另建每任务边界 | NVX 的 Windows 宿主仍跑 Linux guest；整个 WSL2 发行版不能当每任务沙箱 |
 | Windows 原生代码 | 专用 Windows VM runner | AppContainer 配资源与权限策略；需更强边界则用 Hyper-V VM/适用的隔离容器 | Linux 后端跑不了 Windows API；MSVC、GUI、驱动各自验兼容 |
-| Linux 客户端/负载 | 同机或远端 OpenSandbox | bubblewrap 加完整策略用于受控本地任务；gVisor 或 MicroVM 用于不可信任务 | namespace 容器共享宿主内核；cgroup 不是逃逸防护 |
-| macOS 客户端跑 Linux 代码 | HTTPS 接远端 Linux 沙箱 | Apple container 候选 | Apple 官方要求 Apple Silicon、macOS 26；运行的是 Linux guest |
+| Linux 客户端/负载 | 同机或远端；Boxed Docker 可作首个容器候选 | bwrap 完整策略、NVX/KVM 或条件具备时 NVX/MSHV | namespace 容器共享宿主内核；cgroup 不证明防逃逸；MSHV 需特定宿主支持 |
+| macOS 客户端跑 Linux 代码 | 用户配置可达的 Linux 执行端 | Apple container 或 Docker 的 Linux VM 候选 | NVX 当前官方入口没有 macOS 后端；Apple container 要 Apple Silicon/macOS 26，guest 仍是 Linux |
 | macOS 原生/Xcode | 专用 Mac VM/runner 池 | 原生权限隔离另做兼容性试点 | 不能让 Linux VM 冒充 macOS；签名凭据放外侧受控签名服务 |
 
 Microsoft 区分 Windows process isolation 与 Hyper-V isolation：后者为每容器提供独立内核和硬件隔离。AppContainer 管权限和资源访问，不等于独立内核。依据：[Windows 隔离模式](https://learn.microsoft.com/en-us/virtualization/windowscontainers/manage-containers/hyperv-container)、[AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation)。
@@ -159,7 +156,7 @@ Requested -> Provisioning -> Ready -> Quiescing -> Snapshotting -> Ready
 任一非终态 -> Failed / Unknown -> 调和核验 -> 恢复服务或销毁
 ```
 
-执行另有状态：`Accepted -> Running -> Succeeded/Failed`；取消走 `CancelRequested -> Cancelled`。断网只说明状态未知，不能记成功，也不能自动重跑有副作用命令。
+执行另有状态：`Accepted -> Running -> Succeeded/Failed`；取消走 `CancelRequested -> Cancelled`。断网只说明状态未知，不能记成功，也不能自动重跑有副作用命令。guest 的进程退出、子进程退净、VM 回收分开记；后者失败不改写已经确认的业务结果，也不允许脏实例回池。
 
 外部句柄按 `session_id / tool_execution_id / job_id / sandbox_id / remote_exec_id / generation` 关联。沿用 V3 单写者：远端只回事件和完成信封，宿主核验租约代次再落账。后台任务恢复先查远端 exec，再决定重连；首次接单必须可按幂等键查询，避免请求超时后重复执行。
 
@@ -195,17 +192,48 @@ guest 使用只读基础镜像与独立可写层。禁挂宿主根目录、Docke
 
 K8s 负责节点调度与基础资源管理，沙箱平台负责环境租约、恢复与快照语义。用 [RuntimeClass](https://kubernetes.io/docs/concepts/containers/runtime-class/) 选运行时，计入 VM 额外开销。必须确认 CNI 实际执行 [NetworkPolicy](https://kubernetes.io/docs/concepts/services-networking/network-policies/)；提交 YAML 不代表网络已经封住。
 
-## 9. 三套开源方案怎么用
+## 9. Boxed、NVX 与平台候选
+
+### 9.1 名字与源码范围
+
+“微软 nvx”已核准为 [microsoft/nvx](https://github.com/microsoft/nvx)，不是误名。
+“boxed”未附仓库地址；本稿采用与 Agent 沙箱直接对应的 [akshayaggarwal99/boxed](https://github.com/akshayaggarwal99/boxed)，不冒称已确认用户所指的作者，也不把它写成 BoxLite、AgentBox 或微软项目。若后续给出别的地址，只调整适配器调研，不重写内部 owner 合同。
+
+本次固定 Boxed `0909a95458c652e71330154f9f21c97cd68a91ba`、NVX `9c5fc7ea73f8ead363a6a47100d8be4e3219986f`。以下是源码核对，不是 LubanCode 实机验收。
+
+### 9.2 Boxed：借分层，不照搬能力声明
+
+Boxed 将 Go 控制面、Docker driver 与 Rust guest agent 分开。driver 的 Create/Start/Connect/Stop 同文件操作配套，适合参考生命周期与执行流分层。固定版实际只有 Docker driver；Firecracker、Wasm、池复用、多机调度都还在 README 路线图。[README](https://github.com/akshayaggarwal99/boxed/blob/0909a95458c652e71330154f9f21c97cd68a91ba/README.md)、[Driver 源码](https://github.com/akshayaggarwal99/boxed/blob/0909a95458c652e71330154f9f21c97cd68a91ba/internal/driver/driver.go)。
+
+固定 Docker 创建代码采用只读根、去 capability、no-new-privileges、PID/内存限制和默认 network none；配置验证会拒绝网络开放与域名白名单请求，不能把字段存在当出口代理已经实现。源码另允许操作者关闭 CPU quota、选择预建网络，适配时必须读有效配置并验证，不能直接承袭“全限制已启用”的标签。[Docker 创建](https://github.com/akshayaggarwal99/boxed/blob/0909a95458c652e71330154f9f21c97cd68a91ba/internal/driver/docker/docker.go)。
+
+它的 API key 验证不能代替 LubanCode tenant/project/session/actor 授权。exec 响应会收 stdout/stderr 与 artifact 正文，不能原样发给 Control。Rust executor 持子进程并回真实 exit，但这不自动证明整棵后代已退净；必须补本项目的进程树/未知结果验收。其启动清理按公共 managed label 找容器，也不能照搬为跨实例清理权。[HTTP handler](https://github.com/akshayaggarwal99/boxed/blob/0909a95458c652e71330154f9f21c97cd68a91ba/internal/api/handler.go)、[executor](https://github.com/akshayaggarwal99/boxed/blob/0909a95458c652e71330154f9f21c97cd68a91ba/agent/src/executor.rs)。
+
+因此先学实际 driver/guest 分工；要接 Boxed，仍需目标版本、有效能力、持久执行身份、收树与投影门。不开“Firecracker 已支持”的 LubanCode 开关，也不把上游基准数字改作本项目指标。
+
+### 9.3 NVX：借虚拟机边界、握手与收场事实
+
+NVX 基于 OpenVMM，运行 Linux guest。官方入口列 Linux/KVM、Linux/MSHV、Windows/WHP；前两者分别要求可用的 `/dev/kvm`、`/dev/mshv`，Windows 要启用 WHP。现材料没有给出 macOS 原生 backend；也不提供 Windows guest 的等价承诺。[固定 README](https://github.com/microsoft/nvx/blob/9c5fc7ea73f8ead363a6a47100d8be4e3219986f/README.md)、[Setup](https://github.com/microsoft/nvx/blob/9c5fc7ea73f8ead363a6a47100d8be4e3219986f/doc/setup.md)。
+
+guest agent 用 FEATURES 握手列出 CANCEL、HOST_MAPPINGS、EXEC_CGROUP、EXEC_ENVIRONMENT、EXEC_CWD 等能力；有 sandbox layers 与无 layers 的位集不同。Ready 只说明能应答，不证明所需能力齐备。直接执行收场会核 cgroup 的 `pids.current`；清理失败报 containment-failed。LubanCode 应学习这两道实际强制点，不能将 ping 成功或首进程 exit 当整树收妥。[guest agent 源码](https://github.com/microsoft/nvx/blob/9c5fc7ea73f8ead363a6a47100d8be4e3219986f/guest/common/nvx-managed-agent.c)。
+
+控制流与 boot/printk 分通道，执行有界参数、环境、stdout/stderr、取消与返回类别；当前按单 workload 管理。其控制 session reset 会终止旧 workload，而 LubanCode 浏览器 detach 要保留已受理操作。因此 Node 必须持住后端控制链，不能把浏览器断开直接翻成 NVX reset。没有核定双向 stdin/PTY 合同前，也不能拿顺序 EXEC 冒充现 Worker NDJSON 管道。[沙箱与 agent 设计](https://github.com/microsoft/nvx/blob/9c5fc7ea73f8ead363a6a47100d8be4e3219986f/doc/design/sandbox-filesystem-and-agent-architecture.md)。
+
+该设计明确把生产镜像转换服务、可替换配置区、Rust 生产 agent 和部分运行协议标作 Proposed。首片不承诺动态装载多容器、完整热池或透明 checkpoint。NVX 快照区分 clone/resume、绑定层与 scratch；当前兼容要求包含后端与 CPU 等条件，跨 KVM/MSHV/WHP 转换未支持。跨租户模板还需证明没有吃入租户材料，不能只看 tier 名字。[快照合同](https://github.com/microsoft/nvx/blob/9c5fc7ea73f8ead363a6a47100d8be4e3219986f/doc/design/snapshot-and-restore.md)。
+
+因此 NVX 排在一次性命令/文件闭环、能力实测和失联语义之后。先验证冷启动与真实收场，再谈快照。它可以成为 world 的 VM 后端，不接管 LubanCore 会话、审批、模型权限或轨迹。
+
+### 9.4 既有平台候选
 
 | 方案 | 官方材料给出的范围 | 本设计中的用途 |
 | --- | --- | --- |
-| OpenSandbox | 生命周期与执行面分开；Docker/K8s 后端；命令、文件、代码执行；能力随后端变化，当前文档还列 FastSandbox MicroVM 接入 | 第一只适配器。先锁定一套部署与隔离运行时，跑闭环 |
-| CubeSandbox | KVM MicroVM、控制面与节点生命周期、快照/克隆、网络组件、E2B 接口兼容方向 | 第二只适配器，验证快照分叉、密度和尾延迟 |
+| OpenSandbox | 旧调研记录：生命周期与执行面分开，Docker/K8s 后端 | 容器平台候选；开工前重锁版本，不沿用旧调研当验收 |
+| CubeSandbox | 旧调研记录：KVM MicroVM、快照/克隆与网络组件 | VM 平台候选；与 NVX 各验接口与环境要求 |
 | ROCK | Agentic RL 环境管理；Job 入口有 BashJob/HarborJob，也能把 Agent 安装进环境 | 外侧训练/评测调度，接 LubanCode worker 和轨迹导出 |
 
 依据：[OpenSandbox 架构](https://open-sandbox.ai/architecture/)、[CubeSandbox 仓库](https://github.com/TencentCloud/CubeSandbox)、[ROCK 仓库](https://github.com/alibaba/ROCK)、[ROCK Agent Job 文档](https://alibaba.github.io/ROCK/docs/Getting%20Started/rock-agent/)。
 
-CubeSandbox 当前 README 同时写有 ARM64 支持与 x86_64/KVM quick-start 要求；因此按目标部署文档、版本和实机探针确认，不能拿其中一句推断全平台支持。它也把部分 E2B 兼容与故障恢复能力列在路线图，接入必须做合同测试。README 启动/内存数字仅属项目自报，不作为 LubanCode 指标。
+旧 CubeSandbox 调研记录曾见 ARM64 说明与 x86_64/KVM quick-start 并列。此项没有在本轮重新锁源码；开工前须按目标版本与实机探针重查，不能拿历史一句话推断当前全平台支持。所有候选的启动/内存数字都不作为 LubanCode 指标。
 
 无需第一期自研 hypervisor。若后续要深挖底层，可独立研究 [Firecracker](https://github.com/firecracker-microvm/firecracker) 节点后端；届时仍要自己负责调度、存储、网络、镜像和恢复，VMM 不包办平台。
 
@@ -215,7 +243,7 @@ CubeSandbox 当前 README 同时写有 ARM64 支持与 x86_64/KVM quick-start �
 
 优化顺序：按工具链制作只读模板；节点预取镜像；内容寻址增量传输入；同会话复用环境；按模板/租户/策略维护预热池；空闲暂停；根据内存峰值、CPU 与磁盘压力调度。预热池只含未执行用户代码的净模板；脏环境销毁或从可信基线重建。
 
-大批任务用配额、公平队列、并发背压、取消传播和模板缓存亲和，避免热缓存节点过载。控制面创建风暴与数据面日志风暴分别限流。显式测每节点净基线开销、真实任务 RSS/PSS、页缓存与 CoW 写放大；“空壳内存小”不能推算编译任务密度。GPU 另设能力与隔离策略，首期不承诺。
+大批任务用配额、公平队列、并发背压、取消传播和模板缓存亲和，避免热缓存节点过载。控制面创建风暴与数据面日志风暴分别限流。显式测每节点净基线开销、真实任务 RSS/PSS、页缓存与 CoW 写放大；“空壳内存小”不能推算编译任务密度。GPU 占用与调度不在本单；也不借 VM 名称承诺设备隔离。
 
 评测流程：
 
@@ -234,18 +262,30 @@ CubeSandbox 当前 README 同时写有 ARM64 支持与 x86_64/KVM quick-start �
 
 ## 11. 分期与验收门
 
+先看 [SDK 当前进度](../development/sdk-stage-status.md)、[身份合同](../development/lubancore-managed-identity.md) 与 [远端部署合同](remote-agent-deployment.md)。`5aaad8b5` 已有窄 SDK、Worker/Runner 和身份原语；最新文档列出的 Managed 生命周期、来源账、共用准备等尚有本地候选。它们不等于新 Managed 文本执行、工具派发授权或网络 Node 已交付。这里不借“SDK 可嵌入”宣布全部沙箱阶段完成。
+
 | 阶段 | 交付 | 通过条件 |
 | --- | --- | --- |
-| P0 合同 | 威胁模型、工具执行域清单、能力/schema、路径与恢复规范 | 已知旁路全有归属；未知/不支持项一律拒绝 |
-| P1 远端闭环 | ExecutionBinding；OpenSandbox 适配；命令/文件/搜索/后台任务；输入/patch | Windows 客户端在 Linux guest 改文件、运行测试、断线重连、采纳 diff；宿主不出现未授权访问 |
-| P2 生命周期 | 服务端 TTL、幂等、代次 fencing、取消核验、配额、回收调和 | 创建响应丢失不重复建；断网不重跑；客户端崩溃仍回收；脏节点不再接单 |
-| P3 强隔离与快照 | 固定 gVisor/VM 后端；CubeSandbox 适配；fork/restore | 隔离测试通过；快照类别与前提准确；克隆无凭据串用；尾延迟与密度有实测 |
+| P0 真实本地 owner | 先给原 run_command 前台与 owned Job 接受信本地执行适配；保原动作身份、审批、取消与首未知回执 | 一个实际调用闭环；旧行为与三平台进程退场不回归。Fake 只做反例，不单独交空 provider API |
+| P1 容器工作区闭环 | 选定一套 Docker/Boxed 或其它已核后端；命令、文件、编辑、搜索同 world；其余旁路禁用 | 同项目两场共用已有目录与独立副本各验；真实 exec/读写/取消/patch；必要能力缺失即拒 |
+| P2 身份与远端宿主 | SDK Managed 真受理/执行/读返回授权先过门，再接 Node 登记、健康与网络鉴权；加幂等、代次、回收 | 原发起者每次实际发送/工具派发现查；查询按当前主体；断网不重跑、迟到旧 owner 不落新账 |
+| P3 VM 与快照 | NVX 等固定 VM 后端先过冷执行与退场门，再单列快照/fork/restore | Linux/KVM 与 Windows/WHP 逐个验，不互相顶替；FEATURES 缺项拒，快照失配拒，脏实例不回池 |
 | P4 原生三端 | Windows 原生 runner、Mac 原生 runner、可选本地轻隔离 | 各自编译/运行真实样例；文件语义与取消验收；不能用远端 Linux 通过代替原生验收 |
 | P5 批评测 | ROCK/Harbor worker 适配、结果/轨迹规范、外侧评分器 | 同基线批量复跑；隔离基础设施故障；预算与晋级门生效 |
 
-P1 的合同闭环不自动证明强隔离可发布；P3 是对恶意代码开放前的发布门。先接强后端也不能跳过测试。
+P1 的流程闭环不自动证明可向恶意代码开放。所选后端须先过第 8 节隔离测试与身份发布门；需要 VM 的策略必须等 P3，不能拿 Docker 冒充。本文 P0–P5 是沙箱切片，不能替代总路线图的 SDK/身份/Worker 前置门。
 
-建议新增中立目录 `src/execution/` 放合同和文件/执行后端接口，`src/sandbox/` 放生命周期与 provider 适配。修改 `ToolExecutionContext`、会话装配和相关工具；V3 schema 用兼容扩展保存绑定与远端执行引用。现有 `platform/process_*` 继续服务显式本地后端和受信任宿主进程，不在这里全局截获所有启动。
+有真实消费者时再加中立实现目录。先改 `RunCommandTool::execute`/owned Job 的实际启动接点与原 Session owner；后接文件工具和目标 rg，不先建整套没人调用的 `ExecutionProvider`/REST/Registry。`platform/process_*` 继续服务显式本地和受信宿主进程。V3 新字段须有实际 producer、严格 reader、旧 schema 兼容和未知回执验收；不能只加 schema 示例。
+
+## 12. 两端存储与结果出站
+
+执行 Node 保存完整 Session、工具 raw/formal 结果与 provider 原件；Control 保存授权后的目录、状态与 preview。VM/sandbox adapter 回给本 Node 的完整输出，不等于已准许上传 Control；不借 Boxed exec JSON、NVX stdout 或诊断日志绕门。
+
+沿 [Worker 现合同](../development/worker-host.md) 的 `ResultProjector`：Node 先准许 full，每场再显式开启；任一门未开就只传受限 preview。冻结策略版本，查询再核身份与内容范围。Job 本地 4096 字节截断也不是出站许可，必须走同一投影。助手答复与工具结果分开：助手答复查询后续另接当前主体授权口，具体分页等真实接口实现时冻结；现 Worker 分页仍是可信 IPC，不能当托管授权已交。原工具结果默认不回完整正文。日志、错误、重连和重放同样守门。
+
+执行 world/工作区绑定、源/镜像 digest、能力握手、原发起者、当前策略修订、provider 接单号和退出/清理证据留节点账。上传只含最小身份与状态；凭据、宿主路径、原始异常和工具全文不混入健康上报。Node/Control 部署位置可换，存储与投影边界不随 UI 位置漂移。
+
+## 13. 端到端验收
 
 最低验收集：读宿主 secret、路径穿越与 symlink 竞态、网络直连绕代理、metadata 访问、跨租户文件/日志/快照访问、fork bomb/磁盘爆写/日志爆写、PTY 与后台后代逃出取消范围、强制杀客户端、节点丢失、重复响应、旧租约迟到、patch 冲突、快照恢复后凭据轮换。
 
