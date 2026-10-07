@@ -68,8 +68,19 @@
 namespace lubancode::runtime {
 
 // Internal admission state, never an authorization decision or public SDK mode.
-enum class SessionAdmissionMode { LocalTrusted, ManagedStorageOnly };
+enum class SessionAdmissionMode { LocalTrusted, ManagedStorageOnly, ManagedText };
 inline constexpr const char* kManagedStorageOnlyError = "managed.session.storage_only";
+
+// Internal test-only mechanical allocation boundaries. Never SDK options or
+// receipts. Before may throw; probes must not block, reenter or own live writers.
+enum class ManagedCloseAllocationStage {
+    BeforeMaterialCapture, BeforeFailureDiagnostic, BeforeReasonCopy,
+    BeforeFallbackDiagnostic, BeforeOutcomePublication
+};
+struct ManagedCloseAllocationProbe {
+    virtual ~ManagedCloseAllocationProbe() = default;
+    virtual void Before(ManagedCloseAllocationStage) = 0;
+};
 
 // ---------------------------------------------------------------------------
 // /record 选段器(§14.3:从"第二只录音笔"改成"轨迹选段器")
@@ -212,6 +223,9 @@ public:
     static std::expected<TrajectorySessionLedger, std::string> OpenManaged(
         Options options, trajectory::ManagedSessionDirectory admitted,
         trajectory::ManagedSessionCreationAudit creation);
+    static std::expected<TrajectorySessionLedger, std::string> OpenManagedText(
+        Options options, trajectory::ManagedSessionDirectory admitted,
+        trajectory::ManagedSessionCreationAudit creation, trajectory::ManagedTextSessionLaunch);
     SessionAdmissionMode admission_mode() const noexcept;
     // Original native ownership publication. No Writer, lock or Policy permit.
     std::shared_ptr<const trajectory::ManagedSessionOwnershipPublication> managed_publication() const;
@@ -597,10 +611,15 @@ public:
     void SetTelemetryWake(telemetry::CommitObserver* wake);
 
 private:
+    friend class SessionService;
+    std::unique_ptr<TrajectoryTurnBridge> NewTurnBridgeOwned(TrajectoryTurnBridge::Identity identity);
+    trajectory::CloseOutcome CloseManagedSession(const std::string& reason, bool operation_unconfirmed,
+        trajectory::ManagedCloseRetirement&, ManagedCloseAllocationProbe* = nullptr);
+    trajectory::ManagedCloseRetirement RetireManagedSession() noexcept;
     TrajectorySessionLedger() = default;
     static std::expected<TrajectorySessionLedger, std::string> OpenInternal(
         Options& options, trajectory::ManagedSessionDirectory* admitted,
-        trajectory::ManagedSessionCreationAudit* creation);
+        trajectory::ManagedSessionCreationAudit* creation, bool text = false);
     struct Impl;
     std::unique_ptr<Impl> impl_;
     std::unique_ptr<RecordSelectionController> record_selection_;

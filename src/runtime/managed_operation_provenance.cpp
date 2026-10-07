@@ -12,6 +12,9 @@
 #include "platform/text_encoding.hpp"
 #include "trajectory/canonical_json.hpp"
 #include "trajectory/session_recovery_view.hpp"
+#include "trajectory/managed_session_reservation.hpp"
+#include "trajectory/v3/reader.hpp"
+#include "runtime/operation_result.hpp"
 
 namespace lubancode::runtime {
 namespace {
@@ -187,8 +190,9 @@ std::expected<std::string, std::string> PrepareManagedOperationRejection(const M
         {"rejectedAtMs", rejected_at_ms}});
 }
 
-std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOperationLedgerOwned(
-    const std::string& bytes, const Owner& expected, const std::string& run_id) {
+namespace {
+std::expected<std::vector<ManagedStoredOperation>, std::string> ReadLedger(
+    const std::string& bytes, const Owner& expected, const std::string& run_id, bool execution) {
     if (!ValidOwner(expected) || !Id(run_id) || bytes.find('\0') != std::string::npos || !platform::IsValidUtf8(bytes))
         return std::unexpected(kInvalid);
     auto lines = trajectory::RecoveryStreamLines(bytes, trajectory::RecoveryStreamReadLimits{
@@ -201,7 +205,8 @@ std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOpera
     for (const auto& line : *lines) {
         const auto row = Json::parse(line, nullptr, false);
         if (!row.is_object() || !row.contains("schemaVersion") || !row["schemaVersion"].is_number_integer() ||
-            row["schemaVersion"] != 3 || !String(row, "kind") || !String(row, "operationId"))
+            (row["schemaVersion"] != 3 && (!execution || row["schemaVersion"] != 4)) ||
+            !String(row, "kind") || !String(row, "operationId"))
             return std::unexpected(kInvalid);
         auto canonical = Canonical(row);
         if (!canonical || *canonical != line) return std::unexpected(kInvalid);
@@ -209,6 +214,7 @@ std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOpera
         if (!Id(id)) return std::unexpected(kInvalid);
         const auto prior = operations.find(id);
         if (row["kind"] == "operation.accepted") {
+            if (row["schemaVersion"] != 3) return std::unexpected(kInvalid);
             if (!Exact(row, {"schemaVersion", "kind", "operationId", "inputId", "clientOperationId", "payloadHash",
                 "inputRef", "inputSha256", "inputBytes", "provenance", "provenanceHash", "receivedAtMs"}) || prior != operations.end())
                 return std::unexpected(kInvalid);
@@ -230,6 +236,7 @@ std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOpera
             op.input_bytes = static_cast<std::size_t>(count); total_input += op.input_bytes;
             operations.emplace(id, out.size()); out.push_back(std::move(op));
         } else if (row["kind"] == "operation.rejected") {
+            if (row["schemaVersion"] != 3) return std::unexpected(kInvalid);
             if (!Exact(row, {"schemaVersion", "kind", "operationId", "provenanceHash", "terminalStatus", "reasonCode",
                 "decisionPolicyRevision", "rejectedAtMs"}) || prior == operations.end() ||
                 !String(row, "provenanceHash") || !String(row, "terminalStatus") || !String(row, "reasonCode"))
@@ -243,13 +250,58 @@ std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOpera
                 return std::unexpected(kInvalid);
             op.state = ManagedStoredOperation::State::RejectedBeforeDispatch;
             op.terminal_status = row["terminalStatus"].get<std::string>(); op.reason_code = row["reasonCode"].get<std::string>();
-        } else return std::unexpected(kInvalid); // No dispatch/execution enabled in this storage-only profile.
+        } else if (execution && row["kind"] == "operation.dispatched") {
+            if (row["schemaVersion"] != 4 || prior == operations.end() ||
+                !Exact(row, {"schemaVersion", "kind", "operationId", "provenanceHash", "runId", "turnId",
+                    "dispatchPolicyRevision", "dispatchedAtMs"}) || !String(row, "provenanceHash") ||
+                !String(row, "runId") || !String(row, "turnId")) return std::unexpected(kInvalid);
+            auto& op = out[prior->second];
+            if (op.state != ManagedStoredOperation::State::Accepted || row["provenanceHash"] != op.provenance.provenance_hash ||
+                row["runId"] != op.provenance.run_id || !Id(row["turnId"].get<std::string>()) ||
+                !Unsigned(row, "dispatchPolicyRevision", op.dispatch_policy_revision) || !op.dispatch_policy_revision ||
+                !Timestamp(row, "dispatchedAtMs", op.dispatched_at_ms) || op.dispatched_at_ms < op.received_at_ms)
+                return std::unexpected(kInvalid);
+            op.turn_id = row["turnId"].get<std::string>();
+            for (const auto& other : out) if (&other != &op && other.turn_id == op.turn_id) return std::unexpected(kInvalid);
+            op.state = ManagedStoredOperation::State::Dispatched;
+        } else if (execution && row["kind"] == "operation.final") {
+            if (row["schemaVersion"] != 4 || prior == operations.end() ||
+                !Exact(row, {"schemaVersion", "kind", "operationId", "provenanceHash", "runId", "turnId",
+                    "bindingEventId", "bindingSeq", "bindingHash", "executionStatus", "finalMessageRefs", "usageReported",
+                    "resultRef", "resultSha256", "resultBytes", "complete", "finalizedAtMs"})) return std::unexpected(kInvalid);
+            for (const auto* key : {"provenanceHash", "runId", "turnId", "bindingEventId", "bindingHash", "executionStatus",
+                                    "resultRef", "resultSha256"}) if (!String(row, key)) return std::unexpected(kInvalid);
+            auto& op = out[prior->second];
+            std::uint64_t bytes_count = 0;
+            if (op.state != ManagedStoredOperation::State::Dispatched || row["provenanceHash"] != op.provenance.provenance_hash ||
+                row["runId"] != op.provenance.run_id || row["turnId"] != op.turn_id ||
+                !Id(row["bindingEventId"].get<std::string>()) || !Hash(row["bindingHash"].get<std::string>()) ||
+                !Unsigned(row, "bindingSeq", op.binding_seq) || !op.binding_seq ||
+                !row["finalMessageRefs"].is_array() || !row["usageReported"].is_boolean() || !row["complete"].is_boolean() ||
+                !Hash(row["resultSha256"].get<std::string>()) || row["resultRef"] != "sdk-results/" + id + ".json" ||
+                !Unsigned(row, "resultBytes", bytes_count) || !bytes_count || bytes_count > kManagedOperationResultBytes ||
+                !Timestamp(row, "finalizedAtMs", op.finalized_at_ms) || op.finalized_at_ms < op.dispatched_at_ms)
+                return std::unexpected(kInvalid);
+            op.execution_status = row["executionStatus"].get<std::string>();
+            if (op.execution_status != "success" && op.execution_status != "error" &&
+                op.execution_status != "cancelled" && op.execution_status != "interrupted") return std::unexpected(kInvalid);
+            std::set<std::string> refs;
+            for (const auto& ref : row["finalMessageRefs"]) {
+                if (!ref.is_string() || !Id(ref.get<std::string>()) || !refs.insert(ref.get<std::string>()).second)
+                    return std::unexpected(kInvalid);
+                op.final_message_refs.push_back(ref.get<std::string>());
+            }
+            op.binding_event_id = row["bindingEventId"].get<std::string>(); op.binding_hash = row["bindingHash"].get<std::string>();
+            op.result_ref = row["resultRef"].get<std::string>(); op.result_sha256 = row["resultSha256"].get<std::string>();
+            op.result_bytes = static_cast<std::size_t>(bytes_count); op.usage_reported = row["usageReported"].get<bool>();
+            op.complete = row["complete"].get<bool>(); op.state = ManagedStoredOperation::State::Final;
+        } else return std::unexpected(kInvalid); // Storage-only explicitly rejects every schema4 row.
     }
     return out;
 }
 
-std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOperationsOwned(const ManagedOperationMaterials& materials) {
-    auto operations = ReadManagedOperationLedgerOwned(materials.operations, materials.owner, materials.run_id);
+std::expected<std::vector<ManagedStoredOperation>, std::string> ReadInputs(const ManagedOperationMaterials& materials, bool execution) {
+    auto operations = ReadLedger(materials.operations, materials.owner, materials.run_id, execution);
     if (!operations) return std::unexpected(operations.error());
     if (materials.inputs.size() != operations->size()) return std::unexpected(kInvalid);
     std::size_t total = materials.operations.size();
@@ -277,6 +329,152 @@ std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOpera
         auto canonical = Canonical(input);
         if (!canonical || *canonical != found->second) return std::unexpected(kInvalid);
     }
+    return operations;
+}
+} // namespace
+
+std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOperationLedgerOwned(
+    const std::string& bytes, const Owner& expected, const std::string& run_id) {
+    return ReadLedger(bytes, expected, run_id, false);
+}
+std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedExecutionLedgerOwned(
+    const std::string& bytes, const Owner& expected, const std::string& run_id) {
+    return ReadLedger(bytes, expected, run_id, true);
+}
+std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedOperationsOwned(const ManagedOperationMaterials& materials) {
+    return ReadInputs(materials, false);
+}
+
+std::expected<std::string, std::string> PrepareManagedOperationDispatch(const ManagedStoredOperation& op,
+    const std::string& turn_id, std::uint64_t revision, std::int64_t at) {
+    if (op.state != ManagedStoredOperation::State::Accepted || !Id(turn_id) || !revision ||
+        at < op.received_at_ms || !Hash(op.provenance.provenance_hash)) return std::unexpected("managed.operation.invalid_dispatch");
+    return Canonical({{"schemaVersion", 4}, {"kind", "operation.dispatched"}, {"operationId", op.provenance.operation_id},
+        {"provenanceHash", op.provenance.provenance_hash}, {"runId", op.provenance.run_id}, {"turnId", turn_id},
+        {"dispatchPolicyRevision", revision}, {"dispatchedAtMs", at}});
+}
+
+std::expected<PreparedManagedFinal, std::string> PrepareManagedOperationFinal(const ManagedStoredOperation& op,
+    const ManagedOperationResult& result, std::int64_t at) {
+    if (op.state != ManagedStoredOperation::State::Dispatched || !Id(op.turn_id) || !Id(op.binding_event_id) ||
+        !op.binding_seq || !Hash(op.binding_hash) || at < op.dispatched_at_ms ||
+        (result.execution_status != "success" && result.execution_status != "error" && result.execution_status != "cancelled" &&
+         result.execution_status != "interrupted") || !platform::IsValidUtf8(result.final_text) || !platform::IsValidUtf8(result.error) ||
+        result.final_text.find('\0') != std::string::npos || result.error.find('\0') != std::string::npos)
+        return std::unexpected("managed.operation.invalid_final");
+    std::set<std::string> refs;
+    for (const auto& ref : result.final_message_refs) if (!Id(ref) || !refs.insert(ref).second)
+        return std::unexpected("managed.operation.invalid_final");
+    PreparedManagedFinal out; out.operation = op;
+    out.result_bytes = MakeSdkOperationResultPayload(op.provenance.operation_id, op.turn_id,
+        result.final_text, result.error, result.complete).dump();
+    if (out.result_bytes.size() > kManagedOperationResultBytes) return std::unexpected("managed.operation.result_limit");
+    auto& final = out.operation; final.state = ManagedStoredOperation::State::Final; final.finalized_at_ms = at;
+    final.result_ref = "sdk-results/" + op.provenance.operation_id + ".json";
+    final.result_sha256 = platform::Sha256Hex(out.result_bytes); final.result_bytes = out.result_bytes.size();
+    final.execution_status = result.execution_status; final.final_message_refs = result.final_message_refs;
+    final.usage_reported = result.usage_reported; final.complete = result.complete;
+    auto line = Canonical({{"schemaVersion", 4}, {"kind", "operation.final"}, {"operationId", op.provenance.operation_id},
+        {"provenanceHash", op.provenance.provenance_hash}, {"runId", op.provenance.run_id}, {"turnId", op.turn_id},
+        {"bindingEventId", op.binding_event_id}, {"bindingSeq", op.binding_seq}, {"bindingHash", op.binding_hash},
+        {"executionStatus", final.execution_status}, {"finalMessageRefs", final.final_message_refs}, {"usageReported", final.usage_reported},
+        {"resultRef", final.result_ref}, {"resultSha256", final.result_sha256}, {"resultBytes", final.result_bytes},
+        {"complete", final.complete}, {"finalizedAtMs", at}});
+    if (!line || line->size() > kManagedOperationLedgerLineBytes) return std::unexpected("managed.operation.final_limit");
+    out.final_line = std::move(*line); return out;
+}
+
+std::expected<std::vector<ManagedStoredOperation>, std::string> ReadManagedExecutionOwned(const ManagedOperationMaterials& materials) {
+    auto operations = ReadInputs(materials, true);
+    if (!operations) return std::unexpected(operations.error());
+    auto lines = trajectory::RecoveryStreamLines(materials.main,
+        {kManagedOperationMainBytes, 262144, 8 * 1024 * 1024});
+    if (!lines) return std::unexpected(kInvalid);
+    auto ledger = trajectory::v3::ReadV3LedgerOwned({}, *lines);
+    if (!ledger || ledger->session_id != materials.owner.session_id || ledger->run_id != materials.run_id ||
+        ledger->messages.empty() || !ledger->messages.front().system_meta) return std::unexpected(kInvalid);
+    const auto& meta = *ledger->messages.front().system_meta;
+    if (!meta.contains("managedSession") || !meta["managedSession"].is_object() ||
+        !meta["managedSession"].contains("executionProfile") ||
+        !trajectory::IsManagedTextSessionProfile(meta["managedSession"]["executionProfile"])) return std::unexpected(kInvalid);
+    const auto& owner = meta["managedSession"];
+    if (!Exact(owner, {"schemaVersion", "mode", "tenantId", "projectId", "workspaceKey", "sessionId", "bindingVersion",
+                     "creationSubject", "openingPolicyRevision", "executionProfile"})) return std::unexpected(kInvalid);
+    for (const auto* key : {"tenantId", "projectId", "workspaceKey", "sessionId", "mode"})
+        if (!String(owner, key)) return std::unexpected(kInvalid);
+    std::uint64_t opening_revision = 0;
+    if (!owner["schemaVersion"].is_number_integer() || owner["schemaVersion"] != 1 || owner["mode"] != "Managed" ||
+        !Unsigned(owner, "openingPolicyRevision", opening_revision) || !opening_revision ||
+        !Exact(owner["creationSubject"], {"tenantId", "userId", "actorKind", "credentialId"})) return std::unexpected(kInvalid);
+    for (const auto* key : {"tenantId", "userId", "actorKind", "credentialId"})
+        if (!String(owner["creationSubject"], key) || !Opaque(owner["creationSubject"][key].get<std::string>())) return std::unexpected(kInvalid);
+    if (owner["creationSubject"]["tenantId"] != materials.owner.tenant_id ||
+        (owner["creationSubject"]["actorKind"] != "user" && owner["creationSubject"]["actorKind"] != "agent" &&
+         owner["creationSubject"]["actorKind"] != "service")) return std::unexpected(kInvalid);
+    if (owner.value("tenantId", std::string()) != materials.owner.tenant_id ||
+        owner.value("projectId", std::string()) != materials.owner.project_id ||
+        owner.value("workspaceKey", std::string()) != materials.owner.workspace_key ||
+        owner.value("sessionId", std::string()) != materials.owner.session_id ||
+        !owner.contains("bindingVersion") || !owner["bindingVersion"].is_number_integer() ||
+        owner["bindingVersion"] != materials.owner.binding_version) return std::unexpected(kInvalid);
+    auto bindings = trajectory::v3::ReadOperationTurnBindings(*ledger);
+    if (!bindings) return std::unexpected(kInvalid);
+    std::map<std::string, trajectory::v3::OperationTurnBindingFacts> anchors;
+    for (auto& binding : *bindings) {
+        if (binding.provenance_hash.empty() || binding.run_id != materials.run_id ||
+            !anchors.emplace(binding.operation_id, std::move(binding)).second) return std::unexpected(kInvalid);
+    }
+    std::set<std::string> results;
+    std::size_t result_total = 0, total = materials.operations.size() + materials.main.size();
+    for (const auto& [id, bytes] : materials.inputs) { (void)id; total += bytes.size(); }
+    if (total > kManagedOperationViewBytes) return std::unexpected(kInvalid);
+    for (auto& op : *operations) {
+        const auto binding = anchors.find(op.provenance.operation_id);
+        const bool dispatched = op.state == ManagedStoredOperation::State::Dispatched || op.state == ManagedStoredOperation::State::Final;
+        if (!dispatched) { if (binding != anchors.end()) return std::unexpected(kInvalid); continue; }
+        if (binding == anchors.end()) {
+            if (op.state == ManagedStoredOperation::State::Final || materials.completion_known) return std::unexpected(kInvalid);
+        } else {
+            const auto& b = binding->second;
+            if (b.input_id != op.provenance.input_id || b.payload_hash != op.provenance.input_hash ||
+                b.provenance_hash != op.provenance.provenance_hash || b.turn_id != op.turn_id) return std::unexpected(kInvalid);
+            if (op.state == ManagedStoredOperation::State::Final &&
+                (op.binding_event_id != b.event_id || op.binding_seq != b.seq || op.binding_hash != b.line_hash)) return std::unexpected(kInvalid);
+            op.binding_event_id = b.event_id; op.binding_seq = b.seq; op.binding_hash = b.line_hash;
+            anchors.erase(binding);
+        }
+        const auto result = materials.results.find(op.provenance.operation_id);
+        if (op.state != ManagedStoredOperation::State::Final) {
+            // Result may have committed before an unconfirmed final append. It
+            // is retained as an incomplete original, never promoted to Final.
+            if (result == materials.results.end()) continue;
+            if (materials.completion_known) return std::unexpected(kInvalid);
+        } else if (result == materials.results.end()) return std::unexpected(kInvalid);
+        if (op.binding_event_id.empty()) return std::unexpected(kInvalid);
+        if (result->second.empty() || result->second.size() > kManagedOperationResultBytes ||
+            result->second.size() > kManagedOperationResultsTotalBytes - result_total ||
+            result->second.size() > kManagedOperationViewBytes - total) return std::unexpected(kInvalid);
+        result_total += result->second.size(); total += result->second.size(); results.insert(op.provenance.operation_id);
+        const auto payload = Json::parse(result->second, nullptr, false);
+        if (!Exact(payload, {"operationId", "turnId", "finalText", "error", "complete"}) ||
+            !String(payload, "operationId") || !String(payload, "turnId") || !String(payload, "finalText") || !String(payload, "error") ||
+            !payload["complete"].is_boolean() || payload["operationId"] != op.provenance.operation_id || payload["turnId"] != op.turn_id ||
+            payload.dump() != result->second || !platform::IsValidUtf8(payload["finalText"].get<std::string>()) ||
+            !platform::IsValidUtf8(payload["error"].get<std::string>()) ||
+            payload["finalText"].get<std::string>().find('\0') != std::string::npos ||
+            payload["error"].get<std::string>().find('\0') != std::string::npos) return std::unexpected(kInvalid);
+        if (op.state == ManagedStoredOperation::State::Final) {
+            if (op.result_bytes != result->second.size() || platform::Sha256Hex(result->second) != op.result_sha256 ||
+                payload["complete"] != op.complete) return std::unexpected(kInvalid);
+            for (const auto& ref : op.final_message_refs) {
+                const auto* message = ledger->FindMessage(ref);
+                if (!message || message->session_id != materials.owner.session_id || message->run_id != materials.run_id ||
+                    !message->turn_id || *message->turn_id != op.turn_id || message->seq <= op.binding_seq)
+                    return std::unexpected(kInvalid);
+            }
+        }
+    }
+    if (!anchors.empty() || results.size() != materials.results.size()) return std::unexpected(kInvalid);
     return operations;
 }
 

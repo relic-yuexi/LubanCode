@@ -44,6 +44,7 @@
 #include "platform/atomic_write.hpp"
 #include "runtime/session_execution.hpp"
 #include "runtime/session_runtime.hpp"
+#include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
 
 namespace lubancode::runtime {
@@ -121,6 +122,8 @@ public:
     // It does not admit inputs, execution, commands or a Local fallback.
     SessionService(SessionLaunchRequest request, trajectory::ManagedSessionDirectory admitted,
                    trajectory::ManagedSessionCreationAudit creation);
+    SessionService(SessionLaunchRequest request, trajectory::ManagedSessionDirectory admitted,
+                   trajectory::ManagedSessionCreationAudit creation, trajectory::ManagedTextSessionLaunch);
     SessionAdmissionMode admission_mode() const noexcept { return admission_mode_; }
     // 不自动封口:各端显式 Close(reason)(terminal "exit"/app-server
     // "thread_stop"/单发 "exit",reason 是现行口径的合同)。
@@ -148,6 +151,8 @@ public:
     void InitializeExecution(std::unique_ptr<assembly::SessionResources> resources,
                              agent::AgentProfile&& profile,
                              std::optional<std::vector<api::Message>> restored_history = std::nullopt);
+    // Trusted internal fresh-text assembly. Never upgrades ManagedStorageOnly.
+    void InitializeManagedTextExecution(std::unique_ptr<assembly::SessionResources>, agent::AgentProfile&&);
     SessionExecution* execution() { return execution_.get(); }
     const SessionExecution* execution() const { return execution_.get(); }
 
@@ -192,7 +197,7 @@ public:
     // Internal storage-only producer. The trusted host supplies observations;
     // this does not authenticate or authorize, and never admits execution.
     struct ManagedWriteReceipt {
-        enum class Phase { Acceptance, Rejection };
+        enum class Phase { Acceptance, Rejection, Dispatch, Final };
         enum class Knowledge { Rejected, Unconfirmed, NativeCommittedPublicationGap, Committed };
         Phase phase = Phase::Acceptance;
         Knowledge knowledge = Knowledge::Rejected;
@@ -200,6 +205,8 @@ public:
         std::shared_ptr<const ManagedStoredOperation> operation;
         std::optional<platform::ImmutableWriteReceipt> artifact;
         std::optional<trajectory::JournalAppendReceipt> append;
+        std::optional<trajectory::v3::WriteReceipt> binding_append;
+        std::optional<trajectory::v3::OperationTurnBindingFacts> binding;
     };
     std::shared_ptr<const ManagedWriteReceipt> SubmitManagedInput(
         const InputRequest&, const ManagedOperationAdmission&);
@@ -208,15 +215,23 @@ public:
     std::shared_ptr<const ManagedWriteReceipt> RejectManagedPendingInput(
         const ManagedOperationProvenance& expected_front, const std::string& terminal_status,
         const std::string& reason_code, std::uint64_t decision_revision = 0);
+    std::shared_ptr<const ManagedWriteReceipt> DispatchManagedPendingInput(
+        const ManagedOperationProvenance& expected_front, std::uint64_t decision_revision);
+    std::shared_ptr<const ManagedWriteReceipt> RecordManagedTurnFinal(
+        const ManagedOperationProvenance& expected, const ManagedOperationResult&);
+    std::unique_ptr<TrajectoryTurnBridge> NewManagedTextTurnBridge(
+        const ManagedOperationProvenance& expected, TrajectoryTurnBridge::Identity);
     std::expected<ManagedOperationMaterials, std::string> CaptureManagedOperationMaterials() const;
     std::shared_ptr<const ManagedWriteReceipt> FirstManagedWriteFailure() const;
     std::optional<trajectory::JournalCloseReceipt> ManagedOperationCloseReceipt() const;
     std::optional<trajectory::CloseOutcome> ManagedMainCloseOutcome() const;
+    std::optional<trajectory::ManagedCloseRetirement> ManagedMainRetirement() const;
     // Test-only internal native/semantic boundaries, not public SDK options.
     // Trusted probes must not reenter or block. The second may throw only after
     // the real committed append, before mechanical in-memory publication.
     void SetManagedOperationProbesForTest(std::shared_ptr<trajectory::JournalNativeIoProbe>,
         std::function<void()> after_native_commit = {});
+    void SetManagedCloseAllocationProbeForTest(std::shared_ptr<ManagedCloseAllocationProbe>);
 
     // 泵侧消费:队首取出(FIFO;每端自己的回合泵调)。三态:
     //   Ok          取到一笔(dispatched 事实已按 PowerLoss 档落稳,先账
@@ -332,6 +347,10 @@ public:
     static constexpr std::size_t kMaxPendingInputs = 64;
 
 private:
+    void InitializeExecutionOwned(std::unique_ptr<assembly::SessionResources>, agent::AgentProfile&&,
+        std::optional<std::vector<api::Message>> restored_history);
+    bool ManagedTextReadyLocked() const;
+    bool ManagedTextFinalReadyLocked() const;
     const SessionAdmissionMode admission_mode_ = SessionAdmissionMode::LocalTrusted;
     // 操作台账(operations.jsonl)的内存镜像:clientOperationId -> 首发回执。
     struct AcceptedOperation {
@@ -361,6 +380,7 @@ private:
     std::shared_ptr<const ManagedWriteReceipt> RejectManagedPendingInputLocked(
         const ManagedOperationProvenance&, const std::string&, const std::string&, std::uint64_t);
     trajectory::CloseOutcome CloseManaged(const std::string& reason);
+    void RetireInterruptedManagedClose() noexcept;
 
     std::unique_ptr<SessionRuntime> runtime_;
     // Runtime/ledger outlive execution. Explicit shutdown drains tool jobs
@@ -380,15 +400,19 @@ private:
     // Same commit mutex/counter/dedupe/queue as Local, with a distinct schema.
     // No policy callbacks or live owners occur in immutable operation values.
     std::size_t managed_input_bytes_ = 0, managed_ledger_bytes_ = 0;
+    std::size_t managed_result_bytes_ = 0;
     bool managed_closing_ = false, managed_closed_ = false;
+    bool managed_close_interrupted_ = false;
     std::shared_ptr<const ManagedWriteReceipt> managed_first_failure_;
     std::optional<std::expected<ManagedOperationMaterials, std::string>> managed_closed_materials_;
     std::optional<trajectory::JournalCloseReceipt> managed_operation_close_;
     std::optional<trajectory::CloseOutcome> managed_close_outcome_;
     std::optional<trajectory::CloseOutcome> managed_main_close_;
+    std::optional<trajectory::ManagedCloseRetirement> managed_main_retirement_;
     std::mutex managed_close_mutex_;
     std::shared_ptr<trajectory::JournalNativeIoProbe> managed_native_probe_;
     std::function<void()> managed_publication_probe_;
+    std::shared_ptr<ManagedCloseAllocationProbe> managed_close_allocation_probe_;
     // 台账文件句柄(开张成功即持,Close 后拒写)。
     std::optional<std::filesystem::path> operations_path_;
     class OperationsFile;

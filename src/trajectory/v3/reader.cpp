@@ -1633,7 +1633,8 @@ ReadOperationTurnBindings(const V3Ledger& ledger) {
             if (event.kind != EventKindV3::SdkOperationTurnBound) continue;
             const auto invalid = [] { return std::unexpected(std::string("v3reader.operation_turn_invalid")); };
             if (!event.turn_id || event.session_id != ledger.session_id || event.run_id.empty() ||
-                event.payload.at("layout").get<std::string>() != kSdkMainOperationTurnLayout ||
+                (event.payload.at("layout").get<std::string>() != kSdkMainOperationTurnLayout &&
+                 event.payload.at("layout").get<std::string>() != kManagedMainOperationTurnLayout) ||
                 event.payload.at("version") != 1)
                 return invalid();
             OperationTurnBindingFacts fact;
@@ -1641,6 +1642,12 @@ ReadOperationTurnBindings(const V3Ledger& ledger) {
             fact.operation_id = event.payload.at("operationId").get<std::string>();
             fact.input_id = event.payload.at("inputId").get<std::string>();
             fact.payload_hash = event.payload.at("payloadHash").get<std::string>();
+            if (event.payload.at("layout") == kManagedMainOperationTurnLayout) {
+                if (event.payload.size() != 6 || !event.payload.at("provenanceHash").is_string()) return invalid();
+                fact.provenance_hash = event.payload.at("provenanceHash").get<std::string>();
+                if (fact.provenance_hash.size() != 64 ||
+                    fact.provenance_hash.find_first_not_of("0123456789abcdef") != std::string::npos) return invalid();
+            }
             fact.event_id = event.event_id; fact.seq = event.seq; fact.line_hash = event.line_hash;
             if (!operations.insert(fact.operation_id).second || !turns.insert(fact.turn_id).second ||
                 !inputs.insert(fact.input_id).second || first_turn_seq.at(fact.turn_id) != event.seq)

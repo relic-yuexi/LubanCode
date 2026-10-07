@@ -90,6 +90,8 @@ public:
     explicit SessionRuntime(Options options);
     SessionRuntime(Options options, trajectory::ManagedSessionDirectory admitted,
                    trajectory::ManagedSessionCreationAudit creation);
+    SessionRuntime(Options options, trajectory::ManagedSessionDirectory admitted,
+                   trajectory::ManagedSessionCreationAudit creation, trajectory::ManagedTextSessionLaunch);
     SessionAdmissionMode admission_mode() const noexcept { return admission_mode_; }
     ~SessionRuntime();
 
@@ -188,7 +190,7 @@ public:
 
 private:
     void InitializeLedger(trajectory::ManagedSessionDirectory* admitted = nullptr,
-                          trajectory::ManagedSessionCreationAudit* creation = nullptr);
+                          trajectory::ManagedSessionCreationAudit* creation = nullptr, bool text = false);
     const SessionAdmissionMode admission_mode_ = SessionAdmissionMode::LocalTrusted;
     Options options_;
     IdAuthority ids_;

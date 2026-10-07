@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <nlohmann/json.hpp>
 
 #include "trajectory/directory.hpp"
 #include "trajectory/managed_session_ownership.hpp"
@@ -19,6 +20,21 @@ struct ManagedSessionCreationAudit {
     std::string tenant_id, user_id, actor_kind, credential_id;
     std::uint64_t opening_policy_revision = 0;
 };
+
+// Explicit trusted new-opening route, not an Options flag or a Policy permit.
+struct ManagedTextSessionLaunch final {};
+inline nlohmann::json ManagedTextSessionProfile() {
+    return {{"schemaVersion", 1}, {"kind", "managed.text.v1"},
+        {"allowedCapabilities", nlohmann::json::array({"RequestModel"})}, {"tools", false}, {"resume", false}};
+}
+inline bool IsManagedTextSessionProfile(const nlohmann::json& profile) {
+    return profile.is_object() && profile.size() == 5 && profile.contains("schemaVersion") &&
+        profile["schemaVersion"].is_number_integer() && profile["schemaVersion"] == 1 &&
+        profile.contains("kind") && profile["kind"].is_string() && profile["kind"] == "managed.text.v1" &&
+        profile.contains("allowedCapabilities") && profile["allowedCapabilities"] == nlohmann::json::array({"RequestModel"}) &&
+        profile.contains("tools") && profile["tools"].is_boolean() && profile["tools"] == false &&
+        profile.contains("resume") && profile["resume"].is_boolean() && profile["resume"] == false;
+}
 
 // Own this value until the writer and its subordinate resources have closed.
 // It is an internal opening prerequisite, never authentication or a Policy grant.
