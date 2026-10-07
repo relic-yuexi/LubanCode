@@ -13,6 +13,8 @@
 #include <vector>
 
 #include <lubancore/api.hpp>
+#include <lubancore/model.hpp>
+#include <lubancore/operations.hpp>
 #include <lubancore/events.hpp>
 #include <lubancore/extensions.hpp>
 #include <lubancore/results.hpp>
@@ -30,46 +32,6 @@
 // standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
 namespace lubancore {
 
-struct ToolCall { std::string id; std::string name; std::string input_json; };
-struct ToolReply { std::string call_id; std::string text; bool is_error = false; };
-struct Message {
-    std::string role;
-    std::string text;
-    std::vector<ToolCall> tool_calls;
-    std::vector<ToolReply> tool_replies;
-};
-struct ToolDefinition { std::string name; std::string description; std::string input_schema_json; };
-struct ModelRequest {
-    std::string model;
-    std::string system;
-    std::vector<Message> messages;
-    std::vector<ToolDefinition> tools;
-    std::optional<int> max_output_tokens;
-};
-struct Usage { std::int64_t input_tokens = 0; std::int64_t output_tokens = 0; };
-struct ModelReply {
-    std::string text;
-    std::vector<ToolCall> tool_calls;
-    std::optional<Usage> usage;
-};
-
-// Text/tool-call injection surface, useful for an embedded provider or fixture.
-// Unsupported rich history is rejected explicitly, never silently flattened.
-class Backend {
-public:
-    virtual ~Backend() = default;
-    virtual Result<ModelReply> Generate(const ModelRequest&, Cancellation) = 0;
-};
-
-enum class Wire { Anthropic, ChatCompletions, Responses, Gemini };
-struct Connection {
-    Wire wire = Wire::ChatCompletions;
-    std::string base_url;
-    std::string api_key;
-    int connect_timeout_ms = 10000;
-    int idle_timeout_seconds = 60;
-    int request_timeout_seconds = 300;
-};
 struct ToolResult { std::string text; bool is_error = false; };
 struct ToolContext { std::string cwd; Cancellation cancellation; };
 struct Tool {
@@ -172,17 +134,6 @@ struct SessionOptions {
     // Complete named tool-result storage bundle. Null keeps File; same-ID
     // external resume requires the matching provider and frozen binding.
     std::optional<named_results::v1::Options> named_results;
-};
-// operation_id is Session scoped; external callers address (session_id, operation_id).
-struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };
-enum class OperationState { Accepted, Running, Succeeded, Failed, Cancelled, Indeterminate };
-struct Operation {
-    std::string operation_id;
-    std::string turn_id;
-    OperationState state = OperationState::Accepted;
-    std::string final_text;
-    std::string error;
-    bool result_persisted = false;
 };
 class LUBANCORE_API EventStream {
 public:
