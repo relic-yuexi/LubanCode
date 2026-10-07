@@ -3,7 +3,7 @@
 本页介绍这条分支的接口。哪些已合入、哪轮 CI 已过，见
 [SDK 阶段进度](sdk-stage-status.md)。新候选不能借旧源绿灯算交付。
 本轮 `80bb443c` 已验同源三平台并合功能分支 `5aaad8b5`；
-后续 Managed 存储视图与文本执行仍留本地，未算交付。
+后续 Managed 存储视图、内部文本派发和公共值头已组成待验批次，未算交付。
 
 本批提供真实会话闭环。`Runtime` 协调活会话关场，`Session` 句柄持执行资源，经现有
 `SessionService` 接纳输入，再用 `Agent`、轨迹桥和工具表跑回合。
@@ -17,6 +17,9 @@ SDK 与 AppServer 共用会话执行对象，多会话隔离与寿命验收也�
 可信 C++ 扩展已由 [PR #255](https://github.com/relic-yuexi/LubanCode/pull/255) 交付，
 沿用现有中间件核；每场实例、冻结装配、真实上下文接纳和整场卸载均已验收。
 公开安装入口为 `core.hpp`；各模块另供公开头，均只依赖 SDK 和标准库。
+当前候选把模型与操作值原声明移进 `model.hpp`、`operations.hpp`；`core.hpp`
+沿用同一份声明，原调用方不用改。合同见[公共模型与操作值](sdk-public-model-values.md)，
+安装原件和真实外部消费者须由本源远端 CI 核验。
 当前候选另供 `managed.hpp`，合同见[Managed 存储视图](sdk-managed-storage-views.md)。
 它开放项目登记、授权建场、身份读取与关场，沿原会话栈监督存储寿命；
 提交、执行和恢复尚未开放。本源状态与远端验收仍见阶段进度。
