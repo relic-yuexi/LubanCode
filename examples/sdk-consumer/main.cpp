@@ -217,7 +217,7 @@ void SamplingBoundary(const fs::path& base) {
         return sdk::ModelReply{"must not publish",{},sdk::Usage{1,2},std::string(257,'x')};
     });
     auto session=Take(runtime->OpenSession(std::move(options)),"sampling boundary open");
-    const auto receipt=Take(session->Submit("inspect finish reason"),"sampling boundary submit");
+    const auto receipt=Take(session->Submit("sampling-boundary", "inspect finish reason"),"sampling boundary submit");
     const auto operation=Finished(session,receipt);
     Check(operation.state==sdk::OperationState::Failed &&
           operation.error.find("sdk.backend.invalid_stop_reason")!=std::string::npos,
