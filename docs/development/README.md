@@ -19,6 +19,7 @@
 - [子结果严格历史采用合同](child-history-adoption.md)
 - [Runner 就绪探针与失败原件](runner-probe-evidence.md)
 - [SDK 存储、事件与策略 SPI 合同](sdk-storage-spi.md)：场束与独占租约、CAS/named 映射、有界事件流、策略归属及逐口交付门。
+- [工具实际调用前的执行门](sdk-tool-dispatch-gate.md)：最终参数、审批后重查与逐次拒绝；Managed 与 Sandbox 接线仍待后批。
 - [Session named 结果存储](sdk-named-result-blobs.md)：真实结果读写、同 ID 恢复、写 lease 与独立只读句柄；保留默认 File。
 - [主场 V3 Journal 所有权](sdk-journal-owner.md)：归拢真实 File 账、追加借用、首次未知与捕获恢复；公开存储替换口尚待后批。
 - [Command Jobs 缺会话预检补正](sdk-command-job-missing-resume.md)

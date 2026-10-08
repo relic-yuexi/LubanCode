@@ -23,6 +23,7 @@
 #include <functional>
 #include <sstream>
 #include <set>
+#include <stdexcept>
 #include <vector>
 
 #include "agent/agent.hpp"
@@ -329,6 +330,46 @@ TEST_CASE("五工具全成功: sequence 与 id 配对不乱") {
     const auto& result_message = backend.captured_requests[1].messages.back();
     CHECK(result_message.role == api::Role::User);
     CHECK(result_message.content.size() == 5);
+
+    // A previously allowed dispatch is no permit for later calls in the same
+    // real AgentLoop batch. Denials still pair all five protocol results.
+    FakeBackend revoked_backend;
+    revoked_backend.scripts = {
+        FiveToolScript({"r1", "r2", "r3", "r4", "r5"}, "probe"), TextOnlyScript("done")};
+    tools::ToolRegistry revoked_registry;
+    auto revoked_tool = std::make_unique<FakeTool>("probe", tools::Tool::Result{"ok", false});
+    auto* revoked_probe = revoked_tool.get();
+    revoked_registry.Register(std::move(revoked_tool));
+    agent::Agent revoked_loop(revoked_backend, revoked_registry,
+        agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
+    TraceCollector revoked_collector;
+    agent::TurnWiring revoked_callbacks = revoked_collector.Decorate({});
+    int dispatch_checks = 0;
+    revoked_callbacks.on_tool_dispatch_gate = [&](const auto&, const auto&, const auto&, const auto&)
+        -> std::expected<void, std::string> {
+        if (++dispatch_checks > 2) return std::unexpected("private-policy-secret");
+        return {};
+    };
+    const auto revoked_run = revoked_loop.Run("five", revoked_callbacks);
+    REQUIRE(revoked_run.has_value());
+    CHECK(dispatch_checks == 5);
+    CHECK(revoked_probe->call_count == 2);
+    const auto revoked_ledger = Fold(revoked_collector.events);
+    REQUIRE(revoked_ledger.executions().size() == 5);
+    for (std::size_t i = 0; i < 5; ++i) {
+        const auto& execution = revoked_ledger.executions()[i];
+        CHECK(execution.has_finished); CHECK(execution.has_committed);
+        CHECK(execution.outcome == (i < 2 ? agent::ToolOutcome::Succeeded : agent::ToolOutcome::PermissionDeclined));
+    }
+    REQUIRE(revoked_backend.captured_requests.size() == 2);
+    const auto& revoked_results = revoked_backend.captured_requests[1].messages.back();
+    REQUIRE(revoked_results.content.size() == 5);
+    for (std::size_t i = 0; i < 5; ++i) {
+        const auto* reply = std::get_if<api::ToolResultBlock>(&revoked_results.content[i]);
+        REQUIRE(reply != nullptr);
+        CHECK(reply->is_error == (i >= 2));
+        CHECK(reply->content.find("private-policy-secret") == std::string::npos);
+    }
 }
 
 TEST_CASE("第三枚 is_error: 最早明确失败是 #2,#3/#4 照跑") {
@@ -723,6 +764,93 @@ TEST_CASE("RunOneTool: 来源/错误码随 trace 落账(unknown_tool/hook_denied
     CHECK(declined.outcome == "permission_declined");
     REQUIRE(declined_collector.events.size() == 1);
     CHECK(declined_collector.events[0].outcome == agent::ToolOutcome::PermissionDeclined);
+
+    // Actual dispatch rechecks every tool, including read-only and preapproved
+    // calls. Revoke during approval or after started intent, not at preparation.
+    for (bool needs_confirmation : {false, true}) {
+        for (const std::string mode : {"empty", "allow", "deny", "throw", "cancel",
+                                       "revoke", "cancel_before"}) {
+            CAPTURE(needs_confirmation);
+            CAPTURE(mode);
+            struct DispatchProbe : FakeTool {
+                explicit DispatchProbe(bool confirm) : FakeTool("probe", {"executed", false}), confirm_(confirm) {}
+                bool needs_confirm() const override { return confirm_; }
+                bool confirm_;
+            };
+            tools::ToolRegistry gated_registry;
+            auto owned_probe = std::make_unique<DispatchProbe>(needs_confirmation);
+            auto* probe = owned_probe.get();
+            gated_registry.Register(std::move(owned_probe));
+            std::atomic<bool> cancel{false};
+            bool allowed = true;
+            int gate_calls = 0, approvals = 0;
+            TraceCollector gated_collector;
+            agent::TurnWiring gated;
+            gated.on_pre_tool_use_hook = [](const auto&, const auto&, const auto&) {
+                runtime::ToolHookDecision decision;
+                decision.decision = runtime::ToolHookDecision::Decision::Allow;
+                decision.updated_input = nlohmann::json{{"value", "rewritten"}};
+                return decision;
+            };
+            // Explicit Ask still passes the final gate after actual approval.
+            gated.on_permission_evaluate = [](const auto&, const auto&, auto, const auto&, const auto&) {
+                runtime::PermissionVerdict verdict;
+                verdict.action = runtime::PermissionVerdict::Action::Ask;
+                return verdict;
+            };
+            gated.on_tool_confirm = [&](const auto&, const auto&, const auto&) {
+                ++approvals;
+                if (mode == "revoke") allowed = false;
+                return true;
+            };
+            gated = gated_collector.Decorate(std::move(gated));
+            const auto collect = gated.on_tool_trace;
+            gated.on_tool_trace = [&](const agent::ToolTraceEvent& event) {
+                collect(event);
+                if (event.kind == agent::ToolTraceEventKind::ExecutionStarted) {
+                    if (mode == "revoke") allowed = false;
+                    if (mode == "cancel_before") cancel.store(true);
+                }
+            };
+            if (mode != "empty") {
+                gated.on_tool_dispatch_gate = [&](const auto& id, const auto& name, const auto& input,
+                                                  const tools::ToolExecutionContext& context)
+                    -> std::expected<void, std::string> {
+                    ++gate_calls;
+                    CHECK(id == "dispatch-call"); CHECK(name == "probe");
+                    const nlohmann::json expected_input{{"value", "rewritten"}};
+                    CHECK(input == expected_input);
+                    CHECK(context.cancel == &cancel);
+                    CHECK(context.artifact_dir == "owned-artifacts");
+                    CHECK(probe->call_count == 0);
+                    CHECK(approvals == (needs_confirmation ? 1 : 0));
+                    if (mode == "throw") throw std::runtime_error("private-policy-secret");
+                    if (mode == "cancel") cancel.store(true);
+                    if (mode == "deny" || !allowed) return std::unexpected("private-policy-secret");
+                    return {};
+                };
+            }
+            gated.tool_artifact_dir = "owned-artifacts";
+            api::ToolUseBlock dispatch_call;
+            dispatch_call.id = "dispatch-call"; dispatch_call.name = "probe";
+            dispatch_call.input = nlohmann::json{{"value", "original"}};
+            const auto dispatch = agent::RunOneTool(gated_registry, dispatch_call, gated,
+                                                    nullptr, "", &ctx, &cancel);
+            const bool executed = mode == "empty" || mode == "allow";
+            CHECK(probe->call_count == (executed ? 1 : 0));
+            CHECK(gate_calls == (mode == "empty" || mode == "cancel_before" ? 0 : 1));
+            CHECK(dispatch.is_error == !executed);
+            CHECK(dispatch.content.find("private-policy-secret") == std::string::npos);
+            REQUIRE(gated_collector.events.size() == 2);
+            CHECK(gated_collector.events[0].kind == agent::ToolTraceEventKind::ExecutionStarted);
+            CHECK(gated_collector.events[1].kind == agent::ToolTraceEventKind::ExecutionFinished);
+            CHECK(gated_collector.events[1].error_code == dispatch.error_code);
+            if (mode == "throw") CHECK(dispatch.error_code == "tool.dispatch.gate_exception");
+            if (mode == "deny" || mode == "revoke") CHECK(dispatch.error_code == "tool.dispatch.denied");
+            if (mode == "cancel" || mode == "cancel_before")
+                CHECK(dispatch.outcome == "cancelled_before_start");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

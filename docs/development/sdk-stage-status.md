@@ -1,5 +1,13 @@
 # SDK 阶段进度与验收边界
 
+2026-10-09 补记：功能分支已到 `5aaad8b5`，本源
+[原生 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37494237839) 与
+[文档 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37494237819) 均成功。
+以下旧源失败记录保留，不能再将“功能分支停在 fd76b6a5”当当前状态。
+下一片补[工具实际派发门](sdk-tool-dispatch-gate.md)，候选尚待验收；
+真实 Managed 授权、完整 JournalStore 和 CLI 全功能对齐继续留账。
+Sandbox 补入 [Boxed/NVX 参考核查](../architecture/sandbox-platform-design.md#12-boxed-与-nvx-参考核查)，只记参考边界，未交付后端。
+
 核查日期：2026-10-06。已合基线为功能分支 `fd76b6a5`；[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 的已验源 `c522a51c` 与合入头同树。
 
 目标：新宿主只调用公开 SDK，便能运行完整会话，不必复制内部运行栈。CLI 逐项迁入，原功能保住。现已能嵌入；CLI 主入口和 one-shot 仍用内部装配，尚未全部对齐。
