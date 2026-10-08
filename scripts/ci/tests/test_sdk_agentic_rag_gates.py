@@ -553,12 +553,13 @@ class RagActualGraphOwnershipTests(unittest.TestCase):
 
 class RagProfilesAndRemoteRoutesTests(unittest.TestCase):
     def test_exact_on_off_rosters_keep_all_old_members(self):
-        for enabled, count, consumer in ((True, 70, 37), (False, 68, 34)):
+        for enabled, count, consumer in ((True, 71, 37), (False, 69, 34)):
             native = profile.focused_roster(focused.REQUIRED, enabled)
             installed_names = profile.consumer_roster(installed.REQUIRED_TESTS, enabled)
             self.assertEqual(len(native), count)
             self.assertEqual(len(installed_names), consumer)
             self.assertIn("sdk.focused.lubancore_agentic_rag", native)
+            self.assertIn("sdk.focused.lubancore_model_sampling", native)
             self.assertTrue({"sdk.consumer.agentic_rag", "sdk.consumer.agentic_rag_demo"} <= installed_names)
             self.assertIn("sdk.focused.lubancore_todo_write", native)
 
