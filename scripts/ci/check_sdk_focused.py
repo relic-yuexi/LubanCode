@@ -718,6 +718,29 @@ def check_event_sink_registration(command, executable="lubancore_sdk_tests"):
         raise RuntimeError("EventSink registration must run the single absolute native source")
 
 
+def check_opening_start_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe") not in
+            ("lubancore_sdk_tests", "lubancode_tests") or
+            command[1] != "--source-file=*test_lubancore_lifecycle.cpp"):
+        raise RuntimeError("Opening startup must run the complete actual native lifecycle source")
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (12, 12, 0):
+        raise RuntimeError("Opening startup and original lifecycle roster must all pass")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Opening startup native assertions did not actually pass")
+    for path in ("standard", "nonstandard", "repeated", "isolation", "shutdown"):
+        if section.splitlines().count("[sdk-opening-start-path] " + path) != 1:
+            raise RuntimeError("Opening startup actual path did not finish once: " + path)
+
+
 def check_event_sink_native(section, command):
     if (not isinstance(command, list) or len(command) != 2 or
             not all(isinstance(value, str) for value in command)):
@@ -1478,6 +1501,9 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_event_sink":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_event_sink_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_lifecycle":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_opening_start_native(sections[0], registered["command"])
         if case.attrib["name"] == "sdk.focused.lubancore_memory_blob_spi":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_memory_blob_native(sections[0], registered["command"])

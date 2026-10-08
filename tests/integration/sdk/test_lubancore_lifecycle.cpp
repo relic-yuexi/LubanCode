@@ -7,14 +7,17 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
 #include "fake_http_server.hpp"
 #include "lubancore/core.hpp"
+#include "sdk/opening_test_hooks.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "runtime/session_service.hpp"
@@ -133,6 +136,76 @@ bool WaitForFlag(const std::atomic<bool>& flag) {
     return flag.load();
 }
 
+struct ScopedOpeningHook {
+    sdk::detail::testing::OpeningStartHookHandle previous;
+    explicit ScopedOpeningHook(sdk::detail::testing::OpeningStartHook hook)
+        : previous(sdk::detail::testing::ReplaceOpeningStartHook(
+              std::make_shared<const sdk::detail::testing::OpeningStartHook>(std::move(hook)))) {}
+    ~ScopedOpeningHook() { sdk::detail::testing::ReplaceOpeningStartHook(std::move(previous)); }
+};
+struct OpeningOwners {
+    LifetimeGate backend;
+    bool hold_destructor = false;
+    std::atomic<unsigned> model_calls{0};
+    std::atomic<bool> capture_destroyed{false}, provider_destroyed{false};
+};
+class OpeningBackend final : public sdk::Backend {
+public:
+    explicit OpeningBackend(std::shared_ptr<OpeningOwners> owners) : owners_(std::move(owners)) {}
+    ~OpeningBackend() override {
+        owners_->backend.entered.store(true);
+        if (owners_->hold_destructor) {
+            std::unique_lock lock(owners_->backend.mutex);
+            if (!owners_->backend.cv.wait_for(lock, 20s, [&] { return owners_->backend.released; }))
+                owners_->backend.timed_out.store(true);
+        }
+        owners_->backend.destroyed.store(true);
+    }
+    sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest&, sdk::Cancellation) override {
+        ++owners_->model_calls;
+        return sdk::ModelReply{"worker started"};
+    }
+private:
+    std::shared_ptr<OpeningOwners> owners_;
+};
+class OpeningSink final : public sdk::events::v1::EventSink {
+public:
+    explicit OpeningSink(std::shared_ptr<OpeningOwners> owners) : owners_(std::move(owners)) {}
+    ~OpeningSink() override { owners_->provider_destroyed.store(true); }
+    sdk::Result<std::unique_ptr<sdk::events::v1::EventQueue>> CreateQueue(std::size_t) override {
+        return std::unexpected(sdk::Error{"fixture.unused", "no subscription before startup"});
+    }
+private:
+    std::shared_ptr<OpeningOwners> owners_;
+};
+struct OpeningCapture {
+    std::shared_ptr<OpeningOwners> owners;
+    ~OpeningCapture() { owners->capture_destroyed.store(true); }
+};
+sdk::SessionOptions OpeningOptions(const LifecycleFixture& fixture, const std::shared_ptr<OpeningOwners>& owners) {
+    auto options = Options(fixture, [](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        return sdk::ModelReply{};
+    });
+    options.backend = std::make_unique<OpeningBackend>(owners);
+    options.event_sink = std::make_unique<OpeningSink>(owners);
+    auto capture = std::make_shared<OpeningCapture>();
+    capture->owners = owners;
+    sdk::Tool tool;
+    tool.name = "startup_owner_probe";
+    tool.execute = [capture](const std::string&, const sdk::ToolContext&) -> sdk::Result<sdk::ToolResult> {
+        return sdk::ToolResult{"unused"};
+    };
+    options.custom_tools.push_back(std::move(tool));
+    return options;
+}
+void CheckOpeningRetired(const std::shared_ptr<OpeningOwners>& owners) {
+    CHECK(owners->model_calls.load() == 0);
+    CHECK(owners->backend.destroyed.load());
+    CHECK_FALSE(owners->backend.timed_out.load());
+    CHECK(owners->capture_destroyed.load());
+    CHECK(owners->provider_destroyed.load());
+}
+
 lubancode::test_support::FakeHttpResponse Sse(std::vector<std::string> frames) {
     lubancode::test_support::FakeHttpResponse response;
     response.headers.emplace_back("Content-Type", "text/event-stream");
@@ -140,6 +213,147 @@ lubancode::test_support::FakeHttpResponse Sse(std::vector<std::string> frames) {
     return response;
 }
 } // namespace
+
+TEST_CASE("SDK lifecycle: thread startup failure retires owners and permits same ID recovery") {
+    LifecycleFixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+    auto seed = (*runtime)->OpenSession(Options(fixture, [](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        return sdk::ModelReply{};
+    }));
+    REQUIRE(seed.has_value());
+    const auto id = (*seed)->id();
+    REQUIRE((*seed)->Close().has_value());
+    seed->reset();
+    bool nonstandard = false;
+    SUBCASE("standard thread allocation failure") {}
+    SUBCASE("nonstandard startup exception") { nonstandard = true; }
+    auto owners = std::make_shared<OpeningOwners>();
+    unsigned hook_calls = 0;
+    {
+        ScopedOpeningHook hook([&] {
+            ++hook_calls;
+            if (nonstandard) throw 17;
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+        auto options = OpeningOptions(fixture, owners);
+        options.resume_session_id = id;
+        const auto failed = (*runtime)->OpenSession(std::move(options));
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error().code == "sdk.session.open_failed");
+    }
+    CHECK(hook_calls == 1);
+    CheckOpeningRetired(owners);
+    // Moving the real session directory also detects a retained Windows writer.
+    const auto original = fixture.SessionDir(id);
+    auto moved = original;
+    moved += ".startup-retired";
+    fs::rename(original, moved);
+    fs::rename(moved, original);
+    auto healthy_owners = std::make_shared<OpeningOwners>();
+    auto options = OpeningOptions(fixture, healthy_owners);
+    options.resume_session_id = id;
+    auto healthy = (*runtime)->OpenSession(std::move(options));
+    REQUIRE(healthy.has_value());
+    CHECK((*healthy)->id() == id);
+    const auto submitted = (*healthy)->Submit("after-start-failure", "continue");
+    REQUIRE(submitted.has_value());
+    const auto result = (*healthy)->WaitResult(submitted->operation_id, 15s);
+    REQUIRE(result.has_value());
+    CHECK(result->state == sdk::OperationState::Succeeded);
+    CHECK(healthy_owners->model_calls.load() == 1);
+    REQUIRE((*healthy)->Close().has_value());
+    REQUIRE((*runtime)->Shutdown().has_value());
+    std::cout << "[sdk-opening-start-path] " << (nonstandard ? "nonstandard" : "standard") << '\n';
+}
+
+TEST_CASE("SDK lifecycle: repeated thread startup failures do not poison runtime admission") {
+    LifecycleFixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+    unsigned hook_calls = 0;
+    {
+        ScopedOpeningHook hook([&] { ++hook_calls; throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again)); });
+        for (unsigned i = 0; i != 4; ++i) {
+            auto owners = std::make_shared<OpeningOwners>();
+            auto failed = (*runtime)->OpenSession(OpeningOptions(fixture, owners));
+            REQUIRE_FALSE(failed.has_value());
+            CHECK(failed.error().code == "sdk.session.open_failed");
+            CheckOpeningRetired(owners);
+        }
+    }
+    CHECK(hook_calls == 4);
+    auto healthy = (*runtime)->OpenSession(OpeningOptions(fixture, std::make_shared<OpeningOwners>()));
+    REQUIRE(healthy.has_value());
+    REQUIRE((*healthy)->Close().has_value());
+    REQUIRE((*runtime)->Shutdown().has_value());
+    fs::rename(fixture.root / "data", fixture.root / "retired-data");
+    std::cout << "[sdk-opening-start-path] repeated\n";
+}
+
+TEST_CASE("SDK lifecycle: thread startup fault is isolated to its calling thread") {
+    LifecycleFixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+    std::atomic<unsigned> hook_calls{0};
+    ScopedOpeningHook hook([&] { ++hook_calls; throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again)); });
+    auto other = std::async(std::launch::async, [&] {
+        return (*runtime)->OpenSession(OpeningOptions(fixture, std::make_shared<OpeningOwners>()));
+    });
+    REQUIRE(other.wait_for(10s) == std::future_status::ready);
+    auto healthy = other.get();
+    REQUIRE(healthy.has_value());
+    CHECK(hook_calls == 0);
+    REQUIRE((*healthy)->Close().has_value());
+    auto owners = std::make_shared<OpeningOwners>();
+    auto failed = (*runtime)->OpenSession(OpeningOptions(fixture, owners));
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error().code == "sdk.session.open_failed");
+    CHECK(hook_calls == 1);
+    CheckOpeningRetired(owners);
+    REQUIRE((*runtime)->Shutdown().has_value());
+    std::cout << "[sdk-opening-start-path] isolation\n";
+}
+
+TEST_CASE("SDK lifecycle: shutdown waits for failed thread startup owner retirement") {
+    LifecycleFixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+    auto owners = std::make_shared<OpeningOwners>();
+    owners->hold_destructor = true;
+    std::atomic<unsigned> hook_calls{0};
+    std::future<sdk::Result<std::shared_ptr<sdk::Session>>> opening;
+    std::future<sdk::Result<void>> shutdown;
+    // Release before either owned future joins, even on an assertion failure.
+    struct Release { std::shared_ptr<OpeningOwners> owners; ~Release() { owners->backend.Release(); } } release{owners};
+    opening = std::async(std::launch::async, [&] {
+        ScopedOpeningHook hook([&] { ++hook_calls; throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again)); });
+        return (*runtime)->OpenSession(OpeningOptions(fixture, owners));
+    });
+    REQUIRE(WaitForFlag(owners->backend.entered));
+    std::promise<void> entering_shutdown;
+    auto entered = entering_shutdown.get_future();
+    shutdown = std::async(std::launch::async, [&] {
+        entering_shutdown.set_value();
+        return (*runtime)->Shutdown();
+    });
+    REQUIRE(entered.wait_for(10s) == std::future_status::ready);
+    CHECK(shutdown.wait_for(100ms) == std::future_status::timeout);
+    CHECK_FALSE(owners->backend.destroyed.load());
+    owners->backend.Release();
+    REQUIRE(opening.wait_for(10s) == std::future_status::ready);
+    auto failed = opening.get();
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error().code == "sdk.session.open_failed");
+    REQUIRE(shutdown.wait_for(10s) == std::future_status::ready);
+    CHECK(shutdown.get().has_value());
+    CHECK(hook_calls.load() == 1);
+    CheckOpeningRetired(owners);
+    auto closed = (*runtime)->OpenSession(OpeningOptions(fixture, std::make_shared<OpeningOwners>()));
+    REQUIRE_FALSE(closed.has_value());
+    CHECK(closed.error().code == "sdk.runtime.closed");
+    std::cout << "[sdk-opening-start-path] shutdown\n";
+}
 
 TEST_CASE("SDK lifecycle: dropping the last session joins its backend and leaves runtime usable") {
     LifecycleFixture fixture;
