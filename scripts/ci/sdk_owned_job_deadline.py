@@ -85,6 +85,7 @@ def check_owned_job_deadline_native(section, command):
     if sorted(paths) != sorted(PATHS):
         raise RuntimeError('Owned Job deadline has absent, duplicate or foreign paths')
     check_queue_observation(section)
+    check_cap_observations(section)
     raw = [line.removeprefix('[owned-job-deadline-fact] ') for line in section.splitlines()
            if line.startswith('[owned-job-deadline-fact] ')]
     try:
@@ -121,3 +122,30 @@ def check_owned_job_deadline_native(section, command):
         if path in ('runtime-budget', 'startup-close') and calls <= 0:
             raise RuntimeError('Runtime/startup retirement path did not reach the real command')
     return facts
+
+
+def check_cap_observations(section):
+    prefix = '[owned-job-deadline-cap-observation] '
+    raw = [line.removeprefix(prefix) for line in section.splitlines() if line.startswith(prefix)]
+    try:
+        rows = [json.loads(line, object_pairs_hook=unique_object) for line in raw]
+    except (ValueError, TypeError) as error:
+        raise RuntimeError('Owned Job command cap observation is not strict JSON') from error
+    keys = {'path', 'registration_budget_ms', 'host_cap_ms', 'model_cap_ms', 'remaining_lower_ms',
+            'remaining_upper_ms', 'timeout_lower_ms', 'timeout_upper_ms', 'actual_timeout_ms'}
+    if len(rows) != 2 or {row.get('path') for row in rows if isinstance(row, dict)} != {'model', 'host'}:
+        raise RuntimeError('Owned Job requires both actual model and host cap observations')
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != keys or any(type(row[key]) is not int for key in keys - {'path'}):
+            raise RuntimeError('Owned Job cap observation fields differ or are not integers')
+        host, model = (4000, 1000) if row['path'] == 'model' else (3000, 2**64 - 1)
+        if (row['registration_budget_ms'], row['host_cap_ms'], row['model_cap_ms']) != (5000, host, model):
+            raise RuntimeError('Owned Job changed the finite registration, model or host budget')
+        lower, upper = row['remaining_lower_ms'], row['remaining_upper_ms']
+        if not 0 <= lower <= upper <= 5000:
+            raise RuntimeError('Owned Job remaining clock fences are inconsistent')
+        if (row['timeout_lower_ms'], row['timeout_upper_ms']) != (min(host, model, lower), min(host, model, upper)):
+            raise RuntimeError('Owned Job timeout fences do not apply all three real caps')
+        if not max(1, row['timeout_lower_ms']) <= row['actual_timeout_ms'] <= row['timeout_upper_ms']:
+            raise RuntimeError('Owned Job actual timeout lies outside the independently observed clock fences')
+    return rows
