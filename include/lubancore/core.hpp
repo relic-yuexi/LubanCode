@@ -45,12 +45,18 @@ struct ModelRequest {
     std::vector<Message> messages;
     std::vector<ToolDefinition> tools;
     std::optional<int> max_output_tokens;
+    // Empty preserves the default. UTF-8, no NUL, at most 256 bytes;
+    // provider-specific effort names are forwarded without a whitelist.
+    std::string reasoning_effort;
 };
 struct Usage { std::int64_t input_tokens = 0; std::int64_t output_tokens = 0; };
 struct ModelReply {
     std::string text;
     std::vector<ToolCall> tool_calls;
     std::optional<Usage> usage;
+    // Empty preserves text/tool inference; otherwise the provider's actual
+    // finish reason. UTF-8, no NUL, at most 256 bytes.
+    std::string stop_reason;
 };
 
 // Text/tool-call injection surface, useful for an embedded provider or fixture.
