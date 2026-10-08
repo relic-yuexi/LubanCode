@@ -222,6 +222,7 @@ DOC development/sdk-background-jobs.md
 DOC development/sdk-owned-job-deadline.md
 DOC development/sdk-web-fetch.md
 DOC development/sdk-web-search.md
+DOC development/sdk-opening-start-cleanup.md
 DOC development/sdk-job-operation-binding-v1.md
 DOC development/v3-journal-witness.md
 DOC development/sdk-package-inventory.md
