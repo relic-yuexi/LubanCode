@@ -47,6 +47,11 @@ target_compile_features(lubancore_sdk PUBLIC cxx_std_23)
 target_compile_definitions(lubancore_sdk PRIVATE
   LUBANCORE_BUILDING
   LUBANCORE_VERSION="${PROJECT_VERSION}")
+# Use the root's captured switch: third-party subprojects can temporarily change
+# BUILD_TESTING before this file is included. Ordinary SDKs have no fault slot.
+if(LUBANCODE_BUILD_TESTING)
+  target_compile_definitions(lubancore_sdk PRIVATE LUBANCORE_PRIVATE_OPENING_TEST_HOOKS=1)
+endif()
 target_include_directories(lubancore_sdk PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
