@@ -133,7 +133,9 @@ def check_cap_observations(section):
         raise RuntimeError('Owned Job command cap observation is not strict JSON') from error
     keys = {'path', 'registration_budget_ms', 'host_cap_ms', 'model_cap_ms', 'remaining_lower_ms',
             'remaining_upper_ms', 'timeout_lower_ms', 'timeout_upper_ms', 'actual_timeout_ms'}
-    if len(rows) != 2 or {row.get('path') for row in rows if isinstance(row, dict)} != {'model', 'host'}:
+    if len(rows) != 2 or any(not isinstance(row, dict) or not isinstance(row.get('path'), str) for row in rows):
+        raise RuntimeError('Owned Job requires typed model and host cap observations')
+    if {row['path'] for row in rows} != {'model', 'host'}:
         raise RuntimeError('Owned Job requires both actual model and host cap observations')
     for row in rows:
         if not isinstance(row, dict) or set(row) != keys or any(type(row[key]) is not int for key in keys - {'path'}):

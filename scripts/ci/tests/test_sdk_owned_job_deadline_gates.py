@@ -51,6 +51,7 @@ class OwnedDeadlineEvidenceTests(unittest.TestCase):
         lines = [line for line in body.splitlines() if not line.startswith(prefix)]
         self.reject('\n'.join(lines))
         self.reject(body + '\n' + next(line for line in body.splitlines() if line.startswith(prefix)))
+        self.reject(body.replace('"path": "model"', '"path": []'))
 
     def reject(self, body=None, command=None):
         with self.assertRaises(RuntimeError):
