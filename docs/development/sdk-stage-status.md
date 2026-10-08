@@ -5,7 +5,13 @@
 `d596e8e0` 同树。远端全量 Windows 791、Linux 789、macOS 792 项均过；
 三平台独立 SDK Lua ON/OFF 各 70/68 项均过，九册安装消费各 15 次真实 HTTP
 均过；ASan 169 项过，Workflow TSan 本片未触发。74 册产物及原日志已封存。
-接着补[SDK 开场线程失败清理](sdk-opening-start-cleanup.md)，尚未验收。
+[SDK 开场线程失败清理](sdk-opening-start-cleanup.md) 已随
+[#336](https://github.com/relic-yuexi/LubanCode/pull/336) 合入 `8a19edf4`，与验收源
+`49060155` 同树。全量 Windows 791、Linux 789、macOS 792 项均过，三平台
+测试名单与 #335 相同；独立 SDK ON/OFF 各 70/68 项、生命周期 12 案及五条
+真实失败路径、九套安装消费均过。ASan 170 来源、1881 CASE、77461 断言过，
+745 份源码及输入哈希与实际 Git 对象吻合；74 册产物已封存。未跑本地 CI。
+下一片[采样参数与终止原因](sdk-model-sampling.md) 先交合同，尚未实施验收。
 CLI 主入口与 one-shot 尚未迁完，SDK 与 CLI 全面对齐仍欠账。下文保留历史原账。
 
 核查日期：2026-10-06。已合基线为功能分支 `fd76b6a5`；[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 的已验源 `c522a51c` 与合入头同树。
