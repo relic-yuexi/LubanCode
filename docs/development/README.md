@@ -4,6 +4,7 @@
 
 - [构建与发行](build-and-release.md)
 - [LubanCore C++ SDK（实验版）](lubancore-sdk.md)
+- [SDK 显式网络搜索](sdk-web-search.md)：逐场服务、凭据、预算与取消；候选待三平台验收。
 - [SDK main Action 中间件合同](sdk-action-middleware.md)
 - [SDK 显式 Skills 合同](sdk-skills.md)
 - [SDK 项目 Memory 只读召回合同](sdk-memory-recall.md)

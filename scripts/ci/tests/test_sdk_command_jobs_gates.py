@@ -165,7 +165,7 @@ class ClosureTests(unittest.TestCase):
                 gate.check_copies(source, prefix, seal, context)
 
     def test_real_current_rosters_and_all_old_members(self):
-        self.assertEqual((len(focused.REQUIRED), len(focused_roster(focused.REQUIRED, False))), (69, 67))
+        self.assertEqual((len(focused.REQUIRED), len(focused_roster(focused.REQUIRED, False))), (70, 68))
         self.assertEqual((len(installed.REQUIRED_TESTS), len(consumer_roster(installed.REQUIRED_TESTS, False))), (37, 34))
         for stem in gate.SOURCES:
             self.assertIn("sdk.focused." + stem, focused.REQUIRED)

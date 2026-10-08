@@ -48,6 +48,7 @@
 #include "tools/path_utils.hpp"
 #include "tools/search_ripgrep.hpp"
 #include "tools/web_fetch.hpp"
+#include "tools/web_search.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
 
@@ -307,6 +308,30 @@ struct Session::Impl final : rt::InteractionBroker {
             if (!lubancode::tools::ValidateWebFetchOptions(*web_fetch_options))
                 return std::unexpected(Failure("sdk.web_fetch.invalid_options"));
         }
+        std::optional<lubancode::tools::WebSearchOptions> web_search_options;
+        const bool has_web_search = std::find(options.builtin_tools.begin(), options.builtin_tools.end(), "web_search") != options.builtin_tools.end();
+        if (options.web_search && !has_web_search)
+            return std::unexpected(Failure("sdk.web_search.not_selected"));
+        if (has_web_search) {
+            if (!options.web_search) return std::unexpected(Failure("sdk.web_search.missing_options"));
+            const auto& selected = *options.web_search;
+            std::string provider;
+            switch (selected.provider) {
+            case web_search::v1::Provider::Tavily: provider = "tavily"; break;
+            case web_search::v1::Provider::Brave: provider = "brave"; break;
+            case web_search::v1::Provider::Serper: provider = "serper"; break;
+            default: return std::unexpected(Failure("sdk.web_search.invalid_options"));
+            }
+            if (selected.max_header_bytes > 512 * 1024 || selected.max_response_bytes > 8 * 1024 * 1024)
+                return std::unexpected(Failure("sdk.web_search.invalid_options"));
+            web_search_options = lubancode::tools::WebSearchOptions{
+                {provider, selected.api_key}, selected.endpoint,
+                {selected.connect_timeout_ms, selected.total_timeout_ms,
+                 static_cast<std::int64_t>(selected.max_header_bytes), static_cast<std::int64_t>(selected.max_response_bytes)},
+                selected.max_output_bytes, selected.max_query_bytes, selected.max_results};
+            if (!lubancode::tools::ValidateWebSearchOptions(*web_search_options))
+                return std::unexpected(Failure("sdk.web_search.invalid_options"));
+        }
         if (options.command_jobs) {
             const auto valid = detail::ValidateCommandJobOptions(*options.command_jobs);
             if (!valid) return std::unexpected(valid.error());
@@ -386,7 +411,8 @@ struct Session::Impl final : rt::InteractionBroker {
                 // local tool declaration and server spec has been validated.
                 search_runner = std::make_shared<lubancode::tools::BundledRipgrepRunner>(std::move(executable));
             }
-            auto tool = rt::assembly::CreateLocalTool(name, search_runner, web_fetch_options ? &*web_fetch_options : nullptr);
+            auto tool = rt::assembly::CreateLocalTool(name, search_runner,
+                web_fetch_options ? &*web_fetch_options : nullptr, web_search_options ? &*web_search_options : nullptr);
             if (!tool || prepared_registry->Find(name)) return std::unexpected(Failure("sdk.tool.unsupported_or_duplicate", name));
             if (name == "run_command" && (*job_plan)->enabled()) {
                 lubancode::tools::ToolRegistration registration;

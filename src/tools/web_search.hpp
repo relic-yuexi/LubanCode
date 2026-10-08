@@ -11,10 +11,13 @@
 #pragma once
 
 #include <expected>
+#include <memory>
+#include <optional>
 #include <string>
 
 #include "config/config.hpp"
 #include "tools/tool.hpp"
+#include "net/http_transport.hpp"
 
 namespace lubancode::tools {
 
@@ -33,20 +36,41 @@ std::expected<std::string, std::string> ParseSerperResponse(const std::string& b
 // count 参数归一:没给用默认 5,给了夹到 [1, 10]。
 int ClampSearchCount(int requested);
 
+struct WebSearchOptions {
+    config::SearchConfig search;
+    std::string endpoint;
+    net::FullHttpLimits limits;
+    std::uint64_t max_output_bytes = 100 * 1024;
+    std::size_t max_query_bytes = 4096;
+    int max_results = 10;
+};
+std::expected<void, std::string> ValidateWebSearchOptions(const WebSearchOptions&);
+// One bounded authenticated request, no redirects or retained cancellation.
+class WebSearchTransport {
+public:
+    virtual ~WebSearchTransport() = default;
+    virtual std::expected<net::FullHttpResponse, net::FullHttpError> Send(
+        const net::FullHttpRequest&, const net::FullHttpLimits&, const std::atomic<bool>*) = 0;
+};
+
 class WebSearchTool : public Tool {
 public:
 
     // 逐枚追踪单:注册元数据声明。
     lubancode::tools::EffectClass effect_class() const override { return lubancode::tools::EffectClass::ReadOnlyRemote; }
     explicit WebSearchTool(config::SearchConfig search);
+    explicit WebSearchTool(WebSearchOptions options, std::shared_ptr<WebSearchTransport> transport = {});
 
     std::string name() const override;
     std::string description() const override;
     nlohmann::json input_schema() const override;
     Result execute(const nlohmann::json& input) override;
+    Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override;
 
 private:
     config::SearchConfig search_;
+    std::optional<WebSearchOptions> options_;
+    std::shared_ptr<WebSearchTransport> transport_;
 };
 
 }  // namespace lubancode::tools

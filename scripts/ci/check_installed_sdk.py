@@ -56,6 +56,7 @@ REQUIRED_PUBLIC_HEADERS = {
     "include/lubancore/named_results.hpp",
     "include/lubancore/jobs.hpp",
     "include/lubancore/web_fetch.hpp",
+    "include/lubancore/web_search.hpp",
     "include/lubancore/authorization.hpp",
     "include/lubancore/packages.hpp",
     "include/lubancore/api.hpp", "include/lubancore/core.hpp", "include/lubancore/extensions.hpp",
@@ -610,6 +611,9 @@ def main() -> None:
         "status": "passed", "registration": web_test, "requests": request_receipt,
         "fixture_context": fixture.context, "source_seal": web_source, "public_header": web_header,
     }, indent=2) + "\n", encoding="utf-8")
+    run([sys.executable, str(repo / "scripts/ci/run_web_search_consumer.py"),
+         "--consumer", smoke_test["command"][0], "--state", str(scratch / "web-search"),
+         "--evidence", str(evidence / "web-search"), "--source", str(consumer_source)], env)
     rag.check_copy(consumer_source, rag_source, consumer=True)
     after_demo = rag.inspect_demo(scratch, demo_source, demo_build, prefix, repo, rag_source,
                                   producer_build=producer_build)

@@ -2,11 +2,15 @@
 
 #include <string>
 #include <utility>
+#include <algorithm>
+#include <memory>
+#include <curl/curl.h>
 
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
 
 #include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
+#include "tools/web_fetch.hpp"
 
 namespace lubancode::tools {
 
@@ -16,6 +20,59 @@ using nlohmann::json;
 
 constexpr int kDefaultCount = 5;
 constexpr int kMaxCount = 10;
+
+std::expected<std::string, std::string> SearchEndpoint(const WebSearchOptions& options) {
+    std::string value = options.endpoint;
+    if (value.empty()) {
+        if (options.search.provider == "tavily") value = "https://api.tavily.com/search";
+        else if (options.search.provider == "brave") value = "https://api.search.brave.com/res/v1/web/search";
+        else if (options.search.provider == "serper") value = "https://google.serper.dev/search";
+        else return std::unexpected("invalid_options");
+    }
+    if (value.size() > 8192 || !platform::IsValidUtf8(value) ||
+        std::any_of(value.begin(), value.end(), [](unsigned char c) { return c <= 0x20 || c == 0x7f; }))
+        return std::unexpected("invalid_endpoint");
+    cpr::Session initialized;
+    if (!initialized.GetCurlHolder() || !initialized.GetCurlHolder()->handle)
+        return std::unexpected("transport_unavailable");
+    std::unique_ptr<CURLU, decltype(&curl_url_cleanup)> url(curl_url(), curl_url_cleanup);
+    if (!url || curl_url_set(url.get(), CURLUPART_URL, value.c_str(), CURLU_DISALLOW_USER) != CURLUE_OK)
+        return std::unexpected("invalid_endpoint");
+    const auto part = [&](CURLUPart kind) {
+        char* raw = nullptr;
+        const auto status = curl_url_get(url.get(), kind, &raw, 0);
+        std::unique_ptr<char, decltype(&curl_free)> held(raw, curl_free);
+        return status == CURLUE_OK && raw ? std::string(raw) : std::string();
+    };
+    const auto scheme = part(CURLUPART_SCHEME);
+    auto host = part(CURLUPART_HOST);
+    if (host.starts_with('[') && host.ends_with(']')) host = host.substr(1, host.size() - 2);
+    if ((scheme != "https" && !(scheme == "http" && net::IsLoopbackAddress(host))) ||
+        !part(CURLUPART_QUERY).empty() || !part(CURLUPART_FRAGMENT).empty() ||
+        value.find('?') != std::string::npos || value.find('#') != std::string::npos)
+        return std::unexpected("invalid_endpoint");
+    return part(CURLUPART_URL);
+}
+
+std::string EncodeQuery(const std::string& query) {
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : query) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~') out += c;
+        else { out += '%'; out += hex[c >> 4]; out += hex[c & 15]; }
+    }
+    return out;
+}
+
+class DefaultSearchTransport final : public WebSearchTransport {
+public:
+    std::expected<net::FullHttpResponse, net::FullHttpError> Send(
+        const net::FullHttpRequest& request, const net::FullHttpLimits& limits,
+        const std::atomic<bool>* cancel) override {
+        return net::PerformFullHttpRequest(request, limits, cancel, nullptr);
+    }
+};
 
 // 从一个结果项里安全取字符串字段,缺了/类型不对给空串——搜索结果偶尔
 // 缺摘要,不至于整个解析报废。
@@ -118,6 +175,32 @@ int ClampSearchCount(int requested) {
 
 WebSearchTool::WebSearchTool(config::SearchConfig search) : search_(std::move(search)) {}
 
+std::expected<void, std::string> ValidateWebSearchOptions(const WebSearchOptions& options) {
+    const auto& limits = options.limits;
+    if ((options.search.provider != "tavily" && options.search.provider != "brave" && options.search.provider != "serper") ||
+        options.search.api_key.empty() || options.search.api_key.size() > 4096 ||
+        std::any_of(options.search.api_key.begin(), options.search.api_key.end(),
+                    [](unsigned char c) { return c <= 0x20 || c > 0x7e; }) ||
+        limits.connect_timeout_ms <= 0 || limits.connect_timeout_ms > 30000 ||
+        limits.hard_timeout_ms <= 0 || limits.hard_timeout_ms > 120000 ||
+        limits.connect_timeout_ms > limits.hard_timeout_ms ||
+        limits.response_header_bytes <= 0 || limits.response_header_bytes > 512 * 1024 ||
+        limits.response_body_bytes <= 0 || limits.response_body_bytes > 8 * 1024 * 1024 ||
+        options.max_output_bytes < 256 || options.max_output_bytes > 1024 * 1024 ||
+        options.max_query_bytes == 0 || options.max_query_bytes > 8192 ||
+        options.max_results < 1 || options.max_results > 10)
+        return std::unexpected("invalid_options");
+    try {
+        const auto endpoint = SearchEndpoint(options);
+        if (!endpoint) return std::unexpected(endpoint.error());
+    } catch (...) { return std::unexpected("invalid_endpoint"); }
+    return {};
+}
+
+WebSearchTool::WebSearchTool(WebSearchOptions options, std::shared_ptr<WebSearchTransport> transport)
+    : search_(options.search), options_(std::move(options)),
+      transport_(transport ? std::move(transport) : std::make_shared<DefaultSearchTransport>()) {}
+
 std::string WebSearchTool::name() const {
     return "web_search";
 }
@@ -152,6 +235,7 @@ nlohmann::json WebSearchTool::input_schema() const {
 }
 
 Tool::Result WebSearchTool::execute(const nlohmann::json& input) {
+    if (options_) return execute(input, ToolExecutionContext{});
     if (!input.contains("query") || !input.at("query").is_string()) {
         return {"缺少必填参数 query(字符串)", true};
     }
@@ -210,6 +294,90 @@ Tool::Result WebSearchTool::execute(const nlohmann::json& input) {
         return {formatted.error(), true};
     }
     return {*formatted, false};
+}
+
+Tool::Result WebSearchTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
+    if (!options_) return execute(input); // Legacy CLI request semantics remain unchanged.
+    const auto fail = [](const std::string& reason) {
+        Tool::Result result{"web_search." + reason, true};
+        result.error_code = "web_search." + reason;
+        return result;
+    };
+    const auto cancelled = [&] { return context.cancel && context.cancel->load(std::memory_order_acquire); };
+    if (cancelled()) return fail("cancelled");
+    if (!ValidateWebSearchOptions(*options_)) return fail("invalid_options");
+    if (!input.is_object() || !input.contains("query") || !input["query"].is_string()) return fail("invalid_query");
+    const auto query = input["query"].get<std::string>();
+    if (query.empty() || query.size() > options_->max_query_bytes || !platform::IsValidUtf8(query))
+        return fail("invalid_query");
+    int count = (std::min)(kDefaultCount, options_->max_results);
+    if (input.contains("count") && !input["count"].is_null()) {
+        const auto& requested = input["count"];
+        if (!requested.is_number_integer()) return fail("invalid_count");
+        if (requested.is_number_unsigned()) count = static_cast<int>(std::min<std::uint64_t>(
+            requested.get<std::uint64_t>(), static_cast<std::uint64_t>(options_->max_results)));
+        else count = static_cast<int>(std::clamp<std::int64_t>(requested.get<std::int64_t>(), 1, options_->max_results));
+        count = (std::max)(1, count);
+    }
+    try {
+        const auto endpoint = SearchEndpoint(*options_);
+        if (!endpoint) return fail("invalid_options");
+        net::FullHttpRequest request;
+        request.url = *endpoint;
+        request.headers = {{"Accept", "application/json"}};
+        if (search_.provider == "brave") {
+            request.method = "GET";
+            request.url += "?q=" + EncodeQuery(query) + "&count=" + std::to_string(count);
+            request.headers.emplace_back("X-Subscription-Token", search_.api_key);
+        } else {
+            request.method = "POST";
+            request.headers.emplace_back("Content-Type", "application/json");
+            if (search_.provider == "tavily") {
+                request.headers.emplace_back("Authorization", "Bearer " + search_.api_key);
+                request.body = json{{"query", query}, {"max_results", count}}.dump();
+            } else {
+                request.headers.emplace_back("X-API-KEY", search_.api_key);
+                request.body = json{{"q", query}, {"num", count}}.dump();
+            }
+        }
+        if (cancelled()) return fail("cancelled");
+        const auto response = transport_->Send(request, options_->limits, context.cancel);
+        if (cancelled()) return fail("cancelled");
+        if (!response) {
+            switch (response.error().kind) {
+            case net::FullHttpErrorKind::Cancelled: return fail("cancelled");
+            case net::FullHttpErrorKind::Timeout: return fail("timeout");
+            case net::FullHttpErrorKind::ResponseHeaderTooLarge: return fail("header_limit");
+            case net::FullHttpErrorKind::ResponseBodyTooLarge: return fail("response_limit");
+            default: return fail("network_failed");
+            }
+        }
+        if (response->status >= 300 && response->status < 400) return fail("redirect_rejected");
+        if (response->status < 200 || response->status >= 300) return fail("http_status");
+        if (response->received_header_bytes > static_cast<std::uint64_t>(options_->limits.response_header_bytes))
+            return fail("header_limit");
+        if (response->body.size() > static_cast<std::uint64_t>(options_->limits.response_body_bytes))
+            return fail("response_limit");
+        auto parsed = json::parse(response->body, nullptr, false);
+        if (!parsed.is_object()) return fail("invalid_response");
+        json* items = nullptr;
+        if (search_.provider == "tavily" && parsed.contains("results")) items = &parsed["results"];
+        if (search_.provider == "serper" && parsed.contains("organic")) items = &parsed["organic"];
+        if (search_.provider == "brave" && parsed.contains("web") && parsed["web"].is_object() && parsed["web"].contains("results"))
+            items = &parsed["web"]["results"];
+        if (!items || !items->is_array()) return fail("invalid_response");
+        if (items->size() > static_cast<std::size_t>(count)) items->erase(items->begin() + count, items->end());
+        auto formatted = search_.provider == "tavily" ? ParseTavilyResponse(parsed.dump())
+            : search_.provider == "brave" ? ParseBraveResponse(parsed.dump()) : ParseSerperResponse(parsed.dump());
+        if (!formatted) return fail("invalid_response");
+        auto output = platform::SanitizeExternalText(*formatted);
+        if (output.size() > options_->max_output_bytes) {
+            output = TruncateUtf8(output, static_cast<std::size_t>(options_->max_output_bytes - 24));
+            output += "\n[web_search.truncated]";
+        }
+        if (cancelled()) return fail("cancelled");
+        return {std::move(output), false};
+    } catch (...) { return fail("transport_failed"); }
 }
 
 }  // namespace lubancode::tools

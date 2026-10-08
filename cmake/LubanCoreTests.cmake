@@ -95,6 +95,7 @@ add_executable(lubancore_sdk_tests ${_lubancore_tests_exclude}
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/todo_write.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/agentic_rag.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/web_fetch.cpp"
+  "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/web_search.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/command_jobs.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/named_results.cpp"
   "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/journal_owner.cpp"
@@ -147,7 +148,7 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
   set_tests_properties("${sdk_test}" PROPERTIES
     LABELS "sdk-focused" TIMEOUT 300
     ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
-  if(sdk_basename STREQUAL "test_lubancore_web_fetch.cpp")
+  if(sdk_basename STREQUAL "test_lubancore_web_fetch.cpp" OR sdk_basename STREQUAL "test_lubancore_web_search.cpp")
     set_property(TEST "${sdk_test}" APPEND PROPERTY ENVIRONMENT "NO_PROXY=127.0.0.1" "no_proxy=127.0.0.1")
   endif()
   # SDK-only and combined builds keep this fixed-duration shell fixture isolated

@@ -19,7 +19,7 @@ namespace lubancode::runtime::assembly {
 
 std::unique_ptr<tools::Tool> CreateLocalTool(
     const std::string& name, std::shared_ptr<tools::IRipgrepRunner> search_runner,
-    const tools::WebFetchOptions* web_fetch_options) {
+    const tools::WebFetchOptions* web_fetch_options, const tools::WebSearchOptions* web_search_options) {
     if (name == "read_file") return std::make_unique<tools::ReadFileTool>();
     if (name == "run_command") return std::make_unique<tools::RunCommandTool>();
     if (name == "write_file") return std::make_unique<tools::WriteFileTool>();
@@ -27,6 +27,8 @@ std::unique_ptr<tools::Tool> CreateLocalTool(
     if (name == "search" && search_runner) return std::make_unique<tools::SearchTool>(std::move(search_runner));
     if (name == "web_fetch" && web_fetch_options)
         return std::make_unique<tools::WebFetchTool>(*web_fetch_options);
+    if (name == "web_search" && web_search_options)
+        return std::make_unique<tools::WebSearchTool>(*web_search_options);
     // A new table belongs to this exact opening, never a project/host singleton.
     // SDK Close retires it with the registry; resume starts a fresh table.
     if (name == "todo_write") return std::make_unique<tools::TodoWriteTool>(std::make_shared<tools::TodoListState>());
