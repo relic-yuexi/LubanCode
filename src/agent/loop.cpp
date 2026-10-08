@@ -236,8 +236,9 @@ struct ToolCallFrame {
     EffectClass effect_class = EffectClass::InProcessUnknown;
     // 最终参数(PreToolUse 改写并过 schema 复检后的 effective input)。
     nlohmann::json effective_input;
-    // Host callbacks stay on the main thread. Resolve after durable started,
-    // then send only this owned snapshot to an execution worker.
+    // Resolve invocation identity on the main thread after durable started,
+    // then send this owned snapshot to the worker. The final dispatch gate is
+    // the explicit exception: it runs on that actual executing thread.
     tools::ToolInvocationIdentity invocation;
 };
 

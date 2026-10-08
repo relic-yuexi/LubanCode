@@ -786,6 +786,10 @@ TEST_CASE("RunOneTool: 来源/错误码随 trace 落账(unknown_tool/hook_denied
             int gate_calls = 0, approvals = 0;
             TraceCollector gated_collector;
             agent::TurnWiring gated;
+            gated.tool_invocation_identity = [](const std::string& id)
+                -> std::optional<tools::ToolInvocationIdentity> {
+                return tools::ToolInvocationIdentity{"session", "operation", "turn", id, 2};
+            };
             gated.on_pre_tool_use_hook = [](const auto&, const auto&, const auto&) {
                 runtime::ToolHookDecision decision;
                 decision.decision = runtime::ToolHookDecision::Decision::Allow;
@@ -822,6 +826,11 @@ TEST_CASE("RunOneTool: 来源/错误码随 trace 落账(unknown_tool/hook_denied
                     CHECK(input == expected_input);
                     CHECK(context.cancel == &cancel);
                     CHECK(context.artifact_dir == "owned-artifacts");
+                    CHECK(context.invocation.session_id == "session");
+                    CHECK(context.invocation.operation_id == "operation");
+                    CHECK(context.invocation.turn_id == "turn");
+                    CHECK(context.invocation.action_id == id);
+                    CHECK(context.invocation.attempt == 2);
                     CHECK(probe->call_count == 0);
                     CHECK(approvals == (needs_confirmation ? 1 : 0));
                     if (mode == "throw") throw std::runtime_error("private-policy-secret");
