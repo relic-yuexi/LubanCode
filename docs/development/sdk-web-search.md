@@ -71,3 +71,8 @@ options.web_search->api_key = host_secret;
 验收须跑真实公开 SDK 工具回环、三服务请求字段与编码、零请求拒绝、
 响应/输出帽、取消与关闭、同 cwd 多场不同配置、同 ID 恢复重新声明，
 以及安装后源码树外消费。生产与原生测试只走本源远端三平台 CI。
+
+首轮源 `27a18836` 的[远端构建](https://github.com/relic-yuexi/LubanCode/actions/runs/37818382723)
+在 Windows `web_search.cpp` 两处报 C2589：平台 `min/max` 宏撞上新调用。
+修复仅给标准函数和极值调用加括号，查询、预算、CASE 与断言不变。
+Windows 当轮未完成构建，不能据此记原生或安装消费通过；修源须另取同源三平台证据。

@@ -96,7 +96,7 @@ void WebSearchCase(const std::string& name, const fs::path& base, const std::str
             if (mode == "provider") options.web_search->provider = static_cast<sdk::web_search::v1::Provider>(999);
             if (mode == "endpoint") options.web_search->endpoint = "http://example.com/search";
             if (mode == "userinfo") options.web_search->endpoint = "https://user:password@example.com/search";
-            if (mode == "header") options.web_search->max_header_bytes = std::numeric_limits<std::uint64_t>::max();
+            if (mode == "header") options.web_search->max_header_bytes = (std::numeric_limits<std::uint64_t>::max)();
             if (mode == "results") options.web_search->max_results = 11;
             if (mode == "query") options.web_search->max_query_bytes = 0;
             if (mode == "timeout") options.web_search->total_timeout_ms = 1;

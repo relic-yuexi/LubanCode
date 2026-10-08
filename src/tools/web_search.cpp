@@ -310,14 +310,14 @@ Tool::Result WebSearchTool::execute(const nlohmann::json& input, const ToolExecu
     const auto query = input["query"].get<std::string>();
     if (query.empty() || query.size() > options_->max_query_bytes || !platform::IsValidUtf8(query))
         return fail("invalid_query");
-    int count = std::min(kDefaultCount, options_->max_results);
+    int count = (std::min)(kDefaultCount, options_->max_results);
     if (input.contains("count") && !input["count"].is_null()) {
         const auto& requested = input["count"];
         if (!requested.is_number_integer()) return fail("invalid_count");
         if (requested.is_number_unsigned()) count = static_cast<int>(std::min<std::uint64_t>(
             requested.get<std::uint64_t>(), static_cast<std::uint64_t>(options_->max_results)));
         else count = static_cast<int>(std::clamp<std::int64_t>(requested.get<std::int64_t>(), 1, options_->max_results));
-        count = std::max(1, count);
+        count = (std::max)(1, count);
     }
     try {
         const auto endpoint = SearchEndpoint(*options_);

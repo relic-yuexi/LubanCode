@@ -149,7 +149,7 @@ TEST_CASE("WebSearchTool: bounded dispatch handles cancellation overflow and pri
     CHECK(tool.execute({{"query", "test"}, {"count", "bad"}}, context).error_code == "web_search.invalid_count");
     CHECK(transport->calls == 0);
     const auto result = tool.execute({{"query", "test"},
-        {"count", std::numeric_limits<std::uint64_t>::max()}}, context);
+        {"count", (std::numeric_limits<std::uint64_t>::max)()}}, context);
     CHECK_FALSE(result.is_error);
     CHECK(result.content.find("2. second") != std::string::npos);
     CHECK(result.content.find("3. third") == std::string::npos);
