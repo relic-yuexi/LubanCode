@@ -1,14 +1,18 @@
 # SDK 阶段进度与验收边界
 
-2026-10-09 续批：按八步顺序，先补第 2 步[显式 web_search](sdk-web-search.md)。
-基线 `5aaad8b5`；本片补公开配置、有界请求、关闭与安装后消费，待本源三平台 CI。
-不据此宣布 SDK 与 CLI 全面对齐。下文保留上一批验收原账。
+2026-10-09 续批：第 2 步[显式 web_search](sdk-web-search.md) 已随
+[#335](https://github.com/relic-yuexi/LubanCode/pull/335) 合入 `194f587b`，与验收源
+`d596e8e0` 同树。远端全量 Windows 791、Linux 789、macOS 792 项均过；
+三平台独立 SDK Lua ON/OFF 各 70/68 项均过，九册安装消费各 15 次真实 HTTP
+均过；ASan 169 项过，Workflow TSan 本片未触发。74 册产物及原日志已封存。
+接着补[SDK 开场线程失败清理](sdk-opening-start-cleanup.md)，尚未验收。
+CLI 主入口与 one-shot 尚未迁完，SDK 与 CLI 全面对齐仍欠账。下文保留历史原账。
 
 核查日期：2026-10-06。已合基线为功能分支 `fd76b6a5`；[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 的已验源 `c522a51c` 与合入头同树。
 
 目标：新宿主只调用公开 SDK，便能运行完整会话，不必复制内部运行栈。CLI 逐项迁入，原功能保住。现已能嵌入；CLI 主入口和 one-shot 仍用内部装配，尚未全部对齐。
 
-## 当前批：收口后再推进
+## 2026-10-06 批次记录：收口后再推进
 
 当前只留总 Draft [#234](https://github.com/relic-yuexi/LubanCode/pull/234)。
 功能分支停在已验 `fd76b6a5`。候选沿原 CI 分支收齐，不添实施 PR。
