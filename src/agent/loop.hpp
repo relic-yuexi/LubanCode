@@ -230,6 +230,17 @@ struct TurnWiring {
     // ---- 审批(合同形状在 runtime/interaction.hpp,与 InteractionBroker
     // 同源;宿主把"怎么问、怎么答"从那只口子递进来)------------------------
 
+    // Final internal admission on the actual executing thread, after rewrites,
+    // approval and started intent, immediately before Tool::execute. Covers
+    // read-only and preapproved tools too; this is not an approval hook.
+    // Empty preserves LocalTrusted behavior. Concurrent read workers may call
+    // it concurrently; captures must outlive the batch and be thread-safe.
+    // Capture the original execution scope, not a later query actor. Do not
+    // reenter/close the owner here. Failure text is never exported.
+    std::function<std::expected<void, std::string>(const std::string& tool_use_id,
+        const std::string& name, const nlohmann::json& effective_input,
+        const tools::ToolExecutionContext& context)> on_tool_dispatch_gate;
+
     // Runtime 权限预裁定。Allow 直接越过询问，Deny 在 Runtime 边界收口；
     // 只有 Ask 才可进入 PermissionRequest/前端确认。空 = 兼容旧宿主。
     std::function<runtime::PermissionVerdict(const std::string& tool_use_id, const std::string& name,

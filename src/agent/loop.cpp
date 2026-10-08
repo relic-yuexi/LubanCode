@@ -236,8 +236,9 @@ struct ToolCallFrame {
     EffectClass effect_class = EffectClass::InProcessUnknown;
     // 最终参数(PreToolUse 改写并过 schema 复检后的 effective input)。
     nlohmann::json effective_input;
-    // Host callbacks stay on the main thread. Resolve after durable started,
-    // then send only this owned snapshot to an execution worker.
+    // Resolve invocation identity on the main thread after durable started,
+    // then send this owned snapshot to the worker. The final dispatch gate is
+    // the explicit exception: it runs on that actual executing thread.
     tools::ToolInvocationIdentity invocation;
 };
 
@@ -873,6 +874,36 @@ std::optional<tools::Tool::Result> MarkExecutionStarted(ToolCallFrame& frame) {
 tools::Tool::Result ExecuteApprovedTool(const ToolCallFrame& frame) {
     tools::ToolExecutionContext context{frame.cancel, frame.wiring.tool_artifact_dir};
     context.invocation = frame.invocation;
+    if (frame.wiring.on_tool_dispatch_gate) {
+        const auto cancelled = [&]() {
+            return frame.cancel && frame.cancel->load(std::memory_order_acquire);
+        };
+        const auto cancellation_result = []() {
+            tools::Tool::Result result{"runtime.tool.cancelled_before_start", true};
+            result.outcome = ToString(ToolOutcome::CancelledBeforeStart);
+            result.error_code = "runtime.tool.cancelled_before_start";
+            return result;
+        };
+        if (cancelled()) return cancellation_result();
+        std::expected<void, std::string> admission;
+        bool threw = false;
+        try {
+            admission = frame.wiring.on_tool_dispatch_gate(
+                frame.call.id, frame.call.name, frame.effective_input, context);
+        } catch (...) {
+            threw = true;
+        }
+        // A gate may observe/trigger cancellation while checking current policy.
+        // Started is intent only; neither path pretends Tool::execute ran.
+        if (cancelled()) return cancellation_result();
+        if (threw || !admission) {
+            const char* code = threw ? "tool.dispatch.gate_exception" : "tool.dispatch.denied";
+            tools::Tool::Result result{code, true};
+            result.outcome = ToString(ToolOutcome::PermissionDeclined);
+            result.error_code = code;
+            return result;
+        }
+    }
     return frame.tool->execute(frame.effective_input, context);
 }
 
