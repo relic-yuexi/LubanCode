@@ -174,6 +174,7 @@ PRIVATE_SDK_TEST_IMPLEMENTATIONS = {"src/sdk/results.cpp", "src/sdk/approval.cpp
 TODO_CONSUMER_SOURCE = "examples/sdk-consumer/todo_write.cpp"
 RAG_CONSUMER_SOURCE = "examples/sdk-consumer/agentic_rag.cpp"
 WEB_FETCH_CONSUMER_SOURCE = "examples/sdk-consumer/web_fetch.cpp"
+WEB_SEARCH_CONSUMER_SOURCE = "examples/sdk-consumer/web_search.cpp"
 COMMAND_JOBS_CONSUMER_SOURCE = "examples/sdk-consumer/command_jobs.cpp"
 NAMED_RESULTS_CONSUMER_SOURCE = "examples/sdk-consumer/named_results.cpp"
 JOURNAL_OWNER_CONSUMER_SOURCE = "examples/sdk-consumer/journal_owner.cpp"
@@ -205,6 +206,16 @@ def web_fetch_consumer_ownership_violations(targets, testing):
     expected = [("lubancore_sdk_tests", "EXECUTABLE")] if testing else []
     if sorted(owners) != expected:
         return ["WebFetch consumer helper requires exactly the selected reference-test owner when testing is ON"]
+    return []
+
+
+def web_search_consumer_ownership_violations(targets, testing):
+    owners = [(target["name"], target["type"]) for target in targets.values()
+              for entry in target["sources"]
+              if entry.get("compiled") and entry.get("projectPath") == WEB_SEARCH_CONSUMER_SOURCE]
+    expected = [("lubancore_sdk_tests", "EXECUTABLE")] if testing else []
+    if sorted(owners) != expected:
+        return ["WebSearch consumer helper requires exactly the selected reference-test owner when testing is ON"]
     return []
 
 
@@ -364,6 +375,8 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
             violations.append("RAG consumer helper is not a selected testing-only source: " + owner)
         if name == WEB_FETCH_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
             violations.append("WebFetch consumer helper is not a selected testing-only source: " + owner)
+        if name == WEB_SEARCH_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
+            violations.append("WebSearch consumer helper is not a selected testing-only source: " + owner)
         if name == COMMAND_JOBS_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
             violations.append("Command Jobs helper is not a selected testing-only source: " + owner)
         if name == NAMED_RESULTS_CONSUMER_SOURCE and (not expect_testing or owner != "lubancore_sdk_tests"):
@@ -415,7 +428,7 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
             source_facts.append({"path": str(path), "projectPath": name,
                                  "compiled": "compileGroupIndex" in entry,
                                  "generated": entry.get("isGenerated", False)})
-            if name and (name.startswith(("src/", "include/", "tests/")) or name in {TODO_CONSUMER_SOURCE, RAG_CONSUMER_SOURCE, WEB_FETCH_CONSUMER_SOURCE, COMMAND_JOBS_CONSUMER_SOURCE, NAMED_RESULTS_CONSUMER_SOURCE, JOURNAL_OWNER_CONSUMER_SOURCE}):
+            if name and (name.startswith(("src/", "include/", "tests/")) or name in {TODO_CONSUMER_SOURCE, RAG_CONSUMER_SOURCE, WEB_FETCH_CONSUMER_SOURCE, WEB_SEARCH_CONSUMER_SOURCE, COMMAND_JOBS_CONSUMER_SOURCE, NAMED_RESULTS_CONSUMER_SOURCE, JOURNAL_OWNER_CONSUMER_SOURCE}):
                 check_project_path(name, target["name"])
                 group_index = entry.get("compileGroupIndex")
                 include_dirs = include_groups[group_index] if group_index is not None else ()
@@ -457,6 +470,8 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
         violations.extend(todo_consumer_ownership_violations(targets, expect_testing))
     if (source / RAG_CONSUMER_SOURCE).is_file():
         violations.extend(rag_consumer_ownership_violations(targets, expect_testing))
+    if (source / WEB_SEARCH_CONSUMER_SOURCE).is_file():
+        violations.extend(web_search_consumer_ownership_violations(targets, expect_testing))
     if (source / WEB_FETCH_CONSUMER_SOURCE).is_file():
         violations.extend(web_fetch_consumer_ownership_violations(targets, expect_testing))
     if (source / COMMAND_JOBS_CONSUMER_SOURCE).is_file():

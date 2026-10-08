@@ -111,6 +111,7 @@ REQUIRED = {
     "sdk.focused.managed_session_reservation",
     "sdk.focused.lubancore_owned_job_deadline",
     "sdk.focused.lubancore_web_fetch",
+    "sdk.focused.lubancore_web_search",
     "sdk.focused.lubancore_authorization",
     "sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest",
     "sdk.focused.tool_job_coordinator",
