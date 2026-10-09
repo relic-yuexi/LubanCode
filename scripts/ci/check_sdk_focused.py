@@ -100,6 +100,7 @@ REQUIRED = {
     "sdk.focused.lubancore_model_input",
     "sdk.focused.lubancore_model_sampling",
     "sdk.focused.lubancore_sampling_lifetime",
+    "sdk.focused.lubancore_memory_extraction_core",
     "sdk.focused.v3_journal_owner",
     "sdk.focused.lubancore_journal_owner",
     "sdk.focused.lubancore_journal_owner_guards",
@@ -1506,6 +1507,16 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_lifecycle":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_opening_start_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_memory_extraction_core":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            if registered["command"][1:] != ["--source-file=*test_lubancore_memory_extraction_core.cpp"]:
+                raise RuntimeError("Memory extraction must run the actual shared-SDK native source")
+            check_native_command(sections[0], registered["command"])
+            if int(counts[0]) != 7:
+                raise RuntimeError("Memory extraction requires all seven actual shared-module cases")
+            for path in ("parser", "transcript", "prompt", "request", "usage", "finish", "native-connection"):
+                if sections[0].splitlines().count("[memory-extraction-core-path] shared-sdk " + path) != 1:
+                    raise RuntimeError("Memory extraction actual shared-module path missing: " + path)
         if case.attrib["name"] == "sdk.focused.lubancore_sampling_lifetime":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             if registered["command"][1:] != ["--source-file=*test_lubancore_sampling_lifetime.cpp"]:

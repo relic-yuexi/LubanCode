@@ -18,7 +18,14 @@
 案例均过，实际 DLL 拒绝非法终止原因。三平台真实 Memory 抽取核过三种截断。
 ASan 171 来源、1887 CASE、77578 断言过；746 份输入哈希与 Git 对象吻合。
 74 册产物及 1925 份索引原件已封存，未跑本地 CI。
-下一片[旁路采样看门狗关场](sdk-sampling-lifetime.md) 先交合同，尚未实施验收。
+[旁路采样看门狗关场](sdk-sampling-lifetime.md) 已随
+[#338](https://github.com/relic-yuexi/LubanCode/pull/338) 合入 `068db5d3`，与验收源
+`639a9dc2` 同树。全量 Windows 795、Linux 793、macOS 796 项均过，旧名单未减。
+三平台 SDK ON/OFF 各 72/70 来源、九套安装消费各 37/34 项及各 15 次真实 HTTP
+均过；SDK DLL 内六条故障路径与 CLI 采样 25 案均过。ASan 172 来源、1899 CASE、
+78519 断言过；747 份编译输入与 Git 原件吻合。77 册产物、1941 份索引原件
+逐大小和 SHA256 封存。TSan 本片跳过，不计通过。未跑本地 CI。
+下一片[Memory 抽取共享底座](sdk-memory-extraction-core.md) 合同先提交，代码已迁，共享模块与 CLI 两路各补七案；待同源三平台远端验收，不计交付。
 CLI 主入口与 one-shot 尚未迁完，SDK 与 CLI 全面对齐仍欠账。下文保留历史原账。
 
 核查日期：2026-10-06。已合基线为功能分支 `fd76b6a5`；[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 的已验源 `c522a51c` 与合入头同树。

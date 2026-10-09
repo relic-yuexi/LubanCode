@@ -282,8 +282,11 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     // usage 半截也出账(旧口径:六处都是先记账再判错)。
     const api::Usage& usage = assembler.usage();
     result.usage = usage;
-    result.usage_reported = usage.input_tokens > 0 || usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
+    result.usage_reported = assembler.usage_seen() || usage.input_tokens > 0 || usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
                            usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
+    result.cache_read_reported = assembler.cache_read_seen();
+    result.cache_creation_reported = assembler.cache_creation_seen();
+    result.usage_anomaly = assembler.usage_anomaly();
     // 半截流(无 ContentBlockDone/MessageDone 收尾)先催收再取,文本不丢
     // ——llm 节点旧路按裸 TextDelta 累加,这里不许比它少一个字。已收尾时
     // 催收是空操作。
@@ -305,7 +308,9 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     // 轨迹同账。
     if (options.boundary_recorder != nullptr && !recorded_request_id.empty()) {
         options.boundary_recorder->OnUsageRecorded(recorded_request_id, usage, result.usage_reported,
-                                                   result.provider_response_id);
+                                                   result.provider_response_id, 0, true,
+                                                   result.cache_read_reported, result.cache_creation_reported,
+                                                   result.usage_anomaly);
         api::Message assistant;
         assistant.role = api::Role::Assistant;
         assistant.content = assembler.BuildMessage().content;

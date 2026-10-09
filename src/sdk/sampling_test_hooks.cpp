@@ -1,6 +1,14 @@
 #include "sdk/sampling_test_hooks.hpp"
 #include <utility>
 namespace lubancore::detail::testing {
+lubancode::agent::testing::MemoryExtractionTestPort GetMemoryExtractionTestPort() {
+    namespace extraction = lubancode::agent::memory_extraction;
+    return {extraction::ClassifyTaskType, extraction::BuildTurnTranscript,
+            extraction::BuildExtractionSystemPrompt, extraction::ParseExtractionJson,
+            extraction::MemoryExtractionOutputSchema, extraction::RunMemoryExtraction,
+            extraction::FinishMemoryExtraction, lubancode::agent::SampleModel,
+            lubancode::runtime::assembly::BuildBackend};
+}
 lubancode::agent::testing::WatchdogHooksHandle ReplaceSamplingWatchdogHooks(
     lubancode::agent::testing::WatchdogHooksHandle replacement) noexcept {
     return lubancode::agent::testing::ReplaceWatchdogHooks(std::move(replacement));

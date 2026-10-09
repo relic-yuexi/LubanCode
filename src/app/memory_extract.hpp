@@ -16,6 +16,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/memory_extraction.hpp"
 #include "agent/model_router.hpp"  // BackgroundCallAccounting(usage 出账)
 #include "agent/sample_model.hpp"  // SampleResult(抽取侧收口的入参)
 #include "api/backend.hpp"
@@ -31,76 +32,16 @@ class V3Writer;
 
 namespace lubancode::app {
 
-inline constexpr int kMemoryExtractMaxTokens = 4096;
-
-// 抽取请求的本地超时预算(秒):SampleModel 的看门狗到点归因
-// local_deadline(DeadlineTimeout),不是网络错误。原先住在
-// commands/memory_commands.cpp 的匿名段,回合总结异步化单起公开——后台
-// 执行器与收账点的文案同用一把尺。
-inline constexpr int kMemoryExtractTimeoutSecs = 45;
-
-// 抽取结果(回合总结 + 候选 + 检索扩展词)。
-struct ProposedCandidate {
-    std::string kind;         // fact | preference | feedback
-    std::string title;
-    std::string summary;
-    std::string content;
-    std::vector<std::string> keywords;
-    std::vector<std::string> paths;
-    std::string confidence;   // user-stated | verified | inferred
-    std::string occurred_at;  // 事件发生时间:材料里明确给出才填,否则空(不造假)
-};
-
-struct MemoryExtraction {
-    std::string task_type;    // code | research | config | docs | other
-    std::string summary;
-    std::vector<std::string> retrieval_terms;
-    std::vector<ProposedCandidate> candidates;
-};
-
-// ---------------------------------------------------------------------------
-// 抽取失败的结构化错误(P0-A/P0-B):模型文本按不可信输入处理,语法/编码/
-// 字段错都从抽取接口稳定返回,不许越过这层抛出。
-//
-// 旧账兼容:StableExtractErrorCode 的旧文案路把 syntax_invalid/utf8_invalid/
-// schema_invalid 一律记 parse_failed——离线重放旧账时,parse_failed ≈ 这三
-// 类的统称;新账各记各名,route_miss/empty_output 口径不变。
-// ---------------------------------------------------------------------------
-enum class ExtractionErrorCode {
-    SyntaxInvalid,    // JSON 语法坏:未转义引号、漏逗号、多对象歧义、半截对象
-    Utf8Invalid,      // 响应正文不是合法 UTF-8(先验整段,再谈语法)
-    SchemaInvalid,    // 语法过了,字段合同不过:缺必填/null/数字/数组/顶层数组
-    OutputTruncated,  // provider 结束原因报长度截断(max_tokens/length 一族)
-    EmptyOutput,      // 采样"成功"但正文为空
-    TransportFailed,  // 发送失败/流内错/看门狗取消
-    // 本地超时预算到点(取消误报 ESC 单 Bug 1):采样层的 local_deadline
-    // 稳定码在这里立名——与 transport_failed 分开数,离线才知道"慢死"与
-    // "网死"各占多少;终端提示带预算,不冤枉用户按键。
-    DeadlineTimeout,
-    RouteMiss,        // cheap 路由找不到 provider(旧稳定码 route_miss)
-};
+// Source-compatible host facade; values and parser belong to the shared engine.
+using agent::memory_extraction::kMemoryExtractMaxTokens;
+using agent::memory_extraction::kMemoryExtractTimeoutSecs;
+using agent::memory_extraction::kExtractionNoOffset;
+using agent::memory_extraction::kMaxCandidateContentBytes;
+using ProposedCandidate = agent::memory_extraction::ProposedCandidate;
+using MemoryExtraction = agent::memory_extraction::MemoryExtraction;
+using ExtractionErrorCode = agent::memory_extraction::ExtractionErrorCode;
+using ExtractionError = agent::memory_extraction::ExtractionError;
 const char* ExtractionErrorCodeName(ExtractionErrorCode code);
-
-// 一次抽取失败的完整账。message 是终端可直出的短文案(自证合法 UTF-8,
-// 不含库异常的 last read 片段);诊断字段只进日志与轨迹,查原文复用受控
-// 轨迹,不在错误里转储正文。
-struct ExtractionError {
-    ExtractionErrorCode code = ExtractionErrorCode::SyntaxInvalid;
-    std::string message;
-    // ---- 诊断(P0-A) ----
-    std::string request_id;               // provider 外部号(空 = 没回)
-    std::size_t body_bytes = 0;           // 响应正文总字节
-    std::size_t error_offset = static_cast<std::size_t>(-1);  // 原文字节偏移;-1 = 不适用
-    bool utf8_valid = true;               // 整段 UTF-8 预检结果
-    std::string stop_reason;              // provider 结束原因(空 = 未报告,单列诊断)
-    std::string field_path;               // schema_invalid 时的字段路径(如 candidates[0].kind)
-    std::string schema_check_error;       // SampleModel output_schema 复检账(空 = 没设或过了)
-};
-inline constexpr std::size_t kExtractionNoOffset = static_cast<std::size_t>(-1);
-
-// 抽取输出预算(P1-A):候选正文与写路同款上限(kMaxTopicBytes,8 KiB)对齐,
-// 超长候选整条跳过——先减冗长输出,不动请求的 max_tokens。
-inline constexpr std::size_t kMaxCandidateContentBytes = 8 * 1024;
 
 // 任务类型判定(用户基调 1:先推测目的再选总结提示词)。纯词法启发,不
 // 打请求;user_text 是本轮用户消息,tool_names 是本轮调用过的工具名。
