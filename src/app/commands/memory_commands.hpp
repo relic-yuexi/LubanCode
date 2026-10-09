@@ -103,6 +103,11 @@ enum class TurnMemoryDispatch {
 TurnMemoryDispatch ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_text,
                                      std::size_t history_before);
 
+// 收货时记真实抽取调用；未进入抽取入口（线程启动失败）不增模型调用数。
+// usage 缺位的真实调用仍照旧记，换代后的真实花费也照记。
+bool RecordTurnMemoryCall(lubancode::agent::ModelUsageLedger& ledger,
+                          const TurnMemoryExtractor::Outcome& outcome);
+
 // 迟到收账(主线程空闲拍):完工的抽取结果记 usage 账(由调用方在世代门
 // 之前记,弃账也照记)、检索扩展词、候选入队(auto 档直写闸照旧)、台账
 // 补 outcome 落袋,打完成/失败行。tail_wall_ms = 回合收口到收账完成的墙钟

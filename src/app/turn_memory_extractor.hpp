@@ -75,6 +75,7 @@ public:
         std::uint64_t session_generation = 0;  // 原样带回:迟到由调用方对代弃
         std::string turn_id;                   // 原样带回:悬账对档
         std::int64_t extract_wall_ms = 0;      // 发起到采样返回的墙钟
+        bool extraction_invoked = false;      // 真正进入同步抽取；启动失败不算模型调用
     };
 
     TurnMemoryExtractor() = default;

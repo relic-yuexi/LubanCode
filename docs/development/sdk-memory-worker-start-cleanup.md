@@ -22,6 +22,8 @@
 
 失败结果交原 SettleTurnMemory，结清匹配悬账，记 failed 与 worker_start_failed，不入候选队列、不补造 usage。实际 Journal 在创建失败前后逐行相同；收账只追加真实失败评估。
 
+CLI 分角色总账也不得补造调用。内部 Outcome 末尾添 extraction_invoked，真正进入同步抽取才立旗；启动失败留假。收货点走同一份 RecordTurnMemoryCall，按此旗记账，仍放在换代门之前。真抽取遇 transport 失败、没报 usage，仍照旧计调用；不能拿 usage_reported 当调用开关。这是实现复核时补明的零请求约束。
+
 后台异常总出口、旁路借用撤销、完整持久身份及用量来源另有欠账。现有 SuspendTurn 清掉 state_.turn_id，迟到 assessed 仍读此字段；值槽保 ID 与内部对档不能冒称持久身份已齐。V3 用量投影与晚归裸 ledger 借用也尚未补齐。公开自动 Memory owner 上线前须各自验清，旧材料不回写。
 
 ## 必需验收
@@ -32,4 +34,4 @@
 
 故障口只在 lubancode_app 的 BUILD_TESTING 构建中定义，线程本地、作用域恢复。SDK 不装配 app，普通宿主构建无故障定义。测试口不进入公开 include，SDK 安装材料门也拒带这份私有头。
 
-真实 CLI 悬账收口须走 ProjectMemory、TrajectorySessionLedger 与 SettleTurnMemory，不只测手拼 Outcome。保住原抽取、候审、队列、取消、晚归与换代案。Windows/Linux/macOS 全 CLI、SDK Lua ON/OFF、移位安装消费及 ASan 同源远端原件齐了才交付。禁止本地 CI、configure、build、原生或 HTTP 验收。
+真实 CLI 悬账收口须走 ProjectMemory、TrajectorySessionLedger 与 SettleTurnMemory，不只测手拼 Outcome。同册五案还要走实际分角色收账 helper：启动失败零调用，恢复成功记真实 usage，实际 Backend transport 失败未报 usage 也计一次调用。保住原抽取、候审、队列、取消、晚归与换代案。Windows/Linux/macOS 全 CLI、SDK Lua ON/OFF、移位安装消费及 ASan 同源远端原件齐了才交付。禁止本地 CI、configure、build、原生或 HTTP 验收。

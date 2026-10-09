@@ -21,7 +21,11 @@
 namespace {
 namespace fs = std::filesystem;
 using lubancode::app::TurnMemoryExtractor;
-struct Probe { std::atomic<int> calls{0}; std::atomic<int> destroyed{0}; };
+struct Probe {
+    std::atomic<int> calls{0};
+    std::atomic<int> destroyed{0};
+    bool fail_send = false;
+};
 struct ProbeBackend final : lubancode::api::Backend {
     explicit ProbeBackend(std::shared_ptr<Probe> value) : probe(std::move(value)) {}
     ~ProbeBackend() override { ++probe->destroyed; }
@@ -30,6 +34,8 @@ struct ProbeBackend final : lubancode::api::Backend {
         const std::function<void(const lubancode::api::StreamEvent&)>& emit,
         const std::atomic<bool>*) override {
         ++probe->calls;
+        if (probe->fail_send)
+            return std::unexpected(lubancode::api::Error{lubancode::api::ErrorKind::Api,"failed",0});
         emit(lubancode::api::MessageStart{"request", "cheap-m"});
         emit(lubancode::api::TextDelta{R"({"task_type":"research","summary":"已核材料","retrieval_terms":[],"candidates":[]})"});
         emit(lubancode::api::ContentBlockDone{0});
@@ -63,6 +69,7 @@ void StandardFailure() {
 void CheckFailure(const TurnMemoryExtractor::Outcome& out,std::uint64_t generation,
                   const std::string& turn) {
     CHECK_FALSE(out.ok);
+    CHECK_FALSE(out.extraction_invoked);
     CHECK(out.error.code==lubancode::app::ExtractionErrorCode::WorkerStartFailed);
     CHECK(lubancode::app::StableExtractErrorCode(out.error)=="worker_start_failed");
     CHECK(out.error.message=="记忆抽取线程未能启动");
@@ -95,6 +102,9 @@ TEST_CASE("Memory worker creation: standard failure preserves identity and destr
     CHECK(extractor.Busy()); CHECK(extractor.Ready());
     extractor.RequestCancel();
     auto out=extractor.TakeFinished(); REQUIRE(out.has_value()); CheckFailure(*out,37,"turn-start");
+    lubancode::agent::ModelUsageLedger calls;
+    CHECK_FALSE(lubancode::app::RecordTurnMemoryCall(calls,*out));
+    CHECK(calls.by_role().empty());
     CHECK_FALSE(extractor.Busy()); CHECK_FALSE(extractor.Ready());
     CHECK_FALSE(extractor.TakeFinished().has_value());
 }
@@ -135,6 +145,23 @@ TEST_CASE("Memory worker creation: pending failure keeps single flight and colle
     REQUIRE(AwaitReady(extractor));
     auto success=extractor.TakeFinished(); REQUIRE(success.has_value());
     CHECK(success->ok); CHECK(success->turn_id=="recovered"); CHECK(success->session_generation==39);
+    CHECK(success->extraction_invoked);
+    lubancode::agent::ModelUsageLedger calls;
+    CHECK_FALSE(lubancode::app::RecordTurnMemoryCall(calls,*out));
+    REQUIRE(lubancode::app::RecordTurnMemoryCall(calls,*success));
+    REQUIRE(calls.by_role().contains(lubancode::agent::ModelRole::Cheap));
+    CHECK(calls.by_role().at(lubancode::agent::ModelRole::Cheap).calls==1);
+    CHECK(calls.by_role().at(lubancode::agent::ModelRole::Cheap).input_tokens==3);
+    auto transport=std::make_shared<Probe>(); transport->fail_send=true;
+    REQUIRE(extractor.Start(Inputs(transport,40,"transport")));
+    REQUIRE(AwaitReady(extractor));
+    auto failure=extractor.TakeFinished(); REQUIRE(failure.has_value());
+    CHECK_FALSE(failure->ok); CHECK(failure->extraction_invoked);
+    CHECK_FALSE(failure->accounting.usage_reported);
+    REQUIRE(lubancode::app::RecordTurnMemoryCall(calls,*failure));
+    CHECK(calls.by_role().at(lubancode::agent::ModelRole::Cheap).calls==2);
+    CHECK(calls.by_role().at(lubancode::agent::ModelRole::Cheap).input_tokens==3);
+    CHECK(transport->calls.load()==1); CHECK(transport->destroyed.load()==1);
     CHECK(recovered->calls.load()==1); CHECK(recovered->destroyed.load()==1);
     CHECK(failed->calls.load()==0); CHECK(rejected->calls.load()==0); CHECK(rejected->destroyed.load()==1);
     CHECK_FALSE(extractor.Busy());
@@ -187,6 +214,8 @@ TEST_CASE("Memory worker creation: actual failure settles the original CLI suspe
     input.trajectory_wire="anthropic"; input.provider="test";
     REQUIRE(extractor.Start(std::move(input))); ledger.SuspendTurn();
     auto out=extractor.TakeFinished(); REQUIRE(out.has_value()); CheckFailure(*out,41,"turn-settle");
+    lubancode::agent::ModelUsageLedger calls;
+    CHECK_FALSE(lubancode::app::RecordTurnMemoryCall(calls,*out)); CHECK(calls.by_role().empty());
     const auto after_start=lubancode::trajectory::ReadJournalLines(stream);
     REQUIRE(after_start.has_value());
     CHECK(*before_start==*after_start);  // No bypass request, message or usage was invented.

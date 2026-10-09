@@ -475,9 +475,7 @@ void TerminalSessionController::DrainFinishedTurnMemory() {
     if (!outcome.has_value()) {
         return;
     }
-    model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, outcome->model,
-                                  outcome->accounting.usage, outcome->accounting.duration_ms,
-                                  outcome->accounting.usage_reported);
+    lubancode::app::RecordTurnMemoryCall(model_router->ledger(), *outcome);
     if (outcome->session_generation != view_registry_.session_generation()) {
         // 换代(/clear、/resume)后的迟到:旧场的回合账不写进新场的卷里,
         // 宁缺毋滥(世代拒旧账,先例:审批 DenyStaleGenerations、标题精炼

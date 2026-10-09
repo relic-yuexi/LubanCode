@@ -96,6 +96,7 @@ bool TurnMemoryExtractor::Start(Inputs&& inputs) {
             // 抽取墙钟(§10.3):发起到采样返回的墙钟,与旧同步路同一跨度
             //(旧在主线程量,晚不了多少;usage 的 duration 在 accounting 里)。
             const auto extract_started = std::chrono::steady_clock::now();
+            outcome.extraction_invoked = true;
             const auto extraction =
                 RunMemoryExtraction(*backend, model, system_prompt, transcript,
                                     kMemoryExtractTimeoutSecs, effort, &outcome.accounting,
