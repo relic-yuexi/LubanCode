@@ -314,7 +314,7 @@ TEST_CASE("Memory bypass owner: real diagnostic producers and ledger snapshots s
         int node = 0;
         observe(*f.ledger,{[&] {
             auto failed = (*workflow)->SpawnNodeStream(
-                "probe-node","diagnostics-node-"+std::to_string(++node),1,"llm");
+                "probe-node","diagnostics-node-"+std::to_string(++node),1,"llm",-1);
             if (failed.has_value() || failed.error().stage != "run_started" ||
                 failed.error().error_code.find("diagnostics.node.refused") == std::string::npos)
                 throw std::runtime_error("actual workflow node diagnostic boundary differs");
@@ -324,7 +324,7 @@ TEST_CASE("Memory bypass owner: real diagnostic producers and ledger snapshots s
         for (std::size_t i = original; i < notes.size(); ++i)
             CHECK(notes[i].find("workflow_node.start_failed:run_started:") == 0);
         CHECK(node == 16); CHECK(Bytes(f.stream) == before);
-        (*workflow)->Finish("failed",Json::object()); workflow->reset();
+        (*workflow)->Finish(false,false,"diagnostics fixture complete"); workflow->reset();
         f.Close();
     }
 }
