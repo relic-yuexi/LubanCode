@@ -16,6 +16,8 @@ V2 同场重绑还须避开旧桥局部计数器重头撞号。前台以真实 r
 
 Clear 的忙碌、Managed 等前置拒绝和新侧准备先走。只有管理器真正进入 CancelActiveTurn 才退旧借；早拒不可误伤原场。成功切换造新 owner；毁旧场后失败不准盲目复开。第 2 步失败尚未取消，旧桥抵真实 broken writer 并留诊断；第 4 步失败已经退借，晚代理不再触桥。one_shot 拒绝属于恢复源预检，当前 Clear 没有这条门。
 
+Clear 证明须按真实新场格式读盘：RecoverWorkspace 接管的旧 V2 场走现有 V2 Clear，新 V3 场走 V3 Clear。本片只证明两路换场退旧借、绑定新 owner，不把旧盘 Clear 写成格式迁移，也不为测试改管理器。
+
 Memory 前台绑定捕获标准与未知异常，保住 worker_execution_failed 终态、model/task/generation/turn 和一次收货；Backend 未调用便释放。已归还用量照实保留，抽取 Run 入口计数仍按旧语义，不能改称物理 Backend 调用次数。诊断由共享容器持有，Append、原有 128 条条件追加及 Snapshot 共锁；不替其他入口添新限额，也不许拿新容器遮住 I/O 失败。
 
 晚归成功仍可带真实用量。SampleModel 不按 OnOutputCompleted 返回值改写已完成结果；旁路撤销门挡旧场追加，CLI generation 门另挡旧场采用。sent 已确认至物理调用之间仍有交接窗，detach 也不等于 Backend 已停。
