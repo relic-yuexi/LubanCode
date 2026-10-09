@@ -5,4 +5,7 @@
 
 namespace lubancode::app::testing {
 std::function<void()> ExchangeMemoryWorkerStartHook(std::function<void()> hook);
+enum class MemoryWorkerPhase { BeforeWork, AfterExtraction, BeforePublish };
+using MemoryWorkerExecutionHook = std::function<void(MemoryWorkerPhase)>;
+MemoryWorkerExecutionHook ExchangeMemoryWorkerExecutionHook(MemoryWorkerExecutionHook hook);
 }  // namespace lubancode::app::testing
