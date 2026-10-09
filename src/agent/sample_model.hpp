@@ -62,9 +62,8 @@ struct SampleRequest {
 
 // 一次采样的执行选项。
 struct SampleOptions {
-    // 外部取消链(ESC 等)。非空时它是 send_stream 唯一吃的取消口——看门狗
-    // 只改本地旗,不并进外部链(goal evaluator 旧口径:外部链在场时超时
-    // 不抢断,如实保留)。
+    // 外部取消链只借到调用返回。无预算时直接传入，不建线程；
+    // 有预算时看门狗合并两路旗，按先升一方归因。
     const std::atomic<bool>* cancel = nullptr;
     // > 0 起看门狗:到点拉本地取消旗(与旧六处同一形状:steady clock 差 +
     // 100ms 轮询)。0 = 不起(compact 两处的旧路)。外部链与预算同时在场
@@ -110,7 +109,8 @@ struct SampleResult {
     std::string schema_error;
 };
 
-// 跑一次采样。同步;永不抛(流内异常由各 backend 折成错误事件/返回值)。
+// 同步采样。看门狗启动与 Backend 三口异常折成 SampleResult；线程先 join 再返回。
+// recorder、自身分配和本地 schema 校验不新增 noexcept 保证。
 SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, const SampleOptions& options = {});
 
 // BackgroundCallAccounting 出账的唯一写法(六处各自手抄的累加/首报收成
