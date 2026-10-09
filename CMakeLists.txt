@@ -1717,7 +1717,7 @@ if(WIN32)
   target_link_libraries(lubancode_app PUBLIC ws2_32)
 endif()
 target_compile_features(lubancode_app PUBLIC cxx_std_23)
-if(BUILD_TESTING)
+if(LUBANCODE_BUILD_TESTING)
   target_compile_definitions(lubancode_app PRIVATE LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS=1)
 endif()
 target_precompile_headers(lubancode_app PRIVATE
