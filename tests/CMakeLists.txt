@@ -457,6 +457,11 @@ foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)
   else()
     set(test_timeout 180)
   endif()
+  # This real multi-session Journal/child source also runs in the SDK suite.
+  # Windows native durability I/O needs the same 300s budget as that registration.
+  if(WIN32 AND test_name STREQUAL "unit.runtime.child_history_adoption")
+    set(test_timeout 300)
+  endif()
   list(FIND LUBANCODE_TESTS_V3_DEFAULT_BOOKS "${test_name}" _v3_default_idx)
   if(_v3_default_idx EQUAL -1)
     # 未迁移域:显式钉 0,保住 v2 老册的行为断言(见上方分账注释)。

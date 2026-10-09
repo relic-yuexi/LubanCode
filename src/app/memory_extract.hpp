@@ -327,13 +327,15 @@ public:
     const ExtractionFunnel& funnel() const { return funnel_; }
 
 private:
-    void RecordAssessedLocked(std::int64_t foreground_tail_ms);
+    // Assessment identity is frozen separately from inter-turn receipt scope.
+    void RecordAssessedLocked(std::int64_t foreground_tail_ms, const std::string& trigger_turn_id);
     void RecordReceiptLocked(const memory::MemoryWriteReceipt& receipt,
                              const std::string& turn_id);
     // v3 场的写口(取消误报 ESC 单 Bug 2):typed 事件 memory.extraction.
     // assessed / memory.write.receipted,载荷 camelCase;落不稳只吞(诊断
     // 口径与 v2 同一条:调度账不许拖垮回合收尾)。
-    void RecordAssessedV3Locked(trajectory::v3::V3Writer& writer, std::int64_t foreground_tail_ms);
+    void RecordAssessedV3Locked(trajectory::v3::V3Writer& writer, std::int64_t foreground_tail_ms,
+                                const std::string& trigger_turn_id);
     void RecordReceiptV3Locked(trajectory::v3::V3Writer& writer, const memory::MemoryWriteReceipt& receipt,
                                const std::string& turn_id);
 

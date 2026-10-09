@@ -545,7 +545,7 @@ void MemoryTurnLedger::BeginTurn(std::string session_id, std::string turn_id,
     // 开张——悬账以 aborted 口径落袋(decision=Called 而 outcome 缺席,
     // RecordAssessedLocked 的既有兜底),不编数字,也不阻塞新轮。
     if (!suspended_turn_id_.empty()) {
-        RecordAssessedLocked(0);
+        RecordAssessedLocked(0, suspended_turn_id_);
         suspended_turn_id_.clear();
     }
     state_ = MemoryTurnState{};
@@ -631,7 +631,7 @@ void MemoryTurnLedger::OnMemoryWriteReceipt(const memory::MemoryWriteReceipt& re
 void MemoryTurnLedger::FinishTurn(std::int64_t foreground_tail_ms) {
     const std::lock_guard<std::mutex> lock(mutex_);
     if (turn_open_) {
-        RecordAssessedLocked(foreground_tail_ms);
+        RecordAssessedLocked(foreground_tail_ms, state_.turn_id);
     }
     turn_open_ = false;
     suspended_turn_id_.clear();  // FinishTurn 落过袋的回合没有悬账(纪律:二选一)
@@ -669,7 +669,7 @@ bool MemoryTurnLedger::SettleSuspendedTurn(const std::string& turn_id, std::int6
             ++funnel_.extract_failures;
         }
     }
-    RecordAssessedLocked(settle_wall_ms);
+    RecordAssessedLocked(settle_wall_ms, suspended_turn_id_);
     suspended_turn_id_.clear();
     state_ = MemoryTurnState{};  // 悬账期间攒下的回合间回执不串进下一笔
     pending_outcome_ = ExtractOutcome{};
@@ -683,12 +683,13 @@ void MemoryTurnLedger::AbandonSuspendedTurn() {
     suspended_turn_id_.clear();
 }
 
-void MemoryTurnLedger::RecordAssessedLocked(std::int64_t foreground_tail_ms) {
+void MemoryTurnLedger::RecordAssessedLocked(std::int64_t foreground_tail_ms,
+                                            const std::string& trigger_turn_id) {
     if (trajectory_ == nullptr) return;
     // v3 场走 v3 写口(取消误报 ESC 单 Bug 2):typed 事件 + camelCase 载荷,
     // 不往 v3 卷塞 v2 行;v2 老路一字不动。
     if (auto* v3_writer = trajectory_->v3_main_writer()) {
-        RecordAssessedV3Locked(*v3_writer, foreground_tail_ms);
+        RecordAssessedV3Locked(*v3_writer, foreground_tail_ms, trigger_turn_id);
         return;
     }
     auto* recorder = trajectory_->main();
@@ -696,7 +697,7 @@ void MemoryTurnLedger::RecordAssessedLocked(std::int64_t foreground_tail_ms) {
 
     nlohmann::json payload{
         {"trigger", ExtractionTriggerName(ExtractionTrigger::EveryTurn)},
-        {"turn_id", state_.turn_id},
+        {"turn_id", trigger_turn_id},
         {"decision", ExtractionDecisionName(state_.extraction_gate_decision)},
         {"user_text_stats",
          nlohmann::json{{"unicode_scalar_count", state_.user_text_stats.unicode_scalar_count},
@@ -764,14 +765,15 @@ void MemoryTurnLedger::RecordAssessedLocked(std::int64_t foreground_tail_ms) {
 }
 
 void MemoryTurnLedger::RecordAssessedV3Locked(trajectory::v3::V3Writer& writer,
-                                              std::int64_t foreground_tail_ms) {
+                                              std::int64_t foreground_tail_ms,
+                                              const std::string& trigger_turn_id) {
     // v3 的 assessed 事实行(取消误报 ESC 单 Bug 2):字段与 v2 同一套账
     //(跳过原因/决策/收口材料/墙钟/失败码),键名随 v3 合同走 camelCase;
     // turnId 挂触发它的主回合,重开会话单凭事件答得出"哪次抽取、预算
     // 多久、实际多久、谁叫停"。
     nlohmann::json payload{
         {"trigger", ExtractionTriggerName(ExtractionTrigger::EveryTurn)},
-        {"turnId", state_.turn_id},
+        {"turnId", trigger_turn_id},
         {"decision", ExtractionDecisionName(state_.extraction_gate_decision)},
         {"userTextStats",
          nlohmann::json{{"unicodeScalarCount", state_.user_text_stats.unicode_scalar_count},
@@ -811,8 +813,8 @@ void MemoryTurnLedger::RecordAssessedV3Locked(trajectory::v3::V3Writer& writer,
     }
     trajectory::v3::EventDraft draft;
     draft.kind = trajectory::v3::EventKindV3::MemoryExtractionAssessed;
-    if (!state_.turn_id.empty()) {
-        draft.turn_id = state_.turn_id;
+    if (!trigger_turn_id.empty()) {
+        draft.turn_id = trigger_turn_id;
     }
     draft.payload = std::move(payload);
     (void)writer.AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);

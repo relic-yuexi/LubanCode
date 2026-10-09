@@ -66,6 +66,7 @@
 #include "workspace/identity.hpp"
 
 namespace lubancode::runtime {
+namespace testing { struct MemoryDurableLegacyFixtureAccess; }
 
 // ---------------------------------------------------------------------------
 // /record 选段器(§14.3:从"第二只录音笔"改成"轨迹选段器")
@@ -587,6 +588,7 @@ public:
     void SetTelemetryWake(telemetry::CommitObserver* wake);
 
 private:
+    friend struct testing::MemoryDurableLegacyFixtureAccess;
     TrajectorySessionLedger() = default;
     struct Impl;
     std::unique_ptr<Impl> impl_;
