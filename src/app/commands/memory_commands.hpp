@@ -90,7 +90,7 @@ struct SessionTailContext {
 // ExtractTurnMemory 的收口档(调用方据此决定回合账怎么落):
 enum class TurnMemoryDispatch {
     Skipped,      // 前置门拦下(learn off/短文本/同轮去重/…):不发,账已前台记完
-    Dispatched,   // 门过:后台已起飞,回合账悬起(SuspendTurn),迟到收账走 SettleTurnMemory
+    Dispatched,   // 已接纳:回合账悬起，正常结果或启动失败都交 SettleTurnMemory 收账
     DroppedBusy,  // 门过但单飞在途(上一枚没收走):本轮让位不发,账已前台记完
     DroppedRoute, // 门过但路由落空/执行器没接:不发,零账与 route_miss 已前台记完
 };

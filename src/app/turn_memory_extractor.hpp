@@ -6,7 +6,8 @@
 // 要整轮结果),搬发轮前不可行——只能异步化。
 //
 // 材料全在起飞前拼好、值拷贝进闭包(转写/系统提示/分型),不引用会话
-// 任何共享态;HTTP 走 RouteDetached 造的独占裸 backend(不与主会话共用
+// 提示材料共享态；旁路另借 ledger，寿命门还欠账。HTTP 走 RouteDetached
+// 造的独占裸 backend(不与主会话共用
 // client,不抢流式回调)。本地超时预算(看门狗)与会话拆除的外部取消
 // 都走 SampleModel 的合并取消口。
 //
@@ -22,7 +23,7 @@
 //
 // 退出兜底照 SessionTitleRefiner/AgentTool 析构的老方子:RequestCancel 拉
 // 原子取消旗,析构取消 + 有界等待,等不到就 detach 放行——闭包自持
-// shared 状态,晚归不悬垂,也不冻退出。
+// shared 槽，退出有界；旁路裸 ledger 借用尚欠撤销，晚归安全另交。
 #pragma once
 
 #include <atomic>
@@ -58,7 +59,8 @@ public:
         // Token 账本单 A1(旁路落账):flag 开的会话递账本,抽取请求在
         // worker 线程自铸旁路桥落 Journal(purpose=memory_extract)。recorder
         // 提交全程持锁,后台线程与主线程的写在盘上串行;线程只持这只裸
-        // 指针+值拷贝,不引用会话其它共享态。空 = 没接轨迹。
+        // 指针+值拷贝；桥又借 writer、簿与 observer，写锁不护借用寿命。
+        // 这份旧借用另立撤销合同。空 = 没接轨迹。
         lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
         std::string trajectory_wire;  // 桥 identity 的渠道名(与主 turn 桥同源)
         std::string provider;         // 抽取路由的 provider(桥 identity)
@@ -82,8 +84,9 @@ public:
     TurnMemoryExtractor(TurnMemoryExtractor&&) = delete;
     TurnMemoryExtractor& operator=(TurnMemoryExtractor&&) = delete;
 
-    // 起一枚抽取任务。单飞:上一枚还在跑或结果还没被收走就拒(false),
-    // 不叠发。backend 为空同样拒(路由落空由调用方在起飞前自记零账)。
+    // 接纳抽取任务。true 包括线程未能创建、已有失败结果待收；
+    // 失败沿 TakeFinished 收账。false 只表示无效输入或上一枚未收走。
+    // backend 为空、model 为空时不接纳，由调用方保住路由门。
     bool Start(Inputs&& inputs);
 
     // 主线程收货:任务完工(成功/失败/取消都算)给 Outcome 并复位,可再
@@ -93,7 +96,7 @@ public:
     // 拉取消旗(换代 /clear、/resume、退出收尾)。只发信号不 join。
     void RequestCancel();
 
-    // 有任务在跑或结果待收(还没被 TakeFinished 取走)。
+    // 有任务在跑或结果待收，包括确定的线程启动失败。
     bool Busy() const;
 
     // 只读完工查询(空闲唤醒的条件):结果备好待收才 true。不 join、不

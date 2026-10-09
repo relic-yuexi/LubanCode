@@ -34,7 +34,7 @@ ASan 171 来源、1887 CASE、77578 断言过；746 份输入哈希与 Git 对�
 不覆盖全部生产源码。77 册产物、1940 份原件与封存副本逐大小和 SHA256 核过。
 TSan 本片跳过，不计通过。未跑本地 CI。同步共享底座已交，自动 Memory owner、
 候选管理、写回与完整持久身份及来源仍欠账。
-下一片[Memory 抽取线程启动失败](sdk-memory-worker-start-cleanup.md) 合同先提交；尚未交付。
+下一片[Memory 抽取线程启动失败](sdk-memory-worker-start-cleanup.md) 合同先提交；失败槽、原 CLI 收账与五案已接，ASan 两道选择器及执行门已补，待本源远端验收，不计交付。
 CLI 主入口与 one-shot 尚未迁完，SDK 与 CLI 全面对齐仍欠账。下文保留历史原账。
 
 核查日期：2026-10-06。已合基线为功能分支 `fd76b6a5`；[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 的已验源 `c522a51c` 与合入头同树。

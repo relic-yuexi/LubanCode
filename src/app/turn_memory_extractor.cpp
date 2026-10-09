@@ -4,12 +4,25 @@
 #include "app/turn_memory_extractor.hpp"
 
 #include <chrono>
+#include <exception>
 #include <utility>
+
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+#include "app/turn_memory_extractor_test_hooks.hpp"
+#endif
 
 #include "accounting/purpose.hpp"  // RequestPurpose(旁路桥的 purpose 门)
 #include "runtime/trajectory_session.hpp"  // TrajectoryBypassBridge(Token 账本单 A1)
 
 namespace lubancode::app {
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+namespace testing {
+namespace { thread_local std::function<void()> worker_start_hook; }
+std::function<void()> ExchangeMemoryWorkerStartHook(std::function<void()> hook) {
+    return std::exchange(worker_start_hook, std::move(hook));
+}
+}  // namespace testing
+#endif
 namespace {
 // 退出兜底的有界等待窗:取消旗已拉(cpr 的合并取消口应速断),等不起
 // 看门狗的 45 秒全预算——到点 detach 放行,不冻退出。与
@@ -43,8 +56,18 @@ bool TurnMemoryExtractor::Start(Inputs&& inputs) {
     auto shared = std::make_shared<Shared>();
     shared->session_generation = inputs.session_generation;
     shared->turn_id = inputs.turn_id;
-    // 闭包只持值与 shared 槽:不引用本对象,detach 晚归也不悬垂。
-    worker_ = std::thread(
+    // Freeze the failure receipt before any input enters the worker closure.
+    Outcome start_failure;
+    start_failure.model = inputs.model;
+    start_failure.task_type = inputs.task_type;
+    start_failure.session_generation = inputs.session_generation;
+    start_failure.turn_id = inputs.turn_id;
+    start_failure.error.code = ExtractionErrorCode::WorkerStartFailed;
+    start_failure.error.message = "记忆抽取线程未能启动";
+    shared->outcome = std::move(start_failure);
+    // 闭包不引用本对象；值材料与 shared 槽自持。旁路仍借 ledger，
+    // 这份借用尚欠可撤销口，不能凭 shared 槽宣称 detach 晚归安全。
+    auto run =
         [shared, backend = std::move(inputs.backend), model = std::move(inputs.model),
          effort = std::move(inputs.effort), system_prompt = std::move(inputs.system_prompt),
          transcript = std::move(inputs.transcript), task_type = std::move(inputs.task_type),
@@ -57,7 +80,8 @@ bool TurnMemoryExtractor::Start(Inputs&& inputs) {
             outcome.turn_id = shared->turn_id;
             // Token 账本单 A1:本线程自铸旁路桥(purpose=memory_extract)。
             // recorder 提交全程持锁,与主线程的写在盘上串行;桥随本栈
-            // 生灭,detach 晚归也不悬垂。没接轨迹(空)一笔不落。
+            // 生灭；所借 ledger、writer、簿和 observer 仍须活着。
+            // 可撤销借用另交。没接轨迹(空)一笔不落。
             // purpose 必须显式传 MemoryExtract:v3 工厂的 purpose 门只认
             // memory_extract/title_refine 一类白名单,漏传走默认
             // OtherHostRequest 会被拒成 nullptr——采样本体照发,但抽取的
@@ -90,7 +114,17 @@ bool TurnMemoryExtractor::Start(Inputs&& inputs) {
                 shared->outcome = std::move(outcome);
             }
             shared->done.store(true);  // outcome 写完才立收讫旗,主线程收货不抢跑
-        });
+        };
+    try {
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+        if (testing::worker_start_hook) testing::worker_start_hook();
+#endif
+        worker_ = std::thread(std::move(run));
+    } catch (const std::exception&) {
+        shared->done.store(true);
+    } catch (...) {
+        shared->done.store(true);
+    }
     shared_ = std::move(shared);
     return true;
 }

@@ -58,6 +58,7 @@ enum class ExtractionErrorCode {
     // "网死"各占多少;终端提示带预算,不冤枉用户按键。
     DeadlineTimeout,
     RouteMiss,        // cheap 路由找不到 provider(旧稳定码 route_miss)
+    WorkerStartFailed,  // Host accepted extraction, but its worker was not created.
 };
 const char* ExtractionErrorCodeName(ExtractionErrorCode code);
 
