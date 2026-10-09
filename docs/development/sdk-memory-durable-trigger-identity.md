@@ -13,3 +13,7 @@
 旧盘装配 friend 仅在测试 source 定义，接住真实恢复器已持 owner、锁和材料。内部头只留声明，SDK 不添入口或故障函数。Windows/Linux/macOS 全 CLI、SDK Lua ON/OFF、九套移位消费及 ASan 须有同源原件，旧名单不得删减。两道 ASan selector、required 登记、七案七标记须接新 source。禁止本地 CI、构建、原生或 HTTP 验收。
 
 此片只管评估身份。旁路 late preparation 的 parentTurnId、可撤销借用、writer 回执分类和公开自动 Memory owner 另交；不凭评估归号宣称这些也齐了。
+
+验收补记，2026-10-09：候选 `4d224179` 的 Windows 全 CLI 有 801 来源，800 通过；`unit.runtime.child_history_adoption` 在默认 180 秒处超时。最后阶段为 scope-reuse 的真实 Run 入口，不能凭这个入口断言内部死锁。该候选持久身份七案七标记实际通过；全套失败原件另存，整片未验收。
+
+同次原件中，SDK focused 跑的是同一份 `test_child_history_adoption.cpp`，八案完整通过，用时 270.773 秒，既有预算 300 秒。后续只把 Windows CLI 这份实际多场 Journal / child 链来源的 CTest 预算对齐 300 秒；其他来源和平台照旧。命令、八案、断言、真实 writer、事件和耐久条件不得删减，不以跳过或缩小来源换绿灯。修复后重新收三平台同源全量原件，不能挪用旧候选绿灯。
