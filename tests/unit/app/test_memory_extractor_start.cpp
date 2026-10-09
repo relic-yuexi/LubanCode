@@ -80,7 +80,7 @@ void CheckFailure(const TurnMemoryExtractor::Outcome& out,std::uint64_t generati
     CHECK(out.accounting.usage.input_tokens==0); CHECK(out.accounting.usage.output_tokens==0);
     CHECK(out.accounting.usage.cache_read_tokens==0);
     CHECK(out.accounting.usage.cache_creation_tokens==0);
-    CHECK(out.accounting.usage.reasoning_tokens==0);
+    CHECK(out.accounting.usage.output_reasoning_tokens==0);
     CHECK(out.accounting.duration_ms==0); CHECK(out.extract_wall_ms==0);
     CHECK(out.extraction.candidates.empty()); CHECK(out.extraction.retrieval_terms.empty());
 }
