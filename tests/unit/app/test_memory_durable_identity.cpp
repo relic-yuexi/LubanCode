@@ -31,27 +31,7 @@
 
 // Test-only assembly of a real recovered legacy owner. No SDK entry point,
 // alternate creation switch, fabricated assessment or replacement recorder.
-namespace lubancode::runtime::testing {
-struct MemoryDurableLegacyFixtureAccess {
-    static std::unique_ptr<TrajectorySessionLedger> Adopt(
-        std::unique_ptr<trajectory::SessionManager> manager, const std::filesystem::path& root) {
-        REQUIRE(manager != nullptr);
-        auto* active=manager->active();
-        REQUIRE(active != nullptr); REQUIRE_FALSE(active->is_v3());
-        REQUIRE(active->main.has_value());
-        REQUIRE(active->status==trajectory::SessionStatus::Running);
-        auto ledger=std::unique_ptr<TrajectorySessionLedger>(new TrajectorySessionLedger());
-        ledger->impl_=std::make_unique<TrajectorySessionLedger::Impl>();
-        auto& owner=*ledger->impl_;
-        owner.manager=std::move(manager); owner.active=owner.manager->active();
-        owner.workspaces_root=root/"workspaces";
-        owner.main_run_id=owner.active->manifest.main_run_id;
-        owner.lubancode_version="test"; owner.workspace_root_text=(root/"repo").generic_string();
-        owner.recorder_options.event_schema_version=1;
-        return ledger;
-    }
-};
-}
+#include "memory_legacy_fixture.hpp"
 
 namespace {
 namespace fs = std::filesystem;
@@ -98,71 +78,8 @@ std::unique_ptr<lmb::runtime::TrajectorySessionLedger> Open(const fs::path& root
     REQUIRE(opened.has_value());
     return std::make_unique<lmb::runtime::TrajectorySessionLedger>(std::move(*opened));
 }
-std::unique_ptr<lmb::runtime::TrajectorySessionLedger> OpenRecoveredV2(const fs::path& root) {
-    namespace tr=lmb::trajectory;
-    tr::SessionManagerOptions options;
-    options.workspaces_root=root/"workspaces"; options.workspace_root=root/"repo";
-    options.identity=lmb::workspace::MakeFallbackIdentity(root/"repo");
-    options.launch_cwd=(root/"repo").generic_string(); options.lubancode_version="test";
-    options.recorder.event_schema_version=1;
-    const auto now=std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    auto room=tr::TrajectoryDirectory::CreateWorkspace(options.workspaces_root,options.identity,now);
-    REQUIRE(room.has_value());
-    const std::string old_id="20261009-010001-R00001", next_id="20261009-010002-R00002";
-    auto manifest=[&](const std::string& session,const std::string& run) {
-        tr::SessionManifest value;
-        value.schema_version=2; value.workspace_key=options.identity.workspace_key;
-        value.session_id=session; value.main_run_id=run; value.launch_cwd=options.launch_cwd;
-        value.run_kind=tr::RunKindName(tr::RunKind::MainSession); value.start_reason="process_launch";
-        value.status="preparing"; value.created_at_ms=now; value.lubancode_version="test";
-        value.event_schema_version=1; return value;
-    };
-    auto old=tr::TrajectoryDirectory::CreateSession(options.workspaces_root,options.identity.workspace_key,
-                                                   manifest(old_id,"main-0001"));
-    REQUIRE(old.has_value());
-    auto next_manifest=manifest(next_id,"main-0002");
-    next_manifest.start_reason="clear"; next_manifest.previous_session_id=old_id;
-    auto next=tr::TrajectoryDirectory::CreateSession(options.workspaces_root,options.identity.workspace_key,next_manifest);
-    REQUIRE(next.has_value());
-    {
-        // A real V2 archive of a switch interrupted after old-session sealing.
-        // Recovery owns creating/adopting the next main; the fixture never does.
-        tr::EventScope scope;
-        scope.workspace_key=options.identity.workspace_key; scope.session_id=old_id; scope.run_id="main-0001";
-        scope.run_kind=tr::RunKind::MainSession; scope.actor=tr::Actor::Host; scope.origin=tr::Origin::ScheduledHost;
-        scope.visibility={tr::Visibility::HostOnly}; scope.training_policy=tr::TrainingPolicy::Exclude;
-        auto recorder=tr::TrajectoryRecorder::Start(old->main_stream_path(),old->artifacts_root(),scope,options.recorder);
-        REQUIRE(recorder.has_value());
-        REQUIRE(recorder->WriteRunStarted(Json{{"start_reason","process_launch"}},tr::Durability::PowerLoss).status==tr::RecordReceipt::Status::Committed);
-        tr::RecordRequest requested;
-        requested.kind=tr::EventKind::ControlCommandRequested; requested.scope=recorder->base_scope();
-        requested.scope.actor=tr::Actor::User; requested.scope.origin=tr::Origin::ExternalUser;
-        requested.payload=Json{{"command_id","cmd-clear-identity"},{"command_name","clear"},
-            {"action_name","clear"},{"effect_class","session_boundary"},
-            {"args_ref",Json{{"boundary_operation_id","memory-identity-boundary"}}}};
-        requested.links.correlation_id="memory-identity-boundary";
-        REQUIRE(recorder->Record(requested,tr::Durability::PowerLoss).status==tr::RecordReceipt::Status::Committed);
-        tr::RecordRequest clear;
-        clear.kind=tr::EventKind::SessionClearRequested; clear.scope=recorder->base_scope();
-        clear.payload=Json{{"next_session_id",next_id},{"reason","user_clear"}};
-        clear.links.correlation_id="memory-identity-boundary";
-        REQUIRE(recorder->Record(clear,tr::Durability::PowerLoss).status==tr::RecordReceipt::Status::Committed);
-        REQUIRE(recorder->FinishRun(tr::EventKind::RunCompleted,"clear",tr::Durability::PowerLoss).status==tr::RecordReceipt::Status::Committed);
-        REQUIRE(recorder->EndSession("clear",next_id,"clean",tr::Durability::PowerLoss).status==tr::RecordReceipt::Status::Committed);
-        REQUIRE(recorder->Close().has_value());
-        auto sealed=tr::ReadSessionJson(old->session_dir()); REQUIRE(sealed.has_value()); sealed->status="closed";
-        REQUIRE(tr::WriteSessionJsonAtomic(old->session_dir(),*sealed).has_value());
-    }
-    auto recovered=std::make_unique<tr::SessionManager>(options);
-    const auto report=recovered->RecoverWorkspace(tr::ClearRecoveryPolicy::CompleteSwitch);
-    REQUIRE(report.adopted_session_id==next_id);
-    REQUIRE(recovered->active()!=nullptr); REQUIRE_FALSE(recovered->active()->is_v3());
-    REQUIRE(recovered->active()->main.has_value());
-    REQUIRE(tr::VerifyJournalFile(old->main_stream_path()).ok);
-    REQUIRE(tr::VerifyJournalFile(next->main_stream_path()).ok);
-    return lmb::runtime::testing::MemoryDurableLegacyFixtureAccess::Adopt(std::move(recovered),root);
-}
+using lmb::runtime::testing::OpenRecoveredMemoryLegacyLedger;
+
 std::vector<Json> Read(const fs::path& stream) {
     auto lines = lmb::trajectory::ReadJournalLines(stream);
     REQUIRE(lines.has_value());
@@ -225,7 +142,7 @@ struct Fixture {
     std::string session;
     explicit Fixture(bool format, const fs::path& existing_root = {}, const std::string& resume = {})
         : environment(format),v3(format),root(existing_root.empty()?FreshRoot():existing_root),
-          ledger(format?Open(root,resume):OpenRecoveredV2(root)),turns(ledger.get()),theme(lmb::cli::BuiltinTheme("plain")) {
+          ledger(format?Open(root,resume):OpenRecoveredMemoryLegacyLedger(root)),turns(ledger.get()),theme(lmb::cli::BuiltinTheme("plain")) {
         REQUIRE((ledger->v3_main_writer()!=nullptr)==v3);
         session=ledger->session_id();
         if (v3) {

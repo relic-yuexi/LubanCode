@@ -5,6 +5,9 @@
 
 #include <chrono>
 #include <utility>
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+#include "app/bypass_worker_test_hooks.hpp"
+#endif
 
 #include "app/session_title.hpp"  // RefineSessionTitle
 #include "runtime/trajectory_session.hpp"  // TrajectoryBypassBridge(Token 账本单 A1)
@@ -42,30 +45,30 @@ bool SessionTitleRefiner::Start(Inputs&& inputs) {
     }
     auto shared = std::make_shared<Shared>();
     shared->generation = inputs.generation;
-    // 闭包只持值与 shared 槽:不引用本对象,detach 晚归也不悬垂。
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+    auto bypass_hook = testing::SnapshotBypassWorkerHook();
+#endif
+    std::unique_ptr<agent::LoopBoundaryRecorder> bypass;
+    if (inputs.trajectory != nullptr) {
+        runtime::TrajectoryTurnBridge::Identity identity{inputs.provider, inputs.trajectory_wire, "host"};
+        bypass = inputs.trajectory->NewLeasedBypassRecorder(std::move(identity), accounting::RequestPurpose::TitleRefine);
+    }
+    // Proxy/value captures own the callback gate. The ledger retires its real bridge before teardown.
     worker_ = std::thread(
-        [shared, backend = std::move(inputs.backend), model = std::move(inputs.model),
+        [shared,
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+         bypass_hook = std::move(bypass_hook),
+#endif
+         backend = std::move(inputs.backend), model = std::move(inputs.model),
          effort = std::move(inputs.effort), first_query = std::move(inputs.first_query),
-         trajectory = inputs.trajectory, trajectory_wire = std::move(inputs.trajectory_wire),
-         provider = std::move(inputs.provider), timeout_secs = inputs.timeout_secs]() mutable {
+         bypass = std::move(bypass), timeout_secs = inputs.timeout_secs]() mutable {
+            // This private hook only holds a test latch; Title exception cleanup is separate.
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+            if (bypass_hook) bypass_hook(testing::BypassWorkerPurpose::Title, testing::BypassWorkerPhase::BeforeSampling);
+#endif
             Outcome outcome;
             outcome.model = model;
             outcome.generation = shared->generation;
-            // Token 账本单 A1:本线程自铸旁路桥(purpose=title_refine)。
-            // recorder 提交全程持锁,与主线程的写在盘上串行;桥随本栈
-            // 生灭,detach 晚归也不悬垂。没接轨迹(空)一笔不落。
-            // purpose 必须显式传 TitleRefine(标题触发提前单确诊):v3 工厂
-            // 自 T11-A 加 purpose 门起只认 memory_extract/title_refine,漏传
-            // 走默认 OtherHostRequest 会被拒成 nullptr——采样本体照发,但
-            // title_refine 的 prompt/assistant 消息与 prepared/usage 细账
-            // 一笔不落,v3 账本里看不到精炼的痕迹。
-            std::unique_ptr<lubancode::runtime::TrajectoryBypassBridge> bypass;
-            if (trajectory != nullptr) {
-                lubancode::runtime::TrajectoryTurnBridge::Identity identity{provider, trajectory_wire,
-                                                                            "host"};
-                bypass = trajectory->NewBypassBridge(
-                    std::move(identity), lubancode::accounting::RequestPurpose::TitleRefine);
-            }
             // 看门狗(取消误报 ESC 单 Bug 1 后收编):超时交给 SampleModel
             // 的合并取消口(预算照进 timeout_secs,deadline 到点归因
             // local_deadline 并带预算数),会话拆除仍走 RequestCancel 的外

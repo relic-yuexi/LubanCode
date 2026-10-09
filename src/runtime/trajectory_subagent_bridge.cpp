@@ -287,7 +287,7 @@ TrajectorySessionLedger::SpawnSubagentV3(const std::string& parent_call_id,
         failure.error_code = std::move(code);
         failure.detail = std::move(detail);
         failure.retryable = retryable;
-        io_errors_.push_back("subagent.start_failed:" + failure.stage + ":" + failure.error_code);
+        io_errors_->Append("subagent.start_failed:" + failure.stage + ":" + failure.error_code);
         platform::LogSink::Instance().Error(
             "trajectory", "v3 子账开张失败[" + failure.stage + "]: " + failure.error_code +
                               (failure.detail.empty() ? std::string() : " (" + failure.detail + ")"));
@@ -371,7 +371,7 @@ TrajectorySessionLedger::SpawnSubagentV3(const std::string& parent_call_id,
     auto child_bridge = std::make_unique<TrajectoryTurnBridge>(
         child_writer_owner.get(), child_books.get(), std::move(identity_scope),
         std::move(identity));
-    child_bridge->SetErrorSink(&io_errors_);
+    child_bridge->SetErrorSink(io_errors_);
     if (impl_->telemetry_wake != nullptr) {
         child_bridge->SetCommitWake(impl_->telemetry_wake, child_ref.journal_path);
     }
@@ -423,7 +423,7 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
                 (void)trajectory::DiscardUncommittedStream(*stream_path);
             }
         }
-        io_errors_.push_back("subagent.start_failed:" + failure.stage + ":" + failure.error_code);
+        io_errors_->Append("subagent.start_failed:" + failure.stage + ":" + failure.error_code);
         platform::LogSink::Instance().Error(
             "trajectory", "子账开张失败[" + failure.stage + "]: " + failure.error_code +
                               (failure.detail.empty() ? std::string() : " (" + failure.detail + ")"));
@@ -580,7 +580,7 @@ void TrajectorySessionLedger::NoteSubagentStartFailed(const SubagentSpawnFailure
         const std::string note =
             "subagent.run.start_failed:" + receipt.error_code +
             (receipt.error_message.empty() ? std::string() : " (" + receipt.error_message + ")");
-        io_errors_.push_back(note);
+        io_errors_->Append(note);
         platform::LogSink::Instance().Error("trajectory", "子账开张失败事件落不了: " + note);
         return;
     }

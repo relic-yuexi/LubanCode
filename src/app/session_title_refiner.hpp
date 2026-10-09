@@ -3,7 +3,7 @@
 // Start 由会话在首问主回合铸号后(v3 场,触发时机提前单:发车即起飞,
 // BeginTurn 后首模型请求前)或收口后的空闲边界(v2 场兜底)调。v3 场
 // 回合内起飞不撞账:旁路桥的 title_refine 请求归首问主回合号
-//(active_main_turn_id),v3 无轮账互斥,V3Writer 提交全程持锁,与主
+//(前台冻结 active_main_turn_id),v3 无轮账互斥,V3Writer 提交全程持锁,与主
 // turn 的写在盘上串行;HTTP 侧走独占裸 backend(ModelRouterService 的
 // RouteDetached 造,不与主会话共用 client,不抢流式回调)、只发一次
 // cheap 采样——首问截段 600 字节、max_tokens=24、30 秒看门狗
@@ -17,13 +17,14 @@
 // 拿它当唤醒条件会起飞即醒、空转到收货——唤醒只认 Ready。
 //
 // 结果只经 TakeFinished 出去:主线程记账/落盘/上屏全在主线程——后台线程
-// 不碰会话任何共享态,除自己的 shared 槽外只引用自持的值。generation 是
+// 持 shared 槽、值材料与可撤销旁路代理；每次回调借场次短门。generation 是
 // 起飞时的标题代数:人工 /title、/clear、/resume 都会翻代,迟到的结果由
 // 调用方对代丢弃(usage 仍照记,账是真的)。
 //
 // 退出兜底照子代理的老方子(见 AgentTool 析构):RequestCancel 拉原子
 // 取消旗,析构取消 + 有界等待,等不到就 detach 放行——闭包自持 shared
-// 状态,晚归不悬垂,也不冻退出。
+// 状态与代理；场次实际退借后晚归不摸旧 writer。detach 不表示 Backend 停止。
+// 标题线程创建与后台执行异常总出口另有欠账，本片不宣称这些也齐了。
 #pragma once
 
 #include <atomic>
@@ -52,10 +53,9 @@ public:
         std::string effort;         // 路由档位;空 = 精炼请求自带最低档
         std::string first_query;    // 首问原文(线程内截 600 字节)
         std::uint64_t generation = 0;  // 起飞时的标题代数,落地对代
-        // Token 账本单 A1(旁路落账):flag 开的会话递账本,精炼请求在
-        // worker 线程自铸旁路桥落 Journal(purpose=title_refine)。
-        // recorder 提交全程持锁,后台线程与主线程的写在盘上串行;线程
-        // 只持这只裸指针+值拷贝,不引用会话其它共享态。空 = 没接轨迹。
+        // 仅供前台 Start 短借。调用方保住账本直到 Start 返回；前台冻结
+        // 实际首问轮，绑定 purpose=title_refine 的可撤销代理。worker
+        // 不捕获此指针。空表示没接轨迹，绑定失败不能当无账发送许可。
         lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
         std::string trajectory_wire;  // 桥 identity 的渠道名(与主 turn 桥同源)
         std::string provider;         // 精炼路由的 provider(桥 identity)

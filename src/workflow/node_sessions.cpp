@@ -55,7 +55,7 @@ public:
                           std::unique_ptr<runtime::V3SessionBooks> books,
                           std::unique_ptr<runtime::TrajectoryTurnBridge> bridge,
                           std::string run_id,
-                          std::shared_ptr<std::vector<std::string>> errors)
+                          std::shared_ptr<runtime::TrajectoryDiagnostics> errors)
         : writer_(std::move(writer)), books_(std::move(books)), bridge_(std::move(bridge)),
           run_id_(std::move(run_id)), errors_(std::move(errors)) {}
 
@@ -86,7 +86,7 @@ private:
     std::unique_ptr<runtime::V3SessionBooks> books_;
     std::unique_ptr<runtime::TrajectoryTurnBridge> bridge_;
     std::string run_id_;
-    std::shared_ptr<std::vector<std::string>> errors_;  // 桥写它,opener 同份读
+    std::shared_ptr<runtime::TrajectoryDiagnostics> errors_;  // 桥写它,opener 读加锁快照
     std::string terminal_hash_;
     bool finished_ = false;
 };
@@ -121,7 +121,7 @@ std::vector<std::string> WorkflowNodeSessions::recent_errors() const {
     std::lock_guard<std::mutex> lock(errors_mutex_);
     std::vector<std::string> out = io_errors_;
     for (const auto& sink : session_errors_) {
-        for (const auto& note : *sink) {
+        for (const auto& note : sink->Snapshot()) {
             out.push_back(note);
         }
     }
@@ -331,10 +331,10 @@ std::expected<NodeSessionSpawn, runtime::WorkflowSpawnFailure> WorkflowNodeSessi
     auto bridge = std::make_unique<runtime::TrajectoryTurnBridge>(
         writer_owner.get(), books.get(), std::move(identity_scope), std::move(bridge_identity));
     // 每场一份错误汇(shared_ptr 保活:桥在 worker 线程写,opener 聚合读;
-    // 并发各写各的份,run 收口后读无竞)。诊断留在 opener,recent_errors
+    // 各份诊断自带锁,在途快照也可读)。诊断留在 opener,recent_errors
     // 聚合给测试与 /doctor。
-    auto session_errors = std::make_shared<std::vector<std::string>>();
-    bridge->SetErrorSink(session_errors.get());
+    auto session_errors = std::make_shared<runtime::TrajectoryDiagnostics>();
+    bridge->SetErrorSink(session_errors);
 
     NodeSessionSpawn out;
     out.ref.session_id = session_id;

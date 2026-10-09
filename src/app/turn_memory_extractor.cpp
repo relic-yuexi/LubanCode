@@ -10,6 +10,7 @@
 
 #ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
 #include "app/turn_memory_extractor_test_hooks.hpp"
+#include "app/bypass_worker_test_hooks.hpp"
 #endif
 
 #include "accounting/purpose.hpp"  // RequestPurpose(旁路桥的 purpose 门)
@@ -21,6 +22,7 @@ namespace testing {
 namespace {
 thread_local std::function<void()> worker_start_hook;
 thread_local MemoryWorkerExecutionHook worker_execution_hook;
+thread_local BypassWorkerHook bypass_worker_hook;
 }
 std::function<void()> ExchangeMemoryWorkerStartHook(std::function<void()> hook) {
     return std::exchange(worker_start_hook, std::move(hook));
@@ -28,6 +30,10 @@ std::function<void()> ExchangeMemoryWorkerStartHook(std::function<void()> hook) 
 MemoryWorkerExecutionHook ExchangeMemoryWorkerExecutionHook(MemoryWorkerExecutionHook hook) {
     return std::exchange(worker_execution_hook, std::move(hook));
 }
+BypassWorkerHook ExchangeBypassWorkerHook(BypassWorkerHook hook) {
+    return std::exchange(bypass_worker_hook, std::move(hook));
+}
+BypassWorkerHook SnapshotBypassWorkerHook() { return bypass_worker_hook; }
 }  // namespace testing
 #endif
 namespace {
@@ -86,20 +92,47 @@ bool TurnMemoryExtractor::Start(Inputs&& inputs) {
     static_assert(std::is_nothrow_move_assignable_v<ExtractionError>);
     static_assert(std::is_nothrow_move_assignable_v<std::optional<Outcome>>);
 #ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+    auto bypass_hook = testing::SnapshotBypassWorkerHook();
     auto work_hook = testing::worker_execution_hook;  // Worker owns this snapshot, not TLS.
 #endif
-    // 闭包不引用本对象；值材料与 shared 槽自持。旁路仍借 ledger，
-    // 这份借用尚欠可撤销口，不能凭 shared 槽宣称 detach 晚归安全。
+    // Freeze and bind the real recorder while the front thread still owns this scene.
+    std::unique_ptr<agent::LoopBoundaryRecorder> bypass;
+    // Binding moved to the front thread. Preserve the former worker-setup
+    // exception receipt instead of introducing a new unhandled CLI exit.
+    auto fail_binding = [&]() noexcept {
+        outcome.error = std::move(worker_failure);
+        shared->outcome = std::move(outcome);
+        bypass.reset();
+        inputs.backend.reset();  // The accepted setup failure owns disposal too.
+        shared->done.store(true);
+        shared_ = std::move(shared);
+    };
+    try {
+        if (inputs.trajectory != nullptr) {
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+            if (bypass_hook) bypass_hook(testing::BypassWorkerPurpose::Memory,
+                                         testing::BypassWorkerPhase::BeforeBinding);
+#endif
+            runtime::TrajectoryTurnBridge::Identity identity{inputs.provider, inputs.trajectory_wire, "host"};
+            bypass = inputs.trajectory->NewLeasedBypassRecorder(std::move(identity), accounting::RequestPurpose::MemoryExtract);
+        }
+    } catch (const std::exception&) {
+        fail_binding();
+        return true;
+    } catch (...) {
+        fail_binding();
+        return true;
+    }
+    // The closure owns its proxy. Each callback borrows through the revocable scene gate.
+    // Backend execution remains outside that gate; detach is not proof it has stopped.
     auto run =
         [shared, outcome = std::move(outcome), worker_failure = std::move(worker_failure),
 #ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
-         work_hook = std::move(work_hook),
+         work_hook = std::move(work_hook), bypass_hook = std::move(bypass_hook),
 #endif
          backend = std::move(inputs.backend), model = std::move(inputs.model),
          effort = std::move(inputs.effort), system_prompt = std::move(inputs.system_prompt),
-         transcript = std::move(inputs.transcript),
-         trajectory = inputs.trajectory, trajectory_wire = std::move(inputs.trajectory_wire),
-         provider = std::move(inputs.provider)]() mutable noexcept {
+         transcript = std::move(inputs.transcript), bypass = std::move(bypass)]() mutable noexcept {
             auto fail = [&]() noexcept {
                 outcome.ok = false;
                 outcome.extraction = MemoryExtraction{};
@@ -108,23 +141,9 @@ bool TurnMemoryExtractor::Start(Inputs&& inputs) {
             };
             try {
 #ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+                if (bypass_hook) bypass_hook(testing::BypassWorkerPurpose::Memory, testing::BypassWorkerPhase::BeforeSampling);
                 if (work_hook) work_hook(testing::MemoryWorkerPhase::BeforeWork);
 #endif
-                // Token 账本单 A1:本线程自铸旁路桥(purpose=memory_extract)。
-                // recorder 提交全程持锁,与主线程的写在盘上串行;桥随本栈
-                // 生灭；所借 ledger、writer、簿和 observer 仍须活着。
-                // 可撤销借用另交。没接轨迹(空)一笔不落。
-                // purpose 必须显式传 MemoryExtract:v3 工厂的 purpose 门只认
-                // memory_extract/title_refine 一类白名单,漏传走默认
-                // OtherHostRequest 会被拒成 nullptr——采样本体照发,但抽取的
-                // prompt/assistant 消息与 prepared/usage 细账一笔不落。
-                std::unique_ptr<lubancode::runtime::TrajectoryBypassBridge> bypass;
-                if (trajectory != nullptr) {
-                    lubancode::runtime::TrajectoryTurnBridge::Identity identity{provider, trajectory_wire,
-                                                                                "host"};
-                    bypass = trajectory->NewBypassBridge(
-                        std::move(identity), lubancode::accounting::RequestPurpose::MemoryExtract);
-                }
                 // 抽取墙钟(§10.3):发起到采样返回的墙钟,与旧同步路同一跨度
                 //(旧在主线程量,晚不了多少;usage 的 duration 在 accounting 里)。
                 const auto extract_started = std::chrono::steady_clock::now();
