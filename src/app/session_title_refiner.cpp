@@ -4,15 +4,26 @@
 #include "app/session_title_refiner.hpp"
 
 #include <chrono>
+#include <exception>
+#include <type_traits>
 #include <utility>
 #ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
 #include "app/bypass_worker_test_hooks.hpp"
+#include "app/session_title_refiner_test_hooks.hpp"
 #endif
 
 #include "app/session_title.hpp"  // RefineSessionTitle
 #include "runtime/trajectory_session.hpp"  // TrajectoryBypassBridge(Token 账本单 A1)
 
 namespace lubancode::app {
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+namespace testing {
+namespace { thread_local std::function<void()> title_start_hook; }
+std::function<void()> ExchangeTitleWorkerStartHook(std::function<void()> hook) {
+    return std::exchange(title_start_hook,std::move(hook));
+}
+}
+#endif
 namespace {
 // 退出兜底的有界等待窗:取消旗先行,后端听话就快回;真挂死(cpr 卡死
 // 那类)到点 detach 放行,不冻退出——与 AgentTool 析构同一副方子。看门狗
@@ -45,16 +56,43 @@ bool SessionTitleRefiner::Start(Inputs&& inputs) {
     }
     auto shared = std::make_shared<Shared>();
     shared->generation = inputs.generation;
+    Outcome start_failure;
+    start_failure.model = inputs.model;
+    start_failure.generation = inputs.generation;
+    start_failure.error = "标题精炼线程未能启动";
+    shared->outcome = std::move(start_failure);
+    Outcome binding_failure;
+    binding_failure.model = inputs.model;
+    binding_failure.generation = inputs.generation;
+    binding_failure.error = "标题精炼旁路绑定失败";
+    static_assert(std::is_nothrow_move_assignable_v<std::optional<Outcome>>);
 #ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
     auto bypass_hook = testing::SnapshotBypassWorkerHook();
 #endif
     std::unique_ptr<agent::LoopBoundaryRecorder> bypass;
-    if (inputs.trajectory != nullptr) {
-        runtime::TrajectoryTurnBridge::Identity identity{inputs.provider, inputs.trajectory_wire, "host"};
-        bypass = inputs.trajectory->NewLeasedBypassRecorder(std::move(identity), accounting::RequestPurpose::TitleRefine);
+    try {
+        if (inputs.trajectory != nullptr) {
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+            if (bypass_hook) bypass_hook(testing::BypassWorkerPurpose::Title,testing::BypassWorkerPhase::BeforeBinding);
+#endif
+            runtime::TrajectoryTurnBridge::Identity identity{inputs.provider, inputs.trajectory_wire, "host"};
+            bypass = inputs.trajectory->NewLeasedBypassRecorder(std::move(identity), accounting::RequestPurpose::TitleRefine);
+        }
+    } catch (const std::exception&) {
+        shared->outcome = std::move(binding_failure);
+        inputs.backend.reset();
+        shared->done.store(true);
+        shared_ = std::move(shared);
+        return true;
+    } catch (...) {
+        shared->outcome = std::move(binding_failure);
+        inputs.backend.reset();
+        shared->done.store(true);
+        shared_ = std::move(shared);
+        return true;
     }
     // Proxy/value captures own the callback gate. The ledger retires its real bridge before teardown.
-    worker_ = std::thread(
+    auto run =
         [shared,
 #ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
          bypass_hook = std::move(bypass_hook),
@@ -74,6 +112,7 @@ bool SessionTitleRefiner::Start(Inputs&& inputs) {
             // local_deadline 并带预算数),会话拆除仍走 RequestCancel 的外
             // 部旗(升旗人申报 Internal)。本地看门狗线程退役。
             lubancode::agent::BackgroundCallAccounting accounting;
+            outcome.refinement_invoked = true;
             const auto title = RefineSessionTitle(*backend, model, effort, first_query,
                                                   timeout_secs, &shared->cancel, &accounting,
                                                   bypass.get());
@@ -94,7 +133,17 @@ bool SessionTitleRefiner::Start(Inputs&& inputs) {
                 shared->outcome = std::move(outcome);
             }
             shared->done.store(true);  // outcome 写完才立收讫旗,主线程收货不抢跑
-        });
+        };
+    try {
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+        if (testing::title_start_hook) testing::title_start_hook();
+#endif
+        worker_ = std::thread(std::move(run));
+    } catch (const std::exception&) {
+        shared->done.store(true);
+    } catch (...) {
+        shared->done.store(true);
+    }
     shared_ = std::move(shared);
     return true;
 }
@@ -131,4 +180,11 @@ bool SessionTitleRefiner::Ready() const {
     return shared_ != nullptr && shared_->done.load();
 }
 
+bool RecordTitleRefinementCall(agent::ModelUsageLedger& ledger,
+                               const SessionTitleRefiner::Outcome& outcome) {
+    if (!outcome.refinement_invoked) return false;
+    ledger.Record(agent::ModelRole::Cheap,outcome.model,outcome.accounting.usage,
+                  outcome.accounting.duration_ms,outcome.accounting.usage_reported);
+    return true;
+}
 }  // namespace lubancode::app
