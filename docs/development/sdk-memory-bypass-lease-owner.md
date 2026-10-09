@@ -22,6 +22,6 @@ Memory 前台绑定捕获标准与未知异常，保住 worker_execution_failed 
 
 验收备十六案：冻结触发身份、发送前关闭、已发送晚归、move、析构、Observer 同地址更换、同 ID continuation、绑定异常、真实 Clear、恢复早拒、Clear 第 1/2/4 步失败、绑定与退借并发、真实诊断与快照并发、clear.busy 和 Managed 早拒。Memory 与 Title 均走实际入口；V2 用真实旧盘与 RecoverWorkspace，普通 V3 用真实 Open。Managed 用实际 Reserve / PublishOwnership / Finish / LaunchManagedSession，核归属原件、活锁与真实 owner，再由共用测试 friend 组装内部账本。Local Clear 拒绝后旧 worker 照跑，Journal 与归属侧记不得变场；这只证存储和借用，没交公开 Managed API 或 Policy 授权。诊断案分 V3 主轮/子 Agent/旁路和 V2 Workflow node 两组，不套用 V3 缺失的旧 Workflow 工厂。既有 WorkflowNodeSessions 独立 V3 节点也须改收共享诊断容器、读加锁快照，不能保留裸 vector 调用去凑类型。旧 Workflow 来源须全跑；这处调用适配不冒称十六案已专门证明独立 V3 节点的故障并发。
 
-十六案十六标记须在 Windows/Linux/macOS 同源全 CLI 原件里出现；SDK Lua ON/OFF、九套移位消费、ASan 旧名单不得删减。实际 TSan 须跑旧 Workflow 来源和新增 source，并核主桥、子桥、Workflow、旁路、账本、Memory、Title、证明 source、管理器、Managed 预留和归属，以及独立 Workflow 节点场十二份编译命令确有插桩。跳过不算通过。禁止本地 CI、构建、原生或 HTTP 验收。
+十六案十六标记须在 Windows/Linux/macOS 同源全 CLI 原件里出现；SDK Lua ON/OFF、九套移位消费、ASan 旧名单不得删减。实际 TSan 须跑旧 Workflow 来源和新增 source，并核主桥、子桥、Workflow、旁路、账本、Memory、Title、证明 source、管理器、Managed 预留和归属、独立 Workflow 节点场，以及本次改动的 V3 writer，共十三份编译命令确有插桩。旧 Workflow 登记含一份已退役空册，不拿零案登记冒称集成测试；活案仍逐册核实际执行。跳过不算通过。禁止本地 CI、构建、原生或 HTTP 验收。
 
 未齐部分照实留账：本片全部案例尚待原生证明；sent 后物理交接、Title 前台绑定与线程总出口、公开 Backend 回调及捕获对象析构重入还没补齐。主轮/子 Agent/Workflow 其他 raw 借用和 V3 Workflow 工厂另交。此片不凭 Journal 撤销门宣称公开自动 Memory owner 已完成。
