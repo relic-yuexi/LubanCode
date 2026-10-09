@@ -32,6 +32,6 @@ CLI 分角色总账也不得补造调用。内部 Outcome 末尾添 extraction_i
 
 新增 `unit.app.memory_extractor_start`，五案分别留下 standard、nonstandard、restart、gates、settlement 标记。两道原 ASan selector 与首轮 required 名单都添这册；执行门核五案及五条实际标记，不能只增登记。与 #339 原件比较，全量名单只能增这条，ASan 来源只能增这册，CASE 只增五案。最终数量取远端原件，不拿预期冒充实跑。
 
-故障口只在 lubancode_app 的 BUILD_TESTING 构建中定义，线程本地、作用域恢复。SDK 不装配 app，普通宿主构建无故障定义。测试口不进入公开 include，SDK 安装材料门也拒带这份私有头。
+故障口只在 lubancode_app 的 LUBANCODE_BUILD_TESTING 构建中定义，线程本地、作用域恢复。SDK 不装配 app，普通宿主构建无故障定义。测试口不进入公开 include，SDK 安装材料门也拒带这份私有头。
 
 真实 CLI 悬账收口须走 ProjectMemory、TrajectorySessionLedger 与 SettleTurnMemory，不只测手拼 Outcome。同册五案还要走实际分角色收账 helper：启动失败零调用，恢复成功记真实 usage，实际 Backend transport 失败未报 usage 也计一次调用。保住原抽取、候审、队列、取消、晚归与换代案。Windows/Linux/macOS 全 CLI、SDK Lua ON/OFF、移位安装消费及 ASan 同源远端原件齐了才交付。禁止本地 CI、configure、build、原生或 HTTP 验收。
