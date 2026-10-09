@@ -93,7 +93,7 @@ struct SampleResult {
     api::Error error;  // !ok 时:发送失败原样(kind 保留),流内错折成 Api
     std::string text;  // assistant 正文(TextBlock 串,半截也保留)
     api::Usage usage;  // assembler 的账(MessageDone 为准)
-    // 服务端是否真回报过 usage(五项全零 = 没给,不拿 0 冒充)。
+    // 明报位优先；旧 Backend 未置位时仍兼容五项非零推断。明报全零不算缺位。
     bool usage_reported = false;
     // provider 在 MessageStart 一类帧里回的外部号(§6.1.2;空 = 没回)。
     // 只作对账,不顶 local request id。
@@ -107,6 +107,9 @@ struct SampleResult {
     // 是复检后手,不影响 ok——失败怎么收场由调用方定(旧六处各有兜底)。
     bool schema_ok = true;
     std::string schema_error;
+    bool cache_read_reported = false;
+    bool cache_creation_reported = false;
+    std::string usage_anomaly;
 };
 
 // 同步采样。看门狗启动与 Backend 三口异常折成 SampleResult；线程先 join 再返回。

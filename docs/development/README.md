@@ -8,7 +8,7 @@
 - [SDK 开场线程失败清理](sdk-opening-start-cleanup.md)：真实开场失手、资源退场与 Shutdown 交错；#336 同源三平台已验。
 - [SDK 采样参数与终止原因](sdk-model-sampling.md)：真实请求与回复；#337 同源三平台已验。
 - [旁路采样看门狗关场](sdk-sampling-lifetime.md)：启动失败、Backend 异常与真实线程收讫；#338 同源三平台已验。
-- [Memory 抽取共享底座](sdk-memory-extraction-core.md)：共用同步抽取、保住来源与 CLI 入口；先交合同，待实施验收。
+- [Memory 抽取共享底座](sdk-memory-extraction-core.md)：共用同步抽取、保住来源与 CLI 入口；合同先交，代码已迁，待远端验收。
 - [SDK main Action 中间件合同](sdk-action-middleware.md)
 - [SDK 显式 Skills 合同](sdk-skills.md)
 - [SDK 项目 Memory 只读召回合同](sdk-memory-recall.md)
