@@ -616,8 +616,8 @@ TEST_CASE("Memory bypass owner: actual clear revokes the old scene before rebind
         REQUIRE(cleared.error_code.empty()); CHECK(cleared.active_switched);
         CHECK(cleared.old_session_id == old_id); CHECK(cleared.new_session_id != old_id);
         CHECK_FALSE(old.Ready());  // Clear did not join the held physical Backend.
-        REQUIRE(f.ledger->v3_main_writer() != nullptr); // Real V2 clear also creates V3.
-        f.stream = f.ledger->session_dir()/(f.ledger->session_id()+".jsonl");
+        REQUIRE((f.ledger->v3_main_writer() != nullptr) == modern);
+        f.stream = f.ledger->session_dir()/(modern ? f.ledger->session_id()+".jsonl" : "main.jsonl");
         f.Input("turn-after-clear");
         const auto old_bytes = Bytes(old_stream), new_bytes = Bytes(f.stream);
         gate->Release(); old.Collect(true); CheckProbe(old_probe,1);
