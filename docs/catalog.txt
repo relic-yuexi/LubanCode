@@ -257,3 +257,4 @@ DOC development/sdk-sampling-lifetime.md
 DOC development/sdk-memory-extraction-core.md
 DOC development/sdk-memory-worker-start-cleanup.md
 DOC development/sdk-memory-worker-exception-cleanup.md
+DOC development/sdk-memory-durable-trigger-identity.md

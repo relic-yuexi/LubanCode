@@ -42,7 +42,16 @@ TSan 本片跳过，不计通过。未跑本地 CI。同步共享底座已交，
 79663 断言过；750 份测试源码、私有附件与配置输入已核，名单不覆盖全部生产源码。
 77 册产物、1940 份原件与封存副本逐大小和 SHA256 核过。TSan 本片跳过，不计通过。
 未跑本地 CI。后台异常、可撤销旁路借用、持久回合身份与用量来源仍欠账。
-下一片[Memory 后台异常收场](sdk-memory-worker-exception-cleanup.md) 先交合同，尚未交付。
+[Memory 后台异常收场](sdk-memory-worker-exception-cleanup.md) 已随
+[#341](https://github.com/relic-yuexi/LubanCode/pull/341) 合入 `16d02a22`，与验收源
+`db592938` 同树。Windows/Linux/macOS 全 CLI 各 800/798/801 项均过，各只添本片
+异常 source，旧名单未减。SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 案及
+各 15 次真实 HTTP 均过；新增七案七标记在三平台全量与 ASan 均实际执行。
+ASan 176 来源、1925 CASE、79929 断言过；751 份测试及 profile 输入与 Git 原件
+相符，这份名单不指生产依赖闭包。74 份产物、1925 份原件逐大小
+和 SHA256 核过。TSan 本片跳过，不计通过。未跑本地 CI。
+下一片[Memory 持久触发身份](sdk-memory-durable-trigger-identity.md) 先交合同，尚未交付。
+可撤销旁路借用、完整来源与公开自动 Memory owner 仍欠账。
 CLI 主入口与 one-shot 尚未迁完，SDK 与 CLI 全面对齐仍欠账。下文保留历史原账。
 
 核查日期：2026-10-06。已合基线为功能分支 `fd76b6a5`；[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 的已验源 `c522a51c` 与合入头同树。
