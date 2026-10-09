@@ -12,6 +12,8 @@
 
 远端失败复核补充：V2 真实桥若已开内部旁路轮，退借须先给这只轮一次 `turn.cancelled`，原因 `bypass_recording_retired`，再销毁桥。它只证明宿主撤销本轮记账，不冒称 Backend 已停止或物理响应已取消；不伪造模型终态。收轮仍在短门内，旧 recorder 与 Observer 尚活；真实提交失败照实留诊断。V3 没有这套轮终态，不加 V2 行。桥析构仍不碰旧 ledger。冻结主轮的 Memory prepared 须把 `parentTurnId` 写进真实事件信封，转写 user 的同号不能替它作证。
 
+V2 同场重绑还须避开旧桥局部计数器重头撞号。前台以真实 recorder 下一序号和 ledger 内绑定序号冻结一份桥命名空间，轮、请求、输入、输出均从它发号；move 保留绑定序号，Observer 更换不清零。恢复读原盘序号，不凭新对象局部计数重用已落身份。
+
 Clear 的忙碌、Managed 等前置拒绝和新侧准备先走。只有管理器真正进入 CancelActiveTurn 才退旧借；早拒不可误伤原场。成功切换造新 owner；毁旧场后失败不准盲目复开。第 2 步失败尚未取消，旧桥抵真实 broken writer 并留诊断；第 4 步失败已经退借，晚代理不再触桥。one_shot 拒绝属于恢复源预检，当前 Clear 没有这条门。
 
 Memory 前台绑定捕获标准与未知异常，保住 worker_execution_failed 终态、model/task/generation/turn 和一次收货；Backend 未调用便释放。已归还用量照实保留，抽取 Run 入口计数仍按旧语义，不能改称物理 Backend 调用次数。诊断由共享容器持有，Append、原有 128 条条件追加及 Snapshot 共锁；不替其他入口添新限额，也不许拿新容器遮住 I/O 失败。
