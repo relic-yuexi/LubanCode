@@ -59,6 +59,7 @@ enum class ExtractionErrorCode {
     DeadlineTimeout,
     RouteMiss,        // cheap 路由找不到 provider(旧稳定码 route_miss)
     WorkerStartFailed,  // Host accepted extraction, but its worker was not created.
+    WorkerExecutionFailed,  // An accepted host worker threw outside normal extraction results.
 };
 const char* ExtractionErrorCodeName(ExtractionErrorCode code);
 
