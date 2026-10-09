@@ -59,8 +59,13 @@ ASan 177 来源、1932 CASE、81050 断言过；
 752 份测试及 profile 输入核对 Git 原件，不指生产依赖闭包。
 74 份产物、1925 份原件逐大小和 SHA256 核过。
 TSan 本片跳过，不计通过。未跑本地 CI。
-下一片[旁路短借 owner](sdk-memory-bypass-lease-owner.md) 先交合同，尚未交付。
-可撤销旁路借用、完整来源与公开自动 Memory owner 仍欠账。
+[旁路短借 owner](sdk-memory-bypass-lease-owner.md) 已随 #343 合入 `bf465cb7`，与验收源 `f5cfdbd0` 同树。
+Windows/Linux/macOS 全 CLI 各 802/800/803 项均过，旧名单保留；十六案十六标记在三平台和 ASan 齐。
+ASan 178 来源、1948 CASE、89295 断言过；753 份测试及 profile 输入已核 Git 原件。
+SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 案及各 15 次真实 HTTP 均过。
+TSan 十五条注册均运行：十三份 Workflow 有案，一份已退役为空，另有 owner 十六案十六标记；十三条实际编译路径已核线程插桩，空来源不算有效测试。75 份产物、1938 份原件逐大小和 SHA256 已核。未跑本地 CI。
+下一片[标题精炼启动失败清理](sdk-title-start-cleanup.md) 先交合同，尚未交付。
+sent 后物理交接、完整来源、公开自动 Memory owner 与 CLI 装配仍欠账。
 CLI 主入口与 one-shot 尚未迁完，SDK 与 CLI 全面对齐仍欠账。下文保留历史原账。
 
 核查日期：2026-10-06。已合基线为功能分支 `fd76b6a5`；[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 的已验源 `c522a51c` 与合入头同树。
