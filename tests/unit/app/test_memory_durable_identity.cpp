@@ -250,9 +250,14 @@ struct Fixture {
         bool found=false;
         for (const auto& row:Read(stream)) {
             if (v3) {
+                // The first V3 system message legitimately has turnId:null.
+                // Only actual user inputs require a non-null string identity.
                 if (row.value("type",std::string())=="message" &&
-                    row.value("turnId",std::string())==turn &&
-                    row.at("message").value("role",std::string())=="user") found=true;
+                    row.at("message").value("role",std::string())=="user") {
+                    REQUIRE(row.contains("turnId"));
+                    REQUIRE(row.at("turnId").is_string());
+                    if (row.at("turnId").get<std::string>()==turn) found=true;
+                }
             } else if (row.value("kind",std::string())=="input.received" &&
                        row.value("turn_id",std::string())==turn) found=true;
         }
