@@ -17,3 +17,7 @@
 验收补记，2026-10-09：候选 `4d224179` 的 Windows 全 CLI 有 801 来源，800 通过；`unit.runtime.child_history_adoption` 在默认 180 秒处超时。最后阶段为 scope-reuse 的真实 Run 入口，不能凭这个入口断言内部死锁。该候选持久身份七案七标记实际通过；全套失败原件另存，整片未验收。
 
 同次原件中，SDK focused 跑的是同一份 `test_child_history_adoption.cpp`，八案完整通过，用时 270.773 秒，既有预算 300 秒。后续只把 Windows CLI 这份实际多场 Journal / child 链来源的 CTest 预算对齐 300 秒；其他来源和平台照旧。命令、八案、断言、真实 writer、事件和耐久条件不得删减，不以跳过或缩小来源换绿灯。修复后重新收三平台同源全量原件，不能挪用旧候选绿灯。
+
+验收补记，2026-10-10：候选 `0148bc57` 的 Windows Test 已过，两份 child-history JUnit 原件均无失败，CLI 来源用时 92.4965 秒。提取器仍将 CLI 预算固定为 180 秒，拒收实际 300 秒注册，报 `Full child-history registration changed its timeout or disabled the source`；该提取步骤失败，整片仍未验收。
+
+修复先交这条补记，再让提取器依明确平台核预算：Windows CLI 只认 300 秒，POSIX CLI 只认既有 180 秒，SDK 两平台都只认 300 秒。不可改成接受任意预算，也不可只信注册表自报值。纯提取证明保留全部旧案，补跨平台借错预算的拒收；真实八案、断言、命令、阶段配对、成功标记及坏原件留存检查均保留。禁止本地执行这些 CI 门或测试，修后换新源重新收三平台远端原件。
