@@ -65,6 +65,8 @@ ASan 178 来源、1948 CASE、89295 断言过；753 份测试及 profile 输入�
 SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 案及各 15 次真实 HTTP 均过。
 TSan 十五条注册均运行：十三份 Workflow 有案，一份已退役为空，另有 owner 十六案十六标记；十三条实际编译路径已核线程插桩，空来源不算有效测试。75 份产物、1938 份原件逐大小和 SHA256 已核。未跑本地 CI。
 下一片[标题精炼启动失败清理](sdk-title-start-cleanup.md) 先交合同，尚未交付。
+#344 源 `4497cfc7` 的 Linux/macOS 全 CLI 801/804 项通过；Windows 803 项中旧 Memory 批量测试失败，标题七案通过。
+本源原件已留，未验收、未合入；先补[失败阶段诊断](sdk-memory-batch-failure-diagnostic.md)，原断言照留，新源重跑三平台。
 sent 后物理交接、完整来源、公开自动 Memory owner 与 CLI 装配仍欠账。
 CLI 主入口与 one-shot 尚未迁完，SDK 与 CLI 全面对齐仍欠账。下文保留历史原账。
 
