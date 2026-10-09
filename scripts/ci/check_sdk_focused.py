@@ -99,6 +99,7 @@ REQUIRED = {
     "sdk.focused.lubancore_owned_file_paths",
     "sdk.focused.lubancore_model_input",
     "sdk.focused.lubancore_model_sampling",
+    "sdk.focused.lubancore_sampling_lifetime",
     "sdk.focused.v3_journal_owner",
     "sdk.focused.lubancore_journal_owner",
     "sdk.focused.lubancore_journal_owner_guards",
@@ -1505,6 +1506,16 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_lifecycle":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_opening_start_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_sampling_lifetime":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            if registered["command"][1:] != ["--source-file=*test_lubancore_sampling_lifetime.cpp"]:
+                raise RuntimeError("Sampling lifetime must run the actual shared-SDK native source")
+            check_native_command(sections[0], registered["command"])
+            if int(counts[0]) != 6:
+                raise RuntimeError("Sampling lifetime requires all six actual shared-module cases")
+            for path in ("startup", "exceptions", "preflight", "gates", "isolation", "cancellation"):
+                if sections[0].splitlines().count("[sample-lifetime-path] shared-sdk " + path) != 1:
+                    raise RuntimeError("Sampling lifetime actual shared-module path missing: " + path)
         if case.attrib["name"] == "sdk.focused.lubancore_model_sampling":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             if registered["command"][1:] != ["--source-file=*test_lubancore_model_sampling.cpp"]:

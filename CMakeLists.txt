@@ -941,6 +941,9 @@ endif()
 # 消费方,拆 target 后 core/workflow 那层也直接吃,PRIVATE 会断 include 路径。
 target_link_libraries(lubancode_engine PUBLIC yaml-cpp::yaml-cpp)
 target_compile_features(lubancode_engine PUBLIC cxx_std_23)
+if(LUBANCODE_BUILD_TESTING)
+  target_compile_definitions(lubancode_engine PRIVATE LUBANCODE_PRIVATE_SAMPLE_TEST_HOOKS=1)
+endif()
 target_precompile_headers(lubancode_engine PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
 if(MSVC)
