@@ -10,6 +10,14 @@
 #include "app/memory_extract.hpp"
 #include "platform/text_encoding.hpp"
 
+#if defined(LUBANCORE_TEST_MODEL_SAMPLING)
+#include <lubancore/core.hpp>
+#include "agent/sample_model.hpp"
+#include "sdk/adapters.hpp"
+#include <iostream>
+#include <memory>
+#endif
+
 using namespace lubancode;
 
 namespace {
@@ -48,6 +56,39 @@ std::vector<api::Message> ToolRound(const std::string& tool_name, const std::str
 }
 
 }  // namespace
+
+#if defined(LUBANCORE_TEST_MODEL_SAMPLING)
+TEST_CASE("Memory extraction: actual public Backend finish reason rejects truncated JSON") {
+    struct PublicBackend final : lubancore::Backend {
+        std::string reason;
+        std::string seen_effort;
+        lubancore::Result<lubancore::ModelReply> Generate(
+            const lubancore::ModelRequest& request, lubancore::Cancellation) override {
+            seen_effort = request.reasoning_effort;
+            return lubancore::ModelReply{
+                R"({"task_type":"code","summary":"actual backend","candidates":[]})",
+                {}, lubancore::Usage{11,7}, reason};
+        }
+    };
+    const auto public_backend=std::make_shared<PublicBackend>();
+    auto adapter=lubancore::detail::AdaptBackend(public_backend);
+    for (const std::string reason : {"length","max_tokens","max_output_tokens"}) {
+        public_backend->reason=reason;
+        agent::BackgroundCallAccounting accounting;
+        const auto extraction=app::RunMemoryExtraction(*adapter,"fixture","system","actual turn",0,"low",&accounting);
+        REQUIRE_FALSE(extraction);
+        CHECK(extraction.error().code==app::ExtractionErrorCode::OutputTruncated);
+        CHECK(extraction.error().stop_reason==reason); CHECK(public_backend->seen_effort=="low");
+        CHECK(accounting.usage.input_tokens==11); CHECK(accounting.usage.output_tokens==7);
+        std::cout << "[sdk-memory-sampling-path] " << reason << '\n';
+    }
+    public_backend->reason="future-provider-stop";
+    const auto complete=app::RunMemoryExtraction(*adapter,"fixture","system","actual turn",0,"low");
+    REQUIRE(complete); CHECK(complete->summary=="actual backend");
+    public_backend->reason.clear();
+    CHECK(app::RunMemoryExtraction(*adapter,"fixture","system","actual turn",0,"low").has_value());
+}
+#endif
 
 TEST_CASE("ClassifyTaskType: 分型命中各自的侧重") {
     CHECK(app::ClassifyTaskType("帮我装一下依赖,用 conda 建环境", {}) == "config");

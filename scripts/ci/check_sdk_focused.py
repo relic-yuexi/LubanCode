@@ -98,6 +98,7 @@ except ImportError:
 REQUIRED = {
     "sdk.focused.lubancore_owned_file_paths",
     "sdk.focused.lubancore_model_input",
+    "sdk.focused.lubancore_model_sampling",
     "sdk.focused.v3_journal_owner",
     "sdk.focused.lubancore_journal_owner",
     "sdk.focused.lubancore_journal_owner_guards",
@@ -1504,6 +1505,16 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_lifecycle":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_opening_start_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_model_sampling":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            if registered["command"][1:] != ["--source-file=*test_lubancore_model_sampling.cpp"]:
+                raise RuntimeError("Sampling must run the actual complete native source")
+            check_native_command(sections[0], registered["command"])
+            if int(counts[0]) != 6:
+                raise RuntimeError("Sampling native roster must contain all six cases")
+            for path in ("defaults", "effort", "finish", "invalid-request", "invalid-reply", "errors"):
+                if sections[0].splitlines().count("[sdk-model-sampling-path] " + path) != 1:
+                    raise RuntimeError("Sampling actual path did not execute once: " + path)
         if case.attrib["name"] == "sdk.focused.lubancore_memory_blob_spi":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_memory_blob_native(sections[0], registered["command"])

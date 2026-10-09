@@ -125,6 +125,7 @@ if(TARGET luban_job_runner_client)
 endif()
 if(LUBANCODE_BUILD_SDK)
   target_link_libraries(lubancode_tests PRIVATE lubancore_sdk)
+  target_compile_definitions(lubancode_tests PRIVATE LUBANCORE_TEST_MODEL_SAMPLING=1)
   # Scoped pending/reference tests call private implementation symbols. Compile
   # the real source locally rather than exporting a new private SDK DLL ABI.
   target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/approval.cpp")

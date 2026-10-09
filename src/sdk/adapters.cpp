@@ -12,14 +12,23 @@ namespace api = lubancode::api;
 namespace tools = lubancode::tools;
 using Json = nlohmann::json;
 
+bool ValidSamplingValue(const std::string& value) {
+    return value.size() <= 256 && value.find('\0') == std::string::npos &&
+           lubancode::platform::IsValidUtf8(value);
+}
+
 // Both projection and Generate consume this conversion. In particular, these
 // JSON-valued public fields are strings: never parse them back into a guessed
 // provider shape, or invent content that the public backend never receives.
 std::expected<ModelRequest, api::Error> ConvertRequest(const api::Request& request) {
+    if (!ValidSamplingValue(request.reasoning_effort)) {
+        return std::unexpected(api::Error{api::ErrorKind::Api, "sdk.backend.invalid_reasoning_effort"});
+    }
     ModelRequest in;
     in.model = request.model;
     in.system = request.system;
     in.max_output_tokens = request.max_tokens;
+    in.reasoning_effort = request.reasoning_effort;
     for (const auto& source : request.messages) {
         Message message;
         switch (source.role) {
@@ -102,6 +111,9 @@ public:
             auto reply = backend_->Generate(*in, Cancellation{cancel});
             if (cancel && cancel->load()) return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled"});
             if (!reply) return std::unexpected(api::Error{api::ErrorKind::Api, reply.error().code + ": " + reply.error().message});
+            if (!ValidSamplingValue(reply->stop_reason)) {
+                return std::unexpected(api::Error{api::ErrorKind::Parse, "sdk.backend.invalid_stop_reason"});
+            }
             if (!lubancode::platform::IsValidUtf8(reply->text)) {
                 return std::unexpected(api::Error{api::ErrorKind::Parse, "sdk.backend.invalid_utf8"});
             }
@@ -122,7 +134,8 @@ public:
                 ++index;
             }
             api::MessageDone done;
-            done.stop_reason = reply->tool_calls.empty() ? "end_turn" : "tool_use";
+            done.stop_reason = reply->stop_reason.empty()
+                ? (reply->tool_calls.empty() ? "end_turn" : "tool_use") : reply->stop_reason;
             if (reply->usage) {
                 done.usage_reported = true;
                 done.usage.input_tokens = reply->usage->input_tokens;

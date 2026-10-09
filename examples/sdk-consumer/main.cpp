@@ -207,6 +207,25 @@ sdk::Approval ApprovalFor(const std::shared_ptr<sdk::Session>& session,
     throw std::runtime_error("approval did not arrive");
 }
 
+void SamplingBoundary(const fs::path& base) {
+    sdk::ModelRequest old_request{"old", "system", {}, {}, 19};
+    sdk::ModelReply old_reply{"text", {}, sdk::Usage{1,2}};
+    Check(old_request.reasoning_effort.empty() && old_reply.stop_reason.empty(), "old aggregate defaults changed");
+    const auto paths=Fresh(base,"sampling-boundary"); auto runtime=Runtime(paths);
+    auto options=Options(paths,[](const sdk::ModelRequest& request,sdk::Cancellation)->sdk::Result<sdk::ModelReply> {
+        Check(request.reasoning_effort.empty(), "default SDK effort changed");
+        return sdk::ModelReply{"must not publish",{},sdk::Usage{1,2},std::string(257,'x')};
+    });
+    auto session=Take(runtime->OpenSession(std::move(options)),"sampling boundary open");
+    const auto receipt=Take(session->Submit("sampling-boundary", "inspect finish reason"),"sampling boundary submit");
+    const auto operation=Finished(session,receipt);
+    Check(operation.state==sdk::OperationState::Failed &&
+          operation.error.find("sdk.backend.invalid_stop_reason")!=std::string::npos,
+          "actual installed SDK did not validate new finish reason");
+    Take(session->Close(),"sampling boundary close"); Take(runtime->Shutdown(),"sampling boundary shutdown");
+    std::cout << "[sdk-model-sampling-consumer] invalid-reply" << '\n';
+}
+
 void FileAndCommand(const fs::path& base) {
     Progress("begin: FileAndCommand");
     const auto paths = Fresh(base, "files");
@@ -1703,6 +1722,7 @@ int main(int argc, char** argv) {
         if (mode == "authorization") CheckSdkAuthorizationConsumer();
         else if (mode == "smoke") {
             Check(!sdk::Version().empty(), "installed library has no version");
+            SamplingBoundary(base);
             FileAndCommand(base);
             SharedDirectoryIsolation(base);
             CloseAndStreams(base);

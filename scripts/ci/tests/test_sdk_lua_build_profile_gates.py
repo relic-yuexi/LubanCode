@@ -105,9 +105,9 @@ class ProfileGraphTests(unittest.TestCase):
                 self.assertEqual(closure.inspect_graph(targets, False)['status'], 'failed')
 
     def test_exact_rosters_keep_old_on_cases_and_define_off_separately(self):
-        self.assertEqual(len(focused.REQUIRED), 70)
+        self.assertEqual(len(focused.REQUIRED), 71)
         self.assertEqual(len(installed.REQUIRED_TESTS), 37)
-        self.assertEqual(len(profile.focused_roster(focused.REQUIRED, False)), 68)
+        self.assertEqual(len(profile.focused_roster(focused.REQUIRED, False)), 69)
         self.assertEqual(len(profile.consumer_roster(installed.REQUIRED_TESTS, False)), 34)
         self.assertEqual(profile.focused_roster(focused.REQUIRED, True), focused.REQUIRED)
         self.assertEqual(profile.consumer_roster(installed.REQUIRED_TESTS, True), installed.REQUIRED_TESTS)
@@ -116,6 +116,7 @@ class ProfileGraphTests(unittest.TestCase):
         self.assertEqual(installed.REQUIRED_TESTS - profile.consumer_roster(installed.REQUIRED_TESTS, False),
                          {'sdk.consumer.lua', 'sdk.consumer.lua_seed', 'sdk.consumer.lua_resume'})
         self.assertIn('sdk.focused.lubancore_lua_build_profile', profile.focused_roster(focused.REQUIRED, False))
+        self.assertIn('sdk.focused.lubancore_model_sampling', profile.focused_roster(focused.REQUIRED, False))
         self.assertIn('sdk.consumer.lua_build_profile', profile.consumer_roster(installed.REQUIRED_TESTS, False))
 
 

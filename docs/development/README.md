@@ -5,7 +5,8 @@
 - [构建与发行](build-and-release.md)
 - [LubanCore C++ SDK（实验版）](lubancore-sdk.md)
 - [SDK 显式网络搜索](sdk-web-search.md)：逐场服务、凭据、预算与取消；#335 同源三平台已验。
-- [SDK 开场线程失败清理](sdk-opening-start-cleanup.md)：真实开场失手、资源退场与 Shutdown 交错；合同待实施验收。
+- [SDK 开场线程失败清理](sdk-opening-start-cleanup.md)：真实开场失手、资源退场与 Shutdown 交错；#336 同源三平台已验。
+- [SDK 采样参数与终止原因](sdk-model-sampling.md)：自动 Memory 前置合同，先传齐真实请求与回复；待实施验收。
 - [SDK main Action 中间件合同](sdk-action-middleware.md)
 - [SDK 显式 Skills 合同](sdk-skills.md)
 - [SDK 项目 Memory 只读召回合同](sdk-memory-recall.md)
