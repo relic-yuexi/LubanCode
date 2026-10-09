@@ -4,7 +4,9 @@
 // V3SessionBooks 是 v3 写侧会话共享账,由 TrajectorySessionLedger 的 Impl
 // 持有,主会话/子代理/旁路各桥借指针共用——随主桥头走,供各桥与账本同取。
 #pragma once
+#include "runtime/trajectory_diagnostics.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <expected>
 #include <map>
@@ -59,6 +61,10 @@ struct V3SessionBooks {
     // 注:阻断只住内存,不落账——schema 尚无对应 kind(T11 按合同发行),
     // 不拿旧 payload 换名伪造。
     bool execution_blocked = false;
+    // Background readers own this gate, not a borrowed mutable books pointer.
+    // The main owner publishes compact blockage once; a new scene gets a new gate.
+    std::shared_ptr<std::atomic<bool>> bypass_execution_blocked =
+        std::make_shared<std::atomic<bool>>(false);
     std::string execution_block_reason;         // 稳定原因(compact.swap.*)
     std::uint64_t execution_block_revision = 0;  // 阻断时账面 revision(准入对表/诊断)
     // 绑定场次(session_id):换场判据用。manager 的 active 是 std::optional,
@@ -241,7 +247,7 @@ public:
     const std::string& last_committed_assistant_message_id() const { return last_committed_assistant_message_id_; }
     // 落账错误的共享汇(账本持有,/doctor trajectory 的"最近 I/O 错误"
     // 从这取;桥按轮把错误推进来)。
-    void SetErrorSink(std::vector<std::string>* sink) { error_sink_ = sink; }
+    void SetErrorSink(std::shared_ptr<TrajectoryDiagnostics> sink) { error_sink_ = std::move(sink); }
 
     // 端云协同可观测单 T1(§25.3/§25.4):committed wake 窄口。账本侧在
     // receipt committed 后通知;空(默认)= 零行为,trajectory 老路一字
@@ -430,7 +436,7 @@ private:
     std::uint64_t output_counter_ = 0;
     std::uint64_t verification_counter_ = 0;
     std::vector<std::string> recent_errors_;
-    std::vector<std::string>* error_sink_ = nullptr;  // 账本持有的共享汇
+    std::shared_ptr<TrajectoryDiagnostics> error_sink_ = nullptr;  // 账本持有的共享汇
     telemetry::CommitObserver* commit_wake_ = nullptr;  // T1 committed wake(默认空)
     std::string wake_stream_id_;                        // session 相对 stream 路径
 };

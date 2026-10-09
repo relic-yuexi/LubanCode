@@ -17,6 +17,7 @@
 #include "runtime/session_soul.hpp"
 #include "runtime/trajectory_history_view.hpp"
 #include "runtime/trajectory_session.hpp"  // 外围类声明(嵌套 Impl 的定义点)
+#include "runtime/trajectory_bypass_lease.hpp"
 #include "runtime/trajectory_turn_bridge.hpp"  // V3SessionBooks
 #include "telemetry/wake.hpp"
 #include "trajectory/recorder.hpp"
@@ -78,6 +79,8 @@ struct TrajectorySessionLedger::Impl {
         std::vector<RestoredTranscriptLine> lines;
     };
     mutable std::optional<TranscriptCache> transcript_cache;
+    // Lazy scene owner; declared last so its destructor revokes before manager teardown.
+    std::shared_ptr<TrajectoryBypassLeaseOwner> bypass_leases;
 };
 
 }  // namespace lubancode::runtime

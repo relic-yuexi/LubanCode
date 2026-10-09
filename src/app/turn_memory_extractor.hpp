@@ -6,7 +6,7 @@
 // 要整轮结果),搬发轮前不可行——只能异步化。
 //
 // 材料全在起飞前拼好、值拷贝进闭包(转写/系统提示/分型),不引用会话
-// 提示材料共享态；旁路另借 ledger，寿命门还欠账。HTTP 走 RouteDetached
+// 提示材料共享态；旁路在前台冻结、绑定可撤销代理。HTTP 走 RouteDetached
 // 造的独占裸 backend(不与主会话共用
 // client,不抢流式回调)。本地超时预算(看门狗)与会话拆除的外部取消
 // 都走 SampleModel 的合并取消口。
@@ -16,14 +16,14 @@
 // 记账,不冒充网络失败。
 //
 // 结果只经 TakeFinished 出去:usage 记账/候选入队/台账落袋全在主线程的
-// 收货点(SettleTurnMemory),后台线程不碰会话共享态——除自持的 shared
-// 槽与在闭包栈上自生灭的旁路桥(recorder 提交全程持锁,与主线程的写在
-// 盘上串行)。session_generation 是起飞时的会话世代(/clear、/resume 翻
+// 收货点(SettleTurnMemory)。后台持 shared 槽与独占代理；每次 recorder
+// 回调借场次短门，账本在实际破坏边界先撤销，模型执行不占门。
+// session_generation 是起飞时的会话世代(/clear、/resume 翻
 // 号):迟到结果由调用方对代丢弃——usage 仍照记,token 是真花了的。
 //
 // 退出兜底照 SessionTitleRefiner/AgentTool 析构的老方子:RequestCancel 拉
 // 原子取消旗,析构取消 + 有界等待,等不到就 detach 放行——闭包自持
-// shared 槽，退出有界；旁路裸 ledger 借用尚欠撤销，晚归安全另交。
+// shared 槽与代理；晚归回调拒绝旧借用，不等于 Backend 已停止。
 #pragma once
 
 #include <atomic>
@@ -56,11 +56,9 @@ public:
         std::string task_type;       // 前台分型结果(候选入队要挂)
         std::uint64_t session_generation = 0;  // 起飞时的会话世代,落地对代
         std::string turn_id;                   // 迟到收账对档(MemoryTurnLedger 悬账)
-        // Token 账本单 A1(旁路落账):flag 开的会话递账本,抽取请求在
-        // worker 线程自铸旁路桥落 Journal(purpose=memory_extract)。recorder
-        // 提交全程持锁,后台线程与主线程的写在盘上串行;线程只持这只裸
-        // 指针+值拷贝；桥又借 writer、簿与 observer，写锁不护借用寿命。
-        // 这份旧借用另立撤销合同。空 = 没接轨迹。
+        // 前台 Start 短借：调用方须保住账本直到 Start 返回。先冻结实际
+        // 触发轮，再绑定 purpose=memory_extract 的可撤销代理；worker
+        // 不捕获此指针。空表示没接轨迹；已接但不能绑定须用拒绝代理。
         lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
         std::string trajectory_wire;  // 桥 identity 的渠道名(与主 turn 桥同源)
         std::string provider;         // 抽取路由的 provider(桥 identity)

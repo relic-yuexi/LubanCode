@@ -24,6 +24,7 @@
 // Trajectory——开不出账就会话明败,不回退旧 SessionStore(旧件退役待
 // P0-5/P0-6,本批不再消费)。
 #pragma once
+#include "runtime/trajectory_diagnostics.hpp"
 
 #include "approval_mode.hpp"
 
@@ -278,6 +279,11 @@ public:
 
     // 正常封口(/exit 与 EOF):turn 收齐后 run terminal + session.ended +
     // session.json closed。恢复器/replay 是 P0-3 的活,这里只留封口。
+    // Front-thread factory for asynchronous Memory/Title. Returns a non-null
+    // rejection when a connected scene cannot bind, never unrecorded permission.
+    std::unique_ptr<agent::LoopBoundaryRecorder> NewLeasedBypassRecorder(
+        TrajectoryTurnBridge::Identity identity, accounting::RequestPurpose purpose);
+
     trajectory::CloseOutcome CloseSession(const std::string& reason);
 
     // ---- P0-1(§4.5):cwd 变化对账 ----
@@ -595,11 +601,13 @@ private:
     std::unique_ptr<RecordSelectionController> record_selection_;
     std::uint64_t command_counter_ = 0;
     // P0-4:落账错误共享环(桥逐轮推进;doctor 从这读,见 recent_io_errors)。
-    std::vector<std::string> io_errors_;
+    // Shared storage survives a ledger move; snapshots and every producer share its lock.
+    std::shared_ptr<TrajectoryDiagnostics> io_errors_ = std::make_shared<TrajectoryDiagnostics>();
     bool environment_captured_ = false;
 
     // committed wake 的账本侧漏斗:main stream 上的提交经这投。
     void NotifyCommitted_() const;
+    void RetireBypassLeases_();
     // 接线点 1:active 是 v3 场时把 v3 共享账绑到当前主账写者(clear/
     // resume 换场后 active 指针会换,books 必须跟着重绑,不然悬空);
     // v2 场清掉。

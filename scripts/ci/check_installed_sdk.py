@@ -385,7 +385,7 @@ def main() -> None:
                                 "sha256": hashlib.sha256(raw).hexdigest(), "hook_symbol_bytes": present,
                                 "sampling_bridge_symbol_bytes": sampling_present,
                                 "extraction_bridge_symbol_bytes": extraction_present})
-    if any(any(name in relative for name in ("opening_test_hooks", "sampling_test_hooks", "sample_model_test_hooks", "memory_extraction_test_port", "turn_memory_extractor_test_hooks"))
+    if any(any(name in relative for name in ("opening_test_hooks", "sampling_test_hooks", "sample_model_test_hooks", "memory_extraction_test_port", "turn_memory_extractor_test_hooks", "bypass_worker_test_hooks", "trajectory_bypass_lease", "trajectory_diagnostics"))
            for relative in installed_files):
         raise RuntimeError("private SDK startup header leaked into installed package")
     (evidence / "opening-start-boundary.json").write_text(json.dumps({
