@@ -41,3 +41,11 @@ BackgroundCallAccounting 目前只有五项数字、usage_reported 和时长。R
 新增明确报零、缺失用量、只报缓存读/写、异常来源与失败半截 usage，核实际 SampleResult 和 recorder；原非零旧 Backend 推断照留。核 native Connection 全字段及公开 Backend 可选 Usage 全零，不能靠假数证明来源。
 
 Windows/Linux/macOS 全 CLI、SDK Lua ON/OFF、移位公开安装消费和 ASan 同源远端证据齐了才交付。依赖闭包核无 app/CLI 反向边；原测试、预算与注册名单不减。不跑本地 CI、configure、build、原生或 HTTP 验收。
+
+## 验收收口
+
+#339 已合入 `52b71aa8`，验收源 `5c463e9b` 与实际合并同树 `b63091fc`。原生 CI 37881597723、文档 CI 37881597738 成功。三平台全量 798/796/799 项，SDK ON/OFF 各 73/71 项；九套安装消费各 37/34 项及各 15 次真实 HTTP 均过。两路抽取各七案及实际路径标记齐；较 #338 全量只增三条登记，旧名单未删。
+
+ASan 174 来源、1913 CASE、79290 断言过；749 份测试源码、私有附件及四份配置输入哈希吻合，清单不覆盖全部生产源码。77 册产物、1940 份原件与封存副本逐大小和 SHA256 核过。TSan 跳过，不计通过。未跑本地 CI。
+
+本片交同步共享底座，公开自动 Memory owner 仍未交付。下一片先补[抽取线程启动失败](sdk-memory-worker-start-cleanup.md)；后台异常、可撤销旁路借用、完整持久身份与来源逐片交齐。
