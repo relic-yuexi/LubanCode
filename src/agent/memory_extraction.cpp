@@ -317,6 +317,7 @@ const char* ExtractionErrorCodeName(ExtractionErrorCode code) {
         case ExtractionErrorCode::TransportFailed: return "transport_failed";
         case ExtractionErrorCode::DeadlineTimeout: return "deadline_timeout";
         case ExtractionErrorCode::RouteMiss: return "route_miss";
+        case ExtractionErrorCode::WorkerStartFailed: return "worker_start_failed";
     }
     return "other";
 }

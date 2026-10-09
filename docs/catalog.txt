@@ -255,3 +255,4 @@ DOC development/sdk-journal-owner-operation-material-gate.md
 DOC development/sdk-named-owned-paths.md
 DOC development/sdk-sampling-lifetime.md
 DOC development/sdk-memory-extraction-core.md
+DOC development/sdk-memory-worker-start-cleanup.md

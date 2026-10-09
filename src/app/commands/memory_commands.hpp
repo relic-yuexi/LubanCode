@@ -90,7 +90,7 @@ struct SessionTailContext {
 // ExtractTurnMemory 的收口档(调用方据此决定回合账怎么落):
 enum class TurnMemoryDispatch {
     Skipped,      // 前置门拦下(learn off/短文本/同轮去重/…):不发,账已前台记完
-    Dispatched,   // 门过:后台已起飞,回合账悬起(SuspendTurn),迟到收账走 SettleTurnMemory
+    Dispatched,   // 已接纳:回合账悬起，正常结果或启动失败都交 SettleTurnMemory 收账
     DroppedBusy,  // 门过但单飞在途(上一枚没收走):本轮让位不发,账已前台记完
     DroppedRoute, // 门过但路由落空/执行器没接:不发,零账与 route_miss 已前台记完
 };
@@ -102,6 +102,11 @@ enum class TurnMemoryDispatch {
 // 完成与失败的行都在收账点(SettleTurnMemory)打。
 TurnMemoryDispatch ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_text,
                                      std::size_t history_before);
+
+// 收货时记真实抽取调用；未进入抽取入口（线程启动失败）不增模型调用数。
+// usage 缺位的真实调用仍照旧记，换代后的真实花费也照记。
+bool RecordTurnMemoryCall(lubancode::agent::ModelUsageLedger& ledger,
+                          const TurnMemoryExtractor::Outcome& outcome);
 
 // 迟到收账(主线程空闲拍):完工的抽取结果记 usage 账(由调用方在世代门
 // 之前记,弃账也照记)、检索扩展词、候选入队(auto 档直写闸照旧)、台账
