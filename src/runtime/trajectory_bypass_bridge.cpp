@@ -35,8 +35,10 @@ using trajectory::Visibility;
 
 TrajectoryBypassBridge::TrajectoryBypassBridge(trajectory::TrajectoryRecorder& recorder,
                                                trajectory::EventScope base_scope,
-                                               TrajectoryTurnBridge::Identity identity)
-    : recorder_(&recorder), base_scope_(std::move(base_scope)), identity_(std::move(identity)) {}
+                                               TrajectoryTurnBridge::Identity identity,
+                                               std::string id_namespace)
+    : recorder_(&recorder), base_scope_(std::move(base_scope)), identity_(std::move(identity)),
+      id_namespace_(std::move(id_namespace)) {}
 
 TrajectoryBypassBridge::TrajectoryBypassBridge(v3::V3Writer* v3_writer, V3SessionBooks* v3_books,
                                                trajectory::EventScope identity_scope,
@@ -49,6 +51,10 @@ TrajectoryBypassBridge::TrajectoryBypassBridge(v3::V3Writer* v3_writer, V3Sessio
       purpose_(purpose), base_scope_(std::move(identity_scope)), identity_(std::move(identity)) {}
 
 TrajectoryBypassBridge::~TrajectoryBypassBridge() = default;
+
+void TrajectoryBypassBridge::RetireRecording() {
+    if (!V3Mode()) CloseTurn(false, true, "bypass_recording_retired");
+}
 
 RecordReceipt TrajectoryBypassBridge::Put(EventKind kind, std::optional<std::string> request_id, Actor actor,
                                           Origin origin, nlohmann::json payload, Durability durability) {
@@ -91,19 +97,19 @@ void TrajectoryBypassBridge::NoteError(const RecordReceipt& receipt, const char*
 }
 
 std::string TrajectoryBypassBridge::NextRequestId() {
-    return "bypass-req-" + std::to_string(++request_counter_);
+    return (id_namespace_.empty() ? "bypass-req-" : id_namespace_ + "-req-") + std::to_string(++request_counter_);
 }
 
 std::string TrajectoryBypassBridge::NextTurnId() {
-    return "bypass-" + std::to_string(++turn_counter_);
+    return (id_namespace_.empty() ? "bypass-" : id_namespace_ + "-turn-") + std::to_string(++turn_counter_);
 }
 
 std::string TrajectoryBypassBridge::NextInputId() {
-    return "bypass-input-" + std::to_string(++input_counter_);
+    return (id_namespace_.empty() ? "bypass-input-" : id_namespace_ + "-input-") + std::to_string(++input_counter_);
 }
 
 std::string TrajectoryBypassBridge::NextOutputId() {
-    return "bypass-output-" + std::to_string(++output_counter_);
+    return (id_namespace_.empty() ? "bypass-output-" : id_namespace_ + "-output-") + std::to_string(++output_counter_);
 }
 
 void TrajectoryBypassBridge::OpenTurn() {
@@ -453,7 +459,8 @@ std::string TrajectoryBypassBridge::V3RequestPrepared(const api::Request& reques
     const auto prepared = v3_writer_->PrepareRequest(
         request_id, turn_id, step_id, accounting::PurposeName(ctx.purpose), system_message_id,
         input_message_id.empty() ? std::vector<std::string>{} : std::vector<std::string>{input_message_id},
-        std::move(provider_snapshot), std::nullopt, trajectory::Durability::ProcessCrash);
+        std::move(provider_snapshot), std::nullopt, trajectory::Durability::ProcessCrash,
+        std::move(parent_turn_id));
     V3NotifyCommitted(prepared);
     if (prepared.status != v3::WriteReceipt::Status::Committed) {
         NoteV3Error(prepared, "model.request.prepared(bypass)");

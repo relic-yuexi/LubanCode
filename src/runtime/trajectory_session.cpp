@@ -496,8 +496,10 @@ std::unique_ptr<TrajectoryBypassBridge> TrajectorySessionLedger::NewBypassBridge
     trajectory::EventScope scope = impl_->active->main->base_scope();
     scope.visibility = {Visibility::HostOnly};
     scope.training_policy = TrainingPolicy::Metadata;
-    auto bridge =
-        std::make_unique<TrajectoryBypassBridge>(*recorder, std::move(scope), std::move(identity));
+    const auto id_namespace = "bypass-" + std::to_string(recorder->next_seq()) + "-" +
+                              std::to_string(++impl_->v2_bypass_binding_sequence);
+    auto bridge = std::make_unique<TrajectoryBypassBridge>(
+        *recorder, std::move(scope), std::move(identity), id_namespace);
     if (impl_->telemetry_wake != nullptr) {
         bridge->SetCommitWake(impl_->telemetry_wake, "main.jsonl");
     }

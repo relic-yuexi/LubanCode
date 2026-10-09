@@ -120,8 +120,12 @@ public:
     void Retire() {
         std::lock_guard lock(state_->mutex);
         state_->retired = true;
-        for (const auto& weak : state_->slots)
-            if (auto slot = weak.lock()) slot->recorder.reset();
+        for (const auto& weak : state_->slots) {
+            if (auto slot = weak.lock(); slot && slot->recorder) {
+                slot->recorder->RetireRecording();
+                slot->recorder.reset();
+            }
+        }
         state_->slots.clear();
     }
 private:

@@ -5,6 +5,7 @@
 // include;对外面仍是 Pimpl(trajectory_session.hpp 只见前向声明)。
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -79,6 +80,7 @@ struct TrajectorySessionLedger::Impl {
         std::vector<RestoredTranscriptLine> lines;
     };
     mutable std::optional<TranscriptCache> transcript_cache;
+    std::uint64_t v2_bypass_binding_sequence = 0;
     // Lazy scene owner; declared last so its destructor revokes before manager teardown.
     std::shared_ptr<TrajectoryBypassLeaseOwner> bypass_leases;
 };

@@ -1071,7 +1071,8 @@ WriteReceipt V3Writer::PrepareRequest(std::string_view request_id, std::string_v
                                       const std::vector<std::string>& input_message_refs,
                                       nlohmann::json provider_snapshot,
                                       std::optional<std::string> compact_id,
-                                      Durability durability) {
+                                      Durability durability,
+                                      std::optional<std::string> parent_turn_id) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->broken) {
         return WriteReceipt{WriteReceipt::Status::IoFailed, "", 0, "", "v3writer.broken",
@@ -1093,6 +1094,7 @@ WriteReceipt V3Writer::PrepareRequest(std::string_view request_id, std::string_v
     EventDraft draft;
     draft.kind = EventKindV3::ModelRequestPrepared;
     draft.turn_id = std::string(turn_id);
+    draft.parent_turn_id = std::move(parent_turn_id);
     draft.step_id = std::string(step_id);
     draft.request_id = std::string(request_id);
     draft.compact_id = compact_id;

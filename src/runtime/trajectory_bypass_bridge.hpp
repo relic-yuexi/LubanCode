@@ -41,7 +41,7 @@ namespace lubancode::runtime {
 class TrajectoryBypassBridge : public agent::LoopBoundaryRecorder {
 public:
     TrajectoryBypassBridge(trajectory::TrajectoryRecorder& recorder, trajectory::EventScope base_scope,
-                           TrajectoryTurnBridge::Identity identity);
+                           TrajectoryTurnBridge::Identity identity, std::string id_namespace = {});
     // v3 写模式(取消误报 ESC 单 Bug 2):v2 recorder 不在,主账是 V3Writer,
     // 走 v3 的 typed 事件/消息合同,不往 v3 文件硬塞 v2 行。books 只在
     // 前台构造时读取：冻结触发主轮，并持共享原子阻断门；后台不再借 books。
@@ -52,6 +52,10 @@ public:
                            trajectory::EventScope identity_scope, TrajectoryTurnBridge::Identity identity,
                            accounting::RequestPurpose purpose);
     ~TrajectoryBypassBridge() override;
+
+    // Host admission retirement ends an open V2 recording turn while its
+    // recorder is still alive. It does not claim the physical Backend stopped.
+    void RetireRecording();
 
     TrajectoryBypassBridge(const TrajectoryBypassBridge&) = delete;
     TrajectoryBypassBridge& operator=(const TrajectoryBypassBridge&) = delete;
@@ -139,6 +143,7 @@ private:
     accounting::RequestPurpose purpose_ = accounting::RequestPurpose::OtherHostRequest;
     trajectory::EventScope base_scope_;
     TrajectoryTurnBridge::Identity identity_;
+    std::string id_namespace_;  // Frozen legacy recorder position plus ledger binding sequence.
     std::string turn_id_;
     bool turn_open_ = false;
     bool dead_ = false;  // 开不了小 turn(主 turn 在开着)后哑火,不再连发

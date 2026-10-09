@@ -388,6 +388,7 @@ jobs:
               raise SystemExit('TSan actual bypass cases or path markers differ')
           commands=json.loads((build/'compile_commands.json').read_text(encoding='utf-8'))
           required=['src/trajectory/session_manager.cpp','src/trajectory/managed_session_reservation.cpp','src/trajectory/managed_session_ownership.cpp','src/runtime/trajectory_session.cpp','src/runtime/trajectory_bypass_bridge.cpp','src/runtime/trajectory_turn_bridge.cpp','src/runtime/trajectory_subagent_bridge.cpp','src/runtime/trajectory_workflow_bridge.cpp','src/workflow/node_sessions.cpp','src/app/turn_memory_extractor.cpp','src/app/session_title_refiner.cpp','tests/unit/app/test_memory_bypass_owner.cpp']
+          required.append('src/trajectory/v3/writer.cpp')
           verified=[]
           for name in required:
               entries=[r for r in commands if Path(r['file']).resolve()==root/name]

@@ -187,12 +187,13 @@ struct Fixture {
         REQUIRE((ledger->v3_main_writer() != nullptr) == v3);
         stream = ledger->session_dir()/(v3 ? ledger->session_id()+".jsonl" : "main.jsonl");
     }
-    void Input(const std::string& id) {
+    void Input(const std::string& id, bool finish = true) {
         main = ledger->NewTurnBridge({"probe","responses","terminal"}); REQUIRE(main != nullptr);
         main->BeginTurn(id,"external_user");
         lmb::api::Message input; input.role = lmb::api::Role::User;
         input.content.push_back(lmb::api::TextBlock{"real-input-"+id});
-        main->RecordInput(input); main->EndTurn(true,false,"");
+        main->RecordInput(input);
+        if (finish) main->EndTurn(true,false,"");
     }
     void Close() { main.reset(); REQUIRE(ledger->CloseSession("test_done").error_code.empty()); }
 };
@@ -211,6 +212,16 @@ std::vector<Json> Rows(const fs::path& path) {
 }
 void CheckProbe(const std::shared_ptr<Probe>& probe, int calls) {
     CHECK(probe->calls.load() == calls); CHECK(probe->destroyed.load() == 1);
+}
+void CheckRetiredLegacyRecording(const fs::path& stream) {
+    int retired = 0, fabricated_model_terminal = 0;
+    for (const auto& row : Rows(stream)) {
+        const auto kind = row.value("kind",std::string());
+        if (kind == "turn.cancelled" && row.at("payload").value("reason",std::string()) == "bypass_recording_retired")
+            ++retired;
+        if (kind == "model.output.cancelled" || kind == "model.output.failed") ++fabricated_model_terminal;
+    }
+    CHECK(retired == 1); CHECK(fabricated_model_terminal == 0);
 }
 }  // namespace
 
@@ -255,7 +266,7 @@ TEST_CASE("Memory bypass owner: real diagnostic producers and ledger snapshots s
                 return std::nullopt;
             };
         });
-        f.Input("turn-diagnostics");
+        f.Input("turn-diagnostics",false);
         auto recorder = f.ledger->NewLeasedBypassRecorder(
             {"probe","responses","terminal"},lmb::accounting::RequestPurpose::MemoryExtract);
         REQUIRE(recorder != nullptr);
@@ -288,14 +299,15 @@ TEST_CASE("Memory bypass owner: real diagnostic producers and ledger snapshots s
         }
         CheckProbe(probe,0); CHECK(Bytes(f.stream) == before);
         const auto notes = f.ledger->recent_io_errors();
-        int main = 0, child = 0, bypass = 0;
+        int main = 0, received = 0, child = 0, bypass = 0;
         for (std::size_t i = original; i < notes.size(); ++i) {
             if (notes[i].find("user message:v3writer.broken") == 0) ++main;
+            if (notes[i].find("input.received:v3writer.broken") == 0) ++received;
             if (notes[i].find("subagent.start_failed:reserve_stream:trajectory.subagent_v3_request") == 0) ++child;
             if (notes[i].find("bypass system:v3writer.broken") == 0) ++bypass;
         }
-        CHECK(main == 16); CHECK(child == 16); CHECK(bypass == 16);
-        CHECK(notes.size() == original+48);
+        CHECK(main == 16); CHECK(received == 16); CHECK(child == 16); CHECK(bypass == 16);
+        CHECK(notes.size() == original+64);
         // A truly failed writer cannot be falsely closed as clean.
         recorder.reset(); f.main.reset(); f.ledger.reset();
     }
@@ -458,6 +470,7 @@ TEST_CASE("Memory bypass owner: physical Backend late return cannot append after
         // fences late Journal callbacks; the CLI generation gate owns adoption.
         gate->Release(); worker.Collect(true); CheckProbe(probe,1);
         CHECK(Bytes(f.stream) == closed); CHECK_FALSE(gate->Expired());
+        if (!modern) CheckRetiredLegacyRecording(f.stream);
     }
 }
 
@@ -501,20 +514,32 @@ TEST_CASE("Memory bypass owner: replacing an Observer at the same address fences
         auto gate = std::make_shared<Gate>(); auto probe = std::make_shared<Probe>(); probe->backend_gate = gate;
         Worker old(memory); ReleaseGuard release{gate};
         REQUIRE(old.Start(*f.ledger,probe,"turn-observer")); REQUIRE(gate->Await());
-        const auto notifications = old_wake->notifications.load();
-        CHECK(notifications > 0);
+        CHECK(old_wake->notifications.load() > 0);
         // Calling the setter with the same pointer must retire old captures.
         // Retire before destroying the observer, even when its address is reused.
         f.ledger->SetTelemetryWake(&*observer);
+        // V2 retirement may commit the real internal recording-turn cancellation.
+        // Capture its final count before destroying the still-live Observer.
+        const auto notifications = old_wake->notifications.load();
         observer.reset(); CHECK(old_wake->destroyed.load() == 1);
         observer.emplace(new_wake); CHECK(&*observer == old_address);
         f.ledger->SetTelemetryWake(&*observer);
         const auto before = Bytes(f.stream);
         gate->Release(); old.Collect(true); CheckProbe(probe,1);
         CHECK(Bytes(f.stream) == before); CHECK(old_wake->notifications.load() == notifications);
+        if (!modern) CheckRetiredLegacyRecording(f.stream);
         CHECK(new_wake->notifications.load() == 0);
         Worker fresh(memory); auto healthy = std::make_shared<Probe>();
         REQUIRE(fresh.Start(*f.ledger,healthy,"turn-observer")); fresh.Collect(true); CheckProbe(healthy,1);
+        if (!modern) {
+            std::vector<std::string> requests;
+            for (const auto& row : Rows(f.stream))
+                if (row.value("kind",std::string()) == "model.request.prepared")
+                    requests.push_back(row.at("request_id").get<std::string>());
+            REQUIRE(requests.size() == 2);
+            CHECK_FALSE(requests[0].empty()); CHECK_FALSE(requests[1].empty());
+            CHECK(requests[0] != requests[1]);
+        }
         CHECK(new_wake->notifications.load() > 0); CHECK_FALSE(gate->Expired());
         f.ledger->SetTelemetryWake(nullptr); f.Close();
     }
@@ -591,11 +616,13 @@ TEST_CASE("Memory bypass owner: actual clear revokes the old scene before rebind
         REQUIRE(cleared.error_code.empty()); CHECK(cleared.active_switched);
         CHECK(cleared.old_session_id == old_id); CHECK(cleared.new_session_id != old_id);
         CHECK_FALSE(old.Ready());  // Clear did not join the held physical Backend.
-        f.stream = f.ledger->session_dir()/(modern ? f.ledger->session_id()+".jsonl" : "main.jsonl");
+        REQUIRE(f.ledger->v3_main_writer() != nullptr); // Real V2 clear also creates V3.
+        f.stream = f.ledger->session_dir()/(f.ledger->session_id()+".jsonl");
         f.Input("turn-after-clear");
         const auto old_bytes = Bytes(old_stream), new_bytes = Bytes(f.stream);
         gate->Release(); old.Collect(true); CheckProbe(old_probe,1);
         CHECK(Bytes(old_stream) == old_bytes); CHECK(Bytes(f.stream) == new_bytes);
+        if (!modern) CheckRetiredLegacyRecording(old_stream);
         Worker fresh(memory); auto healthy = std::make_shared<Probe>();
         REQUIRE(fresh.Start(*f.ledger,healthy,"turn-after-clear")); fresh.Collect(true); CheckProbe(healthy,1);
         CHECK(Bytes(old_stream) == old_bytes); CHECK(Bytes(f.stream).size() > new_bytes.size());
@@ -763,9 +790,9 @@ TEST_CASE("Memory bypass owner: real clear step2 and step4 failures keep their d
         Worker worker(memory); ReleaseGuard release{gate};
         { HookScope scope(gate); REQUIRE(worker.Start(*f.ledger,probe,"turn-clear-failure")); }
         REQUIRE(gate->Await()); const auto id = f.ledger->session_id();
-        // Real V3Writer::Start commits system then session.started. Only the
-        // following old command.received / session.ended submission is faulted.
-        countdown->store(stage == 2 ? 3 : 4);
+        // New scene commits system, session.started and approval.mode.applied.
+        // Only the following old command.received / session.ended is faulted.
+        countdown->store(stage == 2 ? 4 : 5);
         lmb::trajectory::ClearRequest request; const auto failed = f.ledger->ClearSession(request,nullptr);
         REQUIRE(countdown->load() == 0);
         REQUIRE(failed.error_code == (stage == 2 ? "clear.step2_failed" : "clear.step4_failed"));
