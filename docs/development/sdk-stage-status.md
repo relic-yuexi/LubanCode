@@ -78,8 +78,14 @@ SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 案及各 15 次真实 HT
 TSan 十三条实际插桩编译路径与 owner 十六案照留；标题十四案不在 TSan 注册来源，不称已由 TSan 执行。
 78 份产物、1947 份原件逐大小与 SHA256 已核。未跑本地 CI。
 结果发布、线程退出与闭包析构各有边界；七秒只圈取消后结果等待。
-下一片[SDK Backend 回调与最终析构](sdk-backend-callback-owner.md) 先交合同，尚未交付。
-公开 Backend owner、sent 后物理交接、完整来源、公开自动 Memory owner 与 CLI 装配仍欠账。
+[SDK Backend 回调与最终析构](sdk-backend-callback-owner.md) 已随 #346 合入 `784fd543`，与验收源 `695ea229` 同树。
+Windows/Linux/macOS 全 CLI 各 803/801/804 项，SDK ON/OFF 各 73/71 项，九套消费各 37/34 案与各 15 次真实 HTTP 均过，旧名单未减。
+生命周期十九案与七枚 owner 标记在十三处规范原件齐；后台回调、最后析构、控制块分配失败和观察口异常回滚都核过。
+ASan 179 来源、1969 CASE、89190 断言过；754 份测试与 profile 输入已核，不指完整生产源码闭包。
+普通 SDK 不带私有头与三个 owner 测试导出。TSan 本片按路径跳过，不计通过，不借前驱绿灯。
+74 份产物、1925 份原件已逐大小与 SHA256 封存；未跑本地 CI。
+下一片[Memory 共用词法门控](sdk-memory-learning-gates.md) 先交合同，尚未交付。
+sent 后物理交接、完整来源、公开自动 Memory owner 与 CLI 装配仍欠账。
 CLI 主入口与 one-shot 尚未迁完，SDK 与 CLI 全面对齐仍欠账。下文保留历史原账。
 
 核查日期：2026-10-06。已合基线为功能分支 `fd76b6a5`；[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 的已验源 `c522a51c` 与合入头同树。
