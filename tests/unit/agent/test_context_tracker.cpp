@@ -4,11 +4,44 @@
 #include <doctest/doctest.h>
 
 #include <string>
+#include <limits>
 
 #include "agent/model_router.hpp"
 #include "cli/context_tracker.hpp"
+#include "cli/format_utils.hpp"
 
 using namespace lubancode;
+
+TEST_CASE("ContextTracker: unrepresentable and inconsistent percentages stay unknown without rewriting counts") {
+    const auto maximum = (std::numeric_limits<std::int64_t>::max)();
+    cli::ContextTracker tracker(1);
+    // The total is representable. Its raw cache read contradicts that total;
+    // no external anomaly flag is needed to fence the dangerous int cast.
+    tracker.ApplyUsage(api::Usage{2 - maximum, 0, maximum, 0, 0});
+    CHECK(tracker.current_tokens() == 2);
+    CHECK(tracker.last_total_input_tokens() == 2);
+    CHECK(tracker.last_cache_read_tokens() == maximum);
+    CHECK(tracker.last_cache_hit_percent() == -1);
+    CHECK(tracker.session_cache_hit_percent() == -1);
+    REQUIRE(tracker.cache_request_history().size() == 1);
+    CHECK(tracker.cache_request_history().front().input_tokens == 2);
+    CHECK(tracker.cache_request_history().front().cache_read_tokens == maximum);
+    CHECK(tracker.cache_request_history().front().hit_percent() == -1);
+    tracker.ApplyContextEstimate((std::numeric_limits<std::size_t>::max)());
+    CHECK(tracker.current_tokens() == (std::numeric_limits<std::size_t>::max)());
+    CHECK(tracker.UsagePercent() == -1); CHECK(tracker.ShouldAutoCompact());
+    CHECK(cli::StatusLineInfoSegment("", tracker.UsagePercent(), 0, 1).find("context ?%") != std::string::npos);
+    cli::StatusPanelData data; data.context_percent = tracker.UsagePercent();
+    const auto segments = cli::BuildStatusPanelSegments({"context"}, cli::ConfirmMode::Confirm, data);
+    REQUIRE(segments.size() == 1); CHECK(segments.front().text == "context ?%");
+    tracker.ResetSession();
+    tracker.ApplyUsage(api::Usage{100, 7, 50, 10, maximum});
+    CHECK(tracker.current_tokens() == 167); CHECK(tracker.last_cache_hit_percent() == 31);
+    CHECK(tracker.session_cache_hit_percent() == 31);
+    CHECK(tracker.cache_request_history().front().hit_percent() == 31);
+    CHECK(tracker.UsagePercent() == 16700);
+    tracker.ResetSession(); CHECK(tracker.UsagePercent() == 0);
+}
 
 TEST_CASE("ContextTracker: 初始占用为 0") {
     cli::ContextTracker tracker(1000);

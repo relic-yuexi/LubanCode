@@ -1623,7 +1623,8 @@ RunTurnResult RunTurn(TurnContext ctx) {
         TermOut() << theme.stats
                   << trf("stats.line", lubancode::cli::FormatTokenCount(usage_stats.total_input_tokens()),
                          cache_part, lubancode::cli::FormatTokenCount(usage_stats.output_tokens()),
-                         usage_stats.request_count(), context_tracker.UsagePercent())
+                         usage_stats.request_count(), context_tracker.UsagePercent() >= 0
+                             ? std::to_string(context_tracker.UsagePercent()) : std::string("?"))
                   << theme.reset << "\n";
     }
     // 回合正常结束(不是上面那条 !result.has_value() 的报错早退)——统计行

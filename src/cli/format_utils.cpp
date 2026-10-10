@@ -59,7 +59,7 @@ std::string StatusLineInfoSegment(const std::string& model, int context_percent,
     if (!model.empty()) {
         out += " · " + model;
     }
-    out += " · context " + std::to_string(context_percent) + "%";
+    out += " · context " + (context_percent >= 0 ? std::to_string(context_percent) : std::string("?")) + "%";
     if (used_tokens > 0) {
         out += " (" + FormatTokenCount(used_tokens) + "/" + FormatTokenCount(window_tokens) + ")";
     }
@@ -128,7 +128,8 @@ std::vector<StatusPanelSegment> BuildStatusPanelSegments(
         } else if (key == "git_branch") {
             text = data.git_branch;
         } else if (key == "context") {
-            text = std::string(stale_mark) + "context " + std::to_string(data.context_percent) + "%";
+            text = std::string(stale_mark) + "context " +
+                (data.context_percent >= 0 ? std::to_string(data.context_percent) : std::string("?")) + "%";
         } else if (key == "tokens") {
             if (data.used_tokens > 0) {
                 // 缓存注记(缓存诊断单):cached_tokens 有则"缓存命中 X(Y%)",
