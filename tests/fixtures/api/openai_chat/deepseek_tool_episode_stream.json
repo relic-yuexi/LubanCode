@@ -8,8 +8,13 @@
   "captured_at": "2026-08-27",
   "request_expectation": {"thinking": {"type": "enabled"}},
   "expected_events": [
+    "ProviderResponseIdentity",
     "MessageStart",
     "ThinkingDelta",
+    "ProviderResponseIdentity",
+    "ProviderResponseIdentity",
+    "ProviderResponseIdentity",
+    "UsageSnapshot",
     "ContentBlockDone",
     "ToolUseStart",
     "ToolUseInputDelta",

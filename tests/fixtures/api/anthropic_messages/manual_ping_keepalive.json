@@ -9,7 +9,15 @@
   "captured_at": "2026-08-27",
   "doc_snapshot_hash": "7e35698415e8c7ff5dac8f3b49faedd1bf659bda7d1abd2fe2f401daf8118fcc",
   "request_expectation": {},
-  "expected_events": ["MessageStart", "TextDelta", "ContentBlockDone", "MessageDone"],
+  "expected_events": [
+    "ProviderResponseIdentity",
+    "UsageSnapshot",
+    "MessageStart",
+    "TextDelta",
+    "ContentBlockDone",
+    "UsageSnapshot",
+    "MessageDone"
+  ],
   "expected_replay": [],
   "usage_expectation": {"input_tokens": 8, "output_tokens": 1, "cache_read_tokens": 0, "cache_creation_tokens": 0},
   "stop_reason": "end_turn",

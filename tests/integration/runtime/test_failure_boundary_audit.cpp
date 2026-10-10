@@ -267,26 +267,42 @@ TEST_CASE("failure audit FA-03: prepared and sent write gates") {
 }
 
 TEST_CASE("failure audit control: assistant write failure blocks tool execution") {
-    Audit audit;
-    audit.Inject();
-    AuditBackend backend;
-    backend.emit = [&audit](int, const auto& sink) -> std::expected<void, api::Error> {
-        Reply(sink, true);
-        audit.fail_at = audit.writes + 1;
-        return {};
-    };
-    tools::ToolRegistry registry;
-    auto tool = std::make_unique<AuditTool>();
-    auto* counter = tool.get();
-    registry.Register(std::move(tool));
-    agent::Agent agent(backend, registry, Profile());
-    const auto result = agent.Run(Input(), audit.Wiring());
-    CHECK_FALSE(result.has_value());
-    CHECK(counter->calls == 0);
-    CHECK(backend.requests.size() == 1);
-    REQUIRE_FALSE(audit.bridge->recent_errors().empty());
-    CHECK(audit.bridge->recent_errors().front().find("model.response.completed:") == 0);
-    audit.Report("control_output", {{"run_ok", result.has_value()}, {"tool_calls", counter->calls}});
+    // A tool-only response has no streamed text writes. After backend return:
+    // usage observation, lazy stream start, completion event, assistant row,
+    // then context admission. Each failed publication must fence tool work.
+    for (const int terminal_write : {1, 3, 4, 5}) {
+        CAPTURE(terminal_write);
+        Audit audit;
+        audit.Inject();
+        AuditBackend backend;
+        backend.emit = [&audit, terminal_write](int, const auto& sink) -> std::expected<void, api::Error> {
+            Reply(sink, true);
+            audit.fail_at = audit.writes + terminal_write;
+            return {};
+        };
+        tools::ToolRegistry registry;
+        auto tool = std::make_unique<AuditTool>();
+        auto* counter = tool.get();
+        registry.Register(std::move(tool));
+        agent::Agent agent(backend, registry, Profile());
+        const auto result = agent.Run(Input(), audit.Wiring());
+        CHECK_FALSE(result.has_value());
+        CHECK(counter->calls == 0);
+        CHECK(backend.requests.size() == 1);
+        REQUIRE_FALSE(audit.bridge->recent_errors().empty());
+        CHECK(audit.bridge->recent_errors().front().find(terminal_write == 1
+            ? "model.usage.observed:" : "model.response.completed:") == 0);
+        const auto rows = audit.Rows();
+        CHECK(KindCount(rows, "model.usage.observed") == (terminal_write == 1 ? 0 : 1));
+        CHECK(KindCount(rows, "model.response.started") == (terminal_write == 1 ? 0 : 1));
+        CHECK(KindCount(rows, "model.response.completed") == (terminal_write >= 4 ? 1 : 0));
+        CHECK(std::count_if(rows.begin(), rows.end(), [](const Json& row) {
+            return row.value("type", "") == "message" && row.at("message").value("role", "") == "assistant";
+        }) == (terminal_write == 5 ? 1 : 0));
+        CHECK(audit.ledger->v3_main_writer()->broken());
+        audit.Report("control_output", {{"run_ok", result.has_value()},
+            {"tool_calls", counter->calls}, {"terminal_write", terminal_write}});
+    }
 }
 
 TEST_CASE("failure audit FA-04 FA-05: retry terminals and visible text") {

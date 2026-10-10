@@ -7,7 +7,15 @@
   "source_document": "internal",
   "captured_at": "2026-08-27",
   "request_expectation": {"generationConfig": {"thinkingConfig": {"includeThoughts": true, "thinkingBudget": -1}}},
-  "expected_events": ["MessageStart", "ThinkingDelta", "TextDelta", "TextDelta", "MessageDone"],
+  "expected_events": [
+    "UsageSnapshot",
+    "MessageStart",
+    "ThinkingDelta",
+    "TextDelta",
+    "UsageSnapshot",
+    "TextDelta",
+    "MessageDone"
+  ],
   "expected_replay": ["Gemini 的 thought 一次性,续会话不重放"],
   "usage_expectation": {"input_tokens": 10, "output_tokens": 7, "output_reasoning_tokens": 3, "cache_read_tokens": 0},
   "stop_reason": "end_turn",
