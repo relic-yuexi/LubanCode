@@ -132,11 +132,16 @@ TEST_CASE("Anthropic numeric checkpoint keeps missing, malformed and lexical cum
 
 TEST_CASE("Four parser owners retain unpublished usage while preserving the original exception") {
     const auto check = [](auto parser_factory, const char* body, std::array<std::int64_t, 5> numbers) {
-        for (int mode = 0; mode < 6; ++mode) {
+        for (int mode = 0; mode < 9; ++mode) {
             INFO(mode);
             auto parser = parser_factory(); MessageAssembler owner;
             int usage_callbacks = 0; bool caught = false;
             const std::function<void(const StreamEvent&)> callback = [&](const StreamEvent& event) {
+                if (mode >= 6 && std::holds_alternative<ProviderResponseIdentity>(event)) {
+                    if (mode == 7) throw std::bad_alloc{};
+                    if (mode == 8) throw 17;
+                    throw std::runtime_error("identity callback fault");
+                }
                 if (std::holds_alternative<UsageSnapshot>(event)) {
                     ++usage_callbacks;
                     if (mode == 4 || mode == 5) throw std::runtime_error("callback fault");
@@ -148,17 +153,18 @@ TEST_CASE("Four parser owners retain unpublished usage while preserving the orig
                 SseFrame frame; frame.data = body;
                 const auto events = parser.Consume(frame);
                 REQUIRE(parser.PendingUsage()); // Production parser owns numbers before publication.
-                if (mode == 3 || mode == 4) {
+                if (mode == 3 || mode == 4 || mode >= 6) {
                     for (const auto& event : events) delivery.Emit(event);
                     CHECK_FALSE(parser.PendingUsage());
                 }
                 if (mode == 1) throw std::bad_alloc{};
                 if (mode == 2) throw 17;
                 throw std::runtime_error("publication fault");
-            } catch (const std::bad_alloc&) { caught = true; CHECK(mode == 1); }
+            } catch (const std::bad_alloc&) { caught = true; CHECK((mode == 1 || mode == 7)); }
             catch (const std::runtime_error& error) {
-                caught = true; CHECK(std::string(error.what()) == (mode == 4 ? "callback fault" : "publication fault"));
-            } catch (int value) { caught = true; CHECK(mode == 2); CHECK(value == 17); }
+                caught = true; CHECK(std::string(error.what()) == (mode == 4 ? "callback fault" :
+                    mode == 6 ? "identity callback fault" : "publication fault"));
+            } catch (int value) { caught = true; CHECK((mode == 2 || mode == 8)); CHECK(value == 17); }
             CHECK(caught); CHECK(usage_callbacks == 1);
             CHECK(owner.stop_reason().empty());
             if (mode == 4 || mode == 5) {

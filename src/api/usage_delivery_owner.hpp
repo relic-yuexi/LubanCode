@@ -15,6 +15,11 @@ namespace lubancode::api::usage_wire {
 // This is a callback-delivery checkpoint, never a durable or typed owner ACK.
 class NumericDeliveryOwner {
 public:
+    static bool CarriesUsage(const StreamEvent& event) noexcept {
+        if (std::holds_alternative<UsageSnapshot>(event)) return true;
+        const auto* done = std::get_if<MessageDone>(&event);
+        return done && (done->usage_reported || done->usage_observation);
+    }
     void Own(const Snapshot& source) noexcept {
         Own(source.values);
     }
@@ -23,9 +28,7 @@ public:
         pending_ = true;
     }
     void Delivered(const StreamEvent& event) noexcept {
-        if (std::holds_alternative<UsageSnapshot>(event)) pending_ = false;
-        else if (const auto* done = std::get_if<MessageDone>(&event);
-                 done && (done->usage_reported || done->usage_observation)) pending_ = false;
+        if (CarriesUsage(event)) pending_ = false;
     }
     std::optional<UsageSnapshot> Pending() const noexcept {
         if (!pending_) return std::nullopt;
@@ -51,21 +54,26 @@ public:
     PendingUsageOnUnwind(const PendingUsageOnUnwind&) = delete;
     PendingUsageOnUnwind& operator=(const PendingUsageOnUnwind&) = delete;
     ~PendingUsageOnUnwind() noexcept {
-        if (callback_failed_ || std::uncaught_exceptions() <= exceptions_) return;
+        if (usage_callback_failed_ || std::uncaught_exceptions() <= exceptions_) return;
         try {
             if (auto pending = parser_.PendingUsage()) callback_(std::move(*pending));
         } catch (...) {} // A secondary callback fault must not replace the original exception.
     }
     void Emit(const StreamEvent& event) {
         try { callback_(event); }
-        catch (...) { callback_failed_ = true; throw; }
+        catch (...) {
+            // An identity/body callback may fail before any numeric delivery.
+            // Retry no usage-bearing callback: it may already own the numbers.
+            usage_callback_failed_ = usage_callback_failed_ || NumericDeliveryOwner::CarriesUsage(event);
+            throw;
+        }
         parser_.UsageDelivered(event);
     }
 private:
     Parser& parser_;
     const std::function<void(const StreamEvent&)>& callback_;
     int exceptions_;
-    bool callback_failed_ = false;
+    bool usage_callback_failed_ = false;
 };
 
 } // namespace lubancode::api::usage_wire
