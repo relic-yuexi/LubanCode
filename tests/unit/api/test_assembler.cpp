@@ -81,6 +81,16 @@ TEST_CASE("Four parser owners retain unpublished usage while preserving the orig
     check([] { return anthropic::EventParser{}; },
         R"({"type":"message_start","message":{"id":"actual-anthropic","model":"fixture","content":[],"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":13,"cache_creation_input_tokens":17}}})",
         {11,7,13,17,0});
+    // Exercise the actual HTTP fallback owner, including invalid body shape.
+    // Missing output must retain accounting without issuing a success terminal.
+    struct NonStreamResponsesOwner : responses::EventParser {
+        std::vector<StreamEvent> Consume(const SseFrame& frame) {
+            return ExpandNonStream(frame.data);
+        }
+    };
+    check([] { return NonStreamResponsesOwner{}; },
+        R"({"id":"actual-nonstream","usage":{"input_tokens":41,"output_tokens":7,"input_tokens_details":{"cached_tokens":13,"cache_write_tokens":17},"output_tokens_details":{"reasoning_tokens":3}}})",
+        {11,7,13,17,3});
 }
 
 TEST_CASE("Wire material rejection preserves calculated numeric facts without admitting an observation") {

@@ -31,6 +31,7 @@ std::optional<StreamEvent> parse_event(const SseFrame& frame);
 class EventParser {
 public:
     std::vector<StreamEvent> Consume(const SseFrame& frame);
+    std::vector<StreamEvent> ExpandNonStream(const std::string& body);
     std::optional<UsageSnapshot> PendingUsage() const noexcept { return numeric_delivery_.Pending(); }
     void UsageDelivered(const StreamEvent& event) noexcept { numeric_delivery_.Delivered(event); }
 private:

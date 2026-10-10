@@ -115,7 +115,7 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     // (output 数组逐项),ExpandNonStreamResponse 展得开就当正常回合走。
     if (!saw_message_done && !saw_stream_error) {
         bool fallback_done = false;
-        for (const StreamEvent& event : ExpandNonStreamResponse(raw_body)) {
+        for (const StreamEvent& event : parser.ExpandNonStream(raw_body)) {
             if (std::holds_alternative<MessageDone>(event)) {
                 fallback_done = true;
             }

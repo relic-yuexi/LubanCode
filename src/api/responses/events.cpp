@@ -383,7 +383,8 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
     return events;
 }
 
-std::vector<StreamEvent> ExpandNonStreamResponse(const std::string& body) try {
+static std::vector<StreamEvent> ExpandNonStreamResponseOwned(
+    const std::string& body, usage_wire::NumericDeliveryOwner* delivery_owner) try {
     const usage_wire::LexicalUsage lexical(body, usage_wire::Dialect::ResponsesNonStream);
     json response;
     try { response = json::parse(body); }
@@ -392,6 +393,7 @@ std::vector<StreamEvent> ExpandNonStreamResponse(const std::string& body) try {
         std::vector<StreamEvent> recovered;
         if (lexical.response_id) recovered.push_back(ProviderResponseIdentity{*lexical.response_id});
         auto partial = lexical.Partial();
+        if (partial && delivery_owner) delivery_owner->Own(*partial);
         if (partial) recovered.push_back(usage_wire::Nonterminal(*partial, lexical.response_id));
         recovered.push_back(StreamError{"accounting recovered from an unparseable response body", "usage.frame.incomplete"});
         return recovered;
@@ -410,6 +412,7 @@ std::vector<StreamEvent> ExpandNonStreamResponse(const std::string& body) try {
             return events;
         }
         material = std::move(*snapshot);
+        if (delivery_owner) delivery_owner->Own(*material);
         if (!lexical.complete || lexical.duplicate) usage_wire::LexicalUsage::MarkIncomplete(*material);
         if (!material->material_error.empty()) {
             events.push_back(usage_wire::Nonterminal(*material, id ? *id : std::optional<std::string>{}));
@@ -497,6 +500,14 @@ std::vector<StreamEvent> ExpandNonStreamResponse(const std::string& body) try {
 } catch (const json::exception&) {
     // 坏 JSON/坏形状:当"没有 MessageDone 的不完整响应"处理,不抛。
     return {};
+}
+
+std::vector<StreamEvent> EventParser::ExpandNonStream(const std::string& body) {
+    return ExpandNonStreamResponseOwned(body, &numeric_delivery_);
+}
+
+std::vector<StreamEvent> ExpandNonStreamResponse(const std::string& body) {
+    return ExpandNonStreamResponseOwned(body, nullptr);
 }
 
 }  // namespace lubancode::api::responses
