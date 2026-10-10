@@ -6,6 +6,7 @@
 //     坏 stream 点名不出残账,没有的 session 不算账错。
 #include <doctest/doctest.h>
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -187,6 +188,77 @@ TEST_CASE("聚合数学:求和、unknown 不折 0、reasoning 不双计、重试
         check((std::numeric_limits<std::int64_t>::min)(), -1, 0);
         check(100, -1, 0);
         check(-1, 100, 0);
+    }
+    SUBCASE("every cumulative token bucket retains its own sticky unknown projection") {
+        const auto fields = std::array{&api::Usage::input_tokens, &api::Usage::cache_read_tokens,
+            &api::Usage::cache_creation_tokens, &api::Usage::output_tokens,
+            &api::Usage::output_reasoning_tokens};
+        const auto prefixes = std::array{&UsageTotals::input_tokens, &UsageTotals::cache_read_tokens,
+            &UsageTotals::cache_creation_tokens, &UsageTotals::output_tokens,
+            &UsageTotals::reasoning_tokens};
+        const auto getters = std::array{&UsageTotals::InputProjection, &UsageTotals::CacheReadProjection,
+            &UsageTotals::CacheCreationProjection, &UsageTotals::OutputProjection,
+            &UsageTotals::ReasoningProjection};
+        const auto keys = std::array{"input_tokens", "cache_read_tokens", "cache_creation_tokens",
+                                     "output_tokens", "reasoning_tokens"};
+        for (std::size_t index = 0; index < fields.size(); ++index) {
+            CAPTURE(keys[index]);
+            auto first = Sample("first", RequestPurpose::MainTurn, 0, 0, 0);
+            auto second = Sample("second", RequestPurpose::MainTurn, 0, 0, 0);
+            first.usage.value().*fields[index] = std::numeric_limits<std::int64_t>::max();
+            second.usage.value().*fields[index] = 1;
+            if (index == 4) {
+                first.usage->output_tokens = std::numeric_limits<std::int64_t>::max();
+                second.usage->output_tokens = 1;
+            }
+            first.RefreshTotals();
+            second.RefreshTotals();
+            first.cache_read_reported_by_provider = true;
+            second.cache_read_reported_by_provider = true;
+            const auto result = AggregateUsage({first, second,
+                Sample("third", RequestPurpose::MainTurn, 0, 0, 0)});
+            CHECK(!(result.totals.*getters[index])());
+            CHECK(result.totals.*prefixes[index] == std::numeric_limits<std::int64_t>::max());
+            for (std::size_t other = 0; other < fields.size(); ++other) {
+                if (other == index || (index == 4 && other == 3)) continue;
+                CHECK((result.totals.*getters[other])().has_value());
+            }
+            const auto encoded = result.ToJson();
+            CHECK(encoded["totals"][keys[index]].is_null());
+            for (const char* group : {"by_purpose", "by_model", "by_run", "by_outcome"}) {
+                REQUIRE(encoded.at(group).size() == 1);
+                CHECK(encoded.at(group)[0][keys[index]].is_null());
+            }
+            if (index < 3) {
+                CHECK(!result.totals.cache_read_ratio_percent());
+                REQUIRE(result.by_cache_epoch.size() == 1);
+                CHECK(!result.by_cache_epoch[0].cache_read_ratio_percent());
+            }
+            CHECK(!AggregateUsage({}).totals.HasUnknownProjection());
+        }
+    }
+    SUBCASE("cumulative cost overflow and single-sample overflow cannot become zero price") {
+        for (const bool underflow : {false, true}) {
+            auto first = UnknownSample("cost-first");
+            first.cost.status = CostStatus::Estimated;
+            first.cost.micros = underflow ? std::numeric_limits<std::int64_t>::min()
+                                         : std::numeric_limits<std::int64_t>::max();
+            auto second = first;
+            second.cost.micros = underflow ? -1 : 1;
+            auto third = second;
+            third.cost.micros = -second.cost.micros;
+            const auto result = AggregateUsage({first, second, third});
+            CHECK(!result.totals.CostProjection());
+            CHECK(result.totals.cost_micros == first.cost.micros);
+            CHECK(result.totals.requests_priced == 3);
+            CHECK(result.ToJson()["totals"]["cost_micros"].is_null());
+        }
+        auto overflow = UnknownSample("cost-overflow");
+        overflow.cost.status = CostStatus::Overflow;
+        const auto result = AggregateUsage({overflow});
+        CHECK(!result.totals.CostProjection());
+        CHECK(result.totals.requests_priced == 0);
+        CHECK(result.ToJson()["totals"]["cost_micros"].is_null());
     }
     SUBCASE("sample overflow and cumulative overflow retain nullable totals in every row") {
         const auto maximum = std::numeric_limits<std::int64_t>::max();

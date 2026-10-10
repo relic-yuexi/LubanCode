@@ -295,25 +295,26 @@ std::vector<std::string> FormatUsageReport(const UsageReportModel& model,
     // 输入(§7.4)。
     {
         std::ostringstream out;
-        out << lubancode::cli::FormatTokenCount(totals.input_tokens);
+        out << lubancode::cli::FormatTokenCount(totals.InputProjection());
         if (const auto ratio = totals.cache_read_ratio_percent()) {
-            out << " · cache 读 " << lubancode::cli::FormatTokenCount(totals.cache_read_tokens)
+            out << " · cache 读 " << lubancode::cli::FormatTokenCount(totals.CacheReadProjection())
                 << "(" << *ratio << "%)";
         } else if (totals.requests_with_usage > 0) {
-            out << " · cache 读 " << lubancode::cli::FormatTokenCount(totals.cache_read_tokens)
-                << "(比例 unknown:实测输入为 0)";
+            out << " · cache 读 " << lubancode::cli::FormatTokenCount(totals.CacheReadProjection())
+                << ((!totals.input_known || !totals.cache_read_known || !totals.cache_creation_known)
+                    ? "(比例 unknown:输入累计超界)" : "(比例 unknown:实测输入为 0)");
         }
         out << " · cache 写 "
-            << lubancode::cli::FormatTokenCount(totals.cache_creation_tokens);
+            << lubancode::cli::FormatTokenCount(totals.CacheCreationProjection());
         out << " · 合计输入 " << lubancode::cli::FormatTokenCount(totals.TotalInputProjection());
         fields.push_back(frame::Field{"输入", out.str()});
     }
     // 输出:reasoning 是子集,注明(§四.4)。
     {
         std::ostringstream out;
-        out << lubancode::cli::FormatTokenCount(totals.output_tokens);
-        if (totals.reasoning_tokens > 0) {
-            out << " · 推理 " << lubancode::cli::FormatTokenCount(totals.reasoning_tokens)
+        out << lubancode::cli::FormatTokenCount(totals.OutputProjection());
+        if (const auto reasoning = totals.ReasoningProjection(); !reasoning || *reasoning > 0) {
+            out << " · 推理 " << lubancode::cli::FormatTokenCount(totals.ReasoningProjection())
                 << "(已含在输出,不另加)";
         }
         fields.push_back(frame::Field{"输出", out.str()});
@@ -330,7 +331,7 @@ std::vector<std::string> FormatUsageReport(const UsageReportModel& model,
     {
         std::ostringstream out;
         if (model.pricing.has_value()) {
-            out << FormatMicrosAmount(totals.cost_micros, "$") << " · 价格表 "
+            out << (totals.CostProjection() ? FormatMicrosAmount(*totals.CostProjection(), "$") : "未知（溢出）") << " · 价格表 "
                 << model.pricing->id << " · 本地估算,非账单";
             if (totals.requests_priced < totals.requests_with_usage) {
                 out << " · 命中 " << totals.requests_priced << "/"
@@ -421,14 +422,16 @@ std::vector<std::string> FormatUsageReport(const UsageReportModel& model,
             }
             std::ostringstream tokens;
             tokens << "输入 " << lubancode::cli::FormatTokenCount(t.TotalInputProjection()) << "(读 "
-                   << lubancode::cli::FormatTokenCount(t.cache_read_tokens) << "/写 "
-                   << lubancode::cli::FormatTokenCount(t.cache_creation_tokens) << ")"
-                   << " · 输出 " << lubancode::cli::FormatTokenCount(t.output_tokens);
+                   << lubancode::cli::FormatTokenCount(t.CacheReadProjection()) << "/写 "
+                   << lubancode::cli::FormatTokenCount(t.CacheCreationProjection()) << ")"
+                   << " · 输出 " << lubancode::cli::FormatTokenCount(t.OutputProjection());
             rows.push_back(frame::TableRow{
                 {row.label,
                  ShareText(t.BilledShapeProjection(), totals.BilledShapeProjection()),
                  req.str(), tokens.str(),
-                 t.requests_priced > 0 ? FormatMicrosAmount(t.cost_micros, "$") : std::string()},
+                 (!t.CostProjection() || t.requests_priced > 0)
+                     ? (t.CostProjection() ? FormatMicrosAmount(*t.CostProjection(), "$") : "未知（溢出）")
+                     : std::string()},
                 {}});
         }
         for (const std::string& line : frame::RenderTable(
@@ -478,7 +481,7 @@ nlohmann::json BuildUsageReportJson(const UsageReportModel& model) {
         case ParsedUsageCommand::By::None: by = ""; break;
     }
     const auto unknown_totals = [](const lubancode::accounting::UsageTotals& totals) {
-        return !totals.TotalInputProjection() || !totals.BilledShapeProjection();
+        return totals.HasUnknownProjection();
     };
     bool nullable_totals = unknown_totals(model.aggregate.totals);
     for (const auto* rows : {&model.aggregate.by_model, &model.aggregate.by_purpose,

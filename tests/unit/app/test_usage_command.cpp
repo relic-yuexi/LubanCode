@@ -215,6 +215,34 @@ TEST_CASE("FormatUsageReport:空账不猜;--by purpose 分账表;缺口点名截
         CHECK(exact.find("main_turn 100%") != std::string::npos);
         CHECK(BuildUsageReportJson(model)["schema_version"] == 1);
     }
+    SUBCASE("independent token and cost overflow renders unknown in summary and rows") {
+        auto first = Sample("first", RequestPurpose::MainTurn,
+                            std::numeric_limits<std::int64_t>::max(), 0, 0);
+        first.cost.status = accounting::CostStatus::Estimated;
+        first.cost.micros = std::numeric_limits<std::int64_t>::max();
+        auto second = Sample("second", RequestPurpose::MainTurn, 1, 0, 0);
+        second.cost.status = accounting::CostStatus::Estimated;
+        second.cost.micros = 1;
+        UsageReportModel model;
+        model.session_id = "bucket-overflow";
+        model.by = ParsedUsageCommand::By::Purpose;
+        model.pricing.emplace();
+        model.pricing->id = "bounds";
+        model.aggregate = accounting::AggregateUsage({first, second});
+        const auto text = Join(FormatUsageReport(model, cli::BuiltinTheme("plain"), 0));
+        CHECK(text.find("未知（溢出）") != std::string::npos);
+        CHECK(text.find("main_turn unknown") != std::string::npos);
+        const auto encoded = BuildUsageReportJson(model);
+        CHECK(encoded["schema_version"] == 2);
+        CHECK(encoded["aggregate"]["totals"]["input_tokens"].is_null());
+        CHECK(encoded["aggregate"]["totals"]["cost_micros"].is_null());
+        auto overflow = Sample("single", RequestPurpose::MainTurn, 1, 0, 0);
+        overflow.cost.status = accounting::CostStatus::Overflow;
+        model.aggregate = accounting::AggregateUsage({overflow});
+        const auto single = Join(FormatUsageReport(model, cli::BuiltinTheme("plain"), 0));
+        CHECK(single.find("未知（溢出）") != std::string::npos);
+        CHECK(BuildUsageReportJson(model)["aggregate"]["totals"]["cost_micros"].is_null());
+    }
     SUBCASE("空账") {
         UsageReportModel model;
         model.session_id = "20260831-000009-EMPTY9";

@@ -49,6 +49,34 @@ struct UsageTotals {
 
     bool total_input_known = true;
     bool billed_shape_known = true;
+    bool input_known = true;
+    bool cache_read_known = true;
+    bool cache_creation_known = true;
+    bool output_known = true;
+    bool reasoning_known = true;
+    bool cost_known = true;
+    std::optional<std::int64_t> InputProjection() const noexcept {
+        return input_known ? std::optional<std::int64_t>(input_tokens) : std::nullopt;
+    }
+    std::optional<std::int64_t> CacheReadProjection() const noexcept {
+        return cache_read_known ? std::optional<std::int64_t>(cache_read_tokens) : std::nullopt;
+    }
+    std::optional<std::int64_t> CacheCreationProjection() const noexcept {
+        return cache_creation_known ? std::optional<std::int64_t>(cache_creation_tokens) : std::nullopt;
+    }
+    std::optional<std::int64_t> OutputProjection() const noexcept {
+        return output_known ? std::optional<std::int64_t>(output_tokens) : std::nullopt;
+    }
+    std::optional<std::int64_t> ReasoningProjection() const noexcept {
+        return reasoning_known ? std::optional<std::int64_t>(reasoning_tokens) : std::nullopt;
+    }
+    std::optional<std::int64_t> CostProjection() const noexcept {
+        return cost_known ? std::optional<std::int64_t>(cost_micros) : std::nullopt;
+    }
+    bool HasUnknownProjection() const noexcept {
+        return !total_input_known || !billed_shape_known || !input_known || !cache_read_known ||
+               !cache_creation_known || !output_known || !reasoning_known || !cost_known;
+    }
     std::optional<std::int64_t> TotalInputProjection() const noexcept {
         return total_input_known ? std::optional<std::int64_t>(total_input_tokens) : std::nullopt;
     }
@@ -104,6 +132,9 @@ struct CacheEpochBreakdown {
     // 比例不认它,报告列排除数。
     std::int64_t anomalous_samples = 0;
 
+    bool cache_input_known = true;
+    bool cache_read_known = true;
+    bool cache_creation_known = true;
     std::optional<int> cache_read_ratio_percent() const;
 };
 
