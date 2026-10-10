@@ -54,7 +54,7 @@ public:
         // Reasoning is never synthesized from thinking text. Its fifth field
         // remains Missing/Unknown even when the other four are explicitly zero.
         const auto valid=usage_observation::Validate(snapshot.observation,snapshot.values);
-        if (!valid) return std::unexpected(valid.error());
+        if (!valid) snapshot.material_error = valid.error();
         return snapshot;
     }
 private:

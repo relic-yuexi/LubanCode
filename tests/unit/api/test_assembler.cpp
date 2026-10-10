@@ -16,10 +16,55 @@
 #include "api/usage_json.hpp"
 #include "api/usage_lexical.hpp"
 #include "api/usage_event_projection.hpp"
+#include "api/usage_aggregation.hpp"
 #include "platform/sha256.hpp"
 #include "platform/text_encoding.hpp"  // IsValidUtf8:清洗结果断言
 
 using namespace lubancode::api;
+
+TEST_CASE("Wire material rejection preserves calculated numeric facts without admitting an observation") {
+    namespace wire = usage_wire;
+    namespace facts = ::lubancore::usage::v1;
+    for (const int failure : {0, 1, 2}) {
+        INFO(failure);
+        wire::Builder builder("source.fixture");
+        const nlohmann::json scalar = 11;
+        for (std::size_t i = 0; i < facts::kFieldCount; ++i)
+            builder.Report(static_cast<facts::Field>(i),
+                builder.Capture("usage.field_" + std::to_string(i), &scalar));
+        std::string_view expected;
+        if (failure == 0) {
+            for (std::size_t i = facts::kFieldCount; i <= facts::kMaxRawFields; ++i)
+                builder.Capture("usage.extra_" + std::to_string(i), &scalar);
+            expected = "usage.wire.raw_limit";
+        } else if (failure == 1) {
+            for (std::size_t i = 0; i <= facts::kMaxAnomalies; ++i)
+                builder.Note(facts::Field::Input, facts::AnomalyCode::AliasConflict, "capacity witness", {});
+            expected = "usage.wire.anomaly_limit";
+        } else {
+            builder.Capture(std::string(facts::kMaxPathBytes + 1, 'x'), &scalar);
+            expected = "usage.wire.path";
+        }
+        auto snapshot = std::move(builder).Finish();
+        REQUIRE(snapshot.has_value()); CHECK(snapshot->material_error == expected);
+        for (const auto number : snapshot->values) CHECK(number == 11);
+        const auto event = wire::Nonterminal(*snapshot, std::string("actual-response"));
+        CHECK(event.usage_reported); CHECK_FALSE(event.usage_observation.has_value());
+        CHECK_FALSE(event.cache_read_reported); CHECK_FALSE(event.cache_creation_reported);
+        CHECK(event.provider_response_id == "actual-response");
+        MessageAssembler owner; owner.Feed(event);
+        owner.Feed(StreamError{std::string(expected), "usage.material.invalid"});
+        CHECK(owner.usage().input_tokens == 11); CHECK(owner.usage().output_tokens == 11);
+        CHECK(owner.usage().cache_read_tokens == 11); CHECK(owner.usage().cache_creation_tokens == 11);
+        CHECK(owner.usage().output_reasoning_tokens == 11);
+        CHECK_FALSE(owner.usage_observation().has_value()); CHECK(owner.stop_reason().empty());
+        Usage total; facts::Coverage coverage;
+        usage_aggregation::Add(total, coverage, owner.usage(), nullptr);
+        CHECK(total.input_tokens == 11);
+        for (std::size_t i = 0; i < facts::kFieldCount; ++i)
+            CHECK_FALSE(usage_aggregation::Exact(coverage, static_cast<facts::Field>(i)));
+    }
+}
 
 TEST_CASE("Five-field material capacity: incomplete marking preserves full anomaly history and owns numeric facts") {
     namespace facts = ::lubancore::usage::v1;

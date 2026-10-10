@@ -245,9 +245,15 @@ public:
     }
 
     std::expected<Snapshot, std::string_view> Finish() && {
-        if (!material_error_.empty()) return std::unexpected(material_error_);
-        const auto admitted = usage_observation::Validate(snapshot_.observation, snapshot_.values);
-        if (!admitted) return std::unexpected(admitted.error());
+        // Admission governs material, not ownership of already calculated
+        // numeric facts. Parsers emit this numeric-only snapshot before their
+        // error fence; Apply refuses to publish the rejected observation.
+        if (!material_error_.empty()) {
+            snapshot_.material_error = material_error_;
+        } else {
+            const auto admitted = usage_observation::Validate(snapshot_.observation, snapshot_.values);
+            if (!admitted) snapshot_.material_error = admitted.error();
+        }
         return std::move(snapshot_);
     }
 
