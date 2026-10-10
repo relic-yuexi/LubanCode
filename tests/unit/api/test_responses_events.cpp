@@ -616,7 +616,7 @@ TEST_CASE("Responses 内置搜索起点缺 action 时，终点参数仍可回填
 //(vLLM 扩展;OpenAI 官方是 summary[].summary_text,这台端 summary 恒空),
 // 与流式路 reasoning_text.delta 同源——两路翻出的中立事件同一形状。
 TEST_CASE("ExpandNonStreamResponse: reasoning 项 + message 项展开成中立事件") {
-    const auto events = responses::ExpandNonStreamResponse(
+    const auto events = usage_fixture::ExpandNonStreamLegacyBody(
         R"({"id":"resp_aeb964886f47be44","object":"response","status":"completed","model":"qwen3.8-27b",)"
         R"("output":[{"id":"rs_aeb964886f47be44","type":"reasoning","summary":[],)"
         R"("content":[{"text":"We need answer user: 2+2=4.","type":"reasoning_text"}],"encrypted_content":null},)"
@@ -643,7 +643,7 @@ TEST_CASE("ExpandNonStreamResponse: reasoning 项 + message 项展开成中立�
 }
 
 TEST_CASE("ExpandNonStreamResponse: function_call 项带双 id,认 call_id,整段 arguments 一枚入参增量") {
-    const auto events = responses::ExpandNonStreamResponse(
+    const auto events = usage_fixture::ExpandNonStreamLegacyBody(
         R"({"id":"resp_fc","status":"completed","output":[)"
         R"({"id":"fc_5d81c0aa92f3e70b","type":"function_call","call_id":"chatcmpl-tool-a0d9a4d1bebbd50a",)"
         R"("name":"get_weather","arguments":"{\"city\": \"北京\"}","status":"completed"}],)"
@@ -662,7 +662,7 @@ TEST_CASE("ExpandNonStreamResponse: function_call 项带双 id,认 call_id,整�
 }
 
 TEST_CASE("ExpandNonStreamResponse: OpenAI 官方 summary 系也能展开(vLLM 端 summary 恒空,两者不同源)") {
-    const auto events = responses::ExpandNonStreamResponse(
+    const auto events = usage_fixture::ExpandNonStreamLegacyBody(
         R"({"id":"resp_sum","status":"completed","output":[)"
         R"({"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"摘要一片"}]},)"
         R"({"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"答"}]})"
@@ -678,13 +678,16 @@ TEST_CASE("ExpandNonStreamResponse: OpenAI 官方 summary 系也能展开(vLLM �
 
 TEST_CASE("ExpandNonStreamResponse: 坏 JSON / 缺 output / 空数组,不抛不崩") {
     CHECK(responses::ExpandNonStreamResponse("not json {").empty());
-    CHECK(responses::ExpandNonStreamResponse(R"({"status":"completed"})").empty());  // 没有 output 数组
+    const auto missing = responses::ExpandNonStreamResponse(R"({"status":"completed"})");
+    REQUIRE(missing.size() == 1);
+    REQUIRE(std::holds_alternative<StreamError>(missing.front()));
+    CHECK(std::get<StreamError>(missing.front()).code == "model.payload.invalid");
     CHECK(responses::ExpandNonStreamResponse(R"({"output":[]})").size() == 1);  // 只有 MessageDone
     CHECK_NOTHROW(responses::ExpandNonStreamResponse(R"({"output":[{"type":"reasoning","content":42}]})"));
 }
 
 TEST_CASE("ExpandNonStreamResponse: incomplete 状态映射 max_tokens,与流式 completed 同口径") {
-    const auto events = responses::ExpandNonStreamResponse(
+    const auto events = usage_fixture::ExpandNonStreamLegacyBody(
         R"({"id":"resp_cut","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},)"
         R"("output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"半截"}]}]})");
     REQUIRE(events.size() == 3);

@@ -133,11 +133,20 @@ TEST_CASE("Gemini events: 一只载荷都没有的流 Finish 不硬造 MessageDo
 
 TEST_CASE("Gemini events: 字段类型不对的坏帧当没看见,不崩解析器") {
     api::gemini::EventParser parser;
-    // modelVersion 给了个数字(协议里是字符串):.value() 抛 type_error,整帧
-    // 作废不崩;后面的好帧照常解析。
-    CHECK(lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(R"({"candidates":[{"finishReason":"STOP"}],"modelVersion":7})")).empty());
-    const auto events = lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
+    // Wrong body type closes this request. Later bytes cannot revive success;
+    // a fresh request still parses the original good body sequence.
+    const auto bad = lubancode::api::usage_fixture::ConsumeLegacyBody(parser,
+        Frame(R"({"candidates":[{"finishReason":"STOP"}],"modelVersion":7})"));
+    REQUIRE(bad.size() == 1);
+    REQUIRE(std::holds_alternative<api::StreamError>(bad.front()));
+    CHECK(std::get<api::StreamError>(bad.front()).code == "model.payload.invalid");
+    CHECK(lubancode::api::usage_fixture::ConsumeLegacyBody(parser,
+        Frame(R"({"candidates":[{"content":{"parts":[{"text":"好"}]},"finishReason":"STOP"}]})")).empty());
+    CHECK(parser.Finish().empty());
+    api::gemini::EventParser fresh;
+    const auto events = lubancode::api::usage_fixture::ConsumeLegacyBody(fresh, Frame(
         R"({"candidates":[{"content":{"parts":[{"text":"好"}]},"finishReason":"STOP"}]})"));
+    REQUIRE(events.size() == 2);
     CHECK(std::holds_alternative<api::TextDelta>(events[0]));
     CHECK(std::get<api::MessageDone>(events[1]).stop_reason == "end_turn");
 }

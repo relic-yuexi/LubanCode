@@ -2,6 +2,7 @@
 
 #include <doctest/doctest.h>
 #include "api/assembler.hpp"
+#include "api/responses/events.hpp"
 #include "api/sse_framing.hpp"
 #include "api/usage_aggregation.hpp"
 
@@ -9,9 +10,7 @@ namespace lubancode::api::usage_fixture {
 // Existing fixtures assert the legacy body-event sequence. Validate the added
 // nonterminal fact channel separately, then keep their original body assertions.
 // New fact/identity fixtures call the actual parser directly, without projection.
-template <typename Parser>
-std::vector<StreamEvent> ConsumeLegacyBody(Parser& parser, const SseFrame& frame) {
-    auto actual = parser.Consume(frame);
+inline std::vector<StreamEvent> LegacyBody(std::vector<StreamEvent> actual) {
     std::vector<StreamEvent> body;
     MessageAssembler facts;
     for (auto& event : actual) {
@@ -32,5 +31,12 @@ std::vector<StreamEvent> ConsumeLegacyBody(Parser& parser, const SseFrame& frame
         } else body.push_back(std::move(event));
     }
     return body;
+}
+template <typename Parser>
+std::vector<StreamEvent> ConsumeLegacyBody(Parser& parser, const SseFrame& frame) {
+    return LegacyBody(parser.Consume(frame));
+}
+inline std::vector<StreamEvent> ExpandNonStreamLegacyBody(const std::string& body) {
+    return LegacyBody(responses::ExpandNonStreamResponse(body));
 }
 }  // namespace lubancode::api::usage_fixture

@@ -484,7 +484,25 @@ Result<void> SessionSubagentPlan::CheckRecoveredChildren(const v3::V3Ledger& led
         }
         const bool allow_unconsumed = fact.execution_status == "cancelled" ||
             (fact.execution_status == "error" && result["error"] == "sdk.turn.limit_reached");
-        auto reports = ReadSubagentReports(ledger, resume_dir_, resume_id_, fact.operation_id, fact.turn_id, true, allow_unconsumed);
+        std::optional<OperationUsage> usage;
+        if (const auto saved = result.find("usage"); saved != result.end()) {
+            auto decoded = usage_result::Decode(*saved);
+            if (!decoded) return std::unexpected(Fail("sdk.usage.result_invalid", std::string(decoded.error())));
+            usage = std::move(*decoded);
+            std::set<std::string> requests;
+            for (const auto& record : usage->attempts) {
+                if (record.subordinate) continue;
+                if (record.source_session_id != resume_id_ || record.source_run_id != ledger.run_id ||
+                    record.turn_id != fact.turn_id || !requests.insert(record.trajectory_request_id).second)
+                    return std::unexpected(Fail("sdk.usage.result_invalid", "direct usage owner differs before opening"));
+                const auto bound = usage_result::ValidateRequestBinding(record, ledger);
+                if (!bound) return std::unexpected(Fail("sdk.usage.result_invalid", std::string(bound.error())));
+            }
+        }
+        // Both the prepare read and locked opening repeat this check before any
+        // old system transfer. Rejecting usage must leave the parent untouched.
+        auto reports = ReadSubagentReports(ledger, resume_dir_, resume_id_, fact.operation_id, fact.turn_id,
+            true, allow_unconsumed, usage ? &*usage : nullptr);
         if (!reports) return std::unexpected(reports.error());
     }
     return {};

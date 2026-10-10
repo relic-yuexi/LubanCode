@@ -1167,12 +1167,20 @@ struct Session::Impl final : rt::InteractionBroker {
         active_turn_id = operation.turn_id;
         rt::TurnEventAdapter events(session_id, rt::ProcessIdAuthority());
         bool usage_reported = false;
+        std::string returned_text, returned_text_item;
         events.ObserveUsage([&](const api::Usage& usage, const ::lubancore::usage::v1::Observation* observation,
                                bool subordinate, bool incomplete, const rt::UsageAttemptContext& context) {
             std::lock_guard usage_lock(usage_mutex);
             if (active_usage) detail::usage_result::CaptureAttempt(*active_usage, usage, observation, subordinate, incomplete, context);
         });
         events.Attach([&](const rt::ServerEvent& source) {
+            if (!source.payload.value("subordinate", false) && source.item_kind == rt::ItemKind::Text) {
+                if (source.kind == rt::ServerEventKind::ItemStarted) {
+                    returned_text_item = source.item_id;
+                    returned_text.clear();
+                } else if (source.kind == rt::ServerEventKind::ItemDelta && source.item_id == returned_text_item)
+                    returned_text += source.text;
+            }
             if (source.kind == rt::ServerEventKind::UsageUpdated) {
                 std::lock_guard usage_lock(usage_mutex);
                 if (!source.usage_observed && active_usage) detail::usage_result::Capture(*active_usage, source.payload);
@@ -1560,11 +1568,15 @@ struct Session::Impl final : rt::InteractionBroker {
             operation.error = "sdk.turn.limit_reached";
         }
         const auto& history = agent.history();
-        if (history.size() > history_before && history.back().role == api::Role::Assistant) {
+        if (turn_cancelled) {
+            // Agent history appends a host interruption note. Publish only
+            // actual primary text deltas, retaining any real partial response.
+            operation.final_text = std::move(returned_text);
+        } else if (history.size() > history_before && history.back().role == api::Role::Assistant) {
             for (const auto& block : history.back().content) if (auto* text = std::get_if<api::TextBlock>(&block)) operation.final_text += text->text;
         }
         std::vector<std::string> refs;
-        if (!operation.final_text.empty() && !bridge->last_committed_assistant_message_id().empty()) {
+        if (!turn_cancelled && !operation.final_text.empty() && !bridge->last_committed_assistant_message_id().empty()) {
             refs.push_back(bridge->last_committed_assistant_message_id());
         }
         // Durable operation final precedes its public completion notification.
