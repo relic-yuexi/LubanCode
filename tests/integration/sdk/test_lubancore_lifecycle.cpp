@@ -9,6 +9,7 @@
 #include <functional>
 #include <future>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -481,6 +482,70 @@ TEST_CASE("SDK lifecycle: Close joins a late five-field reply and recovery never
     CHECK(replays.load() == 0); CHECK(gate->calls.load() == 1);
     REQUIRE((*resumed)->Close()); REQUIRE((*runtime)->Shutdown());
     std::cout << "[sdk-usage-close-path] recovery\n";
+}
+
+TEST_CASE("SDK lifecycle: direct usage refusal precedes system transfer without a child plan") {
+    LifecycleFixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime);
+    auto opened = (*runtime)->OpenSession(Options(fixture, [](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        return sdk::ModelReply{"owned reply", {}, sdk::Usage{11, 7, 13, 17, 3}};
+    })); REQUIRE(opened);
+    const auto id = (*opened)->id();
+    const auto receipt = (*opened)->Submit("owned-usage", "save an owned attempt"); REQUIRE(receipt);
+    const auto operation = (*opened)->WaitResult(receipt->operation_id, 15s); REQUIRE(operation);
+    REQUIRE(operation->state == sdk::OperationState::Succeeded); REQUIRE(operation->result_persisted);
+    REQUIRE(operation->usage); REQUIRE(operation->usage->attempts.size() == 1);
+    REQUIRE_FALSE(operation->usage->attempts.front().subordinate);
+    REQUIRE((*opened)->Close()); opened->reset();
+    const auto directory = fixture.SessionDir(id);
+    const auto result_path = directory / "sdk-results" / (receipt->operation_id + ".json");
+    const auto journal = directory / platform::Utf8ToPath(id + ".jsonl");
+    const auto read = [](const fs::path& path) {
+        std::ifstream input(path, std::ios::binary); REQUIRE(input);
+        return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    };
+    const auto write = [](const fs::path& path, const std::string& bytes) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc); REQUIRE(output);
+        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size())); output.flush(); REQUIRE(output.good());
+    };
+    const auto original_result = read(result_path);
+    const auto original_main = read(journal);
+    const auto original_operations = read(directory / "operations.jsonl");
+    const auto original = Json::parse(original_result);
+    REQUIRE(original["usage"]["attempts"].size() == 1);
+    std::atomic<unsigned> replays{0};
+    const auto resume_options = [&] {
+        auto options = Options(fixture, [&](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+            ++replays; return std::unexpected(sdk::Error{"fixture.replay", "recovery must not generate"});
+        });
+        options.resume_session_id = id;
+        options.system_prompt = "A changed system must not publish before usage refusal.";
+        return options;
+    };
+    for (int variant = 0; variant != 9; ++variant) {
+        CAPTURE(variant);
+        auto forged = original;
+        auto& attempt = forged["usage"]["attempts"][0];
+        if (variant == 0) attempt["source_session_id"] = "foreign-session";
+        if (variant == 1) attempt["source_run_id"] = "foreign-run";
+        if (variant == 2) attempt["trajectory_request_id"] = "foreign-request";
+        if (variant == 3) attempt["model"] = "foreign-model";
+        if (variant == 4) attempt["purpose"] = "subagent_turn";
+        if (variant == 5) attempt["cache_epoch"] = 12345;
+        if (variant == 6) attempt["step_id"] = "foreign-step";
+        if (variant == 7) attempt["turn_id"] = "foreign-turn";
+        if (variant == 8) attempt["subordinate"] = true;
+        const auto bytes = forged.dump(); write(result_path, bytes);
+        const auto refused = (*runtime)->OpenSession(resume_options()); REQUIRE_FALSE(refused);
+        CHECK(refused.error().code == "sdk.usage.result_invalid");
+        CHECK(read(journal) == original_main); CHECK(read(result_path) == bytes);
+        CHECK(read(directory / "operations.jsonl") == original_operations); CHECK(replays.load() == 0);
+        write(result_path, original_result);
+    }
+    auto valid = (*runtime)->OpenSession(resume_options()); REQUIRE(valid);
+    const auto recovered = (*valid)->ReadOperation(receipt->operation_id); REQUIRE(recovered);
+    CHECK(recovered->state == sdk::OperationState::Succeeded); CHECK(recovered->final_text == "owned reply");
+    CHECK(replays.load() == 0); REQUIRE((*valid)->Close()); REQUIRE((*runtime)->Shutdown());
 }
 
 TEST_CASE("SDK lifecycle: concurrent shutdown calls both wait for the same live backend") {

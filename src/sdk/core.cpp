@@ -14,6 +14,7 @@
 #include "agent/agent.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "platform/atomic_write.hpp"
+#include "platform/bounded_read.hpp"
 #include "platform/sha256.hpp"
 #include "platform/text_encoding.hpp"
 #include "runtime/assembly/backend.hpp"
@@ -112,6 +113,75 @@ struct CloseErrors {
 };
 
 Error Failure(std::string code, std::string message = {}) { return {std::move(code), std::move(message)}; }
+Result<void> CheckDirectUsageSource(const OperationUsage& usage, const std::string& turn_id,
+    const lubancode::trajectory::v3::V3Ledger& ledger, const std::string& session_id) {
+    if (ledger.session_id != session_id)
+        return std::unexpected(Failure("sdk.usage.result_invalid", "usage source belongs to another Session"));
+    std::set<std::string> seen;
+    for (const auto& record : usage.attempts) {
+        if (record.subordinate) continue; // The child plan checks adopted child journals.
+        if (record.source_session_id != ledger.session_id || record.source_run_id != ledger.run_id ||
+            record.turn_id != turn_id || record.trajectory_request_id.empty() ||
+            !seen.insert(record.trajectory_request_id).second)
+            return std::unexpected(Failure("sdk.usage.result_invalid", "direct usage request owner differs"));
+        const auto bound = detail::usage_result::ValidateRequestBinding(record, ledger);
+        if (!bound) return std::unexpected(Failure("sdk.usage.result_invalid", std::string(bound.error())));
+    }
+    return {};
+}
+
+// Runs inside the existing opening lock before any participant publishes or
+// transfers the old system. Reads owned artifacts only; no factories or repairs.
+Result<void> CheckOpeningUsage(const lubancode::trajectory::V3OpeningContext& context,
+    const lubancode::trajectory::RecoveryReadLimits& limits, bool children_enabled) {
+    if (!context.source) return {}; // A new scene has no restored usage owner.
+    const auto invalid = [](std::string reason) -> Result<void> {
+        return std::unexpected(Failure("sdk.usage.result_invalid", std::move(reason)));
+    };
+    const auto invalid_operations = [](std::string reason) -> Result<void> {
+        return std::unexpected(Failure("sdk.resume.operation_ledger_invalid", std::move(reason)));
+    };
+    const auto operations_path = context.session_dir / "operations.jsonl";
+    std::error_code ec;
+    if (!fs::exists(operations_path, ec)) return ec ? invalid_operations("cannot inspect operation source") : Result<void>{};
+    auto operation_bytes = lubancode::platform::ReadBoundedRegularFile(operations_path, limits.operations.max_bytes);
+    if (!operation_bytes) return invalid_operations("cannot read bounded operation source");
+    const auto lines = lubancode::trajectory::RecoveryStreamLines(*operation_bytes, limits.operations);
+    if (!lines) return invalid_operations(lines.error());
+    auto facts = rt::SessionService::ReadOperationFactsOwned(*operation_bytes);
+    if (!facts) return invalid_operations(facts.error());
+    std::size_t result_bytes = 0;
+    for (const auto& fact : *facts) {
+        if (fact.kind != "operation.final") continue;
+        const auto results = context.session_dir / "sdk-results";
+        const auto path = results / lubancode::tools::Utf8ToPath(fact.operation_id + ".json");
+        const auto status = fs::symlink_status(path, ec);
+        if (ec == std::errc::no_such_file_or_directory) { ec.clear(); continue; }
+        if (ec) return invalid("cannot inspect saved result source");
+        if (!fs::exists(status)) continue; // Retain the established missing-result query gap.
+        const auto directory_status = fs::symlink_status(results, ec);
+        if (ec || fs::is_symlink(directory_status) || !fs::is_directory(directory_status) ||
+            fs::is_symlink(status) || !fs::is_regular_file(status)) return invalid("saved result is not owned regular material");
+        const auto canonical = fs::canonical(path, ec);
+        if (ec || canonical != path) return invalid("saved result escaped its owned path");
+        const auto remaining = limits.result_total_bytes - result_bytes;
+        auto bytes = lubancode::platform::ReadBoundedRegularFile(path, std::min<std::size_t>(64u * 1024u * 1024u, remaining));
+        if (!bytes) return invalid("cannot read bounded saved result");
+        result_bytes += bytes->size(); // The read cap proves this addition stays within the budget.
+        const auto result = Json::parse(*bytes, nullptr, false);
+        if (!result.is_object() || result.value("operationId", Json()) != fact.operation_id ||
+            result.value("turnId", Json()) != fact.turn_id) continue;
+        const auto saved = result.find("usage");
+        if (saved == result.end()) continue; // Older SDK artifacts carried no public usage member.
+        auto usage = detail::usage_result::Decode(*saved);
+        if (!usage) return invalid(std::string(usage.error()));
+        if (!children_enabled && std::any_of(usage->attempts.begin(), usage->attempts.end(),
+            [](const auto& record) { return record.subordinate; })) return invalid("Session admitted no child plan");
+        auto checked = CheckDirectUsageSource(*usage, fact.turn_id, *context.source, context.session_id);
+        if (!checked) return checked;
+    }
+    return {};
+}
 lubancode::trajectory::RecoveryReadLimits InternalRecoveryLimits(const RecoveryReadLimits& value) {
     return {{value.journal.max_bytes, value.journal.max_lines, value.journal.max_line_bytes},
         {value.operations.max_bytes, value.operations.max_lines, value.operations.max_line_bytes},
@@ -624,8 +694,11 @@ struct Session::Impl final : rt::InteractionBroker {
         launch.v3_opening_participant = [skills_opening = std::move(skills_opening), memory_opening = std::move(memory_opening),
                                        write_opening = std::move(write_opening), child_opening = std::move(child_opening),
                                        lua_opening = std::move(lua_opening), action_gate = std::move(action_gate),
-                                       jobs_opening = std::move(jobs_opening)]
+                                       jobs_opening = std::move(jobs_opening), recovery_limits,
+                                       children_enabled = (*child_plan)->enabled()]
             (const lubancode::trajectory::V3OpeningContext& context) -> std::expected<Json, std::string> {
+                const auto usage = CheckOpeningUsage(context, recovery_limits, children_enabled);
+                if (!usage) return std::unexpected(usage.error().code + ": " + usage.error().message);
                 // Recheck the strict Action declaration before another opening
                 // participant can publish metadata or transfer an old system.
                 auto actions = action_gate(context);
@@ -654,6 +727,8 @@ struct Session::Impl final : rt::InteractionBroker {
         launch.resume_source_session_id = options.resume_session_id;
         service = std::make_shared<rt::SessionService>(std::move(launch));
         if (!service->runtime()) return std::unexpected(Failure(
+            service->launch_error().find("sdk.usage.result_invalid") != std::string::npos ? "sdk.usage.result_invalid" :
+            service->launch_error().find("sdk.resume.operation_ledger_invalid") != std::string::npos ? "sdk.resume.operation_ledger_invalid" :
             service->launch_error().find("sdk.skill.") != std::string::npos ? "sdk.skill.open_failed" :
             service->launch_error().find("sdk.memory.") != std::string::npos ? "sdk.memory.open_failed" :
             service->launch_error().find("sdk.memory_write.") != std::string::npos ? "sdk.memory_write.open_failed" :
@@ -764,19 +839,7 @@ struct Session::Impl final : rt::InteractionBroker {
     Result<void> ValidateDirectUsageBindings(const Operation& operation,
         const lubancode::trajectory::v3::V3Ledger& ledger) const {
         if (!operation.usage || operation.usage->attempts.empty()) return {};
-        if (ledger.session_id != session_id)
-            return std::unexpected(Failure("sdk.usage.result_invalid", "usage source belongs to another Session"));
-        std::set<std::string> seen;
-        for (const auto& record : operation.usage->attempts) {
-            if (record.subordinate) continue; // Child ownership requires its adopted child journal.
-            if (record.source_session_id != ledger.session_id || record.source_run_id != ledger.run_id ||
-                record.turn_id != operation.turn_id || record.trajectory_request_id.empty() ||
-                !seen.insert(record.trajectory_request_id).second)
-                return std::unexpected(Failure("sdk.usage.result_invalid", "direct usage request owner differs"));
-            const auto bound = detail::usage_result::ValidateRequestBinding(record, ledger);
-            if (!bound) return std::unexpected(Failure("sdk.usage.result_invalid", std::string(bound.error())));
-        }
-        return {};
+        return CheckDirectUsageSource(*operation.usage, operation.turn_id, ledger, session_id);
     }
 
     Result<void> LoadOperations() {
