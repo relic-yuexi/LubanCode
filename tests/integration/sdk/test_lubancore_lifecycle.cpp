@@ -681,15 +681,22 @@ TEST_CASE("SDK lifecycle: corrupt operation ledger cannot discard a completed op
     // Only the operation ledger was changed. A valid V3 stream alone cannot
     // prove that operation keys and counters remain safe to reuse.
     REQUIRE(lubancode::trajectory::v3::ReadV3Ledger(source_dir / (session_id + ".jsonl")).has_value());
+    const auto read_main = [&] {
+        std::ifstream input(source_dir / (session_id + ".jsonl"), std::ios::binary); REQUIRE(input);
+        return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    };
+    const auto original_main = read_main();
     auto calls = std::make_shared<std::atomic<int>>(0);
     auto options = Options(fixture, [calls](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
         ++*calls;
         return sdk::ModelReply{"must not execute"};
     });
     options.resume_session_id = session_id;
+    options.system_prompt = "Corrupt operation evidence must refuse before this system is published.";
     const auto resumed = (*runtime)->OpenSession(std::move(options));
     REQUIRE_FALSE(resumed.has_value());
     CHECK(resumed.error().code == "sdk.resume.operation_ledger_invalid");
+    CHECK(read_main() == original_main);
     CHECK(calls->load() == 0);
     REQUIRE((*runtime)->Shutdown().has_value());
     fs::rename(fixture.root / "data", fixture.root / "closed-data");

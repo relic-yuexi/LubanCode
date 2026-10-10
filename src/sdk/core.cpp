@@ -143,13 +143,15 @@ Result<void> CheckOpeningUsage(const lubancode::trajectory::V3OpeningContext& co
     };
     const auto operations_path = context.session_dir / "operations.jsonl";
     std::error_code ec;
-    if (!fs::exists(operations_path, ec)) return ec ? invalid_operations("cannot inspect operation source") : Result<void>{};
+    if (!fs::exists(operations_path, ec)) return ec ? invalid_operations("cannot inspect operation source") :
+        detail::ValidateOperationLedger(context.session_dir); // A result cannot outlive all dispatch evidence.
     auto operation_bytes = lubancode::platform::ReadBoundedRegularFile(operations_path, limits.operations.max_bytes);
     if (!operation_bytes) return invalid_operations("cannot read bounded operation source");
     const auto lines = lubancode::trajectory::RecoveryStreamLines(*operation_bytes, limits.operations);
     if (!lines) return invalid_operations(lines.error());
     auto facts = rt::SessionService::ReadOperationFactsOwned(*operation_bytes);
     if (!facts) return invalid_operations(facts.error());
+    if (facts->empty()) return detail::ValidateOperationLedger(context.session_dir);
     std::size_t result_bytes = 0;
     for (const auto& fact : *facts) {
         if (fact.kind != "operation.final") continue;
