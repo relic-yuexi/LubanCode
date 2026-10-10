@@ -51,7 +51,10 @@ TEST_CASE("ContextTracker: unrepresentable and inconsistent percentages stay unk
         REQUIRE(lines.size() == 9);
         CHECK(lines[3].find("######") != std::string::npos);
         CHECK(lines[3].find("100%") != std::string::npos);
-        CHECK(lines[5].find("######") != std::string::npos);
+        // The used-total row deliberately leaves its bar column blank. Only
+        // category rows draw bars; keep the original CLI layout at this bound.
+        CHECK(lines[5].find("######") == std::string::npos);
+        CHECK(lines[5].find(std::string(6, ' ')) != std::string::npos);
         CHECK(lines[5].find("100%") != std::string::npos);
         if (!std::in_range<std::int64_t>(largest)) {
             CHECK(lines[3].find(std::to_string(largest)) != std::string::npos);
