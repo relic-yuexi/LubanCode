@@ -27,6 +27,9 @@
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "sdk/adapters.hpp"
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+#include "sdk/backend_owner_test_hooks.hpp"
+#endif
 #include "sdk/approval.hpp"
 #include "sdk/callback_scope.hpp"
 #include "sdk/policy_callback_scope.hpp"
@@ -77,6 +80,12 @@ Result<web_fetch::v1::Capabilities> web_fetch::v1::DescribeCapabilities() {
 
 namespace detail {
 thread_local bool in_session_worker = false;
+CallbackScope::CallbackScope() noexcept : previous_(in_session_worker) {
+    in_session_worker = true;
+}
+CallbackScope::~CallbackScope() noexcept {
+    in_session_worker = previous_;
+}
 }
 namespace {
 namespace rt = lubancode::runtime;
@@ -365,7 +374,7 @@ struct Session::Impl final : rt::InteractionBroker {
         // MCP launch can fail before registry_factory consumes prepared_registry;
         // later identity/ledger/Agent failures can likewise release the candidate
         // resources before the SDK-owned inline tool callback sources retire.
-        std::shared_ptr<Backend> initialization_backend(std::move(options.backend));
+        std::shared_ptr<Backend> initialization_backend;
         struct SourceScope {
             SessionOptions& options;
             ~SourceScope() {
@@ -376,6 +385,10 @@ struct Session::Impl final : rt::InteractionBroker {
                 options.extensions.clear();
             }
         } source_scope{options};
+        initialization_backend = detail::OwnBackend(options.backend);
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+        detail::testing::ObserveBackendOwner(initialization_backend);
+#endif
         auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
         if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
         auto prepare_journal = std::make_shared<detail::SessionPrepareJournal>(identity->workspace_key, options.resume_session_id);

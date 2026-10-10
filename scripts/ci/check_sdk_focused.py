@@ -732,7 +732,7 @@ def check_opening_start_native(section, command):
         raise RuntimeError("Opening startup must run the complete actual native lifecycle source")
     check_native_command(section, command)
     cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
-    if len(cases) != 1 or tuple(map(int, cases[0])) != (12, 12, 0):
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (19, 19, 0):
         raise RuntimeError("Opening startup and original lifecycle roster must all pass")
     assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
     if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
@@ -742,6 +742,10 @@ def check_opening_start_native(section, command):
     for path in ("standard", "nonstandard", "repeated", "isolation", "shutdown"):
         if section.splitlines().count("[sdk-opening-start-path] " + path) != 1:
             raise RuntimeError("Opening startup actual path did not finish once: " + path)
+
+    for path in ("background", "mutual", "late-deleter", "session-deleter", "exceptions", "nested", "allocation-rollback"):
+        if section.splitlines().count("[sdk-backend-owner-path] " + path) != 1:
+            raise RuntimeError("SDK Backend actual owner path did not finish once: " + path)
 
 
 def check_event_sink_native(section, command):

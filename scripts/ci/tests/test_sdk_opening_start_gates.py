@@ -11,9 +11,11 @@ class OpeningStartEvidenceTests(unittest.TestCase):
     def body(self, command=None):
         command = self.command if command is None else command
         return '\n'.join(('Command: ' + ' '.join('"' + value + '"' for value in command),
-                          '[doctest] test cases: 12 | 12 passed | 0 failed',
+                          '[doctest] test cases: 19 | 19 passed | 0 failed',
                           '[doctest] assertions: 100 | 100 passed | 0 failed', 'Test Passed.',
-                          *('[sdk-opening-start-path] ' + path for path in self.paths)))
+                          *('[sdk-opening-start-path] ' + path for path in self.paths),
+                          *('[sdk-backend-owner-path] ' + path for path in
+                            ('background', 'mutual', 'late-deleter', 'session-deleter', 'exceptions', 'nested', 'allocation-rollback'))))
 
     def test_native_platform_commands(self):
         for executable in ('/real build/lubancore_sdk_tests', 'C:/real build/lubancore_sdk_tests.exe',
@@ -29,8 +31,16 @@ class OpeningStartEvidenceTests(unittest.TestCase):
                 with self.subTest(path=path), self.assertRaises(RuntimeError):
                     check_opening_start_native(body, self.command)
 
+    def test_each_backend_owner_path_must_finish_once(self):
+        for path in ('background', 'mutual', 'late-deleter', 'session-deleter', 'exceptions', 'nested', 'allocation-rollback'):
+            marker = '[sdk-backend-owner-path] ' + path
+            for body in (self.body().replace(marker, ''), self.body() + '\n' + marker):
+                with self.subTest(path=path), self.assertRaises(RuntimeError):
+                    check_opening_start_native(body, self.command)
+
     def test_original_cases_and_assertions_cannot_be_skipped(self):
-        for old, new in (('12 | 12 passed', '8 | 8 passed'),
+        for old, new in (('19 | 19 passed', '12 | 12 passed'),
+                         ('19 | 19 passed', '8 | 8 passed'),
                          ('100 | 100 passed | 0 failed', '100 | 99 passed | 1 failed'),
                          ('Test Passed.', 'Test Failed.')):
             with self.assertRaises(RuntimeError):

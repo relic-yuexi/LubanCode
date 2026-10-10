@@ -1,12 +1,39 @@
 #include "sdk/adapters.hpp"
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+#include "sdk/backend_owner_test_hooks.hpp"
+#endif
+#include "sdk/callback_scope.hpp"
 
 #include <filesystem>
 #include <set>
+#include <new>
 #include <utility>
 
 #include "tools/path_utils.hpp"
 
 namespace lubancore::detail {
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+namespace testing {
+namespace {
+thread_local BackendOwnerObserverHandle backend_owner_observer;
+thread_local bool fail_backend_owner_allocation = false;
+}
+bool ReplaceBackendOwnerAllocationFailure(bool replacement) noexcept {
+    return std::exchange(fail_backend_owner_allocation, replacement);
+}
+void ObserveBackendOwner(const std::shared_ptr<Backend>& owner) {
+    const auto observer = backend_owner_observer;
+    if (observer && *observer) (*observer)(owner);
+}
+BackendOwnerObserverHandle ReplaceBackendOwnerObserver(
+    BackendOwnerObserverHandle replacement) noexcept {
+    return std::exchange(backend_owner_observer, std::move(replacement));
+}
+std::unique_ptr<lubancode::api::Backend> AdaptObservedBackend(std::shared_ptr<Backend> backend) {
+    return AdaptBackend(std::move(backend));
+}
+}
+#endif
 namespace {
 namespace api = lubancode::api;
 namespace tools = lubancode::tools;
@@ -108,7 +135,10 @@ public:
             auto in = ConvertRequest(request);
             if (!in) return std::unexpected(in.error());
             if (cancel && cancel->load()) return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled"});
-            auto reply = backend_->Generate(*in, Cancellation{cancel});
+            auto reply = [&] {
+                CallbackScope callback;
+                return backend_->Generate(*in, Cancellation{cancel});
+            }();
             if (cancel && cancel->load()) return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled"});
             if (!reply) return std::unexpected(api::Error{api::ErrorKind::Api, reply.error().code + ": " + reply.error().message});
             if (!ValidSamplingValue(reply->stop_reason)) {
@@ -268,6 +298,40 @@ private:
     std::string cwd_;
 };
 } // namespace
+
+namespace {
+struct BackendOwnerStorage {
+    std::unique_ptr<Backend> backend;
+    ~BackendOwnerStorage() {
+        CallbackScope callback;
+        backend.reset();
+    }
+};
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+template<class T> struct BackendOwnerAllocator {
+    using value_type = T;
+    BackendOwnerAllocator() noexcept = default;
+    template<class U> BackendOwnerAllocator(const BackendOwnerAllocator<U>&) noexcept {}
+    T* allocate(std::size_t count) {
+        if (std::exchange(testing::fail_backend_owner_allocation, false)) throw std::bad_alloc{};
+        return std::allocator<T>{}.allocate(count);
+    }
+    void deallocate(T* p, std::size_t count) noexcept { std::allocator<T>{}.deallocate(p, count); }
+    template<class U> bool operator==(const BackendOwnerAllocator<U>&) const noexcept { return true; }
+};
+#endif
+}
+std::shared_ptr<Backend> OwnBackend(std::unique_ptr<Backend>& backend) {
+    if (!backend) return {};
+    // Allocation can throw while the original unique owner remains untouched.
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+    auto storage = std::allocate_shared<BackendOwnerStorage>(BackendOwnerAllocator<BackendOwnerStorage>{});
+#else
+    auto storage = std::make_shared<BackendOwnerStorage>();
+#endif
+    storage->backend = std::move(backend);
+    return std::shared_ptr<Backend>(storage, storage->backend.get());
+}
 
 std::unique_ptr<lubancode::api::Backend> AdaptBackend(std::shared_ptr<Backend> backend) {
     return std::make_unique<BackendAdapter>(std::move(backend));

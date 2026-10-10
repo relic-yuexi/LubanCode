@@ -877,3 +877,253 @@ TEST_CASE("SDK lifecycle: real MCP text reaches the next model request and compl
 TEST_CASE("SDK lifecycle: real MCP image is captured once and rejected by the media budget") {
     CheckMcpResultBoundary(true);
 }
+
+
+#include "sdk/backend_owner_test_hooks.hpp"
+#include <exception>
+#include <stdexcept>
+
+namespace {
+namespace backend_owner_port = lubancore::detail::testing;
+struct ObservedBackendOwner {
+    std::weak_ptr<sdk::Backend> observed;
+    backend_owner_port::BackendOwnerObserverHandle previous;
+    ObservedBackendOwner() : previous(backend_owner_port::ReplaceBackendOwnerObserver(
+        std::make_shared<const backend_owner_port::BackendOwnerObserver>(
+            [this](const std::shared_ptr<sdk::Backend>& owner) { observed = owner; }))) {}
+    ~ObservedBackendOwner() { backend_owner_port::ReplaceBackendOwnerObserver(std::move(previous)); }
+    std::shared_ptr<sdk::Backend> Lock() const { return observed.lock(); }
+};
+struct MutualOwnerGate {
+    std::mutex mutex; std::condition_variable cv; unsigned entered = 0;
+    bool Meet() {
+        std::unique_lock lock(mutex); ++entered; cv.notify_all();
+        return cv.wait_for(lock, 5s, [&] { return entered == 2; });
+    }
+};
+struct BackendOwnerProbe {
+    std::atomic<unsigned> generated{0}, destroyed{0};
+    std::atomic<bool> generate_checked{false}, destroy_checked{false}, probe_threw{false};
+    std::function<sdk::Result<sdk::ModelReply>()> generate;
+    std::function<void()> destroy;
+};
+class ObservedPublicBackend final : public sdk::Backend {
+public:
+    explicit ObservedPublicBackend(std::shared_ptr<BackendOwnerProbe> value) : probe_(std::move(value)) {}
+    ~ObservedPublicBackend() override {
+        ++probe_->destroyed;
+        try { if (probe_->destroy) probe_->destroy(); }
+        catch (...) { probe_->probe_threw.store(true); }
+    }
+    sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest&, sdk::Cancellation) override {
+        ++probe_->generated;
+        if (probe_->generate) return probe_->generate();
+        return sdk::ModelReply{"owner probe"};
+    }
+private:
+    std::shared_ptr<BackendOwnerProbe> probe_;
+};
+sdk::SessionOptions BackendOwnerOptions(const LifecycleFixture& fixture,
+                                      const std::shared_ptr<BackendOwnerProbe>& probe) {
+    auto options = Options(fixture, [](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        return sdk::ModelReply{};
+    });
+    options.backend = std::make_unique<ObservedPublicBackend>(probe);
+    return options;
+}
+bool ReentryRejected(sdk::Runtime& runtime, sdk::Session& session) {
+    const auto id = session.id();
+    const auto close = session.Close();
+    const auto wait = session.WaitResult("owner-missing-operation", 1ms);
+    const auto shutdown = runtime.Shutdown();
+    const auto cancel = session.Cancel("owner-missing-operation");
+    (void)session.PendingApprovals();
+    return !id.empty() && !close && close.error().code == "sdk.lifecycle.reentrant" &&
+        !wait && wait.error().code == "sdk.lifecycle.reentrant" &&
+        !shutdown && shutdown.error().code == "sdk.lifecycle.reentrant" &&
+        !cancel && cancel.error().code == "sdk.operation.not_found";
+}
+auto InvokeObserved(lubancode::api::Backend& adapter) {
+    lubancode::api::Request request;
+    request.model = "owner-probe";
+    request.system = "owner probe";
+    return adapter.send_stream(request, [](const lubancode::api::StreamEvent&) {}, nullptr);
+}
+}
+
+TEST_CASE("SDK Backend owner: background adapter rejects lifecycle reentry and permits query/cancel") {
+    std::cout << "[sdk-backend-owner-path] background\n";
+    LifecycleFixture fixture; auto runtime = sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime);
+    auto probe = std::make_shared<BackendOwnerProbe>();
+    ObservedBackendOwner observation;
+    auto session = (*runtime)->OpenSession(BackendOwnerOptions(fixture,probe)); REQUIRE(session);
+    auto owner = observation.Lock(); REQUIRE(owner);
+    auto adapter = backend_owner_port::AdaptObservedBackend(owner); REQUIRE(adapter);
+    probe->generate = [&] { probe->generate_checked.store(ReentryRejected(**runtime,**session));
+        return sdk::Result<sdk::ModelReply>{sdk::ModelReply{"background"}}; };
+    std::exception_ptr failure; bool sent = false;
+    std::jthread worker([&] { try { sent = InvokeObserved(*adapter).has_value(); } catch (...) { failure = std::current_exception(); } });
+    worker.join(); REQUIRE(failure == nullptr); CHECK(sent); CHECK(probe->generate_checked.load());
+    CHECK(probe->generated.load() == 1);
+    adapter.reset(); owner.reset(); REQUIRE((*session)->Close()); CHECK(probe->destroyed.load() == 1);
+    REQUIRE((*runtime)->Shutdown());
+}
+
+TEST_CASE("SDK Backend owner: two background callbacks reject mutual Session close before locking") {
+    std::cout << "[sdk-backend-owner-path] mutual\n";
+    LifecycleFixture fixture; auto runtime = sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime);
+    auto left = std::make_shared<BackendOwnerProbe>(), right = std::make_shared<BackendOwnerProbe>();
+    ObservedBackendOwner observation;
+    auto a = (*runtime)->OpenSession(BackendOwnerOptions(fixture,left)); REQUIRE(a);
+    auto aa = backend_owner_port::AdaptObservedBackend(observation.Lock()); REQUIRE(aa);
+    auto b = (*runtime)->OpenSession(BackendOwnerOptions(fixture,right)); REQUIRE(b);
+    auto bb = backend_owner_port::AdaptObservedBackend(observation.Lock()); REQUIRE(bb);
+    MutualOwnerGate entered;
+    left->generate = [&] { if (!entered.Meet()) return sdk::Result<sdk::ModelReply>{std::unexpected(sdk::Error{"fixture.timeout","mutual owner gate"})}; left->generate_checked.store(ReentryRejected(**runtime,**b));
+        return sdk::Result<sdk::ModelReply>{sdk::ModelReply{"left"}}; };
+    right->generate = [&] { if (!entered.Meet()) return sdk::Result<sdk::ModelReply>{std::unexpected(sdk::Error{"fixture.timeout","mutual owner gate"})}; right->generate_checked.store(ReentryRejected(**runtime,**a));
+        return sdk::Result<sdk::ModelReply>{sdk::ModelReply{"right"}}; };
+    std::exception_ptr fa,fb; bool sa=false,sb=false;
+    std::jthread wa([&] { try { sa=InvokeObserved(*aa).has_value(); } catch (...) { fa=std::current_exception(); } });
+    std::jthread wb([&] { try { sb=InvokeObserved(*bb).has_value(); } catch (...) { fb=std::current_exception(); } });
+    wa.join(); wb.join(); REQUIRE(fa==nullptr); REQUIRE(fb==nullptr); CHECK(sa); CHECK(sb);
+    CHECK(left->generate_checked.load()); CHECK(right->generate_checked.load());
+    aa.reset(); bb.reset(); REQUIRE((*runtime)->Shutdown());
+    CHECK(left->destroyed.load()==1); CHECK(right->destroyed.load()==1);
+}
+
+TEST_CASE("SDK Backend owner: actual Session closes before the final borrowed owner is destroyed on another thread") {
+    std::cout << "[sdk-backend-owner-path] late-deleter\n";
+    LifecycleFixture fixture; auto runtime = sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime);
+    auto probe=std::make_shared<BackendOwnerProbe>(); ObservedBackendOwner observation;
+    auto session=(*runtime)->OpenSession(BackendOwnerOptions(fixture,probe)); REQUIRE(session);
+    auto owner=observation.Lock(); REQUIRE(owner);
+    auto adapter=backend_owner_port::AdaptObservedBackend(owner); REQUIRE(adapter);
+    probe->destroy=[&] { probe->destroy_checked.store(ReentryRejected(**runtime,**session)); };
+    REQUIRE((*session)->Close()); CHECK(probe->destroyed.load()==0);
+    owner.reset(); CHECK_FALSE(observation.observed.expired());
+    std::jthread retiring([owned=std::move(adapter)]() mutable { owned.reset(); }); retiring.join();
+    CHECK(observation.observed.expired()); CHECK(probe->destroyed.load()==1);
+    CHECK(probe->destroy_checked.load()); CHECK_FALSE(probe->probe_threw.load());
+    REQUIRE((*session)->Close()); REQUIRE((*runtime)->Shutdown());
+}
+
+TEST_CASE("SDK Backend owner: final real Session cleanup rejects destructor lifecycle reentry") {
+    std::cout << "[sdk-backend-owner-path] session-deleter\n";
+    LifecycleFixture fixture; auto runtime=sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime);
+    auto probe=std::make_shared<BackendOwnerProbe>(); ObservedBackendOwner observation;
+    auto session=(*runtime)->OpenSession(BackendOwnerOptions(fixture,probe)); REQUIRE(session);
+    REQUIRE_FALSE(observation.observed.expired());
+    probe->destroy=[&] { probe->destroy_checked.store(ReentryRejected(**runtime,**session)); };
+    REQUIRE((*session)->Close()); CHECK(probe->destroyed.load()==1);
+    CHECK(probe->destroy_checked.load()); CHECK_FALSE(probe->probe_threw.load());
+    CHECK(observation.observed.expired()); REQUIRE((*runtime)->Shutdown());
+}
+
+TEST_CASE("SDK Backend owner: standard and unknown Generate exceptions restore the SDK TLS guard") {
+    std::cout << "[sdk-backend-owner-path] exceptions\n";
+    for (bool unknown : {false,true}) {
+    LifecycleFixture fixture; auto runtime=sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime);
+    auto probe=std::make_shared<BackendOwnerProbe>(); ObservedBackendOwner observation;
+    auto session=(*runtime)->OpenSession(BackendOwnerOptions(fixture,probe)); REQUIRE(session);
+    auto adapter=backend_owner_port::AdaptObservedBackend(observation.Lock()); REQUIRE(adapter);
+    probe->generate=[&]() -> sdk::Result<sdk::ModelReply> {
+        probe->generate_checked.store(ReentryRejected(**runtime,**session));
+        if (unknown) throw 71; throw std::runtime_error("owner exception");
+    };
+    bool failed=false, restored=false; std::exception_ptr failure;
+    std::jthread worker([&] { try { failed=!InvokeObserved(*adapter); restored=(*session)->Close().has_value(); }
+        catch (...) { failure=std::current_exception(); } }); worker.join();
+    REQUIRE(failure==nullptr); CHECK(failed); CHECK(restored); CHECK(probe->generate_checked.load());
+    CHECK(probe->destroyed.load()==0); adapter.reset(); CHECK(probe->destroyed.load()==1);
+    REQUIRE((*runtime)->Shutdown());
+    }
+}
+
+TEST_CASE("SDK Backend owner: nested adapter exception restores the outer SDK guard then releases it") {
+    std::cout << "[sdk-backend-owner-path] nested\n";
+    for (bool unknown : {false,true}) {
+    LifecycleFixture fixture; auto runtime=sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime);
+    auto outer=std::make_shared<BackendOwnerProbe>(), inner=std::make_shared<BackendOwnerProbe>();
+    ObservedBackendOwner observation;
+    auto a=(*runtime)->OpenSession(BackendOwnerOptions(fixture,outer)); REQUIRE(a);
+    auto aa=backend_owner_port::AdaptObservedBackend(observation.Lock()); REQUIRE(aa);
+    auto b=(*runtime)->OpenSession(BackendOwnerOptions(fixture,inner)); REQUIRE(b);
+    auto bb=backend_owner_port::AdaptObservedBackend(observation.Lock()); REQUIRE(bb);
+    inner->generate=[&]() -> sdk::Result<sdk::ModelReply> {
+        inner->generate_checked.store(ReentryRejected(**runtime,**a));
+        if (unknown) throw 72; throw std::runtime_error("nested owner exception");
+    };
+    bool inner_failed=false;
+    outer->generate=[&] { inner_failed=!InvokeObserved(*bb); outer->generate_checked.store(ReentryRejected(**runtime,**b));
+        return sdk::Result<sdk::ModelReply>{sdk::ModelReply{"nested returned"}}; };
+    bool sent=false,restored=false; std::exception_ptr failure;
+    std::jthread worker([&] { try { sent=InvokeObserved(*aa).has_value(); restored=(*a)->Close().has_value() && (*b)->Close().has_value(); }
+        catch (...) { failure=std::current_exception(); } }); worker.join();
+    REQUIRE(failure==nullptr); CHECK(sent); CHECK(restored); CHECK(inner_failed);
+    CHECK(inner->generate_checked.load()); CHECK(outer->generate_checked.load());
+    aa.reset(); bb.reset(); CHECK(outer->destroyed.load()==1); CHECK(inner->destroyed.load()==1);
+    REQUIRE((*runtime)->Shutdown());
+    }
+}
+
+TEST_CASE("SDK Backend owner: allocation and observer failure retire captures before Backend") {
+    std::cout << "[sdk-backend-owner-path] allocation-rollback\n";
+    for (const bool allocation_failure : {true, false}) {
+        LifecycleFixture fixture;
+        auto runtime = sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime);
+        auto probe = std::make_shared<BackendOwnerProbe>();
+        auto retired = std::make_shared<std::atomic<bool>>(false);
+        auto retired_before_backend = std::make_shared<std::atomic<bool>>(false);
+        struct Capture {
+            std::shared_ptr<BackendOwnerProbe> probe;
+            std::shared_ptr<std::atomic<bool>> retired, retired_before_backend;
+            ~Capture() {
+                retired_before_backend->store(probe->destroyed.load() == 0);
+                retired->store(true);
+            }
+        };
+        auto options = BackendOwnerOptions(fixture, probe);
+        auto capture = std::make_shared<Capture>();
+        capture->probe = probe; capture->retired = retired;
+        capture->retired_before_backend = retired_before_backend;
+        sdk::Tool tool;
+        tool.name = "backend_allocation_capture";
+        tool.execute = [capture](const std::string&, const sdk::ToolContext&) -> sdk::Result<sdk::ToolResult> {
+            return sdk::ToolResult{"unused"};
+        };
+        options.custom_tools.push_back(std::move(tool));
+        // A moved-from std::function may retain its SBO capture. Retire the
+        // caller's copy before asking the SDK to retire its own source.
+        tool.execute = {};
+        capture.reset();
+        probe->destroy = [retired, probe_raw = probe.get(), owner = runtime->get()] {
+            const auto shutdown = owner->Shutdown();
+            probe_raw->destroy_checked.store(retired->load() && !shutdown &&
+                shutdown.error().code == "sdk.lifecycle.reentrant");
+        };
+        std::atomic<unsigned> observer_calls{0};
+        struct FaultScope {
+            bool previous;
+            backend_owner_port::BackendOwnerObserverHandle observer;
+            explicit FaultScope(bool fail, std::atomic<unsigned>& calls) : previous(
+                backend_owner_port::ReplaceBackendOwnerAllocationFailure(fail)),
+                observer(backend_owner_port::ReplaceBackendOwnerObserver(
+                    std::make_shared<const backend_owner_port::BackendOwnerObserver>(
+                        [&calls](const std::shared_ptr<sdk::Backend>&) { ++calls; throw std::runtime_error("owner observer rollback"); }))) {}
+            ~FaultScope() {
+                backend_owner_port::ReplaceBackendOwnerAllocationFailure(previous);
+                backend_owner_port::ReplaceBackendOwnerObserver(std::move(observer));
+            }
+        } fault(allocation_failure, observer_calls);
+        auto session = (*runtime)->OpenSession(std::move(options));
+        REQUIRE_FALSE(session);
+        CHECK(session.error().code == "sdk.session.open_failed");
+        CHECK_FALSE(backend_owner_port::ReplaceBackendOwnerAllocationFailure(false));
+        CHECK(observer_calls.load() == (allocation_failure ? 0u : 1u));
+        CHECK(retired->load()); CHECK(retired_before_backend->load());
+        CHECK(probe->destroy_checked.load()); CHECK(probe->destroyed.load() == 1);
+        CHECK(probe->generated.load() == 0); CHECK_FALSE(probe->probe_threw.load());
+        CHECK((*runtime)->Shutdown());
+    }
+}
