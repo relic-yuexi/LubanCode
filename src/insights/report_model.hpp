@@ -24,7 +24,7 @@ inline constexpr int kInsightsReportSchemaVersion = 1;
 // prepared 持久请求视图,摩擦走 v3 工具/请求事实;摘要带 source.format
 // 与 coverage.limitations(缺件规则不判分)。analyzer version 抬升使旧
 // 摘要重算;report schema 顶层形状不变(会话条目加可选键)。
-inline constexpr const char* kInsightsAnalyzerVersion = "insights-v2.0";
+inline constexpr const char* kInsightsAnalyzerVersion = "insights-v2.1-checked-usage";
 
 struct InsightsReport {
     std::string generated_at;  // "YYYY-MM-DDTHH:MM:SSZ",调用方注入
@@ -56,6 +56,7 @@ struct InsightsReport {
         std::string cost_currency;
         std::int64_t cost_micros = 0;
         std::string price_table_id;
+        usage_projection::Knowledge knowledge;
     } usage;
     std::string analysis_mode = "local_deterministic";  // 页眉"分析方式"
     std::vector<SessionInsightSummary> sessions;

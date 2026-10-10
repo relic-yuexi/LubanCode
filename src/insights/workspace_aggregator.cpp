@@ -25,14 +25,6 @@ const std::vector<std::string>& FrictionClosedTableOrder() {
 
 namespace {
 
-// 四舍五入整数百分比;分母 <= 0 给 nullopt(unknown,不写 0%)。
-std::optional<int> SharePercent(std::int64_t part, std::int64_t whole) {
-    if (whole <= 0) {
-        return std::nullopt;
-    }
-    return static_cast<int>((part * 200 + whole) / (whole * 2));
-}
-
 void AppendSample(std::vector<std::string>* samples, const std::string& session_id) {
     if (samples->size() < 5) {
         samples->push_back(session_id);
@@ -85,11 +77,7 @@ WorkspaceAggregate AggregateInsights(const InsightsReport& report) {
         agg.requests_total += static_cast<std::int64_t>(session.usage.requests_total);
         agg.requests_with_usage +=
             static_cast<std::int64_t>(session.usage.requests_with_usage);
-        agg.input_tokens += session.usage.input_tokens;
-        agg.cache_read_tokens += session.usage.cache_read_tokens;
-        agg.cache_creation_tokens += session.usage.cache_creation_tokens;
-        agg.output_tokens += session.usage.output_tokens;
-        agg.reasoning_tokens += session.usage.reasoning_tokens;
+        usage_projection::AddSummary(agg, session.usage);
         for (const auto& epoch : session.cache_epochs) {
             WorkspaceAggregate::CacheEpochRow row;
             row.session_id = session.source.session_id;
@@ -103,10 +91,11 @@ WorkspaceAggregate AggregateInsights(const InsightsReport& report) {
             row.input_tokens = epoch.input_tokens;
             row.cache_read_tokens = epoch.cache_read_tokens;
             row.cache_creation_tokens = epoch.cache_creation_tokens;
-            const std::int64_t base = row.input_tokens + row.cache_read_tokens +
-                                      row.cache_creation_tokens;
+            row.knowledge = epoch.knowledge;
             if (row.requests_cache_reported > 0 && row.requests_cache_unknown == 0) {
-                row.cache_read_ratio_percent = SharePercent(row.cache_read_tokens, base);
+                row.cache_read_ratio_percent = usage_projection::Ratio(
+                    usage_projection::Value(row.cache_read_tokens, row.knowledge.cache_read_tokens),
+                    usage_projection::Input(row));
             }
             agg.cache_epochs.push_back(std::move(row));
         }
@@ -159,9 +148,9 @@ WorkspaceAggregate AggregateInsights(const InsightsReport& report) {
     }
 
     agg.requests_unknown = agg.requests_total - agg.requests_with_usage;
-    const std::int64_t cache_base =
-        agg.input_tokens + agg.cache_read_tokens + agg.cache_creation_tokens;
-    agg.cache_read_ratio_percent = SharePercent(agg.cache_read_tokens, cache_base);
+    agg.cache_read_ratio_percent = usage_projection::Ratio(
+        usage_projection::Value(agg.cache_read_tokens, agg.knowledge.cache_read_tokens),
+        usage_projection::Input(agg));
 
     // outcome 分布(字典序;空 outcome 不进表,限制节报"无 outcome 评估"数)。
     {

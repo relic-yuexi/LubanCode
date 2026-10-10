@@ -372,6 +372,7 @@ InsightsGenerateResult GenerateInsightsReport(
     report.usage.cache_creation_tokens = agg.cache_creation_tokens;
     report.usage.output_tokens = agg.output_tokens;
     report.usage.reasoning_tokens = agg.reasoning_tokens;
+    report.usage.knowledge = agg.knowledge;
     report.usage.cost_status = "not_priced";  // 摘要级 schema 不带逐模型拆账,
                                               // 费用逐笔看 /usage;边界进限制节
 

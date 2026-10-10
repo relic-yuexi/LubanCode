@@ -7,6 +7,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -134,6 +135,39 @@ TEST_CASE("信号 rollup:FS-04 只开一条也用本命 id,跨场汇总") {
 }
 
 TEST_CASE("usage 账:unknown 单列不折 0;cache 比例分母 0 给 unknown") {
+    SUBCASE("workspace buckets retain sticky unknown from overflow and restored summaries") {
+        auto first = MakeSession("first", std::numeric_limits<std::int64_t>::max(), 1);
+        auto second = MakeSession("second", 1, 2);
+        auto third = MakeSession("third", 0, 3);
+        auto aggregate = AggregateInsights(ReportOf({first, second, third}));
+        CHECK(!aggregate.knowledge.input_tokens);
+        CHECK(aggregate.input_tokens == std::numeric_limits<std::int64_t>::max());
+        CHECK(aggregate.knowledge.output_tokens);
+        CHECK(aggregate.output_tokens == 6);
+        CHECK(!aggregate.cache_read_ratio_percent);
+        first.usage.input_tokens = 17;
+        first.usage.knowledge.input_tokens = false;
+        std::string error;
+        const auto restored = SessionInsightSummary::FromJsonStrict(first.ToJson(), &error);
+        REQUIRE(restored.has_value());
+        aggregate = AggregateInsights(ReportOf({*restored, second}));
+        CHECK(!aggregate.knowledge.input_tokens);
+        CHECK(aggregate.knowledge.output_tokens);
+        auto exact = MakeSession("large-ratio", 0, 0);
+        exact.usage.cache_read_tokens = std::numeric_limits<std::int64_t>::max();
+        CHECK(AggregateInsights(ReportOf({exact})).cache_read_ratio_percent == 100);
+        SummaryCacheEpoch epoch;
+        epoch.run_id = "main";
+        epoch.requests_total = 1;
+        epoch.requests_cache_reported = 1;
+        epoch.input_tokens = std::numeric_limits<std::int64_t>::max();
+        epoch.cache_read_tokens = 1;
+        exact.cache_epochs.push_back(epoch);
+        const auto epoch_aggregate = AggregateInsights(ReportOf({exact}));
+        REQUIRE(epoch_aggregate.cache_epochs.size() == 1);
+        CHECK(!epoch_aggregate.cache_epochs[0].cache_read_ratio_percent);
+        CHECK(!usage_projection::Input(epoch_aggregate.cache_epochs[0]));
+    }
     SUBCASE("有 unknown 请求") {
         SessionInsightSummary session = MakeSession("s", 100, 200);
         session.usage.requests_total = 3;

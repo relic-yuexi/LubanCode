@@ -34,6 +34,7 @@ struct FeatureSignalInput {
     std::int64_t cache_read_tokens = 0;
     bool main_tokens_known = true;
     bool subagent_tokens_known = true;
+    bool cache_read_known = true;
 };
 
 // 一条功能信号。

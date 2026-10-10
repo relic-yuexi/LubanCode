@@ -72,7 +72,7 @@ std::vector<FeatureSignal> DetectFeatureSignals(const FeatureSignalInput& input)
 
     // §12.2 第 8 行:cache 前缀抖 → 固定排序、稳定段前置、动态段后置。
     // 先决"provider 明报 cache 或有诊断证据"——有实测 cache 账才算。FS-03。
-    if (input.prefix_breaks_same_epoch >= 2 && input.cache_read_tokens > 0) {
+    if (input.cache_read_known && input.prefix_breaks_same_epoch >= 2 && input.cache_read_tokens > 0) {
         FeatureSignal signal;
         signal.signal_id = "FS-03";
         signal.feature = "固定工具排序;稳定段前置、动态段后置";

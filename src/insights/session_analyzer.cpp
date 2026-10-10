@@ -77,11 +77,7 @@ void AnalyzeSessionV3(SessionAnalyzeResult& result, const std::filesystem::path&
             if (sample.usage.has_value()) {
                 summary.coverage.requests_with_usage += 1;
                 summary.usage.requests_with_usage += 1;
-                summary.usage.input_tokens += sample.usage->input_tokens;
-                summary.usage.cache_read_tokens += sample.usage->cache_read_tokens;
-                summary.usage.cache_creation_tokens += sample.usage->cache_creation_tokens;
-                summary.usage.output_tokens += sample.usage->output_tokens;
-                summary.usage.reasoning_tokens += sample.usage->output_reasoning_tokens;
+                usage_projection::AddUsage(summary.usage, *sample.usage);
             }
         }
     }
@@ -237,12 +233,7 @@ SessionAnalyzeResult AnalyzeSession(const std::filesystem::path& session_dir,
                 if (sample.usage.has_value()) {
                     summary.coverage.requests_with_usage += 1;
                     summary.usage.requests_with_usage += 1;
-                    summary.usage.input_tokens += sample.usage->input_tokens;
-                    summary.usage.cache_read_tokens += sample.usage->cache_read_tokens;
-                    summary.usage.cache_creation_tokens +=
-                        sample.usage->cache_creation_tokens;
-                    summary.usage.output_tokens += sample.usage->output_tokens;
-                    summary.usage.reasoning_tokens += sample.usage->output_reasoning_tokens;
+                    usage_projection::AddUsage(summary.usage, *sample.usage);
                 }
                 AccumulateUsageShape(signal_input, sample);
             }
@@ -366,13 +357,17 @@ SessionAnalyzeResult AnalyzeSession(const std::filesystem::path& session_dir,
             epoch.requests_cache_unknown =
                 static_cast<std::uint64_t>(row.requests_cache_unknown);
             epoch.input_tokens = row.totals.input_tokens;
+            epoch.knowledge.input_tokens = row.totals.input_known;
             epoch.cache_read_tokens = row.totals.cache_read_tokens;
+            epoch.knowledge.cache_read_tokens = row.totals.cache_read_known;
             epoch.cache_creation_tokens = row.totals.cache_creation_tokens;
+            epoch.knowledge.cache_creation_tokens = row.totals.cache_creation_known;
             summary.cache_epochs.push_back(std::move(epoch));
         }
         signal_input.unexpected_miss_candidates =
             aggregate.cache.unexpected_miss_candidates;
         signal_input.cache_read_tokens = aggregate.totals.cache_read_tokens;
+        signal_input.cache_read_known = aggregate.totals.cache_read_known;
     }
 
     result.signals = DetectFeatureSignals(signal_input);

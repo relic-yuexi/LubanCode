@@ -104,6 +104,7 @@ struct WorkspaceAggregate {
         std::int64_t cache_read_tokens = 0;
         std::int64_t cache_creation_tokens = 0;
         std::optional<int> cache_read_ratio_percent;
+        usage_projection::Knowledge knowledge;
     };
     std::vector<CacheEpochRow> cache_epochs;
     // 三 Prompt 构成:runtime finding 按规则 id 汇总(每规则一条)。
@@ -119,6 +120,7 @@ struct WorkspaceAggregate {
     std::int64_t sessions_outcome_assessed = 0;
     // 六 建议:功能信号按规则汇总。
     std::vector<SignalRollup> signals;
+    usage_projection::Knowledge knowledge;
 };
 
 // micro 判定(§9.1):摘要字段口径——turn<2 且无工具/验证/outcome。
