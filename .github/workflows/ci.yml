@@ -377,7 +377,8 @@ jobs:
           build=Path('build'); root=Path.cwd()
           expected={'unit.workflows.'+p.stem.removeprefix('test_') for p in Path('tests/unit/workflows').glob('test_*.cpp')}
           expected.add('unit.app.memory_bypass_owner')
-          registered={r['name'] for r in json.loads((build/'tsan-registration.json').read_text(encoding='utf-8'))['tests']}
+          registered_tests=json.loads((build/'tsan-registration.json').read_text(encoding='utf-8'))['tests']
+          registered={r['name'] for r in registered_tests}
           cases=ET.parse(build/'tsan-results.xml').getroot().findall('.//testcase')
           names=[r.attrib['name'] for r in cases]
           if registered!=expected or len(names)!=len(set(names)) or set(names)!=expected:
@@ -386,6 +387,16 @@ jobs:
               raise SystemExit('TSan actual source failure, error or skip')
           log=(build/'Testing/Temporary/LastTest.log').read_text(encoding='utf-8')
           sections=re.split(r'^\d+/\d+ Testing: ([^\r\n]+)\r?$',log,flags=re.M)
+          native_cases={}
+          for test in registered_tests:
+              name=test['name']
+              matching=[sections[i+1] for i in range(1,len(sections),2) if sections[i]==name]
+              if len(matching)!=1 or not test.get('command') or any(arg not in matching[0] for arg in test['command'][1:]):
+                  raise SystemExit('TSan actual registered command missing or ambiguous: '+name)
+              counts=re.findall(r'\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed',matching[0])
+              if len(counts)!=1 or int(counts[0][0])==0 or counts[0][0]!=counts[0][1] or counts[0][2]!='0' or matching[0].splitlines().count('Test Passed.')!=1:
+                  raise SystemExit('TSan actual source ran zero cases or failed: '+name)
+              native_cases[name]=int(counts[0][0])
           bodies=[sections[i+1] for i in range(1,len(sections),2) if sections[i]=='unit.app.memory_bypass_owner']
           if len(bodies)!=1 or '--source-file=*test_memory_bypass_owner.cpp' not in bodies[0]:
               raise SystemExit('TSan did not run actual bypass owner source exactly once')
@@ -396,6 +407,7 @@ jobs:
           commands=json.loads((build/'compile_commands.json').read_text(encoding='utf-8'))
           required=['src/trajectory/session_manager.cpp','src/trajectory/managed_session_reservation.cpp','src/trajectory/managed_session_ownership.cpp','src/runtime/trajectory_session.cpp','src/runtime/trajectory_bypass_bridge.cpp','src/runtime/trajectory_turn_bridge.cpp','src/runtime/trajectory_subagent_bridge.cpp','src/runtime/trajectory_workflow_bridge.cpp','src/workflow/node_sessions.cpp','src/app/turn_memory_extractor.cpp','src/app/session_title_refiner.cpp','tests/unit/app/test_memory_bypass_owner.cpp']
           required.append('src/trajectory/v3/writer.cpp')
+          required.extend(['src/workflow/runtime.cpp','src/workflow/account.cpp','tests/unit/workflows/test_workflow_account_runtime.cpp','tests/unit/workflows/test_workflow_trajectory_runtime.cpp'])
           verified=[]
           for name in required:
               entries=[r for r in commands if Path(r['file']).resolve()==root/name]
@@ -403,7 +415,7 @@ jobs:
                   raise SystemExit('TSan instrumentation missing on actual owner source: '+name)
               verified.append(name)
           files=['tsan-registration.json','tsan-results.xml','Testing/Temporary/LastTest.log','compile_commands.json','CMakeCache.txt']
-          data={'githubSha':os.environ['GITHUB_SHA'],'status':'passed','sources':len(names),'bypass_cases':16,'markers':markers,'instrumented_sources':verified,'inputs':{p:{'bytes':(build/p).stat().st_size,'sha256':hashlib.sha256((build/p).read_bytes()).hexdigest()} for p in files}}
+          data={'githubSha':os.environ['GITHUB_SHA'],'status':'passed','sources':len(names),'native_cases':native_cases,'bypass_cases':16,'markers':markers,'instrumented_sources':verified,'inputs':{p:{'bytes':(build/p).stat().st_size,'sha256':hashlib.sha256((build/p).read_bytes()).hexdigest()} for p in files}}
           (build/'tsan-context.json').write_text(json.dumps(data,indent=2)+'\n',encoding='utf-8')
           PY
 
