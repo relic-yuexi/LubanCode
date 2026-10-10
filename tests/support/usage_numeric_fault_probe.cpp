@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -23,6 +24,9 @@ thread_local unsigned refused = 0;
 thread_local std::size_t fail_after = 0;
 thread_local std::size_t allocations = 0;
 thread_local bool count_allocations = false;
+thread_local const char* active_stage = "setup";
+thread_local const char* active_route = "none";
+thread_local std::size_t active_fault = 0;
 }
 
 void* operator new(std::size_t size) {
@@ -92,6 +96,11 @@ int main(int argc, char** argv) {
     // Preserve the last completed route even if an allocation crosses an
     // unexpected noexcept boundary and the C++ runtime terminates the process.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::set_terminate([] {
+        std::fprintf(stderr, "unexpected-allocation-terminate:stage=%s:route=%s:index=%zu\n",
+            active_stage, active_route, active_fault);
+        std::abort(); // A noexcept escape still fails the real process test.
+    });
     namespace wire = lubancode::api::usage_wire;
     namespace facts = lubancore::usage::v1;
     using Normalize = std::expected<wire::Snapshot, std::string_view> (*)(
@@ -111,7 +120,7 @@ int main(int argc, char** argv) {
             {"candidatesTokenCount",4},{"thoughtsTokenCount",3},{"totalTokenCount",31}}
     };
     for (std::size_t provider = 0; provider < normalize.size(); ++provider) {
-        std::fprintf(stderr, "allocation-route:material:%s\n", names[provider]);
+        active_stage = "material"; active_route = names[provider]; active_fault = 1;
         struct Owner { wire::NumericValues values{}; unsigned calls = 0; } owner;
         const auto prior = refused;
         bool caught = false, returned = false;
@@ -146,7 +155,7 @@ int main(int argc, char** argv) {
         wire::Dialect::Anthropic, wire::Dialect::Gemini, wire::Dialect::ResponsesNonStream};
     const std::array<const char*,5> lexical_names{"chat","responses","anthropic","gemini","responses-nonstream"};
     for (std::size_t provider = 0; provider < frames.size(); ++provider) {
-        std::fprintf(stderr, "allocation-route:lexical:%s\n", lexical_names[provider]);
+        active_stage = "lexical"; active_route = lexical_names[provider]; active_fault = 1;
         struct Owner { wire::NumericValues values{}; unsigned calls = 0; } owner;
         const auto prior = refused;
         bool caught = false, returned = false;
@@ -168,7 +177,7 @@ int main(int argc, char** argv) {
         std::printf("actual-lexical-allocation-fault:%s\n", lexical_names[provider]);
     }
     const auto parser_fault = [&](auto parser, std::size_t provider, auto consume) {
-        std::fprintf(stderr, "allocation-route:parser:%s\n", lexical_names[provider]);
+        active_stage = "parser"; active_route = lexical_names[provider]; active_fault = 1;
         namespace api = lubancode::api;
         struct Owner { wire::NumericValues values{}; unsigned calls = 0, other = 0; } owner;
         const std::function<void(const api::StreamEvent&)> callback = [&](const api::StreamEvent& event) {
@@ -273,8 +282,7 @@ int main(int argc, char** argv) {
         if (!count || count > 10000 || owner.calls != 1 || owner.values != expected || !owner.precise)
             return false;
         for (std::size_t index = 1; index <= count; ++index) {
-            std::fprintf(stderr, "allocation-route:parser-sweep:%s:index=%zu:total=%zu\n",
-                lexical_names[provider], index, count);
+            active_stage = "parser-sweep"; active_route = lexical_names[provider]; active_fault = index;
             owner = {};
             auto parser = prototype;
             const auto prior = refused;
@@ -330,8 +338,7 @@ int main(int argc, char** argv) {
         const auto numbers = wire::Numbers(*source);
         std::size_t count = 0;
         for (std::size_t index = 0; index <= count; ++index) {
-            std::fprintf(stderr, "allocation-route:typed-owner:%s:index=%zu:total=%zu\n",
-                subordinate ? "subordinate" : "direct", index, count);
+            active_stage = "typed-owner"; active_route = subordinate ? "subordinate" : "direct"; active_fault = index;
             sdk::OperationUsage owned;
             owned.attempts_complete = true;
             runtime::IdAuthority ids;
