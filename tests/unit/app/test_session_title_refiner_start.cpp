@@ -151,6 +151,9 @@ TEST_CASE("Title creation: pending failure preserves single flight and real rest
     auto success=std::make_shared<Probe>(); REQUIRE(refiner.Start(Inputs(success,32))); REQUIRE(Await(refiner));
     auto out=refiner.TakeFinished(); REQUIRE(out.has_value()); CHECK(out->ok); CHECK(out->refinement_invoked);
     CHECK(out->generation==32); CHECK(success->calls.load()==1); CHECK(success->destroyed.load()==1);
+    CHECK(out->accounting.usage.input_tokens==9); CHECK(out->accounting.usage.output_tokens==3);
+    CHECK(out->accounting.usage.cache_read_tokens==13); CHECK(out->accounting.usage.cache_creation_tokens==17);
+    CHECK(out->accounting.usage.output_reasoning_tokens==19);
     REQUIRE(lubancode::app::RecordTitleRefinementCall(ledger,*out));
     auto transport=std::make_shared<Probe>(); transport->fail=true;
     REQUIRE(refiner.Start(Inputs(transport,33))); REQUIRE(Await(refiner));
@@ -158,7 +161,7 @@ TEST_CASE("Title creation: pending failure preserves single flight and real rest
     CHECK(failed_send->refinement_invoked); CHECK_FALSE(failed_send->accounting.usage_reported);
     REQUIRE(lubancode::app::RecordTitleRefinementCall(ledger,*failed_send));
     const auto& entry=ledger.by_role().at(lubancode::agent::ModelRole::Cheap);
-    CHECK(entry.calls==2); CHECK(entry.input_tokens==9); CHECK(entry.output_tokens==3);
+    CHECK(entry.calls==2); CHECK(entry.input_tokens==9+13+17); CHECK(entry.output_tokens==3);
 }
 TEST_CASE("Title creation: invalid inputs never consume Backend or enter creation hook") {
     std::cout<<"[title-worker-start-path] gates\n";
