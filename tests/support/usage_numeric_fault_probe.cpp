@@ -8,6 +8,10 @@
 #include <iostream>
 #include <limits>
 #include <new>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 #include "api/usage_provider_normalizers.hpp"
 #include "api/usage_lexical.hpp"
@@ -93,6 +97,9 @@ int main(int argc, char** argv) {
         } catch (...) { return 7; }
     }
     if (argc != 1) return 8;
+#ifdef _WIN32
+    if (_setmode(_fileno(stdout), _O_BINARY) == -1) return 13;
+#endif
     // Preserve the last completed route even if an allocation crosses an
     // unexpected noexcept boundary and the C++ runtime terminates the process.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
