@@ -64,10 +64,15 @@ Windows/Linux/macOS 全 CLI 各 802/800/803 项均过，旧名单保留；十六
 ASan 178 来源、1948 CASE、89295 断言过；753 份测试及 profile 输入已核 Git 原件。
 SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 案及各 15 次真实 HTTP 均过。
 TSan 十五条注册均运行：十三份 Workflow 有案，一份已退役为空，另有 owner 十六案十六标记；十三条实际编译路径已核线程插桩，空来源不算有效测试。75 份产物、1938 份原件逐大小和 SHA256 已核。未跑本地 CI。
-下一片[标题精炼启动失败清理](sdk-title-start-cleanup.md) 先交合同，尚未交付。
-#344 源 `4497cfc7` 的 Linux/macOS 全 CLI 801/804 项通过；Windows 803 项中旧 Memory 批量测试失败，标题七案通过。
-本源原件已留，未验收、未合入；先补[失败阶段诊断](sdk-memory-batch-failure-diagnostic.md)，原断言照留，新源重跑三平台。
-sent 后物理交接、完整来源、公开自动 Memory owner 与 CLI 装配仍欠账。
+[标题精炼启动失败清理](sdk-title-start-cleanup.md) 已随 #344 合入 `163d793b`，与验收源 `83bfede6` 同树。
+Windows/Linux/macOS 全 CLI 各 803/801/804 项均过，旧名单保留；标题七案七标记在三平台和 ASan 齐。
+ASan 179 来源、1955 CASE、87224 断言过；754 份测试及 profile 输入已核 Git 原件。
+SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 案及各 15 次真实 HTTP 均过。
+TSan 保住十三条实际插桩路径与 owner 十六案；本片标题七案不在 TSan 来源，不称线程插桩已验。
+78 份产物、1947 份原件逐大小和 SHA256 已核。未跑本地 CI。
+旧源 `4497cfc7` 的 Windows Memory 批量提交失败原件保留；`83bfede6` 只补阶段诊断，不宣称生产读写竞争已修复。
+下一片[标题后台函数体异常](sdk-title-worker-execution.md) 先交合同，尚未交付。
+函数体异常收场、sent 后物理交接、完整来源、公开自动 Memory owner 与 CLI 装配仍欠账。
 CLI 主入口与 one-shot 尚未迁完，SDK 与 CLI 全面对齐仍欠账。下文保留历史原账。
 
 核查日期：2026-10-06。已合基线为功能分支 `fd76b6a5`；[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 的已验源 `c522a51c` 与合入头同树。
