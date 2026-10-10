@@ -5,6 +5,8 @@
 #include <doctest/doctest.h>
 
 #include <variant>
+#include <array>
+#include <functional>
 #include <iostream>
 #include <new>
 #include <stdexcept>
