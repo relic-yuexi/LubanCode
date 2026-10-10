@@ -108,8 +108,9 @@ struct LifetimeGate {
 };
 class LifetimeBackend final : public sdk::Backend {
 public:
-    explicit LifetimeBackend(std::shared_ptr<LifetimeGate> gate, bool return_usage = false)
-        : gate_(std::move(gate)), return_usage_(return_usage) {}
+    explicit LifetimeBackend(std::shared_ptr<LifetimeGate> gate, bool return_usage = false,
+                             bool invalid_usage_material = false)
+        : gate_(std::move(gate)), return_usage_(return_usage), invalid_usage_material_(invalid_usage_material) {}
     ~LifetimeBackend() override { gate_->destroyed.store(true); }
     sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest&, sdk::Cancellation cancel) override {
         ++gate_->calls;
@@ -143,6 +144,7 @@ public:
                 field.origin = facts::Origin::Reported; field.operands[0] = static_cast<std::uint16_t>(i);
                 field.operand_count = 1;
             }
+            if (invalid_usage_material_) observation.raw_fields.front().path.push_back('\0');
             reply.usage_observation = std::move(observation);
             return reply;
         }
@@ -151,6 +153,7 @@ public:
 private:
     std::shared_ptr<LifetimeGate> gate_;
     bool return_usage_ = false;
+    bool invalid_usage_material_ = false;
 };
 struct ReleaseLifetimeGate {
     std::shared_ptr<LifetimeGate> gate;
@@ -482,6 +485,58 @@ TEST_CASE("SDK lifecycle: Close joins a late five-field reply and recovery never
     CHECK(replays.load() == 0); CHECK(gate->calls.load() == 1);
     REQUIRE((*resumed)->Close()); REQUIRE((*runtime)->Shutdown());
     std::cout << "[sdk-usage-close-path] recovery\n";
+}
+
+TEST_CASE("SDK lifecycle: Close preserves late numbers but refuses invalid material through same ID recovery") {
+    LifecycleFixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime);
+    auto gate = std::make_shared<LifetimeGate>();
+    auto options = Options(fixture, [](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        return sdk::ModelReply{};
+    });
+    options.backend = std::make_unique<LifetimeBackend>(gate, true, true);
+    auto opened = (*runtime)->OpenSession(std::move(options)); REQUIRE(opened);
+    auto session = std::move(*opened); const auto id = session->id();
+    std::future<sdk::Result<void>> closing;
+    ReleaseLifetimeGate release{gate};
+    const auto receipt = session->Submit("close-invalid-usage", "retain numbers, refuse invalid raw path"); REQUIRE(receipt);
+    REQUIRE(WaitForFlag(gate->entered));
+    closing = std::async(std::launch::async, [owner = session.get()] { return owner->Close(); });
+    REQUIRE(WaitForFlag(gate->cancelled));
+    CHECK(closing.wait_for(100ms) == std::future_status::timeout);
+    CHECK_FALSE(gate->returned.load()); CHECK_FALSE(gate->destroyed.load());
+    gate->Release(); REQUIRE(closing.wait_for(10s) == std::future_status::ready); REQUIRE(closing.get());
+    CHECK(gate->returned.load()); CHECK(gate->destroyed.load()); CHECK_FALSE(gate->timed_out.load());
+    const auto check = [](const sdk::Operation& operation) {
+        CHECK(operation.state == sdk::OperationState::Cancelled); CHECK(operation.result_persisted);
+        CHECK(operation.final_text.empty()); REQUIRE(operation.usage);
+        const auto& direct = operation.usage->direct;
+        CHECK(direct.coverage.samples == 1); CHECK(operation.usage->subordinate.coverage.samples == 0);
+        CHECK(direct.total.input_tokens == 11); CHECK(direct.total.output_tokens == 7);
+        CHECK(direct.total.cache_read_tokens == 13); CHECK(direct.total.cache_creation_tokens == 17);
+        CHECK(direct.total.output_reasoning_tokens == 3);
+        for (const auto& field : direct.coverage.fields) {
+            CHECK(field.included == 1); CHECK(field.missing == 1); CHECK(field.valid == 0);
+            CHECK(field.anomalous == 1); CHECK(field.inferred == 0); CHECK(field.omitted == 0);
+            CHECK_FALSE(field.arithmetic_overflow);
+        }
+        REQUIRE(operation.usage->attempts.size() == 1);
+        const auto& attempt = operation.usage->attempts.front();
+        CHECK(attempt.incomplete); CHECK_FALSE(attempt.subordinate); CHECK(attempt.reported_by_provider);
+        CHECK(attempt.provider_response_id == "close-owned-response"); CHECK_FALSE(attempt.observation);
+        CHECK_FALSE(attempt.trajectory_request_id.empty());
+    };
+    const auto saved = session->ReadOperation(receipt->operation_id); REQUIRE(saved); check(*saved);
+    session.reset(); std::atomic<unsigned> replays{0};
+    auto resumed_options = Options(fixture, [&](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        ++replays; return std::unexpected(sdk::Error{"fixture.replay", "recovery must not generate"});
+    });
+    resumed_options.resume_session_id = id;
+    auto resumed = (*runtime)->OpenSession(std::move(resumed_options)); REQUIRE(resumed);
+    const auto recovered = (*resumed)->ReadOperation(receipt->operation_id); REQUIRE(recovered); check(*recovered);
+    CHECK(replays.load() == 0); CHECK(gate->calls.load() == 1);
+    REQUIRE((*resumed)->Close()); REQUIRE((*runtime)->Shutdown());
+    std::cout << "[sdk-usage-close-path] invalid-material-recovery\n";
 }
 
 TEST_CASE("SDK lifecycle: direct usage refusal precedes system transfer without a child plan") {
