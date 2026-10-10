@@ -284,7 +284,7 @@ TEST_CASE("Five-field lexical facts: bounded capture excludes body decoys and fo
     REQUIRE(assembler.usage_observation());
     CHECK(assembler.usage().input_tokens == 0); CHECK(assembler.usage().output_tokens == 7);
     for (const auto& raw : assembler.usage_observation()->raw_fields)
-        CHECK_FALSE(raw.integer == 11 || raw.integer == 999 || raw.integer == 9);
+        CHECK_FALSE((raw.integer == 11 || raw.integer == 999 || raw.integer == 9));
     chat::EventParser escaped;
     MessageAssembler decoded;
     for (const auto& event : escaped.Consume(SseFrame{"", R"({"us\u0061ge":{"prompt_\u0074okens":11,"completion_tokens":9},"choices":[]})"})) decoded.Feed(event);
