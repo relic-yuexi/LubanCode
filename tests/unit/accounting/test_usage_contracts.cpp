@@ -122,6 +122,55 @@ TEST_CASE("UsageSample round-trip") {
         REQUIRE(restored.has_value());
         CHECK(restored->cache_epoch == std::numeric_limits<int>::min());
     }
+
+    SUBCASE("nullable totals preserve five facts and provenance across both versions") {
+        for (const bool input_overflow : {false, true}) {
+            CAPTURE(input_overflow);
+            auto boundary = MakeSample();
+            boundary.usage = api::Usage{};
+            boundary.usage->input_tokens = std::numeric_limits<std::int64_t>::max();
+            boundary.usage->cache_read_tokens = input_overflow ? 1 : 0;
+            boundary.usage->output_tokens = 1;
+            boundary.usage->output_reasoning_tokens = 1;
+            boundary.RefreshTotals();
+            const auto encoded = boundary.ToJson();
+            CHECK(encoded.at("schema_version") == 2);
+            CHECK(encoded.at("total_input_tokens").is_null() == input_overflow);
+            CHECK(encoded.at("total_billed_shape_tokens").is_null());
+            const auto restored = UsageSample::FromJsonStrict(encoded, &error);
+            REQUIRE(restored.has_value());
+            CHECK(restored->TotalInputProjection().has_value() == !input_overflow);
+            CHECK(!restored->BilledShapeProjection());
+            CHECK(restored->ToJson() == encoded);
+            REQUIRE(restored->source_event.has_value());
+            CHECK(restored->source_event->event_id == boundary.source_event->event_id);
+            CHECK(restored->source_event->event_hash == boundary.source_event->event_hash);
+            CHECK(restored->provider_response_id == boundary.provider_response_id);
+            CHECK(restored->request_id == boundary.request_id);
+            for (const char* key : {"total_input_tokens", "total_billed_shape_tokens"}) {
+                auto missing = encoded;
+                missing.erase(key);
+                CHECK(!UsageSample::FromJsonStrict(missing, &error));
+            }
+            auto fabricated = encoded;
+            fabricated["total_billed_shape_tokens"] = 0;
+            CHECK(!UsageSample::FromJsonStrict(fabricated, &error));
+            auto legacy = encoded;
+            legacy["schema_version"] = 1;
+            legacy.erase("total_input_tokens");
+            legacy.erase("total_billed_shape_tokens");
+            const auto upgraded = UsageSample::FromJsonStrict(legacy, &error);
+            REQUIRE(upgraded.has_value());
+            CHECK(upgraded->ToJson() == encoded);
+            legacy["total_billed_shape_tokens"] = 0;
+            CHECK(!UsageSample::FromJsonStrict(legacy, &error));
+        }
+        auto exact = MakeSample().ToJson();
+        exact["schema_version"] = 2;
+        REQUIRE(UsageSample::FromJsonStrict(exact, &error).has_value());
+        exact["total_input_tokens"] = nullptr;
+        CHECK(!UsageSample::FromJsonStrict(exact, &error));
+    }
 }
 
 TEST_CASE("unknown 与 0 分开:没报的 sample 不带 token 字段") {

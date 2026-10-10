@@ -238,9 +238,7 @@ UsageProjection ProjectUsage(const std::vector<trajectory::EventEnvelope>& event
                         owner.payload.value("reasoning_tokens", std::int64_t{0});
                     sample.usage = usage;
                     sample.usage_source = UsageSource::ProviderReported;
-                    sample.total_input_tokens = api::TotalInputTokens(usage);
-                    sample.total_billed_shape_tokens =
-                        sample.total_input_tokens + usage.output_tokens;
+                    sample.RefreshTotals();
                 } else {
                     sample.usage_source = UsageSource::Unknown;
                 }
@@ -274,9 +272,7 @@ UsageProjection ProjectUsage(const std::vector<trajectory::EventEnvelope>& event
                     usage.output_reasoning_tokens > 0) {
                     sample.usage = usage;
                     sample.usage_source = UsageSource::ProviderReported;
-                    sample.total_input_tokens = api::TotalInputTokens(usage);
-                    sample.total_billed_shape_tokens =
-                        sample.total_input_tokens + usage.output_tokens;
+                    sample.RefreshTotals();
                 } else {
                     // v1 没有显式 reported 位:全零当 unknown,不冒充实测零。
                     sample.usage_source = UsageSource::Unknown;
@@ -488,9 +484,7 @@ UsageProjection ProjectV3Usage(const trajectory::v3::V3Ledger& ledger,
             const api::Usage usage = UsageFromV3Owner(*message.usage);
             sample.usage = usage;
             sample.usage_source = UsageSource::ProviderReported;
-            sample.total_input_tokens = api::TotalInputTokens(usage);
-            sample.total_billed_shape_tokens =
-                sample.total_input_tokens + usage.output_tokens;
+            sample.RefreshTotals();
             // 明报位(C2 口径):键在场(0 也算)= 该明细 provider 明报;
             // 省键 = usage 报了但该子项没拆账。
             sample.cache_read_reported_by_provider = message.usage->contains("cacheReadTokens");

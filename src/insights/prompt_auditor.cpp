@@ -1,6 +1,7 @@
 // prompt_auditor.hpp 的实现:static/runtime 两层规则 + runtime 读侧装配。
 // 纯规则部分零 IO;CollectRuntimeRequests 只读 Journal。
 #include "insights/prompt_auditor.hpp"
+#include "api/usage_totals.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -686,7 +687,7 @@ void AuditGrowthVersusCache(const std::vector<RuntimeRequestView>& requests,
     const RuntimeRequestView* first = nullptr;
     const RuntimeRequestView* last = nullptr;
     for (const auto& view : requests) {
-        if (!view.snapshot.has_value() || !view.usage_reported ||
+        if (!view.snapshot.has_value() || !view.usage_reported || !view.total_input_known ||
             view.total_input_tokens <= 0) {
             continue;
         }
@@ -868,7 +869,8 @@ void AuditV3GrowthVersusCache(const std::vector<RuntimeRequestView>& requests,
     const RuntimeRequestView* first = nullptr;
     const RuntimeRequestView* last = nullptr;
     for (const auto& view : requests) {
-        if (!view.input_refs_recorded || !view.usage_reported || view.total_input_tokens <= 0) {
+        if (!view.input_refs_recorded || !view.usage_reported || !view.total_input_known ||
+            view.total_input_tokens <= 0) {
             continue;
         }
         const std::int64_t scale = view.wire_message_count.has_value()
@@ -1149,7 +1151,9 @@ RuntimeRequestsRead CollectRuntimeRequestsFromStreams(
                 const accounting::UsageSample& sample = *it->second[occurrence - 1];
                 view.usage_reported = sample.usage.has_value();
                 if (sample.usage.has_value()) {
-                    view.total_input_tokens = sample.total_input_tokens;
+                    const auto input = sample.TotalInputProjection();
+                    view.total_input_known = input.has_value();
+                    view.total_input_tokens = input.value_or(0);
                     view.cache_read_tokens = sample.usage->cache_read_tokens;
                     view.output_tokens = sample.usage->output_tokens;
                 }
@@ -1182,8 +1186,10 @@ std::vector<RuntimeRequestView> RuntimeViewsFromV3Facts(
             view.purpose = request.purpose;
             view.event_id = request.event_id;
             view.usage_reported = request.usage_reported;
-            view.total_input_tokens = request.input_tokens + request.cache_read_tokens +
-                                      request.cache_creation_tokens;  // 同 api::TotalInputTokens
+            const auto input = api::CheckedTotalInputTokens(api::Usage{
+                request.input_tokens, 0, request.cache_read_tokens, request.cache_creation_tokens});
+            view.total_input_known = input.has_value();
+            view.total_input_tokens = input.value_or(0);
             view.cache_read_tokens = request.cache_read_tokens;
             view.output_tokens = request.output_tokens;
             view.session_id = request.session_id;

@@ -3,6 +3,7 @@
 #include <doctest/doctest.h>
 
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -249,6 +250,29 @@ TEST_CASE("static:动态段插中间与疑似冲突(语义类只给 suspected)")
 }
 
 TEST_CASE("runtime:toolset 抖动/前缀断/缺 snapshot 与增长对 cache 的同向观察") {
+    SUBCASE("v3 facts retain reported identity while unrepresentable input stays unknown") {
+        V3SessionFacts session;
+        V3RequestFacts request;
+        request.request_id = "req-overflow";
+        request.event_id = "event-overflow";
+        request.usage_reported = true;
+        request.input_tokens = std::numeric_limits<std::int64_t>::max();
+        request.cache_read_tokens = 1;
+        session.requests.push_back(request);
+        std::vector<std::string> warnings;
+        const auto views = RuntimeViewsFromV3Facts({session}, &warnings);
+        REQUIRE(views.size() == 1);
+        CHECK(views[0].usage_reported);
+        CHECK(!views[0].total_input_known);
+        CHECK(views[0].cache_read_tokens == 1);
+        CHECK(views[0].request_id == request.request_id);
+        CHECK(views[0].event_id == request.event_id);
+        session.requests[0].cache_read_tokens = 0;
+        const auto exact = RuntimeViewsFromV3Facts({session}, &warnings);
+        REQUIRE(exact.size() == 1);
+        CHECK(exact[0].total_input_known);
+        CHECK(exact[0].total_input_tokens == std::numeric_limits<std::int64_t>::max());
+    }
     auto snapshot_with = [](const std::string& toolset, const std::string& prefix,
                             std::int64_t system_tokens) {
         agent::RequestSnapshotMetadata snapshot;

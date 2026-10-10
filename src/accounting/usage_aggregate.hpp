@@ -47,6 +47,16 @@ struct UsageTotals {
     std::int64_t cost_micros = 0;
     std::int64_t requests_priced = 0;
 
+    bool total_input_known = true;
+    bool billed_shape_known = true;
+    std::optional<std::int64_t> TotalInputProjection() const noexcept {
+        return total_input_known ? std::optional<std::int64_t>(total_input_tokens) : std::nullopt;
+    }
+    std::optional<std::int64_t> BilledShapeProjection() const noexcept {
+        return billed_shape_known ? std::optional<std::int64_t>(total_billed_shape_tokens)
+                                  : std::nullopt;
+    }
+
     void Add(const UsageSample& sample);
 
     // cache 命中率(§7.2):cache_read / (input+read+creation),只对有实测的

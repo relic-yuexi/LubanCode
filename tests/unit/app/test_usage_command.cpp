@@ -3,6 +3,7 @@
 // 与 JSON 输出的报告面 schema。
 #include <doctest/doctest.h>
 
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -191,6 +192,29 @@ TEST_CASE("FormatUsageReport:默认画面——coverage、cache、purpose、成�
 }
 
 TEST_CASE("FormatUsageReport:空账不猜;--by purpose 分账表;缺口点名截断") {
+    SUBCASE("nullable totals render unknown shares and version the JSON report") {
+        auto sample = Sample("overflow", RequestPurpose::MainTurn, 0, 0, 0);
+        sample.usage->input_tokens = std::numeric_limits<std::int64_t>::max();
+        sample.usage->cache_read_tokens = 1;
+        sample.RefreshTotals();
+        UsageReportModel model;
+        model.session_id = "overflow";
+        model.aggregate = lubancode::accounting::AggregateUsage({sample});
+        model.by = ParsedUsageCommand::By::Purpose;
+        const auto text = Join(FormatUsageReport(model, cli::BuiltinTheme("plain"), 0));
+        CHECK(text.find("合计输入 未知（溢出）") != std::string::npos);
+        CHECK(text.find("main_turn unknown") != std::string::npos);
+        const auto encoded = BuildUsageReportJson(model);
+        CHECK(encoded["schema_version"] == 2);
+        CHECK(encoded["aggregate"]["totals"]["total_input_tokens"].is_null());
+        CHECK(encoded["aggregate"]["totals"]["total_billed_shape_tokens"].is_null());
+        model.aggregate = lubancode::accounting::AggregateUsage({
+            Sample("exact", RequestPurpose::MainTurn,
+                   std::numeric_limits<std::int64_t>::max(), 0, 0)});
+        const auto exact = Join(FormatUsageReport(model, cli::BuiltinTheme("plain"), 0));
+        CHECK(exact.find("main_turn 100%") != std::string::npos);
+        CHECK(BuildUsageReportJson(model)["schema_version"] == 1);
+    }
     SUBCASE("空账") {
         UsageReportModel model;
         model.session_id = "20260831-000009-EMPTY9";

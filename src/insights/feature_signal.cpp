@@ -91,7 +91,8 @@ std::vector<FeatureSignal> DetectFeatureSignals(const FeatureSignalInput& input)
 
     // §12.2 第 7 行:subagent token 暴涨 → 收窄工具、prompt、并发与任务。
     // 先决"子流 usage 已独立"——Trajectory 分 stream 记账,已满足。FS-04。
-    if (input.subagent_tokens > input.main_tokens && input.subagent_tokens > 0) {
+    if (input.main_tokens_known && input.subagent_tokens_known &&
+        input.subagent_tokens > input.main_tokens && input.subagent_tokens > 0) {
         FeatureSignal signal;
         signal.signal_id = "FS-04";
         signal.feature = "收窄子代理的工具面与任务边界";

@@ -298,6 +298,20 @@ TEST_CASE("one_shot 场: usage 计入 main 侧,不冒充子代理") {
 }
 
 TEST_CASE("功能信号:同类验证反复与子代理 token 超主会话") {
+    SUBCASE("unknown main or subordinate totals cannot borrow numeric prefixes") {
+        for (const bool main_unknown : {false, true}) {
+            FeatureSignalInput input;
+            input.main_tokens = 1;
+            input.subagent_tokens = 100;
+            input.main_tokens_known = !main_unknown;
+            input.subagent_tokens_known = main_unknown;
+            CHECK(DetectFeatureSignals(input).empty());
+            input.verification_kinds["build"] = 3;
+            const auto independent = DetectFeatureSignals(input);
+            REQUIRE(independent.size() == 1);
+            CHECK(independent[0].signal_id == "FS-01");
+        }
+    }
     SUBCASE("同类验证 ≥3 次 → 固化建议(先决写明)") {
         FeatureSignalInput input;
         input.session_id = "s";

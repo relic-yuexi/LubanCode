@@ -32,6 +32,8 @@ struct FeatureSignalInput {
     std::int64_t prefix_breaks_same_epoch = 0;
     std::int64_t unexpected_miss_candidates = 0;
     std::int64_t cache_read_tokens = 0;
+    bool main_tokens_known = true;
+    bool subagent_tokens_known = true;
 };
 
 // 一条功能信号。

@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -230,6 +231,31 @@ bool HasWarning(const SessionUsageRead& read, const std::string& needle) {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("v3 主账:两轮请求逐笔对账,缺实报的照投 unknown") {
+    SUBCASE("actual v3 owner retains nullable totals and stable provenance") {
+        SessionsRoot boundary("nullable");
+        {
+            auto writer = StartSession(boundary, "S-NULLABLE");
+            REQUIRE(writer.has_value());
+            InstallRequest(*writer, "turn-1", nlohmann::json{
+                {"inputTokens", std::numeric_limits<std::int64_t>::max()},
+                {"cacheReadTokens", 1}, {"outputTokens", 1}, {"reasoningTokens", 1}});
+        }
+        const auto restored = ReadSessionUsage(boundary.Dir("S-NULLABLE"));
+        REQUIRE(restored.ok);
+        REQUIRE(restored.samples.size() == 1);
+        const auto& sample = restored.samples.front();
+        REQUIRE(sample.usage.has_value());
+        CHECK(sample.usage->input_tokens == std::numeric_limits<std::int64_t>::max());
+        CHECK(sample.usage->cache_read_tokens == 1);
+        CHECK(!sample.TotalInputProjection());
+        CHECK(!sample.BilledShapeProjection());
+        REQUIRE(sample.source_event.has_value());
+        std::string error;
+        const auto roundtrip = UsageSample::FromJsonStrict(sample.ToJson(), &error);
+        REQUIRE(roundtrip.has_value());
+        CHECK(roundtrip->source_event->event_id == sample.source_event->event_id);
+        CHECK(roundtrip->source_event->event_hash == sample.source_event->event_hash);
+    }
     SessionsRoot root("main");
     {
         auto writer = StartSession(root, "S-MAIN");

@@ -3,6 +3,8 @@
 #include <limits>
 #include <string_view>
 
+#include "api/usage_totals.hpp"
+
 namespace lubancode::accounting {
 namespace {
 
@@ -204,10 +206,28 @@ nlohmann::json UsageToJson(const api::Usage& usage) {
 
 }  // namespace
 
+std::optional<std::int64_t> UsageSample::TotalInputProjection() const noexcept {
+    return usage ? api::CheckedTotalInputTokens(*usage) : std::nullopt;
+}
+
+std::optional<std::int64_t> UsageSample::BilledShapeProjection() const noexcept {
+    const auto input = TotalInputProjection();
+    return input ? api::usage_observation::CheckedAdd(*input, usage->output_tokens) : std::nullopt;
+}
+
+void UsageSample::RefreshTotals() noexcept {
+    total_input_tokens = TotalInputProjection().value_or(0);
+    total_billed_shape_tokens = BilledShapeProjection().value_or(0);
+}
+
 nlohmann::json UsageSample::ToJson() const {
     nlohmann::json json = nlohmann::json::object();
     json["schema"] = kUsageSampleSchema;
-    json["schema_version"] = kUsageSampleSchemaVersion;
+    const auto input = TotalInputProjection();
+    const auto billed = BilledShapeProjection();
+    const bool nullable_totals = usage && (!input || !billed);
+    json["schema_version"] = nullable_totals ? kUsageSampleNullableTotalsSchemaVersion
+                                             : kUsageSampleSchemaVersion;
     json["workspace_key"] = workspace_key;
     json["session_id"] = session_id;
     json["run_id"] = run_id;
@@ -232,8 +252,12 @@ nlohmann::json UsageSample::ToJson() const {
     json["usage_source"] = UsageSourceName(usage_source);
     if (usage.has_value()) {
         json["usage"] = UsageToJson(*usage);
-        json["total_input_tokens"] = total_input_tokens;
-        json["total_billed_shape_tokens"] = total_billed_shape_tokens;
+        json["total_input_tokens"] = nullable_totals
+            ? (input ? nlohmann::json(*input) : nlohmann::json(nullptr))
+            : nlohmann::json(total_input_tokens);
+        json["total_billed_shape_tokens"] = nullable_totals
+            ? (billed ? nlohmann::json(*billed) : nlohmann::json(nullptr))
+            : nlohmann::json(total_billed_shape_tokens);
     } else {
         json["usage"] = nullptr;
     }
@@ -287,8 +311,9 @@ std::optional<UsageSample> UsageSample::FromJsonStrict(const nlohmann::json& jso
     }
     int schema_version = 0;
     if (!ReadInteger(json, "schema_version", &schema_version) ||
-        schema_version != kUsageSampleSchemaVersion) {
-        *error = "schema_version 只认 1";
+        (schema_version != kUsageSampleSchemaVersion &&
+         schema_version != kUsageSampleNullableTotalsSchemaVersion)) {
+        *error = "schema_version 只认 1 或 2";
         return std::nullopt;
     }
     if (!ReadString(json, "workspace_key", &sample.workspace_key) ||
@@ -357,23 +382,21 @@ std::optional<UsageSample> UsageSample::FromJsonStrict(const nlohmann::json& jso
             return std::nullopt;
         }
         sample.usage = *usage;
-        sample.total_input_tokens = api::TotalInputTokens(*usage);
-        sample.total_billed_shape_tokens = sample.total_input_tokens + usage->output_tokens;
-        if (json.contains("total_input_tokens")) {
-            std::int64_t reported_total = 0;
-            if (!ReadInteger(json, "total_input_tokens", &reported_total) ||
-                reported_total != sample.total_input_tokens) {
-                *error = "total_input_tokens 与 usage 五项不合口径";
-                return std::nullopt;
+        sample.RefreshTotals();
+        const auto validate_total = [&](const char* key,
+                                        std::optional<std::int64_t> expected) {
+            if (!json.contains(key)) return schema_version == kUsageSampleSchemaVersion;
+            if (schema_version == kUsageSampleNullableTotalsSchemaVersion && !expected) {
+                return json.at(key).is_null();
             }
-        }
-        if (json.contains("total_billed_shape_tokens")) {
             std::int64_t reported_total = 0;
-            if (!ReadInteger(json, "total_billed_shape_tokens", &reported_total) ||
-                reported_total != sample.total_billed_shape_tokens) {
-                *error = "total_billed_shape_tokens 与 usage 五项不合口径";
-                return std::nullopt;
-            }
+            return expected && ReadInteger(json, key, &reported_total) &&
+                   reported_total == *expected;
+        };
+        if (!validate_total("total_input_tokens", sample.TotalInputProjection()) ||
+            !validate_total("total_billed_shape_tokens", sample.BilledShapeProjection())) {
+            *error = "合计投影缺失或与 usage 五项不合口径";
+            return std::nullopt;
         }
     } else if (*source != UsageSource::Unknown) {
         *error = "usage_source 非 unknown 时须带 usage 正文";

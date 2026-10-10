@@ -188,6 +188,48 @@ TEST_CASE("聚合数学:求和、unknown 不折 0、reasoning 不双计、重试
         check(100, -1, 0);
         check(-1, 100, 0);
     }
+    SUBCASE("sample overflow and cumulative overflow retain nullable totals in every row") {
+        const auto maximum = std::numeric_limits<std::int64_t>::max();
+        auto first = Sample("first", RequestPurpose::MainTurn, maximum - 1, 0, 0);
+        auto second = Sample("second", RequestPurpose::MainTurn, 0, 2, 0);
+        const auto result = AggregateUsage({first, second,
+            Sample("third", RequestPurpose::MainTurn, 0, 0, 1)});
+        CHECK(!result.totals.TotalInputProjection());
+        CHECK(!result.totals.BilledShapeProjection());
+        CHECK(result.totals.total_input_tokens == maximum - 1);
+        CHECK(result.totals.total_billed_shape_tokens == maximum - 1);
+        const auto encoded = result.ToJson();
+        CHECK(encoded["totals"]["total_input_tokens"].is_null());
+        CHECK(encoded["totals"]["total_billed_shape_tokens"].is_null());
+        for (const char* group : {"by_purpose", "by_model", "by_run", "by_outcome"}) {
+            REQUIRE(encoded.at(group).size() == 1);
+            CHECK(encoded.at(group)[0]["total_input_tokens"].is_null());
+            CHECK(encoded.at(group)[0]["total_billed_shape_tokens"].is_null());
+        }
+        REQUIRE(encoded["by_cache_epoch"].size() == 1);
+        CHECK(encoded["by_cache_epoch"][0]["total_input_tokens"].is_null());
+        second.usage->input_tokens = maximum;
+        second.usage->cache_read_tokens = 1;
+        second.RefreshTotals();
+        const auto single = AggregateUsage({second});
+        CHECK(!single.totals.TotalInputProjection());
+        CHECK(single.totals.requests_with_usage == 1);
+        CHECK(single.totals.input_tokens == maximum);
+        CHECK(single.totals.cache_read_tokens == 1);
+        CHECK(!single.totals.cache_read_ratio_percent());
+        const auto reset = AggregateUsage({Sample("fresh", RequestPurpose::MainTurn, 1, 2, 3)});
+        CHECK(reset.totals.TotalInputProjection() == 3);
+        CHECK(reset.totals.BilledShapeProjection() == 6);
+    }
+    SUBCASE("billed shape overflow leaves an independent input projection exact") {
+        const auto maximum = std::numeric_limits<std::int64_t>::max();
+        const auto result = AggregateUsage({
+            Sample("first", RequestPurpose::MainTurn, maximum - 1, 0, 0),
+            Sample("second", RequestPurpose::MainTurn, 0, 0, 2)});
+        CHECK(result.totals.TotalInputProjection() == maximum - 1);
+        CHECK(!result.totals.BilledShapeProjection());
+        CHECK(result.ToJson()["totals"]["total_input_tokens"] == maximum - 1);
+    }
 }
 
 TEST_CASE("cache epoch 分段:compact 翻页后各段独立求和,未报缓存不伪装 0%") {
@@ -368,6 +410,47 @@ TEST_CASE("费用:只累 estimated 的整数 micros,not_priced 不进") {
 }
 
 TEST_CASE("读侧:真 Journal 的 main+subagent+workflow 读回对账") {
+    SUBCASE("v1 and v2 real owners preserve facts when input totals overflow") {
+        for (const int version : {1, 2}) {
+            CAPTURE(version);
+            const auto boundary_dir = insights_fixtures::PrepareDir(
+                std::filesystem::temp_directory_path() /
+                ("lubancode-usage-nullable-v" + std::to_string(version)));
+            const insights_fixtures::FixedClock boundary_clock;
+            {
+                insights_fixtures::FixtureStream stream(boundary_dir / "main.jsonl",
+                    boundary_dir / "artifacts", "ws-000000000000", "S-OVERFLOW",
+                    "main-0001", insights_fixtures::RunKind::MainSession, version, boundary_clock);
+                stream.StartRun();
+                stream.StartTurn("turn-1");
+                insights_fixtures::UsageSpec usage;
+                usage.input = std::numeric_limits<std::int64_t>::max();
+                usage.cache_read = 1;
+                usage.output = 1;
+                usage.reasoning = 1;
+                stream.ModelExchange("turn-1", "req-overflow", "main_turn", usage);
+                stream.EndTurn("turn-1");
+                stream.Seal();
+            }
+            const auto restored = ReadSessionUsage(boundary_dir);
+            REQUIRE(restored.ok);
+            REQUIRE(restored.samples.size() == 1);
+            const auto& sample = restored.samples.front();
+            REQUIRE(sample.usage.has_value());
+            CHECK(sample.usage->input_tokens == std::numeric_limits<std::int64_t>::max());
+            CHECK(sample.usage->cache_read_tokens == 1);
+            CHECK(sample.usage->output_reasoning_tokens == 1);
+            CHECK(!sample.TotalInputProjection());
+            CHECK(!sample.BilledShapeProjection());
+            CHECK(sample.request_id == "req-overflow");
+            REQUIRE(sample.source_event.has_value());
+            CHECK(!sample.source_event->event_hash.empty());
+            std::string error;
+            const auto roundtrip = UsageSample::FromJsonStrict(sample.ToJson(), &error);
+            REQUIRE(roundtrip.has_value());
+            CHECK(roundtrip->ToJson() == sample.ToJson());
+        }
+    }
     const auto dir = insights_fixtures::PrepareDir(
         std::filesystem::temp_directory_path() / "lubancode-usage-reader");
     // 真目录树布局(§3.1):main.jsonl 在根、subagents/ 与 workflows/<run>/
