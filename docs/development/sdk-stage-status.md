@@ -1,5 +1,16 @@
 # SDK 阶段进度与验收边界
 
+2026-10-11 五项用量候选已提交为 `e7db494f`，开成草稿
+[PR #349](https://github.com/relic-yuexi/LubanCode/pull/349)。同源
+[远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/38070702028)
+仍在运行；三套 SDK 腿先停在安装头文件数据夹具。生产检查新增 `usage.hpp`，
+夹具模拟目录却少了它，报三十四次断言失败、两次错误。编译、原生验收和
+安装消费尚未执行，不能算 SDK 通过。修正只补夹具头文件，并把这枚头加入
+删源不能缩小安装合同的原负例。修正尚无新源远端验收。
+
+已合并用量快照远端分支 `codex/sdk-memory-usage-snapshot` 已按旧 SHA
+`35468c7f` 的 lease 删除，GitHub ref 查询确认不存在。本地恢复 bundle 保留。
+
 2026-10-11 连接故障候选：SSE 写回调收住 parser 和宿主抛错，断流后等
 `Post()` 退出，再交回原异常。取消旗不能遮掉原错；错误响应体也改用差值
 检查容量，免得长度相加溢出。四家真实 Connection 共添二十条故障路径：
