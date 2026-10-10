@@ -61,8 +61,9 @@ std::string StatusLineInfoSegment(const std::string& model, int context_percent,
         out += " · " + model;
     }
     out += " · context " + (context_percent >= 0 ? std::to_string(context_percent) : std::string("?")) + "%";
-    if (used_tokens > 0) {
-        out += " (" + FormatTokenCount(used_tokens) + "/" + FormatTokenCount(window_tokens) + ")";
+    if (used_tokens != 0) {
+        out += " (" + FormatTokenCount(used_tokens >= 0 ? std::optional<std::int64_t>(used_tokens) : std::nullopt) +
+               "/" + FormatTokenCount(window_tokens >= 0 ? std::optional<std::int64_t>(window_tokens) : std::nullopt) + ")";
     }
     return out;
 }
@@ -132,12 +133,13 @@ std::vector<StatusPanelSegment> BuildStatusPanelSegments(
             text = std::string(stale_mark) + "context " +
                 (data.context_percent >= 0 ? std::to_string(data.context_percent) : std::string("?")) + "%";
         } else if (key == "tokens") {
-            if (data.used_tokens > 0) {
+            if (data.used_tokens != 0) {
                 // 缓存注记(缓存诊断单):cached_tokens 有则"缓存命中 X(Y%)",
                 // 没有则"缓存未报告"——不拿含糊的 0% 糊人。空串(一次实测都
                 // 没有)整段不挂。
-                text = std::string(stale_mark) + FormatTokenCount(data.used_tokens) + "/" +
-                       FormatTokenCount(data.window_tokens);
+                text = std::string(stale_mark) +
+                    FormatTokenCount(data.used_tokens >= 0 ? std::optional<std::int64_t>(data.used_tokens) : std::nullopt) + "/" +
+                    FormatTokenCount(data.window_tokens >= 0 ? std::optional<std::int64_t>(data.window_tokens) : std::nullopt);
                 if (!data.cache_note.empty()) {
                     text += " · " + data.cache_note;
                 }
@@ -207,7 +209,8 @@ std::string BuildCacheNote(const ContextTracker& tracker, bool last_usage_report
     // 状态栏缓存注记:显示"最近一次请求"的命中,不显示会话累计——累计
     // 分母每轮都重复加进过去所有输入,数字越大越接近 100%,容易误读成
     // "每轮都 99%"。单轮口径才对应"现在这一下花了多少钱"。
-    if (tracker.last_total_input_tokens() <= 0) {
+    if (!tracker.last_total_input_projection()) return FormatTokenCount(std::nullopt);
+    if (*tracker.last_total_input_projection() <= 0) {
         return {};  // 一次实测都没有:整段不挂
     }
     if (tracker.last_cache_read_tokens() > 0) {
@@ -505,7 +508,7 @@ std::string TokenText(std::size_t tokens) {
 
 std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::size_t tools_tokens_in,
                                                  std::size_t history_tokens_est, std::int64_t cache_read_tokens,
-                                                 std::size_t window_tokens, std::size_t measured_used_tokens,
+                                                 std::size_t window_tokens, std::optional<std::size_t> measured_used_tokens,
                                                  const Theme& theme, int bar_width, int cache_hit_percent,
                                                  const ContextBreakdownDetail* detail, bool current_estimated) {
     // plain 主题全部字段是空串,拿 reset 当探针(真主题 reset 恒非空)。
@@ -525,19 +528,19 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
     // 有实测:总量直接用实测(不带 ~),历史 = max(0, 实测总量 - 系统 - 工具)
     //   反推——这样三分项之和恒等于实测总量,不再各估各的打架。
     // 没实测(实测=0,如刚启动):三项全退回字符估,整体标 ~。
-    const bool have_measured = measured_used_tokens > 0 && !current_estimated;
+    const bool have_measured = measured_used_tokens && *measured_used_tokens > 0 && !current_estimated;
     const auto add = [](std::size_t left, std::size_t right) -> std::optional<std::size_t> {
         if (left > (std::numeric_limits<std::size_t>::max)() - right) return std::nullopt;
         return left + right;
     };
     const auto sys_plus_tools = add(sys_tokens, tools_tokens);
     const std::optional<std::size_t> history_tokens = have_measured
-        ? (sys_plus_tools ? std::optional<std::size_t>(measured_used_tokens > *sys_plus_tools
-                ? measured_used_tokens - *sys_plus_tools : 0) : std::nullopt)
+        ? (sys_plus_tools ? std::optional<std::size_t>(*measured_used_tokens > *sys_plus_tools
+                ? *measured_used_tokens - *sys_plus_tools : 0) : std::nullopt)
         : std::optional<std::size_t>(history_tokens_est);
     // 换链后的完整请求估算优先；旧尺分项只作参考，不再借旧实测反推历史。
-    const std::optional<std::size_t> used = (have_measured || current_estimated)
-        ? std::optional<std::size_t>(measured_used_tokens)
+    const std::optional<std::size_t> used = !measured_used_tokens ? std::nullopt
+        : (have_measured || current_estimated) ? measured_used_tokens
         : (sys_plus_tools ? add(*sys_plus_tools, history_tokens_est) : std::nullopt);
 
     const std::string label_sys = tr("cmd.context.bd.system");
@@ -682,8 +685,9 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
         lines.push_back(category_row(label_autocompact_buffer, buffer_tokens, /*estimated=*/false));
         lines.push_back(category_row(label_free_space, free_tokens, /*estimated=*/false));
     }
-    lines.push_back("  " + tr(current_estimated ? "cmd.context.note.compact_estimate" :
-        (have_measured ? "cmd.context.bd.note.measured" : "cmd.context.bd.note.est")));
+    lines.push_back("  " + (!measured_used_tokens ? FormatTokenCount(std::nullopt) :
+        tr(current_estimated ? "cmd.context.note.compact_estimate" :
+            (have_measured ? "cmd.context.bd.note.measured" : "cmd.context.bd.note.est"))));
     return lines;
 }
 

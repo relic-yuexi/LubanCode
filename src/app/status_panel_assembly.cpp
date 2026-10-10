@@ -48,8 +48,8 @@ lubancode::cli::StatusPanelData BuildStatusPanelData(const StatusPanelInputs& in
     if (inputs.context_tracker != nullptr) {
         const lubancode::cli::ContextTracker& tracker = *inputs.context_tracker;
         status_data.context_percent = tracker.UsagePercent();
-        status_data.used_tokens = static_cast<long long>(tracker.current_tokens());
-        status_data.window_tokens = static_cast<long long>(tracker.window_tokens());
+        status_data.used_tokens = tracker.current_tokens_for_status();
+        status_data.window_tokens = tracker.window_tokens_for_status();
         // 缓存注记(缓存诊断单):与回合内局部更新同一只 helper、同一只
         // tracker,空闲重建的第一帧不会先新后旧。
         status_data.cache_note = lubancode::cli::BuildCacheNote(tracker, !tracker.usage_stale());

@@ -107,6 +107,105 @@ TEST_CASE("ContextTracker: unrepresentable and inconsistent percentages stay unk
         CHECK(saw_deferred);
         CHECK(saw_free);
     }
+    SUBCASE("input overflow fences current projection and remains sticky in session totals") {
+        cli::ContextTracker checked(1);
+        checked.ApplyUsage(api::Usage{10, 5});
+        CHECK(checked.current_tokens_projection() == 15);
+        CHECK(checked.ShouldAutoCompact());
+        const api::Usage source{maximum, 0, 1};
+        checked.ApplyUsage(source);
+        CHECK(source.input_tokens == maximum); CHECK(source.cache_read_tokens == 1);
+        CHECK_FALSE(checked.current_tokens_projection());
+        CHECK_FALSE(checked.last_total_input_projection());
+        CHECK_FALSE(checked.session_input_projection());
+        CHECK(checked.current_tokens() == 15);
+        CHECK(checked.last_total_input_tokens() == 10);
+        CHECK(checked.session_input_total() == 10);
+        CHECK(checked.session_cache_read_projection() == 1);
+        CHECK(checked.current_tokens_for_status() == -1);
+        CHECK(checked.UsagePercent() == -1); CHECK_FALSE(checked.ShouldAutoCompact());
+        CHECK(checked.last_cache_hit_percent() == -1); CHECK(checked.session_cache_hit_percent() == -1);
+        REQUIRE(checked.cache_request_history().size() == 2);
+        CHECK_FALSE(checked.cache_request_history().back().input_tokens_known);
+        CHECK(checked.cache_request_history().back().hit_percent() == -1);
+        CHECK(cli::BuildCacheNote(checked, true) == cli::FormatTokenCount(std::nullopt));
+        checked.ApplyUsage(api::Usage{20, 1});
+        CHECK(checked.current_tokens_projection() == 21);
+        CHECK(checked.last_total_input_projection() == 20);
+        CHECK_FALSE(checked.session_input_projection());
+        CHECK(checked.session_input_total() == 10);
+        CHECK(checked.session_cache_hit_percent() == -1);
+        checked.ResetSession();
+        CHECK(checked.current_tokens_projection() == 0);
+        CHECK(checked.last_total_input_projection() == 0);
+        CHECK(checked.session_input_projection() == 0);
+        CHECK(checked.session_cache_read_projection() == 0);
+        CHECK(checked.cache_request_history().empty());
+    }
+    SUBCASE("output overflow does not invalidate independent input facts") {
+        cli::ContextTracker checked(1000);
+        checked.ApplyUsage(api::Usage{1, maximum});
+        CHECK_FALSE(checked.current_tokens_projection());
+        CHECK(checked.last_total_input_projection() == 1);
+        CHECK(checked.session_input_projection() == 1);
+        CHECK(checked.cache_request_history().back().input_tokens_known);
+        CHECK(checked.last_cache_hit_percent() == 0);
+        CHECK(checked.UsagePercent() == -1);
+        checked.ApplyContextEstimate(17);
+        CHECK(checked.current_tokens_projection() == 17);
+        CHECK(checked.current_estimated());
+    }
+    SUBCASE("session cache and input overflow cannot be healed by a later valid request") {
+        cli::ContextTracker checked(1000);
+        checked.ApplyUsage(api::Usage{0, 0, maximum});
+        CHECK(checked.session_input_projection() == maximum);
+        CHECK(checked.session_cache_read_projection() == maximum);
+        checked.ApplyUsage(api::Usage{0, 0, 1});
+        CHECK(checked.current_tokens_projection() == 1);
+        CHECK(checked.last_total_input_projection() == 1);
+        CHECK(checked.last_cache_hit_percent() == 100);
+        CHECK_FALSE(checked.session_input_projection());
+        CHECK_FALSE(checked.session_cache_read_projection());
+        CHECK(checked.session_input_total() == maximum);
+        CHECK(checked.session_cache_read_total() == maximum);
+        checked.ApplyUsage(api::Usage{1, 0});
+        CHECK_FALSE(checked.session_input_projection());
+        CHECK_FALSE(checked.session_cache_read_projection());
+        CHECK(checked.session_cache_hit_percent() == -1);
+    }
+    SUBCASE("signed input underflow stays unknown without rewriting the source") {
+        cli::ContextTracker checked(1000);
+        const api::Usage source{(std::numeric_limits<std::int64_t>::min)(), 2, -1};
+        checked.ApplyUsage(source);
+        CHECK(source.input_tokens == (std::numeric_limits<std::int64_t>::min)());
+        CHECK(source.cache_read_tokens == -1);
+        CHECK_FALSE(checked.current_tokens_projection());
+        CHECK_FALSE(checked.last_total_input_projection());
+        CHECK_FALSE(checked.cache_request_history().back().input_tokens_known);
+    }
+    SUBCASE("unknown current projection reaches charts and both status renderers") {
+        const auto unknown = cli::FormatTokenCount(std::nullopt);
+        const auto lines = cli::FormatContextBreakdown(1, 2, 3, 0, 1000, std::nullopt,
+            cli::BuiltinTheme("plain"), 6);
+        REQUIRE(lines.size() == 9);
+        CHECK(lines[5].find(unknown) != std::string::npos);
+        CHECK(lines[5].find("?%") != std::string::npos);
+        CHECK(lines[7].find(unknown) != std::string::npos);
+        CHECK(cli::StatusLineInfoSegment("", -1, -1, 1000).find(unknown) != std::string::npos);
+        cli::StatusPanelData status;
+        status.context_percent = -1; status.used_tokens = -1; status.window_tokens = 1000;
+        const auto tokens = cli::BuildStatusPanelSegments({"tokens"}, cli::ConfirmMode::Confirm, status);
+        REQUIRE(tokens.size() == 1);
+        CHECK(tokens.front().text.find(unknown) != std::string::npos);
+        const auto large = (std::numeric_limits<std::size_t>::max)();
+        cli::ContextTracker checked(large);
+        checked.ApplyContextEstimate(large);
+        CHECK(checked.current_tokens_projection() == large);
+        if (!std::in_range<std::int64_t>(large)) {
+            CHECK(checked.current_tokens_for_status() == -1);
+            CHECK(checked.window_tokens_for_status() == -1);
+        }
+    }
 }
 
 TEST_CASE("ContextTracker: 初始占用为 0") {

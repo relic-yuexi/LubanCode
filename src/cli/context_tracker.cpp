@@ -2,8 +2,10 @@
 
 #include <cstdint>
 #include <limits>
+#include <utility>
 
 #include "agent/context.hpp"  // AutoCompactTriggerLine:触发线公共尺(§〇.1)
+#include "api/usage_totals.hpp"
 
 namespace lubancode::cli {
 
@@ -33,6 +35,7 @@ ContextTracker::CacheMissKind ContextTracker::ClassifyMiss(bool usage_reported, 
 
 void ContextTracker::ApplyContextEstimate(std::size_t tokens) {
     current_tokens_ = tokens;
+    current_tokens_known_ = true;
     current_estimated_ = true;
     usage_stale_ = false;
 }
@@ -44,12 +47,15 @@ void ContextTracker::Update(const api::Usage& usage) {
     // 再加输出。三家 wire 摊成同一副语义后,这一只公式对所有家都对——
     // 旧实现里 Chat/Responses 把含 cached 的总数塞进 input_tokens,这里
     // 再加一遍 cache_read,会把占用算重(前缀缓存守恒单第一期修掉)。
-    const std::int64_t total = api::TotalInputTokens(usage) + usage.output_tokens;
-    current_tokens_ = total > 0 ? static_cast<std::size_t>(total) : 0;
+    const auto input = api::CheckedTotalInputTokens(usage);
+    const auto total = input ? api::usage_observation::CheckedAdd(*input, usage.output_tokens) : std::nullopt;
+    current_tokens_known_ = total && (*total <= 0 || std::in_range<std::size_t>(*total));
+    if (current_tokens_known_) current_tokens_ = *total > 0 ? static_cast<std::size_t>(*total) : 0;
     // 缓存命中量与完整输入同样覆盖式记一份,/context 分类明细与命中率用;
     // 负数(不该出现)按 0。
     last_cache_read_tokens_ = usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
-    last_input_tokens_ = api::TotalInputTokens(usage);
+    last_input_known_ = input.has_value();
+    if (input) last_input_tokens_ = *input;
 }
 
 void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn_id, int step_index,
@@ -76,8 +82,18 @@ void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn
         // 本场累计(命中率分子分母):只认实测到且自洽的这笔,跨轮不清零。
         // 异常样本(矛盾账)不进分子分母——比例只对自洽样本算。
         if (!flags.anomalous) {
-            session_cache_read_total_ += usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
-            session_input_total_ += api::TotalInputTokens(usage);
+            if (session_cache_read_known_) {
+                const auto sum = api::usage_observation::CheckedAdd(session_cache_read_total_,
+                    usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0);
+                session_cache_read_known_ = sum.has_value();
+                if (sum) session_cache_read_total_ = *sum;
+            }
+            if (session_input_known_) {
+                const auto input = api::CheckedTotalInputTokens(usage);
+                const auto sum = input ? api::usage_observation::CheckedAdd(session_input_total_, *input) : std::nullopt;
+                session_input_known_ = sum.has_value();
+                if (sum) session_input_total_ = *sum;
+            }
         }
         usage_stale_ = false;
     } else if (flags.known && flags.usage_reported) {
@@ -102,7 +118,9 @@ void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn
         (flags.known ? flags.cache_creation_reported : false) || usage.cache_creation_tokens > 0;
     record.anomalous = flags.anomalous;
     if (measured) {
-        record.input_tokens = api::TotalInputTokens(usage);
+        const auto input = api::CheckedTotalInputTokens(usage);
+        record.input_tokens_known = input.has_value();
+        if (input) record.input_tokens = *input;
         record.cache_read_tokens = usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
     }
     if (diag.present) {
@@ -154,12 +172,16 @@ void ContextTracker::ResetSession() {
     // (归 provider),保留——新场首次 /doctor cache 前它仍是"上一次对
     // 这个端点的观测",不冒充新场实测。
     current_tokens_ = 0;
+    current_tokens_known_ = true;
     current_estimated_ = false;
     last_cache_read_tokens_ = 0;
     last_input_tokens_ = 0;
+    last_input_known_ = true;
     usage_stale_ = false;
     session_cache_read_total_ = 0;
     session_input_total_ = 0;
+    session_input_known_ = true;
+    session_cache_read_known_ = true;
     cache_history_.clear();
     total_model_requests_ = 0;
     turn_labels_.clear();
@@ -234,6 +256,7 @@ const ContextTracker::UserTurnLabel* ContextTracker::FindTurnLabel(const std::st
 }
 
 int ContextTracker::UsagePercent() const {
+    if (!current_tokens_known_) return -1;
     if (window_tokens_ == 0) {
         return 0;
     }
@@ -245,6 +268,7 @@ int ContextTracker::UsagePercent() const {
 }
 
 bool ContextTracker::ShouldAutoCompact() const {
+    if (!current_tokens_known_) return false;
     if (window_tokens_ == 0) {
         return false;
     }
