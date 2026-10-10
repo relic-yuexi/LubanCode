@@ -402,6 +402,88 @@ class BoundaryTests(unittest.TestCase):
         self.targets.append(probe)
         return probe
 
+    def add_numeric_probe(self):
+        self.source_file(boundary.NUMERIC_PROBE_SOURCE, "int main() { return 0; }\n")
+        self.targets[1]["name"] = "lubancode_runtime"
+        probe = {"id": "numeric-probe", "name": boundary.NUMERIC_PROBE_TARGET,
+                 "type": "EXECUTABLE", "compileGroups": [{}],
+                 "sources": [{"path": boundary.NUMERIC_PROBE_SOURCE, "compileGroupIndex": 0}],
+                 "dependencies": [{"id": "engine"}]}
+        self.targets.append(probe)
+        return probe
+
+    def test_numeric_probe_requires_testing_and_exact_executable_owner(self):
+        probe = self.add_numeric_probe()
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        probe["type"] = "STATIC_LIBRARY"
+        self.assert_rejected(self.check(testing=True), "executable target")
+        probe["type"] = "EXECUTABLE"
+        for owner in ("unrelated_probe", "lubancore_sdk_tests"):
+            probe["name"] = owner
+            self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_numeric_probe_rejects_adjacent_and_additional_sources(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_numeric_probe()
+        nearby = "tests/support/usage_numeric_fault_probe_extra.cpp"
+        self.source_file(nearby, "int adjacent;\n")
+        probe["sources"].append({"path": nearby, "compileGroupIndex": 0})
+        self.assert_rejected(self.check(testing=True), "isolated fixture")
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
+    def test_numeric_probe_runtime_exception_cannot_admit_other_dependencies(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        self.add_numeric_probe()
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        self.targets[1]["name"] = "neutral_engine"
+        self.assert_rejected(self.check(testing=True), "must not depend")
+        self.targets[1]["name"] = "lubancode_runtime"
+        self.targets[1]["type"] = "EXECUTABLE"
+        self.assert_rejected(self.check(testing=True), "must not depend")
+        self.targets[1]["type"] = "STATIC_LIBRARY"
+        self.source_file("src/neutral/engine.cpp", '#include "app/turn_runner.hpp"\n')
+        self.source_file("src/app/turn_runner.hpp", "#pragma once\n")
+        self.assert_rejected(self.check(testing=True), "reverse host include")
+
+    def test_numeric_probe_cannot_enter_sdk_library_closure(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        self.add_numeric_probe()
+        self.targets[0]["dependencies"].append({"id": "numeric-probe"})
+        self.assert_rejected(self.check(testing=True), "SDK library depends")
+
+    def test_numeric_probe_allows_only_actual_runtime_transitive_library_edges(self):
+        self.flags["BUILD_TESTING"] = "ON"
+        probe = self.add_numeric_probe()
+        self.source_file("src/neutral/runtime_dependency.cpp", "int dependency;\n")
+        self.targets.append({"id": "runtime-dependency", "name": "runtime_dependency",
+                             "type": "STATIC_LIBRARY", "compileGroups": [{}],
+                             "sources": [{"path": "src/neutral/runtime_dependency.cpp", "compileGroupIndex": 0}]})
+        self.targets[1]["dependencies"] = [{"id": "runtime-dependency"}]
+        probe["dependencies"].append({"id": "runtime-dependency"})
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        self.targets[1].pop("dependencies")
+        self.assert_rejected(self.check(testing=True), "must not depend")
+
+    def test_numeric_shared_assertions_require_exact_sdk_testing_owner(self):
+        shared = "tests/unit/api/test_usage_numeric_allocations.cpp"
+        self.source_file(shared, "int numeric_assertions;\n")
+        target = {"id": "tests", "name": "lubancore_sdk_tests", "type": "EXECUTABLE",
+                  "compileGroups": [{}],
+                  "sources": [{"path": shared, "compileGroupIndex": 0}]}
+        self.targets.append(target)
+        self.assert_rejected(self.check(), "testing is OFF")
+        self.flags["BUILD_TESTING"] = "ON"
+        self.assertEqual(self.check(testing=True)["status"], "passed")
+        target["name"] = "unrelated_test_owner"
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+        target["name"] = "lubancore_sdk_tests"
+        nearby = "tests/unit/api/test_usage_numeric_allocations_extra.cpp"
+        self.source_file(nearby, "int adjacent;\n")
+        target["sources"][0]["path"] = nearby
+        self.assert_rejected(self.check(testing=True), "non-SDK test compilation")
+
     def add_command_probe(self):
         self.source_file(boundary.COMMAND_LIMITS_PROBE_SOURCE, "#include <iostream>\nint main() { return 0; }\n")
         probe = {"id": "command-probe", "name": boundary.COMMAND_LIMITS_PROBE_TARGET,
