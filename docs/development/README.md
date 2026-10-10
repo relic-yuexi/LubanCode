@@ -12,7 +12,9 @@
 - [Memory 抽取线程启动失败](sdk-memory-worker-start-cleanup.md)：失败槽保身份、原 CLI 收账、创建边界清理；#340 同源三平台已验、已合。
 - [Memory 后台异常收场](sdk-memory-worker-exception-cleanup.md)：保住已归还用量、丢弃部分候选、接真实收账；#341 同源三平台已验、已合。
 - [Memory 持久触发身份](sdk-memory-durable-trigger-identity.md)：评估归旧触发轮，回合间写回执不借旧号；#342 同源三平台已验、已合。
-- [旁路短借 owner](sdk-memory-bypass-lease-owner.md)：前台冻身份，关场退旧借；合同先交，待本源验收。
+- [旁路短借 owner](sdk-memory-bypass-lease-owner.md)：前台冻身份，关场退旧借；#343 同源三平台与实际 TSan 已验、已合。
+- [标题精炼启动失败清理](sdk-title-start-cleanup.md)：绑定及创建失败一次收场；合同先交，待本源验收。
+- [Memory 批量提交失败诊断](sdk-memory-batch-failure-diagnostic.md)：失败结果带回阶段观察；原断言照留，不改写入语义。
 - [SDK main Action 中间件合同](sdk-action-middleware.md)
 - [SDK 显式 Skills 合同](sdk-skills.md)
 - [SDK 项目 Memory 只读召回合同](sdk-memory-recall.md)

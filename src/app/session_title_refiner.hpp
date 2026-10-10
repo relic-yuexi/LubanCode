@@ -24,7 +24,7 @@
 // 退出兜底照子代理的老方子(见 AgentTool 析构):RequestCancel 拉原子
 // 取消旗,析构取消 + 有界等待,等不到就 detach 放行——闭包自持 shared
 // 状态与代理；场次实际退借后晚归不摸旧 writer。detach 不表示 Backend 停止。
-// 标题线程创建与后台执行异常总出口另有欠账，本片不宣称这些也齐了。
+// 前台绑定及线程创建失败给一次终态；后台函数体异常总出口仍另交。
 #pragma once
 
 #include <atomic>
@@ -65,6 +65,7 @@ public:
         int timeout_secs = kTitleRefineTimeoutSecs;
     };
     struct Outcome {
+        bool refinement_invoked = false;  // Entered RefineSessionTitle; not physical Backend calls.
         bool ok = false;         // 采样成功且清洗后非空
         std::string title;      // ok 时非空
         std::string model;      // 实际用的模型(记账用)
@@ -84,6 +85,7 @@ public:
 
     // 起一枚精炼任务。单飞:上一枚还在跑或结果还没被收走就拒(false),
     // 不叠发。backend 为空或模型为空同样拒。
+    // Accepted binding/thread failures produce one ready Outcome and keep single flight.
     bool Start(Inputs&& inputs);
 
     // 主线程收货:任务完工(成功/失败/取消都算)给 Outcome 并复位,可再
@@ -113,5 +115,9 @@ private:
     std::shared_ptr<Shared> shared_;
     std::thread worker_;
 };
+
+// Private CLI accounting: unused workers do not invent cheap calls.
+bool RecordTitleRefinementCall(agent::ModelUsageLedger& ledger,
+                               const SessionTitleRefiner::Outcome& outcome);
 
 }  // namespace lubancode::app
