@@ -40,11 +40,13 @@ public:
         }
         return object;
     }
-    std::expected<Snapshot, std::string_view> Partial() const {
+    std::expected<Snapshot, std::string_view> Partial(
+        NumericObserver observer = nullptr, void* observer_context = nullptr) const {
         const auto object = NumericObject();
-        auto result = dialect_ == Dialect::Chat ? Chat(object, &numbers)
-            : (dialect_ == Dialect::Responses || dialect_ == Dialect::ResponsesNonStream) ? Responses(object, &numbers)
-            : dialect_ == Dialect::Gemini ? Gemini(object, &numbers) : Anthropic(object, &numbers);
+        auto result = dialect_ == Dialect::Chat ? Chat(object, &numbers, observer, observer_context)
+            : (dialect_ == Dialect::Responses || dialect_ == Dialect::ResponsesNonStream) ? Responses(object, &numbers, observer, observer_context)
+            : dialect_ == Dialect::Gemini ? Gemini(object, &numbers, observer, observer_context)
+                : Anthropic(object, &numbers, observer, observer_context);
         if (result) MarkIncomplete(*result);
         return result;
     }

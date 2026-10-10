@@ -1,5 +1,11 @@
 # SDK 阶段进度与验收边界
 
+候选把四家归一化规则改为共用投影：固定槽先算数字，原 Builder 再复制
+材料；Chat、Responses、Gemini 与真实 Responses 非流式、残帧恢复路径
+先交请求 owner，再建 raw/异常/字段材料。被拒原材料不能把已算数字抹零。
+新增八路源夹具，核四家完整材料与超限原数摘要；未执行或发布。字面扫描、
+JSON DOM、残帧 NumericObject 分配仍在这层前，完整分配故障验收仍欠。
+
 远程 TSan 本轮在 V3 writer 用量夹具编译失败：十一处 AppendEvent 未传
 Durability，一处故障注入返回 bool 而接口要求 optional<string>。候选现已
 按真实接口补 PowerLoss 与注入错误文本，原断言及两条 CASE 均保留。

@@ -37,7 +37,7 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
     } catch (const json::exception&) {
         if (lexical.numbers.empty()) return {};
         std::vector<StreamEvent> recovered;
-        auto partial = lexical.Partial();
+        auto partial = lexical.Partial(&usage_wire::NumericDeliveryOwner::Observe, &numeric_delivery_);
         if (partial) numeric_delivery_.Own(*partial);
         if (lexical.response_id) recovered.push_back(ProviderResponseIdentity{*lexical.response_id});
         if (partial) recovered.push_back(usage_wire::Nonterminal(*partial, lexical.response_id));
@@ -54,7 +54,8 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
     // erase returned usage, and this event never declares a success terminal.
     bool fresh_usage = false;
     if (auto usage = data.find("usageMetadata"); usage != data.end() && usage->is_object()) {
-        auto observed = usage_wire::Gemini(*usage, &lexical.numbers);
+        auto observed = usage_wire::Gemini(*usage, &lexical.numbers,
+            &usage_wire::NumericDeliveryOwner::Observe, &numeric_delivery_);
         if (!observed) {
             events.push_back(Fail(StreamError{std::string(observed.error()), "usage.material.invalid"}));
             return events;

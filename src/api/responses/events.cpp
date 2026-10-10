@@ -306,7 +306,7 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
     try { data=json::parse(frame.data); }
     catch (const json::exception&) {
         if (lexical.numbers.empty()) return events;
-        auto partial = lexical.Partial();
+        auto partial = lexical.Partial(&usage_wire::NumericDeliveryOwner::Observe, &numeric_delivery_);
         if (partial) numeric_delivery_.Own(*partial);
         if (lexical.response_id) events.push_back(ProviderResponseIdentity{*lexical.response_id});
         if (partial) events.push_back(usage_wire::Nonterminal(*partial, lexical.response_id));
@@ -318,7 +318,8 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
     if (response!=nullptr && response->is_object()) {
         bool fresh_usage = false;
         if (const auto* usage = usage_wire::Find(*response, {"usage"}); usage && usage->is_object()) {
-            auto snapshot = usage_wire::Responses(*usage, &lexical.numbers);
+            auto snapshot = usage_wire::Responses(*usage, &lexical.numbers,
+                &usage_wire::NumericDeliveryOwner::Observe, &numeric_delivery_);
             if (!snapshot) {
                 events.push_back(Fail(StreamError{std::string(snapshot.error()), "usage.material.invalid"}));
                 return events;
@@ -391,7 +392,7 @@ static std::vector<StreamEvent> ExpandNonStreamResponseOwned(
     catch (const json::exception&) {
         if (lexical.numbers.empty()) return {};
         std::vector<StreamEvent> recovered;
-        auto partial = lexical.Partial();
+        auto partial = lexical.Partial(delivery_owner ? &usage_wire::NumericDeliveryOwner::Observe : nullptr, delivery_owner);
         if (partial && delivery_owner) delivery_owner->Own(*partial);
         if (lexical.response_id) recovered.push_back(ProviderResponseIdentity{*lexical.response_id});
         if (partial) recovered.push_back(usage_wire::Nonterminal(*partial, lexical.response_id));
@@ -404,7 +405,8 @@ static std::vector<StreamEvent> ExpandNonStreamResponseOwned(
     std::vector<StreamEvent> events;
     std::optional<usage_wire::Snapshot> material;
     if (const auto* usage=usage_wire::Find(response,{"usage"});usage && usage->is_object()) {
-        auto snapshot=usage_wire::Responses(*usage, &lexical.numbers);
+        auto snapshot=usage_wire::Responses(*usage, &lexical.numbers,
+            delivery_owner ? &usage_wire::NumericDeliveryOwner::Observe : nullptr, delivery_owner);
         if (!snapshot) {
             events.push_back(StreamError{std::string(snapshot.error()),"usage.material.invalid"});
             return events;

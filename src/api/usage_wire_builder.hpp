@@ -81,7 +81,8 @@ inline const nlohmann::json* Find(const nlohmann::json& object,
     const auto* value = &object;
     for (const auto* key : keys) {
         if (!value->is_object()) return nullptr;
-        const auto it = value->find(key);
+        // Borrow a key view; never construct a temporary owned lookup string.
+        const auto it = value->find(std::string_view(key));
         if (it == value->end()) return nullptr;
         value = &*it;
     }
@@ -98,6 +99,7 @@ struct Snapshot {
 
 class Builder {
 public:
+    using Result = Snapshot;
     explicit Builder(std::string provider_namespace,
                      const std::vector<facts::RawField>* lexical = nullptr) : lexical_(lexical) {
         snapshot_.observation.provider_namespace = std::move(provider_namespace);

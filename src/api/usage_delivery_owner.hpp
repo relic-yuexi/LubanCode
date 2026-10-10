@@ -15,6 +15,10 @@ namespace lubancode::api::usage_wire {
 // This is a callback-delivery checkpoint, never a durable or typed owner ACK.
 class NumericDeliveryOwner {
 public:
+    static void Observe(void* context,
+        const std::array<std::int64_t, facts::kFieldCount>& values) noexcept {
+        static_cast<NumericDeliveryOwner*>(context)->Own(values);
+    }
     static bool CarriesUsage(const StreamEvent& event) noexcept {
         if (std::holds_alternative<UsageSnapshot>(event)) return true;
         const auto* done = std::get_if<MessageDone>(&event);

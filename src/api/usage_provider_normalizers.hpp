@@ -4,12 +4,15 @@
 #include <string_view>
 #include <utility>
 
-#include "api/usage_wire_builder.hpp"
+#include "api/usage_numeric_builder.hpp"
 
 namespace lubancode::api::usage_wire {
 using Field = facts::Field;
 
-inline RawIndex MalformedDetails(Builder& builder, const nlohmann::json& usage,
+namespace detail {
+
+template <typename B>
+inline RawIndex MalformedDetails(B& builder, const nlohmann::json& usage,
                                 const char* key, const char* path) {
     const auto* container = Find(usage, {key});
     return container && !container->is_object() ? builder.Capture(path, container) : RawIndex{};
@@ -18,10 +21,11 @@ inline RawIndex MalformedDetails(Builder& builder, const nlohmann::json& usage,
 // These functions consume an individual usage object. Stateful parsers own
 // message boundaries and cumulative per-field updates; they must not add two
 // copies of a stream's usage. No response ID is synthesized here.
-inline std::expected<Snapshot, std::string_view> Chat(const nlohmann::json& usage,
+template <typename B>
+inline std::expected<typename B::Result, std::string_view> ChatProjection(const nlohmann::json& usage,
     const std::vector<facts::RawField>* lexical = nullptr) {
     if (!usage.is_object()) return std::unexpected("usage.wire.object");
-    Builder b("openai.chat", lexical);
+    B b("openai.chat", lexical);
     const auto bad_input_details = MalformedDetails(b, usage, "prompt_tokens_details", "usage.prompt_tokens_details");
     const auto bad_output_details = MalformedDetails(b, usage, "completion_tokens_details", "usage.completion_tokens_details");
     const auto total=b.Capture("usage.prompt_tokens",Find(usage,{"prompt_tokens"}));
@@ -77,10 +81,11 @@ inline std::expected<Snapshot, std::string_view> Chat(const nlohmann::json& usag
     return std::move(b).Finish();
 }
 
-inline std::expected<Snapshot, std::string_view> Responses(const nlohmann::json& usage,
+template <typename B>
+inline std::expected<typename B::Result, std::string_view> ResponsesProjection(const nlohmann::json& usage,
     const std::vector<facts::RawField>* lexical = nullptr) {
     if (!usage.is_object()) return std::unexpected("usage.wire.object");
-    Builder b("openai.responses", lexical);
+    B b("openai.responses", lexical);
     const auto bad_input_details = MalformedDetails(b, usage, "input_tokens_details", "usage.input_tokens_details");
     const auto bad_output_details = MalformedDetails(b, usage, "output_tokens_details", "usage.output_tokens_details");
     const auto total=b.Capture("usage.input_tokens",Find(usage,{"input_tokens"}));
@@ -105,10 +110,11 @@ inline std::expected<Snapshot, std::string_view> Responses(const nlohmann::json&
     return std::move(b).Finish();
 }
 
-inline std::expected<Snapshot, std::string_view> Anthropic(const nlohmann::json& usage,
+template <typename B>
+inline std::expected<typename B::Result, std::string_view> AnthropicProjection(const nlohmann::json& usage,
     const std::vector<facts::RawField>* lexical = nullptr) {
     if (!usage.is_object()) return std::unexpected("usage.wire.object");
-    Builder b("anthropic.messages", lexical);
+    B b("anthropic.messages", lexical);
     b.Report(Field::Input,b.Capture("usage.input_tokens",Find(usage,{"input_tokens"})));
     b.Report(Field::Output,b.Capture("usage.output_tokens",Find(usage,{"output_tokens"})));
     b.Report(Field::CacheRead,b.Capture("usage.cache_read_input_tokens",Find(usage,{"cache_read_input_tokens"})));
@@ -118,10 +124,11 @@ inline std::expected<Snapshot, std::string_view> Anthropic(const nlohmann::json&
     return std::move(b).Finish();
 }
 
-inline std::expected<Snapshot, std::string_view> Gemini(const nlohmann::json& usage,
+template <typename B>
+inline std::expected<typename B::Result, std::string_view> GeminiProjection(const nlohmann::json& usage,
     const std::vector<facts::RawField>* lexical = nullptr) {
     if (!usage.is_object()) return std::unexpected("usage.wire.object");
-    Builder b("google.generateContent", lexical);
+    B b("google.generateContent", lexical);
     const auto prompt=b.Capture("usageMetadata.promptTokenCount",Find(usage,{"promptTokenCount"}));
     const auto cached=b.Capture("usageMetadata.cachedContentTokenCount",Find(usage,{"cachedContentTokenCount"}));
     const auto candidates=b.Capture("usageMetadata.candidatesTokenCount",Find(usage,{"candidatesTokenCount"}));
@@ -154,6 +161,68 @@ inline std::expected<Snapshot, std::string_view> Gemini(const nlohmann::json& us
     }
     // No cache-creation scalar: its Missing/Unknown observation stays intact.
     return std::move(b).Finish();
+}
+
+} // namespace detail
+
+inline std::expected<Snapshot, std::string_view> Chat(const nlohmann::json& usage,
+    const std::vector<facts::RawField>* lexical = nullptr,
+    NumericObserver observer = nullptr, void* observer_context = nullptr) {
+    const auto numeric = detail::ChatProjection<NumericBuilder>(usage, lexical);
+    if (!numeric) return std::unexpected(numeric.error());
+    if (observer) observer(observer_context, *numeric);
+    auto material = detail::ChatProjection<Builder>(usage, lexical);
+    if (material && material->values != *numeric) {
+        // Rejected raw evidence must not erase the independent numeric fact.
+        material->values = *numeric;
+        if (material->material_error.empty()) material->material_error = "usage.wire.numeric_material_mismatch";
+    }
+    return material;
+}
+
+inline std::expected<Snapshot, std::string_view> Responses(const nlohmann::json& usage,
+    const std::vector<facts::RawField>* lexical = nullptr,
+    NumericObserver observer = nullptr, void* observer_context = nullptr) {
+    const auto numeric = detail::ResponsesProjection<NumericBuilder>(usage, lexical);
+    if (!numeric) return std::unexpected(numeric.error());
+    if (observer) observer(observer_context, *numeric);
+    auto material = detail::ResponsesProjection<Builder>(usage, lexical);
+    if (material && material->values != *numeric) {
+        // Rejected raw evidence must not erase the independent numeric fact.
+        material->values = *numeric;
+        if (material->material_error.empty()) material->material_error = "usage.wire.numeric_material_mismatch";
+    }
+    return material;
+}
+
+inline std::expected<Snapshot, std::string_view> Anthropic(const nlohmann::json& usage,
+    const std::vector<facts::RawField>* lexical = nullptr,
+    NumericObserver observer = nullptr, void* observer_context = nullptr) {
+    const auto numeric = detail::AnthropicProjection<NumericBuilder>(usage, lexical);
+    if (!numeric) return std::unexpected(numeric.error());
+    if (observer) observer(observer_context, *numeric);
+    auto material = detail::AnthropicProjection<Builder>(usage, lexical);
+    if (material && material->values != *numeric) {
+        // Rejected raw evidence must not erase the independent numeric fact.
+        material->values = *numeric;
+        if (material->material_error.empty()) material->material_error = "usage.wire.numeric_material_mismatch";
+    }
+    return material;
+}
+
+inline std::expected<Snapshot, std::string_view> Gemini(const nlohmann::json& usage,
+    const std::vector<facts::RawField>* lexical = nullptr,
+    NumericObserver observer = nullptr, void* observer_context = nullptr) {
+    const auto numeric = detail::GeminiProjection<NumericBuilder>(usage, lexical);
+    if (!numeric) return std::unexpected(numeric.error());
+    if (observer) observer(observer_context, *numeric);
+    auto material = detail::GeminiProjection<Builder>(usage, lexical);
+    if (material && material->values != *numeric) {
+        // Rejected raw evidence must not erase the independent numeric fact.
+        material->values = *numeric;
+        if (material->material_error.empty()) material->material_error = "usage.wire.numeric_material_mismatch";
+    }
+    return material;
 }
 
 }  // namespace lubancode::api::usage_wire

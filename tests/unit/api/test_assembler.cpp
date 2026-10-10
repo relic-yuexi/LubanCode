@@ -27,6 +27,56 @@
 
 using namespace lubancode::api;
 
+TEST_CASE("Provider numeric owner precedes raw material admission through shared normalization") {
+    namespace wire = usage_wire;
+    namespace facts = ::lubancore::usage::v1;
+    using Normalize = std::expected<wire::Snapshot, std::string_view> (*)(
+        const nlohmann::json&, const std::vector<facts::RawField>*, wire::NumericObserver, void*);
+    const std::array<Normalize,4> normalize{wire::Chat, wire::Responses, wire::Anthropic, wire::Gemini};
+    const std::array<nlohmann::json,4> usages{
+        nlohmann::json{{"prompt_tokens",41},{"completion_tokens",7},
+            {"prompt_tokens_details",{{"cached_tokens",13},{"cache_write_tokens",17}}},
+            {"completion_tokens_details",{{"reasoning_tokens",3}}}},
+        nlohmann::json{{"input_tokens",41},{"output_tokens",7},
+            {"input_tokens_details",{{"cached_tokens",13},{"cache_write_tokens",17}}},
+            {"output_tokens_details",{{"reasoning_tokens",3}}}},
+        nlohmann::json{{"input_tokens",11},{"output_tokens",7},
+            {"cache_read_input_tokens",13},{"cache_creation_input_tokens",17}},
+        nlohmann::json{{"promptTokenCount",24},{"cachedContentTokenCount",13},
+            {"candidatesTokenCount",4},{"thoughtsTokenCount",3},{"totalTokenCount",31}}
+    };
+    const std::array<const char*,4> paths{"usage.prompt_tokens", "usage.input_tokens",
+        "usage.input_tokens", "usageMetadata.promptTokenCount"};
+    const std::array<std::int64_t,4> raw_inputs{41,41,11,24};
+    for (std::size_t provider = 0; provider < normalize.size(); ++provider)
+        for (const bool reject_material : {false,true}) {
+            INFO(provider); INFO(reject_material);
+            struct Owner { wire::NumericValues values{}; int calls = 0; } owner;
+            std::vector<facts::RawField> lexical;
+            if (reject_material) {
+                facts::RawField raw;
+                raw.path = paths[provider]; raw.kind = facts::RawKind::SignedInteger;
+                raw.integer = raw_inputs[provider];
+                raw.summary = std::string(facts::kMaxSummaryBytes + 1, 'x');
+                lexical.push_back(std::move(raw));
+            }
+            const auto snapshot = normalize[provider](usages[provider], &lexical,
+                [](void* context, const wire::NumericValues& values) noexcept {
+                    auto& target = *static_cast<Owner*>(context);
+                    target.values = values; ++target.calls;
+                }, &owner);
+            REQUIRE(snapshot.has_value()); CHECK(owner.calls == 1);
+            const wire::NumericValues expected{11,7,13,provider == 3 ? 0 : 17,provider == 2 ? 0 : 3};
+            CHECK(owner.values == expected); CHECK(snapshot->values == expected);
+            if (reject_material) {
+                CHECK(snapshot->material_error == "usage.wire.raw_field");
+                const auto delivered = wire::Nonterminal(*snapshot);
+                CHECK_FALSE(delivered.usage_observation.has_value());
+                CHECK(delivered.usage.input_tokens == 11); CHECK(delivered.usage.output_tokens == 7);
+            } else CHECK(snapshot->material_error.empty());
+        }
+}
+
 TEST_CASE("Four production parsers and nonstream fallback preserve accounting when response identity is refused") {
     const auto require = [](const std::vector<StreamEvent>& events,
                             std::array<std::int64_t,5> expected) {
