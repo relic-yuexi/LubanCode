@@ -246,8 +246,12 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
     try { document.Parse(frame.data); }
     catch (const json::exception&) {
         if (lexical.numbers.empty()) return events;
-        if (lexical.event_type == "message_start") ResetUsageState();
-        AbsorbUsageObject(lexical.NumericObject(), &lexical.numbers);
+        // The fixed numeric checkpoint already reset message_start before
+        // owning its facts. A second reset here would discard them if the
+        // recovery DOM's next allocation fails.
+        ParsedJson recovered_usage;
+        lexical.NumericObject(recovered_usage);
+        AbsorbUsageObject(recovered_usage.value(), &lexical.numbers);
         if (lexical.response_id) {
             provider_response_id_ = lexical.response_id;
             events.push_back(ProviderResponseIdentity{*lexical.response_id});

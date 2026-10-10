@@ -258,7 +258,7 @@ int main(int argc, char** argv) {
     for (auto& frame : rich_frames) {
         frame.insert(1, R"("cleanup_extension":{"a":[{"b":[1,true,null,18446744073709551615,1.25]}]},"cleanup_extension":[{"c":{"d":["old"]}}],"cleanup_extension":17,"cleanup_extension":{"e":[[],{},[false]]},"cleanup_extension":null,)");
     }
-    const auto parser_sweep = [&](auto prototype, std::size_t provider, auto consume) {
+    const auto parser_sweep = [&](auto prototype, std::size_t provider, auto consume, bool malformed = false) {
         namespace api = lubancode::api;
         struct Owner {
             wire::NumericValues values{};
@@ -279,6 +279,7 @@ int main(int argc, char** argv) {
             } else ++owner.other;
         };
         api::SseFrame frame; frame.data = rich_frames[provider];
+        if (malformed) frame.data += " invalid trailing input";
         const wire::NumericValues expected{11,7,13,provider == 3 ? 0 : 17,provider == 2 ? 0 : 3};
         allocations = 0;
         {
@@ -295,7 +296,8 @@ int main(int argc, char** argv) {
         if (!count || count > 10000 || owner.calls != 1 || owner.values != expected || !owner.precise)
             return false;
         for (std::size_t index = 1; index <= count; ++index) {
-            active_stage = "parser-sweep"; active_route = lexical_names[provider]; active_fault = index;
+            active_stage = malformed ? "malformed-parser-sweep" : "parser-sweep";
+            active_route = lexical_names[provider]; active_fault = index;
             owner = {};
             auto parser = prototype;
             const auto prior = refused;
@@ -317,8 +319,8 @@ int main(int argc, char** argv) {
                 return false;
             }
         }
-        std::printf("actual-parser-allocation-sweep:%s:allocations=%zu:faults=%zu\n",
-            lexical_names[provider], count, count);
+        std::printf("actual-%s-allocation-sweep:%s:allocations=%zu:faults=%zu\n",
+            malformed ? "malformed-parser" : "parser", lexical_names[provider], count, count);
         return true;
     };
     if (!parser_sweep(lubancode::api::chat::EventParser{}, 0, stream)) return 70;
@@ -327,6 +329,13 @@ int main(int argc, char** argv) {
     if (!parser_sweep(lubancode::api::gemini::EventParser{}, 3, stream)) return 73;
     if (!parser_sweep(lubancode::api::responses::EventParser{}, 4,
         [](auto& parser, const auto& frame) { return parser.ExpandNonStream(frame.data); })) return 74;
+
+    if (!parser_sweep(lubancode::api::chat::EventParser{}, 0, stream, true)) return 75;
+    if (!parser_sweep(lubancode::api::responses::EventParser{}, 1, stream, true)) return 76;
+    if (!parser_sweep(lubancode::api::anthropic::EventParser{}, 2, stream, true)) return 77;
+    if (!parser_sweep(lubancode::api::gemini::EventParser{}, 3, stream, true)) return 78;
+    if (!parser_sweep(lubancode::api::responses::EventParser{}, 4,
+        [](auto& parser, const auto& frame) { return parser.ExpandNonStream(frame.data); }, true)) return 79;
 
     // The production typed callback owns numbers before allocating attempt
     // records. This covers both direct and subordinate aggregation; it does

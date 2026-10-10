@@ -50,6 +50,7 @@ TEST_CASE("Production provider material allocation faults preserve the preceding
             CHECK(result.output.find(marker, offset + marker.size()) == std::string::npos);
         }
         check_sweep("parser", name);
+        check_sweep("malformed-parser", name);
     }
     check_sweep("typed-owner", "direct");
     check_sweep("typed-owner", "subordinate");

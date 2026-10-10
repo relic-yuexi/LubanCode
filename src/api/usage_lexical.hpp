@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "api/usage_provider_normalizers.hpp"
+#include "api/parsed_json.hpp"
 
 namespace lubancode::api::usage_wire {
 enum class Dialect { Chat, Responses, Anthropic, Gemini, ResponsesNonStream };
@@ -48,22 +49,58 @@ public:
     std::optional<std::string> response_id;
     std::optional<std::string> event_type;
 
-    nlohmann::json NumericObject() const {
-        auto object = nlohmann::json::object();
-        for (const auto& raw : numbers) {
-            const auto first = raw.path.find('.');
-            auto suffix = std::string_view(raw.path).substr(first + 1);
-            const auto dot = suffix.find('.');
-            // The placeholder carries presence only. CaptureScalar replaces it
-            // with the original lexical evidence, including out-of-range ints.
-            if (dot == std::string_view::npos) object[std::string(suffix)] = nullptr;
-            else object[std::string(suffix.substr(0, dot))][std::string(suffix.substr(dot + 1))] = nullptr;
+    void NumericObject(ParsedJson& document) const {
+        const auto suffix = [](const facts::RawField& raw) {
+            return std::string_view(raw.path).substr(raw.path.find('.') + 1);
+        };
+        const auto root_key = [&](const facts::RawField& raw) {
+            const auto path = suffix(raw);
+            return path.substr(0, path.find('.'));
+        };
+        document.start_object(numbers.size());
+        // Source fields are bounded. Borrow their paths while grouping the
+        // one-level placeholders; do not allocate another grouping structure.
+        for (std::size_t index = 0; index < numbers.size(); ++index) {
+            const auto name = root_key(numbers[index]);
+            bool seen = false;
+            for (std::size_t prior = 0; prior < index; ++prior)
+                if (root_key(numbers[prior]) == name) { seen = true; break; }
+            if (seen) continue;
+            auto last = index;
+            auto last_scalar = numbers.size();
+            for (std::size_t next = index; next < numbers.size(); ++next) {
+                if (root_key(numbers[next]) != name) continue;
+                last = next;
+                if (suffix(numbers[next]).find('.') == std::string_view::npos) last_scalar = next;
+            }
+            std::string key(name);
+            document.key(key);
+            if (suffix(numbers[last]).find('.') == std::string_view::npos) {
+                document.null();
+                continue;
+            }
+            document.start_object(numbers.size());
+            for (std::size_t next = index; next < numbers.size(); ++next) {
+                if (root_key(numbers[next]) != name ||
+                    (last_scalar != numbers.size() && next <= last_scalar)) continue;
+                const auto path = suffix(numbers[next]);
+                const auto dot = path.find('.');
+                if (dot == std::string_view::npos) continue;
+                key.assign(path.substr(dot + 1));
+                document.key(key);
+                // Presence only. CaptureScalar still reads the original raw
+                // evidence, including out-of-range integers and invalid types.
+                document.null();
+            }
+            document.end_object();
         }
-        return object;
+        document.end_object();
     }
     std::expected<Snapshot, std::string_view> Partial(
         NumericObserver observer = nullptr, void* observer_context = nullptr) const {
-        const auto object = NumericObject();
+        ParsedJson document;
+        NumericObject(document);
+        const auto& object = document.value();
         auto result = dialect_ == Dialect::Chat ? Chat(object, &numbers, observer, observer_context)
             : (dialect_ == Dialect::Responses || dialect_ == Dialect::ResponsesNonStream) ? Responses(object, &numbers, observer, observer_context)
             : dialect_ == Dialect::Gemini ? Gemini(object, &numbers, observer, observer_context)
