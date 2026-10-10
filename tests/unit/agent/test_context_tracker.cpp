@@ -10,6 +10,7 @@
 #include "agent/model_router.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/format_utils.hpp"
+#include "cli/i18n.hpp"
 
 using namespace lubancode;
 
@@ -62,6 +63,49 @@ TEST_CASE("ContextTracker: unrepresentable and inconsistent percentages stay unk
         REQUIRE(zero_window.size() == 9);
         CHECK(zero_window[3].find("------") != std::string::npos);
         CHECK(zero_window[3].find("  0%") != std::string::npos);
+    }
+    SUBCASE("overflowed estimated sums keep used and remaining unknown") {
+        const auto largest = (std::numeric_limits<std::size_t>::max)();
+        const auto unknown = cli::FormatTokenCount(std::nullopt);
+        for (const auto& lines : {
+                cli::FormatContextBreakdown(largest, 1, 4, 0, 1000, 0, cli::BuiltinTheme("plain"), 6),
+                cli::FormatContextBreakdown(1, 2, largest, 0, 1000, 0, cli::BuiltinTheme("plain"), 6)}) {
+            REQUIRE(lines.size() == 9);
+            CHECK(lines[5].find(unknown) != std::string::npos);
+            CHECK(lines[5].find("?%") != std::string::npos);
+            CHECK(lines[7].find(unknown) != std::string::npos);
+        }
+    }
+    SUBCASE("measured total survives an unrepresentable history subtraction") {
+        const auto lines = cli::FormatContextBreakdown((std::numeric_limits<std::size_t>::max)(),
+            1, 4, 0, 1000, 200, cli::BuiltinTheme("plain"), 6);
+        REQUIRE(lines.size() == 9);
+        CHECK(lines[3].find(cli::FormatTokenCount(std::nullopt)) != std::string::npos);
+        CHECK(lines[3].find(cli::tr("cmd.context.bd.history_derived")) == std::string::npos);
+        CHECK(lines[5].find("200") != std::string::npos);
+        CHECK(lines[5].find("20%") != std::string::npos);
+        CHECK(lines[7].find("800") != std::string::npos);
+    }
+    SUBCASE("deferred presence and free space do not borrow an overflowed sum") {
+        const auto largest = (std::numeric_limits<std::size_t>::max)();
+        cli::ContextBreakdownDetail detail;
+        detail.system_tools_deferred_tokens = largest;
+        detail.mcp_tools_deferred_tokens = 1;
+        const auto lines = cli::FormatContextBreakdown(largest, 1, 4, 0, 1000, 0,
+            cli::BuiltinTheme("plain"), 6, -1, &detail);
+        bool saw_deferred = false;
+        bool saw_free = false;
+        for (const auto& line : lines) {
+            if (line.find(cli::tr("cmd.context.bd.system_tools_deferred")) != std::string::npos)
+                saw_deferred = true;
+            if (line.find(cli::tr("cmd.context.bd.free_space")) != std::string::npos) {
+                saw_free = true;
+                CHECK(line.find(cli::FormatTokenCount(std::nullopt)) != std::string::npos);
+                CHECK(line.find("?%") != std::string::npos);
+            }
+        }
+        CHECK(saw_deferred);
+        CHECK(saw_free);
     }
 }
 

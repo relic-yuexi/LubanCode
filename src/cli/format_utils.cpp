@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <utility>
 
 #include "agent/context.hpp"       // AutoCompactTriggerLine:自动压缩线与触发同一只(§〇.1)
@@ -525,13 +526,19 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
     //   反推——这样三分项之和恒等于实测总量,不再各估各的打架。
     // 没实测(实测=0,如刚启动):三项全退回字符估,整体标 ~。
     const bool have_measured = measured_used_tokens > 0 && !current_estimated;
-    const std::size_t sys_plus_tools = sys_tokens + tools_tokens;
-    const std::size_t history_tokens =
-        have_measured ? (measured_used_tokens > sys_plus_tools ? measured_used_tokens - sys_plus_tools : 0)
-                      : history_tokens_est;
+    const auto add = [](std::size_t left, std::size_t right) -> std::optional<std::size_t> {
+        if (left > (std::numeric_limits<std::size_t>::max)() - right) return std::nullopt;
+        return left + right;
+    };
+    const auto sys_plus_tools = add(sys_tokens, tools_tokens);
+    const std::optional<std::size_t> history_tokens = have_measured
+        ? (sys_plus_tools ? std::optional<std::size_t>(measured_used_tokens > *sys_plus_tools
+                ? measured_used_tokens - *sys_plus_tools : 0) : std::nullopt)
+        : std::optional<std::size_t>(history_tokens_est);
     // 换链后的完整请求估算优先；旧尺分项只作参考，不再借旧实测反推历史。
-    const std::size_t used = (have_measured || current_estimated)
-                                 ? measured_used_tokens : sys_plus_tools + history_tokens;
+    const std::optional<std::size_t> used = (have_measured || current_estimated)
+        ? std::optional<std::size_t>(measured_used_tokens)
+        : (sys_plus_tools ? add(*sys_plus_tools, history_tokens_est) : std::nullopt);
 
     const std::string label_sys = tr("cmd.context.bd.system");
     const std::string label_tools = tr("cmd.context.bd.tools");
@@ -569,13 +576,15 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
     const std::size_t tok_cols = 9;     // "~204.8k" 这类数字列的宽度
 
     // estimated=true 时数字前带 ~(字符估);false 是实测/反推的确定值。
-    const auto tok_cell = [&](std::size_t tokens, bool estimated) {
-        return PadRightCols(estimated ? "~" + TokenText(tokens) : TokenText(tokens), tok_cols);
+    const auto tok_cell = [&](std::optional<std::size_t> tokens, bool estimated) {
+        if (!tokens) return PadRightCols(FormatTokenCount(std::nullopt), tok_cols);
+        return PadRightCols(estimated ? "~" + TokenText(*tokens) : TokenText(*tokens), tok_cols);
     };
-    const auto category_row = [&](const std::string& label, std::size_t tokens, bool estimated) {
+    const auto category_row = [&](const std::string& label, std::optional<std::size_t> tokens, bool estimated) {
         return "  " + PadRightCols(label, label_cols) + tok_cell(tokens, estimated) +
-               BuildBar(tokens, window_tokens, bar_width, plain) + "  " +
-               PadLeftCols(std::to_string(PercentOfWindow(tokens, window_tokens)), 3) + "%";
+               (tokens ? BuildBar(*tokens, window_tokens, bar_width, plain)
+                       : std::string(static_cast<std::size_t>(bar_width), '?')) + "  " +
+               PadLeftCols(tokens ? std::to_string(PercentOfWindow(*tokens, window_tokens)) : "?", 3) + "%";
     };
     // 缩进子行(detail 明细专用):比顶层行多缩两格,数字/条形/百分比列同款
     // 对齐,一律按统一口径估(带 ~)——细分没有单独的"实测"通道。
@@ -613,10 +622,8 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
                                            std::to_string(entry.tool_count), TokenText(entry.tokens)));
         }
         lines.push_back(sub_category_row(label_plugin_tools, detail->plugin_tools_tokens));
-        const std::size_t deferred_total = detail->system_tools_deferred_tokens +
-                                           detail->mcp_tools_deferred_tokens +
-                                           detail->plugin_tools_deferred_tokens;
-        if (deferred_total > 0) {
+        if (detail->system_tools_deferred_tokens > 0 || detail->mcp_tools_deferred_tokens > 0 ||
+            detail->plugin_tools_deferred_tokens > 0) {
             lines.push_back(sub_category_row(label_system_tools_deferred, detail->system_tools_deferred_tokens));
             lines.push_back(sub_category_row(label_mcp_tools_deferred, detail->mcp_tools_deferred_tokens));
             lines.push_back(sub_category_row(label_plugin_tools_deferred, detail->plugin_tools_deferred_tokens));
@@ -625,7 +632,7 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
     {
         // 历史:有实测是反推的确定值(不带 ~,行尾注明反推口径),无实测退字符估。
         std::string history_row = category_row(label_history, history_tokens, /*estimated=*/!have_measured);
-        if (have_measured) {
+        if (have_measured && history_tokens) {
             history_row += "  " + tr("cmd.context.bd.history_derived");
         }
         if (cache_read_tokens > 0 && !current_estimated) {
@@ -645,7 +652,7 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
         std::string used_row = "  " + PadRightCols(label_used, label_cols) +
                                tok_cell(used, /*estimated=*/!have_measured) +
                                std::string(static_cast<std::size_t>(bar_width), ' ') + "  " +
-                               PadLeftCols(std::to_string(PercentOfWindow(used, window_tokens)), 3) + "%";
+                               PadLeftCols(used ? std::to_string(PercentOfWindow(*used, window_tokens)) : "?", 3) + "%";
         if (have_measured) {
             used_row += "   " + tr("cmd.context.bd.measured");
         }
@@ -660,15 +667,18 @@ std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens_in, std::
                     std::to_string((agent::kAutoCompactPromptReserveTokens +
                                     agent::kAutoCompactSummaryReserveTokens) / 1024) +
                     "k)");
-    const std::size_t remaining = window_tokens > used ? window_tokens - used : 0;
-    lines.push_back("  " + PadRightCols(label_remaining, label_cols) + TokenText(remaining));
+    const std::optional<std::size_t> remaining = used
+        ? std::optional<std::size_t>(window_tokens > *used ? window_tokens - *used : 0) : std::nullopt;
+    lines.push_back("  " + PadRightCols(label_remaining, label_cols) +
+                    (remaining ? TokenText(*remaining) : FormatTokenCount(std::nullopt)));
     if (detail != nullptr) {
         // 自动压缩缓冲 = 窗口 − 触发线(固定预留,压缩提示词+压缩结果那两笔
         // 加上 80% 参考线切掉的那一截);空闲空间 = 触发线 − 已用,下限钉 0
         // (已用越过触发线时该压缩的是历史,不是把这行打成负数)。两行的
         // 条形与百分比同样按窗口取,跟其余分类行同一套尺,能直接比大小。
         const std::size_t buffer_tokens = window_tokens > threshold_tokens ? window_tokens - threshold_tokens : 0;
-        const std::size_t free_tokens = threshold_tokens > used ? threshold_tokens - used : 0;
+        const std::optional<std::size_t> free_tokens = used
+            ? std::optional<std::size_t>(threshold_tokens > *used ? threshold_tokens - *used : 0) : std::nullopt;
         lines.push_back(category_row(label_autocompact_buffer, buffer_tokens, /*estimated=*/false));
         lines.push_back(category_row(label_free_space, free_tokens, /*estimated=*/false));
     }
