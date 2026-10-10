@@ -76,12 +76,12 @@ TEST_CASE("usage observation requires one actual prepared/sent source across wri
     observation.payload = {{"version", 1}, {"numbers", nlohmann::json::array({-3, 5, 7, 11, 13})},
         {"reportedByProvider", true}, {"incomplete", true}, {"providerResponseId", "real-id"}};
     const auto untouched = writer->next_seq();
-    CHECK(writer->AppendEvent(observation).error_code == "v3writer.usage_source_missing");
+    CHECK(writer->AppendEvent(observation, Durability::PowerLoss).error_code == "v3writer.usage_source_missing");
     CHECK(writer->next_seq() == untouched);
     REQUIRE(writer->PrepareRequest("request-000001", "turn-000001", "step-000001", "conversation",
         writer->context().system_message_ref, {}, {{"provider", "fixture"}, {"model", "fixture-model"},
         {"wire", "responses"}}).status == WriteReceipt::Status::Committed);
-    CHECK(writer->AppendEvent(observation).error_code == "v3writer.usage_source_missing");
+    CHECK(writer->AppendEvent(observation, Durability::PowerLoss).error_code == "v3writer.usage_source_missing");
     EventDraft sent;
     sent.kind = EventKindV3::ModelRequestSent;
     sent.status = OpStatus::Done;
@@ -89,19 +89,19 @@ TEST_CASE("usage observation requires one actual prepared/sent source across wri
     sent.turn_id = observation.turn_id;
     sent.step_id = observation.step_id;
     sent.payload = {{"deliveryScope", "local_transport"}};
-    REQUIRE(writer->AppendEvent(sent).status == WriteReceipt::Status::Committed);
+    REQUIRE(writer->AppendEvent(sent, Durability::PowerLoss).status == WriteReceipt::Status::Committed);
     auto foreign = observation;
     foreign.step_id = "other-step";
-    CHECK(writer->AppendEvent(foreign).error_code == "v3writer.usage_source_mismatch");
-    REQUIRE(writer->AppendEvent(observation).status == WriteReceipt::Status::Committed);
-    CHECK(writer->AppendEvent(observation).error_code == "v3writer.usage_observation_duplicate");
+    CHECK(writer->AppendEvent(foreign, Durability::PowerLoss).error_code == "v3writer.usage_source_mismatch");
+    REQUIRE(writer->AppendEvent(observation, Durability::PowerLoss).status == WriteReceipt::Status::Committed);
+    CHECK(writer->AppendEvent(observation, Durability::PowerLoss).error_code == "v3writer.usage_observation_duplicate");
     REQUIRE(writer->Close().has_value());
     const auto original = ReadLines(harness.jsonl);
     REQUIRE(VerifyV3Lines(original).ok);
     REQUIRE(ReadV3LedgerOwned(harness.jsonl, original).has_value());
     auto continued = V3Writer::Continue(harness.jsonl);
     REQUIRE(continued.has_value());
-    CHECK(continued->AppendEvent(observation).error_code == "v3writer.usage_observation_duplicate");
+    CHECK(continued->AppendEvent(observation, Durability::PowerLoss).error_code == "v3writer.usage_observation_duplicate");
     REQUIRE(continued->Close().has_value());
     CHECK(ReadLines(harness.jsonl) == original);
 
@@ -141,7 +141,10 @@ TEST_CASE("usage observation native append and semantic confirmation failures re
     Harness harness("usage-observation-fault");
     bool fail_before = false, fail_after = false;
     V3WriterOptions options;
-    options.inject_io_failure = [&] { return fail_before; };
+    options.inject_io_failure = [&]() -> std::optional<std::string> {
+        if (fail_before) return std::string("usage observation append refused");
+        return std::nullopt;
+    };
     options.after_native_append = [&] { if (fail_after) throw 19; };
     auto writer = harness.Start(std::move(options));
     REQUIRE(writer.has_value());
@@ -155,7 +158,7 @@ TEST_CASE("usage observation native append and semantic confirmation failures re
     sent.turn_id = "turn-000001";
     sent.step_id = "step-000001";
     sent.payload = {{"deliveryScope", "local_transport"}};
-    REQUIRE(writer->AppendEvent(sent).status == WriteReceipt::Status::Committed);
+    REQUIRE(writer->AppendEvent(sent, Durability::PowerLoss).status == WriteReceipt::Status::Committed);
     EventDraft observation = sent;
     observation.kind = EventKindV3::ModelUsageObserved;
     observation.status.reset();
@@ -163,7 +166,7 @@ TEST_CASE("usage observation native append and semantic confirmation failures re
         {"reportedByProvider", true}, {"incomplete", true}, {"providerResponseId", "real-id"}};
     SUBCASE("before append") { fail_before = true; }
     SUBCASE("after actual append") { fail_after = true; }
-    const auto receipt = writer->AppendEvent(observation);
+    const auto receipt = writer->AppendEvent(observation, Durability::PowerLoss);
     CHECK(receipt.status != WriteReceipt::Status::Committed);
     CHECK(writer->broken());
     CHECK(receipt.error_code == (fail_before ? "v3writer.injected" : "v3writer.completion_unconfirmed"));
@@ -171,9 +174,9 @@ TEST_CASE("usage observation native append and semantic confirmation failures re
     auto restored = V3Writer::Continue(harness.jsonl);
     REQUIRE(restored.has_value());
     if (fail_before) {
-        CHECK(restored->AppendEvent(observation).status == WriteReceipt::Status::Committed);
+        CHECK(restored->AppendEvent(observation, Durability::PowerLoss).status == WriteReceipt::Status::Committed);
     } else {
-        CHECK(restored->AppendEvent(observation).error_code == "v3writer.usage_observation_duplicate");
+        CHECK(restored->AppendEvent(observation, Durability::PowerLoss).error_code == "v3writer.usage_observation_duplicate");
         REQUIRE(receipt.journal_append.has_value());
         CHECK_FALSE(receipt.id.empty());
     }

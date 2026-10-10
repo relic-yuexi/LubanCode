@@ -1,5 +1,10 @@
 # SDK 阶段进度与验收边界
 
+远程 TSan 本轮在 V3 writer 用量夹具编译失败：十一处 AppendEvent 未传
+Durability，一处故障注入返回 bool 而接口要求 optional<string>。候选现已
+按真实接口补 PowerLoss 与注入错误文本，原断言及两条 CASE 均保留。
+尚未远端重跑；ASan 仍在运行，整轮不得记绿。
+
 真实 Connection 失败夹具候选扩至四家各八路：新增响应号交付前的标准、
 分配、未知回调异常，沿真实 HTTP/SSE 和采样口核五项数字、无成功终帧，
 原响应号与材料保持未知、原异常保留、边界 recorder 只退一次、线程关净。
