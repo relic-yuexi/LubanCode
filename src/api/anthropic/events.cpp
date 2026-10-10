@@ -237,11 +237,11 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
     catch (const json::exception&) {
         if (lexical.numbers.empty()) return events;
         if (lexical.event_type == "message_start") ResetUsageState();
+        AbsorbUsageObject(lexical.NumericObject(), &lexical.numbers);
         if (lexical.response_id) {
             provider_response_id_ = lexical.response_id;
             events.push_back(ProviderResponseIdentity{*lexical.response_id});
         }
-        AbsorbUsageObject(lexical.NumericObject(), &lexical.numbers);
         auto partial = accounting_.View();
         if (partial) {
             numeric_delivery_.Own(*partial);
@@ -256,24 +256,28 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
     if (!type || !type->is_string()) return events;
     const auto& name=type->get_ref<const std::string&>();
     const json* usage=nullptr;
+    const json* response_identity=nullptr;
     std::optional<std::string_view> id_error;
     if (name=="message_start") {
         ResetUsageState();
         if (const auto* message=usage_wire::Find(data,{"message"});message && message->is_object()) {
-            const auto id=usage_wire::ResponseId(usage_wire::Find(*message,{"id"}));
-            if (id) {
-                provider_response_id_=*id;
-                if (*id) events.push_back(ProviderResponseIdentity{**id});
-            }
-            else id_error=id.error();
+            response_identity=usage_wire::Find(*message,{"id"});
             usage=usage_wire::Find(*message,{"usage"});
         }
     } else if (name=="message_delta") {
         usage=usage_wire::Find(data,{"usage"});
     }
+    if (usage && usage->is_object()) AbsorbUsageObject(*usage, &lexical.numbers);
+    if (name=="message_start") {
+        const auto id=usage_wire::ResponseId(response_identity);
+        if (id) {
+            provider_response_id_=*id;
+            if (*id) events.push_back(ProviderResponseIdentity{**id});
+        }
+        else id_error=id.error();
+    }
     std::optional<usage_wire::Snapshot> material;
     if (usage && usage->is_object()) {
-        AbsorbUsageObject(*usage, &lexical.numbers);
         auto snapshot=accounting_.View();
         if (!snapshot) {
             events.push_back(Fail(StreamError{std::string(snapshot.error()),"usage.material.invalid"}));

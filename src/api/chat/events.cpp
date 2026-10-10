@@ -35,9 +35,9 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
     catch (const nlohmann::json::exception&) {
         if (lexical.numbers.empty()) return {};
         std::vector<StreamEvent> recovered;
-        if (lexical.response_id) recovered.push_back(ProviderResponseIdentity{*lexical.response_id});
         auto partial = lexical.Partial();
         if (partial) numeric_delivery_.Own(*partial);
+        if (lexical.response_id) recovered.push_back(ProviderResponseIdentity{*lexical.response_id});
         if (partial) recovered.push_back(usage_wire::Nonterminal(*partial, lexical.response_id));
         recovered.push_back(Fail(StreamError{"accounting recovered from an unparseable frame", "usage.frame.incomplete"}));
         return recovered;
@@ -49,14 +49,6 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
     std::vector<StreamEvent> events;
     // Capture accounting before body conversion. A later bad payload must not
     // erase returned usage, and this event never declares a success terminal.
-    const auto response_id=usage_wire::ResponseId(usage_wire::Find(data,{"id"}));
-    const bool changed_response_id=response_id && *response_id && provider_response_id_ &&
-                                   **response_id!=*provider_response_id_;
-    if (response_id && *response_id) {
-        if (changed_response_id) conflicting_response_id_ = **response_id;
-        else provider_response_id_ = **response_id;
-        events.push_back(ProviderResponseIdentity{**response_id});
-    }
     bool fresh_usage = false;
     if (auto usage = data.find("usage"); usage != data.end() && usage->is_object()) {
         auto observed = usage_wire::Chat(*usage, &lexical.numbers);
@@ -67,12 +59,20 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
         usage_material_ = std::move(*observed);
         numeric_delivery_.Own(*usage_material_);
         if (!lexical.complete || lexical.duplicate) usage_wire::LexicalUsage::MarkIncomplete(*usage_material_);
-        if (!usage_material_->material_error.empty()) {
-            events.push_back(usage_wire::Nonterminal(*usage_material_, provider_response_id_));
-            events.push_back(Fail(StreamError{std::string(usage_material_->material_error), "usage.material.invalid"}));
-            return events;
-        }
         fresh_usage = true;
+    }
+    const auto response_id=usage_wire::ResponseId(usage_wire::Find(data,{"id"}));
+    const bool changed_response_id=response_id && *response_id && provider_response_id_ &&
+                                   **response_id!=*provider_response_id_;
+    if (response_id && *response_id) {
+        if (changed_response_id) conflicting_response_id_ = **response_id;
+        else provider_response_id_ = **response_id;
+        events.push_back(ProviderResponseIdentity{**response_id});
+    }
+    if (fresh_usage && !usage_material_->material_error.empty()) {
+        events.push_back(usage_wire::Nonterminal(*usage_material_, provider_response_id_));
+        events.push_back(Fail(StreamError{std::string(usage_material_->material_error), "usage.material.invalid"}));
+        return events;
     }
     if (usage_material_ && (fresh_usage || changed_response_id)) {
         if (conflicting_response_id_) {

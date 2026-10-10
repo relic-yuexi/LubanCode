@@ -27,6 +27,62 @@
 
 using namespace lubancode::api;
 
+TEST_CASE("Four production parsers and nonstream fallback preserve accounting when response identity is refused") {
+    const auto require = [](const std::vector<StreamEvent>& events,
+                            std::array<std::int64_t,5> expected) {
+        MessageAssembler owner;
+        int snapshots = 0, errors = 0;
+        for (const auto& event : events) {
+            CHECK_FALSE(std::holds_alternative<ProviderResponseIdentity>(event));
+            CHECK_FALSE(std::holds_alternative<MessageDone>(event));
+            CHECK_FALSE(std::holds_alternative<TextDelta>(event));
+            if (const auto* usage = std::get_if<UsageSnapshot>(&event)) {
+                ++snapshots; CHECK_FALSE(usage->provider_response_id);
+            }
+            if (const auto* error = std::get_if<StreamError>(&event)) {
+                ++errors; CHECK(error->code == "usage.response_id.invalid");
+            }
+            owner.Feed(event);
+        }
+        CHECK(snapshots == 1); CHECK(errors == 1); CHECK(owner.usage_seen());
+        CHECK(owner.usage().input_tokens == expected[0]); CHECK(owner.usage().output_tokens == expected[1]);
+        CHECK(owner.usage().cache_read_tokens == expected[2]); CHECK(owner.usage().cache_creation_tokens == expected[3]);
+        CHECK(owner.usage().output_reasoning_tokens == expected[4]);
+        CHECK_FALSE(owner.provider_response_id()); CHECK(owner.stop_reason().empty());
+    };
+    namespace facts = ::lubancore::usage::v1;
+    const std::array<nlohmann::json,2> refused_ids{
+        nlohmann::json(17), nlohmann::json(std::string(facts::kMaxResponseIdBytes+1,'x'))};
+    for (const auto& id : refused_ids) {
+        nlohmann::json chat_body{{"id",id},{"choices",nlohmann::json::array()},
+            {"usage",{{"prompt_tokens",41},{"completion_tokens",7},
+                {"prompt_tokens_details",{{"cached_tokens",13},{"cache_write_tokens",17}}},
+                {"completion_tokens_details",{{"reasoning_tokens",3}}}}}};
+        chat::EventParser chat_parser;
+        require(chat_parser.Consume(SseFrame{"",chat_body.dump()}),{11,7,13,17,3});
+        nlohmann::json response{{"id",id},{"output",nlohmann::json::array()},
+            {"usage",{{"input_tokens",41},{"output_tokens",7},
+                {"input_tokens_details",{{"cached_tokens",13},{"cache_write_tokens",17}}},
+                {"output_tokens_details",{{"reasoning_tokens",3}}}}}};
+        responses::EventParser response_parser;
+        require(response_parser.Consume(SseFrame{"",nlohmann::json{{"type","response.created"},
+            {"response",response}}.dump()}),{11,7,13,17,3});
+        responses::EventParser fallback_parser;
+        require(fallback_parser.ExpandNonStream(response.dump()),{11,7,13,17,3});
+        gemini::EventParser gemini_parser;
+        require(gemini_parser.Consume(SseFrame{"",nlohmann::json{{"responseId",id},
+            {"usageMetadata",{{"promptTokenCount",24},{"cachedContentTokenCount",13},
+                {"candidatesTokenCount",4},{"thoughtsTokenCount",3},{"totalTokenCount",31}}}}.dump()}),
+            {11,7,13,0,3});
+        anthropic::EventParser anthropic_parser;
+        require(anthropic_parser.Consume(SseFrame{"",nlohmann::json{{"type","message_start"},
+            {"message",{{"id",id},{"model","fixture"},{"content",nlohmann::json::array()},
+                {"usage",{{"input_tokens",11},{"output_tokens",7},
+                    {"cache_read_input_tokens",13},{"cache_creation_input_tokens",17}}}}}}.dump()}),
+            {11,7,13,17,0});
+    }
+}
+
 TEST_CASE("Anthropic numeric checkpoint keeps missing, malformed and lexical cumulative updates distinct") {
     namespace facts = ::lubancore::usage::v1;
     usage_wire::AnthropicAccounting accounting;

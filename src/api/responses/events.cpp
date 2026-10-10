@@ -306,9 +306,9 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
     try { data=json::parse(frame.data); }
     catch (const json::exception&) {
         if (lexical.numbers.empty()) return events;
-        if (lexical.response_id) events.push_back(ProviderResponseIdentity{*lexical.response_id});
         auto partial = lexical.Partial();
         if (partial) numeric_delivery_.Own(*partial);
+        if (lexical.response_id) events.push_back(ProviderResponseIdentity{*lexical.response_id});
         if (partial) events.push_back(usage_wire::Nonterminal(*partial, lexical.response_id));
         events.push_back(Fail(StreamError{"accounting recovered from an unparseable frame", "usage.frame.incomplete"}));
         return events;
@@ -316,13 +316,6 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
     if (!data.is_object()) return events;
     const auto* response=usage_wire::Find(data,{"response"});
     if (response!=nullptr && response->is_object()) {
-        const auto id=usage_wire::ResponseId(usage_wire::Find(*response,{"id"}));
-        const bool changed=id && *id && provider_response_id_ && **id!=*provider_response_id_;
-        if (id && *id) {
-            if (changed) conflicting_response_id_ = **id;
-            else provider_response_id_ = **id;
-            events.push_back(ProviderResponseIdentity{**id});
-        }
         bool fresh_usage = false;
         if (const auto* usage = usage_wire::Find(*response, {"usage"}); usage && usage->is_object()) {
             auto snapshot = usage_wire::Responses(*usage, &lexical.numbers);
@@ -333,12 +326,19 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
             usage_material_ = std::move(*snapshot);
             numeric_delivery_.Own(*usage_material_);
             if (!lexical.complete || lexical.duplicate) usage_wire::LexicalUsage::MarkIncomplete(*usage_material_);
-            if (!usage_material_->material_error.empty()) {
-                events.push_back(usage_wire::Nonterminal(*usage_material_, provider_response_id_));
-                events.push_back(Fail(StreamError{std::string(usage_material_->material_error), "usage.material.invalid"}));
-                return events;
-            }
             fresh_usage = true;
+        }
+        const auto id=usage_wire::ResponseId(usage_wire::Find(*response,{"id"}));
+        const bool changed=id && *id && provider_response_id_ && **id!=*provider_response_id_;
+        if (id && *id) {
+            if (changed) conflicting_response_id_ = **id;
+            else provider_response_id_ = **id;
+            events.push_back(ProviderResponseIdentity{**id});
+        }
+        if (fresh_usage && !usage_material_->material_error.empty()) {
+            events.push_back(usage_wire::Nonterminal(*usage_material_, provider_response_id_));
+            events.push_back(Fail(StreamError{std::string(usage_material_->material_error), "usage.material.invalid"}));
+            return events;
         }
         if (usage_material_ && (fresh_usage || changed)) {
             if (conflicting_response_id_) {
@@ -391,9 +391,9 @@ static std::vector<StreamEvent> ExpandNonStreamResponseOwned(
     catch (const json::exception&) {
         if (lexical.numbers.empty()) return {};
         std::vector<StreamEvent> recovered;
-        if (lexical.response_id) recovered.push_back(ProviderResponseIdentity{*lexical.response_id});
         auto partial = lexical.Partial();
         if (partial && delivery_owner) delivery_owner->Own(*partial);
+        if (lexical.response_id) recovered.push_back(ProviderResponseIdentity{*lexical.response_id});
         if (partial) recovered.push_back(usage_wire::Nonterminal(*partial, lexical.response_id));
         recovered.push_back(StreamError{"accounting recovered from an unparseable response body", "usage.frame.incomplete"});
         return recovered;
@@ -402,8 +402,6 @@ static std::vector<StreamEvent> ExpandNonStreamResponseOwned(
         return {};
     }
     std::vector<StreamEvent> events;
-    const auto id=usage_wire::ResponseId(usage_wire::Find(response,{"id"}));
-    if (id && *id) events.push_back(ProviderResponseIdentity{**id});
     std::optional<usage_wire::Snapshot> material;
     if (const auto* usage=usage_wire::Find(response,{"usage"});usage && usage->is_object()) {
         auto snapshot=usage_wire::Responses(*usage, &lexical.numbers);
@@ -414,6 +412,10 @@ static std::vector<StreamEvent> ExpandNonStreamResponseOwned(
         material = std::move(*snapshot);
         if (delivery_owner) delivery_owner->Own(*material);
         if (!lexical.complete || lexical.duplicate) usage_wire::LexicalUsage::MarkIncomplete(*material);
+    }
+    const auto id=usage_wire::ResponseId(usage_wire::Find(response,{"id"}));
+    if (id && *id) events.push_back(ProviderResponseIdentity{**id});
+    if (material) {
         if (!material->material_error.empty()) {
             events.push_back(usage_wire::Nonterminal(*material, id ? *id : std::optional<std::string>{}));
             events.push_back(StreamError{std::string(material->material_error), "usage.material.invalid"});
