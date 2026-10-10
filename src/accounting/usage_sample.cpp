@@ -1,5 +1,6 @@
 #include "accounting/usage_sample.hpp"
 
+#include <limits>
 #include <string_view>
 
 namespace lubancode::accounting {
@@ -8,6 +9,28 @@ namespace {
 bool ReadString(const nlohmann::json& json, const char* key, std::string* out) {
     return json.contains(key) && json.at(key).is_string() &&
            (*out = json.at(key).get<std::string>(), true);
+}
+
+template <typename Integer>
+bool ReadInteger(const nlohmann::json& json, const char* key, Integer* out) {
+    if (!json.contains(key)) return false;
+    const auto& value = json.at(key);
+    if (value.is_number_unsigned()) {
+        const auto number = value.get<std::uint64_t>();
+        if (number > static_cast<std::uint64_t>(std::numeric_limits<Integer>::max())) {
+            return false;
+        }
+        *out = static_cast<Integer>(number);
+        return true;
+    }
+    if (!value.is_number_integer()) return false;
+    const auto number = value.get<std::int64_t>();
+    if (number < std::numeric_limits<Integer>::min() ||
+        number > std::numeric_limits<Integer>::max()) {
+        return false;
+    }
+    *out = static_cast<Integer>(number);
+    return true;
 }
 
 }  // namespace
@@ -89,11 +112,10 @@ std::optional<CostEstimate> CostEstimate::FromJsonStrict(const nlohmann::json& j
     cost.status = *status;
     ReadString(json, "currency", &cost.currency);
     if (json.contains("micros")) {
-        if (!json.at("micros").is_number_integer()) {
-            *error = "cost.micros 须是整数";
+        if (!ReadInteger(json, "micros", &cost.micros)) {
+            *error = "cost.micros 须是 int64 范围内的整数";
             return std::nullopt;
         }
-        cost.micros = json.at("micros").get<std::int64_t>();
     }
     ReadString(json, "price_table_id", &cost.price_table_id);
     for (auto it = json.begin(); it != json.end(); ++it) {
@@ -143,15 +165,14 @@ std::optional<api::Usage> ParseUsageObject(const nlohmann::json& json, std::stri
     }
     api::Usage usage;
     const auto read_int = [&](const char* key, std::int64_t* out) {
-        return json.contains(key) && json.at(key).is_number_integer() &&
-               (*out = json.at(key).get<std::int64_t>(), true);
+        return ReadInteger(json, key, out);
     };
     if (!read_int("input_tokens", &usage.input_tokens) ||
         !read_int("cache_read_tokens", &usage.cache_read_tokens) ||
         !read_int("cache_creation_tokens", &usage.cache_creation_tokens) ||
         !read_int("output_tokens", &usage.output_tokens) ||
         !read_int("reasoning_tokens", &usage.output_reasoning_tokens)) {
-        *error = "usage 五项 token 字段缺一或非整数";
+        *error = "usage 五项 token 字段缺一或不是 int64 范围内的整数";
         return std::nullopt;
     }
     if (json.size() != 5) {
@@ -264,8 +285,9 @@ std::optional<UsageSample> UsageSample::FromJsonStrict(const nlohmann::json& jso
         *error = "schema 名不是 " + std::string(kUsageSampleSchema);
         return std::nullopt;
     }
-    if (!json.contains("schema_version") || !json.at("schema_version").is_number_integer() ||
-        json.at("schema_version").get<int>() != kUsageSampleSchemaVersion) {
+    int schema_version = 0;
+    if (!ReadInteger(json, "schema_version", &schema_version) ||
+        schema_version != kUsageSampleSchemaVersion) {
         *error = "schema_version 只认 1";
         return std::nullopt;
     }
@@ -293,12 +315,10 @@ std::optional<UsageSample> UsageSample::FromJsonStrict(const nlohmann::json& jso
         }
         sample.provider_response_id = json.at("provider_response_id").get<std::string>();
     }
-    if (!json.contains("attempt") || !json.at("attempt").is_number_integer() ||
-        json.at("attempt").get<int>() < 1) {
-        *error = "attempt 须是 >= 1 的整数";
+    if (!ReadInteger(json, "attempt", &sample.attempt) || sample.attempt < 1) {
+        *error = "attempt 须是 int 范围内且 >= 1 的整数";
         return std::nullopt;
     }
-    sample.attempt = json.at("attempt").get<int>();
     if (json.contains("purpose")) {
         const auto& purpose = json.at("purpose");
         if (purpose.is_null()) {
@@ -340,16 +360,17 @@ std::optional<UsageSample> UsageSample::FromJsonStrict(const nlohmann::json& jso
         sample.total_input_tokens = api::TotalInputTokens(*usage);
         sample.total_billed_shape_tokens = sample.total_input_tokens + usage->output_tokens;
         if (json.contains("total_input_tokens")) {
-            if (!json.at("total_input_tokens").is_number_integer() ||
-                json.at("total_input_tokens").get<std::int64_t>() != sample.total_input_tokens) {
+            std::int64_t reported_total = 0;
+            if (!ReadInteger(json, "total_input_tokens", &reported_total) ||
+                reported_total != sample.total_input_tokens) {
                 *error = "total_input_tokens 与 usage 五项不合口径";
                 return std::nullopt;
             }
         }
         if (json.contains("total_billed_shape_tokens")) {
-            if (!json.at("total_billed_shape_tokens").is_number_integer() ||
-                json.at("total_billed_shape_tokens").get<std::int64_t>() !=
-                    sample.total_billed_shape_tokens) {
+            std::int64_t reported_total = 0;
+            if (!ReadInteger(json, "total_billed_shape_tokens", &reported_total) ||
+                reported_total != sample.total_billed_shape_tokens) {
                 *error = "total_billed_shape_tokens 与 usage 五项不合口径";
                 return std::nullopt;
             }
@@ -359,11 +380,12 @@ std::optional<UsageSample> UsageSample::FromJsonStrict(const nlohmann::json& jso
         return std::nullopt;
     }
     if (json.contains("cache_epoch")) {
-        if (!json.at("cache_epoch").is_number_integer()) {
-            *error = "cache_epoch 须是整数";
+        int cache_epoch = 0;
+        if (!ReadInteger(json, "cache_epoch", &cache_epoch)) {
+            *error = "cache_epoch 须是 int 范围内的整数";
             return std::nullopt;
         }
-        sample.cache_epoch = json.at("cache_epoch").get<int>();
+        sample.cache_epoch = cache_epoch;
     }
     if (json.contains("prefix_append_only")) {
         if (!json.at("prefix_append_only").is_boolean()) {
