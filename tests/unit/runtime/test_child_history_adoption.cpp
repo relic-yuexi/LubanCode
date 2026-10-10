@@ -18,7 +18,8 @@ namespace {
 using Json = nlohmann::json;
 namespace fs = std::filesystem;
 
-v3::ChildAdoptionCheck CheckHistory(const Rig& rig, const v3::V3Ledger& source, std::size_t index = 0) {
+v3::ChildAdoptionCheck CheckHistory(const Rig& rig, const v3::V3Ledger& source,
+                                  std::size_t index = 0, unsigned* terminal_sources = nullptr) {
     const HistoryStageSpan stage(rig.history_diagnostics, rig.history_rig,
         HistoryDiagnosticStage::CheckHistoryEnter, HistoryDiagnosticStage::CheckHistoryLeave);
     REQUIRE(rig.child_sources.size() > index);
@@ -29,6 +30,7 @@ v3::ChildAdoptionCheck CheckHistory(const Rig& rig, const v3::V3Ledger& source, 
     const auto child_bytes = Read(rig.child_paths[index]);
     const auto before_seq = rig.writer->next_seq();
     unsigned checked_sources = 0;
+    unsigned terminal_source_count = 0;
     auto result = v3::ValidateChildAdoption(source, rig.directory.root, call.turn_id, call.action_id, 1,
         [&](const v3::V3Ledger& child) {
             ++checked_sources;
@@ -37,9 +39,19 @@ v3::ChildAdoptionCheck CheckHistory(const Rig& rig, const v3::V3Ledger& source, 
             CHECK(child.run_id != source.run_id);
             const auto last = child.LastEntry(); REQUIRE(last);
             CHECK_FALSE(last->is_message);
+        }, [&](const v3::V3Ledger& child) {
+            ++terminal_source_count;
+            CHECK(child.path == rig.child_paths[index]);
+            CHECK(child.session_id != source.session_id); CHECK(child.run_id != source.run_id);
+            const auto last = child.LastEntry(); REQUIRE(last);
+            REQUIRE_FALSE(last->is_message); REQUIRE(last->index < child.events.size());
+            CHECK(child.events[last->index].kind == v3::EventKindV3::SessionEnded);
         });
+    if (terminal_sources) *terminal_sources = terminal_source_count;
     if (result.state == v3::ChildAdoptionState::Validated ||
-        result.issue == "subagent.adoption.prepared_consumption_pending") CHECK(checked_sources == 1);
+        result.issue == "subagent.adoption.prepared_consumption_pending") {
+        CHECK(checked_sources == 1); CHECK(terminal_source_count == 1);
+    }
     else CHECK(checked_sources == 0);
     CHECK(rig.backend.parent_calls == parent_calls); CHECK(rig.backend.child_calls == child_calls);
     CHECK(rig.backend.summary_calls == summary_calls); CHECK(rig.after->calls == tools);
@@ -470,8 +482,10 @@ TEST_CASE("child history checks persistent child parent sources rather than same
         payload["display"]["terminalRef"] = {{"sessionId", peer_child.session_id}, {"runId", peer_child.run_id},
             {"id", peer_terminal.event_id}, {"seq", peer_terminal.seq}, {"hash", peer_terminal.line_hash}};
     }));
-    const auto swapped = CheckHistory(rig, Verified(rig.writer->path()));
+    unsigned terminal_sources = 0;
+    const auto swapped = CheckHistory(rig, Verified(rig.writer->path()), 0, &terminal_sources);
     CHECK(swapped.state == v3::ChildAdoptionState::Rejected); CHECK(swapped.issue == "subagent.adoption.child_parent_source_mismatch");
+    CHECK(terminal_sources == 0); // Matching child names cannot open the independent accounting borrow.
     Write(rig.child_paths.front(), child_saved.original); Write(rig.writer->path(), parent_saved.original);
     CHECK(CheckHistory(rig, Verified(rig.writer->path())).state == v3::ChildAdoptionState::Validated);
     const auto wrong_dir = v3::ValidateChildAdoption(parent, peer_directory.root, rig.child_sources.front().parent_action.turn_id, action, 1);
@@ -554,7 +568,7 @@ TEST_CASE("child history never accepts selected source or adopted message owner 
     }
     // Legal historical crash prefixes remain incomplete, not permanently
     // rejected and not accepted. They are slices of the actual native ledger.
-    for (const auto& stop : {value.raw_persisted_event_id, value.selected_event_id,
+    for (const auto& stop : {value.observation_event_id, value.raw_persisted_event_id, value.selected_event_id,
                             value.original_tool_message_id, value.admission_event_id}) {
         std::istringstream lines(saved.original); std::string line, prefix;
         bool found = false;
@@ -563,8 +577,11 @@ TEST_CASE("child history never accepts selected source or adopted message owner 
             if (row.value("eventId", std::string()) == stop || row.value("messageId", std::string()) == stop) { found = true; break; }
         }
         REQUIRE(found); Write(rig.writer->path(), prefix);
-        const auto incomplete = CheckHistory(rig, Verified(rig.writer->path()));
+        unsigned terminal_sources = 0;
+        const auto incomplete = CheckHistory(rig, Verified(rig.writer->path()), 0, &terminal_sources);
         CHECK_MESSAGE(incomplete.state == v3::ChildAdoptionState::Incomplete, incomplete.issue);
+        CHECK(terminal_sources == 1); CHECK_FALSE(incomplete.adoption);
+        if (stop == value.observation_event_id) CHECK(incomplete.issue == "subagent.adoption.raw_capture_pending");
         Write(rig.writer->path(), saved.original);
     }
     std::cout << "[child-adoption-path] adoption-gap\n";

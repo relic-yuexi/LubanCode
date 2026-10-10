@@ -206,7 +206,7 @@ Result<std::vector<subagents::v1::Report>> ReadSubagentReports(
                 return bad("started child action owner or attempt differs");
             const auto attempt = event.payload["attempt"].get<std::uint64_t>();
             if (!seen.emplace(*event.action_id, attempt).second) return bad("duplicate started child action");
-            const auto checked = usage ? v3::ValidateChildAdoption(source, directory, turn_id, *event.action_id, attempt, checked_child) :
+            const auto checked = usage ? v3::ValidateChildAdoption(source, directory, turn_id, *event.action_id, attempt, {}, checked_child) :
                 v3::ValidateChildAdoption(source, directory, turn_id, *event.action_id, attempt);
             if (!usage_error.empty()) return usage_bad(usage_error);
             // A schema/plan refusal reached no child spawn. Its ordinary tool

@@ -377,6 +377,8 @@ void CaptureFault(const fs::path& base) {
         "generic capture failure lost its original diagnostic or borrowed a Memory error code");
     Check(state->calls == 4 && state->tools == 2, "capture failure continued the parent model or reran effects");
     const auto reports = session->GetSubagentReports(result.operation.operation_id);
+    if (!(reports.has_value() && reports->size() == 1))
+        DiagnoseChildFailure("parent-capture-gap-report", session, result.operation, state.get());
     Check(reports.has_value() && reports->size() == 1, "capture gap lost its owned child report");
     const auto& report = reports->front();
     Check(report.operation_id == result.operation.operation_id && report.parent_turn_id == result.operation.turn_id &&
