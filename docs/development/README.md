@@ -16,7 +16,8 @@
 - [标题精炼启动失败清理](sdk-title-start-cleanup.md)：绑定及创建失败一次收场；#344 同源三平台与 ASan 已验、已合。
 - [标题后台函数体异常](sdk-title-worker-execution.md)：保住归还用量，失败一次收货；#345 同源三平台与 ASan 已验、已合。
 - [SDK Backend 回调与最终析构](sdk-backend-callback-owner.md)：回调、最终析构与分配失败回滚；#346 同源三平台与 ASan 已验、已合。
-- [Memory 共用词法门控](sdk-memory-learning-gates.md)：共用文本、证据与稳定原因名；合同先交，待本源验收。
+- [Memory 共用词法门控](sdk-memory-learning-gates.md)：共用文本、证据与稳定原因名；#347 同源三平台已验、已合。
+- [SDK 用量快照](sdk-memory-usage-snapshot.md)：返回事实先记账，取消与正文拒收不造成功；合同先交，待本源验收。
 - [Windows 超时进程映像](sdk-windows-timeout-process-images.md)：#345 同源现场材料已验、已合；旧超时根因未定。
 - [Memory 批量提交失败诊断](sdk-memory-batch-failure-diagnostic.md)：失败结果带回阶段观察；原断言照留，不改写入语义。
 - [SDK main Action 中间件合同](sdk-action-middleware.md)
