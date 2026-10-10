@@ -45,7 +45,8 @@ struct Backend final : lubancode::api::Backend {
         emit(lubancode::api::ContentBlockDone{0});
         lubancode::api::MessageDone done;
         done.stop_reason="end_turn"; done.usage.input_tokens=9; done.usage.output_tokens=3;
-        done.usage_reported=true; emit(done);
+        done.usage.cache_read_tokens=13; done.usage.cache_creation_tokens=17; done.usage.output_reasoning_tokens=19;
+        done.usage_reported=true; done.cache_read_reported=true; done.cache_creation_reported=true; emit(done);
         return {};
     }
 };
@@ -150,6 +151,9 @@ TEST_CASE("Title creation: pending failure preserves single flight and real rest
     auto success=std::make_shared<Probe>(); REQUIRE(refiner.Start(Inputs(success,32))); REQUIRE(Await(refiner));
     auto out=refiner.TakeFinished(); REQUIRE(out.has_value()); CHECK(out->ok); CHECK(out->refinement_invoked);
     CHECK(out->generation==32); CHECK(success->calls.load()==1); CHECK(success->destroyed.load()==1);
+    CHECK(out->accounting.usage.input_tokens==9); CHECK(out->accounting.usage.output_tokens==3);
+    CHECK(out->accounting.usage.cache_read_tokens==13); CHECK(out->accounting.usage.cache_creation_tokens==17);
+    CHECK(out->accounting.usage.output_reasoning_tokens==19);
     REQUIRE(lubancode::app::RecordTitleRefinementCall(ledger,*out));
     auto transport=std::make_shared<Probe>(); transport->fail=true;
     REQUIRE(refiner.Start(Inputs(transport,33))); REQUIRE(Await(refiner));
@@ -157,7 +161,7 @@ TEST_CASE("Title creation: pending failure preserves single flight and real rest
     CHECK(failed_send->refinement_invoked); CHECK_FALSE(failed_send->accounting.usage_reported);
     REQUIRE(lubancode::app::RecordTitleRefinementCall(ledger,*failed_send));
     const auto& entry=ledger.by_role().at(lubancode::agent::ModelRole::Cheap);
-    CHECK(entry.calls==2); CHECK(entry.input_tokens==9); CHECK(entry.output_tokens==3);
+    CHECK(entry.calls==2); CHECK(entry.input_tokens==9+13+17); CHECK(entry.output_tokens==3);
 }
 TEST_CASE("Title creation: invalid inputs never consume Backend or enter creation hook") {
     std::cout<<"[title-worker-start-path] gates\n";
@@ -229,4 +233,105 @@ TEST_CASE("Title creation: actual title account preserves local title on failure
     CHECK(requested==2); CHECK(extracted==1); CHECK(generated==1);
     CHECK(scene.title=="修标题收场"); CHECK(ledger.by_role().at(lubancode::agent::ModelRole::Cheap).calls==1);
     CHECK_FALSE(refiner.TakeFinished().has_value()); CHECK(success->calls.load()==1); CHECK(success->destroyed.load()==1);
+}
+
+namespace {
+struct ExecutionHook {
+    testing::TitleWorkerHook previous;
+    explicit ExecutionHook(testing::TitleWorkerHook hook):previous(testing::ExchangeTitleWorkerExecutionHook(std::move(hook))) {}
+    ~ExecutionHook() { testing::ExchangeTitleWorkerExecutionHook(std::move(previous)); }
+};
+void ExecutionFailure(const Refiner::Outcome& out,std::uint64_t generation,bool invoked) {
+    CHECK_FALSE(out.ok); CHECK(out.title.empty()); CHECK(out.refinement_invoked==invoked);
+    CHECK(out.model=="cheap-title"); CHECK(out.generation==generation); CHECK(out.error=="标题精炼后台执行失败");
+    CHECK(out.error.find("secret")==std::string::npos); CHECK(out.accounting.usage_reported==invoked);
+    CHECK(out.accounting.usage.input_tokens==(invoked?9:0)); CHECK(out.accounting.usage.output_tokens==(invoked?3:0));
+    CHECK(out.accounting.usage.cache_read_tokens==(invoked?13:0)); CHECK(out.accounting.usage.cache_creation_tokens==(invoked?17:0));
+    CHECK(out.accounting.usage.output_reasoning_tokens==(invoked?19:0));
+    lubancode::agent::ModelUsageLedger ledger; CHECK(lubancode::app::RecordTitleRefinementCall(ledger,out)==invoked);
+    if(invoked) { CHECK(ledger.by_role().at(lubancode::agent::ModelRole::Cheap).calls==1); }
+    else { CHECK(ledger.by_role().empty()); CHECK(out.accounting.duration_ms==0); }
+}
+void ThrowExecution(bool standard) { if(standard) StandardFailure(); else throw 73; }
+bool AwaitAtomic(const std::atomic<bool>& flag) {
+    const auto limit=std::chrono::steady_clock::now()+std::chrono::seconds(5);
+    while(!flag.load() && std::chrono::steady_clock::now()<limit) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    return flag.load();
+}
+struct ExecutionReleaseGuard { std::atomic<bool>& flag; ~ExecutionReleaseGuard(){flag.store(true);} };
+}
+TEST_CASE("Title execution: before-work exceptions settle repeatedly without Backend calls") {
+    std::cout<<"[title-worker-execution-path] before-work\n";
+    for(bool standard:{true,false}) {
+        auto probe=std::make_shared<Probe>(); Refiner refiner;
+        ExecutionHook hook([standard](testing::TitleWorkerPhase phase){if(phase==testing::TitleWorkerPhase::BeforeWork) ThrowExecution(standard);});
+        for(std::uint64_t generation=1;generation<=10;++generation) {
+            REQUIRE(refiner.Start(Inputs(probe,generation))); REQUIRE(Await(refiner)); CHECK(refiner.Busy());
+            auto out=refiner.TakeFinished(); REQUIRE(out.has_value()); ExecutionFailure(*out,generation,false);
+            CHECK_FALSE(refiner.TakeFinished().has_value()); CHECK_FALSE(refiner.Busy());
+        }
+        CHECK(probe->calls.load()==0); CHECK(probe->destroyed.load()==10);
+    }
+}
+TEST_CASE("Title execution: exception after real refinement retains returned accounting") {
+    std::cout<<"[title-worker-execution-path] after-refinement\n";
+    for(bool standard:{true,false}) {
+        auto probe=std::make_shared<Probe>(); Refiner refiner;
+        ExecutionHook hook([standard](testing::TitleWorkerPhase phase){if(phase==testing::TitleWorkerPhase::AfterRefinement) ThrowExecution(standard);});
+        REQUIRE(refiner.Start(Inputs(probe,41))); REQUIRE(Await(refiner)); auto out=refiner.TakeFinished();
+        REQUIRE(out.has_value()); ExecutionFailure(*out,41,true); CHECK(probe->calls.load()==1); CHECK(probe->destroyed.load()==1);
+    }
+}
+TEST_CASE("Title execution: publication exception clears prepared success and keeps usage") {
+    std::cout<<"[title-worker-execution-path] before-publish\n";
+    for(bool standard:{true,false}) {
+        auto probe=std::make_shared<Probe>(); Refiner refiner;
+        ExecutionHook hook([standard](testing::TitleWorkerPhase phase){if(phase==testing::TitleWorkerPhase::BeforePublish) ThrowExecution(standard);});
+        REQUIRE(refiner.Start(Inputs(probe,42))); REQUIRE(Await(refiner)); auto out=refiner.TakeFinished();
+        REQUIRE(out.has_value()); ExecutionFailure(*out,42,true); CHECK(probe->calls.load()==1); CHECK(probe->destroyed.load()==1);
+    }
+}
+TEST_CASE("Title execution: pending failure keeps single flight and permits explicit restart") {
+    std::cout<<"[title-worker-execution-path] restart\n";
+    Refiner refiner; auto failed=std::make_shared<Probe>(); auto rejected=std::make_shared<Probe>();
+    { ExecutionHook hook([](testing::TitleWorkerPhase phase){if(phase==testing::TitleWorkerPhase::BeforeWork) throw 73;});
+      REQUIRE(refiner.Start(Inputs(failed,43))); REQUIRE(Await(refiner)); auto input=Inputs(rejected);
+      CHECK_FALSE(refiner.Start(std::move(input))); CHECK(input.backend!=nullptr); }
+    auto out=refiner.TakeFinished(); REQUIRE(out.has_value()); ExecutionFailure(*out,43,false);
+    auto real=std::make_shared<Probe>(); REQUIRE(refiner.Start(Inputs(real,44))); REQUIRE(Await(refiner));
+    auto success=refiner.TakeFinished(); REQUIRE(success.has_value()); CHECK(success->ok); CHECK(success->refinement_invoked);
+    CHECK(success->generation==44); CHECK(real->calls.load()==1); CHECK(real->destroyed.load()==1);
+    CHECK(failed->calls.load()==0); CHECK(failed->destroyed.load()==1); CHECK_FALSE(refiner.TakeFinished().has_value());
+}
+TEST_CASE("Title execution: independent frontend hook snapshots preserve both identities") {
+    std::cout<<"[title-worker-execution-path] isolation\n";
+    Refiner first,second; auto a=std::make_shared<Probe>(),b=std::make_shared<Probe>();
+    { ExecutionHook hook([](testing::TitleWorkerPhase phase){if(phase==testing::TitleWorkerPhase::BeforeWork) StandardFailure();}); REQUIRE(first.Start(Inputs(a,45))); }
+    { ExecutionHook hook([](testing::TitleWorkerPhase phase){if(phase==testing::TitleWorkerPhase::BeforeWork) throw 73;}); REQUIRE(second.Start(Inputs(b,46))); }
+    REQUIRE(Await(first)); REQUIRE(Await(second)); auto one=first.TakeFinished(),two=second.TakeFinished();
+    REQUIRE(one.has_value()); REQUIRE(two.has_value()); ExecutionFailure(*one,45,false); ExecutionFailure(*two,46,false);
+    CHECK(a->calls.load()==0); CHECK(b->calls.load()==0); CHECK(a->destroyed.load()==1); CHECK(b->destroyed.load()==1);
+}
+TEST_CASE("Title execution: actual title account refuses failed title after real usage") {
+    std::cout<<"[title-worker-execution-path] account\n";
+    Scene scene; const auto local=scene.title; auto probe=std::make_shared<Probe>(); auto& refiner=scene.account->refiner();
+    auto input=Inputs(probe,scene.account->generation()); input.trajectory=&*scene.ledger; input.provider="test"; input.trajectory_wire="wire";
+    ExecutionHook hook([](testing::TitleWorkerPhase phase){if(phase==testing::TitleWorkerPhase::BeforePublish) StandardFailure();});
+    REQUIRE(refiner.Start(std::move(input))); scene.account->NoteTitleGenerationStarted("cheap-title","test"); REQUIRE(Await(refiner));
+    auto out=refiner.TakeFinished(); REQUIRE(out.has_value()); ExecutionFailure(*out,scene.account->generation(),true);
+    const auto material=scene.JournalBytes(); CHECK(scene.account->AdoptRefined(*out)==lubancode::app::SessionTitleAccount::AdoptResult::Ignored);
+    CHECK(scene.title==local); CHECK(scene.JournalBytes()==material); CHECK(probe->calls.load()==1); CHECK(probe->destroyed.load()==1);
+    CHECK_FALSE(refiner.TakeFinished().has_value());
+}
+TEST_CASE("Title execution: late failed publication cannot append after actual scene retirement") {
+    std::cout<<"[title-worker-execution-path] late-close\n";
+    Scene scene; std::atomic<bool> entered{false},release{false},expired{false};
+    Refiner refiner; auto probe=std::make_shared<Probe>(); ExecutionReleaseGuard guard{release};
+    ExecutionHook hook([&](testing::TitleWorkerPhase phase){ if(phase!=testing::TitleWorkerPhase::AfterRefinement)return;
+        entered.store(true); if(!AwaitAtomic(release)) expired.store(true); throw 73; });
+    auto input=Inputs(probe,47); input.trajectory=&*scene.ledger; input.provider="test"; input.trajectory_wire="wire";
+    REQUIRE(refiner.Start(std::move(input))); REQUIRE(AwaitAtomic(entered)); REQUIRE(scene.ledger->CloseSession("title_execution_done").error_code.empty());
+    const auto closed=scene.JournalBytes(); release.store(true); REQUIRE(Await(refiner)); auto out=refiner.TakeFinished();
+    REQUIRE(out.has_value()); ExecutionFailure(*out,47,true); CHECK_FALSE(expired.load()); CHECK(scene.JournalBytes()==closed);
+    CHECK(probe->calls.load()==1); CHECK(probe->destroyed.load()==1); CHECK_FALSE(refiner.TakeFinished().has_value());
 }

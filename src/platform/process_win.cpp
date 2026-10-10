@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <optional>
 
@@ -31,11 +32,12 @@ void RecordWindowsProcessDiagnostic(ProcessDiagnosticBuffer* diagnostics,
                                      ProcessDiagnosticStage stage, DWORD pid = 0,
                                      std::int64_t rc = 0, DWORD system_error = 0,
                                      std::int64_t detail = 0,
-                                     ProcessDiagnosticJobAccounting job_accounting = {}) noexcept {
+                                     ProcessDiagnosticJobAccounting job_accounting = {},
+                                     ProcessDiagnosticProcessImage process_image = {}) noexcept {
     if (!diagnostics) return;
     const DWORD saved_error = GetLastError();
     const int saved_errno = errno;
-    diagnostics->Record(stage, pid, -1, rc, system_error, detail, job_accounting);
+    diagnostics->Record(stage, pid, -1, rc, system_error, detail, job_accounting, process_image);
     errno = saved_errno;
     SetLastError(saved_error);
 }
@@ -58,6 +60,59 @@ void ObserveTimeoutJobAccounting(HANDLE job, DWORD pid,
     }
     RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::JobAccountingQueryAfter,
                                     pid, queried, query_error, 0, values);
+    errno = saved_errno;
+    SetLastError(saved_error);
+}
+
+void ObserveTimeoutJobMembers(HANDLE job, DWORD root_pid,
+                              ProcessDiagnosticBuffer* diagnostics) noexcept {
+    if (!diagnostics || job == nullptr) return;
+    const DWORD saved_error = GetLastError();
+    const int saved_errno = errno;
+    struct Members {
+        DWORD assigned;
+        DWORD listed;
+        ULONG_PTR pids[16];
+    } members{};
+    static_assert(offsetof(Members, pids) == offsetof(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList));
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::JobProcessListQueryBefore, root_pid);
+    const BOOL queried = QueryInformationJobObject(job, JobObjectBasicProcessIdList,
+                                                   &members, sizeof(members), nullptr);
+    const DWORD query_error = queried ? 0 : GetLastError();
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::JobProcessListQueryAfter,
+                                    root_pid, queried, query_error, queried ? members.listed : 0);
+    if (queried) {
+        const auto count = std::min<DWORD>(members.listed, 16);
+        for (DWORD i = 0; i < count; ++i) {
+            if (members.pids[i] > MAXDWORD) continue; // Never truncate a native identity.
+            const DWORD pid = static_cast<DWORD>(members.pids[i]);
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            BOOL image_ok = FALSE;
+            DWORD image_error = process ? 0 : GetLastError();
+            ProcessDiagnosticProcessImage image{};
+            if (process) {
+                wchar_t path[MAX_PATH]{};
+                DWORD units = MAX_PATH;
+                image_ok = QueryFullProcessImageNameW(process, 0, path, &units);
+                image_error = image_ok ? 0 : GetLastError();
+                if (image_ok) {
+                    DWORD start = 0;
+                    for (DWORD n = 0; n < units; ++n) {
+                        if (path[n] == L'\\' || path[n] == L'/') start = n + 1;
+                    }
+                    image.name_units = std::min<DWORD>(units - start, 64);
+                    image.truncated = units - start > image.name_units;
+                    static_assert(sizeof(wchar_t) == sizeof(std::uint16_t));
+                    for (DWORD n = 0; n < image.name_units; ++n) {
+                        image.name[n] = static_cast<std::uint16_t>(path[start + n]);
+                    }
+                }
+                CloseHandle(process);
+            }
+            RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::JobProcessImageQueryAfter,
+                                            pid, image_ok, image_error, 0, {}, image);
+        }
+    }
     errno = saved_errno;
     SetLastError(saved_error);
 }
@@ -636,6 +691,7 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
             result.timed_out = true;
             if (diagnostics && job != nullptr) {
                 ObserveTimeoutJobAccounting(job, pi.dwProcessId, diagnostics);
+                ObserveTimeoutJobMembers(job, pi.dwProcessId, diagnostics);
             }
         }
         if (job != nullptr) {

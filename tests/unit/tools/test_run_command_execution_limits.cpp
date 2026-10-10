@@ -323,6 +323,23 @@ nlohmann::json ProcessDiagnosticSnapshot(const ProcessDiagnosticBuffer& buffer) 
                 {"state", item.rc != 0 ? "reported" : "query_failed"},
                 {"cpu_time_unit", "100ns"}, {"values", std::move(values)}};
         }
+        if (item.stage == ProcessDiagnosticStage::JobProcessListQueryAfter) {
+            records.back()["job_process_list"] = {
+                {"state", item.rc != 0 ? "reported" : "query_failed"},
+                {"capacity", 16}, {"listed_processes", item.rc != 0 ? nlohmann::json(item.detail) : nlohmann::json(nullptr)}};
+        }
+        if (item.stage == ProcessDiagnosticStage::JobProcessImageQueryAfter) {
+            nlohmann::json units = nlohmann::json::array();
+            if (item.rc != 0) {
+                for (std::uint32_t n = 0; n < item.process_image.name_units && n < 64; ++n) {
+                    units.push_back(item.process_image.name[n]);
+                }
+            }
+            records.back()["process_image"] = {
+                {"state", item.rc != 0 ? "reported" : "query_failed"},
+                {"basename_utf16_units", std::move(units)},
+                {"truncated", item.rc != 0 && item.process_image.truncated}};
+        }
     }
     return {{"capacity", ProcessDiagnosticBuffer::kCapacity}, {"reserved", reserved},
         {"overflow", reserved > ProcessDiagnosticBuffer::kCapacity || buffer.Overflowed()},
