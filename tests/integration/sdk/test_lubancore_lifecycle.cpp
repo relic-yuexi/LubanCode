@@ -12,6 +12,8 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -109,8 +111,9 @@ struct LifetimeGate {
 class LifetimeBackend final : public sdk::Backend {
 public:
     explicit LifetimeBackend(std::shared_ptr<LifetimeGate> gate, bool return_usage = false,
-                             bool invalid_usage_material = false)
-        : gate_(std::move(gate)), return_usage_(return_usage), invalid_usage_material_(invalid_usage_material) {}
+                             bool invalid_usage_material = false, int late_exception = 0)
+        : gate_(std::move(gate)), return_usage_(return_usage),
+          invalid_usage_material_(invalid_usage_material), late_exception_(late_exception) {}
     ~LifetimeBackend() override { gate_->destroyed.store(true); }
     sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest&, sdk::Cancellation cancel) override {
         ++gate_->calls;
@@ -127,6 +130,9 @@ public:
             gate_->timed_out.store(true);
         }
         gate_->returned.store(true);
+        if (late_exception_ == 1) throw std::bad_alloc{};
+        if (late_exception_ == 2) throw std::runtime_error("late backend callback failed");
+        if (late_exception_ == 3) throw 7;
         if (return_usage_) {
             sdk::ModelReply reply;
             reply.text = "late reply"; reply.stop_reason = "end_turn";
@@ -154,6 +160,7 @@ private:
     std::shared_ptr<LifetimeGate> gate_;
     bool return_usage_ = false;
     bool invalid_usage_material_ = false;
+    int late_exception_ = 0;
 };
 struct ReleaseLifetimeGate {
     std::shared_ptr<LifetimeGate> gate;
@@ -437,6 +444,59 @@ TEST_CASE("SDK lifecycle: dropping the last session joins its backend and leaves
 }
 
 TEST_CASE("SDK lifecycle: Close joins a late five-field reply and recovery never replays it") {
+    SUBCASE("late callback exceptions retire the public Session without invented usage") {
+        for (const int kind : {1, 2, 3}) {
+            CAPTURE(kind);
+            LifecycleFixture failed_fixture;
+            auto failed_runtime = sdk::Runtime::Create(failed_fixture.Roots()); REQUIRE(failed_runtime);
+            auto failed_gate = std::make_shared<LifetimeGate>();
+            auto failed_options = Options(failed_fixture, [](const auto&, sdk::Cancellation)
+                -> sdk::Result<sdk::ModelReply> { return sdk::ModelReply{}; });
+            failed_options.backend = std::make_unique<LifetimeBackend>(failed_gate, true, false, kind);
+            auto failed_opened = (*failed_runtime)->OpenSession(std::move(failed_options)); REQUIRE(failed_opened);
+            auto failed_session = std::move(*failed_opened);
+            const auto failed_id = failed_session->id();
+            std::future<sdk::Result<void>> failed_closing;
+            ReleaseLifetimeGate release_failed{failed_gate};
+            const auto submitted = failed_session->Submit("close-exception", "retire a throwing callback");
+            REQUIRE(submitted); REQUIRE(WaitForFlag(failed_gate->entered));
+            failed_closing = std::async(std::launch::async,
+                [owner = failed_session.get()] { return owner->Close(); });
+            REQUIRE(WaitForFlag(failed_gate->cancelled));
+            CHECK(failed_closing.wait_for(100ms) == std::future_status::timeout);
+            CHECK_FALSE(failed_gate->returned.load()); CHECK_FALSE(failed_gate->destroyed.load());
+            failed_gate->Release();
+            REQUIRE(failed_closing.wait_for(10s) == std::future_status::ready); REQUIRE(failed_closing.get());
+            CHECK(failed_gate->returned.load()); CHECK(failed_gate->destroyed.load());
+            CHECK_FALSE(failed_gate->timed_out.load()); CHECK(failed_gate->calls.load() == 1);
+            const auto check_failed = [](const sdk::Operation& operation) {
+                CHECK(operation.state == sdk::OperationState::Cancelled);
+                CHECK(operation.result_persisted); CHECK(operation.final_text.empty());
+                if (operation.usage) {
+                    CHECK(operation.usage->attempts.empty());
+                    CHECK(operation.usage->direct.coverage.samples == 0);
+                    CHECK(operation.usage->subordinate.coverage.samples == 0);
+                    const auto& numbers = operation.usage->direct.total;
+                    CHECK(numbers.input_tokens == 0); CHECK(numbers.output_tokens == 0);
+                    CHECK(numbers.cache_read_tokens == 0); CHECK(numbers.cache_creation_tokens == 0);
+                    CHECK(numbers.output_reasoning_tokens == 0);
+                }
+            };
+            const auto saved_failed = failed_session->ReadOperation(submitted->operation_id);
+            REQUIRE(saved_failed); check_failed(*saved_failed); failed_session.reset();
+            std::atomic<unsigned> failed_replays{0};
+            auto recovery = Options(failed_fixture, [&](const auto&, sdk::Cancellation)
+                -> sdk::Result<sdk::ModelReply> {
+                ++failed_replays; return std::unexpected(sdk::Error{"fixture.replay", "must not generate"});
+            });
+            recovery.resume_session_id = failed_id;
+            auto recovered_session = (*failed_runtime)->OpenSession(std::move(recovery)); REQUIRE(recovered_session);
+            const auto recovered_failed = (*recovered_session)->ReadOperation(submitted->operation_id);
+            REQUIRE(recovered_failed); check_failed(*recovered_failed); CHECK(failed_replays.load() == 0);
+            REQUIRE((*recovered_session)->Close()); REQUIRE((*failed_runtime)->Shutdown());
+        }
+        std::cout << "[sdk-usage-close-path] callback-exception-recovery\n";
+    }
     LifecycleFixture fixture;
     auto runtime = sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime);
     auto gate = std::make_shared<LifetimeGate>();
