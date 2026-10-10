@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <expected>
 #include <optional>
 #include <string>
@@ -22,15 +23,17 @@ inline std::expected<std::optional<std::string>, std::string_view> ResponseId(
     return std::optional<std::string>(id);
 }
 
-inline Usage Numbers(const Snapshot& snapshot) {
+inline Usage Numbers(const std::array<std::int64_t, facts::kFieldCount>& values) noexcept {
     Usage usage;
-    usage.input_tokens=snapshot.values[static_cast<std::size_t>(facts::Field::Input)];
-    usage.output_tokens=snapshot.values[static_cast<std::size_t>(facts::Field::Output)];
-    usage.cache_read_tokens=snapshot.values[static_cast<std::size_t>(facts::Field::CacheRead)];
-    usage.cache_creation_tokens=snapshot.values[static_cast<std::size_t>(facts::Field::CacheCreation)];
-    usage.output_reasoning_tokens=snapshot.values[static_cast<std::size_t>(facts::Field::OutputReasoning)];
+    usage.input_tokens=values[static_cast<std::size_t>(facts::Field::Input)];
+    usage.output_tokens=values[static_cast<std::size_t>(facts::Field::Output)];
+    usage.cache_read_tokens=values[static_cast<std::size_t>(facts::Field::CacheRead)];
+    usage.cache_creation_tokens=values[static_cast<std::size_t>(facts::Field::CacheCreation)];
+    usage.output_reasoning_tokens=values[static_cast<std::size_t>(facts::Field::OutputReasoning)];
     return usage;
 }
+
+inline Usage Numbers(const Snapshot& snapshot) noexcept { return Numbers(snapshot.values); }
 
 // The compatibility flags retain presence, including a present malformed
 // scalar. Precise validity and inferred/normalized origins live in the typed

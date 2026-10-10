@@ -222,7 +222,11 @@ void EventParser::ResetUsageState() {
 }
 
 void EventParser::AbsorbUsageObject(const json& usage, const std::vector<usage_wire::facts::RawField>* lexical) {
-    usage_seen_=true;accounting_.Absorb(usage,lexical);
+    usage_seen_=true;
+    accounting_.Absorb(usage,lexical,
+        [](void* context, const usage_wire::AnthropicAccounting::NumericValues& values) noexcept {
+            static_cast<EventParser*>(context)->numeric_delivery_.Own(values);
+        },this);
 }
 
 std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
@@ -304,7 +308,7 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
                 return events;
             }
             material=std::move(*snapshot);
-        numeric_delivery_.Own(*material);
+            numeric_delivery_.Own(*material);
         }
         usage_wire::Apply(*done,*material,provider_response_id_);
     }

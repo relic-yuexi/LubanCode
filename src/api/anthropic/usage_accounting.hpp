@@ -3,6 +3,7 @@
 #include <array>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "api/usage_wire_builder.hpp"
@@ -13,7 +14,19 @@ namespace lubancode::api::usage_wire {
 // Missing fields preserve previous observations; present zero overwrites them.
 class AnthropicAccounting {
 public:
-    void Absorb(const nlohmann::json& usage, const std::vector<facts::RawField>* lexical = nullptr) {
+    using NumericValues = std::array<std::int64_t, facts::kFieldCount>;
+    using NumericObserver = void (*)(void*, const NumericValues&) noexcept;
+
+    void Absorb(const nlohmann::json& usage, const std::vector<facts::RawField>* lexical = nullptr,
+                NumericObserver observer = nullptr, void* context = nullptr) {
+        // Own all cumulative numbers before copying any raw strings/vectors.
+        // The same decoder supplies later evidence; this is not a second sum.
+        for (std::size_t i=0;i<keys_.size();++i) {
+            const auto* value=Find(usage,{keys_[i]});
+            if (!value) continue;
+            if (const auto integer=IntegerScalar(*value,lexical,paths_[i])) values_[i]=*integer;
+        }
+        if (observer) observer(context,values_);
         for (std::size_t i=0;i<keys_.size();++i) {
             const auto* value=Find(usage,{keys_[i]});
             if (!value) continue;
@@ -24,7 +37,7 @@ public:
     }
 
     std::expected<Snapshot,std::string_view> View() const {
-        Snapshot snapshot;snapshot.observation.provider_namespace="anthropic.messages";
+        Snapshot snapshot;snapshot.values=values_;snapshot.observation.provider_namespace="anthropic.messages";
         for (std::size_t i=0;i<keys_.size();++i) {
             if (!latest_[i]) continue;
             auto& field=snapshot.observation.fields[i];
@@ -35,7 +48,6 @@ public:
             // Keep the old CLI last-valid numeric behavior after a malformed
             // update. Precise consumers see the latest field as invalid, and
             // the retained raw integer is separate historical material.
-            if (last_valid_[i]) snapshot.values[i]=*last_valid_[i]->integer;
             if (latest_[i]->integer) {
                 field.validity=facts::Validity::ValidInteger;
                 field.origin=facts::Origin::Reported;
@@ -67,6 +79,9 @@ private:
     }
     static constexpr std::array<const char*,4> keys_{
         "input_tokens","output_tokens","cache_read_input_tokens","cache_creation_input_tokens"};
+    static constexpr std::array<std::string_view,4> paths_{
+        "usage.input_tokens","usage.output_tokens","usage.cache_read_input_tokens","usage.cache_creation_input_tokens"};
+    NumericValues values_{};
     std::array<std::optional<facts::RawField>,4> latest_;
     std::array<std::optional<facts::RawField>,4> last_valid_;
 };

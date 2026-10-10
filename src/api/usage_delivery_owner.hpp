@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <exception>
 #include <functional>
 #include <optional>
@@ -15,7 +16,10 @@ namespace lubancode::api::usage_wire {
 class NumericDeliveryOwner {
 public:
     void Own(const Snapshot& source) noexcept {
-        numbers_ = Numbers(source);
+        Own(source.values);
+    }
+    void Own(const std::array<std::int64_t, facts::kFieldCount>& values) noexcept {
+        numbers_ = Numbers(values);
         pending_ = true;
     }
     void Delivered(const StreamEvent& event) noexcept {

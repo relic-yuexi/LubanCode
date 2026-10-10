@@ -17,6 +17,25 @@ namespace lubancode::api::usage_wire {
 namespace facts = ::lubancore::usage::v1;
 using RawIndex = std::optional<std::uint16_t>;
 
+// One integer decoder for numeric ownership and its later raw material.
+// This reads only already parsed scalars and does not allocate or coerce types.
+inline std::optional<std::int64_t> IntegerScalar(const nlohmann::json& value) noexcept {
+    if (value.is_number_unsigned()) {
+        const auto number = value.get<std::uint64_t>();
+        if (number <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+            return static_cast<std::int64_t>(number);
+    } else if (value.is_number_integer()) {
+        return value.get<std::int64_t>();
+    }
+    return std::nullopt;
+}
+
+inline std::optional<std::int64_t> IntegerScalar(const nlohmann::json& value,
+    const std::vector<facts::RawField>* lexical, std::string_view path) noexcept {
+    if (lexical) for (const auto& raw : *lexical) if (raw.path == path) return raw.integer;
+    return IntegerScalar(value);
+}
+
 // Capture only named accounting scalars. Never dump an object, array, or model
 // body to obtain an accounting summary. A DOM floating point summary describes
 // the parsed scalar, not its original JSON number lexeme.
@@ -28,11 +47,10 @@ inline facts::RawField CaptureScalar(std::string path, const nlohmann::json& val
         raw.kind = facts::RawKind::UnsignedInteger;
         const auto number = value.get<std::uint64_t>();
         raw.summary = std::to_string(number);
-        if (number <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
-            raw.integer = static_cast<std::int64_t>(number);
+        raw.integer = IntegerScalar(value);
     } else if (value.is_number_integer()) {
         raw.kind = facts::RawKind::SignedInteger;
-        raw.integer = value.get<std::int64_t>();
+        raw.integer = IntegerScalar(value);
         raw.summary = std::to_string(*raw.integer);
     } else if (value.is_number_float()) {
         raw.kind = facts::RawKind::FloatingPoint;

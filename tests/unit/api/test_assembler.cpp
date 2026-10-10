@@ -8,6 +8,7 @@
 #include <array>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <new>
 #include <stdexcept>
 
@@ -25,6 +26,53 @@
 #include "platform/text_encoding.hpp"  // IsValidUtf8:清洗结果断言
 
 using namespace lubancode::api;
+
+TEST_CASE("Anthropic numeric checkpoint keeps missing, malformed and lexical cumulative updates distinct") {
+    namespace facts = ::lubancore::usage::v1;
+    usage_wire::AnthropicAccounting accounting;
+    usage_wire::NumericDeliveryOwner owner;
+    const auto absorb = [&](const nlohmann::json& input,
+                            const std::vector<facts::RawField>* lexical = nullptr) {
+        accounting.Absorb(input, lexical,
+            [](void* context, const usage_wire::AnthropicAccounting::NumericValues& values) noexcept {
+                static_cast<usage_wire::NumericDeliveryOwner*>(context)->Own(values);
+            }, &owner);
+    };
+    absorb(nlohmann::json{{"input_tokens",11},{"output_tokens",7},
+                         {"cache_read_input_tokens",13},{"cache_creation_input_tokens",17}});
+    auto pending = owner.Pending(); REQUIRE(pending);
+    CHECK(pending->usage.input_tokens == 11); CHECK(pending->usage.output_tokens == 7);
+    CHECK(pending->usage.cache_read_tokens == 13); CHECK(pending->usage.cache_creation_tokens == 17);
+    CHECK(pending->usage.output_reasoning_tokens == 0);
+    CHECK_FALSE(pending->usage_observation); CHECK_FALSE(pending->provider_response_id);
+
+    absorb(nlohmann::json{{"input_tokens","bad"},{"output_tokens",0},
+                         {"cache_read_input_tokens",(std::numeric_limits<std::uint64_t>::max)()}});
+    pending = owner.Pending(); REQUIRE(pending);
+    CHECK(pending->usage.input_tokens == 11); CHECK(pending->usage.output_tokens == 0);
+    CHECK(pending->usage.cache_read_tokens == 13); CHECK(pending->usage.cache_creation_tokens == 17);
+    auto material = accounting.View(); REQUIRE(material); CHECK(material->material_error.empty());
+    CHECK(material->values[0] == 11); CHECK(material->values[1] == 0);
+    CHECK(material->observation.fields[0].validity == facts::Validity::InvalidType);
+    CHECK(material->observation.fields[2].validity == facts::Validity::OutOfRange);
+    CHECK(material->observation.fields[3].validity == facts::Validity::ValidInteger);
+    CHECK(material->observation.fields[4].presence == facts::Presence::Missing);
+
+    facts::RawField raw;
+    raw.path = "usage.input_tokens"; raw.kind = facts::RawKind::SignedInteger;
+    raw.integer = -3; raw.summary = std::string(facts::kMaxSummaryBytes + 1, 'x');
+    const std::vector<facts::RawField> lexical{raw};
+    absorb(nlohmann::json{{"input_tokens",99}}, &lexical);
+    pending = owner.Pending(); REQUIRE(pending);
+    CHECK(pending->usage.input_tokens == -3); // Same lexical scalar wins in numbers and later evidence.
+    CHECK(pending->usage.output_tokens == 0); CHECK(pending->usage.cache_read_tokens == 13);
+    CHECK(pending->usage.cache_creation_tokens == 17); CHECK_FALSE(pending->usage_observation);
+    material = accounting.View(); REQUIRE(material); CHECK_FALSE(material->material_error.empty());
+    CHECK(material->values[0] == -3);
+    const auto refused = usage_wire::Nonterminal(*material);
+    CHECK(refused.usage.input_tokens == -3); CHECK_FALSE(refused.usage_observation);
+    CHECK_FALSE(refused.cache_read_reported); CHECK_FALSE(refused.cache_creation_reported);
+}
 
 TEST_CASE("Four parser owners retain unpublished usage while preserving the original exception") {
     const auto check = [](auto parser_factory, const char* body, std::array<std::int64_t, 5> numbers) {
