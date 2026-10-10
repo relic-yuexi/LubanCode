@@ -2003,6 +2003,7 @@ jobs:
           tests = json.loads(Path('build/asan-host-registration.json').read_text())['tests']
           required = {'unit.api.assembler', 'unit.api.chat_events', 'unit.api.responses_events', 'unit.api.anthropic_events', 'unit.api.gemini_events', 'unit.api.http_stream_transport', 'unit.agent.loop', 'unit.agent.agent_tool', 'unit.trajectory_v3.v3_writer', 'unit.trajectory_v3.v3_envelope_schema', 'unit.trajectory_v3.v3_memory_bypass', 'integration.sdk.lubancore_lifecycle', 'integration.app_server.app_server_session_parity', 'unit.app_server.app_server_browser',
                       'unit.trajectory.session_recovery_view', 'integration.sdk.lubancore_recovery_view', 'unit.memory.model_router', 'unit.agent.context_tracker',
+                      'unit.api.usage_numeric_allocations', 'unit.runtime.headless_usage',
                       'unit.runtime.tool_runtime', 'integration.plugins.tool_runtime_deferral',
                       'unit.runtime.session_execution', 'unit.runtime.execution_owner', 'unit.runtime.subagent_terminal_receipt', 'unit.runtime.child_foreground_integration', 'unit.runtime.child_parent_observation', 'unit.runtime.child_history_adoption', 'unit.runtime.scoped_turn_bindings', 'unit.runtime.owned_job_admission', 'unit.runtime.middleware_native_receipts', 'unit.tools.tool_job_coordinator', 'unit.tools.tool_job_start_transaction', 'unit.tools.tool_job_hold_recovery', 'unit.tools.tool_job_owned_registration', 'unit.tools.tool_job_owned_adoption', 'unit.tools.tool_job_post_live_invocation', 'unit.tools.run_command_execution_limits',
                       'unit.app.turn_runner_scoped_bindings', 'unit.app.memory_extractor_start', 'unit.app.memory_extractor_exception', 'unit.app.memory_durable_identity', 'unit.app.memory_bypass_owner', 'unit.app.session_title_refiner_start', 'integration.sdk.lubancore_extensions',
@@ -2042,7 +2043,9 @@ jobs:
                       'unit.platform.atomic_write', 'unit.packages.package_manifest',
                       'integration.sdk.lubancore_package_manifest'}
           if len(tests) != len(required) or {test['name'] for test in tests} != required:
-              raise SystemExit('ASan SDK/host lifetime regressions are not registered')
+              raise SystemExit('ASan SDK/host lifetime registration differs: missing=' +
+                               repr(sorted(required - {test['name'] for test in tests})) +
+                               ', extra=' + repr(sorted({test['name'] for test in tests} - required)))
           for test in tests:
               props = {p['name']: p['value'] for p in test.get('properties', [])}
               if props.get('DISABLED'):
