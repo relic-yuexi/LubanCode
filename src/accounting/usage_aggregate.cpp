@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <utility>
 
+#include "api/usage_totals.hpp"
+
 namespace lubancode::accounting {
 namespace {
 
@@ -11,9 +13,20 @@ int RatioPercent(std::int64_t part, std::int64_t whole) {
     if (whole <= 0) {
         return 0;
     }
-    // (part*200 + whole) / (whole*2):int64 内的四舍五入,token 量级不溢出。
-    const std::int64_t scaled = part * 200 + whole;
-    return static_cast<int>(scaled / (whole * 2));
+    // Callers establish 0 <= part <= whole. Accumulate the quotient and
+    // remainder of 100 * part without constructing that overflowing product.
+    std::int64_t remainder = 0;
+    int quotient = 0;
+    for (int index = 0; index < 100; ++index) {
+        if (remainder >= whole - part) {
+            remainder -= whole - part;
+            ++quotient;
+        } else {
+            remainder += part;  // Strictly below whole, hence representable.
+        }
+    }
+    if (remainder >= whole - remainder) ++quotient;
+    return quotient;
 }
 
 // map -> 稳定字典序的 breakdown 行。
@@ -55,20 +68,21 @@ void UsageTotals::Add(const UsageSample& sample) {
 }
 
 std::optional<int> UsageTotals::cache_read_ratio_percent() const {
-    const std::int64_t base = input_tokens + cache_read_tokens + cache_creation_tokens;
-    if (requests_with_usage <= 0 || base <= 0) {
+    const auto base = api::CheckedTotalInputTokens(api::Usage{input_tokens, 0, cache_read_tokens, cache_creation_tokens});
+    if (requests_with_usage <= 0 || !base || *base <= 0 || cache_read_tokens < 0 || cache_read_tokens > *base) {
         return std::nullopt;
     }
-    return RatioPercent(cache_read_tokens, base);
+    return RatioPercent(cache_read_tokens, *base);
 }
 
 std::optional<int> CacheEpochBreakdown::cache_read_ratio_percent() const {
-    const std::int64_t base = cache_reported_input_tokens + cache_reported_read_tokens +
-                              cache_reported_creation_tokens;
-    if (requests_cache_reported <= 0 || base <= 0) {
+    const auto base = api::CheckedTotalInputTokens(api::Usage{cache_reported_input_tokens, 0,
+        cache_reported_read_tokens, cache_reported_creation_tokens});
+    if (requests_cache_reported <= 0 || !base || *base <= 0 || cache_reported_read_tokens < 0 ||
+        cache_reported_read_tokens > *base) {
         return std::nullopt;
     }
-    return RatioPercent(cache_reported_read_tokens, base);
+    return RatioPercent(cache_reported_read_tokens, *base);
 }
 
 UsageAggregate AggregateUsage(const std::vector<UsageSample>& samples) {

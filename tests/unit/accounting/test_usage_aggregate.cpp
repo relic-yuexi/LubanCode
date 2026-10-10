@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -141,6 +142,52 @@ TEST_CASE("聚合数学:求和、unknown 不折 0、reasoning 不双计、重试
     CHECK(aggregate.cache.expected_rebuild_events == 1);
     CHECK(aggregate.cache.unexpected_miss_candidates == 1);
     CHECK(aggregate.run_ids.size() == 1);
+
+    SUBCASE("large accounting ratios retain exact half-percent boundaries") {
+        const auto maximum = (std::numeric_limits<std::int64_t>::max)();
+        const auto check = [](std::int64_t part, std::int64_t whole, int expected) {
+            UsageTotals totals;
+            totals.requests_with_usage = 1;
+            totals.input_tokens = whole - part;
+            totals.cache_read_tokens = part;
+            CHECK(totals.cache_read_ratio_percent() == expected);
+            CacheEpochBreakdown epoch;
+            epoch.requests_cache_reported = 1;
+            epoch.cache_reported_input_tokens = whole - part;
+            epoch.cache_reported_read_tokens = part;
+            CHECK(epoch.cache_read_ratio_percent() == expected);
+        };
+        check(maximum, maximum, 100);
+        check(maximum / 2, maximum, 50);
+        check(1, maximum, 0);
+        check(maximum / 200, maximum, 0);
+        check(maximum / 200 + 1, maximum, 1);
+        check(1, 199, 1);
+        check(1, 200, 1);
+        check(1, 201, 0);
+    }
+    SUBCASE("invalid accounting denominators and numerators remain unknown") {
+        const auto maximum = (std::numeric_limits<std::int64_t>::max)();
+        const auto check = [](std::int64_t input, std::int64_t read, std::int64_t creation) {
+            UsageTotals totals;
+            totals.requests_with_usage = 1;
+            totals.input_tokens = input;
+            totals.cache_read_tokens = read;
+            totals.cache_creation_tokens = creation;
+            CHECK_FALSE(totals.cache_read_ratio_percent());
+            CacheEpochBreakdown epoch;
+            epoch.requests_cache_reported = 1;
+            epoch.cache_reported_input_tokens = input;
+            epoch.cache_reported_read_tokens = read;
+            epoch.cache_reported_creation_tokens = creation;
+            CHECK_FALSE(epoch.cache_read_ratio_percent());
+        };
+        check(maximum, 1, 0);
+        check(maximum - 1, 1, 1);
+        check((std::numeric_limits<std::int64_t>::min)(), -1, 0);
+        check(100, -1, 0);
+        check(-1, 100, 0);
+    }
 }
 
 TEST_CASE("cache epoch 分段:compact 翻页后各段独立求和,未报缓存不伪装 0%") {
