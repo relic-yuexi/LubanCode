@@ -2,9 +2,11 @@
 
 #include <limits>
 #include <string>
+#include <utility>
 
 #include "api/usage_totals.hpp"
 #include "runtime/headless_progress.hpp"
+#include "runtime/turn_runtime.hpp"
 
 using namespace lubancode;
 
@@ -86,5 +88,38 @@ TEST_CASE("Headless ordinal and wide context windows do not wrap into valid coun
         pressure.projected_tokens = pressure.window_tokens;
         reporter.Context(pressure);
         CHECK(log.find("占用=未知（溢出）") != std::string::npos);
+    }
+}
+
+TEST_CASE("Actual PostStep command hooks receive raw five-field facts and explicit overflow uncertainty") {
+    for (const std::string mode : {"post-step-normal", "post-step-overflow", "post-step-zero"}) {
+        lubancode::hooks::HookDefinition definition;
+        definition.id = 1;
+        definition.event = lubancode::hooks::HookEvent::PostStep;
+        definition.trusted = true;
+        definition.handler.command = LUBANCORE_TEST_USAGE_NUMERIC_FAULT_PROBE;
+        definition.handler.args = {mode};
+        definition.definition_hash = "actual-post-step-usage";
+        lubancode::hooks::LoadedHooks loaded;
+        loaded.definitions.push_back(std::move(definition));
+        auto [trust, error] = lubancode::hooks::HookTrustStore::Load(std::nullopt);
+        REQUIRE_FALSE(error.has_value());
+        lubancode::hooks::HookDispatcher dispatcher;
+        dispatcher.Configure(std::move(loaded), std::move(trust), {});
+        api::UsageReport report;
+        report.step_id = "step-checked";
+        report.turn_id = "turn-checked";
+        report.reported_by_provider = true;
+        if (mode == "post-step-normal") report.usage = api::Usage{100,7,50,10,9};
+        else if (mode == "post-step-overflow")
+            report.usage = api::Usage{(std::numeric_limits<std::int64_t>::max)(),7,1,-1,9};
+        runtime::EmitPostStep(&dispatcher, report);
+        const auto* record = dispatcher.LastRecordFor(1);
+        REQUIRE(record);
+        INFO(mode); INFO(record->detail);
+        CHECK(record->outcome == "ok");
+        CHECK(record->exit_code == 0);
+        CHECK(report.usage.output_tokens == (mode == "post-step-zero" ? 0 : 7));
+        CHECK(report.usage.output_reasoning_tokens == (mode == "post-step-zero" ? 0 : 9));
     }
 }

@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <iostream>
+#include <limits>
 #include <new>
 
 #include "api/usage_provider_normalizers.hpp"
@@ -42,7 +44,36 @@ void operator delete[](void* value) noexcept { std::free(value); }
 void operator delete(void* value, std::size_t) noexcept { std::free(value); }
 void operator delete[](void* value, std::size_t) noexcept { std::free(value); }
 
-int main() {
+int main(int argc, char** argv) {
+    // A real command hook consumes the actual production stdin envelope.
+    // Fault injection stays disarmed in this observer mode.
+    if (argc == 2) {
+        try {
+            const std::string mode(argv[1]);
+            std::string input;
+            std::getline(std::cin, input);
+            const auto payload = nlohmann::json::parse(input);
+            std::array<std::int64_t, 5> expected{};
+            if (mode == "post-step-normal") expected = {100,7,50,10,9};
+            else if (mode == "post-step-overflow")
+                expected = {(std::numeric_limits<std::int64_t>::max)(),7,1,-1,9};
+            else if (mode != "post-step-zero") return 2;
+            if (payload.at("hook_event_name") != "PostStep" ||
+                payload.at("step_id") != "step-checked" || payload.at("turn_id") != "turn-checked" ||
+                payload.at("usage_reported") != true || payload.at("usage_numbers") != nlohmann::json(expected) ||
+                payload.at("output_tokens") != expected[1]) return 3;
+            for (const auto& number : payload.at("usage_numbers"))
+                if (!number.is_number_integer()) return 4;
+            if (mode == "post-step-overflow") {
+                if (!payload.at("input_tokens").is_null() || payload.at("input_tokens_overflow") != true) return 5;
+            } else if (!payload.at("input_tokens").is_number_integer() ||
+                       payload.at("input_tokens") != (mode == "post-step-normal" ? 160 : 0) ||
+                       payload.at("input_tokens_overflow") != false) return 6;
+            std::puts("{\"systemMessage\":\"actual PostStep usage observer passed\"}");
+            return 0;
+        } catch (...) { return 7; }
+    }
+    if (argc != 1) return 8;
     namespace wire = lubancode::api::usage_wire;
     namespace facts = lubancore::usage::v1;
     using Normalize = std::expected<wire::Snapshot, std::string_view> (*)(

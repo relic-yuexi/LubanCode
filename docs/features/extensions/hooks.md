@@ -50,7 +50,7 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 | `PreTurn` | 用户输入被接受后(UserPromptSubmit 之后)、首个 Step 前 | 无 | 追加上下文;否决本 Turn(不发模型)。改输入仍走 UserPromptSubmit 的既有口径 |
 | `PostTurn` | 终局:最终 assistant 落定且无续跑(恰好一次) | 无 | 只观察。载荷带 Turn 汇总(step 数/action 数/usage/时长)。Stop 判续跑则本事件不触发 |
 | `PreStep` | 每次 Step 请求构建前(steer 注入合批之后) | 无 | 追加上下文(随本 Step 请求);否决 = 终止本 Turn,不是跳过继续 |
-| `PostStep` | assistant 响应落账后、派生 Action 执行前 | 无 | 只观察。载荷带 step_id/turn_id/attempts/API 耗时/stop reason/usage——API 耗时与工具耗时(PostAction 侧)分账 |
+| `PostStep` | assistant 响应落账后、派生 Action 执行前 | 无 | 只观察。载荷带 step_id/turn_id/attempts/API 耗时/stop reason/usage；API 耗时与工具耗时(PostAction 侧)分账 |
 | `PreAction` | **`PreToolUse` 的升格别名** | `tool_name` | 与 `PreToolUse` 同一枚事件:deny/ask/allow、`updatedInput` 改参 |
 | `PostAction` | **`PostToolUse` 的升格别名** | `tool_name` | 与 `PostToolUse` 同一枚事件:只追加反馈,不撤销副作用 |
 
@@ -61,6 +61,8 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 - `UserPromptSubmit` 保留观察+阻断;改输入的决策权不迁往 `PreTurn`(两不发昏)。
 - 别名规则:配置里 `PreAction`/`PostAction`(或带 `Hook` 后缀的长写法)与 `PreToolUse`/`PostToolUse` 完全同效,同一枚事件、同一套能力;stdin JSON 的 `event` 字段保持旧名稳定,既有脚本零迁移。
 - Step 的稳定身份:`step_id`(会话/任务域单调,如 `step-3`,续跑跨 Run 不重号)与 `turn_id`(canonical 轮号,如 `turn-2`);`step_index` 只是单次 Run 内的展示坐标,续跑会重号,对账认 id。
+
+`PostStep.input_tokens` 沿用完整输入口径：普通输入 + 缓存读 + 缓存写。每步加法都检查 int64；溢出时写 `null`，`input_tokens_overflow` 写 `true`。合法合计与明确零仍写整数。`usage_numbers` 按顺序保留五项原数：普通输入、总输出、缓存读、缓存写、输出推理。推理已含在总输出里，不再加一遍。这些观察字段不替代 outbox ACK。
 
 ### 可靠 Post:outbox/ack
 

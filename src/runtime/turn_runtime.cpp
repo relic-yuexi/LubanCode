@@ -4,8 +4,10 @@
 
 #include "runtime/turn_runtime.hpp"
 
+#include <array>
 #include <utility>
 
+#include "api/usage_totals.hpp"
 #include "tools/command_safety.hpp"
 
 namespace lubancode::runtime {
@@ -288,7 +290,14 @@ void EmitPostStep(hooks::HookDispatcher* dispatcher, const api::UsageReport& rep
     payload.fields["api_duration_ms"] = report.api_duration_ms;
     payload.fields["stop_reason"] = report.stop_reason;
     payload.fields["model"] = report.model;
-    payload.fields["input_tokens"] = api::TotalInputTokens(report.usage);
+    const auto input = api::CheckedTotalInputTokens(report.usage);
+    payload.fields["input_tokens"] = input ? nlohmann::json(*input) : nlohmann::json(nullptr);
+    payload.fields["input_tokens_overflow"] = !input.has_value();
+    // Keep the original source counters independently of the legacy total-input
+    // projection. Reasoning is part of output, never an extra billed addend.
+    payload.fields["usage_numbers"] = std::array<std::int64_t, 5>{report.usage.input_tokens,
+        report.usage.output_tokens, report.usage.cache_read_tokens, report.usage.cache_creation_tokens,
+        report.usage.output_reasoning_tokens};
     payload.fields["output_tokens"] = report.usage.output_tokens;
     payload.fields["usage_reported"] = report.reported_by_provider;
     dispatcher->Emit(hooks::HookEvent::PostStep, payload);

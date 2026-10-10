@@ -18,6 +18,11 @@ owner、子路 typed owner。各走实际生产实现，先计成功路径分配
 转型也检查边界；三个新 native 案接 CLI 与 ASan，原显示案保留。尚未
 发布或执行。其他旧合计调用仍须逐处迁完。
 
+候选把 PostStep 旧完整输入合计也改为检查加法，溢出写 null，另记溢出位；
+五项原数单列，推理不重复计入输出。新增一案通过真实 HookDispatcher
+起原生 command observer，逐一核正常、明确零与中间加法溢出三份 stdin。
+案已接 CLI/ASan 来源，尚未执行；其他旧合计调用仍未全迁完。
+
 候选再把字面数字提前：先借帧读入固定槽，选最后一份字段与实际 usage
 范围，沿同一套 provider 规则归一化，再复制响应号、原数摘要和 JSON DOM。
 四家真实 parser 与 Responses 非流式已接；Anthropic 新 message 清数，
