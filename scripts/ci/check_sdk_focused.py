@@ -1536,9 +1536,10 @@ def main():
             if registered["command"][1:] != ["--source-file=*test_lubancore_model_sampling.cpp"]:
                 raise RuntimeError("Sampling must run the actual complete native source")
             check_native_command(sections[0], registered["command"])
-            if int(counts[0]) != 6:
-                raise RuntimeError("Sampling native roster must contain all six cases")
-            for path in ("defaults", "effort", "finish", "invalid-request", "invalid-reply", "errors"):
+            if int(counts[0]) != 11:
+                raise RuntimeError("Sampling native roster must contain all eleven cases")
+            for path in ("defaults", "effort", "finish", "invalid-request", "invalid-reply", "errors",
+                         "usage-cancelled", "usage-invalid-output", "usage-absent", "usage-no-reply", "usage-success"):
                 if sections[0].splitlines().count("[sdk-model-sampling-path] " + path) != 1:
                     raise RuntimeError("Sampling actual path did not execute once: " + path)
         if case.attrib["name"] == "sdk.focused.lubancore_memory_blob_spi":

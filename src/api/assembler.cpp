@@ -146,15 +146,31 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 FinalizeCurrent();
                 content_.push_back(
                     RedactedThinkingBlock{platform::SanitizeExternalText(e.data)});
-            } else if constexpr (std::is_same_v<T, MessageDone>) {
-                FinalizeCurrent();  // 防御性收尾:正常流程里 ContentBlockDone 应该已经收过了
-                stop_reason_ = e.stop_reason;
+            } else if constexpr (std::is_same_v<T, UsageSnapshot>) {
+                // Snapshot overwrite, never sum. Do not finalize or set a stop reason.
                 usage_ = e.usage;
-                usage_seen_ = e.usage_reported;  // 显式位:wire 见没见过 usage 帧
-                // 读/写明报位各自一枚(C2):只报写入不能证明读取为零。
+                usage_seen_ = e.usage_reported;
                 cache_read_seen_ = e.cache_read_reported;
                 cache_creation_seen_ = e.cache_creation_reported;
                 usage_anomaly_ = e.usage_anomaly;
+                usage_snapshot_seen_ = true;
+            } else if constexpr (std::is_same_v<T, MessageDone>) {
+                FinalizeCurrent();  // 防御性收尾:正常流程里 ContentBlockDone 应该已经收过了
+                stop_reason_ = e.stop_reason;
+                // A terminal frame without usage evidence must not erase a snapshot.
+                // Preserve every legacy path when no nonterminal snapshot was seen.
+                const bool has_usage = e.usage_reported || e.cache_read_reported ||
+                    e.cache_creation_reported || !e.usage_anomaly.empty() ||
+                    e.usage.input_tokens != 0 || e.usage.output_tokens != 0 ||
+                    e.usage.cache_read_tokens != 0 || e.usage.cache_creation_tokens != 0 ||
+                    e.usage.output_reasoning_tokens != 0;
+                if (!usage_snapshot_seen_ || has_usage) {
+                    usage_ = e.usage;
+                    usage_seen_ = e.usage_reported;
+                    cache_read_seen_ = e.cache_read_reported;
+                    cache_creation_seen_ = e.cache_creation_reported;
+                    usage_anomaly_ = e.usage_anomaly;
+                }
             }
             // MessageStart / StreamError:不影响攒出来的内容。
         },

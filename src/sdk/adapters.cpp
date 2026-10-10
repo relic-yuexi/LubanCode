@@ -139,6 +139,15 @@ public:
                 CallbackScope callback;
                 return backend_->Generate(*in, Cancellation{cancel});
             }();
+            // Generate returned observable facts. Cancellation/output validation
+            // still rejects the reply, but must not discard its already paid usage.
+            if (reply && reply->usage) {
+                api::UsageSnapshot snapshot;
+                snapshot.usage_reported = true;
+                snapshot.usage.input_tokens = reply->usage->input_tokens;
+                snapshot.usage.output_tokens = reply->usage->output_tokens;
+                emit(snapshot);
+            }
             if (cancel && cancel->load()) return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled"});
             if (!reply) return std::unexpected(api::Error{api::ErrorKind::Api, reply.error().code + ": " + reply.error().message});
             if (!ValidSamplingValue(reply->stop_reason)) {
