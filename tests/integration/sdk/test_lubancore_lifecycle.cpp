@@ -1092,7 +1092,11 @@ TEST_CASE("SDK Backend owner: allocation and observer failure retire captures be
         tool.execute = [capture](const std::string&, const sdk::ToolContext&) -> sdk::Result<sdk::ToolResult> {
             return sdk::ToolResult{"unused"};
         };
-        options.custom_tools.push_back(std::move(tool)); capture.reset();
+        options.custom_tools.push_back(std::move(tool));
+        // A moved-from std::function may retain its SBO capture. Retire the
+        // caller's copy before asking the SDK to retire its own source.
+        tool.execute = {};
+        capture.reset();
         probe->destroy = [retired, probe_raw = probe.get(), owner = runtime->get()] {
             const auto shutdown = owner->Shutdown();
             probe_raw->destroy_checked.store(retired->load() && !shutdown &&
