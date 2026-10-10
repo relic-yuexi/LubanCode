@@ -517,7 +517,7 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
                                 std::to_string(snapshot->wall_limit_secs) + "s");
             }
             if (snapshot->token_limit > 0) {
-                parts.push_back(lubancode::cli::FormatTokenCount(tokens) + "/" +
+                parts.push_back((tokens ? lubancode::cli::FormatTokenCount(*tokens) : "?") + std::string("/") +
                                 lubancode::cli::FormatTokenCount(snapshot->token_limit));
             }
             if (!parts.empty()) {
