@@ -3,11 +3,60 @@
 #include "agent/sample_model.hpp"
 
 #include <chrono>
+#include <exception>
+#ifdef LUBANCODE_PRIVATE_SAMPLE_TEST_HOOKS
+#include "agent/sample_model_test_hooks.hpp"
+#endif
 #include <thread>
 #include <utility>
 
 #include "tools/schema_check.hpp"  // output_schema 复检:与工具入参同一只校验器
 namespace lubancode::agent {
+#ifdef LUBANCODE_PRIVATE_SAMPLE_TEST_HOOKS
+namespace testing {
+namespace { thread_local WatchdogHooksHandle watchdog_hooks; }
+WatchdogHooksHandle ReplaceWatchdogHooks(WatchdogHooksHandle replacement) noexcept {
+    watchdog_hooks.swap(replacement);
+    return replacement;
+}
+WatchdogHooksHandle SnapshotWatchdogHooks() noexcept { return watchdog_hooks; }
+// Observation cannot change production decisions or throw out of a thread.
+void Observe(const std::function<void()>& observer) noexcept {
+    try { if (observer) observer(); } catch (...) {}
+}
+}
+#endif
+namespace {
+class WatchdogOwner {
+public:
+    WatchdogOwner(std::atomic<bool>& done, std::optional<std::thread>& thread)
+        : done_(done), thread_(thread) {}
+    ~WatchdogOwner() { Close(); }
+    void Close() {
+        done_.store(true);
+        if (thread_ && thread_->joinable()) {
+            thread_->join();
+#ifdef LUBANCODE_PRIVATE_SAMPLE_TEST_HOOKS
+            if (hooks) testing::Observe(hooks->after_join);
+#endif
+        }
+    }
+#ifdef LUBANCODE_PRIVATE_SAMPLE_TEST_HOOKS
+    testing::WatchdogHooksHandle hooks;
+#endif
+private:
+    std::atomic<bool>& done_;
+    std::optional<std::thread>& thread_;
+};
+api::Error BackendException(const std::exception& error) {
+    return {api::ErrorKind::Api, std::string("sampling Backend exception: ") + error.what(),
+            0, "sample.backend_exception"};
+}
+api::Error UnknownBackendException() {
+    return {api::ErrorKind::Api, "sampling Backend threw an unknown exception", 0,
+            "sample.backend_unknown_exception"};
+}
+}
 
 SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, const SampleOptions& options) {
     api::Request wire;
@@ -18,8 +67,19 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     wire.reasoning_effort = request.reasoning_effort;
 
     if (request.enforce_output_limit && request.max_tokens) {
-        backend.ForceMaxOutputTokensOverride(wire, *request.max_tokens);
-        const auto effective = backend.GetEffectiveOutputLimit(wire);
+        api::Backend::EffectiveOutputLimit effective;
+        try {
+            backend.ForceMaxOutputTokensOverride(wire, *request.max_tokens);
+            effective = backend.GetEffectiveOutputLimit(wire);
+        } catch (const std::exception& error) {
+            SampleResult blocked;
+            blocked.error = BackendException(error);
+            return blocked;
+        } catch (...) {
+            SampleResult blocked;
+            blocked.error = UnknownBackendException();
+            return blocked;
+        }
         if (!effective.tokens || *effective.tokens <= 0 || *effective.tokens > *request.max_tokens) {
             SampleResult blocked;
             blocked.error = api::Error{api::ErrorKind::Api,
@@ -77,32 +137,65 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     std::atomic<bool> done{false};
     std::optional<std::thread> watchdog;
     const bool dual_cancel = options.cancel != nullptr && options.timeout_secs > 0;
-    if (options.timeout_secs > 0 && !dual_cancel) {
-        watchdog.emplace([&local_cancel, &done, timeout = options.timeout_secs]() {
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
-            while (!done.load() && std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-            if (!done.load()) local_cancel = true;
-        });
-    } else if (dual_cancel) {
-        watchdog.emplace([&merged_cancel, &cancel_fired, &done, external = options.cancel,
-                          timeout = options.timeout_secs]() {
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
-            while (!done.load()) {
-                if (external != nullptr && external->load()) {
-                    cancel_fired.store(1);
-                    merged_cancel.store(true);
-                    return;
+    WatchdogOwner owner(done, watchdog);  // Installed before any real thread can exist.
+#ifdef LUBANCODE_PRIVATE_SAMPLE_TEST_HOOKS
+    owner.hooks = testing::SnapshotWatchdogHooks();
+#endif
+    std::expected<void, api::Error> sent;
+    try {
+#ifdef LUBANCODE_PRIVATE_SAMPLE_TEST_HOOKS
+        if (options.timeout_secs > 0 && owner.hooks && owner.hooks->before_start)
+            owner.hooks->before_start();
+#endif
+        if (options.timeout_secs > 0 && !dual_cancel) {
+            watchdog.emplace([&local_cancel, &done, timeout = options.timeout_secs
+#ifdef LUBANCODE_PRIVATE_SAMPLE_TEST_HOOKS
+                              , hooks = owner.hooks
+#endif
+                              ]() {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
+                while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
-                if (std::chrono::steady_clock::now() >= deadline) {
-                    cancel_fired.store(2);
-                    merged_cancel.store(true);
-                    return;
+                if (!done.load()) local_cancel = true;
+#ifdef LUBANCODE_PRIVATE_SAMPLE_TEST_HOOKS
+                if (hooks) testing::Observe(hooks->on_thread_exit);
+#endif
+            });
+        } else if (dual_cancel) {
+            watchdog.emplace([&merged_cancel, &cancel_fired, &done, external = options.cancel,
+                              timeout = options.timeout_secs
+#ifdef LUBANCODE_PRIVATE_SAMPLE_TEST_HOOKS
+                              , hooks = owner.hooks
+#endif
+                              ]() {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
+                while (!done.load()) {
+                    if (external != nullptr && external->load()) {
+                        cancel_fired.store(1);
+                        merged_cancel.store(true);
+                        break;
+                    }
+                    if (std::chrono::steady_clock::now() >= deadline) {
+                        cancel_fired.store(2);
+                        merged_cancel.store(true);
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-        });
+#ifdef LUBANCODE_PRIVATE_SAMPLE_TEST_HOOKS
+                if (hooks) testing::Observe(hooks->on_thread_exit);
+#endif
+            });
+        }
+
+    } catch (const std::exception& error) {
+        sent = std::unexpected(api::Error{api::ErrorKind::Api,
+            std::string("sampling watchdog start failed: ") + error.what(),
+            0, "sample.watchdog_start_failed"});
+    } catch (...) {
+        sent = std::unexpected(api::Error{api::ErrorKind::Api,
+            "sampling watchdog start threw an unknown exception", 0, "sample.watchdog_start_failed"});
     }
 
     api::MessageAssembler assembler;
@@ -113,30 +206,35 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     const std::atomic<bool>* effective_cancel = dual_cancel ? &merged_cancel
         : (options.cancel != nullptr ? options.cancel
                                      : (options.timeout_secs > 0 ? &local_cancel : nullptr));
-    const auto sent = backend.send_stream(
-        wire,
-        [&](const api::StreamEvent& event) {
-            assembler.Feed(event);
-            std::visit(
-                [&](const auto& e) {
-                    using T = std::decay_t<decltype(e)>;
-                    if constexpr (std::is_same_v<T, api::MessageStart>) {
-                        // provider 回的外部号(§6.1.2):只作对账,不铸本地
-                        // 身份。AgentLoop 侧同源同口径。
-                        assembler_response_id = e.id;
-                    } else if constexpr (std::is_same_v<T, api::StreamError>) {
-                        stream_error = true;
-                        stream_error_message = e.message;
-                        stream_error_code = e.code;
-                    }
+    if (sent.has_value()) {
+        try {
+            sent = backend.send_stream(
+                wire,
+                [&](const api::StreamEvent& event) {
+                    assembler.Feed(event);
+                    std::visit(
+                        [&](const auto& e) {
+                            using T = std::decay_t<decltype(e)>;
+                            if constexpr (std::is_same_v<T, api::MessageStart>) {
+                                // provider 回的外部号(§6.1.2):只作对账,不铸本地
+                                // 身份。AgentLoop 侧同源同口径。
+                                assembler_response_id = e.id;
+                            } else if constexpr (std::is_same_v<T, api::StreamError>) {
+                                stream_error = true;
+                                stream_error_message = e.message;
+                                stream_error_code = e.code;
+                            }
+                        },
+                        event);
                 },
-                event);
-        },
-        effective_cancel);
-    done = true;
-    if (watchdog.has_value()) {
-        watchdog->join();
+                effective_cancel);
+        } catch (const std::exception& error) {
+            sent = std::unexpected(BackendException(error));
+        } catch (...) {
+            sent = std::unexpected(UnknownBackendException());
+        }
     }
+    owner.Close();
 
     // ---- 取消归因(取消误报 ESC 单 Bug 1):四分,不臆断按键 ------------
     // 完成与 deadline 同场的裁决:MessageDone 已见过(stop_reason 非空)=
@@ -184,8 +282,11 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     // usage 半截也出账(旧口径:六处都是先记账再判错)。
     const api::Usage& usage = assembler.usage();
     result.usage = usage;
-    result.usage_reported = usage.input_tokens > 0 || usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
+    result.usage_reported = assembler.usage_seen() || usage.input_tokens > 0 || usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
                            usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
+    result.cache_read_reported = assembler.cache_read_seen();
+    result.cache_creation_reported = assembler.cache_creation_seen();
+    result.usage_anomaly = assembler.usage_anomaly();
     // 半截流(无 ContentBlockDone/MessageDone 收尾)先催收再取,文本不丢
     // ——llm 节点旧路按裸 TextDelta 累加,这里不许比它少一个字。已收尾时
     // 催收是空操作。
@@ -207,7 +308,9 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     // 轨迹同账。
     if (options.boundary_recorder != nullptr && !recorded_request_id.empty()) {
         options.boundary_recorder->OnUsageRecorded(recorded_request_id, usage, result.usage_reported,
-                                                   result.provider_response_id);
+                                                   result.provider_response_id, 0, true,
+                                                   result.cache_read_reported, result.cache_creation_reported,
+                                                   result.usage_anomaly);
         api::Message assistant;
         assistant.role = api::Role::Assistant;
         assistant.content = assembler.BuildMessage().content;

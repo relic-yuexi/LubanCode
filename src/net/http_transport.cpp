@@ -425,14 +425,15 @@ std::expected<FullHttpResponse, FullHttpError> PerformFullHttpRequest(const Full
     bool received_any_bytes = false;
     std::int64_t header_bytes = 0;
 
-    // 硬墙钟只掐"挂死",进度回调每至多 1s 醒一拍(cpr 并发挂死单的老结论),
-    // 不用 cpr::Timeout——那会把正常慢响应拦腰砍断。
+    // 回调检查取消与硬墙钟；libcurl 总超时另守同一硬帽，不能让
+    // 无数据时约一秒的回调间隔替宿主延长明确给定的预算。
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(limits.hard_timeout_ms);
 
     cpr::HeaderCallback header_cb(
         [&](const std::string_view& header, intptr_t) -> bool {
             // 响应头帽在回调入口落锤(§8.3):达帽即中止,不多攒一块。
             header_bytes += static_cast<std::int64_t>(header.size());
+            response.received_header_bytes = static_cast<std::uint64_t>(header_bytes);
             if (header_bytes > limits.response_header_bytes) {
                 header_cap_hit = true;
                 return false;
@@ -512,6 +513,7 @@ std::expected<FullHttpResponse, FullHttpError> PerformFullHttpRequest(const Full
         session.SetBody(cpr::Body{request.body});
     }
     session.SetConnectTimeout(cpr::ConnectTimeout{std::chrono::milliseconds(limits.connect_timeout_ms)});
+    session.SetTimeout(cpr::Timeout{std::chrono::milliseconds(limits.hard_timeout_ms)});
     if (pinned != nullptr && !pinned->addr.empty()) {
         // §8.2 第 5 步:连接钉已验地址(CURLOPT_RESOLVE),libcurl 不再
         // 自行解析,把"验完才连"与"连的就是验过的"钉成同一件事。
@@ -572,6 +574,7 @@ std::expected<FullHttpResponse, FullHttpError> PerformFullHttpRequest(const Full
         error.curl_code = static_cast<long>(raw.error.code);
         error.curl_message = raw.error.message;
         error.received_any_bytes = received_any_bytes;
+        error.response_status = response.status;
         error.kind = ClassifyCurlErrorCode(error.curl_code);
         switch (error.kind) {
             case FullHttpErrorKind::DnsFailed:

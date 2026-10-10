@@ -269,6 +269,12 @@ PreRequestStages RunPreRequestMiddleware(hooks::HookDispatcher* dispatcher,
         return stages;
     }
     stages.token_estimate = stages.estimate_outcome.value;
+    if (!budget.model_input_snapshot_scope.empty()) {
+        stages.token_estimate["modelInputSnapshotScope"] = budget.model_input_snapshot_scope;
+    }
+    if (!budget.output_limit_scope.empty()) {
+        stages.token_estimate["outputLimitScope"] = budget.output_limit_scope;
+    }
 
     // ---- 段三 capacity:消费估算,给准入决定。----
     nlohmann::json capacity_input = request_snapshot;

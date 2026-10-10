@@ -5,6 +5,7 @@
 // include;对外面仍是 Pimpl(trajectory_session.hpp 只见前向声明)。
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -17,6 +18,7 @@
 #include "runtime/session_soul.hpp"
 #include "runtime/trajectory_history_view.hpp"
 #include "runtime/trajectory_session.hpp"  // 外围类声明(嵌套 Impl 的定义点)
+#include "runtime/trajectory_bypass_lease.hpp"
 #include "runtime/trajectory_turn_bridge.hpp"  // V3SessionBooks
 #include "telemetry/wake.hpp"
 #include "trajectory/recorder.hpp"
@@ -39,12 +41,14 @@ struct TrajectorySessionLedger::Impl {
     std::string main_run_id;
     std::string lubancode_version;
     std::string workspace_root_text;  // UTF-8,环境快照与 git 状态取材用
-    // 子代理账:run_id -> 终态 hash(Finish 时填,父账边界引用用)。
-    std::map<std::string, std::string> child_terminal_hashes;
+    // Child terminal values: shared owner never lends a raw Impl map.
+    std::shared_ptr<SubagentTerminalRegistry> child_terminals =
+        std::make_shared<SubagentTerminalRegistry>();
     std::uint64_t subagent_counter = 0;
     // 测试故障注入(生产恒空;子代理空轨迹单 5.1):子账首枚 run.started
     // 提交前问一次。
     std::function<std::optional<std::string>()> subagent_start_fault;
+    std::function<std::optional<std::string>()> subagent_close_fault;
     // workflow 编排单同款:编排账/node 账首枚 run.started 提交前问一次。
     std::function<std::optional<std::string>()> workflow_start_fault;
     std::function<std::optional<std::string>()> workflow_node_start_fault;
@@ -76,6 +80,9 @@ struct TrajectorySessionLedger::Impl {
         std::vector<RestoredTranscriptLine> lines;
     };
     mutable std::optional<TranscriptCache> transcript_cache;
+    std::uint64_t v2_bypass_binding_sequence = 0;
+    // Lazy scene owner; declared last so its destructor revokes before manager teardown.
+    std::shared_ptr<TrajectoryBypassLeaseOwner> bypass_leases;
 };
 
 }  // namespace lubancode::runtime

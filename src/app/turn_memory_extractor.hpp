@@ -6,7 +6,8 @@
 // 要整轮结果),搬发轮前不可行——只能异步化。
 //
 // 材料全在起飞前拼好、值拷贝进闭包(转写/系统提示/分型),不引用会话
-// 任何共享态;HTTP 走 RouteDetached 造的独占裸 backend(不与主会话共用
+// 提示材料共享态；旁路在前台冻结、绑定可撤销代理。HTTP 走 RouteDetached
+// 造的独占裸 backend(不与主会话共用
 // client,不抢流式回调)。本地超时预算(看门狗)与会话拆除的外部取消
 // 都走 SampleModel 的合并取消口。
 //
@@ -15,14 +16,14 @@
 // 记账,不冒充网络失败。
 //
 // 结果只经 TakeFinished 出去:usage 记账/候选入队/台账落袋全在主线程的
-// 收货点(SettleTurnMemory),后台线程不碰会话共享态——除自持的 shared
-// 槽与在闭包栈上自生灭的旁路桥(recorder 提交全程持锁,与主线程的写在
-// 盘上串行)。session_generation 是起飞时的会话世代(/clear、/resume 翻
+// 收货点(SettleTurnMemory)。后台持 shared 槽与独占代理；每次 recorder
+// 回调借场次短门，账本在实际破坏边界先撤销，模型执行不占门。
+// session_generation 是起飞时的会话世代(/clear、/resume 翻
 // 号):迟到结果由调用方对代丢弃——usage 仍照记,token 是真花了的。
 //
 // 退出兜底照 SessionTitleRefiner/AgentTool 析构的老方子:RequestCancel 拉
 // 原子取消旗,析构取消 + 有界等待,等不到就 detach 放行——闭包自持
-// shared 状态,晚归不悬垂,也不冻退出。
+// shared 槽与代理；晚归回调拒绝旧借用，不等于 Backend 已停止。
 #pragma once
 
 #include <atomic>
@@ -55,10 +56,9 @@ public:
         std::string task_type;       // 前台分型结果(候选入队要挂)
         std::uint64_t session_generation = 0;  // 起飞时的会话世代,落地对代
         std::string turn_id;                   // 迟到收账对档(MemoryTurnLedger 悬账)
-        // Token 账本单 A1(旁路落账):flag 开的会话递账本,抽取请求在
-        // worker 线程自铸旁路桥落 Journal(purpose=memory_extract)。recorder
-        // 提交全程持锁,后台线程与主线程的写在盘上串行;线程只持这只裸
-        // 指针+值拷贝,不引用会话其它共享态。空 = 没接轨迹。
+        // 前台 Start 短借：调用方须保住账本直到 Start 返回。先冻结实际
+        // 触发轮，再绑定 purpose=memory_extract 的可撤销代理；worker
+        // 不捕获此指针。空表示没接轨迹；已接但不能绑定须用拒绝代理。
         lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
         std::string trajectory_wire;  // 桥 identity 的渠道名(与主 turn 桥同源)
         std::string provider;         // 抽取路由的 provider(桥 identity)
@@ -73,6 +73,7 @@ public:
         std::uint64_t session_generation = 0;  // 原样带回:迟到由调用方对代弃
         std::string turn_id;                   // 原样带回:悬账对档
         std::int64_t extract_wall_ms = 0;      // 发起到采样返回的墙钟
+        bool extraction_invoked = false;      // 真正进入同步抽取；启动失败不算模型调用
     };
 
     TurnMemoryExtractor() = default;
@@ -82,8 +83,9 @@ public:
     TurnMemoryExtractor(TurnMemoryExtractor&&) = delete;
     TurnMemoryExtractor& operator=(TurnMemoryExtractor&&) = delete;
 
-    // 起一枚抽取任务。单飞:上一枚还在跑或结果还没被收走就拒(false),
-    // 不叠发。backend 为空同样拒(路由落空由调用方在起飞前自记零账)。
+    // 接纳抽取任务。true 包括线程未能创建、已有失败结果待收；
+    // 失败沿 TakeFinished 收账。false 只表示无效输入或上一枚未收走。
+    // backend 为空、model 为空时不接纳，由调用方保住路由门。
     bool Start(Inputs&& inputs);
 
     // 主线程收货:任务完工(成功/失败/取消都算)给 Outcome 并复位,可再
@@ -93,7 +95,7 @@ public:
     // 拉取消旗(换代 /clear、/resume、退出收尾)。只发信号不 join。
     void RequestCancel();
 
-    // 有任务在跑或结果待收(还没被 TakeFinished 取走)。
+    // 有任务在跑或结果待收，包括确定的线程启动失败。
     bool Busy() const;
 
     // 只读完工查询(空闲唤醒的条件):结果备好待收才 true。不 join、不

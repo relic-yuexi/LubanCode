@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <limits>
 #include <utility>
 
 #include "accounting/purpose.hpp"   // PurposeName(Token 账本单 A1)
@@ -16,12 +17,15 @@
 #include "hooks/hash.hpp"           // Sha256Hex:request_snapshot 的 parameters_hash
 #include "platform/log_sink.hpp"
 #include "platform/paths.hpp"
+#include "platform/sha256.hpp"
+#include "platform/text_encoding.hpp"
 #include "runtime/trajectory_bridge_internal.hpp"  // 主桥与旁路桥共用的事实构造
 #include "runtime/v3_tool_result_material.hpp"     // PreserveNativeToolPayload:capture/persist 的原生载荷保全
 #include "tools/path_utils.hpp"     // Utf8ToPath:v3 结果仓/输出索引的路径拼接
 #include "tools/tool_content.hpp"   // TextContent:富结果块的文本投影
 #include "trajectory/metrics.hpp"   // HasDiskReserve:StorageAvailable 的磁盘 reserve 门
 #include "trajectory/v3/tool_action.hpp"  // ToolActionSession:v3 工具操作账(接线点 1)
+#include "trajectory/v3/reader.hpp"
 
 namespace lubancode::runtime {
 
@@ -38,6 +42,17 @@ constexpr std::size_t kV3StreamBatchBytes = 4096;
 // ---------------------------------------------------------------------------
 
 namespace {
+
+std::expected<v3::ResultStore, std::string> OpenNamedStore(v3::V3Writer& writer,
+    V3SessionBooks& books, std::string prefix, std::size_t entries = 0) {
+    if (books.named_results) {
+        if (books.named_results->scope().session_id != writer.session_id())
+            return std::unexpected("named_result.owner_mismatch");
+        return v3::ResultStore::Open(books.named_results, std::move(prefix), entries);
+    }
+    if (books.requires_named_owner) return std::unexpected("named_result.owner_missing");
+    return v3::ResultStore::Open(writer.path().parent_path(), std::move(prefix), entries);
+}
 
 using trajectory::Actor;
 using trajectory::Durability;
@@ -124,6 +139,13 @@ struct V3TurnBooks {
         bool capture_failed = false;
         std::optional<bool> capture_complete;
         std::string capture_reason;
+        std::optional<SubagentSpawnProvenance> child;
+        std::uint64_t child_attempt = 0;
+        std::optional<ToolResultsCommitReceipt> child_capture_receipt;
+        std::optional<v3::WriteReceipt> child_observation_receipt;
+        std::optional<OwnedJobParentCommit> owned_admission;
+        std::string owned_job_id;
+        std::string owned_admission_fingerprint;
     };
     struct Request {
         std::string step_id;
@@ -208,7 +230,7 @@ void TrajectoryTurnBridge::NoteV3Error(const v3::WriteReceipt& receipt, const ch
     }
     recent_errors_.push_back(note);
     if (error_sink_ != nullptr) {
-        error_sink_->push_back(note);
+        error_sink_->Append(note);
     }
     platform::LogSink::Instance().Error("trajectory", "v3 落账失败: " + note);
 }
@@ -233,7 +255,7 @@ void TrajectoryTurnBridge::NoteError(const RecordReceipt& receipt, const char* w
     }
     recent_errors_.push_back(note);
     if (error_sink_ != nullptr) {
-        error_sink_->push_back(note);
+        error_sink_->Append(note);
     }
     platform::LogSink::Instance().Error("trajectory", "落账失败: " + note);
 }
@@ -259,6 +281,7 @@ void TrajectoryTurnBridge::BeginTurn(const std::string& turn_id, const std::stri
     calls_.clear();
     request_prepared_.clear();
     last_input_event_id_.clear();
+    last_committed_assistant_message_id_.clear();
     turn_open_ = true;
     if (V3Mode()) {
         // v3 没有 turn.started 一类行:回合身份由各行信封的 turnId 携带
@@ -347,7 +370,7 @@ void TrajectoryTurnBridge::CancelDanglingCalls(const std::string& reason) {
             const std::string note = "trajectory.dangling_call_undeclared:" + call_id;
             recent_errors_.push_back(note);
             if (error_sink_ != nullptr) {
-                error_sink_->push_back(note);
+                error_sink_->Append(note);
             }
             platform::LogSink::Instance().Error(
                 "trajectory", "悬空调用未声明过(无主账项),不补 cancelled: " + call_id);
@@ -361,7 +384,7 @@ void TrajectoryTurnBridge::CancelDanglingCalls(const std::string& reason) {
             const std::string note = "trajectory.dangling_call_missing_field:" + missing + ":" + call_id;
             recent_errors_.push_back(note);
             if (error_sink_ != nullptr) {
-                error_sink_->push_back(note);
+                error_sink_->Append(note);
             }
             platform::LogSink::Instance().Error(
                 "trajectory", "悬空调用缺 " + missing + ",不补 cancelled,turn 按真实结果收口: " + call_id);
@@ -914,7 +937,7 @@ void TrajectoryTurnBridge::OnToolTrace(const agent::ToolTraceEvent& event) {
                 const std::string note = "storage_exhausted:" + event.tool_name;
                 recent_errors_.push_back(note);
                 if (error_sink_ != nullptr) {
-                    error_sink_->push_back(note);
+                    error_sink_->Append(note);
                 }
                 platform::LogSink::Instance().Error(
                     "trajectory", "磁盘 reserve 不足,拦下副作用工具: " + event.tool_name);
@@ -978,12 +1001,12 @@ void TrajectoryTurnBridge::OnToolTrace(const agent::ToolTraceEvent& event) {
             if (!book.child_run_id.empty()) {
                 links.child_run_id = book.child_run_id;
                 if (kind == EventKind::ToolExecutionFinished || kind == EventKind::ToolExecutionFailed) {
-                    const auto hash = child_terminal_hashes_.find(book.child_run_id);
+                    const auto child = child_terminals_->Find(book.child_run_id);
                     payload["result_ref"] = nlohmann::json{
                         {"kind", "child_stream"},
                         {"child_run_id", book.child_run_id},
                         {"child_terminal_event_hash",
-                         hash != child_terminal_hashes_.end() ? hash->second : std::string()}};
+                         child && child->durable() ? child->terminal->hash : std::string()}};
                     payload["side_effects"] = nlohmann::json::array();
                 }
             }
@@ -1141,7 +1164,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::OnToolResultsCommitted(const std:
     }
     if (V3Mode()) {
         auto adopted = results;
-        return V3ToolResultsCommitted(adopted);
+        return RewriteToolResultsForHistory(adopted);
     }
     ToolResultsCommitReceipt batch;
     for (const auto& block : results.content) {
@@ -1313,6 +1336,16 @@ std::string TrajectoryTurnBridge::V3RequestPrepared(const api::Request& request,
     nlohmann::json provider_snapshot = nlohmann::json{{"provider", identity_.provider},
                                                       {"wire", identity_.wire},
                                                       {"model", request.model}};
+    if (ctx.model_input_snapshot) {
+        // Evidence fingerprint only. It does not reconstruct this input, prove
+        // a provider wire, or replace the original system/message/tool sources.
+        const auto compact = ctx.model_input_snapshot->input.dump();
+        provider_snapshot["modelInputSnapshotScope"] = ctx.model_input_snapshot->scope;
+        provider_snapshot["modelInputSnapshotSha256"] = hooks::Sha256Hex(compact);
+        provider_snapshot["modelInputSnapshotUtf8Bytes"] = compact.size();
+        provider_snapshot["modelInputSnapshotFingerprintAlgorithm"] = "sha256-compact_json_utf8_v1";
+        provider_snapshot["outputLimitScope"] = ctx.model_input_snapshot->output_limit_scope;
+    }
     // 应用Worker接入单 §八:连接快照的冻结局,与 v2 BuildPreparedPayload
     // 同一份合同(见那边的注释);identity 没带整块不落。
     if (identity_.connection.is_object() && !identity_.connection.empty()) {
@@ -1592,6 +1625,7 @@ bool TrajectoryTurnBridge::V3OutputCompleted(const std::string& request_id,
         return false;  // §7.4:输出记不住,不执行工具
     }
     req.output_committed = true;
+    last_committed_assistant_message_id_ = req.reserved_message_id;
     // 声明本份输出的 tool call(§6.1 的 v3 版):actionId 由 writer 发号,
     // provider 号原样留档作配对键(FoldToolActions 按 providerToolCallId
     // 映射回 actionId)。这是 v3_turn_->calls 造册的唯一合法入口;同时
@@ -1602,6 +1636,9 @@ bool TrajectoryTurnBridge::V3OutputCompleted(const std::string& request_id,
                 continue;
             }
             V3TurnBooks::Call& book = v3_turn_->calls[call->id];
+            // A provider may reuse its local ID in a later response. The newly
+            // admitted declaration owns a new action and no earlier child/cache.
+            book = V3TurnBooks::Call{};
             book.action_id = v3_writer_->NewActionId();
             book.request_id = request_id;
             book.step_id = it->second.step_id;
@@ -1689,6 +1726,142 @@ void TrajectoryTurnBridge::V3OutputCancelled(const std::string& request_id,
     }
 }
 
+OwnedJobParentCommit TrajectoryTurnBridge::CommitOwnedJobAdmission(
+    const std::string& provider_call_id, const tools::OwnedJobAdoption& adopted,
+    const v3::JobOperationBindingFacts& binding) {
+    const auto reject = [](std::string error) {
+        OwnedJobParentCommit result; result.error = std::move(error); return result;
+    };
+    if (!V3Mode() || !v3_books_ || !v3_turn_ || !v3_writer_ || !adopted.facts ||
+        adopted.state != tools::OwnedJobAdoptionState::Adopted || !adopted.receipt ||
+        adopted.admission_content.empty()) return reject("job.parent.invalid_adoption");
+    std::lock_guard lock(*v3_books_->tool_results_mutex);
+    const auto found = v3_turn_->calls.find(provider_call_id);
+    if (found == v3_turn_->calls.end()) return reject("job.parent.undeclared");
+    auto& book = found->second;
+    const auto& facts = *adopted.facts;
+    const auto binding_json = [](const v3::JobOperationBindingFacts& value) {
+        return nlohmann::json{{"session", value.session_id}, {"run", value.run_id}, {"turn", value.turn_id},
+            {"step", value.step_id}, {"action", value.action_id}, {"job", value.job_id}, {"attempt", value.attempt},
+            {"seq", value.seq}, {"operation", value.operation_id}, {"parentOperation", value.parent_operation_id},
+            {"parentInput", value.parent_input_id}, {"parentPayloadHash", value.parent_payload_hash},
+            {"event", value.event_id}, {"lineHash", value.line_hash}, {"parentOperationEvent", value.parent_operation_event_id},
+            {"adoptedEvent", value.adopted_event_id}, {"originalHash", value.original_input_sha256},
+            {"effectiveHash", value.effective_input_sha256}};
+    };
+    const nlohmann::json owner_json{{"sessionId", facts.owner.session_id}, {"runId", facts.owner.run_id},
+        {"coordinatorId", facts.owner.coordinator_id}, {"epoch", facts.owner.epoch},
+        {"projectId", facts.owner.project_id}, {"cwd", platform::PathToUtf8(facts.owner.cwd)}};
+    const auto fingerprint = nlohmann::json{{"owner", owner_json},
+        {"job", facts.job_id}, {"action", facts.action_id}, {"parent", facts.parent_action_id}, {"attempt", facts.attempt},
+        {"turn", facts.turn_id}, {"step", facts.step_id}, {"assistant", facts.assistant_message_ref},
+        {"providerCall", facts.provider_tool_call_id}, {"toolName", facts.tool_name},
+        {"pending", facts.source_pending_event_id}, {"sourceAdmission", facts.source_admission_event_id},
+        {"original", facts.original_input}, {"effective", facts.effective_input}, {"tool", facts.tool_identity.ToJson()},
+        {"policy", facts.policy.ToJson()}, {"binding", binding_json(binding)},
+        {"adopted", adopted.receipt->id}, {"adoptedSeq", adopted.receipt->seq}, {"adoptedHash", adopted.receipt->line_hash},
+        {"adoptedStatus", static_cast<int>(adopted.receipt->status)},
+        {"originalHash", facts.original_input_sha256}, {"effectiveHash", facts.effective_input_sha256},
+        {"handle", adopted.admission_content}}.dump();
+    if (book.owned_admission) return book.owned_job_id == facts.job_id && book.owned_admission_fingerprint == fingerprint
+        ? *book.owned_admission : reject("job.parent.already_attempted");
+    if (!book.action || !book.action->last_event_id() || book.started || book.terminal || book.tool_message_done ||
+        book.action_id != facts.parent_action_id || book.assistant_message_ref != facts.assistant_message_ref ||
+        provider_call_id != facts.provider_tool_call_id || book.step_id != facts.step_id ||
+        turn_id_ != facts.turn_id || v3_writer_->session_id() != facts.owner.session_id ||
+        v3_writer_->run_id() != facts.owner.run_id || binding.job_id != facts.job_id ||
+        binding.action_id != facts.action_id || binding.turn_id != facts.turn_id ||
+        binding.adopted_event_id != adopted.receipt->id)
+        return reject("job.parent.source_mismatch");
+    const auto ledger = v3::ReadV3Ledger(v3_writer_->path());
+    if (!ledger) return reject("job.parent.invalid_ledger:" + ledger.error());
+    const auto tail = ledger->LastEntry();
+    if (!tail || tail->seq == std::numeric_limits<std::uint64_t>::max() || tail->seq + 1 != v3_writer_->next_seq() || v3_writer_->last_line_hash() !=
+        (tail->is_message ? ledger->messages[tail->index].line_hash : ledger->events[tail->index].line_hash))
+        return reject("job.parent.prefix_mismatch");
+    const auto bindings = v3::ReadJobOperationBindings(*ledger);
+    const auto adoptions = v3::ReadOwnedJobAdoptions(*ledger);
+    if (!bindings || !adoptions) return reject("job.parent.binding_invalid");
+    const auto actual_binding = std::find_if(bindings->begin(), bindings->end(), [&](const auto& actual) {
+        return binding_json(actual) == binding_json(binding) && actual.job_id == facts.job_id &&
+            actual.action_id == facts.action_id && actual.attempt == facts.attempt &&
+            actual.adopted_event_id == adopted.receipt->id;
+    });
+    const auto* actual_adoption = v3::FindOwnedJobAdoption(*adoptions, facts.job_id);
+    if (actual_binding == bindings->end() || !actual_adoption ||
+        actual_adoption->parent_action_id != book.action_id ||
+        actual_adoption->source_pending_event_id != *book.action->last_event_id() ||
+        actual_adoption->source_pending_event_id != facts.source_pending_event_id ||
+        actual_adoption->source_admission_event_id != facts.source_admission_event_id ||
+        actual_adoption->prepared_owner != owner_json ||
+        actual_adoption->attempt != facts.attempt || actual_adoption->original_input != facts.original_input ||
+        actual_adoption->effective_input != facts.effective_input ||
+        actual_adoption->original_input_sha256 != facts.original_input_sha256 ||
+        actual_adoption->effective_input_sha256 != facts.effective_input_sha256 ||
+        actual_adoption->execution_policy != facts.policy.ToJson() ||
+        actual_adoption->tool_identity != facts.tool_identity.ToJson())
+        return reject("job.parent.binding_mismatch");
+    const auto* actual_adopted = ledger->FindEvent(actual_adoption->adopted_event_id);
+    if (!actual_adopted || adopted.receipt->status != v3::WriteReceipt::Status::Committed ||
+        adopted.receipt->seq != actual_adopted->seq || adopted.receipt->line_hash != actual_adopted->line_hash)
+        return reject("job.parent.adoption_receipt_mismatch");
+    const nlohmann::json expected_handle{{"jobId", facts.job_id}, {"status", "parent_delivery_pending"},
+        {"adoptionEventRef", actual_adoption->adopted_event_id}, {"layout", v3::kOwnedJobLayout}};
+    if (adopted.admission_content != expected_handle.dump()) return reject("job.parent.handle_mismatch");
+    book.owned_job_id = facts.job_id;
+    book.owned_admission_fingerprint = fingerprint;
+    book.owned_admission.emplace(); // Stable first-attempt owner before any native append.
+    auto& out = *book.owned_admission;
+    const auto record = [&](v3::WriteReceipt receipt, const char* stage) {
+        out.receipts.push_back(std::move(receipt));
+        const auto& actual = out.receipts.back();
+        V3NotifyCommitted(actual);
+        if (actual.status == v3::WriteReceipt::Status::Committed) return true;
+        out.error = std::string("job.parent.") + stage + ":" + actual.error_code;
+        NoteV3Error(actual, stage);
+        return false;
+    };
+    try {
+        out.receipts.reserve(6);
+        if (!record(book.action->Start(*v3_writer_, "args-" + book.action_id + "-" + facts.effective_input_sha256,
+            facts.tool_identity, std::nullopt, {{"toolName", facts.tool_name}}, trajectory::Durability::PowerLoss), "started")) return out;
+        book.started = true;
+        if (!record(book.action->Finish(*v3_writer_, std::nullopt, 0), "terminal")) return out;
+        book.terminal = true; book.terminal_event_id = out.receipts.back().id;
+        out.refs.terminal_event_id = book.terminal_event_id;
+        auto store = OpenNamedStore(*v3_writer_, *v3_books_, "job-admission-");
+        if (!store) { out.error = "job.parent.result_store_failed:" + store.error(); return out; }
+        v3::ResultStore::PersistRequest request;
+        request.result_kind = "text"; request.tool_call_id = book.action_id; request.attempt = 1;
+        request.execution_event_ref = book.terminal_event_id;
+        v3::ResultStore::ChannelOutput output;
+        output.channel = "combined"; output.data = adopted.admission_content; output.output_bytes = output.data.size();
+        request.outputs.push_back(std::move(output));
+        request.capture_limits = {{"max_output_bytes", 65536}};
+        request.preview_policy = {{"policy", "sdk-command-job-admission"}, {"maxPreviewBytes", 4096}};
+        const auto material = store->Persist(request);
+        if (!material.ok) { out.error = "job.parent.material_failed:" + material.error; return out; }
+        if (!record(book.action->PersistedResult(*v3_writer_, material.result_ref, book.terminal_event_id, 1), "persisted")) return out;
+        out.refs.persisted_event_id = out.receipts.back().id;
+        if (!record(book.action->SelectResult(*v3_writer_, {out.refs.persisted_event_id}, {}, "done", 1), "selected")) return out;
+        out.refs.selected_event_id = out.receipts.back().id;
+        v3::MessageDraft message;
+        message.turn_id = turn_id_; message.step_id = book.step_id; message.action_id = book.action_id;
+        message.origin = v3::MessageOrigin::SessionRuntime; message.purpose = v3::MessagePurpose::Conversation;
+        message.result_selection_ref = out.refs.selected_event_id;
+        message.message = {{"role", "tool"}, {"tool_call_id", book.action_id}, {"content", adopted.admission_content}};
+        if (!record(v3_writer_->AppendMessage(std::move(message), trajectory::Durability::PowerLoss), "message")) return out;
+        out.refs.tool_message_id = out.receipts.back().id;
+        if (!record(v3_writer_->AdmitMessages({out.refs.tool_message_id}, trajectory::Durability::PowerLoss), "admission")) return out;
+        out.refs.admission_event_id = out.receipts.back().id;
+        book.tool_message_done = true;
+        out.committed = true;
+    } catch (...) {
+        if (out.error.empty()) out.error = "job.parent.publication_unconfirmed";
+    }
+    return out;
+}
+
 void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {
     std::lock_guard lock(*v3_books_->tool_results_mutex);
     // ownership 门(P0-D 的 v3 版):只认模型输出声明过的 call。陌生
@@ -1708,7 +1881,7 @@ void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {
             const std::string note = "tool.execution.pending:" + book.action_id;
             recent_errors_.push_back(note);
             if (error_sink_ != nullptr) {
-                error_sink_->push_back(note);
+                error_sink_->Append(note);
             }
             platform::LogSink::Instance().Error("trajectory", "v3 落账失败: " + note);
         }
@@ -1757,7 +1930,7 @@ void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {
                 const std::string note = "storage_exhausted:" + event.tool_name;
                 recent_errors_.push_back(note);
                 if (error_sink_ != nullptr) {
-                    error_sink_->push_back(note);
+                    error_sink_->Append(note);
                 }
                 platform::LogSink::Instance().Error(
                     "trajectory", "磁盘 reserve 不足,拦下副作用工具: " + event.tool_name);
@@ -1900,6 +2073,108 @@ void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {
     }
 }
 
+namespace {
+
+constexpr std::size_t kChildJournalBytes = 64 * 1024 * 1024;
+constexpr std::size_t kChildJournalLines = 131072;
+constexpr std::size_t kChildLineBytes = 4 * 1024 * 1024;
+constexpr std::size_t kChildResultEntries = 65536;
+
+std::string ChildExecutionName(SubagentExecutionOutcome execution) {
+    switch (execution) {
+        case SubagentExecutionOutcome::Succeeded: return "succeeded";
+        case SubagentExecutionOutcome::Failed: return "failed";
+        case SubagentExecutionOutcome::Cancelled: return "cancelled";
+        case SubagentExecutionOutcome::StartupRejected: return "startup_rejected";
+        case SubagentExecutionOutcome::Indeterminate: return "indeterminate";
+    }
+    return {};
+}
+
+std::expected<nlohmann::json, std::string> CheckChildObservation(
+    const v3::V3Writer& parent, const SubagentSpawnProvenance& bound,
+    const SubagentTerminalReceipt& receipt, const api::ToolResultBlock& result) {
+    const auto fail = [](const char* reason) { return std::unexpected(std::string("subagent.observation.") + reason); };
+    if (!receipt.durable() || receipt.format != SubagentJournalFormat::V3 ||
+        receipt.broken_after_append || receipt.broken_after_close ||
+        receipt.execution == SubagentExecutionOutcome::Indeterminate)
+        return fail("terminal_unconfirmed");
+    const auto* native = std::get_if<v3::WriteReceipt>(&receipt.append);
+    const auto& terminal = *receipt.terminal;
+    if (!native || native->status != v3::WriteReceipt::Status::Committed ||
+        native->id != terminal.event_id || native->seq != terminal.seq || native->line_hash != terminal.hash ||
+        terminal.session_id != bound.child.session_id || terminal.run_id != bound.child.run_id ||
+        receipt.session_id != terminal.session_id || receipt.run_id != terminal.run_id ||
+        receipt.terminal_kind != "session.ended" || ChildExecutionName(receipt.execution).empty())
+        return fail("terminal_owner_mismatch");
+    const auto& relative = bound.child.journal_path;
+    if (relative.empty() || relative.size() > 1024 || relative.find('\0') != std::string::npos ||
+        relative.find('\\') != std::string::npos || relative.find(':') != std::string::npos ||
+        !platform::IsValidUtf8(relative)) return fail("invalid_child_path");
+    const auto path = platform::Utf8ToPath(relative);
+    if (path.is_absolute() || path.has_root_path()) return fail("invalid_child_path");
+    for (const auto& part : path)
+        if (part == ".." || part == ".") return fail("invalid_child_path");
+    if (result.content.size() > kChildJournalBytes || !platform::IsValidUtf8(result.content))
+        return fail("result_limit_or_encoding");
+    nlohmann::json display{{"schemaVersion", 1}, {"execution", ChildExecutionName(receipt.execution)},
+        {"appendConfirmation", "committed"}, {"seal", "closed"},
+        {"terminalRef", {{"sessionId", terminal.session_id}, {"runId", terminal.run_id},
+                         {"id", terminal.event_id}, {"seq", terminal.seq}, {"hash", terminal.hash}}},
+        {"rawTextSha256", platform::Sha256Hex(result.content)}, {"rawTextBytes", result.content.size()}};
+    if (result.structured_content) {
+        const auto structured = result.structured_content->dump();
+        if (structured.size() > kChildJournalBytes) return fail("structured_limit");
+        display["structuredSha256"] = platform::Sha256Hex(structured);
+        display["structuredBytes"] = structured.size();
+    }
+    std::error_code error;
+    const auto parent_root = std::filesystem::canonical(parent.path().parent_path(), error);
+    if (error) return fail("parent_root_unavailable");
+    const auto root = std::filesystem::canonical(parent.path().parent_path() / "subagents", error);
+    if (error) return fail("child_root_unavailable");
+    auto parent_part = parent_root.begin(), root_part = root.begin();
+    for (; parent_part != parent_root.end(); ++parent_part, ++root_part)
+        if (root_part == root.end() || *parent_part != *root_part) return fail("child_path_outside_parent");
+    if (root_part == root.end()) return fail("child_path_outside_parent");
+    const auto actual = std::filesystem::canonical(parent.path().parent_path() / path, error);
+    if (error) return fail("child_unavailable");
+    auto r = root.begin(), p = actual.begin();
+    for (; r != root.end(); ++r, ++p)
+        if (p == actual.end() || *r != *p) return fail("child_path_outside_parent");
+    if (p == actual.end()) return fail("child_path_outside_parent");
+    auto source = v3::ReadV3LedgerBounded(actual, kChildJournalBytes, kChildJournalLines, kChildLineBytes);
+    if (!source) return std::unexpected("subagent.observation.source_invalid:" + source.error());
+    if (source->session_id != terminal.session_id || source->run_id != terminal.run_id ||
+        source->messages.empty() || source->messages.front().seq != 1 || !source->messages.front().system_meta)
+        return fail("child_identity_mismatch");
+    for (const auto& message : source->messages)
+        if (message.session_id != terminal.session_id || message.run_id != terminal.run_id)
+            return fail("child_row_identity_mismatch");
+    std::size_t ended = 0;
+    for (const auto& event : source->events) {
+        if (event.session_id != terminal.session_id || event.run_id != terminal.run_id)
+            return fail("child_row_identity_mismatch");
+        if (event.kind == v3::EventKindV3::SessionEnded) ++ended;
+    }
+    const auto last = source->LastEntry();
+    const auto* event = source->FindEvent(terminal.event_id);
+    if (ended != 1 || !last || last->is_message || !event ||
+        event->kind != v3::EventKindV3::SessionEnded || event->seq != last->seq ||
+        event->seq != terminal.seq || event->line_hash != terminal.hash)
+        return fail("child_terminal_mismatch");
+    const auto& meta = *source->messages.front().system_meta;
+    const nlohmann::json spawn_ref{{"sessionId", bound.spawn.session_id}, {"runId", bound.spawn.run_id},
+        {"id", bound.spawn.event_id}, {"seq", bound.spawn.seq}, {"hash", bound.spawn.hash}};
+    if (meta.value("parentActionRef", nlohmann::json()) != bound.parent_action.ToJson() ||
+        meta.value("taskId", std::string()) != bound.task_id ||
+        meta.value("spawnEventRef", nlohmann::json()) != spawn_ref)
+        return fail("child_derivation_mismatch");
+    return display;
+}
+
+} // namespace
+
 ToolResultsCommitReceipt TrajectoryTurnBridge::CaptureToolResult(const api::ToolResultBlock& result) {
     if (!V3Mode()) return {};
     ToolResultsCommitReceipt outcome;
@@ -1915,14 +2190,62 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::CaptureToolResult(const api::Tool
     const auto found = v3_turn_->calls.find(result.tool_use_id);
     if (found == v3_turn_->calls.end() || !found->second.terminal || !found->second.action.has_value()) {
         fail("tool.capture.missing_terminal");
+        if (found != v3_turn_->calls.end() && found->second.child) {
+            if (found->second.child_capture_receipt) return *found->second.child_capture_receipt;
+            outcome.side_effect_indeterminate = true;
+            found->second.capture_failed = true;
+            found->second.child_capture_receipt = outcome;
+        }
         return outcome;
     }
     auto& book = found->second;
+    if (book.child_capture_receipt) return *book.child_capture_receipt;
+    const auto capture_once = [&]() -> ToolResultsCommitReceipt {
     if (!book.capture_event_id.empty()) return outcome;
+    if (book.child) {
+        // The native producer supplied the frozen parent values under this
+        // live owner; only the sealed child source is independently disk-read.
+        const auto terminal = child_terminals_->Find(book.child->child.run_id);
+        if (!terminal || book.child_attempt != book.action->attempt()) {
+            fail("subagent.observation.missing_terminal");
+            outcome.side_effect_indeterminate = true;
+            return outcome;
+        }
+        try {
+            auto display = CheckChildObservation(*v3_writer_, *book.child, *terminal, result);
+            if (!display) {
+                fail(display.error());
+                outcome.side_effect_indeterminate = true;
+                return outcome;
+            }
+            const auto& ref = *terminal->terminal;
+            v3::EventDraft observed;
+            observed.kind = v3::EventKindV3::SubagentObserved;
+            observed.turn_id = turn_id_;
+            observed.step_id = book.step_id;
+            observed.action_id = book.action_id;
+            observed.task_id = book.child->task_id;
+            observed.payload = {{"taskId", book.child->task_id},
+                {"childCheckpointRef", v3::ChildCheckpointRef{ref.session_id, ref.run_id, ref.seq, ref.hash}.ToJson()},
+                {"display", std::move(*display)}};
+            book.child_observation_receipt = v3_writer_->AppendEvent(std::move(observed), trajectory::Durability::PowerLoss);
+            V3NotifyCommitted(*book.child_observation_receipt);
+            if (book.child_observation_receipt->status != v3::WriteReceipt::Status::Committed) {
+                fail("subagent.observation.append_failed:" + book.child_observation_receipt->error_code);
+                outcome.side_effect_indeterminate = true;
+                return outcome;
+            }
+        } catch (const std::exception& error) {
+            fail("subagent.observation.exception:" + std::string(error.what()));
+            outcome.side_effect_indeterminate = true;
+            return outcome;
+        }
+    }
     book.capture_complete = result.capture_complete;
     book.capture_reason = result.capture_reason;
     if (!v3_books_->captures.has_value()) {
-        auto store = v3::ResultStore::Open(v3_writer_->path().parent_path(), "capture-");
+        auto store = OpenNamedStore(*v3_writer_, *v3_books_, "capture-",
+                                         book.child ? kChildResultEntries : 0);
         if (!store.has_value()) {
             book.capture_failed = true;
             const auto receipt = book.action->PersistFailed(*v3_writer_, "tool.capture.store_unavailable:" + store.error(),
@@ -1938,6 +2261,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::CaptureToolResult(const api::Tool
     capture.content = result.content;
     if (result.structured_content.has_value()) capture.structured_content = *result.structured_content;
     capture.tool_call_id = book.action_id;
+    capture.attempt = book.action->attempt();
     capture.execution_event_ref = book.terminal_event_id;
     capture.preview_policy = {{"policy", "raw-capture-before-post-hook"}};
     capture.outputs.push_back(v3::ResultStore::ChannelOutput{
@@ -1964,6 +2288,26 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::CaptureToolResult(const api::Tool
     }
     book.capture_event_id = receipt.id;
     return outcome;
+    };
+    auto captured = [&]() -> ToolResultsCommitReceipt {
+        if (!book.child) return capture_once();
+        try { return capture_once(); }
+        catch (const std::exception& error) {
+            fail("subagent.capture.exception:" + std::string(error.what()));
+        } catch (...) {
+            fail("subagent.capture.exception");
+        }
+        outcome.side_effect_indeterminate = true;
+        return outcome;
+    }();
+    if (book.child) {
+        if (!captured.ok()) {
+            captured.side_effect_indeterminate = true;
+            book.capture_failed = true;
+        }
+        book.child_capture_receipt = captured;
+    }
+    return captured;
 }
 
 ToolResultsCommitReceipt TrajectoryTurnBridge::RewriteToolResultsForHistory(api::Message& results) {
@@ -1974,7 +2318,30 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::RewriteToolResultsForHistory(api:
         receipt.error_code = "tool.preview.turn_not_open";
         return receipt;
     }
-    return V3ToolResultsCommitted(results);
+    const bool bound_child = [&] {
+        std::lock_guard lock(*v3_books_->tool_results_mutex);
+        for (const auto& block : results.content) {
+            const auto* result = std::get_if<api::ToolResultBlock>(&block);
+            if (!result) continue;
+            const auto found = v3_turn_->calls.find(result->tool_use_id);
+            if (found != v3_turn_->calls.end() && found->second.child)
+                return true;
+        }
+        return false;
+    }();
+    ToolResultsCommitReceipt receipt;
+    try { receipt = V3ToolResultsCommitted(results); }
+    catch (const std::exception& error) {
+        if (!bound_child) throw;
+        receipt.status = ToolResultsCommitReceipt::Status::Failed;
+        receipt.error_code = "subagent.result.exception:" + std::string(error.what());
+    } catch (...) {
+        if (!bound_child) throw;
+        receipt.status = ToolResultsCommitReceipt::Status::Failed;
+        receipt.error_code = "subagent.result.exception";
+    }
+    if (!receipt.ok() && bound_child) receipt.side_effect_indeterminate = true;
+    return receipt;
 }
 
 ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Message& results) {
@@ -1990,6 +2357,25 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
     // Any missing persistence, selection, message or admission receipt fails
     // this batch. A committed preview must have an immutable source to recover.
     ToolResultsCommitReceipt batch;
+    const bool bound_child = std::any_of(results.content.begin(), results.content.end(), [&](const auto& block) {
+        const auto* result = std::get_if<api::ToolResultBlock>(&block);
+        if (!result) return false;
+        const auto found = v3_turn_->calls.find(result->tool_use_id);
+        return found != v3_turn_->calls.end() && found->second.child.has_value();
+    });
+    const auto fail_batch = [&](std::string code, bool overwrite = false) {
+        if (batch.status != ToolResultsCommitReceipt::Status::Failed || (overwrite && !bound_child)) {
+            batch.status = ToolResultsCommitReceipt::Status::Failed;
+            batch.error_code = std::move(code);
+        }
+        if (bound_child) {
+            batch.side_effect_indeterminate = true;
+            // A failure can arise inside this batch after the loop configured
+            // a healthy summary provider. Stop new summary requests immediately;
+            // later siblings may still save deterministic already-executed output.
+            action_summary_backend_ = nullptr;
+        }
+    };
     for (auto& block : results.content) {
         auto* result = std::get_if<api::ToolResultBlock>(&block);
         if (result == nullptr) {
@@ -2004,29 +2390,25 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
         const auto it = v3_turn_->calls.find(result->tool_use_id);
         if (it != v3_turn_->calls.end() && it->second.tool_message_done) continue;
         if (it == v3_turn_->calls.end() || !it->second.terminal || !it->second.action.has_value()) {
-            batch.status = ToolResultsCommitReceipt::Status::Failed;
-            batch.error_code = "tool.preview.missing_terminal:" + result->tool_use_id;
+            fail_batch("tool.preview.missing_terminal:" + result->tool_use_id, true);
             continue;
         }
         V3TurnBooks::Call& book = it->second;
         if (book.capture_failed) {
-            batch.status = ToolResultsCommitReceipt::Status::Failed;
-            batch.error_code = "tool.capture.failed:" + result->tool_use_id;
+            fail_batch("tool.capture.failed:" + result->tool_use_id, true);
             continue;
         }
         if (book.capture_complete.has_value()) {
             result->capture_complete = *book.capture_complete;
             result->capture_reason = book.capture_reason;
         }
-        const auto hard_fail = [&batch](const char* where, const std::string& code) {
-            if (batch.status != ToolResultsCommitReceipt::Status::Failed) {
-                batch.status = ToolResultsCommitReceipt::Status::Failed;
-                batch.error_code = std::string(where) + ":" + code;
-            }
+        const auto hard_fail = [&](const char* where, const std::string& code) {
+            fail_batch(std::string(where) + ":" + code);
         };
         // 结果仓:原文按 artifact 不可变落档(§4.16)。
         if (!v3_books_->results.has_value()) {
-            if (auto store = v3::ResultStore::Open(v3_writer_->path().parent_path());
+            if (auto store = OpenNamedStore(*v3_writer_, *v3_books_, "res-",
+                                                  book.child ? kChildResultEntries : 0);
                 store.has_value()) {
                 v3_books_->results = std::move(*store);
             }
@@ -2067,6 +2449,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                         source.attempt = book.action->attempt();
                         source.execution_started = book.action->started();
                         source.result_refs = persisted.result_ref;
+                        source.named_results = v3_books_->named_results;
                         source.text = result->content;
                         switch (book.action->terminal()) {
                             case v3::ToolActionSession::Terminal::Finished: source.execution_state = "done"; break;
@@ -2100,8 +2483,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                         if (generation != action_summary_generation_ || v3_turn_.get() != turn_identity ||
                             v3_turn_->calls.find(tool_use_id) == v3_turn_->calls.end() ||
                             &v3_turn_->calls.at(tool_use_id) != book_identity) {
-                            batch.status = ToolResultsCommitReceipt::Status::Failed;
-                            batch.error_code = "tool.summary.source_scope_changed";
+                            fail_batch("tool.summary.source_scope_changed", true);
                             return batch;
                         }
                         action_summary_calls_remaining_ += remaining;
@@ -2115,7 +2497,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                         }
                     }
                     auto request = PreviewFromPersistedMaterials(persist, persisted, budget,
-                                                                 v3_writer_->path().parent_path());
+                                                                 v3_writer_->path().parent_path(), v3_books_->named_results.get());
                     if (!summary_event_ref && (result->content.size() > budget || !result->capture_complete || persist.outputs.size() > 1)) {
                         auto preview = v3::BuildToolPreview(request);
                         if (preview.listing_overflow) {
@@ -2126,7 +2508,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
                             }
                             // output_index 与 full_output 同一追回口径:给模型
                             // 绝对路径,相对账留 result_ref(T17)。
-                            request.output_index_path = platform::PathToUtf8(
+                            request.output_index_path = v3_books_->named_results ? v3_books_->named_results->DisplayPath(*index) : platform::PathToUtf8(
                                 v3_writer_->path().parent_path() / platform::Utf8ToPath(*index));
                             preview = v3::BuildToolPreview(request);
                         }
@@ -2172,7 +2554,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
             const std::string note = "tool.result.store_unavailable:" + book.action_id;
             recent_errors_.push_back(note);
             if (error_sink_ != nullptr) {
-                error_sink_->push_back(note);
+                error_sink_->Append(note);
             }
             platform::LogSink::Instance().Error("trajectory", "v3 落账失败: " + note);
             hard_fail("tool.result.store_unavailable", book.action_id);
@@ -2277,6 +2659,16 @@ std::optional<TrajectoryTurnBridge::V3CallOrigin> TrajectoryTurnBridge::V3Declar
     return origin;
 }
 
+std::optional<std::pair<std::string, std::uint64_t>> TrajectoryTurnBridge::V3ExecutingCallIdentity(
+    const std::string& provider_call_id) const {
+    if (!V3Mode() || !v3_turn_ || !v3_books_) return std::nullopt;
+    std::lock_guard lock(*v3_books_->tool_results_mutex);
+    const auto it = v3_turn_->calls.find(provider_call_id);
+    if (it == v3_turn_->calls.end() || !it->second.started || it->second.terminal ||
+        !it->second.action) return std::nullopt;
+    return std::pair{it->second.action_id, it->second.action->attempt()};
+}
+
 std::optional<std::string> TrajectoryTurnBridge::V3ReservedAssistantMessageId(
     const std::string& request_id) const {
     if (!V3Mode() || v3_turn_ == nullptr) {
@@ -2317,18 +2709,41 @@ void TrajectoryTurnBridge::NoteUnownedToolTrace(const agent::ToolTraceEvent& eve
     if (recent_errors_.size() < 64) {  // 有界:同一症状不无限刷错误环
         recent_errors_.push_back(note);
     }
-    if (error_sink_ != nullptr && error_sink_->size() < 128) {
-        error_sink_->push_back(note);
-    }
+    if (error_sink_ != nullptr) error_sink_->AppendIfBelow(note, 128);
     platform::LogSink::Instance().Warn("trajectory", "无主 tool trace(未由模型输出声明): " + note);
 }
 
-void TrajectoryTurnBridge::AttachChildRun(const std::string& call_id, const std::string& agent_run_id) {
-    // 接线点 1:v3 场的父子边由 subagent.spawn.requested/linked 五步自己
-    // 记账(parentActionRef → childSessionRef),calls_ 的 child_run_id 是
-    // v2 事件 relations 的概念,不再挂。
+std::expected<void, std::string> TrajectoryTurnBridge::AttachChildRun(
+    const std::string& call_id, const std::string& agent_run_id,
+    std::optional<SubagentSpawnProvenance> provenance) {
     if (V3Mode()) {
-        return;
+        if (!turn_open_ || !v3_turn_ || call_id.empty() || agent_run_id.empty() || !provenance)
+            return std::unexpected("subagent.attach.missing_current_owner");
+        std::lock_guard lock(*v3_books_->tool_results_mutex);
+        const auto found = v3_turn_->calls.find(call_id);
+        if (found == v3_turn_->calls.end() || !found->second.action ||
+            !found->second.started || found->second.terminal || found->second.child)
+            return std::unexpected("subagent.attach.inactive_action");
+        const auto& owner = provenance->parent_action;
+        const auto& call = found->second;
+        if (owner.session_id != v3_writer_->session_id() || owner.run_id != v3_writer_->run_id() ||
+            owner.turn_id != turn_id_ || owner.action_id != call.action_id ||
+            owner.step_id != call.step_id || owner.declared_message_ref.empty() ||
+            owner.declared_message_ref != call.assistant_message_ref ||
+            !v3_writer_->HasMessageId(owner.declared_message_ref) ||
+            provenance->child.run_id != agent_run_id || provenance->child.session_id.empty() ||
+            provenance->task_id.empty() || provenance->parent_journal.lexically_normal() != v3_writer_->path().lexically_normal() ||
+            provenance->spawn.session_id != owner.session_id || provenance->spawn.run_id != owner.run_id ||
+            provenance->spawn.event_id.empty() || !provenance->spawn.seq || provenance->spawn.hash.empty() ||
+            provenance->native_spawn.status != v3::WriteReceipt::Status::Committed ||
+            provenance->native_spawn.id != provenance->spawn.event_id ||
+            provenance->native_spawn.seq != provenance->spawn.seq ||
+            provenance->native_spawn.line_hash != provenance->spawn.hash ||
+            provenance->attempt != call.action->attempt())
+            return std::unexpected("subagent.attach.owner_mismatch");
+        found->second.child_attempt = call.action->attempt();
+        found->second.child = std::move(provenance);
+        return {};
     }
     // P0-D:挂边也只认已声明的 call——operator[] 会给陌生 id 造空册,正是
     // 这次的污染路径之一。找不到就记一笔诊断,不造册。
@@ -2337,18 +2752,18 @@ void TrajectoryTurnBridge::AttachChildRun(const std::string& call_id, const std:
         const std::string note = "trajectory.attach_child_run_undeclared:" + call_id;
         recent_errors_.push_back(note);
         if (error_sink_ != nullptr) {
-            error_sink_->push_back(note);
+            error_sink_->Append(note);
         }
         platform::LogSink::Instance().Warn(
             "trajectory", "AttachChildRun 指到未声明的 call,边界不挂: " + call_id);
-        return;
+        return std::unexpected(note);
     }
     it->second.child_run_id = agent_run_id;
+    return {};
 }
 
-void TrajectoryTurnBridge::NoteChildTerminal(const std::string& agent_run_id,
-                                             const std::string& terminal_event_hash) {
-    child_terminal_hashes_[agent_run_id] = terminal_event_hash;
+void TrajectoryTurnBridge::NoteChildTerminal(const SubagentTerminalReceipt& receipt) {
+    child_terminals_->Store(receipt);
 }
 
 

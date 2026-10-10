@@ -4,9 +4,12 @@
 // trajectory 事件。接口与主桥同一只(agent::LoopBoundaryRecorder),
 // SampleModel/探针只认接口。
 #pragma once
+#include "runtime/trajectory_diagnostics.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -38,10 +41,10 @@ namespace lubancode::runtime {
 class TrajectoryBypassBridge : public agent::LoopBoundaryRecorder {
 public:
     TrajectoryBypassBridge(trajectory::TrajectoryRecorder& recorder, trajectory::EventScope base_scope,
-                           TrajectoryTurnBridge::Identity identity);
+                           TrajectoryTurnBridge::Identity identity, std::string id_namespace = {});
     // v3 写模式(取消误报 ESC 单 Bug 2):v2 recorder 不在,主账是 V3Writer,
-    // 走 v3 的 typed 事件/消息合同,不往 v3 文件硬塞 v2 行。books 是账本的
-    // 会话共享账(借读 active_main_turn_id,旁路行 parentTurnId 挂主回合);
+    // 走 v3 的 typed 事件/消息合同,不往 v3 文件硬塞 v2 行。books 只在
+    // 前台构造时读取：冻结触发主轮，并持共享原子阻断门；后台不再借 books。
     // purpose 定本桥服务的请求用途(消息 purpose 映射按它)。identity_scope
     // 只借 workspace/session/run 三枚身份(wake 投递用),不进事件信封——
     // v3 行的身份在信封自己的 sessionId/runId。
@@ -49,6 +52,10 @@ public:
                            trajectory::EventScope identity_scope, TrajectoryTurnBridge::Identity identity,
                            accounting::RequestPurpose purpose);
     ~TrajectoryBypassBridge() override;
+
+    // Host admission retirement ends an open V2 recording turn while its
+    // recorder is still alive. It does not claim the physical Backend stopped.
+    void RetireRecording();
 
     TrajectoryBypassBridge(const TrajectoryBypassBridge&) = delete;
     TrajectoryBypassBridge& operator=(const TrajectoryBypassBridge&) = delete;
@@ -74,7 +81,7 @@ public:
     std::vector<std::string> recent_errors() const { return recent_errors_; }
     // v3 模式的落账错误共享汇(账本持有,/doctor trajectory 从这读);
     // v2 路不碰,行为与从前一致。
-    void SetErrorSink(std::vector<std::string>* sink) { error_sink_ = sink; }
+    void SetErrorSink(std::shared_ptr<TrajectoryDiagnostics> sink) { error_sink_ = std::move(sink); }
     // T1 committed wake(与主桥同款;默认空 = 零行为)。
     void SetCommitWake(telemetry::CommitObserver* wake, std::string stream_id) {
         commit_wake_ = wake;
@@ -130,10 +137,13 @@ private:
 
     trajectory::TrajectoryRecorder* recorder_ = nullptr;  // v2 主账(引用改指针:类要装得下 v3 模式)
     trajectory::v3::V3Writer* v3_writer_ = nullptr;        // v3 主账
-    V3SessionBooks* v3_books_ = nullptr;                   // v3 会话共享账(借读,不持有)
+    std::string v3_trigger_turn_id_;  // Frozen on the front thread before worker launch.
+    bool v3_execution_blocked_at_bind_ = false;
+    std::shared_ptr<std::atomic<bool>> v3_execution_gate_;
     accounting::RequestPurpose purpose_ = accounting::RequestPurpose::OtherHostRequest;
     trajectory::EventScope base_scope_;
     TrajectoryTurnBridge::Identity identity_;
+    std::string id_namespace_;  // Frozen legacy recorder position plus ledger binding sequence.
     std::string turn_id_;
     bool turn_open_ = false;
     bool dead_ = false;  // 开不了小 turn(主 turn 在开着)后哑火,不再连发
@@ -145,7 +155,7 @@ private:
     std::uint64_t input_counter_ = 0;
     std::uint64_t output_counter_ = 0;
     std::vector<std::string> recent_errors_;
-    std::vector<std::string>* error_sink_ = nullptr;    // v3 落账错误共享汇(默认空)
+    std::shared_ptr<TrajectoryDiagnostics> error_sink_ = nullptr;    // v3 落账错误共享汇(默认空)
     telemetry::CommitObserver* commit_wake_ = nullptr;  // T1 committed wake(默认空)
     std::string wake_stream_id_;
 };

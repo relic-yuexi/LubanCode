@@ -78,6 +78,11 @@ struct LuaProfile {
     // 指令 hook 每步长查;只拦"跑野的脚本",阻塞 C 边界各 Host API 自己
     // 接 deadline/cancel。
     std::chrono::milliseconds wall_budget{0};
+    // SDK standalone 禁协议 stdout；旧 CLI/Hook 默认仍保留 print。
+    bool allow_print = true;
+    // SDK removes script-level protected calls before source evaluation. The
+    // host's C lua_pcall boundaries and legacy CLI/Hook defaults stay intact.
+    bool allow_error_catching = true;
 
     static LuaProfile PureDefault();
     static LuaProfile TrustedDefault();
@@ -95,8 +100,10 @@ struct LuaProfile {
 //                         coroutine/debug 一概不开)——§五逐项审查后的名单
 //   OpenLuaLibraries   — 按画像开库的唯一入口(Pure/Trusted 开全库再按需
 //                         关门,Whitelisted 走白名单);装载路径不许再各自
-//                         luaL_openlibs 抄一份
-//   PushJsonToLua       — JSON -> lua 值(字符串按字节原样)
+//                         luaL_openlibs 抄一份；调用方须置于受保护 Lua 边界
+//   PushJsonToLua       — JSON -> lua 值(字符串按字节原样)。转换计划在
+//                         pcall 外持有；失败销毁计划后抛回既有 Lua 错误链，
+//                         调用方仍须有外层保护(standalone Run 已具备)
 //   LuaValueToJson      — lua 值 -> JSON(表按 1..n 连续整数判数组)
 lua_State* NewGuardedLuaState(const LuaProfile& profile, std::unique_ptr<LuaGuard>& guard_out);
 void ApplyPureLuaProfile(lua_State* L);

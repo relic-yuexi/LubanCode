@@ -69,10 +69,15 @@ TEST_CASE("健康拍:等首字节越软线翻 SuspectTransport,通知去重只�
     runtime::AgentSupervisor supervisor(ledger);
     supervisor.SetThresholds(FastThresholds());
     const auto task = MakeTask(ledger, "首字节慢");
-    supervisor.WatchTask(task);
+    // This case drives the real HealthPass synchronously. WatchTask would also
+    // start the periodic thread: it can publish health before its notice, while
+    // our manual pass sees unchanged health and has no notice of its own to add.
+    // HealthPass visits live ledger tasks directly; a watch is not required.
+    REQUIRE(supervisor.supervisor_thread_count_for_test() == 0);
     ledger.RecordRequestStarted(task, 1, "hash");
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
     supervisor.TickHealthForTest();
+    REQUIRE(supervisor.supervisor_thread_count_for_test() == 0);
     CHECK(ledger.ProgressOf(task->snapshot.id).health == agent::AgentHealthState::SuspectTransport);
     // 第二拍:同因同代际,不重复弹。
     const auto first_notices = ledger.TakeSupervisorNotices();

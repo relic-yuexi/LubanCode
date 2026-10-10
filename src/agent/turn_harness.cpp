@@ -198,6 +198,17 @@ DriveReport DriveTurn(Agent& agent, const TurnWiring& wiring, api::Message input
         if (options.on_round_settled) {
             options.on_round_settled(*outcome);
         }
+        if (outcome->side_effect_indeterminate) {
+            report.side_effect_indeterminate = true;
+            report.side_effect_error = outcome->side_effect_error;
+            report.ok = false;
+            report.error = outcome->side_effect_error.empty()
+                ? "tool.side_effect_indeterminate" : outcome->side_effect_error;
+            // A started tool follows an actual model request: this input batch
+            // was delivered. Keep pending, not-yet-drained batches untouched.
+            inflight.reset();
+            break;
+        }
         if (outcome->cancelled) {
             // 打断不是错误:半截文本照常交,退批收场。
             restore_inflight();
@@ -270,7 +281,7 @@ DriveReport DriveTurn(Agent& agent, const TurnWiring& wiring, api::Message input
 
 void RunStopContinuation(Agent& agent, const TurnWiring& wiring, const StopOptions& options,
                          DriveReport& report) {
-    if (!options.emit) {
+    if (!options.emit || report.side_effect_indeterminate) {
         return;  // 没配 stop 钩子,整环跳过
     }
     bool stop_hook_active = false;
@@ -284,6 +295,20 @@ void RunStopContinuation(Agent& agent, const TurnWiring& wiring, const StopOptio
             options.on_continue_request(merged.block_reason);
         }
         const auto continuation = agent.Run(options.label + merged.block_reason, wiring, options.cancel);
+        if (continuation.has_value() && continuation->side_effect_indeterminate) {
+            report.side_effect_indeterminate = true;
+            report.side_effect_error = continuation->side_effect_error;
+            report.ok = false;
+            report.error = continuation->side_effect_error.empty()
+                ? "tool.side_effect_indeterminate" : continuation->side_effect_error;
+            report.steps_used += continuation->steps_used;
+            report.output_budget = continuation->output_budget;
+            report.stop_reason = continuation->stop_reason;
+            report.final_round = *continuation;
+            if (options.turn_budget_snapshot) report.turn_budget = options.turn_budget_snapshot();
+            if (options.on_round) options.on_round(*continuation);
+            break;
+        }
         if (!continuation.has_value() || continuation->cancelled || continuation->hit_step_limit) {
             break;  // 续跑轮报错/被打断/撞预算:如实停,不带病硬续
         }

@@ -48,14 +48,14 @@ std::optional<nlohmann::json> Store::GetOutput(const std::string& node_id) const
     const std::lock_guard<std::mutex> lock(mutex_);
     const auto it = outputs_.find(node_id);
     if (it == outputs_.end()) return std::nullopt;
-    return it->second;
+    return std::optional<nlohmann::json>{std::in_place, it->second};
 }
 
 std::optional<nlohmann::json> Store::GetMeta(const std::string& node_id) const {
     const std::lock_guard<std::mutex> lock(mutex_);
     const auto it = metas_.find(node_id);
     if (it == metas_.end()) return std::nullopt;
-    return it->second;
+    return std::optional<nlohmann::json>{std::in_place, it->second};
 }
 
 nlohmann::json Store::ToJson() const {

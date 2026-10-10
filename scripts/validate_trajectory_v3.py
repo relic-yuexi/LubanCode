@@ -50,6 +50,8 @@ EVENT_KEYS = COMMON_KEYS | {
 
 KINDS = {
     "session.started", "session.ended", "system.change",
+    "sdk.operation.turn.bound",
+    "sdk.job.operation.bound",
     "context.system.applied", "context.input.applied", "context.tool_previews.reduced",
     "model.request.prepared", "model.request.sent", "model.request.failed",
     "model.response.started", "model.response.delta", "model.response.completed",
@@ -94,7 +96,7 @@ KINDS = {
     # statusless 事实行:registered/dispatched/acknowledged 只表示事件已
     # 发生,不等于业务 job 已完成;unknown 是执行投影状态(payload
     # observedStatus),不硬塞信封 status。
-    "tool.job.registered", "tool.job.dispatched", "tool.job.observed",
+    "tool.job.registered", "tool.job.adopted", "tool.job.dispatched", "tool.job.observed",
     "tool.job.cancel_requested",
     "tool.delivery.prepared", "tool.delivery.acknowledged",
     "tool.delivery.uncertain",
@@ -124,6 +126,9 @@ KIND_STATUS = {
     "cancelled": "cancelled", "rejected": "rejected", "unknown": "unknown",
 }
 STATUSLESS_KINDS = {
+    "sdk.operation.turn.bound",
+    "sdk.job.operation.bound",
+    "tool.job.adopted",
     "session.started", "system.change", "model.request.prepared",
     "model.response.started", "model.response.delta", "compact.requested",
     "compact.range.retreated",
@@ -434,7 +439,46 @@ def validate_line(obj: object, expect_seq: int) -> dict:
         if id_field is not None and not isinstance(obj.get(id_field), str):
             raise ValidationError(f"{kind} 必带 {id_field}")
         payload = obj.get("payload") or {}
-        if kind.startswith(("tool.execution.", "tool.result.")):
+        if kind == "sdk.operation.turn.bound":
+            if not isinstance(obj.get("turnId"), str) or not obj["turnId"] or any(
+                    key in obj for key in ("parentTurnId", "stepId", "requestId", "actionId", "compactId",
+                                          "commandId", "hookDispatchId", "taskId", "titleGenerationId", "effects", "effectRefs")):
+                raise ValidationError("main operation anchor requires only a turn identity")
+            if len(obj["turnId"]) > 200 or any(char not in
+                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for char in obj["turnId"]):
+                raise ValidationError("invalid main operation turn ID")
+            if set(payload) != {"layout", "version", "operationId", "inputId", "payloadHash"} or \
+                    type(payload.get("version")) is not int or payload["version"] != 1 or \
+                    payload.get("layout") != "sdk_main_operation_turn_v1":
+                raise ValidationError("unknown main operation anchor layout/version")
+            for key in ("operationId", "inputId"):
+                value = payload[key]
+                if not isinstance(value, str) or not 0 < len(value) <= 200 or \
+                        any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for char in value):
+                    raise ValidationError("invalid main operation anchor identity: " + key)
+            if not is_hex64(payload["payloadHash"]):
+                raise ValidationError("main operation anchor payloadHash must be lowercase SHA-256")
+        elif kind == "sdk.job.operation.bound":
+            check_tool_payload(obj, kind, payload, True)
+            if not all(isinstance(obj.get(key), str) and obj[key] for key in ("turnId", "stepId", "actionId")) or \
+                    any(key in obj for key in ("parentTurnId", "requestId", "compactId", "commandId", "hookDispatchId",
+                                             "taskId", "titleGenerationId", "effects", "effectRefs")) or payload["attempt"] != 1:
+                raise ValidationError("Job binding requires business turn/step/action, attempt 1")
+            refs = {"parentOperationRef", "assistantMessageRef", "sourcePendingEventRef", "sourceAdmissionEventRef",
+                    "preparedPendingEventRef", "registeredEventRef", "adoptionEventRef"}
+            keys = refs | {"layout", "version", "jobId", "tool_call_id", "attempt", "originalInputSha256", "effectiveInputSha256"}
+            if set(payload) != keys or type(payload.get("version")) is not int or payload["version"] != 1 or \
+                    payload.get("layout") != "session_owned_job_operation_v1" or not isinstance(payload["jobId"], str) or not payload["jobId"]:
+                raise ValidationError("unknown Job operation layout/version")
+            for key in refs:
+                ref = payload[key]
+                if not isinstance(ref, dict) or set(ref) != {"sessionId", "runId", "id", "seq", "hash"} or \
+                        not all(isinstance(ref[k], str) and ref[k] for k in ("sessionId", "runId", "id")) or \
+                        type(ref["seq"]) is not int or ref["seq"] <= 0 or not is_hex64(ref["hash"]):
+                    raise ValidationError("Job binding requires canonical five-key reference")
+            if not all(is_hex64(payload[key]) for key in ("originalInputSha256", "effectiveInputSha256")):
+                raise ValidationError("Job binding requires original/effective SHA256")
+        elif kind.startswith(("tool.execution.", "tool.result.")):
             # 工具族载荷合同(§4.14-4.16/§4.19;与 C++ schema3 同口径)。
             if kind == "tool.execution.pending":
                 check_tool_payload(obj, kind, payload, True)
@@ -541,12 +585,81 @@ def validate_line(obj: object, expect_seq: int) -> dict:
                             raise ValidationError("wireCallRef.async 应为 boolean")
                     if "approvalRequired" in payload and not isinstance(payload["approvalRequired"], bool):
                         raise ValidationError("tool.job.registered approvalRequired 应为 boolean")
+                elif kind == "tool.job.adopted":
+                    check_tool_payload(obj, kind, payload, True)
+                    if "\0" in payload["jobId"]:
+                        raise ValidationError("owned Job jobId contains NUL")
+                    if payload.get("layout") != "parent_admission_job_business_v1" or payload.get("attempt") != 1 \
+                            or type(payload.get("attempt")) is not int or not obj.get("turnId") or not obj.get("stepId"):
+                        raise ValidationError("owned Job requires the known business-attempt-one layout")
+                    for key in ("parentActionId", "provider_tool_call_id", "toolName"):
+                        if not isinstance(payload.get(key), str) or not payload[key] or "\0" in payload[key]:
+                            raise ValidationError(f"owned Job {key} must be nonempty text")
+                    if payload["toolName"] != "run_command" or payload["parentActionId"] == obj.get("actionId"):
+                        raise ValidationError("owned Job has an invalid command/action role")
+                    for key in ("assistantMessageRef", "sourcePendingEventRef", "sourceAdmissionEventRef",
+                                "preparedPendingEventRef", "registeredEventRef"):
+                        ref = payload.get(key)
+                        if not isinstance(ref, dict) or not is_ref(ref) or type(ref["seq"]) is not int \
+                                or ref["seq"] <= 0 or not ref["id"] or ref["sessionId"] != obj["sessionId"] \
+                                or ref["runId"] != obj["runId"]:
+                            raise ValidationError(f"owned Job {key} must be an actual same-owner five-key reference")
+                    for key in ("originalInputSha256", "effectiveInputSha256"):
+                        if not is_hex64(payload.get(key)):
+                            raise ValidationError(f"owned Job {key} must be hex64")
+                    for key in ("effectiveInput", "preparedOwner", "toolIdentity", "executionPolicy", "commandLimits"):
+                        if not isinstance(payload.get(key), dict):
+                            raise ValidationError(f"owned Job {key} must be an object")
+                    owner, identity, policy, limits, inputs = (payload[key] for key in
+                        ("preparedOwner", "toolIdentity", "executionPolicy", "commandLimits", "effectiveInput"))
+                    for key in ("sessionId", "runId", "projectId", "cwd"):
+                        if not isinstance(owner.get(key), str) or not owner[key] or "\0" in owner[key]:
+                            raise ValidationError(f"owned Job owner {key} must be nonempty text")
+                    if owner["sessionId"] != obj["sessionId"] or owner["runId"] != obj["runId"]:
+                        raise ValidationError("owned Job owner differs from its envelope")
+                    for key in ("coordinatorId", "epoch"):
+                        if type(owner.get(key)) is not int or owner[key] <= 0:
+                            raise ValidationError("owned Job owner counter must be positive")
+                    for key in ("logicalName", "registrationSource", "version", "executionScope"):
+                        if not isinstance(identity.get(key), str) or not identity[key] or "\0" in identity[key]:
+                            raise ValidationError(f"owned Job tool identity {key} must be nonempty text")
+                    if identity["logicalName"] != payload["toolName"] or identity["executionScope"] != owner["cwd"]:
+                        raise ValidationError("owned Job tool identity differs from its target")
+                    if policy.get("allow_background") is not True or policy.get("retry_policy") != "none" \
+                            or policy.get("resume_policy") != "hold":
+                        raise ValidationError("owned Job requires explicit background permission, no retry and Hold")
+                    if "side_effect_class" in policy and (not isinstance(policy["side_effect_class"], str)
+                            or not policy["side_effect_class"]):
+                        raise ValidationError("owned Job side effect must be nonempty text")
+                    if "resource_keys" in policy and (not isinstance(policy["resource_keys"], list)
+                            or any(not isinstance(key, str) or not key for key in policy["resource_keys"])):
+                        raise ValidationError("owned Job resource keys must be an array of nonempty text")
+                    for key, upper in (("timeout_ms", 86400000), ("max_output_bytes", 2097152)):
+                        if type(limits.get(key)) is not int or not 0 < limits[key] <= upper:
+                            raise ValidationError("owned command limits must be positive and bounded")
+                    deadline = policy.get("deadline_ms", 0)
+                    if type(policy.get("max_output_bytes")) is not int or limits["max_output_bytes"] > policy["max_output_bytes"] \
+                            or type(deadline) is not int or deadline < 0 \
+                            or deadline and limits["timeout_ms"] > deadline:
+                        raise ValidationError("owned command limits broaden the frozen policy")
+                    if inputs.get("cwd") != owner["cwd"] or "max_runtime_ms" in inputs \
+                            or inputs.get("run_in_background", False) is not False:
+                        raise ValidationError("owned command input must keep its target and synchronous execution")
                 elif kind == "tool.job.dispatched":
                     check_tool_payload(obj, kind, payload, True)
                     if not isinstance(payload.get("ownerEpoch"), str) or not payload["ownerEpoch"]:
                         raise ValidationError("tool.job.dispatched ownerEpoch 应为非空 string")
                 elif kind == "tool.job.observed":
                     check_tool_payload(obj, kind, payload, False)
+                    if "startupFailed" in payload:
+                        if type(payload["startupFailed"]) is not bool:
+                            raise ValidationError("startupFailed must be boolean")
+                        if payload["startupFailed"] and (payload.get("observedStatus") != "failed"
+                                or "resultRef" in payload or "postEventRef" in payload):
+                            raise ValidationError("confirmed startup failure cannot claim raw or Post")
+                    if "postEventRef" in payload and (not isinstance(payload["postEventRef"], dict)
+                            or not is_ref(payload["postEventRef"])):
+                        raise ValidationError("owned Post requires native five-key provenance")
                     if payload.get("observedStatus") not in (
                             "registered", "queued", "running", "succeeded", "failed",
                             "cancelled", "unknown", "awaiting_approval"):
@@ -1250,6 +1363,56 @@ def self_test() -> int:
     bad = dict(goal_applied); bad["status"] = "done"
     if not expect_fail(lambda: validate_line(bad, 4), "goal statusless"):
         failures += 1
+    # The private main-operation anchor shares its exact C++ single-line shape.
+    anchor = dict(goal_applied)
+    anchor.update({"kind": "sdk.operation.turn.bound", "turnId": "turn-000001", "payload": {
+        "layout": "sdk_main_operation_turn_v1", "version": 1,
+        "operationId": "op-1", "inputId": "in-1", "payloadHash": "a" * 64}})
+    try:
+        validate_line(anchor, 4)
+    except ValidationError as error:
+        failures += 1
+        print(f"self-test main operation anchor rejected: {error}")
+    invalid_anchors = []
+    for key, value in (("version", True), ("version", 2), ("layout", "foreign"),
+                       ("operationId", "../op"), ("inputId", ""), ("inputId", "x" * 201),
+                       ("payloadHash", "A" * 64), ("payloadHash", "a" * 63), ("extra", 1)):
+        invalid_anchors.append({**anchor, "payload": {**anchor["payload"], key: value}})
+    invalid_anchors.append({key: value for key, value in anchor.items() if key != "turnId"})
+    invalid_anchors.extend({**anchor, "turnId": value} for value in ("", "../turn", "x" * 201))
+    for key in ("status", "parentTurnId", "stepId", "requestId", "actionId", "compactId",
+                "commandId", "hookDispatchId", "taskId", "titleGenerationId", "effects", "effectRefs"):
+        invalid_anchors.append({**anchor, key: [] if key in ("effects", "effectRefs") else
+                                "done" if key == "status" else "foreign-1"})
+    for bad_anchor in invalid_anchors:
+        if not expect_fail(lambda: validate_line(bad_anchor, 4), "main operation anchor exact shape"):
+            failures += 1
+    # Only the native single-line shape; cross-row adoption is the C++ reader's job.
+    native_ref = {"sessionId": "fixture", "runId": "run-1", "id": "event-1", "seq": 1, "hash": "a" * 64}
+    job_binding = {**anchor, "kind": "sdk.job.operation.bound", "stepId": "step-1", "actionId": "action-1",
+                   "payload": {"layout": "session_owned_job_operation_v1", "version": 1,
+                               "jobId": "job-owned-action-1", "tool_call_id": "action-1", "attempt": 1,
+                               "originalInputSha256": "a" * 64, "effectiveInputSha256": "b" * 64,
+                               **{key: dict(native_ref) for key in ("parentOperationRef", "assistantMessageRef",
+                                    "sourcePendingEventRef", "sourceAdmissionEventRef", "preparedPendingEventRef",
+                                    "registeredEventRef", "adoptionEventRef")}}}
+    try:
+        validate_line(job_binding, 4)
+    except ValidationError as error:
+        failures += 1
+        print(f"self-test Job operation binding rejected: {error}")
+    for key, value in (("version", True), ("version", 2), ("layout", "foreign"), ("attempt", 2),
+                       ("jobId", ""), ("adoptionEventRef", "event-1"),
+                       ("adoptionEventRef", {**native_ref, "seq": True}),
+                       ("adoptionEventRef", {**native_ref, "extra": "unbounded"}),
+                       ("originalInputSha256", "A" * 64), ("effectiveInputSha256", "x"), ("extra", 1)):
+        bad_job = {**job_binding, "payload": {**job_binding["payload"], key: value}}
+        if not expect_fail(lambda: validate_line(bad_job, 4), "Job operation exact shape"):
+            failures += 1
+    for key in ("status", "requestId", "effects"):
+        bad_job = {**job_binding, key: [] if key == "effects" else "done" if key == "status" else "request-1"}
+        if not expect_fail(lambda: validate_line(bad_job, 4), "Job operation owner/status shape"):
+            failures += 1
     bad = dict(goal_applied)
     bad["payload"] = {**bad["payload"], "toStateRevision": 2}
     if not expect_fail(lambda: validate_line(bad, 4), "goal revision +1"):

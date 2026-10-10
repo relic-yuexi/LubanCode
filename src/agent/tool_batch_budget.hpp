@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "api/types.hpp"
+#include "tools/tool_content.hpp"
 
 namespace lubancode::agent {
 
@@ -37,12 +38,16 @@ inline ToolBatchBudgetPlan PlanToolBatchBudget(const api::Message& results,
             plan.error = "tool_batch.invalid_pairing";
             return plan;
         }
-        // Cap the body before addition to avoid overflow. This is a desired
-        // ceiling, not a charge for bytes actually sent: water filling below
-        // and the final serialized-input check still enforce real capacity.
-        plan.preview_bytes.push_back(
-            std::min<std::size_t>(32768 - kToolPreviewMetadataReserveBytes,
-                                  result->content.size()) + kToolPreviewMetadataReserveBytes);
+        // A separate raw_payload requires source/channel metadata even when the
+        // compatibility body is tiny. Ask for the existing cap, then water-fill
+        // within available; the bridge still checks the actual representation.
+        // Plain text also reserves the framing introduced by the bridge. Cap
+        // the body before adding that reserve to avoid size_t overflow.
+        const auto desired = tools::HasNativePayloadBeyondProjection(result->content, result->blocks)
+                                 ? std::size_t{32768}
+                                 : std::min<std::size_t>(32768 - kToolPreviewMetadataReserveBytes,
+                                                        result->content.size()) + kToolPreviewMetadataReserveBytes;
+        plan.preview_bytes.push_back(desired);
     }
     if (plan.preview_bytes.empty()) return plan;
     // Water filling keeps small results whole, shares the remaining budget among

@@ -65,7 +65,7 @@ public:
     // T11-A:生成身份(一代精炼一枚,起飞/提取/采用同号;manual/local 不铸)。
     static std::string TitleGenerationIdOf(std::uint64_t generation);
     // T11-A:精炼起飞的事实(title.requested,v3 场落账;v2 场 no-op)。
-    // 在 refiner().Start 成功后调——请求真发了才记发起,不冒充。
+    // 在 refiner().Start 接任务后调；失败终态也属一次尝试，不能据此认定 Backend 已发送。
     void NoteTitleGenerationStarted(const std::string& model, const std::string& provider);
     // /clear 开新场:翻代、取消在飞精炼、下一问重走本地起名。
     void ResetForNewSession();

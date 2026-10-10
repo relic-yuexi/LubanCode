@@ -76,7 +76,7 @@ public:
                           trajectory::TrajectoryDirectory directory,
                           trajectory::RecorderOptions recorder_options,
                           trajectory::TrainingPolicy training_policy, std::string run_id,
-                          std::string workflow_id, std::vector<std::string>* io_errors,
+                          std::string workflow_id, std::shared_ptr<TrajectoryDiagnostics> io_errors,
                           telemetry::CommitObserver* wake,
                           std::function<std::optional<std::string>()>* node_start_fault)
         : recorder_(std::move(recorder)), directory_(std::move(directory)),
@@ -265,8 +265,7 @@ public:
                 // AR-03 联动:io_errors_ 指回 ledger 的诊断环,map 并发项的
                 // worker 会同时撞子账开张失败——裸 push_back 是数据竞争
                 //(TSan 实锤),诊断口也走锁。
-                std::lock_guard<std::mutex> lock(io_errors_mutex_);
-                io_errors_->push_back("workflow_node.start_failed:" + failure.stage + ":" +
+                io_errors_->Append("workflow_node.start_failed:" + failure.stage + ":" +
                                       failure.error_code);
             }
             platform::LogSink::Instance().Error(
@@ -381,8 +380,7 @@ public:
         } else {
             terminal_hash_.clear();
             if (io_errors_ != nullptr) {
-                std::lock_guard<std::mutex> lock(io_errors_mutex_);
-                io_errors_->push_back("workflow.finish_failed:" + receipt.error_code);
+                io_errors_->Append("workflow.finish_failed:" + receipt.error_code);
             }
         }
         (void)recorder_->Close();
@@ -416,8 +414,7 @@ private:
                                      trajectory::EventKindName(kind) + ":" + receipt.error_code;
             if (io_errors_ != nullptr) {
                 // Put 是并发口(map worker 各自落编排事实),诊断同锁。
-                std::lock_guard<std::mutex> lock(io_errors_mutex_);
-                io_errors_->push_back(note);
+                io_errors_->Append(note);
             }
             platform::LogSink::Instance().Error("trajectory", "编排事实落不了: " + note);
         } else {
@@ -445,11 +442,8 @@ private:
     trajectory::TrainingPolicy training_policy_ = trajectory::TrainingPolicy::Metadata;
     std::string run_id_;
     std::string workflow_id_;
-    std::vector<std::string>* io_errors_ = nullptr;
-    // 诊断环的并发锁(AR-03 联动):ledger 的 io_errors_ 裸 vector 被多桥
-    // 共指;workflow 侧的三个落诊断口(fail_out/Finish/Put)都可能从 map
-    // worker 并发进——push_back 必须串行。纯诊断路径,无热回路。
-    std::mutex io_errors_mutex_;
+    // The same owned sink synchronizes workflow, main, child and bypass producers.
+    std::shared_ptr<TrajectoryDiagnostics> io_errors_;
     telemetry::CommitObserver* wake_ = nullptr;
     std::function<std::optional<std::string>()>* node_start_fault_ = nullptr;
     std::string terminal_hash_;
@@ -483,7 +477,7 @@ TrajectorySessionLedger::SpawnWorkflowRun(
                 (void)trajectory::DiscardUncommittedStream(*stream);
             }
         }
-        io_errors_.push_back("workflow.start_failed:" + failure.stage + ":" + failure.error_code);
+        io_errors_->Append("workflow.start_failed:" + failure.stage + ":" + failure.error_code);
         platform::LogSink::Instance().Error(
             "trajectory", "编排账开张失败[" + failure.stage + "]: " + failure.error_code +
                               (failure.detail.empty() ? std::string() : " (" + failure.detail + ")"));
@@ -579,7 +573,7 @@ TrajectorySessionLedger::SpawnWorkflowRun(
     }
     return std::unique_ptr<TrajectoryWorkflowRunBridge>(new WorkflowRunBridgeImpl(
         std::move(recorder_owner), impl_->active->directory, impl_->recorder_options,
-        impl_->training_policy, workflow_run_id, definition.workflow_id, &io_errors_,
+        impl_->training_policy, workflow_run_id, definition.workflow_id, io_errors_,
         impl_->telemetry_wake, &impl_->workflow_node_start_fault));
 }
 

@@ -41,6 +41,7 @@
 #include "app/backend_stack.hpp"
 #include "app/runtime_profile.hpp"
 #include "app/tool_runtime.hpp"
+#include "app/cli_tool_assembly.hpp"
 #include "app/hook_runtime.hpp"
 #include "app/turn_runner.hpp"
 #include "app/commands/session_commands.hpp"
@@ -61,6 +62,7 @@
 #include "cli/live_transcript.hpp"
 #include "runtime/worktree.hpp"
 #include "runtime/async_tool_runtime.hpp"  // 异步工具 P2:one-shot 宿主接线(dormant)
+#include "runtime/execution_owner.hpp"
 #include "runtime/id_authority.hpp"      // ProcessIdAuthority:单发工具栅栏的发号局
 #include "runtime/tool_trace_hub.hpp"    // ToolTraceHub:单发工具事件进轨迹的栅栏
 #include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger:单发一场的账本
@@ -268,8 +270,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         runtime_options.deferred_mode = resolution.mode;
         runtime_options.native_server_tool_search = resolution.server_tool_search;
     }
-    lubancode::app::ToolRuntime tool_runtime(config, theme, wrapped_backend, skills, skills_segment,
-                                             CurrentDirUtf8(), std::move(runtime_options));
+    lubancode::app::ToolRuntime tool_runtime(
+        config, wrapped_backend, skills, skills_segment,
+        ResolveCliToolAssemblyPlan(CurrentDirUtf8()), std::move(runtime_options),
+        MakeCliToolAssemblyDiagnosticSink(theme, std::cout));
     auto& registry = tool_runtime.main_registry();
     auto& sub_registry = tool_runtime.sub_registry();
     const auto todo_state = tool_runtime.todo_state();
@@ -401,7 +405,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     }
     // 环境快照要在皮 move 进 loop 前留一份系统提示(§9.1 的真值取材)。
     const std::string oneshot_system_prompt = once_agent_profile.system_prompt;
-    lubancode::agent::Agent loop(wrapped_backend, registry, std::move(once_agent_profile));
+    lubancode::runtime::ExecutionOwner execution(
+        lubancode::runtime::HostBorrowedExecutionResources{wrapped_backend, registry},
+        std::move(once_agent_profile));
+    auto& loop = execution.agent();
     std::string turn_context;
     if (project_memory != nullptr) {
         // 单发模式的问题就是用户提问,query_origin=user 才跑检索。

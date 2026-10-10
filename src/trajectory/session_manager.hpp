@@ -10,6 +10,8 @@
 // fake);轨迹侧只掌账、只落事实。
 #pragma once
 
+#include "trajectory/session_recovery_view.hpp"
+
 #include <atomic>
 #include <cstdint>
 #include <expected>
@@ -25,6 +27,10 @@
 #include <nlohmann/json.hpp>
 
 #include "trajectory/directory.hpp"
+#include "trajectory/cas_store.hpp"
+#include "trajectory/named_result_blobs.hpp"
+#include "trajectory/managed_session_reservation.hpp"
+#include "trajectory/opening.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/replay.hpp"
 #include "trajectory/session_lock.hpp"
@@ -235,10 +241,18 @@ struct EventRef {
 // session.json(盘上身份在 v3 账首行)。
 struct ActiveSession {
     TrajectoryDirectory directory;
+    SessionManifest manifest;
+    // Immutable original native publication; contains no Writer, lock or Policy.
+    // Its lifetime also covers a failed candidate and the post-Close read view.
+    std::shared_ptr<const ManagedSessionOwnershipPublication> managed_publication;
+    SessionLock lock;
+    MemoryCapabilityLease memory_capability;
+    NamedResultLease named_result_capability;
+    std::shared_ptr<const SessionRecoveryView> recovery_view;
+    // Member order also closes native writers before sealing CAS writes and
+    // releasing the lock on a failed opening or owner's destruction.
     std::optional<TrajectoryRecorder> main;  // 关柄后仍在,只是拒写
     std::optional<v3::V3Writer> v3_main;     // v3 场的主账写者(与 main 互斥)
-    SessionManifest manifest;
-    SessionLock lock;
     SessionStatus status = SessionStatus::Preparing;
 
     std::filesystem::path session_dir() const { return directory.session_dir(); }
@@ -520,6 +534,13 @@ struct SessionManagerOptions {
     // 建场时宿主还不知道最终 system,首行先立"此刻已知"的底,第一次
     // 模型请求带上真 system 时走 §4.3 三步切换。恢复不重拼(§4.3)。
     std::string v3_system_content;
+    V3OpeningParticipant v3_opening_participant;
+    std::shared_ptr<MemoryCapabilityFactory> memory_capability_factory;
+    std::shared_ptr<NamedResultFactory> named_result_factory;
+    RecoveryCaptureRequest recovery_capture;
+    SessionRecoveryFactory recovery_factory;
+    // Internal test-only, one fresh journal: observes actual native IO. Never public SDK input.
+    std::shared_ptr<JournalNativeIoProbe> journal_native_io_probe;
     // v3 主账写者的提交故障注入(测试专用;生产恒空 = 零行为):非空稳定
     // 码即该枚提交按 IoFailed 收,写者句柄随后 broken——T08 召回快照的
     // fail-closed 测试用,与 subagent_start_fault 同款纪律。
@@ -539,6 +560,13 @@ public:
     //   → 独占锁 → main recorder → run.started(start_reason=process_launch)
     //   → session.json(running) → lifecycle result。
     std::expected<ActiveSession*, std::string> LaunchSession();
+
+    // Internal new-only Managed admission. Takes the real Finish-owned directory,
+    // lock and original durable publication together. No active Local session may
+    // be converted. Once admitted to this mode, failures/Close never fall back to
+    // LocalTrusted launch/resume/clear/recovery/admin. This is storage, not ACL.
+    std::expected<ActiveSession*, std::string> LaunchManagedSession(
+        ManagedSessionDirectory admitted, ManagedSessionCreationAudit creation);
 
     // clear 八步换账(§3.3.1 逐字)。串行掌管;重复请求回 clear.busy。
     ClearOutcome Clear(const ClearRequest& request, ClearParticipant* participant);
@@ -635,6 +663,13 @@ private:
     // session.started)。lifecycle 账与 active 指针归调用方。
     std::expected<ActiveSession, std::string> OpenV3SessionLocked(
         const std::string& start_reason, const std::optional<std::string>& previous_session_id);
+    // One actual resource/writer assembly, with each caller owning the same real
+    // lock through the call. Managed metadata is immutable initial provenance.
+    std::expected<ActiveSession, std::string> AssembleV3SessionLocked(
+        const TrajectoryDirectory& directory, const SessionManifest& manifest,
+        SessionLock& lock_file,
+        std::shared_ptr<const ManagedSessionOwnershipPublication> managed_publication = {},
+        std::optional<nlohmann::json> managed_metadata = std::nullopt);
     // Close 的 v3 分支(active 已验 running;调用方已持 mutex_):session.ended
     // 封账,无 run terminal/session.json 可写。
     CloseOutcome CloseV3Locked(const CloseRequest& request, ClearParticipant* participant);
@@ -700,6 +735,7 @@ private:
     std::string workspace_key_;
     std::filesystem::path workspace_dir_;
     std::optional<ActiveSession> active_;
+    bool managed_mode_ = false; // Immutable transition, under the Manager mutex.
     // clear/close 同一把串行闸:换账掌管期间,并发请求回 clear/close.busy
     // (§3.3.1"重复请求要排队或回 clear_in_progress",这里选回忙)。
     std::atomic<bool> boundary_in_progress_{false};
@@ -766,9 +802,13 @@ struct IncomingSessionRefs {
     std::vector<std::string> resume_referrers;
     std::vector<std::string> subagent_referrers;
     std::vector<std::string> memory_files;
+    // Body was not read: ownership is Managed, malformed or unreadable. These
+    // are unknown references, never fabricated resume/subagent facts.
+    std::vector<std::string> ownership_unreadable_sessions;
 
     bool empty() const {
-        return resume_referrers.empty() && subagent_referrers.empty() && memory_files.empty();
+        return resume_referrers.empty() && subagent_referrers.empty() && memory_files.empty() &&
+               ownership_unreadable_sessions.empty();
     }
 };
 

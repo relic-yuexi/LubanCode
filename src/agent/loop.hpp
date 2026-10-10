@@ -36,6 +36,7 @@
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 #include "runtime/interaction.hpp"
+#include "runtime/scoped_approval.hpp"
 #include "runtime/middleware_runtime.hpp"  // PreRequestBudget(V3-REAL-07:冻结预算快照,Hook/记账同源)
 #include "runtime/turn_runtime.hpp"
 #include "runtime/turn_event_adapter.hpp"
@@ -79,6 +80,9 @@ struct RequestPreparedContext {
     // wire 消息序——内外消息数量不一一相等是常态(schema §8.1 横切),
     // 不能假定逐条对位。消费方按"不可得"处理,不冒充。
     std::optional<api::WireMessageMap> wire_message_map;
+    // Same owned input value used by final preflight; SDK scope is Generate
+    // arguments, not provider wire. Missing retains legacy metadata-only records.
+    std::optional<api::ModelInputSnapshot> model_input_snapshot;
     // 本采样的本地超时预算(秒;0 = 不设)。主回合(AgentLoop)不设恒 0;
     // 旁路采样(SampleModel)把自己吃到的 timeout_secs 如实递进来,v3 旁路
     // 桥据此在 prepared 事件落 timeoutBudgetSecs——"预算多久"离了账就
@@ -195,6 +199,26 @@ public:
 // 里:每一枚都是"引擎问宿主、宿主答话"的关口——有返回值,或有落账副作
 // 用;显示出水不在这些口上(events 一只口管完)。
 struct TurnWiring {
+    struct ActionPreDecision {
+        runtime::ToolHookDecision hook;
+        bool failed = false;
+        std::string error_code;
+        // Host-owned receipt, invoked on this prepare frame after actual schema
+        // and policy adoption. No callback is retained by a tool or background job.
+        std::function<void(bool, const std::string&, const nlohmann::json&)> settle;
+    };
+    // Explicit new capability. Older CLI/child wiring leaves both callbacks empty.
+    std::function<ActionPreDecision(const std::string&, const std::string&, const nlohmann::json&)> on_pre_action;
+    std::function<tools::Tool::Result(const std::string&, const std::string&, const nlohmann::json&,
+        const tools::Tool::Result&, const tools::ToolInvocationIdentity&,
+        const ToolTraceEvent&, const ToolTraceEvent&)> on_post_action;
+    // Per-turn known failure of the explicit Action host. Preserve completed
+    // raw/results, but do not start a summary or another model after this fails.
+    // Older hosts leave this empty; it is never retained beyond this turn.
+    std::function<std::string()> action_failure_reason;
+    // Actual unconfirmed middleware writes, distinct from a known handler
+    // failure. Checked after the prepare receipt and completed Post adoption.
+    std::function<std::string()> action_receipt_failure_reason;
     // Installed by the trajectory hub; summary sampling occurs only after raw
     // result persistence, and uses a separate request/usage ledger.
     std::function<void(api::Backend*, const runtime::ActionSummaryProfile&)> configure_action_summary;
@@ -223,6 +247,11 @@ struct TurnWiring {
     // 口不会被调。
     std::function<std::shared_ptr<runtime::InteractionFuture>(const runtime::ApprovalRequest& request)>
         on_tool_confirm_async;
+
+    // Explicit per-ticket cancellation capability. Once selected, a missing
+    // lease/future refuses the call; it never falls back to blocking old hooks.
+    std::function<runtime::ApprovalLease(const runtime::ApprovalRequest& request)>
+        on_tool_confirm_scoped;
 
     // 同步审批回落路:与 async 同一个触发点,当场问、当场答。子代理/PTC
     // 转发与单测走这条(任务线程不吃 future);两头都设时 async 优先。
@@ -339,6 +368,10 @@ struct TurnWiring {
     // 的图片/音频/blob 字节先落这里,history 只留 ArtifactRef。空 = 本轮
     // 没开落盘地(单测/单发路),富二进制块按稳定错误收口,文本不受影响。
     std::string tool_artifact_dir;
+    // Asked after execution_started, using the real provider pairing key. The
+    // host resolves its own active action/attempt and returns owned identity.
+    std::function<std::optional<tools::ToolInvocationIdentity>(const std::string&)>
+        tool_invocation_identity;
 
     // ---- Plan 模式(只读研究硬闸单):ModePolicy 硬闸 ------------------------
     // RunOneTool 在 deferred/tool_search 可见性之后、PreToolUse Hook 之前
@@ -532,6 +565,8 @@ struct RunOutcome {
     // 结果。与 hit_step_limit(单次 Run 的输入轮局部保险)分家:前者管整项
     // 任务,后者兼容窗内保留旧义。
     bool hit_turn_limit = false;
+    bool side_effect_indeterminate = false;
+    std::string side_effect_error;
 };
 
 // 步数将尽提醒:剩三步时在当步末条消息尾部附一句"收口"提示——停止
@@ -566,7 +601,8 @@ class AgentLoop {
 public:
     static std::expected<RunOutcome, std::string> Run(Agent& agent, api::Message user_message,
                                                        const TurnWiring& wiring,
-                                                       const std::atomic<bool>* cancel = nullptr);
+                                                       const std::atomic<bool>* cancel = nullptr,
+                                                       bool input_already_admitted = false);
 };
 
 // 执行一枚工具调用的完整链(公开导出;实现在 loop.cpp 顶部,注释在那头):
@@ -600,6 +636,31 @@ public:
 // TurnGateDenied,不执行。空谓词 = 没有 turn 级条件工具(子代理/单测/
 // workflow/PTC/旧装配),行为与从前一字不差。turn_gate_denial 同
 // filter_denial 的"稳定码|人话"两截口径。
+// Internal synchronous preparation snapshot. It owns values only, and is not
+// a permission grant, Job identity, or proof of durable registration. The
+// caller still owns the registry/call/wiring until this function returns.
+struct OwnedPreparedToolInput {
+    std::string call_id;
+    std::string tool_name;
+    nlohmann::json effective_input;
+    ToolSourceKind source_kind = ToolSourceKind::Builtin;
+    std::string source_instance;
+    EffectClass effect_class = EffectClass::InProcessUnknown;
+};
+
+// Reuses the same Prepare stage as RunOneTool, without Started/Execute/Post.
+// Deferred Action/Post capabilities reject before any of those callbacks.
+// A rejection retains the original Result, including StopIndeterminate.
+std::expected<OwnedPreparedToolInput, tools::Tool::Result> PrepareOwnedToolInput(
+    tools::ToolRegistry& registry, const api::ToolUseBlock& call, const TurnWiring& wiring,
+    const std::function<bool(const tools::Tool&)>& tool_filter,
+    const std::string& filter_denial = std::string(),
+    const ToolTraceContext* trace = nullptr,
+    const std::atomic<bool>* cancel = nullptr,
+    const tools::ProxyCallContext* proxy = nullptr,
+    const std::function<bool(const tools::Tool&)>& turn_gate = {},
+    const std::string& turn_gate_denial = std::string());
+
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const TurnWiring& wiring,
                                 const std::function<bool(const tools::Tool&)>& tool_filter,
                                 const std::string& filter_denial = std::string(),

@@ -39,6 +39,7 @@
 
 namespace lubancode::runtime {
 class TrajectorySessionLedger;
+class TrajectoryDiagnostics;
 }
 
 namespace lubancode::workflow {
@@ -85,8 +86,8 @@ private:
     std::string workflow_run_id_;
     mutable std::mutex errors_mutex_;
     std::vector<std::string> io_errors_;
-    // 各节点场的错误汇(桥在 worker 线程写自己那份;run 收口后聚合读)。
-    std::vector<std::shared_ptr<const std::vector<std::string>>> session_errors_;
+    // 各节点场的错误汇(桥写加锁容器;opener 聚合加锁快照)。
+    std::vector<std::shared_ptr<const runtime::TrajectoryDiagnostics>> session_errors_;
 };
 
 }  // namespace lubancode::workflow

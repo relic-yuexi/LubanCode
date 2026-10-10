@@ -7,10 +7,16 @@
 #pragma once
 
 #include <string>
+#include <optional>
 
+#include "runtime/subagent_terminal.hpp"
 #include "runtime/trajectory_turn_bridge.hpp"
 
 namespace lubancode::runtime {
+
+struct ChildApprovalParent {
+    std::string session_id, run_id, turn_id, action_id, declared_message_id;
+};
 
 // ---------------------------------------------------------------------------
 // 子代理轨迹桥:AgentTool 派工时申请,子 loop 的边界与工具事件落子账
@@ -21,10 +27,26 @@ public:
     virtual ~TrajectorySubagentBridge() = default;
     virtual const std::string& run_id() const = 0;
     virtual TrajectoryTurnBridge& turn_bridge() = 0;
-    // 收口:run terminal + 关柄(§8.3 journal_sha256)。返回子账终态事件
-    // 的 event_hash(父账 finished 边界引用它);账已坏给空串,父账如实
-    // 标注。
-    virtual std::string Finish(bool ok, const std::string& reason) = 0;
+    // Only an actual committed V3 declaration yields this immutable snapshot.
+    // The provider-ID fallback and V2 bridges provide no strict authority.
+    virtual std::optional<ChildApprovalParent> approval_parent() const { return std::nullopt; }
+    virtual std::optional<SubagentSpawnProvenance> ParentSpawn() const { return std::nullopt; }
+    // Full cached native append + explicit Close evidence; never retry Finish.
+    virtual SubagentTerminalReceipt Finish(SubagentExecutionOutcome execution,
+                                           const std::string& reason) = 0;
+
+    // Internal construction seams share the real bridge in production/tests.
+    // Each turn bridge borrows the writer/books supplied in this same graph.
+    static std::unique_ptr<TrajectorySubagentBridge> OwnV2(
+        std::unique_ptr<trajectory::TrajectoryRecorder> recorder,
+        std::unique_ptr<TrajectoryTurnBridge> bridge,
+        std::shared_ptr<SubagentTerminalRegistry> registry);
+    static std::unique_ptr<TrajectorySubagentBridge> OwnV3(
+        std::unique_ptr<trajectory::v3::V3Writer> writer,
+        std::unique_ptr<V3SessionBooks> books,
+        std::unique_ptr<TrajectoryTurnBridge> bridge,
+        std::shared_ptr<SubagentTerminalRegistry> registry,
+        std::optional<SubagentSpawnProvenance> provenance = std::nullopt);
 };
 
 // ---------------------------------------------------------------------------
@@ -42,6 +64,8 @@ struct SubagentSpawnFailure {
     std::string detail;
     std::string reserved_run_id;  // 已铸出的子 run id(失败前铸了就带上)
     bool retryable = false;      // I/O 类失败可重试;schema/状态机类不可
+    // Only a real, already opened child can supply this cleanup receipt.
+    std::optional<SubagentTerminalReceipt> cleanup_receipt;
 };
 
 }  // namespace lubancode::runtime

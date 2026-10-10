@@ -10,15 +10,13 @@
 // "要不要给人看"由前端决定(app-server 保证 stdout 只有协议,警告走
 // stderr 或诊断通道)。
 //
-// 默认行为:没挂回调时 warn/error 落 stderr(app-server 起服时换成自己的
-// 通道,免得裸字节漏进协议管道),debug/info 丢弃(不打印)。线程安全
-// (自带锁)。
+// 默认静默。CLI 在入口显式安装 stderr writer;嵌入宿主不必先接管进程
+// 标准流。SDK 创建/关闭不会替换这只出口。线程安全(自带锁)。
 //
 // 依赖:只认标准库,platform 层,谁都能引。
 
 #pragma once
 
-#include <cstdio>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -34,7 +32,7 @@ struct LogRecord {
     std::string message;    // 单行人话(诊断用,不是给最终用户的翻译文案)
 };
 
-// 进程级出口。挂回调替换落笔;不挂按默认(warn/error -> stderr)。
+// 进程级兼容出口。宿主显式挂回调;未配置时不触碰标准流。
 class LogSink {
 public:
     using Writer = std::function<void(const LogRecord&)>;
@@ -44,7 +42,7 @@ public:
         return sink;
     }
 
-    // 换落笔(前端装配时一次;测试各自挂各自的)。传空回到默认。
+    // 换落笔(宿主装配时一次;测试各自挂各自的)。传空恢复静默。
     void SetWriter(Writer writer) {
         std::lock_guard<std::mutex> lock(mutex_);
         writer_ = std::move(writer);
@@ -68,12 +66,6 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         if (writer_) {
             writer_(record);
-            return;
-        }
-        // 默认:warn/error 落 stderr(诊断不是协议,不该进 stdout);debug/
-        // info 丢弃——引擎的低频絮叨不默认刷屏。
-        if (record.level == LogLevel::Warn || record.level == LogLevel::Error) {
-            std::fprintf(stderr, "[%s] %s\n", record.component.c_str(), record.message.c_str());
         }
     }
 

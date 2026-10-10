@@ -45,6 +45,7 @@
 #include "runtime/middleware_v3_sink.hpp"
 #include "runtime/plugin_tool.hpp"
 #include "runtime/tool_trace_hub.hpp"
+#include "runtime/scoped_turn_bindings.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "tools/command_safety.hpp"
 #include "tools/run_command.hpp"
@@ -638,7 +639,8 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
             // 里顺手做错。
             hooks.trajectory_spawn = [ledger, hub, main_bridge](
                                          const std::string& task_label, const std::string& parent_run_id,
-                                         lubancode::runtime::SubagentSpawnFailure* failure_out)
+                                         lubancode::runtime::SubagentSpawnFailure* failure_out,
+                                         lubancode::runtime::SubagentDispatchMode mode)
                                         -> std::unique_ptr<lubancode::runtime::TrajectorySubagentBridge> {
                 const std::string parent_call_id = hub->current_agent_call_id();
                 auto child = ledger->SpawnSubagent(parent_call_id, task_label, parent_run_id);
@@ -655,16 +657,34 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
                     }
                     return nullptr;
                 }
-                if (parent_run_id.empty() && !parent_call_id.empty()) {
-                    main_bridge->AttachChildRun(parent_call_id, (*child)->run_id());
+                if (parent_run_id.empty() && mode == lubancode::runtime::SubagentDispatchMode::Foreground &&
+                    main_bridge->ManagesToolResultPreviews()) {
+                    auto attached = main_bridge->AttachChildRun(parent_call_id, (*child)->run_id(), (*child)->ParentSpawn());
+                    if (!attached) {
+                        lubancode::runtime::SubagentSpawnFailure failure;
+                        failure.stage = "attach_parent";
+                        failure.error_code = attached.error();
+                        failure.detail = "父轮绑定未确认，孩子没有开跑";
+                        failure.reserved_run_id = (*child)->run_id();
+                        failure.cleanup_receipt = (*child)->Finish(
+                            lubancode::runtime::SubagentExecutionOutcome::StartupRejected, attached.error());
+                        ledger->NoteSubagentStartFailed(failure, parent_run_id, parent_call_id,
+                                                        main_bridge->current_turn_id());
+                        if (failure_out) *failure_out = std::move(failure);
+                        return nullptr;
+                    }
+                } else if (parent_run_id.empty() && !parent_call_id.empty() && !main_bridge->ManagesToolResultPreviews()) {
+                    // V2 keeps its existing boundary; background/nested V3 are
+                    // explicitly outside this foreground observation capability.
+                    (void)main_bridge->AttachChildRun(parent_call_id, (*child)->run_id());
                 }
                 return std::move(*child);
             };
-            // 子账收口(run terminal 落定)后回填父桥:父侧 agent 调用的
-            // 执行终态事件引用子账 terminal hash(§3.5 边界对账)。
-            hooks.trajectory_child_finished = [main_bridge](const std::string& run_id,
-                                                            const std::string& terminal_hash) {
-                main_bridge->NoteChildTerminal(run_id, terminal_hash);
+            // Owned terminal evidence; V3 parent terminal observation/adoption
+            // is a later gate. Legacy V2 reads only a complete handoff hash.
+            hooks.trajectory_child_finished = [registry = main_bridge->child_terminal_registry()](
+                const lubancode::runtime::SubagentTerminalReceipt& receipt) {
+                registry->Store(receipt);
             };
         }
         if (wiring.on_post_tool_use_hook) {
@@ -1069,8 +1089,9 @@ RunTurnResult RunTurn(TurnContext ctx) {
     turn_event_stream.AttachAlongside(
         [&terminal_sink](const lubancode::runtime::ServerEvent& event) { terminal_sink.Emit(event); });
     turn_event_stream.Start(canonical_turn_id);
-    lubancode::agent::TurnWiring wiring = BuildTurnWiring(ctx, display, usage_stats, cancel_flag, turn_event_stream,
-                                                          turn_trajectory.get());
+    lubancode::agent::TurnWiring wiring;
+    lubancode::runtime::ScopedTurnBindings turn_bindings(loop);
+    wiring = BuildTurnWiring(ctx, display, usage_stats, cancel_flag, turn_event_stream, turn_trajectory.get());
     // 四层生命周期单 P1:本轮 canonical Turn 号钉进 wiring——本 Run 与
     // harness 拷贝续跑的每只 Run 都带同一枚,StepUsageRecord.turn_id 跨
     // Run 不裂。Stop 续跑环(TurnHarness)拷的就是这份 wiring,不用另钉。
@@ -1079,35 +1100,32 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 运行时(证据/声明册/回合号查询走它),批次闸门与投递规划进 wiring;
     // 模型身份随轮刷新(能力快照 basis)。没装(旧装配/没开会话)= 全
     // inline,行为一字不差。
+    lubancode::runtime::ScopedTurnBindings::Bindings bindings;
+    bindings.hub = turn_trace_hub;
+    if (turn_trajectory != nullptr) bindings.trajectory = turn_trajectory.get();
+    bindings.thread_id = thread_id_for_trace;
+    bindings.turn_id = canonical_turn_id;
     if (ctx.async_tool_runtime != nullptr && turn_trajectory != nullptr) {
-        ctx.async_tool_runtime->InstallTurnBridge(turn_trajectory.get());
+        bindings.async_runtime = ctx.async_tool_runtime;
         ctx.async_tool_runtime->NoteModelIdentity(ctx.trajectory_provider, ctx.model_id);
-        wiring.tool_batch_gate = ctx.async_tool_runtime->gate();
-        wiring.delivery_planner = ctx.async_tool_runtime->planner();
     }
+    if (turn_trace_hub != nullptr && recorder != nullptr) {
+        bindings.projection = [recorder](const lubancode::agent::ToolTraceEvent& event) {
+            if (event.kind == lubancode::agent::ToolTraceEventKind::Scheduled) {
+                recorder->RecordToolCall(event.tool_name, nlohmann::json::object(), event.execution_id,
+                                         event.tool_use_id);
+            } else if (event.kind == lubancode::agent::ToolTraceEventKind::ExecutionFinished) {
+                recorder->RecordToolResult(event.tool_name,
+                                           event.outcome != lubancode::agent::ToolOutcome::Succeeded,
+                                           event.fallback_message, lubancode::agent::ToString(event.outcome),
+                                           event.error_code, event.execution_id);
+            }
+        };
+    }
+    // No recorder leaves any pre-existing session projection intact. Bind owns
+    // the temporary override and all core borrows for the whole canonical turn.
+    turn_bindings.Bind(wiring, std::move(bindings));
     if (turn_trace_hub != nullptr) {
-        if (recorder != nullptr) {
-            turn_trace_hub->AttachProjection(
-                [recorder](const lubancode::agent::ToolTraceEvent& event) {
-                    if (event.kind == lubancode::agent::ToolTraceEventKind::Scheduled) {
-                        recorder->RecordToolCall(event.tool_name, nlohmann::json::object(), event.execution_id,
-                                                 event.tool_use_id);
-                    } else if (event.kind == lubancode::agent::ToolTraceEventKind::ExecutionFinished) {
-                        recorder->RecordToolResult(event.tool_name,
-                                                   event.outcome != lubancode::agent::ToolOutcome::Succeeded,
-                                                   event.fallback_message, lubancode::agent::ToString(event.outcome),
-                                                   event.error_code, event.execution_id);
-                    }
-                });
-        }
-        // P0-2 轨迹:hub 的持久账从 SessionStore 改接本轮边界桥(§15.2)。
-        // 桥在 Install 之前挂:Install 要看轨迹的能力位(ManagesToolResult
-        // Previews)决定挂不挂整批 rewrite 钩子——v3 在管预览才挂,v2 不挂
-        // 走旧口径。落盘关口本就在调用时才看 trajectory_,先挂后装零差。
-        if (turn_trajectory != nullptr) {
-            turn_trace_hub->AttachTrajectory(turn_trajectory.get());
-        }
-        turn_trace_hub->Install(loop, wiring, thread_id_for_trace, canonical_turn_id);
         // 补偿关系边(单子第四期):undo_file_edit execute 后报"这枚补偿
         // 谁",finished 栅栏随账落 compensates。
         wiring.on_tool_compensates = [&registry](const std::string& /*execution_id*/,
@@ -1347,7 +1365,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 视图账。三条路(错误早退/打断/正常)都从这里过——footer 恰一枚,
     // 不再从中途裸退。事件流(批二)也在这收口:tone 三档映射终态,错误
     // 文案随 Failed 带上;没收尾的条目由适配器按 Cancelled 兜底。
-    const std::string turn_error_text = result.has_value() ? std::string() : result.error();
+    std::string turn_error_text = result.has_value() ? std::string() : result.error();
     const auto finish_turn_chrome = [&](lubancode::cli::TurnFooterTone tone) {
         // P0-2 轨迹:轮收口走同一只漏斗(错误早退/步数满/正常三路都过这)。
         // tone 三档映射 turn.completed/cancelled/failed;Stop 钩子续跑轮在
@@ -1357,10 +1375,10 @@ RunTurnResult RunTurn(TurnContext ctx) {
                                      tone == lubancode::cli::TurnFooterTone::Stopped,
                                      tone == lubancode::cli::TurnFooterTone::Failed ? turn_error_text
                                                                                     : std::string());
-            if (turn_trace_hub != nullptr) {
-                turn_trace_hub->DetachTrajectory();
-            }
         }
+        // All Stop continuations have finished before this canonical turn
+        // closes. Restore bindings at the old detach boundary, before display.
+        turn_bindings.Reset();
         turn_event_stream.Finish(tone == lubancode::cli::TurnFooterTone::Worked
                                      ? lubancode::runtime::Outcome::Succeeded
                                  : tone == lubancode::cli::TurnFooterTone::Stopped
@@ -1514,6 +1532,18 @@ RunTurnResult RunTurn(TurnContext ctx) {
         };
         lubancode::agent::RunStopContinuation(loop, wiring, stop_options, drive);
         out.cancelled = out.cancelled || drive.cancelled;
+        if (drive.side_effect_indeterminate) {
+            // The Stop request really ran. Keep its unknown side effect and
+            // fail this turn instead of publishing a successful footer/ledger.
+            out.status = 1;
+            turn_failed = true;
+            turn_error_text = drive.error;
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            TermErr() << "\n" << theme.error << tr("error.prefix") << turn_error_text
+                      << theme.reset << "\n";
+            TermErr().flush();
+            TermOut().flush();
+        }
     }
 
     // 安全点(轮收):后台子代理这轮攒下的 hooks 记录归并落账,报信一行。

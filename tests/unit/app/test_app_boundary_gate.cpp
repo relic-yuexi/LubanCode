@@ -130,7 +130,7 @@ TEST_CASE("守门:engine 与 runtime 源码里搜不到终端件(单子验收原
     const std::vector<std::filesystem::path> gate_files = CollectSources({
         "src/runtime", "src/api", "src/agent", "src/tools", "src/config", "src/memory",
         "src/hooks", "src/mcp", "src/lsp", "src/ptc", "src/sessions", "src/peers",
-        "src/skills",
+        "src/skills", "src/text", "src/sdk",
     });
     REQUIRE_FALSE(gate_files.empty());
 
@@ -202,6 +202,22 @@ TEST_CASE("守门:三叶子自身零标准流(i18n/theme/line_editor)") {
         CHECK_MESSAGE(code.find("std::cin") == std::string::npos, (path.string() + " 含 std::cin"));
         CHECK_MESSAGE(code.find("std::cout") == std::string::npos, (path.string() + " 含 std::cout"));
         CHECK_MESSAGE(code.find("std::cerr") == std::string::npos, (path.string() + " 含 std::cerr"));
+    }
+}
+
+TEST_CASE("守门:共用装配不依赖宿主头或终端类型") {
+    const auto files = CollectSources({"src/runtime/assembly", "src/sdk", "src/text"});
+    if (!std::filesystem::exists(SourceRoot() / "src")) return;
+    REQUIRE_FALSE(files.empty());
+    for (const auto& path : files) {
+        const std::string code = StripComments(SlurpFile(path));
+        for (const char* forbidden : {"#include \"app/", "#include \"cli/", "#include \"app_server/",
+                                      "#include <app/", "#include <cli/", "#include <app_server/",
+                                      "Theme", "Spinner", "std::cout", "std::cerr", "std::cin",
+                                      "std::clog", "printf(", "puts(", "std::print"}) {
+            CHECK_MESSAGE(code.find(forbidden) == std::string::npos,
+                          (path.generic_string() + " contains " + forbidden));
+        }
     }
 }
 

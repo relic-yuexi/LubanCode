@@ -18,6 +18,7 @@
 // 真端点带工具冒烟(run_command 经 /bin/sh)通过;macOS 未经真机验证,
 // 待 CI 亮灯。
 #include "platform/process.hpp"
+#include "platform/process_diagnostics.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -33,6 +34,7 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -73,14 +75,49 @@ void AlignOutputToUtf8Boundary(std::string& output, std::size_t max_output_bytes
     }
 }
 
-// 子进程 stdin 关掉/退出后再往管道写会招 SIGPIPE,默认动作是整个进程死。
-// 统一忽略,让 write 返回 EPIPE 错误码走正常失败路径。
-void IgnoreSigpipeOnce() {
-    static const bool done = [] {
-        std::signal(SIGPIPE, SIG_IGN);
-        return true;
-    }();
-    (void)done;
+// A closed child pipe reports EPIPE without changing the host's signal handler.
+// Darwin pipe writes may signal the process, so use its per-FD opt-out. Linux
+// sends the signal to the writing thread: block it around this write, consume
+// only a new signal, then restore the exact previous mask. Existing pending
+// SIGPIPE remains owned by the host. This runs after spawning, so our temporary
+// mask never reaches a new child.
+ssize_t WriteChildPipe(int fd, const void* data, std::size_t size) {
+#ifdef __APPLE__
+    if (fcntl(fd, F_SETNOSIGPIPE, 1) == -1) return -1;
+    return write(fd, data, size);
+#else
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGPIPE);
+    sigset_t previous;
+    const int mask_error = pthread_sigmask(SIG_BLOCK, &blocked, &previous);
+    if (mask_error != 0) {
+        errno = mask_error;
+        return -1;
+    }
+    sigset_t pending;
+    if (sigpending(&pending) != 0) {
+        const int pending_error = errno;
+        (void)pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+        errno = pending_error;
+        return -1;
+    }
+    const bool already_pending = sigismember(&pending, SIGPIPE) == 1;
+    const ssize_t count = write(fd, data, size);
+    const int write_error = errno;
+    // Linux pipe_write also sends SIGPIPE when the reader closes after a
+    // prefix was copied, returning that positive short count instead of EPIPE.
+    const bool pipe_may_have_closed = (count < 0 && write_error == EPIPE) ||
+        (count > 0 && static_cast<std::size_t>(count) < size);
+    if (pipe_may_have_closed && !already_pending &&
+        sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1) {
+        const timespec immediate{0, 0};
+        while (sigtimedwait(&blocked, nullptr, &immediate) == -1 && errno == EINTR) {}
+    }
+    (void)pthread_sigmask(SIG_SETMASK, &previous, nullptr);
+    errno = write_error;
+    return count;
+#endif
 }
 
 // 预先拼好子进程环境块:Inherit 模式把当前 environ 里被 extra_env 覆盖的
@@ -160,12 +197,18 @@ std::vector<char*> BuildArgvPtrs(const std::vector<std::string>& argv) {
 
 // 读端全量吸干 exec 失败管道:exec 成了读到 EOF(0 字节),败了读到 errno。
 // 返回 std::nullopt = exec 成功。
-std::optional<int> ReadExecErrno(int fd) {
+std::optional<int> ReadExecErrno(int fd, ProcessDiagnosticBuffer* diagnostics = nullptr,
+                                pid_t pid = -1, pid_t pgid = -1) {
     int err = 0;
     ssize_t n = 0;
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ExecHandshakeBefore,
+                            pid, pgid, 0, 0, fd);
     do {
         n = read(fd, &err, sizeof(err));
     } while (n < 0 && errno == EINTR);
+    const int read_error = errno;
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ExecHandshakeAfter,
+                            pid, pgid, n, n < 0 ? read_error : 0, n > 0 ? err : 0);
     if (n <= 0) {
         return std::nullopt;
     }
@@ -173,19 +216,32 @@ std::optional<int> ReadExecErrno(int fd) {
 }
 
 // 限时等一个进程退出(不杀)。返回 true = 已退出并收尸,exit_status 有效。
-bool WaitPidWithDeadline(pid_t pid, int timeout_ms, int* exit_status) {
+bool WaitPidWithDeadline(pid_t pid, int timeout_ms, int* exit_status,
+                          ProcessDiagnosticBuffer* diagnostics = nullptr, pid_t pgid = -1) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    bool first_wait = true;
     while (true) {
         int status = 0;
         const pid_t r = waitpid(pid, &status, WNOHANG);
+        const int wait_error = errno;
+        if (first_wait) {
+            RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::WaitFirst,
+                                    pid, pgid, r, r < 0 ? wait_error : 0, status);
+            first_wait = false;
+        }
         if (r == pid) {
+            RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::WaitTerminal,
+                                    pid, pgid, r, 0, status);
             *exit_status = status;
             return true;
         }
         if (r < 0 && errno != EINTR) {
+            RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::WaitTerminal,
+                                    pid, pgid, r, wait_error, status);
             return false;  // 没有这个孩子(已被别处收尸?)——按"等不到"处理
         }
         if (std::chrono::steady_clock::now() >= deadline) {
+            RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::WaitDeadline, pid, pgid);
             return false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -194,18 +250,47 @@ bool WaitPidWithDeadline(pid_t pid, int timeout_ms, int* exit_status) {
 
 // 杀整个进程组:先 SIGTERM 客气 grace_ms 毫秒,还不退就 SIGKILL,最后
 // 阻塞收尸(SIGKILL 之后必定很快退)。对齐 Windows 关 Job 句柄那一下。
-void KillProcessGroup(pid_t pid, int grace_ms, int* exit_status) {
-    killpg(pid, SIGTERM);
-    if (WaitPidWithDeadline(pid, grace_ms, exit_status)) {
-        killpg(pid, SIGKILL);  // 根进程退了也补一记,清掉可能残留的后代
+pid_t DiagnosticProcessGroup(ProcessDiagnosticBuffer* diagnostics, pid_t pid) noexcept {
+    if (!diagnostics) return -1;
+    const int saved_errno = errno;
+    const pid_t group = getpgid(pid);
+    const int group_error = errno;
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ProcessGroupSnapshot,
+                            pid, group, group, group < 0 ? group_error : 0);
+    errno = saved_errno;
+    return group;
+}
+
+void DiagnosticKillGroup(pid_t pid, int signal, ProcessDiagnosticBuffer* diagnostics,
+                          pid_t pgid) noexcept {
+    const auto before = signal == SIGTERM ? ProcessDiagnosticStage::KillTermBefore
+                                         : ProcessDiagnosticStage::KillForceBefore;
+    const auto after = signal == SIGTERM ? ProcessDiagnosticStage::KillTermAfter
+                                        : ProcessDiagnosticStage::KillForceAfter;
+    RecordProcessDiagnostic(diagnostics, before, pid, pgid, 0, 0, signal);
+    const int rc = killpg(pid, signal);
+    const int kill_error = errno;
+    RecordProcessDiagnostic(diagnostics, after, pid, pgid, rc, rc < 0 ? kill_error : 0, signal);
+}
+
+void KillProcessGroup(pid_t pid, int grace_ms, int* exit_status,
+                      ProcessDiagnosticBuffer* diagnostics = nullptr) {
+    const pid_t pgid = DiagnosticProcessGroup(diagnostics, pid);
+    DiagnosticKillGroup(pid, SIGTERM, diagnostics, pgid);
+    if (WaitPidWithDeadline(pid, grace_ms, exit_status, diagnostics, pgid)) {
+        DiagnosticKillGroup(pid, SIGKILL, diagnostics, pgid);  // 根进程退了也补一记,清掉可能残留的后代
         return;
     }
-    killpg(pid, SIGKILL);
+    DiagnosticKillGroup(pid, SIGKILL, diagnostics, pgid);
     int status = 0;
     pid_t r = 0;
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReapBefore, pid, pgid);
     do {
         r = waitpid(pid, &status, 0);
     } while (r < 0 && errno == EINTR);
+    const int wait_error = errno;
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReapAfter,
+                            pid, pgid, r, r < 0 ? wait_error : 0, status);
     if (r == pid) {
         *exit_status = status;
     }
@@ -445,9 +530,8 @@ struct SpawnedMerged {
 
 // 起一个"合并输出、stdin 接 /dev/null"的子进程。失败时 result 里带人话。
 bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env, const std::string& cwd_utf8,
-                        SpawnedMerged* spawned, ProcessResult* result) {
-    IgnoreSigpipeOnce();
-
+                        SpawnedMerged* spawned, ProcessResult* result,
+                        ProcessDiagnosticBuffer* diagnostics) {
     int out_pipe[2] = {-1, -1};
     if (pipe(out_pipe) != 0) {
         result->spawn_failed = true;
@@ -462,16 +546,30 @@ bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env,
         close(out_pipe[1]);
         return false;
     }
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ExecPipeCreated,
+                            -1, -1, exec_pipe[0], 0, exec_pipe[1]);
     fcntl(exec_pipe[1], F_SETFD, FD_CLOEXEC);
     // 父进程留的读端不给子进程继承(CLOEXEC),不然后代握着写端 EOF 等不到。
     fcntl(out_pipe[0], F_SETFD, FD_CLOEXEC);
     fcntl(exec_pipe[0], F_SETFD, FD_CLOEXEC);
+    if (diagnostics) {
+        const int saved_errno = errno;
+        const int flags = fcntl(exec_pipe[1], F_GETFD);
+        const int flags_error = errno;
+        RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ExecWriteFdFlags,
+                                -1, -1, flags, flags < 0 ? flags_error : 0, exec_pipe[1]);
+        errno = saved_errno;
+    }
 
     EnvBlock env_block = BuildEnvBlock(extra_env, EnvMode::Inherit);
     std::vector<char*> argv_ptrs = BuildArgvPtrs(argv);
 
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ForkBefore);
     const pid_t pid = fork();
     if (pid < 0) {
+        const int fork_error = errno;
+        RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ForkParentReturned,
+                                pid, -1, pid, fork_error);
         result->spawn_failed = true;
         result->spawn_error = std::string("fork 失败: ") + std::strerror(errno);
         close(out_pipe[0]);
@@ -518,9 +616,18 @@ bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env,
         die(errno);
     }
 
+    // All observations after fork belong to the parent. Keep the child setup
+    // branch above free of diagnostic clocks, atomics and C++ logging.
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ForkParentReturned,
+                            pid, -1, pid);
     // 父进程:setpgid 两头都调,谁先跑到都不留窗口(允许的竞态 EACCES/EPERM
     // 单列,别吞真失败)。
-    if (setpgid(pid, pid) != 0 && errno != EACCES && errno != EPERM) {
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::SetProcessGroupBefore, pid);
+    const int group_rc = setpgid(pid, pid);
+    const int group_error = errno;
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::SetProcessGroupAfter,
+                            pid, -1, group_rc, group_rc != 0 ? group_error : 0);
+    if (group_rc != 0 && errno != EACCES && errno != EPERM) {
         // 罕见:子进程已退/被收。清管道、报 spawn 失败,不带坏账往下走。
         close(out_pipe[0]);
         close(out_pipe[1]);
@@ -533,11 +640,16 @@ bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env,
     close(out_pipe[1]);
     close(exec_pipe[1]);
 
-    const std::optional<int> exec_err = ReadExecErrno(exec_pipe[0]);
+    const pid_t pgid = DiagnosticProcessGroup(diagnostics, pid);
+    const std::optional<int> exec_err = ReadExecErrno(exec_pipe[0], diagnostics, pid, pgid);
     close(exec_pipe[0]);
     if (exec_err.has_value()) {
         int status = 0;
-        waitpid(pid, &status, 0);  // 子进程 _exit(127) 了,收尸
+        RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReapBefore, pid, pgid);
+        const pid_t waited = waitpid(pid, &status, 0);  // 子进程 _exit(127) 了,收尸
+        const int wait_error = errno;
+        RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReapAfter,
+                                pid, pgid, waited, waited < 0 ? wait_error : 0, status);
         close(out_pipe[0]);
         result->spawn_failed = true;
         result->spawn_error = "启动子进程失败(" + std::string(std::strerror(*exec_err)) + "): " + argv[0];
@@ -546,6 +658,8 @@ bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env,
 
     spawned->pid = pid;
     spawned->output_fd = out_pipe[0];
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::SpawnReady,
+                            pid, pgid, 0, 0, out_pipe[0]);
     return true;
 }
 
@@ -558,6 +672,10 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
 
 ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, const std::atomic<bool>* cancel,
                           const EnvPairs& extra_env, std::size_t max_output_bytes, const std::string& cwd_utf8) {
+    // Copy this borrowed pointer before starting any reader. The opt-in caller
+    // owns it until this synchronous function and its real reader join finish.
+    ProcessDiagnosticBuffer* const diagnostics = process_diagnostics;
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ProcessEntered);
     ProcessResult result;
     if (argv.empty()) {
         result.spawn_failed = true;
@@ -571,7 +689,7 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
     }
 
     SpawnedMerged spawned;
-    if (!SpawnMergedOutput(argv, extra_env, cwd_utf8, &spawned, &result)) {
+    if (!SpawnMergedOutput(argv, extra_env, cwd_utf8, &spawned, &result, diagnostics)) {
         return result;
     }
 
@@ -581,25 +699,54 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
     std::atomic<bool> output_over_limit{false};
     std::atomic<bool> reader_stop{false};
     std::atomic<bool> reader_done{false};
-    std::thread reader([&] {
+    std::thread reader([&, diagnostics] {
+        RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderEntered,
+                                spawned.pid, -1, 0, 0, spawned.output_fd);
         char buf[4096];
+        bool first_poll = true;
+        bool first_read = true;
+        std::int64_t exit_rc = 0;
+        int exit_error = 0;
+        std::int64_t exit_reason = 0;  // 0: stop, 1: poll error, 2: read EOF/error
         while (!reader_stop.load()) {
             struct pollfd pfd{spawned.output_fd, POLLIN, 0};
             const int pr = poll(&pfd, 1, 100);
+            const int poll_error = errno;
+            if (first_poll) {
+                RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderFirstPoll,
+                                        spawned.pid, -1, pr, pr < 0 ? poll_error : 0, pfd.revents);
+                first_poll = false;
+            }
             if (pr < 0) {
                 if (errno == EINTR) {
                     continue;
                 }
+                exit_rc = pr;
+                exit_error = poll_error;
+                exit_reason = 1;
                 break;
             }
             if (pr == 0) {
                 continue;  // 超时,回头看看停止标志
             }
+            if (first_read) {
+                RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderFirstReadBefore,
+                                        spawned.pid, -1, 0, 0, spawned.output_fd);
+            }
             const ssize_t n = read(spawned.output_fd, buf, sizeof(buf));
+            const int read_error = errno;
+            if (first_read) {
+                RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderFirstReadAfter,
+                                        spawned.pid, -1, n, n < 0 ? read_error : 0, spawned.output_fd);
+                first_read = false;
+            }
             if (n < 0 && errno == EINTR) {
                 continue;
             }
             if (n <= 0) {
+                exit_rc = n;
+                exit_error = n < 0 ? read_error : 0;
+                exit_reason = 2;
                 break;  // EOF / 出错,写端全关了
             }
             if (output.size() < max_output_bytes) {
@@ -616,6 +763,8 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
             }
             // 超限之后继续读但直接丢弃——别让子进程卡在写上,读空到 EOF。
         }
+        RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderExited,
+                                spawned.pid, -1, exit_rc, exit_error, exit_reason);
         reader_done.store(true);
     });
 
@@ -624,32 +773,46 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(has_timeout ? timeout_ms : 0);
     int exit_status = 0;
     bool exited = false;
+    bool first_wait = true;
     while (true) {
         int status = 0;
         const pid_t r = waitpid(spawned.pid, &status, WNOHANG);
+        const int wait_error = errno;
+        if (first_wait) {
+            RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::WaitFirst,
+                                    spawned.pid, -1, r, r < 0 ? wait_error : 0, status);
+            first_wait = false;
+        }
         if (r == spawned.pid) {
+            RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::WaitTerminal,
+                                    spawned.pid, -1, r, 0, status);
             exit_status = status;
             exited = true;
             break;
         }
         if (r < 0 && errno != EINTR) {
+            RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::WaitTerminal,
+                                    spawned.pid, -1, r, wait_error, status);
             break;  // 不该发生;当已退出处理,exit_status 保持 0
         }
         if (output_over_limit.load()) {
-            KillProcessGroup(spawned.pid, 2000, &exit_status);
+            RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::OutputLimitObserved, spawned.pid);
+            KillProcessGroup(spawned.pid, 2000, &exit_status, diagnostics);
             exited = true;
             break;
         }
         // 取消(进程生命线单):ESC 置旗即收整棵树,与超时分开记账。
         if (cancel != nullptr && cancel->load()) {
+            RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::CancelObserved, spawned.pid);
             result.cancelled = true;
-            KillProcessGroup(spawned.pid, 2000, &exit_status);
+            KillProcessGroup(spawned.pid, 2000, &exit_status, diagnostics);
             exited = true;
             break;
         }
         if (has_timeout && std::chrono::steady_clock::now() >= deadline) {
+            RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::TimeoutObserved, spawned.pid);
             result.timed_out = true;
-            KillProcessGroup(spawned.pid, 2000, &exit_status);
+            KillProcessGroup(spawned.pid, 2000, &exit_status, diagnostics);
             exited = true;
             break;
         }
@@ -658,7 +821,8 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
 
     // 根进程退了不代表后代也退了(Windows 关 Job 那一下的对齐):补杀整组,
     // 后代握着的写端全关,读线程才能等到 EOF 收尾。
-    killpg(spawned.pid, SIGKILL);
+    const pid_t cleanup_pgid = DiagnosticProcessGroup(diagnostics, spawned.pid);
+    DiagnosticKillGroup(spawned.pid, SIGKILL, diagnostics, cleanup_pgid);
 
     // 限时等读线程把尾巴读到 EOF 自然退出,等不到就置停止标志——poll 循环
     // 100ms 一醒,最多再等一轮就收,绝不吊死。
@@ -667,11 +831,19 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     reader_stop.store(true);
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderStopPublished, spawned.pid);
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderJoinBefore, spawned.pid);
     reader.join();
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReaderJoinAfter, spawned.pid);
 
     if (!exited) {
         int status = 0;
-        if (waitpid(spawned.pid, &status, WNOHANG) == spawned.pid) {
+        RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReapBefore, spawned.pid);
+        const pid_t waited = waitpid(spawned.pid, &status, WNOHANG);
+        const int wait_error = errno;
+        RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ReapAfter,
+                                spawned.pid, -1, waited, waited < 0 ? wait_error : 0, status);
+        if (waited == spawned.pid) {
             exit_status = status;
         }
     }
@@ -683,6 +855,8 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
     AlignOutputToUtf8Boundary(output, max_output_bytes);
     result.output = std::move(output);
     result.output_truncated = output_over_limit.load();
+    RecordProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ProcessReturned,
+                            spawned.pid, -1, result.exit_code, 0, result.cancelled ? 1 : 0);
     return result;
 }
 
@@ -712,8 +886,6 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
         result.spawn_error = env_error;
         return result;
     }
-
-    IgnoreSigpipeOnce();
 
     int out_pipe[2] = {-1, -1};
     int err_pipe[2] = {-1, -1};
@@ -814,13 +986,13 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
     }
 
     // stdin 写线程:一次性写完就关写端(子进程读到 EOF)。子进程不读而数据
-    // 超过管道缓冲时,write 阻塞——SIGPIPE 已忽略,子进程死掉后读端关闭,
+    // 超过管道缓冲时,write 阻塞;子进程死掉后读端关闭,
     // write 以 EPIPE 失败收场,写线程退,绝不吊死。
     std::atomic<bool> stdin_done{false};
     std::thread stdin_writer([&] {
         std::size_t written_total = 0;
         while (written_total < stdin_data.size()) {
-            const ssize_t n = write(in_pipe[1], stdin_data.data() + written_total, stdin_data.size() - written_total);
+            const ssize_t n = WriteChildPipe(in_pipe[1], stdin_data.data() + written_total, stdin_data.size() - written_total);
             if (n < 0) {
                 if (errno == EINTR) {
                     continue;
@@ -986,7 +1158,6 @@ BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv,
         result.error = env_error;
         return result;
     }
-    IgnoreSigpipeOnce();
 
     // 独占创建 + 0600:文件名可猜的 O_TRUNC 在共享临时目录里有预置文件/
     // symlink 的攻击面;命令输出可能带 token,别的账号不许读。
@@ -1142,7 +1313,6 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
                                   std::function<void(std::string_view)> on_stderr,
                                   const SpawnConstraints& constraints, const std::string& cwd_utf8,
                                   EnvMode env_mode) {
-    IgnoreSigpipeOnce();
     on_stdout_ = std::move(on_stdout);
     on_stderr_ = std::move(on_stderr);
 
@@ -1337,12 +1507,12 @@ bool ChildProcess::Write(const std::string& data) {
     std::lock_guard<std::mutex> lock(write_mutex_);
     std::size_t offset = 0;
     while (offset < data.size()) {
-        const ssize_t n = write(stdin_fd_, data.data() + offset, data.size() - offset);
+        const ssize_t n = WriteChildPipe(stdin_fd_, data.data() + offset, data.size() - offset);
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
             }
-            return false;  // EPIPE(对端死了)等,SIGPIPE 已忽略
+            return false;  // EPIPE 等;本次 SIGPIPE 已在当前线程收拢
         }
         if (n == 0) {
             return false;

@@ -2,6 +2,7 @@
 #include "trajectory/v3/subagent.hpp"
 
 #include <system_error>
+#include <utility>
 
 namespace lubancode::trajectory::v3 {
 
@@ -35,7 +36,7 @@ SubagentSpawn SubagentSpawn::Request(V3Writer& parent, std::string action_id,
 SubagentSpawn::BootstrapResult SubagentSpawn::BootstrapChild(
     const V3Writer& parent, std::string_view child_run_id,
     std::string_view child_system_content, std::string_view task_prompt,
-    Durability durability) const {
+    Durability durability, std::function<std::optional<std::string>()> close_fault) const {
     BootstrapResult outcome;
     // 子目录:父卷同层 subagents/<childSessionId>/(§4.31)。
     const std::filesystem::path parent_jsonl = parent.path();
@@ -62,9 +63,11 @@ SubagentSpawn::BootstrapResult SubagentSpawn::BootstrapChild(
          {"parentActionRef", parent_ref_.ToJson()},
          {"taskId", task_id_},
          {"spawnEventRef", spawn_ref}});
+    V3WriterOptions writer_options;
+    writer_options.inject_close_failure = std::move(close_fault);
     auto child = V3Writer::Start(child_jsonl, child_.session_id, child_run_id,
                                  child_system_content, std::move(system_extra),
-                                 V3WriterOptions{});
+                                 std::move(writer_options));
     if (!child.has_value()) {
         outcome.error = "subagent.child_start_failed: " + child.error();
         return outcome;

@@ -4,14 +4,18 @@
 // V3SessionBooks 是 v3 写侧会话共享账,由 TrajectorySessionLedger 的 Impl
 // 持有,主会话/子代理/旁路各桥借指针共用——随主桥头走,供各桥与账本同取。
 #pragma once
+#include "runtime/trajectory_diagnostics.hpp"
 
+#include <atomic>
 #include <cstdint>
+#include <expected>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -20,10 +24,12 @@
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 #include "runtime/tool_trajectory_sink.hpp"
+#include "runtime/subagent_terminal.hpp"
 #include "telemetry/wake.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/v3/result_store.hpp"
 #include "trajectory/v3/writer.hpp"
+#include "tools/tool_job_coordinator.hpp"
 
 namespace lubancode::runtime {
 
@@ -40,6 +46,8 @@ struct V3SessionBooks {
     std::string system_content;              // 当前根 system 正文(§4.3 切换后更新)
     std::uint64_t settings_version = 1;      // systemMeta.settingsVersion 序列
     std::optional<trajectory::v3::ResultStore> captures;
+    std::shared_ptr<trajectory::NamedResultCapability> named_results;
+    bool requires_named_owner = false; // Standalone private fixtures retain File compatibility.
     std::shared_ptr<std::recursive_mutex> tool_results_mutex = std::make_shared<std::recursive_mutex>();
     std::optional<trajectory::v3::ResultStore> results;  // 惰性开:session 目录 artifacts/
     // ---- T12-A(V3-GAP-07 P0,SessionV3 旧设计清理单):执行阻断 ------------
@@ -53,6 +61,10 @@ struct V3SessionBooks {
     // 注:阻断只住内存,不落账——schema 尚无对应 kind(T11 按合同发行),
     // 不拿旧 payload 换名伪造。
     bool execution_blocked = false;
+    // Background readers own this gate, not a borrowed mutable books pointer.
+    // The main owner publishes compact blockage once; a new scene gets a new gate.
+    std::shared_ptr<std::atomic<bool>> bypass_execution_blocked =
+        std::make_shared<std::atomic<bool>>(false);
     std::string execution_block_reason;         // 稳定原因(compact.swap.*)
     std::uint64_t execution_block_revision = 0;  // 阻断时账面 revision(准入对表/诊断)
     // 绑定场次(session_id):换场判据用。manager 的 active 是 std::optional,
@@ -87,6 +99,13 @@ struct V3SessionBooks {
 
 // v3 模式轮桥的回合簿(定义在 trajectory_session.cpp;此处只占位)。
 struct V3TurnBooks;
+
+struct OwnedJobParentCommit {
+    bool committed = false;
+    tools::ParentJobAdmissionRefs refs;
+    std::vector<trajectory::v3::WriteReceipt> receipts;
+    std::string error;
+};
 
 class TrajectoryTurnBridge : public agent::LoopBoundaryRecorder, public ToolTrajectorySink {
 public:
@@ -186,10 +205,17 @@ public:
     // ---- 子代理边界(§3.5:父子文件只传边界引用与 terminal hash) ----
     // agent 工具派工时挂子 run 引用:该 call 的 started/终态事件带
     // relations.child_run_id。
-    void AttachChildRun(const std::string& call_id, const std::string& agent_run_id);
+    std::expected<void, std::string> AttachChildRun(
+        const std::string& call_id, const std::string& agent_run_id,
+        std::optional<SubagentSpawnProvenance> provenance = std::nullopt);
     // 子账收口后报终态 hash:该 call 的执行终态 payload 带
     // child_run_id 与 child_terminal_event_hash(双向对账的父侧)。
-    void NoteChildTerminal(const std::string& agent_run_id, const std::string& terminal_event_hash);
+    void NoteChildTerminal(const SubagentTerminalReceipt& receipt);
+    // Only receipt storage is shared; this does not keep the parent writer or
+    // other spawn callbacks alive beyond their existing borrowing contract.
+    std::shared_ptr<SubagentTerminalRegistry> child_terminal_registry() const {
+        return child_terminals_;
+    }
 
     // ---- P0-4:verification 与 outcome(§5.5/§五 5.5) ----
     // 验证点落账:started+recorded 两枚,observed_after_seq 钉在当前账尾。
@@ -216,9 +242,12 @@ public:
     // P0-B/turn_runner 用:当前轮 id(空 = 轮没开),子账开张失败的父侧
     // typed 事件按它带 turn_id。
     const std::string& current_turn_id() const { return turn_id_; }
+    // Canonical V3 message ID, assigned only after the assistant message commits.
+    // UI item IDs are not durable message references.
+    const std::string& last_committed_assistant_message_id() const { return last_committed_assistant_message_id_; }
     // 落账错误的共享汇(账本持有,/doctor trajectory 的"最近 I/O 错误"
     // 从这取;桥按轮把错误推进来)。
-    void SetErrorSink(std::vector<std::string>* sink) { error_sink_ = sink; }
+    void SetErrorSink(std::shared_ptr<TrajectoryDiagnostics> sink) { error_sink_ = std::move(sink); }
 
     // 端云协同可观测单 T1(§25.3/§25.4):committed wake 窄口。账本侧在
     // receipt committed 后通知;空(默认)= 零行为,trajectory 老路一字
@@ -238,6 +267,15 @@ public:
         std::string step_id;
     };
     std::optional<V3CallOrigin> V3DeclaredCallOrigin(const std::string& provider_call_id) const;
+    // Completes only this bridge's original pending parent action. No reopened
+    // action or worker borrow; caches the first attempt including partial writes.
+    OwnedJobParentCommit CommitOwnedJobAdmission(const std::string& provider_call_id,
+        const tools::OwnedJobAdoption& adopted,
+        const trajectory::v3::JobOperationBindingFacts& binding);
+    // Only a started active action yields this identity; it is borrowed from no
+    // mutable last-call slot and copied for the current Tool::execute invocation.
+    std::optional<std::pair<std::string, std::uint64_t>> V3ExecutingCallIdentity(
+        const std::string& provider_call_id) const;
     // request_id -> 流式预留的 assistant messageId(提前档调用证据锚;
     // 流没起账/请求簿没有 → nullopt)。
     std::optional<std::string> V3ReservedAssistantMessageId(const std::string& request_id) const;
@@ -253,6 +291,7 @@ public:
     }
 
 private:
+    std::string last_committed_assistant_message_id_;
     api::Backend* action_summary_backend_ = nullptr;
     ActionSummaryProfile action_summary_profile_;
     int action_summary_calls_remaining_ = 0;
@@ -386,7 +425,8 @@ private:
         int input_round_index = 0;
     };
     std::map<std::string, RequestTurnBook> request_turns_;
-    std::map<std::string, std::string> child_terminal_hashes_;  // agent_run_id -> hash
+    std::shared_ptr<SubagentTerminalRegistry> child_terminals_ =
+        std::make_shared<SubagentTerminalRegistry>();
     std::set<std::string> started_io_failed_;  // started 落不住被拦的 execution
     std::set<std::string> storage_blocked_;    // 磁盘 reserve 不足被拦的 execution
     std::vector<VerificationBook> verifications_;
@@ -396,7 +436,7 @@ private:
     std::uint64_t output_counter_ = 0;
     std::uint64_t verification_counter_ = 0;
     std::vector<std::string> recent_errors_;
-    std::vector<std::string>* error_sink_ = nullptr;  // 账本持有的共享汇
+    std::shared_ptr<TrajectoryDiagnostics> error_sink_ = nullptr;  // 账本持有的共享汇
     telemetry::CommitObserver* commit_wake_ = nullptr;  // T1 committed wake(默认空)
     std::string wake_stream_id_;                        // session 相对 stream 路径
 };
