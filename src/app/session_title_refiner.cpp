@@ -18,15 +18,18 @@
 namespace lubancode::app {
 #ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
 namespace testing {
-namespace { thread_local std::function<void()> title_start_hook; }
+namespace { thread_local std::function<void()> title_start_hook; thread_local TitleWorkerHook title_execution_hook; }
 std::function<void()> ExchangeTitleWorkerStartHook(std::function<void()> hook) {
     return std::exchange(title_start_hook,std::move(hook));
+}
+TitleWorkerHook ExchangeTitleWorkerExecutionHook(TitleWorkerHook hook) {
+    return std::exchange(title_execution_hook,std::move(hook));
 }
 }
 #endif
 namespace {
-// 退出兜底的有界等待窗:取消旗先行,后端听话就快回;真挂死(cpr 卡死
-// 那类)到点 detach 放行,不冻退出——与 AgentTool 析构同一副方子。看门狗
+// 退出时先取消,只把结果等待圈在七秒内;结果未归则 detach。
+// 结果已发布后 join 另等线程退出与闭包析构,这段没有统一时限。看门狗
 // 放宽到 30 秒后这窗不再覆盖整段预算:超窗的悬账被弃——本地标题已保住,
 // usage 丢一笔可接受(2026-09-22 超时放宽单认可)。
 constexpr auto kShutdownGrace = std::chrono::seconds(7);
@@ -65,9 +68,13 @@ bool SessionTitleRefiner::Start(Inputs&& inputs) {
     binding_failure.model = inputs.model;
     binding_failure.generation = inputs.generation;
     binding_failure.error = "标题精炼旁路绑定失败";
+    Outcome outcome; outcome.model = inputs.model; outcome.generation = inputs.generation;
+    std::string execution_failure = "标题精炼后台执行失败";
+    static_assert(std::is_nothrow_move_assignable_v<std::string>);
     static_assert(std::is_nothrow_move_assignable_v<std::optional<Outcome>>);
 #ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
     auto bypass_hook = testing::SnapshotBypassWorkerHook();
+    auto execution_hook = testing::title_execution_hook;
 #endif
     std::unique_ptr<agent::LoopBoundaryRecorder> bypass;
     try {
@@ -93,46 +100,48 @@ bool SessionTitleRefiner::Start(Inputs&& inputs) {
     }
     // Proxy/value captures own the callback gate. The ledger retires its real bridge before teardown.
     auto run =
-        [shared,
+        [shared, outcome = std::move(outcome), execution_failure = std::move(execution_failure),
 #ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
-         bypass_hook = std::move(bypass_hook),
+         bypass_hook = std::move(bypass_hook), execution_hook = std::move(execution_hook),
 #endif
          backend = std::move(inputs.backend), model = std::move(inputs.model),
          effort = std::move(inputs.effort), first_query = std::move(inputs.first_query),
-         bypass = std::move(bypass), timeout_secs = inputs.timeout_secs]() mutable {
-            // This private hook only holds a test latch; Title exception cleanup is separate.
+         bypass = std::move(bypass), timeout_secs = inputs.timeout_secs]() mutable noexcept {
+            auto fail = [&]() noexcept {
+                outcome.ok = false;
+                outcome.title.clear();
+                outcome.error = std::move(execution_failure);
+                // Preserve only identity, invocation and accounting facts already returned.
+            };
+            try {
 #ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
-            if (bypass_hook) bypass_hook(testing::BypassWorkerPurpose::Title, testing::BypassWorkerPhase::BeforeSampling);
+                if (execution_hook) execution_hook(testing::TitleWorkerPhase::BeforeWork);
+                if (bypass_hook) bypass_hook(testing::BypassWorkerPurpose::Title, testing::BypassWorkerPhase::BeforeSampling);
 #endif
-            Outcome outcome;
-            outcome.model = model;
-            outcome.generation = shared->generation;
-            // 看门狗(取消误报 ESC 单 Bug 1 后收编):超时交给 SampleModel
-            // 的合并取消口(预算照进 timeout_secs,deadline 到点归因
-            // local_deadline 并带预算数),会话拆除仍走 RequestCancel 的外
-            // 部旗(升旗人申报 Internal)。本地看门狗线程退役。
-            lubancode::agent::BackgroundCallAccounting accounting;
-            outcome.refinement_invoked = true;
-            const auto title = RefineSessionTitle(*backend, model, effort, first_query,
-                                                  timeout_secs, &shared->cancel, &accounting,
-                                                  bypass.get());
-            // 失败半截也出账(旧口径:先记账再判错)。
-            outcome.accounting = std::move(accounting);
-            if (title.has_value() && !title->empty()) {
-                outcome.ok = true;
-                outcome.title = *title;
-            } else if (!title.has_value()) {
-                // 死因原样带回(2026-09-22 报明单):超时/网络错/空回各报
-                // 各的,报明行拿它填 {0}——此前闭包只看 has_value,错误串
-                // 扔在门口。has_value 且空的半档按契不会出现(空回走
-                // unexpected),真出现就留空,报明行降级成无死因。
-                outcome.error = title.error();
+                outcome.refinement_invoked = true;
+                const auto title = RefineSessionTitle(*backend, model, effort, first_query,
+                    timeout_secs, &shared->cancel, &outcome.accounting, bypass.get());
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+                if (execution_hook) execution_hook(testing::TitleWorkerPhase::AfterRefinement);
+#endif
+                if (title.has_value() && !title->empty()) {
+                    outcome.ok = true;
+                    outcome.title = *title;
+                } else if (!title.has_value()) {
+                    outcome.error = title.error();
+                }
+#ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
+                if (execution_hook) execution_hook(testing::TitleWorkerPhase::BeforePublish);
+#endif
+            } catch (const std::exception&) {
+                fail();
+            } catch (...) {
+                fail();
             }
-            {
-                std::lock_guard<std::mutex> lock(shared->mutex);
-                shared->outcome = std::move(outcome);
-            }
-            shared->done.store(true);  // outcome 写完才立收讫旗,主线程收货不抢跑
+            // One producer; readers acquire done before touching the slot.
+            // The optional move is statically checked not to throw.
+            shared->outcome = std::move(outcome);
+            shared->done.store(true);
         };
     try {
 #ifdef LUBANCODE_PRIVATE_MEMORY_WORKER_TEST_HOOKS
@@ -153,7 +162,7 @@ std::optional<SessionTitleRefiner::Outcome> SessionTitleRefiner::TakeFinished() 
         return std::nullopt;
     }
     if (worker_.joinable()) {
-        worker_.join();  // done 已立:线程已退场或正要退,join 立即回
+        worker_.join();  // done 表示结果已发布;这里还等线程退出与闭包析构
     }
     std::optional<Outcome> out;
     {

@@ -2431,12 +2431,16 @@ jobs:
                       if sections[0].splitlines().count(marker) != 1:
                           raise SystemExit('ASan Memory durable identity path did not finish once: ' + path)
               if name == 'unit.app.session_title_refiner_start':
-                  if int(counts[0]) != 7:
-                      raise SystemExit('ASan Title worker start source did not execute all seven cases')
+                  if int(counts[0]) != 14:
+                      raise SystemExit('ASan Title worker source did not execute seven start and seven execution cases')
                   for path in ('standard','nonstandard','restart','gates','isolation','binding','adoption'):
                       marker = '[title-worker-start-path] ' + path
                       if sections[0].splitlines().count(marker) != 1:
                           raise SystemExit('ASan Title worker start path did not finish once: '+path)
+                  for path in ('before-work','after-refinement','before-publish','restart','isolation','account','late-close'):
+                      marker = '[title-worker-execution-path] ' + path
+                      if sections[0].splitlines().count(marker) != 1:
+                          raise SystemExit('ASan Title worker execution path did not finish once: '+path)
               if name == 'unit.app.memory_bypass_owner':
                   if int(counts[0]) != 16:
                       raise SystemExit('ASan real bypass owners did not execute all sixteen cases')
