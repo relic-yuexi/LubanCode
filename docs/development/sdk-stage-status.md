@@ -84,7 +84,12 @@ Windows/Linux/macOS 全 CLI 各 803/801/804 项，SDK ON/OFF 各 73/71 项，九
 ASan 179 来源、1969 CASE、89190 断言过；754 份测试与 profile 输入已核，不指完整生产源码闭包。
 普通 SDK 不带私有头与三个 owner 测试导出。TSan 本片按路径跳过，不计通过，不借前驱绿灯。
 74 份产物、1925 份原件已逐大小与 SHA256 封存；未跑本地 CI。
-下一片[Memory 共用词法门控](sdk-memory-learning-gates.md) 先交合同，尚未交付。
+[Memory 共用词法门控](sdk-memory-learning-gates.md) 已随 [#347](https://github.com/relic-yuexi/LubanCode/pull/347) 合入 `33a057865224`，与验收源 `e6e931ad` 同树。
+Windows/Linux/macOS 全 CLI 803/801/804 项均过；SDK Lua ON/OFF 73/71 案及九套移位消费均已核同源原件。
+SDK DLL 与 CLI 内核两路抽取各十案十标记，Backend 十九案七标记保住；三平台专门 Memory 门及全量 Memory 案均过。
+ASan 179 来源、1975 CASE；77 份产物、1940 份原件已逐大小与 SHA256 封存。
+TSan 本片跳过，不计通过；未跑本地 CI。
+下一片[SDK 用量快照](sdk-memory-usage-snapshot.md) 先交合同，尚未交付。
 sent 后物理交接、完整来源、公开自动 Memory owner 与 CLI 装配仍欠账。
 CLI 主入口与 one-shot 尚未迁完，SDK 与 CLI 全面对齐仍欠账。下文保留历史原账。
 

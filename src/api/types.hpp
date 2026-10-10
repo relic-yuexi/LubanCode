@@ -579,9 +579,19 @@ struct StreamError {
     std::string code;  // provider 的稳定业务错误码(没有则空)
 };
 
+// Observed whole usage snapshot. It never finalizes content or declares success.
+// Presence is the frame itself; explicitly reported zero remains distinguishable.
+struct UsageSnapshot {
+    Usage usage;
+    bool usage_reported = false;
+    bool cache_read_reported = false;
+    bool cache_creation_reported = false;
+    std::string usage_anomaly;
+};
+
 using StreamEvent = std::variant<MessageStart, TextDelta, ThinkingDelta, ToolUseStart, ToolUseInputDelta,
                                  ContentBlockDone, BuiltinToolStart, BuiltinToolDone, MessageDone, ImageOutput,
-                                 ServerToolUseStart, ServerToolResult, RedactedThinking, StreamError>;
+                                 ServerToolUseStart, ServerToolResult, RedactedThinking, StreamError, UsageSnapshot>;
 
 // ---------------------------------------------------------------------------
 // 错误
