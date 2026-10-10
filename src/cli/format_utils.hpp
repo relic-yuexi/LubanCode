@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,6 +23,7 @@ namespace lubancode::cli {
 //   n >= 1000000   —— 两位小数 M("1.05M"),尾随 0 逐位省略("1.5M"/"1M")
 // 四舍五入;负数不该出现,出现了原样十进制打出来,不猜。
 std::string FormatTokenCount(std::int64_t n);
+std::string FormatTokenCount(std::optional<std::int64_t> n);
 
 // 常驻状态行的"确认档"段:"⏵⏵ 确认模式 (shift+tab 切换)" / "⏵⏵ auto ..." /
 // "⏵⏵ yolo ..."。纯文本不夹 ANSI,配什么色是终端层的事(auto 淡色、yolo

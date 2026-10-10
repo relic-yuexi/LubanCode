@@ -163,7 +163,7 @@ public:
     // 最近一次请求的缓存命中率(百分比,四舍五入)。分母只取输入;没实测
     // (总输入为 0)时返回 -1,调用方写"服务端未回报",不许拿 0 冒充真未命中。
     int last_cache_hit_percent() const {
-        if (last_input_tokens_ <= 0) {
+        if (last_input_tokens_ <= 0 || last_cache_read_tokens_ < 0 || last_cache_read_tokens_ > last_input_tokens_) {
             return -1;
         }
         const double ratio = static_cast<double>(last_cache_read_tokens_) /
@@ -185,7 +185,7 @@ public:
 
     // 本场(会话启动至今)缓存命中率(百分比);一次实测都没有返回 -1。
     int session_cache_hit_percent() const {
-        if (session_input_total_ <= 0) {
+        if (session_input_total_ <= 0 || session_cache_read_total_ < 0 || session_cache_read_total_ > session_input_total_) {
             return -1;
         }
         const double ratio = static_cast<double>(session_cache_read_total_) /
@@ -244,7 +244,7 @@ public:
         // 明细未报(cache_read_reported=false 且数字为 0——读取量未知)或
         // 样本异常时返回 -1:这三种都不是"0% 命中",不许冒充。
         int hit_percent() const {
-            if (input_tokens <= 0 || anomalous) {
+            if (input_tokens <= 0 || anomalous || cache_read_tokens < 0 || cache_read_tokens > input_tokens) {
                 return -1;
             }
             if (cache_read_tokens <= 0 && !cache_read_reported) {

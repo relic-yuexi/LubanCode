@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "api/types.hpp"
+#include "api/usage_json.hpp"
 #include "app/agent_view_registry.hpp"
 #include "cli/agent_view_state.hpp"
 #include "cli/console_input.hpp"  // UpdateStatusLineContext
@@ -286,6 +287,7 @@ void TerminalTurnSink::ApplyEvent(const runtime::ServerEvent& event, std::uint64
                 event.payload.value("cache_creation_reported_by_provider",
                                     event.payload.value("cache_reported_by_provider", false));
             report.usage_anomaly = event.payload.value("usage_anomaly", std::string());
+            api::usage_json::Restore(report, event.payload);
             report.model = event.payload.value("model", std::string());
             report.cache_epoch = event.payload.value("cache_epoch", 1);
             report.epoch_break_reason = event.payload.value("epoch_break_reason", std::string());

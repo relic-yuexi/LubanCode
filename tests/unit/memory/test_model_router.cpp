@@ -5,6 +5,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -249,6 +250,58 @@ TEST_CASE("usage 分角色记账:Record/ReportLines/回退留痕") {
     // from == to 不是回退,不记。
     ledger.RecordFallback(TaskKind::Compact, ModelRole::Normal, ModelRole::Normal, "x");
     CHECK(ledger.fallback_notes().size() == 1);
+}
+
+TEST_CASE("分角色账:溢出留下未知,后续报告不能补成精确总数") {
+    lubancode::agent::ModelUsageLedger ledger;
+    const auto maximum = (std::numeric_limits<std::int64_t>::max)();
+    lubancode::api::Usage first;
+    first.input_tokens = maximum; first.output_tokens = maximum;
+    ledger.Record(ModelRole::Cheap, "first", first, maximum, true);
+    auto entry = ledger.by_role().at(ModelRole::Cheap);
+    CHECK_FALSE(entry.input_overflow); CHECK_FALSE(entry.output_overflow); CHECK_FALSE(entry.duration_overflow);
+    lubancode::api::Usage next;
+    next.input_tokens = 1; next.output_tokens = 1; next.output_reasoning_tokens = maximum;
+    ledger.Record(ModelRole::Cheap, "next", next, 1, true);
+    entry = ledger.by_role().at(ModelRole::Cheap);
+    CHECK(entry.input_overflow); CHECK(entry.output_overflow); CHECK(entry.duration_overflow);
+    CHECK(entry.input_tokens == maximum); CHECK(entry.output_tokens == maximum); CHECK(entry.duration_ms == maximum);
+    next.input_tokens = -1; next.output_tokens = -1;
+    ledger.Record(ModelRole::Cheap, "later", next, 1, true);
+    entry = ledger.by_role().at(ModelRole::Cheap);
+    CHECK(entry.input_overflow); CHECK(entry.output_overflow); CHECK(entry.duration_overflow);
+    CHECK(entry.input_tokens == maximum); CHECK(entry.output_tokens == maximum); CHECK(entry.duration_ms == maximum);
+    CHECK(entry.calls == 3); CHECK(entry.last_model == "later");
+    const auto lines = ledger.ReportLines(); REQUIRE(lines.size() == 3);
+    CHECK(lines[0].find("输入 未知（溢出）") != std::string::npos);
+    CHECK(lines[0].find("输出 未知（溢出）") != std::string::npos);
+    CHECK(lines[0].find("用时 未知（溢出）") != std::string::npos);
+    CHECK(lines[0].find(std::to_string(maximum)) == std::string::npos);
+    lubancode::api::Usage scoped;
+    scoped.input_tokens = 100; scoped.cache_read_tokens = 50; scoped.cache_creation_tokens = 10;
+    scoped.output_tokens = 7; scoped.output_reasoning_tokens = maximum;
+    ledger.Record(ModelRole::Normal, "normal", scoped, 1000, true);
+    CHECK(ledger.by_role().at(ModelRole::Normal).input_tokens == 160);
+    CHECK(ledger.by_role().at(ModelRole::Normal).output_tokens == 7); // Reasoning is already part of output.
+    CHECK_FALSE(ledger.by_role().at(ModelRole::Normal).input_overflow);
+    ledger.Clear(); CHECK(ledger.by_role().empty());
+    scoped.input_tokens = maximum; scoped.cache_read_tokens = 1; scoped.cache_creation_tokens = -1;
+    ledger.Record(ModelRole::Cheap, "intermediate", scoped, 1, true);
+    CHECK(ledger.by_role().at(ModelRole::Cheap).input_overflow);
+    CHECK(scoped.input_tokens == maximum); CHECK(scoped.cache_read_tokens == 1); CHECK(scoped.cache_creation_tokens == -1);
+    CHECK_FALSE(ledger.by_role().at(ModelRole::Cheap).output_overflow);
+    ledger.Clear();
+    scoped.input_tokens = (std::numeric_limits<std::int64_t>::min)();
+    scoped.cache_read_tokens = -1; scoped.cache_creation_tokens = 1;
+    ledger.Record(ModelRole::Cheap, "underflow", scoped, 0, true);
+    CHECK(ledger.by_role().at(ModelRole::Cheap).input_overflow);
+    CHECK(scoped.input_tokens == (std::numeric_limits<std::int64_t>::min)());
+    CHECK(scoped.cache_read_tokens == -1); CHECK(scoped.cache_creation_tokens == 1);
+    ledger.Clear();
+    scoped = {}; ledger.Record(ModelRole::Cheap, "zero", scoped, 0, true);
+    CHECK_FALSE(ledger.by_role().at(ModelRole::Cheap).input_overflow);
+    CHECK_FALSE(ledger.by_role().at(ModelRole::Cheap).output_overflow);
+    CHECK(ledger.ReportLines()[0].find("输入 0 tok · 输出 0 tok") != std::string::npos);
 }
 
 TEST_CASE("分角色账:新会话三角色全见 0 次,职责各写一句(问题 6)") {

@@ -521,6 +521,82 @@ def _invocation(rows, session_dir, files, turn, operation, tag, witness=None):
     return materials, used
 
 
+def _ordinary_usage(saved, rows, turn):
+    """Bind the new result extension to actual ordinary host request facts.
+
+    The original five-key result remains valid for old source fixtures. New
+    material is checked, never ignored or used to reconstruct canonical hashes.
+    This installed host reports two legacy integer counters per physical call.
+    """
+    if 'usage' not in saved:
+        return
+    usage = saved['usage']
+    require(isinstance(usage, dict) and set(usage) ==
+            {'version', 'attempts_complete', 'attempts', 'direct', 'subordinate'} and
+            type(usage['version']) is int and usage['version'] == 2 and usage['attempts_complete'] is True,
+            'ordinary usage extension shape differs')
+    attempts = usage['attempts']
+    observed = [row for row in _events(rows, 'model.usage.observed') if row.get('turnId') == turn]
+    require(isinstance(attempts, list) and 0 < len(attempts) <= 1024 and len(attempts) == len(observed),
+            'ordinary usage lost or duplicated actual requests')
+    totals = [0] * 5
+    used = set()
+    for attempt in attempts:
+        require(isinstance(attempt, dict) and set(attempt) == {'numbers', 'observation',
+                'source_session_id', 'source_run_id', 'trajectory_request_id', 'provider_response_id',
+                'model', 'step_id', 'turn_id', 'purpose', 'cache_epoch', 'reported_by_provider',
+                'subordinate', 'incomplete'} and attempt['turn_id'] == turn and
+                attempt['source_session_id'] == rows[0]['sessionId'] and
+                attempt['source_run_id'] == rows[0]['runId'] and attempt['subordinate'] is False and
+                attempt['incomplete'] is False and attempt['reported_by_provider'] is True and
+                attempt['purpose'] == 'main_turn', 'ordinary usage source owner differs')
+        request = attempt['trajectory_request_id']
+        require(isinstance(request, str) and request and request not in used, 'ordinary usage request reused')
+        used.add(request)
+        prepared = [row for row in _events(rows, 'model.request.prepared')
+                    if row.get('requestId') == request and row.get('turnId') == turn]
+        sent = [row for row in _events(rows, 'model.request.sent')
+                if row.get('requestId') == request and row.get('turnId') == turn]
+        facts = [row for row in observed if row.get('requestId') == request]
+        require(len(prepared) == len(sent) == len(facts) == 1 and
+                prepared[0]['seq'] < sent[0]['seq'] < facts[0]['seq'] and
+                prepared[0].get('stepId') == sent[0].get('stepId') == facts[0].get('stepId') and
+                attempt['model'] == prepared[0]['payload'].get('model') and
+                attempt['step_id'] == prepared[0]['payload'].get('producerStepId') and
+                type(attempt['cache_epoch']) is int and attempt['cache_epoch'] ==
+                prepared[0]['payload'].get('prefixAccount', {}).get('cacheEpoch'),
+                'ordinary usage prepared/sent source differs')
+        fact = facts[0]['payload']
+        numbers, observation = attempt['numbers'], attempt['observation']
+        require(isinstance(numbers, list) and len(numbers) == 5 and
+                all(type(value) is int and -(1 << 63) <= value < (1 << 63) for value in numbers) and
+                numbers == fact.get('numbers') and observation == fact.get('observation') and
+                fact.get('reportedByProvider') is True and fact.get('incomplete') is False and
+                attempt['provider_response_id'] == (fact.get('providerResponseId') or '') and
+                isinstance(observation, dict) and observation.get('provider_namespace') == 'lubancore.backend.legacy' and
+                observation.get('anomalies') == [] and observation.get('extensions') == [] and
+                len(observation.get('fields', [])) == 5 and numbers[2:] == [0, 0, 0],
+                'ordinary usage differs from actual observed material')
+        totals = [left + right for left, right in zip(totals, numbers)]
+        require(all(-(1 << 63) <= value < (1 << 63) for value in totals), 'ordinary usage aggregate overflow')
+    def summary(value, count, total):
+        require(isinstance(value, dict) and set(value) == {'total', 'samples', 'counter_overflow', 'fields'} and
+                isinstance(value['total'], list) and len(value['total']) == 5 and
+                all(type(number) is int and -(1 << 63) <= number < (1 << 63) for number in value['total']) and
+                value['total'] == total and type(value['samples']) is int and value['samples'] == count and
+                value['counter_overflow'] is False and isinstance(value['fields'], list) and len(value['fields']) == 5,
+                'ordinary usage summary differs')
+        for index, field in enumerate(value['fields']):
+            known = count if index < 2 else 0
+            expected = {'observed': known, 'missing': count - known, 'valid': known, 'inferred': 0,
+                        'anomalous': 0, 'included': count, 'omitted': 0, 'arithmetic_overflow': False}
+            require(isinstance(field, dict) and field == expected and
+                    all(type(field[key]) is int for key in expected if key != 'arithmetic_overflow') and
+                    field['arithmetic_overflow'] is False, 'ordinary usage field coverage differs')
+    summary(usage['direct'], len(attempts), totals)
+    summary(usage['subordinate'], 0, [0] * 5)
+
+
 def _operations(rows, session_dir, files, expected):
     """Ordinary SDK producer: operation facts, original input and final material.
 
@@ -587,10 +663,12 @@ def _operations(rows, session_dir, files, expected):
                 type(source.get('schemaVersion')) is int and source['schemaVersion'] == 1 and
                 source.get('operationId') == operation and source.get('text') == 'JOURNAL_USER_' + tag and source.get('images') == [],
                 'actual ordinary input artifact differs')
-        require(isinstance(saved, dict) and set(saved) == {'operationId', 'turnId', 'finalText', 'error', 'complete'} and
+        result_keys = {'operationId', 'turnId', 'finalText', 'error', 'complete'}
+        require(isinstance(saved, dict) and set(saved) in (result_keys, result_keys | {'usage'}) and
                 saved.get('operationId') == operation and saved.get('turnId') == turn and saved.get('complete') is True and
                 saved.get('error') == '' and saved.get('finalText') == 'JOURNAL_ANSWER_' + tag,
                 'actual ordinary SDK final artifact differs')
+        _ordinary_usage(saved, rows, turn)
         received = [row for row in _events(rows, 'input.received') if row.get('turnId') == turn]
         users = [row for row in rows if row['type'] == 'message' and row.get('turnId') == turn and row['message'].get('role') == 'user']
         final_refs = final.get('finalMessageRefs')

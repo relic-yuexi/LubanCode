@@ -254,7 +254,9 @@ ChildAdoptionCheck Verdict(ChildAdoptionState state, std::string_view issue) {
 } // namespace
 
 ChildAdoptionCheck ValidateChildAdoption(const V3Ledger& parent, const fs::path& parent_dir,
-    std::string_view turn_id, std::string_view action_id, std::uint64_t attempt) {
+    std::string_view turn_id, std::string_view action_id, std::uint64_t attempt,
+    const std::function<void(const V3Ledger&)>& checked_child,
+    const std::function<void(const V3Ledger&)>& checked_terminal_source) {
     try {
         Require(SafeText(parent.session_id) && SafeText(parent.run_id) && SafeText(turn_id) && SafeText(action_id) && attempt,
                 "invalid_scope");
@@ -351,6 +353,10 @@ ChildAdoptionCheck ValidateChildAdoption(const V3Ledger& parent, const fs::path&
         const auto& meta = *child->messages.front().system_meta;
         Require(meta.at("parentActionRef") == parent_action.ToJson() && Text(meta.at("taskId")) == task &&
                 meta.at("spawnEventRef") == EventRef(spawn), "child_parent_source_mismatch");
+
+        // Accounting belongs to the actual closed child even when the parent
+        // later fails to persist/adopt its tool result. Do not upgrade adoption.
+        if (checked_terminal_source) checked_terminal_source(*child);
 
         ArtifactReader artifacts{parent_root};
         const EventLine* raw = nullptr;
@@ -509,8 +515,10 @@ ChildAdoptionCheck ValidateChildAdoption(const V3Ledger& parent, const fs::path&
             Require(CheckPreparedAgainstChain(parent, event.event_id).empty(), "prepared_chain_mismatch");
             value.consumed_tool_message_id = consumed->message_id; value.prepared_event_id = event.event_id;
             value.prepared_context_revision = Uint(event.payload.at("contextRevision"));
+            if (checked_child) checked_child(*child);
             return {ChildAdoptionState::Validated, {}, std::move(value)};
         }
+        if (checked_child) checked_child(*child);
         return Verdict(ChildAdoptionState::Incomplete, "prepared_consumption_pending");
     } catch (const Incomplete& error) {
         return Verdict(ChildAdoptionState::Incomplete, error.what());

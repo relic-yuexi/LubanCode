@@ -24,6 +24,7 @@
 #include <lubancore/web_fetch.hpp>
 #include <lubancore/web_search.hpp>
 #include <lubancore/jobs.hpp>
+#include <lubancore/usage.hpp>
 #include <lubancore/named_results.hpp>
 
 // Experimental C++23 API. Consumer and library must use a compatible compiler,
@@ -49,7 +50,39 @@ struct ModelRequest {
     // provider-specific effort names are forwarded without a whitelist.
     std::string reasoning_effort;
 };
-struct Usage { std::int64_t input_tokens = 0; std::int64_t output_tokens = 0; };
+struct Usage {
+    std::int64_t input_tokens = 0;
+    std::int64_t output_tokens = 0;
+    std::int64_t cache_read_tokens = 0;
+    std::int64_t cache_creation_tokens = 0;
+    std::int64_t output_reasoning_tokens = 0;
+};
+struct UsageSummary {
+    Usage total;
+    ::lubancore::usage::v1::Coverage coverage;
+};
+inline constexpr std::size_t kMaxUsageAttempts = 1024;
+struct UsageAttempt {
+    Usage usage;
+    std::string trajectory_request_id, provider_response_id, model;
+    std::string step_id, turn_id, purpose;
+    int cache_epoch = 0;
+    bool subordinate = false, incomplete = false;
+    bool reported_by_provider = false;
+    std::optional<::lubancore::usage::v1::Observation> observation;
+    std::string source_session_id, source_run_id;
+};
+struct OperationUsage {
+    // Separate direct and forwarded subordinate observations; never charge a
+    // child's forwarded totals to the direct request count. Samples are reports,
+    // not a claim about hidden provider retries or durable failed-attempt ACK.
+    UsageSummary direct;
+    UsageSummary subordinate;
+    // A complete list covers these admitted observations, not hidden network
+    // retries or a durable failed-attempt ACK. Legacy summaries remain unknown.
+    std::vector<UsageAttempt> attempts;
+    bool attempts_complete = false;
+};
 struct ModelReply {
     std::string text;
     std::vector<ToolCall> tool_calls;
@@ -57,6 +90,12 @@ struct ModelReply {
     // Empty preserves text/tool inference; otherwise the provider's actual
     // finish reason. UTF-8, no NUL, at most 256 bytes.
     std::string stop_reason;
+    // Actual provider response identifier, never a locally invented request ID.
+    // Present values require nonempty UTF-8 without NUL, at most 256 bytes.
+    std::optional<std::string> provider_response_id;
+    // Explicit per-field evidence is authoritative. Without it, only legacy
+    // input/output are reported; appended default counters remain unknown.
+    std::optional<::lubancore::usage::v1::Observation> usage_observation;
 };
 
 // Text/tool-call injection surface, useful for an embedded provider or fixture.
@@ -192,6 +231,9 @@ struct Operation {
     std::string final_text;
     std::string error;
     bool result_persisted = false;
+    // Absent on legacy saved results. Each field's coverage states what is known;
+    // nonzero totals and a successful operation never imply exact accounting.
+    std::optional<OperationUsage> usage;
 };
 class LUBANCORE_API EventStream {
 public:

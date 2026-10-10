@@ -151,6 +151,8 @@ struct ServerEvent {
     // 消费方别读。
     std::string text;              // ItemDelta 的正文/思考增量
     nlohmann::json payload = nlohmann::json::object();  // 其余结构领域数据
+    // In-memory owner receipt only; never serialized or trusted after forwarding.
+    bool usage_observed = false;
 
     nlohmann::json to_json() const;
     static ServerEvent from_json(const nlohmann::json& j);

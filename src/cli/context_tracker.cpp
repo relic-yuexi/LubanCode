@@ -1,6 +1,7 @@
 #include "cli/context_tracker.hpp"
 
 #include <cstdint>
+#include <limits>
 
 #include "agent/context.hpp"  // AutoCompactTriggerLine:触发线公共尺(§〇.1)
 
@@ -237,6 +238,9 @@ int ContextTracker::UsagePercent() const {
         return 0;
     }
     const double ratio = static_cast<double>(current_tokens_) / static_cast<double>(window_tokens_) * 100.0;
+    // Keep the occupancy count and threshold decision; only the legacy int
+    // percentage becomes unknown when its rounded result cannot fit.
+    if (ratio + 0.5 > static_cast<double>((std::numeric_limits<int>::max)())) return -1;
     return static_cast<int>(ratio + 0.5);
 }
 

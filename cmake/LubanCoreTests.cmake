@@ -22,6 +22,7 @@ if(NOT LUBANCORE_FOCUSED_TEST_SOURCES)
   message(FATAL_ERROR "SDK build requires registered integration/sdk tests")
 endif()
 list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
+  "${_lubancore_tests_root}/unit/api/test_usage_numeric_allocations.cpp"
   "${_lubancore_tests_root}/unit/packages/test_package_manifest.cpp"
   "${_lubancore_tests_root}/unit/tools/test_tool_job_coordinator.cpp"
   "${_lubancore_tests_root}/unit/tools/test_tool_job_start_transaction.cpp"
@@ -109,10 +110,12 @@ target_include_directories(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}
 target_compile_definitions(lubancore_sdk_tests PRIVATE
   LUBANCORE_CONSUMER_WITH_LUA=$<BOOL:${LUBANCORE_WITH_LUA}>
   LUBANCORE_TEST_JOB_POST_SDK=1
+  LUBANCORE_TEST_USAGE_NUMERIC_FAULT_PROBE="$<TARGET_FILE:lubancore_usage_numeric_fault_probe>"
   LUBANCODE_TEST_FIXTURES_DIR="${_lubancore_tests_root}/fixtures"
   LUBANCORE_TEST_SEARCH_PROBE="$<TARGET_FILE:lubancore_sdk_search_probe>"
   LUBANCORE_TEST_COMMAND_LIMITS_PROBE="$<TARGET_FILE:lubancore_command_limits_probe>")
 add_dependencies(lubancore_sdk_tests lubancore_sdk_search_probe lubancore_command_limits_probe)
+add_dependencies(lubancore_sdk_tests lubancore_usage_numeric_fault_probe)
 target_compile_features(lubancore_sdk_tests PRIVATE cxx_std_23)
 target_precompile_headers(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}/support/pch.hpp")
 set_source_files_properties("${_lubancore_tests_root}/support/main.cpp"

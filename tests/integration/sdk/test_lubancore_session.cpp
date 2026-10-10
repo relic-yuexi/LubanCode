@@ -263,3 +263,128 @@ TEST_CASE("SDK: runtime shutdown signals every session before joining a worker")
     CHECK_FALSE((*first)->Submit("after", "closed").has_value());
     CHECK_FALSE((*second)->Submit("after", "closed").has_value());
 }
+
+
+TEST_CASE("SDK five-field result: actual operation totals and coverage survive Close and same-ID recovery") {
+    namespace facts = sdk::usage::v1;
+    struct FiveFieldBackend final : sdk::Backend {
+        std::shared_ptr<std::atomic<int>> calls;
+        explicit FiveFieldBackend(std::shared_ptr<std::atomic<int>> value) : calls(std::move(value)) {}
+        sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest&, sdk::Cancellation) override {
+            ++*calls;
+            sdk::ModelReply reply{"five-field", {}, sdk::Usage{3, 7, 11, 13, 2}};
+            reply.provider_response_id = "real-five-field-provider";
+            facts::Observation observation; observation.provider_namespace = "fixture";
+            const std::array<std::int64_t, 5> values{3, 7, 11, 13, 2};
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                observation.raw_fields.push_back({"usage." + std::to_string(i), facts::RawKind::SignedInteger, values[i], {}, {}});
+                auto& field = observation.fields[i];
+                field.presence = facts::Presence::Present; field.validity = facts::Validity::ValidInteger;
+                field.origin = facts::Origin::Reported; field.operands[0] = static_cast<std::uint16_t>(i);
+                field.operand_count = 1;
+            }
+            reply.usage_observation = std::move(observation);
+            return reply;
+        }
+    };
+    Fixture fixture;
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    auto runtime = sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime);
+    auto options = Options(fixture, calls);
+    options.backend = std::make_unique<FiveFieldBackend>(calls);
+    auto session = (*runtime)->OpenSession(std::move(options)); REQUIRE(session);
+    const auto receipt = (*session)->Submit("five-field", "question"); REQUIRE(receipt);
+    const auto result = (*session)->WaitResult(receipt->operation_id, 15s); REQUIRE(result);
+    REQUIRE(result->state == sdk::OperationState::Succeeded); REQUIRE(result->result_persisted);
+    const auto check = [](const sdk::Operation& operation) {
+        REQUIRE(operation.usage);
+        const auto& direct = operation.usage->direct;
+        CHECK(direct.total.input_tokens == 3); CHECK(direct.total.output_tokens == 7);
+        CHECK(direct.total.cache_read_tokens == 11); CHECK(direct.total.cache_creation_tokens == 13);
+        CHECK(direct.total.output_reasoning_tokens == 2); CHECK(direct.coverage.samples == 1);
+        for (const auto& field : direct.coverage.fields) {
+            CHECK(field.observed == 1); CHECK(field.valid == 1); CHECK(field.missing == 0);
+            CHECK(field.included == 1); CHECK(field.omitted == 0); CHECK(field.anomalous == 0);
+        }
+        CHECK(operation.usage->subordinate.coverage.samples == 0);
+        CHECK(operation.usage->attempts_complete); REQUIRE(operation.usage->attempts.size() == 1);
+        const auto& attempt = operation.usage->attempts.front();
+        CHECK_FALSE(attempt.subordinate); CHECK_FALSE(attempt.incomplete); CHECK(attempt.reported_by_provider);
+        CHECK_FALSE(attempt.trajectory_request_id.empty()); CHECK(attempt.provider_response_id == "real-five-field-provider");
+        CHECK(attempt.turn_id == operation.turn_id); CHECK_FALSE(attempt.step_id.empty());
+        CHECK_FALSE(attempt.model.empty()); CHECK(attempt.purpose == "main_turn"); CHECK(attempt.cache_epoch >= 0);
+        CHECK_FALSE(attempt.source_session_id.empty()); CHECK_FALSE(attempt.source_run_id.empty());
+        REQUIRE(attempt.observation); REQUIRE(attempt.observation->raw_fields.size() == 5);
+        CHECK(attempt.observation->raw_fields[0].integer == 3); CHECK(attempt.observation->raw_fields[4].integer == 2);
+    };
+    check(*result);
+    const auto id = (*session)->id(); REQUIRE((*session)->Close());
+    const auto source = lubancode::trajectory::v3::ReadV3Ledger(fixture.SessionDir(id) / lubancode::tools::Utf8ToPath(id + ".jsonl"));
+    REQUIRE(source); unsigned response_rows = 0;
+    for (const auto& message : source->messages) {
+        if (message.request_id != result->usage->attempts.front().trajectory_request_id ||
+            message.message.value("role", std::string()) != "assistant") continue;
+        ++response_rows;
+        CHECK(message.message.at("provider_response_id") == "real-five-field-provider");
+        REQUIRE(message.response_model); CHECK(message.response_model->is_null());
+        REQUIRE(message.usage); CHECK(message.usage->at("inputTokens") == 3);
+        CHECK(message.usage->at("outputTokens") == 7); CHECK(message.usage->at("cacheReadTokens") == 11);
+        CHECK(message.usage->at("cacheWriteTokens") == 13); CHECK(message.usage->at("reasoningTokens") == 2);
+    }
+    CHECK(response_rows == 1);
+    unsigned observed_rows = 0;
+    for (const auto& event : source->events) {
+        if (event.kind != lubancode::trajectory::v3::EventKindV3::ModelUsageObserved ||
+            event.request_id != result->usage->attempts.front().trajectory_request_id) continue;
+        ++observed_rows;
+        CHECK(event.payload.at("numbers") == nlohmann::json::array({3, 7, 11, 13, 2}));
+        CHECK(event.payload.at("providerResponseId") == "real-five-field-provider");
+        CHECK(event.payload.at("incomplete") == false); CHECK(event.payload.at("reportedByProvider") == true);
+        REQUIRE(event.payload.contains("observation"));
+        CHECK(event.payload.at("observation").at("raw_fields").size() == 5);
+    }
+    CHECK(observed_rows == 1);
+    auto resumed_options = Options(fixture, calls); resumed_options.resume_session_id = id;
+    auto resumed = (*runtime)->OpenSession(std::move(resumed_options)); REQUIRE(resumed);
+    const auto recovered = (*resumed)->ReadOperation(receipt->operation_id); REQUIRE(recovered);
+    check(*recovered); CHECK(recovered->result_persisted); CHECK(calls->load() == 1);
+    REQUIRE((*resumed)->Close());
+    const auto result_path = fixture.SessionDir(id) / "sdk-results" / (receipt->operation_id + ".json");
+    nlohmann::json saved;
+    { std::ifstream input(result_path); input >> saved; }
+    auto invalid = saved;
+    invalid["usage"]["direct"]["fields"][0]["observed"] = 2;
+    { std::ofstream output(result_path, std::ios::binary | std::ios::trunc); output << invalid.dump(); }
+    auto invalid_options = Options(fixture, calls); invalid_options.resume_session_id = id;
+    auto rejected = (*runtime)->OpenSession(std::move(invalid_options));
+    REQUIRE_FALSE(rejected); CHECK(rejected.error().code == "sdk.usage.result_invalid");
+    for (int corrupt = 0; corrupt < 14; ++corrupt) {
+        auto bad_attempt = saved;
+        if (corrupt == 0) bad_attempt["usage"]["attempts"][0]["numbers"][0] = 99;
+        if (corrupt == 1) bad_attempt["usage"]["attempts"][0]["provider_response_id"] = std::string(257, 'x');
+        if (corrupt == 2) bad_attempt["usage"]["attempts"][0]["observation"]["fields"][0]["operands"] = nlohmann::json::array({64});
+        if (corrupt == 3) bad_attempt["usage"]["attempts"] = nlohmann::json::array();
+        if (corrupt == 4) bad_attempt["usage"]["attempts"][0]["turn_id"] = "foreign-turn";
+        if (corrupt == 5) bad_attempt["usage"]["attempts"][0]["trajectory_request_id"] = "foreign-request";
+        if (corrupt == 6) bad_attempt["usage"]["attempts"][0]["model"] = "foreign-model";
+        if (corrupt == 7) bad_attempt["usage"]["attempts"][0]["purpose"] = "memory_extract";
+        if (corrupt == 8) bad_attempt["usage"]["attempts"][0]["cache_epoch"] = 12345;
+        if (corrupt == 9) bad_attempt["usage"]["attempts"][0]["step_id"] = "foreign-step";
+        if (corrupt == 10) bad_attempt["usage"]["attempts"][0]["source_session_id"] = "foreign-session";
+        if (corrupt == 11) bad_attempt["usage"]["attempts"][0]["source_run_id"] = "foreign-run";
+        if (corrupt == 12) bad_attempt["usage"]["attempts"][0]["provider_response_id"] = "foreign-response";
+        if (corrupt == 13) bad_attempt["usage"]["attempts"][0]["observation"]["raw_fields"][0]["summary"] = "foreign-material";
+        { std::ofstream output(result_path, std::ios::binary | std::ios::trunc); output << bad_attempt.dump(); }
+        auto bad_options = Options(fixture, calls); bad_options.resume_session_id = id;
+        const auto invalid_record = (*runtime)->OpenSession(std::move(bad_options));
+        REQUIRE_FALSE(invalid_record); CHECK(invalid_record.error().code == "sdk.usage.result_invalid");
+        CHECK(calls->load() == 1);
+    }
+    saved.erase("usage");
+    { std::ofstream output(result_path, std::ios::binary | std::ios::trunc); output << saved.dump(); }
+    auto legacy_options = Options(fixture, calls); legacy_options.resume_session_id = id;
+    auto legacy = (*runtime)->OpenSession(std::move(legacy_options)); REQUIRE(legacy);
+    const auto old = (*legacy)->ReadOperation(receipt->operation_id); REQUIRE(old);
+    CHECK_FALSE(old->usage); CHECK(old->result_persisted); CHECK(calls->load() == 1);
+    REQUIRE((*legacy)->Close());
+}

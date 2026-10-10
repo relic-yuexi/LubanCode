@@ -4,6 +4,7 @@
 // agent::TurnHarness(与主回合 turn_runner 同一份)。本文件顶部的常驻注释
 // (工具语义、递归治理、回调贯通)见 agent_tool.hpp。
 #include "tools/agent_tool.hpp"
+#include "api/usage_json.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -2765,6 +2766,7 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
                     report.step_index = event.payload.value("step_index", 0);
                     report.provider_response_id = event.payload.value("provider_response_id", std::string());
                     report.reported_by_provider = event.payload.value("reported_by_provider", false);
+                    api::usage_json::Restore(report, event.payload);
                     report.model = event.payload.value("model", std::string());
                     report.cache_epoch = event.payload.value("cache_epoch", 1);
                     report.epoch_break_reason = event.payload.value("epoch_break_reason", std::string());
@@ -2772,10 +2774,9 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
                     const bool reported = event.payload.value("reported", report.reported());
                     if (task != nullptr) {
                         std::lock_guard<std::mutex> lock(state->coordinator->ledger().mutex);
-                        task->snapshot.input_tokens += report.usage.input_tokens;
-                        task->snapshot.cache_read_tokens += report.usage.cache_read_tokens;
-                        task->snapshot.cache_creation_tokens += report.usage.cache_creation_tokens;
-                        task->snapshot.output_tokens += report.usage.output_tokens;
+                        if (!event.usage_observed)
+                            AccumulateTaskUsage(task->snapshot, report.usage,
+                                report.usage_observation ? &*report.usage_observation : nullptr, false);
                         if (reported) {
                             task->snapshot.usage_reported = true;
                         }
@@ -2800,11 +2801,25 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
                     break;  // 其余 turn/批次边界事件不进台账
             }
         };
+        const bool host_owns_usage = host_events != nullptr && host_events->HasUsageObserver();
+        sub_events->ObserveUsage([state, task, host_events, host_owns_usage](const api::Usage& usage,
+            const ::lubancore::usage::v1::Observation* observation, bool, bool incomplete,
+            const runtime::UsageAttemptContext& context) {
+            if (task != nullptr) {
+                std::lock_guard<std::mutex> lock(state->coordinator->ledger().mutex);
+                AccumulateTaskUsage(task->snapshot, usage, observation, incomplete);
+                if (context.reported_by_provider || usage.input_tokens != 0 || usage.output_tokens != 0 ||
+                    usage.cache_read_tokens != 0 || usage.cache_creation_tokens != 0 || usage.output_reasoning_tokens != 0)
+                    task->snapshot.usage_reported = true;
+                state->coordinator->ledger().Touch();
+            }
+            if (host_owns_usage) host_events->OnUsageFacts(usage, observation, true, incomplete, context);
+        });
         if (host_events != nullptr) {
             runtime::TurnEventAdapter* host = host_events;
-            sub_events->Attach([ledger_sink, host](const runtime::ServerEvent& event) {
+            sub_events->Attach([ledger_sink, host, host_owns_usage](const runtime::ServerEvent& event) {
                 ledger_sink(event);
-                host->ForwardFromSubordinate(event);
+                host->ForwardFromSubordinate(event, event.usage_observed && host_owns_usage);
             });
             sub_events->Start(host_events->turn_id());
         } else {
@@ -3467,6 +3482,7 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
     // P0-2 轨迹:子账开卷(turn.started + input.received 先于首请求)。
     if (trajectory != nullptr) {
         trajectory->turn_bridge().BeginTurn("turn-1", "external_user");
+        turn_wiring.turn_id = trajectory->turn_bridge().current_turn_id();
         trajectory->turn_bridge().RecordInput(initial_input);
     }
     // 最后装回合借用，先于桥/事件/预算/取消链退场撤线。整段 Drive 与
@@ -3623,6 +3639,8 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
         task_outcome.cache_read_tokens = task->snapshot.cache_read_tokens;
         task_outcome.cache_creation_tokens = task->snapshot.cache_creation_tokens;
         task_outcome.output_tokens = task->snapshot.output_tokens;
+        task_outcome.output_reasoning_tokens = task->snapshot.output_reasoning_tokens;
+        task_outcome.usage_coverage = task->snapshot.usage_coverage;
         task_outcome.elapsed_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - task->snapshot.start_time).count();
         if (!task->snapshot.tool_calls.empty()) {
@@ -3712,8 +3730,10 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
             task_outcome.status = TaskOutcomeStatus::BudgetExhausted;
             task_outcome.reason = TaskOutcomeReason::TokenBudgetExhausted;
             task_outcome.message = "token 预算已用满(上限 " + std::to_string(budget.max_total_tokens) +
-                                   ",已用 " + std::to_string(task_outcome.total_input_tokens() +
-                                                              task_outcome.output_tokens) +
+                                   ",已用 " + [&] {
+                                       const auto total = task_outcome.total_tokens();
+                                       return total ? std::to_string(*total) : std::string("?");
+                                   }() +
                                    ",跑了 " + std::to_string(drive.steps_used) + " 步)";
             task_outcome.partial_result = partial;
             run_result = {ComposeOutcomeText(task_outcome), true};

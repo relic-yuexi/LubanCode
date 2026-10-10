@@ -28,6 +28,7 @@
 #include "agent/tool_batch_budget.hpp"
 #include "agent/tool_batch_schedule.hpp"  // 只读并行单 P2:批次调度核心(策略/划批/有界执行器)
 #include "api/assembler.hpp"
+#include "api/usage_aggregation.hpp"
 #include "api/model_input_snapshot.hpp"
 #include "hooks/middleware_builtins.hpp"
 #include "text/i18n.hpp"
@@ -1441,6 +1442,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
     // 每个步顶查一次,软线催办也吃这两笔账。
     const auto run_started = std::chrono::steady_clock::now();
     std::int64_t tokens_seen = 0;
+    bool token_sum_overflow = false;
     const std::int64_t max_wall_ms =
         profile_.max_wall_secs > 0 ? static_cast<std::int64_t>(profile_.max_wall_secs) * 1000 : 0;
     // 催办只此一条:步数将尽提示与预算软线催办共用这面旗(规格"重复念叨
@@ -1507,7 +1509,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                                 std::chrono::steady_clock::now() - run_started)
                                                 .count();
             const bool over_wall = max_wall_ms > 0 && elapsed_ms >= max_wall_ms;
-            const bool over_tokens = profile_.max_total_tokens > 0 && tokens_seen >= profile_.max_total_tokens;
+            const bool over_tokens = profile_.max_total_tokens > 0 &&
+                                     (token_sum_overflow || tokens_seen >= profile_.max_total_tokens);
             if (over_wall || over_tokens) {
                 RunOutcome outcome{false, false, false, last_stop_reason, steps_used};
                 outcome.hit_time_budget = over_wall;
@@ -2158,6 +2161,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 它,哪一步是哪个请求才有账可查(前缀缓存守恒单第一期)。
         std::string stream_request_id;
         std::string stream_model;
+        const auto provider_response_identity = [&]() -> const std::string& {
+            return assembler.provider_response_id() ? *assembler.provider_response_id() : stream_request_id;
+        };
         // wire 边界闸门(宽窄转换异常单):中转把多字节序列劈在 delta 边界
         // 时,半截尾巴扣在闸内、下一块拼齐再放行——显示层永远只见完整合法
         // 的 UTF-8。history 侧 assembler 攒的是原始拼接(劈半自愈),不走
@@ -2184,6 +2190,50 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 wiring.on_request_attempt(recovery_attempt, phase);
             }
         };
+        const auto step_api_started = std::chrono::steady_clock::now();
+        const auto build_usage_report = [&](bool succeeded) {
+            api::UsageReport report;
+            report.usage = assembler.usage();
+            report.step_index = step_index;
+            report.provider_response_id = provider_response_identity();
+            report.model = stream_model;
+            report.cache_epoch = step_prefix_account.cache_epoch;
+            report.epoch_break_reason = step_epoch_break_reason;
+            report.prefix_append_only = step_prefix_append_only;
+            // provider 明报位(Token 账本单 A0):wire 见过 usage 帧才算,
+            // 明报全零也是真,没报不许拿 0 冒充。缓存读/写明报位分开(C2):
+            // 只报写入不能证明读取为零,两位各自随报告传递。
+            report.reported_by_provider = assembler.usage_seen();
+            report.cache_read_reported_by_provider = assembler.cache_read_seen();
+            report.cache_creation_reported_by_provider = assembler.cache_creation_seen();
+            report.usage_anomaly = assembler.usage_anomaly();
+            // 每请求缓存诊断账(问题 9):本地前缀视角全量带出——epoch 首请
+            // 求、system/tools/稳定前缀指纹与长度、wire 公共前缀字节(诊断
+            // 模式才有,-1 = 不可得)。只留短 hash 与长度,不落正文。
+            report.epoch_first_request = !step_prefix_account.had_previous;
+            report.system_hash = step_prefix_account.system_hash;
+            report.tools_hash = step_prefix_account.tools_hash;
+            report.prefix_hash = step_prefix_account.prefix_hash;
+            report.stable_prefix_messages = step_prefix_account.stable_prefix_messages;
+            report.total_messages = step_prefix_account.total_messages;
+            report.wire_common_prefix_bytes = step_prefix_account.wire_common_prefix_bytes;
+            // 四层生命周期单 P1:Step 身份/尝试/耗时随 usage 流水带出——
+            // StepUsageRecord 据此逐笔记账(attempts 用恢复环的 Started 计数,
+            // 首尝试即 1;api_duration 从首枚尝试发出到此刻的墙钟)。
+            report.step_id = step_id;
+            report.turn_id = wiring.turn_id;
+            report.attempts = recovery_attempts_used;
+            report.api_duration_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                       step_api_started)
+                    .count();
+            report.stop_reason = succeeded ? assembler.stop_reason() : std::string{};
+            report.usage_observation = assembler.usage_observation();
+            report.trajectory_request_id = trajectory_request_id;
+            report.request_purpose = accounting::PurposeName(agent.profile_.purpose);
+            report.attempt_succeeded = succeeded;
+            return report;
+        };
         // 一次尝试:重置局部 -> 轨迹 prepared/sent -> 发流 -> 放闸尾巴。
         const auto run_one_attempt = [&](api::ModelRequestAttempt& recovery_attempt)
                                           -> std::expected<void, api::Error> {
@@ -2205,6 +2255,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             if (wiring.boundary_recorder != nullptr) {
                 RequestPreparedContext prepared_ctx;
                 prepared_ctx.purpose = agent.profile_.purpose;
+                prepared_ctx.producer_step_id = step_id;
                 if (request_prompt_manifest.has_value()) {
                     prepared_ctx.has_prompt_manifest = true;
                     prepared_ctx.prompt_manifest = *request_prompt_manifest;
@@ -2312,6 +2363,41 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
             const std::size_t thinking_bytes_at_attempt_start = budget_report.thinking_bytes;
             std::string thinking_tail_at_attempt_start = budget_report.thinking_tail;
+            const auto usage_context = [&] {
+                return runtime::UsageAttemptContext{trajectory_request_id,
+                    assembler.provider_response_id() ? std::string_view(*assembler.provider_response_id()) : std::string_view(stream_request_id),
+                    request.model, step_id, wiring.turn_id, accounting::PurposeName(agent.profile_.purpose), step_prefix_account.cache_epoch,
+                    assembler.usage_seen(),
+                    wiring.boundary_recorder ? wiring.boundary_recorder->UsageSourceSessionId() : std::string_view{},
+                    wiring.boundary_recorder ? wiring.boundary_recorder->UsageSourceRunId() : std::string_view{}};
+            };
+            struct UnwoundUsage {
+                api::MessageAssembler& assembler;
+                runtime::TurnEventAdapter* events;
+                LoopBoundaryRecorder* recorder;
+                const std::string& request_id;
+                const decltype(usage_context)& make_context;
+                bool retired = false;
+                ~UnwoundUsage() noexcept {
+                    const auto& usage = assembler.usage();
+                    const bool legacy_numbers = usage.input_tokens != 0 || usage.output_tokens != 0 ||
+                        usage.cache_read_tokens != 0 || usage.cache_creation_tokens != 0 || usage.output_reasoning_tokens != 0;
+                    if (retired ||
+                        (!assembler.usage_seen() && !assembler.provider_response_id() && !legacy_numbers)) return;
+                    try {
+                        if (events) events->OnUsageFacts(assembler.usage(),
+                            assembler.usage_observation() ? &*assembler.usage_observation() : nullptr, false, true, make_context());
+                    } catch (...) {
+                        // An observer must not replace the original transport
+                        // exception. The SDK owner admits fixed-size facts only.
+                    }
+                    try {
+                        if (recorder && !request_id.empty()) recorder->OnUsageObservation(request_id, assembler.usage(),
+                            assembler.usage_observation() ? &*assembler.usage_observation() : nullptr,
+                            assembler.usage_seen(), make_context().provider_response_id, true);
+                    } catch (...) { /* Preserve the original transport exception. */ }
+                }
+            } unwound_usage{assembler, wiring.events, wiring.boundary_recorder, trajectory_request_id, usage_context};
             const auto attempt_result = backend_.send_stream(
                 request,
                 [&](const api::StreamEvent& event) {
@@ -2478,6 +2564,34 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     event);
             },
                 cancel);
+            unwound_usage.retired = true;
+            const bool source_observed =
+                (assembler.usage_seen() || assembler.provider_response_id().has_value() ||
+                 assembler.usage().input_tokens != 0 || assembler.usage().output_tokens != 0 ||
+                 assembler.usage().cache_read_tokens != 0 || assembler.usage().cache_creation_tokens != 0 ||
+                 assembler.usage().output_reasoning_tokens != 0 ||
+                 (attempt_result.has_value() && !stream_error));
+            const bool should_report_usage = wiring.events != nullptr && source_observed;
+            // Own returned facts before flushing display tails or allocating a
+            // UsageReport. Those operations can fail without erasing this bill.
+            const bool incomplete_usage = !attempt_result.has_value() || stream_error || assembler.stop_reason().empty();
+            const auto persist_observation = [&]() -> std::optional<bool> {
+                if (!source_observed || !wiring.boundary_recorder || trajectory_request_id.empty()) return std::nullopt;
+                return wiring.boundary_recorder->OnUsageObservation(trajectory_request_id, assembler.usage(),
+                    assembler.usage_observation() ? &*assembler.usage_observation() : nullptr, assembler.usage_seen(),
+                    provider_response_identity(), incomplete_usage);
+            };
+            bool usage_observed = false;
+            try {
+                usage_observed = should_report_usage && wiring.events->OnUsageFacts(assembler.usage(),
+                    assembler.usage_observation() ? &*assembler.usage_observation() : nullptr, false, incomplete_usage, usage_context());
+            } catch (...) {
+                try { (void)persist_observation(); } catch (...) {}
+                throw;
+            }
+            const auto observation_saved = persist_observation();
+            if (observation_saved && !*observation_saved)
+                return std::unexpected(api::Error{api::ErrorKind::Api, "usage observation persistence failed", 0});
             // 流收口:闸里扣着的尾巴拼不齐就是坏字节,按 U+FFFD 放完——错误/
             // 打断路径也要放,显示层与 history 的账对得上。轨迹边同样吃尾巴
             //(轨迹 v3 §4.43):收口前的最后一批片段先落账,终态事件才不越过
@@ -2506,6 +2620,27 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     }
                 }
             }
+            const auto& attempt_usage = assembler.usage();
+            budget_report.usage_reported = budget_report.usage_reported || assembler.usage_seen() ||
+                attempt_usage.input_tokens != 0 || attempt_usage.output_tokens != 0 ||
+                attempt_usage.cache_read_tokens != 0 || attempt_usage.cache_creation_tokens != 0 ||
+                attempt_usage.output_reasoning_tokens != 0;
+            // Budget arithmetic is separate from raw facts. Keep its last representable
+            // prefix on overflow and close a configured token gate on the next step.
+            if (!token_sum_overflow) {
+                const auto input = api::usage_aggregation::TotalInput(attempt_usage);
+                const auto cost = input ? api::usage_observation::CheckedAdd(*input, attempt_usage.output_tokens)
+                                        : std::nullopt;
+                const auto sum = cost ? api::usage_observation::CheckedAdd(tokens_seen, *cost) : std::nullopt;
+                if (sum) tokens_seen = *sum;
+                else token_sum_overflow = true;
+            }
+            // Report returned facts before retry/reset, cancellation, or output validation.
+            // An absent failed reply does not fabricate a usage observation.
+            if (should_report_usage) {
+                wiring.events->OnUsage(build_usage_report(attempt_result.has_value() && !stream_error),
+                                       false, usage_observed);
+            }
             if (attempt_result.has_value() && stream_error) {
                 // 兼容端常回 HTTP 200 + error 事件。必须在尝试边界折成 Api
                 // 错误,恢复环才能按 provider code 判瞬时错并重发。
@@ -2526,7 +2661,6 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 四层生命周期单 P1:Step 的 API 耗时从首枚尝试发出起算(含恢复环
         // 重试与退避),到 assistant 落账(usage 报告处)止——与 Action 的
         // 工具耗时分账,两笔不混写。
-        const auto step_api_started = std::chrono::steady_clock::now();
         const auto send_result = api::RunRequestWithRecovery(run_one_attempt, recovery_hooks, cancel);
         if (trajectory_write_failed) {
             return std::unexpected("轨迹账写盘失败,本轮停在请求边界,未发模型");
@@ -2573,7 +2707,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 // 监听);链没升却回取消分型的,按流侧异常记账,不冤枉用户。
                 if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
                     wiring.boundary_recorder->OnUsageRecorded(
-                        trajectory_request_id, assembler.usage(), assembler.usage_seen(), stream_request_id,
+                        trajectory_request_id, assembler.usage(), assembler.usage_seen(), provider_response_identity(),
                         step_prefix_account.cache_epoch, step_prefix_account.append_only,
                         assembler.cache_read_seen(), assembler.cache_creation_seen(),
                         assembler.usage_anomaly());
@@ -2682,14 +2816,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 记不住就明败,不执行工具(§7.4 耐久栅栏)。
         if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
             wiring.boundary_recorder->OnUsageRecorded(trajectory_request_id, assembler.usage(),
-                                                      assembler.usage_seen(), stream_request_id,
+                                                      assembler.usage_seen(), provider_response_identity(),
                                                       step_prefix_account.cache_epoch,
                                                       step_prefix_account.append_only,
                                                       assembler.cache_read_seen(),
                                                       assembler.cache_creation_seen(),
                                                       assembler.usage_anomaly());
             if (!wiring.boundary_recorder->OnOutputCompleted(trajectory_request_id, assistant_message,
-                                                             stop_reason, stream_request_id)) {
+                                                             stop_reason, provider_response_identity())) {
                 return std::unexpected("轨迹账写盘失败,模型输出未落账,不执行工具");
             }
         }
@@ -2716,7 +2850,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
             // 成本刹车(P2-6):token 硬线按"完整输入 + 输出"累计,与台账/
             // 面板同口径——provider 漏 usage 只会晚触发,不会把闸拆了。
-            tokens_seen += api::TotalInputTokens(usage) + usage.output_tokens;
+            // The returned-attempt boundary already charged this request, including
+            // failed attempts. Do not charge the successful terminal a second time.
         }
 
         // token 估算校准(token 估算校准单):provider 明报了 usage 才记样本
@@ -2726,11 +2861,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // input 对整份字节,cache 命中时必然虚低,样本全废,单子护栏点的
         // 就是这个坑;个别 provider 缓存计数失真的,落在异常带外进不了窗。
         // 漂移重置(分词口径真换了)打一行诊断,别让估算悄悄变了样。
-        if (wiring.token_calibrator != nullptr && !adapter_budget && assembler.usage_seen()) {
+        const auto calibration_input = api::usage_aggregation::ExactTotalInput(assembler.usage(),
+            assembler.usage_observation() ? &*assembler.usage_observation() : nullptr);
+        if (wiring.token_calibrator != nullptr && !adapter_budget && calibration_input) {
             TokenCalibrationSample calibration_sample;
             calibration_sample.request_bytes = calibration_request_bytes;
             calibration_sample.estimated_tokens = calibration_est_tokens;
-            calibration_sample.reported_input_tokens = api::TotalInputTokens(assembler.usage());
+            calibration_sample.reported_input_tokens = *calibration_input;
             const auto verdict =
                 wiring.token_calibrator->Record(agent.profile_.provider, model_, calibration_sample);
             if (verdict == TokenCalibrator::RecordVerdict::WindowReset) {
@@ -2743,45 +2880,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 四层生命周期单 P1/P2:Step 的完整账(usage + 身份/尝试/耗时)拼成
         // 一份 UsageReport——事件流(显示/台账侧)与 PostStep Hook 共用,
         // 拼法一处定。events 空(静默轮)也拼:PostStep 有配置就发。
-        api::UsageReport report;
-        report.usage = assembler.usage();
-        report.step_index = step_index;
-        report.provider_response_id = stream_request_id;
-        report.model = stream_model;
-        report.cache_epoch = context_.cache_epoch();
-        report.epoch_break_reason = step_epoch_break_reason;
-        report.prefix_append_only = step_prefix_append_only;
-        // provider 明报位(Token 账本单 A0):wire 见过 usage 帧才算,
-        // 明报全零也是真,没报不许拿 0 冒充。缓存读/写明报位分开(C2):
-        // 只报写入不能证明读取为零,两位各自随报告传递。
-        report.reported_by_provider = assembler.usage_seen();
-        report.cache_read_reported_by_provider = assembler.cache_read_seen();
-        report.cache_creation_reported_by_provider = assembler.cache_creation_seen();
-        report.usage_anomaly = assembler.usage_anomaly();
-        // 每请求缓存诊断账(问题 9):本地前缀视角全量带出——epoch 首请
-        // 求、system/tools/稳定前缀指纹与长度、wire 公共前缀字节(诊断
-        // 模式才有,-1 = 不可得)。只留短 hash 与长度,不落正文。
-        report.epoch_first_request = !step_prefix_account.had_previous;
-        report.system_hash = step_prefix_account.system_hash;
-        report.tools_hash = step_prefix_account.tools_hash;
-        report.prefix_hash = step_prefix_account.prefix_hash;
-        report.stable_prefix_messages = step_prefix_account.stable_prefix_messages;
-        report.total_messages = step_prefix_account.total_messages;
-        report.wire_common_prefix_bytes = step_prefix_account.wire_common_prefix_bytes;
-        // 四层生命周期单 P1:Step 身份/尝试/耗时随 usage 流水带出——
-        // StepUsageRecord 据此逐笔记账(attempts 用恢复环的 Started 计数,
-        // 首尝试即 1;api_duration 从首枚尝试发出到此刻的墙钟)。
-        report.step_id = step_id;
-        report.turn_id = wiring.turn_id;
-        report.attempts = recovery_attempts_used;
-        report.api_duration_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
-                                                                   step_api_started)
-                .count();
-        report.stop_reason = stop_reason;
-        if (wiring.events != nullptr) {
-            wiring.events->OnUsage(report);
-        }
+        api::UsageReport report = build_usage_report(true);
         // 四层生命周期单 P2:PostStep——assistant 响应落账后、派生 Action
         // 执行前(§4.1)。只观察;API 耗时与 Action 的工具耗时在此分账可证。
         if (wiring.on_post_step_hook) {
@@ -3129,7 +3228,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 trace_ctx.batch_id = batch_id;
                 trace_ctx.turn_id = wiring.turn_id;
                 trace_ctx.sequence_in_batch = tool_index;
-                trace_ctx.provider_request_id = stream_request_id;
+                trace_ctx.provider_request_id = provider_response_identity();
             }
             // ---- 动态工具 P1(通用 ProxyReference):tool_invoke 的规范化
             //(单子 §6.1)。在进入 RunOneTool 之前把 wire 调用解引用成真实
@@ -3235,7 +3334,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     parallel_probes,
                     trace_armed,
                     batch_id,
-                    stream_request_id,
+                    provider_response_identity(),
                     scheduled_ids,
                     scheduled_slot,
                     ordered_results,

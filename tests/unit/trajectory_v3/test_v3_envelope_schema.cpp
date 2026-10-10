@@ -11,6 +11,7 @@
 
 #include "trajectory/v3/envelope.hpp"
 #include "trajectory/v3/schema3.hpp"
+#include "api/usage_json.hpp"
 
 using namespace lubancode::trajectory::v3;
 
@@ -273,4 +274,55 @@ TEST_CASE("usage 校验:非负整数,缺子项省键") {
     CHECK(!ValidateUsage(nlohmann::json::object({{"inputTokens", 10}})).has_value());
     CHECK(ValidateUsage(nlohmann::json::object({{"inputTokens", -3}})).has_value());
     CHECK(ValidateUsage(nlohmann::json::object({{"inputTokens", "10"}})).has_value());
+}
+
+TEST_CASE("raw usage observation schema preserves signed facts and rejects malformed bounded material") {
+    lubancode::api::Usage usage;
+    usage.input_tokens = -3;
+    ::lubancore::usage::v1::Observation raw;
+    raw.provider_namespace = "fixture";
+    auto payload = lubancode::api::usage_json::ObservationPayload(usage, &raw, true, "actual-response", true);
+    REQUIRE(payload.has_value());
+    EventLine line;
+    line.kind = EventKindV3::ModelUsageObserved;
+    line.request_id = "request-000001";
+    line.turn_id = "turn-000001";
+    line.step_id = "step-000001";
+    line.payload = *payload;
+    CHECK_FALSE(ValidateEventLine(line).has_value());
+    CHECK(line.payload.at("numbers")[0] == -3);
+    for (int variant = 0; variant < 15; ++variant) {
+        INFO(variant);
+        auto bad = line;
+        switch (variant) {
+            case 0: bad.payload["numbers"][0] = true; break;
+            case 1: bad.payload["numbers"][1] = 1.5; break;
+            case 2: bad.payload["numbers"][2] = std::uint64_t{18446744073709551615ULL}; break;
+            case 3: bad.payload["numbers"].erase(4); break;
+            case 4: bad.payload["providerResponseId"] = std::string(257, 'x'); break;
+            case 5: bad.payload["providerResponseId"] = std::string("a\0b", 3); break;
+            case 6: bad.payload["reportedByProvider"] = 1; break;
+            case 7: bad.payload["incomplete"] = nullptr; break;
+            case 8: bad.payload["observation"]["version"] = 3; break;
+            case 9: bad.payload["observation"]["raw_fields"] = nlohmann::json::array({nullptr}); break;
+            case 10: bad.payload["observationError"] = "both material and failure"; break;
+            case 11: bad.payload["version"] = 2; break;
+            case 12: bad.turn_id.reset(); break;
+            case 13: bad.step_id.reset(); break;
+            case 14: bad.payload["version"] = 1.0; break;
+        }
+        CHECK(ValidateEventLine(bad).has_value());
+    }
+    // A rejected semantic material retains numbers and closes completeness.
+    raw.provider_namespace = std::string(65, 'x');
+    auto failed = lubancode::api::usage_json::ObservationPayload(usage, &raw, true, {}, false);
+    REQUIRE(failed.has_value());
+    line.payload = *failed;
+    CHECK(line.payload.at("numbers")[0] == -3);
+    CHECK(line.payload.at("incomplete") == true);
+    CHECK(line.payload.contains("observationError"));
+    CHECK_FALSE(line.payload.contains("observation"));
+    CHECK_FALSE(ValidateEventLine(line).has_value());
+    line.payload["incomplete"] = false;
+    CHECK(ValidateEventLine(line).has_value());
 }

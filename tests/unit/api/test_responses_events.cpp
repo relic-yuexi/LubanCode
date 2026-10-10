@@ -12,9 +12,80 @@
 #include "api/responses/events.hpp"
 #include "api/sse_framing.hpp"
 #include "api/types.hpp"
+#include "api/assembler.hpp"
+#include "api/usage_json.hpp"
+#include "platform/sha256.hpp"
+#include "usage_body_fixture.hpp"
 
 using namespace lubancode::api;
 using lubancode::api::responses::parse_event;
+
+TEST_CASE("Five-field Responses nonstream: original lexemes survive snapshot and terminal refinement") {
+    namespace facts = ::lubancore::usage::v1;
+    for (const std::string token : {"184467440737095516160", "1.000000000000000000000e+00"}) {
+        const auto events = responses::ExpandNonStreamResponse("{\"id\":\"actual-response\",\"status\":\"completed\",\"usage\":{\"input_tokens\":" + token + ",\"output_tokens\":9},\"output\":[]}");
+        MessageAssembler assembler;
+        int snapshots = 0, terminals = 0;
+        for (const auto& event : events) {
+            assembler.Feed(event);
+            snapshots += std::holds_alternative<UsageSnapshot>(event);
+            terminals += std::holds_alternative<MessageDone>(event);
+            CHECK_FALSE(std::holds_alternative<StreamError>(event));
+        }
+        CHECK(snapshots == 1); CHECK(terminals == 1);
+        CHECK(assembler.stop_reason() == "end_turn"); CHECK(assembler.usage().output_tokens == 9);
+        REQUIRE(assembler.usage_observation()); REQUIRE(assembler.provider_response_id());
+        CHECK(*assembler.provider_response_id() == "actual-response");
+        bool original = false;
+        for (const auto& raw : assembler.usage_observation()->raw_fields) if (raw.path == "usage.input_tokens") {
+            original = true; CHECK(raw.summary == token); CHECK_FALSE(raw.integer);
+            CHECK(raw.fingerprint == lubancode::platform::Sha256Hex(token));
+            CHECK(raw.kind == (token.find('.') == std::string::npos ? facts::RawKind::UnsignedInteger : facts::RawKind::FloatingPoint));
+        }
+        CHECK(original);
+        auto encoded = usage_json::Encode(*assembler.usage_observation(), assembler.usage()); REQUIRE(encoded);
+        REQUIRE(usage_json::Decode(*encoded, assembler.usage()));
+    }
+}
+
+TEST_CASE("Five-field Responses nonstream: failed DOM preserves numbers and bounded Unicode identity without success") {
+    namespace facts = ::lubancore::usage::v1;
+    for (const std::string suffix : {"\"output\":[]}", "\"output\":[invalid]}"}) {
+        const auto events = responses::ExpandNonStreamResponse(
+            "{\"id\":\"actual-\\u4e2d-\\ud83d\\ude00\",\"usage\":{\"input_tokens\":1e999,\"output_tokens\":9}," + suffix);
+        MessageAssembler assembler;
+        bool error = false;
+        for (const auto& event : events) {
+            assembler.Feed(event); error = error || std::holds_alternative<StreamError>(event);
+            CHECK_FALSE(std::holds_alternative<MessageDone>(event));
+        }
+        CHECK(error); CHECK(assembler.stop_reason().empty()); CHECK(assembler.usage().output_tokens == 9);
+        REQUIRE(assembler.provider_response_id());
+        CHECK(*assembler.provider_response_id() == "actual-\xe4\xb8\xad-\xf0\x9f\x98\x80");
+        REQUIRE(assembler.usage_observation());
+        bool marked = false;
+        for (const auto& anomaly : assembler.usage_observation()->anomalies)
+            marked = marked || anomaly.code == facts::AnomalyCode::ParseIncomplete;
+        CHECK(marked);
+    }
+}
+
+TEST_CASE("Five-field Responses nonstream: rejected identities never borrow prior or partially decoded IDs") {
+    const std::vector<std::string> identities{
+        "\"earlier\",\"id\":null", "\"\\ud800\"", "\"\\udc00\"", "\"\\ud800\\u0061\"",
+        "\"" + std::string(257, 'x') + "\"", "\"a\\u0000b\""};
+    for (const auto& identity : identities) {
+        const auto events = responses::ExpandNonStreamResponse(
+            "{\"usage\":{\"input_tokens\":11,\"output_tokens\":9},\"id\":" + identity + ",\"output\":[invalid]}");
+        MessageAssembler assembler;
+        for (const auto& event : events) {
+            assembler.Feed(event); CHECK_FALSE(std::holds_alternative<ProviderResponseIdentity>(event));
+            CHECK_FALSE(std::holds_alternative<MessageDone>(event));
+        }
+        CHECK_FALSE(assembler.provider_response_id()); CHECK(assembler.usage().output_tokens == 9);
+        CHECK(assembler.stop_reason().empty());
+    }
+}
 
 namespace {
 SseFrame Frame(std::string data) {
@@ -546,7 +617,7 @@ TEST_CASE("Responses 内置搜索起点缺 action 时，终点参数仍可回填
 //(vLLM 扩展;OpenAI 官方是 summary[].summary_text,这台端 summary 恒空),
 // 与流式路 reasoning_text.delta 同源——两路翻出的中立事件同一形状。
 TEST_CASE("ExpandNonStreamResponse: reasoning 项 + message 项展开成中立事件") {
-    const auto events = responses::ExpandNonStreamResponse(
+    const auto events = usage_fixture::ExpandNonStreamLegacyBody(
         R"({"id":"resp_aeb964886f47be44","object":"response","status":"completed","model":"qwen3.8-27b",)"
         R"("output":[{"id":"rs_aeb964886f47be44","type":"reasoning","summary":[],)"
         R"("content":[{"text":"We need answer user: 2+2=4.","type":"reasoning_text"}],"encrypted_content":null},)"
@@ -573,7 +644,7 @@ TEST_CASE("ExpandNonStreamResponse: reasoning 项 + message 项展开成中立�
 }
 
 TEST_CASE("ExpandNonStreamResponse: function_call 项带双 id,认 call_id,整段 arguments 一枚入参增量") {
-    const auto events = responses::ExpandNonStreamResponse(
+    const auto events = usage_fixture::ExpandNonStreamLegacyBody(
         R"({"id":"resp_fc","status":"completed","output":[)"
         R"({"id":"fc_5d81c0aa92f3e70b","type":"function_call","call_id":"chatcmpl-tool-a0d9a4d1bebbd50a",)"
         R"("name":"get_weather","arguments":"{\"city\": \"北京\"}","status":"completed"}],)"
@@ -592,7 +663,7 @@ TEST_CASE("ExpandNonStreamResponse: function_call 项带双 id,认 call_id,整�
 }
 
 TEST_CASE("ExpandNonStreamResponse: OpenAI 官方 summary 系也能展开(vLLM 端 summary 恒空,两者不同源)") {
-    const auto events = responses::ExpandNonStreamResponse(
+    const auto events = usage_fixture::ExpandNonStreamLegacyBody(
         R"({"id":"resp_sum","status":"completed","output":[)"
         R"({"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"摘要一片"}]},)"
         R"({"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"答"}]})"
@@ -608,13 +679,16 @@ TEST_CASE("ExpandNonStreamResponse: OpenAI 官方 summary 系也能展开(vLLM �
 
 TEST_CASE("ExpandNonStreamResponse: 坏 JSON / 缺 output / 空数组,不抛不崩") {
     CHECK(responses::ExpandNonStreamResponse("not json {").empty());
-    CHECK(responses::ExpandNonStreamResponse(R"({"status":"completed"})").empty());  // 没有 output 数组
+    const auto missing = responses::ExpandNonStreamResponse(R"({"status":"completed"})");
+    REQUIRE(missing.size() == 1);
+    REQUIRE(std::holds_alternative<StreamError>(missing.front()));
+    CHECK(std::get<StreamError>(missing.front()).code == "model.payload.invalid");
     CHECK(responses::ExpandNonStreamResponse(R"({"output":[]})").size() == 1);  // 只有 MessageDone
     CHECK_NOTHROW(responses::ExpandNonStreamResponse(R"({"output":[{"type":"reasoning","content":42}]})"));
 }
 
 TEST_CASE("ExpandNonStreamResponse: incomplete 状态映射 max_tokens,与流式 completed 同口径") {
-    const auto events = responses::ExpandNonStreamResponse(
+    const auto events = usage_fixture::ExpandNonStreamLegacyBody(
         R"({"id":"resp_cut","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},)"
         R"("output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"半截"}]}]})");
     REQUIRE(events.size() == 3);
@@ -704,4 +778,25 @@ TEST_CASE("response.completed C3: 负数 token——标异常") {
     CHECK(done.usage.cache_creation_tokens == -50);
     CHECK(done.cache_creation_reported);  // 字段在场:明报位仍真
     CHECK_FALSE(done.usage_anomaly.empty());
+}
+
+
+TEST_CASE("Five-field Responses details: actual batch preserves malformed canonical material before failure") {
+    namespace facts = lubancore::usage::v1;
+    responses::EventParser parser;
+    const auto events = parser.Consume(SseFrame{"response.completed",
+        R"({"type":"response.completed","response":{"id":"failed-with-facts","status":"failed","usage":{"input_tokens":100,"output_tokens":7,"input_tokens_details":false,"cache_write_tokens":5},"output":[]}})"});
+    const UsageSnapshot* snapshot = nullptr;
+    bool terminal = false, error = false;
+    for (const auto& event : events) {
+        if (const auto* value = std::get_if<UsageSnapshot>(&event)) snapshot = value;
+        terminal = terminal || std::holds_alternative<MessageDone>(event);
+        error = error || std::holds_alternative<StreamError>(event);
+    }
+    REQUIRE(snapshot); REQUIRE(snapshot->usage_observation);
+    CHECK(snapshot->usage.output_tokens == 7); CHECK(snapshot->usage.cache_creation_tokens == 0);
+    CHECK(snapshot->usage_observation->fields[3].presence == facts::Presence::Missing);
+    CHECK(snapshot->usage_observation->fields[3].validity == facts::Validity::UnavailableOperands);
+    CHECK(snapshot->provider_response_id == "failed-with-facts");
+    CHECK(error); CHECK_FALSE(terminal);
 }

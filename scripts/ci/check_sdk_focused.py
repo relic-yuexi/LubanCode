@@ -96,6 +96,7 @@ except ImportError:
         from scripts.ci import sdk_owned_file_paths as owned_file_paths
 
 REQUIRED = {
+    "sdk.focused.usage_numeric_allocations",
     "sdk.focused.lubancore_owned_file_paths",
     "sdk.focused.lubancore_model_input",
     "sdk.focused.lubancore_model_sampling",
@@ -732,7 +733,7 @@ def check_opening_start_native(section, command):
         raise RuntimeError("Opening startup must run the complete actual native lifecycle source")
     check_native_command(section, command)
     cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
-    if len(cases) != 1 or tuple(map(int, cases[0])) != (19, 19, 0):
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (22, 22, 0):
         raise RuntimeError("Opening startup and original lifecycle roster must all pass")
     assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
     if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
@@ -746,6 +747,9 @@ def check_opening_start_native(section, command):
     for path in ("background", "mutual", "late-deleter", "session-deleter", "exceptions", "nested", "allocation-rollback"):
         if section.splitlines().count("[sdk-backend-owner-path] " + path) != 1:
             raise RuntimeError("SDK Backend actual owner path did not finish once: " + path)
+    for path in ("callback", "cancellation", "retired", "recovery", "invalid-material-recovery"):
+        if section.splitlines().count("[sdk-usage-close-path] " + path) != 1:
+            raise RuntimeError("Five-field Close actual path did not finish once: " + path)
 
 
 def check_event_sink_native(section, command):
@@ -1516,9 +1520,9 @@ def main():
             if registered["command"][1:] != ["--source-file=*test_lubancore_memory_extraction_core.cpp"]:
                 raise RuntimeError("Memory extraction must run the actual shared-SDK native source")
             check_native_command(sections[0], registered["command"])
-            if int(counts[0]) != 10:
-                raise RuntimeError("Memory extraction requires all ten actual shared-module cases")
-            for path in ("parser", "transcript", "prompt", "request", "usage", "finish", "native-connection", "learning-text-gate", "learning-evidence-gate", "learning-reason-names"):
+            if int(counts[0]) != 11:
+                raise RuntimeError("Memory extraction requires all eleven actual shared-module cases")
+            for path in ("parser", "transcript", "prompt", "request", "usage", "finish", "native-connection", "native-connection-faults", "learning-text-gate", "learning-evidence-gate", "learning-reason-names"):
                 if sections[0].splitlines().count("[memory-extraction-core-path] shared-sdk " + path) != 1:
                     raise RuntimeError("Memory extraction actual shared-module path missing: " + path)
         if case.attrib["name"] == "sdk.focused.lubancore_sampling_lifetime":
@@ -1536,8 +1540,8 @@ def main():
             if registered["command"][1:] != ["--source-file=*test_lubancore_model_sampling.cpp"]:
                 raise RuntimeError("Sampling must run the actual complete native source")
             check_native_command(sections[0], registered["command"])
-            if int(counts[0]) != 11:
-                raise RuntimeError("Sampling native roster must contain all eleven cases")
+            if int(counts[0]) != 20:
+                raise RuntimeError("Sampling native roster must contain all twenty cases")
             for path in ("defaults", "effort", "finish", "invalid-request", "invalid-reply", "errors",
                          "usage-cancelled", "usage-invalid-output", "usage-absent", "usage-no-reply", "usage-success"):
                 if sections[0].splitlines().count("[sdk-model-sampling-path] " + path) != 1:
