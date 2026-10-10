@@ -96,6 +96,7 @@ except ImportError:
         from scripts.ci import sdk_owned_file_paths as owned_file_paths
 
 REQUIRED = {
+    "sdk.focused.usage_numeric_allocations",
     "sdk.focused.lubancore_owned_file_paths",
     "sdk.focused.lubancore_model_input",
     "sdk.focused.lubancore_model_sampling",
