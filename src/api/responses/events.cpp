@@ -1,3 +1,4 @@
+#include "api/parsed_json.hpp"
 #include "api/responses/events.hpp"
 #include "api/usage_event_projection.hpp"
 #include "api/usage_lexical.hpp"
@@ -239,9 +240,10 @@ std::optional<StreamEvent> HandleError(const json& data) {
 }  // namespace
 
 std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
-    json data;
+    ParsedJson document;
+    const auto& data = document.value();
     try {
-        data = json::parse(frame.data);
+        document.Parse(frame.data);
     } catch (const json::parse_error&) {
         // 帧里的数据不是合法 JSON,跳过,不崩。
         return std::nullopt;
@@ -303,8 +305,9 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
     std::vector<StreamEvent> events;
     const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Responses,
         &usage_wire::NumericDeliveryOwner::Observe, &numeric_delivery_);
-    json data;
-    try { data=json::parse(frame.data); }
+    ParsedJson document;
+    const auto& data = document.value();
+    try { document.Parse(frame.data); }
     catch (const json::exception&) {
         if (lexical.numbers.empty()) return events;
         auto partial = lexical.Partial(&usage_wire::NumericDeliveryOwner::Observe, &numeric_delivery_);
@@ -389,8 +392,9 @@ static std::vector<StreamEvent> ExpandNonStreamResponseOwned(
     const std::string& body, usage_wire::NumericDeliveryOwner* delivery_owner) try {
     const usage_wire::LexicalUsage lexical(body, usage_wire::Dialect::ResponsesNonStream,
         delivery_owner ? &usage_wire::NumericDeliveryOwner::Observe : nullptr, delivery_owner);
-    json response;
-    try { response = json::parse(body); }
+    ParsedJson document;
+    const auto& response = document.value();
+    try { document.Parse(body); }
     catch (const json::exception&) {
         if (lexical.numbers.empty()) return {};
         std::vector<StreamEvent> recovered;

@@ -1,3 +1,4 @@
+#include "api/parsed_json.hpp"
 #include "api/anthropic/events.hpp"
 #include "api/usage_event_projection.hpp"
 #include "api/usage_lexical.hpp"
@@ -155,9 +156,10 @@ std::optional<StreamEvent> HandleError(const json& data) {
 }  // namespace
 
 std::optional<StreamEvent> parse_event(const SseFrame& frame, bool parse_server_tool_search) try {
-    json data;
+    ParsedJson document;
+    const auto& data = document.value();
     try {
-        data = json::parse(frame.data);
+        document.Parse(frame.data);
     } catch (const json::parse_error&) {
         // 帧里的数据不是合法 JSON,跳过,不崩。
         return std::nullopt;
@@ -239,8 +241,9 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
             if ((message_start || message_delta) && source.is_object())
                 parser.numeric_delivery_.Own(parser.accounting_.AbsorbNumbers(source));
         });
-    json data;
-    try { data=json::parse(frame.data); }
+    ParsedJson document;
+    const auto& data = document.value();
+    try { document.Parse(frame.data); }
     catch (const json::exception&) {
         if (lexical.numbers.empty()) return events;
         if (lexical.event_type == "message_start") ResetUsageState();

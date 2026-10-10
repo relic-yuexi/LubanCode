@@ -1,3 +1,4 @@
+#include "api/parsed_json.hpp"
 #include "api/gemini/events.hpp"
 #include "api/usage_event_projection.hpp"
 #include "api/usage_lexical.hpp"
@@ -32,9 +33,10 @@ std::string StopReason(const std::string& reason, bool has_calls) {
 std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
     const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Gemini,
         &usage_wire::NumericDeliveryOwner::Observe, &numeric_delivery_);
-    json data;
+    ParsedJson document;
+    const auto& data = document.value();
     try {
-        data = json::parse(frame.data);
+        document.Parse(frame.data);
     } catch (const json::exception&) {
         if (lexical.numbers.empty()) return {};
         std::vector<StreamEvent> recovered;

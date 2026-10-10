@@ -35,6 +35,34 @@ TEST_CASE("Chat events: 文本、usage 与结束原因") {
     CHECK(event.usage.input_tokens == 8);
     CHECK(event.usage.cache_read_tokens == 4);
     CHECK(api::TotalInputTokens(event.usage) == 12);
+
+    SUBCASE("structured duplicate keys retain the final body") {
+        api::chat::EventParser duplicate_parser;
+        const auto events = api::usage_fixture::ConsumeLegacyBody(duplicate_parser, Frame(
+            R"({"unused":{"a":[{"b":[1,true,null,18446744073709551615,1.25]}]},"unused":[{"c":{"d":["old"]}}],"unused":17,"unused":{"e":[[],{},[false]]},"unused":null,"choices":[{"delta":{"content":"old"}}],"choices":[{"delta":{"content":"last"}}]})"));
+        REQUIRE(events.size() == 2);
+        CHECK(std::holds_alternative<api::MessageStart>(events[0]));
+        REQUIRE(std::holds_alternative<api::TextDelta>(events[1]));
+        CHECK(std::get<api::TextDelta>(events[1]).text == "last");
+    }
+    SUBCASE("deep extension JSON keeps the original body admission") {
+        api::chat::EventParser deep_parser;
+        std::string body = R"({"choices":[{"delta":{"content":"deep"}}],"unused":)";
+        body.append(512, '[');
+        body += R"({"leaf":[null,true,-7,1.25,18446744073709551615]})";
+        body.append(512, ']');
+        body += '}';
+        const auto events = api::usage_fixture::ConsumeLegacyBody(deep_parser, Frame(std::move(body)));
+        REQUIRE(events.size() == 2);
+        REQUIRE(std::holds_alternative<api::TextDelta>(events[1]));
+        CHECK(std::get<api::TextDelta>(events[1]).text == "deep");
+    }
+    SUBCASE("strict invalid input publishes no body") {
+        api::chat::EventParser invalid_parser;
+        CHECK(invalid_parser.Consume(Frame(R"({"choices":[{"delta":{"content":"hidden"}}]} true)")).empty());
+        CHECK(invalid_parser.Consume(Frame(R"({"choices":[{"delta":{"content":"hidden"}}],"unused":{"a":[{"b":[1,2)")).empty());
+        CHECK(invalid_parser.Consume(Frame("null")).empty());
+    }
 }
 
 TEST_CASE("Chat events: 交错 tool_calls 先攒齐再按 index 吐出") {

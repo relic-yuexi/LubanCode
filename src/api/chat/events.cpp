@@ -1,3 +1,4 @@
+#include "api/parsed_json.hpp"
 #include "api/chat/events.hpp"
 #include "api/usage_event_projection.hpp"
 #include "api/usage_lexical.hpp"
@@ -31,8 +32,9 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
 
     const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Chat,
         &usage_wire::NumericDeliveryOwner::Observe, &numeric_delivery_);
-    nlohmann::json data;
-    try { data = nlohmann::json::parse(frame.data); }
+    ParsedJson document;
+    const auto& data = document.value();
+    try { document.Parse(frame.data); }
     catch (const nlohmann::json::exception&) {
         if (lexical.numbers.empty()) return {};
         std::vector<StreamEvent> recovered;

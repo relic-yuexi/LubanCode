@@ -252,6 +252,12 @@ int main(int argc, char** argv) {
             {"content", nlohmann::json::array({{{"type", "output_text"}, {"text", long_id}}})}}});
         rich_frames[4] = nonstream.dump();
     }
+    // These unconsumed provider extension keys still build real DOM subtrees.
+    // Exercise replacement of objects, arrays, scalars and null while sweeping
+    // every ordinary allocation on each original provider route.
+    for (auto& frame : rich_frames) {
+        frame.insert(1, R"("cleanup_extension":{"a":[{"b":[1,true,null,18446744073709551615,1.25]}]},"cleanup_extension":[{"c":{"d":["old"]}}],"cleanup_extension":17,"cleanup_extension":{"e":[[],{},[false]]},"cleanup_extension":null,)");
+    }
     const auto parser_sweep = [&](auto prototype, std::size_t provider, auto consume) {
         namespace api = lubancode::api;
         struct Owner {
