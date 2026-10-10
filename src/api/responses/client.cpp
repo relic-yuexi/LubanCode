@@ -50,6 +50,7 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     // 没有),流式路到收尾会一帧都解不出。真出了帧就不再攒,峰值内存
     // 与分帧器自身的缓冲同量级(vLLM 本地模型勘察单 P2)。
     SseFramer framer;
+    EventParser parser;
     bool saw_message_done = false;
     bool saw_stream_error = false;
     bool saw_image_generation = false;
@@ -61,18 +62,18 @@ std::expected<void, Error> ResponsesBackend::send_stream(
         }
         for (const SseFrame& frame : framer.feed(data)) {
             saw_any_frame = true;
-            if (auto event = parse_event(frame); event.has_value()) {
-                if (std::holds_alternative<MessageDone>(*event)) {
+            for (auto& event : parser.Consume(frame)) {
+                if (std::holds_alternative<MessageDone>(event)) {
                     saw_message_done = true;
-                } else if (std::holds_alternative<StreamError>(*event)) {
+                } else if (std::holds_alternative<StreamError>(event)) {
                     saw_stream_error = true;
-                } else if (const auto* builtin = std::get_if<BuiltinToolStart>(&*event);
+                } else if (const auto* builtin = std::get_if<BuiltinToolStart>(&event);
                            builtin != nullptr && builtin->name == "image_generation") {
                     saw_image_generation = true;
-                } else if (std::holds_alternative<ImageOutput>(*event)) {
+                } else if (std::holds_alternative<ImageOutput>(event)) {
                     saw_image_generation = true;
                 }
-                on_event(*event);
+                on_event(event);
             }
         }
         // 单帧超过上限,协议已不可信:返回 false 让传输层掐断。

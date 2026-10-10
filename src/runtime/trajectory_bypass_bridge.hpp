@@ -65,6 +65,9 @@ public:
                                   const agent::RequestPreparedContext& ctx) override;
     // false = sent 落不住(失败与恢复单 P1-C):采样停在发送边界。
     bool OnRequestSent(const std::string& request_id) override;
+    std::optional<bool> OnUsageObservation(const std::string& request_id, const api::Usage& usage,
+        const ::lubancore::usage::v1::Observation* observation, bool reported,
+        std::string_view response_id, bool incomplete) override;
     void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                          bool reported_by_provider, const std::string& provider_response_id,
                          int cache_epoch = 0, bool prefix_append_only = true,

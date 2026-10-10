@@ -3,6 +3,7 @@
 // 函数钉文本/思考/工具调用/用量/finishReason 与断流容错。
 
 #include <doctest/doctest.h>
+#include "usage_body_fixture.hpp"
 
 #include <variant>
 
@@ -16,14 +17,14 @@ api::SseFrame Frame(std::string data) { return api::SseFrame{"", std::move(data)
 
 TEST_CASE("Gemini events: 文本流 + 收尾帧翻 MessageStart/TextDelta/MessageDone") {
     api::gemini::EventParser parser;
-    auto first = parser.Consume(Frame(
+    auto first = lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
         R"({"candidates":[{"content":{"role":"model","parts":[{"text":"你"}]}}],"modelVersion":"gemini-2.5-pro"})"));
     REQUIRE(first.size() == 2);
     const auto& start = std::get<api::MessageStart>(first[0]);
     CHECK(start.model == "gemini-2.5-pro");
     CHECK(std::get<api::TextDelta>(first[1]).text == "你");
 
-    const auto done = parser.Consume(Frame(
+    const auto done = lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
         R"({"candidates":[{"content":{"role":"model","parts":[{"text":"好"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":37,"candidatesTokenCount":5,"totalTokenCount":42}})"));
     // 收尾帧:先吐这帧的 TextDelta,再落锤 MessageDone。
     REQUIRE(done.size() == 2);
@@ -34,13 +35,13 @@ TEST_CASE("Gemini events: 文本流 + 收尾帧翻 MessageStart/TextDelta/Messag
     CHECK(message_done.usage.output_tokens == 5);
     CHECK(message_done.usage.cache_read_tokens == 0);
     // 收尾之后再喂帧(协议上不该有)不再重复落锤。
-    CHECK(parser.Consume(Frame(R"({"candidates":[{"finishReason":"STOP"}]})")).empty());
+    CHECK(lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(R"({"candidates":[{"finishReason":"STOP"}]})")).empty());
     CHECK(parser.finished());
 }
 
 TEST_CASE("Gemini events: thought part 翻 ThinkingDelta") {
     api::gemini::EventParser parser;
-    const auto events = parser.Consume(Frame(
+    const auto events = lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
         R"({"candidates":[{"content":{"role":"model","parts":[{"text":"先想","thought":true},{"text":"答"}]}}],"modelVersion":"gemini-3-pro"})"));
     REQUIRE(events.size() == 3);
     CHECK(std::holds_alternative<api::MessageStart>(events[0]));
@@ -51,9 +52,9 @@ TEST_CASE("Gemini events: thought part 翻 ThinkingDelta") {
 
 TEST_CASE("Gemini events: functionCall 攒齐,finishReason 落锤时按次序吐出") {
     api::gemini::EventParser parser;
-    parser.Consume(Frame(
+    lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
         R"({"candidates":[{"content":{"role":"model","parts":[{"text":"我来"}]}}],"modelVersion":"gemini-2.5-pro"})"));
-    const auto done = parser.Consume(Frame(
+    const auto done = lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
         R"({"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"read_file","args":{"path":"a.cpp"}}},{"functionCall":{"name":"write_file","args":{"path":"b.cpp"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4}})"));
     REQUIRE(done.size() == 8);
     // ContentBlockDone{0} 收文本块的尾,然后每只调用 Start/Delta/Done 三连。
@@ -73,7 +74,7 @@ TEST_CASE("Gemini events: usageMetadata 摊成统一口径") {
     api::gemini::EventParser parser;
     // prompt 含缓存命中:input = prompt - cached,cache_read = cached;
     // candidates 已含思考(官方 API 口径),thoughts 只拆账不叠加。
-    const auto done = parser.Consume(Frame(
+    const auto done = lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
         R"({"candidates":[{"content":{"parts":[{"text":"答"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":50000,"candidatesTokenCount":80,"thoughtsTokenCount":20,"cachedContentTokenCount":49000,"totalTokenCount":50080}})"));
     REQUIRE(done.size() == 2);
     const auto& message_done = std::get<api::MessageDone>(done[1]);
@@ -87,35 +88,35 @@ TEST_CASE("Gemini events: usageMetadata 摊成统一口径") {
 
 TEST_CASE("Gemini events: MAX_TOKENS 翻 max_tokens;SAFETY 类截断翻 end_turn") {
     api::gemini::EventParser parser;
-    const auto done = parser.Consume(Frame(
+    const auto done = lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
         R"({"candidates":[{"content":{"parts":[{"text":"写到一半"}]},"finishReason":"MAX_TOKENS"}],"modelVersion":"gemini-2.5-pro"})"));
     REQUIRE(done.size() == 3);
     CHECK(std::get<api::MessageDone>(done[2]).stop_reason == "max_tokens");
 
     api::gemini::EventParser safety;
-    const auto events = safety.Consume(Frame(
+    const auto events = lubancode::api::usage_fixture::ConsumeLegacyBody(safety, Frame(
         R"({"candidates":[{"content":{"parts":[{"text":"拒绝"}]},"finishReason":"SAFETY"}],"modelVersion":"gemini-2.5-pro"})"));
     CHECK(std::get<api::MessageDone>(events.back()).stop_reason == "end_turn");
 }
 
 TEST_CASE("Gemini events: error 帧翻 StreamError") {
     api::gemini::EventParser parser;
-    const auto events = parser.Consume(Frame(R"({"error":{"code":429,"message":"resource exhausted","status":"RESOURCE_EXHAUSTED"}})"));
+    const auto events = lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(R"({"error":{"code":429,"message":"resource exhausted","status":"RESOURCE_EXHAUSTED"}})"));
     REQUIRE(events.size() == 1);
     CHECK(std::get<api::StreamError>(events[0]).message == "resource exhausted");
 }
 
 TEST_CASE("Gemini events: 坏 JSON 帧、空 candidates 帧都跳过不崩") {
     api::gemini::EventParser parser;
-    CHECK(parser.Consume(Frame("not json")).empty());
-    CHECK(parser.Consume(Frame(R"({"candidates":[]})")).empty());
-    CHECK(parser.Consume(Frame(R"([1,2])")).empty());
+    CHECK(lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame("not json")).empty());
+    CHECK(lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(R"({"candidates":[]})")).empty());
+    CHECK(lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(R"([1,2])")).empty());
     CHECK_FALSE(parser.finished());
 }
 
 TEST_CASE("Gemini events: 断流(没等到 finishReason)由 Finish 兜底落锤") {
     api::gemini::EventParser parser;
-    parser.Consume(Frame(
+    lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
         R"({"candidates":[{"content":{"parts":[{"text":"半截"}]}}],"modelVersion":"gemini-2.5-pro"})"));
     REQUIRE_FALSE(parser.finished());
     const auto done = parser.Finish();
@@ -134,8 +135,8 @@ TEST_CASE("Gemini events: 字段类型不对的坏帧当没看见,不崩解析�
     api::gemini::EventParser parser;
     // modelVersion 给了个数字(协议里是字符串):.value() 抛 type_error,整帧
     // 作废不崩;后面的好帧照常解析。
-    CHECK(parser.Consume(Frame(R"({"candidates":[{"finishReason":"STOP"}],"modelVersion":7})")).empty());
-    const auto events = parser.Consume(Frame(
+    CHECK(lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(R"({"candidates":[{"finishReason":"STOP"}],"modelVersion":7})")).empty());
+    const auto events = lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
         R"({"candidates":[{"content":{"parts":[{"text":"好"}]},"finishReason":"STOP"}]})"));
     CHECK(std::holds_alternative<api::TextDelta>(events[0]));
     CHECK(std::get<api::MessageDone>(events[1]).stop_reason == "end_turn");

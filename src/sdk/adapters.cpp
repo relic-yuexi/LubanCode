@@ -3,6 +3,7 @@
 #include "sdk/backend_owner_test_hooks.hpp"
 #endif
 #include "sdk/callback_scope.hpp"
+#include "api/usage_event_projection.hpp"
 
 #include <filesystem>
 #include <set>
@@ -131,6 +132,7 @@ public:
     std::expected<void, api::Error> send_stream(
         const api::Request& request, const std::function<void(const api::StreamEvent&)>& emit,
         const std::atomic<bool>* cancel) override {
+        bool received_reply = false;
         try {
             auto in = ConvertRequest(request);
             if (!in) return std::unexpected(in.error());
@@ -139,16 +141,60 @@ public:
                 CallbackScope callback;
                 return backend_->Generate(*in, Cancellation{cancel});
             }();
-            // Generate returned observable facts. Cancellation/output validation
-            // still rejects the reply, but must not discard its already paid usage.
+            received_reply = reply.has_value();
+            // Capture all returned numeric facts before copying bounded host
+            // metadata. If a later material copy/validation fails, the shared
+            // assembler has already received the nonterminal numeric snapshot.
+            api::UsageSnapshot numeric;
             if (reply && reply->usage) {
-                api::UsageSnapshot snapshot;
-                snapshot.usage_reported = true;
-                snapshot.usage.input_tokens = reply->usage->input_tokens;
-                snapshot.usage.output_tokens = reply->usage->output_tokens;
-                emit(snapshot);
+                numeric.usage_reported=true;
+                numeric.usage.input_tokens=reply->usage->input_tokens;
+                numeric.usage.output_tokens=reply->usage->output_tokens;
+                numeric.usage.cache_read_tokens=reply->usage->cache_read_tokens;
+                numeric.usage.cache_creation_tokens=reply->usage->cache_creation_tokens;
+                numeric.usage.output_reasoning_tokens=reply->usage->output_reasoning_tokens;
+                emit(numeric);
             }
-            if (cancel && cancel->load()) return std::unexpected(api::Error{api::ErrorKind::Cancelled, "cancelled"});
+            std::optional<api::usage_wire::Snapshot> material;
+            std::optional<std::string> provider_response_id;
+            std::optional<std::string_view> material_error;
+            if (reply) {
+                if (reply->provider_response_id) {
+                    if (!api::usage_observation::TextFits(*reply->provider_response_id,
+                            ::lubancore::usage::v1::kMaxResponseIdBytes,true))
+                        material_error="usage.response_id.invalid";
+                    else {
+                        provider_response_id=reply->provider_response_id;
+                        emit(api::ProviderResponseIdentity{*provider_response_id});
+                    }
+                }
+                if (reply->usage_observation) {
+                    if (!reply->usage) material_error="usage.material.without_numbers";
+                    else {
+                        const std::array<std::int64_t,::lubancore::usage::v1::kFieldCount> values{
+                            reply->usage->input_tokens,reply->usage->output_tokens,
+                            reply->usage->cache_read_tokens,reply->usage->cache_creation_tokens,
+                            reply->usage->output_reasoning_tokens};
+                        const auto valid=api::usage_observation::Validate(*reply->usage_observation,values);
+                        if (!valid) material_error=valid.error();
+                        else {
+                            material=api::usage_wire::Snapshot{values,std::move(*reply->usage_observation)};
+                            emit(api::usage_wire::Nonterminal(*material,provider_response_id));
+                        }
+                    }
+                } else if (reply->usage) {
+                    auto legacy = api::usage_wire::LegacyBackend(numeric.usage);
+                    if (!legacy) material_error = legacy.error();
+                    else {
+                        material = std::move(*legacy);
+                        emit(api::usage_wire::Nonterminal(*material, provider_response_id));
+                    }
+                }
+            }
+            // Cancellation keeps its existing outcome even if optional returned
+            // material is invalid. No body or success terminal has been emitted.
+            if (cancel && cancel->load()) return std::unexpected(api::Error{api::ErrorKind::Cancelled,"cancelled"});
+            if (material_error) return std::unexpected(api::Error{api::ErrorKind::Api,std::string(*material_error)});
             if (!reply) return std::unexpected(api::Error{api::ErrorKind::Api, reply.error().code + ": " + reply.error().message});
             if (!ValidSamplingValue(reply->stop_reason)) {
                 return std::unexpected(api::Error{api::ErrorKind::Parse, "sdk.backend.invalid_stop_reason"});
@@ -175,16 +221,19 @@ public:
             api::MessageDone done;
             done.stop_reason = reply->stop_reason.empty()
                 ? (reply->tool_calls.empty() ? "end_turn" : "tool_use") : reply->stop_reason;
-            if (reply->usage) {
-                done.usage_reported = true;
-                done.usage.input_tokens = reply->usage->input_tokens;
-                done.usage.output_tokens = reply->usage->output_tokens;
+            if (material) api::usage_wire::Apply(done,*material,provider_response_id);
+            else {
+                done.usage=numeric.usage;
+                done.usage_reported=numeric.usage_reported;
+                done.provider_response_id=provider_response_id;
             }
             emit(done);
             return {};
         } catch (const std::exception& error) {
+            if (received_reply && cancel && cancel->load()) return std::unexpected(api::Error{api::ErrorKind::Cancelled,"cancelled"});
             return std::unexpected(api::Error{api::ErrorKind::Api, std::string("sdk.backend.exception: ") + error.what()});
         } catch (...) {
+            if (received_reply && cancel && cancel->load()) return std::unexpected(api::Error{api::ErrorKind::Cancelled,"cancelled"});
             return std::unexpected(api::Error{api::ErrorKind::Api, "sdk.backend.exception"});
         }
     }

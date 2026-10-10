@@ -28,7 +28,19 @@ v3::ChildAdoptionCheck CheckHistory(const Rig& rig, const v3::V3Ledger& source, 
     const auto parent_bytes = Read(rig.writer->path());
     const auto child_bytes = Read(rig.child_paths[index]);
     const auto before_seq = rig.writer->next_seq();
-    auto result = v3::ValidateChildAdoption(source, rig.directory.root, call.turn_id, call.action_id, 1);
+    unsigned checked_sources = 0;
+    auto result = v3::ValidateChildAdoption(source, rig.directory.root, call.turn_id, call.action_id, 1,
+        [&](const v3::V3Ledger& child) {
+            ++checked_sources;
+            CHECK(child.path == rig.child_paths[index]);
+            CHECK(child.session_id != source.session_id);
+            CHECK(child.run_id != source.run_id);
+            const auto last = child.LastEntry(); REQUIRE(last);
+            CHECK_FALSE(last->is_message);
+        });
+    if (result.state == v3::ChildAdoptionState::Validated ||
+        result.issue == "subagent.adoption.prepared_consumption_pending") CHECK(checked_sources == 1);
+    else CHECK(checked_sources == 0);
     CHECK(rig.backend.parent_calls == parent_calls); CHECK(rig.backend.child_calls == child_calls);
     CHECK(rig.backend.summary_calls == summary_calls); CHECK(rig.after->calls == tools);
     CHECK(Read(rig.writer->path()) == parent_bytes); CHECK(Read(rig.child_paths[index]) == child_bytes);

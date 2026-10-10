@@ -80,6 +80,7 @@ struct State {
     std::string marker = "SDKCHILD_OWN";
     std::string argument = R"({"title":"explicit child","prompt":"SDKCHILD_OWN task","agent_type":"general-purpose"})";
     bool parent_grant_first = false, read_file = false, stop_at_first = false, wall_wait = false, child_final_first = false;
+    bool five_field_usage = false;
     std::shared_ptr<Gate> gate; unsigned gate_owner = 0;
     std::function<void()> before_child_final;
     sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest& request, sdk::Cancellation cancel) {
@@ -138,7 +139,13 @@ class Backend final : public sdk::Backend {
 public:
     explicit Backend(std::shared_ptr<State> state) : state_(std::move(state)) {}
     sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest& request, sdk::Cancellation cancel) override {
-        return state_->Generate(request, cancel);
+        auto reply = state_->Generate(request, cancel);
+        if (reply && reply->usage && state_->five_field_usage) {
+            reply->usage->cache_read_tokens = 3;
+            reply->usage->cache_creation_tokens = 5;
+            reply->usage->output_reasoning_tokens = 7;
+        }
+        return reply;
     }
 private: std::shared_ptr<State> state_;
 };
@@ -432,12 +439,47 @@ void ParentStepBudget(const fs::path& base) {
 }
 void Successful(const fs::path& base, bool parent_first = false) {
     Rig rig(base); auto state = std::make_shared<State>(); state->parent_grant_first = parent_first;
+    state->five_field_usage = true;
     auto session = rig.Open(rig.Options(state)); auto result = Execute(session, parent_first);
     if (result.operation.state != sdk::OperationState::Succeeded || !result.operation.result_persisted)
         DiagnoseChildFailure(parent_first ? "parent-grant-completion" : "success-completion", session, result.operation, state.get());
     Check(result.operation.state == sdk::OperationState::Succeeded && result.operation.result_persisted, "child operation failed");
     Check(state->tools == (parent_first ? 3 : 2) && result.tickets.size() == (parent_first ? 2 : 1), "child grant did not stay within this child");
     Check(state->max_active == 1, "parent and child concurrently used the shared backend");
+    const auto check_usage = [parent_first, parent_session = session->id()](const sdk::Operation& operation) {
+        Check(operation.usage.has_value(), "actual parent operation lost typed child usage");
+        const auto check_scope = [](const sdk::UsageSummary& scope, std::uint64_t samples) {
+            const auto count = static_cast<std::int64_t>(samples);
+            Check(scope.coverage.samples == samples && scope.total.input_tokens == count && scope.total.output_tokens == count &&
+                scope.total.cache_read_tokens == 3 * count && scope.total.cache_creation_tokens == 5 * count &&
+                scope.total.output_reasoning_tokens == 7 * count, "child accounting lost or double charged numeric facts");
+            for (std::size_t i = 0; i < sdk::usage::v1::kFieldCount; ++i) {
+                const auto& field = scope.coverage.fields[i];
+                Check(field.included == samples && field.omitted == 0 && field.anomalous == 0,
+                    "successful child changed coverage conservation");
+                Check(i < 2 ? field.valid == samples && field.observed == samples : field.valid == 0 && field.missing == samples,
+                    "legacy appended numeric slots fabricated field provenance");
+            }
+        };
+        check_scope(operation.usage->direct, parent_first ? 3 : 2);
+        check_scope(operation.usage->subordinate, 3);
+        Check(operation.usage->attempts_complete && operation.usage->attempts.size() == (parent_first ? 6 : 5),
+            "actual child request records are incomplete or duplicated");
+        std::size_t child_records = 0;
+        for (const auto& attempt : operation.usage->attempts) {
+            Check(!attempt.source_session_id.empty() && !attempt.source_run_id.empty() &&
+                !attempt.trajectory_request_id.empty() && !attempt.turn_id.empty() && !attempt.step_id.empty(),
+                "actual request record lost journal source identity");
+            if (attempt.subordinate) {
+                ++child_records;
+                Check(attempt.source_session_id != parent_session && attempt.model == "child-model" &&
+                    attempt.purpose == "subagent_turn", "child record borrowed parent authority");
+            } else Check(attempt.source_session_id == parent_session && attempt.turn_id == operation.turn_id,
+                "parent record borrowed child authority");
+        }
+        Check(child_records == 3, "child record count differs from subordinate summary");
+    };
+    check_usage(result.operation);
     const auto report = Reports(session, result.operation);
     auto before = session->DescribeSubagents(); Check(before.has_value() && before->enabled && before->profiles.size() == 1 &&
         before->profiles.front().effective_tools == std::vector<std::string>{"guarded"} &&
@@ -446,6 +488,13 @@ void Successful(const fs::path& base, bool parent_first = false) {
     auto after = session->DescribeSubagents(); Check(after.has_value() && after->plan_sha256 == before->plan_sha256, "Close lost frozen values");
     Check(Reports(session, result.operation).front().adoption->selected_event_id == report.front().adoption->selected_event_id,
         "Close changed the frozen report");
+    auto recovered_state = std::make_shared<State>(); recovered_state->five_field_usage = true;
+    auto options = rig.Options(recovered_state); options.resume_session_id = session->id(); options.system_prompt.clear();
+    auto recovered = rig.Open(std::move(options));
+    auto saved = recovered->WaitResult(result.operation.operation_id, 5s); Check(saved.has_value(), "child usage recovery lost operation");
+    check_usage(*saved);
+    Check(recovered_state->calls == 0 && recovered_state->tools == 0, "child usage recovery reran model or effects");
+    Check(recovered->Close().has_value(), "child usage recovery Close failed");
 }
 } // namespace
 

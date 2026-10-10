@@ -3,6 +3,7 @@
 // 坏掉的 JSON 都不会崩。
 
 #include <doctest/doctest.h>
+#include "usage_body_fixture.hpp"
 
 #include <algorithm>
 #include <variant>
@@ -310,7 +311,7 @@ TEST_CASE("工具续轮兼容:think 开闭标签横跨 delta 时隔离思考,只
         R"({"type":"content_block_stop","index":0})",
     };
     for (const auto& raw : frames) {
-        for (auto& event : parser.Consume(Frame(raw))) events.push_back(std::move(event));
+        for (auto& event : lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(raw))) events.push_back(std::move(event));
     }
 
     std::string thinking;
@@ -326,7 +327,7 @@ TEST_CASE("工具续轮兼容:think 开闭标签横跨 delta 时隔离思考,只
 
 TEST_CASE("工具续轮兼容:普通正文与正文中间的 think 标签一字不改") {
     anthropic::EventParser parser(/*recover_tagged_thinking=*/true);
-    const auto first = parser.Consume(Frame(
+    const auto first = lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
         R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"XML 示例: <think>保留</think>"}})"));
     REQUIRE(first.size() == 1);
     REQUIRE(std::holds_alternative<TextDelta>(first[0]));
@@ -336,11 +337,11 @@ TEST_CASE("工具续轮兼容:普通正文与正文中间的 think 标签一字�
 TEST_CASE("工具续轮兼容:正文从 think 标签开头但没有空行后续时原样保留") {
     anthropic::EventParser parser(/*recover_tagged_thinking=*/true);
     std::vector<StreamEvent> events;
-    for (auto& event : parser.Consume(Frame(
+    for (auto& event : lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
              R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<think>XML 字面量</think>直接说明"}})"))) {
         events.push_back(std::move(event));
     }
-    for (auto& event : parser.Consume(Frame(R"({"type":"content_block_stop","index":0})"))) {
+    for (auto& event : lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(R"({"type":"content_block_stop","index":0})"))) {
         events.push_back(std::move(event));
     }
     std::string text;
@@ -354,11 +355,11 @@ TEST_CASE("工具续轮兼容:正文从 think 标签开头但没有空行后续�
 TEST_CASE("工具续轮兼容:think 标签没闭合时报协议错,不漏进正文") {
     anthropic::EventParser parser(/*recover_tagged_thinking=*/true);
     std::vector<StreamEvent> events;
-    for (auto& event : parser.Consume(Frame(
+    for (auto& event : lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(
              R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<think>半截思考"}})"))) {
         events.push_back(std::move(event));
     }
-    for (auto& event : parser.Consume(Frame(R"({"type":"content_block_stop","index":0})"))) {
+    for (auto& event : lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(R"({"type":"content_block_stop","index":0})"))) {
         events.push_back(std::move(event));
     }
 
@@ -446,7 +447,7 @@ TEST_CASE("P3 完整一轮官方流样例: 搜索 -> 结果 -> 直调真实工�
         R"({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":20,"output_tokens":30}})",
     };
     for (const auto& raw : frames) {
-        for (auto& event : parser.Consume(Frame(raw))) {
+        for (auto& event : lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(raw))) {
             assembler.Feed(event);
         }
     }
@@ -491,7 +492,7 @@ TEST_CASE("P3 搜索失败流: tool_search_tool_result_error 的 error_code/mess
         R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":9,"output_tokens":9}})",
     };
     for (const auto& raw : frames) {
-        for (auto& event : parser.Consume(Frame(raw))) {
+        for (auto& event : lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(raw))) {
             assembler.Feed(event);
         }
     }
@@ -530,7 +531,7 @@ const MessageDone* FindDone(const std::vector<StreamEvent>& events) {
 std::vector<StreamEvent> FeedAll(anthropic::EventParser& parser, const std::vector<std::string>& frames) {
     std::vector<StreamEvent> events;
     for (const auto& raw : frames) {
-        for (auto& event : parser.Consume(Frame(raw))) {
+        for (auto& event : lubancode::api::usage_fixture::ConsumeLegacyBody(parser, Frame(raw))) {
             events.push_back(std::move(event));
         }
     }

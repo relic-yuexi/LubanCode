@@ -2,6 +2,7 @@
 #include "sdk/prepare_journal.hpp"
 #include "sdk/operation_ledger.hpp"
 #include "sdk/plan_write.hpp"
+#include "sdk/usage_result.hpp"
 
 #include <algorithm>
 #include <array>
@@ -168,13 +169,33 @@ subagents::v1::LiveTerminalReceipt CopyChildReceipt(const lubancode::runtime::Su
 
 Result<std::vector<subagents::v1::Report>> ReadSubagentReports(
     const v3::V3Ledger& source, const fs::path& directory, const std::string& session_id,
-    const std::string& operation_id, const std::string& turn_id, bool require_complete, bool allow_unconsumed) {
+    const std::string& operation_id, const std::string& turn_id, bool require_complete, bool allow_unconsumed,
+    const OperationUsage* usage) {
     const auto bad = [](std::string why) -> Result<std::vector<subagents::v1::Report>> {
         return std::unexpected(Fail("sdk.subagent.report_invalid", std::move(why)));
     };
     if (source.session_id != session_id) return bad("verified parent belongs to another Session");
     std::vector<subagents::v1::Report> reports;
     std::set<std::pair<std::string, std::uint64_t>> seen;
+    std::vector<bool> bound(usage ? usage->attempts.size() : 0, false);
+    std::string_view usage_error;
+    const auto usage_bad = [](std::string_view why) -> Result<std::vector<subagents::v1::Report>> {
+        return std::unexpected(Fail("sdk.usage.result_invalid", std::string(why)));
+    };
+    const auto checked_child = [&](const v3::V3Ledger& child) {
+        if (!usage) return;
+        std::set<std::string> requests;
+        for (std::size_t i = 0; i < usage->attempts.size(); ++i) {
+            const auto& record = usage->attempts[i];
+            if (!record.subordinate || record.source_session_id != child.session_id || record.source_run_id != child.run_id) continue;
+            const auto checked = usage_result::ValidateRequestBinding(record, child);
+            if (!checked) { usage_error = checked.error(); return; }
+            if (bound[i] || !requests.insert(record.trajectory_request_id).second) {
+                usage_error = "sdk.usage.child_request_ambiguous"; return;
+            }
+            bound[i] = true;
+        }
+    };
     try {
         for (const auto& event : source.events) {
             if (event.kind != v3::EventKindV3::ToolExecutionStarted || event.turn_id != turn_id ||
@@ -185,7 +206,9 @@ Result<std::vector<subagents::v1::Report>> ReadSubagentReports(
                 return bad("started child action owner or attempt differs");
             const auto attempt = event.payload["attempt"].get<std::uint64_t>();
             if (!seen.emplace(*event.action_id, attempt).second) return bad("duplicate started child action");
-            const auto checked = v3::ValidateChildAdoption(source, directory, turn_id, *event.action_id, attempt);
+            const auto checked = usage ? v3::ValidateChildAdoption(source, directory, turn_id, *event.action_id, attempt, checked_child) :
+                v3::ValidateChildAdoption(source, directory, turn_id, *event.action_id, attempt);
+            if (!usage_error.empty()) return usage_bad(usage_error);
             // A schema/plan refusal reached no child spawn. Its ordinary tool
             // result remains queryable; it is not an invented child report.
             if (checked.state == v3::ChildAdoptionState::NotApplicable) continue;
@@ -225,6 +248,8 @@ Result<std::vector<subagents::v1::Report>> ReadSubagentReports(
             reports.push_back(std::move(report));
         }
     } catch (const std::exception& error) { return bad(error.what()); }
+    if (usage) for (std::size_t i = 0; i < usage->attempts.size(); ++i)
+        if (usage->attempts[i].subordinate && !bound[i]) return usage_bad("sdk.usage.child_source_unavailable");
     return reports;
 }
 

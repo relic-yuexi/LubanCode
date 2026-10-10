@@ -53,6 +53,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
 REQUIRED_PUBLIC_HEADERS = {
+    "include/lubancore/usage.hpp",
     "include/lubancore/named_results.hpp",
     "include/lubancore/jobs.hpp",
     "include/lubancore/web_fetch.hpp",

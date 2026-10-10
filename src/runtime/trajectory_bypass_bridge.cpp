@@ -5,6 +5,7 @@
 
 #include <utility>
 
+#include "api/usage_json.hpp"
 #include "platform/log_sink.hpp"
 #include "runtime/trajectory_bridge_internal.hpp"  // 与主桥共用的事实构造(口径只此一处)
 
@@ -13,6 +14,29 @@ namespace lubancode::runtime {
 // trajectory v3 简称(本件内 v3:: 一律指 trajectory::v3;runtime 命名空间
 // 下裸写 v3:: 解析不到 trajectory::v3)。
 namespace v3 = ::lubancode::trajectory::v3;
+
+std::optional<bool> TrajectoryBypassBridge::OnUsageObservation(const std::string& request_id,
+    const api::Usage& usage, const ::lubancore::usage::v1::Observation* observation,
+    bool reported, std::string_view response_id, bool incomplete) {
+    if (!V3Mode()) return std::nullopt;
+    const auto found = v3_requests_.find(request_id);
+    if (found == v3_requests_.end()) return false;
+    auto payload = api::usage_json::ObservationPayload(usage, observation, reported, response_id, incomplete);
+    if (!payload) return false;
+    v3::EventDraft draft;
+    draft.kind = v3::EventKindV3::ModelUsageObserved;
+    draft.request_id = request_id;
+    draft.turn_id = found->second.turn_id;
+    draft.step_id = found->second.step_id;
+    draft.payload = std::move(*payload);
+    const auto receipt = v3_writer_->AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);
+    V3NotifyCommitted(receipt);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        NoteV3Error(receipt, "model.usage.observed(bypass)");
+        return false;
+    }
+    return true;
+}
 
 // 原实现文件顶部的类型简称集随段迁移(与主桥同款)。
 namespace {
@@ -590,11 +614,11 @@ bool TrajectoryBypassBridge::V3OutputCompleted(const std::string& request_id, co
         // 旁路采样无工具调用,ToolUse/ToolResult 不该出现,出现了也不入账。
     }
     nlohmann::json body = nlohmann::json{{"role", "assistant"}, {"content", std::move(content)}};
+    body["provider_response_id"] = provider_response_id.empty() ? nlohmann::json(nullptr) : nlohmann::json(provider_response_id);
     const auto receipt = v3_writer_->CompleteStreamResponse(
         request_id, book.stream_id, book.turn_id, book.step_id, book.reserved_message_id,
         std::move(body), identity_.provider, identity_.wire, book.model,
-        provider_response_id.empty() ? nlohmann::json(nullptr)
-                                     : nlohmann::json(provider_response_id),
+        nlohmann::json(nullptr), // A response ID never proves the response model.
         book.usage.has_value() ? *book.usage : nlohmann::json(nullptr),
         stop_reason.empty() ? std::string("end_turn") : stop_reason,
         V3MessagePurpose(), std::nullopt,

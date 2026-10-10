@@ -140,6 +140,7 @@ struct BackgroundCallAccounting {
     api::Usage usage;  // 各次子请求的 usage 合计
     bool usage_reported = false;
     std::int64_t duration_ms = 0;
+    ::lubancore::usage::v1::Coverage usage_coverage;
 };
 
 // 一档角色的累计账。

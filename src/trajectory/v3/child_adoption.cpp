@@ -254,7 +254,8 @@ ChildAdoptionCheck Verdict(ChildAdoptionState state, std::string_view issue) {
 } // namespace
 
 ChildAdoptionCheck ValidateChildAdoption(const V3Ledger& parent, const fs::path& parent_dir,
-    std::string_view turn_id, std::string_view action_id, std::uint64_t attempt) {
+    std::string_view turn_id, std::string_view action_id, std::uint64_t attempt,
+    const std::function<void(const V3Ledger&)>& checked_child) {
     try {
         Require(SafeText(parent.session_id) && SafeText(parent.run_id) && SafeText(turn_id) && SafeText(action_id) && attempt,
                 "invalid_scope");
@@ -509,8 +510,10 @@ ChildAdoptionCheck ValidateChildAdoption(const V3Ledger& parent, const fs::path&
             Require(CheckPreparedAgainstChain(parent, event.event_id).empty(), "prepared_chain_mismatch");
             value.consumed_tool_message_id = consumed->message_id; value.prepared_event_id = event.event_id;
             value.prepared_context_revision = Uint(event.payload.at("contextRevision"));
+            if (checked_child) checked_child(*child);
             return {ChildAdoptionState::Validated, {}, std::move(value)};
         }
+        if (checked_child) checked_child(*child);
         return Verdict(ChildAdoptionState::Incomplete, "prepared_consumption_pending");
     } catch (const Incomplete& error) {
         return Verdict(ChildAdoptionState::Incomplete, error.what());

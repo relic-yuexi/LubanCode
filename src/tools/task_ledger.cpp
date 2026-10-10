@@ -609,6 +609,8 @@ std::vector<AgentTaskSummary> TaskLedger::Summaries() const {
         summary.cache_read_tokens = task->snapshot.cache_read_tokens;
         summary.cache_creation_tokens = task->snapshot.cache_creation_tokens;
         summary.output_tokens = task->snapshot.output_tokens;
+        summary.output_reasoning_tokens = task->snapshot.output_reasoning_tokens;
+        summary.usage_coverage = task->snapshot.usage_coverage;
         summary.usage_reported = task->snapshot.usage_reported;
         summary.start_time = task->snapshot.start_time;
         summary.end_time = task->snapshot.end_time;

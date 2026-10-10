@@ -10,6 +10,7 @@
 
 #include "api/sse_framing.hpp"
 #include "api/types.hpp"
+#include "api/usage_wire_builder.hpp"
 
 namespace lubancode::api::responses {
 
@@ -22,6 +23,20 @@ namespace lubancode::api::responses {
 //   - 完全没见过的事件类型(尚未接线的内置工具、MCP 调用等)。
 // web_search_call 例外：翻成 BuiltinToolStart/Done，只展示，不本地执行。
 std::optional<StreamEvent> parse_event(const SseFrame& frame);
+
+// A real stream can carry both accounting and a terminal/error in one frame.
+// Keep the legacy one-event translator for internal callers; the actual HTTP
+// client uses this batch owner, including failed response accounting.
+class EventParser {
+public:
+    std::vector<StreamEvent> Consume(const SseFrame& frame);
+private:
+    std::optional<std::string> provider_response_id_;
+    std::optional<std::string> conflicting_response_id_;
+    std::optional<usage_wire::Snapshot> usage_material_;
+    bool failed_ = false;
+    StreamError Fail(StreamError error) { failed_ = true; return error; }
+};
 
 // 非流式响应体(POST /responses 不带 stream,一次 JSON 对象)的展开路径
 //(vLLM 本地模型勘察单 P2;当前客户端恒走流式,这层给非流式体一条现成的

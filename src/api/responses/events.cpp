@@ -1,4 +1,6 @@
 #include "api/responses/events.hpp"
+#include "api/usage_event_projection.hpp"
+#include "api/usage_lexical.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -133,7 +135,7 @@ std::optional<StreamEvent> HandleOutputItemDone(const json& data) {
 
 // 收尾事件(response.completed 帧里的 response 对象,或非流式响应体顶层):
 // stop_reason 三态 + usage 摊法,流式/非流式两路共用同一口径。
-MessageDone DoneFromResponseObject(const json& response) {
+std::expected<MessageDone,std::string_view> DoneFromResponseObject(const json& response) {
     bool has_pending_function_call = false;
     if (auto output_it = response.find("output"); output_it != response.end() && output_it->is_array()) {
         for (const auto& item : *output_it) {
@@ -148,6 +150,9 @@ MessageDone DoneFromResponseObject(const json& response) {
 
     MessageDone event;
     const std::string status = response.value("status", "");
+    if (status=="failed") return std::unexpected("model.response.failed");
+    if (status=="cancelled") return std::unexpected("model.response.cancelled");
+    if (status=="queued" || status=="in_progress") return std::unexpected("model.response.not_terminal");
 
     if (status == "incomplete") {
         event.stop_reason = "max_tokens";
@@ -157,69 +162,14 @@ MessageDone DoneFromResponseObject(const json& response) {
         event.stop_reason = "end_turn";
     }
 
-    if (auto usage_it = response.find("usage"); usage_it != response.end() && usage_it->is_object()) {
-        // completed 帧里真有 usage 对象才算 provider 明报(Token 账本单 A0)。
-        event.usage_reported = true;
-        // 统一口径(api::Usage 文件头,缓存用量按 Wire 归一单 C3):厂商的
-        // input_tokens(T)已含缓存读 R 与写 W,摊开成
-        //   cache_read=R=input_tokens_details.cached_tokens
-        //   cache_creation=W=cache_write_tokens(协议给了才在,2026 起官方
-        //               Responses 缓存文档有此字段;旧模型/兼容服务缺它
-        //               = 写入未知,不是"明报零")
-        //   input(内部普通输入)=T-R-W
-        // W 不再加回 T、不进命中分子;T 保持厂商原数,TotalInputTokens
-        // 恰与 T 对上。
-        event.usage.output_tokens = usage_it->value("output_tokens", static_cast<std::int64_t>(0));
-        std::int64_t input_total = 0;
-        if (auto t = usage_it->find("input_tokens"); t != usage_it->end() && t->is_number_integer()) {
-            input_total = t->get<std::int64_t>();
-        }
-        std::int64_t cached = 0;
-        if (auto details_it = usage_it->find("input_tokens_details");
-            details_it != usage_it->end() && details_it->is_object()) {
-            if (auto cached_it = details_it->find("cached_tokens");
-                cached_it != details_it->end() && cached_it->is_number_integer()) {
-                cached = cached_it->get<std::int64_t>();
-                event.cache_read_reported = true;
-            }
-        }
-        std::int64_t cache_write = 0;
-        if (auto w = usage_it->find("cache_write_tokens"); w != usage_it->end()) {
-            // 缺字段与显式零分开:在场就置写入旗标(类型错也置,矛盾另记)。
-            event.cache_creation_reported = true;
-            if (w->is_number_integer()) {
-                cache_write = w->get<std::int64_t>();
-            } else {
-                event.usage_anomaly = "usage.cache_write_tokens 类型不是整数";
-            }
-        }
-        // 自相矛盾的账(负数、R>T、R+W>T):原数照记不截零,U=T-R-W 可为
-        // 负,anomaly 点名——消费端把异常样本排除出精确比例,不掩盖。
-        if (cached < 0) {
-            event.usage_anomaly = "cached_tokens(" + std::to_string(cached) + ")为负";
-        } else if (cache_write < 0) {
-            event.usage_anomaly = "cache_write_tokens(" + std::to_string(cache_write) + ")为负";
-        } else if (input_total < 0) {
-            event.usage_anomaly = "input_tokens(" + std::to_string(input_total) + ")为负";
-        } else if (cached > input_total) {
-            event.usage_anomaly = "cached_tokens(" + std::to_string(cached) + ") > input_tokens(" +
-                                  std::to_string(input_total) + ")";
-        } else if (cached + cache_write > input_total) {
-            event.usage_anomaly = "cached(" + std::to_string(cached) + ")+write(" +
-                                  std::to_string(cache_write) + ") > input_tokens(" +
-                                  std::to_string(input_total) + ")";
-        }
-        event.usage.cache_read_tokens = cached;
-        event.usage.cache_creation_tokens = cache_write;
-        event.usage.input_tokens = input_total - cached - cache_write;
-        // reasoning 拆账:output_tokens_details.reasoning_tokens(已含在
-        // output_tokens 总数里)。没拆账就是 0(语义见 api::Usage 注释)。
-        if (auto out_details = usage_it->find("output_tokens_details");
-            out_details != usage_it->end() && out_details->is_object()) {
-            event.usage.output_reasoning_tokens =
-                out_details->value("reasoning_tokens", static_cast<std::int64_t>(0));
-        }
+    if (auto usage=response.find("usage"); usage!=response.end() && usage->is_object()) {
+        auto snapshot=usage_wire::Responses(*usage);
+        if (!snapshot) return std::unexpected(snapshot.error());
+        usage_wire::Apply(event,*snapshot);
     }
+    const auto id=usage_wire::ResponseId(usage_wire::Find(response,{"id"}));
+    if (!id) return std::unexpected(id.error());
+    event.provider_response_id=*id;
 
     return event;
 }
@@ -237,7 +187,9 @@ std::optional<StreamEvent> HandleCompleted(const json& data) {
     // agent 层都会把回合明败,见 agent/loop.cpp 的 on_model_image 口。
     // 重复终帧(同一 completed 到两遍)也由宿主按 item id 去重。
 
-    return DoneFromResponseObject(*it);
+    auto done=DoneFromResponseObject(*it);
+    if (!done) return StreamError{std::string(done.error()),"model.response.invalid"};
+    return std::move(*done);
 }
 
 // 错误体的人话拼装(ccmoon 真机巡检单 P1):message 为主,type/code 有就
@@ -346,15 +298,133 @@ std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
     return std::nullopt;
 }
 
+
+std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
+    std::vector<StreamEvent> events;
+    const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Responses);
+    json data;
+    try { data=json::parse(frame.data); }
+    catch (const json::exception&) {
+        if (lexical.numbers.empty()) return events;
+        if (lexical.response_id) events.push_back(ProviderResponseIdentity{*lexical.response_id});
+        auto partial = lexical.Partial();
+        if (partial) events.push_back(usage_wire::Nonterminal(*partial, lexical.response_id));
+        events.push_back(Fail(StreamError{"accounting recovered from an unparseable frame", "usage.frame.incomplete"}));
+        return events;
+    }
+    if (!data.is_object()) return events;
+    const auto* response=usage_wire::Find(data,{"response"});
+    if (response!=nullptr && response->is_object()) {
+        const auto id=usage_wire::ResponseId(usage_wire::Find(*response,{"id"}));
+        const bool changed=id && *id && provider_response_id_ && **id!=*provider_response_id_;
+        if (id && *id) {
+            if (changed) conflicting_response_id_ = **id;
+            else provider_response_id_ = **id;
+            events.push_back(ProviderResponseIdentity{**id});
+        }
+        bool fresh_usage = false;
+        if (const auto* usage = usage_wire::Find(*response, {"usage"}); usage && usage->is_object()) {
+            auto snapshot = usage_wire::Responses(*usage, &lexical.numbers);
+            if (!snapshot) {
+                events.push_back(Fail(StreamError{std::string(snapshot.error()), "usage.material.invalid"}));
+                return events;
+            }
+            usage_material_ = std::move(*snapshot);
+            if (!lexical.complete || lexical.duplicate) usage_wire::LexicalUsage::MarkIncomplete(*usage_material_);
+            if (!usage_material_->material_error.empty()) {
+                events.push_back(usage_wire::Nonterminal(*usage_material_, provider_response_id_));
+                events.push_back(Fail(StreamError{std::string(usage_material_->material_error), "usage.material.invalid"}));
+                return events;
+            }
+            fresh_usage = true;
+        }
+        if (usage_material_ && (fresh_usage || changed)) {
+            if (conflicting_response_id_) {
+                const auto annotated = usage_wire::IdentityConflict(*usage_material_, *provider_response_id_, *conflicting_response_id_);
+                if (!annotated) {
+                    events.push_back(usage_wire::NumericUnknown(*usage_material_));
+                    events.push_back(Fail(StreamError{std::string(annotated.error()), "usage.identity.material_invalid"}));
+                    return events;
+                }
+            }
+            const auto observed_id = id && *id ? *id
+                : (conflicting_response_id_ ? conflicting_response_id_ : provider_response_id_);
+            events.push_back(usage_wire::Nonterminal(*usage_material_, observed_id));
+        }
+        if (!id) {
+            events.push_back(Fail(StreamError{std::string(id.error()),"usage.response_id.invalid"}));
+            return events;
+        }
+        if (changed) {
+            events.push_back(Fail(StreamError{"provider response ID changed within one stream","usage.response_id.changed"}));
+            return events;
+        }
+    }
+    if (failed_) return events;  // Late accounting cannot revive this response.
+    // The compatibility translator can reject a malformed payload. Accounting
+    // already captured above stays in the batch instead of vanishing with it.
+    auto event=parse_event(frame);
+    if (event) {
+        if (std::holds_alternative<StreamError>(*event)) failed_ = true;
+        if (auto* done=std::get_if<MessageDone>(&*event)) {
+            if (usage_material_) usage_wire::Apply(*done,*usage_material_,provider_response_id_);
+            else if (!done->provider_response_id) done->provider_response_id=provider_response_id_;
+        }
+        events.push_back(std::move(*event));
+    } else {
+        const auto* type=usage_wire::Find(data,{"type"});
+        if (type && type->is_string() &&
+            (type->get_ref<const std::string&>()=="response.completed" ||
+             type->get_ref<const std::string&>()=="response.failed"))
+            events.push_back(Fail(StreamError{"terminal response has an invalid payload","model.payload.invalid"}));
+    }
+    return events;
+}
+
 std::vector<StreamEvent> ExpandNonStreamResponse(const std::string& body) try {
-    json response = json::parse(body);
+    const usage_wire::LexicalUsage lexical(body, usage_wire::Dialect::ResponsesNonStream);
+    json response;
+    try { response = json::parse(body); }
+    catch (const json::exception&) {
+        if (lexical.numbers.empty()) return {};
+        std::vector<StreamEvent> recovered;
+        if (lexical.response_id) recovered.push_back(ProviderResponseIdentity{*lexical.response_id});
+        auto partial = lexical.Partial();
+        if (partial) recovered.push_back(usage_wire::Nonterminal(*partial, lexical.response_id));
+        recovered.push_back(StreamError{"accounting recovered from an unparseable response body", "usage.frame.incomplete"});
+        return recovered;
+    }
     if (!response.is_object()) {
         return {};
     }
     std::vector<StreamEvent> events;
+    const auto id=usage_wire::ResponseId(usage_wire::Find(response,{"id"}));
+    if (id && *id) events.push_back(ProviderResponseIdentity{**id});
+    std::optional<usage_wire::Snapshot> material;
+    if (const auto* usage=usage_wire::Find(response,{"usage"});usage && usage->is_object()) {
+        auto snapshot=usage_wire::Responses(*usage, &lexical.numbers);
+        if (!snapshot) {
+            events.push_back(StreamError{std::string(snapshot.error()),"usage.material.invalid"});
+            return events;
+        }
+        material = std::move(*snapshot);
+        if (!lexical.complete || lexical.duplicate) usage_wire::LexicalUsage::MarkIncomplete(*material);
+        if (!material->material_error.empty()) {
+            events.push_back(usage_wire::Nonterminal(*material, id ? *id : std::optional<std::string>{}));
+            events.push_back(StreamError{std::string(material->material_error), "usage.material.invalid"});
+            return events;
+        }
+        events.push_back(usage_wire::Nonterminal(*material,id ? *id : std::optional<std::string>{}));
+    }
+    if (!id) {
+        events.push_back(StreamError{std::string(id.error()),"usage.response_id.invalid"});
+        return events;
+    }
+    try {
     auto output_it = response.find("output");
     if (output_it == response.end() || !output_it->is_array()) {
-        return {};
+        events.push_back(StreamError{"nonstream response has no output array","model.payload.invalid"});
+        return events;
     }
     // 非流式条目身上没有 output_index(那是流式帧的字段),编号按数组位置
     // ——与流式路的 output_index 同一语义(条目在 output 里的下标)。
@@ -412,7 +482,15 @@ std::vector<StreamEvent> ExpandNonStreamResponse(const std::string& body) try {
         // 别的条目类型(web_search_call 等)非流式不接线:流式路怎么翻,
         // 这路将来照着补;眼下静默跳过,收尾事件照发。
     }
-    events.push_back(DoneFromResponseObject(response));
+    auto done=DoneFromResponseObject(response);
+    if (!done) events.push_back(StreamError{std::string(done.error()),"model.response.invalid"});
+    else {
+        if (material) usage_wire::Apply(*done, *material, id ? *id : std::optional<std::string>{});
+        events.push_back(std::move(*done));
+    }
+    } catch (const json::exception&) {
+        events.push_back(StreamError{"nonstream response has an invalid payload","model.payload.invalid"});
+    }
     return events;
 } catch (const json::exception&) {
     // 坏 JSON/坏形状:当"没有 MessageDone 的不完整响应"处理,不抛。

@@ -8,10 +8,235 @@
 #include <iostream>
 
 #include "api/assembler.hpp"
+#include "api/chat/events.hpp"
+#include "api/gemini/events.hpp"
+#include "api/anthropic/events.hpp"
+#include "api/responses/events.hpp"
 #include "api/types.hpp"
+#include "api/usage_json.hpp"
+#include "api/usage_lexical.hpp"
+#include "api/usage_event_projection.hpp"
+#include "platform/sha256.hpp"
 #include "platform/text_encoding.hpp"  // IsValidUtf8:清洗结果断言
 
 using namespace lubancode::api;
+
+TEST_CASE("Five-field material capacity: incomplete marking preserves full anomaly history and owns numeric facts") {
+    namespace facts = ::lubancore::usage::v1;
+    auto original = usage_wire::LegacyBackend(Usage{-3, 9, 11, 13, 2});
+    REQUIRE(original); REQUIRE(original->observation.anomalies.size() == 1);
+    for (std::size_t i = 1; i < facts::kMaxAnomalies; ++i) {
+        auto note = original->observation.anomalies.front();
+        note.detail = "retained negative evidence " + std::to_string(i);
+        original->observation.anomalies.push_back(std::move(note));
+    }
+    const auto before = usage_json::Encode(original->observation, usage_wire::Numbers(*original)); REQUIRE(before);
+    usage_wire::LexicalUsage::MarkIncomplete(*original);
+    CHECK(original->material_error == "usage.material.parse_marker_capacity");
+    const auto after = usage_json::Encode(original->observation, usage_wire::Numbers(*original)); REQUIRE(after);
+    CHECK(*after == *before); CHECK(original->observation.anomalies.size() == facts::kMaxAnomalies);
+    const auto event = usage_wire::Nonterminal(*original, std::string("actual-id"));
+    CHECK(event.usage_reported); CHECK_FALSE(event.usage_observation);
+    CHECK_FALSE(event.cache_read_reported); CHECK_FALSE(event.cache_creation_reported);
+    REQUIRE(event.provider_response_id); CHECK(*event.provider_response_id == "actual-id");
+    MessageAssembler assembler; assembler.Feed(event);
+    CHECK(assembler.usage().input_tokens == -3); CHECK(assembler.usage().output_tokens == 9);
+    CHECK(assembler.usage().cache_read_tokens == 11); CHECK(assembler.usage().cache_creation_tokens == 13);
+    CHECK(assembler.usage().output_reasoning_tokens == 2); CHECK(assembler.stop_reason().empty());
+    Usage total; facts::Coverage coverage;
+    usage_aggregation::Add(total, coverage, assembler.usage(), nullptr);
+    for (std::size_t i = 0; i < facts::kFieldCount; ++i)
+        CHECK_FALSE(usage_aggregation::Exact(coverage, static_cast<facts::Field>(i)));
+    original->observation.anomalies.pop_back(); original->material_error = {};
+    usage_wire::LexicalUsage::MarkIncomplete(*original);
+    CHECK(original->material_error.empty()); CHECK(original->observation.anomalies.size() == facts::kMaxAnomalies);
+    CHECK(original->observation.anomalies.back().code == facts::AnomalyCode::ParseIncomplete);
+    const auto once = usage_json::Encode(original->observation, usage_wire::Numbers(*original)); REQUIRE(once);
+    usage_wire::LexicalUsage::MarkIncomplete(*original);
+    const auto twice = usage_json::Encode(original->observation, usage_wire::Numbers(*original)); REQUIRE(twice);
+    CHECK(*once == *twice);  // Repeated refinement does not consume another slot.
+}
+
+TEST_CASE("Five-field material capacity: a byte-limit failure rejects provenance without discarding numeric slots") {
+    namespace facts = ::lubancore::usage::v1;
+    usage_wire::Snapshot snapshot;
+    snapshot.values = {17, 9, 11, 13, 2};
+    snapshot.observation.provider_namespace = std::string(facts::kMaxNamespaceBytes, 'n');
+    for (int i = 0; i < 46; ++i) {
+        const auto prefix = "usage." + std::to_string(i) + ".";
+        facts::RawField raw;
+        raw.path = prefix + std::string(facts::kMaxPathBytes - prefix.size(), 'p');
+        raw.kind = facts::RawKind::String; raw.summary = std::string(facts::kMaxSummaryBytes, 's');
+        snapshot.observation.raw_fields.push_back(std::move(raw));
+    }
+    facts::Extension extension;
+    extension.namespace_name = std::string(facts::kMaxNamespaceBytes, 'e');
+    extension.field.path = std::string(32, 'p'); extension.field.kind = facts::RawKind::Null;
+    snapshot.observation.extensions.push_back(std::move(extension));
+    REQUIRE(usage_observation::Validate(snapshot.observation, snapshot.values));
+    usage_wire::LexicalUsage::MarkIncomplete(snapshot);
+    CHECK(snapshot.material_error == "usage.material.byte_limit");
+    CHECK(snapshot.observation.raw_fields.size() == 46); CHECK(snapshot.observation.extensions.size() == 1);
+    const auto event = usage_wire::Nonterminal(snapshot);
+    CHECK_FALSE(event.usage_observation); CHECK(event.usage_reported);
+    CHECK(event.usage.input_tokens == 17); CHECK(event.usage.output_tokens == 9);
+    CHECK(event.usage.cache_read_tokens == 11); CHECK(event.usage.cache_creation_tokens == 13);
+    CHECK(event.usage.output_reasoning_tokens == 2);
+}
+
+namespace {
+void RequireOriginalNumeric(const std::vector<StreamEvent>& events, const std::string& token,
+                            ::lubancore::usage::v1::RawKind kind, bool incomplete) {
+    namespace facts = ::lubancore::usage::v1;
+    MessageAssembler assembler;
+    bool found = false, error = false;
+    for (const auto& event : events) {
+        assembler.Feed(event);
+        error = error || std::holds_alternative<StreamError>(event);
+        CHECK_FALSE(std::holds_alternative<MessageDone>(event));
+        if (const auto* snapshot = std::get_if<UsageSnapshot>(&event)) {
+            REQUIRE(snapshot->usage_observation);
+            for (const auto& raw : snapshot->usage_observation->raw_fields) {
+                if (raw.summary == token) {
+                    found = true; CHECK(raw.kind == kind); CHECK_FALSE(raw.integer);
+                    CHECK(raw.fingerprint == lubancode::platform::Sha256Hex(token));
+                }
+            }
+            const auto encoded = usage_json::Encode(*snapshot->usage_observation, snapshot->usage);
+            REQUIRE(encoded);
+            const auto restored = usage_json::Decode(*encoded, snapshot->usage); REQUIRE(restored);
+            if (incomplete) {
+                bool marked = false;
+                for (const auto& anomaly : restored->anomalies) if (anomaly.code == facts::AnomalyCode::ParseIncomplete) {
+                    marked = true; CHECK(anomaly.affected_field_count == facts::kFieldCount);
+                }
+                CHECK(marked);
+            }
+        }
+    }
+    CHECK(found); CHECK(error == incomplete);
+    CHECK(assembler.usage_seen()); CHECK(assembler.usage().output_tokens == 9);
+    CHECK(assembler.stop_reason().empty()); CHECK(assembler.BuildMessage().content.empty());
+    Usage total;
+    facts::Coverage coverage;
+    lubancode::api::usage_aggregation::Add(total, coverage, assembler.usage(), assembler.usage_observation() ? &*assembler.usage_observation() : nullptr);
+    CHECK_FALSE(lubancode::api::usage_aggregation::Exact(coverage, facts::Field::Input));
+    if (incomplete) for (std::size_t i = 0; i < facts::kFieldCount; ++i)
+        CHECK_FALSE(lubancode::api::usage_aggregation::Exact(coverage, static_cast<facts::Field>(i)));
+}
+}
+
+TEST_CASE("Five-field lexical facts: four real parsers retain huge integers and original floating lexemes") {
+    namespace facts = ::lubancore::usage::v1;
+    for (const std::string token : {"184467440737095516160", "1.000000000000000000000e+00"}) {
+        const auto kind = token.find('.') == std::string::npos ? facts::RawKind::UnsignedInteger : facts::RawKind::FloatingPoint;
+        chat::EventParser chat;
+        RequireOriginalNumeric(chat.Consume(SseFrame{"", "{\"usage\":{\"prompt_tokens\":" + token + ",\"completion_tokens\":9},\"choices\":[]}"}), token, kind, false);
+        gemini::EventParser gemini;
+        RequireOriginalNumeric(gemini.Consume(SseFrame{"", "{\"usageMetadata\":{\"promptTokenCount\":" + token + ",\"candidatesTokenCount\":9}}"}), token, kind, false);
+        responses::EventParser responses;
+        RequireOriginalNumeric(responses.Consume(SseFrame{"response.created", "{\"type\":\"response.created\",\"response\":{\"usage\":{\"input_tokens\":" + token + ",\"output_tokens\":9}}}"}), token, kind, false);
+        anthropic::EventParser anthropic;
+        RequireOriginalNumeric(anthropic.Consume(SseFrame{"message_start", "{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":" + token + ",\"output_tokens\":9}}}"}), token, kind, false);
+    }
+}
+
+TEST_CASE("Five-field lexical facts: four real parsers recover numeric facts when DOM rejects an overflowing float") {
+    namespace facts = ::lubancore::usage::v1;
+    chat::EventParser chat;
+    RequireOriginalNumeric(chat.Consume(SseFrame{"", R"({"usage":{"prompt_tokens":1e999,"completion_tokens":9},"choices":[]})"}), "1e999", facts::RawKind::FloatingPoint, true);
+    CHECK(chat.Finish().empty());
+    gemini::EventParser gemini;
+    RequireOriginalNumeric(gemini.Consume(SseFrame{"", R"({"usageMetadata":{"promptTokenCount":1e999,"candidatesTokenCount":9}})"}), "1e999", facts::RawKind::FloatingPoint, true);
+    CHECK(gemini.Finish().empty());
+    responses::EventParser responses;
+    RequireOriginalNumeric(responses.Consume(SseFrame{"response.completed", R"({"type":"response.completed","response":{"usage":{"input_tokens":1e999,"output_tokens":9}}})"}), "1e999", facts::RawKind::FloatingPoint, true);
+    anthropic::EventParser anthropic;
+    RequireOriginalNumeric(anthropic.Consume(SseFrame{"message_start", R"({"type":"message_start","message":{"usage":{"input_tokens":1e999,"output_tokens":9}}})"}), "1e999", facts::RawKind::FloatingPoint, true);
+    CHECK(anthropic.Finish().empty());
+}
+
+TEST_CASE("Five-field lexical facts: four real parsers keep complete scalars before malformed body bytes") {
+    namespace facts = ::lubancore::usage::v1;
+    const std::string token = "184467440737095516160";
+    chat::EventParser chat;
+    RequireOriginalNumeric(chat.Consume(SseFrame{"", "{\"usage\":{\"prompt_tokens\":" + token + ",\"completion_tokens\":9},\"choices\":[invalid]}"}), token, facts::RawKind::UnsignedInteger, true);
+    gemini::EventParser gemini;
+    RequireOriginalNumeric(gemini.Consume(SseFrame{"", "{\"usageMetadata\":{\"promptTokenCount\":" + token + ",\"candidatesTokenCount\":9},\"candidates\":[invalid]}"}), token, facts::RawKind::UnsignedInteger, true);
+    responses::EventParser responses;
+    RequireOriginalNumeric(responses.Consume(SseFrame{"response.completed", "{\"response\":{\"usage\":{\"input_tokens\":" + token + ",\"output_tokens\":9},\"output\":[invalid]}}"}), token, facts::RawKind::UnsignedInteger, true);
+    anthropic::EventParser anthropic;
+    RequireOriginalNumeric(anthropic.Consume(SseFrame{"message_start", "{\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":" + token + ",\"output_tokens\":9},\"content\":[invalid]}}"}), token, facts::RawKind::UnsignedInteger, true);
+}
+
+TEST_CASE("Five-field lexical facts: bounded capture excludes body decoys and follows last canonical presence") {
+    namespace facts = ::lubancore::usage::v1;
+    chat::EventParser parser;
+    const auto events = parser.Consume(SseFrame{"", R"({"body":{"usage":{"prompt_tokens":999}},"usage":{"prompt_tokens":11,"completion_tokens":9},"usage":{"prompt_tokens":null,"completion_tokens":7},"choices":[]})"});
+    MessageAssembler assembler;
+    for (const auto& event : events) assembler.Feed(event);
+    REQUIRE(assembler.usage_observation());
+    CHECK(assembler.usage().input_tokens == 0); CHECK(assembler.usage().output_tokens == 7);
+    for (const auto& raw : assembler.usage_observation()->raw_fields)
+        CHECK_FALSE(raw.integer == 11 || raw.integer == 999 || raw.integer == 9);
+    chat::EventParser escaped;
+    MessageAssembler decoded;
+    for (const auto& event : escaped.Consume(SseFrame{"", R"({"us\u0061ge":{"prompt_\u0074okens":11,"completion_tokens":9},"choices":[]})"})) decoded.Feed(event);
+    CHECK(decoded.usage().input_tokens == 11); CHECK(decoded.usage().output_tokens == 9);
+    chat::EventParser enormous;
+    const std::string number(facts::kMaxMaterialBytes + 1, '9');
+    MessageAssembler bounded;
+    for (const auto& event : enormous.Consume(SseFrame{"", "{\"usage\":{\"prompt_tokens\":" + number + ",\"completion_tokens\":9}}"})) bounded.Feed(event);
+    REQUIRE(bounded.usage_observation());
+    bool captured = false;
+    for (const auto& raw : bounded.usage_observation()->raw_fields) if (raw.path == "usage.prompt_tokens") {
+        captured = true; CHECK(raw.summary.size() == facts::kMaxSummaryBytes);
+        CHECK(raw.fingerprint.empty()); CHECK_FALSE(raw.integer);
+    }
+    CHECK(captured); CHECK(bounded.usage().output_tokens == 9); CHECK(bounded.stop_reason().empty());
+}
+
+TEST_CASE("Provider identity: identity-only frames preserve numeric facts and do not complete") {
+    MessageAssembler assembler;
+    assembler.Feed(UsageSnapshot{Usage{17, 9, 3, 5, 7}, true});
+    assembler.Feed(ProviderResponseIdentity{"real-provider-id"});
+    REQUIRE(assembler.provider_response_id());
+    CHECK(*assembler.provider_response_id() == "real-provider-id");
+    CHECK(assembler.usage().input_tokens == 17);
+    CHECK(assembler.usage().cache_creation_tokens == 5);
+    CHECK(assembler.usage_seen()); CHECK(assembler.stop_reason().empty());
+    MessageDone done;
+    done.provider_response_id = "terminal-provider-id";
+    assembler.Feed(done);
+    CHECK(*assembler.provider_response_id() == "terminal-provider-id");
+    CHECK(assembler.usage().input_tokens == 17);
+    MessageAssembler absent;
+    absent.Feed(ProviderResponseIdentity{"id-without-usage"});
+    REQUIRE(absent.provider_response_id());
+    CHECK_FALSE(absent.usage_seen()); CHECK_FALSE(absent.usage_observation());
+    CHECK(absent.usage().input_tokens == 0); CHECK(absent.stop_reason().empty());
+}
+
+TEST_CASE("Five-field identity conflict: ID-only streams without prior usage never fabricate a snapshot") {
+    const auto absent = [](const std::vector<StreamEvent>& events) {
+        bool error = false;
+        for (const auto& event : events) {
+            error = error || std::holds_alternative<StreamError>(event);
+            CHECK_FALSE(std::holds_alternative<UsageSnapshot>(event));
+            CHECK_FALSE(std::holds_alternative<MessageDone>(event));
+        }
+        CHECK(error);
+    };
+    chat::EventParser chat;
+    chat.Consume(SseFrame{"", R"({"id":"first-id","choices":[]})"});
+    absent(chat.Consume(SseFrame{"", R"({"id":"second-id","choices":[]})"}));
+    gemini::EventParser gemini;
+    gemini.Consume(SseFrame{"", R"({"responseId":"first-id"})"});
+    absent(gemini.Consume(SseFrame{"", R"({"responseId":"second-id"})"}));
+    responses::EventParser responses;
+    responses.Consume(SseFrame{"response.created", R"({"type":"response.created","response":{"id":"first-id"}})"});
+    absent(responses.Consume(SseFrame{"response.completed", R"({"type":"response.completed","response":{"id":"second-id"}})"}));
+}
 
 TEST_CASE("纯 text:多段 TextDelta 拼成一个 TextBlock") {
     MessageAssembler assembler;
@@ -383,4 +608,181 @@ TEST_CASE("Usage snapshot: whole snapshots replace flags and preserve legacy ter
     CHECK(legacy.usage().input_tokens == 3); CHECK_FALSE(legacy.usage_seen());
     legacy.Feed(MessageDone{"end_turn", Usage{}});
     CHECK(legacy.usage().input_tokens == 0); CHECK_FALSE(legacy.usage_seen());
+}
+
+
+namespace {
+void RequireLateAccounting(const std::vector<StreamEvent>& events, MessageAssembler& assembler,
+                           const char* id) {
+    int snapshots = 0;
+    for (const auto& event : events) {
+        CHECK((std::holds_alternative<UsageSnapshot>(event) ||
+               std::holds_alternative<ProviderResponseIdentity>(event)));
+        if (const auto* snapshot = std::get_if<UsageSnapshot>(&event)) {
+            ++snapshots; REQUIRE(snapshot->usage_observation);
+            CHECK(snapshot->usage.input_tokens == 17); CHECK(snapshot->usage.output_tokens == 9);
+            CHECK(snapshot->provider_response_id == id);
+        }
+        assembler.Feed(event);
+    }
+    CHECK(snapshots == 1); CHECK(assembler.stop_reason().empty());
+    CHECK(assembler.usage().input_tokens == 17); CHECK(assembler.usage().output_tokens == 9);
+}
+void RequireFailure(const std::vector<StreamEvent>& events, MessageAssembler& assembler) {
+    bool failed = false;
+    for (const auto& event : events) {
+        failed = failed || std::holds_alternative<StreamError>(event);
+        CHECK_FALSE(std::holds_alternative<MessageDone>(event));
+        assembler.Feed(event);
+    }
+    CHECK(failed); CHECK(assembler.stop_reason().empty());
+}
+}
+
+TEST_CASE("Five-field failure fence: Chat late accounting cannot revive a failed stream") {
+    chat::EventParser parser; MessageAssembler assembler;
+    for (const auto& event : parser.Consume(SseFrame{"", R"({"id":"chat-real","choices":[{"delta":{"content":"before"}}]})"}))
+        assembler.Feed(event);
+    RequireFailure(parser.Consume(SseFrame{"", R"({"error":{"message":"failed","code":"bad_request"},"usage":{"prompt_tokens":11,"completion_tokens":7}})"}), assembler);
+    RequireLateAccounting(parser.Consume(SseFrame{"", R"({"id":"chat-real","choices":[{"delta":{"content":"must not appear"},"finish_reason":"stop"}],"usage":{"prompt_tokens":17,"completion_tokens":9}})"}), assembler, "chat-real");
+    CHECK(parser.Finish().empty()); CHECK(parser.Consume(SseFrame{"", "[DONE]"}).empty());
+    assembler.FinalizeOpenBlock();
+    REQUIRE(assembler.BuildMessage().content.size() == 1);
+    CHECK(std::get<TextBlock>(assembler.BuildMessage().content[0]).text == "before");
+}
+
+TEST_CASE("Five-field failure fence: Gemini late accounting cannot flush a success terminal") {
+    gemini::EventParser parser; MessageAssembler assembler;
+    for (const auto& event : parser.Consume(SseFrame{"", R"({"responseId":"gemini-real","candidates":[{"content":{"parts":[{"text":"before"}]}}]})"}))
+        assembler.Feed(event);
+    RequireFailure(parser.Consume(SseFrame{"", R"({"error":{"message":"failed","code":400},"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7}})"}), assembler);
+    RequireLateAccounting(parser.Consume(SseFrame{"", R"({"responseId":"gemini-real","candidates":[{"content":{"parts":[{"text":"must not appear"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":17,"candidatesTokenCount":9}})"}), assembler, "gemini-real");
+    CHECK(parser.Finish().empty());
+    assembler.FinalizeOpenBlock();
+    REQUIRE(assembler.BuildMessage().content.size() == 1);
+    CHECK(std::get<TextBlock>(assembler.BuildMessage().content[0]).text == "before");
+}
+
+TEST_CASE("Five-field failure fence: Anthropic late cumulative usage survives without completion") {
+    anthropic::EventParser parser; MessageAssembler assembler;
+    for (const auto& event : parser.Consume(SseFrame{"message_start", R"({"type":"message_start","message":{"id":"anthropic-real","model":"fixture","usage":{"input_tokens":11,"output_tokens":7}}})"}))
+        assembler.Feed(event);
+    RequireFailure(parser.Consume(SseFrame{"error", R"({"type":"error","error":{"type":"bad_request","message":"failed"}})"}), assembler);
+    RequireLateAccounting(parser.Consume(SseFrame{"message_delta", R"({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":17,"output_tokens":9}})"}), assembler, "anthropic-real");
+    CHECK(parser.Consume(SseFrame{"content_block_delta", R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"must not appear"}})"}).empty());
+    CHECK(parser.Finish().empty()); CHECK(assembler.BuildMessage().content.empty());
+}
+
+TEST_CASE("Five-field failure fence: Responses late completed frame cannot override an error") {
+    responses::EventParser parser; MessageAssembler assembler;
+    for (const auto& event : parser.Consume(SseFrame{"response.created", R"({"type":"response.created","response":{"id":"responses-real","status":"in_progress","usage":{"input_tokens":11,"output_tokens":7}}})"}))
+        assembler.Feed(event);
+    RequireFailure(parser.Consume(SseFrame{"error", R"({"type":"error","message":"failed","code":"bad_request"})"}), assembler);
+    RequireLateAccounting(parser.Consume(SseFrame{"response.completed", R"({"type":"response.completed","response":{"id":"responses-real","status":"completed","output":[],"usage":{"input_tokens":17,"output_tokens":9}}})"}), assembler, "responses-real");
+    CHECK(parser.Consume(SseFrame{"response.output_text.delta", R"({"type":"response.output_text.delta","delta":"must not appear"})"}).empty());
+    CHECK(assembler.BuildMessage().content.empty());
+}
+
+
+namespace {
+void RequireScopedIdentityConflict(const std::vector<StreamEvent>& events, std::int64_t input, std::int64_t output,
+                                   bool expected_error = true) {
+    namespace facts = lubancore::usage::v1;
+    const UsageSnapshot* snapshot = nullptr; bool error = false;
+    for (const auto& event : events) {
+        if (const auto* value = std::get_if<UsageSnapshot>(&event)) snapshot = value;
+        error = error || std::holds_alternative<StreamError>(event);
+        CHECK_FALSE(std::holds_alternative<MessageDone>(event)); CHECK_FALSE(std::holds_alternative<TextDelta>(event));
+    }
+    REQUIRE(snapshot); REQUIRE(snapshot->usage_observation); CHECK(error == expected_error);
+    CHECK(snapshot->provider_response_id == "second-id");
+    CHECK(snapshot->usage.input_tokens == input); CHECK(snapshot->usage.output_tokens == output);
+    const auto& material = *snapshot->usage_observation;
+    bool conflict = false;
+    for (const auto& anomaly : material.anomalies) {
+        if (anomaly.code != facts::AnomalyCode::ResponseIdentityConflict) continue;
+        conflict = true; CHECK(anomaly.affected_field_count == facts::kFieldCount); REQUIRE(anomaly.raw_field_count == 2);
+        CHECK(material.raw_fields[anomaly.raw_fields[0]].fingerprint != material.raw_fields[anomaly.raw_fields[1]].fingerprint);
+    }
+    CHECK(conflict);
+    Usage total; facts::Coverage coverage;
+    usage_aggregation::Add(total, coverage, snapshot->usage, &material);
+    CHECK(total.input_tokens == input); CHECK(coverage.samples == 1);
+    for (std::size_t i = 0; i < facts::kFieldCount; ++i) {
+        CHECK(coverage.fields[i].anomalous == 1);
+        CHECK_FALSE(usage_aggregation::Exact(coverage, static_cast<facts::Field>(i)));
+    }
+    auto encoded = usage_json::Encode(material, snapshot->usage); REQUIRE(encoded);
+    CHECK(encoded->at("version") == 2);
+    auto decoded = usage_json::Decode(*encoded, snapshot->usage); REQUIRE(decoded);
+    auto invalid_scope = *encoded;
+    for (auto& anomaly : invalid_scope["anomalies"])
+        if (anomaly["code"] == static_cast<unsigned>(facts::AnomalyCode::ResponseIdentityConflict))
+            anomaly["affected_fields"] = nlohmann::json::array({0, 0});
+    const auto duplicate = usage_json::Decode(invalid_scope, snapshot->usage);
+    REQUIRE_FALSE(duplicate); CHECK(duplicate.error() == "usage.json.anomaly_scope");
+    encoded->at("version") = 1;
+    const auto fenced = usage_json::Decode(*encoded, snapshot->usage);
+    REQUIRE_FALSE(fenced); CHECK(fenced.error() == "usage.json.anomaly_scope_version");
+}
+}
+
+TEST_CASE("Five-field identity conflict: Chat keeps changed-ID facts and marks cached facts on identity-only changes") {
+    for (const bool usage : {false, true}) {
+        chat::EventParser parser;
+        parser.Consume(SseFrame{"", R"({"id":"first-id","usage":{"prompt_tokens":11,"completion_tokens":7},"choices":[]})"});
+        nlohmann::json changed{{"id", "second-id"}, {"choices", nlohmann::json::array()}};
+        if (usage) changed["usage"] = {{"prompt_tokens", 17}, {"completion_tokens", 9}};
+        RequireScopedIdentityConflict(parser.Consume(SseFrame{"", changed.dump()}), usage ? 17 : 11, usage ? 9 : 7);
+        RequireScopedIdentityConflict(parser.Consume(SseFrame{"", R"({"usage":{"prompt_tokens":19,"completion_tokens":10},"choices":[]})"}), 19, 10, false);
+        CHECK(parser.Finish().empty());
+    }
+}
+
+TEST_CASE("input precision keeps independent output faults and rejects negative numbers without trusting anomaly labels") {
+    auto source = usage_wire::Anthropic(nlohmann::json{{"input_tokens", -3}, {"output_tokens", 5},
+        {"cache_read_input_tokens", 11}, {"cache_creation_input_tokens", 13}});
+    REQUIRE(source.has_value());
+    source->observation.anomalies.clear(); // Host omitted the negative diagnostic; numbers still prove it.
+    const auto negative = usage_wire::Numbers(*source);
+    Usage total;
+    ::lubancore::usage::v1::Coverage coverage;
+    usage_aggregation::Add(total, coverage, negative, &source->observation);
+    CHECK(total.input_tokens == -3);
+    CHECK(coverage.fields[0].anomalous == 1);
+    CHECK_FALSE(usage_aggregation::Exact(coverage, ::lubancore::usage::v1::Field::Input));
+    CHECK(usage_aggregation::Exact(coverage, ::lubancore::usage::v1::Field::CacheRead));
+    CHECK_FALSE(usage_aggregation::ExactTotalInput(negative, &source->observation).has_value());
+    CHECK_FALSE(usage_aggregation::ExactTotalInput(negative, nullptr).has_value());
+
+    auto output_fault = usage_wire::Anthropic(nlohmann::json{{"input_tokens", 100}, {"output_tokens", -5},
+        {"cache_read_input_tokens", 11}, {"cache_creation_input_tokens", 13}});
+    REQUIRE(output_fault.has_value());
+    const auto independent = usage_aggregation::ExactTotalInput(usage_wire::Numbers(*output_fault), &output_fault->observation);
+    REQUIRE(independent.has_value());
+    CHECK(*independent == 124);
+}
+
+TEST_CASE("Five-field identity conflict: Gemini changed-ID accounting cannot remain exact") {
+    for (const bool usage : {false, true}) {
+        gemini::EventParser parser;
+        parser.Consume(SseFrame{"", R"({"responseId":"first-id","usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":7}})"});
+        nlohmann::json changed{{"responseId", "second-id"}};
+        if (usage) changed["usageMetadata"] = {{"promptTokenCount", 17}, {"candidatesTokenCount", 9}};
+        RequireScopedIdentityConflict(parser.Consume(SseFrame{"", changed.dump()}), usage ? 17 : 11, usage ? 9 : 7);
+        RequireScopedIdentityConflict(parser.Consume(SseFrame{"", R"({"usageMetadata":{"promptTokenCount":19,"candidatesTokenCount":10}})"}), 19, 10, false);
+        CHECK(parser.Finish().empty());
+    }
+}
+
+TEST_CASE("Five-field identity conflict: Responses retains scope witnesses without fabricating new usage") {
+    for (const bool usage : {false, true}) {
+        responses::EventParser parser;
+        parser.Consume(SseFrame{"response.created", R"({"type":"response.created","response":{"id":"first-id","usage":{"input_tokens":11,"output_tokens":7}}})"});
+        nlohmann::json response{{"id", "second-id"}, {"status", "completed"}, {"output", nlohmann::json::array()}};
+        if (usage) response["usage"] = {{"input_tokens", 17}, {"output_tokens", 9}};
+        nlohmann::json changed{{"type", "response.completed"}, {"response", response}};
+        RequireScopedIdentityConflict(parser.Consume(SseFrame{"response.completed", changed.dump()}), usage ? 17 : 11, usage ? 9 : 7);
+        RequireScopedIdentityConflict(parser.Consume(SseFrame{"response.completed", R"({"type":"response.completed","response":{"usage":{"input_tokens":19,"output_tokens":10}}})"}), 19, 10, false);
+    }
 }

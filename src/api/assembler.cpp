@@ -146,20 +146,27 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 FinalizeCurrent();
                 content_.push_back(
                     RedactedThinkingBlock{platform::SanitizeExternalText(e.data)});
+            } else if constexpr (std::is_same_v<T, ProviderResponseIdentity>) {
+                provider_response_id_ = e.id;
             } else if constexpr (std::is_same_v<T, UsageSnapshot>) {
                 // Snapshot overwrite, never sum. Do not finalize or set a stop reason.
                 usage_ = e.usage;
                 usage_seen_ = e.usage_reported;
                 cache_read_seen_ = e.cache_read_reported;
                 cache_creation_seen_ = e.cache_creation_reported;
-                usage_anomaly_ = e.usage_anomaly;
                 usage_snapshot_seen_ = true;
+                // Retire older material before any allocating copy. A failed
+                // refinement keeps the new numbers with unknown provenance,
+                // never the previous snapshot's evidence.
+                usage_observation_.reset();
+                usage_anomaly_.clear();
+                usage_anomaly_ = e.usage_anomaly;
+                usage_observation_ = e.usage_observation;
+                if (e.provider_response_id) provider_response_id_ = e.provider_response_id;
             } else if constexpr (std::is_same_v<T, MessageDone>) {
-                FinalizeCurrent();  // 防御性收尾:正常流程里 ContentBlockDone 应该已经收过了
-                stop_reason_ = e.stop_reason;
                 // A terminal frame without usage evidence must not erase a snapshot.
                 // Preserve every legacy path when no nonterminal snapshot was seen.
-                const bool has_usage = e.usage_reported || e.cache_read_reported ||
+                const bool has_usage = e.usage_observation.has_value() || e.usage_reported || e.cache_read_reported ||
                     e.cache_creation_reported || !e.usage_anomaly.empty() ||
                     e.usage.input_tokens != 0 || e.usage.output_tokens != 0 ||
                     e.usage.cache_read_tokens != 0 || e.usage.cache_creation_tokens != 0 ||
@@ -169,8 +176,16 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                     usage_seen_ = e.usage_reported;
                     cache_read_seen_ = e.cache_read_reported;
                     cache_creation_seen_ = e.cache_creation_reported;
+                    usage_observation_.reset();
+                    usage_anomaly_.clear();
                     usage_anomaly_ = e.usage_anomaly;
+                    usage_observation_ = e.usage_observation;
                 }
+                if (e.provider_response_id) provider_response_id_ = e.provider_response_id;
+                // Body finalization can allocate or parse a tool input. Capture
+                // returned usage first; only a completed body earns a stop reason.
+                FinalizeCurrent();
+                stop_reason_ = e.stop_reason;
             }
             // MessageStart / StreamError:不影响攒出来的内容。
         },

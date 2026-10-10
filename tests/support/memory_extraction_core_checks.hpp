@@ -7,6 +7,9 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <limits>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <utility>
@@ -15,6 +18,7 @@
 #include "sdk/adapters.hpp"
 #endif
 #include "agent/memory_extraction_test_port.hpp"
+#include "api/usage_aggregation.hpp"
 #include "config/config.hpp"
 #include "fake_http_server.hpp"
 #include "platform/text_encoding.hpp"
@@ -119,8 +123,36 @@ inline void Request(const Port& port,const char* module) {
     CHECK(backend.request.max_tokens==4096); CHECK(backend.request.tools.empty());
     REQUIRE(backend.request.messages.size()==1); CHECK(std::get<api::TextBlock>(backend.request.messages[0].content[0]).text=="frozen material");
     CHECK(accounting.usage.input_tokens==14); CHECK(accounting.usage.output_tokens==7); CHECK(accounting.usage_reported);
+    CHECK(accounting.usage_coverage.samples == 1);
+    CHECK_FALSE(api::usage_aggregation::Exact(accounting.usage_coverage, ::lubancore::usage::v1::Field::Input));
     CHECK(recorder.completed==1); CHECK(recorder.failed==0); CHECK(recorder.reported); CHECK(recorder.provider=="actual-provider");
     CHECK(port.schema().at("type")=="object");
+    agent::BackgroundCallAccounting bounded;
+    bounded.usage.output_reasoning_tokens = std::numeric_limits<std::int64_t>::max();
+    Backend overflow;
+    overflow.done.usage.input_tokens = 3;
+    overflow.done.usage.output_tokens = 5;
+    overflow.done.usage.cache_read_tokens = 7;
+    overflow.done.usage.cache_creation_tokens = 11;
+    overflow.done.usage.output_reasoning_tokens = 1;
+    REQUIRE(port.run(overflow,"actual-model","explicit prompt","frozen material",0,"",&bounded,nullptr,nullptr).has_value());
+    CHECK(bounded.usage.input_tokens == 3);
+    CHECK(bounded.usage.output_tokens == 5);
+    CHECK(bounded.usage.cache_read_tokens == 7);
+    CHECK(bounded.usage.cache_creation_tokens == 11);
+    CHECK(bounded.usage.output_reasoning_tokens == std::numeric_limits<std::int64_t>::max());
+    const auto& reasoning = bounded.usage_coverage.fields[4];
+    CHECK(reasoning.arithmetic_overflow);
+    CHECK(reasoning.omitted == 1);
+    overflow.fail = true;
+    const auto partial = port.run(overflow,"actual-model","explicit prompt","frozen material",0,"",&bounded,nullptr,nullptr);
+    REQUIRE_FALSE(partial.has_value());
+    CHECK(partial.error().code == core::ExtractionErrorCode::TransportFailed);
+    CHECK(bounded.usage.input_tokens == 6); CHECK(bounded.usage.output_tokens == 10);
+    CHECK(bounded.usage.cache_read_tokens == 14); CHECK(bounded.usage.cache_creation_tokens == 22);
+    CHECK(bounded.usage.output_reasoning_tokens == std::numeric_limits<std::int64_t>::max());
+    CHECK(bounded.usage_coverage.fields[4].omitted == 2);
+    CHECK(bounded.usage_coverage.samples == 2);
     Mark(module,"request");
 }
 inline void Usage(const Port& port,const char* module) {
@@ -194,8 +226,152 @@ inline void NativeConnection(const Port& port,const char* module) {
     CHECK(responses_sample.usage.input_tokens==11); CHECK(responses_sample.usage.cache_read_tokens==13); CHECK(responses_sample.usage.output_tokens==7); CHECK(responses_sample.usage.output_reasoning_tokens==3);
     CHECK(responses_sample.usage.cache_creation_tokens==0); CHECK_FALSE(responses_sample.cache_creation_reported); CHECK(responses_sample.cache_read_reported);
     CHECK(api::TotalInputTokens(responses_sample.usage)==24); CHECK(responses_sample.usage.output_tokens==7);
-    server.StopAndJoin(); CHECK(server.owned_threads_quiescent()); REQUIRE(server.requests().size()==2); CHECK(server.requests()[0].method=="POST"); CHECK(server.requests()[1].method=="POST");
+    REQUIRE(sampled.usage_observation.has_value());
+    REQUIRE(responses_sample.usage_observation.has_value());
+    CHECK_FALSE(sampled.usage_observation->raw_fields.empty());
+    CHECK_FALSE(responses_sample.usage_observation->raw_fields.empty());
+    std::string chat_wire = event({{"id", "chat-memory"}, {"model", "model"},
+        {"choices", nlohmann::json::array({{{"index", 0}, {"delta", {{"role", "assistant"}, {"content", ValidBody()}}},
+                                           {"finish_reason", nullptr}}})}});
+    chat_wire += event({{"id", "chat-memory"}, {"choices", nlohmann::json::array({{{"index", 0}, {"delta", nlohmann::json::object()}, {"finish_reason", "stop"}}})},
+        {"usage", {{"prompt_tokens", 24}, {"completion_tokens", 7}, {"total_tokens", 31},
+                   {"prompt_tokens_details", {{"cached_tokens", 13}}}, {"completion_tokens_details", {{"reasoning_tokens", 3}}}}}});
+    chat_wire += "data: [DONE]\n\n";
+    lubancode::test_support::FakeHttpResponse chat_reply;
+    chat_reply.headers = {{"Content-Type", "text/event-stream"}}; chat_reply.body = chat_wire;
+    server.Enqueue(std::move(chat_reply));
+    config.wire = lubancode::config::Wire::ChatCompletions;
+    auto chat_backend = port.connection(config); REQUIRE(chat_backend != nullptr);
+    const auto chat_sample = port.sample(*chat_backend, request, {});
+    REQUIRE(chat_sample.ok); CHECK(port.finish(chat_sample).has_value());
+    CHECK(chat_sample.provider_response_id == "chat-memory");
+    CHECK(chat_sample.usage.input_tokens == 11); CHECK(chat_sample.usage.output_tokens == 7);
+    CHECK(chat_sample.usage.cache_read_tokens == 13); CHECK(chat_sample.usage.output_reasoning_tokens == 3);
+    REQUIRE(chat_sample.usage_observation.has_value());
+    CHECK_FALSE(chat_sample.usage_observation->raw_fields.empty());
+
+    const auto gemini_wire = event({{"responseId", "gemini-memory"}, {"modelVersion", "model"},
+        {"candidates", nlohmann::json::array({{{"index", 0}, {"finishReason", "STOP"},
+            {"content", {{"role", "model"}, {"parts", nlohmann::json::array({{{"text", ValidBody()}}})}}}}})},
+        {"usageMetadata", {{"promptTokenCount", 24}, {"cachedContentTokenCount", 13},
+                            {"candidatesTokenCount", 4}, {"thoughtsTokenCount", 3}, {"totalTokenCount", 31}}}});
+    lubancode::test_support::FakeHttpResponse gemini_reply;
+    gemini_reply.headers = {{"Content-Type", "text/event-stream"}}; gemini_reply.body = gemini_wire;
+    server.Enqueue(std::move(gemini_reply));
+    config.wire = lubancode::config::Wire::GoogleGenerateContent;
+    auto gemini_backend = port.connection(config); REQUIRE(gemini_backend != nullptr);
+    const auto gemini_sample = port.sample(*gemini_backend, request, {});
+    REQUIRE(gemini_sample.ok); CHECK(port.finish(gemini_sample).has_value());
+    CHECK(gemini_sample.provider_response_id == "gemini-memory");
+    CHECK(gemini_sample.usage.input_tokens == 11); CHECK(gemini_sample.usage.output_tokens == 7);
+    CHECK(gemini_sample.usage.cache_read_tokens == 13); CHECK(gemini_sample.usage.output_reasoning_tokens == 3);
+    REQUIRE(gemini_sample.usage_observation.has_value());
+    CHECK_FALSE(gemini_sample.usage_observation->raw_fields.empty());
+    server.StopAndJoin(); CHECK(server.owned_threads_quiescent()); REQUIRE(server.requests().size()==4); CHECK(server.requests()[0].method=="POST"); CHECK(server.requests()[1].method=="POST");
+    CHECK(server.requests()[2].method == "POST"); CHECK(server.requests()[3].method == "POST");
     Mark(module,"native-connection");
+}
+
+inline void NativeConnectionFaults(const Port& port, const char* module) {
+    // Only delegation and fault injection live in this wrapper. All facts and
+    // physical transport outcomes come from the actual linked Connection.
+    struct AfterFacts final : api::Backend {
+        std::unique_ptr<api::Backend> connection;
+        std::atomic<bool>* stop = nullptr;
+        int mode = 0, calls = 0, facts = 0, terminals = 0;
+        std::expected<void, api::Error> send_stream(const api::Request& request,
+            const std::function<void(const api::StreamEvent&)>& emit, const std::atomic<bool>* cancel) override {
+            ++calls;
+            return connection->send_stream(request, [&](const api::StreamEvent& event) {
+                const bool observed = std::holds_alternative<api::UsageSnapshot>(event);
+                if (observed) ++facts;
+                if (std::holds_alternative<api::MessageDone>(event)) ++terminals;
+                emit(event); // Actual sampling owner sees the numbers before the injected fault.
+                if (!observed || mode == 0) return;
+                stop->store(true);
+                if (mode == 2) throw std::runtime_error("actual Connection callback fault");
+                if (mode == 3) throw std::bad_alloc{};
+                if (mode == 4) throw 19;
+            }, cancel);
+        }
+    };
+    using Wire = lubancode::config::Wire;
+    using Server = lubancode::test_support::FakeHttpServer;
+    const auto event = [](const nlohmann::json& value) { return "data: " + value.dump() + "\n\n"; };
+    for (const auto wire : {Wire::Anthropic, Wire::Responses, Wire::ChatCompletions, Wire::GoogleGenerateContent})
+        for (int mode = 0; mode < 5; ++mode) {
+            INFO(static_cast<int>(wire)); INFO(mode);
+            Server server(Server::ThreadMode::Owned); REQUIRE(server.port() > 0);
+            const std::string response_id = "native-fault-" + std::to_string(static_cast<int>(wire)) + "-" + std::to_string(mode);
+            nlohmann::json prefix;
+            if (wire == Wire::Anthropic) {
+                prefix = {{"type", "message_start"}, {"message", {{"id", response_id}, {"model", "model"},
+                    {"content", nlohmann::json::array()}, {"usage", {{"input_tokens", 11}, {"output_tokens", 7},
+                    {"cache_read_input_tokens", 13}, {"cache_creation_input_tokens", 17}}}}}};
+            } else if (wire == Wire::Responses) {
+                prefix = {{"type", "response.created"}, {"response", {{"id", response_id}, {"model", "model"},
+                    {"status", "in_progress"}, {"usage", {{"input_tokens", 41}, {"output_tokens", 7}, {"total_tokens", 48},
+                    {"input_tokens_details", {{"cached_tokens", 13}, {"cache_write_tokens", 17}}},
+                    {"output_tokens_details", {{"reasoning_tokens", 3}}}}}}}};
+            } else if (wire == Wire::ChatCompletions) {
+                prefix = {{"id", response_id}, {"model", "model"}, {"choices", nlohmann::json::array()},
+                    {"usage", {{"prompt_tokens", 41}, {"completion_tokens", 7}, {"total_tokens", 48},
+                    {"prompt_tokens_details", {{"cached_tokens", 13}, {"cache_write_tokens", 17}}},
+                    {"completion_tokens_details", {{"reasoning_tokens", 3}}}}}};
+            } else {
+                prefix = {{"responseId", response_id}, {"modelVersion", "model"},
+                    {"usageMetadata", {{"promptTokenCount", 24}, {"cachedContentTokenCount", 13},
+                    {"candidatesTokenCount", 4}, {"thoughtsTokenCount", 3}, {"totalTokenCount", 31}}}};
+            }
+            nlohmann::json failure{{"type", "error"}, {"error", {{"message", "native source failure"},
+                {"code", "native.source.failure"}, {"type", "native.source.failure"}}}};
+            const auto prefix_bytes = event(prefix);
+            lubancode::test_support::FakeHttpResponse response;
+            response.headers = {{"Content-Type", "text/event-stream"}};
+            response.body = prefix_bytes + event(failure);
+            if (mode == 1) response.stall_after_body_bytes = prefix_bytes.size();
+            server.Enqueue(std::move(response));
+            lubancode::config::Config config;
+            config.wire = wire; config.base_url = "http://127.0.0.1:" + std::to_string(server.port());
+            config.auth_token = "FAKE_NATIVE_FAULT"; config.connect_timeout_ms = 2000;
+            config.stream_idle_timeout_secs = 3; config.request_hard_timeout_secs = 5;
+            std::atomic<bool> stop{false};
+            AfterFacts backend; backend.connection = port.connection(config); REQUIRE(backend.connection != nullptr);
+            backend.stop = &stop; backend.mode = mode;
+            Recorder recorder;
+            agent::SampleOptions options; options.cancel = &stop;
+            options.cancel_source = agent::OutputCancelSource::Internal; options.boundary_recorder = &recorder;
+            agent::SampleRequest request; request.model = "model"; request.max_tokens = 4096;
+            request.messages.push_back(Text(api::Role::User, "material"));
+            const auto sampled = port.sample(backend, request, options);
+            CHECK_FALSE(sampled.ok); CHECK(sampled.stop_reason.empty()); CHECK(sampled.text.empty());
+            CHECK(sampled.provider_response_id == response_id);
+            CHECK(sampled.usage.input_tokens == 11); CHECK(sampled.usage.output_tokens == 7);
+            CHECK(sampled.usage.cache_read_tokens == 13);
+            CHECK(sampled.usage.cache_creation_tokens == (wire == Wire::GoogleGenerateContent ? 0 : 17));
+            CHECK(sampled.usage.output_reasoning_tokens == (wire == Wire::Anthropic ? 0 : 3));
+            REQUIRE(sampled.usage_observation.has_value());
+            CHECK_FALSE(sampled.usage_observation->raw_fields.empty());
+            CHECK(backend.calls == 1); CHECK(backend.facts == 1); CHECK(backend.terminals == 0);
+            CHECK(recorder.owners == 1); CHECK(recorder.completed == 0);
+            if (mode == 1) {
+                CHECK(sampled.error.kind == api::ErrorKind::Cancelled); CHECK(recorder.cancelled == 1);
+            } else {
+                CHECK(sampled.error.kind == api::ErrorKind::Api); CHECK(recorder.failed == 1);
+                if (mode == 0) CHECK(sampled.error.message == "native source failure");
+                if (mode == 2 || mode == 3) CHECK(sampled.error.api_code == "sample.backend_exception");
+                if (mode == 2) CHECK(sampled.error.message.find("actual Connection callback fault") != std::string::npos);
+                if (mode == 4) CHECK(sampled.error.api_code == "sample.backend_unknown_exception");
+            }
+            agent::BackgroundCallAccounting accounting; agent::AddSampleAccounting(&accounting, sampled);
+            CHECK(accounting.usage.input_tokens == sampled.usage.input_tokens);
+            CHECK(accounting.usage.output_reasoning_tokens == sampled.usage.output_reasoning_tokens);
+            CHECK(accounting.usage_coverage.samples == 1);
+            backend.connection.reset();
+            server.StopAndJoin(); CHECK(server.owned_threads_quiescent());
+            REQUIRE(server.requests().size() == 1); CHECK(server.requests()[0].method == "POST");
+        }
+    Mark(module, "native-connection-faults");
 }
 
 inline void LearningTextGate(const Port& port,const char* module) {

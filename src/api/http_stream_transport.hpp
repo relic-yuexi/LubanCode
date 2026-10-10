@@ -69,6 +69,9 @@ using StreamDataSink = std::function<bool(std::string_view)>;
 
 // POST + 流式收体 + 取消/超时/错误分型。失败(取消、网络错、HTTP 非 2xx、
 // 帧溢出)返回 Error;流走完返回 void(是否"走完整"由调用方检查)。
+// Parser/host callback exceptions abort the transfer inside the C callback,
+// then rethrow the original exception after Post retires; cancellation flags
+// cannot replace that fault. The caller still owns already-observed usage.
 std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const StreamDataSink& sink,
                                          const std::atomic<bool>* cancel = nullptr);
 

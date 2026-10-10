@@ -10,6 +10,7 @@
 
 #include "api/sse_framing.hpp"
 #include "api/types.hpp"
+#include "api/usage_wire_builder.hpp"
 
 namespace lubancode::api::gemini {
 
@@ -37,12 +38,17 @@ private:
 
     std::vector<PendingCall> calls_;
     Usage usage_;
+    std::optional<usage_wire::Snapshot> usage_material_;
+    std::optional<std::string> provider_response_id_;
+    std::optional<std::string> conflicting_response_id_;
     bool usage_reported_ = false;  // 流里真见过 usageMetadata(Token 账本单 A0)
     std::string finish_reason_;
     std::string model_;
     bool started_ = false;
     bool saw_payload_ = false;
     bool finished_ = false;
+    bool failed_ = false;
+    StreamError Fail(StreamError error) { failed_ = true; return error; }
 };
 
 }  // namespace lubancode::api::gemini

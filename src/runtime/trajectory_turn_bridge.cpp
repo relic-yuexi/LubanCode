@@ -16,6 +16,7 @@
 #include "agent/context_events.hpp"  // Fingerprint64:prepared 行 inputView 的视图指纹(V3-REAL-06)
 #include "hooks/hash.hpp"           // Sha256Hex:request_snapshot 的 parameters_hash
 #include "platform/log_sink.hpp"
+#include "api/usage_json.hpp"
 #include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "platform/text_encoding.hpp"
@@ -1336,6 +1337,8 @@ std::string TrajectoryTurnBridge::V3RequestPrepared(const api::Request& request,
     nlohmann::json provider_snapshot = nlohmann::json{{"provider", identity_.provider},
                                                       {"wire", identity_.wire},
                                                       {"model", request.model}};
+    provider_snapshot["requestPurpose"] = accounting::PurposeName(ctx.purpose);
+    if (!ctx.producer_step_id.empty()) provider_snapshot["producerStepId"] = ctx.producer_step_id;
     if (ctx.model_input_snapshot) {
         // Evidence fingerprint only. It does not reconstruct this input, prove
         // a provider wire, or replace the original system/message/tool sources.
@@ -1422,6 +1425,32 @@ std::string TrajectoryTurnBridge::V3RequestPrepared(const api::Request& request,
     book.model = request.model;
     v3_turn_->requests.emplace(request_id, std::move(book));
     return request_id;
+}
+
+std::string_view TrajectoryTurnBridge::UsageSourceSessionId() const {
+    return v3_writer_ ? std::string_view(v3_writer_->session_id()) : std::string_view{};
+}
+std::optional<bool> TrajectoryTurnBridge::OnUsageObservation(const std::string& request_id,
+    const api::Usage& usage, const ::lubancore::usage::v1::Observation* observation,
+    bool reported, std::string_view response_id, bool incomplete) {
+    if (!V3Mode()) return std::nullopt;
+    const auto found = v3_turn_->requests.find(request_id);
+    if (found == v3_turn_->requests.end()) return false;
+    auto payload = api::usage_json::ObservationPayload(usage, observation, reported, response_id, incomplete);
+    if (!payload) return false;
+    v3::EventDraft draft;
+    draft.kind = v3::EventKindV3::ModelUsageObserved;
+    draft.request_id = request_id; draft.turn_id = turn_id_; draft.step_id = found->second.step_id;
+    draft.payload = std::move(*payload);
+    const auto receipt = v3_writer_->AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);
+    V3NotifyCommitted(receipt);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        NoteV3Error(receipt, "model.usage.observed"); return false;
+    }
+    return true;
+}
+std::string_view TrajectoryTurnBridge::UsageSourceRunId() const {
+    return v3_writer_ ? std::string_view(v3_writer_->run_id()) : std::string_view{};
 }
 
 bool TrajectoryTurnBridge::V3RequestSent(const std::string& request_id) {
@@ -1601,6 +1630,8 @@ bool TrajectoryTurnBridge::V3OutputCompleted(const std::string& request_id,
         }
     }
     nlohmann::json body = nlohmann::json{{"role", "assistant"}, {"content", std::move(content)}};
+    // Explicit response identity. It is not a model name or a local request key.
+    body["provider_response_id"] = provider_response_id.empty() ? nlohmann::json(nullptr) : nlohmann::json(provider_response_id);
     if (!tool_calls.empty()) {
         body["tool_calls"] = std::move(tool_calls);
     }
@@ -1610,8 +1641,7 @@ bool TrajectoryTurnBridge::V3OutputCompleted(const std::string& request_id,
     const auto receipt = v3_writer_->CompleteStreamResponse(
         request_id, req.stream_id, turn_id_, req.step_id, req.reserved_message_id,
         std::move(body), identity_.provider, identity_.wire, req.model,
-        provider_response_id.empty() ? nlohmann::json(nullptr)
-                                     : nlohmann::json(provider_response_id),
+        nlohmann::json(nullptr), // Response model was not observed by this bridge.
         req.usage.has_value() ? *req.usage : nlohmann::json(nullptr),
         stop_reason.empty() ? std::string("end_turn") : stop_reason,
         v3::MessagePurpose::Conversation, std::nullopt,

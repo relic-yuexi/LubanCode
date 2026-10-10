@@ -110,6 +110,7 @@ struct SampleResult {
     bool cache_read_reported = false;
     bool cache_creation_reported = false;
     std::string usage_anomaly;
+    std::optional<::lubancore::usage::v1::Observation> usage_observation;
 };
 
 // 同步采样。看门狗启动与 Backend 三口异常折成 SampleResult；线程先 join 再返回。
@@ -117,7 +118,8 @@ struct SampleResult {
 SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, const SampleOptions& options = {});
 
 // BackgroundCallAccounting 出账的唯一写法(六处各自手抄的累加/首报收成
-// 一份):usage 五项累加,usage_reported 只置不撤。duration_ms 不在此落——
+// 一份):五项检查溢出后累加,逐字段留 coverage;旧 usage_reported 只置不撤,
+// 不拿它证明字段齐全。duration_ms 不在此落——
 // 各处口径不一(map/reduce 不计时,其余首包覆盖),调用方按旧口径自己写。
 void AddSampleAccounting(BackgroundCallAccounting* accounting, const SampleResult& result);
 

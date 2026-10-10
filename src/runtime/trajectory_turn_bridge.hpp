@@ -109,6 +109,10 @@ struct OwnedJobParentCommit {
 
 class TrajectoryTurnBridge : public agent::LoopBoundaryRecorder, public ToolTrajectorySink {
 public:
+    std::string_view UsageSourceSessionId() const override;
+    std::string_view UsageSourceRunId() const override;
+    std::optional<bool> OnUsageObservation(const std::string&, const api::Usage&,
+        const ::lubancore::usage::v1::Observation*, bool, std::string_view, bool) override;
     // recorder:落账的 stream(main 或 subagent 各一只)。identity:身份
     // 与渠道(provider/wire 名、channel 名),进 run/turn 事件的 payload。
     struct Identity {

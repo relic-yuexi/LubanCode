@@ -27,6 +27,7 @@
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "sdk/adapters.hpp"
+#include "sdk/usage_result.hpp"
 #if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
 #include "sdk/backend_owner_test_hooks.hpp"
 #endif
@@ -185,6 +186,12 @@ Result<std::optional<Event>> EventStream::Next(std::chrono::milliseconds timeout
 // One writer/Agent per session. Cwd belongs to tool adapters, never the process.
 // All borrowed Agent/MCP/trajectory references die before their owners.
 struct Session::Impl final : rt::InteractionBroker {
+    // Owned accumulator survives Run's stack unwinding; foreground child
+    // admissions share usage_mutex. Complete freezes it after callers retire.
+    std::optional<OperationUsage> active_usage;
+    // Parallel foreground children share only this short numeric admission lock.
+    // Never hold it across model calls, persistence, event callbacks or joining.
+    mutable std::mutex usage_mutex;
     RuntimeOptions roots;
     SessionOptions options;
     std::shared_ptr<std::atomic<bool>> runtime_stopping;
@@ -754,6 +761,24 @@ struct Session::Impl final : rt::InteractionBroker {
         worker = std::thread([this] { Pump(); });
     }
 
+    Result<void> ValidateDirectUsageBindings(const Operation& operation,
+        const lubancode::trajectory::v3::V3Ledger& ledger) const {
+        if (!operation.usage || operation.usage->attempts.empty()) return {};
+        if (ledger.session_id != session_id)
+            return std::unexpected(Failure("sdk.usage.result_invalid", "usage source belongs to another Session"));
+        std::set<std::string> seen;
+        for (const auto& record : operation.usage->attempts) {
+            if (record.subordinate) continue; // Child ownership requires its adopted child journal.
+            if (record.source_session_id != ledger.session_id || record.source_run_id != ledger.run_id ||
+                record.turn_id != operation.turn_id || record.trajectory_request_id.empty() ||
+                !seen.insert(record.trajectory_request_id).second)
+                return std::unexpected(Failure("sdk.usage.result_invalid", "direct usage request owner differs"));
+            const auto bound = detail::usage_result::ValidateRequestBinding(record, ledger);
+            if (!bound) return std::unexpected(Failure("sdk.usage.result_invalid", std::string(bound.error())));
+        }
+        return {};
+    }
+
     Result<void> LoadOperations() {
         const auto valid = detail::ValidateOperationLedger(session_dir);
         if (!valid) return valid;
@@ -782,6 +807,14 @@ struct Session::Impl final : rt::InteractionBroker {
                     has_owned_result = true;
                     operation.final_text = json.value("finalText", "");
                     operation.error = json.value("error", "");
+                    if (const auto found = json.find("usage"); found != json.end()) {
+                        auto usage = detail::usage_result::Decode(*found);
+                        if (!usage) return std::unexpected(Failure("sdk.usage.result_invalid", std::string(usage.error())));
+                        if (!subagent_snapshot.enabled && std::any_of(usage->attempts.begin(), usage->attempts.end(),
+                            [](const auto& record) { return record.subordinate; }))
+                            return std::unexpected(Failure("sdk.usage.result_invalid", "Session admitted no child plan"));
+                        operation.usage = std::move(*usage);
+                    }
                     operation.result_persisted = json.value("complete", false) && operation.state != OperationState::Indeterminate;
                 }
             }
@@ -829,6 +862,13 @@ struct Session::Impl final : rt::InteractionBroker {
         // No worker has started. Read the verified ledger once for all restored
         // terminal operations; a failed read is retained as a query error.
         const auto ledger = lubancode::trajectory::v3::ReadV3LedgerLive(*service->trajectory()->v3_main_writer());
+        for (const auto& [id, operation] : operations) {
+            (void)id;
+            if (!operation.usage || operation.usage->attempts.empty()) continue;
+            if (!ledger) return std::unexpected(Failure("sdk.usage.result_invalid", "verified usage source unavailable"));
+            const auto bound = ValidateDirectUsageBindings(operation, *ledger);
+            if (!bound) return bound;
+        }
         if (memory_snapshot.enabled) {
             if (!ledger) return std::unexpected(Failure("sdk.memory.report_invalid", "verified input is unavailable"));
             for (auto& [id, report] : memory_reports) {
@@ -888,7 +928,8 @@ struct Session::Impl final : rt::InteractionBroker {
                 else children = detail::ReadSubagentReports(*ledger, session_dir, session_id, id,
                     operation.turn_id, operation.result_persisted,
                     operation.state == OperationState::Cancelled ||
-                    (operation.state == OperationState::Failed && operation.error == "sdk.turn.limit_reached"));
+                    (operation.state == OperationState::Failed && operation.error == "sdk.turn.limit_reached"),
+                    operation.usage ? &*operation.usage : nullptr);
                 if (!children && operation.result_persisted) return std::unexpected(children.error());
             }
             subagent_reports.insert_or_assign(id, std::move(children));
@@ -944,6 +985,10 @@ struct Session::Impl final : rt::InteractionBroker {
         return SaveMemoryReport(std::move(report));
     }
     Operation Complete(Operation operation, const std::vector<std::string>& refs, bool usage_reported, bool ledger_ok = true) {
+        {
+            std::lock_guard usage_lock(usage_mutex);
+            if (operation.operation_id == active_operation) operation.usage = active_usage;
+        }
         if (command_jobs) {
             if (!ledger_ok || operation.state != OperationState::Succeeded)
                 command_jobs->StopParent(operation.operation_id, "parent_not_succeeded");
@@ -1020,7 +1065,8 @@ struct Session::Impl final : rt::InteractionBroker {
                 session_id, operation.operation_id, operation.turn_id,
                 ledger_ok && operation.state != OperationState::Indeterminate,
                 operation.state == OperationState::Cancelled ||
-                (operation.state == OperationState::Failed && operation.error == "sdk.turn.limit_reached")) :
+                (operation.state == OperationState::Failed && operation.error == "sdk.turn.limit_reached"),
+                operation.usage ? &*operation.usage : nullptr) :
                 Result<std::vector<subagents::v1::Report>>(std::unexpected(Failure("sdk.subagent.report_unavailable", "verified parent journal unavailable")));
             if (children) for (auto& report : *children) {
                 const auto found = live_child_receipts.find({report.parent_action_id, report.parent_attempt});
@@ -1039,12 +1085,26 @@ struct Session::Impl final : rt::InteractionBroker {
         // Reads/Job publication above may have observed the first unknown after
         // Run returned. Freeze the truthful state before saving the SDK final.
         CheckNamedPublication(operation);
+        if (operation.usage && !operation.usage->attempts.empty()) {
+            if (!verified_memory) {
+                auto source = lubancode::trajectory::v3::ReadV3LedgerLive(*service->trajectory()->v3_main_writer());
+                if (source) verified_memory = std::move(*source);
+            }
+            const auto bound = verified_memory ? ValidateDirectUsageBindings(operation, *verified_memory) :
+                Result<void>(std::unexpected(Failure("sdk.usage.result_invalid", "verified usage source unavailable")));
+            if (!bound) {
+                operation.state = OperationState::Indeterminate;
+                operation.usage->attempts_complete = false;
+                operation.error += " sdk.usage.binding_unconfirmed";
+            }
+        }
         const bool complete = ledger_ok && memory_saved && writes_saved && children_saved && operation.state != OperationState::Indeterminate;
         const auto directory = session_dir / "sdk-results";
         std::error_code ec;
         fs::create_directories(directory, ec);
-        const Json result{{"operationId", operation.operation_id}, {"turnId", operation.turn_id},
+        Json result{{"operationId", operation.operation_id}, {"turnId", operation.turn_id},
                           {"finalText", operation.final_text}, {"error", operation.error}, {"complete", complete}};
+        if (operation.usage) result["usage"] = detail::usage_result::Encode(*operation.usage);
         const auto written = lubancode::platform::AtomicWriteFile(directory / (operation.operation_id + ".json"), result.dump(),
             lubancode::platform::WriteDurability::ProcessCrashDurability);
         if (!written) {
@@ -1107,9 +1167,17 @@ struct Session::Impl final : rt::InteractionBroker {
         active_turn_id = operation.turn_id;
         rt::TurnEventAdapter events(session_id, rt::ProcessIdAuthority());
         bool usage_reported = false;
+        events.ObserveUsage([&](const api::Usage& usage, const ::lubancore::usage::v1::Observation* observation,
+                               bool subordinate, bool incomplete, const rt::UsageAttemptContext& context) {
+            std::lock_guard usage_lock(usage_mutex);
+            if (active_usage) detail::usage_result::CaptureAttempt(*active_usage, usage, observation, subordinate, incomplete, context);
+        });
         events.Attach([&](const rt::ServerEvent& source) {
-            if (source.kind == rt::ServerEventKind::UsageUpdated && source.payload.contains("reported_by_provider")) {
-                usage_reported = usage_reported || source.payload.at("reported_by_provider").get<bool>();
+            if (source.kind == rt::ServerEventKind::UsageUpdated) {
+                std::lock_guard usage_lock(usage_mutex);
+                if (!source.usage_observed && active_usage) detail::usage_result::Capture(*active_usage, source.payload);
+                if (source.payload.contains("reported_by_provider"))
+                    usage_reported = usage_reported || source.payload.at("reported_by_provider").get<bool>();
             }
             Event event;
             event.kind = rt::ToString(source.kind);
@@ -1546,6 +1614,11 @@ struct Session::Impl final : rt::InteractionBroker {
                 if (pop.status == rt::SessionService::PendingPop::Status::WriteFailed) { broken = true; cv.notify_all(); break; }
                 if (pop.status != rt::SessionService::PendingPop::Status::Ok) continue;
                 active_operation = pop.input.operation_id;
+                {
+                    std::lock_guard usage_lock(usage_mutex);
+                    active_usage.emplace();
+                    active_usage->attempts_complete = true;
+                }
                 const auto* writer = service->trajectory()->v3_main_writer();
                 approvals.SetOperationOwner(session_id, active_operation, writer ? writer->run_id() : std::string());
                 active_turn_id.clear();
