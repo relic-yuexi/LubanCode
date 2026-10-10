@@ -10,6 +10,7 @@
 
 #include "api/sse_framing.hpp"
 #include "api/types.hpp"
+#include "api/usage_delivery_owner.hpp"
 #include "api/usage_wire_builder.hpp"
 
 namespace lubancode::api::gemini {
@@ -24,6 +25,8 @@ namespace lubancode::api::gemini {
 class EventParser {
 public:
     std::vector<StreamEvent> Consume(const SseFrame& frame);
+    std::optional<UsageSnapshot> PendingUsage() const noexcept { return numeric_delivery_.Pending(); }
+    void UsageDelivered(const StreamEvent& event) noexcept { numeric_delivery_.Delivered(event); }
     std::vector<StreamEvent> Finish();
     bool finished() const { return finished_; }
 
@@ -47,6 +50,7 @@ private:
     bool started_ = false;
     bool saw_payload_ = false;
     bool finished_ = false;
+    usage_wire::NumericDeliveryOwner numeric_delivery_;
     bool failed_ = false;
     StreamError Fail(StreamError error) { failed_ = true; return error; }
 };

@@ -39,6 +39,7 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
         std::vector<StreamEvent> recovered;
         if (lexical.response_id) recovered.push_back(ProviderResponseIdentity{*lexical.response_id});
         auto partial = lexical.Partial();
+        if (partial) numeric_delivery_.Own(*partial);
         if (partial) recovered.push_back(usage_wire::Nonterminal(*partial, lexical.response_id));
         recovered.push_back(Fail(StreamError{"accounting recovered from an unparseable frame", "usage.frame.incomplete"}));
         return recovered;
@@ -67,6 +68,7 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
             return events;
         }
         usage_material_ = std::move(*observed);
+        numeric_delivery_.Own(*usage_material_);
         if (!lexical.complete || lexical.duplicate) usage_wire::LexicalUsage::MarkIncomplete(*usage_material_);
         if (!usage_material_->material_error.empty()) {
             events.push_back(usage_wire::Nonterminal(*usage_material_, provider_response_id_));

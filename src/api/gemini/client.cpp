@@ -46,13 +46,14 @@ std::expected<void, Error> GeminiBackend::send_stream(
     // 2xx 响应体 -> 分帧 -> 事件。终止事件/流错误两枚标志给收尾那段检查。
     SseFramer framer;
     EventParser parser;
+    usage_wire::PendingUsageOnUnwind delivery(parser, on_event);
     bool saw_message_done = false;
     bool saw_stream_error = false;
     const auto dispatch = [&](const std::vector<StreamEvent>& events) {
         for (const auto& event : events) {
             saw_message_done = saw_message_done || std::holds_alternative<MessageDone>(event);
             saw_stream_error = saw_stream_error || std::holds_alternative<StreamError>(event);
-            on_event(event);
+            delivery.Emit(event);
         }
     };
     const StreamDataSink sink = [&](std::string_view chunk) -> bool {

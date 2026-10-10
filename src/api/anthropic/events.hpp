@@ -10,6 +10,7 @@
 
 #include "api/sse_framing.hpp"
 #include "api/types.hpp"
+#include "api/usage_delivery_owner.hpp"
 #include "api/anthropic/usage_accounting.hpp"
 
 namespace lubancode::api::anthropic {
@@ -55,6 +56,8 @@ public:
           parse_server_tool_search_(parse_server_tool_search) {}
 
     std::vector<StreamEvent> Consume(const SseFrame& frame);
+    std::optional<UsageSnapshot> PendingUsage() const noexcept { return numeric_delivery_.Pending(); }
+    void UsageDelivered(const StreamEvent& event) noexcept { numeric_delivery_.Delivered(event); }
     std::vector<StreamEvent> Finish();
     bool recovered_tagged_thinking() const { return recovered_tagged_thinking_; }
 
@@ -78,6 +81,7 @@ private:
     usage_wire::AnthropicAccounting accounting_;
     bool usage_seen_=false;
     std::optional<std::string> provider_response_id_;
+    usage_wire::NumericDeliveryOwner numeric_delivery_;
     bool failed_ = false;
     StreamError Fail(StreamError error) { failed_ = true; return error; }
 

@@ -1358,6 +1358,9 @@ struct Session::Impl final : rt::InteractionBroker {
         } child_turn_scope{subagent_module};
         if (subagent_module) {
             lubancode::tools::AgentTool::Hooks hooks;
+            // The foreground child borrows this live turn's actual typed owner.
+            // ChildTurnScope clears the borrow before events leave this scope.
+            hooks.events = &events;
             hooks.on_child_permission_evaluate = [this](const rt::ChildApprovalScope& scope,
                 const rt::ToolHookDecision& pre, lubancode::tools::ApprovalClass kind,
                 const std::string& name, const Json& arguments) {

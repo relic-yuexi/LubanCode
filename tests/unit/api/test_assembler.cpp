@@ -6,6 +6,8 @@
 
 #include <variant>
 #include <iostream>
+#include <new>
+#include <stdexcept>
 
 #include "api/assembler.hpp"
 #include "api/chat/events.hpp"
@@ -21,6 +23,63 @@
 #include "platform/text_encoding.hpp"  // IsValidUtf8:清洗结果断言
 
 using namespace lubancode::api;
+
+TEST_CASE("Four parser owners retain unpublished usage while preserving the original exception") {
+    const auto check = [](auto parser_factory, const char* body, std::array<std::int64_t, 5> numbers) {
+        for (int mode = 0; mode < 6; ++mode) {
+            INFO(mode);
+            auto parser = parser_factory(); MessageAssembler owner;
+            int usage_callbacks = 0; bool caught = false;
+            const std::function<void(const StreamEvent&)> callback = [&](const StreamEvent& event) {
+                if (std::holds_alternative<UsageSnapshot>(event)) {
+                    ++usage_callbacks;
+                    if (mode == 4 || mode == 5) throw std::runtime_error("callback fault");
+                }
+                owner.Feed(event);
+            };
+            try {
+                usage_wire::PendingUsageOnUnwind delivery(parser, callback);
+                SseFrame frame; frame.data = body;
+                const auto events = parser.Consume(frame);
+                REQUIRE(parser.PendingUsage()); // Production parser owns numbers before publication.
+                if (mode == 3 || mode == 4) {
+                    for (const auto& event : events) delivery.Emit(event);
+                    CHECK_FALSE(parser.PendingUsage());
+                }
+                if (mode == 1) throw std::bad_alloc{};
+                if (mode == 2) throw 17;
+                throw std::runtime_error("publication fault");
+            } catch (const std::bad_alloc&) { caught = true; CHECK(mode == 1); }
+            catch (const std::runtime_error& error) {
+                caught = true; CHECK(std::string(error.what()) == (mode == 4 ? "callback fault" : "publication fault"));
+            } catch (int value) { caught = true; CHECK(mode == 2); CHECK(value == 17); }
+            CHECK(caught); CHECK(usage_callbacks == 1);
+            CHECK(owner.stop_reason().empty());
+            if (mode == 4 || mode == 5) {
+                CHECK_FALSE(owner.usage_seen()); CHECK_FALSE(owner.usage_observation());
+            } else {
+                const auto& usage = owner.usage();
+                CHECK(usage.input_tokens == numbers[0]); CHECK(usage.output_tokens == numbers[1]);
+                CHECK(usage.cache_read_tokens == numbers[2]); CHECK(usage.cache_creation_tokens == numbers[3]);
+                CHECK(usage.output_reasoning_tokens == numbers[4]); CHECK(owner.usage_seen());
+                CHECK(owner.usage_observation().has_value() == (mode == 3));
+                if (mode != 3) CHECK_FALSE(owner.provider_response_id()); // Never invent identity for numeric recovery.
+            }
+        }
+    };
+    check([] { return chat::EventParser{}; },
+        R"({"id":"actual-chat","choices":[],"usage":{"prompt_tokens":41,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":13,"cache_write_tokens":17},"completion_tokens_details":{"reasoning_tokens":3}}})",
+        {11,7,13,17,3});
+    check([] { return responses::EventParser{}; },
+        R"({"type":"response.created","response":{"id":"actual-responses","usage":{"input_tokens":41,"output_tokens":7,"input_tokens_details":{"cached_tokens":13,"cache_write_tokens":17},"output_tokens_details":{"reasoning_tokens":3}}}})",
+        {11,7,13,17,3});
+    check([] { return gemini::EventParser{}; },
+        R"({"responseId":"actual-gemini","usageMetadata":{"promptTokenCount":24,"cachedContentTokenCount":13,"candidatesTokenCount":4,"thoughtsTokenCount":3,"totalTokenCount":31}})",
+        {11,7,13,0,3});
+    check([] { return anthropic::EventParser{}; },
+        R"({"type":"message_start","message":{"id":"actual-anthropic","model":"fixture","content":[],"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":13,"cache_creation_input_tokens":17}}})",
+        {11,7,13,17,0});
+}
 
 TEST_CASE("Wire material rejection preserves calculated numeric facts without admitting an observation") {
     namespace wire = usage_wire;

@@ -217,6 +217,7 @@ std::optional<StreamEvent> parse_event_json(const json& data, bool parse_server_
 
 void EventParser::ResetUsageState() {
     accounting_=usage_wire::AnthropicAccounting{};
+    numeric_delivery_=usage_wire::NumericDeliveryOwner{};
     usage_seen_=false;provider_response_id_.reset();
 }
 
@@ -239,6 +240,7 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
         AbsorbUsageObject(lexical.NumericObject(), &lexical.numbers);
         auto partial = accounting_.View();
         if (partial) {
+            numeric_delivery_.Own(*partial);
             usage_wire::LexicalUsage::MarkIncomplete(*partial);
             events.push_back(usage_wire::Nonterminal(*partial, provider_response_id_));
         }
@@ -274,6 +276,7 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
             return events;
         }
         material=std::move(*snapshot);
+        numeric_delivery_.Own(*material);
         if (!lexical.complete || lexical.duplicate) usage_wire::LexicalUsage::MarkIncomplete(*material);
         if (!material->material_error.empty()) {
             events.push_back(usage_wire::Nonterminal(*material, provider_response_id_));
@@ -301,6 +304,7 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
                 return events;
             }
             material=std::move(*snapshot);
+        numeric_delivery_.Own(*material);
         }
         usage_wire::Apply(*done,*material,provider_response_id_);
     }

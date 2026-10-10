@@ -51,6 +51,7 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     // 与分帧器自身的缓冲同量级(vLLM 本地模型勘察单 P2)。
     SseFramer framer;
     EventParser parser;
+    usage_wire::PendingUsageOnUnwind delivery(parser, on_event);
     bool saw_message_done = false;
     bool saw_stream_error = false;
     bool saw_image_generation = false;
@@ -73,7 +74,7 @@ std::expected<void, Error> ResponsesBackend::send_stream(
                 } else if (std::holds_alternative<ImageOutput>(event)) {
                     saw_image_generation = true;
                 }
-                on_event(event);
+                delivery.Emit(event);
             }
         }
         // 单帧超过上限,协议已不可信:返回 false 让传输层掐断。
@@ -118,7 +119,7 @@ std::expected<void, Error> ResponsesBackend::send_stream(
             if (std::holds_alternative<MessageDone>(event)) {
                 fallback_done = true;
             }
-            on_event(event);
+            delivery.Emit(event);
         }
         if (!fallback_done) {
             return std::unexpected(
