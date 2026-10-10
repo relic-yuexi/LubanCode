@@ -484,6 +484,12 @@ Result<void> SessionSubagentPlan::CheckRecoveredChildren(const v3::V3Ledger& led
         }
         const bool allow_unconsumed = fact.execution_status == "cancelled" ||
             (fact.execution_status == "error" && result["error"] == "sdk.turn.limit_reached");
+        // Establish the adoption's semantic source before checking accounting.
+        // A rehashed but invalid prepared chain is still an adoption refusal;
+        // saved usage cannot change that domain's established error priority.
+        const auto adoption = ReadSubagentReports(ledger, resume_dir_, resume_id_, fact.operation_id, fact.turn_id,
+            true, allow_unconsumed);
+        if (!adoption) return std::unexpected(adoption.error());
         std::optional<OperationUsage> usage;
         if (const auto saved = result.find("usage"); saved != result.end()) {
             auto decoded = usage_result::Decode(*saved);

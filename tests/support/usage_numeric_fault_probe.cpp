@@ -53,6 +53,21 @@ int main(int argc, char** argv) {
             std::string input;
             std::getline(std::cin, input);
             const auto payload = nlohmann::json::parse(input);
+            if (mode.starts_with("post-turn-")) {
+                const bool overflow = mode == "post-turn-overflow";
+                const bool zero = mode == "post-turn-zero";
+                if (!overflow && !zero && mode != "post-turn-normal") return 9;
+                if (payload.at("hook_event_name") != "PostTurn" || payload.at("turn_id") != "turn-checked" ||
+                    payload.at("last_assistant_message") != "owned last reply" || payload.at("steps") != 2 ||
+                    payload.at("actions") != 3 || payload.at("duration_ms") != 1234 || payload.at("cancelled") != false ||
+                    payload.at("input_tokens_overflow") != overflow || payload.at("output_tokens_overflow") != overflow) return 10;
+                if (overflow) {
+                    if (!payload.at("input_tokens").is_null() || !payload.at("output_tokens").is_null()) return 11;
+                } else if (!payload.at("input_tokens").is_number_integer() || !payload.at("output_tokens").is_number_integer() ||
+                    payload.at("input_tokens") != (zero ? 0 : 160) || payload.at("output_tokens") != (zero ? 0 : 7)) return 12;
+                std::puts("{\"systemMessage\":\"actual PostTurn usage observer passed\"}");
+                return 0;
+            }
             std::array<std::int64_t, 5> expected{};
             if (mode == "post-step-normal") expected = {100,7,50,10,9};
             else if (mode == "post-step-overflow")
@@ -74,6 +89,9 @@ int main(int argc, char** argv) {
         } catch (...) { return 7; }
     }
     if (argc != 1) return 8;
+    // Preserve the last completed route even if an allocation crosses an
+    // unexpected noexcept boundary and the C++ runtime terminates the process.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     namespace wire = lubancode::api::usage_wire;
     namespace facts = lubancore::usage::v1;
     using Normalize = std::expected<wire::Snapshot, std::string_view> (*)(
@@ -93,6 +111,7 @@ int main(int argc, char** argv) {
             {"candidatesTokenCount",4},{"thoughtsTokenCount",3},{"totalTokenCount",31}}
     };
     for (std::size_t provider = 0; provider < normalize.size(); ++provider) {
+        std::fprintf(stderr, "allocation-route:material:%s\n", names[provider]);
         struct Owner { wire::NumericValues values{}; unsigned calls = 0; } owner;
         const auto prior = refused;
         bool caught = false, returned = false;
@@ -127,6 +146,7 @@ int main(int argc, char** argv) {
         wire::Dialect::Anthropic, wire::Dialect::Gemini, wire::Dialect::ResponsesNonStream};
     const std::array<const char*,5> lexical_names{"chat","responses","anthropic","gemini","responses-nonstream"};
     for (std::size_t provider = 0; provider < frames.size(); ++provider) {
+        std::fprintf(stderr, "allocation-route:lexical:%s\n", lexical_names[provider]);
         struct Owner { wire::NumericValues values{}; unsigned calls = 0; } owner;
         const auto prior = refused;
         bool caught = false, returned = false;
@@ -148,6 +168,7 @@ int main(int argc, char** argv) {
         std::printf("actual-lexical-allocation-fault:%s\n", lexical_names[provider]);
     }
     const auto parser_fault = [&](auto parser, std::size_t provider, auto consume) {
+        std::fprintf(stderr, "allocation-route:parser:%s\n", lexical_names[provider]);
         namespace api = lubancode::api;
         struct Owner { wire::NumericValues values{}; unsigned calls = 0, other = 0; } owner;
         const std::function<void(const api::StreamEvent&)> callback = [&](const api::StreamEvent& event) {
@@ -252,6 +273,8 @@ int main(int argc, char** argv) {
         if (!count || count > 10000 || owner.calls != 1 || owner.values != expected || !owner.precise)
             return false;
         for (std::size_t index = 1; index <= count; ++index) {
+            std::fprintf(stderr, "allocation-route:parser-sweep:%s:index=%zu:total=%zu\n",
+                lexical_names[provider], index, count);
             owner = {};
             auto parser = prototype;
             const auto prior = refused;
@@ -307,6 +330,8 @@ int main(int argc, char** argv) {
         const auto numbers = wire::Numbers(*source);
         std::size_t count = 0;
         for (std::size_t index = 0; index <= count; ++index) {
+            std::fprintf(stderr, "allocation-route:typed-owner:%s:index=%zu:total=%zu\n",
+                subordinate ? "subordinate" : "direct", index, count);
             sdk::OperationUsage owned;
             owned.attempts_complete = true;
             runtime::IdAuthority ids;

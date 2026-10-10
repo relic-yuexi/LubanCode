@@ -15,6 +15,7 @@
 #include "api/assembler.hpp"
 #include "api/usage_json.hpp"
 #include "platform/sha256.hpp"
+#include "usage_body_fixture.hpp"
 
 using namespace lubancode::api;
 using lubancode::api::responses::parse_event;

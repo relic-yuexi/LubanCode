@@ -64,6 +64,8 @@ cli_app(会话起落)         HookRunRecord(全程留痕)
 
 `PostStep.input_tokens` 沿用完整输入口径：普通输入 + 缓存读 + 缓存写。每步加法都检查 int64；溢出时写 `null`，`input_tokens_overflow` 写 `true`。合法合计与明确零仍写整数。`usage_numbers` 按顺序保留五项原数：普通输入、总输出、缓存读、缓存写、输出推理。推理已含在总输出里，不再加一遍。这些观察字段不替代 outbox ACK。
 
+`PostTurn` 的完整输入与总输出也核累计加法。合计不可表示，对应 `input_tokens` 或 `output_tokens` 写 `null`，同名 `_overflow` 标记写 `true`。合法合计和明确零仍写整数、标记写 `false`。原逐步五项数保留；推理不再叠到输出，后续正常报告不能掩盖前头溢出。
+
 ### 可靠 Post:outbox/ack
 
 Post 型观察事件(`PostToolUse`/`PostAction`、`PostCompact`、`SessionEnd`、`SubagentStop`、`LoopTickEnd`、`LoopTaskStop`、`GoalIterationEnd`/`GoalEvaluated`/`GoalCompleted`、`PostSession`、`PostTurn`、`PostStep`)在有 hooks 定义时启用 durable outbox(`~/.lubancode/hooks-outbox.jsonl`):事件先落 pending 行,handler 跑完落 ack 行销账;幂等键 `(event_id, handler_definition_hash)`——同键重放只记一次。账本在下次进程开张时压实(已 ack 的行出账,崩溃残留的 pending 留作待办)。对外部副作用的承诺是 **at-least-once,不承诺 exactly-once**;崩溃后的自动重投(重跑 handler)本期不接线,账面提供判重与待办查询。

@@ -43,6 +43,10 @@ std::string FormatTokenCount(std::int64_t n) {
     return out + "M";
 }
 
+std::string FormatTokenCount(std::optional<std::int64_t> n) {
+    return n ? FormatTokenCount(*n) : "未知（溢出）";
+}
+
 std::string StatusLineModeSegment(ConfirmMode mode) {
     // i18n:标签与提示分别进表。
     const std::string label = ConfirmModeLabel(mode);

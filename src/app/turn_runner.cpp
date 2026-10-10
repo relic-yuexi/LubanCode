@@ -1461,7 +1461,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // reasoning 占多少一目了然;provider 没拆账(reasoning 字段缺席)就按
     // "未拆账"说,不猜 0。
     if (result->length_empty_output) {
-        const std::int64_t reasoning_total = usage_stats.reasoning_tokens();
+        const auto reasoning_total = usage_stats.reasoning_tokens();
         TermOut() << theme.error << trf("agent_outcome.output_budget.head", result->output_budget.continuations_used)
                   << theme.reset << "\n";
         if (result->output_budget.limit_tokens > 0) {
@@ -1483,8 +1483,8 @@ RunTurnResult RunTurn(TurnContext ctx) {
                       << theme.reset << "\n";
         }
         TermOut() << theme.stats
-                  << (reasoning_total > 0
-                          ? trf("error.length_empty_reasoning", reasoning_total)
+                  << (!reasoning_total ? std::string("推理 token 未知（溢出）") : *reasoning_total > 0
+                          ? trf("error.length_empty_reasoning", *reasoning_total)
                           : tr("error.length_empty_no_split"))
                   << theme.reset << "\n";
         TermOut() << theme.stats << tr("agent_outcome.output_budget.escapes") << theme.reset << "\n";
@@ -1602,7 +1602,9 @@ RunTurnResult RunTurn(TurnContext ctx) {
             if (crep == 0) {
                 return tr("stats.cache_not_reported");
             }
-            if (usage_stats.cache_read_tokens() > 0) {
+            const auto cached = usage_stats.cache_read_tokens();
+            if (!cached) return std::string("缓存命中 未知（溢出）");
+            if (*cached > 0) {
                 const int hit_percent = usage_stats.cache_hit_percent();
                 const std::string pct = hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?");
                 if (crep < rep) {

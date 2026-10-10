@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "api/usage_totals.hpp"
+#include "cli/format_utils.hpp"
 #include "runtime/headless_progress.hpp"
 #include "runtime/turn_runtime.hpp"
 
@@ -121,5 +122,67 @@ TEST_CASE("Actual PostStep command hooks receive raw five-field facts and explic
         CHECK(record->exit_code == 0);
         CHECK(report.usage.output_tokens == (mode == "post-step-zero" ? 0 : 7));
         CHECK(report.usage.output_reasoning_tokens == (mode == "post-step-zero" ? 0 : 9));
+    }
+}
+
+TEST_CASE("Turn statistics retain original fields and propagate overflow through CLI totals and ratios") {
+    runtime::TurnUsageStats stats;
+    api::UsageReport report;
+    const auto maximum = (std::numeric_limits<std::int64_t>::max)();
+    report.reported_by_provider = true;
+    report.cache_read_reported_by_provider = true;
+    report.usage = api::Usage{maximum,maximum,maximum,maximum,maximum};
+    stats.Add(report);
+    CHECK(stats.input_tokens() == maximum); CHECK(stats.output_tokens() == maximum);
+    CHECK(stats.cache_read_tokens() == maximum); CHECK(stats.cache_creation_tokens() == maximum);
+    CHECK(stats.reasoning_tokens() == maximum);
+    CHECK_FALSE(stats.steps.front().total_input_tokens());
+    CHECK(stats.steps.front().cache_hit_percent() == -1);
+    report.usage = api::Usage{1,1,1,1,1}; stats.Add(report);
+    report.usage = api::Usage{-1,-1,-1,-1,-1}; stats.Add(report);
+    CHECK_FALSE(stats.input_tokens()); CHECK_FALSE(stats.output_tokens());
+    CHECK_FALSE(stats.cache_read_tokens()); CHECK_FALSE(stats.cache_creation_tokens()); CHECK_FALSE(stats.reasoning_tokens());
+    CHECK_FALSE(stats.total_input_tokens()); CHECK(stats.cache_hit_percent() == -1);
+    CHECK(stats.request_count() == 3);
+    CHECK(cli::FormatTokenCount(stats.total_input_tokens()) == "未知（溢出）");
+    CHECK(cli::FormatTokenCount(stats.output_tokens()) == "未知（溢出）");
+    CHECK(stats.steps[0].input_tokens == maximum); CHECK(stats.steps[0].reasoning_tokens == maximum);
+    CHECK(stats.steps[1].output_tokens == 1); CHECK(stats.steps[2].output_tokens == -1);
+    stats = {};
+    report.usage = api::Usage{100,7,50,10,maximum}; stats.Add(report);
+    CHECK(stats.total_input_tokens() == 160); CHECK(stats.output_tokens() == 7);
+    CHECK(stats.reasoning_tokens() == maximum); CHECK(stats.cache_hit_percent() == 31);
+    CHECK(cli::FormatTokenCount(stats.total_input_tokens()) == "160");
+    stats = {}; report.usage = {}; stats.Add(report);
+    CHECK(stats.total_input_tokens() == 0); CHECK(stats.output_tokens() == 0);
+    CHECK(cli::FormatTokenCount(stats.total_input_tokens()) == "0");
+    stats = {}; report.usage = api::Usage{maximum,7,1,-1,3}; stats.Add(report);
+    CHECK_FALSE(stats.total_input_tokens()); CHECK(stats.output_tokens() == 7);
+    stats = {}; report.usage = api::Usage{(std::numeric_limits<std::int64_t>::min)(),7,-1,1,3}; stats.Add(report);
+    CHECK_FALSE(stats.total_input_tokens()); CHECK(stats.output_tokens() == 7);
+}
+
+TEST_CASE("Actual PostTurn command hooks preserve normal and zero counts and carry overflow as null") {
+    for (const std::string mode : {"post-turn-normal", "post-turn-overflow", "post-turn-zero"}) {
+        hooks::HookDefinition definition;
+        definition.id = 1; definition.event = hooks::HookEvent::PostTurn; definition.trusted = true;
+        definition.handler.command = LUBANCORE_TEST_USAGE_NUMERIC_FAULT_PROBE;
+        definition.handler.args = {mode}; definition.definition_hash = "actual-post-turn-usage";
+        hooks::LoadedHooks loaded; loaded.definitions.push_back(std::move(definition));
+        auto [trust, error] = hooks::HookTrustStore::Load(std::nullopt); REQUIRE_FALSE(error);
+        hooks::HookDispatcher dispatcher; dispatcher.Configure(std::move(loaded), std::move(trust), {});
+        runtime::TurnUsageStats stats; api::UsageReport report;
+        report.reported_by_provider = true;
+        if (mode == "post-turn-normal") report.usage = api::Usage{100,7,50,10,9};
+        else if (mode == "post-turn-overflow") report.usage = api::Usage{(std::numeric_limits<std::int64_t>::max)(),
+            (std::numeric_limits<std::int64_t>::max)(),0,0,9};
+        stats.Add(report);
+        if (mode == "post-turn-overflow") report.usage = api::Usage{1,1,0,0,0};
+        else report.usage = {};
+        stats.Add(report);
+        runtime::EmitPostTurn(&dispatcher, "turn-checked", "owned last reply", stats.request_count(), 3,
+            stats.total_input_tokens(), stats.output_tokens(), 1234, false);
+        const auto* record = dispatcher.LastRecordFor(1); REQUIRE(record);
+        INFO(mode); INFO(record->detail); CHECK(record->outcome == "ok"); CHECK(record->exit_code == 0);
     }
 }

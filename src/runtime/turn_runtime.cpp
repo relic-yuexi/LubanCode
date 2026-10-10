@@ -236,7 +236,7 @@ PromptGate EmitPreTurn(hooks::HookDispatcher* dispatcher, const std::string& tur
 }
 
 void EmitPostTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id, const std::string& final_text,
-                  int steps, int actions, std::int64_t input_tokens, std::int64_t output_tokens,
+                  std::size_t steps, int actions, std::optional<std::int64_t> input_tokens, std::optional<std::int64_t> output_tokens,
                   std::int64_t duration_ms, bool cancelled) {
     if (dispatcher == nullptr || dispatcher->Empty() || !dispatcher->HasHandlersFor(hooks::HookEvent::PostTurn)) {
         return;
@@ -247,8 +247,10 @@ void EmitPostTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id,
     payload.fields["last_assistant_message"] = final_text;
     payload.fields["steps"] = steps;
     payload.fields["actions"] = actions;
-    payload.fields["input_tokens"] = input_tokens;
-    payload.fields["output_tokens"] = output_tokens;
+    payload.fields["input_tokens"] = input_tokens ? nlohmann::json(*input_tokens) : nlohmann::json(nullptr);
+    payload.fields["output_tokens"] = output_tokens ? nlohmann::json(*output_tokens) : nlohmann::json(nullptr);
+    payload.fields["input_tokens_overflow"] = !input_tokens.has_value();
+    payload.fields["output_tokens_overflow"] = !output_tokens.has_value();
     payload.fields["duration_ms"] = duration_ms;
     payload.fields["cancelled"] = cancelled;
     dispatcher->Emit(hooks::HookEvent::PostTurn, payload);
