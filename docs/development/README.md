@@ -14,8 +14,9 @@
 - [Memory 持久触发身份](sdk-memory-durable-trigger-identity.md)：评估归旧触发轮，回合间写回执不借旧号；#342 同源三平台已验、已合。
 - [旁路短借 owner](sdk-memory-bypass-lease-owner.md)：前台冻身份，关场退旧借；#343 同源三平台与实际 TSan 已验、已合。
 - [标题精炼启动失败清理](sdk-title-start-cleanup.md)：绑定及创建失败一次收场；#344 同源三平台与 ASan 已验、已合。
-- [标题后台函数体异常](sdk-title-worker-execution.md)：保住归还用量，失败一次收货；合同先交，待本源验收。
-- [Windows 超时进程映像](sdk-windows-timeout-process-images.md)：私有缓冲限量取现场材料；根因未定，待本源验收。
+- [标题后台函数体异常](sdk-title-worker-execution.md)：保住归还用量，失败一次收货；#345 同源三平台与 ASan 已验、已合。
+- [SDK Backend 回调与最终析构](sdk-backend-callback-owner.md)：生成及最后借用归还都升回调守卫；合同先交，待本源验收。
+- [Windows 超时进程映像](sdk-windows-timeout-process-images.md)：#345 同源现场材料已验、已合；旧超时根因未定。
 - [Memory 批量提交失败诊断](sdk-memory-batch-failure-diagnostic.md)：失败结果带回阶段观察；原断言照留，不改写入语义。
 - [SDK main Action 中间件合同](sdk-action-middleware.md)
 - [SDK 显式 Skills 合同](sdk-skills.md)
