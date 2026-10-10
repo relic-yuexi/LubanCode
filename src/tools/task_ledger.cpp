@@ -1108,12 +1108,12 @@ std::vector<std::string> TaskLedger::CompletionNoticeLines() const {
             snapshot.delivery_target != TaskDeliveryTarget::MainTurnContext) {
             continue;
         }
-        const std::int64_t tokens = snapshot.total_input_tokens() + snapshot.output_tokens;
+        const auto tokens = snapshot.total_tokens();
         // tokens 三态(规格根因三):报告了给数;没报告但已跑过步数就写
         // "未报告";一步没跑才是真 0。不拿 0 冒充"服务端一枚 token 没烧"。
         const std::string token_text =
             snapshot.usage_reported || snapshot.steps_used == 0
-                ? lubancode::tools::FormatTokenCount(tokens)
+                ? (tokens ? lubancode::tools::FormatTokenCount(*tokens) : "?")
                 : lubancode::text::tr("agent_status.tokens_not_reported");
         // 短因先行(规格"现场三"):耗尽/停下/失败·接口报错一眼分得开。
         std::string label = StateShortLabel(snapshot.state);

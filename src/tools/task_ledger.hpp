@@ -169,8 +169,13 @@ struct TaskOutcome {
     std::int64_t output_reasoning_tokens = 0;
     ::lubancore::usage::v1::Coverage usage_coverage;
 
-    std::int64_t total_input_tokens() const {
-        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    std::optional<std::int64_t> total_input_tokens() const {
+        return api::usage_aggregation::TotalInput(
+            api::Usage{input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens});
+    }
+    std::optional<std::int64_t> total_tokens() const {
+        const auto input = total_input_tokens();
+        return input ? api::usage_observation::CheckedAdd(*input, output_tokens) : std::nullopt;
     }
 };
 
@@ -261,8 +266,13 @@ struct AgentTaskSnapshot {
     std::int64_t output_reasoning_tokens = 0;
     ::lubancore::usage::v1::Coverage usage_coverage;
 
-    std::int64_t total_input_tokens() const {
-        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    std::optional<std::int64_t> total_input_tokens() const {
+        return api::usage_aggregation::TotalInput(
+            api::Usage{input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens});
+    }
+    std::optional<std::int64_t> total_tokens() const {
+        const auto input = total_input_tokens();
+        return input ? api::usage_observation::CheckedAdd(*input, output_tokens) : std::nullopt;
     }
 };
 
@@ -381,8 +391,13 @@ struct AgentTaskSummary {
     std::int64_t output_reasoning_tokens = 0;
     ::lubancore::usage::v1::Coverage usage_coverage;
 
-    std::int64_t total_input_tokens() const {
-        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    std::optional<std::int64_t> total_input_tokens() const {
+        return api::usage_aggregation::TotalInput(
+            api::Usage{input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens});
+    }
+    std::optional<std::int64_t> total_tokens() const {
+        const auto input = total_input_tokens();
+        return input ? api::usage_observation::CheckedAdd(*input, output_tokens) : std::nullopt;
     }
 };
 

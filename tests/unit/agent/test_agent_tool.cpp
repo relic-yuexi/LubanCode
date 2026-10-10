@@ -35,6 +35,32 @@
 
 using namespace lubancode;
 
+TEST_CASE("Task usage projections refuse overflowing totals and retain original fields") {
+    const auto check = [](auto value) {
+        constexpr auto max = std::numeric_limits<std::int64_t>::max();
+        constexpr auto min = std::numeric_limits<std::int64_t>::min();
+        value.input_tokens = max; value.cache_read_tokens = 1;
+        value.cache_creation_tokens = 0; value.output_tokens = 7;
+        CHECK_FALSE(value.total_input_tokens().has_value());
+        CHECK_FALSE(value.total_tokens().has_value());
+        CHECK(value.input_tokens == max); CHECK(value.cache_read_tokens == 1);
+        value.input_tokens = max - 2; value.cache_read_tokens = 1; value.cache_creation_tokens = 1;
+        REQUIRE(value.total_input_tokens().has_value()); CHECK(*value.total_input_tokens() == max);
+        CHECK_FALSE(value.total_tokens().has_value());
+        value.input_tokens = min; value.cache_read_tokens = -1;
+        CHECK_FALSE(value.total_input_tokens().has_value()); CHECK(value.input_tokens == min);
+        value.input_tokens = 11; value.cache_read_tokens = 13; value.cache_creation_tokens = 17;
+        value.output_tokens = 7; value.output_reasoning_tokens = max;
+        REQUIRE(value.total_tokens().has_value()); CHECK(*value.total_tokens() == 48);
+        CHECK(value.output_reasoning_tokens == max); // Already included in output; never add it twice.
+        value.input_tokens = 0; value.cache_read_tokens = 0; value.cache_creation_tokens = 0;
+        value.output_tokens = 0; REQUIRE(value.total_tokens().has_value()); CHECK(*value.total_tokens() == 0);
+    };
+    check(tools::TaskOutcome{});
+    check(tools::AgentTaskSnapshot{});
+    check(tools::AgentTaskSummary{});
+}
+
 namespace {
 
 // 按脚本吐事件的假后端,跟 test_loop.cpp / test_compact.cpp 同一套写法:

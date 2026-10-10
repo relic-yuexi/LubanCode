@@ -1,5 +1,11 @@
 # SDK 阶段进度与验收边界
 
+任务显示候选补三份真实投影：Outcome、Snapshot、Summary 的完整输入与总量
+均逐步检查 int64。面板、完成通知、后台详情与预算文案遇溢出显示 `?`，
+不截零、不饱和成假数；原始五项保持原值，reasoning 已包含在输出中，不再加。
+补正溢出、负下溢、输出单独溢出、明确零及 reasoning 不重复计数的源夹具。
+原生尚未执行；其它旧 `api::TotalInputTokens` 消费口仍须逐处核，不能称全链已齐。
+
 2026-10-11 五项用量候选已提交为 `e7db494f`，开成草稿
 [PR #349](https://github.com/relic-yuexi/LubanCode/pull/349)。同源
 [远端 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/38070702028)

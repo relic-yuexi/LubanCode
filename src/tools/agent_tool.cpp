@@ -3730,8 +3730,10 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
             task_outcome.status = TaskOutcomeStatus::BudgetExhausted;
             task_outcome.reason = TaskOutcomeReason::TokenBudgetExhausted;
             task_outcome.message = "token 预算已用满(上限 " + std::to_string(budget.max_total_tokens) +
-                                   ",已用 " + std::to_string(task_outcome.total_input_tokens() +
-                                                              task_outcome.output_tokens) +
+                                   ",已用 " + [&] {
+                                       const auto total = task_outcome.total_tokens();
+                                       return total ? std::to_string(*total) : std::string("?");
+                                   }() +
                                    ",跑了 " + std::to_string(drive.steps_used) + " 步)";
             task_outcome.partial_result = partial;
             run_result = {ComposeOutcomeText(task_outcome), true};
