@@ -261,4 +261,5 @@ DOC development/sdk-memory-durable-trigger-identity.md
 DOC development/sdk-memory-bypass-lease-owner.md
 DOC development/sdk-title-start-cleanup.md
 DOC development/sdk-title-worker-execution.md
+DOC development/sdk-windows-timeout-process-images.md
 DOC development/sdk-memory-batch-failure-diagnostic.md
