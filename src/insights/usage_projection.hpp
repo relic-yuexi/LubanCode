@@ -72,6 +72,30 @@ std::optional<std::int64_t> Input(const Owner& owner) noexcept {
         owner.input_tokens, 0, owner.cache_read_tokens, owner.cache_creation_tokens});
 }
 
+// Tool estimates can exceed measured input. Preserve those percentages while
+// bounding the int result and every intermediate, without floating rounding.
+inline std::optional<int> Percentage(std::int64_t part, std::int64_t whole) noexcept {
+    if (part < 0 || whole <= 0) return std::nullopt;
+    const auto units = part / whole;
+    constexpr int maximum = std::numeric_limits<int>::max();
+    if (units > maximum / 100) return std::nullopt;
+    const auto fraction = part % whole;
+    std::int64_t remainder = 0;
+    int tail = 0;
+    for (int index = 0; index < 100; ++index) {
+        if (remainder >= whole - fraction) {
+            remainder -= whole - fraction;
+            ++tail;
+        } else {
+            remainder += fraction;
+        }
+    }
+    if (remainder >= whole - remainder) ++tail;
+    const int base = static_cast<int>(units) * 100;
+    if (base > maximum - tail) return std::nullopt;
+    return base + tail;
+}
+
 inline std::optional<int> Ratio(std::optional<std::int64_t> part,
                                 std::optional<std::int64_t> whole) noexcept {
     if (!part || !whole || *whole <= 0 || *part < 0 || *part > *whole) return std::nullopt;

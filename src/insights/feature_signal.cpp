@@ -1,17 +1,11 @@
 #include "insights/feature_signal.hpp"
+#include "insights/usage_projection.hpp"
 
 #include <algorithm>
 #include <cstdio>
 
 namespace lubancode::insights {
 namespace {
-
-int SharePercent(std::int64_t part, std::int64_t whole) {
-    if (whole <= 0) {
-        return 0;
-    }
-    return static_cast<int>((part * 200 + whole) / (whole * 2));
-}
 
 EvidenceItem Ev(std::string metric, nlohmann::json value) {
     EvidenceItem item;
@@ -53,19 +47,19 @@ std::vector<FeatureSignal> DetectFeatureSignals(const FeatureSignalInput& input)
     // §12.2 第 3 行:system/tool 占比过高 → Prompt Profile、延迟工具、裁 MCP。
     // 先决"模块占比可定位"——manifest 的段级表就是定位账。FS-02 本命 id。
     if (input.total_input_tokens > 0) {
-        const int tool_share =
-            SharePercent(input.tool_definition_tokens, input.total_input_tokens);
-        if (tool_share >= 40) {
+        const auto tool_share = usage_projection::Percentage(
+            input.tool_definition_tokens, input.total_input_tokens);
+        if (tool_share && *tool_share >= 40) {
             FeatureSignal signal;
             signal.signal_id = "FS-02";
             signal.feature = "Prompt Profile / 延迟工具索引(tool_search)/ 裁 MCP";
-            signal.summary = "工具定义估算约占实测输入 " + std::to_string(tool_share) +
+            signal.summary = "工具定义估算约占实测输入 " + std::to_string(*tool_share) +
                              "%(≥40%);工具面可收窄";
             signal.precondition = "模块占比可定位(manifest 段级表在 /prompt audit)";
             signal.evidence.push_back(Ev("tool_definition_tokens_estimated",
                                          input.tool_definition_tokens));
             signal.evidence.push_back(Ev("total_input_tokens", input.total_input_tokens));
-            signal.evidence.push_back(Ev("tool_share_percent", tool_share));
+            signal.evidence.push_back(Ev("tool_share_percent", *tool_share));
             out.push_back(std::move(signal));
         }
     }

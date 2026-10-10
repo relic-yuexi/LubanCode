@@ -343,6 +343,42 @@ TEST_CASE("one_shot 场: usage 计入 main 侧,不冒充子代理") {
 }
 
 TEST_CASE("功能信号:同类验证反复与子代理 token 超主会话") {
+    SUBCASE("tool percentages retain large facts and exact half boundaries") {
+        const auto maximum = std::numeric_limits<std::int64_t>::max();
+        const auto check_share = [](std::int64_t part, std::int64_t whole, int expected) {
+            FeatureSignalInput input;
+            input.tool_definition_tokens = part; input.total_input_tokens = whole;
+            const auto signals = DetectFeatureSignals(input);
+            REQUIRE(signals.size() == 1);
+            CHECK(signals[0].signal_id == "FS-02");
+            REQUIRE(signals[0].evidence.size() == 3);
+            CHECK(signals[0].evidence[0].value == part);
+            CHECK(signals[0].evidence[1].value == whole);
+            CHECK(signals[0].evidence[2].value == expected);
+        };
+        check_share(maximum - 1, maximum, 100);
+        check_share(79, 200, 40);
+        check_share(3, 2, 150);
+        check_share(std::numeric_limits<int>::max(), 100,
+                    std::numeric_limits<int>::max());
+        for (const auto part : {std::int64_t{-1}, maximum}) {
+            FeatureSignalInput input;
+            input.tool_definition_tokens = part; input.total_input_tokens = 1;
+            CHECK(DetectFeatureSignals(input).empty());
+            input.verification_kinds["build"] = 3;
+            const auto independent = DetectFeatureSignals(input);
+            REQUIRE(independent.size() == 1);
+            CHECK(independent[0].signal_id == "FS-01");
+        }
+        FeatureSignalInput below;
+        below.tool_definition_tokens = 78; below.total_input_tokens = 200;
+        CHECK(DetectFeatureSignals(below).empty());
+        below.tool_definition_tokens = maximum; below.total_input_tokens = 0;
+        CHECK(DetectFeatureSignals(below).empty());
+        below.tool_definition_tokens = static_cast<std::int64_t>(std::numeric_limits<int>::max()) + 1;
+        below.total_input_tokens = 100;
+        CHECK(DetectFeatureSignals(below).empty());
+    }
     SUBCASE("unknown cache usage cannot justify prefix recommendations") {
         FeatureSignalInput input;
         input.cache_read_tokens = 100;
