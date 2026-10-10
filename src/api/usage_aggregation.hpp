@@ -8,6 +8,7 @@
 
 #include "api/types.hpp"
 #include "api/usage_observation.hpp"
+#include "api/usage_totals.hpp"
 
 namespace lubancode::api::usage_aggregation {
 namespace facts = ::lubancore::usage::v1;
@@ -85,8 +86,7 @@ inline bool Exact(const facts::Coverage& coverage, facts::Field field) {
 }
 
 inline std::optional<std::int64_t> TotalInput(const Usage& usage) {
-    auto value = usage_observation::CheckedAdd(usage.input_tokens, usage.cache_read_tokens);
-    return value ? usage_observation::CheckedAdd(*value, usage.cache_creation_tokens) : std::nullopt;
+    return CheckedTotalInputTokens(usage);
 }
 
 // Precision is scoped to the three input fields. Output-only gaps do not erase
