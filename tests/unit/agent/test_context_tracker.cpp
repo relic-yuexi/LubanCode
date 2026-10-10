@@ -5,6 +5,7 @@
 
 #include <string>
 #include <limits>
+#include <utility>
 
 #include "agent/model_router.hpp"
 #include "cli/context_tracker.hpp"
@@ -41,6 +42,27 @@ TEST_CASE("ContextTracker: unrepresentable and inconsistent percentages stay unk
     CHECK(tracker.cache_request_history().front().hit_percent() == 31);
     CHECK(tracker.UsagePercent() == 16700);
     tracker.ResetSession(); CHECK(tracker.UsagePercent() == 0);
+
+    SUBCASE("context chart bounds the scale before narrowing a large estimate") {
+        const auto largest = (std::numeric_limits<std::size_t>::max)();
+        const auto lines = cli::FormatContextBreakdown(0, 0, 0, 0, 1, largest,
+            cli::BuiltinTheme("plain"), 6);
+        REQUIRE(lines.size() == 9);
+        CHECK(lines[3].find("######") != std::string::npos);
+        CHECK(lines[3].find("100%") != std::string::npos);
+        CHECK(lines[5].find("######") != std::string::npos);
+        CHECK(lines[5].find("100%") != std::string::npos);
+        if (!std::in_range<std::int64_t>(largest)) {
+            CHECK(lines[3].find(std::to_string(largest)) != std::string::npos);
+            CHECK(lines[5].find(std::to_string(largest)) != std::string::npos);
+            CHECK(lines[3].find("-1") == std::string::npos);
+        }
+        const auto zero_window = cli::FormatContextBreakdown(0, 0, 0, 0, 0, largest,
+            cli::BuiltinTheme("plain"), 6);
+        REQUIRE(zero_window.size() == 9);
+        CHECK(zero_window[3].find("------") != std::string::npos);
+        CHECK(zero_window[3].find("  0%") != std::string::npos);
+    }
 }
 
 TEST_CASE("ContextTracker: 初始占用为 0") {

@@ -460,6 +460,9 @@ int PercentOfWindow(std::size_t part, std::size_t window) {
     if (window == 0) {
         return 0;
     }
+    if (part >= window) {
+        return 100;
+    }
     const int pct =
         static_cast<int>(static_cast<double>(part) / static_cast<double>(window) * 100.0 + 0.5);
     return pct > 100 ? 100 : pct;
@@ -480,7 +483,9 @@ std::string BuildBar(std::size_t part, std::size_t window, int width, bool plain
         return {};
     }
     int filled = 0;
-    if (window > 0) {
+    if (window > 0 && part >= window) {
+        filled = width;
+    } else if (window > 0) {
         const double ratio = static_cast<double>(part) / static_cast<double>(window);
         filled = static_cast<int>(ratio * width + 0.5);
         filled = std::clamp(filled, 0, width);
@@ -488,7 +493,12 @@ std::string BuildBar(std::size_t part, std::size_t window, int width, bool plain
     return RepeatGlyph(plain ? "#" : "█", filled) + RepeatGlyph(plain ? "-" : "░", width - filled);
 }
 
-std::string TokenText(std::size_t tokens) { return FormatTokenCount(static_cast<std::int64_t>(tokens)); }
+std::string TokenText(std::size_t tokens) {
+    // Keep a wide observed/estimated count intact instead of turning it into a
+    // negative signed value merely to use the compact display formatter.
+    return std::in_range<std::int64_t>(tokens)
+        ? FormatTokenCount(static_cast<std::int64_t>(tokens)) : std::to_string(tokens);
+}
 
 }  // namespace
 
