@@ -22,7 +22,7 @@ inline bool Unsigned(const nlohmann::json* value, std::uint64_t limit) {
 }
 inline bool Signed(const nlohmann::json* value) {
     return value && ((value->is_number_unsigned() &&
-        value->get<std::uint64_t>() <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) ||
+        value->get<std::uint64_t>() <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())) ||
         (value->is_number_integer() && !value->is_number_unsigned()));
 }
 

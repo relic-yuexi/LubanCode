@@ -450,6 +450,11 @@ void Successful(const fs::path& base, bool parent_first = false) {
         Check(operation.usage.has_value(), "actual parent operation lost typed child usage");
         const auto check_scope = [](const sdk::UsageSummary& scope, std::uint64_t samples) {
             const auto count = static_cast<std::int64_t>(samples);
+            std::cerr << "[sdk-child-usage-diagnostic] expected_samples=" << samples
+                << " actual_samples=" << scope.coverage.samples << " numbers="
+                << scope.total.input_tokens << ',' << scope.total.output_tokens << ','
+                << scope.total.cache_read_tokens << ',' << scope.total.cache_creation_tokens << ','
+                << scope.total.output_reasoning_tokens << '\n';
             Check(scope.coverage.samples == samples && scope.total.input_tokens == count && scope.total.output_tokens == count &&
                 scope.total.cache_read_tokens == 3 * count && scope.total.cache_creation_tokens == 5 * count &&
                 scope.total.output_reasoning_tokens == 7 * count, "child accounting lost or double charged numeric facts");

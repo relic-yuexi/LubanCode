@@ -17,14 +17,14 @@ namespace facts = ::lubancore::usage::v1;
 
 // Avoid negating INT64_MIN. Every intermediate in each guard is representable.
 inline std::optional<std::int64_t> CheckedAdd(std::int64_t a, std::int64_t b) {
-    constexpr auto min = std::numeric_limits<std::int64_t>::min();
-    constexpr auto max = std::numeric_limits<std::int64_t>::max();
+    constexpr auto min = (std::numeric_limits<std::int64_t>::min)();
+    constexpr auto max = (std::numeric_limits<std::int64_t>::max)();
     if ((b > 0 && a > max - b) || (b < 0 && a < min - b)) return std::nullopt;
     return a + b;
 }
 inline std::optional<std::int64_t> CheckedSubtract(std::int64_t a, std::int64_t b) {
-    constexpr auto min = std::numeric_limits<std::int64_t>::min();
-    constexpr auto max = std::numeric_limits<std::int64_t>::max();
+    constexpr auto min = (std::numeric_limits<std::int64_t>::min)();
+    constexpr auto max = (std::numeric_limits<std::int64_t>::max)();
     if ((b > 0 && a < min + b) || (b < 0 && a > max + b)) return std::nullopt;
     return a - b;
 }

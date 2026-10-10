@@ -215,7 +215,7 @@ inline std::expected<UsageSummary, std::string_view> ReadSummary(const Json& enc
     const auto* samples = Member(encoded, "samples");
     if (!numbers || !numbers->is_array() || numbers->size() != facts::kFieldCount ||
         !fields || !fields->is_array() || fields->size() != facts::kFieldCount ||
-        !overflow || !overflow->is_boolean() || !Unsigned(samples, std::numeric_limits<std::uint64_t>::max()))
+        !overflow || !overflow->is_boolean() || !Unsigned(samples, (std::numeric_limits<std::uint64_t>::max)()))
         return std::unexpected("sdk.usage.summary_shape");
     UsageSummary result;
     std::array<std::int64_t, facts::kFieldCount> values{};
@@ -280,7 +280,7 @@ inline std::expected<OperationUsage, std::string_view> Decode(const Json& encode
         if (!numbers || !numbers->is_array() || numbers->size() != facts::kFieldCount ||
             !subordinate_flag || !subordinate_flag->is_boolean() || !incomplete_flag || !incomplete_flag->is_boolean() ||
             !reported_flag || !reported_flag->is_boolean() ||
-            !api::usage_json::Unsigned(epoch, std::numeric_limits<int>::max()))
+            !api::usage_json::Unsigned(epoch, (std::numeric_limits<int>::max)()))
             return std::unexpected("sdk.usage.attempt_shape");
         for (const char* key : {"trajectory_request_id", "provider_response_id", "model", "step_id", "turn_id", "purpose", "source_session_id", "source_run_id"}) {
             const auto* text = api::usage_json::Member(item, key);

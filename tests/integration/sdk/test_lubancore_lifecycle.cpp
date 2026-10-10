@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
@@ -96,6 +97,7 @@ struct LifetimeGate {
     std::atomic<bool> returned{false};
     std::atomic<bool> destroyed{false};
     std::atomic<bool> timed_out{false};
+    std::atomic<unsigned> calls{0};
 
     void Release() {
         std::lock_guard lock(mutex);
@@ -105,9 +107,11 @@ struct LifetimeGate {
 };
 class LifetimeBackend final : public sdk::Backend {
 public:
-    explicit LifetimeBackend(std::shared_ptr<LifetimeGate> gate) : gate_(std::move(gate)) {}
+    explicit LifetimeBackend(std::shared_ptr<LifetimeGate> gate, bool return_usage = false)
+        : gate_(std::move(gate)), return_usage_(return_usage) {}
     ~LifetimeBackend() override { gate_->destroyed.store(true); }
     sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest&, sdk::Cancellation cancel) override {
+        ++gate_->calls;
         gate_->entered.store(true);
         const auto deadline = std::chrono::steady_clock::now() + 20s;
         std::unique_lock lock(gate_->mutex);
@@ -121,10 +125,31 @@ public:
             gate_->timed_out.store(true);
         }
         gate_->returned.store(true);
+        if (return_usage_) {
+            sdk::ModelReply reply;
+            reply.text = "late reply"; reply.stop_reason = "end_turn";
+            reply.provider_response_id = "close-owned-response";
+            reply.usage = sdk::Usage{11, 7, 13, 17, 3};
+            namespace facts = sdk::usage::v1;
+            facts::Observation observation; observation.provider_namespace = "sdk.close.fixture";
+            const std::array<std::int64_t, facts::kFieldCount> numbers{11, 7, 13, 17, 3};
+            for (std::size_t i = 0; i < numbers.size(); ++i) {
+                facts::RawField raw; raw.path = "reply.usage." + std::to_string(i);
+                raw.kind = facts::RawKind::SignedInteger; raw.integer = numbers[i];
+                raw.summary = std::to_string(numbers[i]); observation.raw_fields.push_back(std::move(raw));
+                auto& field = observation.fields[i];
+                field.presence = facts::Presence::Present; field.validity = facts::Validity::ValidInteger;
+                field.origin = facts::Origin::Reported; field.operands[0] = static_cast<std::uint16_t>(i);
+                field.operand_count = 1;
+            }
+            reply.usage_observation = std::move(observation);
+            return reply;
+        }
         return std::unexpected(sdk::Error{"fixture.cancelled", "released cooperative backend"});
     }
 private:
     std::shared_ptr<LifetimeGate> gate_;
+    bool return_usage_ = false;
 };
 struct ReleaseLifetimeGate {
     std::shared_ptr<LifetimeGate> gate;
@@ -405,6 +430,57 @@ TEST_CASE("SDK lifecycle: dropping the last session joins its backend and leaves
     CHECK(saved->state == sdk::OperationState::Succeeded);
     CHECK(saved->result_persisted);
     CHECK(saved->final_text == std::string(12000, 'r'));
+}
+
+TEST_CASE("SDK lifecycle: Close joins a late five-field reply and recovery never replays it") {
+    LifecycleFixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots()); REQUIRE(runtime);
+    auto gate = std::make_shared<LifetimeGate>();
+    auto options = Options(fixture, [](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        return sdk::ModelReply{};
+    });
+    options.backend = std::make_unique<LifetimeBackend>(gate, true);
+    auto opened = (*runtime)->OpenSession(std::move(options)); REQUIRE(opened);
+    auto session = std::move(*opened); const auto id = session->id();
+    std::future<sdk::Result<void>> closing;
+    ReleaseLifetimeGate release{gate};
+    const auto receipt = session->Submit("close-usage", "retain a late reply"); REQUIRE(receipt);
+    REQUIRE(WaitForFlag(gate->entered));
+    std::cout << "[sdk-usage-close-path] callback\n";
+    closing = std::async(std::launch::async, [owner = session.get()] { return owner->Close(); });
+    REQUIRE(WaitForFlag(gate->cancelled));
+    CHECK(closing.wait_for(100ms) == std::future_status::timeout);
+    CHECK_FALSE(gate->returned.load()); CHECK_FALSE(gate->destroyed.load());
+    std::cout << "[sdk-usage-close-path] cancellation\n";
+    gate->Release(); REQUIRE(closing.wait_for(10s) == std::future_status::ready); REQUIRE(closing.get());
+    CHECK(gate->returned.load()); CHECK(gate->destroyed.load()); CHECK_FALSE(gate->timed_out.load());
+    CHECK(gate->calls.load() == 1);
+    const auto check = [](const sdk::Operation& operation) {
+        CHECK(operation.state == sdk::OperationState::Cancelled); CHECK(operation.result_persisted);
+        CHECK(operation.final_text.empty()); REQUIRE(operation.usage);
+        const auto& direct = operation.usage->direct;
+        CHECK(direct.coverage.samples == 1);
+        CHECK(direct.total.input_tokens == 11); CHECK(direct.total.output_tokens == 7);
+        CHECK(direct.total.cache_read_tokens == 13); CHECK(direct.total.cache_creation_tokens == 17);
+        CHECK(direct.total.output_reasoning_tokens == 3);
+        REQUIRE(operation.usage->attempts.size() == 1);
+        const auto& attempt = operation.usage->attempts.front();
+        CHECK(attempt.incomplete); CHECK_FALSE(attempt.subordinate); CHECK(attempt.reported_by_provider);
+        CHECK(attempt.provider_response_id == "close-owned-response"); REQUIRE(attempt.observation);
+        CHECK(attempt.observation->raw_fields.size() == 5); CHECK_FALSE(attempt.trajectory_request_id.empty());
+    };
+    const auto saved = session->ReadOperation(receipt->operation_id); REQUIRE(saved); check(*saved);
+    std::cout << "[sdk-usage-close-path] retired\n";
+    session.reset(); std::atomic<unsigned> replays{0};
+    auto resumed_options = Options(fixture, [&](const auto&, sdk::Cancellation) -> sdk::Result<sdk::ModelReply> {
+        ++replays; return std::unexpected(sdk::Error{"fixture.replay", "recovery must not generate"});
+    });
+    resumed_options.resume_session_id = id;
+    auto resumed = (*runtime)->OpenSession(std::move(resumed_options)); REQUIRE(resumed);
+    const auto recovered = (*resumed)->ReadOperation(receipt->operation_id); REQUIRE(recovered); check(*recovered);
+    CHECK(replays.load() == 0); CHECK(gate->calls.load() == 1);
+    REQUIRE((*resumed)->Close()); REQUIRE((*runtime)->Shutdown());
+    std::cout << "[sdk-usage-close-path] recovery\n";
 }
 
 TEST_CASE("SDK lifecycle: concurrent shutdown calls both wait for the same live backend") {

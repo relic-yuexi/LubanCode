@@ -24,7 +24,7 @@ inline void Assign(Usage& usage, const std::array<std::int64_t, facts::kFieldCou
     usage.output_reasoning_tokens = values[4];
 }
 inline void Increment(std::uint64_t& value, facts::Coverage& coverage) {
-    if (value == std::numeric_limits<std::uint64_t>::max()) coverage.counter_overflow = true;
+    if (value == (std::numeric_limits<std::uint64_t>::max)()) coverage.counter_overflow = true;
     else ++value;
 }
 

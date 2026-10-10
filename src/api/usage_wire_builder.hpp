@@ -28,7 +28,7 @@ inline facts::RawField CaptureScalar(std::string path, const nlohmann::json& val
         raw.kind = facts::RawKind::UnsignedInteger;
         const auto number = value.get<std::uint64_t>();
         raw.summary = std::to_string(number);
-        if (number <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+        if (number <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
             raw.integer = static_cast<std::int64_t>(number);
     } else if (value.is_number_integer()) {
         raw.kind = facts::RawKind::SignedInteger;
