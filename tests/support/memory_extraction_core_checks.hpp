@@ -283,11 +283,18 @@ inline void NativeConnectionFaults(const Port& port, const char* module) {
             const std::function<void(const api::StreamEvent&)>& emit, const std::atomic<bool>* cancel) override {
             ++calls;
             return connection->send_stream(request, [&](const api::StreamEvent& event) {
+                if (mode >= 5 && std::holds_alternative<api::ProviderResponseIdentity>(event)) {
+                    // The actual Connection parsed its facts; the sampling
+                    // owner has received neither identity nor usage yet.
+                    if (mode == 6) throw std::bad_alloc{};
+                    if (mode == 7) throw 19;
+                    throw std::runtime_error("actual Connection identity callback fault");
+                }
                 const bool observed = std::holds_alternative<api::UsageSnapshot>(event);
                 if (observed) ++facts;
                 if (std::holds_alternative<api::MessageDone>(event)) ++terminals;
                 emit(event); // Actual sampling owner sees the numbers before the injected fault.
-                if (!observed || mode == 0) return;
+                if (!observed || mode == 0 || mode >= 5) return;
                 stop->store(true);
                 if (mode == 2) throw std::runtime_error("actual Connection callback fault");
                 if (mode == 3) throw std::bad_alloc{};
@@ -299,7 +306,7 @@ inline void NativeConnectionFaults(const Port& port, const char* module) {
     using Server = lubancode::test_support::FakeHttpServer;
     const auto event = [](const nlohmann::json& value) { return "data: " + value.dump() + "\n\n"; };
     for (const auto wire : {Wire::Anthropic, Wire::Responses, Wire::ChatCompletions, Wire::GoogleGenerateContent})
-        for (int mode = 0; mode < 5; ++mode) {
+        for (int mode = 0; mode < 8; ++mode) {
             INFO(static_cast<int>(wire)); INFO(mode);
             Server server(Server::ThreadMode::Owned); REQUIRE(server.port() > 0);
             const std::string response_id = "native-fault-" + std::to_string(static_cast<int>(wire)) + "-" + std::to_string(mode);
@@ -345,13 +352,17 @@ inline void NativeConnectionFaults(const Port& port, const char* module) {
             request.messages.push_back(Text(api::Role::User, "material"));
             const auto sampled = port.sample(backend, request, options);
             CHECK_FALSE(sampled.ok); CHECK(sampled.stop_reason.empty()); CHECK(sampled.text.empty());
-            CHECK(sampled.provider_response_id == response_id);
+            if (mode >= 5) CHECK(sampled.provider_response_id.empty());
+            else CHECK(sampled.provider_response_id == response_id);
             CHECK(sampled.usage.input_tokens == 11); CHECK(sampled.usage.output_tokens == 7);
             CHECK(sampled.usage.cache_read_tokens == 13);
             CHECK(sampled.usage.cache_creation_tokens == (wire == Wire::GoogleGenerateContent ? 0 : 17));
             CHECK(sampled.usage.output_reasoning_tokens == (wire == Wire::Anthropic ? 0 : 3));
-            REQUIRE(sampled.usage_observation.has_value());
-            CHECK_FALSE(sampled.usage_observation->raw_fields.empty());
+            if (mode >= 5) CHECK_FALSE(sampled.usage_observation.has_value());
+            else {
+                REQUIRE(sampled.usage_observation.has_value());
+                CHECK_FALSE(sampled.usage_observation->raw_fields.empty());
+            }
             CHECK(backend.calls == 1); CHECK(backend.facts == 1); CHECK(backend.terminals == 0);
             CHECK(recorder.owners == 1); CHECK(recorder.completed == 0);
             if (mode == 1) {
@@ -365,9 +376,11 @@ inline void NativeConnectionFaults(const Port& port, const char* module) {
                     CHECK(sampled.error.message == expected_message);
                     CHECK(sampled.error.api_code == "native.source.failure");
                 }
-                if (mode == 2 || mode == 3) CHECK(sampled.error.api_code == "sample.backend_exception");
+                if (mode == 2 || mode == 3 || mode == 5 || mode == 6)
+                    CHECK(sampled.error.api_code == "sample.backend_exception");
                 if (mode == 2) CHECK(sampled.error.message.find("actual Connection callback fault") != std::string::npos);
-                if (mode == 4) CHECK(sampled.error.api_code == "sample.backend_unknown_exception");
+                if (mode == 5) CHECK(sampled.error.message.find("actual Connection identity callback fault") != std::string::npos);
+                if (mode == 4 || mode == 7) CHECK(sampled.error.api_code == "sample.backend_unknown_exception");
             }
             agent::BackgroundCallAccounting accounting; agent::AddSampleAccounting(&accounting, sampled);
             CHECK(accounting.usage.input_tokens == sampled.usage.input_tokens);
