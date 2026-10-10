@@ -1,6 +1,7 @@
 #pragma once
 #include <doctest/doctest.h>
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -196,4 +197,41 @@ inline void NativeConnection(const Port& port,const char* module) {
     server.StopAndJoin(); CHECK(server.owned_threads_quiescent()); REQUIRE(server.requests().size()==2); CHECK(server.requests()[0].method=="POST"); CHECK(server.requests()[1].method=="POST");
     Mark(module,"native-connection");
 }
+
+inline void LearningTextGate(const Port& port,const char* module) {
+    const auto cjk=port.text_stats("一二三四五六七八");
+    CHECK(cjk.unicode_scalar_count==8); CHECK(cjk.cjk_char_count==8); CHECK(cjk.latin_word_count==0);
+    CHECK(port.minimum_text(cjk)); CHECK_FALSE(port.text_gate(cjk,false).has_value());
+    const auto latin=port.text_stats("alpha beta gamma"); CHECK(latin.latin_word_count==3); CHECK(port.minimum_text(latin));
+    const auto code=port.text_stats("`foo` `bar` test"); CHECK(code.code_token_count==2); CHECK(port.minimum_text(code));
+    const auto ack=port.text_stats("ok"); REQUIRE(port.text_gate(ack,false).has_value());
+    CHECK(*port.text_gate(ack,false)==agent::memory_learning_gates::ExtractionSkipReason::AcknowledgementOnly);
+    REQUIRE(port.text_gate(ack,true).has_value()); CHECK(*port.text_gate(ack,true)==agent::memory_learning_gates::ExtractionSkipReason::ShortText);
+    const auto command=port.text_stats(" /help"); REQUIRE(port.text_gate(command,true).has_value());
+    CHECK(*port.text_gate(command,true)==agent::memory_learning_gates::ExtractionSkipReason::SlashCommandOnly);
+    const auto mixed=port.text_stats("ok please fix the actual build"); CHECK_FALSE(mixed.only_acknowledgement);
+    Mark(module,"learning-text-gate");
+}
+inline void LearningEvidenceGate(const Port& port,const char* module) {
+    const auto has=[](const std::vector<std::string>& values,const char* name) { return std::find(values.begin(),values.end(),name)!=values.end(); };
+    const auto preference=port.turn_signals("以后简短","好。",false); CHECK(has(preference,"preference_or_correction"));
+    CHECK(port.turn_signals("普通问题","以后简短，记住",true).empty());
+    CHECK(port.turn_signals("普通问题","tests passed",false).empty());
+    const auto verified=port.turn_signals("普通问题","tests passed",true); CHECK(has(verified,"test_conclusion"));
+    CHECK_FALSE(has(verified,"explicit_remember_unsaved")); CHECK_FALSE(has(verified,"preference_or_correction"));
+    const auto text=std::string("记住这个项目用 pnpm"); const auto stats=port.text_stats(text);
+    CHECK(has(port.durable_signals(text,stats,false,false),"explicit_remember_unsaved"));
+    CHECK_FALSE(has(port.durable_signals(text,stats,false,true),"explicit_remember_unsaved"));
+    Mark(module,"learning-evidence-gate");
+}
+inline void LearningReasonNames(const Port& port,const char* module) {
+    using Reason=agent::memory_learning_gates::ExtractionSkipReason;
+    const std::pair<Reason,const char*> values[]={{Reason::Disabled,"disabled"},{Reason::NoNewHistory,"no_new_history"},
+        {Reason::EmptyTranscript,"empty_transcript"},{Reason::PromptMissing,"prompt_missing"},{Reason::AlreadyMutated,"already_mutated"},
+        {Reason::ShortText,"short_text"},{Reason::AcknowledgementOnly,"acknowledgement_only"},{Reason::SlashCommandOnly,"slash_command_only"},
+        {Reason::ExtractModeOff,"extract_mode_off"},{Reason::NoDurableSignal,"no_durable_signal"}};
+    for(const auto& [value,name]:values) CHECK(std::string(port.skip_name(value))==name);
+    Mark(module,"learning-reason-names");
+}
+
 }  // namespace memory_extraction_fixture

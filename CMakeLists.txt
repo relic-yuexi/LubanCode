@@ -727,6 +727,7 @@ add_library(lubancode_engine STATIC
   # 骨架拆解批一·病四:SampleModel 原语(六处单发采样的公共路)。
   src/agent/sample_model.cpp
   src/agent/memory_extraction.cpp
+  src/agent/memory_learning_gates.cpp
   src/agent/prefix.cpp
   src/agent/compact.cpp
   src/agent/context_budget.cpp

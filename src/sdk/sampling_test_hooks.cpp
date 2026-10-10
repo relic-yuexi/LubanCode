@@ -7,7 +7,13 @@ lubancode::agent::testing::MemoryExtractionTestPort GetMemoryExtractionTestPort(
             extraction::BuildExtractionSystemPrompt, extraction::ParseExtractionJson,
             extraction::MemoryExtractionOutputSchema, extraction::RunMemoryExtraction,
             extraction::FinishMemoryExtraction, lubancode::agent::SampleModel,
-            lubancode::runtime::assembly::BuildBackend};
+            lubancode::runtime::assembly::BuildBackend,
+            lubancode::agent::memory_learning_gates::ComputeMeaningfulTextStats,
+            lubancode::agent::memory_learning_gates::PassesMinimumTextGate,
+            lubancode::agent::memory_learning_gates::EvaluateMustSkipTextGate,
+            lubancode::agent::memory_learning_gates::EvaluateDurableSignals,
+            lubancode::agent::memory_learning_gates::EvaluateTurnDurableSignals,
+            lubancode::agent::memory_learning_gates::ExtractionSkipReasonName};
 }
 lubancode::agent::testing::WatchdogHooksHandle ReplaceSamplingWatchdogHooks(
     lubancode::agent::testing::WatchdogHooksHandle replacement) noexcept {
