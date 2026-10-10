@@ -238,15 +238,25 @@ TEST_CASE("SDK model input: unsupported history and cancellation never create an
     const auto conversion_send = backend->send_stream(invalid_json_text, [](const api::StreamEvent&) {}, nullptr);
     REQUIRE_FALSE(conversion_send.has_value()); REQUIRE(conversion_error.error() == conversion_send.error().message);
     REQUIRE(conversion_error.error().starts_with("sdk.backend.exception")); REQUIRE(capture->requests.empty());
-    auto request = RichTextRequest(); std::atomic<bool> cancel{true}; unsigned emitted = 0;
+    auto request = RichTextRequest(); std::atomic<bool> cancel{true};
+    std::vector<api::StreamEvent> emitted;
     const auto measured = backend->PrepareModelInput(request); REQUIRE(measured.has_value()); REQUIRE(measured->has_value());
-    const auto before = backend->send_stream(request, [&](const api::StreamEvent&) { ++emitted; }, &cancel);
+    const auto before = backend->send_stream(request, [&](const api::StreamEvent& event) { emitted.push_back(event); }, &cancel);
     REQUIRE_FALSE(before.has_value()); REQUIRE(before.error().kind == api::ErrorKind::Cancelled);
-    REQUIRE(capture->requests.empty()); REQUIRE(emitted == 0);
+    REQUIRE(capture->requests.empty()); REQUIRE(emitted.empty());
     cancel = false; capture->during_generate = [&] { cancel = true; };
-    const auto after = backend->send_stream(request, [&](const api::StreamEvent&) { ++emitted; }, &cancel);
+    const auto after = backend->send_stream(request, [&](const api::StreamEvent& event) { emitted.push_back(event); }, &cancel);
     REQUIRE_FALSE(after.has_value()); REQUIRE(after.error().kind == api::ErrorKind::Cancelled);
-    REQUIRE(capture->requests.size() == 1); REQUIRE(emitted == 0);
+    REQUIRE(capture->requests.size() == 1);
+    // Returned usage is a fact even when cancellation rejects the reply body.
+    // Exactly one nonterminal snapshot means no content or success frame leaks.
+    REQUIRE(emitted.size() == 1);
+    const auto* snapshot = std::get_if<api::UsageSnapshot>(&emitted.front());
+    REQUIRE(snapshot != nullptr); REQUIRE(snapshot->usage_reported);
+    REQUIRE(snapshot->usage.input_tokens == 11); REQUIRE(snapshot->usage.output_tokens == 7);
+    REQUIRE(snapshot->usage.cache_read_tokens == 0); REQUIRE(snapshot->usage.cache_creation_tokens == 0);
+    REQUIRE(snapshot->usage.output_reasoning_tokens == 0);
+    REQUIRE_FALSE(snapshot->cache_read_reported); REQUIRE_FALSE(snapshot->cache_creation_reported);
 }
 
 TEST_CASE("SDK model input: legacy unavailable invalid and all four real provider projections remain distinct") {
