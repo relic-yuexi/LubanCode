@@ -358,7 +358,13 @@ inline void NativeConnectionFaults(const Port& port, const char* module) {
                 CHECK(sampled.error.kind == api::ErrorKind::Cancelled); CHECK(recorder.cancelled == 1);
             } else {
                 CHECK(sampled.error.kind == api::ErrorKind::Api); CHECK(recorder.failed == 1);
-                if (mode == 0) CHECK(sampled.error.message == "native source failure");
+                if (mode == 0) {
+                    const std::string expected_message = wire == Wire::Responses
+                        ? "native source failure (type=native.source.failure, code=native.source.failure)"
+                        : "native source failure";
+                    CHECK(sampled.error.message == expected_message);
+                    CHECK(sampled.error.api_code == "native.source.failure");
+                }
                 if (mode == 2 || mode == 3) CHECK(sampled.error.api_code == "sample.backend_exception");
                 if (mode == 2) CHECK(sampled.error.message.find("actual Connection callback fault") != std::string::npos);
                 if (mode == 4) CHECK(sampled.error.api_code == "sample.backend_unknown_exception");
