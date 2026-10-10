@@ -30,7 +30,8 @@ std::string StopReason(const std::string& reason, bool has_calls) {
 }  // namespace
 
 std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
-    const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Gemini);
+    const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Gemini,
+        &usage_wire::NumericDeliveryOwner::Observe, &numeric_delivery_);
     json data;
     try {
         data = json::parse(frame.data);

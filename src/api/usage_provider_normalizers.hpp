@@ -11,8 +11,8 @@ using Field = facts::Field;
 
 namespace detail {
 
-template <typename B>
-inline RawIndex MalformedDetails(B& builder, const nlohmann::json& usage,
+template <typename B, typename U>
+inline RawIndex MalformedDetails(B& builder, const U& usage,
                                 const char* key, const char* path) {
     const auto* container = Find(usage, {key});
     return container && !container->is_object() ? builder.Capture(path, container) : RawIndex{};
@@ -21,8 +21,8 @@ inline RawIndex MalformedDetails(B& builder, const nlohmann::json& usage,
 // These functions consume an individual usage object. Stateful parsers own
 // message boundaries and cumulative per-field updates; they must not add two
 // copies of a stream's usage. No response ID is synthesized here.
-template <typename B>
-inline std::expected<typename B::Result, std::string_view> ChatProjection(const nlohmann::json& usage,
+template <typename B, typename U>
+inline std::expected<typename B::Result, std::string_view> ChatProjection(const U& usage,
     const std::vector<facts::RawField>* lexical = nullptr) {
     if (!usage.is_object()) return std::unexpected("usage.wire.object");
     B b("openai.chat", lexical);
@@ -81,8 +81,8 @@ inline std::expected<typename B::Result, std::string_view> ChatProjection(const 
     return std::move(b).Finish();
 }
 
-template <typename B>
-inline std::expected<typename B::Result, std::string_view> ResponsesProjection(const nlohmann::json& usage,
+template <typename B, typename U>
+inline std::expected<typename B::Result, std::string_view> ResponsesProjection(const U& usage,
     const std::vector<facts::RawField>* lexical = nullptr) {
     if (!usage.is_object()) return std::unexpected("usage.wire.object");
     B b("openai.responses", lexical);
@@ -110,8 +110,8 @@ inline std::expected<typename B::Result, std::string_view> ResponsesProjection(c
     return std::move(b).Finish();
 }
 
-template <typename B>
-inline std::expected<typename B::Result, std::string_view> AnthropicProjection(const nlohmann::json& usage,
+template <typename B, typename U>
+inline std::expected<typename B::Result, std::string_view> AnthropicProjection(const U& usage,
     const std::vector<facts::RawField>* lexical = nullptr) {
     if (!usage.is_object()) return std::unexpected("usage.wire.object");
     B b("anthropic.messages", lexical);
@@ -124,8 +124,8 @@ inline std::expected<typename B::Result, std::string_view> AnthropicProjection(c
     return std::move(b).Finish();
 }
 
-template <typename B>
-inline std::expected<typename B::Result, std::string_view> GeminiProjection(const nlohmann::json& usage,
+template <typename B, typename U>
+inline std::expected<typename B::Result, std::string_view> GeminiProjection(const U& usage,
     const std::vector<facts::RawField>* lexical = nullptr) {
     if (!usage.is_object()) return std::unexpected("usage.wire.object");
     B b("google.generateContent", lexical);

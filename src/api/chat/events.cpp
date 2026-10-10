@@ -29,7 +29,8 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
         return Finish();
     }
 
-    const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Chat);
+    const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Chat,
+        &usage_wire::NumericDeliveryOwner::Observe, &numeric_delivery_);
     nlohmann::json data;
     try { data = nlohmann::json::parse(frame.data); }
     catch (const nlohmann::json::exception&) {

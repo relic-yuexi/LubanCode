@@ -231,7 +231,14 @@ void EventParser::AbsorbUsageObject(const json& usage, const std::vector<usage_w
 
 std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
     std::vector<StreamEvent> events;
-    const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Anthropic);
+    const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Anthropic,
+        nullptr, this,
+        [](void* context, const usage_wire::SourceNumbers& source, bool message_start, bool message_delta) noexcept {
+            auto& parser = *static_cast<EventParser*>(context);
+            if (message_start) parser.ResetUsageState();
+            if ((message_start || message_delta) && source.is_object())
+                parser.numeric_delivery_.Own(parser.accounting_.AbsorbNumbers(source));
+        });
     json data;
     try { data=json::parse(frame.data); }
     catch (const json::exception&) {

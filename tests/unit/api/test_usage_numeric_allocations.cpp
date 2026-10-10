@@ -19,5 +19,13 @@ TEST_CASE("Production provider material allocation faults preserve the preceding
         REQUIRE(offset != std::string::npos);
         CHECK(result.output.find(marker, offset + marker.size()) == std::string::npos);
     }
+    for (const char* name : {"chat", "responses", "anthropic", "gemini", "responses-nonstream"}) {
+        for (const char* stage : {"lexical", "parser"}) {
+            const auto marker = std::string("actual-") + stage + "-allocation-fault:" + name + "\n";
+            const auto offset = result.output.find(marker);
+            REQUIRE(offset != std::string::npos);
+            CHECK(result.output.find(marker, offset + marker.size()) == std::string::npos);
+        }
+    }
     std::cout << result.output;
 }

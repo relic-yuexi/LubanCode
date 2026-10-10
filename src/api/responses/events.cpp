@@ -301,7 +301,8 @@ std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
 
 std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
     std::vector<StreamEvent> events;
-    const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Responses);
+    const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Responses,
+        &usage_wire::NumericDeliveryOwner::Observe, &numeric_delivery_);
     json data;
     try { data=json::parse(frame.data); }
     catch (const json::exception&) {
@@ -386,7 +387,8 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
 
 static std::vector<StreamEvent> ExpandNonStreamResponseOwned(
     const std::string& body, usage_wire::NumericDeliveryOwner* delivery_owner) try {
-    const usage_wire::LexicalUsage lexical(body, usage_wire::Dialect::ResponsesNonStream);
+    const usage_wire::LexicalUsage lexical(body, usage_wire::Dialect::ResponsesNonStream,
+        delivery_owner ? &usage_wire::NumericDeliveryOwner::Observe : nullptr, delivery_owner);
     json response;
     try { response = json::parse(body); }
     catch (const json::exception&) {

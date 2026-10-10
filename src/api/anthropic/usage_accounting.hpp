@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "api/usage_wire_builder.hpp"
+#include "api/usage_source_numbers.hpp"
 
 namespace lubancode::api::usage_wire {
 
@@ -16,6 +17,13 @@ class AnthropicAccounting {
 public:
     using NumericValues = std::array<std::int64_t, facts::kFieldCount>;
     using NumericObserver = void (*)(void*, const NumericValues&) noexcept;
+
+    NumericValues AbsorbNumbers(const SourceNumbers& usage) noexcept {
+        for (std::size_t i = 0; i < keys_.size(); ++i)
+            if (const auto* value = Find(usage, {keys_[i]}); value && value->integer)
+                values_[i] = *value->integer;
+        return values_;
+    }
 
     void Absorb(const nlohmann::json& usage, const std::vector<facts::RawField>* lexical = nullptr,
                 NumericObserver observer = nullptr, void* context = nullptr) {

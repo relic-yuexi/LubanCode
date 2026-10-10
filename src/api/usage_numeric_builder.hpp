@@ -1,6 +1,7 @@
 #pragma once
 
 #include "api/usage_wire_builder.hpp"
+#include "api/usage_source_numbers.hpp"
 
 namespace lubancode::api::usage_wire {
 
@@ -23,6 +24,15 @@ public:
         if (count_ == raws_.size()) return std::nullopt;
         const auto index = count_++;
         raws_[index] = {path, IntegerScalar(*value, lexical_, path)};
+        return index;
+    }
+    RawIndex Capture(std::string_view path, const SourceScalar* value) noexcept {
+        if (!value) return std::nullopt;
+        for (std::uint16_t i = 0; i < count_; ++i)
+            if (raws_[i].path == path) return i;
+        if (count_ == raws_.size()) return std::nullopt;
+        const auto index = count_++;
+        raws_[index] = {path, value->integer};
         return index;
     }
     std::optional<std::int64_t> Integer(RawIndex raw) const noexcept {

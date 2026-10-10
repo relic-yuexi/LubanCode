@@ -27,6 +27,35 @@
 
 using namespace lubancode::api;
 
+TEST_CASE("Borrowed lexical numeric checkpoints keep last fields and actual provider scopes") {
+    const auto check = [](const char* frame, usage_wire::Dialect dialect,
+        usage_wire::NumericValues expected, int expected_calls = 1) {
+        struct Owner { usage_wire::NumericValues values{}; int calls = 0; } owner;
+        const usage_wire::LexicalUsage source(frame, dialect,
+            [](void* context, const usage_wire::NumericValues& values) noexcept {
+                auto& target = *static_cast<Owner*>(context); target.values = values; ++target.calls;
+            }, &owner);
+        CHECK(owner.calls == expected_calls); CHECK(owner.values == expected);
+    };
+    using D = usage_wire::Dialect;
+    check(R"({"usage":{"prompt_tokens":99,"prompt_tokens":0,"completion_tokens":8,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":7}}})",
+        D::Chat, {0,8,0,0,7});
+    check(R"({"usage":{"prompt_tokens":41,"completion_tokens":8,"prompt_tokens_details":7,"cache_write_tokens":5,"reasoning_tokens":9}})",
+        D::Chat, {0,8,0,0,9});
+    check(R"({"response":{"usage":{"input_tokens":41,"input_tokens_details":{"cached_tokens":13}},"usage":{"input_tokens":0,"output_tokens":0}}})",
+        D::Responses, {0,0,0,0,0});
+    check(R"({"response":{"usage":{"input_tokens":41,"output_tokens":7,"input_tokens_details":{"cached_tokens":13,"cached_tokens":null,"cache_write_tokens":17},"output_tokens_details":{"reasoning_tokens":3}}}})",
+        D::Responses, {0,7,0,17,3});
+    check(R"({"usage":{"input_tokens":99},"message":{"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":13,"cache_creation_input_tokens":17}},"type":"message_start"})",
+        D::Anthropic, {11,7,13,17,0});
+    check(R"({"message":{"usage":{"input_tokens":99}},"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":13,"cache_creation_input_tokens":17},"type":"message_delta"})",
+        D::Anthropic, {11,7,13,17,0});
+    check(R"({"usageMetadata":{"promptTokenCount":24,"cachedContentTokenCount":13,"candidatesTokenCount":4,"candidatesTokenCount":null,"thoughtsTokenCount":3,"totalTokenCount":31}})",
+        D::Gemini, {11,0,13,0,3});
+    check(R"({"output":[{"usage":{"input_tokens":99,"output_tokens":99}}]})",
+        D::ResponsesNonStream, {0,0,0,0,0}, 0);
+}
+
 TEST_CASE("Provider numeric owner precedes raw material admission through shared normalization") {
     namespace wire = usage_wire;
     namespace facts = ::lubancore::usage::v1;

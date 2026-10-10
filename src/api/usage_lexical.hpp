@@ -17,9 +17,30 @@ enum class Dialect { Chat, Responses, Anthropic, Gemini, ResponsesNonStream };
 // This observer never decides whether a body is acceptable; the DOM parser does.
 class LexicalUsage {
 public:
-    LexicalUsage(std::string_view source, Dialect dialect) : source_(source), dialect_(dialect) {
-        complete = Value(0, false);
-        Space(); complete = complete && offset_ == source_.size();
+    using SourceCheckpoint = void (*)(void*, const SourceNumbers&, bool, bool) noexcept;
+    LexicalUsage(std::string_view source, Dialect dialect,
+        NumericObserver observer = nullptr, void* context = nullptr,
+        SourceCheckpoint source_checkpoint = nullptr) : source_(source), dialect_(dialect) {
+        if (observer || source_checkpoint || dialect == Dialect::Anthropic) {
+            // First pass borrows bytes and fills fixed slots only. Even an ID
+            // preceding usage cannot allocate before these numeric facts.
+            LexicalUsage numeric(source, dialect, NumericOnly{});
+            anthropic_scope_ = numeric.event_name_;
+            const auto& captured = dialect == Dialect::Anthropic && numeric.event_name_ == 1
+                ? numeric.message_numbers_ : numeric.source_numbers_;
+            if (source_checkpoint) source_checkpoint(context, captured,
+                numeric.event_name_ == 1, numeric.event_name_ == 2);
+            else if (observer && captured.is_object()) {
+                const auto values = dialect == Dialect::Chat
+                    ? detail::ChatProjection<NumericBuilder>(captured)
+                    : (dialect == Dialect::Responses || dialect == Dialect::ResponsesNonStream)
+                        ? detail::ResponsesProjection<NumericBuilder>(captured)
+                    : dialect == Dialect::Gemini ? detail::GeminiProjection<NumericBuilder>(captured)
+                        : detail::AnthropicProjection<NumericBuilder>(captured);
+                if (values) observer(context, *values);
+            }
+        }
+        Scan();
     }
     bool complete = false;
     bool duplicate = false;
@@ -72,8 +93,25 @@ private:
     Dialect dialect_;
     std::size_t offset_ = 0;
     std::array<std::string_view, 64> path_{};
-    std::vector<std::string> seen_paths_;
-    std::vector<std::string> seen_scopes_;
+    struct NumericOnly {};
+    LexicalUsage(std::string_view source, Dialect dialect, NumericOnly)
+        : source_(source), dialect_(dialect), material_(false) { Scan(); }
+    void Scan() {
+        complete = Value(0, false);
+        Space(); complete = complete && offset_ == source_.size();
+    }
+    bool material_ = true;
+    SourceNumbers source_numbers_;
+    SourceNumbers message_numbers_;
+    unsigned event_name_ = 0;
+    unsigned anthropic_scope_ = 0;
+    SourceNumbers& SourceForPath() noexcept {
+        return dialect_ == Dialect::Anthropic && path_[0] == "message" ? message_numbers_ : source_numbers_;
+    }
+    std::array<std::string_view,64> seen_paths_{};
+    std::size_t seen_path_count_ = 0;
+    std::array<std::string_view,8> seen_scopes_{};
+    std::size_t seen_scope_count_ = 0;
     bool identity_seen_ = false;
     void Space() {
         while (offset_ < source_.size() && (source_[offset_] == ' ' || source_[offset_] == '\t' ||
@@ -132,7 +170,7 @@ private:
         }
         return false;
     }
-    std::optional<std::string> Target(std::size_t depth, bool array) const {
+    std::optional<std::string_view> Target(std::size_t depth, bool array) const {
         if (array) return {};
         std::size_t start = 0;
         const auto prefix = dialect_ == Dialect::Gemini ? "usageMetadata" : "usage";
@@ -140,6 +178,8 @@ private:
             if (depth < 3 || path_[0] != "response") return {};
             start = 1;
         } else if (dialect_ == Dialect::Anthropic && depth >= 3 && path_[0] == "message") start = 1;
+        if (material_ && dialect_ == Dialect::Anthropic &&
+            ((anthropic_scope_ == 1 && start == 0) || (anthropic_scope_ == 2 && start == 1))) return {};
         if (depth < start + 2 || depth > start + 3 || path_[start] != prefix) return {};
         const auto leaf = path_[depth - 1];
         bool known = false;
@@ -160,9 +200,31 @@ private:
                   leaf == "thoughtsTokenCount" || leaf == "totalTokenCount";
         }
         if (!known) return {};
-        std::string path(prefix);
-        for (auto i = start + 1; i < depth; ++i) { path += '.'; path += path_[i]; }
-        return path;
+        static constexpr std::string_view paths[] = {
+            "usage.prompt_tokens", "usage.completion_tokens", "usage.prompt_cache_hit_tokens",
+            "usage.prompt_cache_miss_tokens", "usage.cache_write_tokens", "usage.reasoning_tokens",
+            "usage.prompt_tokens_details.cached_tokens", "usage.prompt_tokens_details.cache_write_tokens",
+            "usage.completion_tokens_details.reasoning_tokens", "usage.input_tokens", "usage.output_tokens",
+            "usage.input_tokens_details.cached_tokens", "usage.input_tokens_details.cache_write_tokens",
+            "usage.output_tokens_details.reasoning_tokens", "usage.cache_read_input_tokens",
+            "usage.cache_creation_input_tokens", "usageMetadata.promptTokenCount",
+            "usageMetadata.cachedContentTokenCount", "usageMetadata.candidatesTokenCount",
+            "usageMetadata.thoughtsTokenCount", "usageMetadata.totalTokenCount"
+        };
+        for (const auto canonical : paths) {
+            auto suffix = canonical;
+            bool match = true;
+            for (auto i = start; i < depth; ++i) {
+                const auto separator = suffix.find('.');
+                if (suffix.substr(0, separator) != path_[i]) { match = false; break; }
+                if (i + 1 < depth) {
+                    if (separator == std::string_view::npos) { match = false; break; }
+                    suffix.remove_prefix(separator + 1);
+                } else if (separator != std::string_view::npos) match = false;
+            }
+            if (match) return canonical;
+        }
+        return {};
     }
     bool Number(std::size_t depth, bool array) {
         const auto begin = offset_;
@@ -191,16 +253,20 @@ private:
             source_[offset_] != ' ' && source_[offset_] != '\t' && source_[offset_] != '\n' && source_[offset_] != '\r') return false;
         auto path = Target(depth, array);
         if (!path) return true;
-        facts::RawField raw; raw.path = std::move(*path);
         const auto token = source_.substr(begin, offset_ - begin);
-        raw.kind = floating ? facts::RawKind::FloatingPoint : token.front() == '-' ? facts::RawKind::SignedInteger : facts::RawKind::UnsignedInteger;
-        raw.summary = std::string(token.substr(0, facts::kMaxSummaryBytes));
-        if (token.size() <= facts::kMaxMaterialBytes) raw.fingerprint = platform::Sha256Hex(token);
+        std::optional<std::int64_t> owned_integer;
         if (!floating) {
             std::int64_t integer = 0;
             const auto converted = std::from_chars(token.data(), token.data() + token.size(), integer);
-            if (converted.ec == std::errc{} && converted.ptr == token.data() + token.size()) raw.integer = integer;
+            if (converted.ec == std::errc{} && converted.ptr == token.data() + token.size()) owned_integer = integer;
         }
+        SourceForPath().Set(*path, owned_integer);
+        if (!material_) return true;
+        facts::RawField raw; raw.path = *path;
+        raw.kind = floating ? facts::RawKind::FloatingPoint : token.front() == '-' ? facts::RawKind::SignedInteger : facts::RawKind::UnsignedInteger;
+        raw.summary = std::string(token.substr(0, facts::kMaxSummaryBytes));
+        if (token.size() <= facts::kMaxMaterialBytes) raw.fingerprint = platform::Sha256Hex(token);
+        raw.integer = owned_integer;
         for (auto& old : numbers) if (old.path == raw.path) { old = std::move(raw); duplicate = true; return true; }
         if (numbers.size() >= facts::kMaxRawFields) return false;
         numbers.push_back(std::move(raw)); return true;
@@ -216,29 +282,43 @@ private:
             duplicate = duplicate || identity_seen_; identity_seen_ = true;
             response_id.reset();  // Last wrong-type identity never borrows an earlier ID.
         }
-        if (!array && depth == 1 && path_[0] == "type") event_type.reset();
+        if (!array && depth == 1 && path_[0] == "type") { event_type.reset(); event_name_ = 0; }
         std::size_t usage_depth = dialect_ == Dialect::Responses ? 2 :
             dialect_ == Dialect::Anthropic && depth > 1 && path_[0] == "message" ? 2 : 1;
         const auto usage_key = dialect_ == Dialect::Gemini ? "usageMetadata" : "usage";
-        const bool correct_root = usage_depth == 1 || path_[0] == (dialect_ == Dialect::Responses ? "response" : "message");
+        const bool selected_anthropic_scope = !material_ || dialect_ != Dialect::Anthropic ||
+            anthropic_scope_ == 0 || (anthropic_scope_ == 1 ? usage_depth == 2 : usage_depth == 1);
+        const bool correct_root = selected_anthropic_scope &&
+            (usage_depth == 1 || path_[0] == (dialect_ == Dialect::Responses ? "response" : "message"));
         if (!array && correct_root && depth >= usage_depth && depth <= usage_depth + 1 &&
             path_[usage_depth - 1] == usage_key &&
             (depth == usage_depth || path_[depth - 1] == "prompt_tokens_details" ||
              path_[depth - 1] == "completion_tokens_details" || path_[depth - 1] == "input_tokens_details" ||
              path_[depth - 1] == "output_tokens_details")) {
-            std::string scope(usage_key);
-            if (depth > usage_depth) { scope += '.'; scope += path_[depth - 1]; }
+            std::string_view scope(usage_key);
+            if (depth > usage_depth) {
+                const auto key = path_[depth - 1];
+                scope = key == "prompt_tokens_details" ? "usage.prompt_tokens_details"
+                    : key == "completion_tokens_details" ? "usage.completion_tokens_details"
+                    : key == "input_tokens_details" ? "usage.input_tokens_details" : "usage.output_tokens_details";
+            }
+            SourceForPath().Scope(scope, c == '{');
             bool seen = false;
-            for (const auto& old : seen_scopes_) seen = seen || old == scope;
+            for (std::size_t i = 0; i < seen_scope_count_; ++i) seen = seen || seen_scopes_[i] == scope;
             if (seen) {
-                duplicate = true; scope += '.';
-                for (auto it = numbers.begin(); it != numbers.end();)
-                    if (it->path.starts_with(scope)) it = numbers.erase(it); else ++it;
-            } else seen_scopes_.push_back(std::move(scope));
+                duplicate = true;
+                if (material_) for (auto it = numbers.begin(); it != numbers.end();)
+                    if (it->path.starts_with(scope) && it->path.size() > scope.size() && it->path[scope.size()] == '.')
+                        it = numbers.erase(it); else ++it;
+            } else {
+                if (seen_scope_count_ == seen_scopes_.size()) return false;
+                seen_scopes_[seen_scope_count_++] = scope;
+            }
         }
         if (auto target = Target(depth, array)) {
+            SourceForPath().Set(*target, {}, c == '{');
             bool seen = false;
-            for (const auto& previous : seen_paths_) seen = seen || previous == *target;
+            for (std::size_t i = 0; i < seen_path_count_; ++i) seen = seen || seen_paths_[i] == *target;
             if (seen) {
                 duplicate = true;
                 // A last null/string/container must not inherit a previous
@@ -246,8 +326,8 @@ private:
                 for (auto it = numbers.begin(); it != numbers.end(); ++it)
                     if (it->path == *target) { numbers.erase(it); break; }
             } else {
-                if (seen_paths_.size() >= facts::kMaxRawFields) return false;
-                seen_paths_.push_back(std::move(*target));
+                if (seen_path_count_ == seen_paths_.size()) return false;
+                seen_paths_[seen_path_count_++] = *target;
             }
         }
         if (c == '{') {
@@ -271,8 +351,11 @@ private:
             if (!String(text, size, fits)) return false;
             if (!array && fits) {
                 std::string_view value(text.data(), size);
-                if (depth == 1 && path_[0] == "type") event_type = std::string(value);
-                if (identity_path && !value.empty()) {
+                if (depth == 1 && path_[0] == "type") {
+                    event_name_ = value == "message_start" ? 1 : value == "message_delta" ? 2 : 0;
+                    if (material_) event_type = std::string(value);
+                }
+                if (material_ && identity_path && !value.empty()) {
                     std::string owned(value);
                     if (usage_observation::TextFits(owned, facts::kMaxResponseIdBytes, true)) response_id = std::move(owned);
                 }
