@@ -80,6 +80,12 @@ Result<web_fetch::v1::Capabilities> web_fetch::v1::DescribeCapabilities() {
 
 namespace detail {
 thread_local bool in_session_worker = false;
+CallbackScope::CallbackScope() noexcept : previous_(in_session_worker) {
+    in_session_worker = true;
+}
+CallbackScope::~CallbackScope() noexcept {
+    in_session_worker = previous_;
+}
 }
 namespace {
 namespace rt = lubancode::runtime;
