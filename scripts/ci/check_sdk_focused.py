@@ -1516,9 +1516,9 @@ def main():
             if registered["command"][1:] != ["--source-file=*test_lubancore_memory_extraction_core.cpp"]:
                 raise RuntimeError("Memory extraction must run the actual shared-SDK native source")
             check_native_command(sections[0], registered["command"])
-            if int(counts[0]) != 7:
-                raise RuntimeError("Memory extraction requires all seven actual shared-module cases")
-            for path in ("parser", "transcript", "prompt", "request", "usage", "finish", "native-connection"):
+            if int(counts[0]) != 10:
+                raise RuntimeError("Memory extraction requires all ten actual shared-module cases")
+            for path in ("parser", "transcript", "prompt", "request", "usage", "finish", "native-connection", "learning-text-gate", "learning-evidence-gate", "learning-reason-names"):
                 if sections[0].splitlines().count("[memory-extraction-core-path] shared-sdk " + path) != 1:
                     raise RuntimeError("Memory extraction actual shared-module path missing: " + path)
         if case.attrib["name"] == "sdk.focused.lubancore_sampling_lifetime":
