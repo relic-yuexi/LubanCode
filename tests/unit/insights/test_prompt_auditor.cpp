@@ -2,11 +2,13 @@
 // runtime 层变化账、读侧装配与隐私红线(正文/canary 不进输出)。
 #include <doctest/doctest.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -187,6 +189,18 @@ TEST_CASE("static:n-gram 高重合与预算占比") {
 }
 
 TEST_CASE("static:工具描述/schema/同名撞车/MCP 占比") {
+    SUBCASE("MCP share accepts a context denominator above half the int64 range") {
+        StaticAuditInput large;
+        large.manifest.resolved_prompt_tokens_estimated = std::numeric_limits<std::int64_t>::max() / 2 + 1;
+        AuditToolDefinition tool;
+        tool.name = "mcp__large__query"; tool.description = "query"; tool.source_kind = "mcp";
+        tool.input_schema = nlohmann::json{{"type", "object"}};
+        large.tools.push_back(tool);
+        PromptAuditFacts facts;
+        const auto findings = AuditPromptStatic(large, &facts);
+        CHECK(facts.total_context_tokens > std::numeric_limits<std::int64_t>::max() / 2);
+        CHECK(FindByCategory(findings, "tool.mcp_weight") == nullptr);
+    }
     StaticAuditInput input;
     input.manifest.resolved_prompt_tokens_estimated = 1000;
     AuditToolDefinition bloated;
@@ -405,6 +419,63 @@ TEST_CASE("runtime:toolset 抖动/前缀断/缺 snapshot 与增长对 cache 的�
     CHECK(summary.toolset_changes == 2);
     CHECK(summary.prefix_changes == 2);
     CHECK(summary.prefix_breaks_same_epoch == 2);
+    SUBCASE("real v2 and v3 growth rules retain integer boundaries and unknown isolation") {
+        constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+        const auto audit = [&](bool v3, std::uint64_t first_scale, std::uint64_t last_scale,
+                               std::int64_t first_input, std::int64_t last_input,
+                               std::int64_t first_cache, std::int64_t last_cache,
+                               bool expected, int displayed_growth = 0) {
+            CAPTURE(v3); CAPTURE(first_scale); CAPTURE(last_scale);
+            CAPTURE(first_input); CAPTURE(last_input); CAPTURE(first_cache); CAPTURE(last_cache);
+            RuntimeAuditInput boundary;
+            for (int index = 0; index != 2; ++index) {
+                RuntimeRequestView view;
+                view.run_id = "boundary-run"; view.request_id = "boundary-" + std::to_string(index);
+                view.event_id = "boundary-event-" + std::to_string(index);
+                view.usage_reported = true;
+                view.total_input_tokens = index == 0 ? first_input : last_input;
+                view.cache_read_tokens = index == 0 ? first_cache : last_cache;
+                const auto scale = index == 0 ? first_scale : last_scale;
+                if (v3) {
+                    view.input_refs_recorded = true; view.wire_message_count = scale;
+                    view.input_message_refs = {"input-" + std::to_string(index)};
+                } else {
+                    REQUIRE(scale <= static_cast<std::uint64_t>(maximum));
+                    view.snapshot = snapshot_with("stable-tools", "stable-prefix", static_cast<std::int64_t>(scale));
+                }
+                boundary.requests.push_back(std::move(view));
+            }
+            const auto findings = AuditPromptRuntime(boundary);
+            if (v3) CHECK(FindByCategory(findings, "prompt.token_estimate_missing") != nullptr);
+            const auto* growth = FindByCategory(findings, "prompt.growth_cache_miss");
+            CHECK((growth != nullptr) == expected);
+            if (expected) {
+                REQUIRE(growth != nullptr);
+                CHECK(growth->summary.find("涨了 " + std::to_string(displayed_growth) + "%") != std::string::npos);
+                CHECK(growth->rule_version == std::string("prompt-audit-v1:") + (v3 ? "V05" : "R05"));
+                CHECK_FALSE(growth->counter_evidence.empty());
+            }
+        };
+        audit(false, maximum / 2, maximum, maximum, maximum, maximum - 1, 0, true, 100);
+        audit(true, maximum / 4, maximum, maximum, maximum, maximum - 1, 0, true, 300);
+        audit(false, 1000, 1299, 1000, 1000, 950, 0, false);
+        audit(false, 1000, 1300, 1000, 1000, 950, 0, true, 30);
+        audit(false, 1000, 1309, 1000, 1000, 950, 0, true, 30);
+        audit(true, 1000, 2999, 1000, 1000, 950, 0, false);
+        audit(true, 1000, 3000, 1000, 1000, 950, 0, true, 200);
+        for (const bool v3 : {false, true}) {
+            const auto last = v3 ? 3000 : 1500;
+            audit(v3, 1000, last, 200, 200, 79, 31, false);
+            audit(v3, 1000, last, 200, 200, 81, 31, true, v3 ? 200 : 50);
+            audit(v3, 1000, last, 1000, 1000, 950, -1, false);
+            audit(v3, 1000, last, 1000, 0, 950, 0, false);
+            audit(v3, 1000, last, 1, 1000, maximum, 0, false);
+            audit(v3, 1, maximum, 1000, 1000, 950, 0, false);
+            audit(v3, 1000, 999, 1000, 1000, 950, 0, false);
+        }
+        audit(true, 1000, std::numeric_limits<std::uint64_t>::max(), 1000, 1000, 950, 0, false);
+        audit(true, std::numeric_limits<std::uint64_t>::max(), 3000, 1000, 1000, 950, 0, false);
+    }
 }
 
 TEST_CASE("runtime 读侧:真 Journal 装配 + 隐私红线(canary 不进输出)") {

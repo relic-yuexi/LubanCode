@@ -74,7 +74,9 @@ std::optional<std::int64_t> Input(const Owner& owner) noexcept {
 
 // Tool estimates can exceed measured input. Preserve those percentages while
 // bounding the int result and every intermediate, without floating rounding.
-inline std::optional<int> Percentage(std::int64_t part, std::int64_t whole) noexcept {
+// Runtime growth uses truncation; shares keep their existing half-up rounding.
+inline std::optional<int> Percentage(std::int64_t part, std::int64_t whole,
+                                     bool round_half_up = true) noexcept {
     if (part < 0 || whole <= 0) return std::nullopt;
     const auto units = part / whole;
     constexpr int maximum = std::numeric_limits<int>::max();
@@ -90,7 +92,7 @@ inline std::optional<int> Percentage(std::int64_t part, std::int64_t whole) noex
             remainder += fraction;
         }
     }
-    if (remainder >= whole - remainder) ++tail;
+    if (round_half_up && remainder >= whole - remainder) ++tail;
     const int base = static_cast<int>(units) * 100;
     if (base > maximum - tail) return std::nullopt;
     return base + tail;

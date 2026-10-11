@@ -24,12 +24,13 @@ namespace {
 
 // ---------------- 通用小件 ----------------
 
-// 四舍五入整数百分比;分母 <= 0 给 0(调用方先判 unknown)。
-int SharePercent(std::int64_t part, std::int64_t whole) {
-    if (whole <= 0) {
-        return 0;
+std::optional<std::int64_t> InputScale(const RuntimeRequestView& view) {
+    if (view.wire_message_count) {
+        if (!std::in_range<std::int64_t>(*view.wire_message_count)) return std::nullopt;
+        return static_cast<std::int64_t>(*view.wire_message_count);
     }
-    return static_cast<int>((part * 200 + whole) / (whole * 2));
+    if (!std::in_range<std::int64_t>(view.input_message_refs.size())) return std::nullopt;
+    return static_cast<std::int64_t>(view.input_message_refs.size());
 }
 
 EvidenceItem Ev(std::string metric, nlohmann::json value) {
@@ -554,14 +555,14 @@ void AuditMcpWeight(const std::vector<AuditToolDefinition>& tools,
     if (mcp_count == 0 || facts.total_context_tokens <= 0) {
         return;
     }
-    const int share = SharePercent(mcp_tokens, facts.total_context_tokens);
-    if (share < 10) {
+    const auto share = usage_projection::Percentage(mcp_tokens, facts.total_context_tokens);
+    if (!share || *share < 10) {
         return;
     }
     Finding finding = MakeFinding(
         "tool.mcp_weight", FindingSeverity::Info, FindingConfidence::High,
         "MCP 工具 " + std::to_string(mcp_count) + " 枚常驻,估算 " +
-            std::to_string(mcp_tokens) + " token,约占上下文 " + std::to_string(share) +
+            std::to_string(mcp_tokens) + " token,约占上下文 " + std::to_string(*share) +
             "%(是否曾被调用,看 /prompt audit runtime)",
         "不常用的 MCP server 走按需挂载或裁掉", "S13");
     finding.scope = "config";
@@ -707,24 +708,24 @@ void AuditGrowthVersusCache(const std::vector<RuntimeRequestView>& requests,
     if (first_system <= 0 || last_system <= 0) {
         return;
     }
-    const double growth =
-        static_cast<double>(last_system - first_system) / static_cast<double>(first_system);
-    const int first_ratio = SharePercent(first->cache_read_tokens, first->total_input_tokens);
-    const int last_ratio = SharePercent(last->cache_read_tokens, last->total_input_tokens);
-    if (growth < 0.3 || (first_ratio - last_ratio) < 25) {
+    if (last_system < first_system) return;
+    const auto growth = usage_projection::Percentage(last_system - first_system, first_system, false);
+    const auto first_ratio = usage_projection::Percentage(first->cache_read_tokens, first->total_input_tokens);
+    const auto last_ratio = usage_projection::Percentage(last->cache_read_tokens, last->total_input_tokens);
+    if (!growth || !first_ratio || !last_ratio || *growth < 30 || (*first_ratio - *last_ratio) < 25) {
         return;
     }
     Finding finding = MakeFinding(
         "prompt.growth_cache_miss", FindingSeverity::Warning, FindingConfidence::Medium,
-        "system prompt 估算涨了 " + std::to_string(static_cast<int>(growth * 100)) +
-            "%,同期 cache 命中率从 " + std::to_string(first_ratio) + "% 落到 " +
-            std::to_string(last_ratio) + "%(同向观察,不是因果结论)",
+        "system prompt 估算涨了 " + std::to_string(*growth) +
+            "%,同期 cache 命中率从 " + std::to_string(*first_ratio) + "% 落到 " +
+            std::to_string(*last_ratio) + "%(同向观察,不是因果结论)",
         "查这段增长来自哪几段(段级表);把膨胀段按需化", "R05");
     finding.scope = "session";
     finding.evidence.push_back(Ev("first_system_tokens", first_system));
     finding.evidence.push_back(Ev("last_system_tokens", last_system));
-    finding.evidence.push_back(Ev("first_cache_read_percent", first_ratio));
-    finding.evidence.push_back(Ev("last_cache_read_percent", last_ratio));
+    finding.evidence.push_back(Ev("first_cache_read_percent", *first_ratio));
+    finding.evidence.push_back(Ev("last_cache_read_percent", *last_ratio));
     finding.evidence.push_back(Ev("first_event", first->event_id));
     finding.evidence.push_back(Ev("last_event", last->event_id));
     finding.counter_evidence.push_back(
@@ -876,10 +877,9 @@ void AuditV3GrowthVersusCache(const std::vector<RuntimeRequestView>& requests,
             view.total_input_tokens <= 0) {
             continue;
         }
-        const std::int64_t scale = view.wire_message_count.has_value()
-                                       ? static_cast<std::int64_t>(*view.wire_message_count)
-                                       : static_cast<std::int64_t>(view.input_message_refs.size());
-        if (scale <= 0) {
+        const auto scale = InputScale(view);
+        if (!scale) return;
+        if (*scale <= 0) {
             continue;
         }
         if (first == nullptr) {
@@ -890,34 +890,29 @@ void AuditV3GrowthVersusCache(const std::vector<RuntimeRequestView>& requests,
     if (first == nullptr || last == nullptr || first == last) {
         return;
     }
-    const auto scale_of = [](const RuntimeRequestView& view) {
-        return view.wire_message_count.has_value()
-                   ? static_cast<std::int64_t>(*view.wire_message_count)
-                   : static_cast<std::int64_t>(view.input_message_refs.size());
-    };
-    const std::int64_t first_scale = scale_of(*first);
-    const std::int64_t last_scale = scale_of(*last);
+    const std::int64_t first_scale = *InputScale(*first);
+    const std::int64_t last_scale = *InputScale(*last);
     if (first_scale <= 0) {
         return;
     }
-    const double growth =
-        static_cast<double>(last_scale - first_scale) / static_cast<double>(first_scale);
-    const int first_ratio = SharePercent(first->cache_read_tokens, first->total_input_tokens);
-    const int last_ratio = SharePercent(last->cache_read_tokens, last->total_input_tokens);
-    if (growth < 2.0 || (first_ratio - last_ratio) < 25) {
+    if (last_scale < first_scale) return;
+    const auto growth = usage_projection::Percentage(last_scale - first_scale, first_scale, false);
+    const auto first_ratio = usage_projection::Percentage(first->cache_read_tokens, first->total_input_tokens);
+    const auto last_ratio = usage_projection::Percentage(last->cache_read_tokens, last->total_input_tokens);
+    if (!growth || !first_ratio || !last_ratio || *growth < 200 || (*first_ratio - *last_ratio) < 25) {
         return;
     }
     Finding finding = MakeFinding(
         "prompt.growth_cache_miss", FindingSeverity::Warning, FindingConfidence::Medium,
-        "请求输入规模(发送消息数)涨了 " + std::to_string(static_cast<int>(growth * 100)) +
-            "%,同期 cache 命中率从 " + std::to_string(first_ratio) + "% 落到 " +
-            std::to_string(last_ratio) + "%(v3 账同向观察,不是因果结论)",
+        "请求输入规模(发送消息数)涨了 " + std::to_string(*growth) +
+            "%,同期 cache 命中率从 " + std::to_string(*first_ratio) + "% 落到 " +
+            std::to_string(*last_ratio) + "%(v3 账同向观察,不是因果结论)",
         "查这段增长来自哪些输入(逐请求引用在账);膨胀段按需化", "V05");
     finding.scope = "session";
     finding.evidence.push_back(Ev("first_scale_messages", first_scale));
     finding.evidence.push_back(Ev("last_scale_messages", last_scale));
-    finding.evidence.push_back(Ev("first_cache_read_percent", first_ratio));
-    finding.evidence.push_back(Ev("last_cache_read_percent", last_ratio));
+    finding.evidence.push_back(Ev("first_cache_read_percent", *first_ratio));
+    finding.evidence.push_back(Ev("last_cache_read_percent", *last_ratio));
     finding.evidence.push_back(V3Ev("first_event", first->request_id, *first));
     finding.evidence.push_back(V3Ev("last_event", last->request_id, *last));
     finding.counter_evidence.push_back(
