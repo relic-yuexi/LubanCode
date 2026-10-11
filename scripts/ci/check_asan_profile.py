@@ -300,6 +300,9 @@ def check_execution(manifest, registrations, executable, junit, last_test, owned
                 'ASan source failed or skipped: ' + name)
         section = sections[name]
         check_native_command(section, commands[name])
+        if name == 'integration.sdk.lubancore_allocation_owner':
+            from check_sdk_focused import check_allocation_owner_native
+            check_allocation_owner_native(section, commands[name])
         stem = name.removeprefix('integration.sdk.')
         if name.startswith('integration.sdk.') and stem in named_results.SOURCES:
             named_results.check_native(section, commands[name], stem)

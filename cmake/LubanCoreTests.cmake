@@ -117,6 +117,11 @@ target_compile_definitions(lubancore_sdk_tests PRIVATE
 add_dependencies(lubancore_sdk_tests lubancore_sdk_search_probe lubancore_command_limits_probe)
 add_dependencies(lubancore_sdk_tests lubancore_usage_numeric_fault_probe)
 target_compile_features(lubancore_sdk_tests PRIVATE cxx_std_23)
+if(CMAKE_DL_LIBS)
+  target_link_libraries(lubancore_sdk_tests PRIVATE ${CMAKE_DL_LIBS})
+endif()
+target_compile_definitions(lubancore_sdk_tests PRIVATE
+  LUBANCORE_TEST_SHARED_MODULE="$<TARGET_FILE:lubancore_sdk>")
 target_precompile_headers(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}/support/pch.hpp")
 set_source_files_properties("${_lubancore_tests_root}/support/main.cpp"
   PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
@@ -130,6 +135,11 @@ if(MSVC)
   target_compile_options(lubancore_sdk_tests PRIVATE /MP /FS)
 endif()
 if(TARGET lubancode_tests)
+  if(CMAKE_DL_LIBS)
+    target_link_libraries(lubancode_tests PRIVATE ${CMAKE_DL_LIBS})
+  endif()
+  target_compile_definitions(lubancode_tests PRIVATE
+    LUBANCORE_TEST_SHARED_MODULE="$<TARGET_FILE:lubancore_sdk>")
   if(LUBANCODE_ASAN_TEST_PROFILE)
     add_dependencies(lubancode_tests lubancore_sdk_search_probe)
   else()

@@ -150,6 +150,7 @@ REQUIRED = {
     "sdk.focused.lubancore_event_sink",
     "sdk.focused.lubancore_builtin_search",
     "sdk.focused.lubancore_lifecycle",
+    "sdk.focused.lubancore_allocation_owner",
     "sdk.focused.lubancore_host_boundary",
     "sdk.focused.lubancore_history",
     "sdk.focused.lubancore_extensions",
@@ -173,6 +174,29 @@ REQUIRED = {
 
 LUA_PATHS = ("off-and-visible", "four-sessions", "approval", "cancel-and-close",
              "invalid-budget", "bad-declarations", "resume-fresh-vm", "resume-drift", "owned-opening")
+
+
+def check_allocation_owner_native(section: str, registered: list[str]):
+    check_native_command(section, registered)
+    if len(registered) != 2 or registered[1] != "--source-file=*test_lubancore_allocation_owner.cpp":
+        raise RuntimeError("Allocation qualification did not run its original native source")
+    cases = re.findall(r"\[doctest\] test cases:\s+(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    assertions = re.findall(r"\[doctest\] assertions:\s+(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if cases != [("1", "1", "0")] or len(assertions) != 1:
+        raise RuntimeError("Allocation qualification native CASE/summary was skipped, failed or duplicated")
+    total, passed, failed = map(int, assertions[0])
+    if not total or total != passed or failed or section.count("Test Passed.") != 1:
+        raise RuntimeError("Allocation qualification native assertions did not pass")
+    routes = [tuple(map(int, row)) for row in re.findall(
+        r"\[sdk-allocation-owner-route\] (\d+) ([01]) (\d+) (\d+)(?:\r?\n|$)", section)]
+    expected = {(kind, sized, size, route) for kind in range(8)
+                for sized in (0, 1) for size in (0, 1, 257) for route in range(3)}
+    if len(routes) != len(expected) or set(routes) != expected:
+        raise RuntimeError("Allocation qualification native routes are missing, duplicated or foreign")
+    summaries = re.findall(r"\[sdk-allocation-owner\] qualified_paths=(\d+) image=([^\r\n]+)", section)
+    if len(summaries) != 1 or int(summaries[0][0]) != len(expected) or not summaries[0][1].strip():
+        raise RuntimeError("Allocation qualification native image/summary is missing or duplicated")
+    return {"qualified_paths": len(routes), "actual_image": summaries[0][1], "allocation_refusals": "not_evaluated"}
 
 
 def check_native_command(section: str, registered: list[str]):
@@ -1455,6 +1479,9 @@ def main():
         if len(commands) != 1:
             raise RuntimeError("SDK source has no unique registered command: " + case.attrib["name"])
         check_native_command(sections[0], commands[0])
+        if case.attrib["name"] == "sdk.focused.lubancore_allocation_owner":
+            details = check_allocation_owner_native(sections[0], commands[0])
+            (evidence / "allocation-qualification.json").write_text(json.dumps(details, indent=2) + "\n", encoding="utf-8")
         job_stem = case.attrib["name"].removeprefix("sdk.focused.")
         if job_stem in command_jobs.SOURCES:
             command_job_reports[case.attrib["name"]] = command_jobs.check_native(sections[0], commands[0], job_stem, os.name)
