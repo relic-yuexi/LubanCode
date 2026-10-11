@@ -229,6 +229,21 @@ struct ReturnedAllocationFixture {
         return *directory / "sessions" / id;
     }
 };
+void CheckAllocationObservation(const sdk::usage::v1::Observation& observation) {
+    namespace facts = sdk::usage::v1;
+    const std::array<std::int64_t, facts::kFieldCount> numbers{11, 7, 13, 17, 3};
+    CHECK(observation.provider_namespace == "sdk.allocation.calibration");
+    REQUIRE(observation.raw_fields.size() == numbers.size());
+    for (std::size_t i = 0; i != numbers.size(); ++i) {
+        const auto& raw = observation.raw_fields[i];
+        CHECK(raw.path == "reply.usage." + std::to_string(i));
+        CHECK(raw.kind == facts::RawKind::SignedInteger); CHECK(raw.integer == numbers[i]);
+        CHECK(raw.summary == std::to_string(numbers[i]));
+        const auto& field = observation.fields[i];
+        CHECK(field.presence == facts::Presence::Present); CHECK(field.validity == facts::Validity::ValidInteger);
+        CHECK(field.origin == facts::Origin::Reported); CHECK(field.operand_count == 1); CHECK(field.operands[0] == i);
+    }
+}
 void CheckReturnedOperation(const sdk::Operation& operation, ReturnedPath path) {
     CHECK(operation.state == (path == ReturnedPath::Success ? sdk::OperationState::Succeeded : sdk::OperationState::Cancelled));
     CHECK(operation.result_persisted);
@@ -244,7 +259,7 @@ void CheckReturnedOperation(const sdk::Operation& operation, ReturnedPath path) 
     CHECK(attempt.reported_by_provider); CHECK_FALSE(attempt.subordinate);
     CHECK(attempt.incomplete == (path != ReturnedPath::Success));
     CHECK(attempt.provider_response_id == "actual-allocation-calibration-response");
-    REQUIRE(attempt.observation); CHECK(attempt.observation->raw_fields.size() == 5);
+    REQUIRE(attempt.observation); CheckAllocationObservation(*attempt.observation);
     CHECK_FALSE(attempt.trajectory_request_id.empty());
 }
 struct ReturnedAllocationRun {
@@ -287,7 +302,8 @@ void CheckReturnedFaultNumbers(const sdk::Operation& operation, ReturnedPath pat
         CHECK(attempt.usage.cache_read_tokens == 13); CHECK(attempt.usage.cache_creation_tokens == 17);
         CHECK(attempt.usage.output_reasoning_tokens == 3);
         if (!attempt.provider_response_id.empty()) CHECK(attempt.provider_response_id == "actual-allocation-calibration-response");
-        if (attempt.observation) CHECK(attempt.observation->raw_fields.size() == 5);
+        if (attempt.observation) CheckAllocationObservation(*attempt.observation);
+        else CHECK(attempt.incomplete);
     }
 }
 ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationFailurePort port,
