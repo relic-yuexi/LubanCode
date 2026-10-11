@@ -559,6 +559,35 @@ TEST_CASE("SDK allocation ownership: real shared image and matching host release
     REQUIRE(std::filesystem::equivalent(ImageOf(reinterpret_cast<const void*>(failure.begin)), expected));
     REQUIRE(std::filesystem::equivalent(ImageOf(reinterpret_cast<const void*>(failure.end)), expected));
     OwnedRefusalImports imports{failure, failure.install()};
+    if (!imports.installed) {
+        const auto diagnostic = lubancore::detail::testing::GetAllocationInstallationDiagnostic();
+        std::cout << "[sdk-module-installation-failure] stage=" << diagnostic.stage
+                  << " forms_mask=" << diagnostic.forms_mask << " slots=" << diagnostic.slots
+                  << " aliases=" << diagnostic.aliases << " overflow=" << diagnostic.collection_overflow << '\n';
+        for (unsigned form = 0; form != 8; ++form) {
+            const auto* address = diagnostic.original_addresses[form];
+            std::cout << "[sdk-module-original] form=" << form << " address=" << address;
+            try { std::cout << " image=" << ImageOf(address).string(); }
+            catch (const std::exception& error) { std::cout << " image_error=" << error.what(); }
+#ifdef _WIN32
+            MEMORY_BASIC_INFORMATION region{};
+            const auto start = reinterpret_cast<std::uintptr_t>(address);
+            if (VirtualQuery(address, &region, sizeof(region)) == sizeof(region) && region.State == MEM_COMMIT &&
+                !(region.Protect & (PAGE_GUARD | PAGE_NOACCESS)) &&
+                (region.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                                  PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) &&
+                start >= reinterpret_cast<std::uintptr_t>(region.BaseAddress) &&
+                region.RegionSize >= 16 &&
+                start - reinterpret_cast<std::uintptr_t>(region.BaseAddress) <= region.RegionSize - 16) {
+                std::cout << " entry_bytes=";
+                const auto* bytes = static_cast<const unsigned char*>(address);
+                for (unsigned n = 0; n != 16; ++n) std::cout << (n ? "," : "") << static_cast<unsigned>(bytes[n]);
+            }
+#endif
+            std::cout << '\n';
+        }
+        std::cout.flush();
+    }
     REQUIRE(imports.installed);
     for (unsigned form = 0; form != 8; ++form) {
         CAPTURE(form);
