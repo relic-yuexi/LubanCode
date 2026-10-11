@@ -74,6 +74,12 @@ if(LUBANCODE_BUILD_TESTING)
       "${_lubancore_detours_src}/disolarm64.cpp")
     target_include_directories(lubancore_test_detours PUBLIC "${_lubancore_detours_src}")
     target_compile_definitions(lubancore_test_detours PRIVATE WIN32_LEAN_AND_MEAN)
+    # Pinned 4.0.1 has scalar initializers crossed by legacy goto Cleanup.
+    # C++17 avoids an implicit late /permissive- from /std:c++latest; this
+    # target-local switch follows the root's explicit /permissive- options.
+    # SDK and host targets retain their strict C++23 compiler profile.
+    set_target_properties(lubancore_test_detours PROPERTIES CXX_STANDARD 17)
+    target_compile_options(lubancore_test_detours PRIVATE /Zc:gotoScope-)
     target_compile_definitions(lubancore_sdk PRIVATE LUBANCORE_PRIVATE_WINDOWS_BODY_HOOKS=1)
     target_link_libraries(lubancore_sdk PRIVATE lubancore_test_detours)
     install(FILES "${lubancore_test_detours_SOURCE_DIR}/LICENSE.md"
