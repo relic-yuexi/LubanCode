@@ -96,3 +96,19 @@ an armed ordinary-allocation scope, require zero allocations, then refuse an
 ordinary standard allocation in that same scope to prove the controller stayed
 armed. Retain original module ownership, all 144 routes, eight forms and every
 real Session ordinal. All verification stays on remote CI and ASan.
+
+### Relocated dependency notice qualification
+
+Actual PR354 d95957e6 macOS SDK-only job 114402671951 compiled the tests-OFF
+SDK, then rejected share/lubancore/licenses/nlohmann-json/LICENSE.MIT as a
+private development artifact. The earlier no-product configure error belongs
+to the required successful negative case; it is not this job's failure.
+
+Qualify only the exact installed dependency notice paths and SHA-256-pinned
+original bytes. Require the JSON notice in both component and full relocated
+packages; require the immutable Detours notice only for Windows testing builds,
+and reject its presence in ordinary/non-Windows packages. Record their actual
+hashes separately from the staged search resources. Do not admit an entire
+licenses directory, private JSON/Detours headers, sources or extra notices.
+Preserve every existing full-install boundary, native roster and refusal point.
+Acceptance remains same-source remote CI; run no local gates or native work.
