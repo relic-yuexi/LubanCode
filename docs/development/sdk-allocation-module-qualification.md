@@ -26,3 +26,12 @@ ordinary allocator refusal mechanism, full post-Backend-return calibration,
 every allocation point, actual Close/retirement and zero-replay same-ID recovery.
 Qualification alone does not accept the confirmed completion owner or automatic
 Memory. No local configure, build, native tests or repository CI may run.
+
+The profile roster fixture must admit the added allocation-owner source in both
+Lua profiles: focused ON 75 and OFF 73, retaining the previous 74/72 sources.
+The existing two Lua-only exclusions and installed-consumer ON 37/OFF 34 remain.
+The actual remote validator-data step rejected stale 74/72 expectations on both
+Windows and Linux at source a24653e8, before configure or native tests. Correct
+those exact expectations and require the new source in both profiles; do not
+remove a source, loosen cardinality or describe the early failure as native
+allocator evidence. This correction still requires same-source remote CI.
