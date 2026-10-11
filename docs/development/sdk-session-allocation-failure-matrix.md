@@ -67,3 +67,32 @@ All three real paths, every calibrated ordinal, eight operator forms, original
 144 release routes, five returned numbers and original observations stay required.
 Same-source remote full CLI, SDK Lua ON/OFF, installed/relocated consumers and ASan
 must accept the repair. No local configure, build, native tests or CI may run.
+
+### Container-owned retirement frames and private dependency ABI
+
+Keep the existing upstream JSON versions (FetchContent 3.11.3 and current vcpkg
+3.12.0), with SHA-256-pinned original json.hpp and abi_macros.hpp inputs. Build a
+private header overlay that changes only container allocation/retirement and its
+ABI namespace. Unsupported or modified source inputs fail configuration closed;
+no silent fallback to allocating noexcept teardown is admitted. Do not mutate the
+package installation or install private JSON headers as public SDK dependencies.
+
+An object/array allocation reserves its retirement frame in the same original
+standard-allocator block, before constructing children. Strings, scalar values,
+map nodes and public SDK values retain their existing allocators. Each frame can
+link to its parent during destructive retirement; visit children iteratively,
+empty a child before releasing it, and never allocate a traversal stack. Ordered
+objects retire from the back without shifting/copying const string keys. Preserve
+exception-safe allocation/deallocation pairing, alignment, moves and all existing
+JSON schema/canonical bytes. No destructor recursion or arbitrary depth cap is
+introduced. Give all project internal JSON headers the same private ownership ABI
+namespace, including forward declarations; foreign package JSON objects cannot
+silently cross the ownership boundary. Installed public headers expose no JSON
+objects. Preserve the upstream MIT notice in distributed SDK license material.
+
+The actual SDK qualification port must build and inspect deep mixed object/array
+documents, including ordered objects, before the refusal scope; retire them inside
+an armed ordinary-allocation scope, require zero allocations, then refuse an
+ordinary standard allocation in that same scope to prove the controller stayed
+armed. Retain original module ownership, all 144 routes, eight forms and every
+real Session ordinal. All verification stays on remote CI and ASan.
