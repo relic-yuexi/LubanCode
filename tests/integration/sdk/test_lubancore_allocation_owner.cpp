@@ -280,8 +280,8 @@ void WriteAllocationMaterial(const std::filesystem::path& path, const nlohmann::
     output << value.dump(); output.close(); REQUIRE_FALSE(output.fail());
 }
 void CheckReturnedFaultNumbers(const sdk::Operation& operation, ReturnedPath path) {
-    CHECK(operation.state == sdk::OperationState::Succeeded || operation.state == sdk::OperationState::Failed ||
-          operation.state == sdk::OperationState::Cancelled || operation.state == sdk::OperationState::Indeterminate);
+    CHECK((operation.state == sdk::OperationState::Succeeded || operation.state == sdk::OperationState::Failed ||
+           operation.state == sdk::OperationState::Cancelled || operation.state == sdk::OperationState::Indeterminate));
     if (!operation.result_persisted) CHECK(operation.state == sdk::OperationState::Indeterminate);
     if (path != ReturnedPath::Success) CHECK(operation.final_text.empty());
     if (operation.state == sdk::OperationState::Succeeded) {
