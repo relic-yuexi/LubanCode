@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <new>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -892,6 +893,28 @@ WriteReceipt V3Writer::AppendEvent(EventDraft draft, Durability durability) {
                             "句柄已断,停止提交"};
     }
     return impl_->CommitEvent(std::move(draft), durability);
+}
+
+std::optional<WriteReceipt> V3Writer::AppendPreparedEvent(EventDraftFactory prepare, void* context,
+                                                         Durability durability) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->broken) {
+        return WriteReceipt{WriteReceipt::Status::IoFailed, "", 0, "", "v3writer.broken",
+                            "句柄已断,停止提交"};
+    }
+    for (unsigned attempt = 0; ; ++attempt) {
+        try {
+            auto draft = prepare(context);
+            if (!draft) return std::nullopt;
+            // CommitEvent catches every exception after native append and returns
+            // its owned witness. Only pre-I/O bad_alloc can escape to this catch.
+            auto receipt = impl_->CommitEvent(std::move(*draft), durability);
+            // Never copy allocating receipt strings after a real append.
+            return std::optional<WriteReceipt>{std::in_place, std::move(receipt)};
+        } catch (const std::bad_alloc&) {
+            if (attempt != 0) throw;
+        }
+    }
 }
 
 WriteReceipt V3Writer::AdmitMessages(std::vector<std::string> message_ids,

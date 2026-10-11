@@ -1436,13 +1436,10 @@ std::optional<bool> TrajectoryTurnBridge::OnUsageObservation(const std::string& 
     if (!V3Mode()) return std::nullopt;
     const auto found = v3_turn_->requests.find(request_id);
     if (found == v3_turn_->requests.end()) return false;
-    auto payload = api::usage_json::ObservationPayload(usage, observation, reported, response_id, incomplete);
-    if (!payload) return false;
-    v3::EventDraft draft;
-    draft.kind = v3::EventKindV3::ModelUsageObserved;
-    draft.request_id = request_id; draft.turn_id = turn_id_; draft.step_id = found->second.step_id;
-    draft.payload = std::move(*payload);
-    const auto receipt = v3_writer_->AppendEvent(std::move(draft), trajectory::Durability::ProcessCrash);
+    const auto prepared_receipt = AppendUsageObservation(*v3_writer_, request_id,
+        turn_id_, found->second.step_id, usage, observation, reported, response_id, incomplete);
+    if (!prepared_receipt) return false;
+    const auto& receipt = *prepared_receipt;
     V3NotifyCommitted(receipt);
     if (receipt.status != v3::WriteReceipt::Status::Committed) {
         NoteV3Error(receipt, "model.usage.observed"); return false;

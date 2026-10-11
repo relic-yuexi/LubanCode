@@ -213,6 +213,11 @@ public:
 
     WriteReceipt AppendMessage(MessageDraft draft, Durability durability);
     WriteReceipt AppendEvent(EventDraft draft, Durability durability);
+    // Synchronous borrowed facts; reconstruct only after a pre-I/O allocation refusal.
+    // A returned native receipt is final for this call and must never be replayed.
+    using EventDraftFactory = std::optional<EventDraft> (*)(void*);
+    std::optional<WriteReceipt> AppendPreparedEvent(EventDraftFactory prepare, void* context,
+                                                   Durability durability);
 
     // ---- 上下文链 ----
 
