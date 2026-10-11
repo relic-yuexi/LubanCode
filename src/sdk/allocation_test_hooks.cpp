@@ -31,15 +31,16 @@ using Scalar = void* (*)(std::size_t);
 using NoThrow = void* (*)(std::size_t, const std::nothrow_t&) noexcept;
 using Aligned = void* (*)(std::size_t, std::align_val_t);
 using AlignedNoThrow = void* (*)(std::size_t, std::align_val_t, const std::nothrow_t&) noexcept;
-// Capture the real operator addresses before modifying this module's imports.
-const Scalar original_scalar = static_cast<Scalar>(&::operator new);
-const Scalar original_array = static_cast<Scalar>(&::operator new[]);
-const NoThrow original_nothrow = static_cast<NoThrow>(&::operator new);
-const NoThrow original_array_nothrow = static_cast<NoThrow>(&::operator new[]);
-const Aligned original_aligned = static_cast<Aligned>(&::operator new);
-const Aligned original_aligned_array = static_cast<Aligned>(&::operator new[]);
-const AlignedNoThrow original_aligned_nothrow = static_cast<AlignedNoThrow>(&::operator new);
-const AlignedNoThrow original_aligned_array_nothrow = static_cast<AlignedNoThrow>(&::operator new[]);
+// Force actual saved-address reads: a constant-folded direct operator call would
+// go through the patched import again instead of delegating to the original.
+Scalar volatile original_scalar = static_cast<Scalar>(&::operator new);
+Scalar volatile original_array = static_cast<Scalar>(&::operator new[]);
+NoThrow volatile original_nothrow = static_cast<NoThrow>(&::operator new);
+NoThrow volatile original_array_nothrow = static_cast<NoThrow>(&::operator new[]);
+Aligned volatile original_aligned = static_cast<Aligned>(&::operator new);
+Aligned volatile original_aligned_array = static_cast<Aligned>(&::operator new[]);
+AlignedNoThrow volatile original_aligned_nothrow = static_cast<AlignedNoThrow>(&::operator new);
+AlignedNoThrow volatile original_aligned_array_nothrow = static_cast<AlignedNoThrow>(&::operator new[]);
 thread_local AllocationFailureControl* active_control = nullptr;
 thread_local AllocationFailureControl* prepared_control = nullptr;
 std::atomic<unsigned> active_borrows{0};
