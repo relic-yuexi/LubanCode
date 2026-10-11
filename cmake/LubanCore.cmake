@@ -52,6 +52,7 @@ target_compile_definitions(lubancore_sdk PRIVATE
 if(LUBANCODE_BUILD_TESTING)
   target_compile_definitions(lubancore_sdk PRIVATE LUBANCORE_PRIVATE_OPENING_TEST_HOOKS=1)
   target_sources(lubancore_sdk PRIVATE src/sdk/sampling_test_hooks.cpp)
+  target_sources(lubancore_sdk PRIVATE src/sdk/allocation_test_hooks.cpp)
 endif()
 target_include_directories(lubancore_sdk PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
