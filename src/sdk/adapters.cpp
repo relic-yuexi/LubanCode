@@ -1,6 +1,7 @@
 #include "sdk/adapters.hpp"
 #if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
 #include "sdk/backend_owner_test_hooks.hpp"
+#include "sdk/allocation_test_hooks.hpp"
 #endif
 #include "sdk/callback_scope.hpp"
 #include "api/usage_event_projection.hpp"
@@ -141,6 +142,9 @@ public:
                 CallbackScope callback;
                 return backend_->Generate(*in, Cancellation{cancel});
             }();
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+            testing::ActivateReturnedBackendAllocationScope();
+#endif
             received_reply = reply.has_value();
             // Capture all returned numeric facts before copying bounded host
             // metadata. If a later material copy/validation fails, the shared

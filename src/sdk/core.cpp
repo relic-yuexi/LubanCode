@@ -32,6 +32,7 @@
 #include "sdk/usage_result.hpp"
 #if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
 #include "sdk/backend_owner_test_hooks.hpp"
+#include "sdk/allocation_test_hooks.hpp"
 #endif
 #include "sdk/approval.hpp"
 #include "sdk/callback_scope.hpp"
@@ -1685,7 +1686,12 @@ struct Session::Impl final : rt::InteractionBroker {
     void Pump() {
         struct WorkerScope {
             WorkerScope() { in_session_worker = true; }
-            ~WorkerScope() { in_session_worker = false; }
+            ~WorkerScope() {
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+                detail::testing::RetireReturnedBackendAllocationScope();
+#endif
+                in_session_worker = false;
+            }
         } worker_scope;
         for (;;) {
             rt::SessionService::PendingPop pop;
