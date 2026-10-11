@@ -53,6 +53,32 @@ if(LUBANCODE_BUILD_TESTING)
   target_compile_definitions(lubancore_sdk PRIVATE LUBANCORE_PRIVATE_OPENING_TEST_HOOKS=1)
   target_sources(lubancore_sdk PRIVATE src/sdk/sampling_test_hooks.cpp)
   target_sources(lubancore_sdk PRIVATE src/sdk/allocation_test_hooks.cpp)
+  if(WIN32 AND MSVC)
+    # Private test machinery only: no extra library or headers in ordinary SDKs.
+    # An immutable source URL and hash also cover the vcpkg configuration path.
+    FetchContent_Declare(lubancore_test_detours
+      URL https://codeload.github.com/microsoft/Detours/tar.gz/e4bfd6b03e50de46b47abfbd1e46b384f0c5f833
+      URL_HASH SHA256=d24f5dd1f977c33301ebd9f3be064e938a7908954df15b31235c9ca6691cb356)
+    FetchContent_MakeAvailable(lubancore_test_detours)
+    set(_lubancore_detours_src "${lubancore_test_detours_SOURCE_DIR}/src")
+    add_library(lubancore_test_detours STATIC
+      "${_lubancore_detours_src}/detours.cpp"
+      "${_lubancore_detours_src}/modules.cpp"
+      "${_lubancore_detours_src}/disasm.cpp"
+      "${_lubancore_detours_src}/image.cpp"
+      "${_lubancore_detours_src}/creatwth.cpp"
+      "${_lubancore_detours_src}/disolx86.cpp"
+      "${_lubancore_detours_src}/disolx64.cpp"
+      "${_lubancore_detours_src}/disolia64.cpp"
+      "${_lubancore_detours_src}/disolarm.cpp"
+      "${_lubancore_detours_src}/disolarm64.cpp")
+    target_include_directories(lubancore_test_detours PUBLIC "${_lubancore_detours_src}")
+    target_compile_definitions(lubancore_test_detours PRIVATE WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(lubancore_sdk PRIVATE LUBANCORE_PRIVATE_WINDOWS_BODY_HOOKS=1)
+    target_link_libraries(lubancore_sdk PRIVATE lubancore_test_detours)
+    install(FILES "${lubancore_test_detours_SOURCE_DIR}/LICENSE.md"
+      DESTINATION ${CMAKE_INSTALL_DATADIR}/lubancore/licenses/detours COMPONENT LubanCore)
+  endif()
   if(CMAKE_DL_LIBS)
     target_link_libraries(lubancore_sdk PRIVATE ${CMAKE_DL_LIBS})
   endif()
