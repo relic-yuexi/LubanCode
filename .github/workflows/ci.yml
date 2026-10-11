@@ -133,7 +133,7 @@ jobs:
             # Session ownership, extensions and per-turn borrowing span multiple hosts.
             # Their SDK, middleware and host regressions need three platforms and ASan.
             case "$f" in
-              src/api/usage_*.hpp|src/api/types.hpp|src/api/assembler.*|src/api/http_stream_transport.*|src/api/chat/*|src/api/responses/*|src/api/anthropic/*|src/api/gemini/*|tests/unit/api/test_*events.cpp|tests/unit/api/test_assembler.cpp|tests/unit/api/test_http_stream_transport.cpp|tests/unit/api/usage_body_fixture.hpp|tests/support/memory_extraction_core_checks.hpp)
+              tests/integration/runtime/test_failure_boundary_audit.cpp|tests/unit/api/test_api_fixture_replay.cpp|tests/fixtures/api/*|src/insights/usage_projection.hpp|src/api/usage_*.hpp|src/api/types.hpp|src/api/assembler.*|src/api/http_stream_transport.*|src/api/chat/*|src/api/responses/*|src/api/anthropic/*|src/api/gemini/*|tests/unit/api/test_*events.cpp|tests/unit/api/test_assembler.cpp|tests/unit/api/test_http_stream_transport.cpp|tests/unit/api/usage_body_fixture.hpp|tests/support/memory_extraction_core_checks.hpp)
                 # Wire accounting and callback retirement belong to the shared
                 # SDK as well as the CLI, even when no public header changes.
                 cross_platform=true
