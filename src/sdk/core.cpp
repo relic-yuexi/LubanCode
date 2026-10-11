@@ -1843,7 +1843,7 @@ struct Session::Impl final : rt::InteractionBroker {
         // SessionService destruction also releases operations.jsonl. Keep query
         // projections, not the live writer, after Close (Windows delete/rename).
         std::shared_ptr<rt::SessionService> closed_service;
-        std::vector<std::shared_ptr<EventStream::Impl>> streams;
+        std::vector<std::weak_ptr<EventStream::Impl>> streams;
         {
             std::unique_lock lock(mutex);
             closed = true;
@@ -1853,8 +1853,9 @@ struct Session::Impl final : rt::InteractionBroker {
             closed_service = std::move(service);
             extensions = nullptr;
             subagent_module = nullptr;
-            for (auto& weak : subscriptions) if (auto stream = weak.lock()) streams.push_back(std::move(stream));
-            subscriptions.clear();
+            // closed is already visible: transferring the original list must
+            // not allocate and skip remaining owners if storage is refused.
+            streams.swap(subscriptions);
             cv.notify_all();
         }
         {
@@ -1881,7 +1882,7 @@ struct Session::Impl final : rt::InteractionBroker {
             memory_blob_factory.reset();
             named_result_factory.reset(); // Read handle retains only its Store/provider, never this Service.
         }
-        for (auto& stream : streams) (void)stream->CloseChecked();
+        for (auto& weak : streams) if (auto stream = weak.lock()) (void)stream->CloseChecked();
         if (event_delivery) {
             auto closed_delivery = event_delivery->CloseAndWait();
             if (!closed_delivery && !close_error) close_error = closed_delivery.error();
