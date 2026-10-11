@@ -17,6 +17,8 @@ class AllocationQualificationGateTests(unittest.TestCase):
             '[sdk-allocation-owner] qualified_paths=144 image=/actual build/liblubancore.so',
             *('[sdk-module-refusal] form=%d baseline=1 refused=1 host=0' % kind for kind in range(8)),
             '[sdk-module-refusal] qualified_forms=8 imports_restored=1',
+            *('[sdk-json-retirement] ordered=%d depth=%d allocations=0 sentinel_refused=1' % (ordered, depth)
+              for ordered in (0, 1) for depth in (0, 32, 16384)),
             *('[sdk-returned-allocation-baseline] path=%d allocations=%d refusals=0 retired=1 recovery_calls=0' % (path, 101 + path) for path in range(3)),
             *('[sdk-returned-allocation-point] path=%d ordinal=%d allocations=%d phase=2 refusals=1 retired=1 recovery_calls=0 state=%d persisted=1 finals=1 observations=1 terminals=%d' % (path, ordinal, 101 + path, 2 if path == 0 else 4, int(path != 2))
               for path in range(3) for ordinal in range(1, 102 + path)),
@@ -142,3 +144,15 @@ class AllocationQualificationGateTests(unittest.TestCase):
                      self.body().replace(marker, marker.split('directory=')[0] + 'directory=""')):
             with self.assertRaises(RuntimeError):
                 check_allocation_owner_native(body, self.command)
+
+    def test_retirement_requires_every_real_depth_and_armed_zero_allocation(self):
+        for ordered in (0, 1):
+            for depth in (0, 32, 16384):
+                marker = '[sdk-json-retirement] ordered=%d depth=%d allocations=0 sentinel_refused=1' % (ordered, depth)
+                for body in (self.body().replace(marker, ''), self.body() + '\n' + marker,
+                             self.body().replace(marker, marker.replace('allocations=0', 'allocations=1')),
+                             self.body().replace(marker, marker.replace('sentinel_refused=1', 'sentinel_refused=0')),
+                             self.body().replace(marker, marker.replace('depth=%d' % depth, 'depth=7')),
+                             self.body() + '\n[sdk-json-retirement] invalid'):
+                    with self.assertRaises(RuntimeError):
+                        check_allocation_owner_native(body, self.command)

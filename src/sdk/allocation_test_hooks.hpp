@@ -15,6 +15,14 @@ struct AllocationQualificationPort {
     void (*release)(void*, std::size_t, std::size_t, AllocationKind, bool) noexcept;
 };
 LUBANCORE_API AllocationQualificationPort GetAllocationQualificationPort() noexcept;
+// Opaque real SDK JSON documents; only allocation/retirement facts, no results.
+struct JsonRetirementQualificationPort {
+    void* (*make)(std::size_t depth, bool ordered);
+    bool (*inspect)(const void*, std::size_t depth, bool ordered) noexcept;
+    void (*retire)(void*, bool ordered) noexcept;
+};
+LUBANCORE_API JsonRetirementQualificationPort GetJsonRetirementQualificationPort() noexcept;
+
 enum class AllocationPhase : unsigned {
     None, BackendReturned, Numbers, Material, Completion,
     ResultWrite, FinalRecord, Projection, Notification, Close

@@ -688,6 +688,40 @@ TEST_CASE("SDK allocation ownership: real shared image and matching host release
                   << " baseline=" << baseline.allocations.load()
                   << " refused=" << refused.refusals.load() << " host=" << host_count << '\n';
     }
+    const auto json_port = lubancore::detail::testing::GetJsonRetirementQualificationPort();
+    REQUIRE(json_port.make); REQUIRE(json_port.inspect); REQUIRE(json_port.retire);
+    REQUIRE(std::filesystem::equivalent(ImageOf(reinterpret_cast<const void*>(json_port.make)), expected));
+    REQUIRE(std::filesystem::equivalent(ImageOf(reinterpret_cast<const void*>(json_port.inspect)), expected));
+    REQUIRE(std::filesystem::equivalent(ImageOf(reinterpret_cast<const void*>(json_port.retire)), expected));
+    for (const bool ordered : {false, true}) for (const std::size_t depth : {0U, 32U, 16384U}) {
+        CAPTURE(ordered); CAPTURE(depth);
+        struct JsonOwner {
+            decltype(json_port) port;
+            void* value;
+            bool ordered;
+            ~JsonOwner() { if (value) port.retire(value, ordered); }
+        } document{json_port, json_port.make(depth, ordered), ordered};
+        REQUIRE(document.value);
+        REQUIRE(json_port.inspect(document.value, depth, ordered));
+        lubancore::detail::testing::AllocationFailureControl armed;
+        armed.refuse_ordinal = 1;
+        OwnedRefusalScope scope{failure, failure.begin(armed)};
+        REQUIRE(scope.active);
+        json_port.retire(document.value, ordered); document.value = nullptr;
+        const auto retirement_allocations = armed.allocations.load();
+        // An ordinary allocation in the same scope proves retirement neither
+        // disabled the control nor silently consumed its refusal ordinal.
+        OwnedAllocation sentinel{port.allocate(257, 4096, Kind::ScalarNoThrow), port.release,
+                                 257, 4096, Kind::ScalarNoThrow, false};
+        scope.End();
+        CHECK(retirement_allocations == 0);
+        CHECK(sentinel.pointer == nullptr);
+        CHECK(armed.allocations.load() == 1); CHECK(armed.refusals.load() == 1);
+        CHECK(armed.last_kind.load() == static_cast<unsigned>(Kind::ScalarNoThrow));
+        std::cout << "[sdk-json-retirement] ordered=" << ordered << " depth=" << depth
+                  << " allocations=" << retirement_allocations << " sentinel_refused=" << armed.refusals.load()
+                  << '\n' << std::flush;
+    }
     for (const auto path : {ReturnedPath::Success, ReturnedPath::Cancel, ReturnedPath::Close}) {
         const auto baseline = RunReturnedSession(failure, path);
         std::cout << "[sdk-returned-allocation-baseline] path=" << static_cast<unsigned>(path)
