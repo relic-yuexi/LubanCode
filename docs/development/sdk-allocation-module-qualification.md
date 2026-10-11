@@ -1,7 +1,9 @@
 # SDK allocation module qualification
 
 This is a prerequisite of the public Session ordinary-allocation failure matrix,
-not that matrix's acceptance. No allocator replacement or refusal is installed.
+not that matrix's acceptance. The original qualification installed no allocator
+replacement or refusal. The separate [module refusal contract](sdk-module-allocation-refusal.md)
+adds a private testing-only import controller; neither accepts the Session matrix.
 The existing parser-only probe does not establish Windows SDK DLL ownership.
 
 Testing builds expose a private POD port from the actual shared SDK. It allocates
@@ -24,6 +26,9 @@ installed consumers and the existing ASan selection. Original native CASEs,
 fixtures and checks remain. The subsequent matrix still needs a module-local
 ordinary allocator refusal mechanism, full post-Backend-return calibration,
 every allocation point, actual Close/retirement and zero-replay same-ID recovery.
+The import controller must additionally prove all eight real baseline/refusal
+forms, zero host interception and restored imports. Missing module imports or
+unmodifiable slots fail qualification; they are never a passing skipped path.
 Qualification alone does not accept the confirmed completion owner or automatic
 Memory. No local configure, build, native tests or repository CI may run.
 

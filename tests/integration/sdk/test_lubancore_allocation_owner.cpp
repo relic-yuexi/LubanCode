@@ -84,6 +84,17 @@ struct OwnedAllocation {
     bool sized;
     ~OwnedAllocation() { if (pointer) release(pointer, size, alignment, kind, sized); }
 };
+struct OwnedRefusalImports {
+    lubancore::detail::testing::AllocationFailurePort port;
+    bool installed;
+    ~OwnedRefusalImports() { port.end(); if (installed) port.restore(); }
+};
+struct OwnedRefusalScope {
+    lubancore::detail::testing::AllocationFailurePort port;
+    bool active;
+    ~OwnedRefusalScope() { if (active) port.end(); }
+    void End() { if (active) { port.end(); active = false; } }
+};
 }
 
 TEST_CASE("SDK allocation ownership: real shared image and matching host release") {
@@ -132,4 +143,65 @@ TEST_CASE("SDK allocation ownership: real shared image and matching host release
     CHECK(paths == 144);
     std::cout << "[sdk-allocation-owner] qualified_paths=" << paths
               << " image=" << allocate_image.string() << '\n';
+    // Warm all eight actual SDK imports above before inspecting their resolved
+    // addresses. The host executable's allocation imports are never patched.
+    const auto failure = lubancore::detail::testing::GetAllocationFailurePort();
+    REQUIRE(failure.install);
+    REQUIRE(failure.restore);
+    REQUIRE(failure.begin);
+    REQUIRE(failure.end);
+    REQUIRE(std::filesystem::equivalent(ImageOf(reinterpret_cast<const void*>(failure.install)), expected));
+    REQUIRE(std::filesystem::equivalent(ImageOf(reinterpret_cast<const void*>(failure.restore)), expected));
+    REQUIRE(std::filesystem::equivalent(ImageOf(reinterpret_cast<const void*>(failure.begin)), expected));
+    REQUIRE(std::filesystem::equivalent(ImageOf(reinterpret_cast<const void*>(failure.end)), expected));
+    OwnedRefusalImports imports{failure, failure.install()};
+    REQUIRE(imports.installed);
+    for (unsigned form = 0; form != 8; ++form) {
+        CAPTURE(form);
+        const auto kind = static_cast<Kind>(form);
+        lubancore::detail::testing::AllocationFailureControl baseline;
+        OwnedRefusalScope normal{failure, failure.begin(baseline)};
+        REQUIRE(normal.active);
+        // Nested scopes and import restoration during a live borrow are errors.
+        CHECK_FALSE(failure.begin(baseline));
+        CHECK_FALSE(failure.restore());
+        OwnedAllocation host{HostAllocate(257, 4096, kind), HostRelease, 257, 4096, kind, false};
+        REQUIRE(host.pointer);
+        const auto host_count = baseline.allocations.load();
+        OwnedAllocation sdk{port.allocate(257, 4096, kind), port.release, 257, 4096, kind, false};
+        REQUIRE(sdk.pointer);
+        normal.End();
+        CHECK(host_count == 0);
+        CHECK(baseline.allocations.load() == 1);
+        CHECK(baseline.refusals.load() == 0);
+        CHECK(baseline.last_kind.load() == form);
+        // Release real storage with the unchanged corresponding operators.
+        sdk.release(sdk.pointer, 257, 4096, kind, false); sdk.pointer = nullptr;
+        host.release(host.pointer, 257, 4096, kind, false); host.pointer = nullptr;
+        lubancore::detail::testing::AllocationFailureControl refused;
+        refused.refuse_ordinal = 1;
+        OwnedRefusalScope fault{failure, failure.begin(refused)};
+        REQUIRE(fault.active);
+        void* returned = nullptr;
+        bool bad_alloc = false;
+        try { returned = port.allocate(257, 4096, kind); }
+        catch (const std::bad_alloc&) { bad_alloc = true; }
+        fault.End();
+        // If a broken controller allocated anyway, release before assertions.
+        if (returned) port.release(returned, 257, 4096, kind, false);
+        CHECK(returned == nullptr);
+        CHECK(bad_alloc == ((form & 2U) == 0));
+        CHECK(refused.allocations.load() == 1);
+        CHECK(refused.refusals.load() == 1);
+        CHECK(refused.last_kind.load() == form);
+        std::cout << "[sdk-module-refusal] form=" << form
+                  << " baseline=" << baseline.allocations.load()
+                  << " refused=" << refused.refusals.load() << " host=" << host_count << '\n';
+    }
+    REQUIRE(failure.restore());
+    imports.installed = false;
+    // Real allocation still works after restoring all imports.
+    OwnedAllocation restored{port.allocate(257, 4096, Kind::Scalar), port.release, 257, 4096, Kind::Scalar, false};
+    REQUIRE(restored.pointer);
+    std::cout << "[sdk-module-refusal] qualified_forms=8 imports_restored=1\n";
 }
