@@ -41,11 +41,13 @@ const Aligned original_aligned_array = static_cast<Aligned>(&::operator new[]);
 const AlignedNoThrow original_aligned_nothrow = static_cast<AlignedNoThrow>(&::operator new);
 const AlignedNoThrow original_aligned_array_nothrow = static_cast<AlignedNoThrow>(&::operator new[]);
 thread_local AllocationFailureControl* active_control = nullptr;
+thread_local AllocationFailureControl* prepared_control = nullptr;
 std::atomic<unsigned> active_borrows{0};
 bool imports_installed = false;
 
 bool Refuse(AllocationKind kind) noexcept {
     if (!active_control) return false;
+    if (active_control->require_returned_backend && !active_control->backend_returned.load()) return false;
     active_control->last_kind.store(static_cast<unsigned>(kind));
     const auto ordinal = active_control->allocations.fetch_add(1) + 1;
     if (!active_control->refuse_ordinal || ordinal != active_control->refuse_ordinal) return false;
@@ -341,15 +343,22 @@ bool InstallImports() noexcept {
     return true;
 }
 bool BeginScope(AllocationFailureControl& control) noexcept {
-    if (!imports_installed || active_control) return false;
+    if (!imports_installed || active_control || prepared_control) return false;
     active_control = &control;
     active_borrows.fetch_add(1);
     return true;
 }
 void EndScope() noexcept {
-    if (!active_control) return;
+    if (!active_control && !prepared_control) return;
     active_control = nullptr;
+    prepared_control = nullptr;
     active_borrows.fetch_sub(1);
+}
+bool PrepareReturnedScope(AllocationFailureControl& control) noexcept {
+    if (!imports_installed || active_control || prepared_control || !control.require_returned_backend) return false;
+    prepared_control = &control;
+    active_borrows.fetch_add(1);
+    return true;
 }
 void* Allocate(std::size_t size, std::size_t alignment, AllocationKind kind) {
     const auto align = static_cast<std::align_val_t>(alignment);
@@ -399,6 +408,13 @@ AllocationQualificationPort GetAllocationQualificationPort() noexcept {
     return {Allocate, Release};
 }
 AllocationFailurePort GetAllocationFailurePort() noexcept {
-    return {InstallImports, RestoreImports, BeginScope, EndScope};
+    return {InstallImports, RestoreImports, BeginScope, EndScope, PrepareReturnedScope};
 }
+void ActivateReturnedBackendAllocationScope() noexcept {
+    if (!prepared_control || active_control) return;
+    active_control = prepared_control;
+    prepared_control = nullptr;
+    active_control->backend_returned.store(true);
+}
+void RetireReturnedBackendAllocationScope() noexcept { EndScope(); }
 }

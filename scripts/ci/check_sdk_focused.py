@@ -204,9 +204,15 @@ def check_allocation_owner_native(section: str, registered: list[str]):
         raise RuntimeError("SDK module refusal imports were not confirmed restored exactly once")
     if sum(line.startswith("[sdk-module-refusal]") for line in section.splitlines()) != 9:
         raise RuntimeError("SDK module refusal qualification contains malformed or extra markers")
+    baselines = re.findall(r"^\[sdk-returned-allocation-baseline\] path=([012]) allocations=(\d+) refusals=0 retired=1 recovery_calls=0\r?$", section, re.M)
+    if (len(baselines) != 3 or {path for path, _ in baselines} != {"0", "1", "2"}
+            or any(int(count) <= 0 for _, count in baselines)
+            or sum(line.startswith("[sdk-returned-allocation-baseline]") for line in section.splitlines()) != 3):
+        raise RuntimeError("SDK actual returned-Session baselines are missing, empty, duplicated or incomplete")
     return {"qualified_paths": len(routes), "actual_image": summaries[0][1],
             "allocation_refusals": 8, "refusal_scope": "module_port_qualification",
-            "ordinary_session_allocation_matrix": "not_evaluated"}
+            "returned_session_baselines": {path: int(count) for path, count in baselines},
+            "ordinary_session_allocation_matrix": "calibrated_not_swept"}
 
 
 def check_native_command(section: str, registered: list[str]):

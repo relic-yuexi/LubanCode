@@ -21,12 +21,18 @@ struct AllocationFailureControl {
     std::atomic<std::uint64_t> allocations{0};
     std::atomic<std::uint64_t> refusals{0};
     std::atomic<unsigned> last_kind{0};
+    bool require_returned_backend = false;
+    std::atomic<bool> backend_returned{false};
 };
 struct AllocationFailurePort {
     bool (*install)() noexcept;
     bool (*restore)() noexcept;
     bool (*begin)(AllocationFailureControl&) noexcept;
     void (*end)() noexcept;
+    bool (*prepare_returned_backend)(AllocationFailureControl&) noexcept;
 };
 LUBANCORE_API AllocationFailurePort GetAllocationFailurePort() noexcept;
+// Called only by the real adapter/worker, never by the host to fabricate return.
+void ActivateReturnedBackendAllocationScope() noexcept;
+void RetireReturnedBackendAllocationScope() noexcept;
 }
