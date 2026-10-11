@@ -10,11 +10,11 @@
   "expected_events": [
     "MessageStart",
     "ThinkingDelta",
+    "UsageSnapshot",
     "ContentBlockDone",
     "ToolUseStart",
     "ToolUseInputDelta",
     "ContentBlockDone",
-    "UsageSnapshot",
     "MessageDone"
   ],
   "expected_replay": ["第二轮 contents 回传 functionCall(函数名对应)与 functionResponse;thought 一次性不重放"],
