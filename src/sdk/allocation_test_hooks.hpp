@@ -33,11 +33,14 @@ struct AllocationFailurePort {
 };
 LUBANCORE_API AllocationFailurePort GetAllocationFailurePort() noexcept;
 // Read-only installation facts, queried with no active worker or borrow.
-// Stages: 0 idle, 1 alias check, 2 collection, 3 patching, 4 installed.
+// Stages: 0 idle, 1 alias check, 2 collection, 3 import patching, 4 installed.
+// Windows bodies: 5 ownership, 6 transaction, 7 attach/detach, 8 commit.
 struct AllocationInstallationDiagnostic {
     unsigned stage = 0;
     unsigned forms_mask = 0;
     std::size_t slots = 0;
+    unsigned body_targets = 0;
+    unsigned long body_error = 0;
     bool aliases = false;
     bool collection_overflow = false;
     void* original_addresses[8]{};
