@@ -43,6 +43,7 @@ AlignedNoThrow volatile original_aligned_nothrow = static_cast<AlignedNoThrow>(&
 AlignedNoThrow volatile original_aligned_array_nothrow = static_cast<AlignedNoThrow>(&::operator new[]);
 thread_local AllocationFailureControl* active_control = nullptr;
 thread_local AllocationFailureControl* prepared_control = nullptr;
+thread_local AllocationPhase allocation_phase = AllocationPhase::None;
 std::atomic<unsigned> active_borrows{0};
 bool imports_installed = false;
 
@@ -53,6 +54,7 @@ bool Refuse(AllocationKind kind) noexcept {
     const auto ordinal = active_control->allocations.fetch_add(1) + 1;
     if (!active_control->refuse_ordinal || ordinal != active_control->refuse_ordinal) return false;
     active_control->refusals.fetch_add(1);
+    active_control->refused_phase.store(static_cast<unsigned>(allocation_phase));
     return true;
 }
 void* RefusedScalar(std::size_t size) {
@@ -416,6 +418,12 @@ void ActivateReturnedBackendAllocationScope() noexcept {
     active_control = prepared_control;
     prepared_control = nullptr;
     active_control->backend_returned.store(true);
+    allocation_phase = AllocationPhase::BackendReturned;
 }
-void RetireReturnedBackendAllocationScope() noexcept { EndScope(); }
+void RetireReturnedBackendAllocationScope() noexcept {
+    auto* control = active_control ? active_control : prepared_control;
+    if (control && control->require_returned_backend) control->worker_retired.store(true);
+    EndScope();
+}
+void SetAllocationPhase(AllocationPhase phase) noexcept { allocation_phase = phase; }
 }

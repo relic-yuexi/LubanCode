@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <new>
 #include <stdexcept>
@@ -15,6 +16,7 @@
 #include "workspace/identity.hpp"
 #include "workspace/index.hpp"
 #include "sdk/allocation_test_hooks.hpp"
+#include "sdk/usage_result.hpp"
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -187,6 +189,8 @@ private:
 };
 struct ReturnedAllocationFixture {
     std::filesystem::path root;
+    std::filesystem::path material_source, material_target;
+    std::string material_operation_id;
     ReturnedAllocationFixture() {
         static std::atomic<unsigned> serial{0};
         root = std::filesystem::temp_directory_path() / ("sdk-actual-returned-alloc-" +
@@ -194,7 +198,23 @@ struct ReturnedAllocationFixture {
         std::filesystem::create_directories(root / "cwd");
         std::filesystem::create_directories(root / "resources");
     }
-    ~ReturnedAllocationFixture() { std::error_code ec; std::filesystem::remove_all(root, ec); }
+    void Archive() const {
+        if (material_source.empty()) return;
+        std::filesystem::create_directories(material_target);
+        for (const auto& [source, name] : std::array<std::pair<std::filesystem::path, const char*>, 3>{
+                std::pair{material_source / (material_source.filename().string() + ".jsonl"), "main.jsonl"},
+                std::pair{material_source / "operations.jsonl", "operations.jsonl"},
+                std::pair{material_source / "sdk-results" / (material_operation_id + ".json"), "result.json"}}) {
+            if (!std::filesystem::exists(source)) continue;
+            if (std::filesystem::is_symlink(source)) throw std::runtime_error("allocation evidence is a symbolic link");
+            std::filesystem::copy_file(source, material_target / name, std::filesystem::copy_options::overwrite_existing);
+        }
+    }
+    ~ReturnedAllocationFixture() {
+        try { Archive(); } // Also retain the original failed point after owners retire.
+        catch (...) { } // A failed assertion/exception must remain the native failure.
+        std::error_code ec; std::filesystem::remove_all(root, ec);
+    }
     sdk::SessionOptions Options() const {
         sdk::SessionOptions options;
         options.cwd = platform::PathToUtf8(root / "cwd"); options.model = "fixture";
@@ -227,22 +247,83 @@ void CheckReturnedOperation(const sdk::Operation& operation, ReturnedPath path) 
     REQUIRE(attempt.observation); CHECK(attempt.observation->raw_fields.size() == 5);
     CHECK_FALSE(attempt.trajectory_request_id.empty());
 }
-std::uint64_t CalibrateReturnedSession(lubancore::detail::testing::AllocationFailurePort port, ReturnedPath path) {
+struct ReturnedAllocationRun {
+    std::uint64_t allocations = 0;
+    unsigned phase = 0, finals = 0, observations = 0, terminals = 0;
+    bool persisted = false;
+    sdk::OperationState state = sdk::OperationState::Accepted;
+};
+nlohmann::json OperationMaterial(const sdk::Operation& operation) {
+    nlohmann::json result{{"operationId", operation.operation_id}, {"turnId", operation.turn_id},
+        {"state", static_cast<unsigned>(operation.state)}, {"finalText", operation.final_text},
+        {"error", operation.error}, {"resultPersisted", operation.result_persisted}};
+    if (operation.usage) result["usage"] = lubancore::detail::usage_result::Encode(*operation.usage);
+    return result;
+}
+void WriteAllocationMaterial(const std::filesystem::path& path, const nlohmann::json& value) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc); REQUIRE(output);
+    output << value.dump(); output.close(); REQUIRE_FALSE(output.fail());
+}
+void CheckReturnedFaultNumbers(const sdk::Operation& operation, ReturnedPath path) {
+    CHECK(operation.state == sdk::OperationState::Succeeded || operation.state == sdk::OperationState::Failed ||
+          operation.state == sdk::OperationState::Cancelled || operation.state == sdk::OperationState::Indeterminate);
+    if (!operation.result_persisted) CHECK(operation.state == sdk::OperationState::Indeterminate);
+    if (path != ReturnedPath::Success) CHECK(operation.final_text.empty());
+    if (operation.state == sdk::OperationState::Succeeded) {
+        CHECK(path == ReturnedPath::Success); CHECK(operation.result_persisted);
+        CHECK(operation.final_text == "actual post-return allocation calibration reply");
+    }
+    REQUIRE(operation.usage);
+    const auto& usage = *operation.usage;
+    CHECK(usage.direct.coverage.samples == 1);
+    CHECK(usage.direct.total.input_tokens == 11); CHECK(usage.direct.total.output_tokens == 7);
+    CHECK(usage.direct.total.cache_read_tokens == 13); CHECK(usage.direct.total.cache_creation_tokens == 17);
+    CHECK(usage.direct.total.output_reasoning_tokens == 3); CHECK(usage.subordinate.coverage.samples == 0);
+    REQUIRE(usage.attempts.size() <= 1);
+    if (usage.attempts.empty()) CHECK_FALSE(usage.attempts_complete);
+    for (const auto& attempt : usage.attempts) {
+        CHECK(attempt.reported_by_provider); CHECK_FALSE(attempt.subordinate);
+        CHECK(attempt.usage.input_tokens == 11); CHECK(attempt.usage.output_tokens == 7);
+        CHECK(attempt.usage.cache_read_tokens == 13); CHECK(attempt.usage.cache_creation_tokens == 17);
+        CHECK(attempt.usage.output_reasoning_tokens == 3);
+        if (!attempt.provider_response_id.empty()) CHECK(attempt.provider_response_id == "actual-allocation-calibration-response");
+        if (attempt.observation) CHECK(attempt.observation->raw_fields.size() == 5);
+    }
+}
+ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationFailurePort port,
+                                        ReturnedPath path, std::uint64_t ordinal = 0) {
     ReturnedAllocationFixture fixture;
     lubancore::detail::testing::AllocationFailureControl control;
     control.require_returned_backend = true;
+    control.refuse_ordinal = ordinal;
     auto gate = std::make_shared<ReturnedGate>();
     auto runtime = sdk::Runtime::Create({platform::PathToUtf8(fixture.root / "data"), platform::PathToUtf8(fixture.root / "resources")});
     REQUIRE(runtime);
+    std::atomic<unsigned> tools{0};
+    const auto tool_sentinel = [&] {
+        sdk::Tool tool;
+        tool.name = "allocation_replay_probe"; tool.description = "must not execute"; tool.requires_approval = false;
+        tool.execute = [&](const std::string&, const sdk::ToolContext&) -> sdk::Result<sdk::ToolResult> {
+            tools.fetch_add(1); return std::unexpected(sdk::Error{"fixture.tool_replay", "must not execute"});
+        };
+        return tool;
+    };
     auto options = fixture.Options();
+    options.custom_tools.push_back(tool_sentinel());
     options.backend = std::make_unique<ReturnedAllocationBackend>(gate, port, control);
     auto opened = (*runtime)->OpenSession(std::move(options)); REQUIRE(opened);
     auto session = std::move(*opened); const auto id = session->id();
+    fixture.material_source = fixture.SessionDir(id);
+    fixture.material_target = std::filesystem::path(LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT) /
+        (std::to_string(static_cast<unsigned>(path)) + "-" + std::to_string(ordinal)) / id;
+    std::filesystem::create_directories(fixture.material_target);
     auto events = session->Subscribe(); REQUIRE(events);
+    ReturnedAllocationRun run;
     std::future<sdk::Result<void>> closing;
     ReleaseReturnedGate release{gate}; // Unblocks before future/session destruction on every assertion failure.
     const auto receipt = session->Submit("actual-allocation-calibration", "calibrate the real SDK reply return");
     REQUIRE(receipt); REQUIRE(WaitReturnedFlag(gate->entered));
+    fixture.material_operation_id = receipt->operation_id;
     CHECK_FALSE(control.backend_returned.load()); CHECK(control.allocations.load() == 0);
     if (path == ReturnedPath::Close) {
         closing = std::async(std::launch::async, [owner = session.get(), port, &control] {
@@ -258,54 +339,148 @@ std::uint64_t CalibrateReturnedSession(lubancore::detail::testing::AllocationFai
     }
     gate->Release();
     if (path == ReturnedPath::Close) {
-        REQUIRE(closing.wait_for(15s) == std::future_status::ready); REQUIRE(closing.get());
+        REQUIRE(closing.wait_for(15s) == std::future_status::ready);
+        try {
+            const auto closed = closing.get();
+            if (!ordinal) REQUIRE(closed);
+            else if (!closed) CHECK_FALSE(closed.error().code.empty());
+        } catch (const std::bad_alloc&) {
+            REQUIRE(ordinal != 0); REQUIRE(control.refusals.load() == 1);
+            // The actual Close borrow has unwound. Retry the actual API with
+            // ordinary allocation restored, never substitute a retirement flag.
+            const auto retired = session->Close();
+            if (!retired) CHECK_FALSE(retired.error().code.empty());
+        }
     } else {
         const auto complete = session->WaitResult(receipt->operation_id, 15s); REQUIRE(complete);
-        CheckReturnedOperation(*complete, path);
+        if (!ordinal) CheckReturnedOperation(*complete, path);
+        else CheckReturnedFaultNumbers(*complete, path);
         bool terminal = false;
         for (unsigned n = 0; n != 256 && !terminal; ++n) {
             const auto event = (*events)->Next(50ms); REQUIRE(event);
-            if (!event->has_value() || (*event)->kind != "operation_completed") continue;
+            if (!event->has_value()) {
+                // A confirmed final can outlive failed transient notification.
+                // Actual worker retirement makes that omission observable; the
+                // test records it rather than fabricating an ACK or an event.
+                if (ordinal && control.worker_retired.load()) break;
+                continue;
+            }
+            if ((*event)->kind != "operation_completed") continue;
             CHECK((*event)->session_id == id); CHECK((*event)->operation_id == receipt->operation_id);
             CHECK((*event)->turn_id == complete->turn_id);
             const auto payload = nlohmann::json::parse((*event)->payload_json);
-            CHECK(payload.at("resultPersisted") == true);
-            CHECK(payload.at("status") == (path == ReturnedPath::Success ? "success" : "cancelled"));
+            CHECK(payload.at("resultPersisted") == complete->result_persisted);
+            const auto status = complete->state == sdk::OperationState::Succeeded ? "success" :
+                complete->state == sdk::OperationState::Cancelled ? "cancelled" :
+                complete->state == sdk::OperationState::Failed ? "error" : "interrupted";
+            CHECK(payload.at("status") == status); CHECK(payload.at("error") == complete->error);
             terminal = true;
         }
-        REQUIRE(terminal); // The actual transient terminal is consumed before Close clears it.
-        OwnedRefusalScope scope{port, port.begin(control)}; REQUIRE(scope.active);
-        REQUIRE(session->Close());
+        run.terminals = terminal ? 1U : 0U;
+        if (!ordinal) REQUIRE(terminal);
+        try {
+            OwnedRefusalScope scope{port, port.begin(control)}; REQUIRE(scope.active);
+            const auto closed = session->Close();
+            if (!ordinal) REQUIRE(closed);
+            else if (!closed) CHECK_FALSE(closed.error().code.empty());
+        } catch (const std::bad_alloc&) {
+            REQUIRE(ordinal != 0); REQUIRE(control.refusals.load() == 1);
+            const auto retired = session->Close();
+            if (!retired) CHECK_FALSE(retired.error().code.empty());
+        }
     }
     CHECK(control.backend_returned.load()); CHECK(gate->prepared.load());
     CHECK(gate->destroyed.load()); CHECK_FALSE(gate->timed_out.load()); CHECK(gate->calls.load() == 1);
-    CHECK(control.refusals.load() == 0);
+    REQUIRE(control.worker_retired.load());
+    REQUIRE(control.refusals.load() == (ordinal ? 1U : 0U));
     const auto count = control.allocations.load(); REQUIRE(count > 0);
+    run.allocations = count; run.phase = control.refused_phase.load();
+    if (ordinal) REQUIRE(run.phase > 0);
     const auto operation = session->ReadOperation(receipt->operation_id); REQUIRE(operation);
-    CheckReturnedOperation(*operation, path);
+    if (!ordinal) CheckReturnedOperation(*operation, path);
+    else CheckReturnedFaultNumbers(*operation, path);
+    run.state = operation->state; run.persisted = operation->result_persisted;
+    WriteAllocationMaterial(fixture.material_target / "query.json", OperationMaterial(*operation));
     const auto directory = fixture.SessionDir(id);
+    std::ifstream final_file(directory / "operations.jsonl", std::ios::binary); REQUIRE(final_file);
+    nlohmann::json final_record;
+    for (std::string line; std::getline(final_file, line);) {
+        const auto row = nlohmann::json::parse(line);
+        if (row.value("kind", "") != "operation.final" || row.value("operationId", "") != receipt->operation_id) continue;
+        ++run.finals; final_record = row;
+        CHECK(row.at("turnId") == operation->turn_id);
+    }
+    REQUIRE(run.finals <= 1); // Never a second exception completion over a confirmed final.
+    final_file.close();
+    std::ifstream result_file(directory / "sdk-results" / (receipt->operation_id + ".json"), std::ios::binary);
+    nlohmann::json result_record;
+    if (result_file) result_record = nlohmann::json::parse(result_file);
+    result_file.close();
+    const bool complete_record = run.finals == 1 && result_record.is_object() && result_record.value("complete", false);
+    CHECK(operation->result_persisted == complete_record);
+    if (operation->result_persisted) {
+        const auto status = operation->state == sdk::OperationState::Succeeded ? "success" :
+            operation->state == sdk::OperationState::Cancelled ? "cancelled" : "error";
+        CHECK(final_record.at("executionStatus") == status);
+        CHECK(result_record.at("error") == operation->error);
+    }
+    if (run.finals == 1 && result_record.is_object()) {
+        CHECK(result_record.at("operationId") == operation->operation_id);
+        CHECK(result_record.at("turnId") == operation->turn_id);
+        CHECK(result_record.at("finalText") == operation->final_text);
+        REQUIRE(operation->usage);
+        CHECK(result_record.at("usage") == lubancore::detail::usage_result::Encode(*operation->usage));
+    }
     const auto ledger = lubancode::trajectory::v3::ReadV3Ledger(directory / (id + ".jsonl")); REQUIRE(ledger);
     unsigned observations = 0;
     for (const auto& event : ledger->events) {
         if (event.kind != lubancode::trajectory::v3::EventKindV3::ModelUsageObserved) continue;
         ++observations;
         CHECK(event.session_id == id); CHECK(event.turn_id == operation->turn_id);
-        CHECK(event.request_id == operation->usage->attempts.front().trajectory_request_id);
+        if (!operation->usage->attempts.empty()) CHECK(event.request_id == operation->usage->attempts.front().trajectory_request_id);
         CHECK(event.payload.at("numbers") == nlohmann::json::array({11, 7, 13, 17, 3}));
-        CHECK(event.payload.at("providerResponseId") == "actual-allocation-calibration-response");
+        const auto response = event.payload.value("providerResponseId", nlohmann::json());
+        if (!ordinal || !response.is_null()) CHECK(response == "actual-allocation-calibration-response");
     }
-    CHECK(observations == 1);
+    run.observations = observations;
+    REQUIRE(observations <= 1);
+    if (!ordinal) CHECK(observations == 1);
+    for (const auto& attempt : operation->usage->attempts) {
+        const auto bound = lubancore::detail::usage_result::ValidateRequestBinding(attempt, *ledger);
+        if (!bound) {
+            CHECK_FALSE(operation->result_persisted);
+            CHECK(operation->state == sdk::OperationState::Indeterminate);
+        }
+    }
     session.reset();
     std::atomic<unsigned> replays{0};
     auto recovery_options = fixture.Options(); recovery_options.resume_session_id = id;
+    recovery_options.custom_tools.push_back(tool_sentinel());
     recovery_options.backend = std::make_unique<RecoveryAllocationBackend>(replays);
     auto resumed = (*runtime)->OpenSession(std::move(recovery_options)); REQUIRE(resumed);
     CHECK((*resumed)->id() == id);
     const auto recovered = (*resumed)->ReadOperation(receipt->operation_id); REQUIRE(recovered);
-    CheckReturnedOperation(*recovered, path);
-    CHECK(recovered->operation_id == operation->operation_id); CHECK(recovered->turn_id == operation->turn_id);
+    WriteAllocationMaterial(fixture.material_target / "recovered.json", OperationMaterial(*recovered));
+    if (!ordinal) CheckReturnedOperation(*recovered, path);
+    CHECK(recovered->operation_id == operation->operation_id);
+    CHECK(recovered->result_persisted == operation->result_persisted);
+    if (run.finals == 1 && result_record.is_object()) {
+        CHECK(recovered->turn_id == operation->turn_id);
+        CHECK(recovered->state == operation->state);
+        CHECK(recovered->final_text == operation->final_text);
+        REQUIRE(recovered->usage);
+        CHECK(lubancore::detail::usage_result::Encode(*recovered->usage) == result_record.at("usage"));
+    } else {
+        CHECK(recovered->state == sdk::OperationState::Indeterminate);
+        CHECK_FALSE(recovered->result_persisted); CHECK(recovered->final_text.empty());
+        CHECK_FALSE(recovered->usage); CHECK_FALSE(recovered->error.empty());
+    }
     REQUIRE((*resumed)->Close()); REQUIRE((*runtime)->Shutdown()); CHECK(replays.load() == 0);
-    return count;
+    REQUIRE(tools.load() == 0);
+    fixture.Archive();
+    std::cout << "[sdk-returned-allocation-materials] path=" << static_cast<unsigned>(path)
+              << " ordinal=" << ordinal << " directory=" << nlohmann::json(platform::PathToUtf8(fixture.material_target)).dump() << '\n';
+    return run;
 }
 }
 
@@ -412,9 +587,21 @@ TEST_CASE("SDK allocation ownership: real shared image and matching host release
                   << " refused=" << refused.refusals.load() << " host=" << host_count << '\n';
     }
     for (const auto path : {ReturnedPath::Success, ReturnedPath::Cancel, ReturnedPath::Close}) {
-        const auto count = CalibrateReturnedSession(failure, path);
+        const auto baseline = RunReturnedSession(failure, path);
         std::cout << "[sdk-returned-allocation-baseline] path=" << static_cast<unsigned>(path)
-                  << " allocations=" << count << " refusals=0 retired=1 recovery_calls=0\n";
+                  << " allocations=" << baseline.allocations << " refusals=0 retired=1 recovery_calls=0\n";
+        for (std::uint64_t ordinal = 1; ordinal <= baseline.allocations; ++ordinal) {
+            CAPTURE(path); CAPTURE(ordinal);
+            const auto point = RunReturnedSession(failure, path, ordinal);
+            std::cout << "[sdk-returned-allocation-point] path=" << static_cast<unsigned>(path)
+                      << " ordinal=" << ordinal << " allocations=" << point.allocations
+                      << " phase=" << point.phase << " refusals=1 retired=1 recovery_calls=0"
+                      << " state=" << static_cast<unsigned>(point.state) << " persisted=" << point.persisted
+                      << " finals=" << point.finals << " observations=" << point.observations
+                      << " terminals=" << point.terminals << '\n';
+        }
+        std::cout << "[sdk-returned-allocation-sweep] path=" << static_cast<unsigned>(path)
+                  << " baseline=" << baseline.allocations << " points=" << baseline.allocations << '\n';
     }
     REQUIRE(failure.restore());
     imports.installed = false;

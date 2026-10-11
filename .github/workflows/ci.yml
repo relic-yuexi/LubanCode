@@ -2249,8 +2249,10 @@ jobs:
                   raise SystemExit('ASan source has no unique registered command: ' + name)
               check_native_command(sections[0], commands[0])
               if name == 'integration.sdk.lubancore_allocation_owner':
-                  from check_sdk_focused import check_allocation_owner_native
-                  check_allocation_owner_native(sections[0], commands[0])
+                  from check_sdk_focused import check_allocation_owner_native, check_allocation_owner_materials
+                  allocation = check_allocation_owner_native(sections[0], commands[0])
+                  allocation['material_receipts'] = check_allocation_owner_materials(allocation, Path('build'))
+                  Path('build/asan-allocation-matrix.json').write_text(json.dumps(allocation, indent=2) + '\n')
               counts = re.findall(r'\[doctest\] test cases:\s+(\d+)', sections[0])
               if len(counts) != 1 or int(counts[0]) == 0:
                   raise SystemExit('ASan source filter ran no native test cases: ' + name)
@@ -2526,6 +2528,8 @@ jobs:
             build/asan-model-input.json
             build/asan-owned-file-paths.json
             build/asan-results.xml
+            build/asan-allocation-matrix.json
+            build/test-evidence/sdk-focused/allocation-matrix/
             build/Testing/Temporary/LastTest.log
           if-no-files-found: warn
 
