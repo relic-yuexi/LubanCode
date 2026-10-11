@@ -67,3 +67,7 @@ Chat 正文夹具须带明确 wire 身份，才要求开场事件。重复键末
 静态 PromptAudit 的 S04 预算占比同迁这把整数尺。总占比与单段占比各核原数，各递可空百分比；超出 int 不写零，也不拿坏总占比转去判单段。可表示便保住 50% 和 15% 两条原四舍五入门槛、超百表达及独立规则。沿原静态预算 CASE 添 int64 大数、半分界、int 百分比边界和单段未知子案。静态 token 加法、MCP 占比、运行期增长和事件计数仍另欠，不能冒称整份 PromptAudit 已守界。
 
 SDK 闭包证据再留生成原件。每次出 build-closure 报告，同存那份 File API index 及它逐层引用的 codemodel、cache、target、directory 等 JSON，逐份记字节与 SHA-256。报告与原件同名配对，Lua 开关、测试开关各留各份，不拿最后一次 configure 覆盖前账。原件 owner 归 CI 证据目录，不进入安装包或 SDK 依赖；缺引用、越目录、符号链接和已有归档都拒收，不把半份原件写成通过。已有图门禁与原用例不删。归档只证材料保全，闭包复核、运行验收和端侧实机仍各欠各份证据。
+
+结果文件落盘失败也要留下实证。沿真实公开 Session 取消一场，等 Backend 交回五项；用结果路径上的目录冲突拒绝实际原子写入，不添生产故障开关。活场查询保住已返回五项，终态报 Indeterminate，result_persisted 为 false，错误列明 artifact_failed 与 persistence_failed；后续提交拒绝 storage.broken。默认事件流须在 Close 前收到同场同回合的失败终态，不能拿队列接收冒称耐久 ACK。
+
+Close 仍收回 Backend。主 V3 账若已存用量观察，逐项核原数、回复身份与回合归属；同 ID 恢复不重跑模型，缺 SDK 结果文件便报 unavailable，不从主账补造公开用量。恢复查询与原始观察各守自己的确认范围。沿现有 Close CASE 加子案，原二十二案及路径标记不删；普通堆逐点拒绝、持久 outbox/ACK 仍各欠验收。这片只补实际结果落盘失败及瞬时失败通知。
