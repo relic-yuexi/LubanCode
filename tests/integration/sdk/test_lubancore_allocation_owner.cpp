@@ -1,6 +1,9 @@
 #include <doctest/doctest.h>
 #include <array>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -24,10 +27,46 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <execinfo.h>
 #endif
 
 namespace {
 using Kind = lubancore::detail::testing::AllocationKind;
+std::terminate_handler prior_allocation_terminate = nullptr;
+[[noreturn]] void TraceAllocationTermination() noexcept {
+    // The original host owns this failure diagnostic. No SDK result is invented
+    // and the original terminate outcome remains a native test failure.
+    std::fputs("[sdk-allocation-terminate] actual host stack follows\n", stderr);
+    std::array<void*, 64> frames{};
+#ifdef _WIN32
+    const auto count = CaptureStackBackTrace(0, static_cast<DWORD>(frames.size()), frames.data(), nullptr);
+    for (unsigned i = 0; i != count; ++i) std::fprintf(stderr, "[sdk-allocation-frame] %u %p\n", i, frames[i]);
+#else
+    const auto count = ::backtrace(frames.data(), static_cast<int>(frames.size()));
+    if (count > 0) ::backtrace_symbols_fd(frames.data(), count, 2);
+#endif
+    std::fflush(stderr);
+    if (prior_allocation_terminate && prior_allocation_terminate != &TraceAllocationTermination)
+        prior_allocation_terminate();
+    std::abort();
+}
+struct ScopedAllocationTerminationDiagnostic {
+    std::terminate_handler previous;
+    ScopedAllocationTerminationDiagnostic() noexcept {
+        // Warm native unwinding before installing any refusal scope.
+        std::array<void*, 64> frames{};
+#ifdef _WIN32
+        (void)CaptureStackBackTrace(0, static_cast<DWORD>(frames.size()), frames.data(), nullptr);
+#else
+        (void)::backtrace(frames.data(), static_cast<int>(frames.size()));
+#endif
+        previous = std::set_terminate(&TraceAllocationTermination);
+        prior_allocation_terminate = previous;
+    }
+    ~ScopedAllocationTerminationDiagnostic() { std::set_terminate(previous); }
+    ScopedAllocationTerminationDiagnostic(const ScopedAllocationTerminationDiagnostic&) = delete;
+    ScopedAllocationTerminationDiagnostic& operator=(const ScopedAllocationTerminationDiagnostic&) = delete;
+};
 std::filesystem::path ImageOf(const void* address) {
 #ifdef _WIN32
     HMODULE module = nullptr;
@@ -501,6 +540,7 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
 }
 
 TEST_CASE("SDK allocation ownership: real shared image and matching host release") {
+    const ScopedAllocationTerminationDiagnostic termination_diagnostic;
     const auto port = lubancore::detail::testing::GetAllocationQualificationPort();
     REQUIRE(port.allocate);
     REQUIRE(port.release);
@@ -637,6 +677,8 @@ TEST_CASE("SDK allocation ownership: real shared image and matching host release
                   << " allocations=" << baseline.allocations << " refusals=0 retired=1 recovery_calls=0\n";
         for (std::uint64_t ordinal = 1; ordinal <= baseline.allocations; ++ordinal) {
             CAPTURE(path); CAPTURE(ordinal);
+            std::cout << "[sdk-returned-allocation-begin] path=" << static_cast<unsigned>(path)
+                      << " ordinal=" << ordinal << '\n' << std::flush;
             const auto point = RunReturnedSession(failure, path, ordinal);
             std::cout << "[sdk-returned-allocation-point] path=" << static_cast<unsigned>(path)
                       << " ordinal=" << ordinal << " allocations=" << point.allocations
