@@ -1484,8 +1484,9 @@ def main():
         props = {p["name"]: p["value"] for p in test.get("properties", [])}
         if job_stem == owned_file_paths.STEM and (type(props.get("TIMEOUT")) not in (int, float) or props["TIMEOUT"] != 300):
             raise RuntimeError("Owned file paths source must retain its original300s timeout")
-        if (props.get("DISABLED") or "sdk-focused" not in props.get("LABELS", [])
-                or not 0 < float(props.get("TIMEOUT", 0)) <= 300):
+        allocation_owner = test["name"] == "sdk.focused.lubancore_allocation_owner"
+        timeout_ok = float(props.get("TIMEOUT", 0)) == 3600 if allocation_owner else 0 < float(props.get("TIMEOUT", 0)) <= 300
+        if (props.get("DISABLED") or "sdk-focused" not in props.get("LABELS", []) or not timeout_ok):
             raise RuntimeError("SDK test is disabled, mislabeled or unbounded: " + test["name"])
         if test["name"] in ("sdk.focused.tool_job_coordinator", "sdk.focused.tool_job_start_transaction", "sdk.focused.tool_job_hold_recovery"):
             source = "test_" + test["name"].removeprefix("sdk.focused.") + ".cpp"

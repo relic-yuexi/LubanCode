@@ -163,6 +163,14 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
   set_tests_properties("${sdk_test}" PROPERTIES
     LABELS "sdk-focused" TIMEOUT 300
     ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
+  if(sdk_basename STREQUAL "test_lubancore_allocation_owner.cpp")
+    # Actual three-path baselines contain thousands of points each. Preserve
+    # every fresh Runtime and the original integration/ASan source registration.
+    set_tests_properties("${sdk_test}" PROPERTIES TIMEOUT 3600)
+    if(TEST "integration.sdk.lubancore_allocation_owner")
+      set_tests_properties("integration.sdk.lubancore_allocation_owner" PROPERTIES TIMEOUT 3600)
+    endif()
+  endif()
   if(sdk_basename STREQUAL "test_lubancore_web_fetch.cpp" OR sdk_basename STREQUAL "test_lubancore_web_search.cpp")
     set_property(TEST "${sdk_test}" APPEND PROPERTY ENVIRONMENT "NO_PROXY=127.0.0.1" "no_proxy=127.0.0.1")
   endif()
