@@ -79,7 +79,7 @@ inline std::optional<int> Percentage(std::int64_t part, std::int64_t whole,
                                      bool round_half_up = true) noexcept {
     if (part < 0 || whole <= 0) return std::nullopt;
     const auto units = part / whole;
-    constexpr int maximum = std::numeric_limits<int>::max();
+    constexpr int maximum = (std::numeric_limits<int>::max)();
     if (units > maximum / 100) return std::nullopt;
     const auto fraction = part % whole;
     std::int64_t remainder = 0;
@@ -127,12 +127,12 @@ bool Read(const nlohmann::json& object, const char* key, Integer* prefix, bool* 
     }
     if (value.is_number_unsigned()) {
         const auto raw = value.get<std::uint64_t>();
-        if (raw > static_cast<std::uint64_t>(std::numeric_limits<Integer>::max())) return false;
+        if (raw > static_cast<std::uint64_t>((std::numeric_limits<Integer>::max)())) return false;
         *prefix = static_cast<Integer>(raw);
     } else {
         if (!value.is_number_integer()) return false;
         const auto raw = value.get<std::int64_t>();
-        if (raw < std::numeric_limits<Integer>::min() || raw > std::numeric_limits<Integer>::max()) {
+        if (raw < (std::numeric_limits<Integer>::min)() || raw > (std::numeric_limits<Integer>::max)()) {
             return false;
         }
         *prefix = static_cast<Integer>(raw);
