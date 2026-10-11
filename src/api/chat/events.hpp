@@ -6,6 +6,8 @@
 
 #include "api/sse_framing.hpp"
 #include "api/types.hpp"
+#include "api/usage_delivery_owner.hpp"
+#include "api/usage_wire_builder.hpp"
 
 namespace lubancode::api::chat {
 
@@ -22,6 +24,8 @@ public:
         : reasoning_delta_field_(std::move(reasoning_delta_field)) {}
 
     std::vector<StreamEvent> Consume(const SseFrame& frame);
+    std::optional<UsageSnapshot> PendingUsage() const noexcept { return numeric_delivery_.Pending(); }
+    void UsageDelivered(const StreamEvent& event) noexcept { numeric_delivery_.Delivered(event); }
     std::vector<StreamEvent> Finish();
     bool finished() const { return finished_; }
 
@@ -39,9 +43,12 @@ private:
 
     std::map<int, ToolCall> tool_calls_;
     Usage usage_;
+    std::optional<usage_wire::Snapshot> usage_material_;
+    std::optional<std::string> provider_response_id_;
+    std::optional<std::string> conflicting_response_id_;
     bool usage_reported_ = false;  // 流里真见过 usage 对象(Token 账本单 A0)
     // 读取/写入明报位分开(缓存用量按 Wire 归一单 C2):字段在场才算明报,
-    // 推算值不算;chat wire 无缓存写入概念,creation 恒 false(未报)。
+    // 推算值不算;规范 nested cache-write 与旧顶层别名分别保留。
     bool cache_read_reported_ = false;
     bool cache_creation_reported_ = false;
     std::string usage_anomaly_;  // 最后一帧解析出的矛盾账(空 = 自洽)
@@ -50,6 +57,9 @@ private:
     bool started_ = false;
     bool saw_payload_ = false;
     bool finished_ = false;
+    usage_wire::NumericDeliveryOwner numeric_delivery_;
+    bool failed_ = false;
+    StreamError Fail(StreamError error) { failed_ = true; return error; }
     int reasoning_details_blocks_ = 0;
     bool reasoning_details_diagnostic_printed_ = false;
     bool reasoning_conflict_diagnostic_printed_ = false;

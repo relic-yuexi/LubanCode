@@ -22,6 +22,7 @@ if(NOT LUBANCORE_FOCUSED_TEST_SOURCES)
   message(FATAL_ERROR "SDK build requires registered integration/sdk tests")
 endif()
 list(APPEND LUBANCORE_FOCUSED_TEST_SOURCES
+  "${_lubancore_tests_root}/unit/api/test_usage_numeric_allocations.cpp"
   "${_lubancore_tests_root}/unit/packages/test_package_manifest.cpp"
   "${_lubancore_tests_root}/unit/tools/test_tool_job_coordinator.cpp"
   "${_lubancore_tests_root}/unit/tools/test_tool_job_start_transaction.cpp"
@@ -109,11 +110,19 @@ target_include_directories(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}
 target_compile_definitions(lubancore_sdk_tests PRIVATE
   LUBANCORE_CONSUMER_WITH_LUA=$<BOOL:${LUBANCORE_WITH_LUA}>
   LUBANCORE_TEST_JOB_POST_SDK=1
+  LUBANCORE_TEST_USAGE_NUMERIC_FAULT_PROBE="$<TARGET_FILE:lubancore_usage_numeric_fault_probe>"
   LUBANCODE_TEST_FIXTURES_DIR="${_lubancore_tests_root}/fixtures"
   LUBANCORE_TEST_SEARCH_PROBE="$<TARGET_FILE:lubancore_sdk_search_probe>"
   LUBANCORE_TEST_COMMAND_LIMITS_PROBE="$<TARGET_FILE:lubancore_command_limits_probe>")
 add_dependencies(lubancore_sdk_tests lubancore_sdk_search_probe lubancore_command_limits_probe)
+add_dependencies(lubancore_sdk_tests lubancore_usage_numeric_fault_probe)
 target_compile_features(lubancore_sdk_tests PRIVATE cxx_std_23)
+if(CMAKE_DL_LIBS)
+  target_link_libraries(lubancore_sdk_tests PRIVATE ${CMAKE_DL_LIBS})
+endif()
+target_compile_definitions(lubancore_sdk_tests PRIVATE
+  LUBANCORE_TEST_SHARED_MODULE="$<TARGET_FILE:lubancore_sdk>"
+  LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT="${CMAKE_BINARY_DIR}/test-evidence/sdk-focused/allocation-matrix")
 target_precompile_headers(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}/support/pch.hpp")
 set_source_files_properties("${_lubancore_tests_root}/support/main.cpp"
   PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
@@ -127,6 +136,12 @@ if(MSVC)
   target_compile_options(lubancore_sdk_tests PRIVATE /MP /FS)
 endif()
 if(TARGET lubancode_tests)
+  if(CMAKE_DL_LIBS)
+    target_link_libraries(lubancode_tests PRIVATE ${CMAKE_DL_LIBS})
+  endif()
+  target_compile_definitions(lubancode_tests PRIVATE
+    LUBANCORE_TEST_SHARED_MODULE="$<TARGET_FILE:lubancore_sdk>"
+    LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT="${CMAKE_BINARY_DIR}/test-evidence/sdk-focused/allocation-matrix")
   if(LUBANCODE_ASAN_TEST_PROFILE)
     add_dependencies(lubancode_tests lubancore_sdk_search_probe)
   else()
@@ -148,6 +163,14 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
   set_tests_properties("${sdk_test}" PROPERTIES
     LABELS "sdk-focused" TIMEOUT 300
     ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
+  if(sdk_basename STREQUAL "test_lubancore_allocation_owner.cpp")
+    # Actual three-path baselines contain thousands of points each. Preserve
+    # every fresh Runtime and the original integration/ASan source registration.
+    set_tests_properties("${sdk_test}" PROPERTIES TIMEOUT 3600)
+    if(TEST "integration.sdk.lubancore_allocation_owner")
+      set_tests_properties("integration.sdk.lubancore_allocation_owner" PROPERTIES TIMEOUT 3600)
+    endif()
+  endif()
   if(sdk_basename STREQUAL "test_lubancore_web_fetch.cpp" OR sdk_basename STREQUAL "test_lubancore_web_search.cpp")
     set_property(TEST "${sdk_test}" APPEND PROPERTY ENVIRONMENT "NO_PROXY=127.0.0.1" "no_proxy=127.0.0.1")
   endif()

@@ -249,14 +249,22 @@ TEST_CASE("SDK model input: unsupported history and cancellation never create an
     REQUIRE_FALSE(after.has_value()); REQUIRE(after.error().kind == api::ErrorKind::Cancelled);
     REQUIRE(capture->requests.size() == 1);
     // Returned usage is a fact even when cancellation rejects the reply body.
-    // Exactly one nonterminal snapshot means no content or success frame leaks.
-    REQUIRE(emitted.size() == 1);
+    // Numeric capture comes first; a second nonterminal snapshot supplies the
+    // legacy two-field provenance. Neither is content or a success terminal.
+    REQUIRE(emitted.size() == 2);
     const auto* snapshot = std::get_if<api::UsageSnapshot>(&emitted.front());
     REQUIRE(snapshot != nullptr); REQUIRE(snapshot->usage_reported);
     REQUIRE(snapshot->usage.input_tokens == 11); REQUIRE(snapshot->usage.output_tokens == 7);
     REQUIRE(snapshot->usage.cache_read_tokens == 0); REQUIRE(snapshot->usage.cache_creation_tokens == 0);
     REQUIRE(snapshot->usage.output_reasoning_tokens == 0);
     REQUIRE_FALSE(snapshot->cache_read_reported); REQUIRE_FALSE(snapshot->cache_creation_reported);
+    const auto* material = std::get_if<api::UsageSnapshot>(&emitted.back());
+    REQUIRE(material != nullptr); REQUIRE(material->usage_observation);
+    REQUIRE(material->usage.input_tokens == 11); REQUIRE(material->usage.output_tokens == 7);
+    namespace facts = lubancore::usage::v1;
+    REQUIRE(material->usage_observation->fields[0].presence == facts::Presence::Present);
+    REQUIRE(material->usage_observation->fields[1].origin == facts::Origin::Reported);
+    REQUIRE(material->usage_observation->fields[2].presence == facts::Presence::Missing);
 }
 
 TEST_CASE("SDK model input: legacy unavailable invalid and all four real provider projections remain distinct") {

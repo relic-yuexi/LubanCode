@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,6 +23,7 @@ namespace lubancode::cli {
 //   n >= 1000000   —— 两位小数 M("1.05M"),尾随 0 逐位省略("1.5M"/"1M")
 // 四舍五入;负数不该出现,出现了原样十进制打出来,不猜。
 std::string FormatTokenCount(std::int64_t n);
+std::string FormatTokenCount(std::optional<std::int64_t> n);
 
 // 常驻状态行的"确认档"段:"⏵⏵ 确认模式 (shift+tab 切换)" / "⏵⏵ auto ..." /
 // "⏵⏵ yolo ..."。纯文本不夹 ANSI,配什么色是终端层的事(auto 淡色、yolo
@@ -226,9 +228,10 @@ struct ContextBreakdownDetail {
 // ——"自动压缩缓冲"(窗口 − 自动压缩线,固定预留)与"空闲空间"(自动压缩
 // 线 − 已用,下限钉 0)。旧调用点不传这个参数,输出与从前逐字节一致。
 // current_estimated:传入总量来自换链后的完整请求估算，不能标作实测。
+// measured_used_tokens 缺值表示未知；不能拿字符估算顶替或印成零。
 std::vector<std::string> FormatContextBreakdown(std::size_t sys_tokens, std::size_t tools_tokens,
                                                  std::size_t history_tokens_est, std::int64_t cache_read_tokens,
-                                                 std::size_t window_tokens, std::size_t measured_used_tokens,
+                                                 std::size_t window_tokens, std::optional<std::size_t> measured_used_tokens,
                                                  const Theme& theme, int bar_width = 16,
                                                  int cache_hit_percent = -1,
                                                  const ContextBreakdownDetail* detail = nullptr,

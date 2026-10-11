@@ -55,7 +55,7 @@ KINDS = {
     "context.system.applied", "context.input.applied", "context.tool_previews.reduced",
     "model.request.prepared", "model.request.sent", "model.request.failed",
     "model.response.started", "model.response.delta", "model.response.completed",
-    "model.response.failed", "model.response.cancelled", "model.usage.appended",
+    "model.response.failed", "model.response.cancelled", "model.usage.appended", "model.usage.observed",
     "compact.requested", "compact.pending", "compact.started",
     "compact.range.retreated",
     "compact.validation.started", "compact.validation.completed", "compact.applied",
@@ -139,7 +139,7 @@ STATUSLESS_KINDS = {
     "hook.dispatch.requested", "hook.skipped", "title.requested",
     "title.extracted", "session.title.applied", "tool.result.persisted",
     "tool.result.persist_failed", "tool.result.selected", "tool.result.summary.finished",
-    "hook.effects.applied", "hook.effects.rejected", "model.usage.appended",
+    "hook.effects.applied", "hook.effects.rejected", "model.usage.appended", "model.usage.observed",
     "subagent.spawn.requested",
     # §4.67 G0:goal 控制状态提交点(与 context.*.applied 同族,不带 status;
     # 后缀虽是 applied,属于状态事实而非操作终态,故列豁免)。
@@ -833,7 +833,42 @@ def validate_line(obj: object, expect_seq: int) -> dict:
             if "usage" in payload or "cumulativeUsageTokens" in payload:
                 raise ValidationError(
                     "context.pressure.recorded 禁携带累计用量(usage 唯一 owner 在 assistant)")
-        if kind == "model.request.prepared":
+        if kind == "model.usage.observed":
+            require_payload(kind, payload, ["version", "numbers", "providerResponseId", "reportedByProvider", "incomplete"])
+            if type(payload["version"]) is not int or payload["version"] != 1:
+                raise ValidationError("usage observation version must be integer 1")
+            if not obj.get("turnId") or not obj.get("stepId"):
+                raise ValidationError("usage observation requires turnId and stepId")
+            numbers = payload["numbers"]
+            if not isinstance(numbers, list) or len(numbers) != 5 or any(
+                    type(n) is not int or not -(1 << 63) <= n < (1 << 63) for n in numbers):
+                raise ValidationError("usage observation requires five signed int64 facts")
+            if type(payload["reportedByProvider"]) is not bool or type(payload["incomplete"]) is not bool:
+                raise ValidationError("usage observation flags must be boolean")
+            def bounded_text(value, limit):
+                try:
+                    return isinstance(value, str) and bool(value) and "\0" not in value and len(value.encode("utf-8")) <= limit
+                except UnicodeError:
+                    return False
+            response = payload["providerResponseId"]
+            if response is not None and not bounded_text(response, 256):
+                raise ValidationError("usage observation response identity is invalid")
+            if "observationError" in payload and ("observation" in payload or not payload["incomplete"] or
+                    not bounded_text(payload["observationError"], 256)):
+                raise ValidationError("usage observation error requires incomplete, without material")
+            if "observation" in payload:
+                # Native usage_json::Decode additionally checks operand semantics against numbers.
+                material = payload["observation"]
+                if not isinstance(material, dict) or type(material.get("version")) is not int or material["version"] not in (1, 2):
+                    raise ValidationError("usage observation material version differs")
+                if not bounded_text(material.get("provider_namespace"), 64):
+                    raise ValidationError("usage observation provider namespace differs")
+                for key, limit, exact in (("fields", 5, True), ("raw_fields", 64, False),
+                                          ("anomalies", 16, False), ("extensions", 16, False)):
+                    values = material.get(key)
+                    if not isinstance(values, list) or len(values) > limit or (exact and len(values) != limit):
+                        raise ValidationError(f"usage observation material {key} count differs")
+        elif kind == "model.request.prepared":
             for key in ("contextId", "contextRevision", "systemMessageRef",
                         "inputMessageRefs", "readThroughSeq", "readThroughHash"):
                 if key not in payload:
@@ -1046,6 +1081,34 @@ def validate_chain_nodes(chain: list, where: str) -> None:
 def validate_semantics(lines: list[dict]) -> list[str]:
     """跨行语义;返回发现的问题列表(空 = 全绿)。"""
     problems: list[str] = []
+
+    # The observation is source material, never an additional charge owner.
+    requests: dict[str, dict] = {}
+    for obj in lines:
+        kind = obj.get("kind")
+        if kind not in ("model.request.prepared", "model.request.sent", "model.usage.observed"):
+            continue
+        request = requests.setdefault(obj.get("requestId", ""), {"prepared": None, "sent": None,
+                                                                  "ambiguous": False, "observed": False})
+        owner = tuple(obj.get(key) for key in ("sessionId", "runId", "turnId", "stepId"))
+        if kind == "model.request.prepared":
+            if request["prepared"] is not None or request["sent"] is not None:
+                request["ambiguous"] = True
+            if request["prepared"] is None:
+                request["prepared"] = owner
+        elif kind == "model.request.sent":
+            if request["sent"] is not None or request["prepared"] is None:
+                request["ambiguous"] = True
+            if request["sent"] is None:
+                request["sent"] = owner
+        else:
+            if request["prepared"] is None or request["sent"] is None:
+                problems.append("usage observation missing prepared/sent source")
+            elif request["ambiguous"] or request["prepared"] != owner or request["sent"] != owner:
+                problems.append("usage observation source mismatch")
+            if request["observed"]:
+                problems.append("duplicate physical-request usage observation")
+            request["observed"] = True
 
     # Workflow 编排账(事件账 profile):全 event 行且首行是 workflow.* 开账
     # 事实——按编排语义验,不套 agent 会话首行 system 的断言(§四 workflow)。
@@ -1266,6 +1329,23 @@ def self_test() -> int:
         "prevHash": GENESIS_HASH, "lineHash": "0" * 64,
     }
     failures = 0
+    observation = {**base, "kind": "model.usage.observed", "requestId": "request-1",
+                   "turnId": "turn-1", "stepId": "step-1",
+                   "payload": {"version": 1, "numbers": [-3, 5, 7, 11, 13],
+                               "providerResponseId": "real-id", "reportedByProvider": True,
+                               "incomplete": True}}
+    try:
+        validate_line(observation, 2)
+    except ValidationError as error:
+        failures += 1
+        print(f"self-test usage observation false rejection: {error}")
+    for field, value in (("version", 1.0), ("numbers", [True, 5, 7, 11, 13]),
+                         ("numbers", [1 << 63, 5, 7, 11, 13]),
+                         ("providerResponseId", "x" * 257), ("providerResponseId", "a\0b"),
+                         ("reportedByProvider", 1), ("incomplete", None)):
+        bad_observation = {**observation, "payload": {**observation["payload"], field: value}}
+        if not expect_fail(lambda: validate_line(bad_observation, 2), f"observation {field}"):
+            failures += 1
     # 好:合法事件行。
     try:
         validate_line(dict(base), 2)
@@ -1485,6 +1565,19 @@ def self_test() -> int:
     if not any("不得再有 applied" in problem for problem in problems):
         failures += 1
         print("self-test 漏报: achieved 后复活未报")
+    prepared = {**observation, "kind": "model.request.prepared", "seq": 3, "eventId": "evt-3", "payload": {}}
+    sent = {**prepared, "kind": "model.request.sent", "seq": 4, "eventId": "evt-4", "status": "done"}
+    source_observation = {**observation, "seq": 5, "eventId": "evt-5"}
+    usage_lines = [system_first, started, prepared, sent, source_observation]
+    if any("usage observation" in p for p in validate_semantics(usage_lines)):
+        failures += 1
+        print("self-test usage observation valid source rejected")
+    for changed in (usage_lines[:-2] + [source_observation],
+                    usage_lines + [{**source_observation, "seq": 6, "eventId": "evt-6"}],
+                    usage_lines[:-1] + [{**source_observation, "stepId": "foreign-step"}]):
+        if not any("usage observation" in p for p in validate_semantics(changed)):
+            failures += 1
+            print("self-test usage observation broken source missed")
     print(f"self-test {'PASS' if failures == 0 else 'FAIL'}({failures} 处失败)")
     return 1 if failures else 0
 

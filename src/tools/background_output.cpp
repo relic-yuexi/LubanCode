@@ -50,7 +50,9 @@ void AppendAgentSummary(std::ostringstream& oss, const AgentTaskSummary& s) {
     if (!s.title.empty()) {
         oss << " · " << s.title;
     }
-    oss << "\n  工具调用 " << s.tool_call_count << " 次 · " << s.total_input_tokens() << " tokens(完整输入)";
+    const auto input_tokens = s.total_input_tokens();
+    oss << "\n  工具调用 " << s.tool_call_count << " 次 · "
+        << (input_tokens ? std::to_string(*input_tokens) : "?") << " tokens(完整输入)";
     if (!s.activity.last_tool_name.empty()) {
         oss << " · 最后工具 " << s.activity.last_tool_name;
     }

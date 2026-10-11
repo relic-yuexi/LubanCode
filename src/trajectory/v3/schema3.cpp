@@ -2,9 +2,11 @@
 #include "trajectory/v3/schema3.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
+#include "api/usage_json.hpp"
 
 #include "trajectory/blob_store.hpp"  // BlobRef 形状(T11-C 环境快照引用)
 
@@ -44,7 +46,7 @@ std::optional<IdRequirement> IdRequirementForKind(EventKindV3 kind) {
             K::ModelRequestFailed})) {
         return IdRequirement{"requestId", true};
     }
-    if (kind == K::ModelRequestPrepared || kind == K::ModelUsageAppended) {
+    if (kind == K::ModelRequestPrepared || kind == K::ModelUsageAppended || kind == K::ModelUsageObserved) {
         return IdRequirement{"requestId", true};
     }
     if (in({K::ToolExecutionPending, K::ToolExecutionStarted, K::ToolExecutionWaiting,
@@ -810,7 +812,30 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         }
     }
     // 关键 payload 子字段(§四;完整载荷表归领域层)。
-    if (line.kind == K::ModelRequestPrepared) {
+    if (line.kind == K::ModelUsageObserved) {
+        const auto& p = line.payload;
+        const auto numbers = p.find("numbers"), id = p.find("providerResponseId");
+        if (!line.turn_id || !line.step_id || !api::usage_json::Unsigned(api::usage_json::Member(p, "version"), 1) ||
+            p["version"] != 1 ||
+            numbers == p.end() || !numbers->is_array() || numbers->size() != 5 || id == p.end() ||
+            !p.contains("reportedByProvider") || !p["reportedByProvider"].is_boolean() ||
+            !p.contains("incomplete") || !p["incomplete"].is_boolean())
+            return Err("schema3.bad_usage_observation", "usage observation shape differs");
+        std::array<std::int64_t, 5> values{};
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (!api::usage_json::Signed(&(*numbers)[i])) return Err("schema3.bad_usage_observation", "usage observation number differs");
+            values[i] = (*numbers)[i].get<std::int64_t>();
+        }
+        if (!id->is_null() && (!id->is_string() ||
+            !api::usage_observation::TextFits(id->get_ref<const std::string&>(), ::lubancore::usage::v1::kMaxResponseIdBytes, true)))
+            return Err("schema3.bad_usage_observation", "usage observation response ID differs");
+        api::Usage selected; api::usage_aggregation::Assign(selected, values);
+        if (p.contains("observation") && (p.contains("observationError") || !api::usage_json::Decode(p["observation"], selected)))
+            return Err("schema3.bad_usage_observation", "usage observation material differs");
+        if (p.contains("observationError") && (!p["incomplete"].get<bool>() || !p["observationError"].is_string() ||
+            !api::usage_observation::TextFits(p["observationError"].get_ref<const std::string&>(), ::lubancore::usage::v1::kMaxPathBytes, true)))
+            return Err("schema3.bad_usage_observation", "usage observation error differs");
+    } else if (line.kind == K::ModelRequestPrepared) {
         for (const auto* key : {"contextId", "contextRevision", "systemMessageRef",
                                 "inputMessageRefs", "readThroughSeq", "readThroughHash"}) {
             if (!line.payload.contains(key)) {

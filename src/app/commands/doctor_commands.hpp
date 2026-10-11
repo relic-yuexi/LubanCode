@@ -165,7 +165,8 @@ struct CacheProbeRoundResult {
     bool http_ok = false;
     bool usage_reported = false;
     std::int64_t cache_read = 0;
-    std::int64_t total_input = 0;
+    // nullopt retains an unrepresentable projection without changing raw usage.
+    std::optional<std::int64_t> total_input = 0;
 };
 
 // 多轮探针分型(问题 9):连跑多组固定前缀,区分——

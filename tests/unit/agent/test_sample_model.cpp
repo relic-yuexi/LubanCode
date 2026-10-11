@@ -205,22 +205,77 @@ class CancelSourceRecorder final : public lubancode::agent::LoopBoundaryRecorder
 public:
     std::optional<lubancode::agent::OutputCancelSource> cancel_source;
     int prepared_count = 0;
+    std::optional<bool> observation_receipt;
+    bool throw_observation = false;
+    int observation_count = 0;
+    int completed_count = 0;
+    int failed_count = 0;
+    bool observed_incomplete = false;
+    lubancode::api::Usage observed_usage;
     std::string OnRequestPrepared(const lubancode::api::Request&,
                                   const lubancode::agent::RequestPreparedContext&) override {
         return "req-" + std::to_string(++prepared_count);
     }
     bool OnRequestSent(const std::string&) override { return true; }
+    std::optional<bool> OnUsageObservation(const std::string&, const lubancode::api::Usage& usage,
+        const ::lubancore::usage::v1::Observation*, bool, std::string_view, bool incomplete) override {
+        ++observation_count;
+        observed_usage = usage;
+        observed_incomplete = incomplete;
+        if (throw_observation) throw 19;
+        return observation_receipt;
+    }
     void OnUsageRecorded(const std::string&, const lubancode::api::Usage&, bool, const std::string&, int, bool,
                          bool, bool, const std::string&) override {}
     bool OnOutputCompleted(const std::string&, const lubancode::api::Message&, const std::string&,
                            const std::string&) override {
+        ++completed_count;
         return true;
     }
-    void OnOutputFailed(const std::string&, const std::string&) override {}
+    void OnOutputFailed(const std::string&, const std::string&) override { ++failed_count; }
     void OnOutputCancelled(const std::string&, lubancode::agent::OutputCancelSource source) override {
         cancel_source = source;
     }
 };
+
+TEST_CASE("sample source observation failure stops success but preserves original transport error") {
+    CancelSourceRecorder recorder;
+    SampleOptions options;
+    options.boundary_recorder = &recorder;
+    SUBCASE("unsupported keeps legacy success") {
+        FullBackend backend;
+        backend.finish_reason = "end_turn";
+        const auto result = SampleModel(backend, OneShot("指令", "材料"), options);
+        CHECK(result.ok);
+        CHECK(recorder.completed_count == 1);
+        CHECK_FALSE(recorder.observed_incomplete);
+    }
+    SUBCASE("rejection stops a completed source") {
+        recorder.observation_receipt = false;
+        FullBackend backend;
+        backend.finish_reason = "end_turn";
+        const auto result = SampleModel(backend, OneShot("指令", "材料"), options);
+        CHECK_FALSE(result.ok);
+        CHECK(result.error.api_code == "sample.usage_observation_failed");
+        CHECK(result.usage.input_tokens == 100);
+        CHECK(recorder.completed_count == 0);
+        CHECK(recorder.failed_count == 1);
+    }
+    SUBCASE("unknown persistence exception retains transport cancellation") {
+        recorder.throw_observation = true;
+        FailingBackend backend;
+        const auto result = SampleModel(backend, OneShot("指令", "材料"), options);
+        CHECK_FALSE(result.ok);
+        CHECK(result.error.kind == lubancode::api::ErrorKind::Cancelled);
+        CHECK(result.error.message == "被取消");
+        CHECK(result.usage.input_tokens == 11);
+        CHECK(recorder.observed_usage.output_tokens == 4);
+        CHECK(recorder.observed_incomplete);
+        CHECK(recorder.completed_count == 0);
+        REQUIRE(recorder.cancel_source.has_value());
+    }
+    CHECK(recorder.observation_count == 1);
+}
 
 TEST_CASE("取消记账(§4.2): 外部取消链升旗记 user_interrupt") {
     BlockingBackend backend;

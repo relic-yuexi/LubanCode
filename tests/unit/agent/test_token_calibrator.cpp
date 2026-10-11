@@ -5,6 +5,9 @@
 
 #include <doctest/doctest.h>
 
+#include "api/usage_provider_normalizers.hpp"
+#include "api/usage_event_projection.hpp"
+
 #include <atomic>
 #include <cstdint>
 #include <expected>
@@ -202,7 +205,16 @@ public:
         on_event(api::MessageStart{"msg", "calib-model"});
         on_event(api::TextDelta{"回答"});
         on_event(api::ContentBlockDone{0});
-        on_event(api::MessageDone{"end_turn", usage, /*usage_reported=*/true});
+        // This controlled backend knows its cache fields are explicitly zero.
+        // Legacy two-field observations must remain ineligible for calibration.
+        const auto material = api::usage_wire::Chat(nlohmann::json{
+            {"prompt_tokens", usage.input_tokens}, {"completion_tokens", usage.output_tokens},
+            {"prompt_tokens_details", {{"cached_tokens", 0}, {"cache_write_tokens", 0}}},
+            {"completion_tokens_details", {{"reasoning_tokens", 0}}}});
+        REQUIRE(material);
+        api::MessageDone done{"end_turn", usage, true};
+        api::usage_wire::Apply(done, *material, std::nullopt);
+        on_event(done);
         return {};
     }
 };

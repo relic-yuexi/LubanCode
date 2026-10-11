@@ -12,9 +12,12 @@
     "stream": true
   },
   "expected_events": [
+    "ProviderResponseIdentity",
+    "UsageSnapshot",
     "MessageStart",
     "TextDelta",
     "ContentBlockDone",
+    "UsageSnapshot",
     "MessageDone"
   ],
   "expected_replay": [

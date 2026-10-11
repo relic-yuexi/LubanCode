@@ -9,6 +9,22 @@ if(MSVC)
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
 
+# Production numeric/material normalization with a child-only failing allocator.
+# Link actual runtime utilities; do not link a host or install this probe.
+add_executable(lubancore_usage_numeric_fault_probe
+  support/usage_numeric_fault_probe.cpp)
+target_link_libraries(lubancore_usage_numeric_fault_probe PRIVATE
+  lubancode_runtime nlohmann_json::nlohmann_json)
+target_include_directories(lubancore_usage_numeric_fault_probe PRIVATE
+  "${CMAKE_SOURCE_DIR}/src" "${CMAKE_SOURCE_DIR}/include")
+target_compile_features(lubancore_usage_numeric_fault_probe PRIVATE cxx_std_23)
+set_target_properties(lubancore_usage_numeric_fault_probe PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+if(MSVC)
+  set_property(TARGET lubancore_usage_numeric_fault_probe PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
+
 if(NOT LUBANCODE_BUILD_CLI)
   if(LUBANCODE_BUILD_SDK)
     include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
@@ -106,6 +122,9 @@ add_executable(lubancode_tests
   ${LUBANCODE_TEST_COMPILE_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
+add_dependencies(lubancode_tests lubancore_usage_numeric_fault_probe)
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCORE_TEST_USAGE_NUMERIC_FAULT_PROBE="$<TARGET_FILE:lubancore_usage_numeric_fault_probe>")
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCORE_TEST_COMMAND_LIMITS_PROBE="$<TARGET_FILE:lubancore_command_limits_probe>")
 add_dependencies(lubancode_tests lubancore_command_limits_probe)

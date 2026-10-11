@@ -30,6 +30,7 @@ TEST_CASE("CLI Memory extraction: shared actual request") { memory_extraction_fi
 TEST_CASE("CLI Memory extraction: shared usage provenance") { memory_extraction_fixture::Usage(EnginePort(),"cli-engine"); }
 TEST_CASE("CLI Memory extraction: shared finish and cancellation") { memory_extraction_fixture::Finish(EnginePort(),"cli-engine"); }
 TEST_CASE("CLI Memory extraction: actual native Connection") { memory_extraction_fixture::NativeConnection(EnginePort(),"cli-engine"); }
+TEST_CASE("CLI Memory extraction: actual native Connection faults retain source facts") { memory_extraction_fixture::NativeConnectionFaults(EnginePort(),"cli-engine"); }
 
 TEST_CASE("CLI Memory extraction: shared learning text gate") { memory_extraction_fixture::LearningTextGate(EnginePort(),"cli-engine"); }
 TEST_CASE("CLI Memory extraction: shared learning evidence gate") { memory_extraction_fixture::LearningEvidenceGate(EnginePort(),"cli-engine"); }

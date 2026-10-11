@@ -266,6 +266,8 @@ if(MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+include(cmake/JsonRetirement.cmake)
+
 # Lua 5.4(M7 Lua 插件用):不管走没走 vcpkg,统一 FetchContent 拉源码
 # (跟下面 doctest 一个待遇)。lua 官方仓库没有 CMakeLists,这里自己包一层:
 # GLOB 根目录的 *.c,排除 lua.c(独立解释器入口)/onelua.c(单文件合并编译

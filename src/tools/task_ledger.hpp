@@ -32,6 +32,7 @@
 #include "agent/task_spec.hpp"  // AgentTaskSpec v2 canonical task contract
 #include "agent/turn_budget.hpp"  // TurnBudgetAccount:任务级 turn 预算唯一真账(turn 预算单)
 #include "api/types.hpp"
+#include "api/usage_aggregation.hpp"
 #include "tools/subagent_scheduler.hpp"  // SubagentGovernance/AgentLedgerStats:P0-2 纯 admission
 
 namespace lubancode::tools {
@@ -165,9 +166,16 @@ struct TaskOutcome {
     std::int64_t cache_creation_tokens = 0;
     std::int64_t output_tokens = 0;
     double elapsed_seconds = 0;
+    std::int64_t output_reasoning_tokens = 0;
+    ::lubancore::usage::v1::Coverage usage_coverage;
 
-    std::int64_t total_input_tokens() const {
-        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    std::optional<std::int64_t> total_input_tokens() const {
+        return api::usage_aggregation::TotalInput(
+            api::Usage{input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens});
+    }
+    std::optional<std::int64_t> total_tokens() const {
+        const auto input = total_input_tokens();
+        return input ? api::usage_observation::CheckedAdd(*input, output_tokens) : std::nullopt;
     }
 };
 
@@ -255,9 +263,16 @@ struct AgentTaskSnapshot {
     // 消费方只看 state == Running 判"还在跑"。
     TaskOutcome outcome;
     bool delivered = false;
+    std::int64_t output_reasoning_tokens = 0;
+    ::lubancore::usage::v1::Coverage usage_coverage;
 
-    std::int64_t total_input_tokens() const {
-        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    std::optional<std::int64_t> total_input_tokens() const {
+        return api::usage_aggregation::TotalInput(
+            api::Usage{input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens});
+    }
+    std::optional<std::int64_t> total_tokens() const {
+        const auto input = total_input_tokens();
+        return input ? api::usage_observation::CheckedAdd(*input, output_tokens) : std::nullopt;
     }
 };
 
@@ -265,6 +280,22 @@ struct AgentTaskSnapshot {
 // 子代理消息账(规格"现场三"):事件类型与 main 的 transcript 对齐,查看态
 // 复用 main 的 TranscriptItem/折叠规则/工具卡 renderer 渲染这份账。
 // ---------------------------------------------------------------------------
+// Caller holds the task ledger mutex. Fixed-size numeric ownership precedes
+// event construction and host callbacks; an overflowing field keeps its prefix.
+inline void AccumulateTaskUsage(AgentTaskSnapshot& snapshot, const api::Usage& source,
+    const ::lubancore::usage::v1::Observation* observation, bool incomplete) {
+    const auto before = snapshot.usage_coverage;
+    api::Usage total{snapshot.input_tokens, snapshot.output_tokens, snapshot.cache_read_tokens,
+                     snapshot.cache_creation_tokens, snapshot.output_reasoning_tokens};
+    api::usage_aggregation::Add(total, snapshot.usage_coverage, source, observation);
+    snapshot.input_tokens = total.input_tokens; snapshot.output_tokens = total.output_tokens;
+    snapshot.cache_read_tokens = total.cache_read_tokens; snapshot.cache_creation_tokens = total.cache_creation_tokens;
+    snapshot.output_reasoning_tokens = total.output_reasoning_tokens;
+    if (incomplete) for (std::size_t i = 0; i < ::lubancore::usage::v1::kFieldCount; ++i)
+        if (snapshot.usage_coverage.fields[i].anomalous == before.fields[i].anomalous)
+            api::usage_aggregation::Increment(snapshot.usage_coverage.fields[i].anomalous, snapshot.usage_coverage);
+}
+
 enum class AgentTaskEventKind {
     UserMessage,         // 任务说明(派出时的 prompt)或续投输入
     AssistantText,       // 助手正文一段(工具/思考边界切段)
@@ -357,9 +388,16 @@ struct AgentTaskSummary {
     agent::AgentProgressClock progress;
     // 结果是否已交回主会话(DrainCompletionNotices 置位)。
     bool delivered = false;
+    std::int64_t output_reasoning_tokens = 0;
+    ::lubancore::usage::v1::Coverage usage_coverage;
 
-    std::int64_t total_input_tokens() const {
-        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    std::optional<std::int64_t> total_input_tokens() const {
+        return api::usage_aggregation::TotalInput(
+            api::Usage{input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens});
+    }
+    std::optional<std::int64_t> total_tokens() const {
+        const auto input = total_input_tokens();
+        return input ? api::usage_observation::CheckedAdd(*input, output_tokens) : std::nullopt;
     }
 };
 

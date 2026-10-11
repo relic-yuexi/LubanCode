@@ -5,7 +5,7 @@
 // "17/20 请求有 provider usage",不给一只貌似完整的总数。
 //
 // 口径铁律:
-//   - total_input_tokens 只调 api::TotalInputTokens(input+cache_read+cache_creation);
+//   - 完整输入走 checked 投影(input+cache_read+cache_creation);
 //   - reasoning 含在 output 里,汇总不再加一遍;
 //   - provider 没报,token 字段不出现,绝不拿 0 顶上;
 //   - context 估算、provider usage、价格估算、实际账单分栏(此处只装
@@ -30,6 +30,9 @@ inline constexpr const char* kUsageSampleSchema = "lubancode.usage.sample";
 // cache_reported_by_provider 读进 read 位、creation 位留 nullopt。仍算
 // v1:旧档可读、新档旧读端忽略新键,不需迁移。
 inline constexpr int kUsageSampleSchemaVersion = 1;
+// v2 preserves all five facts when a derived total is unrepresentable;
+// both totals are required, with null exactly where arithmetic overflows.
+inline constexpr int kUsageSampleNullableTotalsSchemaVersion = 2;
 
 // usage 的来源三态(§6.1)。
 enum class UsageSource { ProviderReported, Estimated, Unknown };
@@ -84,8 +87,8 @@ struct UsageSample {
     std::string model;
     UsageSource usage_source = UsageSource::Unknown;
     std::optional<api::Usage> usage;          // nullopt = unknown,字段不出现
-    std::int64_t total_input_tokens = 0;      // 只等于 api::TotalInputTokens(usage)
-    std::int64_t total_billed_shape_tokens = 0;  // total_input + output,比较规模用
+    std::int64_t total_input_tokens = 0;      // Legacy slot; consume TotalInputProjection.
+    std::int64_t total_billed_shape_tokens = 0;  // Legacy slot; consume BilledShapeProjection.
     std::optional<int> cache_epoch;
     std::optional<bool> prefix_append_only;
     // 读/写明报位分开(缓存用量按 Wire 归一单 C2,2026-09):nullopt = 旧账
@@ -108,6 +111,10 @@ struct UsageSample {
     bool legacy_owner = false;
     bool legacy_inferred = false;
 
+    // Raw facts remain authoritative; legacy numeric slots are not projections.
+    std::optional<std::int64_t> TotalInputProjection() const noexcept;
+    std::optional<std::int64_t> BilledShapeProjection() const noexcept;
+    void RefreshTotals() noexcept;
     nlohmann::json ToJson() const;
     // 严格解析:未知键拒绝、枚举严格、口径校验(reasoning ⊆ output、
     // total_input 与五项一致、unknown ⇒ usage 缺席)。

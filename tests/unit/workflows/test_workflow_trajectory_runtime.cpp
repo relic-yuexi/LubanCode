@@ -33,3 +33,41 @@
 // 空 main,是存量隐患,见销项册 V3-LEGACY-01 边界注);workflow 的 v3
 // 编排账(account_root/WorkflowRunAccount)接线归 V3-GAP-05,旧桥回归随
 // 旧盘 v2 活场(恢复收养)另立夹具单守。以下整段退役,不硬凑前提。
+
+// Actual V3 recovery lives here; the retired v2 write bridge stays retired.
+#include "workflow_account_runtime_fixture.hpp"
+
+TEST_CASE("账路恢复:预算计数不归零,token 账跨恢复延续") {
+    const fs::path root = TempRoot("budget");
+    auto parsed = ParseWorkflowYaml(kLinearYaml);
+    REQUIRE(parsed.has_value());
+
+    auto first_executor = std::make_shared<PerNodeExecutor>();
+    first_executor->script["a"] = {{true, "", nlohmann::json{{"who", std::string("a")}}, 7}};
+    first_executor->script["b"] = {{true, "", nlohmann::json{{"who", std::string("b")}}, 3}};
+    RuntimeOptions first_options = BaseOptions(root, first_executor);
+    int writes = 0;
+    first_options.account_fault = [&writes] {
+        ++writes;
+        // a/b 全部收口(#1-#10 落稳),终态前 checkpoint(#11)注入失败:
+        // 执行事实齐全、run 无终态——恢复只补收口,零新执行。
+        return writes == 11 ? std::optional<std::string>("test.injected") : std::nullopt;
+    };
+    WorkflowRuntime first(first_options);
+    const auto interrupted = first.Run(*parsed, RunInputs{});
+    // 执行全成、终态没写住:summary 如实带 account_terminal_unwritten。
+    REQUIRE(interrupted.state == RunState::Succeeded);
+    CHECK(interrupted.error_code == "account_terminal_unwritten");
+    CHECK(interrupted.tokens_used == 10);
+
+    auto second_executor = std::make_shared<PerNodeExecutor>();
+    WorkflowRuntime resumer(BaseOptions(root, second_executor));
+    const auto resumed = resumer.Resume(root / "run-acc");
+    REQUIRE(resumed.has_value());
+    CHECK(resumed->state == RunState::Succeeded);
+    CHECK(second_executor->calls.empty());  // 事实齐全:恢复零新执行
+    // 计数不归零:两只节点的 token 账(7+3)原样带进恢复后的 run。
+    CHECK(resumed->tokens_used == 10);
+    // 终态这次写住了:再 resume 拒绝复活。
+    CHECK_FALSE(resumer.Resume(root / "run-acc").has_value());
+}

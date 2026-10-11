@@ -297,7 +297,11 @@ void BlockedParent(const fs::path& base, const fs::path& probe, bool fail) {
     } else {
         Write(fixture.project / "blocked.release");
         const auto until = std::chrono::steady_clock::now() + 10s;
-        while (!fs::is_regular_file(fixture.project / "blocked.done") && std::chrono::steady_clock::now() < until) std::this_thread::sleep_for(5ms);
+        while (std::chrono::steady_clock::now() < until) {
+            if (fs::is_regular_file(fixture.project / "blocked.done") &&
+                Read(fixture.project / "blocked.done") == "blocked") break;
+            std::this_thread::sleep_for(5ms);
+        }
         Check(Read(fixture.project / "blocked.done") == "blocked", "actual command did not finish");
         const auto waiting = session->WaitJob(id, 20ms);
         Check(!waiting && waiting.error().code == "sdk.wait.timeout", "query pumped writer while backend was blocked");

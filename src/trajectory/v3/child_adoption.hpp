@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -48,6 +49,15 @@ struct ChildAdoptionCheck {
 // policy, authenticate producer claims or reconstruct append-after-Close facts.
 ChildAdoptionCheck ValidateChildAdoption(
     const V3Ledger& verified_parent, const std::filesystem::path& parent_dir,
-    std::string_view turn_id, std::string_view action_id, std::uint64_t attempt);
+    std::string_view turn_id, std::string_view action_id, std::uint64_t attempt,
+    const std::function<void(const V3Ledger&)>& checked_child = {},
+    const std::function<void(const V3Ledger&)>& checked_terminal_source = {});
+// checked_child borrows the original bounded read only after terminal, parent
+// source, result selection and input adoption checks. Pending prepared
+// consumption retains its Incomplete verdict; the callback cannot upgrade it.
+// checked_terminal_source is a distinct accounting-source borrow after child
+// identity, parent spawn/source and the real closed terminal are verified. It
+// does not prove raw capture, selection, adoption or parent consumption. Both
+// callbacks share the original bounded read and cannot change the verdict.
 
 } // namespace lubancode::trajectory::v3

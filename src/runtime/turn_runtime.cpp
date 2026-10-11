@@ -4,8 +4,10 @@
 
 #include "runtime/turn_runtime.hpp"
 
+#include <array>
 #include <utility>
 
+#include "api/usage_totals.hpp"
 #include "tools/command_safety.hpp"
 
 namespace lubancode::runtime {
@@ -234,7 +236,7 @@ PromptGate EmitPreTurn(hooks::HookDispatcher* dispatcher, const std::string& tur
 }
 
 void EmitPostTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id, const std::string& final_text,
-                  int steps, int actions, std::int64_t input_tokens, std::int64_t output_tokens,
+                  std::size_t steps, int actions, std::optional<std::int64_t> input_tokens, std::optional<std::int64_t> output_tokens,
                   std::int64_t duration_ms, bool cancelled) {
     if (dispatcher == nullptr || dispatcher->Empty() || !dispatcher->HasHandlersFor(hooks::HookEvent::PostTurn)) {
         return;
@@ -245,8 +247,10 @@ void EmitPostTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id,
     payload.fields["last_assistant_message"] = final_text;
     payload.fields["steps"] = steps;
     payload.fields["actions"] = actions;
-    payload.fields["input_tokens"] = input_tokens;
-    payload.fields["output_tokens"] = output_tokens;
+    payload.fields["input_tokens"] = input_tokens ? nlohmann::json(*input_tokens) : nlohmann::json(nullptr);
+    payload.fields["output_tokens"] = output_tokens ? nlohmann::json(*output_tokens) : nlohmann::json(nullptr);
+    payload.fields["input_tokens_overflow"] = !input_tokens.has_value();
+    payload.fields["output_tokens_overflow"] = !output_tokens.has_value();
     payload.fields["duration_ms"] = duration_ms;
     payload.fields["cancelled"] = cancelled;
     dispatcher->Emit(hooks::HookEvent::PostTurn, payload);
@@ -288,7 +292,14 @@ void EmitPostStep(hooks::HookDispatcher* dispatcher, const api::UsageReport& rep
     payload.fields["api_duration_ms"] = report.api_duration_ms;
     payload.fields["stop_reason"] = report.stop_reason;
     payload.fields["model"] = report.model;
-    payload.fields["input_tokens"] = api::TotalInputTokens(report.usage);
+    const auto input = api::CheckedTotalInputTokens(report.usage);
+    payload.fields["input_tokens"] = input ? nlohmann::json(*input) : nlohmann::json(nullptr);
+    payload.fields["input_tokens_overflow"] = !input.has_value();
+    // Keep the original source counters independently of the legacy total-input
+    // projection. Reasoning is part of output, never an extra billed addend.
+    payload.fields["usage_numbers"] = std::array<std::int64_t, 5>{report.usage.input_tokens,
+        report.usage.output_tokens, report.usage.cache_read_tokens, report.usage.cache_creation_tokens,
+        report.usage.output_reasoning_tokens};
     payload.fields["output_tokens"] = report.usage.output_tokens;
     payload.fields["usage_reported"] = report.reported_by_provider;
     dispatcher->Emit(hooks::HookEvent::PostStep, payload);

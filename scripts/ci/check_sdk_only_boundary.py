@@ -127,6 +127,7 @@ SDK_HOST_ONLY_SOURCE_FILES = {
 }
 HOST_PREFIXES = ("src/cli/", "src/app/", "src/app_server/", "src/frontend/", "src/tui/", *SDK_HOST_ONLY_SOURCE_PREFIXES)
 SHARED_SDK_TEST_SOURCES = {
+    "tests/unit/api/test_usage_numeric_allocations.cpp",
     "tests/unit/packages/test_package_manifest.cpp",
     "tests/unit/tools/test_lua_protected.cpp",
     "tests/unit/tools/test_tool_job_coordinator.cpp",
@@ -167,6 +168,16 @@ PRIVATE_TEST_PROBES = {
     SEARCH_PROBE_TARGET: SEARCH_PROBE_SOURCE,
     COMMAND_LIMITS_PROBE_TARGET: COMMAND_LIMITS_PROBE_SOURCE,
 }
+NUMERIC_PROBE_TARGET = "lubancore_usage_numeric_fault_probe"
+NUMERIC_PROBE_SOURCE = "tests/support/usage_numeric_fault_probe.cpp"
+PRIVATE_RUNTIME_TEST_PROBES = {NUMERIC_PROBE_TARGET: NUMERIC_PROBE_SOURCE}
+ALL_PRIVATE_TEST_PROBES = {**PRIVATE_TEST_PROBES, **PRIVATE_RUNTIME_TEST_PROBES}
+
+
+def private_probe_label(name):
+    return {SEARCH_PROBE_TARGET: "search probe", COMMAND_LIMITS_PROBE_TARGET: "command limits probe",
+            NUMERIC_PROBE_TARGET: "numeric usage probe"}[name]
+
 # Real private implementations compiled into the SDK reference-test executable,
 # rather than exposed as additional DLL ABI. No other SDK implementation gets
 # this testing-only exception.
@@ -393,8 +404,8 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
         if name.startswith("tests/"):
             if not expect_testing:
                 violations.append(f"testing is OFF but target {owner} includes {name}")
-            elif not ((owner in PRIVATE_TEST_PROBES and name == PRIVATE_TEST_PROBES[owner]) or
-                      (owner == "lubancore_sdk_tests" and name not in PRIVATE_TEST_PROBES.values() and (
+            elif not ((owner in ALL_PRIVATE_TEST_PROBES and name == ALL_PRIVATE_TEST_PROBES[owner]) or
+                      (owner == "lubancore_sdk_tests" and name not in ALL_PRIVATE_TEST_PROBES.values() and (
                           name.startswith(("tests/integration/sdk/", "tests/unit/sdk/", "tests/support/")) or
                           name in SHARED_SDK_TEST_SOURCES))):
                 violations.append(f"non-SDK test compilation: target {owner} includes {name}")
@@ -441,12 +452,12 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
             "artifacts": [entry["path"] for entry in target.get("artifacts", [])],
             "includeDirectories": [[str(path) for path in paths] for paths in include_groups],
         }
-        if target["name"] in PRIVATE_TEST_PROBES:
-            label = "search probe" if target["name"] == SEARCH_PROBE_TARGET else "command limits probe"
+        if target["name"] in ALL_PRIVATE_TEST_PROBES:
+            label = private_probe_label(target["name"])
             if not expect_testing or target["type"] != "EXECUTABLE":
                 violations.append(label + " requires testing ON and an executable target")
             compiled = {entry["projectPath"] for entry in source_facts if entry["compiled"]}
-            if compiled != {PRIVATE_TEST_PROBES[target["name"]]}:
+            if compiled != {ALL_PRIVATE_TEST_PROBES[target["name"]]}:
                 violations.append(label + " must compile only its isolated fixture")
     violations.extend(package_ownership_violations({key: {
         "name": target["name"], "type": target["type"],
@@ -457,13 +468,28 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
             "name": target["name"], "type": target["type"],
             "projectSources": [entry["projectPath"] or entry["path"] for entry in target["sources"] if entry["compiled"]],
         } for key, target in targets.items()}, with_lua))
+    # CMake's codemodel includes transitive link dependencies. Admit only the
+    # actual runtime's library closure, never a separately attached host edge.
+    numeric_runtime_closure = set()
+    pending_runtime = [key for key, value in targets.items() if value["name"] == "lubancode_runtime"]
+    while pending_runtime:
+        key = pending_runtime.pop()
+        if key in numeric_runtime_closure:
+            continue
+        linked = targets.get(key, {})
+        if linked.get("type") not in ("STATIC_LIBRARY", "SHARED_LIBRARY", "OBJECT_LIBRARY", "INTERFACE_LIBRARY"):
+            continue
+        numeric_runtime_closure.add(key)
+        pending_runtime.extend(linked.get("dependencies", []))
     for target in targets.values():
-        if target["name"] in PRIVATE_TEST_PROBES:
-            label = "search probe" if target["name"] == SEARCH_PROBE_TARGET else "command limits probe"
+        if target["name"] in ALL_PRIVATE_TEST_PROBES:
+            label = private_probe_label(target["name"])
             for dependency in target["dependencies"]:
                 # Visual Studio can add CMake's regeneration utility. It is not
                 # a linked SDK/runtime dependency and contains no probe code.
                 linked = targets.get(dependency, {})
+                if target["name"] == NUMERIC_PROBE_TARGET and dependency in numeric_runtime_closure:
+                    continue
                 if linked.get("name") != "ZERO_CHECK" or linked.get("type") != "UTILITY":
                     violations.append(label + " must not depend on a project library or host target")
     if (source / TODO_CONSUMER_SOURCE).is_file():
@@ -523,9 +549,9 @@ def inspect(source: Path, build: Path, config: str, expect_testing: bool, lua_pr
             raise ValueError(f"unknown build dependency {target_id}")
         sdk_closure.add(target_id)
         pending.extend(targets[target_id]["dependencies"])
-    for probe in PRIVATE_TEST_PROBES:
+    for probe in ALL_PRIVATE_TEST_PROBES:
         if any(targets[target_id]["name"] == probe for target_id in sdk_closure):
-            label = "search probe" if probe == SEARCH_PROBE_TARGET else "command limits probe"
+            label = private_probe_label(probe)
             violations.append("SDK library depends on the private " + label)
     sdk_sources = sorted({entry["projectPath"] for target_id in sdk_closure
                           for entry in targets[target_id]["sources"]

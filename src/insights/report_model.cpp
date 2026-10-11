@@ -18,7 +18,9 @@ bool ReadUint(const nlohmann::json& json, const char* key, std::uint64_t* out) {
 nlohmann::json InsightsReport::ToJson() const {
     nlohmann::json json = nlohmann::json::object();
     json["schema"] = kInsightsReportSchema;
-    json["schema_version"] = kInsightsReportSchemaVersion;
+    bool nullable = usage.knowledge.HasUnknown();
+    for (const auto& session : sessions) nullable |= session.HasUnknownProjection();
+    json["schema_version"] = nullable ? 2 : kInsightsReportSchemaVersion;
     json["analyzer_version"] = kInsightsAnalyzerVersion;
     json["generated_at"] = generated_at;
     nlohmann::json scope_json = nlohmann::json::object();
@@ -38,15 +40,15 @@ nlohmann::json InsightsReport::ToJson() const {
     usage_json["requests_total"] = usage.requests_total;
     usage_json["requests_with_usage"] = usage.requests_with_usage;
     usage_json["requests_unknown"] = usage.requests_unknown;
-    usage_json["input_tokens"] = usage.input_tokens;
-    usage_json["cache_read_tokens"] = usage.cache_read_tokens;
-    usage_json["cache_creation_tokens"] = usage.cache_creation_tokens;
-    usage_json["output_tokens"] = usage.output_tokens;
-    usage_json["reasoning_tokens"] = usage.reasoning_tokens;
+    usage_json["input_tokens"] = usage_projection::Number(usage.input_tokens, usage.knowledge.input_tokens);
+    usage_json["cache_read_tokens"] = usage_projection::Number(usage.cache_read_tokens, usage.knowledge.cache_read_tokens);
+    usage_json["cache_creation_tokens"] = usage_projection::Number(usage.cache_creation_tokens, usage.knowledge.cache_creation_tokens);
+    usage_json["output_tokens"] = usage_projection::Number(usage.output_tokens, usage.knowledge.output_tokens);
+    usage_json["reasoning_tokens"] = usage_projection::Number(usage.reasoning_tokens, usage.knowledge.reasoning_tokens);
     nlohmann::json cost_json = nlohmann::json::object();
     cost_json["status"] = usage.cost_status;
     cost_json["currency"] = usage.cost_currency;
-    cost_json["micros"] = usage.cost_micros;
+    cost_json["micros"] = usage_projection::Number(usage.cost_micros, usage.knowledge.cost_micros);
     cost_json["price_table_id"] = usage.price_table_id;
     usage_json["cost"] = std::move(cost_json);
     json["usage"] = std::move(usage_json);
@@ -76,11 +78,12 @@ std::optional<InsightsReport> InsightsReport::FromJsonStrict(const nlohmann::jso
         *error = "schema 名不是 " + std::string(kInsightsReportSchema);
         return std::nullopt;
     }
-    if (!json.contains("schema_version") || !json.at("schema_version").is_number_integer() ||
-        json.at("schema_version").get<int>() != kInsightsReportSchemaVersion) {
-        *error = "schema_version 只认 1";
+    const auto version = usage_projection::Version(json);
+    if (!version) {
+        *error = "schema_version 只认 1 或 2";
         return std::nullopt;
     }
+    const bool nullable = *version == 2;
     if (!ReadString(json, "generated_at", &report.generated_at) ||
         !ReadString(json, "analysis_mode", &report.analysis_mode)) {
         *error = "generated_at/analysis_mode 必填";
@@ -119,18 +122,17 @@ std::optional<InsightsReport> InsightsReport::FromJsonStrict(const nlohmann::jso
         return std::nullopt;
     }
     const auto& usage = json.at("usage");
-    const auto read_int = [&](const char* key, std::int64_t* out) {
-        return usage.contains(key) && usage.at(key).is_number_integer() &&
-               (*out = usage.at(key).get<std::int64_t>(), true);
+    const auto read_int = [&](const char* key, std::int64_t* out, bool* known) {
+        return usage_projection::Read(usage, key, out, known, nullable);
     };
     if (!ReadUint(usage, "requests_total", &report.usage.requests_total) ||
         !ReadUint(usage, "requests_with_usage", &report.usage.requests_with_usage) ||
         !ReadUint(usage, "requests_unknown", &report.usage.requests_unknown) ||
-        !read_int("input_tokens", &report.usage.input_tokens) ||
-        !read_int("cache_read_tokens", &report.usage.cache_read_tokens) ||
-        !read_int("cache_creation_tokens", &report.usage.cache_creation_tokens) ||
-        !read_int("output_tokens", &report.usage.output_tokens) ||
-        !read_int("reasoning_tokens", &report.usage.reasoning_tokens)) {
+        !read_int("input_tokens", &report.usage.input_tokens, &report.usage.knowledge.input_tokens) ||
+        !read_int("cache_read_tokens", &report.usage.cache_read_tokens, &report.usage.knowledge.cache_read_tokens) ||
+        !read_int("cache_creation_tokens", &report.usage.cache_creation_tokens, &report.usage.knowledge.cache_creation_tokens) ||
+        !read_int("output_tokens", &report.usage.output_tokens, &report.usage.knowledge.output_tokens) ||
+        !read_int("reasoning_tokens", &report.usage.reasoning_tokens, &report.usage.knowledge.reasoning_tokens)) {
         *error = "usage 八键不合";
         return std::nullopt;
     }
@@ -141,11 +143,11 @@ std::optional<InsightsReport> InsightsReport::FromJsonStrict(const nlohmann::jso
     const auto& cost = usage.at("cost");
     if (!ReadString(cost, "status", &report.usage.cost_status) ||
         !ReadString(cost, "currency", &report.usage.cost_currency) ||
-        !cost.contains("micros") || !cost.at("micros").is_number_integer() || cost.size() > 4) {
+        !usage_projection::Read(cost, "micros", &report.usage.cost_micros,
+                               &report.usage.knowledge.cost_micros, nullable) || cost.size() > 4) {
         *error = "usage.cost 四键不合";
         return std::nullopt;
     }
-    report.usage.cost_micros = cost.at("micros").get<std::int64_t>();
     ReadString(cost, "price_table_id", &report.usage.price_table_id);
     if (usage.size() != 9) {
         *error = "usage 未知键";
@@ -156,6 +158,10 @@ std::optional<InsightsReport> InsightsReport::FromJsonStrict(const nlohmann::jso
         return std::nullopt;
     }
     for (const auto& item : json.at("sessions")) {
+        if (!nullable && usage_projection::Version(item) != 1) {
+            *error = "v1 report 不认新版 session 材料";
+            return std::nullopt;
+        }
         const auto session = SessionInsightSummary::FromJsonStrict(item, error);
         if (!session.has_value()) {
             return std::nullopt;

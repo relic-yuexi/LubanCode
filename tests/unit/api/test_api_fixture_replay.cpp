@@ -11,6 +11,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <map>
 #include <random>
 #include <string>
@@ -80,22 +81,14 @@ api::SseFrame Frame(const std::pair<std::string, std::string>& raw) {
 
 // 中立事件的类型名(与 manifest expected_events 的记法一致)。
 std::string EventName(const api::StreamEvent& event) {
-    switch (event.index()) {
-    case 0: return "MessageStart";
-    case 1: return "TextDelta";
-    case 2: return "ThinkingDelta";
-    case 3: return "ToolUseStart";
-    case 4: return "ToolUseInputDelta";
-    case 5: return "ContentBlockDone";
-    case 6: return "BuiltinToolStart";
-    case 7: return "BuiltinToolDone";
-    case 8: return "MessageDone";
-    case 9: return "ImageOutput";
-    // 动态工具 P3:服务端工具搜索的两枚事件(原生块解析开门时才有)。
-    case 10: return "ServerToolUseStart";
-    case 11: return "ServerToolResult";
-    default: return "StreamError";
-    }
+    constexpr auto names = std::array{"MessageStart", "TextDelta", "ThinkingDelta",
+        "ToolUseStart", "ToolUseInputDelta", "ContentBlockDone", "BuiltinToolStart",
+        "BuiltinToolDone", "MessageDone", "ImageOutput", "ServerToolUseStart",
+        "ServerToolResult", "RedactedThinking", "StreamError", "UsageSnapshot",
+        "ProviderResponseIdentity"};
+    static_assert(names.size() == std::variant_size_v<api::StreamEvent>,
+                  "Every new stream variant must have a fixture contract name");
+    return names.at(event.index());
 }
 
 // 一册 fixture 按自家 wire 喂对应 parser,吐中立事件序列。字节先按切法
@@ -244,6 +237,22 @@ TEST_CASE("fixture 回放:每册事件类型序列/usage/stop_reason 与 manifes
         }
 
         const auto* done = FinalDone(events);
+        for (const auto& event : events) {
+            if (const auto* snapshot = std::get_if<api::UsageSnapshot>(&event)) {
+                CHECK(snapshot->usage_reported);
+                REQUIRE(snapshot->usage_observation.has_value());
+                if (done && done->provider_response_id) {
+                    CHECK(snapshot->provider_response_id == done->provider_response_id);
+                }
+            }
+            if (const auto* identity = std::get_if<api::ProviderResponseIdentity>(&event)) {
+                CHECK_FALSE(identity->id.empty());
+                if (done) {
+                    REQUIRE(done->provider_response_id.has_value());
+                    CHECK(identity->id == *done->provider_response_id);
+                }
+            }
+        }
         if (std::find(fixture.expected_events.begin(), fixture.expected_events.end(), "MessageDone") !=
             fixture.expected_events.end()) {
             REQUIRE(done != nullptr);

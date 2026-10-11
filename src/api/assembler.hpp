@@ -49,6 +49,10 @@ public:
     // provider 账目自相矛盾的人话(空 = 自洽):数字照攒,矛盾由消费端
     // 排除出精确比例并点名,不掩盖。
     const std::string& usage_anomaly() const { return usage_anomaly_; }
+    const std::optional<::lubancore::usage::v1::Observation>& usage_observation() const {
+        return usage_observation_;
+    }
+    const std::optional<std::string>& provider_response_id() const { return provider_response_id_; }
 
     // tool_use 的 input JSON 拼完后解析失败时置位。就算解析失败,BuildMessage()
     // 依旧会给出可用的 Message——那个 tool_use 块的 input 会是个空对象,不会因为
@@ -104,6 +108,8 @@ private:
     bool cache_read_seen_ = false;
     bool cache_creation_seen_ = false;
     std::string usage_anomaly_;
+    std::optional<::lubancore::usage::v1::Observation> usage_observation_;
+    std::optional<std::string> provider_response_id_;
     std::string parse_error_;
     int idless_tool_calls_dropped_ = 0;
 

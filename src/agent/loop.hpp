@@ -26,6 +26,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -88,6 +89,8 @@ struct RequestPreparedContext {
     // 桥据此在 prepared 事件落 timeoutBudgetSecs——"预算多久"离了账就
     // 没处可查(取消误报 ESC 单 Bug 1:预算要进账,不进猜测)。
     int timeout_budget_secs = 0;
+    // Producer loop step is separate from the durable writer's step authority.
+    std::string producer_step_id;
 };
 
 // model.output.cancelled 的取消来源(主会话输出预留占坑单 §4.2):轨迹是
@@ -146,6 +149,13 @@ inline const char* OutputCancelSourceText(OutputCancelSource source) {
 class LoopBoundaryRecorder {
 public:
     virtual ~LoopBoundaryRecorder() = default;
+    // Borrow the actual journal authority; legacy or unbound recorders stay unknown.
+    virtual std::string_view UsageSourceSessionId() const { return {}; }
+    virtual std::string_view UsageSourceRunId() const { return {}; }
+    // nullopt = unsupported. Append confirmation is observation persistence,
+    // not a typed failed-attempt ACK or proof of provider delivery.
+    virtual std::optional<bool> OnUsageObservation(const std::string&, const api::Usage&,
+        const ::lubancore::usage::v1::Observation*, bool, std::string_view, bool) { return std::nullopt; }
     // 上下文最终预检的可观测账。默认 no-op 让旁路采样桥与旧测试替身
     // 不必为不可能触发的 AgentLoop 压力事件造假实现。
     virtual void OnContextPressure(const ContextPressure& pressure) { (void)pressure; }

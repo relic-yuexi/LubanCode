@@ -39,6 +39,7 @@ using lubancode::cli::TermErr;
 #include "api/gemini/request.hpp"
 #include "api/responses/client.hpp"
 #include "api/responses/request.hpp"
+#include "api/usage_totals.hpp"
 #include "app/backend_stack.hpp"
 #include "app/commands/usage_commands.hpp"  // LoadPricingTable:/doctor insights 的价格表口径
 #include "cli/console_input.hpp"  // ReadLine:公网探针的一次性确认门(问题 9)
@@ -1050,7 +1051,7 @@ void RunCacheProbe(const DoctorContext& context, int rounds) {
         } else {
             row.http = "HTTP 2xx";
             if (outcome.usage_reported) {
-                row.input = lubancode::cli::FormatTokenCount(api::TotalInputTokens(outcome.usage));
+                row.input = lubancode::cli::FormatTokenCount(api::CheckedTotalInputTokens(outcome.usage));
                 row.cached = lubancode::cli::FormatTokenCount(outcome.usage.cache_read_tokens);
             } else {
                 row.input = row.cached = tr("doctor.value.absent");
@@ -1063,7 +1064,7 @@ void RunCacheProbe(const DoctorContext& context, int rounds) {
         result.usage_reported = outcome.usage_reported;
         if (outcome.usage_reported) {
             result.cache_read = outcome.usage.cache_read_tokens;
-            result.total_input = api::TotalInputTokens(outcome.usage);
+            result.total_input = api::CheckedTotalInputTokens(outcome.usage);
         }
         round_results.push_back(result);
     }

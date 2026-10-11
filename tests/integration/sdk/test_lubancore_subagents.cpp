@@ -142,6 +142,33 @@ void RehashedAdoptionResume() {
         CHECK(Read(journal) == forged); CHECK(models == 0); CHECK(effects == 0);
         Write(journal, original);
     }
+    const auto result_path = parent / "sdk-results" / (op + ".json");
+    const auto saved_result = Read(result_path);
+    const auto result_json = Json::parse(saved_result);
+    REQUIRE(result_json.contains("usage")); REQUIRE(result_json["usage"]["attempts"].is_array());
+    std::size_t child_index = result_json["usage"]["attempts"].size();
+    for (std::size_t i = 0; i < result_json["usage"]["attempts"].size(); ++i)
+        if (result_json["usage"]["attempts"][i].value("subordinate", false)) { child_index = i; break; }
+    REQUIRE(child_index < result_json["usage"]["attempts"].size());
+    for (int variant = 0; variant != 8; ++variant) {
+        CAPTURE(variant);
+        auto forged = result_json;
+        auto& record = forged["usage"]["attempts"][child_index];
+        if (variant == 0) record["source_session_id"] = "foreign-child";
+        if (variant == 1) record["source_run_id"] = "foreign-run";
+        if (variant == 2) record["trajectory_request_id"] = "foreign-request";
+        if (variant == 3) record["model"] = "foreign-model";
+        if (variant == 4) record["purpose"] = "main_turn";
+        if (variant == 5) record["cache_epoch"] = 12345;
+        if (variant == 6) record["step_id"] = "foreign-step";
+        if (variant == 7) record["turn_id"] = "foreign-turn";
+        const auto bytes = forged.dump(); Write(result_path, bytes);
+        const auto rejected = (*runtime)->OpenSession(options()); REQUIRE_FALSE(rejected);
+        CHECK(rejected.error().code == "sdk.usage.result_invalid");
+        CHECK(Read(result_path) == bytes); CHECK(Read(journal) == original);
+        CHECK(models == 0); CHECK(effects == 0);
+        Write(result_path, saved_result);
+    }
     auto valid = (*runtime)->OpenSession(options()); REQUIRE(valid.has_value());
     auto report = (*valid)->GetSubagentReports(op); REQUIRE(report.has_value()); REQUIRE(report->size() == 1);
     CHECK(report->front().adoption_state == sdk::subagents::v1::AdoptionState::Validated);

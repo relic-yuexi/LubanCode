@@ -307,10 +307,13 @@ J2b 添无 `status` 的 `tool.job.adopted`，布局固定为 `parent_admission_j
 | 流中断(Esc/断流定稿) | 同上 | 已收部分照实内联;没收到 → `usage:null` |
 | 请求失败、无 assistant 落盘 | `model.usage.appended` 事件 | 关联 requestId;观察承载,不参与累计 |
 | 实报迟到/更正 | `model.usage.appended` 事件 | 关联 messageId/requestId;不倒改旧 message |
+| 每次物理请求原始观察 | `model.usage.observed` 事件 | 不另收费；同 request 的 prepared、sent 必须先落账，Session/run/turn/step 相同，只收一条 |
 | compact 模型 usage | compact 内部 assistant(purpose=compact)自己的 usage | 不得充当主上下文前后数字(§4.11) |
 | provider 没报 | `usage:null` + 事件里不造数 | 不补 0,不借下一请求倒填 |
 
 `model.request.prepared` 若引用估算,只引用不复制实报;估算与实报不得混为同一字段(§4.12)。
+
+`model.usage.observed` 不带 status。payload 为 `version:1`、`numbers:[input,output,cacheRead,cacheWrite,reasoning]`、`reportedByProvider`、`incomplete`、`providerResponseId`（缺号为 null）。五项均为有符号 int64，负数也留原事实，不能冒充可累计 owner。可附有界 `observation` 原材料；材料不合合同时改留 `observationError` 且 `incomplete:true`，两键不能共存。响应号只记实值，最多 256 字节，不夹 NUL。旧账可以没有观察；新版观察在写入、验卷和续卷都核源边界，重算哈希不能绕过。此事件不证明 provider ACK，也不代替失败持久回执。
 
 ## 六、未知版本策略与多流归属
 

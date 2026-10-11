@@ -53,6 +53,7 @@ REQUIRED_TESTS = {
     "sdk.consumer.recovery_seed", "sdk.consumer.recovery_resume",
 }
 REQUIRED_PUBLIC_HEADERS = {
+    "include/lubancore/usage.hpp",
     "include/lubancore/named_results.hpp",
     "include/lubancore/jobs.hpp",
     "include/lubancore/web_fetch.hpp",
@@ -160,6 +161,45 @@ def check_search_resources(repo: Path, prefix: Path, staged_dir: Path, platform:
             raise RuntimeError("SDK search backend lost executable permission: " + relative)
         hashes[relative] = installed_hash
     return hashes
+
+
+JSON_NOTICE_PATH = "share/lubancore/licenses/nlohmann-json/LICENSE.MIT"
+DETOURS_NOTICE_PATH = "share/lubancore/licenses/detours/LICENSE.md"
+DEPENDENCY_NOTICE_HASHES = {
+    JSON_NOTICE_PATH: "46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603",
+    DETOURS_NOTICE_PATH: "b301808b732cfaa60df2b4b422d78cd97d2a15058b207e7e33f0535ba5170dd6",
+}
+
+
+def check_dependency_licenses(prefix: Path, platform: str, testing: bool) -> dict:
+    """Qualify exact upstream notices, never an entire license directory."""
+    expected = {JSON_NOTICE_PATH}
+    if platform == "win32" and testing:
+        expected.add(DETOURS_NOTICE_PATH)
+    elif (prefix / DETOURS_NOTICE_PATH).exists() or (prefix / DETOURS_NOTICE_PATH).is_symlink():
+        raise RuntimeError("Ordinary/non-Windows SDK contains the private testing dependency notice")
+    hashes = {}
+    for relative in sorted(expected):
+        notice = prefix / relative
+        if notice.is_symlink() or not notice.is_file():
+            raise RuntimeError("SDK dependency notice is missing or substituted: " + relative)
+        actual = hashlib.sha256(notice.read_bytes()).hexdigest()
+        if actual != DEPENDENCY_NOTICE_HASHES[relative]:
+            raise RuntimeError("SDK dependency notice differs from pinned upstream bytes: " + relative)
+        hashes[relative] = actual
+    return hashes
+
+
+def check_full_sdk_files(installed_files, public_headers, resource_hashes, license_hashes, platform):
+    package_files = re.compile(r"lib(?:64)?/cmake/LubanCore/LubanCore(?:Config(?:Version)?|Targets(?:-[A-Za-z0-9_]+)?)\.cmake")
+    library_files = re.compile(r"lib(?:64)?/(?:liblubancore(?:\.so(?:\.[0-9]+)*|(?:\.[0-9]+)*\.dylib|\.dll\.a)|lubancore\.lib)")
+    for relative in installed_files:
+        allowed = (relative in public_headers or relative in resource_hashes or relative in license_hashes or
+                   relative == "share/lubancore/lubancore-sdk.md" or
+                   package_files.fullmatch(relative) or library_files.fullmatch(relative) or
+                   (platform == "win32" and re.fullmatch(r"bin/[^/]+\.dll", relative, re.IGNORECASE)))
+        if not allowed:
+            raise RuntimeError("full SDK install contains a host/private-development artifact: " + relative)
 
 
 def check_public_headers(repo: Path, installed_files: list[str], install_mode: str) -> set[str]:
@@ -409,15 +449,13 @@ def main() -> None:
         "hashes": resource_hashes,
         "scope": "Relocated bytes match the CI-staged backend and repository license/manifest; archive verification is performed by fetch_ripgrep.sh.",
     }, indent=2) + "\n", encoding="utf-8")
+    license_hashes = check_dependency_licenses(prefix, sys.platform, expected_hook)
+    (evidence / "dependency-notices.json").write_text(json.dumps({
+        "githubSha": os.environ.get("GITHUB_SHA"), "producer_testing": expected_hook,
+        "hashes": license_hashes, "scope": "Exact relocated immutable upstream license bytes, no private headers or source allowance.",
+    }, indent=2) + "\n", encoding="utf-8")
     if args.install_mode == "full":
-        package_files = re.compile(r"lib(?:64)?/cmake/LubanCore/LubanCore(?:Config(?:Version)?|Targets(?:-[A-Za-z0-9_]+)?)\.cmake")
-        library_files = re.compile(r"lib(?:64)?/(?:liblubancore(?:\.so(?:\.[0-9]+)*|(?:\.[0-9]+)*\.dylib|\.dll\.a)|lubancore\.lib)")
-        for relative in installed_files:
-            allowed = (relative in public_headers or relative in resource_hashes or relative == "share/lubancore/lubancore-sdk.md" or
-                       package_files.fullmatch(relative) or library_files.fullmatch(relative) or
-                       (sys.platform == "win32" and re.fullmatch(r"bin/[^/]+\.dll", relative, re.IGNORECASE)))
-            if not allowed:
-                raise RuntimeError("full SDK install contains a host/private-development artifact: " + relative)
+        check_full_sdk_files(installed_files, public_headers, resource_hashes, license_hashes, sys.platform)
     def normalized(value: str) -> str:
         return re.sub(r"/+", "/", value.replace(chr(92), "/")).casefold()
     forbidden = [normalized(str(path)) for path in (repo, producer_build, staging)]
@@ -577,11 +615,38 @@ def main() -> None:
             # The consumer lives outside the checkout; keep its diagnostic logs in
             # the producer's artifact directory even when one of its tests fails.
             # The controlled Journal acceptance retains its actual main/result
-            # materials separately. Other consumer Session data stays in scratch.
+            # materials separately. Failed search fixtures retain their real
+            # ledger and result blobs for diagnosis; successful ones clean up.
             for name in ("LastTest.log", "LastTestsFailed.log"):
                 log = consumer_build / "Testing" / "Temporary" / name
                 if log.is_file():
                     shutil.copy2(log, evidence / name)
+            try:
+                search_root = consumer_build / "state-builtin-search"
+                search_target = evidence / "failed-search-materials"
+                retained = []
+                if search_root.exists():
+                    for source in sorted(search_root.rglob("*")):
+                        if source.is_symlink():
+                            raise RuntimeError("search evidence contains a symbolic link: " + str(source))
+                        if not source.is_file():
+                            continue
+                        relative = source.relative_to(search_root)
+                        raw = source.read_bytes()
+                        target = search_target / relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(raw)
+                        retained.append({"path": relative.as_posix(), "bytes": len(raw),
+                                         "sha256": hashlib.sha256(raw).hexdigest()})
+                (evidence / "failed-search-materials.json").write_text(json.dumps({
+                    "status": "diagnostic_only", "source": str(search_root),
+                    "files": retained, "is_acceptance": False,
+                }, indent=2) + "\n", encoding="utf-8")
+            except Exception as error:
+                (evidence / "failed-search-materials-error.json").write_text(json.dumps({
+                    "status": "not_evaluated", "error": str(error),
+                    "source": str(consumer_build / "state-builtin-search"),
+                }, indent=2) + "\n", encoding="utf-8")
             try:
                 journal_capture = journal_owner.capture_materials(
                     consumer_build / "state-journal-owner", evidence / "journal-owner-materials")

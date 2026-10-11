@@ -1,22 +1,36 @@
 #include "runtime/headless_progress.hpp"
 
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <utility>
 
 #include "api/types.hpp"
+#include "api/usage_totals.hpp"
 #include "privacy/secret_scan.hpp"
 
 namespace lubancode::runtime {
 namespace {
-std::string Percent(std::int64_t numerator, std::int64_t denominator) {
-    if (denominator <= 0) return "不适用";
+std::string Percent(std::optional<std::int64_t> numerator, std::optional<std::int64_t> denominator) {
+    if (!numerator || !denominator) return "未知（溢出）";
+    if (*denominator <= 0) return "不适用";
     std::ostringstream out;
-    out << std::fixed << std::setprecision(1) << 100.0 * numerator / denominator << "%";
+    out << std::fixed << std::setprecision(1) << 100.0 * *numerator / *denominator << "%";
     return out.str();
 }
-std::string Count(std::int64_t value, bool reported) {
-    return reported ? std::to_string(value) : "未报告";
+std::string Count(std::optional<std::int64_t> value, bool reported) {
+    if (!reported) return "未报告";
+    return value ? std::to_string(*value) : "未知（溢出）";
+}
+void Add(std::optional<std::int64_t>& total, std::optional<std::int64_t> value) noexcept {
+    total = total && value ? api::usage_observation::CheckedAdd(*total, *value) : std::nullopt;
+}
+std::optional<std::int64_t> Window(std::size_t value) noexcept {
+    return value <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())
+        ? std::optional<std::int64_t>{static_cast<std::int64_t>(value)} : std::nullopt;
+}
+std::string Ordinal(const nlohmann::json& payload) {
+    return Count(api::usage_observation::CheckedAdd(payload.value("step_index", std::int64_t{0}), 1), true);
 }
 }  // namespace
 
@@ -52,8 +66,8 @@ void HeadlessProgressReporter::Observe(const ServerEvent& event) {
     if (event.kind == ServerEventKind::TurnStarted) {
         Note("开始处理 model=" + Preview(model_) + " turn=" + Preview(event.turn_id));
     } else if (event.kind == ServerEventKind::ModelStepStarted) {
-        ++requests_;
-        Note("请求模型 step=" + std::to_string(p.value("step_index", 0) + 1));
+        Add(requests_, 1);
+        Note("请求模型 step=" + Ordinal(p));
     } else if (event.kind == ServerEventKind::ItemStarted && event.item_kind == ItemKind::Tool) {
         const auto name = p.value("tool_name", std::string("unknown"));
         tools_[event.item_id] = name;
@@ -82,9 +96,9 @@ void HeadlessProgressReporter::Observe(const ServerEvent& event) {
         usage.output_tokens = p.value("output_tokens", std::int64_t{0});
         usage.cache_read_tokens = p.value("cache_read_tokens", std::int64_t{0});
         usage.cache_creation_tokens = p.value("cache_creation_tokens", std::int64_t{0});
-        const auto total = api::TotalInputTokens(usage);
+        const auto total = api::CheckedTotalInputTokens(usage);
         const auto anomaly = p.value("usage_anomaly", std::string());
-        std::string line = "用量 step=" + std::to_string(p.value("step_index", 0) + 1) +
+        std::string line = "用量 step=" + Ordinal(p) +
             " 输入=" + Count(total, reported) + " 输出=" + Count(usage.output_tokens, reported) +
             " 缓存读=" + Count(usage.cache_read_tokens, read) +
             " 缓存写=" + Count(usage.cache_creation_tokens, write);
@@ -92,14 +106,14 @@ void HeadlessProgressReporter::Observe(const ServerEvent& event) {
         line += " API=" + std::to_string(p.value("api_duration_ms", std::int64_t{0})) + "ms";
         Note(line);
         if (reported) {
-            ++usage_reports_;
-            input_ += total;
-            output_ += usage.output_tokens;
-            if (read) { ++reads_reported_; cache_read_ += usage.cache_read_tokens; }
-            if (write) { ++writes_reported_; cache_write_ += usage.cache_creation_tokens; }
-            Note("本次输入占运行窗口=" + std::to_string(total) + "/" +
+            has_usage_ = true; Add(usage_reports_, 1);
+            Add(input_, total);
+            Add(output_, usage.output_tokens);
+            if (read) { has_reads_ = true; Add(reads_reported_, 1); Add(cache_read_, usage.cache_read_tokens); }
+            if (write) { has_writes_ = true; Add(writes_reported_, 1); Add(cache_write_, usage.cache_creation_tokens); }
+            Note("本次输入占运行窗口=" + Count(total, true) + "/" +
                  (window_ ? std::to_string(window_) : "未知") +
-                 (window_ ? "（" + Percent(total, static_cast<std::int64_t>(window_)) + "）" : "") +
+                 (window_ ? "（" + Percent(total, Window(window_)) + "）" : "") +
                  "；这是本次请求输入，不是整轮累计消耗");
         }
         if (!anomaly.empty()) Note("用量口径异常：" + Preview(anomaly));
@@ -111,15 +125,16 @@ void HeadlessProgressReporter::Observe(const ServerEvent& event) {
     } else if (event.kind == ServerEventKind::TurnCompleted) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started_).count();
-        const auto partial = usage_reports_ < requests_ ? "（部分请求未报告）" : "";
+        const auto partial = !usage_reports_ || !requests_ ? "（报告次数未知）"
+            : *usage_reports_ < *requests_ ? "（部分请求未报告）" : "";
         Note("模型回合结束 status=" + (event.outcome ? ToString(*event.outcome) : "unknown") +
-             " 耗时=" + std::to_string(elapsed) + "ms 模型步数=" + std::to_string(requests_) +
-             " 累计输入=" + Count(input_, usage_reports_ > 0) +
-             " 累计输出=" + Count(output_, usage_reports_ > 0) + partial +
-             " 缓存读合计=" + Count(cache_read_, reads_reported_ > 0) +
-             (reads_reported_ < requests_ && reads_reported_ > 0 ? "（仅已报告）" : "") +
-             " 缓存写合计=" + Count(cache_write_, writes_reported_ > 0) +
-             (writes_reported_ < requests_ && writes_reported_ > 0 ? "（仅已报告）" : "") +
+             " 耗时=" + std::to_string(elapsed) + "ms 模型步数=" + Count(requests_, true) +
+             " 累计输入=" + Count(input_, has_usage_) +
+             " 累计输出=" + Count(output_, has_usage_) + partial +
+             " 缓存读合计=" + Count(cache_read_, has_reads_) +
+             (reads_reported_ && requests_ && *reads_reported_ < *requests_ && has_reads_ ? "（仅已报告）" : "") +
+             " 缓存写合计=" + Count(cache_write_, has_writes_) +
+             (writes_reported_ && requests_ && *writes_reported_ < *requests_ && has_writes_ ? "（仅已报告）" : "") +
              "；回复是否送达另看投递回执");
     }
 }
@@ -132,8 +147,7 @@ void HeadlessProgressReporter::Context(const agent::ContextPressure& p) {
         Note("context 估算：工作视图=" + std::to_string(p.working_view_tokens) +
              " 预计请求含输出预留=" + std::to_string(p.projected_tokens) +
              " 运行窗口=" + std::to_string(p.window_tokens) +
-             " 占用=" + Percent(static_cast<std::int64_t>(p.projected_tokens),
-                                static_cast<std::int64_t>(p.window_tokens)) +
+             " 占用=" + Percent(Window(p.projected_tokens), Window(p.window_tokens)) +
              (p.projected_overflow ? "；达到上下文压力阈值，未据此宣称已压缩" : ""));
     } else if (p.phase == Phase::AfterHardTrim && p.hard_truncated_results) {
         Note("context：超长工具结果发生有损截断（不是语义压缩）");

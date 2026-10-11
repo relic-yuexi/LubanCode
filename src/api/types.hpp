@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include <lubancore/usage.hpp>
 
 #include "api/reasoning.hpp"
 
@@ -450,6 +451,13 @@ struct UsageReport {
         return usage.input_tokens > 0 || usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
                usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
     }
+    std::optional<::lubancore::usage::v1::Observation> usage_observation;
+    // This report describes one returned attempt; it does not assert durable ACK.
+    std::string trajectory_request_id;
+    // Canonical producer purpose; absent on legacy reports, never guessed.
+    std::string request_purpose;
+    bool attempt_succeeded = false;
+    std::string usage_observation_error;
 };
 
 // 流的第一个事件,标记消息开始。
@@ -561,6 +569,10 @@ struct MessageDone {
     bool cache_read_reported = false;
     bool cache_creation_reported = false;
     std::string usage_anomaly;
+    // Appended to preserve every existing aggregate prefix. Same-source C++,
+    // not a stable shared-library ABI. A real provider ID only, never a local ID.
+    std::optional<::lubancore::usage::v1::Observation> usage_observation;
+    std::optional<std::string> provider_response_id;
 };
 
 // 模型输出的一张图片(Responses 的 image_generation_call.result)。base64
@@ -587,11 +599,21 @@ struct UsageSnapshot {
     bool cache_read_reported = false;
     bool cache_creation_reported = false;
     std::string usage_anomaly;
+    // Appended to preserve every existing aggregate prefix. Same-source C++,
+    // not a stable shared-library ABI. A real provider ID only, never a local ID.
+    std::optional<::lubancore::usage::v1::Observation> usage_observation;
+    std::optional<std::string> provider_response_id;
+};
+
+// Identity-only evidence must not erase usage or pretend that zero was reported.
+struct ProviderResponseIdentity {
+    std::string id;
 };
 
 using StreamEvent = std::variant<MessageStart, TextDelta, ThinkingDelta, ToolUseStart, ToolUseInputDelta,
                                  ContentBlockDone, BuiltinToolStart, BuiltinToolDone, MessageDone, ImageOutput,
-                                 ServerToolUseStart, ServerToolResult, RedactedThinking, StreamError, UsageSnapshot>;
+                                 ServerToolUseStart, ServerToolResult, RedactedThinking, StreamError, UsageSnapshot,
+                                 ProviderResponseIdentity>;
 
 // ---------------------------------------------------------------------------
 // 错误

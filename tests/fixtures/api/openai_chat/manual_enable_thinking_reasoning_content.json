@@ -10,9 +10,13 @@
   "doc_snapshot_hash": "0a4ae02111e2f6fdca649f49b09ce09ea57e51122b38971cc8ee2df2e068fbab",
   "request_expectation": {"enable_thinking": true},
   "expected_events": [
+    "ProviderResponseIdentity",
     "MessageStart",
     "ThinkingDelta",
+    "ProviderResponseIdentity",
     "ThinkingDelta",
+    "ProviderResponseIdentity",
+    "UsageSnapshot",
     "TextDelta",
     "MessageDone"
   ],

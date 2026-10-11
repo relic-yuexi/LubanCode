@@ -28,16 +28,34 @@ namespace frame = lubancode::cli::frame;
 using lubancode::cli::TermOut;
 
 // 四舍五入的整数百分比;分母 <= 0 给 0(调用方先判 unknown)。
-int SharePercent(std::int64_t part, std::int64_t whole) {
-    if (whole <= 0) {
-        return 0;
+std::optional<int> SharePercent(std::optional<std::int64_t> part,
+                                std::optional<std::int64_t> whole) {
+    if (!part || !whole) return std::nullopt;
+    if (*whole <= 0) return 0;
+    if (*part < 0 || *part > *whole) return std::nullopt;
+    std::int64_t remainder = 0;
+    int quotient = 0;
+    for (int index = 0; index < 100; ++index) {
+        if (remainder >= *whole - *part) {
+            remainder -= *whole - *part;
+            ++quotient;
+        } else {
+            remainder += *part;
+        }
     }
-    return static_cast<int>((part * 200 + whole) / (whole * 2));
+    if (remainder >= *whole - remainder) ++quotient;
+    return quotient;
+}
+
+std::string ShareText(std::optional<std::int64_t> part,
+                      std::optional<std::int64_t> whole) {
+    const auto ratio = SharePercent(part, whole);
+    return ratio ? std::to_string(*ratio) + "%" : "unknown";
 }
 
 // "用途/模型"行的份额摘要:最多 max_entries 个 "label P%",其余折进"…共 N 类"。
 std::string ShareLine(const std::vector<lubancode::accounting::UsageBreakdown>& rows,
-                      std::int64_t whole, std::size_t max_entries) {
+                      std::optional<std::int64_t> whole, std::size_t max_entries) {
     if (rows.empty()) {
         return "0";
     }
@@ -49,8 +67,8 @@ std::string ShareLine(const std::vector<lubancode::accounting::UsageBreakdown>& 
     }
     std::sort(sorted.begin(), sorted.end(),
               [](const auto* a, const auto* b) {
-                  const std::int64_t va = a->totals.total_billed_shape_tokens;
-                  const std::int64_t vb = b->totals.total_billed_shape_tokens;
+                  const auto va = a->totals.BilledShapeProjection();
+                  const auto vb = b->totals.BilledShapeProjection();
                   if (va != vb) {
                       return va > vb;
                   }
@@ -65,8 +83,7 @@ std::string ShareLine(const std::vector<lubancode::accounting::UsageBreakdown>& 
         if (shown > 0) {
             line << " · ";
         }
-        line << row->label << " " << SharePercent(row->totals.total_billed_shape_tokens, whole)
-             << "%";
+        line << row->label << " " << ShareText(row->totals.BilledShapeProjection(), whole);
         ++shown;
     }
     if (sorted.size() > shown) {
@@ -278,32 +295,33 @@ std::vector<std::string> FormatUsageReport(const UsageReportModel& model,
     // 输入(§7.4)。
     {
         std::ostringstream out;
-        out << lubancode::cli::FormatTokenCount(totals.input_tokens);
+        out << lubancode::cli::FormatTokenCount(totals.InputProjection());
         if (const auto ratio = totals.cache_read_ratio_percent()) {
-            out << " · cache 读 " << lubancode::cli::FormatTokenCount(totals.cache_read_tokens)
+            out << " · cache 读 " << lubancode::cli::FormatTokenCount(totals.CacheReadProjection())
                 << "(" << *ratio << "%)";
         } else if (totals.requests_with_usage > 0) {
-            out << " · cache 读 " << lubancode::cli::FormatTokenCount(totals.cache_read_tokens)
-                << "(比例 unknown:实测输入为 0)";
+            out << " · cache 读 " << lubancode::cli::FormatTokenCount(totals.CacheReadProjection())
+                << ((!totals.input_known || !totals.cache_read_known || !totals.cache_creation_known)
+                    ? "(比例 unknown:输入累计超界)" : "(比例 unknown:实测输入为 0)");
         }
         out << " · cache 写 "
-            << lubancode::cli::FormatTokenCount(totals.cache_creation_tokens);
-        out << " · 合计输入 " << lubancode::cli::FormatTokenCount(totals.total_input_tokens);
+            << lubancode::cli::FormatTokenCount(totals.CacheCreationProjection());
+        out << " · 合计输入 " << lubancode::cli::FormatTokenCount(totals.TotalInputProjection());
         fields.push_back(frame::Field{"输入", out.str()});
     }
     // 输出:reasoning 是子集,注明(§四.4)。
     {
         std::ostringstream out;
-        out << lubancode::cli::FormatTokenCount(totals.output_tokens);
-        if (totals.reasoning_tokens > 0) {
-            out << " · 推理 " << lubancode::cli::FormatTokenCount(totals.reasoning_tokens)
+        out << lubancode::cli::FormatTokenCount(totals.OutputProjection());
+        if (const auto reasoning = totals.ReasoningProjection(); !reasoning || *reasoning > 0) {
+            out << " · 推理 " << lubancode::cli::FormatTokenCount(totals.ReasoningProjection())
                 << "(已含在输出,不另加)";
         }
         fields.push_back(frame::Field{"输出", out.str()});
     }
     // 模型与用途:份额行,分母注明(§7.4"任何比例都要注明分母")。
     {
-        const std::int64_t whole = totals.total_billed_shape_tokens;
+        const auto whole = totals.BilledShapeProjection();
         fields.push_back(frame::Field{"模型", ShareLine(model.aggregate.by_model, whole, 3) +
                                                "(按 input+output token 占比)"});
         fields.push_back(frame::Field{"用途", ShareLine(model.aggregate.by_purpose, whole, 4) +
@@ -313,7 +331,7 @@ std::vector<std::string> FormatUsageReport(const UsageReportModel& model,
     {
         std::ostringstream out;
         if (model.pricing.has_value()) {
-            out << FormatMicrosAmount(totals.cost_micros, "$") << " · 价格表 "
+            out << (totals.CostProjection() ? FormatMicrosAmount(*totals.CostProjection(), "$") : "未知（溢出）") << " · 价格表 "
                 << model.pricing->id << " · 本地估算,非账单";
             if (totals.requests_priced < totals.requests_with_usage) {
                 out << " · 命中 " << totals.requests_priced << "/"
@@ -403,17 +421,17 @@ std::vector<std::string> FormatUsageReport(const UsageReportModel& model,
                 req << "[" << t.requests_unknown << " 笔 unknown]";
             }
             std::ostringstream tokens;
-            tokens << "输入 " << lubancode::cli::FormatTokenCount(t.total_input_tokens) << "(读 "
-                   << lubancode::cli::FormatTokenCount(t.cache_read_tokens) << "/写 "
-                   << lubancode::cli::FormatTokenCount(t.cache_creation_tokens) << ")"
-                   << " · 输出 " << lubancode::cli::FormatTokenCount(t.output_tokens);
+            tokens << "输入 " << lubancode::cli::FormatTokenCount(t.TotalInputProjection()) << "(读 "
+                   << lubancode::cli::FormatTokenCount(t.CacheReadProjection()) << "/写 "
+                   << lubancode::cli::FormatTokenCount(t.CacheCreationProjection()) << ")"
+                   << " · 输出 " << lubancode::cli::FormatTokenCount(t.OutputProjection());
             rows.push_back(frame::TableRow{
                 {row.label,
-                 std::to_string(
-                     SharePercent(t.total_billed_shape_tokens, totals.total_billed_shape_tokens)) +
-                     "%",
+                 ShareText(t.BilledShapeProjection(), totals.BilledShapeProjection()),
                  req.str(), tokens.str(),
-                 t.requests_priced > 0 ? FormatMicrosAmount(t.cost_micros, "$") : std::string()},
+                 (!t.CostProjection() || t.requests_priced > 0)
+                     ? (t.CostProjection() ? FormatMicrosAmount(*t.CostProjection(), "$") : "未知（溢出）")
+                     : std::string()},
                 {}});
         }
         for (const std::string& line : frame::RenderTable(
@@ -462,9 +480,20 @@ nlohmann::json BuildUsageReportJson(const UsageReportModel& model) {
         case ParsedUsageCommand::By::Outcome: by = "outcome"; break;
         case ParsedUsageCommand::By::None: by = ""; break;
     }
+    const auto unknown_totals = [](const lubancode::accounting::UsageTotals& totals) {
+        return totals.HasUnknownProjection();
+    };
+    bool nullable_totals = unknown_totals(model.aggregate.totals);
+    for (const auto* rows : {&model.aggregate.by_model, &model.aggregate.by_purpose,
+                             &model.aggregate.by_run, &model.aggregate.by_outcome}) {
+        for (const auto& row : *rows) nullable_totals |= unknown_totals(row.totals);
+    }
+    for (const auto& row : model.aggregate.by_cache_epoch) {
+        nullable_totals |= unknown_totals(row.totals);
+    }
     return nlohmann::json{
         {"schema", "lubancode.usage.report"},
-        {"schema_version", 1},
+        {"schema_version", nullable_totals ? 2 : 1},
         {"session_id", model.session_id},
         {"workspace_key", model.workspace_key},
         {"session_status", model.status},

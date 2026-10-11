@@ -10,6 +10,7 @@
   "expected_events": [
     "MessageStart",
     "ThinkingDelta",
+    "UsageSnapshot",
     "ContentBlockDone",
     "ToolUseStart",
     "ToolUseInputDelta",

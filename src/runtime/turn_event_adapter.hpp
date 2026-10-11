@@ -31,18 +31,30 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "api/types.hpp"
+#include "api/usage_json.hpp"
 #include "runtime/event.hpp"
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
 #include "tools/tool.hpp"
 
 namespace lubancode::runtime {
+
+// Borrowed only during usage admission. Empty identities remain unknown;
+// a trajectory request key never substitutes for a provider response ID.
+struct UsageAttemptContext {
+    std::string_view trajectory_request_id, provider_response_id, model;
+    std::string_view step_id, turn_id, purpose;
+    int cache_epoch = 0;
+    bool reported_by_provider = false;
+    std::string_view source_session_id, source_run_id;
+};
 
 class TurnEventAdapter {
 public:
@@ -64,6 +76,18 @@ public:
 
     // 挂事件落点(可换;每次开轮之前挂好)。
     void Attach(std::function<void(const ServerEvent&)> sink) { sink_ = std::move(sink); }
+    using UsageObserver = std::function<void(const api::Usage&,
+        const ::lubancore::usage::v1::Observation*, bool, bool, const UsageAttemptContext&)>;
+    // Attach before Run; borrow the assembler's bounded evidence only for this
+    // call. The owner retires this adapter before returning from the turn.
+    void ObserveUsage(UsageObserver observer) { usage_observer_ = std::move(observer); }
+    bool HasUsageObserver() const { return static_cast<bool>(usage_observer_); }
+    bool OnUsageFacts(const api::Usage& usage, const ::lubancore::usage::v1::Observation* observation,
+                      bool subordinate = false, bool incomplete = false, const UsageAttemptContext& context = {}) {
+        if (!usage_observer_) return false;
+        usage_observer_(usage, observation, subordinate, incomplete, context);
+        return true;
+    }
 
     // 在既有落点旁边再挂一只(批二余款:终端渲染改吃事件流——SessionRuntime
     // 造的适配器已带着会话事件链,画屏的 sink 从这里补挂,两条吃同一份流,
@@ -221,8 +245,14 @@ public:
     // 节)——终端的逐步流水账(TurnUsageStats)与 ContextTracker 的逐请求
     // 缓存账都从这份 payload 里还原,不必另开一条旁路回调。诊断字段只含
     // hash/长度/枚举,不含正文。
-    void OnUsage(const api::UsageReport& report, bool subordinate = false) {
+    void OnUsage(const api::UsageReport& report, bool subordinate = false, bool usage_already_observed = false) {
+        const UsageAttemptContext context{report.trajectory_request_id, report.provider_response_id, report.model,
+            report.step_id, report.turn_id, report.request_purpose, report.cache_epoch, report.reported_by_provider};
+        const bool observed = usage_already_observed || OnUsageFacts(report.usage,
+            report.usage_observation && report.usage_observation_error.empty()
+                ? &*report.usage_observation : nullptr, subordinate, false, context);
         ServerEvent event = MakeEvent(ServerEventKind::UsageUpdated);
+        event.usage_observed = observed;
         event.payload = nlohmann::json{{"input_tokens", report.usage.input_tokens},
                                        {"output_tokens", report.usage.output_tokens},
                                        {"cache_read_tokens", report.usage.cache_read_tokens},
@@ -261,7 +291,19 @@ public:
                                        {"turn_id", report.turn_id},
                                        {"attempts", report.attempts},
                                        {"api_duration_ms", report.api_duration_ms},
-                                       {"stop_reason", report.stop_reason}};
+                                       {"stop_reason", report.stop_reason},
+                                       {"trajectory_request_id", report.trajectory_request_id},
+                                       {"request_purpose", report.request_purpose},
+                                       {"attempt_succeeded", report.attempt_succeeded}};
+        if (report.usage_observation) {
+            auto material = api::usage_json::Encode(*report.usage_observation, report.usage);
+            if (material) event.payload["usage_observation"] = std::move(*material);
+            else event.payload["usage_observation_error"] = std::string(material.error());
+        }
+        if (!report.usage_observation_error.empty()) {
+            event.payload.erase("usage_observation");
+            event.payload["usage_observation_error"] = report.usage_observation_error;
+        }
         MarkSubordinate(event, subordinate);
         Emit(std::move(event));
     }
@@ -293,8 +335,10 @@ public:
     // 从路并入:嵌套回合(子代理/PTC 之外的宿主侧装配)把已翻好的事件
     // 原样递进来——本流只补 subordinate 标与转发,不动条目状态机。
     // ------------------------------------------------------------------
-    void ForwardFromSubordinate(const ServerEvent& event) {
+    void ForwardFromSubordinate(const ServerEvent& event, bool usage_already_observed = false) {
         ServerEvent forwarded = event;
+        // A child's receipt says nothing about this parent's operation owner.
+        forwarded.usage_observed = usage_already_observed;
         MarkSubordinate(forwarded, true);
         Emit(std::move(forwarded));
     }
@@ -429,6 +473,7 @@ private:
     std::string thread_id_;
     IdAuthority& ids_;
     std::function<void(const ServerEvent&)> sink_;
+    UsageObserver usage_observer_;
     std::string turn_id_;
     std::string text_item_id_;
     std::string last_text_item_id_;

@@ -419,7 +419,9 @@ TEST_CASE("开关开: 输入→回复→工具链→结束,验卷过、配对完
         CHECK(row.value("provider", std::string()) == "moonshot");
         CHECK(row.value("wire", std::string()) == "openai-chat-completions");
         CHECK(row.value("model", std::string()) == "kimi-k2.6");
-        CHECK(row.value("responseModel", std::string()) == "resp-123");
+        REQUIRE(row.contains("responseModel"));
+        CHECK(row.at("responseModel").is_null());
+        CHECK(row.at("message").value("provider_response_id", std::string()) == "resp-123");
         REQUIRE(row.contains("usage"));
         CHECK(row.at("usage").value("inputTokens", 0) == 1180);
     }

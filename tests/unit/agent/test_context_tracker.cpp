@@ -4,11 +4,212 @@
 #include <doctest/doctest.h>
 
 #include <string>
+#include <limits>
+#include <utility>
 
 #include "agent/model_router.hpp"
 #include "cli/context_tracker.hpp"
+#include "cli/format_utils.hpp"
+#include "cli/i18n.hpp"
 
 using namespace lubancode;
+
+TEST_CASE("ContextTracker: unrepresentable and inconsistent percentages stay unknown without rewriting counts") {
+    const auto maximum = (std::numeric_limits<std::int64_t>::max)();
+    cli::ContextTracker tracker(1);
+    // The total is representable. Its raw cache read contradicts that total;
+    // no external anomaly flag is needed to fence the dangerous int cast.
+    tracker.ApplyUsage(api::Usage{2 - maximum, 0, maximum, 0, 0});
+    CHECK(tracker.current_tokens() == 2);
+    CHECK(tracker.last_total_input_tokens() == 2);
+    CHECK(tracker.last_cache_read_tokens() == maximum);
+    CHECK(tracker.last_cache_hit_percent() == -1);
+    CHECK(tracker.session_cache_hit_percent() == -1);
+    REQUIRE(tracker.cache_request_history().size() == 1);
+    CHECK(tracker.cache_request_history().front().input_tokens == 2);
+    CHECK(tracker.cache_request_history().front().cache_read_tokens == maximum);
+    CHECK(tracker.cache_request_history().front().hit_percent() == -1);
+    tracker.ApplyContextEstimate((std::numeric_limits<std::size_t>::max)());
+    CHECK(tracker.current_tokens() == (std::numeric_limits<std::size_t>::max)());
+    CHECK(tracker.UsagePercent() == -1); CHECK(tracker.ShouldAutoCompact());
+    CHECK(cli::StatusLineInfoSegment("", tracker.UsagePercent(), 0, 1).find("context ?%") != std::string::npos);
+    cli::StatusPanelData data; data.context_percent = tracker.UsagePercent();
+    const auto segments = cli::BuildStatusPanelSegments({"context"}, cli::ConfirmMode::Confirm, data);
+    REQUIRE(segments.size() == 1); CHECK(segments.front().text == "context ?%");
+    tracker.ResetSession();
+    tracker.ApplyUsage(api::Usage{100, 7, 50, 10, maximum});
+    CHECK(tracker.current_tokens() == 167); CHECK(tracker.last_cache_hit_percent() == 31);
+    CHECK(tracker.session_cache_hit_percent() == 31);
+    CHECK(tracker.cache_request_history().front().hit_percent() == 31);
+    CHECK(tracker.UsagePercent() == 16700);
+    tracker.ResetSession(); CHECK(tracker.UsagePercent() == 0);
+
+    SUBCASE("context chart bounds the scale before narrowing a large estimate") {
+        const auto largest = (std::numeric_limits<std::size_t>::max)();
+        const auto lines = cli::FormatContextBreakdown(0, 0, 0, 0, 1, largest,
+            cli::BuiltinTheme("plain"), 6);
+        REQUIRE(lines.size() == 9);
+        CHECK(lines[3].find("######") != std::string::npos);
+        CHECK(lines[3].find("100%") != std::string::npos);
+        // The used-total row deliberately leaves its bar column blank. Only
+        // category rows draw bars; keep the original CLI layout at this bound.
+        CHECK(lines[5].find("######") == std::string::npos);
+        CHECK(lines[5].find(std::string(6, ' ')) != std::string::npos);
+        CHECK(lines[5].find("100%") != std::string::npos);
+        if (!std::in_range<std::int64_t>(largest)) {
+            CHECK(lines[3].find(std::to_string(largest)) != std::string::npos);
+            CHECK(lines[5].find(std::to_string(largest)) != std::string::npos);
+            CHECK(lines[3].find("-1") == std::string::npos);
+        }
+        const auto zero_window = cli::FormatContextBreakdown(0, 0, 0, 0, 0, largest,
+            cli::BuiltinTheme("plain"), 6);
+        REQUIRE(zero_window.size() == 9);
+        CHECK(zero_window[3].find("------") != std::string::npos);
+        CHECK(zero_window[3].find("  0%") != std::string::npos);
+    }
+    SUBCASE("overflowed estimated sums keep used and remaining unknown") {
+        const auto largest = (std::numeric_limits<std::size_t>::max)();
+        const auto unknown = cli::FormatTokenCount(std::nullopt);
+        for (const auto& lines : {
+                cli::FormatContextBreakdown(largest, 1, 4, 0, 1000, 0, cli::BuiltinTheme("plain"), 6),
+                cli::FormatContextBreakdown(1, 2, largest, 0, 1000, 0, cli::BuiltinTheme("plain"), 6)}) {
+            REQUIRE(lines.size() == 9);
+            CHECK(lines[5].find(unknown) != std::string::npos);
+            CHECK(lines[5].find("?%") != std::string::npos);
+            CHECK(lines[7].find(unknown) != std::string::npos);
+        }
+    }
+    SUBCASE("measured total survives an unrepresentable history subtraction") {
+        const auto lines = cli::FormatContextBreakdown((std::numeric_limits<std::size_t>::max)(),
+            1, 4, 0, 1000, 200, cli::BuiltinTheme("plain"), 6);
+        REQUIRE(lines.size() == 9);
+        CHECK(lines[3].find(cli::FormatTokenCount(std::nullopt)) != std::string::npos);
+        CHECK(lines[3].find(cli::tr("cmd.context.bd.history_derived")) == std::string::npos);
+        CHECK(lines[5].find("200") != std::string::npos);
+        CHECK(lines[5].find("20%") != std::string::npos);
+        CHECK(lines[7].find("800") != std::string::npos);
+    }
+    SUBCASE("deferred presence and free space do not borrow an overflowed sum") {
+        const auto largest = (std::numeric_limits<std::size_t>::max)();
+        cli::ContextBreakdownDetail detail;
+        detail.system_tools_deferred_tokens = largest;
+        detail.mcp_tools_deferred_tokens = 1;
+        const auto lines = cli::FormatContextBreakdown(largest, 1, 4, 0, 1000, 0,
+            cli::BuiltinTheme("plain"), 6, -1, &detail);
+        bool saw_deferred = false;
+        bool saw_free = false;
+        for (const auto& line : lines) {
+            if (line.find(cli::tr("cmd.context.bd.system_tools_deferred")) != std::string::npos)
+                saw_deferred = true;
+            if (line.find(cli::tr("cmd.context.bd.free_space")) != std::string::npos) {
+                saw_free = true;
+                CHECK(line.find(cli::FormatTokenCount(std::nullopt)) != std::string::npos);
+                CHECK(line.find("?%") != std::string::npos);
+            }
+        }
+        CHECK(saw_deferred);
+        CHECK(saw_free);
+    }
+    SUBCASE("input overflow fences current projection and remains sticky in session totals") {
+        cli::ContextTracker checked(1);
+        checked.ApplyUsage(api::Usage{10, 5});
+        CHECK(checked.current_tokens_projection() == 15);
+        CHECK(checked.ShouldAutoCompact());
+        const api::Usage source{maximum, 0, 1};
+        checked.ApplyUsage(source);
+        CHECK(source.input_tokens == maximum); CHECK(source.cache_read_tokens == 1);
+        CHECK_FALSE(checked.current_tokens_projection());
+        CHECK_FALSE(checked.last_total_input_projection());
+        CHECK_FALSE(checked.session_input_projection());
+        CHECK(checked.current_tokens() == 15);
+        CHECK(checked.last_total_input_tokens() == 10);
+        CHECK(checked.session_input_total() == 10);
+        CHECK(checked.session_cache_read_projection() == 1);
+        CHECK(checked.current_tokens_for_status() == -1);
+        CHECK(checked.UsagePercent() == -1); CHECK_FALSE(checked.ShouldAutoCompact());
+        CHECK(checked.last_cache_hit_percent() == -1); CHECK(checked.session_cache_hit_percent() == -1);
+        REQUIRE(checked.cache_request_history().size() == 2);
+        CHECK_FALSE(checked.cache_request_history().back().input_tokens_known);
+        CHECK(checked.cache_request_history().back().hit_percent() == -1);
+        CHECK(cli::BuildCacheNote(checked, true) == cli::FormatTokenCount(std::nullopt));
+        checked.ApplyUsage(api::Usage{20, 1});
+        CHECK(checked.current_tokens_projection() == 21);
+        CHECK(checked.last_total_input_projection() == 20);
+        CHECK_FALSE(checked.session_input_projection());
+        CHECK(checked.session_input_total() == 10);
+        CHECK(checked.session_cache_hit_percent() == -1);
+        checked.ResetSession();
+        CHECK(checked.current_tokens_projection() == 0);
+        CHECK(checked.last_total_input_projection() == 0);
+        CHECK(checked.session_input_projection() == 0);
+        CHECK(checked.session_cache_read_projection() == 0);
+        CHECK(checked.cache_request_history().empty());
+    }
+    SUBCASE("output overflow does not invalidate independent input facts") {
+        cli::ContextTracker checked(1000);
+        checked.ApplyUsage(api::Usage{1, maximum});
+        CHECK_FALSE(checked.current_tokens_projection());
+        CHECK(checked.last_total_input_projection() == 1);
+        CHECK(checked.session_input_projection() == 1);
+        CHECK(checked.cache_request_history().back().input_tokens_known);
+        CHECK(checked.last_cache_hit_percent() == 0);
+        CHECK(checked.UsagePercent() == -1);
+        checked.ApplyContextEstimate(17);
+        CHECK(checked.current_tokens_projection() == 17);
+        CHECK(checked.current_estimated());
+    }
+    SUBCASE("session cache and input overflow cannot be healed by a later valid request") {
+        cli::ContextTracker checked(1000);
+        checked.ApplyUsage(api::Usage{0, 0, maximum});
+        CHECK(checked.session_input_projection() == maximum);
+        CHECK(checked.session_cache_read_projection() == maximum);
+        checked.ApplyUsage(api::Usage{0, 0, 1});
+        CHECK(checked.current_tokens_projection() == 1);
+        CHECK(checked.last_total_input_projection() == 1);
+        CHECK(checked.last_cache_hit_percent() == 100);
+        CHECK_FALSE(checked.session_input_projection());
+        CHECK_FALSE(checked.session_cache_read_projection());
+        CHECK(checked.session_input_total() == maximum);
+        CHECK(checked.session_cache_read_total() == maximum);
+        checked.ApplyUsage(api::Usage{1, 0});
+        CHECK_FALSE(checked.session_input_projection());
+        CHECK_FALSE(checked.session_cache_read_projection());
+        CHECK(checked.session_cache_hit_percent() == -1);
+    }
+    SUBCASE("signed input underflow stays unknown without rewriting the source") {
+        cli::ContextTracker checked(1000);
+        const api::Usage source{(std::numeric_limits<std::int64_t>::min)(), 2, -1};
+        checked.ApplyUsage(source);
+        CHECK(source.input_tokens == (std::numeric_limits<std::int64_t>::min)());
+        CHECK(source.cache_read_tokens == -1);
+        CHECK_FALSE(checked.current_tokens_projection());
+        CHECK_FALSE(checked.last_total_input_projection());
+        CHECK_FALSE(checked.cache_request_history().back().input_tokens_known);
+    }
+    SUBCASE("unknown current projection reaches charts and both status renderers") {
+        const auto unknown = cli::FormatTokenCount(std::nullopt);
+        const auto lines = cli::FormatContextBreakdown(1, 2, 3, 0, 1000, std::nullopt,
+            cli::BuiltinTheme("plain"), 6);
+        REQUIRE(lines.size() == 9);
+        CHECK(lines[5].find(unknown) != std::string::npos);
+        CHECK(lines[5].find("?%") != std::string::npos);
+        CHECK(lines[7].find(unknown) != std::string::npos);
+        CHECK(cli::StatusLineInfoSegment("", -1, -1, 1000).find(unknown) != std::string::npos);
+        cli::StatusPanelData status;
+        status.context_percent = -1; status.used_tokens = -1; status.window_tokens = 1000;
+        const auto tokens = cli::BuildStatusPanelSegments({"tokens"}, cli::ConfirmMode::Confirm, status);
+        REQUIRE(tokens.size() == 1);
+        CHECK(tokens.front().text.find(unknown) != std::string::npos);
+        const auto large = (std::numeric_limits<std::size_t>::max)();
+        cli::ContextTracker checked(large);
+        checked.ApplyContextEstimate(large);
+        CHECK(checked.current_tokens_projection() == large);
+        if (!std::in_range<std::int64_t>(large)) {
+            CHECK(checked.current_tokens_for_status() == -1);
+            CHECK(checked.window_tokens_for_status() == -1);
+        }
+    }
+}
 
 TEST_CASE("ContextTracker: 初始占用为 0") {
     cli::ContextTracker tracker(1000);

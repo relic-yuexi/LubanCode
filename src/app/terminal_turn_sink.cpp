@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "api/types.hpp"
+#include "api/usage_json.hpp"
 #include "app/agent_view_registry.hpp"
 #include "cli/agent_view_state.hpp"
 #include "cli/console_input.hpp"  // UpdateStatusLineContext
@@ -286,6 +287,7 @@ void TerminalTurnSink::ApplyEvent(const runtime::ServerEvent& event, std::uint64
                 event.payload.value("cache_creation_reported_by_provider",
                                     event.payload.value("cache_reported_by_provider", false));
             report.usage_anomaly = event.payload.value("usage_anomaly", std::string());
+            api::usage_json::Restore(report, event.payload);
             report.model = event.payload.value("model", std::string());
             report.cache_epoch = event.payload.value("cache_epoch", 1);
             report.epoch_break_reason = event.payload.value("epoch_break_reason", std::string());
@@ -356,8 +358,8 @@ void TerminalTurnSink::ApplyEvent(const runtime::ServerEvent& event, std::uint64
                 // 不碰 tracker——主 context 不被独立子代理的上下文虚抬。
                 cli::UpdateStatusLineContext(
                     ingredients_.context_tracker->UsagePercent(),
-                    static_cast<std::int64_t>(ingredients_.context_tracker->current_tokens()),
-                    static_cast<std::int64_t>(ingredients_.context_tracker->window_tokens()),
+                    ingredients_.context_tracker->current_tokens_for_status(),
+                    ingredients_.context_tracker->window_tokens_for_status(),
                     !ingredients_.context_tracker->usage_stale() &&
                         !ingredients_.context_tracker->current_estimated(),
                     // 缓存注记(缓存诊断单):cached_tokens 有则摆本场命中与

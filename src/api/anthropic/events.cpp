@@ -1,4 +1,7 @@
+#include "api/parsed_json.hpp"
 #include "api/anthropic/events.hpp"
+#include "api/usage_event_projection.hpp"
+#include "api/usage_lexical.hpp"
 
 #include <cctype>
 #include <string_view>
@@ -11,32 +14,6 @@ namespace lubancode::api::anthropic {
 namespace {
 
 using nlohmann::json;
-
-// 从 usage 对象读一枚整数字段(缓存用量按 Wire 归一单 C4 的判型规矩):
-//   缺席     -> nullopt,不置 seen——"没报"与"报零"从这里分家;
-//   在场合法 -> 取值并置 seen(显式零一样置);
-//   在场类型错/负数 -> 记人话进 anomaly(矛盾点名,不吞帧不崩),值不取
-//   (消费端见 seen=true 而 anomaly 非空便知"报了但读不出/自相矛盾")。
-// const json 只走 find/contains,绝不用 operator[] 查不存在键(那是 UB)。
-std::optional<std::int64_t> ReadUsageInt(const json& usage, const char* key, bool* seen,
-                                         std::string* anomaly) {
-    const auto it = usage.find(key);
-    if (it == usage.end()) {
-        return std::nullopt;
-    }
-    *seen = true;
-    if (!it->is_number_integer()) {
-        if (anomaly != nullptr && anomaly->empty()) {
-            *anomaly = std::string("usage.") + key + " 类型不是整数";
-        }
-        return std::nullopt;
-    }
-    const std::int64_t value = it->get<std::int64_t>();
-    if (value < 0 && anomaly != nullptr && anomaly->empty()) {
-        *anomaly = std::string("usage.") + key + " 为负(" + std::to_string(value) + ")";
-    }
-    return value;
-}
 
 std::optional<StreamEvent> HandleMessageStart(const json& data) {
     MessageStart event;
@@ -156,28 +133,12 @@ std::optional<StreamEvent> HandleMessageDelta(const json& data) {
     if (auto it = data.find("delta"); it != data.end() && it->is_object()) {
         event.stop_reason = it->value("stop_reason", "");
     }
-    if (auto it = data.find("usage"); it != data.end() && it->is_object()) {
-        // 帧里真有 usage 对象才算 provider 明报(Token 账本单 A0):明报全零
-        // 也是真,没这对象才是没报。实测 MiniMax 在 message_delta 的顶层
-        // usage 里回缓存字段;字段在场与否分别置读/写旗标。
-        event.usage_reported = true;
-        bool input_seen = false;
-        std::string anomaly;
-        if (auto v = ReadUsageInt(*it, "input_tokens", &input_seen, &anomaly)) {
-            event.usage.input_tokens = *v;
-        }
-        if (auto v = ReadUsageInt(*it, "output_tokens", &input_seen, &anomaly)) {
-            event.usage.output_tokens = *v;
-        }
-        if (auto v = ReadUsageInt(*it, "cache_read_input_tokens", &event.cache_read_reported, &anomaly)) {
-            event.usage.cache_read_tokens = *v;
-        }
-        if (auto v = ReadUsageInt(*it, "cache_creation_input_tokens", &event.cache_creation_reported,
-                                  &anomaly)) {
-            event.usage.cache_creation_tokens = *v;
-        }
-        event.usage_anomaly = std::move(anomaly);
+    if (const auto* usage=usage_wire::Find(data,{"usage"});usage && usage->is_object()) {
+        auto snapshot=usage_wire::Anthropic(*usage);
+        if (!snapshot) return StreamError{std::string(snapshot.error()),"usage.material.invalid"};
+        usage_wire::Apply(event,*snapshot);
     }
+
     return event;
 }
 
@@ -195,9 +156,10 @@ std::optional<StreamEvent> HandleError(const json& data) {
 }  // namespace
 
 std::optional<StreamEvent> parse_event(const SseFrame& frame, bool parse_server_tool_search) try {
-    json data;
+    ParsedJson document;
+    const auto& data = document.value();
     try {
-        data = json::parse(frame.data);
+        document.Parse(frame.data);
     } catch (const json::parse_error&) {
         // 帧里的数据不是合法 JSON,跳过,不崩。
         return std::nullopt;
@@ -256,98 +218,124 @@ std::optional<StreamEvent> parse_event_json(const json& data, bool parse_server_
 }
 
 void EventParser::ResetUsageState() {
-    usage_snapshot_ = UsageSnapshot{};
-    usage_seen_ = false;
-    cache_read_seen_ = false;
-    cache_creation_seen_ = false;
-    usage_anomaly_.clear();
+    accounting_=usage_wire::AnthropicAccounting{};
+    numeric_delivery_=usage_wire::NumericDeliveryOwner{};
+    usage_seen_=false;provider_response_id_.reset();
 }
 
-void EventParser::AbsorbUsageObject(const json& usage) {
-    // 字段级吸收(C1):出现的字段覆盖快照(显式零一样覆盖),缺席的保留
-    // 旧值——绝不相加(官方 output_tokens 本就是累计值)。矛盾账(类型
-    // 错/负数)只记首条,不刷屏。
-    usage_seen_ = true;
-    bool dummy_seen = false;
-    std::string anomaly;
-    if (auto v = ReadUsageInt(usage, "input_tokens", &dummy_seen, &anomaly)) {
-        usage_snapshot_.input_tokens = *v;
-    }
-    if (auto v = ReadUsageInt(usage, "output_tokens", &dummy_seen, &anomaly)) {
-        usage_snapshot_.output_tokens = *v;
-    }
-    if (auto v = ReadUsageInt(usage, "cache_read_input_tokens", &cache_read_seen_, &anomaly)) {
-        usage_snapshot_.cache_read = *v;
-    }
-    if (auto v = ReadUsageInt(usage, "cache_creation_input_tokens", &cache_creation_seen_, &anomaly)) {
-        usage_snapshot_.cache_creation = *v;
-    }
-    if (usage_anomaly_.empty()) {
-        usage_anomaly_ = std::move(anomaly);
-    }
+void EventParser::AbsorbUsageObject(const json& usage, const std::vector<usage_wire::facts::RawField>* lexical) {
+    usage_seen_=true;
+    accounting_.Absorb(usage,lexical,
+        [](void* context, const usage_wire::AnthropicAccounting::NumericValues& values) noexcept {
+            static_cast<EventParser*>(context)->numeric_delivery_.Own(values);
+        },this);
 }
 
-std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
-    // C1:先在 json 层吸收 usage 快照(message_start/message_delta 两类帧),
-    // 再走无状态翻译——同一棵树只 parse 一遍。吸收只认"帧里真有 usage
-    // 对象"的路;翻译结果里的 MessageDone 出口换成合并账。
-    json data;
-    try {
-        data = json::parse(frame.data);
-    } catch (const json::parse_error&) {
-        return {};
+std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
+    std::vector<StreamEvent> events;
+    const usage_wire::LexicalUsage lexical(frame.data, usage_wire::Dialect::Anthropic,
+        nullptr, this,
+        [](void* context, const usage_wire::SourceNumbers& source, bool message_start, bool message_delta) noexcept {
+            auto& parser = *static_cast<EventParser*>(context);
+            if (message_start) parser.ResetUsageState();
+            if ((message_start || message_delta) && source.is_object())
+                parser.numeric_delivery_.Own(parser.accounting_.AbsorbNumbers(source));
+        });
+    ParsedJson document;
+    const auto& data = document.value();
+    try { document.Parse(frame.data); }
+    catch (const json::exception&) {
+        if (lexical.numbers.empty()) return events;
+        // The fixed numeric checkpoint already reset message_start before
+        // owning its facts. A second reset here would discard them if the
+        // recovery DOM's next allocation fails.
+        ParsedJson recovered_usage;
+        lexical.NumericObject(recovered_usage);
+        AbsorbUsageObject(recovered_usage.value(), &lexical.numbers);
+        if (lexical.response_id) {
+            provider_response_id_ = lexical.response_id;
+            events.push_back(ProviderResponseIdentity{*lexical.response_id});
+        }
+        auto partial = accounting_.View();
+        if (partial) {
+            numeric_delivery_.Own(*partial);
+            usage_wire::LexicalUsage::MarkIncomplete(*partial);
+            events.push_back(usage_wire::Nonterminal(*partial, provider_response_id_));
+        }
+        events.push_back(Fail(StreamError{"accounting recovered from an unparseable frame", "usage.frame.incomplete"}));
+        return events;
     }
-    if (data.is_object()) {
-        const auto type_it = data.find("type");
-        if (type_it != data.end() && type_it->is_string()) {
-            const std::string type = type_it->get<std::string>();
-            if (type == "message_start") {
-                // 新响应开始:先清旧账,绝不串上一条流的数字(parser 复用、
-                // 连发两条流的测试场景都靠这一下)。
-                ResetUsageState();
-                if (auto msg = data.find("message"); msg != data.end() && msg->is_object()) {
-                    if (auto u = msg->find("usage"); u != msg->end() && u->is_object()) {
-                        AbsorbUsageObject(*u);
-                    }
-                }
-            } else if (type == "message_delta") {
-                if (auto u = data.find("usage"); u != data.end() && u->is_object()) {
-                    AbsorbUsageObject(*u);
-                }
+    if (!data.is_object()) return events;
+    const auto* type=usage_wire::Find(data,{"type"});
+    if (!type || !type->is_string()) return events;
+    const auto& name=type->get_ref<const std::string&>();
+    const json* usage=nullptr;
+    const json* response_identity=nullptr;
+    std::optional<std::string_view> id_error;
+    if (name=="message_start") {
+        ResetUsageState();
+        if (const auto* message=usage_wire::Find(data,{"message"});message && message->is_object()) {
+            response_identity=usage_wire::Find(*message,{"id"});
+            usage=usage_wire::Find(*message,{"usage"});
+        }
+    } else if (name=="message_delta") {
+        usage=usage_wire::Find(data,{"usage"});
+    }
+    if (usage && usage->is_object()) AbsorbUsageObject(*usage, &lexical.numbers);
+    if (name=="message_start") {
+        const auto id=usage_wire::ResponseId(response_identity);
+        if (id) {
+            provider_response_id_=*id;
+            if (*id) events.push_back(ProviderResponseIdentity{**id});
+        }
+        else id_error=id.error();
+    }
+    std::optional<usage_wire::Snapshot> material;
+    if (usage && usage->is_object()) {
+        auto snapshot=accounting_.View();
+        if (!snapshot) {
+            events.push_back(Fail(StreamError{std::string(snapshot.error()),"usage.material.invalid"}));
+            return events;
+        }
+        material=std::move(*snapshot);
+        numeric_delivery_.Own(*material);
+        if (!lexical.complete || lexical.duplicate) usage_wire::LexicalUsage::MarkIncomplete(*material);
+        if (!material->material_error.empty()) {
+            events.push_back(usage_wire::Nonterminal(*material, provider_response_id_));
+            events.push_back(Fail(StreamError{std::string(material->material_error), "usage.material.invalid"}));
+            return events;
+        }
+        events.push_back(usage_wire::Nonterminal(*material,provider_response_id_));
+    }
+    if (id_error) {
+        events.push_back(Fail(StreamError{std::string(*id_error),"usage.response_id.invalid"}));
+        return events;
+    }
+    if (failed_) return events;  // Keep late facts without translating a success.
+    auto event=parse_event_json(data,parse_server_tool_search_);
+    if (!event) {
+        if (name=="message_delta")
+            events.push_back(Fail(StreamError{"message_delta has an invalid payload","model.payload.invalid"}));
+        return events;
+    }
+    if (auto* done=std::get_if<MessageDone>(&*event);done && usage_seen_) {
+        if (!material) {
+            auto snapshot=accounting_.View();
+            if (!snapshot) {
+                events.push_back(Fail(StreamError{std::string(snapshot.error()),"usage.material.invalid"}));
+                return events;
             }
+            material=std::move(*snapshot);
+            numeric_delivery_.Own(*material);
         }
+        usage_wire::Apply(*done,*material,provider_response_id_);
     }
-
-    auto event = parse_event_json(data, parse_server_tool_search_);
-    if (!event.has_value()) {
-        return {};
+    for (auto& translated : ConsumeParsed(std::move(*event))) {
+        if (std::holds_alternative<StreamError>(translated)) failed_ = true;
+        if (failed_ && !std::holds_alternative<StreamError>(translated)) continue;
+        events.push_back(std::move(translated));
     }
-    if (auto* done = std::get_if<MessageDone>(&*event); done != nullptr) {
-        // 出口换合并账:快照里出现过的字段覆盖帧内缺省值(帧内本来就有
-        // 的,吸收时已被本帧值覆盖,等价);旗标带全流的看见账。半截流
-        // (没有 message_delta)不会走到这里,MessageDone 不发——未完成的
-        // 响应不伪装完整账,取消/错误路径由上层按"没收到终帧"收口。
-        if (usage_snapshot_.input_tokens.has_value()) {
-            done->usage.input_tokens = *usage_snapshot_.input_tokens;
-        }
-        if (usage_snapshot_.output_tokens.has_value()) {
-            done->usage.output_tokens = *usage_snapshot_.output_tokens;
-        }
-        if (usage_snapshot_.cache_read.has_value()) {
-            done->usage.cache_read_tokens = *usage_snapshot_.cache_read;
-        }
-        if (usage_snapshot_.cache_creation.has_value()) {
-            done->usage.cache_creation_tokens = *usage_snapshot_.cache_creation;
-        }
-        done->usage_reported = usage_seen_;
-        done->cache_read_reported = cache_read_seen_;
-        done->cache_creation_reported = cache_creation_seen_;
-        done->usage_anomaly = usage_anomaly_;
-    }
-    return ConsumeParsed(std::move(*event));
-} catch (const json::exception&) {
-    // 坏帧当没看见:与 parse_event 同一条兜底,不崩。
-    return {};
+    return events;
 }
 
 std::vector<StreamEvent> EventParser::ConsumeParsed(StreamEvent event) {
@@ -459,12 +447,15 @@ std::vector<StreamEvent> EventParser::CloseOpenProbe() {
 }
 
 std::vector<StreamEvent> EventParser::Finish() {
+    if (failed_) return {};
     if (!recover_tagged_thinking_ ||
         (tagged_state_ != TaggedThinkingState::Probe && tagged_state_ != TaggedThinkingState::Thinking &&
          tagged_state_ != TaggedThinkingState::AwaitingAnswer)) {
         return {};
     }
-    return CloseOpenProbe();
+    auto tail = CloseOpenProbe();
+    for (const auto& event : tail) if (std::holds_alternative<StreamError>(event)) failed_ = true;
+    return tail;
 }
 
 }  // namespace lubancode::api::anthropic

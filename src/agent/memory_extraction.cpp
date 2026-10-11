@@ -629,11 +629,8 @@ std::expected<MemoryExtraction, ExtractionError> RunMemoryExtraction(api::Backen
 
     // usage 出账(分角色记账):抽取这轮采样不混普通 turn 的账。
     if (accounting != nullptr) {
-        accounting->usage.input_tokens += sampled.usage.input_tokens;
-        accounting->usage.cache_read_tokens += sampled.usage.cache_read_tokens;
-        accounting->usage.cache_creation_tokens += sampled.usage.cache_creation_tokens;
-        accounting->usage.output_tokens += sampled.usage.output_tokens;
-        accounting->usage.output_reasoning_tokens += sampled.usage.output_reasoning_tokens;
+        agent::AddSampleAccounting(accounting, sampled);
+        // Keep the existing last-call display flag; per-field coverage owns precision.
         accounting->usage_reported = sampled.usage_reported;
         accounting->duration_ms = sampled.duration_ms;
     }

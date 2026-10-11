@@ -5,6 +5,7 @@
 
 #include <charconv>
 #include <chrono>
+#include <exception>
 #include <utility>
 
 #include <curl/curl.h>
@@ -96,6 +97,9 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
     // 置位,收场分型据此把"我们主动杀的流"与 curl 自报的网络错分开——
     // cpr 只给一个共用的 ABORTED_BY_CALLBACK,不分青红皂白。
     bool hard_timeout_hit = false;
+    // Never unwind a parser/host exception through libcurl's C callback stack.
+    // The request owns the first exception until Post has retired the transfer.
+    std::exception_ptr callback_failure;
 
     cpr::HeaderCallback header_cb(
         [&](const std::string_view& header, intptr_t) -> bool {
@@ -108,36 +112,42 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
 
     cpr::WriteCallback write_cb(
         [&](const std::string_view& data, intptr_t) -> bool {
-            received_any_bytes = true;
-            if (cancel != nullptr && cancel->load()) {
-                // 返回 false 让 cpr/libcurl 就地掐断这次传输;response.error
-                // 会因此被置位,靠上面这个 cancelled 标志把"用户主动打断"
-                // 和"真网络错"分开,不走到 ErrorKind::Network 那条报错路。
-                cancelled = true;
-                return false;
-            }
-            const bool is_success = status_known && status_code >= 200 && status_code < 300;
-            if (!is_success) {
-                // 非 2xx:这不是 SSE 流,是普通的错误响应体,攒起来好塞进
-                // Error 里,不要喂给分帧器瞎解析。攒量设帽(FD-09):时间
-                // 上限(硬墙钟/空闲超时)不等于字节上限,故障/恶意服务器回
-                // 无 Content-Length 的连接式错误体时,光靠时间闸内存照样涨。
-                // 这一段放进去就超 -> 不放,就地掐流;正好到帽不超(与
-                // net/http_transport 的响应体帽同一套语义)。
-                if (error_body.size() + data.size() > call.max_error_body_bytes) {
-                    error_body_cap_hit = true;
+            if (callback_failure) return false;
+            try {
+                received_any_bytes = true;
+                if (cancel != nullptr && cancel->load()) {
+                    // 返回 false 让 cpr/libcurl 就地掐断这次传输;response.error
+                    // 会因此被置位,靠上面这个 cancelled 标志把"用户主动打断"
+                    // 和"真网络错"分开,不走到 ErrorKind::Network 那条报错路。
+                    cancelled = true;
                     return false;
                 }
-                error_body.append(data);
+                const bool is_success = status_known && status_code >= 200 && status_code < 300;
+                if (!is_success) {
+                    // 非 2xx:这不是 SSE 流,是普通的错误响应体,攒起来好塞进
+                    // Error 里,不要喂给分帧器瞎解析。攒量设帽(FD-09):时间
+                    // 上限(硬墙钟/空闲超时)不等于字节上限,故障/恶意服务器回
+                    // 无 Content-Length 的连接式错误体时,光靠时间闸内存照样涨。
+                    // 这一段放进去就超 -> 不放,就地掐流;正好到帽不超(与
+                    // net/http_transport 的响应体帽同一套语义)。
+                    if (data.size() > call.max_error_body_bytes - error_body.size()) {
+                        error_body_cap_hit = true;
+                        return false;
+                    }
+                    error_body.append(data);
+                    return true;
+                }
+                if (!sink(data)) {
+                    // sink 报了协议绝境(分帧器单帧溢出):掐断传输,后面按
+                    // 协议错误报。
+                    frame_overflow = true;
+                    return false;
+                }
                 return true;
-            }
-            if (!sink(data)) {
-                // sink 报了协议绝境(分帧器单帧溢出):掐断传输,后面按
-                // 协议错误报。
-                frame_overflow = true;
+            } catch (...) {
+                callback_failure = std::current_exception();
                 return false;
             }
-            return true;
         });
 
     // ProgressCallback 在连接/TLS 握手阶段(还没有响应体)也会被周期性调用,
@@ -199,7 +209,14 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
     session.SetHeaderCallback(header_cb);
     session.SetWriteCallback(write_cb);
     session.SetProgressCallback(progress_cb);
-    cpr::Response response = session.Post();
+    cpr::Response response = [&] {
+        try { return session.Post(); }
+        catch (...) {
+            if (callback_failure) std::rethrow_exception(callback_failure);
+            throw;
+        }
+    }();
+    if (callback_failure) std::rethrow_exception(callback_failure);
 
     // 收场分型,顺序有讲究:用户取消 > 帧溢出 > 错误体帽 > 网络错 > HTTP 状态。
     if (cancelled || (cancel != nullptr && cancel->load())) {
