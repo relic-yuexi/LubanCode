@@ -141,3 +141,25 @@ calibrated ordinal (7351 in this Linux success baseline), raw original materials
 actual OpenSession errors in the native failure material, not guessed causes.
 Only same-source remote full CLI, SDK Lua ON/OFF, relocated consumption and ASan
 can accept the repair; these partial receipts do not complete the matrix.
+
+### Prepare event decoding before native append
+
+Actual PR354 source e14dcde5 macOS job 114414258317 fails refusal ordinal 80.
+Original artifact preserves the real SDK image, query/result, operation final,
+and journal: model.response.started is committed at seq 9, while no
+model.usage.observed exists. All five returned values and typed raw fields
+remain in the incomplete result. Actual OpenSession reports
+sdk.usage.result_invalid / sdk.usage.observation_mismatch. The returned-fact
+factory alone cannot repair an earlier writer frozen by allocating event decode
+after the response-start append.
+
+Prepare strict EventLine decoding before native I/O for every event, and reuse
+that owned decoded event for post-append projection. Decode refusal must leave
+the native journal untouched and writer usable for original returned usage
+settlement; it must not replay Generate or a native append. Invalid event decode
+is rejected before I/O. Remaining context/source projection failure retains the
+original native witness and freezes the writer exactly as before. Keep actual
+post-native failure tests and strict recovery/source validation, all release
+routes/forms, deep JSON qualifications and every real refusal ordinal. This
+source repair requires same-source remote full CLI, SDK Lua ON/OFF, relocated
+consumption and ASan evidence; no local CI or native work is permitted.
