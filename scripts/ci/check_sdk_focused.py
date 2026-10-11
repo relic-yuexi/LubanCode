@@ -196,7 +196,17 @@ def check_allocation_owner_native(section: str, registered: list[str]):
     summaries = re.findall(r"\[sdk-allocation-owner\] qualified_paths=(\d+) image=([^\r\n]+)", section)
     if len(summaries) != 1 or int(summaries[0][0]) != len(expected) or not summaries[0][1].strip():
         raise RuntimeError("Allocation qualification native image/summary is missing or duplicated")
-    return {"qualified_paths": len(routes), "actual_image": summaries[0][1], "allocation_refusals": "not_evaluated"}
+    refusals = re.findall(r"^\[sdk-module-refusal\] form=(\d+) baseline=(\d+) refused=(\d+) host=(\d+)\r?$", section, re.M)
+    expected_refusals = {(str(kind), "1", "1", "0") for kind in range(8)}
+    if len(refusals) != 8 or set(refusals) != expected_refusals:
+        raise RuntimeError("SDK module refusal qualification is missing, duplicated, foreign or intercepted the host")
+    if section.splitlines().count("[sdk-module-refusal] qualified_forms=8 imports_restored=1") != 1:
+        raise RuntimeError("SDK module refusal imports were not confirmed restored exactly once")
+    if sum(line.startswith("[sdk-module-refusal]") for line in section.splitlines()) != 9:
+        raise RuntimeError("SDK module refusal qualification contains malformed or extra markers")
+    return {"qualified_paths": len(routes), "actual_image": summaries[0][1],
+            "allocation_refusals": 8, "refusal_scope": "module_port_qualification",
+            "ordinary_session_allocation_matrix": "not_evaluated"}
 
 
 def check_native_command(section: str, registered: list[str]):

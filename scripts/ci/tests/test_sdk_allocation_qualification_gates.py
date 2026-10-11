@@ -13,7 +13,9 @@ class AllocationQualificationGateTests(unittest.TestCase):
             '[doctest] assertions: 100 | 100 passed | 0 failed', 'Test Passed.',
             *('[sdk-allocation-owner-route] %d %d %d %d' % (kind, sized, size, route)
               for kind in range(8) for sized in (0, 1) for size in (0, 1, 257) for route in range(3)),
-            '[sdk-allocation-owner] qualified_paths=144 image=/actual build/liblubancore.so'))
+            '[sdk-allocation-owner] qualified_paths=144 image=/actual build/liblubancore.so',
+            *('[sdk-module-refusal] form=%d baseline=1 refused=1 host=0' % kind for kind in range(8)),
+            '[sdk-module-refusal] qualified_forms=8 imports_restored=1'))
 
     def test_native_commands_and_line_endings(self):
         for executable in ('/real build/lubancore_sdk_tests', 'C:/real build/lubancore_sdk_tests.exe', '/real build/lubancode_tests'):
@@ -21,7 +23,9 @@ class AllocationQualificationGateTests(unittest.TestCase):
             for ending in ('\n', '\r\n'):
                 value = check_allocation_owner_native(self.body(command).replace('\n', ending), command)
                 self.assertEqual(value['qualified_paths'], 144)
-                self.assertEqual(value['allocation_refusals'], 'not_evaluated')
+                self.assertEqual(value['allocation_refusals'], 8)
+                self.assertEqual(value['refusal_scope'], 'module_port_qualification')
+                self.assertEqual(value['ordinary_session_allocation_matrix'], 'not_evaluated')
 
     def test_each_route_must_appear_once(self):
         for kind in range(8):
@@ -54,3 +58,26 @@ class AllocationQualificationGateTests(unittest.TestCase):
         command = [self.command[0], '--source-file=*test_lubancore_lifecycle.cpp']
         with self.assertRaises(RuntimeError):
             check_allocation_owner_native(self.body(command), command)
+
+    def test_each_real_module_refusal_is_required_once(self):
+        for kind in range(8):
+            marker = '[sdk-module-refusal] form=%d baseline=1 refused=1 host=0' % kind
+            for body in (self.body().replace(marker + '\n', ''), self.body() + '\n' + marker):
+                with self.subTest(kind=kind), self.assertRaises(RuntimeError):
+                    check_allocation_owner_native(body, self.command)
+
+    def test_refusal_requires_real_baseline_fault_and_host_isolation(self):
+        marker = '[sdk-module-refusal] form=0 baseline=1 refused=1 host=0'
+        for wrong in ('form=8 baseline=1 refused=1 host=0', 'form=0 baseline=0 refused=1 host=0',
+                      'form=0 baseline=1 refused=0 host=0', 'form=0 baseline=1 refused=2 host=0',
+                      'form=0 baseline=1 refused=1 host=1'):
+            with self.assertRaises(RuntimeError):
+                check_allocation_owner_native(self.body().replace(marker, '[sdk-module-refusal] ' + wrong), self.command)
+
+    def test_refusal_import_restore_and_marker_shape_are_required(self):
+        marker = '[sdk-module-refusal] qualified_forms=8 imports_restored=1'
+        for body in (self.body().replace(marker, ''), self.body() + '\n' + marker,
+                     self.body().replace('imports_restored=1', 'imports_restored=0'),
+                     self.body() + '\n[sdk-module-refusal] invalid'):
+            with self.assertRaises(RuntimeError):
+                check_allocation_owner_native(body, self.command)
