@@ -121,7 +121,8 @@ if(CMAKE_DL_LIBS)
   target_link_libraries(lubancore_sdk_tests PRIVATE ${CMAKE_DL_LIBS})
 endif()
 target_compile_definitions(lubancore_sdk_tests PRIVATE
-  LUBANCORE_TEST_SHARED_MODULE="$<TARGET_FILE:lubancore_sdk>")
+  LUBANCORE_TEST_SHARED_MODULE="$<TARGET_FILE:lubancore_sdk>"
+  LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT="${CMAKE_BINARY_DIR}/test-evidence/sdk-focused/allocation-matrix")
 target_precompile_headers(lubancore_sdk_tests PRIVATE "${_lubancore_tests_root}/support/pch.hpp")
 set_source_files_properties("${_lubancore_tests_root}/support/main.cpp"
   PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
@@ -139,7 +140,8 @@ if(TARGET lubancode_tests)
     target_link_libraries(lubancode_tests PRIVATE ${CMAKE_DL_LIBS})
   endif()
   target_compile_definitions(lubancode_tests PRIVATE
-    LUBANCORE_TEST_SHARED_MODULE="$<TARGET_FILE:lubancore_sdk>")
+    LUBANCORE_TEST_SHARED_MODULE="$<TARGET_FILE:lubancore_sdk>"
+    LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT="${CMAKE_BINARY_DIR}/test-evidence/sdk-focused/allocation-matrix")
   if(LUBANCODE_ASAN_TEST_PROFILE)
     add_dependencies(lubancode_tests lubancore_sdk_search_probe)
   else()
