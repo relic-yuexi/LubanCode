@@ -35,3 +35,35 @@ Close 撤订阅须接走原弱引用册，不能在 closed 已置位后另建强
 远端源 a7749b4f 已交实际基线：Linux 7816 / 6028 / 6029 点，macOS 7230 / 5597 / 5597 点，依次为成功、取消、Close。Windows 与整套同源验收仍未齐。单条 Close 点还须实际等 20 ms 核等待，完整矩阵不能沿用小案 300 秒预算。本案 SDK focused 和原 CLI/ASan 注册各留 3600 秒，其余案仍按原预算；门禁明确核本案预算，不能借放宽全册或少扫点过关。超时仍判失败，不当通过。
 
 远端源 06d7ad9a 的 macOS 成功路实际基线为 7261 点，1 至 23 点已交原件，随后未捕获 bad_alloc 导致 SIGABRT。测试宿主须在下一次实际中止时留固定帧数组的调用栈，并在每点开场前刷新真实路径与序号。诊断由原宿主执行，不能另编 SDK、改异常结果、接管 Operation 或关掉后续分配点；打印后仍交回原 terminate handler，中止照判失败。诊断需要的栈接口先在无拒绝借用时预热，正常测试结束须还回旧 handler。安装拒绝控制前另存实际 CMake SDK 映像原件，供隐藏符号与栈偏移定位；源映像须先同真实分配口核归属，副本不装载、不执行，也不代替原模块参与测试。
+
+## Actual JSON construction termination at the post-return stream start
+
+Remote macOS job 114394531203, source 0c65a60a, records the actual start of
+success-path ordinal 24 and then the original host terminate stack. The stack
+enters nlohmann 3.12.0's initializer-list basic_json constructor, called by
+V3Writer::BeginStreamResponse, through V3EnsureStreamStarted, the real
+BackendAdapter, AgentLoop and Session worker. This replaces the earlier
+unlocated destructor hypothesis with an actual construction/retirement boundary.
+The loaded SDK image is retained as module-image.bin for source/offset inspection.
+The native abort remains failure; points 1 through 23 are not a completed sweep.
+
+Repair the real post-return JSON construction and retirement owners. Structured
+initializer-list temporaries must not escape cleanup ownership; a noexcept DOM
+retirement must not allocate a new traversal stack. Register container cleanup
+before mutation, move the cleanup ownership together with transferred DOMs, and
+empty children before parents on normal and exceptional exits. Retain arbitrary
+admitted nested payloads and the existing canonical wire schema: neither a new
+arbitrary nesting cap nor a recursive destructor substitutes for bounded owner
+bookkeeping. Borrowed serialization cannot outlive its document owner.
+
+BeginStreamResponse is the first evidenced caller. Audit its actual CommitEvent,
+EventLine projection, canonical serialization, subsequent returned-usage,
+completion, result/final and notification JSON owners as the uncapped scan reaches
+them. Do not fix only the host probe, suppress a destructor refusal, change the
+ordinal domain, replace allocation with malloc/free, skip the failing point, or
+fabricate committed usage. Native append confirmation and later semantic failure
+must retain their existing distinct receipts and same-ID zero-replay recovery.
+All three real paths, every calibrated ordinal, eight operator forms, original
+144 release routes, five returned numbers and original observations stay required.
+Same-source remote full CLI, SDK Lua ON/OFF, installed/relocated consumers and ASan
+must accept the repair. No local configure, build, native tests or CI may run.
