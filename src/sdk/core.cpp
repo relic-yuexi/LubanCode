@@ -1076,6 +1076,9 @@ struct Session::Impl final : rt::InteractionBroker {
     }
 
     const Operation& Complete(Operation candidate, const std::vector<std::string>& refs, bool usage_reported, bool ledger_ok = true) {
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+        detail::testing::SetAllocationPhase(detail::testing::AllocationPhase::Completion);
+#endif
         static_assert(std::is_nothrow_move_constructible_v<Operation>);
         completing_operation.emplace(std::move(candidate));
         completion_final_recorded = false;
@@ -1194,6 +1197,9 @@ struct Session::Impl final : rt::InteractionBroker {
             }
         }
         const bool complete = ledger_ok && memory_saved && writes_saved && children_saved && operation.state != OperationState::Indeterminate;
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+        detail::testing::SetAllocationPhase(detail::testing::AllocationPhase::ResultWrite);
+#endif
         const auto directory = session_dir / "sdk-results";
         std::error_code ec;
         fs::create_directories(directory, ec);
@@ -1207,6 +1213,9 @@ struct Session::Impl final : rt::InteractionBroker {
             operation.error += " sdk.result.artifact_failed";
         }
         rt::SessionService::TurnFinalRecord final;
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+        detail::testing::SetAllocationPhase(detail::testing::AllocationPhase::FinalRecord);
+#endif
         final.operation_id = operation.operation_id;
         final.turn_id = operation.turn_id;
         final.execution_status = Status(operation.state);
@@ -1218,6 +1227,9 @@ struct Session::Impl final : rt::InteractionBroker {
             operation.state = OperationState::Indeterminate;
         }
         completion_final_recorded = recorded;
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+        detail::testing::SetAllocationPhase(detail::testing::AllocationPhase::Projection);
+#endif
         if (!operation.result_persisted) operation.error += " sdk.result.persistence_failed";
         if (command_jobs) {
             if (operation.state != OperationState::Succeeded)
@@ -1237,6 +1249,9 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         Event event;
         event.kind = "operation_completed";
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+        detail::testing::SetAllocationPhase(detail::testing::AllocationPhase::Notification);
+#endif
         if (command_jobs) command_jobs->EndParent(operation.operation_id);
         event.operation_id = operation.operation_id;
         event.turn_id = operation.turn_id;
@@ -1820,6 +1835,9 @@ struct Session::Impl final : rt::InteractionBroker {
     }
     Result<void> Close() {
         if (in_session_worker || detail::InEventProvider() || detail::InMemoryBlobProvider() || lubancode::trajectory::InNamedResultProvider()) return std::unexpected(Failure("sdk.lifecycle.reentrant"));
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+        detail::testing::SetAllocationPhase(detail::testing::AllocationPhase::Close);
+#endif
         std::lock_guard close_lock(close_mutex);
         {
             std::lock_guard lock(mutex);
@@ -1843,7 +1861,7 @@ struct Session::Impl final : rt::InteractionBroker {
         // SessionService destruction also releases operations.jsonl. Keep query
         // projections, not the live writer, after Close (Windows delete/rename).
         std::shared_ptr<rt::SessionService> closed_service;
-        std::vector<std::shared_ptr<EventStream::Impl>> streams;
+        std::vector<std::weak_ptr<EventStream::Impl>> streams;
         {
             std::unique_lock lock(mutex);
             closed = true;
@@ -1853,8 +1871,9 @@ struct Session::Impl final : rt::InteractionBroker {
             closed_service = std::move(service);
             extensions = nullptr;
             subagent_module = nullptr;
-            for (auto& weak : subscriptions) if (auto stream = weak.lock()) streams.push_back(std::move(stream));
-            subscriptions.clear();
+            // closed is already visible: transferring the original list must
+            // not allocate and skip remaining owners if storage is refused.
+            streams.swap(subscriptions);
             cv.notify_all();
         }
         {
@@ -1881,7 +1900,7 @@ struct Session::Impl final : rt::InteractionBroker {
             memory_blob_factory.reset();
             named_result_factory.reset(); // Read handle retains only its Store/provider, never this Service.
         }
-        for (auto& stream : streams) (void)stream->CloseChecked();
+        for (auto& weak : streams) if (auto stream = weak.lock()) (void)stream->CloseChecked();
         if (event_delivery) {
             auto closed_delivery = event_delivery->CloseAndWait();
             if (!closed_delivery && !close_error) close_error = closed_delivery.error();

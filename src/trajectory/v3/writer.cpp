@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <new>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -311,6 +312,19 @@ struct V3Writer::Impl {
             receipt.error_message = "注入的提交失败(测试)";
             return receipt;
         }
+        // Own event decoding before native I/O. A decode allocation refusal
+        // must not strand an already returned usage fact behind a broken writer.
+        const bool message_line = json.at("type").get<std::string>() == "message";
+        std::optional<EventLine> prepared_event;
+        if (!message_line) {
+            std::string error_code, error_message;
+            prepared_event = EventLine::FromJsonStrict(json, &error_code, &error_message);
+            if (!prepared_event) {
+                receipt.error_code = std::move(error_code);
+                receipt.error_message = std::move(error_message);
+                return receipt;
+            }
+        }
         // All returned identity and diagnostic storage belongs to this call
         // before actual I/O. The lease keeps the owner gate through every
         // allocating V3 view update, then freezes before that gate is released.
@@ -331,7 +345,7 @@ struct V3Writer::Impl {
         }
         try {
             if (options.after_native_append) options.after_native_append();
-            if (json.at("type").get<std::string>() == "message") {
+            if (message_line) {
                 message_ids.insert(json.at("messageId").get<std::string>());
                 if (json.at("message").value("role", std::string()) == "system" &&
                     json.contains("systemMeta") && json["systemMeta"].contains("hostBindings")) {
@@ -340,11 +354,8 @@ struct V3Writer::Impl {
                 }
             } else {
                 // 事件落稳后统一重放内存视图(链/版本),便利 API 不各自手工维护。
-                std::string ec, msg;
-                if (auto event = EventLine::FromJsonStrict(json, &ec, &msg)) {
-                    ApplyCommitEventToView(context, *event);
-                    usage_observations.Record(*event);
-                }
+                ApplyCommitEventToView(context, *prepared_event);
+                usage_observations.Record(*prepared_event);
             }
             ++next_seq;
             last_hash = line_hash;
@@ -892,6 +903,28 @@ WriteReceipt V3Writer::AppendEvent(EventDraft draft, Durability durability) {
                             "句柄已断,停止提交"};
     }
     return impl_->CommitEvent(std::move(draft), durability);
+}
+
+std::optional<WriteReceipt> V3Writer::AppendPreparedEvent(EventDraftFactory prepare, void* context,
+                                                         Durability durability) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->broken) {
+        return WriteReceipt{WriteReceipt::Status::IoFailed, "", 0, "", "v3writer.broken",
+                            "句柄已断,停止提交"};
+    }
+    for (unsigned attempt = 0; ; ++attempt) {
+        try {
+            auto draft = prepare(context);
+            if (!draft) return std::nullopt;
+            // CommitEvent catches every exception after native append and returns
+            // its owned witness. Only pre-I/O bad_alloc can escape to this catch.
+            auto receipt = impl_->CommitEvent(std::move(*draft), durability);
+            // Never copy allocating receipt strings after a real append.
+            return std::optional<WriteReceipt>{std::in_place, std::move(receipt)};
+        } catch (const std::bad_alloc&) {
+            if (attempt != 0) throw;
+        }
+    }
 }
 
 WriteReceipt V3Writer::AdmitMessages(std::vector<std::string> message_ids,

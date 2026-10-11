@@ -15,6 +15,18 @@ struct AllocationQualificationPort {
     void (*release)(void*, std::size_t, std::size_t, AllocationKind, bool) noexcept;
 };
 LUBANCORE_API AllocationQualificationPort GetAllocationQualificationPort() noexcept;
+// Opaque real SDK JSON documents; only allocation/retirement facts, no results.
+struct JsonRetirementQualificationPort {
+    void* (*make)(std::size_t depth, bool ordered);
+    bool (*inspect)(const void*, std::size_t depth, bool ordered) noexcept;
+    void (*retire)(void*, bool ordered) noexcept;
+};
+LUBANCORE_API JsonRetirementQualificationPort GetJsonRetirementQualificationPort() noexcept;
+
+enum class AllocationPhase : unsigned {
+    None, BackendReturned, Numbers, Material, Completion,
+    ResultWrite, FinalRecord, Projection, Notification, Close
+};
 // Owned by the caller until end() and actual worker retirement. No reply facts.
 struct AllocationFailureControl {
     std::uint64_t refuse_ordinal = 0;
@@ -23,6 +35,8 @@ struct AllocationFailureControl {
     std::atomic<unsigned> last_kind{0};
     bool require_returned_backend = false;
     std::atomic<bool> backend_returned{false};
+    std::atomic<bool> worker_retired{false};
+    std::atomic<unsigned> refused_phase{0};
 };
 struct AllocationFailurePort {
     bool (*install)() noexcept;
@@ -49,4 +63,5 @@ LUBANCORE_API AllocationInstallationDiagnostic GetAllocationInstallationDiagnost
 // Called only by the real adapter/worker, never by the host to fabricate return.
 void ActivateReturnedBackendAllocationScope() noexcept;
 void RetireReturnedBackendAllocationScope() noexcept;
+void SetAllocationPhase(AllocationPhase) noexcept;
 }

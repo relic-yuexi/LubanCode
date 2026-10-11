@@ -150,6 +150,9 @@ public:
             // metadata. If a later material copy/validation fails, the shared
             // assembler has already received the nonterminal numeric snapshot.
             api::UsageSnapshot numeric;
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+            testing::SetAllocationPhase(testing::AllocationPhase::Numbers);
+#endif
             if (reply && reply->usage) {
                 numeric.usage_reported=true;
                 numeric.usage.input_tokens=reply->usage->input_tokens;
@@ -160,6 +163,9 @@ public:
                 emit(numeric);
             }
             std::optional<api::usage_wire::Snapshot> material;
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+            testing::SetAllocationPhase(testing::AllocationPhase::Material);
+#endif
             std::optional<std::string> provider_response_id;
             std::optional<std::string_view> material_error;
             if (reply) {

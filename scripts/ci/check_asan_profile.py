@@ -266,7 +266,8 @@ def check_registration(manifest, registration, index, executable):
         require(test.get('command') == expected, 'actual aggregate full argv differs: ' + name)
         properties = {item['name']: item['value'] for item in test.get('properties', [])}
         require(not properties.get('DISABLED'), 'selected ASan source disabled: ' + name)
-        require(properties.get('TIMEOUT') == (300 if name.startswith('integration.') else 180),
+        timeout = 3600 if name == 'integration.sdk.lubancore_allocation_owner' else 300 if name.startswith('integration.') else 180
+        require(properties.get('TIMEOUT') == timeout,
                 'original per-source timeout differs: ' + name)
         stem = name.removeprefix('integration.sdk.')
         if name.startswith('integration.sdk.') and stem in named_results.SOURCES:
