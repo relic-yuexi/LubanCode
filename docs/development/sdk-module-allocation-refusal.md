@@ -55,3 +55,17 @@ Pin the downloaded source archive by SHA-256; keep this dependency out of ordina
 SDK builds, exported target requirements and installed public headers. Acceptance
 still needs same-source remote three-platform full CLI, SDK Lua ON/OFF, installed
 and relocated consumers and ASan. No local configure, build or tests run.
+
+### Pinned Detours compiler profile
+
+Actual Windows job 114394174071 at fd829289 failed in pinned upstream
+creatwth.cpp with C2362: legacy goto Cleanup crosses scalar initializers.
+The failure precedes allocation-hook qualification. The root's C++23 and
+/permissive- automatically enable the newer goto-scope check. Microsoft's
+[/Zc:gotoScope reference](https://learn.microsoft.com/en-us/cpp/build/reference/zc-gotoscope?view=msvc-170)
+provides /Zc:gotoScope- for this legacy pattern and requires it after the
+conformance-enabling option. Give only the private upstream static target a
+C++17 profile and the trailing goto-scope compatibility switch. Keep SDK/host
+C++23 and their strict compiler flags. Retain all pinned upstream source files,
+the immutable archive/hash and all native requirements. Do not treat a compiled
+library as qualification; runtime acceptance remains remote and pending.
