@@ -578,11 +578,38 @@ def main() -> None:
             # The consumer lives outside the checkout; keep its diagnostic logs in
             # the producer's artifact directory even when one of its tests fails.
             # The controlled Journal acceptance retains its actual main/result
-            # materials separately. Other consumer Session data stays in scratch.
+            # materials separately. Failed search fixtures retain their real
+            # ledger and result blobs for diagnosis; successful ones clean up.
             for name in ("LastTest.log", "LastTestsFailed.log"):
                 log = consumer_build / "Testing" / "Temporary" / name
                 if log.is_file():
                     shutil.copy2(log, evidence / name)
+            try:
+                search_root = consumer_build / "state-builtin-search"
+                search_target = evidence / "failed-search-materials"
+                retained = []
+                if search_root.exists():
+                    for source in sorted(search_root.rglob("*")):
+                        if source.is_symlink():
+                            raise RuntimeError("search evidence contains a symbolic link: " + str(source))
+                        if not source.is_file():
+                            continue
+                        relative = source.relative_to(search_root)
+                        raw = source.read_bytes()
+                        target = search_target / relative
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(raw)
+                        retained.append({"path": relative.as_posix(), "bytes": len(raw),
+                                         "sha256": hashlib.sha256(raw).hexdigest()})
+                (evidence / "failed-search-materials.json").write_text(json.dumps({
+                    "status": "diagnostic_only", "source": str(search_root),
+                    "files": retained, "is_acceptance": False,
+                }, indent=2) + "\n", encoding="utf-8")
+            except Exception as error:
+                (evidence / "failed-search-materials-error.json").write_text(json.dumps({
+                    "status": "not_evaluated", "error": str(error),
+                    "source": str(consumer_build / "state-builtin-search"),
+                }, indent=2) + "\n", encoding="utf-8")
             try:
                 journal_capture = journal_owner.capture_materials(
                     consumer_build / "state-journal-owner", evidence / "journal-owner-materials")
