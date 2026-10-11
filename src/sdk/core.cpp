@@ -10,6 +10,7 @@
 #include <set>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 
 #include "agent/agent.hpp"
 #include "mcp/mcp_tool.hpp"
@@ -298,6 +299,11 @@ struct Session::Impl final : rt::InteractionBroker {
     mutable std::condition_variable cv;
     std::mutex close_mutex;
     std::map<std::string, Operation> operations;
+    // Worker-owned candidate survives Complete unwinding after durable final
+    // confirmation. Query slots already exist from Submit; recovery publication
+    // only moves into that slot and never writes a second result/final.
+    std::optional<Operation> completing_operation;
+    bool completion_final_recorded = false;
     results::v1::SessionResultPolicy result_policy;
     // Immutable per-operation identity/ref snapshots. These retain no service,
     // Agent or original output bytes and remain usable after Close.
@@ -1049,7 +1055,30 @@ struct Session::Impl final : rt::InteractionBroker {
         if (report.enabled) report.state = "not_attempted";
         return SaveMemoryReport(std::move(report));
     }
-    Operation Complete(Operation operation, const std::vector<std::string>& refs, bool usage_reported, bool ledger_ok = true) {
+    bool PreserveConfirmedCompletion(const std::string& operation_id) {
+        static_assert(std::is_nothrow_move_assignable_v<Operation>);
+        std::lock_guard lock(mutex);
+        const auto slot = operations.find(operation_id);
+        if (slot == operations.end()) return false;
+        if (completion_final_recorded && completing_operation &&
+            completing_operation->operation_id == operation_id) {
+            // A throwing copy assignment may already have copied the terminal
+            // enum while leaving text/usage partial. Restore the entire owner.
+            slot->second = std::move(*completing_operation);
+        } else if (!Terminal(slot->second.state)) return false;
+        // A cache, Job or notification may be incomplete. Keep the confirmed
+        // result truthful, fence later work, and retire Jobs through Pump/Close.
+        broken = true;
+        active_operation.clear();
+        cv.notify_all();
+        return true;
+    }
+
+    const Operation& Complete(Operation candidate, const std::vector<std::string>& refs, bool usage_reported, bool ledger_ok = true) {
+        static_assert(std::is_nothrow_move_constructible_v<Operation>);
+        completing_operation.emplace(std::move(candidate));
+        completion_final_recorded = false;
+        Operation& operation = *completing_operation;
         {
             std::lock_guard usage_lock(usage_mutex);
             if (operation.operation_id == active_operation) operation.usage = active_usage;
@@ -1185,9 +1214,10 @@ struct Session::Impl final : rt::InteractionBroker {
         const bool recorded = service->RecordTurnFinal(final);
         operation.result_persisted = written.has_value() && recorded && complete;
         if (!operation.result_persisted) {
-            operation.error += " sdk.result.persistence_failed";
             operation.state = OperationState::Indeterminate;
         }
+        completion_final_recorded = recorded;
+        if (!operation.result_persisted) operation.error += " sdk.result.persistence_failed";
         if (command_jobs) {
             if (operation.state != OperationState::Succeeded)
                 command_jobs->StopParent(operation.operation_id, "parent_final_failed");
@@ -1645,11 +1675,11 @@ struct Session::Impl final : rt::InteractionBroker {
             refs.push_back(bridge->last_committed_assistant_message_id());
         }
         // Durable operation final precedes its public completion notification.
-        operation = Complete(operation, refs, usage_reported,
-                             bridge->recent_errors().empty() && context_healthy && middleware_healthy());
-        events.Finish(operation.state == OperationState::Succeeded ? rt::Outcome::Succeeded :
-                      operation.state == OperationState::Cancelled ? rt::Outcome::Cancelled : rt::Outcome::Failed,
-                      operation.error);
+        const Operation& completed = Complete(std::move(operation), refs, usage_reported,
+                                             bridge->recent_errors().empty() && context_healthy && middleware_healthy());
+        events.Finish(completed.state == OperationState::Succeeded ? rt::Outcome::Succeeded :
+                      completed.state == OperationState::Cancelled ? rt::Outcome::Cancelled : rt::Outcome::Failed,
+                      completed.error);
     }
 
     void Pump() {
@@ -1694,6 +1724,8 @@ struct Session::Impl final : rt::InteractionBroker {
                 if (pop.status == rt::SessionService::PendingPop::Status::WriteFailed) { broken = true; cv.notify_all(); break; }
                 if (pop.status != rt::SessionService::PendingPop::Status::Ok) continue;
                 active_operation = pop.input.operation_id;
+                completing_operation.reset();
+                completion_final_recorded = false;
                 {
                     std::lock_guard usage_lock(usage_mutex);
                     active_usage.emplace();
@@ -1708,11 +1740,15 @@ struct Session::Impl final : rt::InteractionBroker {
             }
             try { Run(pop.input, skip, bound_turn); }
             catch (const std::exception& error) {
-                Operation failed{pop.input.operation_id, active_turn_id, OperationState::Failed, {}, error.what(), false};
-                Complete(std::move(failed), {}, false);
+                if (!PreserveConfirmedCompletion(pop.input.operation_id)) {
+                    Operation failed{pop.input.operation_id, active_turn_id, OperationState::Failed, {}, error.what(), false};
+                    Complete(std::move(failed), {}, false);
+                }
             } catch (...) {
-                Operation failed{pop.input.operation_id, active_turn_id, OperationState::Failed, {}, "sdk.turn.exception", false};
-                Complete(std::move(failed), {}, false);
+                if (!PreserveConfirmedCompletion(pop.input.operation_id)) {
+                    Operation failed{pop.input.operation_id, active_turn_id, OperationState::Failed, {}, "sdk.turn.exception", false};
+                    Complete(std::move(failed), {}, false);
+                }
             }
             CancelApprovals();
         }
