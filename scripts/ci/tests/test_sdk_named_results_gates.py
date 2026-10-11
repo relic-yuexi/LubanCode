@@ -165,7 +165,9 @@ class OwnershipTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): gate.check_copies(consumer, prefix, changed, REPO)
 
     def test_current_source_rosters_preserve_every_old_member(self):
-        self.assertEqual((len(focused.REQUIRED), len(focused_roster(focused.REQUIRED, False))), (74, 72))
+        self.assertEqual((len(focused.REQUIRED), len(focused_roster(focused.REQUIRED, False))), (75, 73))
+        self.assertIn("sdk.focused.lubancore_allocation_owner", focused.REQUIRED)
+        self.assertIn("sdk.focused.lubancore_allocation_owner", focused_roster(focused.REQUIRED, False))
         self.assertIn("sdk.focused.usage_numeric_allocations", focused.REQUIRED)
         self.assertIn("sdk.focused.usage_numeric_allocations", focused_roster(focused.REQUIRED, False))
         self.assertIn('sdk.focused.lubancore_model_sampling', focused_roster(focused.REQUIRED, False))

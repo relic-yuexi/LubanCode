@@ -165,7 +165,9 @@ class ClosureTests(unittest.TestCase):
                 gate.check_copies(source, prefix, seal, context)
 
     def test_real_current_rosters_and_all_old_members(self):
-        self.assertEqual((len(focused.REQUIRED), len(focused_roster(focused.REQUIRED, False))), (74, 72))
+        self.assertEqual((len(focused.REQUIRED), len(focused_roster(focused.REQUIRED, False))), (75, 73))
+        self.assertIn("sdk.focused.lubancore_allocation_owner", focused.REQUIRED)
+        self.assertIn("sdk.focused.lubancore_allocation_owner", focused_roster(focused.REQUIRED, False))
         self.assertIn("sdk.focused.usage_numeric_allocations", focused.REQUIRED)
         self.assertIn("sdk.focused.usage_numeric_allocations", focused_roster(focused.REQUIRED, False))
         self.assertIn('sdk.focused.lubancore_model_sampling', focused_roster(focused.REQUIRED, False))
