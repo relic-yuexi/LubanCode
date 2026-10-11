@@ -747,7 +747,7 @@ def check_opening_start_native(section, command):
     for path in ("background", "mutual", "late-deleter", "session-deleter", "exceptions", "nested", "allocation-rollback"):
         if section.splitlines().count("[sdk-backend-owner-path] " + path) != 1:
             raise RuntimeError("SDK Backend actual owner path did not finish once: " + path)
-    for path in ("callback", "cancellation", "retired", "recovery", "invalid-material-recovery", "callback-exception-recovery"):
+    for path in ("callback", "cancellation", "retired", "recovery", "invalid-material-recovery", "callback-exception-recovery", "result-persistence-failure-recovery"):
         if section.splitlines().count("[sdk-usage-close-path] " + path) != 1:
             raise RuntimeError("Five-field Close actual path did not finish once: " + path)
 
