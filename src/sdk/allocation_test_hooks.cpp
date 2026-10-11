@@ -145,7 +145,7 @@ bool CollectModuleImports() noexcept {
         if (load->cmd == LC_SEGMENT_64) {
             const auto* segment = reinterpret_cast<const segment_command_64*>(load);
             if (load->cmdsize < sizeof(*segment)) return false;
-            if (segment->fileoff == 0 && segment->filesize && segment->vmaddr) {
+            if (segment->fileoff == 0 && segment->filesize) {
                 slide = reinterpret_cast<std::intptr_t>(header) - static_cast<std::intptr_t>(segment->vmaddr);
                 slide_found = true;
             }
