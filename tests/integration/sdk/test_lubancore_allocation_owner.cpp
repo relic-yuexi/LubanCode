@@ -512,7 +512,13 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
     auto recovery_options = fixture.Options(); recovery_options.resume_session_id = id;
     recovery_options.custom_tools.push_back(tool_sentinel());
     recovery_options.backend = std::make_unique<RecoveryAllocationBackend>(replays);
-    auto resumed = (*runtime)->OpenSession(std::move(recovery_options)); REQUIRE(resumed);
+    auto resumed = (*runtime)->OpenSession(std::move(recovery_options));
+    if (!resumed) {
+        const nlohmann::json error{{"code", resumed.error().code}, {"message", resumed.error().message}};
+        WriteAllocationMaterial(fixture.material_target / "recovery-error.json", error);
+        std::cerr << "SDK_ALLOCATION_RECOVERY_ERROR " << error.dump() << '\n';
+    }
+    REQUIRE(resumed);
     CHECK((*resumed)->id() == id);
     const auto recovered = (*resumed)->ReadOperation(receipt->operation_id); REQUIRE(recovered);
     WriteAllocationMaterial(fixture.material_target / "recovered.json", OperationMaterial(*recovered));
