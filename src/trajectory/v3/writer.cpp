@@ -312,6 +312,19 @@ struct V3Writer::Impl {
             receipt.error_message = "注入的提交失败(测试)";
             return receipt;
         }
+        // Own event decoding before native I/O. A decode allocation refusal
+        // must not strand an already returned usage fact behind a broken writer.
+        const bool message_line = json.at("type").get<std::string>() == "message";
+        std::optional<EventLine> prepared_event;
+        if (!message_line) {
+            std::string error_code, error_message;
+            prepared_event = EventLine::FromJsonStrict(json, &error_code, &error_message);
+            if (!prepared_event) {
+                receipt.error_code = std::move(error_code);
+                receipt.error_message = std::move(error_message);
+                return receipt;
+            }
+        }
         // All returned identity and diagnostic storage belongs to this call
         // before actual I/O. The lease keeps the owner gate through every
         // allocating V3 view update, then freezes before that gate is released.
@@ -332,7 +345,7 @@ struct V3Writer::Impl {
         }
         try {
             if (options.after_native_append) options.after_native_append();
-            if (json.at("type").get<std::string>() == "message") {
+            if (message_line) {
                 message_ids.insert(json.at("messageId").get<std::string>());
                 if (json.at("message").value("role", std::string()) == "system" &&
                     json.contains("systemMeta") && json["systemMeta"].contains("hostBindings")) {
@@ -341,11 +354,8 @@ struct V3Writer::Impl {
                 }
             } else {
                 // 事件落稳后统一重放内存视图(链/版本),便利 API 不各自手工维护。
-                std::string ec, msg;
-                if (auto event = EventLine::FromJsonStrict(json, &ec, &msg)) {
-                    ApplyCommitEventToView(context, *event);
-                    usage_observations.Record(*event);
-                }
+                ApplyCommitEventToView(context, *prepared_event);
+                usage_observations.Record(*prepared_event);
             }
             ++next_seq;
             last_hash = line_hash;
