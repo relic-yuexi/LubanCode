@@ -32,3 +32,7 @@ SDK component 与普通安装将 manifest/hash 校验过的 rg 放在 `${CMAKE_I
 - 取消与 Close 收齐实际子进程和线程；共享 ASan 明列本批必验来源，原件、登记、JUnit 与完整日志相合。LSan、TSan、条件跳过按实际结果说明。
 
 本批退出线：新宿主只调公开 SDK，显式选五件本地工具，在给定项目与资源根跑完整搜索会话。Memory、Skills、子 Agent/Action、Lua/Package、Detached 各另立小 PR。
+# 安装消费失败留档
+
+搜索安装消费测试异常退出时，宿主夹具保留本轮项目和 SDK 原盘；正常完成仍清理。Session 与 Runtime 照常关场，不能为留档挂住 worker。远端验收脚本在 CTest 退出后收原材料，逐文件记字节数与 SHA-256；拒绝符号链接，不跟出夹具。收档失败另记诊断，不能遮住原测试错误。留档只供查错，不记验收通过，不补造回执，不改原测试名单。
+
