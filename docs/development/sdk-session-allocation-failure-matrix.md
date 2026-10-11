@@ -112,3 +112,32 @@ hashes separately from the staged search resources. Do not admit an entire
 licenses directory, private JSON/Detours headers, sources or extra notices.
 Preserve every existing full-install boundary, native roster and refusal point.
 Acceptance remains same-source remote CI; run no local gates or native work.
+
+### Returned usage observation owner across persistence failure
+
+Actual source 7f30d22b Linux job 114403566518 passed all six JSON retirement
+qualifications and actual success-path refusal points 1 through 86. Point 87
+failed same-ID OpenSession. Original artifact 11694745785 preserves query,
+result, operation final and main journal: the five returned values and typed raw
+observation survive in an incomplete SDK result, but main.jsonl contains the
+prepared request and no model.usage.observed. Opening's existing source check
+therefore rejects that usage. This is incomplete producer ownership, not proof
+that source validation should be weakened.
+
+Keep the actual returned usage/observation under an owner until its native
+observation append is confirmed or its uncertainty is explicitly retained.
+Reconcile only the original prepared request and original returned fact; never
+invoke Generate again, synthesize numbers/observations, claim missing sources
+complete, or blindly append after an unknown native outcome. A confirmed native
+append with later projection failure must reconcile against the actual journal
+and produce at most one observation. A pre-append construction failure must not
+lose the original fact before normal failure/Close settlement. Keep original
+execution failure/cancellation and confirmed versus unknown result receipts.
+
+Fix the producer and settlement path. Preserve strict opening/request/usage
+validation and existing corruption rejection. Keep all three actual paths, every
+calibrated ordinal (7351 in this Linux success baseline), raw original materials,
+144 release routes, eight allocation forms and all existing assertions. Report
+actual OpenSession errors in the native failure material, not guessed causes.
+Only same-source remote full CLI, SDK Lua ON/OFF, relocated consumption and ASan
+can accept the repair; these partial receipts do not complete the matrix.
