@@ -1,6 +1,7 @@
 // prompt_auditor.hpp 的实现:static/runtime 两层规则 + runtime 读侧装配。
 // 纯规则部分零 IO;CollectRuntimeRequests 只读 Journal。
 #include "insights/prompt_auditor.hpp"
+#include "insights/usage_projection.hpp"
 #include "api/usage_totals.hpp"
 
 #include <algorithm>
@@ -252,18 +253,19 @@ void AuditTokenShare(const PromptAuditFacts& facts, std::vector<Finding>& out) {
     if (facts.budget_tokens <= 0 || facts.total_context_tokens <= 0) {
         return;  // 预算未知,占比规则不判(§8.1 第 4 条的分母要先在)
     }
-    const int total_percent =
-        SharePercent(facts.total_context_tokens, facts.budget_tokens);
-    if (total_percent >= 50) {
+    const auto total_percent = usage_projection::Percentage(
+        facts.total_context_tokens, facts.budget_tokens);
+    if (!total_percent) return;
+    if (*total_percent >= 50) {
         Finding finding = MakeFinding(
             "prompt.token_share", FindingSeverity::Warning, FindingConfidence::High,
-            "system+工具定义合计约占上下文预算 " + std::to_string(total_percent) +
+            "system+工具定义合计约占上下文预算 " + std::to_string(*total_percent) +
                 "%(超过 50% 线)",
             "裁工具面(延迟工具索引/裁 MCP)或精简模块;占比可定位见段级表", "S04");
         finding.scope = "config";
         finding.evidence.push_back(Ev("context_tokens", facts.total_context_tokens));
         finding.evidence.push_back(Ev("budget_tokens", facts.budget_tokens));
-        finding.evidence.push_back(Ev("share_percent", total_percent));
+        finding.evidence.push_back(Ev("share_percent", *total_percent));
         out.push_back(std::move(finding));
         return;
     }
@@ -276,11 +278,12 @@ void AuditTokenShare(const PromptAuditFacts& facts, std::vector<Finding>& out) {
             biggest_id = segment.segment_id;
         }
     }
-    if (biggest > 0 && SharePercent(biggest, facts.budget_tokens) >= 15) {
+    const auto segment_percent = usage_projection::Percentage(biggest, facts.budget_tokens);
+    if (biggest > 0 && segment_percent && *segment_percent >= 15) {
         Finding finding = MakeFinding(
             "prompt.token_share", FindingSeverity::Info, FindingConfidence::High,
             "单段 " + biggest_id + " 约占上下文预算 " +
-                std::to_string(SharePercent(biggest, facts.budget_tokens)) + "%(≥15%)",
+                std::to_string(*segment_percent) + "%(≥15%)",
             "大段拆薄或按能力开关分档;是否要紧由主人裁决", "S04");
         finding.scope = "config";
         finding.evidence.push_back(Ev("segment_id", biggest_id));

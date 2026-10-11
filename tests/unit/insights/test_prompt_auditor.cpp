@@ -110,6 +110,47 @@ TEST_CASE("static:override 链、同文重复、漂移与段级事实账") {
 }
 
 TEST_CASE("static:n-gram 高重合与预算占比") {
+    SUBCASE("static budget percentages preserve large facts and unknown boundaries") {
+        const auto check_total = [](std::int64_t tokens, std::int64_t budget, int expected) {
+            StaticAuditInput input;
+            input.manifest.resolved_prompt_tokens_estimated = tokens;
+            input.context_budget_tokens = budget;
+            PromptAuditFacts facts;
+            const auto findings = AuditPromptStatic(input, &facts);
+            CHECK(facts.total_context_tokens == tokens);
+            CHECK(facts.budget_tokens == budget);
+            const auto* share = FindByCategory(findings, "prompt.token_share");
+            REQUIRE(share != nullptr);
+            REQUIRE(share->evidence.size() == 3);
+            CHECK(share->evidence[0].value == tokens);
+            CHECK(share->evidence[1].value == budget);
+            CHECK(share->evidence[2].value == expected);
+        };
+        const auto maximum = std::numeric_limits<std::int64_t>::max();
+        check_total(maximum - 1, maximum, 100);
+        check_total(99, 200, 50);
+        check_total(3, 2, 150);
+        check_total(std::numeric_limits<int>::max(), 100,
+                    std::numeric_limits<int>::max());
+        StaticAuditInput rejected;
+        rejected.context_budget_tokens = 100;
+        rejected.manifest.resolved_prompt_tokens_estimated =
+            static_cast<std::int64_t>(std::numeric_limits<int>::max()) + 1;
+        rejected.manifest.segments.push_back(Segment("large", "", 20, 0));
+        auto findings = AuditPromptStatic(rejected, nullptr);
+        CHECK(FindByCategory(findings, "prompt.token_share") == nullptr);
+        rejected.manifest.resolved_prompt_tokens_estimated = 1;
+        rejected.manifest.segments[0].rendered_tokens_estimated = maximum;
+        findings = AuditPromptStatic(rejected, nullptr);
+        CHECK(FindByCategory(findings, "prompt.token_share") == nullptr);
+        rejected.manifest.segments[0].rendered_tokens_estimated = 29;
+        rejected.context_budget_tokens = 200;
+        findings = AuditPromptStatic(rejected, nullptr);
+        REQUIRE(FindByCategory(findings, "prompt.token_share") != nullptr);
+        rejected.manifest.segments[0].rendered_tokens_estimated = 28;
+        findings = AuditPromptStatic(rejected, nullptr);
+        CHECK(FindByCategory(findings, "prompt.token_share") == nullptr);
+    }
     StaticAuditInput input;
     const std::string base = LongText("read the file and edit the lines carefully", 12);
     const std::string near = LongText("read the file and edit the lines carefully again", 12);
