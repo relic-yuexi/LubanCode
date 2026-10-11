@@ -557,6 +557,14 @@ TEST_CASE("SDK allocation ownership: real shared image and matching host release
     REQUIRE_FALSE(ec);
     REQUIRE_FALSE(std::filesystem::equivalent(host_image, expected, ec));
     REQUIRE_FALSE(ec);
+    // Preserve this exact loaded SDK for offline hidden-symbol/offset diagnosis.
+    // This copy is never loaded, called, or used as a substitute test module.
+    const auto module_copy = std::filesystem::path(LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT) / "module-image.bin";
+    std::filesystem::create_directories(module_copy.parent_path());
+    std::filesystem::copy_file(expected, module_copy, std::filesystem::copy_options::overwrite_existing, ec);
+    REQUIRE_FALSE(ec);
+    std::cout << "[sdk-allocation-module-copy] source=" << nlohmann::json(platform::PathToUtf8(expected)).dump()
+              << " copy=" << nlohmann::json(platform::PathToUtf8(module_copy)).dump() << '\n' << std::flush;
     unsigned paths = 0;
     for (unsigned form = 0; form != 8; ++form) {
         const auto kind = static_cast<Kind>(form);
