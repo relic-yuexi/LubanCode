@@ -1078,6 +1078,61 @@ class InstalledSearchResourcesTests(unittest.TestCase):
                 installed.check_search_resources(self.repo, self.prefix, self.stage, "linux")
 
 
+class InstalledDependencyNoticesTests(unittest.TestCase):
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory(prefix="sdk-notice-data-")
+        self.addCleanup(scratch.cleanup)
+        self.prefix = Path(scratch.name)
+        self.json_bytes = (SCRIPT.parents[2] / "cmake/json-retirement/LICENSE.MIT").read_bytes()
+        self.detours_bytes = b'# Copyright (c) Microsoft Corporation\n\nAll rights reserved.\n\n# MIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of\nthis software and associated documentation files (the "Software"), to deal in\nthe Software without restriction, including without limitation the rights to\nuse, copy, modify, merge, publish, distribute, sublicense, and/or sell copies\nof the Software, and to permit persons to whom the Software is furnished to do\nso, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n'
+        self.put(installed.JSON_NOTICE_PATH, self.json_bytes)
+
+    def put(self, name, raw):
+        path = self.prefix / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        return path
+
+    def test_each_platform_and_testing_profile_requires_exact_original_notices(self):
+        for platform in ("win32", "linux", "darwin"):
+            for testing in (False, True):
+                with self.subTest(platform=platform, testing=testing):
+                    detours = self.prefix / installed.DETOURS_NOTICE_PATH
+                    if detours.exists(): detours.unlink()
+                    if platform == "win32" and testing:
+                        self.put(installed.DETOURS_NOTICE_PATH, self.detours_bytes)
+                    facts = installed.check_dependency_licenses(self.prefix, platform, testing)
+                    self.assertEqual(facts[installed.JSON_NOTICE_PATH], installed.DEPENDENCY_NOTICE_HASHES[installed.JSON_NOTICE_PATH])
+                    self.assertEqual(set(facts), {installed.JSON_NOTICE_PATH, installed.DETOURS_NOTICE_PATH}
+                                     if platform == "win32" and testing else {installed.JSON_NOTICE_PATH})
+                    installed.check_full_sdk_files(list(facts), set(), {}, facts, platform)
+
+    def test_required_notice_missing_or_changed_and_private_notice_leak_are_rejected(self):
+        for name, raw in ((installed.JSON_NOTICE_PATH, self.json_bytes), (installed.DETOURS_NOTICE_PATH, self.detours_bytes)):
+            self.put(installed.JSON_NOTICE_PATH, self.json_bytes)
+            self.put(installed.DETOURS_NOTICE_PATH, self.detours_bytes)
+            path = self.prefix / name
+            path.unlink()
+            with self.assertRaisesRegex(RuntimeError, "missing or substituted"):
+                installed.check_dependency_licenses(self.prefix, "win32", True)
+            path.write_bytes(raw + b"changed")
+            with self.assertRaisesRegex(RuntimeError, "differs from pinned"):
+                installed.check_dependency_licenses(self.prefix, "win32", True)
+        self.put(installed.JSON_NOTICE_PATH, self.json_bytes)
+        self.put(installed.DETOURS_NOTICE_PATH, self.detours_bytes)
+        for platform, testing in (("win32", False), ("linux", True), ("darwin", False)):
+            with self.assertRaisesRegex(RuntimeError, "private testing dependency"):
+                installed.check_dependency_licenses(self.prefix, platform, testing)
+
+    def test_notice_qualification_does_not_admit_private_headers_sources_or_extra_files(self):
+        facts = installed.check_dependency_licenses(self.prefix, "darwin", False)
+        for forbidden in ("share/lubancore/licenses/nlohmann-json/json.hpp", "share/lubancore/licenses/nlohmann-json/README.md",
+                          "share/lubancore/licenses/detours/detours.h", "include/nlohmann/json.hpp",
+                          "cmake/JsonRetirement.cmake", "src/sdk/allocation_test_hooks.cpp", "lib/liblubancode_runtime.a"):
+            with self.subTest(forbidden=forbidden), self.assertRaisesRegex(RuntimeError, "host/private-development"):
+                installed.check_full_sdk_files([*facts, forbidden], set(), {}, facts, "darwin")
+
+
 class LuaEvidenceTests(unittest.TestCase):
     def body(self, protected=False, executable="lubancore_sdk_tests"):
         source = "test_lua_protected.cpp" if protected else "test_lubancore_lua.cpp"
