@@ -21,3 +21,37 @@ Mach-O 映像定位须接纳 fileoff 为零、filesize 非零而 vmaddr 为零�
 同源 Windows/Linux/macOS、SDK Lua ON/OFF、移位安装消费与 ASan 证据齐了才交付。保留旧 CASE、144 标记、六条门禁负例和精确名单。只在远端验，不跑本地 CI、configure、构建、原生测试。
 
 Windows 源 a774 的实际原生日志报安装失败，尚未证明分配入口走哪条路。失败诊断须先留安装阶段、收集槽数、八种入口命中位和地址重合标记；再由实际宿主读取八个保存入口所属映像与入口字节。只读已提交、可读页面，不探未映射地址。诊断在无计数借用时执行，不改导入槽、不改标准分配器、不造回程结果。缺入口仍须失败，不能靠诊断行放宽验收；查明实际导入跳板或模块自有实现后再写修复。
+
+## Windows SDK-resident standard allocation bodies
+
+Actual Windows full-host job 114386577931 at source 510b69ea reports all eight
+original standard allocation addresses inside the loaded lubancore.dll, distinct
+entry bodies, zero matching import slots and forms_mask=0. Scalar/array forwarding
+bodies are not missing operators. IAT-only discovery cannot qualify this build.
+
+Keep import interception where all eight imports exist. On Windows only, admit a
+second strategy when every original entry belongs to this exact SDK image and
+lies in committed executable memory. Use Microsoft's Detours 4.0.1 at immutable
+commit e4bfd6b03e50de46b47abfbd1e46b384f0c5f833, private to MSVC testing builds.
+Do not patch a shared CRT, host allocator, delete function, or SDK release build.
+Require DetourCodeFromPointer to retain each exact entry rather than silently
+following an alias into another function. Installation and restoration each use
+one transaction for all eight entries, outside workers and active borrows. Any
+ownership, attachment or transaction error fails qualification with its actual
+stage/error; a partial strategy never passes. Keep separate import-slot and
+body-target counts so diagnostics cannot present patched code as import slots.
+
+Each replacement reads its live saved standard-function delegate. Detours updates
+that delegate to a trampoline in the same transaction. Delegated array/nothrow
+implementations may call another SDK standard operator: a thread-local guard
+counts/refuses only the outer call, not the implementation's nested delegation.
+Unwind the guard on every exception. Successful allocations and all 144 original
+release routes retain the actual standard allocator/free pairing. Restore every
+entry before retiring the installer; no live allocation scope permits detach.
+
+The original eight-form baseline/refusal/restoration assertions, host isolation,
+three actual Session paths and uncapped every-ordinal matrix remain required.
+Pin the downloaded source archive by SHA-256; keep this dependency out of ordinary
+SDK builds, exported target requirements and installed public headers. Acceptance
+still needs same-source remote three-platform full CLI, SDK Lua ON/OFF, installed
+and relocated consumers and ASan. No local configure, build or tests run.
