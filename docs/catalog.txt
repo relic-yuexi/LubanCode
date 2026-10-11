@@ -263,6 +263,8 @@ DOC development/sdk-title-start-cleanup.md
 DOC development/sdk-title-worker-execution.md
 DOC development/sdk-backend-callback-owner.md
 DOC development/sdk-memory-five-field-provenance.md
+DOC development/sdk-returned-usage-failure-roster.md
+DOC development/sdk-session-allocation-failure-matrix.md
 DOC development/sdk-memory-learning-gates.md
 DOC development/sdk-memory-usage-snapshot.md
 DOC development/sdk-windows-timeout-process-images.md
