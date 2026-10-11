@@ -6,6 +6,8 @@
 
 公开学习与召回、显式保存分开配置。新 Session 默认为 Off，Review 只产待审候选，Auto 按原规则发写请求。配置持值，Backend 另交独占 owner；模型、effort、预算、有效权限与资源声明冻结进场次计划。不给 SDK 偷读 HOME、CLI 配置或环境开关。恢复省略配置便沿已存计划；显式配置须匹配。凭据与 Backend 不落计划，同 ID 再开须重新交匹配 Backend。
 
+拟交入口为 `memory::v1::LearningMode / LearningOptions / LearningSnapshot / LearningReport`、`SessionOptions::memory_learning`、独立 `memory_learning_backend / memory_learning_connection`、`Session::DescribeMemoryLearning()` 与 `GetMemoryLearning(operation_id)`。启用时 Backend 与 Connection 二选一，不能借主会话 Backend 并发抽取。选项只持配置，报告复用公开用量事实类型；后续候选接口只认 Session 已准入的项目与学习计划，不能让调用方另塞任意路径。
+
 第一片交真实 Review 学习 owner 与逐操作报告，不挂空开关。Off 不起线程、不造模型调用；Review 接实际共享抽取与候选落盘。Auto 尚未接入时须明确拒绝，不降成 Review。随后第二片交候选查询、编辑、拒绝与接受，第三片交 Auto 耐久写回，第四片迁 CLI 调度与收货。四片验收后才能记自动 Memory 完整交付。
 
 学习报告按 session / operation / 原触发 turn 归号，持学习计划、请求与来源引用、阶段、错误及独立 Usage。主操作已交终态，晚归学习不改写原终态、不替旧 Usage 补假完整。模型已调用而正文、解析、候选或提交失败，实际请求与五项数字仍照记。报告须区分无调用、明确报零、缺字段、拒绝来源与未知提交；使用前驱共享来源投影，不能另造解析器。
