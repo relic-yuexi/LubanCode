@@ -8,6 +8,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#ifdef LUBANCORE_PRIVATE_WINDOWS_BODY_HOOKS
+#include <detours.h>
+#endif
 #else
 #include <dlfcn.h>
 #ifdef __APPLE__
@@ -41,6 +44,35 @@ Aligned volatile original_aligned = static_cast<Aligned>(&::operator new);
 Aligned volatile original_aligned_array = static_cast<Aligned>(&::operator new[]);
 AlignedNoThrow volatile original_aligned_nothrow = static_cast<AlignedNoThrow>(&::operator new);
 AlignedNoThrow volatile original_aligned_array_nothrow = static_cast<AlignedNoThrow>(&::operator new[]);
+#ifdef LUBANCORE_PRIVATE_WINDOWS_BODY_HOOKS
+// Detours mutates these exact pointer slots at commit; wrappers must read the
+// live trampolines, not a second copy updated after code is already patched.
+void* volatile body_delegates[8]{
+    reinterpret_cast<void*>(original_scalar), reinterpret_cast<void*>(original_array),
+    reinterpret_cast<void*>(original_nothrow), reinterpret_cast<void*>(original_array_nothrow),
+    reinterpret_cast<void*>(original_aligned), reinterpret_cast<void*>(original_aligned_array),
+    reinterpret_cast<void*>(original_aligned_nothrow), reinterpret_cast<void*>(original_aligned_array_nothrow)};
+bool body_strategy = false;
+thread_local unsigned delegation_depth = 0;
+#endif
+template<class Function>
+Function Delegate(Function original, AllocationKind kind) noexcept {
+#ifdef LUBANCORE_PRIVATE_WINDOWS_BODY_HOOKS
+    if (body_strategy) return reinterpret_cast<Function>(body_delegates[static_cast<unsigned>(kind)]);
+#else
+    (void)kind;
+#endif
+    return original;
+}
+struct DelegatedStandardCall {
+#ifdef LUBANCORE_PRIVATE_WINDOWS_BODY_HOOKS
+    bool guarded = body_strategy;
+    DelegatedStandardCall() noexcept { if (guarded) ++delegation_depth; }
+    ~DelegatedStandardCall() { if (guarded) --delegation_depth; }
+#else
+    DelegatedStandardCall() noexcept = default;
+#endif
+};
 thread_local AllocationFailureControl* active_control = nullptr;
 thread_local AllocationFailureControl* prepared_control = nullptr;
 thread_local AllocationPhase allocation_phase = AllocationPhase::None;
@@ -48,6 +80,9 @@ std::atomic<unsigned> active_borrows{0};
 bool imports_installed = false;
 
 bool Refuse(AllocationKind kind) noexcept {
+#ifdef LUBANCORE_PRIVATE_WINDOWS_BODY_HOOKS
+    if (body_strategy && delegation_depth) return false;
+#endif
     if (!active_control) return false;
     if (active_control->require_returned_backend && !active_control->backend_returned.load()) return false;
     active_control->last_kind.store(static_cast<unsigned>(kind));
@@ -59,31 +94,43 @@ bool Refuse(AllocationKind kind) noexcept {
 }
 void* RefusedScalar(std::size_t size) {
     if (Refuse(AllocationKind::Scalar)) throw std::bad_alloc{};
-    return original_scalar(size);
+    DelegatedStandardCall delegated;
+    return Delegate(original_scalar, AllocationKind::Scalar)(size);
 }
 void* RefusedArray(std::size_t size) {
     if (Refuse(AllocationKind::Array)) throw std::bad_alloc{};
-    return original_array(size);
+    DelegatedStandardCall delegated;
+    return Delegate(original_array, AllocationKind::Array)(size);
 }
 void* RefusedNoThrow(std::size_t size, const std::nothrow_t& tag) noexcept {
-    return Refuse(AllocationKind::ScalarNoThrow) ? nullptr : original_nothrow(size, tag);
+    if (Refuse(AllocationKind::ScalarNoThrow)) return nullptr;
+    DelegatedStandardCall delegated;
+    return Delegate(original_nothrow, AllocationKind::ScalarNoThrow)(size, tag);
 }
 void* RefusedArrayNoThrow(std::size_t size, const std::nothrow_t& tag) noexcept {
-    return Refuse(AllocationKind::ArrayNoThrow) ? nullptr : original_array_nothrow(size, tag);
+    if (Refuse(AllocationKind::ArrayNoThrow)) return nullptr;
+    DelegatedStandardCall delegated;
+    return Delegate(original_array_nothrow, AllocationKind::ArrayNoThrow)(size, tag);
 }
 void* RefusedAligned(std::size_t size, std::align_val_t align) {
     if (Refuse(AllocationKind::AlignedScalar)) throw std::bad_alloc{};
-    return original_aligned(size, align);
+    DelegatedStandardCall delegated;
+    return Delegate(original_aligned, AllocationKind::AlignedScalar)(size, align);
 }
 void* RefusedAlignedArray(std::size_t size, std::align_val_t align) {
     if (Refuse(AllocationKind::AlignedArray)) throw std::bad_alloc{};
-    return original_aligned_array(size, align);
+    DelegatedStandardCall delegated;
+    return Delegate(original_aligned_array, AllocationKind::AlignedArray)(size, align);
 }
 void* RefusedAlignedNoThrow(std::size_t size, std::align_val_t align, const std::nothrow_t& tag) noexcept {
-    return Refuse(AllocationKind::AlignedScalarNoThrow) ? nullptr : original_aligned_nothrow(size, align, tag);
+    if (Refuse(AllocationKind::AlignedScalarNoThrow)) return nullptr;
+    DelegatedStandardCall delegated;
+    return Delegate(original_aligned_nothrow, AllocationKind::AlignedScalarNoThrow)(size, align, tag);
 }
 void* RefusedAlignedArrayNoThrow(std::size_t size, std::align_val_t align, const std::nothrow_t& tag) noexcept {
-    return Refuse(AllocationKind::AlignedArrayNoThrow) ? nullptr : original_aligned_array_nothrow(size, align, tag);
+    if (Refuse(AllocationKind::AlignedArrayNoThrow)) return nullptr;
+    DelegatedStandardCall delegated;
+    return Delegate(original_aligned_array_nothrow, AllocationKind::AlignedArrayNoThrow)(size, align, tag);
 }
 const std::array<void*, 8> originals{
     reinterpret_cast<void*>(original_scalar), reinterpret_cast<void*>(original_array),
@@ -102,6 +149,72 @@ bool collection_failed = false;
 std::array<bool, 8> forms_found{};
 unsigned installation_stage = 0;
 bool aliased_originals = false;
+unsigned body_targets = 0;
+unsigned long body_error = 0;
+#ifdef LUBANCORE_PRIVATE_WINDOWS_BODY_HOOKS
+bool OwnsStandardBodies() noexcept {
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&GetAllocationFailurePort), &module)) {
+        body_error = GetLastError(); return false;
+    }
+    for (void* entry : originals) {
+        MEMORY_BASIC_INFORMATION mapping{};
+        if (VirtualQuery(entry, &mapping, sizeof(mapping)) != sizeof(mapping) ||
+                mapping.AllocationBase != module || mapping.State != MEM_COMMIT ||
+                (mapping.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+                !(mapping.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                                     PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
+            body_error = ERROR_INVALID_ADDRESS; return false;
+        }
+        // Reject Detours' alias resolution before any code becomes writable.
+        if (DetourCodeFromPointer(entry, nullptr) != entry) {
+            body_error = ERROR_INVALID_FUNCTION; return false;
+        }
+    }
+    return true;
+}
+bool TransactStandardBodies(bool attach) noexcept {
+    bool begun = false;
+    try {
+        installation_stage = 6;
+        body_error = DetourTransactionBegin();
+        if (body_error != NO_ERROR) return false;
+        begun = true;
+        body_error = DetourUpdateThread(GetCurrentThread());
+        if (body_error != NO_ERROR) { DetourTransactionAbort(); return false; }
+        installation_stage = 7;
+        for (unsigned i = 0; i != originals.size(); ++i) {
+            auto** slot = const_cast<void**>(&body_delegates[i]);
+            body_error = attach ? DetourAttach(slot, replacements[i]) : DetourDetach(slot, replacements[i]);
+            if (body_error != NO_ERROR) { DetourTransactionAbort(); return false; }
+        }
+        installation_stage = 8;
+        body_error = DetourTransactionCommit();
+        return body_error == NO_ERROR;
+    } catch (...) {
+        // Upstream transaction bookkeeping uses C++ new even outside a refusal
+        // scope. Abort its pending operations if real memory exhaustion throws.
+        if (begun) DetourTransactionAbort();
+        body_error = ERROR_NOT_ENOUGH_MEMORY;
+        return false;
+    }
+}
+bool InstallStandardBodies() noexcept {
+    installation_stage = 5;
+    if (!OwnsStandardBodies()) return false;
+    for (unsigned i = 0; i != originals.size(); ++i) body_delegates[i] = originals[i];
+    body_strategy = true;
+    if (!TransactStandardBodies(true)) { body_strategy = false; return false; }
+    body_targets = static_cast<unsigned>(originals.size());
+    forms_found.fill(true);
+    imports_installed = true;
+    installation_stage = 4;
+    return true;
+}
+#endif
+
 
 void Collect(void** address, int protection = 0) noexcept {
     for (std::size_t i = 0; i != slot_count; ++i) if (import_slots[i].address == address) return;
@@ -323,6 +436,15 @@ bool WriteSlot(const ImportSlot& slot, void* value) noexcept {
 }
 bool RestoreImports() noexcept {
     if (!imports_installed || active_borrows.load()) return false;
+#ifdef LUBANCORE_PRIVATE_WINDOWS_BODY_HOOKS
+    if (body_strategy) {
+        if (!TransactStandardBodies(false)) return false;
+        body_strategy = false;
+        body_targets = 0;
+        imports_installed = false;
+        return true;
+    }
+#endif
     bool restored = true;
     for (std::size_t i = 0; i != slot_count; ++i) if (!WriteSlot(import_slots[i], import_slots[i].original)) restored = false;
     if (restored) imports_installed = false;
@@ -331,7 +453,7 @@ bool RestoreImports() noexcept {
 bool InstallImports() noexcept {
     if (imports_installed || active_borrows.load()) return false;
     slot_count = 0; collection_failed = false; forms_found.fill(false);
-    installation_stage = 1; aliased_originals = false;
+    installation_stage = 1; aliased_originals = false; body_targets = 0; body_error = 0;
     // Aliased operators need a symbol-aware resolver; never mislabel their kind.
     for (unsigned i = 0; i != originals.size(); ++i)
         for (unsigned j = i + 1; j != originals.size(); ++j) if (originals[i] == originals[j]) {
@@ -339,7 +461,17 @@ bool InstallImports() noexcept {
             return false;
         }
     installation_stage = 2;
-    if (!CollectModuleImports()) return false;
+    if (!CollectModuleImports()) {
+#ifdef LUBANCORE_PRIVATE_WINDOWS_BODY_HOOKS
+        // Never combine a partial import strategy with code interception.
+        // Collection has not patched anything; resident ownership must hold for
+        // all eight actual standard entries before the fallback can begin.
+        slot_count = 0;
+        forms_found.fill(false);
+        if (!collection_failed) return InstallStandardBodies();
+#endif
+        return false;
+    }
     installation_stage = 3;
     std::size_t applied = 0;
     for (; applied != slot_count; ++applied) {
@@ -426,6 +558,8 @@ AllocationInstallationDiagnostic GetAllocationInstallationDiagnostic() noexcept 
     AllocationInstallationDiagnostic result;
     result.stage = installation_stage;
     result.slots = slot_count;
+    result.body_targets = body_targets;
+    result.body_error = body_error;
     result.aliases = aliased_originals;
     result.collection_overflow = collection_failed;
     for (unsigned i = 0; i != originals.size(); ++i) {

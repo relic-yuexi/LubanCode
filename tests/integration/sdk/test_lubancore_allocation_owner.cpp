@@ -611,6 +611,8 @@ TEST_CASE("SDK allocation ownership: real shared image and matching host release
         const auto diagnostic = lubancore::detail::testing::GetAllocationInstallationDiagnostic();
         std::cout << "[sdk-module-installation-failure] stage=" << diagnostic.stage
                   << " forms_mask=" << diagnostic.forms_mask << " slots=" << diagnostic.slots
+                  << " body_targets=" << diagnostic.body_targets
+                  << " body_error=" << diagnostic.body_error
                   << " aliases=" << diagnostic.aliases << " overflow=" << diagnostic.collection_overflow << '\n';
         for (unsigned form = 0; form != 8; ++form) {
             const auto* address = diagnostic.original_addresses[form];
@@ -637,6 +639,13 @@ TEST_CASE("SDK allocation ownership: real shared image and matching host release
         std::cout.flush();
     }
     REQUIRE(imports.installed);
+    const auto installed = lubancore::detail::testing::GetAllocationInstallationDiagnostic();
+    CHECK(installed.forms_mask == 255);
+    CHECK(((installed.body_targets == 8 && installed.slots == 0 && installed.body_error == 0) ||
+           (installed.body_targets == 0 && installed.slots >= 8)));
+    std::cout << "[sdk-module-installation] slots=" << installed.slots
+              << " body_targets=" << installed.body_targets << " body_error=" << installed.body_error
+              << " forms_mask=" << installed.forms_mask << '\n' << std::flush;
     for (unsigned form = 0; form != 8; ++form) {
         CAPTURE(form);
         const auto kind = static_cast<Kind>(form);
@@ -703,5 +712,14 @@ TEST_CASE("SDK allocation ownership: real shared image and matching host release
     // Real allocation still works after restoring all imports.
     OwnedAllocation restored{port.allocate(257, 4096, Kind::Scalar), port.release, 257, 4096, Kind::Scalar, false};
     REQUIRE(restored.pointer);
+    for (unsigned form = 0; form != 8; ++form) {
+        CAPTURE(form);
+        const auto kind = static_cast<Kind>(form);
+        OwnedAllocation ordinary{port.allocate(257, 4096, kind), port.release, 257, 4096, kind, false};
+        REQUIRE(ordinary.pointer);
+        auto* bytes = static_cast<unsigned char*>(ordinary.pointer);
+        bytes[0] = 0x35; bytes[256] = 0x71;
+        CHECK(bytes[0] == 0x35); CHECK(bytes[256] == 0x71);
+    }
     std::cout << "[sdk-module-refusal] qualified_forms=8 imports_restored=1\n";
 }
