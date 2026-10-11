@@ -166,6 +166,8 @@ if(WIN32)
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT LubanCore)
 endif()
 install(DIRECTORY include/lubancore DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT LubanCore)
+install(FILES cmake/json-retirement/LICENSE.MIT
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/lubancore/licenses/nlohmann-json COMPONENT LubanCore)
 install(FILES docs/development/lubancore-sdk.md
   DESTINATION ${CMAKE_INSTALL_DATADIR}/lubancore COMPONENT LubanCore)
 # Search consumes an explicitly staged, manifest-pinned backend. SDK-only does

@@ -205,6 +205,11 @@ def check_allocation_owner_native(section: str, registered: list[str]):
         raise RuntimeError("SDK module refusal imports were not confirmed restored exactly once")
     if sum(line.startswith("[sdk-module-refusal]") for line in section.splitlines()) != 9:
         raise RuntimeError("SDK module refusal qualification contains malformed or extra markers")
+    retirements = re.findall(r"^\[sdk-json-retirement\] ordered=([01]) depth=(\d+) allocations=0 sentinel_refused=1\r?$", section, re.M)
+    expected_retirements = {(str(ordered), str(depth)) for ordered in (0, 1) for depth in (0, 32, 16384)}
+    if (len(retirements) != 6 or set(retirements) != expected_retirements or
+            sum(line.startswith("[sdk-json-retirement]") for line in section.splitlines()) != 6):
+        raise RuntimeError("SDK JSON retirement qualification is missing, allocated, disarmed, duplicated or malformed")
     baselines = re.findall(r"^\[sdk-returned-allocation-baseline\] path=([012]) allocations=(\d+) refusals=0 retired=1 recovery_calls=0\r?$", section, re.M)
     if (len(baselines) != 3 or {path for path, _ in baselines} != {"0", "1", "2"}
             or any(int(count) <= 0 for _, count in baselines)
