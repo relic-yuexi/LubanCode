@@ -32,6 +32,17 @@ struct AllocationFailurePort {
     bool (*prepare_returned_backend)(AllocationFailureControl&) noexcept;
 };
 LUBANCORE_API AllocationFailurePort GetAllocationFailurePort() noexcept;
+// Read-only installation facts, queried with no active worker or borrow.
+// Stages: 0 idle, 1 alias check, 2 collection, 3 patching, 4 installed.
+struct AllocationInstallationDiagnostic {
+    unsigned stage = 0;
+    unsigned forms_mask = 0;
+    std::size_t slots = 0;
+    bool aliases = false;
+    bool collection_overflow = false;
+    void* original_addresses[8]{};
+};
+LUBANCORE_API AllocationInstallationDiagnostic GetAllocationInstallationDiagnostic() noexcept;
 // Called only by the real adapter/worker, never by the host to fabricate return.
 void ActivateReturnedBackendAllocationScope() noexcept;
 void RetireReturnedBackendAllocationScope() noexcept;
