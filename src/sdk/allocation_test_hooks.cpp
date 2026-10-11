@@ -100,6 +100,8 @@ std::array<ImportSlot, 256> import_slots{};
 std::size_t slot_count = 0;
 bool collection_failed = false;
 std::array<bool, 8> forms_found{};
+unsigned installation_stage = 0;
+bool aliased_originals = false;
 
 void Collect(void** address, int protection = 0) noexcept {
     for (std::size_t i = 0; i != slot_count; ++i) if (import_slots[i].address == address) return;
@@ -329,10 +331,16 @@ bool RestoreImports() noexcept {
 bool InstallImports() noexcept {
     if (imports_installed || active_borrows.load()) return false;
     slot_count = 0; collection_failed = false; forms_found.fill(false);
+    installation_stage = 1; aliased_originals = false;
     // Aliased operators need a symbol-aware resolver; never mislabel their kind.
     for (unsigned i = 0; i != originals.size(); ++i)
-        for (unsigned j = i + 1; j != originals.size(); ++j) if (originals[i] == originals[j]) return false;
+        for (unsigned j = i + 1; j != originals.size(); ++j) if (originals[i] == originals[j]) {
+            aliased_originals = true;
+            return false;
+        }
+    installation_stage = 2;
     if (!CollectModuleImports()) return false;
+    installation_stage = 3;
     std::size_t applied = 0;
     for (; applied != slot_count; ++applied) {
         if (!WriteSlot(import_slots[applied], replacements[import_slots[applied].kind])) {
@@ -343,6 +351,7 @@ bool InstallImports() noexcept {
         }
     }
     imports_installed = true;
+    installation_stage = 4;
     return true;
 }
 bool BeginScope(AllocationFailureControl& control) noexcept {
@@ -412,6 +421,18 @@ AllocationQualificationPort GetAllocationQualificationPort() noexcept {
 }
 AllocationFailurePort GetAllocationFailurePort() noexcept {
     return {InstallImports, RestoreImports, BeginScope, EndScope, PrepareReturnedScope};
+}
+AllocationInstallationDiagnostic GetAllocationInstallationDiagnostic() noexcept {
+    AllocationInstallationDiagnostic result;
+    result.stage = installation_stage;
+    result.slots = slot_count;
+    result.aliases = aliased_originals;
+    result.collection_overflow = collection_failed;
+    for (unsigned i = 0; i != originals.size(); ++i) {
+        if (forms_found[i]) result.forms_mask |= 1U << i;
+        result.original_addresses[i] = originals[i];
+    }
+    return result;
 }
 void ActivateReturnedBackendAllocationScope() noexcept {
     if (!prepared_control || active_control) return;
