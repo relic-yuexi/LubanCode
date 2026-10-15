@@ -117,6 +117,12 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
     }
     body["stream"] = true;
     body["store"] = false;  // 无状态:历史全靠自己带,跟 Anthropic 后端行为一致
+    // 会话级缓存分组键:兼容中转常拿它派生上游会话身份(session_id /
+    // conversation_id)并做账号粘性,不只是 OpenAI 的缓存分组。extra_body
+    // 在后面合并,显式写了同名键仍以用户为准。
+    if (!request.prompt_cache_key.empty()) {
+        body["prompt_cache_key"] = request.prompt_cache_key;
+    }
 
     // 四角色换骨(v3 第二棒,差距清单 §8.2 第 4 条):System 角色消息是
     // 上下文根,顶置进顶层 instructions(§4.46 目标表),input 里一条不落。

@@ -1362,6 +1362,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             request.system = WithSoul(request.system, agent.profile_.soul);
         }
         api::ApplyRequestProfile(request, agent.profile_.request);
+        if (agent.profile_.prompt_cache_key_provider) {
+            request.prompt_cache_key = agent.profile_.prompt_cache_key_provider();
+        }
         // 每轮现拼:tool_search 可能刚在上一拍挂载新工具。压力预估与最终
         // 发送必须吃同一份定义，免得先估旧表、后发新表。
         request.tools = BuildToolDefinitions();

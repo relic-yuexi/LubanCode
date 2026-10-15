@@ -99,6 +99,9 @@ struct AgentProfile {
     // 会在一次 Run() 中途改变 loaded 集合,下一份请求的索引段就得跟着变。
     // 空 = 不注。
     std::function<std::string()> deferred_index_provider;
+    // 会话级 prompt_cache_key 的活口:逐请求现查(/clear 换新场后 id 跟着换)。
+    // 空函数或返回空串 = 不发。子代理不继承,前缀与主会话不同,不共用分组。
+    std::function<std::string()> prompt_cache_key_provider;
 
     // ---- 病十三的方向:工具可见性策略写进皮(实例仓与策略分家的第一步)。
     // 谓词不放行的工具不进请求的 tools 数组;模型调了"注册表里查得到、

@@ -45,6 +45,17 @@ TEST_CASE("stream 恒为 true,store 恒为 false") {
     CHECK(body.at("store") == false);
 }
 
+TEST_CASE("prompt_cache_key 非空才落线,extra_body 同名键仍可覆盖") {
+    Request request;
+    CHECK_FALSE(BuildRequestJson(request).contains("prompt_cache_key"));
+
+    request.prompt_cache_key = "lubancode-sess-1";
+    CHECK(BuildRequestJson(request).at("prompt_cache_key") == "lubancode-sess-1");
+
+    request.extra_body = nlohmann::json{{"prompt_cache_key", "custom"}};
+    CHECK(BuildRequestJson(request).at("prompt_cache_key") == "custom");
+}
+
 TEST_CASE("max_tokens 映射成 max_output_tokens") {
     Request request;
     request.max_tokens = 2048;

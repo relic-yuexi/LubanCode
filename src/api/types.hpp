@@ -289,6 +289,10 @@ struct Request {
     // 调用方显式给出的请求级私有参数。推理档位不走这里；provider 级
     // extra_body 先合并，这里后合并，同名顶层键由请求覆盖。
     nlohmann::json extra_body = nlohmann::json::object();
+    // 会话级缓存分组键。responses wire 落 prompt_cache_key;其余 wire 不认,
+    // 忽略。空 = 不发。同一会话内必须恒定(工具往返、resume 沿用),新会话
+    // 再换;不随请求随机生成,也不跨会话共用。
+    std::string prompt_cache_key;
 };
 
 // 一次代理运行所用的请求档案。主会话每次发送前现取当前值；后台任务在
