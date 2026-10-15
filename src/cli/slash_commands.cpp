@@ -847,8 +847,9 @@ const std::vector<SlashCommandDescriptor>& SlashCommandDescriptors() {
         {SlashCommand::Insights, "insights", "slash.desc.insights", true},
         {SlashCommand::Compact, "compact", "slash.desc.compact", true},
         {SlashCommand::Think, "think", "slash.desc.think", true},
-        // M10:/effort 是 /think 的别名,同一个命令枚举值——解析层面这俩词
-        // 天生等价;帮助面单列一条(有自己的描述键)。
+        // M10:/effort 与 /think 同一个命令枚举值,解析层面等价;带档位参数
+        // 时行为一致,裸敲由 HandleSlashThink 按 raw_word 分流(/effort 给
+        // 档位选择面板/概览,/think 保持原文字清单)。帮助面单列一条。
         {SlashCommand::Think, "effort", "slash.desc.effort", false},
         {SlashCommand::Skills, "skills", "slash.desc.skills", true},
         {SlashCommand::Skill, "skill", "slash.desc.skill", true},
