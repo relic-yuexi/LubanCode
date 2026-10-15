@@ -198,10 +198,10 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
     bool warned_missing_reasoning_item = false;
     const auto replay_thinking = [&](const ThinkingBlock& thinking, Role role) {
         if (!ShouldReplayThinking(request) || role != Role::Assistant) return false;
-        // store:false 下服务端不留 rs_ 条目,只剩 id/summary 的裸 item 回传
-        // 会查无此项(或被中转悄悄改写,前缀逐轮变)。自包含的才回传:带
-        // encrypted_content(OpenAI),或带 content 原文(vLLM 一类无状态兼容端
-        // 的 reasoning_text)。其余整条跳过。
+        // store:false 下服务端不留 rs_ 条目,光有 id 的空壳 item 回传会查无
+        // 此项(或被中转悄悄改写,前缀逐轮变)。带实质内容的才回传:
+        // encrypted_content(OpenAI)、content 原文(vLLM 一类的 reasoning_text)
+        // 或非空 summary(DashScope 等兼容端,既有行为)。其余空壳整条跳过。
         if (thinking.responses_item.is_object()) {
             const auto& item = thinking.responses_item;
             const auto encrypted = item.find("encrypted_content");
@@ -212,10 +212,14 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
             if (content != item.end() && content->is_array() && !content->empty()) {
                 return true;
             }
+            const auto summary = item.find("summary");
+            if (summary != item.end() && summary->is_array() && !summary->empty()) {
+                return true;
+            }
         }
         if (!warned_missing_reasoning_item) {
             platform::LogSink::Instance().Warn("responses",
-                "历史思考缺少可回传的 reasoning item(无原生 item,或既无 encrypted_content 也无 content),本轮不回传;"
+                "历史思考缺少可回传的 reasoning item(无原生 item,或 item 是无 encrypted_content/content/summary 的空壳),本轮不回传;"
                 "旧存档或跨协议消息不能伪造服务端 ID。");
             warned_missing_reasoning_item = true;
         }

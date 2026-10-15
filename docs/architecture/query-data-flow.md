@@ -508,7 +508,7 @@ Responses API 不叫 `messages`，叫 `input`。函数调用与函数结果各�
 
 地址是 `<base_url>/responses`。
 
-`store: false` 写得明白：LubanCode 不靠 `previous_response_id` 串会话，也不指望服务端替它记账。每次请求都从本地 history 重新展开。Responses 的 reasoning 只回传自包含的 item（带 `encrypted_content`，或带 `content` 原文的无状态兼容端）：开着思考且允许回传时，请求会带 `include: ["reasoning.encrypted_content"]` 索取它，缺它的历史 item 整条跳过，避免 `store:false` 下回传查无此项的裸 `rs_` id。
+`store: false` 写得明白：LubanCode 不靠 `previous_response_id` 串会话，也不指望服务端替它记账。每次请求都从本地 history 重新展开。Responses 的 reasoning 只回传带实质内容的 item（`encrypted_content`、`content` 原文或非空 `summary`）：开着思考且允许回传时，请求会带 `include: ["reasoning.encrypted_content"]` 索取它，只剩 `rs_` id 的空壳 item 整条跳过，避免 `store:false` 下回传查无此项的 id。
 
 ## 同一份历史，Gemini 怎样穿
 
