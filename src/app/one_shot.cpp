@@ -399,6 +399,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             };
         }
     }
+    // 会话级 prompt_cache_key:账本在皮之后才开,皮上只挂活口,开账后回填。
+    // 开不出账即明败退出,所以到发请求时这里一定已有值。
+    auto oneshot_cache_key = std::make_shared<std::string>();
+    once_agent_profile.prompt_cache_key_provider = [oneshot_cache_key]() { return *oneshot_cache_key; };
     // 环境快照要在皮 move 进 loop 前留一份系统提示(§9.1 的真值取材)。
     const std::string oneshot_system_prompt = once_agent_profile.system_prompt;
     lubancode::agent::Agent loop(wrapped_backend, registry, std::move(once_agent_profile));
@@ -437,6 +441,9 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         return 1;
     }
     lubancode::runtime::TrajectorySessionLedger* oneshot_ledger = oneshot_service.trajectory();
+    if (oneshot_ledger != nullptr) {
+        *oneshot_cache_key = "lubancode-" + oneshot_ledger->session_id();
+    }
     // P0-4 环境快照:与交互会话同一只取材件(§9.1);落不进账只是缺口
     //(replay 降档如实报),不拦问答。
     {

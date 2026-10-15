@@ -1980,6 +1980,11 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // Agent 档案从会话材料取(装配层显式定的 system_prompt 与步数闸);
         // Agent 循环对象本身每轮新建(便宜、无跨轮状态),材料不重建。
         agent::AgentProfile profile = record->assembly->agent_profile;
+        // 会话级 prompt_cache_key:取该线程的轨迹场 id,同线程多轮恒定。
+        if (record->session_service != nullptr && record->session_service->trajectory() != nullptr) {
+            profile.prompt_cache_key_provider =
+                [key = "lubancode-" + record->session_service->trajectory()->session_id()]() { return key; };
+        }
         agent::Agent loop(backend, registry, std::move(profile));
 
         // ---- 事件流(骨架拆解批二:整装切到 TurnEventAdapter) ----

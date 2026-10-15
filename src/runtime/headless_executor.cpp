@@ -382,6 +382,10 @@ HeadlessExecutor::LiveChannelSession* HeadlessExecutor::GetOrOpenChannelSession(
         profile.runtime.max_total_tokens = options_.max_total_tokens;
         profile.runtime.tool_batch_strategy = options_.tool_batch_strategy;
         profile.runtime.parallel_read_concurrency = options_.parallel_read_concurrency;
+        // 会话级 prompt_cache_key:同一常驻场内恒定,换场(新 session)即换。
+        if (const auto* ledger = live->service->trajectory(); ledger != nullptr) {
+            profile.prompt_cache_key_provider = [key = "lubancode-" + ledger->session_id()]() { return key; };
+        }
         profile = ApplyChannelToolPolicy(std::move(profile), options_.tools);
         live->agent = std::make_unique<agent::Agent>(backend_, registry_, std::move(profile));
     }
@@ -542,6 +546,7 @@ HeadlessExecutor::Result HeadlessExecutor::RunTurnOnService(
     agent::AgentProfile profile;
     profile.system_prompt = agent::DefaultPersona() + "\n" + options_.skills_prompt;
     profile.request.model = options_.model;
+    profile.prompt_cache_key_provider = [key = "lubancode-" + ledger->session_id()]() { return key; };
     profile.runtime.max_steps_per_turn = options_.max_steps_per_turn;
     profile.runtime.context_window_tokens = options_.context_window_tokens;
     profile.runtime.max_wall_secs = options_.max_wall_secs;

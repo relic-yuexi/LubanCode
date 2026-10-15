@@ -20,6 +20,10 @@ class TrajectorySubagentBridge {
 public:
     virtual ~TrajectorySubagentBridge() = default;
     virtual const std::string& run_id() const = 0;
+    // 子账自己的会话 id(v3 子卷 sessionId)。v2 子账没有独立 session id,
+    // 回落 run_id()(同一父场内逐只唯一)。供子代理请求的 prompt_cache_key
+    // 取用:每只子代理一个固定分组,不与主会话或兄弟共用。
+    virtual const std::string& session_id() const { return run_id(); }
     virtual TrajectoryTurnBridge& turn_bridge() = 0;
     // 收口:run terminal + 关柄(§8.3 journal_sha256)。返回子账终态事件
     // 的 event_hash(父账 finished 边界引用它);账已坏给空串,父账如实

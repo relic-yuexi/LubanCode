@@ -2237,6 +2237,14 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
     if (resolved != nullptr && !resolved->soul) {
         task_agent_profile.soul.clear();
     }
+    // 子代理自成一个缓存分组:key 取子账会话 id(无账的旧调用方不发)。
+    // 先清掉可能从父皮拷来的活口,免得子代理借用主会话的 key。
+    task_agent_profile.prompt_cache_key_provider = nullptr;
+    if (trajectory != nullptr) {
+        task_agent_profile.prompt_cache_key_provider = [key = "lubancode-" + trajectory->session_id()]() {
+            return key;
+        };
+    }
     agent::Agent sub_agent(loop_backend, effective_registry, std::move(task_agent_profile));
     // 子代理的项目记忆召回(存储 v2 P0-3 §6.2):派工当刻检索一次,整段
     // 冻结下发——子代理不自动扫整库;child_run_id 进快照事件的

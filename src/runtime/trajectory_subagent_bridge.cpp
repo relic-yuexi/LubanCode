@@ -91,11 +91,13 @@ public:
     SubagentBridgeV3Impl(std::unique_ptr<v3::V3Writer> writer,
                          std::unique_ptr<V3SessionBooks> books,
                          std::unique_ptr<TrajectoryTurnBridge> bridge, std::string run_id,
-                         std::map<std::string, std::string>* terminal_hashes)
+                         std::string session_id, std::map<std::string, std::string>* terminal_hashes)
         : writer_(std::move(writer)), books_(std::move(books)), bridge_(std::move(bridge)),
-          run_id_(std::move(run_id)), terminal_hashes_(terminal_hashes) {}
+          run_id_(std::move(run_id)), session_id_(std::move(session_id)),
+          terminal_hashes_(terminal_hashes) {}
 
     const std::string& run_id() const override { return run_id_; }
+    const std::string& session_id() const override { return session_id_; }
     TrajectoryTurnBridge& turn_bridge() override { return *bridge_; }
 
     std::string Finish(bool ok, const std::string& reason) override {
@@ -123,6 +125,7 @@ private:
     std::unique_ptr<V3SessionBooks> books_;
     std::unique_ptr<TrajectoryTurnBridge> bridge_;
     std::string run_id_;
+    std::string session_id_;
     std::map<std::string, std::string>* terminal_hashes_;
     std::string terminal_hash_;
     bool finished_ = false;
@@ -248,7 +251,7 @@ TrajectorySessionLedger::SpawnSubagentV3(const std::string& parent_call_id,
     }
     return std::unique_ptr<TrajectorySubagentBridge>(new SubagentBridgeV3Impl(
         std::move(child_writer_owner), std::move(child_books), std::move(child_bridge),
-        agent_run_id, &impl_->child_terminal_hashes));
+        agent_run_id, child_session_id, &impl_->child_terminal_hashes));
 }
 
 std::expected<std::unique_ptr<TrajectorySubagentBridge>, SubagentSpawnFailure>
