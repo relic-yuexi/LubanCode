@@ -139,7 +139,17 @@ ManifestRead ReadWorkspaceManifest(const fs::path& workspace_dir) {
         std::error_code ec;
         if (const bool present = fs::exists(path, ec); !ec) {
             if (!present) {
-                read.status = ManifestRead::Status::Missing;  // 真没有:立即定案
+#ifdef _WIN32
+                // Windows 换名窗内目标可能瞬时"不存在"(delete-pending 或过滤
+                // 驱动短拒),并发读会误判 Missing(CI 实测 windows-msvc
+                // identity_cross_platform:ifstream 读手 4 次)。不存在时同档
+                // 退避,至多 5 步(50ms);真没有只多付这点等待,POSIX 零变化。
+                if (attempt < 5) {
+                    std::this_thread::sleep_for(kTransientReadBackoff);
+                    continue;
+                }
+#endif
+                read.status = ManifestRead::Status::Missing;  // 真没有:定案
                 return read;
             }
             if (std::ifstream file(path, std::ios::binary); file.is_open()) {
