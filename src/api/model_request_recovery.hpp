@@ -76,6 +76,23 @@ std::chrono::milliseconds BackoffMsForAttempt(int attempt);
 // 一条逻辑请求最多几次尝试(含首发):首发 + 5 次重试。
 constexpr int kMaxRequestAttempts = 6;
 
+// 代价高的网络失败(Terminal-Bench 超时单):kind == Network,且断在流已
+// 开始之后(error.stream_started,或本次尝试见过流事件 saw_stream_event),
+// 或无进展墙落锤(error.hard_timeout)。这类失败重发等于从头重生成整段
+// 长输出——开源长思考模型一步就是几百秒,走满六次长阶梯单步能耗三十多
+// 分钟。连接前失败、429/5xx、Api 稳定码不算,照旧走满阶梯。
+bool IsCostlyNetworkFailure(const Error& error, bool saw_stream_event);
+
+// 一条逻辑请求里,代价高的失败之后至多再重发几次(累计,不按连续算):
+// 第 1、2 次代价高的失败仍重发,第 3 次即收口。
+constexpr int kMaxCostlyFailureRetries = 2;
+
+// 恢复环的重发判据(纯函数,单测直接调):attempt = 刚失败的尝试号(1 起),
+// costly_failures = 连同本次在内,这条逻辑请求累计的代价高失败次数。
+// 不可重试、尝试用尽、代价高失败超出 kMaxCostlyFailureRetries 三者任一
+// 即不再重发。用户取消不归这里管(环里先判,压过一切)。
+bool ShouldRetryAfterFailure(const Error& error, int attempt, int costly_failures);
+
 struct RequestRecoveryHooks {
     // 恢复账出水口(空 = 没人记账,恢复照跑)。在发送线程上同步调。
     std::function<void(const ModelRequestAttempt&, RequestAttemptPhase)> on_attempt;

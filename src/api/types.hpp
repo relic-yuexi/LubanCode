@@ -606,6 +606,12 @@ struct Error {
     std::string message;
     int http_status = 0;  // kind == HttpStatus 时才有意义
     std::string api_code;  // kind == Api 时的 provider 稳定错误码(没有则空)
+    // kind == Network 时传输层留的两枚旁证(重试封顶用,见
+    // model_request_recovery.hpp 的 IsCostlyNetworkFailure):
+    // stream_started = 断在收到过响应体字节之后;hard_timeout = 无进展墙
+    // (request_hard_timeout_secs)落锤。两者都意味着重发要从头重生成。
+    bool stream_started = false;
+    bool hard_timeout = false;
 };
 
 // 给人看的错误体摘要(ccmoon 真机巡检单 P1):HTTP 非 2xx 的原始响应体

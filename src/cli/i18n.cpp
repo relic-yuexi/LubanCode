@@ -1168,11 +1168,12 @@ const Entry kZhCN[] = {
     {"error.network.connect_failed", "连接失败: {0}"},
     {"error.request.failed", "请求失败: {0}"},
     {"error.request.recovery_exhausted", "(已自动重试 {0} 次仍失败,总时长 {1},含退避)"},
-    // 流式请求硬墙钟(cpr 并发挂死单):连接/空闲两道闸都不触发的挂死绝境,
-    // 由这面墙兜底掐断。文案要点:不是网络慢,是挂死;配置键写明,好让人调。
+    // 流式请求无进展墙(cpr 并发挂死单):连接/空闲两道闸都不触发的挂死绝境,
+    // 由这面墙兜底掐断;收字节即顺延,长流不掐。文案要点:不是网络慢,是
+    // 挂死;配置键写明,好让人调。
     {"error.network.hard_timeout",
-     "请求硬超时:整枚请求超过 {0} 秒被强制掐断(request_hard_timeout_secs)。多半是连接被代理/TUN "
-     "截胡或服务端彻底无响应;重试前先排查网络,长任务可调大此值"},
+     "请求硬超时:连续 {0} 秒没收到任何响应数据,请求被强制掐断(request_hard_timeout_secs)。多半是连接被"
+     "代理/TUN 截胡或服务端彻底无响应;重试前先排查网络,模型首字前思考过久可调大此值"},
 
     // ---- transcript 摘要词(彩色主题;plain 的 [RUNNING] 等不进表) ----
     {"transcript.pending", "待确认"},
@@ -3546,9 +3547,9 @@ const Entry kEn[] = {
     {"error.request.recovery_exhausted",
      " (failed after {0} automatic retries; total elapsed {1}, including backoff)"},
     {"error.network.hard_timeout",
-     "request hard timeout: the whole request was force-aborted after {0}s (request_hard_timeout_secs). Usually the "
-     "connection was hijacked by a proxy/TUN or the server went silent; check the network before retrying, and raise "
-     "this limit for long tasks"},
+     "request hard timeout: no response data arrived for {0}s, so the request was force-aborted "
+     "(request_hard_timeout_secs). Usually the connection was hijacked by a proxy/TUN or the server went silent; check "
+     "the network before retrying, and raise this limit if the model thinks very long before its first byte"},
 
     // ---- transcript summary words ----
     {"transcript.pending", "Awaiting confirmation"},
