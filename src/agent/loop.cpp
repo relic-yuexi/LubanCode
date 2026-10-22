@@ -29,6 +29,7 @@
 #include "agent/tool_batch_schedule.hpp"  // 只读并行单 P2:批次调度核心(策略/划批/有界执行器)
 #include "api/assembler.hpp"
 #include "api/model_input_snapshot.hpp"
+#include "api/tool_args_repair.hpp"  // 入参兜底:稳定码 tool.input.*
 #include "hooks/middleware_builtins.hpp"
 #include "cli/i18n.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:trace 的入参/结果摘要锚
@@ -420,6 +421,21 @@ ToolCallGate PrepareToolCall(ToolCallFrame& frame) {
     frame.source_instance = source_instance;
     frame.effect_class = effect_class;
 
+    // ---- 入参兜底(开源模型坏 JSON 单):assembler 判了坏 JSON/长度截断,
+    // 或批次收口时 schema 浅检不过——不执行,病因原文合成 is_error 结果回
+    // 喂模型(配对照旧,终态照落)。排在未知工具之前:tool_invoke 坏了参
+    // 解不开引用,也得让模型看见真病因。
+    if (!call.input_error.empty()) {
+        NotifyPhase(frame, runtime::ToolPhase::Blocked);
+        tools::Tool::Result rejected{call.input_error, true};
+        rejected.outcome = ToString(ToolOutcome::SchemaRejected);
+        rejected.error_code = call.input_error_code.empty() ? std::string(api::kErrToolInputInvalidJson)
+                                                            : call.input_error_code;
+        rejected.details["gate"] = "tool_input";
+        FinishTrace(frame, rejected);
+        return {false, DispatchDone(frame, std::move(rejected))};
+    }
+
     if (tool == nullptr) {
         tools::Tool::Result unknown{"未知工具: " + call.name, true};
         unknown.outcome = ToString(ToolOutcome::UnknownTool);
@@ -784,7 +800,39 @@ tools::Tool::Result CompleteToolCall(ToolCallFrame& frame, tools::Tool::Result r
     if (wiring.on_post_tool_hook) {
         wiring.on_post_tool_hook(call.id, call.name, frame.effective_input, result);
     }
+    // 入参兜底:修补/宽容转换过的入参,结果尾巴上明说,不静默——模型
+    // 下回才知道该给什么形状。
+    if (!call.input_repair.empty()) {
+        result.AppendText("\n[宿主附注] 本次入参不合规,经宿主修补后执行: " + call.input_repair +
+                          "。下次请直接给合法 JSON、符合 input_schema 的参数。");
+    }
     return DispatchDone(frame, std::move(result));
+}
+
+// 入参兜底(开源模型坏 JSON 单):批次收口、执行之前,对照工具 input_schema
+// 浅检 required 与顶层基本类型;数字字符串宽容转数(就地改这枚批内副本,
+// history 里模型原话不动),说明记进 input_repair。不过 = 记进 input_error,
+// 阶段一合成 is_error 结果回喂。未知工具/未挂载工具不检——原路的指路文案
+// 更贴切;已判坏 JSON 的不再叠检。
+void PrecheckModelToolCall(tools::ToolRegistry& registry,
+                           const std::function<bool(const tools::Tool&)>& tool_filter, api::ToolUseBlock& call) {
+    if (!call.input_error.empty()) {
+        return;
+    }
+    tools::Tool* tool = registry.Find(call.name);
+    if (tool == nullptr || (tool_filter && !tool_filter(*tool))) {
+        return;
+    }
+    const tools::ModelInputPrecheck precheck = tools::PrecheckModelToolInput(call.input, tool->input_schema());
+    if (precheck.error.has_value()) {
+        call.input_error = "工具 " + call.name + " 的入参未通过 schema 预检,本次未执行: " + *precheck.error +
+                           "\n请对照该工具的 input_schema 补齐/修正参数后重新调用。";
+        call.input_error_code = api::kErrToolInputSchemaInvalid;
+        return;
+    }
+    for (const std::string& note : precheck.coerced) {
+        call.input_repair += (call.input_repair.empty() ? "" : "、") + note;
+    }
 }
 
 }  // namespace
@@ -2211,9 +2259,16 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                             // 恢复归协调器账面(dispatched 无终态 → unknown_
                             // hold,不盲重跑)。
                             if (wiring.tool_batch_gate != nullptr && !e.tool_use_id.empty()) {
-                                for (const api::ToolUseBlock& done : assembler.completed_tool_uses()) {
-                                    if (done.id != e.tool_use_id) {
+                                for (const api::ToolUseBlock& completed : assembler.completed_tool_uses()) {
+                                    if (completed.id != e.tool_use_id) {
                                         continue;
+                                    }
+                                    // 入参兜底:schema 浅检不过的不提前派发,留到批次
+                                    // 收口按 inline 合成 is_error 结果(与收口时同一检)。
+                                    api::ToolUseBlock done = completed;
+                                    PrecheckModelToolCall(registry_, tool_filter_, done);
+                                    if (!done.input_error.empty()) {
+                                        break;
                                     }
                                     ToolBatchGate::StreamCallContext stream_context;
                                     stream_context.turn_id = wiring.turn_id;
@@ -2616,6 +2671,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         for (const auto& block : last_assistant.content) {
             if (std::holds_alternative<api::ToolUseBlock>(block)) {
                 batch_calls.push_back(std::get<api::ToolUseBlock>(block));
+                // 入参兜底:schema 浅检与数字字符串宽容转换(批内副本)。
+                PrecheckModelToolCall(registry_, tool_filter_, batch_calls.back());
             }
         }
         const bool gate_armed = wiring.tool_batch_gate != nullptr && batch_calls.size() > 0 &&
@@ -2623,6 +2680,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         std::vector<ToolCallAdjudication> adjudications(batch_calls.size());
         if (gate_armed) {
             adjudications = wiring.tool_batch_gate->AdjudicateBatch(batch_calls);
+            // 入参不可用的调用一律 inline:不接单、不留欠账,阶段一就地合成
+            // is_error 结果配对(坏参数派出去只会把病因藏进后台任务)。
+            for (std::size_t i = 0; i < batch_calls.size() && i < adjudications.size(); ++i) {
+                if (!batch_calls[i].input_error.empty()) {
+                    adjudications[i] = ToolCallAdjudication{};
+                }
+            }
         }
         const auto call_is_inline = [&adjudications](std::size_t index) {
             return index >= adjudications.size() ||
@@ -2812,7 +2876,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // 的 tool_result(仍用原 wire id),并补终态栅栏——不是无 id 的
             // assistant 文本。直接按名调用延迟工具不走这条:tool_filter 照拦
             //(发现不等于授权,模型不能凭名字穿代理)。
-            if (tool_ref_resolver_ != nullptr && call.name == "tool_invoke") {
+            if (tool_ref_resolver_ != nullptr && call.name == "tool_invoke" && call.input_error.empty()) {
                 const auto resolved = tool_ref_resolver_->Resolve(registry_, call);
                 if (!resolved.has_value()) {
                     const tools::DeferredToolResolver::Refusal& refusal = resolved.error();

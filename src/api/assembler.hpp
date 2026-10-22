@@ -50,6 +50,11 @@ public:
     // 排除出精确比例并点名,不掩盖。
     const std::string& usage_anomaly() const { return usage_anomaly_; }
 
+    // 入参兜底(开源模型坏 JSON 单):本地 tool_use 的入参先严格 parse,失败
+    // 再宽松修补(tool_args_repair);修成的块带 input_repair,修不成的带
+    // input_error(入参 {})。终帧 stop_reason 是长度截断时,修不成的与靠
+    // 补齐末尾救回的块一律改判 input_error(截断),不许补齐执行。
+    // 修补过/坏掉的块不进 completed_tool_uses()(不提前派发)。
     // tool_use 的 input JSON 拼完后解析失败时置位。就算解析失败,BuildMessage()
     // 依旧会给出可用的 Message——那个 tool_use 块的 input 会是个空对象,不会因为
     // 解析失败就丢数据、崩掉;调用方看 has_parse_error() 自己决定要不要额外报错。
@@ -104,6 +109,13 @@ private:
     bool cache_creation_seen_ = false;
     std::string usage_anomaly_;
     std::string parse_error_;
+    // 截断嫌疑块(入参修不成,或靠补齐末尾才救回):content_ 下标 + 原文。
+    // MessageDone 见长度截断即改判 input_error;收口即清。
+    struct TruncationSuspect {
+        std::size_t content_index = 0;
+        std::string raw;
+    };
+    std::vector<TruncationSuspect> truncation_suspects_;
     int idless_tool_calls_dropped_ = 0;
 
     void FinalizeCurrent();
