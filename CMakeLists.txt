@@ -387,7 +387,10 @@ else()
     src/platform/console_posix.cpp
     src/platform/peer_transport_posix.cpp
     src/platform/clipboard_posix.cpp
-    src/platform/file_in_use_posix.cpp)
+    src/platform/file_in_use_posix.cpp
+    # terminal 工具的 PTY 底座(posix_openpt 标准件,不用 forkpty,Linux 不必链 -lutil)。
+    # Windows 本单不做 ConPTY,无对应 _win 件。
+    src/platform/pty_posix.cpp)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -498,6 +501,11 @@ add_library(lubancode_engine STATIC
   src/tools/background_tasks.cpp
   src/tools/shell_info.cpp
   src/tools/background_output.cpp
+  # terminal 工具:按键记号解析 + 最小终端仿真器(纯逻辑,两平台都编)+ 会话工具
+  # (POSIX 实现在 #ifndef _WIN32 里,Windows 只编出"仅 POSIX"空壳,不注册)。
+  src/tools/terminal_keys.cpp
+  src/tools/terminal_screen.cpp
+  src/tools/terminal_session_tool.cpp
   src/tools/command_safety.cpp
   # AR-07 审批与 Plan 重复 shell 词法合并:无策略词法件(拆段/拆词/引号
   # 状态机/重定向/子表达式/脚本块/词形归一)自 command_safety 提炼,
