@@ -213,19 +213,33 @@ TEST_CASE("语言包: 目录里混着子目录/悬空链接,跳过不崩,好包�
     std::filesystem::remove_all(dir);
 }
 
-TEST_CASE("MapLocaleToLanguage: zh 前缀→zh-CN,en 前缀→en,认不出→zh-CN") {
+TEST_CASE("MapLocaleToLanguage: 只有 zh 前缀→zh-CN,其余(含未设/C/POSIX)→en") {
     CHECK(cli::MapLocaleToLanguage("zh-CN") == "zh-CN");
+    CHECK(cli::MapLocaleToLanguage("zh_CN.UTF-8") == "zh-CN");
     CHECK(cli::MapLocaleToLanguage("zh-TW") == "zh-CN");
     CHECK(cli::MapLocaleToLanguage("zh") == "zh-CN");
     CHECK(cli::MapLocaleToLanguage("en-US") == "en");
+    CHECK(cli::MapLocaleToLanguage("en_US.UTF-8") == "en");
     CHECK(cli::MapLocaleToLanguage("en_GB.UTF-8") == "en");
     CHECK(cli::MapLocaleToLanguage("en") == "en");
-    CHECK(cli::MapLocaleToLanguage("ja-JP") == "zh-CN");
-    CHECK(cli::MapLocaleToLanguage("fr") == "zh-CN");
-    CHECK(cli::MapLocaleToLanguage("") == "zh-CN");
-    // "eo"(世界语)不是 en:前两个字母相同也不能误判,得看边界。
-    CHECK(cli::MapLocaleToLanguage("eo") == "zh-CN");
-    CHECK(cli::MapLocaleToLanguage("english") == "zh-CN");  // en 后跟字母,不算 en 前缀
+    // Docker 镜像的常态:LANG 未设(空串)、C、C.UTF-8、POSIX——回落 en,
+    // 不再给英文题目配中文提示(one-shot 无人值守适配)。
+    CHECK(cli::MapLocaleToLanguage("") == "en");
+    CHECK(cli::MapLocaleToLanguage("C") == "en");
+    CHECK(cli::MapLocaleToLanguage("C.UTF-8") == "en");
+    CHECK(cli::MapLocaleToLanguage("POSIX") == "en");
+    CHECK(cli::MapLocaleToLanguage("ja-JP") == "en");
+    CHECK(cli::MapLocaleToLanguage("fr") == "en");
+    // zh 也看边界:"zhx" 这类不是中文 locale。
+    CHECK(cli::MapLocaleToLanguage("zhx") == "en");
+}
+
+TEST_CASE("ResolveLanguage: 显式设置非空即用,压过系统探测") {
+    CHECK(cli::ResolveLanguage("zh-CN") == "zh-CN");
+    CHECK(cli::ResolveLanguage("en") == "en");
+    CHECK(cli::ResolveLanguage("ja") == "ja");  // 用户语言包码原样认
+    // 空 = 跟系统探测,与 DetectSystemLanguage 同一口。
+    CHECK(cli::ResolveLanguage("") == cli::DetectSystemLanguage());
 }
 
 TEST_CASE("ParseSlashCommand: /language 与 /lang 别名,参数是语言码") {
