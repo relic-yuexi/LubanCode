@@ -356,7 +356,7 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const EnvP
 
 ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std::atomic<bool>* cancel,
                          const EnvPairs& extra_env, std::size_t max_output_bytes,
-                         const std::string& cwd_utf8) {
+                         const std::string& cwd_utf8, OutputOverflow overflow) {
     ProcessResult result;
 
     // 显式环境块(P0 并发修复):不再临时改宿主环境再还原——Hook
@@ -446,6 +446,10 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     // 杀进程,不用等超时。手动重置事件,只置一次。
     HANDLE overflow_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
+    // KeepHeadTail 模式(与 POSIX 同一份 HeadTailCapture):读线程只灌捕获器,
+    // 不置 overflow、不点 overflow_event,命令照常跑完。
+    const bool keep_head_tail = overflow == OutputOverflow::KeepHeadTail;
+    HeadTailCapture head_tail(max_output_bytes);
     std::string output;
     std::atomic<bool> output_over_limit{false};
     std::atomic<bool> reader_stop{false};
@@ -454,7 +458,9 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
         char buf[4096];
         DWORD n = 0;
         while (!reader_stop.load() && ReadFile(read_pipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
-            if (output.size() < max_output_bytes) {
+            if (keep_head_tail) {
+                head_tail.Append(buf, static_cast<std::size_t>(n));
+            } else if (output.size() < max_output_bytes) {
                 const std::size_t room = max_output_bytes - output.size();
                 const std::size_t take = std::min<std::size_t>(n, room);
                 output.append(buf, take);
@@ -557,10 +563,16 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     DWORD exit_code = 0;
     GetExitCodeProcess(pi.hProcess, &exit_code);
     result.exit_code = exit_code;
-    // 截断的刀口对齐 UTF-8 码点边界(见文件头 AlignOutputToUtf8Boundary)。
-    AlignOutputToUtf8Boundary(output, max_output_bytes);
-    result.output = std::move(output);
-    result.output_truncated = output_over_limit.load();
+    if (keep_head_tail) {
+        // 读线程已 join,捕获器归本线程独占。整字对齐在 Finish 里做。
+        result.output = head_tail.Finish(&result.omitted_bytes);
+        result.output_truncated = head_tail.overflowed();
+    } else {
+        // 截断的刀口对齐 UTF-8 码点边界(见文件头 AlignOutputToUtf8Boundary)。
+        AlignOutputToUtf8Boundary(output, max_output_bytes);
+        result.output = std::move(output);
+        result.output_truncated = output_over_limit.load();
+    }
 
     if (job != nullptr) {
         CloseHandle(job);
@@ -587,7 +599,8 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
 }
 
 ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, const std::atomic<bool>* cancel,
-                         const EnvPairs& extra_env, std::size_t max_output_bytes, const std::string& cwd_utf8) {
+                         const EnvPairs& extra_env, std::size_t max_output_bytes, const std::string& cwd_utf8,
+                         OutputOverflow overflow) {
     if (argv.empty()) {
         ProcessResult result;
         result.spawn_failed = true;
@@ -595,7 +608,7 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
         return result;
     }
     return RunProcess(BuildProcessCommandLine(argv[0], std::vector<std::string>(argv.begin() + 1, argv.end())),
-                       timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8);
+                       timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8, overflow);
 }
 
 ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const EnvPairs& extra_env,
@@ -609,9 +622,10 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, c
 
 ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const std::atomic<bool>* cancel,
                               const EnvPairs& extra_env, std::size_t max_output_bytes,
-                              const std::string& cwd_utf8) {
-    ProcessResult result =
-        RunProcess(BuildCmdCommandLine(command_utf8), timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8);
+                              const std::string& cwd_utf8, OutputOverflow overflow) {
+    // KeepHeadTail 的省略标记是纯 ASCII,下面这道 ACP 转换伤不着它。
+    ProcessResult result = RunProcess(BuildCmdCommandLine(command_utf8), timeout_ms, cancel, extra_env,
+                                      max_output_bytes, cwd_utf8, overflow);
     result.output = AcpBytesToUtf8(result.output);
     return result;
 }

@@ -1,10 +1,46 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "tools/tool.hpp"
 
 namespace lubancode::tools {
+
+// run_command 的几枚纯函数(Terminal-Bench 加固单抽出来,便于确定性测试)。
+namespace run_command_detail {
+
+// 未显式传 timeout_ms 时的默认超时(毫秒)。只看真正的可执行名:跳过前导
+// `cd <dir> &&`、`sudo [-opts]`、`env [-opts] K=V`、`VAR=val`、`time`、
+// `nohup` 这些前缀;构建/装依赖/测试类首词抬到 900000,其余 120000。参数
+// 正文一概不扫(`echo "cmake"` 不抬)。python/python3 只在 `-m pip|pytest`
+// 时抬。
+int DefaultTimeoutMsForCommand(const std::string& command);
+
+// POSIX 下选哪只 shell。requested 空 = 模型没指定:本机有 bash(bash_path
+// 有值)就用它,没有回落 /bin/sh;"sh" 恒走 /bin/sh;"bash" 走 bash_path
+// (调用方已验过装没装,没装时同样回落 /bin/sh 防呆)。id 进后台台账与隔离闸。
+struct ShellChoice {
+    std::string id;          // "bash" / "sh"
+    std::string executable;  // 绝对路径
+};
+ShellChoice ChoosePosixShell(const std::string& requested, const std::optional<std::string>& bash_path);
+
+// 非交互默认环境(POSIX 子进程):apt/pip/git 不弹问、python 不攒缓冲、
+// 分页器不吊住。
+std::vector<std::pair<std::string, std::string>> NonInteractiveEnvDefaults();
+
+// 只挑父环境没设的那几条补(is_set 判"设没设",空串也算设过——用户显式
+// 设成空是他的意思,不替他改)。
+std::vector<std::pair<std::string, std::string>> FillMissingEnv(
+    const std::vector<std::pair<std::string, std::string>>& defaults,
+    const std::function<bool(const std::string&)>& is_set);
+
+}  // namespace run_command_detail
 
 // 跑一条 shell 命令,把标准输出/标准错误合流捕获,带上退出码回传。
 // 入参可选 "shell": "powershell"(默认)或 "cmd",分别经 PowerShell 或
