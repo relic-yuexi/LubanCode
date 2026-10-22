@@ -420,3 +420,67 @@ TEST_CASE("项目指令逐 source 记账:清单非空每份一行,空则照旧�
         CHECK(saw_root_line);
     }
 }
+
+// ---- one-shot 无人值守适配 ----
+// 交互原文里的两句(断言靠子串,与 prompt_assembler.cpp 的替换常量、
+// src/prompts 下的 .md 原文三方对得上才绿)。
+constexpr const char* kWorkflowAskLine =
+    "需求有岔路、走错代价大时,先问一句;代价小就挑个合理做法,把假设说明白,接着干。";
+constexpr const char* kShellConfirmLine =
+    "危险动作(删文件、改系统、动网络)先把意图说清,等用户确认放行,别拿命令绕开确认机制。";
+
+TEST_CASE("无人值守:交互模式原文不变,不含无人值守段") {
+    const std::string prompt = AssembleSystemPrompt(BaseOptions());
+    CHECK(Contains(prompt, kWorkflowAskLine));
+    CHECK(Contains(prompt, kShellConfirmLine));
+    CHECK_FALSE(Contains(prompt, embedded::kMode_unattended_zh));
+    CHECK_FALSE(Contains(prompt, embedded::kMode_unattended_en));
+    CHECK(Contains(embedded::kCore_20_workflow, kWorkflowAskLine));
+    CHECK(Contains(embedded::kFeature_shell, kShellConfirmLine));
+}
+
+TEST_CASE("无人值守 + --yes:注无人值守段,不含'先问一句'与'等用户确认'") {
+    PromptOptions options = BaseOptions();
+    options.unattended = true;
+    options.auto_approve = true;
+    options.language = "en";
+    PromptSourceLedger ledger;
+    const std::string prompt = AssembleSystemPrompt(options, &ledger);
+    CHECK(Contains(prompt, embedded::kMode_unattended_en));
+    CHECK_FALSE(Contains(prompt, embedded::kMode_unattended_zh));
+    CHECK_FALSE(Contains(prompt, kWorkflowAskLine));
+    CHECK_FALSE(Contains(prompt, kShellConfirmLine));
+    CHECK_FALSE(Contains(prompt, "等用户确认"));
+    CHECK_FALSE(Contains(prompt, "先问一句"));
+    CHECK(Contains(prompt, "setsid nohup"));
+    // 段压轴,账本末条记宿主内置来源。
+    const std::string segment = embedded::kMode_unattended_en;
+    REQUIRE(prompt.size() >= segment.size());
+    CHECK(prompt.compare(prompt.size() - segment.size(), segment.size(), segment) == 0);
+    REQUIRE_FALSE(ledger.entries.empty());
+    CHECK(ledger.entries.back().rel_path == "modes/unattended-en.md");
+    CHECK(ledger.entries.back().origin == PromptModuleOrigin::EmbeddedHostPolicy);
+}
+
+TEST_CASE("无人值守:段随语言选,zh 与空给中文版,其余给英文版") {
+    PromptOptions options = BaseOptions();
+    options.unattended = true;
+    options.language = "zh-CN";
+    CHECK(Contains(AssembleSystemPrompt(options), embedded::kMode_unattended_zh));
+    options.language.clear();
+    CHECK(Contains(AssembleSystemPrompt(options), embedded::kMode_unattended_zh));
+    options.language = "ja";
+    CHECK(Contains(AssembleSystemPrompt(options), embedded::kMode_unattended_en));
+    CHECK(UnattendedInstructionSegment("en") == embedded::kMode_unattended_en);
+    CHECK(UnattendedInstructionSegment("zh-CN") == embedded::kMode_unattended_zh);
+}
+
+TEST_CASE("无人值守未带 --yes:workflow 换措辞,shell 确认句照留") {
+    PromptOptions options = BaseOptions();
+    options.unattended = true;
+    options.auto_approve = false;
+    const std::string prompt = AssembleSystemPrompt(options);
+    CHECK_FALSE(Contains(prompt, kWorkflowAskLine));
+    CHECK(Contains(prompt, kShellConfirmLine));  // 没 --yes,终端确认口还在
+    CHECK(Contains(prompt, embedded::kMode_unattended_zh));
+}

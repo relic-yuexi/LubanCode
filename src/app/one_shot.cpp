@@ -30,6 +30,7 @@
 #include <nlohmann/json.hpp>
 #include "agent/compact.hpp"
 #include "agent/loop.hpp"
+#include "agent/unattended_guard.hpp"  // WallClockBudget/催验证续投源(one-shot 墙钟预算单)
 #include "peers/peer_session.hpp"
 #include "agent/prompts.hpp"
 #include "skills/workflow_recorder.hpp"
@@ -138,6 +139,19 @@ lubancode::runtime::SessionLaunchRequest BuildOneShotSessionRequest(
     return request;
 }
 
+lubancode::agent::AgentWiring BuildOneShotContextWiring(
+    std::function<CompactSessionInputs()> make_inputs) {
+    lubancode::agent::AgentWiring wiring;
+    if (!make_inputs) {
+        return wiring;  // 没材料不接:空回调 = 安全网照旧,只是没人听见
+    }
+    wiring.on_context_pressure = [make_inputs = std::move(make_inputs)](
+                                     const lubancode::agent::ContextPressure& pressure) {
+        lubancode::app::HandleContextPressure(pressure, make_inputs());
+    };
+    return wiring;
+}
+
 using lubancode::platform::CurrentDirUtf8;
 using lubancode::app::RunTurn;
 using lubancode::app::MemoryOptionsFromConfig;
@@ -161,7 +175,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
             const lubancode::config::SettingsLocal& settings_local,
             const std::string& model_instructions, const std::string& soul_content,
-            const std::vector<std::string>& package_dirs, const std::string& harness_output) {
+            const std::vector<std::string>& package_dirs, const std::string& harness_output,
+            const std::optional<OneShotTimeBudget>& time_budget) {
     // app-server 防守(app-server 单:绝不能把子命令当单发问题送进 AskOnce
     // ——那会在协议管线上打出一坨终端文案,搅坏 stdout 分帧)。旗标在
     // ParseCliArgs/RunCli 两层都拦了,这里守最后一道:问题正文恰是裸
@@ -352,6 +367,17 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     prompt_options.prompts_dir = prompts_dir;  // 运行时模块:构造时现读现拼
     // 统一 Package 封装单阶段 3:包层 Profile 根(canonical 名在包里解析)。
     prompt_options.package_profile_roots = lubancode::package::MountProfileRoots(package_snapshot->mount());
+    // 无人值守(one-shot 无人值守适配):单发没人回答提问(ask_user 已关),
+    // 殿后注无人值守段、workflow"先问一句"换措辞;--yes 下 shell 段"等用户
+    // 确认放行"一并换掉。段的语言随会话语言(cli 已按 LUBANCODE_LANG/配置/
+    // 系统定稿)。
+    prompt_options.unattended = true;
+    prompt_options.auto_approve = auto_confirm;
+    prompt_options.language = lubancode::cli::CurrentLanguage();
+    // 墙钟预算(one-shot 墙钟预算单):无人值守段末尾报总预算,模型好照着排活。
+    if (time_budget.has_value()) {
+        prompt_options.time_budget_secs = time_budget->total_secs;
+    }
 
     // 运行策略走统一 profile(规格根因一):输出上限三级解析(config >
     // provider > 模型目录),unset 交服务端默认——与交互会话同一只装配
@@ -501,6 +527,106 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         pop.status == lubancode::runtime::SessionService::PendingPop::Status::Ok
             ? pop.input.text
             : question;
+    // 上下文压缩接线(one-shot 无人值守适配):从前单发一处没接,loop 的
+    // 压力通报是空操作,长任务上下文只涨不压,撞窗即死。材料包与交互会话
+    // MakeCompactInputs 同形,压缩走同一只 HandleContextPressure → TryRunCompact
+    //(v3 账本自动进 RunV3CompactBranch),一行压缩逻辑不新造。差别只在
+    // 单发没有 /model:路由服务按本场配置现建一只,会话模型钉死。
+    lubancode::config::ConfigResult oneshot_config_result;
+    oneshot_config_result.config = config;
+    const auto oneshot_current_model = std::make_shared<std::string>(config.model);
+    lubancode::app::ModelRouterService oneshot_router(oneshot_config_result, *backend, oneshot_current_model,
+                                                     bound_provider);
+    lubancode::app::CompactHysteresis oneshot_hysteresis;
+    int oneshot_compact_epoch = 0;
+    std::string oneshot_last_compact_line;
+    const std::string oneshot_wire = lubancode::config::ProviderWireName(config.wire);
+    const std::string oneshot_cwd = CurrentDirUtf8();
+    const auto build_oneshot_compact_options = [&]() {
+        lubancode::agent::CompactOptions options;
+        options.prompts_dir = prompts_dir;
+        options.working_directory_line = "当前工作目录: " + oneshot_cwd;
+        // 窗口预算认压缩路由的声明,没有再查目录;都查不到留空(压缩明说
+        // "窗口未知,未校验"),与交互 BuildCompactOptions 同一口径。
+        const auto compact_route = oneshot_router.RouteInfo(lubancode::agent::TaskKind::Compact);
+        if (compact_route.context_window.has_value()) {
+            options.budget.window_tokens = compact_route.context_window;
+        } else if (const auto* entry = once_catalog.FindBySlug(compact_route.model); entry != nullptr) {
+            options.budget.window_tokens = entry->context_window_tokens;
+        }
+        lubancode::agent::ContextBudgetInputs budget_inputs;
+        budget_inputs.window_tokens = options.budget.window_tokens;
+        budget_inputs.requested_output_reserve_tokens = options.budget.output_reserve_tokens;
+        budget_inputs.compact_prompt_overhead_tokens = 512;  // 压缩指令的公开估算档
+        const auto plan = lubancode::agent::BuildContextBudgetPlan(budget_inputs);
+        if (plan.compact_call_input_budget.has_value()) {
+            options.budget.protocol_headroom_tokens =
+                plan.protocol_headroom + plan.tokenizer_error_margin + plan.compact_prompt_overhead;
+        }
+        // 活动待办守恒:摘要漏一项就拒收,旧历史不动。
+        if (todo_state != nullptr) {
+            for (const auto& item : todo_state->items) {
+                if (item.status != lubancode::tools::TodoStatus::Completed && !item.content.empty()) {
+                    options.required_open_items.push_back(item.content);
+                }
+            }
+        }
+        options.partition_count = static_cast<std::size_t>(config.compact_partition_count);
+        return options;
+    };
+    const auto make_oneshot_compact_inputs = [&]() {
+        lubancode::app::CompactSessionInputs in;
+        in.agent = &loop;
+        in.theme = &theme;
+        in.spinner_enabled = spinner_enabled;
+        in.session_compact_epoch = &oneshot_compact_epoch;
+        in.last_compact_line = &oneshot_last_compact_line;
+        in.hysteresis = &oneshot_hysteresis;
+        in.context_tracker = &context_tracker;
+        in.build_compact_options = build_oneshot_compact_options;
+        // 采用门禁核完整主请求(AR-10):system 用开场冻结那份,延迟索引段
+        // 现拼;tools 走暴露过滤,与实发同形。
+        in.main_request_facts = [&]() {
+            lubancode::app::MainRequestFacts facts;
+            facts.system = oneshot_system_prompt;
+            if (main_deferral && !main_proxy && !main_native) {
+                facts.system = lubancode::agent::WithDeferredToolsIndex(
+                    facts.system, lubancode::tools::BuildDeferredToolsIndexSegment(registry, *loaded_tools));
+            }
+            const std::function<bool(const lubancode::tools::Tool&)>& filter = tool_runtime.main_tool_filter();
+            for (const auto& tool : registry.All()) {
+                if (filter && !filter(*tool)) {
+                    continue;
+                }
+                facts.tools.push_back(nlohmann::json{{"name", tool->name()},
+                                                     {"description", tool->description()},
+                                                     {"input_schema", tool->input_schema()}});
+            }
+            return facts;
+        };
+        in.route_compact = [&]() { return oneshot_router.Route(lubancode::agent::TaskKind::Compact); };
+        in.route_repair = [&]() { return oneshot_router.Route(lubancode::agent::TaskKind::CompactRepair); };
+        in.normal_backend = backend.get();
+        in.current_model = oneshot_current_model.get();
+        in.record_usage = [&](lubancode::agent::ModelRole role, const lubancode::agent::ModelRoute& route,
+                              const lubancode::agent::BackgroundCallAccounting& accounting) {
+            oneshot_router.ledger().Record(role, route.model, accounting.usage, accounting.duration_ms,
+                                           accounting.usage_reported);
+        };
+        in.record_fallback = [&](lubancode::agent::TaskKind kind, lubancode::agent::ModelRole from,
+                                 lubancode::agent::ModelRole to, const std::string& reason) {
+            oneshot_router.ledger().RecordFallback(kind, from, to, reason);
+        };
+        in.trajectory = oneshot_ledger;
+        in.trajectory_wire = oneshot_wire;
+        return in;
+    };
+    {
+        lubancode::agent::AgentWiring oneshot_wiring = loop.wiring();
+        oneshot_wiring.on_context_pressure =
+            BuildOneShotContextWiring(make_oneshot_compact_inputs).on_context_pressure;
+        loop.SetWiring(std::move(oneshot_wiring));
+    }
     // 批三:RunTurn 二十四参收成一只 TurnContext。
     lubancode::app::TurnContext turn;
     turn.loop = &loop;
@@ -547,6 +673,30 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         lubancode::runtime::AttachDefaultAsyncToolRuntime(
             *oneshot_service.runtime(), lubancode::config::ProviderWireName(config.wire));
         turn.async_tool_runtime = oneshot_service.runtime()->async_tool_runtime();
+    }
+    // 墙钟预算与收工前催验证(one-shot 墙钟预算单)。预算对象活到 RunTurn
+    // 返回之后(TurnWiring/看门狗只捏指针);语言档与无人值守段同一口径。
+    const bool unattended_chinese = lubancode::agent::UnattendedPrefersChinese(prompt_options.language);
+    std::optional<lubancode::agent::WallClockBudget> wall_budget;
+    if (time_budget.has_value()) {
+        wall_budget.emplace(time_budget->started, static_cast<std::int64_t>(time_budget->total_secs) * 1000,
+                            unattended_chinese);
+        turn.wall_budget = &*wall_budget;
+    }
+    {
+        // 收工前催验证:模型不带工具调用就收口时,写了没验/todo 未完就再
+        // 递一条 user 消息跑一轮(整场至多两回,剩不足 60 秒不催)。续跑
+        // 消息走 DriveTurn 的续投源,正规 user 消息落账,不在 loop 里硬塞。
+        lubancode::agent::VerifyNudgeOptions verify_options;
+        verify_options.agent = &loop;
+        verify_options.todo_state = todo_state;
+        verify_options.wall_budget = wall_budget.has_value() ? &*wall_budget : nullptr;
+        verify_options.chinese = unattended_chinese;
+        verify_options.on_nudge = [](int nudge_index) {
+            // stderr 出声,不污染被重定向的 stdout(评测日志里看得见催了几回)。
+            std::cerr << "[one-shot] 收工前催验证(第 " << nudge_index << " 回)\n";
+        };
+        turn.continuation = lubancode::agent::BuildVerifyNudgeContinuation(std::move(verify_options));
     }
     const int status = RunTurn(std::move(turn)).status;
     // 收口:turn 终态已由 RunTurn 的桥落账,这里封 run/session(§14.5);

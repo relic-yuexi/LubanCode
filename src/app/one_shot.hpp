@@ -4,9 +4,14 @@
 // 解耦在后续 commit 里收,这里只留窄接口。
 #pragma once
 
+#include <chrono>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "agent/agent.hpp"
+#include "app/commands/session_commands.hpp"  // CompactSessionInputs / HandleContextPressure
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "config/settings_local.hpp"
@@ -19,6 +24,21 @@ namespace lubancode::app {
 // 身份裁决起点(AskOnce 递启动 cwd)。
 lubancode::runtime::SessionLaunchRequest BuildOneShotSessionRequest(
     const lubancode::config::Config& config, const std::string& cwd_utf8);
+
+// 单发场的上下文压力接线(one-shot 无人值守适配):从前单发一处没接,
+// loop 的压力通报是空操作,长任务上下文只涨不压。这里把通报转进与交互
+// 会话同一只 HandleContextPressure——PreRequest 撞线 mid-turn 压一次、
+// provider 确认超窗收一次、hard trim 告警,压缩本身一行不新造。
+// make_inputs 每次通报现取材料包(滞回账/压缩次数/账本由调用方持有)。
+lubancode::agent::AgentWiring BuildOneShotContextWiring(
+    std::function<CompactSessionInputs()> make_inputs);
+
+// 墙钟预算(one-shot 墙钟预算单):--time-budget / LUBANCODE_TIME_BUDGET_SECS
+// 定稿后的整场预算与起算点(RunCli 进门那刻,进程启动开销一并算进去)。
+struct OneShotTimeBudget {
+    int total_secs = 0;
+    std::chrono::steady_clock::time_point started{};
+};
 
 // 单发模式(位置参数):也走 agent loop,同样支持工具,只是只问这一句。
 // 管道/单发场景下 spinner_enabled 传进来的必然是 false(RunCli 里按
@@ -38,11 +58,16 @@ lubancode::runtime::SessionLaunchRequest BuildOneShotSessionRequest(
 // stderr 打一行稳定可解析的收据(schema/session_id/records/sha256/path)。
 // 导出失败不吞:退出码按"执行成败优先,执行成而导出败给导出失败码 3"
 // 结算,stderr 带 session_id 与补导命令(单子 §三/§七)。
+// time_budget(one-shot 墙钟预算单):空 = 没预算,行为与从前一字不差。给了
+// 就三管齐下:无人值守段报总预算;工具结果按档追附注、run_command 超时
+// 封顶;死线前留余量收工,照常 Close 与导出。收工前催验证不看预算有无,
+// 单发一律开(预算只决定"时间不够就别催")。
 int AskOnce(const lubancode::config::Config& config, const std::string& question, bool auto_confirm,
             const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
             const lubancode::config::SettingsLocal& settings_local,
             const std::string& model_instructions = std::string(), const std::string& soul_content = std::string(),
             const std::vector<std::string>& package_dirs = std::vector<std::string>{},
-            const std::string& harness_output = std::string());
+            const std::string& harness_output = std::string(),
+            const std::optional<OneShotTimeBudget>& time_budget = std::nullopt);
 
 }  // namespace lubancode::app

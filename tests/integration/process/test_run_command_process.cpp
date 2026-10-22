@@ -6,7 +6,9 @@
 //   - POSIX 单引号路径转义(cwd 含 ' 的目录前后台都得跑对);
 //   - 后台 ReadOutput 的 UTF-8 边界与截断标记(半字起刀不许冒充整行);
 //   - 后台日志 POSIX 权限 0600、独占创建;
-//   - Windows 后台 PowerShell 用对 command_with_cwd(前后台目录探针一致)。
+//   - Windows 后台 PowerShell 用对 command_with_cwd(前后台目录探针一致);
+//   - Terminal-Bench 加固单:POSIX 默认 bash、非交互环境补缺、子进程 SIGPIPE
+//     复位、长命令首词抬档、输出超量留首尾不杀(纯函数 + POSIX 真跑)。
 // 进程生命线批(BackgroundProcessHandle/Stop 整树收口)的测试另在
 // test_background_tasks.cpp 与本文件生命周期节。
 
@@ -19,6 +21,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -26,6 +29,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "platform/paths.hpp"  // GetEnvVarPresent:非交互环境用例对照父环境
 #include "platform/process.hpp"
 #include "platform/text_encoding.hpp"
 #include "tools/background_output.hpp"
@@ -116,24 +120,206 @@ bool RefersToPath(const std::string& output_utf8, const std::filesystem::path& e
 // P1:输出超限是失败终态 + off-by-one
 // ---------------------------------------------------------------------------
 
-TEST_CASE("run_command: 输出超上限是失败终态(is_error=true),不再涂成成功") {
+TEST_CASE("run_command: 输出超上限留首尾不杀命令,成败按退出码,截断如实注明") {
+    // Terminal-Bench 加固单:旧口径"超量即杀、判失败"丢了尾巴(编译报错多
+    // 在尾巴)。新口径:命令照常跑完,前 1MB + 后 1MB 留住,中间记省略字节数。
     RunCommandTool tool;
     nlohmann::json input;
 #ifdef _WIN32
-    input["command"] = "1..200000 | ForEach-Object { '0123456789012345678901234567890' }";
+    input["command"] =
+        "1..200000 | ForEach-Object { '0123456789012345678901234567890' }; Write-Output 'TAIL-MARKER-END'";
 #else
-    input["command"] = "i=0; while [ $i -lt 200000 ]; do echo 0123456789012345678901234567890; i=$((i+1)); done";
+    input["command"] =
+        "i=0; while [ $i -lt 200000 ]; do echo 0123456789012345678901234567890; i=$((i+1)); done; "
+        "echo TAIL-MARKER-END";
 #endif
     input["timeout_ms"] = 90000;
 
     const Tool::Result result = tool.execute(input);
 
     CHECK(result.content.find("[输出超过上限") != std::string::npos);
-    // 单子的硬话:输出截断 = 命令被杀,结果不得是成功。
-    CHECK(result.is_error);
-    CHECK(result.outcome == "output_limit");
-    CHECK(result.error_code == "process.output_limit");
+    CHECK(result.content.find("bytes omitted") != std::string::npos);
+    CHECK(result.content.find("TAIL-MARKER-END") != std::string::npos);  // 尾巴还在
+    CHECK_FALSE(result.is_error);
+    CHECK(result.outcome == "succeeded");
+    CHECK(result.content.find("[退出码 0]") != std::string::npos);
+    REQUIRE(result.details.contains("output_truncated"));
+    CHECK(result.details["output_truncated"] == true);
+    REQUIRE(result.details.contains("omitted_bytes"));
+    CHECK(result.details["omitted_bytes"].get<std::uint64_t>() > 0);
     CHECK(result.content.size() <= 2 * 1024 * 1024 + 4096);
+}
+
+// ---------------------------------------------------------------------------
+// Terminal-Bench 加固单:纯函数(首尾捕获器 / 首词抬档 / shell 选择 / env 补缺)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("HeadTailCapture: 不超帽原样拼回,超帽留首尾并记省略字节数") {
+    using lubancode::platform::HeadTailCapture;
+    // 不超帽:分块灌进去,拼回一字不差(含恰好满帽)。
+    {
+        HeadTailCapture cap(10);
+        cap.Append("abcd", 4);
+        cap.Append("efghij", 6);
+        CHECK_FALSE(cap.overflowed());
+        std::uint64_t omitted = 99;
+        CHECK(cap.Finish(&omitted) == "abcdefghij");
+        CHECK(omitted == 0);
+    }
+    // 超帽:帽 10 = 前 5 + 后 5;灌 26 个字母,中间省 16。
+    {
+        HeadTailCapture cap(10);
+        const std::string letters = "abcdefghijklmnopqrstuvwxyz";
+        for (char c : letters) {
+            cap.Append(&c, 1);  // 逐字节灌,尾巴缓冲反复裁
+        }
+        CHECK(cap.overflowed());
+        CHECK(cap.total_bytes() == 26);
+        std::uint64_t omitted = 0;
+        const std::string out = cap.Finish(&omitted);
+        CHECK(omitted == 16);
+        CHECK(out.starts_with("abcde"));
+        CHECK(out.ends_with("vwxyz"));
+        CHECK(out.find("[... 16 bytes omitted ...]") != std::string::npos);
+    }
+    // 大块一次灌:尾巴取的是最后 tail_cap 字节。
+    {
+        HeadTailCapture cap(8);
+        const std::string big(1000, 'x');
+        cap.Append(big.data(), big.size());
+        cap.Append("TAIL", 4);
+        std::uint64_t omitted = 0;
+        const std::string out = cap.Finish(&omitted);
+        CHECK(out.starts_with("xxxx\n"));
+        CHECK(out.ends_with("TAIL"));
+        CHECK(omitted == 1004 - 8);
+    }
+    // 中文刀口:首段不留半个字,尾段不以续字节起头,两头都是合法 UTF-8。
+    {
+        HeadTailCapture cap(10);  // 前 5 后 5:"汉"3 字节,两刀都劈在字腰上
+        std::string han;
+        for (int i = 0; i < 10; ++i) {
+            han += "汉";
+        }
+        cap.Append(han.data(), han.size());
+        std::uint64_t omitted = 0;
+        const std::string out = cap.Finish(&omitted);
+        CHECK(lubancode::platform::IsValidUtf8(out));
+        CHECK(out.starts_with("汉\n"));  // 首段 5 字节退到 3(一个整字)
+        CHECK(out.ends_with("\n汉"));    // 尾段 5 字节跳掉 2 个悬空续字节
+        CHECK(omitted == 30 - 3 - 3);
+    }
+}
+
+TEST_CASE("run_command 首词抬档: 各前缀剥净后看真首词,参数正文不扫") {
+    using lubancode::tools::run_command_detail::DefaultTimeoutMsForCommand;
+    constexpr int kShort = 120000;
+    constexpr int kLong = 900000;
+    // 新增的装依赖/编译/测试首词。
+    for (const char* cmd : {"pip install -r requirements.txt", "pip3 install numpy", "uv sync", "poetry install",
+                            "conda install -y numpy", "mamba create -n x", "npm install", "pnpm i", "yarn",
+                            "bun install", "apt install -y gcc", "apt-get update", "pytest -q", "tox -e py311",
+                            "go build ./...", "rustc main.rs", "gcc -O2 a.c", "g++ a.cpp", "clang a.c",
+                            "clang++ a.cpp", "./configure --prefix=/usr", "configure", "cmake --build build",
+                            "/usr/bin/make -j8"}) {
+        CAPTURE(cmd);
+        CHECK(DefaultTimeoutMsForCommand(cmd) == kLong);
+    }
+    // python -m pip / -m pytest 算;跑脚本、-m 别的模块不算。
+    CHECK(DefaultTimeoutMsForCommand("python -m pip install x") == kLong);
+    CHECK(DefaultTimeoutMsForCommand("python3 -m pytest tests/") == kLong);
+    CHECK(DefaultTimeoutMsForCommand("python3.11 -u -m pip install x") == kLong);
+    CHECK(DefaultTimeoutMsForCommand("python script.py pip") == kShort);
+    CHECK(DefaultTimeoutMsForCommand("python -m http.server") == kShort);
+    CHECK(DefaultTimeoutMsForCommand("python3 -c \"import pip\"") == kShort);
+    // 前缀:cd <dir> &&、sudo、env K=V、VAR=val 叠着用。
+    CHECK(DefaultTimeoutMsForCommand("cd /app && make") == kLong);
+    CHECK(DefaultTimeoutMsForCommand("cd \"/my dir\" && pip install .") == kLong);
+    CHECK(DefaultTimeoutMsForCommand("cd build ; ctest") == kLong);
+    CHECK(DefaultTimeoutMsForCommand("sudo apt-get install -y curl") == kLong);
+    CHECK(DefaultTimeoutMsForCommand("sudo -E -u root pip install x") == kLong);
+    CHECK(DefaultTimeoutMsForCommand("env CC=clang CFLAGS=-O2 make") == kLong);
+    CHECK(DefaultTimeoutMsForCommand("env -i PATH=/usr/bin cargo build") == kLong);
+    CHECK(DefaultTimeoutMsForCommand("DEBIAN_FRONTEND=noninteractive apt-get install -y x") == kLong);
+    CHECK(DefaultTimeoutMsForCommand("cd /app && sudo env A=1 B=2 npm ci") == kLong);
+    // 不误抬:参数里出现构建词、单纯 cd、普通命令。
+    CHECK(DefaultTimeoutMsForCommand("echo \"cmake\"") == kShort);
+    CHECK(DefaultTimeoutMsForCommand("echo pip install") == kShort);
+    CHECK(DefaultTimeoutMsForCommand("cat Makefile") == kShort);
+    CHECK(DefaultTimeoutMsForCommand("cd /app") == kShort);
+    CHECK(DefaultTimeoutMsForCommand("cd /app && ls") == kShort);
+    CHECK(DefaultTimeoutMsForCommand("FOO=bar echo make") == kShort);
+    CHECK(DefaultTimeoutMsForCommand("") == kShort);
+    CHECK(DefaultTimeoutMsForCommand("   ") == kShort);
+    CHECK(DefaultTimeoutMsForCommand("gopher") == kShort);
+    // Windows 路径与扩展名照旧认。
+    CHECK(DefaultTimeoutMsForCommand("\"C:\\Program Files\\CMake\\bin\\cmake.exe\" --build .") == kLong);
+    CHECK(DefaultTimeoutMsForCommand("C:\\tools\\ninja.exe") == kLong);
+}
+
+TEST_CASE("run_command 首词抬档: 显式 timeout_ms 永远优先") {
+    RunCommandTool tool;
+#ifdef _WIN32
+    const std::string pip_like = "cd . ; pip --version";  // 抬档判定只看文本,pip 装没装无所谓
+#else
+    const std::string pip_like = "cd . && pip --version";
+#endif
+    const auto explicit_timeout = tool.execute(nlohmann::json{{"command", pip_like}, {"timeout_ms", 30000}});
+    // pip 可能没装(非零退出),details 照样带 timeout_ms。
+    REQUIRE(explicit_timeout.details.contains("timeout_ms"));
+    CHECK(explicit_timeout.details["timeout_ms"] == 30000);
+    const auto defaulted = tool.execute(nlohmann::json{{"command", pip_like}});
+    REQUIRE(defaulted.details.contains("timeout_ms"));
+    CHECK(defaulted.details["timeout_ms"] == 900000);
+}
+
+TEST_CASE("ChoosePosixShell: 不填有 bash 用 bash,没 bash 回落 sh,sh 点名恒 sh") {
+    using lubancode::tools::run_command_detail::ChoosePosixShell;
+    const std::optional<std::string> bash = std::string("/usr/bin/bash");
+    const std::optional<std::string> none;
+
+    auto c = ChoosePosixShell("", bash);
+    CHECK(c.id == "bash");
+    CHECK(c.executable == "/usr/bin/bash");
+    c = ChoosePosixShell("", none);
+    CHECK(c.id == "sh");
+    CHECK(c.executable == "/bin/sh");
+    c = ChoosePosixShell("sh", bash);
+    CHECK(c.id == "sh");
+    CHECK(c.executable == "/bin/sh");
+    c = ChoosePosixShell("bash", bash);
+    CHECK(c.id == "bash");
+    CHECK(c.executable == "/usr/bin/bash");
+    c = ChoosePosixShell("bash", none);  // 调用方本该先拦;防呆回落
+    CHECK(c.id == "sh");
+    c = ChoosePosixShell("", std::string());  // 空路径当没有
+    CHECK(c.id == "sh");
+}
+
+TEST_CASE("FillMissingEnv: 只补父环境没设的,设过(含空串)的不动") {
+    using lubancode::tools::run_command_detail::FillMissingEnv;
+    using lubancode::tools::run_command_detail::NonInteractiveEnvDefaults;
+
+    const auto defaults = NonInteractiveEnvDefaults();
+    // 六枚默认值都在,值对。
+    const std::vector<std::pair<std::string, std::string>> expected = {
+        {"DEBIAN_FRONTEND", "noninteractive"}, {"PIP_NO_INPUT", "1"}, {"PYTHONUNBUFFERED", "1"},
+        {"GIT_TERMINAL_PROMPT", "0"},          {"PAGER", "cat"},      {"GIT_PAGER", "cat"},
+    };
+    CHECK(defaults == expected);
+
+    // 父环境啥也没设:全补。
+    CHECK(FillMissingEnv(defaults, [](const std::string&) { return false; }) == defaults);
+    // 父环境全设了:一条不补。
+    CHECK(FillMissingEnv(defaults, [](const std::string&) { return true; }).empty());
+    // 设了 PAGER(哪怕是空串,is_set 照样报 true)与 DEBIAN_FRONTEND:只补其余四条,顺序不乱。
+    const auto merged = FillMissingEnv(
+        defaults, [](const std::string& key) { return key == "PAGER" || key == "DEBIAN_FRONTEND"; });
+    const std::vector<std::pair<std::string, std::string>> rest = {
+        {"PIP_NO_INPUT", "1"}, {"PYTHONUNBUFFERED", "1"}, {"GIT_TERMINAL_PROMPT", "0"}, {"GIT_PAGER", "cat"}};
+    CHECK(merged == rest);
+    // 判定口为空:按"都没设"补。
+    CHECK(FillMissingEnv(defaults, {}) == defaults);
 }
 
 #ifndef _WIN32
@@ -808,17 +994,121 @@ TEST_CASE("run_command(POSIX): shell=bash 装了就真用 bash(Bash 语法跑通
     CHECK(result.content.find("[退出码 0]") != std::string::npos);
 }
 
-TEST_CASE("run_command(POSIX): 默认 shell 固定走 /bin/sh,不偷换 /bin/bash") {
+TEST_CASE("run_command(POSIX): 默认 shell 有 bash 就走 bash,shell=sh 点名仍走 /bin/sh") {
+    // Terminal-Bench 加固单:旧口径"默认固定 /bin/sh"在 Debian(dash)上
+    // 让 source、[[ ]] 全军覆没,改为有 bash 默认 bash。$0 是调用入口,
+    // 拿它判走的哪只 shell(macOS 的 /bin/sh 也是 Bash 实现,看 BASH_VERSION
+    // 会冤枉它)。
     RunCommandTool tool;
-    nlohmann::json input;
-    // macOS 的 /bin/sh 本就由 Bash 提供,BASH_VERSION 并不为空;拿实现
-    // 特征判断会冤枉它。$0 则是调用入口:若宿主把默认 shell 偷换成
-    // /bin/bash,这里会直接露出 /bin/bash。
-    input["command"] = "printf 'shell0=[%s]\\n' \"$0\"";
-    const Tool::Result result = tool.execute(input);
+    const bool has_bin_bash = access("/bin/bash", X_OK) == 0;
+    {
+        nlohmann::json input;
+        input["command"] = "printf 'shell0=[%s]\\n' \"$0\"";
+        const Tool::Result result = tool.execute(input);
+        CHECK_FALSE(result.is_error);
+        CHECK(result.content.find("[退出码 0]") != std::string::npos);
+        if (has_bin_bash) {
+            CHECK(result.content.find("shell0=[/bin/bash]") != std::string::npos);
+        }  // 没有 /bin/bash:可能是 PATH 里别处的 bash,也可能回落 /bin/sh,不钉
+    }
+    {
+        nlohmann::json input;
+        input["command"] = "printf 'shell0=[%s]\\n' \"$0\"";
+        input["shell"] = "sh";
+        const Tool::Result result = tool.execute(input);
+        CHECK_FALSE(result.is_error);
+        CHECK(result.content.find("shell0=[/bin/sh]") != std::string::npos);
+    }
+}
+
+TEST_CASE("run_command(POSIX): 默认 shell 下 [[ ]] 跑通(有 bash 时)") {
+    const auto probe = lubancode::platform::RunProcess({"bash", "-c", "echo ok"}, 5000);
+    if (probe.spawn_failed) {
+        return;  // 没装 bash:默认回落 sh,[[ ]] 本就不保证
+    }
+    RunCommandTool tool;
+    const Tool::Result result = tool.execute(nlohmann::json{{"command", "[[ 1 == 1 ]] && echo ok-double-bracket"}});
     CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("ok-double-bracket") != std::string::npos);
     CHECK(result.content.find("[退出码 0]") != std::string::npos);
-    CHECK(result.content.find("shell0=[/bin/sh]") != std::string::npos);
+}
+
+TEST_CASE("run_command(POSIX): yes | head -n 1 迅速返回,子进程 SIGPIPE 已复位") {
+    // lubancode 自己忽略 SIGPIPE;处置若遗传给子进程,yes 收不到信号只能
+    // 吃 EPIPE,GNU yes 会吐 "Broken pipe" 进合并输出,写错误不查的程序更会
+    // 空转吊住。复位后 yes 被 SIGPIPE 安静带走,管道退出码随 head 是 0。
+    RunCommandTool tool;
+    const auto started = std::chrono::steady_clock::now();
+    const Tool::Result result =
+        tool.execute(nlohmann::json{{"command", "yes | head -n 1"}, {"timeout_ms", 20000}});
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+    CHECK_FALSE(result.is_error);
+    CHECK(result.outcome == "succeeded");
+    CHECK(result.content.find("[退出码 0]\ny") != std::string::npos);
+    CHECK(result.content.find("Broken pipe") == std::string::npos);
+    CHECK(elapsed_ms < 10000);
+
+    // 直接验处置:子进程里 SIGPIPE 的处置不是 ignore。kill -s PIPE $$ 自杀,
+    // 复位了就死于信号(退出码 128+13=141),没复位就活着打印 alive。
+    const auto self_pipe =
+        lubancode::platform::RunProcess({"/bin/sh", "-c", "kill -s PIPE $$; echo alive"}, 10000, nullptr);
+    REQUIRE_FALSE(self_pipe.spawn_failed);
+    CHECK(self_pipe.output.find("alive") == std::string::npos);
+    CHECK(self_pipe.exit_code == 141);
+}
+
+TEST_CASE("run_command(POSIX): 非交互环境变量父环境没设就补上,前台后台一致") {
+    // 父环境设了的(CI 可能自带 DEBIAN_FRONTEND)照父环境走,没设的补默认值。
+    const auto expect = [](const char* key, const char* fallback) {
+        const auto parent = lubancode::platform::GetEnvVarPresent(key);
+        return parent.has_value() ? *parent : std::string(fallback);
+    };
+    const std::string want = "DF=[" + expect("DEBIAN_FRONTEND", "noninteractive") + "] PNI=[" +
+                             expect("PIP_NO_INPUT", "1") + "] PU=[" + expect("PYTHONUNBUFFERED", "1") +
+                             "] GTP=[" + expect("GIT_TERMINAL_PROMPT", "0") + "] PG=[" + expect("PAGER", "cat") +
+                             "] GP=[" + expect("GIT_PAGER", "cat") + "]";
+    const std::string probe =
+        "printf 'DF=[%s] PNI=[%s] PU=[%s] GTP=[%s] PG=[%s] GP=[%s]\\n' \"$DEBIAN_FRONTEND\" \"$PIP_NO_INPUT\" "
+        "\"$PYTHONUNBUFFERED\" \"$GIT_TERMINAL_PROMPT\" \"$PAGER\" \"$GIT_PAGER\"";
+
+    RunCommandTool tool;
+    const Tool::Result fg = tool.execute(nlohmann::json{{"command", probe}});
+    CHECK_FALSE(fg.is_error);
+    CHECK(fg.content.find(want) != std::string::npos);
+
+    const Tool::Result bg = tool.execute(nlohmann::json{{"command", probe}, {"run_in_background", true}});
+    REQUIRE_FALSE(bg.is_error);
+    const auto pos = bg.content.find("task #");
+    REQUIRE(pos != std::string::npos);
+    const auto end = bg.content.find(',', pos);
+    const std::string task_id = bg.content.substr(pos + 6, end - pos - 6);
+    auto& registry = BackgroundTaskRegistry::Instance();
+    REQUIRE(WaitUntil(
+        [&] {
+            const auto info = registry.Get(task_id);
+            return info.has_value() && info->status != BackgroundTaskStatus::Running;
+        },
+        10000));
+    const auto info = registry.Get(task_id);
+    REQUIRE(info.has_value());
+    CHECK(ReadAllBytes(info->log_path).find(want) != std::string::npos);
+}
+
+TEST_CASE("run_command(POSIX): 输出 3MB 不被杀,尾部标记可见") {
+    RunCommandTool tool;
+    // head -c 生成 3MB,再打一行尾标:旧口径 2MB 处杀树,尾标永远见不着。
+    const Tool::Result result = tool.execute(
+        nlohmann::json{{"command", "head -c 3145728 /dev/zero | tr '\\0' 'x'; echo; echo TAIL-3MB-END"},
+                       {"timeout_ms", 60000}});
+    CHECK_FALSE(result.is_error);
+    CHECK(result.outcome == "succeeded");
+    CHECK(result.content.find("TAIL-3MB-END") != std::string::npos);
+    CHECK(result.content.find("bytes omitted") != std::string::npos);
+    CHECK(result.content.find("[输出超过上限") != std::string::npos);
+    REQUIRE(result.details.contains("omitted_bytes"));
+    // 3MB + 两行尾巴,留 2MB:省掉的约 1MB(两头整字对齐的零头 ASCII 下为 0)。
+    CHECK(result.details["omitted_bytes"].get<std::uint64_t>() == 3145728 + 1 + 13 - 2 * 1024 * 1024);
 }
 
 #endif  // !_WIN32
@@ -965,5 +1255,42 @@ TEST_CASE("run_command: context 的取消旗置位时压过实例那根(context 
     CHECK(result.is_error);
     CHECK(result.outcome == "cancelled_during_run");
     CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 15000);
+}
+
+TEST_CASE("run_command: 墙钟死线封顶单次超时,显式 timeout_ms 也受封,超时文案点明预算") {
+    // one-shot 墙钟预算单:死线只剩 32 秒,扣 30 秒保留余量落 5 秒下限——
+    // 显式 60 秒的命令按 5 秒超时收,文案说明是预算压的、加大无效。
+    RunCommandTool tool;
+    nlohmann::json input;
+#ifdef _WIN32
+    input["command"] = "ping -n 30 127.0.0.1 > NUL";
+    input["shell"] = "cmd";
+#else
+    input["command"] = "sleep 30";
+#endif
+    input["timeout_ms"] = 60000;
+    lubancode::tools::ToolExecutionContext context;
+    context.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(32);
+    const auto started = std::chrono::steady_clock::now();
+    const Tool::Result result = tool.execute(input, context);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    REQUIRE(result.is_error);
+    CHECK(result.outcome == "timed_out");
+    CHECK(result.content.find("墙钟预算所限") != std::string::npos);
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 20000);
+}
+
+TEST_CASE("run_command: 死线宽裕时不改超时,details 不带封顶标记") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = "echo ok";
+    input["timeout_ms"] = 30000;
+    lubancode::tools::ToolExecutionContext context;
+    context.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3600);
+    const Tool::Result result = tool.execute(input, context);
+    REQUIRE_FALSE(result.is_error);
+    CHECK(result.details.at("timeout_ms") == 30000);
+    CHECK_FALSE(result.details.contains("timeout_capped_by_budget"));
 }
 

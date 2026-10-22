@@ -5,7 +5,9 @@
 //     正常退出后同样补一记 killpg,对齐 KILL_ON_JOB_CLOSE"后代不许赖着
 //     握管道写端"的行为。
 //   - 一次性捕获:合并 stdout/stderr 进同一条管道,输出超上限截断保留前段、
-//     杀树、继续读空到 EOF(不读的话子进程卡在写上死不掉)。
+//     杀树、继续读空到 EOF(不读的话子进程卡在写上死不掉);KeepHeadTail
+//     模式不杀,首尾各留一半(HeadTailCapture),命令照常跑完。
+//   - 子进程 exec 前把 SIGPIPE 复位成 SIG_DFL(本进程忽略它,处置会遗传)。
 //   - env 注入:fork 后在子进程里把预先拼好的 envp 赋给 environ 再 exec,
 //     不碰父进程环境(Windows 侧进程生命线单 P0 之后同样不改父环境,两
 //     平台一张合同:并发调用不串值)。
@@ -33,6 +35,7 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>  // sigaction:子进程复位 SIGPIPE
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -81,6 +84,19 @@ void IgnoreSigpipeOnce() {
         return true;
     }();
     (void)done;
+}
+
+// 上面那道忽略是给 lubancode 自己的,信号处置 SIG_IGN 却会穿过 fork 与
+// exec 原样遗传:子进程里 `yes | head -n 1` 的 yes 收不到 SIGPIPE,只能
+// 吃 EPIPE 报 "Broken pipe",写错误不查的程序更会空转吊住。fork 之后、
+// exec 之前复位成 SIG_DFL——sigaction/sigemptyset 都在 async-signal-safe
+// 名单里,fork 后的子进程上下文能用。
+void RestoreDefaultSigpipeInChild() {
+    struct sigaction sa{};
+    sa.sa_handler = SIG_DFL;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGPIPE, &sa, nullptr);
 }
 
 // 预先拼好子进程环境块:Inherit 模式把当前 environ 里被 extra_env 覆盖的
@@ -513,6 +529,7 @@ bool SpawnMergedOutput(std::vector<std::string> argv, const EnvPairs& extra_env,
         if (!cwd_utf8.empty() && chdir(cwd_utf8.c_str()) != 0) {
             die(errno);
         }
+        RestoreDefaultSigpipeInChild();  // 父进程忽略的 SIGPIPE 不许漏给子进程(prog | head 才能体面收场)
         environ = env_block.ptrs.data();
         execvp(argv_ptrs[0], argv_ptrs.data());
         die(errno);
@@ -557,7 +574,8 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
 }
 
 ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, const std::atomic<bool>* cancel,
-                          const EnvPairs& extra_env, std::size_t max_output_bytes, const std::string& cwd_utf8) {
+                          const EnvPairs& extra_env, std::size_t max_output_bytes, const std::string& cwd_utf8,
+                          OutputOverflow overflow) {
     ProcessResult result;
     if (argv.empty()) {
         result.spawn_failed = true;
@@ -577,6 +595,10 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
 
     // 读线程:poll + read,攒到上限就置 overflow(主循环看到立刻杀树),但
     // 继续读空丢弃到 EOF——跟 Windows 版一个道理,别让子进程卡在写上。
+    // KeepHeadTail 模式:读线程只往首尾捕获器里灌,不置 overflow,主循环
+    // 也就不会因超量杀树——命令照常跑完,收尾时拼"首段 + 标记 + 尾段"。
+    const bool keep_head_tail = overflow == OutputOverflow::KeepHeadTail;
+    HeadTailCapture head_tail(max_output_bytes);
     std::string output;
     std::atomic<bool> output_over_limit{false};
     std::atomic<bool> reader_stop{false};
@@ -602,7 +624,9 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
             if (n <= 0) {
                 break;  // EOF / 出错,写端全关了
             }
-            if (output.size() < max_output_bytes) {
+            if (keep_head_tail) {
+                head_tail.Append(buf, static_cast<std::size_t>(n));
+            } else if (output.size() < max_output_bytes) {
                 const std::size_t room = max_output_bytes - output.size();
                 const std::size_t take = std::min(static_cast<std::size_t>(n), room);
                 output.append(buf, take);
@@ -679,6 +703,12 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
     close(spawned.output_fd);
 
     result.exit_code = ExitCodeFromStatus(exit_status);
+    if (keep_head_tail) {
+        // 读线程已 join,捕获器归本线程独占。整字对齐在 Finish 里做。
+        result.output = head_tail.Finish(&result.omitted_bytes);
+        result.output_truncated = head_tail.overflowed();
+        return result;
+    }
     // 截断的刀口对齐 UTF-8 码点边界(见文件头 AlignOutputToUtf8Boundary)。
     AlignOutputToUtf8Boundary(output, max_output_bytes);
     result.output = std::move(output);
@@ -695,8 +725,9 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, c
 
 ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const std::atomic<bool>* cancel,
                               const EnvPairs& extra_env, std::size_t max_output_bytes,
-                              const std::string& cwd_utf8) {
-    return RunProcess({"/bin/sh", "-c", command_utf8}, timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8);
+                              const std::string& cwd_utf8, OutputOverflow overflow) {
+    return RunProcess({"/bin/sh", "-c", command_utf8}, timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8,
+                      overflow);
 }
 
 ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const std::string& stdin_data,
@@ -776,6 +807,7 @@ ProcessResult RunProcessWithStdin(const std::vector<std::string>& argv, const st
                 close(fd);
             }
         }
+        RestoreDefaultSigpipeInChild();  // 父进程忽略的 SIGPIPE 不许漏给子进程(prog | head 才能体面收场)
         environ = env_block.ptrs.data();
         execvp(argv_ptrs[0], argv_ptrs.data());
         die(errno);
@@ -1056,6 +1088,7 @@ BackgroundSpawnResult RunProcessBackground(const std::vector<std::string>& argv,
         if (!cwd_utf8.empty() && chdir(cwd_utf8.c_str()) != 0) {
             report_and_die(errno);
         }
+        RestoreDefaultSigpipeInChild();  // 父进程忽略的 SIGPIPE 不许漏给子进程(prog | head 才能体面收场)
         environ = env_block.ptrs.data();
         execvp(argv_ptrs[0], argv_ptrs.data());
         const int err = errno;
@@ -1220,6 +1253,7 @@ SpawnResult ChildProcess::Start(const std::string& command, const std::vector<st
             as_limit.rlim_max = static_cast<rlim_t>(constraints.memory_bytes);
             setrlimit(RLIMIT_AS, &as_limit);
         }
+        RestoreDefaultSigpipeInChild();  // 父进程忽略的 SIGPIPE 不许漏给子进程(prog | head 才能体面收场)
         environ = env_block.ptrs.data();
         execvp(argv_ptrs[0], argv_ptrs.data());
         die(errno);
@@ -1530,6 +1564,7 @@ int RunAttachedProcess(const std::vector<std::string>& argv, std::string* error)
         return -1;
     }
     if (pid == 0) {
+        RestoreDefaultSigpipeInChild();
         ::execvp(c_argv[0], c_argv.data());
         // exec 失败:_exit 别冲掉父进程的缓冲
         ::_exit(127);

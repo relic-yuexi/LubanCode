@@ -12,8 +12,9 @@
 //      启动扫一遍;文件名撞内置语言码(zh-CN.json / en.json)就按键覆盖
 //      内置同键——用户改措辞的口子。坏 JSON 警告跳过,不拦人。
 //   3. 选择:config 字段 language(四级合并,LUBANCODE_LANG env),空 =
-//      跟系统(GetUserDefaultUILanguage,zh 前缀→zh-CN,en 前缀→en,
-//      认不出→zh-CN)。/language 会话级即时切换。
+//      跟系统(Windows 看 GetUserDefaultUILanguage,认不出→zh-CN;其余
+//      平台看 $LANG,只有 zh 前缀→zh-CN,未设/C/POSIX/其余→en)。
+//      /language 会话级即时切换。
 //
 // 键名规矩:分层小写点号,如 help.slash.sessions、status.mode.confirm、
 // confirm.prompt、error.api_key_missing。占位符 {0} {1} ... 由 trf 按序填。
@@ -76,12 +77,17 @@ std::string LanguageDisplayName(const std::string& code);
 // 值不是字符串——整文件跳过),每条一行,调用方决定打不打。
 std::vector<std::string> LoadLanguagePacksFromDir(const std::string& dir);
 
-// 纯函数:系统 locale 字符串(如 "zh-CN"/"en-US"/"ja-JP")映射到内置语言。
-// zh 前缀 → zh-CN,en 前缀 → en,认不出 → zh-CN。
+// 纯函数:系统 locale 字符串(如 "zh_CN.UTF-8"/"en-US"/"C.UTF-8")映射到内置
+// 语言。只有明确的 zh 前缀 → zh-CN;空(LANG 未设)、C、C.UTF-8、POSIX、
+// en 前缀与认不出的一律 → en。
 std::string MapLocaleToLanguage(std::string_view locale);
 
-// Windows 下按 GetUserDefaultUILanguage 探测,其余平台看 $LANG;都过
-// MapLocaleToLanguage 收口。
+// Windows 下按 GetUserDefaultUILanguage 探测,其余平台看 $LANG(过
+// MapLocaleToLanguage 收口)。
 std::string DetectSystemLanguage();
+
+// 语言定稿:显式设置(LUBANCODE_LANG / 配置 language)非空即用,空才跟
+// 系统探测(DetectSystemLanguage)。
+std::string ResolveLanguage(std::string_view explicit_setting);
 
 }  // namespace lubancode::cli

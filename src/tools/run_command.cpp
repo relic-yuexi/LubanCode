@@ -1,6 +1,7 @@
 #include "tools/run_command.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -38,29 +39,50 @@ namespace lubancode::tools {
 namespace {
 
 constexpr int kDefaultTimeoutMs = 120000;
-constexpr int kBuildTimeoutMs = 900000;  // 构建/configure/测试类默认 15 分钟
-// 只看命令起始的可执行名前缀(允许常见路径与引号),不扫描参数正文——避免
-// echo "cmake ..." 之类普通命令被误抬档。显式 timeout_ms 始终优先。
-int DefaultTimeoutMsForCommand(const std::string& command) {
-    const auto first = command.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) {
-        return kDefaultTimeoutMs;
-    }
-    std::size_t end = first;
-    const char quote = command[first] == '\'' || command[first] == '"' ? command[first] : '\0';
-    if (quote != '\0') {
-        end = command.find(quote, first + 1);
-        if (end == std::string::npos) {
-            end = command.size();
+constexpr int kBuildTimeoutMs = 900000;  // 构建/configure/装依赖/测试类默认 15 分钟
+
+// 命令开头切词(只切到够判首词为止):空白分词,单双引号内的空白不断词、
+// 引号本身剥掉。反斜杠不当转义——Windows 不带引号的 C:\tools\cmake.exe
+// 得原样留着给下面剥路径。不做变量展开,不认重定向,够判首词即可。
+std::vector<std::string> LeadingWords(const std::string& command, std::size_t max_words) {
+    std::vector<std::string> words;
+    std::size_t i = 0;
+    const std::size_t n = command.size();
+    while (i < n && words.size() < max_words) {
+        while (i < n && std::isspace(static_cast<unsigned char>(command[i])) != 0) {
+            ++i;
         }
-    } else {
-        end = command.find_first_of(" \t\r\n", first);
-        if (end == std::string::npos) {
-            end = command.size();
+        if (i >= n) {
+            break;
         }
+        std::string word;
+        char quote = '\0';
+        for (; i < n; ++i) {
+            const char c = command[i];
+            if (quote != '\0') {
+                if (c == quote) {
+                    quote = '\0';
+                } else {
+                    word.push_back(c);
+                }
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                quote = c;
+                continue;
+            }
+            if (std::isspace(static_cast<unsigned char>(c)) != 0) {
+                break;
+            }
+            word.push_back(c);
+        }
+        words.push_back(std::move(word));
     }
-    std::string executable = command.substr(first + (quote != '\0' ? 1 : 0),
-                                            end - first - (quote != '\0' ? 1 : 0));
+    return words;
+}
+
+// 可执行名归一:剥目录、转小写、去 .exe/.cmd/.bat。
+std::string NormalizeExecutable(std::string executable) {
     const auto slash = executable.find_last_of("/\\");
     if (slash != std::string::npos) {
         executable.erase(0, slash + 1);
@@ -70,15 +92,163 @@ int DefaultTimeoutMsForCommand(const std::string& command) {
     if (executable.ends_with(".exe") || executable.ends_with(".cmd") || executable.ends_with(".bat")) {
         executable.erase(executable.find_last_of('.'));
     }
-    static constexpr const char* kBuildCommands[] = {
-        "cmake", "msbuild", "ninja", "ctest", "gradle", "gradlew", "cargo", "npx",
-        "make", "gmake", "xcodebuild", "mvn", "mvnw", "dotnet", "bazel", "buck2",
-    };
-    return std::find(std::begin(kBuildCommands), std::end(kBuildCommands), executable) !=
-                   std::end(kBuildCommands)
-               ? kBuildTimeoutMs
-               : kDefaultTimeoutMs;
+    return executable;
 }
+
+// VAR=val 形式的环境赋值前缀(变量名:字母/下划线起头,后跟字母数字下划线)。
+bool IsEnvAssignment(const std::string& word) {
+    const auto eq = word.find('=');
+    if (eq == std::string::npos || eq == 0) {
+        return false;
+    }
+    const auto head = static_cast<unsigned char>(word[0]);
+    if (std::isalpha(head) == 0 && head != '_') {
+        return false;
+    }
+    for (std::size_t k = 1; k < eq; ++k) {
+        const auto c = static_cast<unsigned char>(word[k]);
+        if (std::isalnum(c) == 0 && c != '_') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// sudo 带参数的选项(选项后跟一个词);其余 -x 一律当无参开关跳。
+bool SudoOptionTakesValue(const std::string& word) {
+    return word == "-u" || word == "-g" || word == "-h" || word == "-p" || word == "-C" || word == "-D" ||
+           word == "-r" || word == "-t" || word == "-U";
+}
+
+}  // namespace
+
+namespace run_command_detail {
+
+int DefaultTimeoutMsForCommand(const std::string& command) {
+    // 前缀最多剥这么多词;正常命令十来个词以内就见到真首词。
+    const std::vector<std::string> words = LeadingWords(command, 32);
+    std::size_t i = 0;
+    while (i < words.size()) {
+        const std::string& w = words[i];
+        if (w == "cd") {
+            // cd <dir> && / cd <dir> ; ——跳过,看后半句。没接连接符就是单纯 cd。
+            if (i + 2 < words.size() && (words[i + 2] == "&&" || words[i + 2] == ";")) {
+                i += 3;
+                continue;
+            }
+            return kDefaultTimeoutMs;
+        }
+        if (w == "sudo") {
+            ++i;
+            while (i < words.size() && words[i].size() > 1 && words[i][0] == '-') {
+                if (words[i] == "--") {
+                    ++i;
+                    break;
+                }
+                i += SudoOptionTakesValue(words[i]) ? 2 : 1;
+            }
+            continue;
+        }
+        if (w == "env") {
+            ++i;
+            while (i < words.size() && ((words[i].size() > 1 && words[i][0] == '-') || IsEnvAssignment(words[i]))) {
+                ++i;
+            }
+            continue;
+        }
+        if (w == "time" || w == "nohup" || IsEnvAssignment(w)) {
+            ++i;
+            continue;
+        }
+        break;
+    }
+    if (i >= words.size()) {
+        return kDefaultTimeoutMs;
+    }
+    const std::string executable = NormalizeExecutable(words[i]);
+    static constexpr const char* kLongCommands[] = {
+        // 构建
+        "cmake", "msbuild", "ninja", "ctest", "gradle", "gradlew", "cargo", "npx", "make", "gmake",
+        "xcodebuild", "mvn", "mvnw", "dotnet", "bazel", "buck2", "configure", "go", "rustc", "gcc", "g++",
+        "clang", "clang++",
+        // 装依赖
+        "pip", "pip3", "uv", "poetry", "conda", "mamba", "npm", "pnpm", "yarn", "bun", "apt", "apt-get",
+        // 测试
+        "pytest", "tox",
+    };
+    if (std::find(std::begin(kLongCommands), std::end(kLongCommands), executable) != std::end(kLongCommands)) {
+        return kBuildTimeoutMs;
+    }
+    // python -m pip / python3 -m pytest(含 python3.11 这类带版本号的名字):
+    // 只认紧跟的 -m 模块,不扫后面的参数。
+    if (executable == "python" || executable == "py" || executable.starts_with("python3")) {
+        for (std::size_t k = i + 1; k + 1 < words.size(); ++k) {
+            if (words[k] == "-m") {
+                const std::string& module = words[k + 1];
+                return (module == "pip" || module == "pytest") ? kBuildTimeoutMs : kDefaultTimeoutMs;
+            }
+            if (words[k].empty() || words[k][0] != '-') {
+                break;  // 跑脚本文件,不是 -m
+            }
+        }
+    }
+    return kDefaultTimeoutMs;
+}
+
+ShellChoice ChoosePosixShell(const std::string& requested, const std::optional<std::string>& bash_path) {
+    if (requested == "sh") {
+        return {"sh", "/bin/sh"};
+    }
+    // 没指定或点名 bash:有 bash 就用(非 login、不读 rc,只是 -c);没有
+    // 回落 /bin/sh——Debian 的 /bin/sh 是 dash,source/[[ ]] 跑不通,
+    // 能用 bash 就别让模型撞这堵墙。
+    if (bash_path.has_value() && !bash_path->empty()) {
+        return {"bash", *bash_path};
+    }
+    return {"sh", "/bin/sh"};
+}
+
+std::vector<std::pair<std::string, std::string>> NonInteractiveEnvDefaults() {
+    return {
+        {"DEBIAN_FRONTEND", "noninteractive"},
+        {"PIP_NO_INPUT", "1"},
+        {"PYTHONUNBUFFERED", "1"},
+        {"GIT_TERMINAL_PROMPT", "0"},
+        {"PAGER", "cat"},
+        {"GIT_PAGER", "cat"},
+    };
+}
+
+std::vector<std::pair<std::string, std::string>> FillMissingEnv(
+    const std::vector<std::pair<std::string, std::string>>& defaults,
+    const std::function<bool(const std::string&)>& is_set) {
+    std::vector<std::pair<std::string, std::string>> missing;
+    for (const auto& [key, value] : defaults) {
+        if (!is_set || !is_set(key)) {
+            missing.emplace_back(key, value);
+        }
+    }
+    return missing;
+}
+
+int CapTimeoutToDeadlineMs(int requested_ms, std::optional<std::int64_t> remaining_ms) {
+    if (!remaining_ms.has_value()) {
+        return requested_ms;
+    }
+    // 封顶值先在 64 位里算,再夹回 int:剩余再多也不会越过 requested。
+    // 不用 std::max:Windows 头的 max 宏会把它咬坏。
+    const std::int64_t usable = *remaining_ms - kDeadlineCommandReserveMs;
+    const std::int64_t ceiling = usable > kDeadlineCommandFloorMs ? usable : kDeadlineCommandFloorMs;
+    if (static_cast<std::int64_t>(requested_ms) <= ceiling) {
+        return requested_ms;
+    }
+    return static_cast<int>(ceiling);
+}
+
+}  // namespace run_command_detail
+
+namespace {
+
 // timeout_ms 的合法上限(int 全域放进来没意义:Windows 的 DWORD 等得起,
 // 会话也早没了)。超大值体面报错,不窄化走样。
 constexpr int kMaxTimeoutMs = 86400000;  // 24 小时
@@ -142,22 +312,35 @@ std::optional<std::string> FindOnPath(const std::string& name_utf8, const char* 
     return std::nullopt;
 }
 
-// 本机装没装 bash(POSIX)/pwsh(Windows)。结果缓存。
-bool OptionalShellAvailable(const std::string& shell_id) {
+// 本机 bash 的落点(POSIX)。常见落点先直查(/bin/bash、/usr/bin/bash),
+// 再走 PATH(NixOS 之类没有 /bin/bash)。Windows 恒 nullopt。结果缓存。
+std::optional<std::string> ResolveBashPath() {
     // PATH 读取并入 platform::GetEnvVar(src 收口审计 P3 候选:私有读取把
     // "空 PATH"当 optional("")、平台口当 nullopt——三格语义测试钉住平台
     // 合同后并口。对本处行为无差:FindOnPath 对空串与缺席同样找不到,
     // bash/pwsh 都按"PATH 里没有"收场。
-    static const bool bash_ok = [] {
+    static const std::optional<std::string> cached = []() -> std::optional<std::string> {
 #ifdef _WIN32
-        return false;  // bash 是 POSIX 侧的可选 shell;Windows 不认(WSL 那只 bash 不是宿主 shell)
+        return std::nullopt;  // bash 是 POSIX 侧的可选 shell;Windows 不认(WSL 那只 bash 不是宿主 shell)
 #else
-        // 常见落点先直查(/bin/bash、/usr/bin/bash),再走 PATH。
+        for (const char* candidate : {"/bin/bash", "/usr/bin/bash"}) {
+            if (ShellExecutableExists(candidate)) {
+                return std::string(candidate);
+            }
+        }
         const auto path = platform::GetEnvVar("PATH");
-        return ShellExecutableExists("/bin/bash") || ShellExecutableExists("/usr/bin/bash") ||
-               (path.has_value() && FindOnPath("bash", path->c_str()).has_value());
+        if (!path.has_value()) {
+            return std::nullopt;
+        }
+        return FindOnPath("bash", path->c_str());
 #endif
     }();
+    return cached;
+}
+
+// 本机装没装 bash(POSIX)/pwsh(Windows)。结果缓存。
+bool OptionalShellAvailable(const std::string& shell_id) {
+    static const bool bash_ok = ResolveBashPath().has_value();
     static const bool pwsh_ok = [] {
 #ifdef _WIN32
         // pwsh 按名字过 PATH 找(PowerShell 7 默认装进 Program Files 并入 PATH;
@@ -202,11 +385,15 @@ std::string RunCommandTool::description() const {
                     "查状态/读输出,stop_background 工具收尾。");
 #else
     return ToolText("run_command", "description (POSIX)",
-                    "在 shell(/bin/sh)里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。"
-                    "按 POSIX sh 语法写命令。执行前要经用户确认。超时会被强制杀掉。"
-                    "构建/configure/测试类命令默认 900000 毫秒(15 分钟),其余默认 120000 毫秒(2 分钟);"
+                    "在 shell 里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。"
+                    "默认用 bash(/bin/bash -c,不读 rc 文件),本机没有 bash 才回落 /bin/sh;"
+                    "shell=sh 可强制走 POSIX sh。命令在非交互环境里跑:stdin 接 /dev/null,"
+                    "已设 DEBIAN_FRONTEND=noninteractive、PIP_NO_INPUT=1、GIT_TERMINAL_PROMPT=0、PAGER=cat 等,"
+                    "要交互输入的命令请改用 -y 之类的非交互参数。执行前要经用户确认。超时会被强制杀掉。"
+                    "构建/configure/装依赖/测试类命令默认 900000 毫秒(15 分钟),其余默认 120000 毫秒(2 分钟);"
                     "预计更久的长命令请显式传 timeout_ms,或传 run_in_background=true 后台运行并用 "
-                    "background_output 轮询。"
+                    "background_output 轮询。输出超过 2MB 时只保留前 1MB 与后 1MB,中间注明省略字节数,"
+                    "命令照常跑完。"
                     "起 dev server、watch 进程这类要跨命令、跨调用存活的长命进程,或者想后台跑完不阻塞对话的短任务,"
                     "传 run_in_background=true:不等它跑完,spawn 成功立刻返回 task_id、PID 和日志文件路径;"
                     "命令跑完时下一次给提示符会打一行完成通知。之后用 background_output 工具(传 task_id)"
@@ -227,7 +414,8 @@ nlohmann::json RunCommandTool::input_schema() const {
         ToolText("run_command", "param.command", "要执行的命令,按所选 shell 的语法写(默认 PowerShell 语法)");
 #else
     command_prop["description"] =
-        ToolText("run_command", "param.command (POSIX)", "要执行的命令,按 POSIX sh 语法写");
+        ToolText("run_command", "param.command (POSIX)",
+                 "要执行的命令,按所选 shell 的语法写(默认 Bash 语法;本机没有 bash 时为 POSIX sh)");
 #endif
     properties["command"] = command_prop;
 
@@ -258,15 +446,17 @@ nlohmann::json RunCommandTool::input_schema() const {
 #else
     {
         nlohmann::json shell_enum = nlohmann::json::array({"sh"});
-        // bash:装了才进 schema;/bin/sh 不偷换成 bash(单子"不做"节)。
+        // bash:装了才进 schema。不填 shell 时有 bash 默认就走 bash(Terminal-Bench
+        // 加固单:Debian 的 /bin/sh 是 dash,source/[[ ]] 跑不通);sh 显式点名仍走 /bin/sh。
         if (OptionalShellAvailable("bash")) {
             shell_enum.push_back("bash");
         }
         shell_prop["enum"] = std::move(shell_enum);
         shell_prop["description"] =
             ToolText("run_command", "param.shell (POSIX)",
-                     "用哪个 shell 执行,默认 sh(/bin/sh,不保证是 Bash,Ubuntu 常见 dash);"
-                     "本机装了 bash 时可选 bash。powershell/cmd 是 Windows 专属");
+                     "用哪个 shell 执行。不填时本机有 bash 就用 bash(/bin/bash),没有再用 sh(/bin/sh);"
+                     "sh 强制走 POSIX sh(Debian/Ubuntu 上是 dash,不认 source、[[ ]])。"
+                     "powershell/cmd 是 Windows 专属");
     }
 #endif
     properties["shell"] = shell_prop;
@@ -408,10 +598,11 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
 Tool::Result RunCommandTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
     // context 的取消旗优先(本次调用真用的那根:主回合 ESC / 子代理的
     // CancelChain 合并旗);没递进来(旧调用方)退回 SetCancel 灌的那根。
-    return Run(input, context.cancel != nullptr ? context.cancel : cancel_);
+    return Run(input, context.cancel != nullptr ? context.cancel : cancel_, context.deadline);
 }
 
-Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel) {
+Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel,
+                                 std::optional<std::chrono::steady_clock::time_point> deadline) {
     if (!input.contains("command") || !input.at("command").is_string()) {
         return {"缺少必填参数 command(字符串)", true};
     }
@@ -459,7 +650,7 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
     // timeout_ms 对后台模式没有意义(spawn 完就返回,根本不等),背景模式下
     // 干脆不解析——模型哪怕手滑传了个非法值也不该在这条不使用它的路径上
     // 报错,忽略得彻底一点。
-    int timeout_ms = DefaultTimeoutMsForCommand(command);
+    int timeout_ms = run_command_detail::DefaultTimeoutMsForCommand(command);
     if (!run_in_background) {
         if (auto it = input.find("timeout_ms"); it != input.end() && !it->is_null()) {
             // 模型偶尔会把数字发成字符串/数组;直接 get<int>() 遇到超范围的
@@ -475,6 +666,19 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
                         true};
             }
             timeout_ms = static_cast<int>(raw);
+        }
+    }
+    // 墙钟预算封顶(one-shot 墙钟预算单):默认值与显式值一并受封——到点
+    // 宿主进程会被评测侧直接杀掉,单条命令不许把整场的收尾时间吃光。
+    int budget_capped_from_ms = 0;  // 非 0 = 本次被预算压过,原值记下给超时文案
+    if (!run_in_background && deadline.has_value()) {
+        const std::int64_t remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              *deadline - std::chrono::steady_clock::now())
+                                              .count();
+        const int capped = run_command_detail::CapTimeoutToDeadlineMs(timeout_ms, remaining_ms);
+        if (capped < timeout_ms) {
+            budget_capped_from_ms = timeout_ms;
+            timeout_ms = capped;
         }
     }
 
@@ -602,7 +806,7 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
         // [Console]::OutputEncoding=UTF8),这里拿到手就是合法 UTF-8。
         // cwd 走 lpCurrentDirectory(P1 根治:cmd 的 %VAR% 展开坑一并绕开)。
         proc = platform::RunShellCommand(command, timeout_ms, effective_cancel, {}, platform::kDefaultMaxOutputBytes,
-                                         effective_cwd);
+                                         effective_cwd, platform::OutputOverflow::KeepHeadTail);
     } else {
         // 前台 PowerShell 同上:cwd 走 lpCurrentDirectory,命令本体只保留
         // wrapper 的编码设置,不再前置 Set-Location。cancel 从前写死
@@ -613,33 +817,44 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
                                       platform::Utf8ToWide(BuildEncodedCommand(command));
         proc = platform::RunProcess(cmdline, timeout_ms, effective_cancel, {},
                                     platform::kDefaultMaxOutputBytes,
-                                    effective_cwd);
+                                    effective_cwd, platform::OutputOverflow::KeepHeadTail);
     }
 #else
-    // POSIX:默认 /bin/sh -c;本机装了 bash 时显式 shell=bash 可选(装了才
-    // 认,不装不猜)。powershell/cmd 是 Windows 专属选项,模型带着旧习惯
+    // POSIX(Terminal-Bench 加固单):不填 shell 时本机有 bash 就走
+    // `bash -c`(非 login、不读 rc,免副作用),没有再回落 /bin/sh——Debian
+    // 的 /bin/sh 是 dash,source venv/bin/activate、[[ ]] 都跑不通。sh 显式
+    // 点名仍走 /bin/sh。powershell/cmd 是 Windows 专属选项,模型带着旧习惯
     // 传过来就明说不支持,别悄悄换 shell 让语义走样。
-    std::string shell = "sh";
+    std::string requested_shell;
     if (auto it = input.find("shell"); it != input.end() && !it->is_null()) {
         if (!it->is_string()) {
             return {"shell 参数必须是字符串", true};
         }
-        shell = it->get<std::string>();
-        if (shell == "powershell" || shell == "cmd") {
-            return {"shell=" + shell + " 是 Windows 专属,本平台请用 sh(/bin/sh)", true};
+        requested_shell = it->get<std::string>();
+        if (requested_shell == "powershell" || requested_shell == "cmd") {
+            return {"shell=" + requested_shell + " 是 Windows 专属,本平台请用 bash 或 sh", true};
         }
-        if (shell != "sh" && shell != "bash") {
-            return {"shell 参数只认得 sh 或 bash,写的是: " + shell, true};
+        if (requested_shell != "sh" && requested_shell != "bash") {
+            return {"shell 参数只认得 sh 或 bash,写的是: " + requested_shell, true};
         }
-        if (shell == "bash" && !OptionalShellAvailable("bash")) {
-            return {"shell=bash 需要本机装有 bash;没装,请用默认 sh(/bin/sh)", true};
+        if (requested_shell == "bash" && !OptionalShellAvailable("bash")) {
+            return {"shell=bash 需要本机装有 bash;没装,请用 sh(/bin/sh)", true};
         }
     }
-    const std::string shell_exe = (shell == "bash") ? "/bin/bash" : "/bin/sh";
+    const run_command_detail::ShellChoice shell_choice =
+        run_command_detail::ChoosePosixShell(requested_shell, ResolveBashPath());
+    const std::string& shell = shell_choice.id;
+    const std::string& shell_exe = shell_choice.executable;
+
+    // 非交互环境:只补父环境没设的(用户自己设过的,哪怕是空串,都不动)。
+    // 前台后台同一份。
+    const platform::EnvPairs noninteractive_env = run_command_detail::FillMissingEnv(
+        run_command_detail::NonInteractiveEnvDefaults(),
+        [](const std::string& key) { return platform::GetEnvVarPresent(key.c_str()).has_value(); });
 
     if (run_in_background) {
         const platform::BackgroundSpawnResult bg =
-            platform::RunProcessBackground({shell_exe, "-c", command}, effective_cwd);
+            platform::RunProcessBackground({shell_exe, "-c", command}, effective_cwd, noninteractive_env);
         if (!bg.success) {
             return {bg.error, true};
         }
@@ -663,15 +878,11 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
     }
 
     // 前台 POSIX:cwd 走操作系统参数(子进程 exec 前 chdir),命令文本不
-    // 拼 cd——验收口径"cwd 不再拼进 shell 字符串"的前台半边。
-    platform::ProcessResult proc;
-    if (shell == "bash") {
-        proc = platform::RunProcess({shell_exe, "-c", command}, timeout_ms, effective_cancel, {},
-                                    platform::kDefaultMaxOutputBytes, effective_cwd);
-    } else {
-        proc = platform::RunShellCommand(command, timeout_ms, effective_cancel, {}, platform::kDefaultMaxOutputBytes,
-                                         effective_cwd);
-    }
+    // 拼 cd——验收口径"cwd 不再拼进 shell 字符串"的前台半边。输出超帽
+    // 留首尾、不杀(编译报错多在尾巴)。
+    platform::ProcessResult proc =
+        platform::RunProcess({shell_exe, "-c", command}, timeout_ms, effective_cancel, noninteractive_env,
+                             platform::kDefaultMaxOutputBytes, effective_cwd, platform::OutputOverflow::KeepHeadTail);
 #endif
 
     // 捕获侧治本:cmd 分支已经在 platform 层按 CP_ACP 转过一遍,理论上到手
@@ -693,8 +904,13 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
     }
     if (proc.timed_out) {
         std::ostringstream oss;
-        oss << "命令执行超时(超过 " << timeout_ms << " 毫秒),已强制终止。\n"
-            << "可改用以下策略：\n"
+        oss << "命令执行超时(超过 " << timeout_ms << " 毫秒),已强制终止。\n";
+        if (budget_capped_from_ms > 0) {
+            // 预算封顶压出来的超时:加大 timeout_ms 无用,明说,别让模型白重跑。
+            oss << "[墙钟预算所限:本次超时已从 " << budget_capped_from_ms << " 毫秒封顶到 " << timeout_ms
+                << " 毫秒,整场剩余时间不多;加大 timeout_ms 无效,请改用更快的检查或直接收尾]\n";
+        }
+        oss << "可改用以下策略：\n"
             << "1. 加大 timeout_ms 后重跑。\n"
             << "2. 传 run_in_background=true 后台运行，再用 background_output 查进度。\n"
             << "3. 首次构建检查依赖下载是否卡网；离线环境先备好 _deps。\n";
@@ -716,19 +932,17 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
         cancelled.outcome = "cancelled_during_run";
         return cancelled;
     }
-    if (proc.output_truncated) {
-        std::ostringstream oss;
-        oss << "[输出超过上限(2MB)已截断,命令已被强制终止。以下是截断前捕获到的输出]\n" << proc.output;
-        // 单子的硬话:输出超限 = 命令被杀,结果不是成功。Agent Loop、workflow
-        // recorder、UI 只看布尔值时也不许把半截构建当成功。
-        Tool::Result truncated{oss.str(), true};
-        truncated.outcome = "output_limit";
-        truncated.error_code = "process.output_limit";
-        return truncated;
-    }
-
+    // 输出超帽(Terminal-Bench 加固单):platform 层走 KeepHeadTail,不再杀
+    // 命令——命令照常跑完,退出码照实算;输出只留前 1MB 与后 1MB,中间换成
+    // 一行省略标记。成败仍按退出码,截断另在正文头与 details 里注明。
     std::ostringstream oss;
-    oss << "[退出码 " << proc.exit_code << "]\n" << proc.output;
+    oss << "[退出码 " << proc.exit_code << "]\n";
+    if (proc.output_truncated) {
+        oss << "[输出超过上限(" << platform::kDefaultMaxOutputBytes / (1024 * 1024)
+            << "MB)已截断:只保留前后各一半,中间省略 " << proc.omitted_bytes
+            << " 字节;命令已照常跑完。要看全文,把输出重定向到文件再分段读]\n";
+    }
+    oss << proc.output;
     Tool::Result exited{oss.str(), proc.exit_code != 0};
     if (proc.exit_code != 0) {
         exited.outcome = "process_exit_nonzero";
@@ -737,6 +951,13 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
         exited.outcome = "succeeded";
     }
     exited.details = nlohmann::json{{"exit_code", proc.exit_code}, {"timeout_ms", timeout_ms}};
+    if (budget_capped_from_ms > 0) {
+        exited.details["timeout_capped_by_budget"] = true;
+    }
+    if (proc.output_truncated) {
+        exited.details["output_truncated"] = true;
+        exited.details["omitted_bytes"] = proc.omitted_bytes;
+    }
     exited.effect_summary = "run (exit=" + std::to_string(proc.exit_code) + ")";
     return exited;
 }

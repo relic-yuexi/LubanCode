@@ -3,7 +3,9 @@
 
 #include "app/cli_options.hpp"
 
+#include <cctype>
 #include <cstdlib>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -1074,6 +1076,23 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             options.output_given = true;
             continue;
         }
+        if (arg == "--time-budget") {
+            // one-shot 墙钟预算单:整场墙钟预算(秒)。缺值/认不得当场退,
+            // 不静默当没给——评测侧以为开了预算、实际没开,超时照杀。模式
+            // 错配(非单发)归 RunCli 的门卫。
+            const std::optional<int> secs =
+                i + 1 < args.size() ? ParseTimeBudgetSecs(args[i + 1]) : std::optional<int>();
+            if (!secs.has_value()) {
+                parsed.action = CliAction::BadTimeBudget;
+                parsed.error_text = "--time-budget 需要一个正整数秒数(1~" + std::to_string(kMaxTimeBudgetSecs) +
+                                    ",单发模式专用:lubancode --yes --time-budget 900 \"<任务正文>\")";
+                return parsed;
+            }
+            ++i;
+            options.time_budget_secs = *secs;
+            options.time_budget_given = true;
+            continue;
+        }
         if (arg == "--reset-system-prompt") {
             // 跟 /prompt reset 同效,只是不进交互、不二次确认(命令行参数
             // 本身就是明确意图),RunCli 打完结果就退。
@@ -1086,6 +1105,51 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
         options.positional += arg;
     }
     return parsed;
+}
+
+std::optional<int> ParseTimeBudgetSecs(const std::string& text) {
+    // 首尾空白(空格/制表/回车/换行)剥掉;中间一律只认数字。
+    const auto is_space = [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; };
+    std::size_t begin = 0;
+    std::size_t end = text.size();
+    while (begin < end && is_space(text[begin])) {
+        ++begin;
+    }
+    while (end > begin && is_space(text[end - 1])) {
+        --end;
+    }
+    if (begin == end || end - begin > 9) {
+        return std::nullopt;  // 空串,或位数多到必然越界(9 位以内不溢 int)
+    }
+    long long value = 0;
+    for (std::size_t i = begin; i < end; ++i) {
+        const char c = text[i];
+        if (c < '0' || c > '9') {
+            return std::nullopt;
+        }
+        value = value * 10 + (c - '0');
+    }
+    if (value < 1 || value > kMaxTimeBudgetSecs) {
+        return std::nullopt;
+    }
+    return static_cast<int>(value);
+}
+
+TimeBudgetResolution ResolveTimeBudgetSecs(const CliOptions& options, const std::optional<std::string>& env_value) {
+    TimeBudgetResolution resolution;
+    if (options.time_budget_given) {
+        resolution.secs = options.time_budget_secs;  // 选项优先,环境变量不看
+        return resolution;
+    }
+    if (!env_value.has_value() || env_value->empty()) {
+        return resolution;
+    }
+    resolution.secs = ParseTimeBudgetSecs(*env_value);
+    if (!resolution.secs.has_value()) {
+        resolution.warning = "LUBANCODE_TIME_BUDGET_SECS=\"" + *env_value + "\" 认不得(要 1~" +
+                             std::to_string(kMaxTimeBudgetSecs) + " 的正整数秒数),已忽略,本场不设墙钟预算";
+    }
+    return resolution;
 }
 
 }  // namespace lubancode::app

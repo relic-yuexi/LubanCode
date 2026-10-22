@@ -465,6 +465,8 @@ add_library(lubancode_engine STATIC
   src/api/gemini/events.cpp
   src/api/gemini/request.cpp
   src/api/assembler.cpp
+  # 工具入参兜底(开源模型坏 JSON 单):宽松解析纯函数,assembler 收尾时调。
+  src/api/tool_args_repair.cpp
   src/api/models.cpp
   src/api/types.cpp
   src/config/config.cpp
@@ -627,6 +629,8 @@ add_library(lubancode_engine STATIC
   # 骨架拆解批三·harness 合流:主回合与子代理共用的续投外环/取消链/
   # 收场分型/Stop 续跑环。
   src/agent/turn_harness.cpp
+  # one-shot 墙钟预算与收工前催验证单:无人值守护栏(预算档位/催验证判据)。
+  src/agent/unattended_guard.cpp
   # 递归派工单 P0-1:结构化任务合同(parse/validate/canonicalize/render)。
   src/agent/task_spec.cpp
   # 监督器单 P0-0:进展合同——四本时钟、监督相位、健康态、空转指纹与判定尺。
