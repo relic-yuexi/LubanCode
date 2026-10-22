@@ -397,8 +397,16 @@ public:
 
 TEST_CASE("RunOneTool: updatedInput 不过工具 schema = 打回并拦截,不按原参跑") {
     FakeBackend backend;
+    // 原参给合法的(path 是 string):执行前的 schema 浅检放行,拦下的才
+    // 是钩子改写后的复检——不然浅检先拦,这条复检路就测不着了。
     backend.scripts = {
-        ToolUseScript("toolu_12", "write_file"),
+        {
+            api::MessageStart{"msg", "model"},
+            api::ToolUseStart{0, "toolu_12", "write_file"},
+            api::ToolUseInputDelta{0, R"({"path":"a.txt"})"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"tool_use", api::Usage{}},
+        },
         TextOnlyScript("改写被拒"),
     };
     tools::ToolRegistry registry;
@@ -423,6 +431,7 @@ TEST_CASE("RunOneTool: updatedInput 不过工具 schema = 打回并拦截,不按
         std::get<api::ToolResultBlock>(backend.captured_requests[1].messages.back().content[0]);
     CHECK(tool_result.is_error);
     CHECK(tool_result.content.find("schema") != std::string::npos);
+    CHECK(tool_result.content.find("PreToolUse") != std::string::npos);  // 拦的是改写复检,不是执行前浅检
 }
 
 TEST_CASE("RunOneTool: PostToolUse 反馈追加进模型所见 tool_result") {

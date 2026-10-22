@@ -807,7 +807,7 @@ int RunCli(const std::vector<std::string>& args) {
     }
     {
         const std::string early_lang = lubancode::platform::GetEnvVar("LUBANCODE_LANG").value_or(std::string());
-        lubancode::cli::SetLanguage(early_lang.empty() ? lubancode::cli::DetectSystemLanguage() : early_lang);
+        lubancode::cli::SetLanguage(lubancode::cli::ResolveLanguage(early_lang));
     }
 
     // 参数解析走纯函数(cli_options):这里只兑现早退动作,再按解析结果
@@ -1100,9 +1100,7 @@ int RunCli(const std::vector<std::string>& args) {
 
     // i18n:配置读出来了,按四级合并的 language 字段定稿(空 = 跟系统)。
     // 语言包早在函数开头扫过,这里只是切码;坏包警告攒到现在,按定稿语言打。
-    lubancode::cli::SetLanguage(config_result->config.language.empty()
-                                     ? lubancode::cli::DetectSystemLanguage()
-                                     : config_result->config.language);
+    lubancode::cli::SetLanguage(lubancode::cli::ResolveLanguage(config_result->config.language));
     for (const auto& warning : language_pack_warnings) {
         std::cerr << trf("i18n.pack_warning", warning) << "\n";
     }

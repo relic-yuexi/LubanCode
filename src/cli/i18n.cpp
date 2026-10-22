@@ -4208,19 +4208,24 @@ std::string MapLocaleToLanguage(std::string_view locale) {
     if (locale.size() >= 2) {
         const char a = static_cast<char>(std::tolower(static_cast<unsigned char>(locale[0])));
         const char b = static_cast<char>(std::tolower(static_cast<unsigned char>(locale[1])));
-        // 前缀后面要么结束、要么跟分隔符/子标签,别把 "english_custom" 之外
-        // 的 "eo"(世界语)这类两字码误判——只看前两个字母 + 边界。
+        // 前缀后面要么结束、要么跟分隔符/子标签,别把 "zhx" 这类撞前缀的
+        // 码误判——只看前两个字母 + 边界。
         const bool boundary = locale.size() == 2 || !std::isalpha(static_cast<unsigned char>(locale[2]));
-        if (boundary) {
-            if (a == 'z' && b == 'h') {
-                return "zh-CN";
-            }
-            if (a == 'e' && b == 'n') {
-                return "en";
-            }
+        if (boundary && a == 'z' && b == 'h') {
+            return "zh-CN";
         }
     }
-    return "zh-CN";
+    // 明确是 zh 才给中文;未设、C、C.UTF-8、POSIX、en_* 与认不出的一律回落
+    // en(one-shot 无人值守适配:Docker 镜像 LANG 多半未设或是 C.UTF-8,
+    // 旧口径回落 zh-CN,英文题目配了一身中文提示)。
+    return "en";
+}
+
+std::string ResolveLanguage(std::string_view explicit_setting) {
+    if (!explicit_setting.empty()) {
+        return std::string(explicit_setting);
+    }
+    return DetectSystemLanguage();
 }
 
 std::string DetectSystemLanguage() {

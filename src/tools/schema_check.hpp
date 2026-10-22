@@ -15,7 +15,9 @@
 // tests/unit/schema/test_schema_contract.cpp。
 #pragma once
 
+#include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -23,5 +25,17 @@ namespace lubancode::tools {
 
 // 返回 std::nullopt = 通过;有值 = 人话错误(第一个撞上的问题)。
 std::optional<std::string> ValidateInputAgainstSchema(const nlohmann::json& input, const nlohmann::json& schema);
+
+// 模型入参的执行前浅检(开源模型坏 JSON 单):只查 required 与顶层
+// properties 的基本 type(string/integer/number/boolean/object/array),
+// enum 不查(工具自己的 execute 给得出更贴切的人话),不递归。宽容一味:
+// integer/number 字段收到数字字符串("120")就地转成数,记进 coerced。
+// error 有值 = 不过(缺哪个字段/期望什么类型的人话,首错);coerced 是
+// 转换说明,调用方附注给模型,不静默。
+struct ModelInputPrecheck {
+    std::optional<std::string> error;
+    std::vector<std::string> coerced;
+};
+ModelInputPrecheck PrecheckModelToolInput(nlohmann::json& input, const nlohmann::json& schema);
 
 }  // namespace lubancode::tools
