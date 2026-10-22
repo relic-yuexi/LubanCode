@@ -58,6 +58,7 @@
 #include "api/backend.hpp"
 #include "api/chat/client.hpp"
 #include "api/models.hpp"
+#include "platform/log_sink.hpp"  // 窗口探测来源记一条 info
 #include "api/responses/client.hpp"
 #include "app/backend_stack.hpp"
 #include "app/tool_runtime.hpp"
@@ -1314,6 +1315,21 @@ int RunCli(const std::vector<std::string>& args) {
             }
             if (catalog_apply.context_window_tokens.has_value()) {
                 once_config.context_window_tokens = *catalog_apply.context_window_tokens;
+            }
+            // 自部署端点窗口探测(Terminal-Bench 自部署单):目录没给窗口、也没
+            // 显式配窗口时,问一次 OpenAI 兼容端 GET /models(≤3s),拿到正整数
+            // 才采用;失败静默回落兜底值。优先级:显式配置 > 目录 > 探测 > 兜底。
+            if (!catalog_apply.context_window_tokens.has_value() &&
+                config_result->sources.context_window_tokens == lubancode::config::Source::Default) {
+                if (const auto probed = lubancode::api::ProbeModelContextWindow(
+                        once_config.wire, once_config.base_url, once_config.auth_token, once_config.model,
+                        once_config.extra_headers);
+                    probed.has_value()) {
+                    once_config.context_window_tokens = *probed;
+                    lubancode::platform::LogSink::Instance().Info(
+                        "config", "context_window 来源:端点 /models 探测(" + once_config.model + " = " +
+                                      std::to_string(*probed) + " tokens)");
+                }
             }
             // 魂:按配置的 soul 名读一次(缺文件不警告——管道输出保持干净),
             // 拼在系统提示最后。
