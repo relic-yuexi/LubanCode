@@ -1,5 +1,5 @@
 // 批六(API 传输合流):HttpStreamTransport 的纯函数件单测——状态行抠码、
-// 网络错误分型、请求体 dump 兜底,外加归一到 types.hpp 的三个共用小件
+// 网络错误分型、请求体 dump 兜底、无进展墙期限账,外加归一到 types.hpp 的三个共用小件
 // (ApplyExtraHeaders/RoleToString/MergeExtraBody)。
 // 真socket 那头的传输行为(取消/硬墙钟/空闲超时/非 2xx/帧溢出)由
 // tests/integration/process/test_network_timeout.cpp 拿假服务器钉着,这里
@@ -9,6 +9,7 @@
 
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <string>
 
 #include <cpr/cpr.h>
@@ -23,6 +24,7 @@ using lubancode::api::ClassifyNetworkError;
 using lubancode::api::DumpRequestBody;
 using lubancode::api::ExtractStatusCode;
 using lubancode::api::MergeExtraBody;
+using lubancode::api::NoProgressDeadline;
 using lubancode::api::RoleToString;
 namespace cli = lubancode::cli;
 
@@ -91,6 +93,67 @@ TEST_CASE("ClassifyNetworkError: 其余错误码原样透传 curl message,不过
     CHECK(ClassifyNetworkError(MakeError(cpr::ErrorCode::SEND_ERROR, "send failed"), false, 15000, 45, false, 30) ==
           "send failed");
     CHECK(ClassifyNetworkError(MakeError(cpr::ErrorCode::OK, ""), false, 15000, 45, false, 30).empty());
+}
+
+// ---------------------------------------------------------------------------
+// NoProgressDeadline(无进展墙账本,Terminal-Bench 超时单)
+// 时间点全由用例递,不睡真钟:t0 起步,秒级推演。
+// ---------------------------------------------------------------------------
+
+namespace {
+using WallClock = NoProgressDeadline::Clock;
+const WallClock::time_point kT0{};
+WallClock::time_point At(int secs) { return kT0 + std::chrono::seconds(secs); }
+}  // namespace
+
+TEST_CASE("NoProgressDeadline: 持续来字节,总时长远超一格墙也不到期") {
+    NoProgressDeadline wall(300, kT0);
+    REQUIRE(wall.enabled());
+    // 每 10 秒来一段正文,一路流到第 1200 秒(四格墙)——旧死墙第 300 秒就砍。
+    for (int t = 10; t <= 1200; t += 10) {
+        CHECK_FALSE(wall.Expired(At(t)));
+        wall.OnBodyBytes(64, At(t));
+    }
+    CHECK(wall.deadline() == At(1500));
+    CHECK_FALSE(wall.Expired(At(1499)));
+    CHECK(wall.Expired(At(1500)));  // 最后一个字节之后满一格,照样落锤
+}
+
+TEST_CASE("NoProgressDeadline: 一个字节都不来,从发出起算到点落锤") {
+    NoProgressDeadline wall(300, kT0);
+    CHECK_FALSE(wall.Expired(At(299)));
+    CHECK(wall.Expired(At(300)));
+    // 进度回调每秒照醒,但累计量为 0 不涨:不算进展,不顺延。
+    wall.OnDownloadProgress(0, At(299));
+    CHECK(wall.deadline() == At(300));
+    // 空段(写回调零长)也不算进展。
+    wall.OnBodyBytes(0, At(299));
+    CHECK(wall.deadline() == At(300));
+}
+
+TEST_CASE("NoProgressDeadline: 进度回调只认累计下载量创新高") {
+    NoProgressDeadline wall(60, kT0);
+    wall.OnDownloadProgress(100, At(50));
+    CHECK(wall.deadline() == At(110));
+    wall.OnDownloadProgress(100, At(100));  // 量没涨:不顺延
+    CHECK(wall.deadline() == At(110));
+    wall.OnDownloadProgress(40, At(105));  // 量回退:不顺延
+    CHECK(wall.deadline() == At(110));
+    wall.OnDownloadProgress(101, At(109));
+    CHECK(wall.deadline() == At(169));
+    CHECK_FALSE(wall.Expired(At(168)));
+    CHECK(wall.Expired(At(169)));
+}
+
+TEST_CASE("NoProgressDeadline: timeout <= 0 不设墙,永不到期") {
+    for (const int secs : {0, -5}) {
+        NoProgressDeadline wall(secs, kT0);
+        CHECK_FALSE(wall.enabled());
+        CHECK_FALSE(wall.Expired(kT0));
+        CHECK_FALSE(wall.Expired(At(100000)));
+        wall.OnBodyBytes(1, At(10));
+        CHECK_FALSE(wall.Expired(At(100000)));
+    }
 }
 
 // ---------------------------------------------------------------------------

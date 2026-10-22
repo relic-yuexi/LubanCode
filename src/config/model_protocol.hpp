@@ -43,13 +43,16 @@ enum class Wire { Anthropic, Responses, ChatCompletions, GoogleGenerateContent }
 //   总时长上限。30 秒跟 tools/web_search.cpp、tools/web_fetch.cpp 里已有的
 //   cpr::Timeout{30000} 保持一致的量级。
 // - kDefaultRequestHardTimeoutSecs(cpr 并发挂死单):每枚**流式**请求的
-//   硬墙钟——与上面三个是两码事。connect/idle 两道闸只管"连接阶段"与
-//   "连续无字节";真机现场(本机代理/TUN 截胡 127.0.0.1 回环)出现过
-//   请求进了 cpr::Post 再不返、两道闸都不触发的挂死,唯一兜底是给整枚
-//   请求一面不可穿透的墙:ProgressCallback 里对 steady_clock 比期限,
-//   超期返回 false 掐流(libcurl 周期性调它,连接死寂也醒)。不能用
-//   cpr::Timeout 实现——那是 CURLOPT_TIMEOUT,会把正常的长流拦腰砍断。
-//   默认 300s 给足长思考/长回复的余量;0 = 不设这道墙(回到旧行为)。
+//   无进展墙——与上面三个是两码事。connect/idle 两道闸靠 libcurl 自家
+//   判据;真机现场(本机代理/TUN 截胡 127.0.0.1 回环)出现过请求进了
+//   cpr::Post 再不返、两道闸都不触发的挂死,兜底是我们自己记的一面墙:
+//   ProgressCallback 里对 steady_clock 比期限,超期返回 false 掐流
+//   (libcurl 周期性调它,连接死寂也醒)。期限从发出起算,每收到响应体
+//   字节就顺延为 now + 本值——字节还在来就不掐,长思考/长回复流多久都
+//   行;连续这么多秒一个字节不来才落锤(Terminal-Bench 超时单:原先是
+//   发出起算的死墙,长流一过 300s 就被砍断重来)。不能用 cpr::Timeout
+//   实现——那是 CURLOPT_TIMEOUT,会把正常的长流拦腰砍断。默认 300s,
+//   比 idle 闸宽,常态下 idle 先响,墙只兜底;0 = 不设这道墙。
 constexpr int kDefaultConnectTimeoutMs = 15000;
 constexpr int kDefaultStreamIdleTimeoutSecs = 60;
 constexpr int kDefaultRequestTimeoutSecs = 30;

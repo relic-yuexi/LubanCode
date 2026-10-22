@@ -763,7 +763,7 @@ struct Config {
     int connect_timeout_ms = kDefaultConnectTimeoutMs;
     int stream_idle_timeout_secs = kDefaultStreamIdleTimeoutSecs;
     int request_timeout_secs = kDefaultRequestTimeoutSecs;
-    // 每枚流式请求的硬墙钟(秒,0 = 不设;见 kDefaultRequestHardTimeoutSecs
+    // 每枚流式请求的无进展墙(秒,0 = 不设;收字节即顺延,见 kDefaultRequestHardTimeoutSecs
     // 注释)。待遇同上:只从配置文件读,项目级压全局。注意与
     // subagent.wall_clock_timeout_secs 分工:那是"一只任务整轮"的墙,
     // 这是"一枚请求"的墙——整轮墙兜的是所有超时全失效的绝境,请求墙

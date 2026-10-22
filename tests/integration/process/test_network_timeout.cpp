@@ -691,3 +691,99 @@ TEST_CASE("PostSseStream: 错误体帽不碰 2xx 成功流——总量越过小�
     REQUIRE(result.has_value());
     CHECK(sink_bytes == static_cast<std::size_t>(kFrames) * frame.size());
 }
+
+// ---------------------------------------------------------------------------
+// 无进展墙(Terminal-Bench 超时单):request_hard_timeout_secs 原先是发出起算
+// 的死墙,长流一过就被砍断重来。如今每收到响应体字节就顺延一整格——下面
+// 一组直调 PostSseStream,idle 闸配得很大(25s),只留墙一道闸可落锤。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PostSseStream: 持续来字节的 2xx 流总时长越过无进展墙,不被掐断") {
+    constexpr int kHardTimeoutSecs = 2;
+    constexpr int kFrames = 9;  // 每 500ms 一帧,共 ~4.5s,是墙的两倍多
+    const std::string frame = "data: tick\n\n";
+    const int port = StartFakeServer([frame](socket_t client) {
+        DrainRequest(client);
+        SendAll(client, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n");
+        for (int i = 0; i < kFrames; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (!SendIfAlive(client, frame.data(), static_cast<int>(frame.size()))) {
+                return;  // 客户端掐了流:用例自会红在下面的断言上
+            }
+        }
+        ShutdownSend(client);
+    });
+
+    lubancode::api::HttpStreamCall call;
+    call.url = "http://127.0.0.1:" + std::to_string(port);
+    call.body = "{}";
+    call.connect_timeout_ms = 3000;
+    call.stream_idle_timeout_secs = 25;
+    call.request_hard_timeout_secs = kHardTimeoutSecs;
+
+    std::size_t sink_bytes = 0;
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = lubancode::api::PostSseStream(call, [&](std::string_view chunk) {
+        sink_bytes += chunk.size();
+        return true;
+    });
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    // 旧语义下这里会在 ~2s 报 hard_timeout;新语义字节在来,墙就往后退。
+    REQUIRE(result.has_value());
+    CHECK(sink_bytes == static_cast<std::size_t>(kFrames) * frame.size());
+    CHECK(elapsed > std::chrono::seconds(kHardTimeoutSecs + 1));  // 确实越过了一整格墙
+}
+
+TEST_CASE("PostSseStream: 2xx 流吐一帧后装死,墙从最后一个字节起算落锤,旁证两枚都在") {
+    lubancode::cli::SetLanguage("zh-CN");
+    constexpr int kHardTimeoutSecs = 2;
+    const int port = StartFakeServer([](socket_t client) {
+        DrainRequest(client);
+        SendAll(client, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: first\n\n");
+        std::this_thread::sleep_for(std::chrono::seconds(30));
+    });
+
+    lubancode::api::HttpStreamCall call;
+    call.url = "http://127.0.0.1:" + std::to_string(port);
+    call.body = "{}";
+    call.connect_timeout_ms = 3000;
+    call.stream_idle_timeout_secs = 25;
+    call.request_hard_timeout_secs = kHardTimeoutSecs;
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = lubancode::api::PostSseStream(call, [](std::string_view) { return true; });
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().kind == lubancode::api::ErrorKind::Network);
+    CHECK(result.error().message.find(
+              lubancode::cli::trf("error.network.hard_timeout", kHardTimeoutSecs)) == 0);
+    CHECK(result.error().hard_timeout);
+    CHECK(result.error().stream_started);  // 断在 2xx 正文之后:重试环据此封顶
+    CHECK(elapsed < std::chrono::seconds(kHardTimeoutSecs + 8));  // 不是等了 25s 的 idle 闸
+}
+
+TEST_CASE("PostSseStream: 一个字节都不来,无进展墙照样到点落锤,不算流已开始") {
+    constexpr int kHardTimeoutSecs = 2;
+    const int port = StartFakeServer([](socket_t) {
+        std::this_thread::sleep_for(std::chrono::seconds(30));
+    });
+
+    lubancode::api::HttpStreamCall call;
+    call.url = "http://127.0.0.1:" + std::to_string(port);
+    call.body = "{}";
+    call.connect_timeout_ms = 3000;
+    call.stream_idle_timeout_secs = 25;
+    call.request_hard_timeout_secs = kHardTimeoutSecs;
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = lubancode::api::PostSseStream(call, [](std::string_view) { return true; });
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().kind == lubancode::api::ErrorKind::Network);
+    CHECK(result.error().hard_timeout);
+    CHECK_FALSE(result.error().stream_started);
+    CHECK(elapsed < std::chrono::seconds(kHardTimeoutSecs + 8));
+}

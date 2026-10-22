@@ -34,8 +34,8 @@ public:
     // M11(网络超时):connect_timeout_ms(连接超时,毫秒)、
     // stream_idle_timeout_secs(SSE 读空闲超时,秒,不是总时长上限)两个都有
     // 默认值,来自 config::kDefault*,main.cpp 用 Config 里实际生效的值调用。
-    // request_hard_timeout_secs(cpr 并发挂死单):每枚请求的硬墙钟(秒,
-    // 0 = 不设),ProgressCallback 里比期限掐流——语义与 anthropic/chat 两个
+    // request_hard_timeout_secs(cpr 并发挂死单):每枚请求的无进展墙(秒,
+    // 0 = 不设),ProgressCallback 里比期限掐流、收字节顺延——语义与 anthropic/chat 两个
     // client 的同名参数一致,详见 anthropic/client.hpp 的注释。
     // native_web_search:该端(ProviderConfig::native_web_search 镜像到
     // Config::native_web_search)是否声明协议原生联网搜索,默认 false。

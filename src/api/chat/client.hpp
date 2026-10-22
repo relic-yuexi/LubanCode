@@ -17,8 +17,8 @@ class ChatCompletionsBackend : public Backend {
 public:
     // options.stream_usage:provider 声明支持流式 usage chunk 时置真,
     // 请求体带 stream_options.include_usage(见 request.hpp)。
-    // request_hard_timeout_secs(cpr 并发挂死单):每枚请求的硬墙钟(秒,
-    // 0 = 不设),ProgressCallback 里比期限掐流——语义与 anthropic/responses
+    // request_hard_timeout_secs(cpr 并发挂死单):每枚请求的无进展墙(秒,
+    // 0 = 不设),ProgressCallback 里比期限掐流、收字节顺延——语义与 anthropic/responses
     // 两个 client 的同名参数一致,详见那边的注释。
     ChatCompletionsBackend(std::string base_url, std::string auth_token,
                            int connect_timeout_ms = config::kDefaultConnectTimeoutMs,
