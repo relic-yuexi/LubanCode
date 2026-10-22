@@ -92,6 +92,15 @@ struct PromptOptions {
     // 嵌入版——用户/项目目录里的同名文件不覆盖(单子:mode instructions
     // 宿主内置,不给项目覆盖)。
     bool plan_mode = false;
+    // ---- 无人值守(one-shot 无人值守适配) ----
+    // unattended:没人回答提问(one-shot,ask_user 已关)。模式段之后殿后
+    // 注 modes/unattended-<语言>.md,workflow 的"先问一句"换成自行决断措辞。
+    // auto_approve:无人值守且工具自动放行(--yes),shell 段"等用户确认
+    // 放行"一句换成无人值守措辞。两者默认关,交互模式原文一字不动。
+    bool unattended = false;
+    bool auto_approve = false;
+    // 无人值守段的语言:zh 前缀或空给中文版,其余给英文版。
+    std::string language;
     // ---- Prompt Profile(阶段 2) ----
     std::string profile;  // Profile 名;空或 "default" = 不选,走隐式 default
     // 项目模块目录(<项目根>/.lubancode/prompts)。只有"项目选中 Profile
@@ -219,5 +228,10 @@ std::string ModuleTextByPath(const std::string& prompts_dir, const std::string& 
 // 覆盖(单子:用户覆盖 prompts 不能删 Plan 硬指令)。plan_mode=false 给
 // Default 模板(内含"旧 Plan 指令已结束"的明令,防切档残留)。
 std::string ModeInstructionSegment(bool plan_mode);
+
+// 无人值守段(one-shot):modes/unattended-zh.md 或 unattended-en.md 的嵌入
+// 版正文,同模式段一样宿主内置、不读用户目录。language 取 zh 前缀或空给
+// 中文版,其余给英文版。
+std::string UnattendedInstructionSegment(const std::string& language);
 
 }  // namespace lubancode::agent
