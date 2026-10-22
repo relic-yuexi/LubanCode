@@ -430,6 +430,7 @@ const Entry kZhCN[] = {
     {"clipboard.paste_text_failed", "没贴上:{0}"},
     {"transcript.assistant_bg_title", "后台回流 · 分析"},
     {"error.step_limit", "已达 step 上限(max_steps_per_turn;旧名 max_turns),本轮实际跑了 {0} 步,可调大上限或设 0 解除。"},
+    {"error.time_budget", "墙钟预算耗尽(--time-budget / LUBANCODE_TIME_BUDGET_SECS):不再发新请求,本轮按预算耗尽收口,已有结果照常落账导出。"},
     {"error.length_empty_output", "输出预算耗尽(finish_reason=length):共输出 {0} tokens,正文一个字都没落。"},
     {"error.length_empty_reasoning", "usage 拆账:其中 reasoning {0} tokens——输出预算全被思考吃掉。"},
     {"error.length_empty_no_split", "usage 未拆 reasoning 账(服务端没回 reasoning_tokens),预算去向无法核对。"},
@@ -1214,6 +1215,9 @@ const Entry kZhCN[] = {
     //      收据行不进 i18n,稳定可解析)----
     {"cli.output_mode_mismatch",
      "--output 只在带任务正文的单发模式有效:lubancode --yes --output <文件路径> \"<任务正文>\";"
+     "交互模式、app-server 与各子命令都不认它"},
+    {"cli.time_budget_mode_mismatch",
+     "--time-budget 只在带任务正文的单发模式有效:lubancode --yes --time-budget 900 \"<任务正文>\";"
      "交互模式、app-server 与各子命令都不认它"},
     {"oneshot.output_invalid", "--output 路径解析不了: {0}({1})"},
     {"oneshot.output_target_is_dir", "--output 的目标是目录,不是文件: {0}"},
@@ -2653,6 +2657,7 @@ const Entry kEn[] = {
     {"clipboard.paste_text_failed", "Nothing pasted: {0}"},
     {"transcript.assistant_bg_title", "background reflow · analysis"},
     {"error.step_limit", "Step limit reached (max_steps_per_turn; formerly max_turns); {0} steps used this turn. Raise the limit or set 0 to remove it."},
+    {"error.time_budget", "Wall-clock budget exhausted (--time-budget / LUBANCODE_TIME_BUDGET_SECS): no new requests; the turn ends as budget exhausted and the results so far are recorded and exported."},
     {"agent_panel.detail_prompt", "Task: "},
     {"agent_panel.detail_pending_head", "{0} queued intervention message(s) not yet delivered: "},
     {"agent_panel.budget_head", "budget: {0}"},
@@ -3598,6 +3603,9 @@ const Entry kEn[] = {
     {"cli.output_mode_mismatch",
      "--output is only valid in one-shot mode with a task prompt: lubancode --yes --output "
      "<file-path> \"<task instruction>\"; interactive mode, app-server and subcommands reject it"},
+    {"cli.time_budget_mode_mismatch",
+     "--time-budget is only valid in one-shot mode with a task prompt: lubancode --yes --time-budget 900 "
+     "\"<task instruction>\"; interactive mode, app-server and subcommands reject it"},
     {"oneshot.output_invalid", "--output path cannot be resolved: {0} ({1})"},
     {"oneshot.output_target_is_dir", "--output target is a directory, not a file: {0}"},
     {"oneshot.output_parent_unavailable",

@@ -1257,3 +1257,40 @@ TEST_CASE("run_command: context 的取消旗置位时压过实例那根(context 
     CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 15000);
 }
 
+TEST_CASE("run_command: 墙钟死线封顶单次超时,显式 timeout_ms 也受封,超时文案点明预算") {
+    // one-shot 墙钟预算单:死线只剩 32 秒,扣 30 秒保留余量落 5 秒下限——
+    // 显式 60 秒的命令按 5 秒超时收,文案说明是预算压的、加大无效。
+    RunCommandTool tool;
+    nlohmann::json input;
+#ifdef _WIN32
+    input["command"] = "ping -n 30 127.0.0.1 > NUL";
+    input["shell"] = "cmd";
+#else
+    input["command"] = "sleep 30";
+#endif
+    input["timeout_ms"] = 60000;
+    lubancode::tools::ToolExecutionContext context;
+    context.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(32);
+    const auto started = std::chrono::steady_clock::now();
+    const Tool::Result result = tool.execute(input, context);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    REQUIRE(result.is_error);
+    CHECK(result.outcome == "timed_out");
+    CHECK(result.content.find("墙钟预算所限") != std::string::npos);
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 20000);
+}
+
+TEST_CASE("run_command: 死线宽裕时不改超时,details 不带封顶标记") {
+    RunCommandTool tool;
+    nlohmann::json input;
+    input["command"] = "echo ok";
+    input["timeout_ms"] = 30000;
+    lubancode::tools::ToolExecutionContext context;
+    context.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3600);
+    const Tool::Result result = tool.execute(input, context);
+    REQUIRE_FALSE(result.is_error);
+    CHECK(result.details.at("timeout_ms") == 30000);
+    CHECK_FALSE(result.details.contains("timeout_capped_by_budget"));
+}
+

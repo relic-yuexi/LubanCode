@@ -762,6 +762,9 @@ int RunCli(const std::vector<std::string>& args) {
     if (const auto relayed = launcher::MaybeRelayToCurrent(args); relayed.has_value()) {
         return *relayed;
     }
+    // 墙钟预算的起算点(one-shot 墙钟预算单):进门即记——评测侧的墙钟从
+    // 进程起跑算,配置装载/包快照/工具栈装配的开销一并吃进预算。
+    const auto cli_started = std::chrono::steady_clock::now();
     // 应用根启动门(应用Worker接入单 §四/P1):LUBANCODE_HOME /
     // LUBANCODE_DATA_HOME / LUBANCODE_MANAGED 三变量先识别、先校验,再
     // 干活——空值/相对路径/不合法重叠/托管缺根在这里明拒(退出码 1,
@@ -827,6 +830,16 @@ int RunCli(const std::vector<std::string>& args) {
             return 1;
         }
     }
+    // --time-budget 模式门卫(one-shot 墙钟预算单):与 --output 同规矩,只在
+    // 带任务正文的单发模式有效;别处带了明报,不悄悄吞。
+    if (parsed_cli.options.time_budget_given) {
+        const bool one_shot_mode =
+            parsed_cli.action == CliAction::Proceed && !parsed_cli.options.positional.empty();
+        if (!one_shot_mode) {
+            std::cerr << tr("cli.time_budget_mode_mismatch") << "\n";
+            return 1;
+        }
+    }
     switch (parsed_cli.action) {
         case CliAction::RunPluginInit:
             return HandlePluginInitCommand(parsed_cli.plugin_init);
@@ -877,6 +890,10 @@ int RunCli(const std::vector<std::string>& args) {
             return cli::RunTrajectoryCommand(trajectory_args);
         }
         case CliAction::BadTrajectory:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
+        case CliAction::BadTimeBudget:
+            // one-shot 墙钟预算单:--time-budget 缺值/认不得,明报退出。
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::BadOutput:
@@ -1317,10 +1334,23 @@ int RunCli(const std::vector<std::string>& args) {
             // 拼在系统提示最后。
             const std::string soul_content =
                 LoadSoulContentByName(once_config.soul.empty() ? "default" : once_config.soul, /*warn=*/false);
+            // 墙钟预算定稿(one-shot 墙钟预算单):--time-budget 优先,其次
+            // LUBANCODE_TIME_BUDGET_SECS;环境变量值认不得就当没给,stderr 明说。
+            std::optional<OneShotTimeBudget> once_time_budget;
+            {
+                const TimeBudgetResolution budget_resolution = ResolveTimeBudgetSecs(
+                    cli_options, lubancode::platform::GetEnvVar("LUBANCODE_TIME_BUDGET_SECS"));
+                if (!budget_resolution.warning.empty()) {
+                    std::cerr << budget_resolution.warning << "\n";
+                }
+                if (budget_resolution.secs.has_value()) {
+                    once_time_budget = OneShotTimeBudget{*budget_resolution.secs, cli_started};
+                }
+            }
             return AskOnce(once_config, cli_options.positional, cli_options.auto_confirm, theme, persona,
                             spinner_enabled,
                             settings_local, catalog_apply.base_instructions, soul_content,
-                            cli_options.package_dirs, harness_output_absolute);
+                            cli_options.package_dirs, harness_output_absolute, once_time_budget);
         }
 
         // 交互模式缺连接时开欢迎页。用户可以直接添 provider，也可以明选

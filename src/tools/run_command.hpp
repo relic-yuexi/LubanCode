@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -39,6 +41,13 @@ std::vector<std::pair<std::string, std::string>> NonInteractiveEnvDefaults();
 std::vector<std::pair<std::string, std::string>> FillMissingEnv(
     const std::vector<std::pair<std::string, std::string>>& defaults,
     const std::function<bool(const std::string&)>& is_set);
+
+// 墙钟预算封顶(one-shot 墙钟预算单):单次前台超时不得越过整场死线。
+// 封顶值 = 剩余 - 30 秒保留余量,下限 5 秒;requested 比封顶值小就照旧
+//(封顶只往下压,不往上抬)。remaining_ms 空 = 没预算,原样返回。
+inline constexpr std::int64_t kDeadlineCommandReserveMs = 30000;
+inline constexpr std::int64_t kDeadlineCommandFloorMs = 5000;
+int CapTimeoutToDeadlineMs(int requested_ms, std::optional<std::int64_t> remaining_ms);
 
 }  // namespace run_command_detail
 
@@ -80,7 +89,9 @@ public:
 private:
     // 公共实现:effective_cancel 是本调用真用的取消旗(execute 两个口各算
     // 各的)。置位即收整棵进程树,结果分型 cancelled(与超时分开记账)。
-    Result Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel);
+    // deadline:本调用的墙钟死线(ToolExecutionContext 递进来;空 = 没预算)。
+    Result Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel,
+               std::optional<std::chrono::steady_clock::time_point> deadline = std::nullopt);
 
     const std::atomic<bool>* cancel_ = nullptr;
 };

@@ -30,6 +30,7 @@
 #include "api/assembler.hpp"
 #include "api/model_input_snapshot.hpp"
 #include "api/tool_args_repair.hpp"  // 入参兜底:稳定码 tool.input.*
+#include "agent/unattended_guard.hpp"  // WallClockBudget:one-shot 墙钟预算(步顶闸/附注/死线)
 #include "hooks/middleware_builtins.hpp"
 #include "cli/i18n.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:trace 的入参/结果摘要锚
@@ -758,8 +759,11 @@ std::optional<tools::Tool::Result> MarkExecutionStarted(ToolCallFrame& frame) {
 // 件)置位即收,不再等到超时。不碰 session/history/终端 UI——完成件由
 // 阶段四在主线程收口。
 tools::Tool::Result ExecuteApprovedTool(const ToolCallFrame& frame) {
-    return frame.tool->execute(frame.effective_input,
-                               tools::ToolExecutionContext{frame.cancel, frame.wiring.tool_artifact_dir});
+    tools::ToolExecutionContext context{frame.cancel, frame.wiring.tool_artifact_dir};
+    if (frame.wiring.wall_budget != nullptr) {
+        context.deadline = frame.wiring.wall_budget->deadline();  // 墙钟预算:run_command 据此封顶超时
+    }
+    return frame.tool->execute(frame.effective_input, context);
 }
 
 // 阶段四(主线程):接完成信封收口。
@@ -811,6 +815,13 @@ tools::Tool::Result CompleteToolCall(ToolCallFrame& frame, tools::Tool::Result r
     if (!call.input_repair.empty()) {
         result.AppendText("\n[宿主附注] 本次入参不合规,经宿主修补后执行: " + call.input_repair +
                           "。下次请直接给合法 JSON、符合 input_schema 的参数。");
+    }
+    // 墙钟预算(one-shot):剩余跨过 25%/120 秒两档时,结果尾巴追一行宿主
+    // 附注催收尾——每档一次,不每步刷屏(档位账在 WallClockBudget 里)。
+    if (wiring.wall_budget != nullptr) {
+        if (const auto note = wiring.wall_budget->TakeToolResultNote(); note.has_value()) {
+            result.AppendText("\n" + *note);
+        }
     }
     return DispatchDone(frame, std::move(result));
 }
@@ -1354,6 +1365,16 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 outcome.output_budget = budget_report;
                 return outcome;
             }
+        }
+        // 整场墙钟预算(one-shot 墙钟预算单):剩余不足保留余量(20 秒)就不
+        // 再发新请求——一发出去多半等不到回话就被评测侧杀进程,Close 与
+        // --output 导出全落空。按时间成本线同款收场(hit_time_budget →
+        // budget_exhausted 分型),history 里到此为止的来回照常交账。
+        if (wiring.wall_budget != nullptr && wiring.wall_budget->ShouldStopRequests()) {
+            RunOutcome outcome{false, false, false, last_stop_reason, steps_used};
+            outcome.hit_time_budget = true;
+            outcome.output_budget = budget_report;
+            return outcome;
         }
 
         // Soul 会话冻结单 P0(§5.1 锁定边界):首个请求准备一开始就把

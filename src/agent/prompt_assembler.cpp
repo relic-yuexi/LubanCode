@@ -9,6 +9,7 @@
 #include <system_error>
 #include <utility>
 
+#include "agent/unattended_guard.hpp"  // WallBudgetPromptLine:无人值守段的总预算一句
 #include "agent/context.hpp"     // EstimateUtf8Tokens:ledger 段级 token 估算(Token 账本单 A1)
 #include "embedded_prompts.hpp"  // 构建期生成:<build>/generated/embedded_prompts.hpp
 #include "hooks/hash.hpp"        // Sha256Hex:ledger 段级 content_hash(与 trajectory 同一把 SHA-256)
@@ -587,7 +588,8 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
     // 无人值守段压轴(one-shot):没人回答、不等确认、收尾实测、服务脱离
     // 会话起、交互程序改非交互写法。宿主内置,与模式段同一档不读用户目录。
     if (options.unattended) {
-        const std::string unattended_segment = UnattendedInstructionSegment(options.language);
+        const std::string unattended_segment =
+            UnattendedInstructionSegment(options.language, options.time_budget_secs);
         append(unattended_segment);
         PromptSourceLedgerEntry entry;
         entry.rel_path = UnattendedUsesChinese(options.language) ? "modes/unattended-zh.md"
@@ -622,9 +624,18 @@ std::string ModeInstructionSegment(bool plan_mode) {
     return std::string(plan_mode ? embedded::kMode_plan : embedded::kMode_default);
 }
 
-std::string UnattendedInstructionSegment(const std::string& language) {
-    return std::string(UnattendedUsesChinese(language) ? embedded::kMode_unattended_zh
-                                                       : embedded::kMode_unattended_en);
+std::string UnattendedInstructionSegment(const std::string& language, std::optional<int> time_budget_secs) {
+    std::string segment(UnattendedUsesChinese(language) ? embedded::kMode_unattended_zh
+                                                        : embedded::kMode_unattended_en);
+    if (time_budget_secs.has_value() && *time_budget_secs > 0) {
+        // 墙钟预算一句接在要点清单末尾(嵌入正文以换行收尾与否都接得上)。
+        if (!segment.empty() && segment.back() != '\n') {
+            segment += '\n';
+        }
+        segment += WallBudgetPromptLine(*time_budget_secs, UnattendedUsesChinese(language));
+        segment += '\n';
+    }
+    return segment;
 }
 
 }  // namespace lubancode::agent
