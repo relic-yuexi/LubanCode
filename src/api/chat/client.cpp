@@ -6,6 +6,7 @@
 #include "api/chat/events.hpp"
 #include "api/chat/request.hpp"
 #include "api/http_stream_transport.hpp"  // 批六:PostSseStream/DumpRequestBody,四家共用的传输骨架
+#include "api/model_request_recovery.hpp"  // TagHttpContextOverflow:自部署端点超窗 400 补码
 #include "api/sse_framing.hpp"
 
 namespace lubancode::api::chat {
@@ -63,7 +64,10 @@ std::expected<void, Error> ChatCompletionsBackend::send_stream(
 
     auto streamed = PostSseStream(call, sink, cancel);
     if (!streamed.has_value()) {
-        return std::unexpected(std::move(streamed.error()));
+        api::Error error = std::move(streamed.error());
+        // vLLM/SGLang 等自部署端超窗只回 400 + 人话,补成超窗稳定码走压缩恢复路。
+        TagHttpContextOverflow(error);
+        return std::unexpected(std::move(error));
     }
 
     if (!parser.finished()) dispatch(parser.Finish());
