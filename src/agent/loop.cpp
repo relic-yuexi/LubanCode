@@ -764,7 +764,13 @@ tools::Tool::Result CompleteToolCall(ToolCallFrame& frame, tools::Tool::Result r
     if (wiring.capture_tool_result) {
         api::ToolResultBlock captured{call.id, result.content, result.is_error,
                                      result.payload.content, result.payload.structured_content};
-        captured.capture_complete = result.outcome != "output_limit";
+        // 不完整两种口径:旧 output_limit(超量被杀);新 details.output_truncated
+        //(run_command 超量留首尾、命令照常跑完)。查键先 contains,不碰缺键。
+        captured.capture_complete =
+            result.outcome != "output_limit" &&
+            !(result.details.is_object() && result.details.contains("output_truncated") &&
+              result.details.at("output_truncated").is_boolean() &&
+              result.details.at("output_truncated").get<bool>());
         if (!captured.capture_complete) captured.capture_reason = "quota";
         const auto receipt = wiring.capture_tool_result(captured);
         if (receipt.status == runtime::ToolResultsCommitReceipt::Status::Failed) {
@@ -854,7 +860,11 @@ api::ToolResultBlock MakeToolResultBlock(const std::string& tool_use_id, const t
     block.tool_use_id = tool_use_id;
     block.content = platform::SanitizeUtf8(result.content);
     block.is_error = result.is_error;
-    block.capture_complete = result.outcome != "output_limit";
+    // 同 CompleteToolCall:output_limit 或 details.output_truncated 为真都算不完整。
+    block.capture_complete =
+        result.outcome != "output_limit" &&
+        !(result.details.is_object() && result.details.contains("output_truncated") &&
+          result.details.at("output_truncated").is_boolean() && result.details.at("output_truncated").get<bool>());
     if (!block.capture_complete) block.capture_reason = "quota";
     if (!result.payload.empty()) {
         block.blocks = result.payload.content;
