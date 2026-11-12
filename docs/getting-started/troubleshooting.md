@@ -69,10 +69,10 @@ git status --short
 
 排查顺序：
 
-1. 看错误文案里有没有 `request_hard_timeout_secs`——落锤的是每枚请求的硬墙钟（默认 300 秒），说明确实挂到了绝境，不是网络慢。
+1. 看错误文案里有没有 `request_hard_timeout_secs`——落锤的是每枚请求的无进展墙（默认 300 秒，收到字节即顺延），说明连续这么久一个字节都没来，确实挂到了绝境，不是网络慢。
 2. 代理/TUN 环境下把回环与内网地址加直连规则（bypass `127.0.0.1`、`localhost` 与内网段），别让本地假服务或本地网关的流量走代理。
 3. 子代理任务另有整轮墙钟 `subagent.wall_clock_timeout_secs`（默认 1800 秒）：请求墙管一枚请求，任务墙管整轮，两道先到先响。
-4. 长任务合法撞墙（超长思考、超长流式回复）就显式调大 `request_hard_timeout_secs`，别设 `0` 关墙——关掉后回到旧病：挂死无兜底。
+4. 长流式回复不会撞墙（字节在来，墙就顺延）；模型首字前思考过久合法撞墙，就显式调大 `request_hard_timeout_secs`，别设 `0` 关墙——关掉后回到旧病：挂死无兜底。
 5. 再现与取证：开 `LUBANCODE_DEBUG_SUBAGENT=1`，子代理诊断日志里每枚请求一行 `request`/`stream_end`，硬超时落锤另有 `hard_timeout` 一行带耗时，拿它对照时间线。
 
 详见[会话与上下文](../features/sessions/README.md)与[测试指南](../development/testing.md)。

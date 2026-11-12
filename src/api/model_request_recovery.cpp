@@ -111,6 +111,23 @@ bool IsRetryableError(const Error& error) {
     return false;
 }
 
+bool IsCostlyNetworkFailure(const Error& error, bool saw_stream_event) {
+    if (error.kind != ErrorKind::Network) {
+        return false;
+    }
+    // 传输层旁证(收到过 2xx 正文/无进展墙落锤)与恢复环旁证(见过流事件)
+    // 任一成立即算:前者认得"字节到了、事件还没拼出来"的半帧,后者兜住
+    // 不经 PostSseStream 的后端。
+    return error.stream_started || error.hard_timeout || saw_stream_event;
+}
+
+bool ShouldRetryAfterFailure(const Error& error, int attempt, int costly_failures) {
+    if (attempt >= kMaxRequestAttempts || !IsRetryableError(error)) {
+        return false;
+    }
+    return costly_failures <= kMaxCostlyFailureRetries;
+}
+
 std::chrono::milliseconds BackoffMsForAttempt(int attempt) {
     // 五档长退避:低高界内均匀抖动,同时断的多只任务不会齐步拥上去。
     // 表外也钳在最后一档,保证任何单次等待都不越过 2 分钟。
@@ -156,6 +173,8 @@ std::expected<void, Error> RunRequestWithRecovery(const AttemptSender& send_once
             hooks.on_attempt(attempt, phase);
         }
     };
+    // 代价高失败的累计账(流中途断/无进展墙落锤),封顶见 ShouldRetryAfterFailure。
+    int costly_failures = 0;
     for (attempt.attempt = 1;; ++attempt.attempt) {
         attempt.saw_stream_event = false;
         attempt.saw_headers = false;
@@ -174,7 +193,10 @@ std::expected<void, Error> RunRequestWithRecovery(const AttemptSender& send_once
             emit(RequestAttemptPhase::Exhausted);
             return result;
         }
-        if (attempt.attempt >= kMaxRequestAttempts || !IsRetryableError(result.error())) {
+        if (IsCostlyNetworkFailure(result.error(), attempt.saw_stream_event)) {
+            ++costly_failures;
+        }
+        if (!ShouldRetryAfterFailure(result.error(), attempt.attempt, costly_failures)) {
             emit(RequestAttemptPhase::Exhausted);
             return result;
         }

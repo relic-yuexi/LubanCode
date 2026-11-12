@@ -5,6 +5,7 @@
 
 #include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <utility>
 
 #include "cli/i18n.hpp"
@@ -40,7 +41,7 @@ int ExtractStatusCode(std::string_view header_line) {
 // 过数据又停了,是流中途假死。COULDNT_CONNECT/COULDNT_RESOLVE_HOST/
 // COULDNT_RESOLVE_PROXY 是明确的"连不上"类错误,原始 curl 错误信息拼进去
 // 不丢细节。ABORTED_BY_CALLBACK 可能是我们自己在 ProgressCallback 里掐流
-// 的结果(cpr 并发挂死单的硬墙钟,与 WriteCallback 掐流共用这个码),须与
+// 的结果(cpr 并发挂死单的无进展墙,与 WriteCallback 掐流共用这个码),须与
 // "用户取消"分开报——hard_timeout_hit 标志就是为这一步分型留的旁证。别的
 // 错误码原样透传 curl 的 message(留着排查用,不做过度包装)。
 std::string ClassifyNetworkError(const cpr::Error& error, bool received_any_bytes, int connect_timeout_ms,
@@ -59,6 +60,29 @@ std::string ClassifyNetworkError(const cpr::Error& error, bool received_any_byte
         return cli::trf("error.network.connect_failed", error.message);
     }
     return error.message;
+}
+
+NoProgressDeadline::NoProgressDeadline(int timeout_secs, Clock::time_point now)
+    : enabled_(timeout_secs > 0),
+      timeout_(std::chrono::seconds(timeout_secs > 0 ? timeout_secs : 0)),
+      deadline_(now + timeout_) {}
+
+void NoProgressDeadline::OnBodyBytes(std::size_t bytes, Clock::time_point now) {
+    if (bytes > 0) {
+        deadline_ = now + timeout_;
+    }
+}
+
+void NoProgressDeadline::OnDownloadProgress(std::int64_t downloaded_now, Clock::time_point now) {
+    // 只认"累计量创新高":进度回调每秒照醒,量不涨就不是进展。
+    if (downloaded_now > max_downloaded_) {
+        max_downloaded_ = downloaded_now;
+        deadline_ = now + timeout_;
+    }
+}
+
+bool NoProgressDeadline::Expired(Clock::time_point now) const {
+    return enabled_ && now >= deadline_;
 }
 
 std::string DumpRequestBody(const char* wire_tag, const nlohmann::json& body) {
@@ -94,6 +118,9 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
     // 置位,收场分型据此把"我们主动杀的流"与 curl 自报的网络错分开——
     // cpr 只给一个共用的 ABORTED_BY_CALLBACK,不分青红皂白。
     bool hard_timeout_hit = false;
+    // 无进展墙的期限账:请求发出前起算,写回调/进度回调见进展就顺延。
+    // 三枚回调都在 cpr::Post 的同一线程里同步调,不用上锁。
+    NoProgressDeadline no_progress_wall(call.request_hard_timeout_secs, std::chrono::steady_clock::now());
 
     cpr::HeaderCallback header_cb(
         [&](const std::string_view& header, intptr_t) -> bool {
@@ -107,6 +134,7 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
     cpr::WriteCallback write_cb(
         [&](const std::string_view& data, intptr_t) -> bool {
             received_any_bytes = true;
+            no_progress_wall.OnBodyBytes(data.size(), std::chrono::steady_clock::now());
             if (cancel != nullptr && cancel->load()) {
                 // 返回 false 让 cpr/libcurl 就地掐断这次传输;response.error
                 // 会因此被置位,靠上面这个 cancelled 标志把"用户主动打断"
@@ -142,23 +170,24 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
     // 返回 false 即中止——WriteCallback 只有数据到达才触发,光靠它,ESC 在
     // 连不上的服务器面前毫无办法。总超时不设死(流式回复可以很长),连接
     // 阶段单独给 connect_timeout_ms 上限。
-    // 硬墙钟(cpr 并发挂死单)也挂在这里:request_hard_timeout_secs > 0 时
-    // 对 steady_clock 记一枚期限,超期返回 false 掐流。真机现场(本机代理/
+    // 无进展墙(cpr 并发挂死单)也挂在这里:request_hard_timeout_secs > 0 时
+    // 对 steady_clock 记一枚期限,超期返回 false 掐流;每见响应体进展就把
+    // 期限顺延一整格(账本与取舍见 NoProgressDeadline)。真机现场(本机代理/
     // TUN 截胡 127.0.0.1 回环)出现过请求进 cpr::Post 再不返、connect/idle
     // 两道闸都不触发的挂死——libcurl 的 easy_transfer 循环每至多 1s 醒一拍
     // 调 Curl_pgrsUpdate,连接死寂也照醒,所以这道墙在"一个字节都不来"的
     // 绝境里也走得动。不用 cpr::Timeout 实现:那是 CURLOPT_TIMEOUT,会把
-    // 正常的长流拦腰砍断,墙必须只掐"挂死",不掐"长"。
-    const bool hard_wall_on = call.request_hard_timeout_secs > 0;
-    const auto hard_deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(call.request_hard_timeout_secs);
+    // 正常的长流拦腰砍断;墙只掐"挂死",不掐"长"——字节还在来,墙就往后退。
     cpr::ProgressCallback progress_cb(
-        [&](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t, intptr_t) -> bool {
+        [&](cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t download_now, cpr::cpr_pf_arg_t, cpr::cpr_pf_arg_t,
+            intptr_t) -> bool {
             if (cancel != nullptr && cancel->load()) {
                 cancelled = true;
                 return false;
             }
-            if (hard_wall_on && std::chrono::steady_clock::now() >= hard_deadline) {
+            const auto now = std::chrono::steady_clock::now();
+            no_progress_wall.OnDownloadProgress(static_cast<std::int64_t>(download_now), now);
+            if (no_progress_wall.Expired(now)) {
                 hard_timeout_hit = true;
                 return false;
             }
@@ -228,7 +257,13 @@ std::expected<void, Error> PostSseStream(const HttpStreamCall& call, const Strea
         const std::string message =
             ClassifyNetworkError(response.error, received_any_bytes, call.connect_timeout_ms,
                                  call.stream_idle_timeout_secs, hard_timeout_hit, call.request_hard_timeout_secs);
-        return std::unexpected(Error{ErrorKind::Network, message, 0});
+        Error error{ErrorKind::Network, message, 0};
+        // 重试封顶的两枚旁证:断在流开始之后,或无进展墙落锤——重发都得
+        // 从头重生成,重试环不再走满六次长阶梯(IsCostlyNetworkFailure)。
+        // "流开始"只认 2xx 正文:错误体半路断不算,照旧按网络抖动重试。
+        error.stream_started = received_any_bytes && status_known && status_code >= 200 && status_code < 300;
+        error.hard_timeout = hard_timeout_hit;
+        return std::unexpected(std::move(error));
     }
 
     const int final_status = static_cast<int>(response.status_code);
