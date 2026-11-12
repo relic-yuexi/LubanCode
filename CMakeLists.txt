@@ -465,6 +465,8 @@ add_library(lubancode_engine STATIC
   src/api/gemini/events.cpp
   src/api/gemini/request.cpp
   src/api/assembler.cpp
+  # 工具入参兜底(开源模型坏 JSON 单):宽松解析纯函数,assembler 收尾时调。
+  src/api/tool_args_repair.cpp
   src/api/models.cpp
   src/api/types.cpp
   src/config/config.cpp

@@ -80,6 +80,15 @@ struct ToolUseBlock {
     // 单 §4)。四家 wire 里只有 responses 会填;序列化回 wire 不带它
     //(声明侧 async 是 P3 原生试点的事)。
     bool async_call = false;
+    // 入参兜底(开源模型坏 JSON 单):宿主侧账,不上 wire、不落 session,
+    // 只活在"收口 → 执行"这一程。
+    //   input_error  非空 = 入参不可用(JSON 解析失败/输出截断/schema 浅检
+    //                不过),不执行该工具,原文合成 is_error 结果回喂模型;
+    //   input_repair 非空 = 入参经宽松修补或宽容转换才可用,记修了什么,
+    //                随工具结果附注给模型,不静默。
+    std::string input_error;
+    std::string input_error_code;  // 稳定码(tool.input.*,见 api/tool_args_repair.hpp)
+    std::string input_repair;
 };
 
 // 工具执行完,把结果回传给模型。MCP 富结果单起 blocks/structured_content
