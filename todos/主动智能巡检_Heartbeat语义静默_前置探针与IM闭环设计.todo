@@ -1,0 +1,119 @@
+# 主动智能巡检：Heartbeat 语义静默、前置变化探针与 IM 渠道闭环设计
+
+- 状态：已完成（远程 CI Run `43192066948` `macos-clang` + `windows-msvc` 全绿验收）
+- 日期：2026-11-12
+- 级别：P1（常驻助理体验、Token 成本治理与多渠道主动巡检闭环）
+- 范围：`src/gateway/heartbeat.hpp`、`src/gateway/heartbeat.cpp`、`src/gateway/automation_store.hpp`、`src/gateway/automation_store.cpp`、`src/gateway/work_pump.hpp`、`src/gateway/work_pump.cpp`、`src/runtime/automation_pump.cpp`、`src/runtime/channel_work_pump.cpp`、`src/runtime/channel_automation.cpp`、`src/cli/gateway_command.hpp`、`src/cli/gateway_command.cpp`、`src/app/cli_options.hpp`、`src/app/cli_options.cpp`、`src/app/cli_app.cpp`、`src/app/assistant_tasks.cpp`、`CMakeLists.txt` 及对应单元/总装测试册
+- 依赖：`持久Agent_Gateway接入SessionV3_常驻助理与可靠自动任务总装计划.todo`、`QQ机器人接入_Channel桥与SessionV3权限闭环.todo`、`src/gateway`、`src/runtime`
+- 不在本单：公网入站 Webhook 服务器、跨工作区偷偷扫盘、无授权自动执行高危副作用工具、改动 Session V3 信封 schema
+
+## 一、先下断语
+
+- **不另起炉灶造第二套调度器**：主动智能（Proactive Heartbeat）直接长在现有 `AutomationStore` + `GatewayAutomationPump` + `ChannelWorkPump` + `ChannelAutomationBridge` 持久底座之上，继续遵守 Session V3 事实账、`ownerEpoch` fencing 与 `PowerLoss` 追加写纪律。
+- **语义静默优先，字面去重保留，真告警宁投勿吞**：`notify_on_change`（`--heartbeat`）从单纯的全文 SHA-256 比对升级为双层门禁——模型仅回复静默哨兵 `HEARTBEAT_OK`（允许首尾空白或单层反引号包裹，严禁夹带额外正文）时，即使首拍也静默抑制（`detail = "heartbeat_ok_suppressed"`），并将 `last_observed_sha` 归位为 `Sha256Hex("HEARTBEAT_OK")`，保证“故障恢复后再复发同文”仍能重新告警；非静默正文继续对照 `last_observed_sha` 去重（`detail = "unchanged_notification_suppressed"`），存量 V2 行为逐字节不变。
+- **补齐 IM 渠道侧的主动巡检断口**：`ChannelWorkPump` 执行与恢复两条路补齐 `notify_on_change` 观察账、静默抑制与检查失败必投脱敏通知；聊天侧 `create_reminder` / `list_reminders` 补齐 `interval_seconds`、`notify_on_change` 与 `watch_paths`，打通“IM 一句话设主动巡检 → 无事静默零打扰 → 有事回传原聊天窗口”全链路。
+- **零 Token 前置变化探针（Tier-0 Watch Probe）+ `HEARTBEAT.md` 清单感知**：任务可选声明工作区内相对路径 `watch_paths`（上限 16 项，严禁绝对路径、`..` 逃逸与跨根软链，违者以 `automation.watch_invalid` 明拒）。开轮前先算确定性指纹：与上次已检指纹 `last_watch_sha` 相同时**零模型调用**直接结算 `succeeded`（`detail = "watch_unchanged_skipped"`）；首拍或指纹变化才拉起模型，并在 `notify_on_change` 模式下自动挂载工作区 `.lubancode/HEARTBEAT.md`（回退根 `HEARTBEAT.md`，上限 8 KiB）有效待办清单与探针摘要。模型回合失败绝不推进 `last_watch_sha`，下拍必重检。
+
+## 二、现状证据（当前真相）
+
+1. **字面哈希去重挡不住大模型措辞微变**：
+   - `src/runtime/automation_pump.cpp:487-501` 与恢复路 `:310-322` 当前仅对 `result.reply_text` 算 `platform::Sha256Hex` 比对 `job->last_observed_sha`，且未向模型注入任何静默出口约定。模型两次均判断“无异常”，只要措辞相差一字即触发投递。
+2. **渠道周期任务漏接 `notify_on_change` 与 `interval`**：
+   - `src/runtime/channel_work_pump.cpp:1784-1823`（`RunOneChannelJob`）与 `:1667-1705`（`RecoverChannelJobOccurrence`）完全未判 `job->notify_on_change`，渠道周期任务每拍必入 `EnqueueChannel` 发回 IM，且失败分支未投递巡检失败提示。
+   - `src/runtime/channel_automation.cpp:32-41`（`ComposeJobPrompt`）写死“输出直接发给该用户的最终正文”，`:128-194`（`CreateReminder`）只认 `at_ms / delay_seconds / cron`，不支持 `interval_seconds`、`notify_on_change`、`watch_paths`。
+3. **无前置探针与工作区巡检清单入口**：
+   - 每拍到点即进 `HeadlessExecutor` 开完整 V3 会话调大模型，高频巡检空转烧 Token；工作区亦无对标 OpenClaw `HEARTBEAT.md` 的常驻关注清单自动装配。
+4. **已有可复用底座**：
+   - `src/gateway/automation_store.*` 已有 `notify_on_change`、`last_observed_sha`、`RecordObservation`（`PowerLoss` 追加写）与 `ClaimScope` 本地/渠道分流；
+   - `src/app/assistant_tasks.cpp:833` 以 `!occurrence.observed_sha.empty()` 识别已观察拍并向前端投影 `observed{changed, delivered}`；
+   - `src/platform/paths.hpp`（`Utf8ToPath` / `PathToUtf8`）与 `src/platform/sha256.hpp`（`Sha256Hex`）已在 engine 层就位。
+
+## 三、外部依据与裁决
+
+- 参照 OpenClaw Heartbeat 约定：采用显式大写哨兵 `HEARTBEAT_OK` 作为“已巡检、无需打扰人类”的模型契约，工作区常驻清单文件名采用 `.lubancode/HEARTBEAT.md`（兼容工作区根 `HEARTBEAT.md`）。
+- 与 OpenClaw 不同的安全收紧：OpenClaw 允许剥离前后缀子串，易误吞“HEARTBEAT_OK 但顺便提一句线上崩了”之类的混合回复；LubanCode 裁决**仅当整段回复去空白及可选单层反引号后精确等于 `HEARTBEAT_OK` 时才判定静默**，夹带任何业务文字一律按正常回复走投递链（宁投勿吞）。
+
+## 四、不可破的合同
+
+1. **分层守门不变**：`src/gateway/*` 保持纯 engine 层，零 `runtime/*`、`app/*`、`cli/*` 依赖，零 `std::cin/cout/cerr/clog`，全仓 `src/` 零八进制 ESC 转义，路径与 UTF-8 互转一律走 `platform::Utf8ToPath` / `platform::PathToUtf8`。
+2. **存量账本与测试逐字节兼容**：`jobs.jsonl` 旧档无 `watchPaths` / `occurrence.watch_checked` 行时重放行为与 V2 完全一致；`job.prompt` 落盘原文不掺系统包装词（巡检提示词仅在执行期拼装）；既有 V2 `heartbeat` 单测（非 `HEARTBEAT_OK` 文本靠 SHA-256 去重）原样全绿。
+3. **检查失败永不静默**：无论是本地泵还是渠道泵，`notify_on_change` 任务执行失败（非用户主动取消）一律投递失败通知且 `update_last_observed = false`，绝不把执行故障记成“无变化”，也绝不推进 `last_watch_sha`。
+4. **路径探针严守工作区边界**：`watch_paths` 拒绝空串、绝对路径、驱动器前缀、`..` 段及超出上限（16 项）；探测时不跨出 `workspace_root` 解析外部软链，单目录遍历设条目上限（512 项）与小文件正文哈希上限（64 KiB），绝不阻塞主泵。
+
+## 五、详细设计
+
+### 5.1 `src/gateway/heartbeat.hpp` / `heartbeat.cpp`（纯领域引擎件）
+
+1. **语义静默与去重裁决**：
+   - `IsHeartbeatSilentReply(std::string_view reply_text)`：剥离首尾 ASCII 空白；若首尾为成对 `` ` `` 则剥离一层后再去空白；精确匹配 `"HEARTBEAT_OK"`。
+   - `EvaluateHeartbeatReply(std::string_view reply_text, std::string_view last_observed_sha)`：
+     - 命中 `IsHeartbeatSilentReply`：`suppress = SilentToken`，`observed_sha = Sha256Hex("HEARTBEAT_OK")`，`changed = false`，`delivered = false`，`update_last_observed = (last_observed_sha != observed_sha)`，`settle_detail = "heartbeat_ok_suppressed"`。
+     - 未命中静默哨兵：算 `sha = Sha256Hex(reply_text)`；若 `!last_observed_sha.empty() && sha == last_observed_sha`，则 `suppress = UnchangedHash`，`settle_detail = "unchanged_notification_suppressed"`，`update_last_observed = false`；否则 `suppress = None`，走正常投递并在投递成功后更新 `last_observed_sha = sha`。
+2. **工作区 `HEARTBEAT.md` 装载**：
+   - `LoadWorkspaceHeartbeatChecklist(const std::filesystem::path& workspace_root)`：按序探 `.lubancode/HEARTBEAT.md` → `HEARTBEAT.md`（须为普通文件且非软链逃逸）。剥除纯空白与 HTML 注释/Markdown 标题后若仍有有效正文则截断至 8 KiB UTF-8 边界返回；空清单不注入噪音。
+3. **零 Token 前置探针（Watch Probe）**：
+   - `ValidateWatchPaths(const std::vector<std::string>& watch_paths)`：校验数量 `<= 16`、每项非空 UTF-8 相对路径、无 `:` / 前导 `/` `\`、词法段不含 `.` 之外的 `..` 逃逸；标准化为 `/` 分隔。失败返回 `"automation.watch_invalid: ..."`。
+   - `ProbeWorkspaceWatch(const std::filesystem::path& workspace_root, const std::vector<std::string>& watch_paths)`：逐项在 `workspace_root` 下读取状态（不存在记 `missing`；普通文件 <= 64 KiB 记大小 + 内容 SHA-256，大文件记大小 + `last_write_time` 计数；目录按字典序最多扫 512 项并跳过 `.git/objects`、`build`、`node_modules` 重目录），汇总算出单一 `fingerprint_sha` 与简短 `summary`。
+4. **执行期提示词拼装**：
+   - `BuildHeartbeatTurnPrompt(std::string_view base_prompt, const WorkspaceHeartbeatChecklist& checklist, const WatchProbeResult* watch_probe)`：不改 `job.prompt` 存储值，仅在 `notify_on_change == true` 执行开轮时追加清单（若有）、探针摘要（若有）及 `HEARTBEAT_OK` 契约指令。
+
+### 5.2 `AutomationStore` 账面扩展（纯追加）
+
+- `AutomationJob` / `JobSpec` / `JobUpdatePatch` 新增：
+  - `std::vector<std::string> watch_paths;`（JSON 键 `"watchPaths"`，非空写入，旧档缺省空）；
+  - `std::string last_watch_sha;`（由新事实行 `"occurrence.watch_checked"` 维护：`occurrenceId`、`jobId`、`watchSha256`、`skipped`、`checkedAtMs`；仅在探针跳过或模型回合成功结算后推进）。
+- `CreateJob` / `UpdateJob` 对 `watch_paths` 调 `ValidateWatchPaths`，非法即回 `"automation.watch_invalid"`，同时纳入创建幂等载荷比对。
+
+### 5.3 本地泵与渠道泵双路对齐
+
+- **`GatewayAutomationPump`（本地任务）**：
+  - `RunOneOccurrence`：若 `!job->watch_paths.empty()`，开轮前跑 `ProbeWorkspaceWatch`；与 `job->last_watch_sha` 一致则记 `RecordWatchCheck(..., skipped=true)`（若 `notify_on_change` 同步记 `RecordObservation(..., "watch:" + sha, false, false, false)` 供 Web 助理展示）并结算 `succeeded` / `"watch_unchanged_skipped"`，零模型调用。
+  - 开轮时若 `job->notify_on_change` 为真，经 `BuildHeartbeatTurnPrompt` 装配工作区 `HEARTBEAT.md` 与探针摘要。
+  - 执行与恢复结算统一改调 `EvaluateHeartbeatReply`，覆盖 `HEARTBEAT_OK` 与 `Sha256Hex` 双路径；成功结算后若有 `watch_probe` 则落 `RecordWatchCheck(..., skipped=false)` 更新 `last_watch_sha`。
+- **`ChannelWorkPump` + `ChannelAutomationBridge`（IM 渠道任务）**：
+  - `CreateReminder` 新增支持 `interval_seconds`（与 `at_ms / delay_seconds / cron` 四选一）、`notify_on_change`（布尔，别名 `heartbeat`）与 `watch_paths`（字符串数组）；`ComposeJobPrompt` 按 `notify_on_change` 切换常规提醒提示词与主动巡检 `HEARTBEAT_OK` 提示词；`ListReminders` 回传 `notifyOnChange`、`intervalSeconds`、`watchPaths`。
+  - `RunOneChannelJob` 与 `RecoverChannelJobOccurrence` 完整接入前置 `watch_paths` 短路、`HEARTBEAT.md` 清单装配、`EvaluateHeartbeatReply` 静默抑制（静默拍不进 `EnqueueChannel`）以及检查失败时的渠道脱敏失败通知投递。
+
+### 5.4 CLI 与 Web 助理控制面透传
+
+- CLI：`lubancode gateway job add / update` 新增 `--watch <相对路径>`（可重复传多项；`update` 传 `--clear-watch` 可清空）；`job list / read --json` 输出 `watch_paths`。
+- Web 助理：`src/app/assistant_tasks.cpp` 的 `task/create`、`task/update` 与任务详情投影透传 `watchPaths`。
+
+## 分期落地（迁移批次）
+
+### P0：Heartbeat 引擎原语与 `AutomationStore` 探针账
+- [x] 新增 `src/gateway/heartbeat.hpp` 与 `src/gateway/heartbeat.cpp`，实现 `HEARTBEAT_OK` 判定、双层去重裁决、`HEARTBEAT.md` 清单读取、`watch_paths` 边界校验与确定性指纹探针 → 落点见 `src/gateway/heartbeat.*`、`CMakeLists.txt`。
+- [x] `AutomationStore` 与 `GatewayJob*Command` 追加 `watch_paths`、`last_watch_sha` 与 `RecordWatchCheck` 幂等重放 → 落点见 `src/gateway/automation_store.*`、`src/gateway/work_pump.*`。
+
+验收：单元测试覆盖 `HEARTBEAT_OK` 边界（精确匹配 vs 夹带告警正文不误吞、恢复后再复发重投）、`watch_paths` 路径逃逸拦截、文件增删改指纹变化与 `jobs.jsonl` 断电重放。
+
+### P1：本地泵与 IM 渠道泵双路主动巡检闭环
+- [x] `GatewayAutomationPump` 接入前置探针零 Token 短路、`HEARTBEAT.md` 清单拼装与 `EvaluateHeartbeatReply`（含恢复路对齐）→ 落点见 `src/runtime/automation_pump.cpp`。
+- [x] `ChannelAutomationBridge` 与 `ChannelWorkPump` 补齐 `interval_seconds`、`notify_on_change`、`watch_paths`、渠道静默抑制与巡检失败通知 → 落点见 `src/runtime/channel_automation.cpp`、`src/runtime/channel_work_pump.cpp`。
+
+验收：假模型 + 假渠道纵向测试验证：IM 创建周期主动巡检任务 → 探针未变零模型调用 → 探针变化但模型回 `HEARTBEAT_OK` 零出箱 → 模型发现问题回传原会话 → 巡检报错必投失败提示。
+
+### P2：CLI / Web 助理参数透传与远程 CI 全绿
+- [x] CLI `gateway job add/update/read/list` 接入 `--watch` / `--clear-watch`，`assistant_tasks` 接入 `watchPaths` → 落点见 `src/app/cli_options.*`、`src/cli/gateway_command.*`、`src/app/assistant_tasks.cpp`。
+- [x] 推送 `ci/proactive-heartbeat` 分支触发 GitHub Actions 远程编译与测试（不在本地编译），核验 Windows MSVC 与 macOS Clang 双腿全绿（Run `43192066948` 已通过：`macos-clang` 34m58s 绿、`windows-msvc` 1h05m33s 绿）。
+
+验收：远程 CI 流水线（含 ANSI lint、依赖守门、原有 V1/V2/Q5 回归册与新增主动巡检册）全部通过。
+
+## 改动边界（预计）
+
+- 新增：`todos/主动智能巡检_Heartbeat语义静默_前置探针与IM闭环设计.todo`、`src/gateway/heartbeat.hpp`、`src/gateway/heartbeat.cpp`、`tests/unit/gateway/test_proactive_heartbeat.cpp`
+- 修改：`CMakeLists.txt`、`src/gateway/automation_store.hpp`、`src/gateway/automation_store.cpp`、`src/gateway/work_pump.hpp`、`src/gateway/work_pump.cpp`、`src/runtime/automation_pump.cpp`、`src/runtime/channel_automation.cpp`、`src/runtime/channel_work_pump.cpp`、`src/app/cli_options.hpp`、`src/app/cli_options.cpp`、`src/app/cli_app.cpp`、`src/cli/gateway_command.hpp`、`src/cli/gateway_command.cpp`、`src/app/assistant_tasks.cpp`、`tests/unit/runtime/test_channel_job_pump.cpp`
+
+## 不做什么
+
+- **不把包含 `HEARTBEAT_OK` 子串的长回复当静默**（不采用子串匹配，理由：模型若输出“HEARTBEAT_OK，但顺便发现生产库连接失败”，子串匹配会吞掉真故障）。
+- **不在 `AutomationStore` 落盘时改写用户的 `job.prompt`**（不采用建单拼死提示词，理由：`job list/read` 与幂等比对需要保留用户原始意图，且工作区 `HEARTBEAT.md` 会随时间演进，须在每拍开轮时动态读取）。
+- **不在本地跑编译**：严格遵照用户指令，通过远程 GitHub Actions CI 完成跨平台编译与测试核验。
+
+## 最终验收门
+
+- `scripts/check_src_ansi.sh --selftest` 绿；
+- `unit.app.app_boundary_gate` 架构分层守门绿；
+- 存量 `unit.gateway.*`、`unit.runtime.*`、`unit.app.assistant_task_face` 全绿；
+- 新增 `unit.gateway.proactive_heartbeat` 与渠道主动巡检用例在远程 CI（Windows + macOS）全绿；
+- 真机 QQ/飞书/企微实网推送标注“本地假渠道与远程 CI 已验，真账号实网待用户现场联调”。

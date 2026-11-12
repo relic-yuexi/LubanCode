@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -75,6 +76,12 @@ struct ToolExecutionContext {
     std::string artifact_dir;
     ToolInvocationIdentity invocation;
     std::optional<CommandExecutionLimits> command_limits;
+
+    // 本调用的墙钟死线(one-shot 墙钟预算单):整场预算的截止点。有值 =
+    // 肯合作的工具(run_command)把单次超时封顶到"剩余 - 保留余量",显式
+    // timeout_ms 同样受封;nullopt = 没预算(交互会话/子代理/单测),行为
+    // 与从前一字不差。
+    std::optional<std::chrono::steady_clock::time_point> deadline;
 };
 
 class Tool {

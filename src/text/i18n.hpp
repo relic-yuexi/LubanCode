@@ -77,12 +77,17 @@ std::string LanguageDisplayName(const std::string& code);
 // 值不是字符串——整文件跳过),每条一行,调用方决定打不打。
 std::vector<std::string> LoadLanguagePacksFromDir(const std::string& dir);
 
-// 纯函数:系统 locale 字符串(如 "zh-CN"/"en-US"/"ja-JP")映射到内置语言。
-// zh 前缀 → zh-CN,en 前缀 → en,认不出 → zh-CN。
+// 纯函数:系统 locale 字符串(如 "zh_CN.UTF-8"/"en-US"/"C.UTF-8")映射到内置
+// 语言。只有明确的 zh 前缀 → zh-CN;空(LANG 未设)、C、C.UTF-8、POSIX、
+// en 前缀与认不出的一律 → en。
 std::string MapLocaleToLanguage(std::string_view locale);
 
-// Windows 下按 GetUserDefaultUILanguage 探测,其余平台看 $LANG;都过
-// MapLocaleToLanguage 收口。
+// Windows 下按 GetUserDefaultUILanguage 探测,其余平台看 $LANG(过
+// MapLocaleToLanguage 收口)。
 std::string DetectSystemLanguage();
+
+// 语言定稿:显式设置(LUBANCODE_LANG / 配置 language)非空即用,空才跟
+// 系统探测(DetectSystemLanguage)。
+std::string ResolveLanguage(std::string_view explicit_setting);
 
 }  // namespace lubancode::text

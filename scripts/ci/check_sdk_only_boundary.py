@@ -93,6 +93,7 @@ CHANNEL_HOST_SOURCES = frozenset({
     "src/gateway/automation_store.cpp",
     "src/gateway/control_server.cpp",
     "src/gateway/doctor.cpp",
+    "src/gateway/heartbeat.cpp",
     "src/gateway/pairing_command.cpp",
     "src/gateway/process.cpp",
     "src/gateway/profile.cpp",

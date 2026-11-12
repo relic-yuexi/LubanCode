@@ -8,8 +8,12 @@
 // test_network_timeout.cpp 拿真 socket 钉着):
 //   - cancel 非空且置位:Write/Progress 回调里就地掐流,收场报
 //     ErrorKind::Cancelled,不当网络错;
-//   - 硬墙钟(request_hard_timeout_secs > 0):ProgressCallback 里比
-//     steady_clock 期限掐流,收场文案优先走 hard_timeout 档;
+//   - 无进展墙(request_hard_timeout_secs > 0):ProgressCallback 里比
+//     steady_clock 期限掐流,每收到响应体字节就把期限顺延一整格(见
+//     NoProgressDeadline);收场文案优先走 hard_timeout 档,Error 带
+//     hard_timeout 旁证;
+//   - 网络错发生在收到过响应体字节之后:Error 带 stream_started 旁证
+//     (重试环据此给"流中途断"封顶,见 model_request_recovery.hpp);
 //   - OPERATION_TIMEDOUT 按"收到过响应体字节没有"分型成连接超时/流空闲
 //     超时(CURLOPT 两处共用同一个错误码,只能靠旁证分);
 //   - 非 2xx:响应体攒进 Error(不喂 sink,免得分帧器瞎解析);攒量设帽
@@ -22,7 +26,9 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <functional>
 #include <map>
@@ -57,10 +63,45 @@ struct HttpStreamCall {
     std::string body;
     int connect_timeout_ms = 0;         // 连接阶段上限(毫秒)
     int stream_idle_timeout_secs = 0;   // 空闲读超时(秒,cpr::LowSpeed)
-    int request_hard_timeout_secs = 0;  // 硬墙钟(秒),<= 0 不设
+    int request_hard_timeout_secs = 0;  // 无进展墙(秒),<= 0 不设;语义见 NoProgressDeadline
     // 非 2xx 错误体接收帽(字节),合同见 kMaxErrorBodyBytes 注释。测试
     // 注小帽钉边界值;线上用缺省。
     std::size_t max_error_body_bytes = kMaxErrorBodyBytes;
+};
+
+// 无进展墙的期限账(request_hard_timeout_secs)。原先是"从请求发出起算、
+// 收字节也不顺延"的死墙,Qwen3 一类长思考模型一步流过 300 秒就被拦腰砍
+// 断、从头重生成——墙本意只掐挂死,不掐长。如今的语义:发出时记期限
+// now + timeout;此后每见到响应体进展(写回调收到非空数据,或进度回调里
+// 下载计数比上回大),期限顺延为 now + timeout。一个字节都不来,照样
+// 到点落锤,保住"cpr::Post 挂死、connect/idle 两闸都不响"的原始兜底。
+// 与 LowSpeed 空闲闸实质同义("连续 N 秒没字节"),区别在执行者:空闲闸
+// 是 libcurl 自家的速率检查,真机挂死现场它就没响过;这面墙是我们自己
+// 对 steady_clock 比的表,不信 libcurl 的判据,只借它的周期回调醒拍。
+// 两道并存,缺省墙(300s)比闸(60s)宽,常态下空闲闸先响,墙只兜底。
+// 纯账本,时间点由调用方递,单测可确定性推演。
+class NoProgressDeadline {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    // timeout_secs <= 0:不设墙,Expired 恒 false。
+    NoProgressDeadline(int timeout_secs, Clock::time_point now);
+
+    // 写回调收到一段响应体:bytes > 0 才算进展,期限顺延。
+    void OnBodyBytes(std::size_t bytes, Clock::time_point now);
+    // 进度回调报的累计下载量:比见过的最大值大才算进展,期限顺延。
+    void OnDownloadProgress(std::int64_t downloaded_now, Clock::time_point now);
+    // 到期(now >= 期限)即真;墙未启用恒假。
+    bool Expired(Clock::time_point now) const;
+
+    bool enabled() const { return enabled_; }
+    Clock::time_point deadline() const { return deadline_; }
+
+private:
+    bool enabled_ = false;
+    Clock::duration timeout_{};
+    Clock::time_point deadline_{};
+    std::int64_t max_downloaded_ = 0;
 };
 
 // 2xx 响应体回调:吃到一段调一段。返回 false = 协议已不可信,掐流(分帧
