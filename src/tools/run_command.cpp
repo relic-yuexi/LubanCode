@@ -1,6 +1,7 @@
 #include "tools/run_command.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -228,6 +229,20 @@ std::vector<std::pair<std::string, std::string>> FillMissingEnv(
         }
     }
     return missing;
+}
+
+int CapTimeoutToDeadlineMs(int requested_ms, std::optional<std::int64_t> remaining_ms) {
+    if (!remaining_ms.has_value()) {
+        return requested_ms;
+    }
+    // 封顶值先在 64 位里算,再夹回 int:剩余再多也不会越过 requested。
+    // 不用 std::max:Windows 头的 max 宏会把它咬坏。
+    const std::int64_t usable = *remaining_ms - kDeadlineCommandReserveMs;
+    const std::int64_t ceiling = usable > kDeadlineCommandFloorMs ? usable : kDeadlineCommandFloorMs;
+    if (static_cast<std::int64_t>(requested_ms) <= ceiling) {
+        return requested_ms;
+    }
+    return static_cast<int>(ceiling);
 }
 
 }  // namespace run_command_detail
@@ -583,10 +598,11 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
 Tool::Result RunCommandTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
     // context 的取消旗优先(本次调用真用的那根:主回合 ESC / 子代理的
     // CancelChain 合并旗);没递进来(旧调用方)退回 SetCancel 灌的那根。
-    return Run(input, context.cancel != nullptr ? context.cancel : cancel_);
+    return Run(input, context.cancel != nullptr ? context.cancel : cancel_, context.deadline);
 }
 
-Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel) {
+Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel,
+                                 std::optional<std::chrono::steady_clock::time_point> deadline) {
     if (!input.contains("command") || !input.at("command").is_string()) {
         return {"缺少必填参数 command(字符串)", true};
     }
@@ -650,6 +666,19 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
                         true};
             }
             timeout_ms = static_cast<int>(raw);
+        }
+    }
+    // 墙钟预算封顶(one-shot 墙钟预算单):默认值与显式值一并受封——到点
+    // 宿主进程会被评测侧直接杀掉,单条命令不许把整场的收尾时间吃光。
+    int budget_capped_from_ms = 0;  // 非 0 = 本次被预算压过,原值记下给超时文案
+    if (!run_in_background && deadline.has_value()) {
+        const std::int64_t remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              *deadline - std::chrono::steady_clock::now())
+                                              .count();
+        const int capped = run_command_detail::CapTimeoutToDeadlineMs(timeout_ms, remaining_ms);
+        if (capped < timeout_ms) {
+            budget_capped_from_ms = timeout_ms;
+            timeout_ms = capped;
         }
     }
 
@@ -875,8 +904,13 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
     }
     if (proc.timed_out) {
         std::ostringstream oss;
-        oss << "命令执行超时(超过 " << timeout_ms << " 毫秒),已强制终止。\n"
-            << "可改用以下策略：\n"
+        oss << "命令执行超时(超过 " << timeout_ms << " 毫秒),已强制终止。\n";
+        if (budget_capped_from_ms > 0) {
+            // 预算封顶压出来的超时:加大 timeout_ms 无用,明说,别让模型白重跑。
+            oss << "[墙钟预算所限:本次超时已从 " << budget_capped_from_ms << " 毫秒封顶到 " << timeout_ms
+                << " 毫秒,整场剩余时间不多;加大 timeout_ms 无效,请改用更快的检查或直接收尾]\n";
+        }
+        oss << "可改用以下策略：\n"
             << "1. 加大 timeout_ms 后重跑。\n"
             << "2. 传 run_in_background=true 后台运行，再用 background_output 查进度。\n"
             << "3. 首次构建检查依赖下载是否卡网；离线环境先备好 _deps。\n";
@@ -917,6 +951,9 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
         exited.outcome = "succeeded";
     }
     exited.details = nlohmann::json{{"exit_code", proc.exit_code}, {"timeout_ms", timeout_ms}};
+    if (budget_capped_from_ms > 0) {
+        exited.details["timeout_capped_by_budget"] = true;
+    }
     if (proc.output_truncated) {
         exited.details["output_truncated"] = true;
         exited.details["omitted_bytes"] = proc.omitted_bytes;

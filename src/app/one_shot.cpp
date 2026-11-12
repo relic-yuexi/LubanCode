@@ -30,6 +30,7 @@
 #include <nlohmann/json.hpp>
 #include "agent/compact.hpp"
 #include "agent/loop.hpp"
+#include "agent/unattended_guard.hpp"  // WallClockBudget/催验证续投源(one-shot 墙钟预算单)
 #include "peers/peer_session.hpp"
 #include "agent/prompts.hpp"
 #include "skills/workflow_recorder.hpp"
@@ -174,7 +175,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
             const lubancode::config::SettingsLocal& settings_local,
             const std::string& model_instructions, const std::string& soul_content,
-            const std::vector<std::string>& package_dirs, const std::string& harness_output) {
+            const std::vector<std::string>& package_dirs, const std::string& harness_output,
+            const std::optional<OneShotTimeBudget>& time_budget) {
     // app-server 防守(app-server 单:绝不能把子命令当单发问题送进 AskOnce
     // ——那会在协议管线上打出一坨终端文案,搅坏 stdout 分帧)。旗标在
     // ParseCliArgs/RunCli 两层都拦了,这里守最后一道:问题正文恰是裸
@@ -372,6 +374,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     prompt_options.unattended = true;
     prompt_options.auto_approve = auto_confirm;
     prompt_options.language = lubancode::cli::CurrentLanguage();
+    // 墙钟预算(one-shot 墙钟预算单):无人值守段末尾报总预算,模型好照着排活。
+    if (time_budget.has_value()) {
+        prompt_options.time_budget_secs = time_budget->total_secs;
+    }
 
     // 运行策略走统一 profile(规格根因一):输出上限三级解析(config >
     // provider > 模型目录),unset 交服务端默认——与交互会话同一只装配
@@ -667,6 +673,30 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         lubancode::runtime::AttachDefaultAsyncToolRuntime(
             *oneshot_service.runtime(), lubancode::config::ProviderWireName(config.wire));
         turn.async_tool_runtime = oneshot_service.runtime()->async_tool_runtime();
+    }
+    // 墙钟预算与收工前催验证(one-shot 墙钟预算单)。预算对象活到 RunTurn
+    // 返回之后(TurnWiring/看门狗只捏指针);语言档与无人值守段同一口径。
+    const bool unattended_chinese = lubancode::agent::UnattendedPrefersChinese(prompt_options.language);
+    std::optional<lubancode::agent::WallClockBudget> wall_budget;
+    if (time_budget.has_value()) {
+        wall_budget.emplace(time_budget->started, static_cast<std::int64_t>(time_budget->total_secs) * 1000,
+                            unattended_chinese);
+        turn.wall_budget = &*wall_budget;
+    }
+    {
+        // 收工前催验证:模型不带工具调用就收口时,写了没验/todo 未完就再
+        // 递一条 user 消息跑一轮(整场至多两回,剩不足 60 秒不催)。续跑
+        // 消息走 DriveTurn 的续投源,正规 user 消息落账,不在 loop 里硬塞。
+        lubancode::agent::VerifyNudgeOptions verify_options;
+        verify_options.agent = &loop;
+        verify_options.todo_state = todo_state;
+        verify_options.wall_budget = wall_budget.has_value() ? &*wall_budget : nullptr;
+        verify_options.chinese = unattended_chinese;
+        verify_options.on_nudge = [](int nudge_index) {
+            // stderr 出声,不污染被重定向的 stdout(评测日志里看得见催了几回)。
+            std::cerr << "[one-shot] 收工前催验证(第 " << nudge_index << " 回)\n";
+        };
+        turn.continuation = lubancode::agent::BuildVerifyNudgeContinuation(std::move(verify_options));
     }
     const int status = RunTurn(std::move(turn)).status;
     // 收口:turn 终态已由 RunTurn 的桥落账,这里封 run/session(§14.5);

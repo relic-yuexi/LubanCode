@@ -10,12 +10,14 @@
 #include "app/turn_runner.hpp"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <typeinfo>
 #include <utility>
 
@@ -23,6 +25,7 @@
 #include "agent/model_image_store.hpp"  // LandModelImage:on_model_image 落盘口的实现
 #include "agent/token_calibrator.hpp"  // DefaultTokenCalibrator:token 估算校准的进程级实例
 #include "agent/turn_harness.hpp"
+#include "agent/unattended_guard.hpp"  // WallClockBudget:one-shot 墙钟看门狗的死线
 #include "app/agent_view_registry.hpp"  // 按代理状态投影单 P1:收账/绘制分账
 #include "app/hook_runtime.hpp"
 #include "app/session_ui_dispatcher.hpp"  // 按代理状态投影单 P2:会话级 UI 调度
@@ -503,6 +506,8 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
     // 音频/blob 字节的落盘地。没开会话就不给,富二进制块由客户端按稳定
     // 错误收口(明败),不吞字节也不冒充落盘。
     wiring.tool_artifact_dir = ctx.tool_artifact_dir;
+    // one-shot 墙钟预算:步顶闸/工具结果附注/工具死线三处认这一只;空 = 没预算。
+    wiring.wall_budget = ctx.wall_budget;
 
     // agent 工具(注册了的话)需要这一轮现算好的转发逻辑:确认回调直接
     // 转发父级那份(三档确认模式照管子代理);usage 累进 usage_stats(统计
@@ -1248,9 +1253,45 @@ RunTurnResult RunTurn(TurnContext ctx) {
     if (ctx.after_turn_bridge_open) {
         ctx.after_turn_bridge_open();
     }
+    // 墙钟看门狗(one-shot 墙钟预算单):死线前 10 秒仍在跑(多半是一次
+    // 长请求在飞),置停止旗把流掐断——loop 按打断收场,本轮随后按预算
+    // 耗尽交账,单发的 Close 与 --output 导出赶在评测侧杀进程前做完。
+    // 没预算不起线程。
+    std::atomic<bool> wall_deadline_fired{false};
+    struct WallDeadlineWatchdog {
+        std::mutex mutex;
+        std::condition_variable wake;
+        bool stop = false;
+        std::optional<std::thread> worker;
+        void Stop() {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                stop = true;
+            }
+            wake.notify_all();
+            if (worker.has_value() && worker->joinable()) {
+                worker->join();
+            }
+            worker.reset();
+        }
+        ~WallDeadlineWatchdog() { Stop(); }
+    } wall_watchdog;
+    if (ctx.wall_budget != nullptr) {
+        const auto fire_at =
+            ctx.wall_budget->deadline() - std::chrono::milliseconds(lubancode::agent::kWallBudgetHardCancelReserveMs);
+        wall_watchdog.worker.emplace([&wall_watchdog, &wall_deadline_fired, &cancel_flag, fire_at]() {
+            std::unique_lock<std::mutex> lock(wall_watchdog.mutex);
+            if (!wall_watchdog.wake.wait_until(lock, fire_at, [&wall_watchdog]() { return wall_watchdog.stop; })) {
+                wall_deadline_fired.store(true, std::memory_order_release);
+                cancel_flag.store(true, std::memory_order_release);
+            }
+        });
+    }
     try {
         lubancode::agent::DriveOptions drive_options;
         drive_options.cancel = &cancel_flag;
+        // 续投源(one-shot 收工前催验证):空 = 单轮即收(交互会话照旧)。
+        drive_options.continuation = ctx.continuation;
         drive = lubancode::agent::DriveTurn(loop, wiring, std::move(prepared_input->message), drive_options);
         if (!drive.ok) {
             result = std::unexpected(drive.error);
@@ -1275,6 +1316,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // Run() 已经返回,不管是不是被打断——先收输入线程，保证它不再碰转录
     // 快照；也保证下一次 ReadLine() 前不再抢控制台输入。心跳线程随后收。
     listener.Stop();
+    wall_watchdog.Stop();  // 墙钟看门狗随 Run 段收(没起就是空过)
     // P3(审批的 turn 绑定收口):监听线程的尾账已 DenyAllPending,这里再
     // 按本轮 canonical 号收一次——防御别名路(续跑轮的 wiring 拷贝里还捏
     // 着旧闭包),本轮的悬账随本轮走,future 不悬死工具线程。
@@ -1430,6 +1472,15 @@ RunTurnResult RunTurn(TurnContext ctx) {
                   << trf("error.step_limit", result->steps_used) << theme.reset << "\n";
         out.status = 1;
         finish_turn_chrome(lubancode::cli::TurnFooterTone::Failed);  // 预算耗尽也是 Failed
+        return out;
+    }
+    if (drive.time_budget_exhausted || wall_deadline_fired.load(std::memory_order_acquire)) {
+        // 墙钟预算耗尽(one-shot 墙钟预算单):步顶闸不再发请求,或看门狗
+        // 掐断了在飞的那次。与步数闸同一口径——预算耗尽,不是用户中止;
+        // 打一行、status=1、Failed 收口,单发随后照常 Close 与导出。
+        TermErr() << theme.error << tr("error.prefix") << tr("error.time_budget") << theme.reset << "\n";
+        out.status = 1;
+        finish_turn_chrome(lubancode::cli::TurnFooterTone::Failed);
         return out;
     }
     out.cancelled = result->cancelled;

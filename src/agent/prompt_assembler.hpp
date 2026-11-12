@@ -101,6 +101,9 @@ struct PromptOptions {
     bool auto_approve = false;
     // 无人值守段的语言:zh 前缀或空给中文版,其余给英文版。
     std::string language;
+    // 墙钟预算(one-shot 墙钟预算单):有值 = 无人值守段末尾添一句"总共约
+    // N 秒,照预算排活"。只在 unattended 下生效;空 = 不提。
+    std::optional<int> time_budget_secs;
     // ---- Prompt Profile(阶段 2) ----
     std::string profile;  // Profile 名;空或 "default" = 不选,走隐式 default
     // 项目模块目录(<项目根>/.lubancode/prompts)。只有"项目选中 Profile
@@ -232,6 +235,8 @@ std::string ModeInstructionSegment(bool plan_mode);
 // 无人值守段(one-shot):modes/unattended-zh.md 或 unattended-en.md 的嵌入
 // 版正文,同模式段一样宿主内置、不读用户目录。language 取 zh 前缀或空给
 // 中文版,其余给英文版。
-std::string UnattendedInstructionSegment(const std::string& language);
+// time_budget_secs 有值时末尾添一句总预算(one-shot 墙钟预算单)。
+std::string UnattendedInstructionSegment(const std::string& language,
+                                         std::optional<int> time_budget_secs = std::nullopt);
 
 }  // namespace lubancode::agent
