@@ -614,7 +614,9 @@ struct Error {
     ErrorKind kind = ErrorKind::Network;
     std::string message;
     int http_status = 0;  // kind == HttpStatus 时才有意义
-    std::string api_code;  // kind == Api 时的 provider 稳定错误码(没有则空)
+    // kind == Api 时的 provider 稳定错误码(没有则空);HttpStatus 超窗报文
+    // 经 TagHttpContextOverflow 补成 context_length_exceeded,其余 HttpStatus 为空。
+    std::string api_code;
     // kind == Network 时传输层留的两枚旁证(重试封顶用,见
     // model_request_recovery.hpp 的 IsCostlyNetworkFailure):
     // stream_started = 断在收到过响应体字节之后;hard_timeout = 无进展墙

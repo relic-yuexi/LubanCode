@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -67,6 +68,22 @@ bool IsRetryableError(const Error& error);
 // 被拒一次,恢复必须走"输入严格更小"的路(compact/降档/裁输入)。loop
 // 与压缩客户端(SampleModelV3CompactClient)共用这一张表,不各抄一份。
 bool IsInputContextOverflowCode(std::string_view api_code);
+
+// 自部署端点的 HTTP 超窗识别(Terminal-Bench 自部署单):vLLM/SGLang/
+// llama.cpp/Ollama 超窗时不给稳定码,只回 400/413 + 人话。状态码须是
+// 400/413,报文(大小写不敏感)含各家固定的"上下文装不下"句子才算;普通
+// 400(参数错、鉴权错)不误认。
+bool IsHttpContextOverflowBody(int http_status, std::string_view body);
+
+// 从超窗报文里读出服务端的真窗口:"maximum context length is N"(vLLM/
+// OpenAI)、"model's context length (N tokens)"(SGLang)、"n_ctx": N
+// (llama.cpp)。读不出正整数给空。
+std::optional<std::size_t> ParseContextLimitFromOverflowBody(std::string_view body);
+
+// 后端出口的补码:HttpStatus 错误且 IsHttpContextOverflowBody 命中、api_code
+// 尚空时,补成 "context_length_exceeded",让它与官方 provider 超窗走同一条
+// 恢复路(IsInputContextOverflowCode 那张表)。其余错误原样不动。
+void TagHttpContextOverflow(Error& error);
 
 // 重试阶梯:五次失败分别等 1~2s / 4~8s / 15~30s / 30~60s /
 // 60~120s,均匀抖动;单次等待不超过 2 分钟。attempt = 刚失败的

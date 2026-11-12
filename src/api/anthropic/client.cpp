@@ -11,6 +11,7 @@
 
 #include "api/anthropic/events.hpp"
 #include "api/http_stream_transport.hpp"  // 批六:PostSseStream/DumpRequestBody,四家共用的传输骨架
+#include "api/model_request_recovery.hpp"  // TagHttpContextOverflow:自部署端点超窗 400 补码
 #include "api/sse_framing.hpp"
 #include "platform/log_sink.hpp"  // BuildThinkingJson 的档位警告仍在这边打
 
@@ -505,9 +506,13 @@ std::expected<void, Error> AnthropicBackend::send_stream(
                               "本次请求不自动改发;可换端点/模型,或将配置 deferred_tool_mode 改为 "
                               "proxy_reference(下一轮生效,切换会开新 cache epoch)。";
             }
+            TagHttpContextOverflow(err);
             return std::unexpected(std::move(err));
         }
-        return std::unexpected(std::move(streamed.error()));
+        // 超窗 400(prompt is too long 一类)补成超窗稳定码,走压缩恢复路。
+        api::Error error = std::move(streamed.error());
+        TagHttpContextOverflow(error);
+        return std::unexpected(std::move(error));
     }
 
     for (auto& event : parser.Finish()) {

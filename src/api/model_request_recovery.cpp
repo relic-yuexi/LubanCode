@@ -7,6 +7,7 @@
 #include <array>
 #include <iterator>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <string_view>
 #include <type_traits>
@@ -82,6 +83,94 @@ bool IsInputContextOverflowCode(std::string_view api_code) {
     };
     return std::find(std::begin(kOverflowCodes), std::end(kOverflowCodes), api_code) !=
            std::end(kOverflowCodes);
+}
+
+namespace {
+
+// 超窗报文比对用的 ASCII 小写副本(各家文案大小写不一)。
+std::string LowerAsciiCopy(std::string_view text) {
+    std::string out(text);
+    for (char& c : out) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return out;
+}
+
+}  // namespace
+
+bool IsHttpContextOverflowBody(int http_status, std::string_view body) {
+    // 自部署端点(vLLM/SGLang/llama.cpp/Ollama)超窗不发稳定码,只回
+    // HTTP 400/413 + 一段人话。这里按状态码收口,再认几句各家固定文案;
+    // 文案只收"明说上下文装不下"的句子,单提 context/token 的不算。
+    if (http_status != 400 && http_status != 413) return false;
+    static constexpr std::string_view kOverflowPhrases[] = {
+        "context_length_exceeded",                // OpenAI 及照抄它的兼容端(400 体里的 code)
+        "context_window_exceeded",
+        "input_context_overflow",
+        "maximum context length",                 // vLLM / OpenAI:maximum context length is N tokens
+        "context length exceeded",                // SGLang / 各家转发层
+        "exceeds the context window",
+        "exceeds the available context size",     // llama.cpp server
+        "exceed_context_size_error",              // llama.cpp server 的 type
+        "longer than the model's context length", // SGLang:input (M tokens) is longer than ...
+        "exceeds the context length",             // Ollama
+        "prompt is too long",                     // Anthropic 系:prompt is too long: M tokens > N maximum
+    };
+    const std::string lowered = LowerAsciiCopy(body);
+    for (const auto phrase : kOverflowPhrases) {
+        if (lowered.find(phrase) != std::string::npos) return true;
+    }
+    return false;
+}
+
+std::optional<std::size_t> ParseContextLimitFromOverflowBody(std::string_view body) {
+    // 能报出窗口数的三种写法:vLLM/OpenAI 的 "maximum context length is N",
+    // SGLang 的 "model's context length (N tokens)",llama.cpp 错误体里的
+    // "n_ctx": N。标记后只容空白/冒号,紧接的数字(允许千分位逗号)
+    // 才算;读不出正整数就给空,不猜。
+    static constexpr std::string_view kMarkers[] = {
+        "maximum context length is",
+        "model's context length (",
+        "\"n_ctx\"",
+    };
+    const std::string lowered = LowerAsciiCopy(body);
+    for (const auto marker : kMarkers) {
+        std::size_t pos = lowered.find(marker);
+        while (pos != std::string::npos) {
+            std::size_t i = pos + marker.size();
+            while (i < lowered.size() && (lowered[i] == ' ' || lowered[i] == ':' || lowered[i] == '\t')) ++i;
+            std::size_t value = 0;
+            bool any_digit = false;
+            bool overflowed = false;
+            while (i < lowered.size()) {
+                const char c = lowered[i];
+                if (c >= '0' && c <= '9') {
+                    any_digit = true;
+                    if (value > (static_cast<std::size_t>(1) << 40)) overflowed = true;
+                    value = value * 10 + static_cast<std::size_t>(c - '0');
+                } else if (c == ',' && any_digit && i + 1 < lowered.size() && lowered[i + 1] >= '0' &&
+                           lowered[i + 1] <= '9') {
+                    // 千分位:"131,072 tokens"
+                } else {
+                    break;
+                }
+                ++i;
+            }
+            if (any_digit && !overflowed && value > 0) return value;
+            pos = lowered.find(marker, pos + marker.size());
+        }
+    }
+    return std::nullopt;
+}
+
+void TagHttpContextOverflow(Error& error) {
+    // 只给 HTTP 状态类错误补码:Api 类本就带 provider 稳定码,不覆写。
+    // 补上 context_length_exceeded 后,下游(loop 的 SendOverflow 相、压缩
+    // 客户端)认 IsInputContextOverflowCode 那一张表即可,不另开分支。
+    if (error.kind != ErrorKind::HttpStatus || !error.api_code.empty()) return;
+    if (IsHttpContextOverflowBody(error.http_status, error.message)) {
+        error.api_code = "context_length_exceeded";
+    }
 }
 
 bool IsRetryableError(const Error& error) {

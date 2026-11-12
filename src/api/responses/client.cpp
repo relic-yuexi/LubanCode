@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include "api/http_stream_transport.hpp"  // 批六:PostSseStream/DumpRequestBody,四家共用的传输骨架
+#include "api/model_request_recovery.hpp"  // TagHttpContextOverflow:自部署端点超窗 400 补码
 #include "api/responses/events.hpp"
 #include "api/responses/request.hpp"
 #include "api/sse_framing.hpp"
@@ -103,6 +104,8 @@ std::expected<void, Error> ResponsesBackend::send_stream(
             error.message =
                 "图片帧超过 SSE 单帧上限(8 MiB),已断开;这张图过大,流式收不下,可试更小的尺寸或更低的质量档";
         }
+        // 兼容端超窗只回 400 + 人话时补成超窗稳定码(见 TagHttpContextOverflow)。
+        TagHttpContextOverflow(error);
         return std::unexpected(std::move(error));
     }
 
