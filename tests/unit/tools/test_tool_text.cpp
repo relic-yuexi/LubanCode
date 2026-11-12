@@ -209,12 +209,17 @@ const char* kRunCommandDescBefore =
     "命令跑完时下一次给提示符会打一行完成通知。之后用 background_output 工具(传 task_id)"
     "查状态/读输出,stop_background 工具收尾。";
 #else
+// Terminal-Bench 加固单:POSIX 默认 shell 改 bash、非交互环境、超量留首尾,文案随改。
 const char* kRunCommandDescBefore =
-    "在 shell(/bin/sh)里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。"
-    "按 POSIX sh 语法写命令。执行前要经用户确认。超时会被强制杀掉。"
-    "构建/configure/测试类命令默认 900000 毫秒(15 分钟),其余默认 120000 毫秒(2 分钟);"
+    "在 shell 里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。"
+    "默认用 bash(/bin/bash -c,不读 rc 文件),本机没有 bash 才回落 /bin/sh;"
+    "shell=sh 可强制走 POSIX sh。命令在非交互环境里跑:stdin 接 /dev/null,"
+    "已设 DEBIAN_FRONTEND=noninteractive、PIP_NO_INPUT=1、GIT_TERMINAL_PROMPT=0、PAGER=cat 等,"
+    "要交互输入的命令请改用 -y 之类的非交互参数。执行前要经用户确认。超时会被强制杀掉。"
+    "构建/configure/装依赖/测试类命令默认 900000 毫秒(15 分钟),其余默认 120000 毫秒(2 分钟);"
     "预计更久的长命令请显式传 timeout_ms,或传 run_in_background=true 后台运行并用 "
-    "background_output 轮询。"
+    "background_output 轮询。输出超过 2MB 时只保留前 1MB 与后 1MB,中间注明省略字节数,"
+    "命令照常跑完。"
     "起 dev server、watch 进程这类要跨命令、跨调用存活的长命进程,或者想后台跑完不阻塞对话的短任务,"
     "传 run_in_background=true:不等它跑完,spawn 成功立刻返回 task_id、PID 和日志文件路径;"
     "命令跑完时下一次给提示符会打一行完成通知。之后用 background_output 工具(传 task_id)"
@@ -307,9 +312,12 @@ TEST_CASE("命令族批: run_command/background_output/stop_background 缺省与
           "要执行的命令,按所选 shell 的语法写(默认 PowerShell 语法)");
     CHECK(rs["properties"]["shell"]["description"] == "用哪个 shell 执行,不填默认 powershell");
 #else
-    CHECK(rs["properties"]["command"]["description"] == "要执行的命令,按 POSIX sh 语法写");
+    CHECK(rs["properties"]["command"]["description"] ==
+          "要执行的命令,按所选 shell 的语法写(默认 Bash 语法;本机没有 bash 时为 POSIX sh)");
     CHECK(rs["properties"]["shell"]["description"] ==
-          "用哪个 shell 执行,本平台只有 sh(/bin/sh);powershell/cmd 是 Windows 专属");
+          "用哪个 shell 执行。不填时本机有 bash 就用 bash(/bin/bash),没有再用 sh(/bin/sh);"
+          "sh 强制走 POSIX sh(Debian/Ubuntu 上是 dash,不认 source、[[ ]])。"
+          "powershell/cmd 是 Windows 专属");
 #endif
     CHECK(rs["properties"]["timeout_ms"]["description"] ==
           "超时时间,单位毫秒。不填时构建/configure/测试类命令默认 900000(15 分钟),其余默认 "
@@ -356,7 +364,13 @@ TEST_CASE("命令族批: en 下 run_command/background_output/stop_background �
               "omit for the default powershell") != std::string::npos);
 #else
     CHECK(rs["properties"]["command"]["description"].get<std::string>().find(
-              "write it in POSIX sh syntax") != std::string::npos);
+              "Bash syntax by default") != std::string::npos);
+    // POSIX 文案不许带 Windows 残留(默认 PowerShell 语法那句只属于 Windows 档)。
+    CHECK(rs["properties"]["command"]["description"].get<std::string>().find("PowerShell") ==
+          std::string::npos);
+    CHECK(rs["properties"]["shell"]["description"].get<std::string>().find("only has sh") ==
+          std::string::npos);
+    CHECK(run.description().find("PowerShell") == std::string::npos);
 #endif
     CHECK(rs["properties"]["run_in_background"]["description"].get<std::string>().find(
               "true = run in the background") == 0);
