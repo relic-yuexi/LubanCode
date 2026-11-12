@@ -905,6 +905,8 @@ int RunCli(const std::vector<std::string>& args) {
             gateway_args.misfire = parsed_cli.gateway.misfire;
             gateway_args.deadline_ms = parsed_cli.gateway.deadline_ms;
             gateway_args.heartbeat = parsed_cli.gateway.heartbeat;
+            gateway_args.watch_paths = parsed_cli.gateway.watch_paths;
+            gateway_args.clear_watch = parsed_cli.gateway.clear_watch;
             gateway_args.expected_revision = parsed_cli.gateway.expected_revision;
             gateway_args.source_session_id = parsed_cli.gateway.source_session_id;
             gateway_args.source_task_id = parsed_cli.gateway.source_task_id;

@@ -84,6 +84,8 @@ struct GatewayJobSchedulePatch {
     std::int64_t deadline_ms = 0;
     bool set_notify_on_change = false;
     bool notify_on_change = false;      // heartbeat 口:结果未变不投递
+    bool set_watch_paths = false;
+    std::vector<std::string> watch_paths;  // 前置变化探针相对路径(空数组 = 清空)
 };
 
 struct GatewayJobAddCommand {

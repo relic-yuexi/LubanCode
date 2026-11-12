@@ -123,6 +123,8 @@ struct GatewayCliArgs {
     std::string misfire;              // --misfire(coalesce|skip;缺省 coalesce)
     long long deadline_ms = 0;        // --deadline(0 = 不设)
     bool heartbeat = false;           // --heartbeat(notify_on_change)
+    std::vector<std::string> watch_paths;  // --watch <相对路径>(可重复,最多 16 项)
+    bool clear_watch = false;         // --clear-watch(update 清空 watch_paths)
     long long expected_revision = 0;  // --rev(update/pause/resume/cancel 的 CAS)
     std::string source_session_id;    // import-loop 位置参数(原 /loop 会话)
     std::string source_task_id;       // import-loop --task(原 loop-N)

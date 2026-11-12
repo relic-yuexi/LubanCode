@@ -918,6 +918,7 @@ add_library(lubancode_engine STATIC
   # V2:周期调度引擎(interval/cron/时区 DST/misfire,纯函数零 IO)。
   src/gateway/automation_store.cpp
   src/gateway/automation_schedule.cpp
+  src/gateway/heartbeat.cpp
   src/gateway/reply_outbox.cpp
   src/gateway/work_pump.cpp
   # 常驻总装 V4:服务安装与常驻运维——平台服务单元生成(schtasks XML/

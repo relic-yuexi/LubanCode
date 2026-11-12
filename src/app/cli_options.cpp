@@ -7,6 +7,7 @@
 #include <set>
 #include <string>
 
+#include "gateway/heartbeat.hpp"
 #include "gateway/profile.hpp"
 
 namespace lubancode::app {
@@ -515,6 +516,19 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                     gateway.heartbeat = true;
                     continue;
                 }
+                if (gateway.verb == "job" && args[extra] == "--watch") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--watch 需要工作区内相对路径(如 src/ 或 status.txt)";
+                        return parsed;
+                    }
+                    gateway.watch_paths.push_back(args[++extra]);
+                    continue;
+                }
+                if (gateway.verb == "job" && args[extra] == "--clear-watch") {
+                    gateway.clear_watch = true;
+                    continue;
+                }
                 if (gateway.verb == "job" && args[extra] == "--rev") {
                     if (extra + 1 >= args.size()) {
                         parsed.action = CliAction::BadGateway;
@@ -564,10 +578,34 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                 parsed.error_text =
                     "gateway " + gateway.verb + " 认不得参数 \"" + args[extra] +
                     "\":只认 --profile <名> --json --gateway-root <路径>(job 族另认 "
-                    "--at/--every/--cron/--tz/--misfire/--deadline/--heartbeat/--rev/--task/"
-                    "--prompt/--id/--idem;doctor 另认 --wait-ready/--ack-safe-mode;logs 另认 "
-                    "--tail)";
+                    "--at/--every/--cron/--tz/--misfire/--deadline/--heartbeat/--watch/"
+                    "--clear-watch/--rev/--task/--prompt/--id/--idem;doctor 另认 "
+                    "--wait-ready/--ack-safe-mode;logs 另认 --tail)";
                 return parsed;
+            }
+            if (gateway.verb == "job" && gateway.clear_watch && !gateway.watch_paths.empty()) {
+                parsed.action = CliAction::BadGateway;
+                parsed.error_text = "gateway job: --watch 与 --clear-watch 不能同时给";
+                return parsed;
+            }
+            if (gateway.verb == "job" && gateway.clear_watch && gateway.job_verb != "update") {
+                parsed.action = CliAction::BadGateway;
+                parsed.error_text = "--clear-watch 只在 gateway job update 下有效";
+                return parsed;
+            }
+            if (gateway.verb == "job" && !gateway.watch_paths.empty()) {
+                if (gateway.job_verb != "add" && gateway.job_verb != "update") {
+                    parsed.action = CliAction::BadGateway;
+                    parsed.error_text = "--watch 只在 gateway job add / update 下有效";
+                    return parsed;
+                }
+                const std::string watch_err = lubancode::gateway::ValidateWatchPaths(
+                    gateway.watch_paths, &gateway.watch_paths);
+                if (!watch_err.empty()) {
+                    parsed.action = CliAction::BadGateway;
+                    parsed.error_text = "gateway job --watch 非法: " + watch_err;
+                    return parsed;
+                }
             }
             // 写操作族的前置形状检查(细校验归活 Gateway 的账面;这里只挡
             // 明显缺参:CAS 必须显式、import-loop 必须带来源与周期)。
