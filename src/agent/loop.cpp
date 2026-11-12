@@ -2227,7 +2227,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 绝不重跑工具。用户取消与不可重试错误立即收口,退避等待中也可打断。
         // 主路与子路共用这一环:两路都经 AgentLoop::Run,不在 AgentTool 里
         // 另抄私货(单子 §8.2)。
-        api::MessageAssembler assembler;
+        const bool lenient_tool_input = agent.profile_.lenient_tool_input;
+        api::MessageAssembler assembler{lenient_tool_input};
         bool stream_error = false;
         std::string stream_error_message;
         std::string stream_error_code;
@@ -2269,7 +2270,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 一次尝试:重置局部 -> 轨迹 prepared/sent -> 发流 -> 放闸尾巴。
         const auto run_one_attempt = [&](api::ModelRequestAttempt& recovery_attempt)
                                           -> std::expected<void, api::Error> {
-            assembler = api::MessageAssembler{};
+            assembler = api::MessageAssembler{lenient_tool_input};
             stream_error = false;
             stream_error_message.clear();
             stream_error_code.clear();
@@ -2550,9 +2551,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                     // 入参兜底:schema 浅检不过的不提前派发,留到批次
                                     // 收口按 inline 合成 is_error 结果(与收口时同一检)。
                                     api::ToolUseBlock done = completed;
-                                    PrecheckModelToolCall(registry_, tool_filter_, done);
-                                    if (!done.input_error.empty()) {
-                                        break;
+                                    if (lenient_tool_input) {
+                                        PrecheckModelToolCall(registry_, tool_filter_, done);
+                                        if (!done.input_error.empty()) {
+                                            break;
+                                        }
                                     }
                                     ToolBatchGate::StreamCallContext stream_context;
                                     stream_context.turn_id = wiring.turn_id;
@@ -2957,8 +2960,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         for (const auto& block : last_assistant.content) {
             if (std::holds_alternative<api::ToolUseBlock>(block)) {
                 batch_calls.push_back(std::get<api::ToolUseBlock>(block));
-                // 入参兜底:schema 浅检与数字字符串宽容转换(批内副本)。
-                PrecheckModelToolCall(registry_, tool_filter_, batch_calls.back());
+                if (lenient_tool_input) {
+                    // 入参兜底:schema 浅检与数字字符串宽容转换(批内副本)。
+                    PrecheckModelToolCall(registry_, tool_filter_, batch_calls.back());
+                }
             }
         }
         const bool gate_armed = wiring.tool_batch_gate != nullptr && batch_calls.size() > 0 &&

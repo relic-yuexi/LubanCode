@@ -714,6 +714,7 @@ struct Session::Impl final : rt::InteractionBroker {
         profile.system_prompt = options.system_prompt;
         profile.runtime.max_steps_per_turn = options.max_steps_per_turn;
         profile.runtime.context_window_tokens = options.context_window_tokens;
+        profile.lenient_tool_input = false;
         detail::SessionSubagents* child_module_ptr = nullptr;
         if ((*child_plan)->enabled()) {
             auto children = detail::SessionSubagents::Build(*child_plan,

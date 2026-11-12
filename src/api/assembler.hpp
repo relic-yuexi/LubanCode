@@ -14,6 +14,9 @@ namespace lubancode::api {
 
 class MessageAssembler {
 public:
+    MessageAssembler() = default;
+    explicit MessageAssembler(bool lenient_tool_args) : lenient_tool_args_(lenient_tool_args) {}
+
     // 喂一个事件:
     //   TextDelta         —— 拼进当前正在累积的文本块
     //   ThinkingDelta     —— 拼进当前正在累积的思考块(text + signature)
@@ -118,6 +121,7 @@ private:
     };
     std::vector<TruncationSuspect> truncation_suspects_;
     int idless_tool_calls_dropped_ = 0;
+    bool lenient_tool_args_ = true;
 
     void FinalizeCurrent();
 };

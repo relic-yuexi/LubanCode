@@ -169,6 +169,10 @@ struct AgentProfile {
     // 假 = 本 Agent 不走原生路(Disabled/LegacyExpand/ProxyReference 行为
     // 与从前一字不差)。
     bool native_deferred_tools = false;
+    // 工具入参宽松兜底(坏 JSON 修补 + 执行前顶层 schema 浅检与数字串宽容转换):
+    // CLI/单发/网关等终端宿主默认开;LubanCore SDK 会话显式关掉,保留确定性
+    // 非启发式入参契约(Action 钩子原样观测/改写,工具自验入参)。
+    bool lenient_tool_input = true;
 };
 
 // 环境接线(批四·病十二:接线类的门收成一只)。这些都是"宿主把外面的

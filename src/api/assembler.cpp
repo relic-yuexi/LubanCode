@@ -20,7 +20,7 @@ void MessageAssembler::FinalizeCurrent() {
         // loop 见了不执行、合成 is_error 结果回喂。服务端块不走修补(那是
         // provider 执行过的事实,本地不改写)。
         ToolArgsRepairResult parsed;
-        if (open_tool_->is_server) {
+        if (open_tool_->is_server || !lenient_tool_args_) {
             if (!raw.empty()) {
                 try {
                     input = nlohmann::json::parse(raw);
@@ -55,22 +55,26 @@ void MessageAssembler::FinalizeCurrent() {
         } else {
             ToolUseBlock block{open_tool_->id, open_tool_->name, std::move(input), open_tool_->caller};
             block.async_call = open_tool_->async_call;
-            if (!parsed.ok) {
-                block.input_error = BuildToolArgsParseErrorText(open_tool_->name, parsed.error, raw);
-                block.input_error_code = kErrToolInputInvalidJson;
-            } else if (parsed.repaired) {
-                for (const std::string& repair : parsed.repairs) {
-                    block.input_repair += (block.input_repair.empty() ? "" : "、") + repair;
+            if (lenient_tool_args_) {
+                if (!parsed.ok) {
+                    block.input_error = BuildToolArgsParseErrorText(open_tool_->name, parsed.error, raw);
+                    block.input_error_code = kErrToolInputInvalidJson;
+                } else if (parsed.repaired) {
+                    for (const std::string& repair : parsed.repairs) {
+                        block.input_repair += (block.input_repair.empty() ? "" : "、") + repair;
+                    }
                 }
-            }
-            // 截断嫌疑(修不成,或靠补齐末尾才救回):stop_reason 要到
-            // MessageDone 才知道,先记下块位与原文,收口时再裁。
-            if (!parsed.ok || parsed.closed_truncation) {
-                truncation_suspects_.push_back(TruncationSuspect{content_.size(), raw});
-            }
-            // 流式提前档探针(异步工具单 P2 §7):单枚 call item 完整即报。
-            // 只报严格一次过的——修补过的、坏掉的等整份消息收口再裁,不提前派发。
-            if (parsed.ok && !parsed.repaired) {
+                // 截断嫌疑(修不成,或靠补齐末尾才救回):stop_reason 要到
+                // MessageDone 才知道,先记下块位与原文,收口时再裁。
+                if (!parsed.ok || parsed.closed_truncation) {
+                    truncation_suspects_.push_back(TruncationSuspect{content_.size(), raw});
+                }
+                // 流式提前档探针(异步工具单 P2 §7):单枚 call item 完整即报。
+                // 只报严格一次过的——修补过的、坏掉的等整份消息收口再裁,不提前派发。
+                if (parsed.ok && !parsed.repaired) {
+                    completed_tool_uses_.push_back(block);
+                }
+            } else {
                 completed_tool_uses_.push_back(block);
             }
             content_.push_back(std::move(block));
