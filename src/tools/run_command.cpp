@@ -907,7 +907,7 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
     }
 
     const platform::OutputOverflow overflow_mode =
-        limits ? platform::OutputOverflow::KillOnOverflow : platform::OutputOverflow::KeepHeadTail;
+        limits ? platform::OutputOverflow::KillTree : platform::OutputOverflow::KeepHeadTail;
     platform::ProcessResult proc;
     if (is_cmd) {
         // RunShellCommand 内部已把 cmd.exe 的系统 ANSI 代码页输出转成 UTF-8
@@ -988,9 +988,9 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
 
     // 前台 POSIX:cwd 走操作系统参数(子进程 exec 前 chdir),命令文本不
     // 拼 cd——验收口径"cwd 不再拼进 shell 字符串"的前台半边。宿主带限额画像
-    // 时走 KillOnOverflow,缺省走 KeepHeadTail(留首尾、不杀)。
+    // 时走 KillTree,缺省走 KeepHeadTail(留首尾、不杀)。
     const platform::OutputOverflow overflow_mode =
-        limits ? platform::OutputOverflow::KillOnOverflow : platform::OutputOverflow::KeepHeadTail;
+        limits ? platform::OutputOverflow::KillTree : platform::OutputOverflow::KeepHeadTail;
     platform::ProcessResult proc =
         platform::RunProcess({shell_exe, "-c", command}, timeout_ms, effective_cancel,
                              limits ? platform::EnvPairs{} : noninteractive_env, max_output_bytes,
