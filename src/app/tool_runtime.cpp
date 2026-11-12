@@ -30,6 +30,7 @@
 #include "tools/path_utils.hpp"
 #include "tools/read_file.hpp"
 #include "tools/run_command.hpp"
+#include "tools/terminal_session_tool.hpp"  // POSIX 交互终端(PTY 会话);Windows 不注册
 #include "tools/search.hpp"
 #include "tools/search_ripgrep.hpp"  // BundledRipgrepRunner:SearchTool 的 P0-2 装配注入口
 #include "tools/skill_tool.hpp"
@@ -106,6 +107,11 @@ lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode
     // 是纯进程内单例查询/控制,无外部依赖,直接进基础表(子代理也能用)。
     registry.Register(std::make_unique<lubancode::tools::BackgroundOutputTool>());
     registry.Register(std::make_unique<lubancode::tools::StopBackgroundTool>());
+#ifndef _WIN32
+    // terminal:PTY 交互会话(vim/REPL/安装向导/ssh/gdb)。会话台账是进程级
+    // 单例,与后台命令三件套同理直接进基础表;Windows 本单不做 ConPTY,不挂。
+    registry.Register(std::make_unique<lubancode::tools::TerminalSessionTool>());
+#endif
     registry.Register(std::make_unique<lubancode::tools::WriteFileTool>());
     registry.Register(std::make_unique<lubancode::tools::EditFileTool>());
     // ripgrep 迁移单 P0-5:search 生产主路(装配与 SearchTool 默认构造同一款
