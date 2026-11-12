@@ -1,6 +1,6 @@
 # 主动智能巡检：Heartbeat 语义静默、前置变化探针与 IM 渠道闭环设计
 
-- 状态：代码与测试已落盘并推送 `ci/proactive-heartbeat`，待 GitHub Actions 账单解锁后重跑远程 CI（Run `43191748170` 因账号 billing lock 未分配 runner）
+- 状态：已完成（远程 CI Run `43192066948` `macos-clang` + `windows-msvc` 全绿验收）
 - 日期：2026-11-12
 - 级别：P1（常驻助理体验、Token 成本治理与多渠道主动巡检闭环）
 - 范围：`src/gateway/heartbeat.hpp`、`src/gateway/heartbeat.cpp`、`src/gateway/automation_store.hpp`、`src/gateway/automation_store.cpp`、`src/gateway/work_pump.hpp`、`src/gateway/work_pump.cpp`、`src/runtime/automation_pump.cpp`、`src/runtime/channel_work_pump.cpp`、`src/runtime/channel_automation.cpp`、`src/cli/gateway_command.hpp`、`src/cli/gateway_command.cpp`、`src/app/cli_options.hpp`、`src/app/cli_options.cpp`、`src/app/cli_app.cpp`、`src/app/assistant_tasks.cpp`、`CMakeLists.txt` 及对应单元/总装测试册
@@ -95,7 +95,7 @@
 
 ### P2：CLI / Web 助理参数透传与远程 CI 全绿
 - [x] CLI `gateway job add/update/read/list` 接入 `--watch` / `--clear-watch`，`assistant_tasks` 接入 `watchPaths` → 落点见 `src/app/cli_options.*`、`src/cli/gateway_command.*`、`src/app/assistant_tasks.cpp`。
-- [ ] 推送 `ci/proactive-heartbeat` 分支触发 GitHub Actions 远程编译与测试（不在本地编译），核验 Windows MSVC 与 macOS Clang 双腿全绿（分支已推送，Run `43191748170` 报 `The job was not started because your account is locked due to a billing issue`，待账号恢复后 `gh run rerun 43191748170`）。
+- [x] 推送 `ci/proactive-heartbeat` 分支触发 GitHub Actions 远程编译与测试（不在本地编译），核验 Windows MSVC 与 macOS Clang 双腿全绿（Run `43192066948` 已通过：`macos-clang` 34m58s 绿、`windows-msvc` 1h05m33s 绿）。
 
 验收：远程 CI 流水线（含 ANSI lint、依赖守门、原有 V1/V2/Q5 回归册与新增主动巡检册）全部通过。
 
