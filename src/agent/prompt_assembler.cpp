@@ -271,6 +271,41 @@ void LedgerAdd(PromptSourceLedger* ledger, PromptSourceLedgerEntry entry, const 
     }
 }
 
+// 无人值守改写(one-shot 无人值守适配):交互原文里"先问一句""等用户确认
+// 放行"两句,在没人值守的场子里是空头指令——模型照做就干等到超时。按原句
+// 精确替换成无人值守措辞;用户改写过模块、原句对不上就原样不动(殿后的
+// 无人值守段仍压得住)。交互模式两旗皆关,不进这条路,原文一字不动。
+constexpr std::string_view kWorkflowAskLine =
+    "需求有岔路、走错代价大时,先问一句;代价小就挑个合理做法,把假设说明白,接着干。";
+constexpr std::string_view kWorkflowUnattendedLine =
+    "需求有岔路时没人可问:挑个合理做法,把假设说明白,接着干完。";
+constexpr std::string_view kShellConfirmLine =
+    "危险动作(删文件、改系统、动网络)先把意图说清,等用户确认放行,别拿命令绕开确认机制。";
+constexpr std::string_view kShellUnattendedLine =
+    "危险动作(删文件、改系统、动网络)只做任务必需的那部分,先把意图说清再动手。";
+
+// 无人值守段的语言档:zh 前缀或空(未定稿)给中文版,其余一律英文版。
+bool UnattendedUsesChinese(const std::string& language) {
+    return language.empty() || language.rfind("zh", 0) == 0;
+}
+
+void ReplaceFirst(std::string& text, std::string_view from, std::string_view to) {
+    const std::size_t pos = text.find(from);
+    if (pos != std::string::npos) {
+        text.replace(pos, from.size(), to);
+    }
+}
+
+std::string ApplyUnattendedRewrites(std::string_view rel_path, std::string content, const PromptOptions& options) {
+    if (options.unattended && rel_path == "core/20-workflow.md") {
+        ReplaceFirst(content, kWorkflowAskLine, kWorkflowUnattendedLine);
+    }
+    if (options.unattended && options.auto_approve && rel_path == "features/shell.md") {
+        ReplaceFirst(content, kShellConfirmLine, kShellUnattendedLine);
+    }
+    return content;
+}
+
 }  // namespace
 
 // Profile 名是否生效(契约 §4.2):空 = 没选;显式 "default" = 强制用内置
@@ -431,8 +466,9 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
             if (!prompt.empty()) {
                 prompt += "\n\n";
             }
-            prompt += resolved.content;
-            const std::string content = resolved.content;
+            const std::string content =
+                ApplyUnattendedRewrites(module.rel_path, std::move(resolved.content), options);
+            prompt += content;
             LedgerAdd(ledger, std::move(resolved.entry), content, ledger_order++);
         }
     }
@@ -444,8 +480,8 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
         ResolvedModule resolved = ResolveModule(options.profile, options.prompts_dir,
                                                 options.project_prompts_dir,
                                                 options.package_profile_roots, rel_path);
-        append(resolved.content);
-        const std::string content = resolved.content;
+        const std::string content = ApplyUnattendedRewrites(rel_path, std::move(resolved.content), options);
+        append(content);
         LedgerAdd(ledger, std::move(resolved.entry), content, ledger_order++);
     };
 
@@ -548,6 +584,17 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
         entry.origin = PromptModuleOrigin::EmbeddedHostPolicy;
         LedgerAdd(ledger, std::move(entry), mode_segment, ledger_order++);
     }
+    // 无人值守段压轴(one-shot):没人回答、不等确认、收尾实测、服务脱离
+    // 会话起、交互程序改非交互写法。宿主内置,与模式段同一档不读用户目录。
+    if (options.unattended) {
+        const std::string unattended_segment = UnattendedInstructionSegment(options.language);
+        append(unattended_segment);
+        PromptSourceLedgerEntry entry;
+        entry.rel_path = UnattendedUsesChinese(options.language) ? "modes/unattended-zh.md"
+                                                                 : "modes/unattended-en.md";
+        entry.origin = PromptModuleOrigin::EmbeddedHostPolicy;
+        LedgerAdd(ledger, std::move(entry), unattended_segment, ledger_order++);
+    }
     return prompt;
 }
 
@@ -573,6 +620,11 @@ std::string ModeInstructionSegment(bool plan_mode) {
     // 生成 kMode_<stem>(plan/default),这里按名字直取;构建期 GLOB 保证
     // 在,防御分支返回空串,拼装侧空段不 append。
     return std::string(plan_mode ? embedded::kMode_plan : embedded::kMode_default);
+}
+
+std::string UnattendedInstructionSegment(const std::string& language) {
+    return std::string(UnattendedUsesChinese(language) ? embedded::kMode_unattended_zh
+                                                       : embedded::kMode_unattended_en);
 }
 
 }  // namespace lubancode::agent

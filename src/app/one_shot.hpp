@@ -4,9 +4,12 @@
 // 解耦在后续 commit 里收,这里只留窄接口。
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
+#include "agent/agent.hpp"
+#include "app/commands/session_commands.hpp"  // CompactSessionInputs / HandleContextPressure
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "config/settings_local.hpp"
@@ -19,6 +22,14 @@ namespace lubancode::app {
 // 身份裁决起点(AskOnce 递启动 cwd)。
 lubancode::runtime::SessionLaunchRequest BuildOneShotSessionRequest(
     const lubancode::config::Config& config, const std::string& cwd_utf8);
+
+// 单发场的上下文压力接线(one-shot 无人值守适配):从前单发一处没接,
+// loop 的压力通报是空操作,长任务上下文只涨不压。这里把通报转进与交互
+// 会话同一只 HandleContextPressure——PreRequest 撞线 mid-turn 压一次、
+// provider 确认超窗收一次、hard trim 告警,压缩本身一行不新造。
+// make_inputs 每次通报现取材料包(滞回账/压缩次数/账本由调用方持有)。
+lubancode::agent::AgentWiring BuildOneShotContextWiring(
+    std::function<CompactSessionInputs()> make_inputs);
 
 // 单发模式(位置参数):也走 agent loop,同样支持工具,只是只问这一句。
 // 管道/单发场景下 spinner_enabled 传进来的必然是 false(RunCli 里按
