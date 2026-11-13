@@ -1733,8 +1733,8 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_memory_save" and int(counts[0]) != 12:
             raise RuntimeError("SDK memory-save native roster differs from 12 cases")
         if case.attrib["name"] == "sdk.focused.lubancore_memory_learning":
-            if int(counts[0]) != 18:
-                raise RuntimeError("SDK memory-learning native roster differs from 18 cases")
+            if int(counts[0]) != 25:
+                raise RuntimeError("SDK memory-learning native roster differs from 25 cases")
             for path in (
                 "off-default-and-unexpected-backend",
                 "auto-and-invalid-options-rejected",
@@ -1754,6 +1754,13 @@ def main():
                 "candidate-accept-commit-and-recall",
                 "candidate-accept-resume-and-close",
                 "candidate-accept-indeterminate-stop",
+                "auto-eligibility-and-fallback",
+                "auto-authorization-revocation",
+                "auto-queued-crash-recovery",
+                "auto-cas-conflict",
+                "auto-all-stage-failures",
+                "auto-duplicate-commit-key",
+                "auto-close-races",
             ):
                 marker = "[sdk-memory-learning-path] " + path
                 if sections[0].splitlines().count(marker) != 1:

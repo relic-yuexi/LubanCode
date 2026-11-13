@@ -105,7 +105,7 @@ struct SaveReport {
     std::string error;
 };
 
-// Automatic memory learning owner (Slice 1: Off or Review; Auto rejected explicitly).
+// Automatic memory learning owner (Off, Review, or Auto durable writeback).
 enum class LearningMode { Off, Review, Auto };
 struct LearningOptions {
     LearningMode mode = LearningMode::Off;
@@ -114,6 +114,7 @@ struct LearningOptions {
     int timeout_secs = 45;
     std::size_t max_candidates = 3;
     std::size_t max_transcript_bytes = 8192;
+    bool auto_write_enabled = true;
     bool operator==(const LearningOptions&) const = default;
 };
 struct LearningSnapshot {
@@ -126,6 +127,7 @@ struct LearningSnapshot {
     int timeout_secs = 45;
     std::size_t max_candidates = 3;
     std::size_t max_transcript_bytes = 8192;
+    bool auto_write_enabled = true;
     std::string plan_sha256;
 };
 enum class LearningStage {
@@ -139,6 +141,27 @@ enum class LearningStage {
     Completed,
     Indeterminate,
 };
+struct LearningWriteAttempt {
+    std::string commit_key;
+    std::string source_event_ref;
+    std::string save_request_sha256;
+    std::string request_sha256;
+    std::string queue_stage = "not_queued";      // not_queued | queued | completed | cancelled | failed | indeterminate
+    std::string worker_stage = "not_started";    // not_started | running | finished | cancelled | failed | indeterminate
+    std::string admission_stage = "not_checked"; // not_checked | admitted | denied | revoked | indeterminate
+    std::string commit_state = "not_started";    // not_started | committed | indeterminate
+    std::string fallback_candidate_id;
+    std::string memory_id;
+    std::string memory_path;
+    std::string content_sha256;
+    std::string committed_at;
+    std::vector<SaveStageReceipt> stages;
+    bool duplicate = false;
+    std::string error_code;
+    std::string error;
+    bool operator==(const LearningWriteAttempt&) const = default;
+};
+
 // Owned per-operation automatic learning receipt. Retained as pure values after Close.
 // turn_id names the triggering main turn; learning_turn_id names the bypass turn when called.
 struct LearningReport {
@@ -155,6 +178,7 @@ struct LearningReport {
     std::string model;
     std::vector<std::string> candidate_ids;
     std::vector<std::string> retrieval_hints;
+    std::vector<LearningWriteAttempt> auto_writes;
     std::string error_code;
     std::string error;
     OperationUsage usage;
