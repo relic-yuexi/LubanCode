@@ -374,6 +374,8 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
     std::filesystem::create_directories(fixture.material_target);
     auto events = session->Subscribe(); REQUIRE(events);
     ReturnedAllocationRun run;
+    bool close_faulted = false;
+    std::optional<std::string> close_error_code;
     std::future<sdk::Result<void>> closing;
     ReleaseReturnedGate release{gate}; // Unblocks before future/session destruction on every assertion failure.
     const auto receipt = session->Submit("actual-allocation-calibration", "calibrate the real SDK reply return");
@@ -398,13 +400,21 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
         try {
             const auto closed = closing.get();
             if (!ordinal) REQUIRE(closed);
-            else if (!closed) CHECK_FALSE(closed.error().code.empty());
+            else if (!closed) {
+                CHECK_FALSE(closed.error().code.empty());
+                close_faulted = true;
+                close_error_code = closed.error().code;
+            }
         } catch (const std::bad_alloc&) {
             REQUIRE(ordinal != 0); REQUIRE(control.refusals.load() == 1);
+            close_faulted = true;
             // The actual Close borrow has unwound. Retry the actual API with
             // ordinary allocation restored, never substitute a retirement flag.
             const auto retired = session->Close();
-            if (!retired) CHECK_FALSE(retired.error().code.empty());
+            if (!retired) {
+                CHECK_FALSE(retired.error().code.empty());
+                close_error_code = retired.error().code;
+            }
         }
     } else {
         const auto complete = session->WaitResult(receipt->operation_id, 15s); REQUIRE(complete);
@@ -443,11 +453,19 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
             OwnedRefusalScope scope{port, port.begin(control)}; REQUIRE(scope.active);
             const auto closed = session->Close();
             if (!ordinal) REQUIRE(closed);
-            else if (!closed) CHECK_FALSE(closed.error().code.empty());
+            else if (!closed) {
+                CHECK_FALSE(closed.error().code.empty());
+                close_faulted = true;
+                close_error_code = closed.error().code;
+            }
         } catch (const std::bad_alloc&) {
             REQUIRE(ordinal != 0); REQUIRE(control.refusals.load() == 1);
+            close_faulted = true;
             const auto retired = session->Close();
-            if (!retired) CHECK_FALSE(retired.error().code.empty());
+            if (!retired) {
+                CHECK_FALSE(retired.error().code.empty());
+                close_error_code = retired.error().code;
+            }
         }
     }
     CHECK(control.backend_returned.load()); CHECK(gate->prepared.load());
@@ -542,7 +560,16 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
         CHECK_FALSE(recovered->result_persisted); CHECK(recovered->final_text.empty());
         CHECK_FALSE(recovered->usage); CHECK_FALSE(recovered->error.empty());
     }
-    REQUIRE((*resumed)->Close()); REQUIRE((*runtime)->Shutdown()); CHECK(replays.load() == 0);
+    REQUIRE((*resumed)->Close());
+    const auto shutdown = (*runtime)->Shutdown();
+    if (!ordinal) {
+        REQUIRE(shutdown);
+    } else if (!shutdown) {
+        REQUIRE(close_faulted);
+        CHECK_FALSE(shutdown.error().code.empty());
+        if (close_error_code) CHECK(shutdown.error().code == *close_error_code);
+    }
+    CHECK(replays.load() == 0);
     REQUIRE(tools.load() == 0);
     fixture.Archive();
     std::cout << "[sdk-returned-allocation-materials] path=" << static_cast<unsigned>(path)
