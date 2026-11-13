@@ -29,8 +29,29 @@ class TrajectoryBypassLeaseOwner {
     class Proxy final : public agent::LoopBoundaryRecorder {
     public:
         Proxy(std::shared_ptr<State> state, std::shared_ptr<Slot> slot)
-            : state_(std::move(state)), slot_(std::move(slot)) {}
+            : state_(std::move(state)), slot_(std::move(slot)),
+              session_id_(slot_ && slot_->recorder ? std::string(slot_->recorder->UsageSourceSessionId()) : std::string()),
+              run_id_(slot_ && slot_->recorder ? std::string(slot_->recorder->UsageSourceRunId()) : std::string()) {}
 
+        std::string_view UsageSourceSessionId() const override { return session_id_; }
+        std::string_view UsageSourceRunId() const override { return run_id_; }
+        std::string RequestTurnId(const std::string& request_id) const override {
+            std::lock_guard lock(state_->mutex);
+            if (state_->retired || !slot_->recorder) return {};
+            return slot_->recorder->RequestTurnId(request_id);
+        }
+        std::string RequestStepId(const std::string& request_id) const override {
+            std::lock_guard lock(state_->mutex);
+            if (state_->retired || !slot_->recorder) return {};
+            return slot_->recorder->RequestStepId(request_id);
+        }
+        std::optional<bool> OnUsageObservation(const std::string& request_id, const api::Usage& usage,
+            const ::lubancore::usage::v1::Observation* observation, bool reported,
+            std::string_view response_id, bool incomplete) override {
+            std::lock_guard lock(state_->mutex);
+            if (state_->retired || !slot_->recorder) return std::nullopt;
+            return slot_->recorder->OnUsageObservation(request_id, usage, observation, reported, response_id, incomplete);
+        }
         std::string OnRequestPrepared(const api::Request& request,
                                       const agent::RequestPreparedContext& context) override {
             std::lock_guard lock(state_->mutex);
@@ -75,6 +96,8 @@ class TrajectoryBypassLeaseOwner {
     private:
         std::shared_ptr<State> state_;
         std::shared_ptr<Slot> slot_;
+        std::string session_id_;
+        std::string run_id_;
     };
 public:
     enum class BindError { MissingRecorder, Retired };

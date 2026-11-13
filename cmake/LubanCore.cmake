@@ -22,6 +22,7 @@ add_library(lubancore_sdk SHARED
   src/sdk/memory_blobs.cpp
   src/sdk/named_results.cpp
   src/sdk/memory_write.cpp
+  src/sdk/memory_learning.cpp
   src/sdk/packages.cpp
   src/sdk/lua.cpp
   src/sdk/extensions.cpp

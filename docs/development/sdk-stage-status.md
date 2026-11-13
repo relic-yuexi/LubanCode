@@ -1,5 +1,15 @@
 # SDK 阶段进度与验收边界
 
+自动 Memory 学习 owner 首片候选现按 [自动 Memory 学习 owner 合同](sdk-memory-learning-owner.md) 接入。
+公开头新增 [usage.hpp](../../include/lubancore/usage.hpp) 拆出五项用量类型，`SessionOptions` 增加
+`memory_learning`、`memory_learning_backend` 与 `memory_learning_connection`，`Session` 增加
+`DescribeMemoryLearning()` 与 `GetMemoryLearning(operation_id)`。`SessionMemoryLearning` 在主 `RecordTurnFinal`
+持久化之后按单飞后台线程运行 `Review` 提取（`Auto` 显式报 `sdk.memory_learning.auto_unsupported` 拒绝），
+共用 CLI `EvaluateMustSkipTextGate`、`EvaluateTurnDurableSignals`、`BuildTurnTranscript`、`ClassifyTaskType` 与
+嵌入式提取提示，仅写入本地 candidate store（`candidates.json`），旁路 V3 轨迹单独记录 `ModelRequestPrepared` 与
+`ModelUsageObserved`（五项用量及来源留 `LearningReport::usage`，不混入主 `Operation::usage`），并在关场时协作取消并
+先于 `SessionService::Close` 汇合线程与释放注入后端。十二案原生聚焦测试已写入源码，尚待远端 CI 与 ASan 实跑验收。
+
 2026-10-09 补记（#334 工具派发门）：功能分支已合入后续批，本片补[工具实际派发门](sdk-tool-dispatch-gate.md)，
 Sandbox 补入 [Boxed/NVX 参考核查](../architecture/sandbox-platform-design.md#12-boxed-与-nvx-参考核查)，只记参考边界，未交付后端。
 

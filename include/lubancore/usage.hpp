@@ -101,3 +101,41 @@ struct Coverage {
 };
 
 }  // namespace lubancore::usage::v1
+
+namespace lubancore {
+
+struct Usage {
+    std::int64_t input_tokens = 0;
+    std::int64_t output_tokens = 0;
+    std::int64_t cache_read_tokens = 0;
+    std::int64_t cache_creation_tokens = 0;
+    std::int64_t output_reasoning_tokens = 0;
+};
+struct UsageSummary {
+    Usage total;
+    ::lubancore::usage::v1::Coverage coverage;
+};
+inline constexpr std::size_t kMaxUsageAttempts = 1024;
+struct UsageAttempt {
+    Usage usage;
+    std::string trajectory_request_id, provider_response_id, model;
+    std::string step_id, turn_id, purpose;
+    int cache_epoch = 0;
+    bool subordinate = false, incomplete = false;
+    bool reported_by_provider = false;
+    std::optional<::lubancore::usage::v1::Observation> observation;
+    std::string source_session_id, source_run_id;
+};
+struct OperationUsage {
+    // Separate direct and forwarded subordinate observations; never charge a
+    // child's forwarded totals to the direct request count. Samples are reports,
+    // not a claim about hidden provider retries or durable failed-attempt ACK.
+    UsageSummary direct;
+    UsageSummary subordinate;
+    // A complete list covers these admitted observations, not hidden network
+    // retries or a durable failed-attempt ACK. Legacy summaries remain unknown.
+    std::vector<UsageAttempt> attempts;
+    bool attempts_complete = false;
+};
+
+}  // namespace lubancore

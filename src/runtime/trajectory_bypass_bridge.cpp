@@ -174,6 +174,22 @@ void TrajectoryBypassBridge::CloseTurn(bool ok, bool cancelled, const std::strin
     turn_open_ = false;
 }
 
+std::string TrajectoryBypassBridge::RequestTurnId(const std::string& request_id) const {
+    if (V3Mode()) {
+        const auto it = v3_requests_.find(request_id);
+        return it == v3_requests_.end() ? std::string() : it->second.turn_id;
+    }
+    return turn_id_;
+}
+
+std::string TrajectoryBypassBridge::RequestStepId(const std::string& request_id) const {
+    if (V3Mode()) {
+        const auto it = v3_requests_.find(request_id);
+        return it == v3_requests_.end() ? std::string() : it->second.step_id;
+    }
+    return {};
+}
+
 std::string TrajectoryBypassBridge::OnRequestPrepared(const api::Request& request,
                                                       const agent::RequestPreparedContext& ctx) {
     if (V3Mode()) {
