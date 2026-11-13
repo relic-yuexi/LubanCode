@@ -18,6 +18,7 @@
 
 #include "agent/memory_extraction.hpp"
 #include "agent/memory_learning_gates.hpp"
+#include "agent/memory_learning_owner.hpp"
 #include "agent/model_router.hpp"  // BackgroundCallAccounting(usage 出账)
 #include "agent/sample_model.hpp"  // SampleResult(抽取侧收口的入参)
 #include "api/backend.hpp"
@@ -120,6 +121,21 @@ using agent::memory_learning_gates::PassesMinimumTextGate;
 using agent::memory_learning_gates::EvaluateMustSkipTextGate;
 using agent::memory_learning_gates::EvaluateDurableSignals;
 using agent::memory_learning_gates::EvaluateTurnDurableSignals;
+using agent::memory_learning_owner::AutoWriteAttemptOutcome;
+using agent::memory_learning_owner::BuildAutoWriteSaveRequest;
+using agent::memory_learning_owner::BuildReviewCandidate;
+using agent::memory_learning_owner::CandidateClassification;
+using agent::memory_learning_owner::ClassifyLearnedCandidate;
+using agent::memory_learning_owner::EvaluateTurnLearningDispatch;
+using agent::memory_learning_owner::ExtractTurnSliceFacts;
+using agent::memory_learning_owner::LearningSettlementSink;
+using agent::memory_learning_owner::SettleLearnedCandidates;
+using agent::memory_learning_owner::SettlementActionStatus;
+using agent::memory_learning_owner::SettlementOptions;
+using agent::memory_learning_owner::SettlementSummary;
+using agent::memory_learning_owner::TurnLearningDispatchInput;
+using agent::memory_learning_owner::TurnLearningDispatchResult;
+using agent::memory_learning_owner::TurnSliceFacts;
 
 // shadow 开关(§7.2):环境变量 LUBANCODE_MEMORY_GATE_SHADOW 置
 // 1/true/on 才评耐久信号,默认关——typed event 与 P0 同形,要量漏判再
