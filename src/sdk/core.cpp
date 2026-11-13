@@ -48,6 +48,7 @@
 #include "sdk/memory_blobs.hpp"
 #include "sdk/named_results.hpp"
 #include "sdk/memory_write.hpp"
+#include "sdk/memory_learning.hpp"
 #include "sdk/lua.hpp"
 #include "sdk/operation_ledger.hpp"
 #include "sdk/prepare_journal.hpp"
@@ -293,6 +294,8 @@ struct Session::Impl final : rt::InteractionBroker {
     std::map<std::string, Result<memory::v1::RecallReport>> memory_reports;
     std::shared_ptr<detail::SessionMemoryWrite> memory_write_module;
     memory::v1::WriteSnapshot memory_write_snapshot;
+    std::shared_ptr<detail::SessionMemoryLearning> memory_learning_module;
+    memory::v1::LearningSnapshot memory_learning_snapshot;
     lua::v1::Snapshot lua_snapshot;
     std::map<std::string, Result<std::vector<memory::v1::SaveReport>>> memory_saves;
     bool memory_write_indeterminate = false; // protected by mutex after publication
@@ -461,16 +464,24 @@ struct Session::Impl final : rt::InteractionBroker {
         // later identity/ledger/Agent failures can likewise release the candidate
         // resources before the SDK-owned inline tool callback sources retire.
         std::shared_ptr<Backend> initialization_backend;
+        bool init_committed = false;
         struct SourceScope {
             SessionOptions& options;
+            std::shared_ptr<detail::SessionMemoryLearning>& learning;
+            bool& committed;
             ~SourceScope() {
                 // Other initialization locals retire first, under the same TLS
                 // lifecycle guard. Clear the actual sources before the backend
                 // anchor declared above, including std::function SBO copies.
                 options.custom_tools.clear();
                 options.extensions.clear();
+                if (!committed) {
+                    if (learning) learning->ReleaseBackend();
+                    learning.reset();
+                    options.memory_learning_backend.reset();
+                }
             }
-        } source_scope{options};
+        } source_scope{options, memory_learning_module, init_committed};
         initialization_backend = detail::OwnBackend(options.backend);
 #if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
         detail::testing::ObserveBackendOwner(initialization_backend);
@@ -508,6 +519,11 @@ struct Session::Impl final : rt::InteractionBroker {
             lubancode::tools::Utf8ToPath(roots.data_root), *identity, options.resume_session_id);
         if (!write_candidate) return std::unexpected(write_candidate.error());
         memory_write_module = std::move(*write_candidate);
+        auto learning_candidate = detail::SessionMemoryLearning::Prepare(
+            options.memory_learning, options.memory_learning_backend, options.memory_learning_connection,
+            lubancode::tools::Utf8ToPath(roots.data_root), *identity, options.resume_session_id);
+        if (!learning_candidate) return std::unexpected(learning_candidate.error());
+        memory_learning_module = std::move(*learning_candidate);
         auto lua_module = detail::SessionLua::Prepare(options.lua,
             lubancode::tools::Utf8ToPath(roots.data_root), identity->workspace_key,
             options.resume_session_id, prepare_journal);
@@ -696,12 +712,14 @@ struct Session::Impl final : rt::InteractionBroker {
         auto skills_opening = (*skill_module)->OpeningParticipant();
         auto memory_opening = memory_module->OpeningParticipant();
         auto write_opening = memory_write_module->OpeningParticipant();
+        auto learning_opening = memory_learning_module->OpeningParticipant();
         auto child_opening = (*child_plan)->OpeningParticipant();
         auto lua_opening = (*lua_module)->OpeningParticipant();
         auto action_gate = (*action_opening)->OpeningParticipant();
         auto jobs_opening = (*job_plan)->OpeningParticipant();
         launch.v3_opening_participant = [skills_opening = std::move(skills_opening), memory_opening = std::move(memory_opening),
-                                       write_opening = std::move(write_opening), child_opening = std::move(child_opening),
+                                       write_opening = std::move(write_opening), learning_opening = std::move(learning_opening),
+                                       child_opening = std::move(child_opening),
                                        lua_opening = std::move(lua_opening), action_gate = std::move(action_gate),
                                        jobs_opening = std::move(jobs_opening), recovery_limits,
                                        children_enabled = (*child_plan)->enabled()]
@@ -720,11 +738,13 @@ struct Session::Impl final : rt::InteractionBroker {
                 if (!memory) return std::unexpected(memory.error());
                 auto writes = write_opening(context);
                 if (!writes) return std::unexpected(writes.error());
+                auto learnings = learning_opening(context);
+                if (!learnings) return std::unexpected(learnings.error());
                 auto children = child_opening(context);
                 if (!children) return std::unexpected(children.error());
                 auto scripts = lua_opening(context);
                 if (!scripts) return std::unexpected(scripts.error());
-                for (const auto* part : {&*memory, &*writes, &*children, &*scripts, &*actions, &*jobs}) if (part->contains("hostBindings")) {
+                for (const auto* part : {&*memory, &*writes, &*learnings, &*children, &*scripts, &*actions, &*jobs}) if (part->contains("hostBindings")) {
                     if (!skills->contains("hostBindings")) (*skills)["hostBindings"] = Json::object();
                     for (auto it = (*part)["hostBindings"].begin(); it != (*part)["hostBindings"].end(); ++it)
                         (*skills)["hostBindings"][it.key()] = it.value();
@@ -741,6 +761,7 @@ struct Session::Impl final : rt::InteractionBroker {
             service->launch_error().find("sdk.skill.") != std::string::npos ? "sdk.skill.open_failed" :
             service->launch_error().find("sdk.memory.") != std::string::npos ? "sdk.memory.open_failed" :
             service->launch_error().find("sdk.memory_write.") != std::string::npos ? "sdk.memory_write.open_failed" :
+            service->launch_error().find("sdk.memory_learning.") != std::string::npos ? "sdk.memory_learning.open_failed" :
             service->launch_error().find("sdk.subagent.") != std::string::npos ? "sdk.subagent.open_failed" :
             service->launch_error().find("sdk.action.") != std::string::npos ? "sdk.action.open_failed" :
             service->launch_error().find("sdk.lua.") != std::string::npos ? "sdk.lua.open_failed" :
@@ -752,6 +773,7 @@ struct Session::Impl final : rt::InteractionBroker {
         if (!named_result_reader) return std::unexpected(Failure("sdk.result.owner_missing"));
         memory_snapshot = memory_module->Describe();
         memory_write_snapshot = memory_write_module->Describe();
+        memory_learning_snapshot = memory_learning_module->Describe();
         lua_snapshot = (*lua_module)->Describe();
         if (!options.resume_session_id.empty() && session_id != options.resume_session_id) {
             return std::unexpected(Failure("sdk.resume.identity_changed"));
@@ -831,6 +853,7 @@ struct Session::Impl final : rt::InteractionBroker {
         extensions = module_ptr;
         subagent_module = child_module_ptr;
         skills_snapshot = (*skill_module)->Describe();
+        init_committed = true;
         return {};
     }
 
@@ -1006,6 +1029,13 @@ struct Session::Impl final : rt::InteractionBroker {
                 if (!children && operation.result_persisted) return std::unexpected(children.error());
             }
             subagent_reports.insert_or_assign(id, std::move(children));
+            if (memory_learning_module) {
+                auto loaded_learning = memory_learning_module->LoadOperationReport(
+                    id, operation, ledger ? &*ledger : nullptr, operation.result_persisted);
+                if (!loaded_learning && operation.result_persisted) {
+                    return std::unexpected(loaded_learning.error());
+                }
+            }
         }
         return {};
     }
@@ -1076,7 +1106,8 @@ struct Session::Impl final : rt::InteractionBroker {
         return true;
     }
 
-    const Operation& Complete(Operation candidate, const std::vector<std::string>& refs, bool usage_reported, bool ledger_ok = true) {
+    const Operation& Complete(Operation candidate, const std::vector<std::string>& refs, bool usage_reported, bool ledger_ok = true,
+        std::optional<detail::SessionMemoryLearning::PreparedDispatch> learning_dispatch = std::nullopt) {
 #if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
         detail::testing::SetAllocationPhase(detail::testing::AllocationPhase::Completion);
 #endif
@@ -1241,6 +1272,13 @@ struct Session::Impl final : rt::InteractionBroker {
         // Freeze identities before making the terminal operation visible. Readers
         // use this snapshot, so another turn may append V3 without a read race.
         CacheToolResults(operation, ledger_ok && recorded, verified_memory ? &*verified_memory : nullptr);
+        if (memory_learning_module) {
+            if (learning_dispatch) {
+                memory_learning_module->SettleOrStartOperation(operation, std::move(*learning_dispatch), *service->trajectory());
+            } else {
+                memory_learning_module->PopulateNotAttempted(operation.operation_id, operation.turn_id);
+            }
+        }
         {
             std::lock_guard lock(mutex);
             operations[operation.operation_id] = operation;
@@ -1666,6 +1704,33 @@ struct Session::Impl final : rt::InteractionBroker {
             named_uncertain ? kNamedPublicationUnconfirmed : "sdk.side_effect.indeterminate";
         if (effect_uncertain && outcome && !outcome->side_effect_error.empty()) uncertain_error += ": " + outcome->side_effect_error;
         else if (!action_receipt_error.empty()) uncertain_error += ": " + action_receipt_error;
+        std::optional<detail::SessionMemoryLearning::PreparedDispatch> learning_dispatch;
+        if (memory_learning_module && memory_learning_snapshot.mode != memory::v1::LearningMode::Off) {
+            const bool limit_reached = outcome && (outcome->hit_step_limit || outcome->hit_time_budget || outcome->hit_token_budget || outcome->hit_turn_limit);
+            detail::SessionMemoryLearning::TurnMaterials materials;
+            materials.operation_id = input.operation_id;
+            materials.turn_id = operation.turn_id;
+            materials.turn_succeeded = outcome.has_value() && !uncertain && !turn_cancelled && !limit_reached;
+            materials.turn_mutated = memory_write_module && memory_write_module->HasCommittedForOperation(input.operation_id);
+            materials.user_text = pre.prompt;
+            const auto& live_history = agent.history();
+            for (std::size_t idx = history_before; idx < live_history.size(); ++idx) {
+                const auto& msg = live_history[idx];
+                materials.turn_messages.push_back(msg);
+                for (const auto& blk : msg.content) {
+                    if (msg.role == api::Role::Assistant) {
+                        if (const auto* txt = std::get_if<api::TextBlock>(&blk)) materials.assistant_text += txt->text + "\n";
+                    }
+                    if (const auto* use = std::get_if<api::ToolUseBlock>(&blk)) {
+                        materials.tool_names.push_back(use->name);
+                        materials.has_tool_evidence = true;
+                    } else if (std::get_if<api::ToolResultBlock>(&blk) != nullptr) {
+                        materials.has_tool_evidence = true;
+                    }
+                }
+            }
+            learning_dispatch.emplace(memory_learning_module->PrepareTurnDispatch(materials, *service->trajectory()));
+        }
         bridge->EndTurn(outcome.has_value() && !uncertain, turn_cancelled && !uncertain,
             uncertain ? uncertain_error : outcome ? "" : outcome.error());
         if (subagent_module) subagent_module->ClearTurn();
@@ -1693,7 +1758,8 @@ struct Session::Impl final : rt::InteractionBroker {
         }
         // Durable operation final precedes its public completion notification.
         const Operation& completed = Complete(std::move(operation), refs, usage_reported,
-                                             bridge->recent_errors().empty() && context_healthy && middleware_healthy());
+                                             bridge->recent_errors().empty() && context_healthy && middleware_healthy(),
+                                             std::move(learning_dispatch));
         events.Finish(completed.state == OperationState::Succeeded ? rt::Outcome::Succeeded :
                       completed.state == OperationState::Cancelled ? rt::Outcome::Cancelled : rt::Outcome::Failed,
                       completed.error);
@@ -1801,6 +1867,7 @@ struct Session::Impl final : rt::InteractionBroker {
             cv.notify_all();
         }
         if (command_jobs) command_jobs->RequestClose();
+        if (memory_learning_module) memory_learning_module->RequestClose();
         approvals.Close();
         if (event_delivery) event_delivery->BeginClose();
     }
@@ -1855,6 +1922,7 @@ struct Session::Impl final : rt::InteractionBroker {
             const auto joined = command_jobs->Finalize();
             if (!joined && !close_error) close_error = joined.error();
         }
+        if (memory_learning_module) memory_learning_module->JoinAndSettle();
         if (service && service->runtime()) {
             const auto outcome = service->Close("sdk_close");
             if (!outcome.error_code.empty() && !close_error) close_error = Failure(outcome.error_code, outcome.message);
@@ -1896,8 +1964,10 @@ struct Session::Impl final : rt::InteractionBroker {
             // backend in options. Retire it under the same lifecycle guard,
             // after every tool/Agent, rather than during Impl member teardown.
             options.backend.reset();
+            options.memory_learning_backend.reset();
             memory_module.reset();
             memory_write_module.reset();
+            if (memory_learning_module) memory_learning_module->ReleaseBackend();
             memory_blob_factory.reset();
             named_result_factory.reset(); // Read handle retains only its Store/provider, never this Service.
         }
@@ -1966,6 +2036,20 @@ Result<std::vector<memory::v1::SaveReport>> Session::GetMemorySaves(const std::s
     if (found == impl_->memory_saves.end()) return std::unexpected(Failure("sdk.memory_write.report_not_ready"));
     return found->second;
 }
+Result<memory::v1::LearningSnapshot> Session::DescribeMemoryLearning() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->memory_learning_snapshot;
+}
+Result<memory::v1::LearningReport> Session::GetMemoryLearning(const std::string& operation_id) const {
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto operation = impl_->operations.find(operation_id);
+        if (operation == impl_->operations.end()) return std::unexpected(Failure("sdk.operation.not_found"));
+        if (!Terminal(operation->second.state)) return std::unexpected(Failure("sdk.memory_learning.report_not_ready"));
+    }
+    if (!impl_->memory_learning_module) return std::unexpected(Failure("sdk.memory_learning.report_not_ready"));
+    return impl_->memory_learning_module->GetReport(operation_id);
+}
 Result<Receipt> Session::Submit(std::string key, std::string text) {
     if (key.empty()) return std::unexpected(Failure("sdk.operation.key_required"));
     if (!lubancode::platform::IsValidUtf8(key) || !lubancode::platform::IsValidUtf8(text)) {
@@ -2033,6 +2117,7 @@ Result<void> Session::Cancel(std::string id) {
         impl_->CancelApprovals();
     }
     if (impl_->command_jobs) impl_->command_jobs->StopParent(id, "parent_cancelled");
+    if (impl_->memory_learning_module) impl_->memory_learning_module->CancelOperation(id);
     return {};
 }
 Result<std::vector<jobs::v1::JobView>> Session::ListJobs(std::optional<std::string> parent) const {

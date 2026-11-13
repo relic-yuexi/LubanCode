@@ -61,6 +61,10 @@ public:
     TrajectoryBypassBridge& operator=(const TrajectoryBypassBridge&) = delete;
 
     // ---- agent::LoopBoundaryRecorder(采样/探针在模型边界调) ----
+    std::string_view UsageSourceSessionId() const override { return base_scope_.session_id; }
+    std::string_view UsageSourceRunId() const override { return base_scope_.run_id; }
+    std::string RequestTurnId(const std::string& request_id) const override;
+    std::string RequestStepId(const std::string& request_id) const override;
     std::string OnRequestPrepared(const api::Request& request,
                                   const agent::RequestPreparedContext& ctx) override;
     // false = sent 落不住(失败与恢复单 P1-C):采样停在发送边界。

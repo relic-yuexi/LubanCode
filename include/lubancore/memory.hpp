@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include <lubancore/usage.hpp>
+
 namespace lubancore::memory::v1 {
 
 // Trusted local project recall only. No learning, writes or background workers.
@@ -99,6 +101,62 @@ struct SaveReport {
     bool duplicate = false;
     std::string error_code;
     std::string error;
+};
+
+// Automatic memory learning owner (Slice 1: Off or Review; Auto rejected explicitly).
+enum class LearningMode { Off, Review, Auto };
+struct LearningOptions {
+    LearningMode mode = LearningMode::Off;
+    std::string model;
+    std::string reasoning_effort;
+    int timeout_secs = 45;
+    std::size_t max_candidates = 3;
+    std::size_t max_transcript_bytes = 8192;
+    bool operator==(const LearningOptions&) const = default;
+};
+struct LearningSnapshot {
+    LearningMode mode = LearningMode::Off;
+    std::string session_id;
+    std::string workspace_key;
+    std::string memory_directory;
+    std::string model;
+    std::string reasoning_effort;
+    int timeout_secs = 45;
+    std::size_t max_candidates = 3;
+    std::size_t max_transcript_bytes = 8192;
+    std::string plan_sha256;
+};
+enum class LearningStage {
+    NotAttempted,
+    Skipped,
+    BusyDropped,
+    StartFailed,
+    Running,
+    Failed,
+    Cancelled,
+    Completed,
+    Indeterminate,
+};
+// Owned per-operation automatic learning receipt. Retained as pure values after Close.
+// turn_id names the triggering main turn; learning_turn_id names the bypass turn when called.
+struct LearningReport {
+    LearningMode mode = LearningMode::Off;
+    std::string session_id;
+    std::string operation_id;
+    std::string turn_id;
+    std::string learning_turn_id;
+    std::string workspace_key;
+    std::string plan_sha256;
+    LearningStage stage = LearningStage::NotAttempted;
+    std::string skip_reason;
+    std::string task_type;
+    std::string model;
+    std::vector<std::string> candidate_ids;
+    std::vector<std::string> retrieval_hints;
+    std::string error_code;
+    std::string error;
+    OperationUsage usage;
+    bool model_called = false;
 };
 
 } // namespace lubancore::memory::v1
