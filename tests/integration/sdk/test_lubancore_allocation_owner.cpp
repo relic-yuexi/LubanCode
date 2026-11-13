@@ -352,7 +352,8 @@ void CheckReturnedFaultNumbers(const sdk::Operation& operation, ReturnedPath pat
     }
 }
 ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationFailurePort port,
-                                        ReturnedPath path, std::uint64_t ordinal = 0) {
+                                        ReturnedPath path, std::uint64_t ordinal = 0,
+                                        bool record_materials = true) {
     ReturnedAllocationFixture fixture;
     lubancore::detail::testing::AllocationFailureControl control;
     control.require_returned_backend = true;
@@ -374,10 +375,12 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
     options.backend = std::make_unique<ReturnedAllocationBackend>(gate, port, control);
     auto opened = (*runtime)->OpenSession(std::move(options)); REQUIRE(opened);
     auto session = std::move(*opened); const auto id = session->id();
-    fixture.material_source = fixture.SessionDir(id);
-    fixture.material_target = std::filesystem::path(LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT) /
-        (std::to_string(static_cast<unsigned>(path)) + "-" + std::to_string(ordinal)) / id;
-    std::filesystem::create_directories(fixture.material_target);
+    if (record_materials) {
+        fixture.material_source = fixture.SessionDir(id);
+        fixture.material_target = std::filesystem::path(LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT) /
+            (std::to_string(static_cast<unsigned>(path)) + "-" + std::to_string(ordinal)) / id;
+        std::filesystem::create_directories(fixture.material_target);
+    }
     auto events = session->Subscribe(); REQUIRE(events);
     ReturnedAllocationRun run;
     bool close_faulted = false;
@@ -485,7 +488,7 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
     if (!ordinal) CheckReturnedOperation(*operation, path);
     else CheckReturnedFaultNumbers(*operation, path);
     run.state = operation->state; run.persisted = operation->result_persisted;
-    WriteAllocationMaterial(fixture.material_target / "query.json", OperationMaterial(*operation));
+    if (record_materials) WriteAllocationMaterial(fixture.material_target / "query.json", OperationMaterial(*operation));
     const auto directory = fixture.SessionDir(id);
     std::ifstream final_file(directory / "operations.jsonl", std::ios::binary); REQUIRE(final_file);
     nlohmann::json final_record;
@@ -545,13 +548,13 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
     auto resumed = (*runtime)->OpenSession(std::move(recovery_options));
     if (!resumed) {
         const nlohmann::json error{{"code", resumed.error().code}, {"message", resumed.error().message}};
-        WriteAllocationMaterial(fixture.material_target / "recovery-error.json", error);
+        if (record_materials) WriteAllocationMaterial(fixture.material_target / "recovery-error.json", error);
         std::cerr << "SDK_ALLOCATION_RECOVERY_ERROR " << error.dump() << '\n';
     }
     REQUIRE(resumed);
     CHECK((*resumed)->id() == id);
     const auto recovered = (*resumed)->ReadOperation(receipt->operation_id); REQUIRE(recovered);
-    WriteAllocationMaterial(fixture.material_target / "recovered.json", OperationMaterial(*recovered));
+    if (record_materials) WriteAllocationMaterial(fixture.material_target / "recovered.json", OperationMaterial(*recovered));
     if (!ordinal) CheckReturnedOperation(*recovered, path);
     CHECK(recovered->operation_id == operation->operation_id);
     CHECK(recovered->result_persisted == operation->result_persisted);
@@ -577,9 +580,11 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
     }
     CHECK(replays.load() == 0);
     REQUIRE(tools.load() == 0);
-    fixture.Archive();
-    std::cout << "[sdk-returned-allocation-materials] path=" << static_cast<unsigned>(path)
-              << " ordinal=" << ordinal << " directory=" << nlohmann::json(platform::PathToUtf8(fixture.material_target)).dump() << '\n';
+    if (record_materials) {
+        fixture.Archive();
+        std::cout << "[sdk-returned-allocation-materials] path=" << static_cast<unsigned>(path)
+                  << " ordinal=" << ordinal << " directory=" << nlohmann::json(platform::PathToUtf8(fixture.material_target)).dump() << '\n';
+    }
     return run;
 }
 }
@@ -766,6 +771,11 @@ TEST_CASE("SDK allocation ownership: real shared image and matching host release
         std::cout << "[sdk-json-retirement] ordered=" << ordered << " depth=" << depth
                   << " allocations=" << retirement_allocations << " sentinel_refused=" << armed.refusals.load()
                   << '\n' << std::flush;
+    }
+    for (const auto warm_path : {ReturnedPath::Success, ReturnedPath::Cancel, ReturnedPath::Close}) {
+        (void)RunReturnedSession(failure, warm_path, 0, false);
+        (void)RunReturnedSession(failure, warm_path, 1, false);
+        (void)RunReturnedSession(failure, warm_path, 0, false);
     }
     for (const auto path : {ReturnedPath::Success, ReturnedPath::Cancel, ReturnedPath::Close}) {
         const auto baseline = RunReturnedSession(failure, path);
