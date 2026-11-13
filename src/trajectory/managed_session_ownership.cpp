@@ -39,7 +39,8 @@ std::expected<ManagedSessionOwnership, std::string> Parse(const std::string& byt
     const auto value = Json::parse(bytes, nullptr, false);
     if (!value.is_object() || value.size() != 7 || !value.contains("schemaVersion") ||
         !value["schemaVersion"].is_number_integer() || value["schemaVersion"] != 1 ||
-        !value.contains("mode") || !value["mode"].is_string() || value["mode"] != "Managed" ||
+        !value.contains("mode") || !value["mode"].is_string() ||
+        value["mode"].get_ref<const std::string&>() != "Managed" ||
         !value.contains("bindingVersion") || !value["bindingVersion"].is_number_unsigned())
         return std::unexpected("managed.ownership.invalid_metadata");
     for (const auto* key : {"tenantId", "projectId", "workspaceKey", "sessionId"})

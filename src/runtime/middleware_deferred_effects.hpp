@@ -65,8 +65,13 @@ struct DeferredEffects final : mw::MiddlewareEventSink {
             if (outcome && outcome->kind == mw::DispatchOutcome::Kind::Denied) {
                 // Admission is the only adopted effect of a denied call. A
                 // proposed argument rewrite never reached the real tool gate.
-                applied = applied && effect.type == "admission.decision" &&
-                    effect.value.value("decision", Json()) == "deny";
+                const bool is_deny = [&]() noexcept {
+                    if (!effect.value.is_object()) return false;
+                    for (const auto& [name, val] : effect.value.get_ref<const Json::object_t&>())
+                        if (name == "decision") return val.is_string() && val.get_ref<const std::string&>() == "deny";
+                    return false;
+                }();
+                applied = applied && effect.type == "admission.decision" && is_deny;
             }
             if (effect.type == "input.rewrite" && effective && effect.value != *effective) applied = false;
             Json value = effect.value;

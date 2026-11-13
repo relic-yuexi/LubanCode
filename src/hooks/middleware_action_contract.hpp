@@ -59,8 +59,14 @@ inline bool IsActionInput(const Json& value, HookPoint point) {
         ValidActionText(result["errorCode"].get_ref<const std::string&>(), 256);
 }
 inline bool ObserverEffectsAllowed(bool deny, std::size_t count) { return !deny && count == 0; }
+inline bool MemberStringEquals(const Json& object, const char* key, const char* expected) noexcept {
+    if (!object.is_object()) return false;
+    for (const auto& [name, value] : object.get_ref<const Json::object_t&>())
+        if (name == key) return value.is_string() && value.get_ref<const std::string&>() == expected;
+    return false;
+}
 inline std::optional<const char*> AdmissionError(const Json& payload) {
-    if (!payload.is_object() || payload.size() != 2 || payload.value("decision", Json()) != "ask" ||
+    if (!payload.is_object() || payload.size() != 2 || !MemberStringEquals(payload, "decision", "ask") ||
         !payload.contains("reason") || !payload["reason"].is_string() ||
         !ValidActionText(payload["reason"].get_ref<const std::string&>(), 4096))
         return "PreAction admission requires exactly {decision:ask,reason:string}";

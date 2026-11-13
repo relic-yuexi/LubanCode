@@ -1026,8 +1026,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (auto error = CheckStringField(kind_name, line.payload, "phase")) {
             return error;
         }
-        if (line.payload["phase"] != "before_started" &&
-            line.payload["phase"] != "during_execution") {
+        if (line.payload["phase"].get_ref<const std::string&>() != "before_started" &&
+            line.payload["phase"].get_ref<const std::string&>() != "during_execution") {
             return Err("schema3.bad_enum",
                        "cancelled.phase 应为 before_started|during_execution(§4.14)");
         }
@@ -1706,7 +1706,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             line.request_id || line.parent_turn_id || line.compact_id || line.command_id ||
             line.hook_dispatch_id || line.task_id || line.title_generation_id || line.effects || line.effect_refs)
             return Err("schema3.bad_job_operation", "Job binding requires only business turn/step/action, attempt 1");
-        if (line.payload.size() != 14 || line.payload.value("layout", nlohmann::json()) != "session_owned_job_operation_v1" ||
+        if (line.payload.size() != 14 ||
+            !lubancode::api::usage_json::MemberStringEquals(line.payload, "layout", "session_owned_job_operation_v1") ||
             !line.payload.contains("version") || !line.payload.at("version").is_number_integer() || line.payload.at("version") != 1)
             return Err("schema3.bad_job_operation", "unknown Job operation layout/version");
         if (auto error = CheckStringField(kind_name, line.payload, "jobId")) return error;
@@ -1715,7 +1716,9 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             const auto ref = line.payload.find(key);
             if (ref == line.payload.end() || !ref->is_object() || ref->size() != 5 || !IsValidRef(*ref) ||
                 !ref->at("seq").is_number_integer() || ref->at("seq") <= 0 ||
-                ref->at("sessionId") == "" || ref->at("runId") == "" || ref->at("id") == "")
+                lubancode::api::usage_json::StringEquals(ref->at("sessionId"), "") ||
+                lubancode::api::usage_json::StringEquals(ref->at("runId"), "") ||
+                lubancode::api::usage_json::StringEquals(ref->at("id"), ""))
                 return Err("schema3.bad_job_operation", "Job binding requires canonical native five-key references");
         }
         for (const char* key : {"originalInputSha256", "effectiveInputSha256"})
@@ -1732,7 +1735,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             return Err("schema3.bad_operation_turn", "invalid main operation turn ID");
         if (line.payload.size() != 5 || !line.payload.contains("version") ||
             !line.payload.at("version").is_number_integer() || line.payload.at("version") != 1 ||
-            !line.payload.contains("layout") || line.payload.at("layout") != "sdk_main_operation_turn_v1")
+            !line.payload.contains("layout") ||
+            !lubancode::api::usage_json::StringEquals(line.payload.at("layout"), "sdk_main_operation_turn_v1"))
             return Err("schema3.bad_operation_turn", "unknown main operation anchor layout or version");
         for (const char* key : {"operationId", "inputId"}) {
             if (auto error = CheckStringField(kind_name, line.payload, key)) return error;
@@ -1753,8 +1757,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             if (line.payload.at(key).get<std::string>().find('\0') != std::string::npos)
                 return Err("schema3.bad_owned_job", "owned Job text contains NUL");
         }
-        if (line.payload.at("layout") != "parent_admission_job_business_v1" ||
-            line.payload.at("toolName") != "run_command" ||
+        if (!lubancode::api::usage_json::StringEquals(line.payload.at("layout"), "parent_admission_job_business_v1") ||
+            !lubancode::api::usage_json::StringEquals(line.payload.at("toolName"), "run_command") ||
             line.payload.at("parentActionId") == *line.action_id)
             return Err("schema3.bad_owned_job", "unknown owned Job layout or action role");
         for (const char* key : {"assistantMessageRef", "sourcePendingEventRef", "sourceAdmissionEventRef",
@@ -1797,8 +1801,10 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (auto error = CheckExecutionPolicy(kind_name, line.payload)) return error;
         const auto& policy = line.payload.at("executionPolicy");
         if (!policy.contains("allow_background") || policy.at("allow_background") != true ||
-            !policy.contains("retry_policy") || policy.at("retry_policy") != "none" ||
-            !policy.contains("resume_policy") || policy.at("resume_policy") != "hold")
+            !policy.contains("retry_policy") ||
+            !lubancode::api::usage_json::StringEquals(policy.at("retry_policy"), "none") ||
+            !policy.contains("resume_policy") ||
+            !lubancode::api::usage_json::StringEquals(policy.at("resume_policy"), "hold"))
             return Err("schema3.bad_owned_job", "owned Job policy must explicitly allow background with no retry and passive recovery");
         const auto& limits = line.payload.at("commandLimits");
         for (const char* key : {"timeout_ms", "max_output_bytes"})
@@ -1857,8 +1863,10 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             if (!witness.is_object() || witness.size() != 2 ||
                 !witness.contains("version") || !witness.at("version").is_number_integer() ||
                 witness.at("version") != 1 || !witness.contains("reason") ||
-                !witness.at("reason").is_string() || witness.at("reason") != "registration_deadline_elapsed" ||
-                line.payload.at("observedStatus") != "cancelled" || line.payload.contains("startupFailed") ||
+                !witness.at("reason").is_string() ||
+                witness.at("reason").get_ref<const std::string&>() != "registration_deadline_elapsed" ||
+                !lubancode::api::usage_json::StringEquals(line.payload.at("observedStatus"), "cancelled") ||
+                line.payload.contains("startupFailed") ||
                 !line.payload.contains("parentAdmission") ||
                 line.payload.contains("resultRef") || line.payload.contains("resultVersion") ||
                 line.payload.contains("postEventRef"))
@@ -1868,7 +1876,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             if (!line.payload.at("startupFailed").is_boolean())
                 return Err("schema3.bad_owned_job", "startupFailed must be boolean");
             if (line.payload.at("startupFailed") == true &&
-                (line.payload.at("observedStatus") != "failed" || line.payload.contains("resultRef") || line.payload.contains("postEventRef")))
+                (!lubancode::api::usage_json::StringEquals(line.payload.at("observedStatus"), "failed") ||
+                 line.payload.contains("resultRef") || line.payload.contains("postEventRef")))
                 return Err("schema3.bad_owned_job", "confirmed startup failure cannot claim raw or Post");
         }
         if (line.payload.contains("postEventRef")) {
