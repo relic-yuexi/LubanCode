@@ -265,16 +265,18 @@ std::optional<Schema3Error> ValidateUsage(const nlohmann::json& usage) {
     if (!usage.is_object()) {
         return Err("schema3.bad_type", "usage 应为 object 或 null");
     }
-    static const std::vector<std::string> kKnownKeys = {
+    static constexpr std::array<std::string_view, 5> kKnownKeys = {
         "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens",
     };
-    for (const auto& key : kKnownKeys) {
-        auto it = usage.find(key);
-        if (it == usage.end()) {
+    const auto& fields = usage.get_ref<const nlohmann::json::object_t&>();
+    for (const std::string_view key : kKnownKeys) {
+        const auto it = std::find_if(fields.begin(), fields.end(),
+                                     [key](const auto& kv) { return kv.first == key; });
+        if (it == fields.end()) {
             continue;
         }
-        if (!JsonIsNonNegativeInt(*it)) {
-            return Err("schema3.bad_usage", "usage." + key + " 应为非负整数");
+        if (!JsonIsNonNegativeInt(it->second)) {
+            return Err("schema3.bad_usage", "usage." + it->first + " 应为非负整数");
         }
     }
     return std::nullopt;
@@ -288,7 +290,7 @@ std::optional<Schema3Error> ValidateUsage(const nlohmann::json& usage) {
 // kind ∈ result_metadata|stdout|stderr|combined|raw_payload|report|image|blob。
 std::optional<Schema3Error> ValidateArtifactRef(std::string_view context,
                                                 const nlohmann::json& ref) {
-    static const std::vector<std::string> kKinds = {
+    static constexpr std::array<std::string_view, 8> kKinds = {
         "result_metadata", "stdout", "stderr", "combined", "raw_payload", "report", "image", "blob",
     };
     if (!ref.is_object()) {
@@ -306,7 +308,7 @@ std::optional<Schema3Error> ValidateArtifactRef(std::string_view context,
         return Err("schema3.bad_ref", std::string(context) + " artifactRef 字段类型错");
     }
     if (!ref["kind"].is_string() ||
-        std::find(kKinds.begin(), kKinds.end(), ref["kind"].get<std::string>()) == kKinds.end()) {
+        std::find(kKinds.begin(), kKinds.end(), std::string_view(ref["kind"].get_ref<const std::string&>())) == kKinds.end()) {
         return Err("schema3.bad_enum", std::string(context) + " artifactRef.kind 未知");
     }
     if (!ref["sha256"].is_string() || !IsHex64(ref["sha256"].get<std::string>())) {
@@ -574,12 +576,12 @@ std::optional<Schema3Error> CheckCapabilityVerdicts(std::string_view context,
         return Err("schema3.bad_type",
                    std::string(context) + " payload.verdicts 应为非空 object");
     }
-    static const std::unordered_set<std::string> kStatuses = {
+    static constexpr std::array<std::string_view, 3> kStatuses = {
         "unknown", "verified", "unsupported"};
     for (auto verdict = it->begin(); verdict != it->end(); ++verdict) {
         if (!verdict.value().is_object() || !verdict.value().contains("status") ||
             !verdict.value()["status"].is_string() ||
-            !kStatuses.count(verdict.value()["status"].get<std::string>())) {
+            std::find(kStatuses.begin(), kStatuses.end(), std::string_view(verdict.value()["status"].get_ref<const std::string&>())) == kStatuses.end()) {
             return Err("schema3.bad_enum",
                        std::string(context) + " verdicts." + verdict.key() +
                            ".status 应为 unknown|verified|unsupported(单 §4)");
@@ -618,12 +620,12 @@ std::optional<Schema3Error> CheckJobMode(std::string_view context, const nlohman
 // job 观测状态(单 §6 执行投影;unknown 是投影状态,不是信封 status)。
 std::optional<Schema3Error> CheckObservedStatus(std::string_view context,
                                                 const nlohmann::json& payload) {
-    static const std::unordered_set<std::string> kStatuses = {
+    static constexpr std::array<std::string_view, 8> kStatuses = {
         "registered", "queued", "running", "succeeded", "failed", "cancelled", "unknown",
         "awaiting_approval"};
     auto it = payload.find("observedStatus");
     if (it == payload.end() || !it->is_string() ||
-        !kStatuses.count(it->get<std::string>())) {
+        std::find(kStatuses.begin(), kStatuses.end(), std::string_view(it->get_ref<const std::string&>())) == kStatuses.end()) {
         return Err("schema3.bad_enum",
                    std::string(context) + " payload.observedStatus 应为 registered|queued|"
                                           "running|succeeded|failed|cancelled|unknown|"
@@ -1274,11 +1276,11 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             return Err("schema3.bad_type", "state.goal.applied 的 lifecycle 应为 string");
         }
         const std::string lifecycle = line.payload["lifecycle"].get<std::string>();
-        static const std::unordered_set<std::string> kGoalLifecycles = {
+        static constexpr std::array<std::string_view, 11> kGoalLifecycles = {
             "preparing", "active",    "waiting",        "paused",
             "awaiting_user", "blocked", "budget_exhausted", "suspended_by_policy",
             "achieved",  "cleared",   "failed"};
-        if (!kGoalLifecycles.count(lifecycle)) {
+        if (std::find(kGoalLifecycles.begin(), kGoalLifecycles.end(), std::string_view(lifecycle)) == kGoalLifecycles.end()) {
             return Err("schema3.bad_enum",
                        "state.goal.applied 的 lifecycle 枚举不认得: " + lifecycle);
         }
@@ -1394,9 +1396,9 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (!line.payload["decision"].is_string()) {
             return Err("schema3.bad_type", "goal.evaluation.completed 的 decision 应为 string");
         }
-        static const std::unordered_set<std::string> kDecisions = {
+        static constexpr std::array<std::string_view, 4> kDecisions = {
             "continue", "achieved", "blocked", "needs_user"};
-        if (!kDecisions.count(line.payload["decision"].get<std::string>())) {
+        if (std::find(kDecisions.begin(), kDecisions.end(), std::string_view(line.payload["decision"].get_ref<const std::string&>())) == kDecisions.end()) {
             return Err("schema3.bad_enum",
                        "goal.evaluation.completed 的 decision 枚举不认得: " +
                            line.payload["decision"].get<std::string>());
