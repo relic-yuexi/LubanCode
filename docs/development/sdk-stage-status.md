@@ -1,14 +1,10 @@
 # SDK 阶段进度与验收边界
 
-自动 Memory 学习 owner 首片候选现按 [自动 Memory 学习 owner 合同](sdk-memory-learning-owner.md) 接入。
-公开头新增 [usage.hpp](../../include/lubancore/usage.hpp) 拆出五项用量类型，`SessionOptions` 增加
-`memory_learning`、`memory_learning_backend` 与 `memory_learning_connection`，`Session` 增加
-`DescribeMemoryLearning()` 与 `GetMemoryLearning(operation_id)`。`SessionMemoryLearning` 在主 `RecordTurnFinal`
-持久化之后按单飞后台线程运行 `Review` 提取（`Auto` 显式报 `sdk.memory_learning.auto_unsupported` 拒绝），
-共用 CLI `EvaluateMustSkipTextGate`、`EvaluateTurnDurableSignals`、`BuildTurnTranscript`、`ClassifyTaskType` 与
-嵌入式提取提示，仅写入本地 candidate store（`candidates.json`），旁路 V3 轨迹单独记录 `ModelRequestPrepared` 与
-`ModelUsageObserved`（五项用量及来源留 `LearningReport::usage`，不混入主 `Operation::usage`），并在关场时协作取消并
-先于 `SessionService::Close` 汇合线程与释放注入后端。十二案原生聚焦测试已写入源码，尚待远端 CI 与 ASan 实跑验收。
+自动 Memory 学习 owner 现按 [自动 Memory 学习 owner 合同](sdk-memory-learning-owner.md) 完成 Slice 1–4 代码落地（分别位于 `codex/sdk-memory-learning-slice1` PR #365、`codex/sdk-memory-learning-slice2` PR #366、`codex/sdk-memory-learning-slice3` PR #367 及当前 Slice 4 堆叠分支 `codex/sdk-memory-learning-slice4`，待远端 CI 与 ASan 全矩阵验证后并入 `#234`）：
+- Slice 1（#365）：公开头拆分 [usage.hpp](../../include/lubancore/usage.hpp)，`SessionOptions` 接入 `memory_learning`、`memory_learning_backend` 与 `memory_learning_connection`，`Session` 增加 `DescribeMemoryLearning()` 与 `GetMemoryLearning(operation_id)`；`SessionMemoryLearning` 在主 `RecordTurnFinal` 持久化之后按单飞后台线程运行 `Review` 提取，旁路 V3 轨迹单独记录 `ModelRequestPrepared` 与 `ModelUsageObserved`（不混入主 `Operation::usage`），并在 `Session::Close` 前协作汇合线程与释放后端。
+- Slice 2（#366）：接入候选治理控制面（候选查询、编辑、拒绝、接受与相关生命周期事件）。
+- Slice 3（#367）：接入 `Auto` 档持久回写链路（`LearningWriteQueue`、`ProjectCommitter`、revocation/indeterminate 防护与崩溃恢复）。
+- Slice 4（本分支）：抽出 UI 无关、宿主中立的共享策略核心 [memory_learning_owner.hpp](../../src/agent/memory_learning_owner.hpp) / [memory_learning_owner.cpp](../../src/agent/memory_learning_owner.cpp)（`EvaluateTurnLearningDispatch`、`ExtractTurnSliceFacts`、`ClassifyLearnedCandidate`、`BuildAutoWriteSaveRequest`、`SettleLearnedCandidates`），同时迁移 CLI（[memory_commands.cpp](../../src/app/commands/memory_commands.cpp) 的 `ExtractTurnMemory` / `SettleTurnMemory`）与 SDK（[memory_learning.cpp](../../src/sdk/memory_learning.cpp)）共用同一门控、分类、请求构造与结算协调路，100% 保留 CLI 终端文案、`ModelUsageLedger` 分角色记账、`MemoryTurnLedger` 漏斗/悬账与 `ProjectMemory` 写路；并新增单元一致性测试 [test_memory_learning_owner.cpp](../../tests/unit/memory/test_memory_learning_owner.cpp)。本地只执行了 Python CI 规则自测；完整 C++/ASan/SDK focused matrix 尚待远端 CI 实跑验收。
 
 2026-10-09 补记（#334 工具派发门）：功能分支已合入后续批，本片补[工具实际派发门](sdk-tool-dispatch-gate.md)，
 Sandbox 补入 [Boxed/NVX 参考核查](../architecture/sandbox-platform-design.md#12-boxed-与-nvx-参考核查)，只记参考边界，未交付后端。

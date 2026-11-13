@@ -802,91 +802,52 @@ TurnMemoryDispatch ExtractTurnMemory(const SessionTailContext& ctx, const std::s
     // 的 skipped_* 分子)。P1 起前置门添了真闸:同轮去重(§7.1 案二)与
     // 必跳层文本门(案三至案六 + §7.3 门槛)——这两处拦下就真不发请求,
     // 不只是记账；耐久信号也会在发请求前拦下无长期价值的回合。
-    if (project_memory == nullptr || !project_memory->generate_enabled()) {
-        if (memory_turns != nullptr) {
-            memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::Disabled);
-        }
-        return TurnMemoryDispatch::Skipped;
+    // 调度门控与快照冻结统一收口到 agent::memory_learning_owner。
+    const bool enabled = project_memory != nullptr && project_memory->generate_enabled();
+    const bool has_new_history = enabled && ctx.agent != nullptr &&
+                                 history_before < ctx.agent->History().size();
+    std::vector<api::Message> slice;
+    TurnSliceFacts slice_facts;
+    if (has_new_history) {
+        const auto& history = ctx.agent->History();
+        slice.assign(history.begin() + static_cast<std::ptrdiff_t>(history_before), history.end());
+        slice_facts = ExtractTurnSliceFacts(slice);
     }
 
-    const auto& history = ctx.agent->History();
-    if (history_before >= history.size()) {
-        if (memory_turns != nullptr) {
-            memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::NoNewHistory);
-        }
-        return TurnMemoryDispatch::Skipped;
-    }
-    if (memory_turns != nullptr) memory_turns->NoteHistoryGrew();
-    std::vector<api::Message> slice(history.begin() + static_cast<std::ptrdiff_t>(history_before),
-                                    history.end());
+    TurnLearningDispatchInput dispatch_input;
+    dispatch_input.enabled = enabled;
+    dispatch_input.has_new_history = has_new_history;
+    dispatch_input.turn_mutated = memory_turns != nullptr && memory_turns->turn_mutated();
+    dispatch_input.has_tool_evidence = slice_facts.has_tool_evidence;
+    dispatch_input.user_text = user_text;
+    dispatch_input.assistant_text = slice_facts.assistant_text;
+    dispatch_input.turn_messages = &slice;
+    dispatch_input.tool_names = &slice_facts.tool_names;
+    dispatch_input.prompts_dir = ctx.prompts_dir != nullptr ? *ctx.prompts_dir : std::string{};
+    dispatch_input.max_transcript_bytes = 8 * 1024;
 
-    // 工具名清单喂给分型器;转写按用户、最终答复、工具摘录分配预算，整段不超 8 KiB。顺手记一枚
-    // P1(§7.1)的工具证据位:工具调用或工具结果任一在场即算——ack 门
-    // 与耐久信号都看它。
-    std::vector<std::string> tool_names;
-    std::string assistant_text;
-    bool has_tool_evidence = false;
-    for (const auto& message : slice) {
-        for (const auto& block : message.content) {
-            if (message.role == api::Role::Assistant) {
-                if (const auto* text = std::get_if<api::TextBlock>(&block)) {
-                    assistant_text += text->text + "\n";
-                }
-            }
-            if (const auto* use = std::get_if<api::ToolUseBlock>(&block)) {
-                tool_names.push_back(use->name);
-                has_tool_evidence = true;
-            } else if (std::get_if<api::ToolResultBlock>(&block) != nullptr) {
-                has_tool_evidence = true;
-            }
+    const TurnLearningDispatchResult dispatch = EvaluateTurnLearningDispatch(dispatch_input);
+    if (memory_turns != nullptr) {
+        if (dispatch.history_grew) {
+            memory_turns->NoteHistoryGrew();
+            memory_turns->NoteGateContext(dispatch.has_tool_evidence);
+        }
+        if (dispatch.durable_signals_evaluated) {
+            memory_turns->NoteDurableSignals(dispatch.durable_signals);
+        }
+        if (dispatch.skip_reason.has_value()) {
+            memory_turns->NoteExtractionSkipped(*dispatch.skip_reason);
         }
     }
-    if (memory_turns != nullptr) memory_turns->NoteGateContext(has_tool_evidence);
-
-    // 记忆写入调度单 P1(§7.1 案二·同轮去重):本轮已有成功的 save/forget/
-    // accept(§6.2 回执账,P0 起就在记),回合尾立即收手——显式保存一轮
-    // 只走一条写路。放在文本门之前:§7.1 的次序里案二压过案三至案六。
-    // (存过东西的回合 history 必然增长过,与 no_new_history 无冲突。)
-    if (memory_turns != nullptr && memory_turns->turn_mutated()) {
-        memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::AlreadyMutated);
-        return TurnMemoryDispatch::Skipped;
-    }
-
-    // P1(§7.1 案三至案六 + §7.3 门槛):必跳层的文本侧判定。纯词法、
-    // 不构造 prompt——"好""继续""/help"一类不再叫模型。
-    const MeaningfulTextStats text_stats = ComputeMeaningfulTextStats(user_text);
-    const auto durable_signals = EvaluateTurnDurableSignals(user_text, assistant_text, has_tool_evidence);
-    if (memory_turns != nullptr) memory_turns->NoteDurableSignals(durable_signals);
-    if (const auto blocked = EvaluateMustSkipTextGate(text_stats, has_tool_evidence)) {
-        // A short explicit preference or a tool-backed conclusion still matters.
-        if (*blocked != ExtractionSkipReason::ShortText || durable_signals.empty()) {
-            if (memory_turns != nullptr) memory_turns->NoteExtractionSkipped(*blocked);
-            return TurnMemoryDispatch::Skipped;
-        }
-    }
-    if (durable_signals.empty()) {
-        if (memory_turns != nullptr) memory_turns->NoteExtractionSkipped(ExtractionSkipReason::NoDurableSignal);
-        return TurnMemoryDispatch::Skipped;
-    }
-
-    const std::string turn_transcript = BuildTurnTranscript(slice, 8 * 1024);
-    if (turn_transcript.empty()) {
-        if (memory_turns != nullptr) {
-            memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::EmptyTranscript);
-        }
-        return TurnMemoryDispatch::Skipped;
-    }
-
-    const std::string task_type = ClassifyTaskType(user_text, tool_names);
-    const std::string system_prompt = BuildExtractionSystemPrompt(*ctx.prompts_dir, task_type);
-    if (system_prompt.empty()) {
-        if (memory_turns != nullptr) {
-            memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::PromptMissing);
-        }
+    if (!dispatch.ready) {
         return TurnMemoryDispatch::Skipped;
     }
     // Local durable-signal gating above runs before transcript/prompt construction.
     if (memory_turns != nullptr) memory_turns->NoteExtractionCalled();
+
+    const std::string& turn_transcript = dispatch.transcript;
+    const std::string& task_type = dispatch.task_type;
+    const std::string& system_prompt = dispatch.system_prompt;
 
     // ---- 回合总结异步化单:门过,起飞(前台不再有网络等待) ----
     // 前台显示:收口不打 [memory] 起跑行——learn 开着的每一场,收口即刻
@@ -996,50 +957,21 @@ void SettleTurnMemory(const SessionTailContext& ctx, const TurnMemoryExtractor::
     }
 
     // 检索扩展词:合并进 ProjectMemory,下一轮 BM25/词法查询用;learns off
-    // 或失败时不清旧值,自然退回纯词法。
-    std::vector<std::string> hints = outcome.extraction.retrieval_terms;
-    hints.reserve(hints.size() + outcome.extraction.candidates.size());
-    for (const auto& candidate : outcome.extraction.candidates) {
-        for (const auto& keyword : candidate.keywords) hints.push_back(keyword);
-    }
-    if (!hints.empty()) project_memory->SetRetrievalHints(std::move(hints));
+    // 或失败时不清旧值,自然退回纯词法。候选分类、SaveRequest 组装与
+    // auto/review 分派经由共享 owner 协调器执行。
+    class CliSettlementSink final : public LearningSettlementSink {
+    public:
+        explicit CliSettlementSink(lubancode::memory::ProjectMemory* pm) : project_memory_(pm) {}
 
-    std::size_t queued = 0;
-    std::size_t auto_queued = 0;
-    std::size_t start_failed = 0;  // 排队成功但 worker 没起来(修复单 §五 B:两笔账分开)
-    for (const auto& proposed : outcome.extraction.candidates) {
-        lubancode::memory::MemoryCandidate candidate;
-        auto kind = lubancode::memory::ParseMemoryKind(proposed.kind);
-        if (!kind.has_value()) continue;
-        candidate.kind = *kind;
-        candidate.title = proposed.title;
-        candidate.summary = proposed.summary;
-        candidate.content = proposed.content;
-        candidate.keywords = proposed.keywords;
-        candidate.paths = proposed.paths;
-        candidate.confidence = proposed.confidence;
-        candidate.occurred_at = proposed.occurred_at;
-        candidate.task_type = outcome.task_type;
+        void ApplyRetrievalHints(std::vector<std::string> hints) override {
+            project_memory_->SetRetrievalHints(std::move(hints));
+        }
 
-        // auto 档直写闸:inferred 只进候选区;fact 须 verified 且带证据,
-        // feedback 须用户明说,否则也落待审区让人把关(规格"inferred 只准
-        // 进候选区"、"模型推断不得直写 feedback")。
-        const bool auto_writable = project_memory->learn_mode() == lubancode::memory::LearnMode::Auto &&
-                                   candidate.confidence != "inferred" &&
-                                   !(candidate.kind == lubancode::memory::MemoryKind::Fact &&
-                                     (candidate.confidence != "verified" || candidate.paths.empty())) &&
-                                   !(candidate.kind == lubancode::memory::MemoryKind::Feedback &&
-                                     candidate.confidence != "user-stated");
-        if (auto_writable) {
-            lubancode::memory::SaveRequest request;
-            request.kind = candidate.kind;
-            request.title = candidate.title;
-            request.summary = candidate.summary;
-            request.content = candidate.content;
-            request.keywords = candidate.keywords;
-            request.paths = candidate.paths;
-            request.occurred_at = candidate.occurred_at;
-            const auto enqueued = project_memory->EnqueueSave(
+        AutoWriteAttemptOutcome TryAutoWrite(
+            std::size_t /*candidate_index*/,
+            const ProposedCandidate& /*proposed*/,
+            const lubancode::memory::SaveRequest& request) override {
+            const auto enqueued = project_memory_->EnqueueSave(
                 request, /*user_initiated=*/false,
                 lubancode::memory::MemoryWriteSource::AutoExtraction);
             if (enqueued.has_value()) {
@@ -1048,13 +980,42 @@ void SettleTurnMemory(const SessionTailContext& ctx, const TurnMemoryExtractor::
                     lubancode::memory::MemoryWorkerLaunchState::StartFailed) {
                     ++start_failed;
                 }
-                continue;
+                return AutoWriteAttemptOutcome::Handled;
             }
+            return AutoWriteAttemptOutcome::FallbackToReview;
         }
-        if (project_memory->AddCandidate(std::move(candidate)).has_value()) {
-            ++queued;
+
+        SettlementActionStatus AddReviewCandidate(
+            std::size_t /*candidate_index*/,
+            const ProposedCandidate& /*proposed*/,
+            lubancode::memory::MemoryCandidate candidate,
+            bool /*auto_write_eligible*/,
+            bool /*fallback_from_auto_write*/) override {
+            if (project_memory_->AddCandidate(std::move(candidate)).has_value()) {
+                ++queued;
+            }
+            return SettlementActionStatus::Completed;
         }
-    }
+
+        std::size_t queued = 0;
+        std::size_t auto_queued = 0;
+        std::size_t start_failed = 0;  // 排队成功但 worker 没起来(修复单 §五 B:两笔账分开)
+
+    private:
+        lubancode::memory::ProjectMemory* project_memory_ = nullptr;
+    };
+
+    SettlementOptions settlement_options;
+    settlement_options.mode = project_memory->learn_mode();
+    settlement_options.task_type = outcome.task_type;
+    settlement_options.max_candidates = outcome.extraction.candidates.size();
+    settlement_options.include_candidate_keywords_in_hints = true;
+
+    CliSettlementSink cli_sink(project_memory);
+    (void)SettleLearnedCandidates(outcome.extraction, settlement_options, cli_sink);
+    const std::size_t queued = cli_sink.queued;
+    const std::size_t auto_queued = cli_sink.auto_queued;
+    const std::size_t start_failed = cli_sink.start_failed;
     if (queued + auto_queued > 0) {
         TermOut() << theme.stats << trf("memory.extract.done", queued, auto_queued) << theme.reset << "\n";
         if (start_failed > 0) {
