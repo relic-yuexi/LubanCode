@@ -316,14 +316,20 @@ struct RevocablePolicy::Impl {
     }
     void Close() noexcept {
         PolicyCallbackScope callback_scope;
-        std::map<Observer*, std::shared_ptr<Observer>> retired;
         {
             std::lock_guard lock(mutex);
             closed = true;
-            retired.swap(observers);
+            if (observers.empty()) return;
         }
-        for (const auto& [key, observer] : retired) { (void)key; observer->Stop(); }
-        retired.clear();
+        for (;;) {
+            decltype(observers)::node_type retired;
+            {
+                std::lock_guard lock(mutex);
+                if (observers.empty()) break;
+                retired = observers.extract(observers.begin());
+            }
+            retired.mapped()->Stop();
+        }
     }
 };
 RevocablePolicy::RevocablePolicy(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}

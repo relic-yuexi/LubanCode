@@ -156,16 +156,17 @@ struct ReturnedGate {
     bool released = false;
     std::atomic<bool> entered{false}, cancelled{false}, prepared{false}, destroyed{false}, timed_out{false};
     std::atomic<unsigned> calls{0};
+    void Notify() { std::lock_guard lock(mutex); cv.notify_all(); }
     void Release() { std::lock_guard lock(mutex); released = true; cv.notify_all(); }
 };
 struct ReleaseReturnedGate {
     std::shared_ptr<ReturnedGate> gate;
     ~ReleaseReturnedGate() { gate->Release(); }
 };
-bool WaitReturnedFlag(const std::atomic<bool>& flag) {
+bool WaitReturnedFlag(ReturnedGate& gate, const std::atomic<bool>& flag) {
     const auto deadline = std::chrono::steady_clock::now() + 10s;
-    while (!flag.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(2ms);
-    return flag.load();
+    std::unique_lock lock(gate.mutex);
+    return gate.cv.wait_until(lock, deadline, [&] { return flag.load(); });
 }
 class ReturnedAllocationBackend final : public sdk::Backend {
 public:
@@ -197,12 +198,14 @@ public:
     }
     ~ReturnedAllocationBackend() override { gate_->destroyed.store(true); }
     sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest&, sdk::Cancellation cancel) override {
-        gate_->calls.fetch_add(1); gate_->entered.store(true);
+        gate_->calls.fetch_add(1);
         const auto deadline = std::chrono::steady_clock::now() + 20s;
         std::unique_lock lock(gate_->mutex);
+        gate_->entered.store(true);
+        gate_->cv.notify_all();
         while (!gate_->released && std::chrono::steady_clock::now() < deadline) {
-            if (cancel.requested()) gate_->cancelled.store(true);
-            gate_->cv.wait_for(lock, 2ms);
+            if (cancel.requested() && !gate_->cancelled.exchange(true)) gate_->cv.notify_all();
+            gate_->cv.wait_for(lock, 1ms);
         }
         gate_->cancelled.store(cancel.requested());
         if (!gate_->released) gate_->timed_out.store(true);
@@ -230,10 +233,12 @@ struct ReturnedAllocationFixture {
     std::filesystem::path root;
     std::filesystem::path material_source, material_target;
     std::string material_operation_id;
+    mutable bool archived = false;
     ReturnedAllocationFixture() {
         static std::atomic<unsigned> serial{0};
-        root = std::filesystem::temp_directory_path() / ("sdk-actual-returned-alloc-" +
-            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(serial.fetch_add(1)));
+        root = std::filesystem::path(LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT).parent_path() / "allocation-scratch" /
+            ("sdk-actual-returned-alloc-" +
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(serial.fetch_add(1)));
         std::filesystem::create_directories(root / "cwd");
         std::filesystem::create_directories(root / "resources");
     }
@@ -248,9 +253,10 @@ struct ReturnedAllocationFixture {
             if (std::filesystem::is_symlink(source)) throw std::runtime_error("allocation evidence is a symbolic link");
             std::filesystem::copy_file(source, material_target / name, std::filesystem::copy_options::overwrite_existing);
         }
+        archived = true;
     }
     ~ReturnedAllocationFixture() {
-        try { Archive(); } // Also retain the original failed point after owners retire.
+        try { if (!archived) Archive(); } // Also retain the original failed point after owners retire.
         catch (...) { } // A failed assertion/exception must remain the native failure.
         std::error_code ec; std::filesystem::remove_all(root, ec);
     }
@@ -379,7 +385,7 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
     std::future<sdk::Result<void>> closing;
     ReleaseReturnedGate release{gate}; // Unblocks before future/session destruction on every assertion failure.
     const auto receipt = session->Submit("actual-allocation-calibration", "calibrate the real SDK reply return");
-    REQUIRE(receipt); REQUIRE(WaitReturnedFlag(gate->entered));
+    REQUIRE(receipt); REQUIRE(WaitReturnedFlag(*gate, gate->entered));
     fixture.material_operation_id = receipt->operation_id;
     CHECK_FALSE(control.backend_returned.load()); CHECK(control.allocations.load() == 0);
     if (path == ReturnedPath::Close) {
@@ -388,11 +394,11 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
             if (!scope.active) return sdk::Result<void>(std::unexpected(sdk::Error{"fixture.scope", "Close allocation borrow failed"}));
             return owner->Close();
         });
-        REQUIRE(WaitReturnedFlag(gate->cancelled));
+        REQUIRE(WaitReturnedFlag(*gate, gate->cancelled));
         CHECK(closing.wait_for(20ms) == std::future_status::timeout);
         CHECK(control.allocations.load() == 0); CHECK_FALSE(control.backend_returned.load());
     } else if (path == ReturnedPath::Cancel) {
-        REQUIRE(session->Cancel(receipt->operation_id)); REQUIRE(WaitReturnedFlag(gate->cancelled));
+        REQUIRE(session->Cancel(receipt->operation_id)); gate->Notify(); REQUIRE(WaitReturnedFlag(*gate, gate->cancelled));
     }
     gate->Release();
     if (path == ReturnedPath::Close) {
@@ -422,7 +428,7 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
         else CheckReturnedFaultNumbers(*complete, path);
         bool terminal = false;
         for (unsigned n = 0; n != 256 && !terminal; ++n) {
-            const auto event = (*events)->Next(50ms);
+            const auto event = (*events)->Next((ordinal && control.worker_retired.load()) ? 0ms : 50ms);
             if (!event) {
                 REQUIRE(ordinal != 0);
                 REQUIRE(control.refusals.load() == 1);

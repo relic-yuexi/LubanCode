@@ -35,7 +35,7 @@ struct JobOperations::Record { JobOperationRegistration value; };
 JobOperations::JobOperations(std::size_t capacity) : capacity_(capacity) {
     if (!capacity) throw std::invalid_argument("sdk.job_operation.invalid_capacity");
 }
-JobOperations::~JobOperations() { (void)Close(); }
+JobOperations::~JobOperations() { try { (void)Close(); } catch (...) {} }
 
 JobOperationRegistration JobOperations::Bind(lubancode::runtime::SessionService& service,
     lubancode::tools::ToolJobCoordinator& coordinator, const std::string& job_id,

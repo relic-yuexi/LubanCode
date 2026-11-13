@@ -405,6 +405,16 @@ V3VerifyReport VerifyV3File(const std::filesystem::path& path);
 // checks complete newlines and bounds before constructing these lines.
 V3VerifyReport VerifyV3Lines(const std::vector<std::string>& lines);
 
+struct VerifiedV3ParsedLines {
+    V3VerifyReport report;
+    std::string session_id;
+    std::string run_id;
+    std::vector<MessageLine> messages;
+    std::vector<EventLine> events;
+    std::vector<bool> is_message;
+};
+VerifiedV3ParsedLines VerifyAndParseV3Lines(const std::vector<std::string>& lines);
+
 // 重放一枚提交事件到视图(Continue/VerifyV3File/读取侧 P2 共用同一份
 // 链重放,单一事实来源)。返回错误码或空串。
 std::string ApplyCommitEventToView(ContextView& view, const EventLine& line);

@@ -1912,7 +1912,7 @@ struct Session::Impl final : rt::InteractionBroker {
 };
 
 Session::Session(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
-Session::~Session() { (void)impl_->Close(); }
+Session::~Session() { try { (void)impl_->Close(); } catch (...) {} }
 std::string Session::id() const { return impl_->session_id; }
 Result<void> Session::Close() { return impl_->Close(); }
 Result<std::string> Session::DescribeExtensions() const {
@@ -2122,7 +2122,7 @@ struct Runtime::Impl {
     std::shared_ptr<CloseErrors> close_errors = std::make_shared<CloseErrors>();
 };
 Runtime::Runtime(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
-Runtime::~Runtime() { (void)Shutdown(); }
+Runtime::~Runtime() { try { (void)Shutdown(); } catch (...) {} }
 Result<std::unique_ptr<Runtime>> Runtime::Create(RuntimeOptions options) {
     try {
         auto data = AbsoluteDirectory(options.data_root, true);
