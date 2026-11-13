@@ -6,6 +6,7 @@
 #include <exception>
 #include <set>
 #include <stdexcept>
+#include <stop_token>
 #include <utility>
 #include <variant>
 
@@ -42,6 +43,7 @@ LearningWorkerStartHookHandle learning_start_hook;
 LearningWorkerExecutionHookHandle learning_execution_hook;
 LearningCandidateStoreHookHandle learning_candidate_hook;
 LearningCommitWriteHookHandle learning_commit_write_hook;
+LearningAutoAdmissionHookHandle learning_auto_admission_hook;
 } // namespace
 
 LearningWorkerStartHookHandle ReplaceLearningWorkerStartHook(
@@ -84,6 +86,16 @@ LearningCommitWriteHookHandle SnapshotLearningCommitWriteHook() noexcept {
     std::lock_guard lock(learning_hooks_mutex);
     return learning_commit_write_hook;
 }
+LearningAutoAdmissionHookHandle ReplaceLearningAutoAdmissionHook(
+    LearningAutoAdmissionHookHandle replacement) noexcept {
+    std::lock_guard lock(learning_hooks_mutex);
+    learning_auto_admission_hook.swap(replacement);
+    return replacement;
+}
+LearningAutoAdmissionHookHandle SnapshotLearningAutoAdmissionHook() noexcept {
+    std::lock_guard lock(learning_hooks_mutex);
+    return learning_auto_admission_hook;
+}
 } // namespace testing
 #endif
 
@@ -102,11 +114,13 @@ using memory::v1::LearningOptions;
 using memory::v1::LearningReport;
 using memory::v1::LearningSnapshot;
 using memory::v1::LearningStage;
+using memory::v1::LearningWriteAttempt;
 using memory::v1::SaveStageReceipt;
 
 constexpr auto kPlanFile = "sdk-memory-learning-plan.json";
 constexpr auto kReportsDir = "sdk-memory-learnings";
 constexpr auto kAcceptsDir = "sdk-memory-accepts";
+constexpr auto kQueueDir = "sdk-memory-learning-queue";
 constexpr std::size_t kPlanCap = 4096;
 constexpr std::size_t kReportCap = 524288;
 constexpr std::size_t kTotalCap = 67108864;
@@ -256,6 +270,143 @@ std::string CandidateCommitKey(
     return "sdk-cand-" + lubancode::platform::Sha256Hex(key.dump());
 }
 
+std::string AutoSourceEventRef(
+    const std::string& workspace_key,
+    const std::string& session_id,
+    const std::string& operation_id,
+    const std::string& turn_id,
+    const std::string& learning_turn_id,
+    std::size_t index) {
+    return "workspace_key=" + workspace_key + "/session_id=" + session_id +
+           "/operation_id=" + operation_id + "/turn_id=" + turn_id +
+           "/learning_turn_id=" + learning_turn_id + "/index=" + std::to_string(index);
+}
+
+std::string AutoCommitKey(
+    const std::string& session_id,
+    const std::string& operation_id,
+    const std::string& turn_id,
+    std::size_t index,
+    const std::string& save_request_sha256) {
+    const Json key{
+        {"session", session_id},
+        {"operation", operation_id},
+        {"turn", turn_id},
+        {"index", index},
+        {"saveRequestSha256", save_request_sha256},
+    };
+    return "sdk-learn-" + lubancode::platform::Sha256Hex(key.dump());
+}
+
+bool IsAutoWritable(const mem::MemoryKind kind, const std::string& confidence, const std::vector<std::string>& paths) {
+    switch (kind) {
+    case mem::MemoryKind::Fact:
+        return confidence == "verified" && !paths.empty();
+    case mem::MemoryKind::Feedback:
+        return confidence == "user-stated";
+    case mem::MemoryKind::Preference:
+        return confidence == "verified" || confidence == "user-stated";
+    }
+    return false;
+}
+
+bool ValidQueueStage(const std::string& s) {
+    return s == "not_queued" || s == "queued" || s == "completed" ||
+           s == "cancelled" || s == "failed" || s == "indeterminate";
+}
+
+bool ValidWorkerStage(const std::string& s) {
+    return s == "not_started" || s == "running" || s == "finished" ||
+           s == "cancelled" || s == "failed" || s == "indeterminate";
+}
+
+bool ValidAdmissionStage(const std::string& s) {
+    return s == "not_checked" || s == "admitted" || s == "denied" ||
+           s == "revoked" || s == "indeterminate";
+}
+
+bool ValidCommitState(const std::string& s) {
+    return s == "not_started" || s == "committed" || s == "indeterminate";
+}
+
+Json WriteAttemptJson(const LearningWriteAttempt& a) {
+    Json stages = Json::array();
+    for (const auto& s : a.stages) {
+        stages.push_back({{"stage", s.stage}, {"outcome", s.outcome}});
+    }
+    return {
+        {"commitKey", a.commit_key},
+        {"sourceEventRef", a.source_event_ref},
+        {"saveRequestSha256", a.save_request_sha256},
+        {"requestSha256", a.request_sha256},
+        {"queueStage", a.queue_stage},
+        {"workerStage", a.worker_stage},
+        {"admissionStage", a.admission_stage},
+        {"commitState", a.commit_state},
+        {"fallbackCandidateId", a.fallback_candidate_id},
+        {"memoryId", a.memory_id},
+        {"memoryPath", a.memory_path},
+        {"contentSha256", a.content_sha256},
+        {"committedAt", a.committed_at},
+        {"stages", std::move(stages)},
+        {"duplicate", a.duplicate},
+        {"errorCode", a.error_code},
+        {"error", a.error},
+    };
+}
+
+LearningWriteAttempt ParseWriteAttempt(const Json& j) {
+    if (!j.is_object() || j.size() != 17) throw std::runtime_error("auto_write shape");
+    for (const auto* key : {"commitKey", "sourceEventRef", "saveRequestSha256", "requestSha256",
+                            "queueStage", "workerStage", "admissionStage", "commitState",
+                            "fallbackCandidateId", "memoryId", "memoryPath", "contentSha256",
+                            "committedAt", "errorCode", "error"}) {
+        if (!j.contains(key) || !j.at(key).is_string()) throw std::runtime_error("auto_write field");
+    }
+    if (!j.contains("duplicate") || !j.at("duplicate").is_boolean() ||
+        !j.contains("stages") || !j.at("stages").is_array()) {
+        throw std::runtime_error("auto_write field");
+    }
+    LearningWriteAttempt a;
+    a.commit_key = j.at("commitKey").get<std::string>();
+    a.source_event_ref = j.at("sourceEventRef").get<std::string>();
+    a.save_request_sha256 = j.at("saveRequestSha256").get<std::string>();
+    a.request_sha256 = j.at("requestSha256").get<std::string>();
+    a.queue_stage = j.at("queueStage").get<std::string>();
+    a.worker_stage = j.at("workerStage").get<std::string>();
+    a.admission_stage = j.at("admissionStage").get<std::string>();
+    a.commit_state = j.at("commitState").get<std::string>();
+    a.fallback_candidate_id = j.at("fallbackCandidateId").get<std::string>();
+    a.memory_id = j.at("memoryId").get<std::string>();
+    a.memory_path = j.at("memoryPath").get<std::string>();
+    a.content_sha256 = j.at("contentSha256").get<std::string>();
+    a.committed_at = j.at("committedAt").get<std::string>();
+    a.duplicate = j.at("duplicate").get<bool>();
+    a.error_code = j.at("errorCode").get<std::string>();
+    a.error = j.at("error").get<std::string>();
+    for (const auto& s : j.at("stages")) {
+        if (!s.is_object() || !s.contains("stage") || !s.contains("outcome") ||
+            !s.at("stage").is_string() || !s.at("outcome").is_string()) {
+            throw std::runtime_error("auto_write stage");
+        }
+        SaveStageReceipt receipt{s.at("stage").get<std::string>(), s.at("outcome").get<std::string>()};
+        if (!SafeText(receipt.stage) || !SafeText(receipt.outcome)) throw std::runtime_error("utf8");
+        a.stages.push_back(std::move(receipt));
+    }
+    for (const auto* s : {&a.commit_key, &a.source_event_ref, &a.save_request_sha256, &a.request_sha256,
+                          &a.queue_stage, &a.worker_stage, &a.admission_stage, &a.commit_state,
+                          &a.fallback_candidate_id, &a.memory_id, &a.memory_path, &a.content_sha256,
+                          &a.committed_at, &a.error_code, &a.error}) {
+        if (!SafeText(*s)) throw std::runtime_error("utf8");
+    }
+    if (!ValidQueueStage(a.queue_stage) || !ValidWorkerStage(a.worker_stage) ||
+        !ValidAdmissionStage(a.admission_stage) || !ValidCommitState(a.commit_state)) {
+        throw std::runtime_error("auto_write enum");
+    }
+    if (WriteAttemptJson(a) != j) throw std::runtime_error("auto_write canonical shape");
+    return a;
+}
+
 const char* ModeName(LearningMode mode) {
     switch (mode) {
     case LearningMode::Off: return "off";
@@ -360,6 +511,10 @@ const Json* Binding(const v3::MessageLine& m) {
 }
 
 Json ReportJson(const LearningReport& r) {
+    Json auto_writes = Json::array();
+    for (const auto& w : r.auto_writes) {
+        auto_writes.push_back(WriteAttemptJson(w));
+    }
     return {
         {"schemaVersion", 1},
         {"mode", ModeName(r.mode)},
@@ -375,6 +530,7 @@ Json ReportJson(const LearningReport& r) {
         {"model", r.model},
         {"candidateIds", r.candidate_ids},
         {"retrievalHints", r.retrieval_hints},
+        {"autoWrites", std::move(auto_writes)},
         {"errorCode", r.error_code},
         {"error", r.error},
         {"modelCalled", r.model_called},
@@ -383,7 +539,7 @@ Json ReportJson(const LearningReport& r) {
 }
 
 LearningReport ParseReport(const Json& j) {
-    if (!j.is_object() || j.size() != 18) throw std::runtime_error("report shape");
+    if (!j.is_object() || j.size() != 19) throw std::runtime_error("report shape");
     LearningReport r;
     const auto parsed_mode = ParseModeName(j.at("mode").get<std::string>());
     const auto parsed_stage = ParseStageName(j.at("stage").get<std::string>());
@@ -401,6 +557,12 @@ LearningReport ParseReport(const Json& j) {
     r.model = j.at("model").get<std::string>();
     r.candidate_ids = j.at("candidateIds").get<std::vector<std::string>>();
     r.retrieval_hints = j.at("retrievalHints").get<std::vector<std::string>>();
+    if (!j.contains("autoWrites") || !j.at("autoWrites").is_array()) {
+        throw std::runtime_error("autoWrites");
+    }
+    for (const auto& item : j.at("autoWrites")) {
+        r.auto_writes.push_back(ParseWriteAttempt(item));
+    }
     r.error_code = j.at("errorCode").get<std::string>();
     r.error = j.at("error").get<std::string>();
     r.model_called = j.at("modelCalled").get<bool>();
@@ -822,6 +984,226 @@ private:
     bool model_called_ = false;
 };
 
+Json QueueRecordJson(const LearningQueueRecord& r) {
+    return {
+        {"schemaVersion", 1},
+        {"sessionId", r.session_id},
+        {"operationId", r.operation_id},
+        {"turnId", r.turn_id},
+        {"learningTurnId", r.learning_turn_id},
+        {"candidateIndex", r.candidate_index},
+        {"saveRequest", SaveRequestJson(r.request)},
+        {"attempt", WriteAttemptJson(r.attempt)},
+    };
+}
+
+Result<LearningQueueRecord> DecodeQueueRecord(
+    const std::string& commit_key,
+    const std::string& bytes) {
+    try {
+        auto value = Json::parse(bytes);
+        if (!value.is_object() || !value.contains("sha256") || !value["sha256"].is_string()) {
+            return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+        }
+        const auto hash = value.at("sha256").get<std::string>();
+        value.erase("sha256");
+        if (lubancode::platform::Sha256Hex(value.dump()) != hash) {
+            return std::unexpected(Fail("sdk.memory_learning.queue_tampered"));
+        }
+        if (!value.is_object() || value.size() != 8 ||
+            !value.contains("schemaVersion") || !value.at("schemaVersion").is_number_integer() ||
+            value.at("schemaVersion").get<int>() != 1 ||
+            !value.contains("sessionId") || !value.at("sessionId").is_string() ||
+            !value.contains("operationId") || !value.at("operationId").is_string() ||
+            !value.contains("turnId") || !value.at("turnId").is_string() ||
+            !value.contains("learningTurnId") || !value.at("learningTurnId").is_string() ||
+            !value.contains("candidateIndex") || !value.at("candidateIndex").is_number_unsigned() ||
+            !value.contains("saveRequest") || !value.at("saveRequest").is_object() ||
+            !value.contains("attempt") || !value.at("attempt").is_object()) {
+            return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+        }
+        LearningQueueRecord r;
+        r.session_id = value.at("sessionId").get<std::string>();
+        r.operation_id = value.at("operationId").get<std::string>();
+        r.turn_id = value.at("turnId").get<std::string>();
+        r.learning_turn_id = value.at("learningTurnId").get<std::string>();
+        r.candidate_index = value.at("candidateIndex").get<std::size_t>();
+        if (!SafeId(r.session_id) || !SafeId(r.operation_id) ||
+            !SafeText(r.turn_id) || !SafeText(r.learning_turn_id)) {
+            return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+        }
+        auto req = mem::store::ParseUpsertJob(value.at("saveRequest"), true);
+        if (!req) return std::unexpected(Fail("sdk.memory_learning.queue_invalid", req.error()));
+        r.request = std::move(*req);
+        r.attempt = ParseWriteAttempt(value.at("attempt"));
+        if (r.attempt.commit_key != commit_key ||
+            r.attempt.save_request_sha256 != lubancode::platform::Sha256Hex(SaveRequestJson(r.request).dump()) ||
+            r.attempt.commit_key != AutoCommitKey(
+                r.session_id, r.operation_id, r.turn_id, r.candidate_index, r.attempt.save_request_sha256) ||
+            QueueRecordJson(r) != value) {
+            return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+        }
+        return r;
+    } catch (const std::exception&) {
+        return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+    }
+}
+
+class LocalLearningWriteQueue final : public LearningWriteQueue {
+public:
+    explicit LocalLearningWriteQueue(fs::path session_dir)
+        : session_dir_(std::move(session_dir)) {}
+
+    Result<void> Enqueue(const LearningQueueRecord& record) override {
+        return WriteRecord(record, true);
+    }
+
+    Result<void> Update(const LearningQueueRecord& record) override {
+        return WriteRecord(record, false);
+    }
+
+    Result<std::vector<LearningQueueRecord>> List() const override {
+        std::lock_guard lock(mutex_);
+        const fs::path dir = session_dir_ / kQueueDir;
+        if (!lubancode::platform::IsUnlinkedOwnedPath(session_dir_, dir)) {
+            return std::unexpected(Fail("sdk.memory_learning.path_escape"));
+        }
+        const auto io_dir = lubancode::platform::FileIoPath(dir);
+        std::error_code ec;
+        const auto dir_status = fs::symlink_status(io_dir, ec);
+        if (ec == std::errc::no_such_file_or_directory || (!ec && dir_status.type() == fs::file_type::not_found)) {
+            return std::vector<LearningQueueRecord>{};
+        }
+        if (ec || fs::is_symlink(dir_status) || !fs::is_directory(dir_status) ||
+            !lubancode::platform::RejectReparsePoint(io_dir)) {
+            return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+        }
+
+        std::vector<LearningQueueRecord> out;
+        std::size_t entries = 0;
+        std::size_t total_bytes = 0;
+        for (fs::directory_iterator it(io_dir, ec), end; !ec && it != end; it.increment(ec)) {
+            if (++entries > kDirEntryCap) return std::unexpected(Fail("sdk.memory_learning.queue_limit"));
+            const fs::path entry_path = dir / it->path().filename();
+            if (entry_path.extension() == ".tmp") continue;
+            std::error_code item_ec;
+            const auto io_entry = lubancode::platform::FileIoPath(entry_path);
+            const auto item_status = fs::symlink_status(io_entry, item_ec);
+            if (item_ec || fs::is_symlink(item_status) || !fs::is_regular_file(item_status) ||
+                !lubancode::platform::RejectReparsePoint(io_entry)) {
+                return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+            }
+            const auto name = lubancode::platform::PathToUtf8(entry_path.filename());
+            if (name.size() <= 5 || name.substr(name.size() - 5) != ".json") {
+                return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+            }
+            const auto commit_key = name.substr(0, name.size() - 5);
+            if (!SafeId(commit_key)) return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+            auto bytes = ReadOwned(entry_path, session_dir_, kReportCap);
+            if (!bytes) return std::unexpected(bytes.error());
+            if (!*bytes) return std::unexpected(Fail("sdk.memory_learning.queue_unavailable"));
+            total_bytes += (*bytes)->size();
+            if (total_bytes > kTotalCap) return std::unexpected(Fail("sdk.memory_learning.queue_limit"));
+            auto decoded = DecodeQueueRecord(commit_key, **bytes);
+            if (!decoded) return std::unexpected(decoded.error());
+            out.push_back(std::move(*decoded));
+        }
+        if (ec) return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+        std::sort(out.begin(), out.end(), [](const LearningQueueRecord& a, const LearningQueueRecord& b) {
+            if (a.operation_id != b.operation_id) return a.operation_id < b.operation_id;
+            if (a.candidate_index != b.candidate_index) return a.candidate_index < b.candidate_index;
+            return a.attempt.commit_key < b.attempt.commit_key;
+        });
+        return out;
+    }
+
+    Result<std::optional<LearningQueueRecord>> Get(const std::string& commit_key) const override {
+        if (!SafeId(commit_key)) return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+        std::lock_guard lock(mutex_);
+        if (auto valid = Directory(session_dir_ / kQueueDir, session_dir_, false); !valid) {
+            return std::unexpected(valid.error());
+        }
+        auto bytes = ReadOwned(session_dir_ / kQueueDir / (commit_key + ".json"), session_dir_, kReportCap);
+        if (!bytes) return std::unexpected(bytes.error());
+        if (!*bytes) return std::optional<LearningQueueRecord>{};
+        auto decoded = DecodeQueueRecord(commit_key, **bytes);
+        if (!decoded) return std::unexpected(decoded.error());
+        return std::optional<LearningQueueRecord>{std::move(*decoded)};
+    }
+
+private:
+    Result<void> WriteRecord(const LearningQueueRecord& record, bool must_not_exist) {
+        if (!SafeId(record.attempt.commit_key)) {
+            return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+        }
+        std::lock_guard lock(mutex_);
+        if (auto valid = Directory(session_dir_ / kQueueDir, session_dir_, true); !valid) {
+            return valid;
+        }
+        Json payload = QueueRecordJson(record);
+        payload["sha256"] = lubancode::platform::Sha256Hex(payload.dump());
+        const auto bytes = payload.dump();
+        if (bytes.size() > kReportCap) return std::unexpected(Fail("sdk.memory_learning.queue_limit"));
+        const fs::path path = session_dir_ / kQueueDir / (record.attempt.commit_key + ".json");
+        auto existing = ReadOwned(path, session_dir_, kReportCap);
+        if (!existing) return std::unexpected(existing.error());
+        if (must_not_exist && existing->has_value()) {
+            return std::unexpected(Fail("sdk.memory_learning.queue_duplicate", record.attempt.commit_key));
+        }
+        if (!must_not_exist && !existing->has_value()) {
+            return std::unexpected(Fail("sdk.memory_learning.queue_missing", record.attempt.commit_key));
+        }
+        const auto saved = lubancode::platform::AtomicWriteFile(
+            path, bytes, lubancode::platform::WriteDurability::ProcessCrashDurability);
+        if (!saved || saved->outcome != lubancode::platform::WriteOutcome::CommittedDurable) {
+            return std::unexpected(Fail("sdk.memory_learning.queue_write_failed",
+                saved ? "unconfirmed" : saved.error().message));
+        }
+        return {};
+    }
+
+    mutable std::mutex mutex_;
+    fs::path session_dir_;
+};
+
+class LocalLearningProjectCommitter final : public LearningProjectCommitter {
+public:
+    mem::ProjectCommitReceipt Commit(
+        const mem::ProjectCommitContext& context,
+        const mem::SaveRequest& request,
+        std::function<bool()> cancelled) override {
+#ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
+        if (const auto write_hook = testing::SnapshotLearningCommitWriteHook()) {
+            std::stop_source stop_src;
+            if (cancelled && cancelled()) stop_src.request_stop();
+            return mem::commit_testing::CommitProjectUpsert(
+                context,
+                request,
+                [&](const fs::path& p, std::string_view content, lubancode::platform::WriteDurability d) {
+                    if (cancelled && cancelled()) stop_src.request_stop();
+                    auto result = (*write_hook)(p, content, d);
+                    if (cancelled && cancelled()) stop_src.request_stop();
+                    return result;
+                },
+                stop_src.get_token());
+        }
+#endif
+        return mem::CommitProjectUpsertWithCancellation(context, request, std::move(cancelled));
+    }
+
+    mem::ProjectCommitReceipt Inspect(
+        const mem::ProjectCommitContext& context,
+        const mem::SaveRequest& request) const override {
+        return mem::InspectProjectCommitReceipt(context, request);
+    }
+
+    mem::ProjectCommitReceipt Confirm(
+        const fs::path& lifecycle_root,
+        const std::string& operation_id) const override {
+        return mem::ConfirmProjectCommitReceipt(lifecycle_root, operation_id);
+    }
+};
+
 } // namespace
 
 Result<std::shared_ptr<SessionMemoryLearning>> SessionMemoryLearning::Prepare(
@@ -844,11 +1226,8 @@ Result<std::shared_ptr<SessionMemoryLearning>> SessionMemoryLearning::Prepare(
 #endif
 
     const auto validate_options = [](const LearningOptions& opts) -> Result<void> {
-        if (opts.mode == LearningMode::Auto) {
-            return std::unexpected(Fail("sdk.memory_learning.auto_unsupported",
-                "automatic direct memory commit is not enabled in Slice 1"));
-        }
-        if (opts.mode != LearningMode::Off && opts.mode != LearningMode::Review) {
+        if (opts.mode != LearningMode::Off && opts.mode != LearningMode::Review &&
+            opts.mode != LearningMode::Auto) {
             return std::unexpected(Fail("sdk.memory_learning.invalid_options"));
         }
         if (!SafeText(opts.model) || !SafeText(opts.reasoning_effort) ||
@@ -858,9 +1237,10 @@ Result<std::shared_ptr<SessionMemoryLearning>> SessionMemoryLearning::Prepare(
             opts.max_transcript_bytes < 256 || opts.max_transcript_bytes > 65536) {
             return std::unexpected(Fail("sdk.memory_learning.invalid_options"));
         }
-        if (opts.mode == LearningMode::Review && opts.model.empty()) {
+        if ((opts.mode == LearningMode::Review || opts.mode == LearningMode::Auto) &&
+            opts.model.empty()) {
             return std::unexpected(Fail("sdk.memory_learning.invalid_options",
-                "Review mode requires a nonempty extraction model"));
+                "Review and Auto modes require a nonempty extraction model"));
         }
         return {};
     };
@@ -873,6 +1253,7 @@ Result<std::shared_ptr<SessionMemoryLearning>> SessionMemoryLearning::Prepare(
         owner->snapshot_.timeout_secs = selection->timeout_secs;
         owner->snapshot_.max_candidates = selection->max_candidates;
         owner->snapshot_.max_transcript_bytes = selection->max_transcript_bytes;
+        owner->snapshot_.auto_write_enabled = selection->auto_write_enabled;
     }
 
     if (!owner->resume_id_.empty()) {
@@ -887,12 +1268,13 @@ Result<std::shared_ptr<SessionMemoryLearning>> SessionMemoryLearning::Prepare(
             if (!plan.is_object() || !plan.contains("mode") || !plan["mode"].is_string())
                 return std::unexpected(Fail("sdk.memory_learning.plan_invalid"));
             const auto parsed_mode = ParseModeName(plan["mode"].get<std::string>());
-            if (!parsed_mode || *parsed_mode == LearningMode::Auto ||
+            if (!parsed_mode ||
                 !plan.contains("model") || !plan["model"].is_string() ||
                 !plan.contains("reasoningEffort") || !plan["reasoningEffort"].is_string() ||
                 !plan.contains("timeoutSecs") || !plan["timeoutSecs"].is_number_integer() ||
                 !plan.contains("maxCandidates") || !plan["maxCandidates"].is_number_unsigned() ||
-                !plan.contains("maxTranscriptBytes") || !plan["maxTranscriptBytes"].is_number_unsigned()) {
+                !plan.contains("maxTranscriptBytes") || !plan["maxTranscriptBytes"].is_number_unsigned() ||
+                !plan.contains("autoWriteEnabled") || !plan["autoWriteEnabled"].is_boolean()) {
                 return std::unexpected(Fail("sdk.memory_learning.plan_invalid"));
             }
             LearningOptions saved;
@@ -902,6 +1284,7 @@ Result<std::shared_ptr<SessionMemoryLearning>> SessionMemoryLearning::Prepare(
             saved.timeout_secs = plan["timeoutSecs"].get<int>();
             saved.max_candidates = plan["maxCandidates"].get<std::size_t>();
             saved.max_transcript_bytes = plan["maxTranscriptBytes"].get<std::size_t>();
+            saved.auto_write_enabled = plan["autoWriteEnabled"].get<bool>();
             if (!validate_options(saved))
                 return std::unexpected(Fail("sdk.memory_learning.plan_invalid"));
             if (selection && *selection != saved)
@@ -912,6 +1295,7 @@ Result<std::shared_ptr<SessionMemoryLearning>> SessionMemoryLearning::Prepare(
             owner->snapshot_.timeout_secs = saved.timeout_secs;
             owner->snapshot_.max_candidates = saved.max_candidates;
             owner->snapshot_.max_transcript_bytes = saved.max_transcript_bytes;
+            owner->snapshot_.auto_write_enabled = saved.auto_write_enabled;
             if (plan != owner->Plan(owner->resume_id_) || plan.dump() != **bytes)
                 return std::unexpected(Fail("sdk.memory_learning.plan_invalid"));
             owner->saved_plan_bytes_ = **bytes;
@@ -941,7 +1325,7 @@ Result<std::shared_ptr<SessionMemoryLearning>> SessionMemoryLearning::Prepare(
     }
     if (!has_backend && !has_connection) {
         return std::unexpected(Fail("sdk.memory_learning.missing_backend",
-            "Review mode requires memory_learning_backend or memory_learning_connection"));
+            "Review and Auto modes require memory_learning_backend or memory_learning_connection"));
     }
 
     if (has_backend) {
@@ -1007,6 +1391,7 @@ Json SessionMemoryLearning::Plan(const std::string& session) const {
         {"timeoutSecs", snapshot_.timeout_secs},
         {"maxCandidates", snapshot_.max_candidates},
         {"maxTranscriptBytes", snapshot_.max_transcript_bytes},
+        {"autoWriteEnabled", snapshot_.auto_write_enabled},
         {"limits", {{"reportBytes", kReportCap}, {"reportTotalBytes", kTotalCap}, {"directoryEntries", kDirEntryCap}}},
     };
 }
@@ -1093,6 +1478,8 @@ std::expected<Json, std::string> SessionMemoryLearning::Open(const lubancode::tr
     snapshot_.session_id = context.session_id;
     memory_dir_ = dir.parent_path().parent_path() / "memory";
     snapshot_.memory_directory = lubancode::tools::PathToUtf8(memory_dir_);
+    write_queue_ = std::make_shared<LocalLearningWriteQueue>(session_dir_);
+    project_committer_ = std::make_shared<LocalLearningProjectCommitter>();
 
     if (context.source) {
         if (context.session_id != resume_id_ || context.session_dir != expected_resume_dir_)
@@ -1104,6 +1491,7 @@ std::expected<Json, std::string> SessionMemoryLearning::Open(const lubancode::tr
         if (auto valid = CheckBinding(*context.source); !valid) return fail(valid.error());
         if (auto valid = CheckSavedReports(*context.source); !valid) return fail(valid.error());
         if (auto valid = CheckSavedAcceptReports(); !valid) return fail(valid.error());
+        if (auto valid = CheckSavedQueueAndAutoWrites(); !valid) return fail(valid.error());
     } else {
         if (!resume_id_.empty()) return std::unexpected("sdk.memory_learning.resume_mismatch");
         auto prior = ReadOwned(session_dir_ / kPlanFile, owned_root_, kPlanCap);
@@ -1211,6 +1599,115 @@ Result<LearningReport> SessionMemoryLearning::DecodeReport(
     }
 }
 
+Result<void> SessionMemoryLearning::ValidateWriteAttempt(
+    const std::string& operation_id,
+    const LearningWriteAttempt& attempt,
+    bool require_complete) const {
+    if (!ValidQueueStage(attempt.queue_stage) || !ValidWorkerStage(attempt.worker_stage) ||
+        !ValidAdmissionStage(attempt.admission_stage) || !ValidCommitState(attempt.commit_state)) {
+        return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+    }
+    if (attempt.queue_stage == "not_queued") {
+        if (attempt.commit_state != "not_started" ||
+            (attempt.fallback_candidate_id.empty() && attempt.error_code.empty())) {
+            return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+        }
+        if (!attempt.fallback_candidate_id.empty() && !SafeCandidateId(attempt.fallback_candidate_id)) {
+            return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+        }
+        return {};
+    }
+    if (!SafeId(attempt.commit_key) || !write_queue_ || !project_committer_) {
+        return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+    }
+    auto qrec = write_queue_->Get(attempt.commit_key);
+    if (!qrec) return std::unexpected(qrec.error());
+    if (!*qrec) {
+        return std::unexpected(Fail("sdk.memory_learning.report_invalid",
+            "missing queue envelope for auto write attempt"));
+    }
+    if ((*qrec)->session_id != snapshot_.session_id || (*qrec)->operation_id != operation_id ||
+        attempt.save_request_sha256 != (*qrec)->attempt.save_request_sha256 ||
+        attempt.request_sha256 != (*qrec)->attempt.request_sha256 ||
+        attempt.source_event_ref != (*qrec)->attempt.source_event_ref) {
+        return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+    }
+
+    const fs::path lifecycle_root = session_dir_.parent_path().parent_path() / "lifecycle";
+    if (auto valid = Directory(lifecycle_root, session_dir_.parent_path().parent_path(), false); !valid) {
+        return valid;
+    }
+    const mem::ProjectCommitContext gate{
+        identity_.project_root,
+        memory_dir_,
+        lifecycle_root,
+        snapshot_.workspace_key,
+        attempt.commit_key,
+        snapshot_.session_id,
+        attempt.source_event_ref,
+    };
+    if (mem::ProjectCommitRequestSha256(gate, (*qrec)->request) != attempt.request_sha256) {
+        return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+    }
+    if (require_complete && attempt.worker_stage == "running") {
+        return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+    }
+
+    const auto intent_bytes = ReadOwned(lifecycle_root / attempt.commit_key / "intent.json", lifecycle_root, kReportCap);
+    if (!intent_bytes) return std::unexpected(intent_bytes.error());
+
+    if (attempt.commit_state == "committed") {
+        if (attempt.queue_stage != "completed" || attempt.admission_stage != "admitted" ||
+            !intent_bytes->has_value()) {
+            return std::unexpected(Fail("sdk.memory_learning.report_invalid",
+                "committed auto write missing queue/admission/intent confirmation"));
+        }
+        const auto intent = Json::parse(**intent_bytes, nullptr, false);
+        if (!intent.is_object() || !intent.contains("parameters") || !intent.at("parameters").is_object() ||
+            !lubancode::api::usage_json::MemberStringEquals(intent, "session_id", snapshot_.session_id) ||
+            !lubancode::api::usage_json::MemberStringEquals(intent, "workspace_key", snapshot_.workspace_key)) {
+            return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+        }
+        const auto& parameters = intent.at("parameters");
+        if (!lubancode::api::usage_json::MemberStringEquals(parameters, "source_event_ref", attempt.source_event_ref)) {
+            return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+        }
+        const auto parsed_request = mem::store::ParseUpsertJob(parameters, true);
+        if (!parsed_request ||
+            lubancode::platform::Sha256Hex(SaveRequestJson(*parsed_request).dump()) != attempt.save_request_sha256 ||
+            mem::ProjectCommitRequestSha256(gate, *parsed_request) != attempt.request_sha256) {
+            return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+        }
+        const auto inspected = project_committer_->Inspect(gate, *parsed_request);
+        if (inspected.state != mem::ProjectCommitState::Committed || !inspected.error_code.empty() ||
+            inspected.memory_id != attempt.memory_id || inspected.memory_path != attempt.memory_path ||
+            inspected.content_sha256 != attempt.content_sha256 || inspected.committed_at != attempt.committed_at ||
+            !attempt.error_code.empty() || !attempt.error.empty() ||
+            attempt.stages.size() != inspected.stages.size() + 1 ||
+            attempt.stages.back() != SaveStageReceipt{"result", "durable"}) {
+            return std::unexpected(Fail("sdk.memory_learning.report_invalid",
+                "committed auto write not confirmed by project commit ledger"));
+        }
+        for (std::size_t n = 0; n < inspected.stages.size(); ++n) {
+            if (attempt.stages[n] !=
+                SaveStageReceipt{CommitStageName(inspected.stages[n].stage), CommitOutcomeName(inspected.stages[n].outcome)}) {
+                return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+            }
+        }
+    } else if (attempt.commit_state == "not_started") {
+        if (std::any_of(attempt.stages.begin(), attempt.stages.end(), [](const SaveStageReceipt& s) {
+                return s.stage == "topic" && s.outcome != "not_committed";
+            })) {
+            return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+        }
+        if (intent_bytes->has_value() &&
+            project_committer_->Inspect(gate, (*qrec)->request).state != mem::ProjectCommitState::NotStarted) {
+            return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+        }
+    }
+    return {};
+}
+
 Result<void> SessionMemoryLearning::ValidateReport(
     const LearningReport& report,
     const v3::V3Ledger* source,
@@ -1224,6 +1721,14 @@ Result<void> SessionMemoryLearning::ValidateReport(
     if (require_complete && report.stage == LearningStage::Running) {
         return std::unexpected(Fail("sdk.memory_learning.report_invalid",
             "saved report remained in Running state"));
+    }
+    if (report.mode != LearningMode::Auto && !report.auto_writes.empty()) {
+        return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+    }
+    for (const auto& attempt : report.auto_writes) {
+        if (auto ok = ValidateWriteAttempt(report.operation_id, attempt, require_complete); !ok) {
+            return ok;
+        }
     }
     if (!report.usage.attempts.empty()) {
         if (!source) return std::unexpected(Fail("sdk.memory_learning.report_invalid",
@@ -1450,19 +1955,25 @@ void SessionMemoryLearning::SettleOrStartOperation(
     LearningReport base_report = EmptyReport(completed.operation_id, completed.turn_id, LearningStage::Failed);
     base_report.task_type = dispatch.task_type;
     auto store = candidate_store_;
+    auto queue = write_queue_;
+    auto committer = project_committer_;
     const fs::path mem_dir = memory_dir_;
+    const fs::path lifecycle_root = session_dir_.parent_path().parent_path() / "lifecycle";
     const LearningSnapshot snap = snapshot_;
     std::string system_prompt = std::move(dispatch.system_prompt);
     std::string transcript = std::move(dispatch.transcript);
     std::string task_type = std::move(dispatch.task_type);
+#ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
+    auto admission_hook = testing::SnapshotLearningAutoAdmissionHook();
+#endif
 
-    auto worker_fn = [self, slot, box, store, mem_dir, snap,
+    auto worker_fn = [self, slot, box, store, queue, committer, mem_dir, lifecycle_root, snap,
                       base_report = std::move(base_report),
                       system_prompt = std::move(system_prompt),
                       transcript = std::move(transcript),
                       task_type = std::move(task_type)
 #ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
-                      , exec_hook
+                      , exec_hook, admission_hook
 #endif
     ]() mutable {
         LearningReport report = std::move(base_report);
@@ -1490,20 +2001,17 @@ void SessionMemoryLearning::SettleOrStartOperation(
             } else {
                 report.retrieval_hints = extracted->retrieval_terms;
                 const std::size_t limit = std::min(extracted->candidates.size(), snap.max_candidates);
-                bool store_failed = false;
-                for (std::size_t i = 0; i < limit; ++i) {
-                    if (slot->cancel.load() || self->closing_.load()) {
-                        report.stage = LearningStage::Cancelled;
-                        report.error_code = "cancelled";
-                        report.error = "memory learning cancelled before candidate write";
-                        store_failed = true;
-                        break;
-                    }
-                    const auto& proposed = extracted->candidates[i];
-                    const auto kind = mem::ParseMemoryKind(proposed.kind);
-                    if (!kind.has_value()) continue;
+                bool fatal_error = false;
+                bool cancelled_during_writes = false;
+                bool auto_indeterminate = false;
+                bool auto_write_incomplete = false;
+                std::string first_auto_error_code;
+                std::string first_auto_error;
+
+                const auto add_review_candidate = [&](const extract::ProposedCandidate& proposed,
+                                                      mem::MemoryKind kind) -> std::expected<std::string, Error> {
                     mem::MemoryCandidate cand;
-                    cand.kind = *kind;
+                    cand.kind = kind;
                     cand.title = proposed.title;
                     cand.summary = proposed.summary;
                     cand.content = proposed.content;
@@ -1514,15 +2022,348 @@ void SessionMemoryLearning::SettleOrStartOperation(
                     cand.task_type = task_type;
                     auto added = store->Add(mem_dir, std::move(cand));
                     if (!added) {
-                        report.stage = LearningStage::Failed;
-                        report.error_code = "sdk.memory_learning.candidate_store_failed";
-                        report.error = added.error();
-                        store_failed = true;
+                        return std::unexpected(Fail("sdk.memory_learning.candidate_store_failed", added.error()));
+                    }
+                    return *added;
+                };
+
+                for (std::size_t i = 0; i < limit; ++i) {
+                    if (slot->cancel.load() || self->closing_.load()) {
+                        report.stage = LearningStage::Cancelled;
+                        report.error_code = "cancelled";
+                        report.error = "memory learning cancelled before candidate write";
+                        cancelled_during_writes = true;
                         break;
                     }
-                    report.candidate_ids.push_back(*added);
+                    const auto& proposed = extracted->candidates[i];
+                    const auto kind = mem::ParseMemoryKind(proposed.kind);
+                    if (!kind.has_value()) continue;
+
+                    if (snap.mode == LearningMode::Review) {
+                        auto added = add_review_candidate(proposed, *kind);
+                        if (!added) {
+                            report.stage = LearningStage::Failed;
+                            report.error_code = added.error().code;
+                            report.error = added.error().message;
+                            fatal_error = true;
+                            break;
+                        }
+                        report.candidate_ids.push_back(*added);
+                        continue;
+                    }
+
+                    // LearningMode::Auto
+                    if (!IsAutoWritable(*kind, proposed.confidence, proposed.paths)) {
+                        auto added = add_review_candidate(proposed, *kind);
+                        if (!added) {
+                            report.stage = LearningStage::Failed;
+                            report.error_code = added.error().code;
+                            report.error = added.error().message;
+                            fatal_error = true;
+                            break;
+                        }
+                        report.candidate_ids.push_back(*added);
+                        LearningWriteAttempt fallback_attempt;
+                        fallback_attempt.queue_stage = "not_queued";
+                        fallback_attempt.worker_stage = "finished";
+                        fallback_attempt.admission_stage = "denied";
+                        fallback_attempt.commit_state = "not_started";
+                        fallback_attempt.fallback_candidate_id = *added;
+                        fallback_attempt.error_code = "sdk.memory_learning.not_auto_writable";
+                        fallback_attempt.error = "candidate ineligible for auto write; routed to candidate review";
+                        report.auto_writes.push_back(std::move(fallback_attempt));
+                        continue;
+                    }
+
+                    mem::SaveRequest req;
+                    req.kind = *kind;
+                    req.title = proposed.title;
+                    req.summary = proposed.summary;
+                    req.content = proposed.content;
+                    req.keywords = proposed.keywords;
+                    req.paths = proposed.paths;
+                    req.confidence = proposed.confidence;
+                    req.source_session = snap.session_id;
+                    req.occurred_at = proposed.occurred_at;
+                    req.scope.level = "project";
+                    req.scope.kind = "project";
+                    for (const auto& path : proposed.paths) {
+                        req.evidence.push_back(mem::MemoryEvidence{path, {}});
+                    }
+
+                    const auto valid_req = mem::store::ValidateSaveRequest(req);
+                    if (!valid_req) {
+                        auto added = add_review_candidate(proposed, *kind);
+                        if (!added) {
+                            report.stage = LearningStage::Failed;
+                            report.error_code = added.error().code;
+                            report.error = added.error().message;
+                            fatal_error = true;
+                            break;
+                        }
+                        report.candidate_ids.push_back(*added);
+                        LearningWriteAttempt fallback_attempt;
+                        fallback_attempt.queue_stage = "not_queued";
+                        fallback_attempt.worker_stage = "finished";
+                        fallback_attempt.admission_stage = "denied";
+                        fallback_attempt.commit_state = "not_started";
+                        fallback_attempt.fallback_candidate_id = *added;
+                        fallback_attempt.error_code = valid_req.error();
+                        fallback_attempt.error = "auto save request rejected before enqueue; routed to candidate review";
+                        report.auto_writes.push_back(std::move(fallback_attempt));
+                        continue;
+                    }
+
+                    if (!queue || !committer) {
+                        report.stage = LearningStage::Failed;
+                        report.error_code = "sdk.memory_learning.auto_writer_unavailable";
+                        report.error = "auto write queue or project committer unavailable";
+                        fatal_error = true;
+                        break;
+                    }
+
+                    LearningWriteAttempt attempt;
+                    attempt.source_event_ref = AutoSourceEventRef(
+                        snap.workspace_key, snap.session_id, slot->operation_id,
+                        report.turn_id, report.learning_turn_id, i);
+                    attempt.save_request_sha256 = lubancode::platform::Sha256Hex(SaveRequestJson(req).dump());
+                    attempt.commit_key = AutoCommitKey(
+                        snap.session_id, slot->operation_id, report.turn_id, i, attempt.save_request_sha256);
+
+                    const mem::ProjectCommitContext gate{
+                        self->identity_.project_root,
+                        mem_dir,
+                        lifecycle_root,
+                        snap.workspace_key,
+                        attempt.commit_key,
+                        snap.session_id,
+                        attempt.source_event_ref,
+                    };
+                    attempt.request_sha256 = mem::ProjectCommitRequestSha256(gate, req);
+                    attempt.queue_stage = "queued";
+                    attempt.worker_stage = "running";
+                    attempt.admission_stage = "not_checked";
+                    attempt.commit_state = "not_started";
+
+                    LearningQueueRecord qrec{
+                        snap.session_id,
+                        slot->operation_id,
+                        report.turn_id,
+                        report.learning_turn_id,
+                        i,
+                        req,
+                        attempt,
+                    };
+                    if (auto enq = queue->Enqueue(qrec); !enq) {
+                        attempt.queue_stage = "failed";
+                        attempt.worker_stage = "failed";
+                        attempt.error_code = enq.error().code;
+                        attempt.error = enq.error().message;
+                        report.auto_writes.push_back(attempt);
+                        report.stage = LearningStage::Failed;
+                        report.error_code = attempt.error_code;
+                        report.error = attempt.error;
+                        fatal_error = true;
+                        break;
+                    }
+
+#ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
+                    if (admission_hook && *admission_hook) {
+                        (*admission_hook)(slot->operation_id, attempt.commit_key);
+                    }
+#endif
+
+                    // Once enqueued onto LearningWriteQueue, NEVER silently fall back to candidate_store_.
+                    const auto update_queue = [&](const LearningWriteAttempt& updated_attempt) -> bool {
+                        qrec.attempt = updated_attempt;
+                        auto qupd = queue->Update(qrec);
+                        if (!qupd) {
+                            self->write_indeterminate_.store(true);
+                            auto_indeterminate = true;
+                            report.stage = LearningStage::Indeterminate;
+                            report.error_code = qupd.error().code;
+                            report.error = qupd.error().message;
+                            return false;
+                        }
+                        return true;
+                    };
+
+                    if (slot->cancel.load() || self->closing_.load()) {
+                        attempt.queue_stage = "queued";
+                        attempt.worker_stage = "cancelled";
+                        attempt.admission_stage = self->auto_write_revoked_.load() ? "revoked" : "not_checked";
+                        attempt.commit_state = "not_started";
+                        attempt.error_code = "cancelled";
+                        attempt.error = "memory learning cancelled before auto commit";
+                        if (!update_queue(attempt)) {
+                            attempt.queue_stage = "indeterminate";
+                        }
+                        report.auto_writes.push_back(std::move(attempt));
+                        if (auto_indeterminate) break;
+                        cancelled_during_writes = true;
+                        break;
+                    }
+
+                    if (!snap.auto_write_enabled) {
+                        attempt.queue_stage = "queued";
+                        attempt.worker_stage = "finished";
+                        attempt.admission_stage = "denied";
+                        attempt.commit_state = "not_started";
+                        attempt.error_code = "sdk.memory_learning.auto_write_denied";
+                        attempt.error = "auto write disabled in frozen learning plan";
+                        (void)update_queue(attempt);
+                        if (auto_indeterminate) attempt.queue_stage = "indeterminate";
+                        auto_write_incomplete = true;
+                        if (first_auto_error_code.empty()) {
+                            first_auto_error_code = attempt.error_code;
+                            first_auto_error = attempt.error;
+                        }
+                        report.auto_writes.push_back(std::move(attempt));
+                        if (auto_indeterminate) break;
+                        continue;
+                    }
+
+                    if (self->auto_write_revoked_.load()) {
+                        attempt.queue_stage = "queued";
+                        attempt.worker_stage = "finished";
+                        attempt.admission_stage = "revoked";
+                        attempt.commit_state = "not_started";
+                        attempt.error_code = "sdk.memory_learning.auto_write_revoked";
+                        {
+                            std::lock_guard rev_lock(self->revoke_mutex_);
+                            attempt.error = self->auto_write_revoke_reason_.empty()
+                                ? std::string("auto memory writeback revoked")
+                                : self->auto_write_revoke_reason_;
+                        }
+                        (void)update_queue(attempt);
+                        if (auto_indeterminate) attempt.queue_stage = "indeterminate";
+                        auto_write_incomplete = true;
+                        if (first_auto_error_code.empty()) {
+                            first_auto_error_code = attempt.error_code;
+                            first_auto_error = attempt.error;
+                        }
+                        report.auto_writes.push_back(std::move(attempt));
+                        if (auto_indeterminate) break;
+                        continue;
+                    }
+
+                    if (self->HasIndeterminate()) {
+                        attempt.queue_stage = "queued";
+                        attempt.worker_stage = "finished";
+                        attempt.admission_stage = "denied";
+                        attempt.commit_state = "not_started";
+                        attempt.error_code = "sdk.memory_learning.stopped";
+                        attempt.error = "earlier memory write entered indeterminate state";
+                        (void)update_queue(attempt);
+                        if (auto_indeterminate) attempt.queue_stage = "indeterminate";
+                        auto_write_incomplete = true;
+                        if (first_auto_error_code.empty()) {
+                            first_auto_error_code = attempt.error_code;
+                            first_auto_error = attempt.error;
+                        }
+                        report.auto_writes.push_back(std::move(attempt));
+                        break;
+                    }
+
+                    attempt.admission_stage = "admitted";
+                    if (!update_queue(attempt)) {
+                        attempt.queue_stage = "indeterminate";
+                        attempt.worker_stage = "indeterminate";
+                        report.auto_writes.push_back(std::move(attempt));
+                        break;
+                    }
+
+                    const auto saved = committer->Commit(gate, req, [&slot, &self] {
+                        return slot->cancel.load() || self->closing_.load();
+                    });
+
+                    attempt.memory_id = saved.memory_id;
+                    attempt.memory_path = saved.memory_path;
+                    attempt.content_sha256 = saved.content_sha256;
+                    attempt.committed_at = saved.committed_at;
+                    attempt.duplicate = saved.duplicate;
+                    attempt.error_code = saved.error_code;
+                    attempt.error = saved.error;
+                    attempt.stages.clear();
+                    for (const auto& stage : saved.stages) {
+                        attempt.stages.push_back({CommitStageName(stage.stage), CommitOutcomeName(stage.outcome)});
+                    }
+
+                    const bool request_mismatch =
+                        !saved.request_sha256.empty() && saved.request_sha256 != attempt.request_sha256;
+                    const bool result_durable =
+                        !attempt.stages.empty() &&
+                        attempt.stages.back() == SaveStageReceipt{"result", "durable"};
+
+                    if (request_mismatch) {
+                        attempt.commit_state = "indeterminate";
+                        attempt.queue_stage = "indeterminate";
+                        attempt.worker_stage = "indeterminate";
+                        attempt.error_code = "sdk.memory_learning.request_mismatch";
+                        attempt.error = attempt.error_code;
+                        self->write_indeterminate_.store(true);
+                        auto_indeterminate = true;
+                    } else if (saved.state == mem::ProjectCommitState::Committed &&
+                               result_durable && saved.error_code.empty()) {
+                        attempt.commit_state = "committed";
+                        attempt.queue_stage = "completed";
+                        attempt.worker_stage = "finished";
+                    } else if (saved.state == mem::ProjectCommitState::NotStarted) {
+                        attempt.commit_state = "not_started";
+                        const bool was_cancelled =
+                            slot->cancel.load() || self->closing_.load() ||
+                            saved.error_code == "memory.commit.cancelled";
+                        attempt.worker_stage = was_cancelled ? "cancelled" : "finished";
+                        attempt.queue_stage = was_cancelled ? "queued" : "failed";
+                        if (was_cancelled) {
+                            cancelled_during_writes = true;
+                        } else {
+                            auto_write_incomplete = true;
+                            if (first_auto_error_code.empty()) {
+                                first_auto_error_code = attempt.error_code;
+                                first_auto_error = attempt.error;
+                            }
+                        }
+                    } else {
+                        attempt.commit_state = "indeterminate";
+                        attempt.queue_stage = "indeterminate";
+                        attempt.worker_stage = "indeterminate";
+                        if (attempt.error_code.empty()) {
+                            attempt.error_code = "sdk.memory_learning.commit_unconfirmed";
+                            attempt.error = "project commit did not confirm durable result";
+                        }
+                        self->write_indeterminate_.store(true);
+                        auto_indeterminate = true;
+                    }
+
+                    if (!update_queue(attempt)) {
+                        attempt.queue_stage = "indeterminate";
+                    }
+                    report.auto_writes.push_back(attempt);
+
+                    if (auto_indeterminate) {
+                        report.stage = LearningStage::Indeterminate;
+                        report.error_code = attempt.error_code;
+                        report.error = attempt.error;
+                        break;
+                    }
                 }
-                if (!store_failed) {
+
+                if (auto_indeterminate) {
+                    report.stage = LearningStage::Indeterminate;
+                } else if (cancelled_during_writes) {
+                    report.stage = LearningStage::Cancelled;
+                    if (report.error_code.empty()) {
+                        report.error_code = "cancelled";
+                        report.error = "memory learning cancelled during auto writeback";
+                    }
+                } else if (fatal_error) {
+                    report.stage = LearningStage::Failed;
+                } else if (auto_write_incomplete) {
+                    report.stage = LearningStage::Failed;
+                    report.error_code = first_auto_error_code;
+                    report.error = first_auto_error;
+                } else {
                     report.stage = LearningStage::Completed;
                 }
             }
@@ -1553,6 +2394,9 @@ void SessionMemoryLearning::SettleOrStartOperation(
             report.stage = LearningStage::Indeterminate;
             report.error_code = saved.error().code;
             report.error = saved.error().message;
+            if (snap.mode == LearningMode::Auto) {
+                self->write_indeterminate_.store(true);
+            }
         }
         {
             std::lock_guard rlock(self->reports_mutex_);
@@ -1642,6 +2486,44 @@ Result<void> SessionMemoryLearning::LoadOperationReport(
         report.error_code = "sdk.memory_learning.interrupted";
         report.error = "memory learning was running when session terminated";
         report.usage.attempts_complete = false;
+        if (snapshot_.mode == LearningMode::Auto) {
+            write_indeterminate_.store(true);
+            if (write_queue_) {
+                auto queued = write_queue_->List();
+                if (!queued) {
+                    if (require_persisted_valid) return std::unexpected(queued.error());
+                    std::lock_guard rlock(reports_mutex_);
+                    reports_.insert_or_assign(operation_id, Result<LearningReport>(std::unexpected(queued.error())));
+                    return {};
+                }
+                const fs::path lifecycle_root = session_dir_.parent_path().parent_path() / "lifecycle";
+                for (auto& qrec : *queued) {
+                    if (qrec.operation_id != operation_id) continue;
+                    if (project_committer_) {
+                        const mem::ProjectCommitContext gate{
+                            identity_.project_root, memory_dir_, lifecycle_root,
+                            snapshot_.workspace_key, qrec.attempt.commit_key,
+                            snapshot_.session_id, qrec.attempt.source_event_ref};
+                        const auto inspected = project_committer_->Inspect(gate, qrec.request);
+                        if (inspected.state == mem::ProjectCommitState::Indeterminate) {
+                            qrec.attempt.commit_state = "indeterminate";
+                        }
+                    }
+                    report.auto_writes.push_back(std::move(qrec.attempt));
+                }
+            }
+        }
+    } else if (snapshot_.mode == LearningMode::Auto && report.stage == LearningStage::Indeterminate) {
+        write_indeterminate_.store(true);
+    }
+    for (const auto& attempt : report.auto_writes) {
+        if (attempt.commit_state == "indeterminate" || attempt.queue_stage == "indeterminate" ||
+            attempt.worker_stage == "indeterminate" ||
+            (attempt.queue_stage == "queued" && attempt.commit_state == "not_started" &&
+             (attempt.worker_stage == "running" || attempt.admission_stage == "admitted" ||
+              attempt.admission_stage == "not_checked"))) {
+            write_indeterminate_.store(true);
+        }
     }
 
     std::lock_guard rlock(reports_mutex_);
@@ -1961,6 +2843,75 @@ Result<void> SessionMemoryLearning::CheckSavedAcceptReports() {
     return {};
 }
 
+Result<void> SessionMemoryLearning::CheckSavedQueueAndAutoWrites() {
+    if (!write_queue_ || !project_committer_) return {};
+    auto listed = write_queue_->List();
+    if (!listed) return std::unexpected(listed.error());
+    if (listed->empty()) return {};
+
+    const fs::path lifecycle_root = session_dir_.parent_path().parent_path() / "lifecycle";
+    if (auto valid = Directory(lifecycle_root, session_dir_.parent_path().parent_path(), false); !valid) {
+        return valid;
+    }
+
+    for (const auto& qrec : *listed) {
+        if (qrec.session_id != snapshot_.session_id) {
+            return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+        }
+        const mem::ProjectCommitContext gate{
+            identity_.project_root,
+            memory_dir_,
+            lifecycle_root,
+            snapshot_.workspace_key,
+            qrec.attempt.commit_key,
+            snapshot_.session_id,
+            qrec.attempt.source_event_ref,
+        };
+        if (mem::ProjectCommitRequestSha256(gate, qrec.request) != qrec.attempt.request_sha256) {
+            return std::unexpected(Fail("sdk.memory_learning.queue_invalid"));
+        }
+        const auto inspected = project_committer_->Inspect(gate, qrec.request);
+        if (qrec.attempt.commit_state == "committed") {
+            if (qrec.attempt.queue_stage != "completed" ||
+                qrec.attempt.admission_stage != "admitted" ||
+                inspected.state != mem::ProjectCommitState::Committed ||
+                !inspected.error_code.empty() ||
+                inspected.memory_id != qrec.attempt.memory_id ||
+                inspected.memory_path != qrec.attempt.memory_path ||
+                inspected.content_sha256 != qrec.attempt.content_sha256 ||
+                inspected.committed_at != qrec.attempt.committed_at ||
+                !qrec.attempt.error_code.empty() || !qrec.attempt.error.empty() ||
+                qrec.attempt.stages.size() != inspected.stages.size() + 1 ||
+                qrec.attempt.stages.back() != SaveStageReceipt{"result", "durable"}) {
+                return std::unexpected(Fail("sdk.memory_learning.queue_unconfirmed",
+                    "committed queue record not confirmed by project commit ledger"));
+            }
+            for (std::size_t n = 0; n < inspected.stages.size(); ++n) {
+                if (qrec.attempt.stages[n] !=
+                    SaveStageReceipt{CommitStageName(inspected.stages[n].stage),
+                                     CommitOutcomeName(inspected.stages[n].outcome)}) {
+                    return std::unexpected(Fail("sdk.memory_learning.queue_unconfirmed"));
+                }
+            }
+            continue;
+        }
+        if (qrec.attempt.commit_state == "indeterminate" ||
+            qrec.attempt.queue_stage == "indeterminate" ||
+            qrec.attempt.worker_stage == "indeterminate" ||
+            inspected.state == mem::ProjectCommitState::Indeterminate) {
+            write_indeterminate_.store(true);
+            continue;
+        }
+        if (qrec.attempt.queue_stage == "queued" && qrec.attempt.commit_state == "not_started" &&
+            (qrec.attempt.worker_stage == "running" ||
+             qrec.attempt.admission_stage == "admitted" ||
+             qrec.attempt.admission_stage == "not_checked")) {
+            write_indeterminate_.store(true);
+        }
+    }
+    return {};
+}
+
 Result<std::vector<LearningCandidate>> SessionMemoryLearning::ListCandidates() const {
     if (legacy_ || snapshot_.mode == LearningMode::Off) {
         return std::unexpected(Fail("sdk.memory_learning.disabled"));
@@ -2050,7 +3001,7 @@ Result<CandidateAcceptReport> SessionMemoryLearning::AcceptCandidate(
     }
 
     std::lock_guard lock(accept_mutex_);
-    if (accept_indeterminate_ || write_indeterminate) {
+    if (accept_indeterminate_ || write_indeterminate || write_indeterminate_.load()) {
         return std::unexpected(Fail("sdk.memory_learning.stopped",
             "earlier project write or candidate accept entered indeterminate state"));
     }
@@ -2214,9 +3165,32 @@ Result<std::vector<CandidateAcceptReport>> SessionMemoryLearning::GetAcceptedCan
     return out;
 }
 
+Result<void> SessionMemoryLearning::RevokeAutoWrite(const std::string& reason) {
+    if (legacy_ || snapshot_.mode != LearningMode::Auto) {
+        return std::unexpected(Fail("sdk.memory_learning.not_auto",
+            "RevokeAutoMemoryLearning requires LearningMode::Auto"));
+    }
+    if (!SafeText(reason)) {
+        return std::unexpected(Fail("sdk.memory_learning.invalid_input", "invalid revocation reason"));
+    }
+    {
+        std::lock_guard lock(revoke_mutex_);
+        if (!reason.empty()) {
+            auto_write_revoke_reason_ = reason;
+        }
+    }
+    auto_write_revoked_.store(true);
+    return {};
+}
+
 bool SessionMemoryLearning::HasIndeterminateAccept() const {
     std::lock_guard lock(accept_mutex_);
     return accept_indeterminate_;
+}
+
+bool SessionMemoryLearning::HasIndeterminate() const {
+    std::lock_guard lock(accept_mutex_);
+    return accept_indeterminate_ || write_indeterminate_.load();
 }
 
 } // namespace lubancore::detail
