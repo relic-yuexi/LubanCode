@@ -2013,6 +2013,12 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             if (record->assembly->agent_profile.request.model.empty()) {
                 record->assembly->agent_profile.request.model = options_.session_model;
             }
+            // 会话级 prompt_cache_key:取该线程的轨迹场 id,同线程多轮恒定。
+            if (record->session_service != nullptr && record->session_service->trajectory() != nullptr &&
+                !record->assembly->agent_profile.prompt_cache_key_provider) {
+                record->assembly->agent_profile.prompt_cache_key_provider =
+                    [key = "lubancode-" + record->session_service->trajectory()->session_id()]() { return key; };
+            }
             try {
                 std::optional<std::vector<api::Message>> restored_history;
                 auto* trajectory = record->session_service->trajectory();

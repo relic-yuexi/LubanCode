@@ -100,6 +100,9 @@ struct AgentProfile {
     // 会在一次 Run() 中途改变 loaded 集合,下一份请求的索引段就得跟着变。
     // 空 = 不注。
     std::function<std::string()> deferred_index_provider;
+    // 会话级 prompt_cache_key 的活口:逐请求现查(/clear 换新场后 id 跟着换)。
+    // 空函数或返回空串 = 不发。子代理不继承,前缀与主会话不同,不共用分组。
+    std::function<std::string()> prompt_cache_key_provider;
 
     // ---- 病十三的方向:工具可见性策略写进皮(实例仓与策略分家的第一步)。
     // 谓词不放行的工具不进请求的 tools 数组;模型调了"注册表里查得到、
@@ -166,6 +169,10 @@ struct AgentProfile {
     // 假 = 本 Agent 不走原生路(Disabled/LegacyExpand/ProxyReference 行为
     // 与从前一字不差)。
     bool native_deferred_tools = false;
+    // 工具入参宽松兜底(坏 JSON 修补 + 执行前顶层 schema 浅检与数字串宽容转换):
+    // CLI/单发/网关等终端宿主默认开;LubanCore SDK 会话显式关掉,保留确定性
+    // 非启发式入参契约(Action 钩子原样观测/改写,工具自验入参)。
+    bool lenient_tool_input = true;
 };
 
 // 环境接线(批四·病十二:接线类的门收成一只)。这些都是"宿主把外面的

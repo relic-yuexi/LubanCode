@@ -15,5 +15,6 @@ using text::LanguageDisplayName;
 using text::LoadLanguagePacksFromDir;
 using text::MapLocaleToLanguage;
 using text::DetectSystemLanguage;
+using text::ResolveLanguage;
 namespace i18n_detail = text::i18n_detail;
 }  // namespace lubancode::cli

@@ -26,9 +26,11 @@ def native_body():
             + "[doctest] assertions: 80 | 80 passed | 0 failed\nTest Passed.\n")
 
 
-def materialize(build):
+def materialize(build, cli_timeout=300):
     tests, sections, cases = [], [], []
     for index, (name, (binary, timeout)) in enumerate(gate.REQUIRED.items()):
+        if name == "unit.runtime.child_history_adoption":
+            timeout = cli_timeout
         command = [f"/actual build/tests/{binary}", gate.FILTER]
         tests.append({"name": name, "command": command, "properties": [{"name": "TIMEOUT", "value": timeout}]})
         sections.append(f'{index + 1}/3 Testing: {name}\nCommand: "{command[0]}" "{command[1]}"\n' + native_body())
@@ -57,8 +59,28 @@ class ChildHistoryFullGateTests(unittest.TestCase):
     def test_posix_uses_same_actual_roster(self):
         with tempfile.TemporaryDirectory() as directory:
             build = Path(directory)
-            materialize(build)
+            materialize(build, cli_timeout=180)
             self.assertEqual(gate.extract(build, "posix")["status"], "passed")
+
+    def test_posix_cannot_borrow_windows_cli_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            build = Path(directory)
+            materialize(build, cli_timeout=300)
+            with self.assertRaisesRegex(RuntimeError, "changed its timeout"):
+                gate.extract(build, "posix")
+
+    def test_sdk_budget_remains_300_on_both_platforms(self):
+        for platform, cli_timeout in (("nt", 300), ("posix", 180)):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as directory:
+                build = Path(directory)
+                materialize(build, cli_timeout=cli_timeout)
+                path = build / "child-history-full-registration.json"
+                data = json.loads(path.read_text())
+                sdk = next(test for test in data["tests"] if test["name"] == "sdk.focused.child_history_adoption")
+                sdk["properties"][0]["value"] = 180
+                path.write_text(json.dumps(data), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "changed its timeout"):
+                    gate.extract(build, platform)
 
     def test_source_gap_peer_with_no_adoption_check_is_the_real_roster(self):
         body = native_body()
@@ -145,7 +167,7 @@ class ChildHistoryFullGateTests(unittest.TestCase):
                 elif mode == "disabled":
                     data["tests"][0]["properties"].append({"name": "DISABLED", "value": True})
                 elif mode == "budget":
-                    data["tests"][1]["properties"][0]["value"] = 300
+                    data["tests"][1]["properties"][0]["value"] = 180
                 elif mode == "missing":
                     data["tests"].pop()
                 else:

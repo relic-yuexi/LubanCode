@@ -26,6 +26,7 @@
 #include "app_server/dispatcher.hpp"
 #include "app_server/protocol.hpp"
 #include "app_server/schema.hpp"
+#include "gateway/heartbeat.hpp"
 #include "gateway/process.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
@@ -128,6 +129,9 @@ nlohmann::json ScheduleProjectionFor(const gateway::AutomationJob& job, std::int
         schedule["deadlineMs"] = job.deadline_ms;
     }
     schedule["notifyOnChange"] = job.notify_on_change;
+    if (!job.watch_paths.empty()) {
+        schedule["watchPaths"] = job.watch_paths;
+    }
     if (job.state == gateway::AutomationJobState::Active) {
         if (job.schedule_kind == gateway::ScheduleKind::Once) {
             schedule["nextDueMs"] = job.due_at_ms;
@@ -485,6 +489,32 @@ nlohmann::json AssistantAutomationFace::HandleTaskCreate(const nlohmann::json& p
     const std::string timezone = ReadJsonString(params, "timezone");
     const std::string misfire_text = ReadJsonString(params, "misfirePolicy");
     const bool notify_on_change = ReadJsonBool(params, "notifyOnChange");
+    std::vector<std::string> watch_paths;
+    const bool has_watch_paths = params.contains("watchPaths");
+    if (has_watch_paths) {
+        if (!params["watchPaths"].is_array()) {
+            out_error_code = app_server::kErrInvalidParams;
+            out_error_message = "task/create: watchPaths 须是字符串数组";
+            return nlohmann::json();
+        }
+        std::vector<std::string> raw_watch_paths;
+        raw_watch_paths.reserve(params["watchPaths"].size());
+        for (const auto& elem : params["watchPaths"]) {
+            if (!elem.is_string()) {
+                out_error_code = app_server::kErrInvalidParams;
+                out_error_message = "task/create: watchPaths 数组元素须是字符串";
+                return nlohmann::json();
+            }
+            raw_watch_paths.push_back(elem.get<std::string>());
+        }
+        const std::string watch_err =
+            gateway::ValidateWatchPaths(raw_watch_paths, &watch_paths);
+        if (!watch_err.empty()) {
+            out_error_code = app_server::kErrInvalidParams;
+            out_error_message = "task/create: watchPaths 不过——" + watch_err;
+            return nlohmann::json();
+        }
+    }
     if (interval_seconds > 0 && !cron_expr.empty()) {
         out_error_code = app_server::kErrInvalidParams;
         out_error_message = "task/create: intervalSeconds 与 cronExpr 二选一,别都给";
@@ -581,6 +611,10 @@ nlohmann::json AssistantAutomationFace::HandleTaskCreate(const nlohmann::json& p
     if (params.is_object() && params.contains("notifyOnChange")) {
         command.schedule.set_notify_on_change = true;
         command.schedule.notify_on_change = notify_on_change;
+    }
+    if (has_watch_paths) {
+        command.schedule.set_watch_paths = true;
+        command.schedule.watch_paths = std::move(watch_paths);
     }
     const std::string error =
         gateway::WriteJobAddCommand(paths_.control_dir, command);
@@ -833,6 +867,10 @@ nlohmann::json AssistantAutomationFace::HandleTaskRead(const nlohmann::json& par
         if (!occurrence.observed_sha.empty()) {
             item["observed"] = nlohmann::json{{"changed", occurrence.observed_changed},
                                               {"delivered", occurrence.observed_delivered}};
+        }
+        if (!occurrence.watch_sha.empty()) {
+            item["watch"] = nlohmann::json{{"sha", occurrence.watch_sha},
+                                           {"skipped", occurrence.watch_skipped}};
         }
         const auto result = FindOccurrenceResult(occurrence, outbox);
         if (result.has_value()) {

@@ -230,7 +230,7 @@ void TrajectoryTurnBridge::NoteV3Error(const v3::WriteReceipt& receipt, const ch
     }
     recent_errors_.push_back(note);
     if (error_sink_ != nullptr) {
-        error_sink_->push_back(note);
+        error_sink_->Append(note);
     }
     platform::LogSink::Instance().Error("trajectory", "v3 落账失败: " + note);
 }
@@ -255,7 +255,7 @@ void TrajectoryTurnBridge::NoteError(const RecordReceipt& receipt, const char* w
     }
     recent_errors_.push_back(note);
     if (error_sink_ != nullptr) {
-        error_sink_->push_back(note);
+        error_sink_->Append(note);
     }
     platform::LogSink::Instance().Error("trajectory", "落账失败: " + note);
 }
@@ -370,7 +370,7 @@ void TrajectoryTurnBridge::CancelDanglingCalls(const std::string& reason) {
             const std::string note = "trajectory.dangling_call_undeclared:" + call_id;
             recent_errors_.push_back(note);
             if (error_sink_ != nullptr) {
-                error_sink_->push_back(note);
+                error_sink_->Append(note);
             }
             platform::LogSink::Instance().Error(
                 "trajectory", "悬空调用未声明过(无主账项),不补 cancelled: " + call_id);
@@ -384,7 +384,7 @@ void TrajectoryTurnBridge::CancelDanglingCalls(const std::string& reason) {
             const std::string note = "trajectory.dangling_call_missing_field:" + missing + ":" + call_id;
             recent_errors_.push_back(note);
             if (error_sink_ != nullptr) {
-                error_sink_->push_back(note);
+                error_sink_->Append(note);
             }
             platform::LogSink::Instance().Error(
                 "trajectory", "悬空调用缺 " + missing + ",不补 cancelled,turn 按真实结果收口: " + call_id);
@@ -937,7 +937,7 @@ void TrajectoryTurnBridge::OnToolTrace(const agent::ToolTraceEvent& event) {
                 const std::string note = "storage_exhausted:" + event.tool_name;
                 recent_errors_.push_back(note);
                 if (error_sink_ != nullptr) {
-                    error_sink_->push_back(note);
+                    error_sink_->Append(note);
                 }
                 platform::LogSink::Instance().Error(
                     "trajectory", "磁盘 reserve 不足,拦下副作用工具: " + event.tool_name);
@@ -1881,7 +1881,7 @@ void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {
             const std::string note = "tool.execution.pending:" + book.action_id;
             recent_errors_.push_back(note);
             if (error_sink_ != nullptr) {
-                error_sink_->push_back(note);
+                error_sink_->Append(note);
             }
             platform::LogSink::Instance().Error("trajectory", "v3 落账失败: " + note);
         }
@@ -1930,7 +1930,7 @@ void TrajectoryTurnBridge::V3ToolTrace(const agent::ToolTraceEvent& event) {
                 const std::string note = "storage_exhausted:" + event.tool_name;
                 recent_errors_.push_back(note);
                 if (error_sink_ != nullptr) {
-                    error_sink_->push_back(note);
+                    error_sink_->Append(note);
                 }
                 platform::LogSink::Instance().Error(
                     "trajectory", "磁盘 reserve 不足,拦下副作用工具: " + event.tool_name);
@@ -2554,7 +2554,7 @@ ToolResultsCommitReceipt TrajectoryTurnBridge::V3ToolResultsCommitted(api::Messa
             const std::string note = "tool.result.store_unavailable:" + book.action_id;
             recent_errors_.push_back(note);
             if (error_sink_ != nullptr) {
-                error_sink_->push_back(note);
+                error_sink_->Append(note);
             }
             platform::LogSink::Instance().Error("trajectory", "v3 落账失败: " + note);
             hard_fail("tool.result.store_unavailable", book.action_id);
@@ -2709,9 +2709,7 @@ void TrajectoryTurnBridge::NoteUnownedToolTrace(const agent::ToolTraceEvent& eve
     if (recent_errors_.size() < 64) {  // 有界:同一症状不无限刷错误环
         recent_errors_.push_back(note);
     }
-    if (error_sink_ != nullptr && error_sink_->size() < 128) {
-        error_sink_->push_back(note);
-    }
+    if (error_sink_ != nullptr) error_sink_->AppendIfBelow(note, 128);
     platform::LogSink::Instance().Warn("trajectory", "无主 tool trace(未由模型输出声明): " + note);
 }
 
@@ -2754,7 +2752,7 @@ std::expected<void, std::string> TrajectoryTurnBridge::AttachChildRun(
         const std::string note = "trajectory.attach_child_run_undeclared:" + call_id;
         recent_errors_.push_back(note);
         if (error_sink_ != nullptr) {
-            error_sink_->push_back(note);
+            error_sink_->Append(note);
         }
         platform::LogSink::Instance().Warn(
             "trajectory", "AttachChildRun 指到未声明的 call,边界不挂: " + call_id);

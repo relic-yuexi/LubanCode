@@ -204,36 +204,42 @@ TEST_CASE("dispatcher: 无 deny、有 ask -> ask;全无表态 -> None") {
 }
 
 TEST_CASE("dispatcher: 两只慢钩子并发,总耗时接近最慢一只") {
-    // 两只各睡 ~600ms;串行要 1200ms+,并发应明显小于之和(给足裕量,只挡
-    // "退化成全数相加"的回归)。
-    const std::string slow1 = WriteHookScript("slow1",
+    // 单只钩子约 600ms(Windows 约 1s);串行两只要 2 倍,并发应明显小于之和。
+    // 判据取同机实测的"单只耗时"做基线(不写死毫秒数):共享 runner 上进程
+    // 创建忽快忽慢,绝对阈值会误报(windows-msvc 曾实测 4560ms 越过 1100)。
+    // 只挡"退化成全数相加"的回归。
 #ifdef _WIN32
-                                              "exit 0"
+    // Windows cmd 没有 sleep;ping 本机回环 -n 2 约 1s,不碰不可路由地址
+    // (其超时时长不可控)。两条命令文本不同,免被按定义去重。
+    const std::string cmd1 = "ping -n 2 127.0.0.1 >nul & exit 0";
+    const std::string cmd2 = "ping -n 2 127.0.0.2 >nul & exit 0";
+    hooks::HookDispatcher single = MakeDispatcher({MakeDefinition(cmd1)});
+    hooks::HookDispatcher both = MakeDispatcher({MakeDefinition(cmd1), MakeDefinition(cmd2)});
 #else
-                                              "sleep 0.6\nexit 0"
-#endif
-    );
-#ifndef _WIN32
+    const std::string slow1 = WriteHookScript("slow1", "sleep 0.6\nexit 0");
     // 第二只用不同脚本:同一文件同 hash,dispatcher 按定义去重就只剩一只
-    // (executed==2 挂)。Windows 分支两条 ping 命令本就不同,没这问题。
+    // (executed==2 挂)。
     const std::string slow2 = WriteHookScript("slow2", "sleep 0.6\nexit 0");
+    hooks::HookDispatcher single = MakeDispatcher({MakeDefinition(RunScriptCommand(slow1))});
+    hooks::HookDispatcher both = MakeDispatcher({MakeDefinition(RunScriptCommand(slow1)),
+                                                  MakeDefinition(RunScriptCommand(slow2))});
 #endif
-#ifdef _WIN32
-    // Windows cmd 没有 sleep,用 ping 顶(约 600ms+)。
-    const std::string cmd1 = "ping -n 1 -w 600 127.0.0.1 >nul & exit 0";
-    const std::string cmd2 = "ping -n 1 -w 600 192.0.2.1 >nul & exit 0";
-    hooks::HookDispatcher dispatcher = MakeDispatcher({MakeDefinition(cmd1), MakeDefinition(cmd2)});
-#else
-    hooks::HookDispatcher dispatcher = MakeDispatcher({MakeDefinition(RunScriptCommand(slow1)),
-                                                        MakeDefinition(RunScriptCommand(slow2))});
-#endif
-    const auto start = std::chrono::steady_clock::now();
-    const auto merged = dispatcher.Emit(hooks::HookEvent::PreToolUse, MakeToolPayload());
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::steady_clock::now() - start)
-                             .count();
-    CHECK(merged.executed == 2);
-    CHECK(elapsed < 1100);  // 两只 ~600ms 并发:显著小于 1200ms 串行和
+    const auto time_emit = [](hooks::HookDispatcher& dispatcher, int* executed) {
+        const auto start = std::chrono::steady_clock::now();
+        const auto merged = dispatcher.Emit(hooks::HookEvent::PreToolUse, MakeToolPayload());
+        *executed = merged.executed;
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - start)
+            .count();
+    };
+    int single_executed = 0;
+    int both_executed = 0;
+    const auto single_ms = time_emit(single, &single_executed);
+    const auto both_ms = time_emit(both, &both_executed);
+    CHECK(single_executed == 1);
+    CHECK(both_executed == 2);
+    // 串行约 2×single;并发约 1×single。1.7× 留足抖动裕量。
+    CHECK(both_ms < single_ms * 17 / 10);
 }
 
 // ---------------------------------------------------------------------------

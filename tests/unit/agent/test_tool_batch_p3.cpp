@@ -181,6 +181,7 @@ public:
                                nlohmann::json{
                                    {"i", nlohmann::json{{"type", "integer"}}},
                                    {"over_budget", nlohmann::json{{"type", "boolean"}}},
+                                   {"head_tail", nlohmann::json{{"type", "boolean"}}},
                                    {"rich", nlohmann::json{{"type", "boolean"}}},
                                }}};
     }
@@ -216,6 +217,14 @@ public:
             tools::Tool::Result capped{"很长被截断的正文", false};
             capped.outcome = agent::ToString(agent::ToolOutcome::OutputLimit);
             return capped;
+        }
+        if (input.value("head_tail", false)) {
+            // run_command 新口径:超量留首尾、命令照常跑完,outcome 照退出码记
+            // succeeded,截断只在 details.output_truncated 里。
+            tools::Tool::Result kept{"首段[... 9 bytes omitted ...]尾段", false};
+            kept.outcome = "succeeded";
+            kept.details = nlohmann::json{{"exit_code", 0}, {"output_truncated", true}, {"omitted_bytes", 9}};
+            return kept;
         }
         if (input.value("rich", false)) {
             tools::ToolResultPayload rich;
@@ -466,6 +475,33 @@ TEST_CASE("资源:输出预算 output_limit 逐枚投影,批内不串污") {
     CHECK_FALSE(blocks[0]->capture_complete);
     CHECK(blocks[0]->capture_reason == "quota");
     CHECK(blocks[0]->content.find("截断") != std::string::npos);
+    CHECK(blocks[1]->capture_complete);
+    CHECK(blocks[1]->capture_reason.empty());
+}
+
+TEST_CASE("资源:details.output_truncated 为真也算不完整(run_command 留首尾新口径)") {
+    FakeBackend backend;
+    ConcurrencyGate gate;
+    gate.enter_target = 2;
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<ProbeReadTool>(gate));
+
+    const nlohmann::json kept = {{"i", 0}, {"head_tail", true}};
+    backend.scripts = {BatchScript({{"u0", "read_file", kept.dump()},
+                                    {"u1", "read_file", ReadInput(1)}}),
+                       TextScript("收工")};
+    agent::Agent loop(backend, registry, MakeProfile());
+    TraceCollector collector;
+    const auto result = loop.Run("留首尾", collector.Decorate({}));
+
+    REQUIRE(result.has_value());
+    REQUIRE(backend.captured_requests.size() == 2);
+    const auto blocks = ResultBlocksOf(backend.captured_requests[1]);
+    REQUIRE(blocks.size() == 2);
+    // outcome 是 succeeded,判据全靠 details:不完整 + quota;同批另一枚不受污染。
+    CHECK_FALSE(blocks[0]->is_error);
+    CHECK_FALSE(blocks[0]->capture_complete);
+    CHECK(blocks[0]->capture_reason == "quota");
     CHECK(blocks[1]->capture_complete);
     CHECK(blocks[1]->capture_reason.empty());
 }

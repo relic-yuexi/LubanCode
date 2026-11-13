@@ -142,6 +142,8 @@ def extract(build, platform_name):
         commands = {}
         for test in tests:
             binary, timeout = REQUIRED[test["name"]]
+            if platform_name == "nt" and test["name"] == "unit.runtime.child_history_adoption":
+                timeout = 300  # Match this Windows native registration; POSIX keeps 180.
             command = test.get("command", [])
             if (len(command) != 2 or not isinstance(command[0], str)
                     or command[0].replace("\\", "/").rsplit("/", 1)[-1] not in (binary, binary + ".exe")

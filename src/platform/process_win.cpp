@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <optional>
 
@@ -31,11 +32,12 @@ void RecordWindowsProcessDiagnostic(ProcessDiagnosticBuffer* diagnostics,
                                      ProcessDiagnosticStage stage, DWORD pid = 0,
                                      std::int64_t rc = 0, DWORD system_error = 0,
                                      std::int64_t detail = 0,
-                                     ProcessDiagnosticJobAccounting job_accounting = {}) noexcept {
+                                     ProcessDiagnosticJobAccounting job_accounting = {},
+                                     ProcessDiagnosticProcessImage process_image = {}) noexcept {
     if (!diagnostics) return;
     const DWORD saved_error = GetLastError();
     const int saved_errno = errno;
-    diagnostics->Record(stage, pid, -1, rc, system_error, detail, job_accounting);
+    diagnostics->Record(stage, pid, -1, rc, system_error, detail, job_accounting, process_image);
     errno = saved_errno;
     SetLastError(saved_error);
 }
@@ -58,6 +60,59 @@ void ObserveTimeoutJobAccounting(HANDLE job, DWORD pid,
     }
     RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::JobAccountingQueryAfter,
                                     pid, queried, query_error, 0, values);
+    errno = saved_errno;
+    SetLastError(saved_error);
+}
+
+void ObserveTimeoutJobMembers(HANDLE job, DWORD root_pid,
+                              ProcessDiagnosticBuffer* diagnostics) noexcept {
+    if (!diagnostics || job == nullptr) return;
+    const DWORD saved_error = GetLastError();
+    const int saved_errno = errno;
+    struct Members {
+        DWORD assigned;
+        DWORD listed;
+        ULONG_PTR pids[16];
+    } members{};
+    static_assert(offsetof(Members, pids) == offsetof(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList));
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::JobProcessListQueryBefore, root_pid);
+    const BOOL queried = QueryInformationJobObject(job, JobObjectBasicProcessIdList,
+                                                   &members, sizeof(members), nullptr);
+    const DWORD query_error = queried ? 0 : GetLastError();
+    RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::JobProcessListQueryAfter,
+                                    root_pid, queried, query_error, queried ? members.listed : 0);
+    if (queried) {
+        const auto count = std::min<DWORD>(members.listed, 16);
+        for (DWORD i = 0; i < count; ++i) {
+            if (members.pids[i] > MAXDWORD) continue; // Never truncate a native identity.
+            const DWORD pid = static_cast<DWORD>(members.pids[i]);
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            BOOL image_ok = FALSE;
+            DWORD image_error = process ? 0 : GetLastError();
+            ProcessDiagnosticProcessImage image{};
+            if (process) {
+                wchar_t path[MAX_PATH]{};
+                DWORD units = MAX_PATH;
+                image_ok = QueryFullProcessImageNameW(process, 0, path, &units);
+                image_error = image_ok ? 0 : GetLastError();
+                if (image_ok) {
+                    DWORD start = 0;
+                    for (DWORD n = 0; n < units; ++n) {
+                        if (path[n] == L'\\' || path[n] == L'/') start = n + 1;
+                    }
+                    image.name_units = std::min<DWORD>(units - start, 64);
+                    image.truncated = units - start > image.name_units;
+                    static_assert(sizeof(wchar_t) == sizeof(std::uint16_t));
+                    for (DWORD n = 0; n < image.name_units; ++n) {
+                        image.name[n] = static_cast<std::uint16_t>(path[start + n]);
+                    }
+                }
+                CloseHandle(process);
+            }
+            RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::JobProcessImageQueryAfter,
+                                            pid, image_ok, image_error, 0, {}, image);
+        }
+    }
     errno = saved_errno;
     SetLastError(saved_error);
 }
@@ -422,7 +477,7 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const EnvP
 
 ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std::atomic<bool>* cancel,
                          const EnvPairs& extra_env, std::size_t max_output_bytes,
-                         const std::string& cwd_utf8) {
+                         const std::string& cwd_utf8, OutputOverflow overflow) {
     ProcessDiagnosticBuffer* const diagnostics = process_diagnostics;
     RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ProcessEntered);
     ProcessResult result;
@@ -534,6 +589,10 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     // 杀进程,不用等超时。手动重置事件,只置一次。
     HANDLE overflow_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
+    // KeepHeadTail 模式(与 POSIX 同一份 HeadTailCapture):读线程只灌捕获器,
+    // 不置 overflow、不点 overflow_event,命令照常跑完。
+    const bool keep_head_tail = overflow == OutputOverflow::KeepHeadTail;
+    HeadTailCapture head_tail(max_output_bytes);
     std::string output;
     std::atomic<bool> output_over_limit{false};
     std::atomic<bool> reader_stop{false};
@@ -545,7 +604,9 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
         bool first_read = true;
         while (!reader_stop.load() &&
                ReadDiagnosticPipe(read_pipe, buf, sizeof(buf), &n, diagnostics, pi.dwProcessId, first_read) && n > 0) {
-            if (output.size() < max_output_bytes) {
+            if (keep_head_tail) {
+                head_tail.Append(buf, static_cast<std::size_t>(n));
+            } else if (output.size() < max_output_bytes) {
                 const std::size_t room = max_output_bytes - output.size();
                 const std::size_t take = std::min<std::size_t>(n, room);
                 output.append(buf, take);
@@ -636,6 +697,7 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
             result.timed_out = true;
             if (diagnostics && job != nullptr) {
                 ObserveTimeoutJobAccounting(job, pi.dwProcessId, diagnostics);
+                ObserveTimeoutJobMembers(job, pi.dwProcessId, diagnostics);
             }
         }
         if (job != nullptr) {
@@ -698,10 +760,16 @@ ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std:
     RecordWindowsProcessDiagnostic(diagnostics, ProcessDiagnosticStage::ExitCodeRead,
                                     pi.dwProcessId, got_exit_code, exit_code_error, exit_code);
     result.exit_code = exit_code;
-    // 截断的刀口对齐 UTF-8 码点边界(见文件头 AlignOutputToUtf8Boundary)。
-    AlignOutputToUtf8Boundary(output, max_output_bytes);
-    result.output = std::move(output);
-    result.output_truncated = output_over_limit.load();
+    if (keep_head_tail) {
+        // 读线程已 join,捕获器归本线程独占。整字对齐在 Finish 里做。
+        result.output = head_tail.Finish(&result.omitted_bytes);
+        result.output_truncated = head_tail.overflowed();
+    } else {
+        // 截断的刀口对齐 UTF-8 码点边界(见文件头 AlignOutputToUtf8Boundary)。
+        AlignOutputToUtf8Boundary(output, max_output_bytes);
+        result.output = std::move(output);
+        result.output_truncated = output_over_limit.load();
+    }
 
     if (job != nullptr) {
         CloseDiagnosticJob(job, pi.dwProcessId, diagnostics);
@@ -730,7 +798,8 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
 }
 
 ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, const std::atomic<bool>* cancel,
-                         const EnvPairs& extra_env, std::size_t max_output_bytes, const std::string& cwd_utf8) {
+                         const EnvPairs& extra_env, std::size_t max_output_bytes, const std::string& cwd_utf8,
+                         OutputOverflow overflow) {
     if (argv.empty()) {
         ProcessResult result;
         result.spawn_failed = true;
@@ -738,7 +807,7 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, c
         return result;
     }
     return RunProcess(BuildProcessCommandLine(argv[0], std::vector<std::string>(argv.begin() + 1, argv.end())),
-                       timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8);
+                       timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8, overflow);
 }
 
 ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const EnvPairs& extra_env,
@@ -752,9 +821,10 @@ ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, c
 
 ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const std::atomic<bool>* cancel,
                               const EnvPairs& extra_env, std::size_t max_output_bytes,
-                              const std::string& cwd_utf8) {
-    ProcessResult result =
-        RunProcess(BuildCmdCommandLine(command_utf8), timeout_ms, cancel, extra_env, max_output_bytes, cwd_utf8);
+                              const std::string& cwd_utf8, OutputOverflow overflow) {
+    // KeepHeadTail 的省略标记是纯 ASCII,下面这道 ACP 转换伤不着它。
+    ProcessResult result = RunProcess(BuildCmdCommandLine(command_utf8), timeout_ms, cancel, extra_env,
+                                      max_output_bytes, cwd_utf8, overflow);
     result.output = AcpBytesToUtf8(result.output);
     return result;
 }

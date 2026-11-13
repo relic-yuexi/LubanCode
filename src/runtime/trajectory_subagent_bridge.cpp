@@ -157,8 +157,10 @@ public:
                          std::shared_ptr<SubagentTerminalRegistry> registry,
                          std::optional<SubagentSpawnProvenance> provenance)
         : writer_(std::move(writer)), books_(std::move(books)), bridge_(std::move(bridge)),
-          run_id_(writer_->run_id()), registry_(std::move(registry)), provenance_(std::move(provenance)) {}
+          run_id_(writer_->run_id()), session_id_(writer_->session_id()),
+          registry_(std::move(registry)), provenance_(std::move(provenance)) {}
     const std::string& run_id() const override { return run_id_; }
+    const std::string& session_id() const override { return session_id_; }
     TrajectoryTurnBridge& turn_bridge() override { return *bridge_; }
     std::optional<SubagentSpawnProvenance> ParentSpawn() const override { return provenance_; }
     std::optional<ChildApprovalParent> approval_parent() const override {
@@ -234,6 +236,7 @@ private:
     std::unique_ptr<V3SessionBooks> books_;
     std::unique_ptr<TrajectoryTurnBridge> bridge_;
     std::string run_id_;
+    std::string session_id_;
     std::shared_ptr<SubagentTerminalRegistry> registry_;
     std::mutex finish_mutex_;
     std::optional<SubagentTerminalReceipt> finished_;
@@ -287,7 +290,7 @@ TrajectorySessionLedger::SpawnSubagentV3(const std::string& parent_call_id,
         failure.error_code = std::move(code);
         failure.detail = std::move(detail);
         failure.retryable = retryable;
-        io_errors_.push_back("subagent.start_failed:" + failure.stage + ":" + failure.error_code);
+        io_errors_->Append("subagent.start_failed:" + failure.stage + ":" + failure.error_code);
         platform::LogSink::Instance().Error(
             "trajectory", "v3 子账开张失败[" + failure.stage + "]: " + failure.error_code +
                               (failure.detail.empty() ? std::string() : " (" + failure.detail + ")"));
@@ -371,7 +374,7 @@ TrajectorySessionLedger::SpawnSubagentV3(const std::string& parent_call_id,
     auto child_bridge = std::make_unique<TrajectoryTurnBridge>(
         child_writer_owner.get(), child_books.get(), std::move(identity_scope),
         std::move(identity));
-    child_bridge->SetErrorSink(&io_errors_);
+    child_bridge->SetErrorSink(io_errors_);
     if (impl_->telemetry_wake != nullptr) {
         child_bridge->SetCommitWake(impl_->telemetry_wake, child_ref.journal_path);
     }
@@ -423,7 +426,7 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
                 (void)trajectory::DiscardUncommittedStream(*stream_path);
             }
         }
-        io_errors_.push_back("subagent.start_failed:" + failure.stage + ":" + failure.error_code);
+        io_errors_->Append("subagent.start_failed:" + failure.stage + ":" + failure.error_code);
         platform::LogSink::Instance().Error(
             "trajectory", "子账开张失败[" + failure.stage + "]: " + failure.error_code +
                               (failure.detail.empty() ? std::string() : " (" + failure.detail + ")"));
@@ -580,7 +583,7 @@ void TrajectorySessionLedger::NoteSubagentStartFailed(const SubagentSpawnFailure
         const std::string note =
             "subagent.run.start_failed:" + receipt.error_code +
             (receipt.error_message.empty() ? std::string() : " (" + receipt.error_message + ")");
-        io_errors_.push_back(note);
+        io_errors_->Append(note);
         platform::LogSink::Instance().Error("trajectory", "子账开张失败事件落不了: " + note);
         return;
     }

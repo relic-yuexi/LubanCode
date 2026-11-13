@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "api/tool_args_repair.hpp"  // 入参兜底:宽松解析与截断/失败人话
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:模型输出进历史前的编码关口
 
 namespace lubancode::api {
@@ -14,12 +15,26 @@ void MessageAssembler::FinalizeCurrent() {
     if (open_tool_.has_value()) {
         nlohmann::json input = nlohmann::json::object();
         const std::string& raw = open_tool_->partial_json;
-        if (!raw.empty()) {
-            try {
-                input = nlohmann::json::parse(raw);
-            } catch (const nlohmann::json::parse_error& e) {
-                parse_error_ = "工具 " + open_tool_->name + " 的入参 JSON 解析失败: " + e.what();
-                input = nlohmann::json::object();
+        // 入参兜底(开源模型坏 JSON 单):先严格 parse,失败按序宽松修补;
+        // 修不成就记病因,块照出(配对不断),入参给 {}、input_error 带人话,
+        // loop 见了不执行、合成 is_error 结果回喂。服务端块不走修补(那是
+        // provider 执行过的事实,本地不改写)。
+        ToolArgsRepairResult parsed;
+        if (open_tool_->is_server || !lenient_tool_args_) {
+            if (!raw.empty()) {
+                try {
+                    input = nlohmann::json::parse(raw);
+                } catch (const nlohmann::json::parse_error& e) {
+                    parse_error_ = "工具 " + open_tool_->name + " 的入参 JSON 解析失败: " + e.what();
+                    input = nlohmann::json::object();
+                }
+            }
+        } else {
+            parsed = RepairToolArgs(raw);
+            if (parsed.ok) {
+                input = std::move(parsed.value);
+            } else {
+                parse_error_ = "工具 " + open_tool_->name + " 的入参 JSON 解析失败: " + parsed.error;
             }
         }
         if (open_tool_->is_server) {
@@ -40,8 +55,28 @@ void MessageAssembler::FinalizeCurrent() {
         } else {
             ToolUseBlock block{open_tool_->id, open_tool_->name, std::move(input), open_tool_->caller};
             block.async_call = open_tool_->async_call;
-            // 流式提前档探针(异步工具单 P2 §7):单枚 call item 完整即报。
-            completed_tool_uses_.push_back(block);
+            if (lenient_tool_args_) {
+                if (!parsed.ok) {
+                    block.input_error = BuildToolArgsParseErrorText(open_tool_->name, parsed.error, raw);
+                    block.input_error_code = kErrToolInputInvalidJson;
+                } else if (parsed.repaired) {
+                    for (const std::string& repair : parsed.repairs) {
+                        block.input_repair += (block.input_repair.empty() ? "" : "、") + repair;
+                    }
+                }
+                // 截断嫌疑(修不成,或靠补齐末尾才救回):stop_reason 要到
+                // MessageDone 才知道,先记下块位与原文,收口时再裁。
+                if (!parsed.ok || parsed.closed_truncation) {
+                    truncation_suspects_.push_back(TruncationSuspect{content_.size(), raw});
+                }
+                // 流式提前档探针(异步工具单 P2 §7):单枚 call item 完整即报。
+                // 只报严格一次过的——修补过的、坏掉的等整份消息收口再裁,不提前派发。
+                if (parsed.ok && !parsed.repaired) {
+                    completed_tool_uses_.push_back(block);
+                }
+            } else {
+                completed_tool_uses_.push_back(block);
+            }
             content_.push_back(std::move(block));
         }
         open_tool_.reset();
@@ -146,15 +181,50 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 FinalizeCurrent();
                 content_.push_back(
                     RedactedThinkingBlock{platform::SanitizeExternalText(e.data)});
-            } else if constexpr (std::is_same_v<T, MessageDone>) {
-                FinalizeCurrent();  // 防御性收尾:正常流程里 ContentBlockDone 应该已经收过了
-                stop_reason_ = e.stop_reason;
+            } else if constexpr (std::is_same_v<T, UsageSnapshot>) {
+                // Snapshot overwrite, never sum. Do not finalize or set a stop reason.
                 usage_ = e.usage;
-                usage_seen_ = e.usage_reported;  // 显式位:wire 见没见过 usage 帧
-                // 读/写明报位各自一枚(C2):只报写入不能证明读取为零。
+                usage_seen_ = e.usage_reported;
                 cache_read_seen_ = e.cache_read_reported;
                 cache_creation_seen_ = e.cache_creation_reported;
                 usage_anomaly_ = e.usage_anomaly;
+                usage_snapshot_seen_ = true;
+            } else if constexpr (std::is_same_v<T, MessageDone>) {
+                FinalizeCurrent();  // 防御性收尾:正常流程里 ContentBlockDone 应该已经收过了
+                stop_reason_ = e.stop_reason;
+                // A terminal frame without usage evidence must not erase a snapshot.
+                // Preserve every legacy path when no nonterminal snapshot was seen.
+                const bool has_usage = e.usage_reported || e.cache_read_reported ||
+                    e.cache_creation_reported || !e.usage_anomaly.empty() ||
+                    e.usage.input_tokens != 0 || e.usage.output_tokens != 0 ||
+                    e.usage.cache_read_tokens != 0 || e.usage.cache_creation_tokens != 0 ||
+                    e.usage.output_reasoning_tokens != 0;
+                if (!usage_snapshot_seen_ || has_usage) {
+                    usage_ = e.usage;
+                    usage_seen_ = e.usage_reported;
+                    cache_read_seen_ = e.cache_read_reported;
+                    cache_creation_seen_ = e.cache_creation_reported;
+                    usage_anomaly_ = e.usage_anomaly;
+                }
+                // 长度截断(max_tokens/length)且入参不完整:绝不补齐执行
+                //(写半截文件是灾难),按解析失败处理,病因点明截断。
+                if (IsLengthStopReason(stop_reason_)) {
+                    for (const TruncationSuspect& suspect : truncation_suspects_) {
+                        if (suspect.content_index >= content_.size()) {
+                            continue;
+                        }
+                        auto* block = std::get_if<ToolUseBlock>(&content_[suspect.content_index]);
+                        if (block == nullptr) {
+                            continue;
+                        }
+                        block->input = nlohmann::json::object();
+                        block->input_repair.clear();
+                        block->input_error = BuildToolArgsTruncatedText(block->name, suspect.raw);
+                        block->input_error_code = kErrToolInputTruncated;
+                        parse_error_ = "工具 " + block->name + " 的入参因输出长度截断而不完整";
+                    }
+                }
+                truncation_suspects_.clear();
             }
             // MessageStart / StreamError:不影响攒出来的内容。
         },

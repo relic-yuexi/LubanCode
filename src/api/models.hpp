@@ -16,7 +16,9 @@
 #pragma once
 
 #include <expected>
+#include <cstddef>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -82,5 +84,28 @@ std::expected<std::vector<ModelInfo>, Error> ListModels(config::Wire wire, const
                                                           int connect_timeout_ms = config::kDefaultConnectTimeoutMs,
                                                           int request_timeout_secs = config::kDefaultRequestTimeoutSecs,
                                                           const std::map<std::string, std::string>& extra_headers = {});
+
+// ---- 自部署端点窗口探测(Terminal-Bench 自部署单)----------------------
+// 模型不在 catalog、用户也没显式配窗口时,对 OpenAI 兼容端(vLLM/SGLang/
+// llama.cpp/LM Studio 一类)GET {base_url}/models 一次,读出本场模型的真
+// 窗口,免得按 256k 兜底算压缩阈值、撞服务端 --max-model-len 吃 400。
+
+// 纯函数:在 /models 响应体的 data[] 里按 id 找本场模型(先精确,再 ASCII
+// 忽略大小写),依次读 max_model_len(vLLM)、context_length、context_window、
+// max_context_length,取第一枚正整数。非 JSON、非对象、缺 data、找不到
+// 模型、字段缺失或非正数,一律给空。
+std::optional<std::size_t> ParseModelContextWindowFromModelsResponse(const std::string& json_text,
+                                                                     const std::string& model_id);
+
+// 真发一次 GET:只对 responses/chat_completions 两种 OpenAI 兼容 wire 动手
+// (anthropic/gemini 直接给空)。地址与请求头出自 ModelsUrl/
+// ModelsRequestHeaders,跟 ListModels 同一份;连接与总时长都钳在
+// timeout_ms(≤3000)内。网络错、非 2xx、解析不出,一律静默给空——探测
+// 只是锦上添花,拦不住开工。代理照 cpr/libcurl 的环境变量规矩走(同
+// ListModels)。
+std::optional<std::size_t> ProbeModelContextWindow(config::Wire wire, const std::string& base_url,
+                                                   const std::string& api_key, const std::string& model_id,
+                                                   const std::map<std::string, std::string>& extra_headers = {},
+                                                   int timeout_ms = 3000);
 
 }  // namespace lubancode::api

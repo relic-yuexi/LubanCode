@@ -22,6 +22,7 @@
 #include <lubancore/memory_blobs.hpp>
 #include <lubancore/lua.hpp>
 #include <lubancore/web_fetch.hpp>
+#include <lubancore/web_search.hpp>
 #include <lubancore/jobs.hpp>
 #include <lubancore/named_results.hpp>
 
@@ -44,12 +45,18 @@ struct ModelRequest {
     std::vector<Message> messages;
     std::vector<ToolDefinition> tools;
     std::optional<int> max_output_tokens;
+    // Empty preserves the default. UTF-8, no NUL, at most 256 bytes;
+    // provider-specific effort names are forwarded without a whitelist.
+    std::string reasoning_effort;
 };
 struct Usage { std::int64_t input_tokens = 0; std::int64_t output_tokens = 0; };
 struct ModelReply {
     std::string text;
     std::vector<ToolCall> tool_calls;
     std::optional<Usage> usage;
+    // Empty preserves text/tool inference; otherwise the provider's actual
+    // finish reason. UTF-8, no NUL, at most 256 bytes.
+    std::string stop_reason;
 };
 
 // Text/tool-call injection surface, useful for an embedded provider or fixture.
@@ -126,7 +133,7 @@ struct SessionOptions {
     // Empty creates a new V3 session. Nonempty strictly resumes that same V3 ID.
     std::string resume_session_id;
     // Explicit admission. read_file/write_file/edit_file/run_command/search,
-    // todo_write and web_fetch (bounded HTTP(S), no implicit credentials).
+    // todo_write, web_fetch (bounded HTTP(S)), and web_search (explicit credentials).
     // Search defaults to this session's cwd; null/empty paths do the same.
     // run_command is foreground unless command_jobs and execution_mode explicitly opt in.
     std::vector<std::string> builtin_tools;
@@ -171,6 +178,9 @@ struct SessionOptions {
     // Complete named tool-result storage bundle. Null keeps File; same-ID
     // external resume requires the matching provider and frozen binding.
     std::optional<named_results::v1::Options> named_results;
+    // Requires explicit builtin_tools selection of web_search and a credential.
+    // Fresh on every opening, including resume; never saved in session plans.
+    std::optional<web_search::v1::Options> web_search;
 };
 // operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };

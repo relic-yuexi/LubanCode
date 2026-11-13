@@ -6,6 +6,7 @@
 #include <fstream>
 #include <utility>
 
+#include "gateway/heartbeat.hpp"
 #include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 
@@ -27,8 +28,22 @@ constexpr const char* kTypeOccurrenceSettled = "occurrence.settled";
 constexpr const char* kTypeOccurrenceMerged = "occurrence.merged";
 constexpr const char* kTypeOccurrenceRedispatched = "occurrence.redispatched";
 constexpr const char* kTypeOccurrenceObserved = "occurrence.observed";
+constexpr const char* kTypeOccurrenceWatchChecked = "occurrence.watch_checked";
 constexpr const char* kTypeOccurrenceCancelRequested = "occurrence.cancel_requested";
 constexpr const char* kTypeLoopImported = "loop.imported";
+
+std::vector<std::string> GetJsonStringArray(const nlohmann::json& json, const char* key) {
+    std::vector<std::string> out;
+    if (!json.is_object() || !json.contains(key) || !json[key].is_array()) {
+        return out;
+    }
+    for (const auto& item : json[key]) {
+        if (item.is_string()) {
+            out.push_back(item.get<std::string>());
+        }
+    }
+    return out;
+}
 
 std::string GetJsonString(const nlohmann::json& json, const char* key) {
     if (!json.is_object() || !json.contains(key) || !json[key].is_string()) {
@@ -97,6 +112,7 @@ void LoadJobLine(const nlohmann::json& line, AutomationJob* job,
     job->misfire = ParseMisfireOr(line, "misfirePolicy");
     job->deadline_ms = GetJsonInt(line, "deadlineMs");
     job->notify_on_change = GetJsonBool(line, "notifyOnChange");
+    job->watch_paths = GetJsonStringArray(line, "watchPaths");
     const std::string session_policy = GetJsonString(line, "sessionPolicy");
     if (!session_policy.empty()) {
         job->session_policy = session_policy;
@@ -229,6 +245,10 @@ AutomationProjection ReadAutomationProjection(const std::filesystem::path& log_f
             if (line.contains("notifyOnChange") && line["notifyOnChange"].is_boolean()) {
                 job.notify_on_change = line["notifyOnChange"].get<bool>();
             }
+            if (line.contains("watchPaths") && line["watchPaths"].is_array()) {
+                job.watch_paths = GetJsonStringArray(line, "watchPaths");
+                job.last_watch_sha.clear();
+            }
             const std::string kind_text = GetJsonString(line, "scheduleKind");
             if (!kind_text.empty()) {
                 ScheduleKind kind = job.schedule_kind;
@@ -356,6 +376,21 @@ AutomationProjection ReadAutomationProjection(const std::filesystem::path& log_f
                 const auto job = projection.jobs.find(found->second.job_id);
                 if (job != projection.jobs.end()) {
                     job->second.last_observed_sha = found->second.observed_sha;
+                }
+            }
+        } else if (type == kTypeOccurrenceWatchChecked) {
+            const auto found =
+                projection.occurrences.find(GetJsonString(line, "occurrenceId"));
+            if (found == projection.occurrences.end()) {
+                ++projection.skipped_lines;
+                continue;
+            }
+            found->second.watch_sha = GetJsonString(line, "watchSha256");
+            found->second.watch_skipped = GetJsonBool(line, "skipped");
+            if (GetJsonBool(line, "updateLastWatch")) {
+                const auto job = projection.jobs.find(found->second.job_id);
+                if (job != projection.jobs.end()) {
+                    job->second.last_watch_sha = found->second.watch_sha;
                 }
             }
         } else if (type == kTypeOccurrenceCancelRequested) {
@@ -520,6 +555,12 @@ AutomationStore::JobReceipt AutomationStore::CreateJob(const JobSpec& spec,
         receipt.error_code = schedule_error.substr(0, schedule_error.find(':'));
         return receipt;
     }
+    std::vector<std::string> normalized_watch;
+    const std::string watch_error = ValidateWatchPaths(spec.watch_paths, &normalized_watch);
+    if (!watch_error.empty()) {
+        receipt.error_code = watch_error.substr(0, watch_error.find(':'));
+        return receipt;
+    }
     // 幂等键查重:同键同载荷回原回执,同键异载荷 conflict。
     if (!idempotency_key.empty()) {
         const auto found = create_keys_.find(idempotency_key);
@@ -534,6 +575,7 @@ AutomationStore::JobReceipt AutomationStore::CreateJob(const JobSpec& spec,
                 original->second.misfire == spec.misfire &&
                 original->second.deadline_ms == spec.deadline_ms &&
                 original->second.notify_on_change == spec.notify_on_change &&
+                original->second.watch_paths == normalized_watch &&
                 original->second.owner_channel == spec.owner_channel &&
                 original->second.owner_account == spec.owner_account &&
                 original->second.owner_sender == spec.owner_sender &&
@@ -577,6 +619,7 @@ AutomationStore::JobReceipt AutomationStore::CreateJob(const JobSpec& spec,
     line["misfirePolicy"] = ToString(spec.misfire);
     line["deadlineMs"] = spec.deadline_ms;
     line["notifyOnChange"] = spec.notify_on_change;
+    if (!normalized_watch.empty()) line["watchPaths"] = normalized_watch;
     line["sessionPolicy"] = spec.session_policy;
     // Q5 渠道面:创建者/交付目标随建账行冻结(旧读法缺键 = 本地)。
     if (!spec.owner_channel.empty()) line["ownerChannel"] = spec.owner_channel;
@@ -632,6 +675,7 @@ AutomationStore::JobReceipt AutomationStore::CreateJob(const JobSpec& spec,
     job.misfire = spec.misfire;
     job.deadline_ms = spec.deadline_ms;
     job.notify_on_change = spec.notify_on_change;
+    job.watch_paths = std::move(normalized_watch);
     job.session_policy = spec.session_policy;
     job.owner_channel = spec.owner_channel;
     job.owner_account = spec.owner_account;
@@ -876,6 +920,14 @@ AutomationStore::JobReceipt AutomationStore::UpdateJob(const std::string& job_id
     if (patch.set_misfire) next.misfire = patch.misfire;
     if (patch.set_deadline) next.deadline_ms = patch.deadline_ms;
     if (patch.set_notify_on_change) next.notify_on_change = patch.notify_on_change;
+    if (patch.set_watch_paths) {
+        const std::string watch_error = ValidateWatchPaths(patch.watch_paths, &next.watch_paths);
+        if (!watch_error.empty()) {
+            receipt.error_code = watch_error.substr(0, watch_error.find(':'));
+            return receipt;
+        }
+        next.last_watch_sha.clear();
+    }
     if (patch.set_prompt && next.prompt.empty()) {
         receipt.error_code = "automation.schedule_invalid";
         receipt.error_code += ": prompt 为空";
@@ -915,6 +967,7 @@ AutomationStore::JobReceipt AutomationStore::UpdateJob(const std::string& job_id
     if (patch.set_misfire) line["misfirePolicy"] = ToString(next.misfire);
     if (patch.set_deadline) line["deadlineMs"] = next.deadline_ms;
     if (patch.set_notify_on_change) line["notifyOnChange"] = next.notify_on_change;
+    if (patch.set_watch_paths) line["watchPaths"] = next.watch_paths;
     if (re_anchor) line["cursorMs"] = next.schedule_cursor_ms;
     if (!idempotency_key.empty()) line["idempotencyKey"] = idempotency_key;
     if (!AppendLinePowerLoss(line)) {
@@ -1477,6 +1530,37 @@ bool AutomationStore::RecordObservation(const std::string& occurrence_id,
         const auto job = jobs_.find(occurrence.job_id);
         if (job != jobs_.end()) {
             job->second.last_observed_sha = result_sha;
+        }
+    }
+    return true;
+}
+
+bool AutomationStore::RecordWatchCheck(const std::string& occurrence_id,
+                                       const std::string& watch_sha, bool skipped,
+                                       bool update_last_watch, std::int64_t now_ms) {
+    auto found = occurrences_.find(occurrence_id);
+    if (found == occurrences_.end()) {
+        return false;
+    }
+    AutomationOccurrence& occurrence = found->second;
+    nlohmann::json line = nlohmann::json::object();
+    line["type"] = kTypeOccurrenceWatchChecked;
+    line["schemaVersion"] = 1;
+    line["occurrenceId"] = occurrence_id;
+    line["jobId"] = occurrence.job_id;
+    line["watchSha256"] = watch_sha;
+    line["skipped"] = skipped;
+    line["updateLastWatch"] = update_last_watch;
+    line["checkedAtMs"] = now_ms;
+    if (!AppendLinePowerLoss(line)) {
+        return false;
+    }
+    occurrence.watch_sha = watch_sha;
+    occurrence.watch_skipped = skipped;
+    if (update_last_watch) {
+        const auto job = jobs_.find(occurrence.job_id);
+        if (job != jobs_.end()) {
+            job->second.last_watch_sha = watch_sha;
         }
     }
     return true;

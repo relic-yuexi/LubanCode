@@ -14,6 +14,9 @@ namespace lubancode::api {
 
 class MessageAssembler {
 public:
+    MessageAssembler() = default;
+    explicit MessageAssembler(bool lenient_tool_args) : lenient_tool_args_(lenient_tool_args) {}
+
     // 喂一个事件:
     //   TextDelta         —— 拼进当前正在累积的文本块
     //   ThinkingDelta     —— 拼进当前正在累积的思考块(text + signature)
@@ -38,7 +41,7 @@ public:
 
     const std::string& stop_reason() const { return stop_reason_; }
     const Usage& usage() const { return usage_; }
-    // provider 是否明报过 usage(Token 账本单 A0):取终帧 MessageDone 的
+    // provider 是否明报过 usage：取 UsageSnapshot 或 MessageDone 的
     // 显式位,与"五项是否非零"分开。老 wire 路径没置位便是 false,消费端
     // 要兼容就退回 usage() 的非零推断。
     bool usage_seen() const { return usage_seen_; }
@@ -50,6 +53,11 @@ public:
     // 排除出精确比例并点名,不掩盖。
     const std::string& usage_anomaly() const { return usage_anomaly_; }
 
+    // 入参兜底(开源模型坏 JSON 单):本地 tool_use 的入参先严格 parse,失败
+    // 再宽松修补(tool_args_repair);修成的块带 input_repair,修不成的带
+    // input_error(入参 {})。终帧 stop_reason 是长度截断时,修不成的与靠
+    // 补齐末尾救回的块一律改判 input_error(截断),不许补齐执行。
+    // 修补过/坏掉的块不进 completed_tool_uses()(不提前派发)。
     // tool_use 的 input JSON 拼完后解析失败时置位。就算解析失败,BuildMessage()
     // 依旧会给出可用的 Message——那个 tool_use 块的 input 会是个空对象,不会因为
     // 解析失败就丢数据、崩掉;调用方看 has_parse_error() 自己决定要不要额外报错。
@@ -99,12 +107,21 @@ private:
     std::optional<OpenThinking> open_thinking_;
     std::string stop_reason_;
     Usage usage_;
+    bool usage_snapshot_seen_ = false;
     bool usage_seen_ = false;
     bool cache_read_seen_ = false;
     bool cache_creation_seen_ = false;
     std::string usage_anomaly_;
     std::string parse_error_;
+    // 截断嫌疑块(入参修不成,或靠补齐末尾才救回):content_ 下标 + 原文。
+    // MessageDone 见长度截断即改判 input_error;收口即清。
+    struct TruncationSuspect {
+        std::size_t content_index = 0;
+        std::string raw;
+    };
+    std::vector<TruncationSuspect> truncation_suspects_;
     int idless_tool_calls_dropped_ = 0;
+    bool lenient_tool_args_ = true;
 
     void FinalizeCurrent();
 };

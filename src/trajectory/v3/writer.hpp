@@ -275,7 +275,8 @@ public:
                                 const std::vector<std::string>& input_message_refs,
                                 nlohmann::json provider_snapshot,  // provider/model/wire/参数/工具定义引用
                                 std::optional<std::string> compact_id = std::nullopt,
-                                Durability durability = Durability::ProcessCrash);
+                                Durability durability = Durability::ProcessCrash,
+                                std::optional<std::string> parent_turn_id = std::nullopt);
 
     // ---- 流式(§4.43) ----
 

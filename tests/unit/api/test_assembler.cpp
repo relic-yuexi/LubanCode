@@ -5,6 +5,7 @@
 #include <doctest/doctest.h>
 
 #include <variant>
+#include <iostream>
 
 #include "api/assembler.hpp"
 #include "api/types.hpp"
@@ -324,4 +325,62 @@ TEST_CASE("C2 旗标: MessageDone 的读/写明报位与异常位各自独立落
     CHECK(bare.usage_seen() == false);
     CHECK_FALSE(bare.cache_read_seen());
     CHECK_FALSE(bare.cache_creation_seen());
+}
+
+
+TEST_CASE("Usage snapshot: facts neither finalize content nor declare completion") {
+    std::cout << "[usage-snapshot-assembler] nonterminal\n";
+    MessageAssembler assembler;
+    assembler.Feed(TextDelta{"unfinished"});
+    assembler.Feed(UsageSnapshot{Usage{17, 9}, true});
+    CHECK(assembler.stop_reason().empty());
+    CHECK(assembler.BuildMessage().content.empty());
+    CHECK(assembler.usage_seen());
+    CHECK(assembler.usage().input_tokens == 17);
+    assembler.Feed(TextDelta{" continued"});
+    assembler.FinalizeOpenBlock();
+    REQUIRE(assembler.BuildMessage().content.size() == 1);
+    CHECK(std::get<TextBlock>(assembler.BuildMessage().content.front()).text == "unfinished continued");
+    CHECK(assembler.stop_reason().empty());
+}
+
+TEST_CASE("Usage snapshot: empty terminal preserves facts and explicit zero overwrites") {
+    std::cout << "[usage-snapshot-assembler] terminal\n";
+    MessageAssembler assembler;
+    assembler.Feed(UsageSnapshot{Usage{17, 9}, true});
+    assembler.Feed(MessageDone{"end_turn", Usage{}});
+    CHECK(assembler.stop_reason() == "end_turn");
+    CHECK(assembler.usage().input_tokens == 17);
+    CHECK(assembler.usage().output_tokens == 9);
+    CHECK(assembler.usage_seen());
+    MessageDone zero; zero.stop_reason = "end_turn"; zero.usage_reported = true;
+    assembler.Feed(zero);
+    CHECK(assembler.usage().input_tokens == 0);
+    CHECK(assembler.usage().output_tokens == 0);
+    CHECK(assembler.usage_seen());
+    assembler.Feed(UsageSnapshot{Usage{17, 9}, true});
+    assembler.Feed(MessageDone{"end_turn", Usage{3, 4}});
+    CHECK(assembler.usage().input_tokens == 3);
+    CHECK(assembler.usage().output_tokens == 4);
+    CHECK_FALSE(assembler.usage_seen());
+}
+
+TEST_CASE("Usage snapshot: whole snapshots replace flags and preserve legacy terminals") {
+    std::cout << "[usage-snapshot-assembler] flags\n";
+    MessageAssembler assembler;
+    assembler.Feed(UsageSnapshot{Usage{5, 2, 7, 11, 13}, true, true, true, "original anomaly"});
+    CHECK(assembler.cache_read_seen()); CHECK(assembler.cache_creation_seen());
+    CHECK(assembler.usage().cache_read_tokens == 7);
+    CHECK(assembler.usage().cache_creation_tokens == 11);
+    CHECK(assembler.usage().output_reasoning_tokens == 13);
+    CHECK(assembler.usage_anomaly() == "original anomaly");
+    assembler.Feed(UsageSnapshot{Usage{}, true});
+    CHECK(assembler.usage_seen()); CHECK_FALSE(assembler.cache_read_seen());
+    CHECK_FALSE(assembler.cache_creation_seen()); CHECK(assembler.usage_anomaly().empty());
+    CHECK(assembler.usage().input_tokens == 0); CHECK(assembler.usage().output_reasoning_tokens == 0);
+    MessageAssembler legacy;
+    legacy.Feed(MessageDone{"end_turn", Usage{3, 4}});
+    CHECK(legacy.usage().input_tokens == 3); CHECK_FALSE(legacy.usage_seen());
+    legacy.Feed(MessageDone{"end_turn", Usage{}});
+    CHECK(legacy.usage().input_tokens == 0); CHECK_FALSE(legacy.usage_seen());
 }

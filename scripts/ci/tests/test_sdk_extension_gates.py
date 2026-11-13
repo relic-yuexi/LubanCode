@@ -974,6 +974,7 @@ class InstalledHeadersTests(unittest.TestCase):
             "include/lubancore/named_results.hpp",
             "include/lubancore/jobs.hpp",
             "include/lubancore/web_fetch.hpp",
+            "include/lubancore/web_search.hpp",
             "include/lubancore/packages.hpp",
             "include/lubancore/api.hpp", "include/lubancore/core.hpp",
             "include/lubancore/extensions.hpp", "include/lubancore/detail/types.hpp",

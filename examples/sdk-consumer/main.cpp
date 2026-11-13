@@ -40,6 +40,8 @@ void NamedResults(const std::filesystem::path& base, const std::filesystem::path
 void JournalOwner(const std::filesystem::path& base);
 void WebFetch(const std::filesystem::path& base, const std::string& base_url,
               const std::filesystem::path& requests_file);
+void WebSearch(const std::filesystem::path& base, const std::string& base_url,
+               const std::filesystem::path& requests_file);
 void Actions(const std::filesystem::path& base);
 void BuiltinSearch(const std::filesystem::path& base, const std::filesystem::path& resource_root);
 void MemorySeed(const std::filesystem::path& base);
@@ -203,6 +205,25 @@ sdk::Approval ApprovalFor(const std::shared_ptr<sdk::Session>& session,
         Check(!Terminal(state.state), "operation ended before expected approval: " + state.error);
     }
     throw std::runtime_error("approval did not arrive");
+}
+
+void SamplingBoundary(const fs::path& base) {
+    sdk::ModelRequest old_request{"old", "system", {}, {}, 19};
+    sdk::ModelReply old_reply{"text", {}, sdk::Usage{1,2}};
+    Check(old_request.reasoning_effort.empty() && old_reply.stop_reason.empty(), "old aggregate defaults changed");
+    const auto paths=Fresh(base,"sampling-boundary"); auto runtime=Runtime(paths);
+    auto options=Options(paths,[](const sdk::ModelRequest& request,sdk::Cancellation)->sdk::Result<sdk::ModelReply> {
+        Check(request.reasoning_effort.empty(), "default SDK effort changed");
+        return sdk::ModelReply{"must not publish",{},sdk::Usage{1,2},std::string(257,'x')};
+    });
+    auto session=Take(runtime->OpenSession(std::move(options)),"sampling boundary open");
+    const auto receipt=Take(session->Submit("sampling-boundary", "inspect finish reason"),"sampling boundary submit");
+    const auto operation=Finished(session,receipt);
+    Check(operation.state==sdk::OperationState::Failed &&
+          operation.error.find("sdk.backend.invalid_stop_reason")!=std::string::npos,
+          "actual installed SDK did not validate new finish reason");
+    Take(session->Close(),"sampling boundary close"); Take(runtime->Shutdown(),"sampling boundary shutdown");
+    std::cout << "[sdk-model-sampling-consumer] invalid-reply" << '\n';
 }
 
 void FileAndCommand(const fs::path& base) {
@@ -1693,14 +1714,15 @@ int main(int argc, char** argv) {
     try {
         Check(argc >= 2, "usage: lubancore_consumer MODE ABSOLUTE_STATE_DIRECTORY [ABSOLUTE_INSTALLED_RESOURCE_ROOT]");
         const std::string mode = argv[1];
-        Check(argc == ((mode == "builtin-search" || mode == "command-jobs" || mode == "named-results") ? 4 : mode == "web-fetch" ? 5 : 3),
-              "builtin-search requires STATE and installed ROOT; web-fetch requires STATE, explicit URL and request ledger; command-jobs and named-results require STATE and explicit PROBE; other modes require STATE only");
+        Check(argc == ((mode == "builtin-search" || mode == "command-jobs" || mode == "named-results") ? 4 : (mode == "web-fetch" || mode == "web-search") ? 5 : 3),
+              "builtin-search requires STATE and installed ROOT; web-fetch/web-search require STATE, explicit URL and request ledger; command-jobs and named-results require STATE and explicit PROBE; other modes require STATE only");
         const fs::path base = Path(argv[2]);
         Check(base.is_absolute(), "state directory must be absolute");
         fs::create_directories(base);
         if (mode == "authorization") CheckSdkAuthorizationConsumer();
         else if (mode == "smoke") {
             Check(!sdk::Version().empty(), "installed library has no version");
+            SamplingBoundary(base);
             FileAndCommand(base);
             SharedDirectoryIsolation(base);
             CloseAndStreams(base);
@@ -1721,6 +1743,7 @@ int main(int argc, char** argv) {
         else if (mode == "named-results") lubancore_consumer::NamedResults(base, Path(argv[3]));
         else if (mode == "journal-owner") lubancore_consumer::JournalOwner(base);
         else if (mode == "web-fetch") lubancore_consumer::WebFetch(base, argv[3], Path(argv[4]));
+        else if (mode == "web-search") lubancore_consumer::WebSearch(base, argv[3], Path(argv[4]));
         else if (mode == "actions") lubancore_consumer::Actions(base);
         else if (mode == "results") PublicResults(base);
         else if (mode == "skills-seed") SkillsSeed(base);

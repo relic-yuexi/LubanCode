@@ -56,6 +56,7 @@ REQUIRED_PUBLIC_HEADERS = {
     "include/lubancore/named_results.hpp",
     "include/lubancore/jobs.hpp",
     "include/lubancore/web_fetch.hpp",
+    "include/lubancore/web_search.hpp",
     "include/lubancore/authorization.hpp",
     "include/lubancore/packages.hpp",
     "include/lubancore/api.hpp", "include/lubancore/core.hpp", "include/lubancore/extensions.hpp",
@@ -354,6 +355,50 @@ def main() -> None:
     public_headers = check_public_headers(repo, installed_files, args.install_mode)
     web_header = web_fixture.check_installed_header(repo, prefix)
     producer_cache = (producer_build / "CMakeCache.txt").read_text(encoding="utf-8")
+    cache_values = {line.split(":", 1)[0]: line.split("=", 1)[1]
+                    for line in producer_cache.splitlines() if ":" in line and "=" in line and
+                    not line.startswith(("#", "//"))}
+    testing = cache_values.get("BUILD_TESTING", "").upper()
+    if testing not in {"ON", "TRUE", "YES", "1", "OFF", "FALSE", "NO", "0"}:
+        raise RuntimeError("installed SDK startup seam requires an explicit producer testing profile")
+    expected_hook = testing in {"ON", "TRUE", "YES", "1"}
+    modules = [path for path in prefix.rglob("*") if path.is_file() and
+               re.fullmatch(r"(?:lib)?lubancore(?:\.dll|\.so(?:\.[0-9]+)*|(?:\.[0-9]+)*\.dylib)", path.name)]
+    if not modules:
+        raise RuntimeError("installed SDK startup seam has no actual shared module")
+    module_evidence = []
+    for module in modules:
+        raw = module.read_bytes()
+        present = b"ReplaceOpeningStartHook" in raw
+        if present != expected_hook:
+            raise RuntimeError("installed SDK startup hook differs from producer testing profile: " + str(module))
+        sampling_present = all(symbol in raw for symbol in
+                               (b"ReplaceSamplingWatchdogHooks", b"SampleInsideSharedSdk"))
+        sampling_any = any(symbol in raw for symbol in
+                           (b"ReplaceSamplingWatchdogHooks", b"SampleInsideSharedSdk"))
+        if sampling_present != expected_hook or sampling_any != expected_hook:
+            raise RuntimeError("installed SDK sampling bridge differs from producer testing profile: " + str(module))
+        extraction_present = b"GetMemoryExtractionTestPort" in raw
+        if extraction_present != expected_hook:
+            raise RuntimeError("installed SDK extraction bridge differs from producer testing profile: " + str(module))
+        owner_symbols = (b"ReplaceBackendOwnerObserver", b"AdaptObservedBackend", b"ReplaceBackendOwnerAllocationFailure")
+        owner_all = all(symbol in raw for symbol in owner_symbols)
+        owner_any = any(symbol in raw for symbol in owner_symbols)
+        if owner_all != expected_hook or owner_any != expected_hook:
+            raise RuntimeError("installed SDK Backend owner bridge differs from testing profile: " + str(module))
+        module_evidence.append({"path": module.relative_to(prefix).as_posix(),
+                                "sha256": hashlib.sha256(raw).hexdigest(), "hook_symbol_bytes": present,
+                                "sampling_bridge_symbol_bytes": sampling_present,
+                                "extraction_bridge_symbol_bytes": extraction_present,
+                                "backend_owner_bridge_symbol_bytes": owner_all})
+    if any(any(name in relative for name in ("opening_test_hooks", "sampling_test_hooks", "sample_model_test_hooks", "memory_extraction_test_port", "turn_memory_extractor_test_hooks", "session_title_refiner_test_hooks", "bypass_worker_test_hooks", "trajectory_bypass_lease", "trajectory_diagnostics", "backend_owner_test_hooks"))
+           for relative in installed_files):
+        raise RuntimeError("private SDK startup header leaked into installed package")
+    (evidence / "opening-start-boundary.json").write_text(json.dumps({
+        "githubSha": os.environ.get("GITHUB_SHA"), "producer_testing": expected_hook,
+        "private_header_installed": False, "modules": module_evidence,
+        "scope": "Actual relocated shared-module symbol bytes; no test hook in ordinary SDK builds.",
+    }, indent=2) + "\n", encoding="utf-8")
     staged_entries = [line.split("=", 1)[1] for line in producer_cache.splitlines()
                       if line.startswith("LUBANCODE_BUNDLED_RG_DIR:PATH=")]
     if len(staged_entries) != 1 or not staged_entries[0]:
@@ -610,6 +655,9 @@ def main() -> None:
         "status": "passed", "registration": web_test, "requests": request_receipt,
         "fixture_context": fixture.context, "source_seal": web_source, "public_header": web_header,
     }, indent=2) + "\n", encoding="utf-8")
+    run([sys.executable, str(repo / "scripts/ci/run_web_search_consumer.py"),
+         "--consumer", smoke_test["command"][0], "--state", str(scratch / "web-search"),
+         "--evidence", str(evidence / "web-search"), "--source", str(consumer_source)], env)
     rag.check_copy(consumer_source, rag_source, consumer=True)
     after_demo = rag.inspect_demo(scratch, demo_source, demo_build, prefix, repo, rag_source,
                                   producer_build=producer_build)

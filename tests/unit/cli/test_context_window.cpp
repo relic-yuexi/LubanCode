@@ -665,3 +665,98 @@ TEST_CASE("BuildContextWindowPanelFrame: 英文词条成对(切 en 后布局仍�
     CHECK(cli::tr("cw_panel.footer_nav").find("Left/Right") != std::string::npos);  // 文本回退
     cli::SetLanguage(saved);
 }
+
+// ---------------------------------------------------------------------------
+// /effort 概览与单行面板:默认值、声明来源、可选档位一屏说清
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string JoinLines(const std::vector<std::string>& lines) {
+    std::string out;
+    for (const std::string& line : lines) {
+        out += line + "\n";
+    }
+    return out;
+}
+
+bool Contains(const std::string& haystack, const std::string& needle) {
+    return haystack.find(needle) != std::string::npos;
+}
+
+}  // namespace
+
+TEST_CASE("ResolveThinkEffortCapability: 来源与默认值——目录/provider/未知") {
+    cli::SetLanguage("zh-CN");
+    auto entry = MakeEntry();
+    entry.default_think = "high";
+    entry.supported_think_levels = {{"low", ""}, {"high", ""}};
+    const auto from_catalog = cli::ResolveThinkEffortCapability(&entry, {"medium"}, "high");
+    CHECK(from_catalog.source == cli::ThinkEffortSource::Catalog);
+    CHECK(from_catalog.default_effort == "high");
+
+    const auto from_provider = cli::ResolveThinkEffortCapability(nullptr, {"low", "high"}, "low");
+    CHECK(from_provider.source == cli::ThinkEffortSource::Provider);
+    CHECK(from_provider.default_effort.empty());
+
+    const auto unknown = cli::ResolveThinkEffortCapability(nullptr, {}, "");
+    CHECK(unknown.source == cli::ThinkEffortSource::None);
+    CHECK(unknown.control == cli::ThinkEffortControl::Unknown);
+}
+
+TEST_CASE("BuildEffortOverviewLines: 目录声明档列出当前/默认,provider 档标未验证") {
+    cli::SetLanguage("zh-CN");
+    auto entry = MakeEntry();
+    entry.default_think = "high";
+    entry.supported_think_levels = {{"low", ""}, {"high", ""}};
+    const std::string catalog_text = JoinLines(
+        cli::BuildEffortOverviewLines("模型: p/m", cli::ResolveThinkEffortCapability(&entry, {}, "low")));
+    CHECK(Contains(catalog_text, "当前值: Low"));
+    CHECK(Contains(catalog_text, "默认值: High"));
+    CHECK(Contains(catalog_text, "声明来源: 模型目录"));
+    CHECK(Contains(catalog_text, "可选档位:"));
+    CHECK(Contains(catalog_text, "[当前]"));
+    CHECK(Contains(catalog_text, "(默认)"));
+
+    const std::string provider_text = JoinLines(
+        cli::BuildEffortOverviewLines("模型: p/m", cli::ResolveThinkEffortCapability(nullptr, {"low"}, "low")));
+    CHECK(Contains(provider_text, "声明来源: provider 配置(未验证)"));
+    CHECK(Contains(provider_text, "目录未声明默认档"));
+    CHECK(Contains(provider_text, "未验证"));
+}
+
+TEST_CASE("BuildEffortOverviewLines: 能力未知不猜档位,不列档位表") {
+    cli::SetLanguage("zh-CN");
+    const std::string text = JoinLines(
+        cli::BuildEffortOverviewLines("模型: p/m", cli::ResolveThinkEffortCapability(nullptr, {}, "")));
+    CHECK(Contains(text, "能力未知,不猜档位"));
+    CHECK(Contains(text, "声明来源: 无"));
+    CHECK_FALSE(Contains(text, "可选档位:"));
+}
+
+TEST_CASE("单行面板:effort_only 帧不画窗口段,带默认值与来源,焦点恒在思考行") {
+    cli::SetLanguage("zh-CN");
+    auto entry = MakeEntry();
+    entry.default_think = "high";
+    entry.supported_think_levels = {{"low", ""}, {"high", ""}};
+    cli::ContextWindowPanelView view;
+    view.effort_only = true;
+    view.model_title = "模型: p/m";
+    view.effort = cli::ResolveThinkEffortCapability(&entry, {}, "low");
+    view.effort_index = 0;
+    view.original_effort_index = 0;
+    view.focus = 1;
+    const std::string frame = JoinLines(cli::BuildContextWindowPanelFrame(view, 100).lines);
+    CHECK_FALSE(Contains(frame, "上下文窗口"));
+    CHECK(Contains(frame, "默认值: High"));
+    CHECK(Contains(frame, "声明来源: 模型目录"));
+    CHECK(Contains(frame, "当前选择: Low 思考"));
+
+    cli::ContextWindowPanelCore core(0, view.effort.options.size(), 0, 0);
+    CHECK(core.state().focus == 1);
+    core.HandleKey(Key(cli::KeyKind::Down));
+    CHECK(core.state().focus == 1);
+    core.HandleKey(Key(cli::KeyKind::Right));
+    CHECK(core.state().effort_index == 1);
+    CHECK(core.dirty());
+}

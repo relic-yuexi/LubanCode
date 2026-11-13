@@ -158,7 +158,8 @@ void PrintMemoryWorkerBatchStatus(const char* check, const memory::RuntimeStatus
 }
 
 void PrintMemoryWorkerBatchDrain(int round,
-    const std::vector<memory::ProjectMemory::MemoryWriteCompletion>& completions) noexcept {
+    const std::vector<memory::ProjectMemory::MemoryWriteCompletion>& completions,
+    const fs::path& lifecycle) noexcept {
     try {
         constexpr std::size_t cap = 32;
         PrintMemoryWorkerBatchLine("drain", {{"round", round}, {"completion_count", completions.size()},
@@ -176,6 +177,21 @@ void PrintMemoryWorkerBatchDrain(int round,
             field("outcome", completion.outcome, 256);
             field("memory_id", completion.memory_id, 256);
             field("error", completion.error, 1024);
+            if (completion.outcome != "committed") {
+                const auto& operation = completion.operation_id;
+                bool safe = !operation.empty() && operation.size() <= 256;
+                for (const unsigned char c : operation) {
+                    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                          (c >= '0' && c <= '9') || c == '-' || c == '_')) safe = false;
+                }
+                if (safe) {
+                    observation["raw_result"] = MemoryDiagnosticFile(
+                        lifecycle / fs::path(operation) / "result.json", 128 * 1024,
+                        {"schema_version", "commit_schema", "commit_state", "status", "stages", "outcome"});
+                } else {
+                    observation["raw_result"] = {{"state", "invalid_operation_id"}};
+                }
+            }
             PrintMemoryWorkerBatchLine("completion", observation);
         }
     } catch (...) {
@@ -836,7 +852,7 @@ TEST_CASE("ProjectMemory: 真 worker 连续入队不起风暴,全部提交且回
     std::size_t committed = 0;
     for (int drain_round = 0; drain_round < 2; ++drain_round) {
         const auto batch_completions = store.DrainWriteCompletions();
-        PrintMemoryWorkerBatchDrain(drain_round, batch_completions);
+        PrintMemoryWorkerBatchDrain(drain_round, batch_completions, identity->workspace_dir / "lifecycle");
         for (const auto& completion : batch_completions) {
             if (drain_round == 0) {
                 CHECK(completion.outcome == "committed");

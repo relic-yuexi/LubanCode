@@ -150,18 +150,29 @@ struct Trace {
     bool scope_valid = true;
     std::optional<CommandExecutionLimits> limits;
     std::optional<Tool::Result> raw;
+    Clock::time_point before_budget, command_entered;
+};
+struct CommandClock {
+    std::mutex mutex;
+    Clock::time_point worker_entered;
 };
 class Command final : public RunCommandTool {
 public:
-    explicit Command(std::shared_ptr<Trace> trace) : trace_(std::move(trace)) {}
+    Command(std::shared_ptr<Trace> trace, std::shared_ptr<CommandClock> clock)
+        : trace_(std::move(trace)), clock_(std::move(clock)) {}
     Result execute(const Json& input, const ToolExecutionContext& context) override {
-        { std::lock_guard lock(trace_->mutex); ++trace_->command_calls; trace_->limits = context.command_limits; }
+        const auto entered = Clock::now();
+        Clock::time_point before_budget;
+        { std::lock_guard lock(clock_->mutex); before_budget = clock_->worker_entered; }
+        { std::lock_guard lock(trace_->mutex); ++trace_->command_calls; trace_->limits = context.command_limits;
+          trace_->before_budget = before_budget; trace_->command_entered = entered; }
         auto result = RunCommandTool::execute(input, context);
         { std::lock_guard lock(trace_->mutex); trace_->raw = result; }
         return result;
     }
 private:
     std::shared_ptr<Trace> trace_;
+    std::shared_ptr<CommandClock> clock_;
 };
 struct Gate {
     std::mutex mutex; std::condition_variable cv; bool entered = false, released = false;
@@ -190,6 +201,7 @@ struct Rig {
     std::unique_ptr<rt::SessionService> service;
     std::shared_ptr<std::recursive_mutex> serial = std::make_shared<std::recursive_mutex>();
     std::shared_ptr<GlobalRunningQuota> quota = std::make_shared<GlobalRunningQuota>();
+    std::shared_ptr<CommandClock> command_clock = std::make_shared<CommandClock>();
     std::shared_ptr<ToolJobCoordinator> coordinator;
     sdk::JobOperations table;
     sdk::MainOperationTurnStart main;
@@ -210,7 +222,14 @@ struct Rig {
         options.global = quota; options.limits.session_running = 1; options.limits.per_tool = 1;
         options.clock_ms = [this] { ++legacy; return std::int64_t{1}; };
         options.thread_starter = [this, starter = std::move(starter)](std::thread& thread, std::function<void()> body) {
-            ++threads; if (starter) starter(thread, std::move(body)); else thread = std::thread(std::move(body));
+            ++threads;
+            // The single running slot makes this the actual command's worker.
+            // Fence its budget calculation without replacing the production clock.
+            auto fenced = [clock = command_clock, body = std::move(body)]() mutable {
+                { std::lock_guard lock(clock->mutex); clock->worker_entered = Clock::now(); }
+                body();
+            };
+            if (starter) starter(thread, std::move(fenced)); else thread = std::thread(std::move(fenced));
         };
         coordinator = std::make_shared<ToolJobCoordinator>(Writer(),
             [this](const auto&, const auto&) { ++legacy; return JobAuthDecision{true, false, {}}; },
@@ -268,7 +287,7 @@ struct Rig {
     void Adopt(Ticket& ticket, std::uint64_t cap, std::function<void(unsigned)> scope = {}) {
         const auto facts = ticket.registered.facts; const auto trace = ticket.trace;
         OwnedJobCapability capability;
-        capability.command = std::make_shared<Command>(trace); capability.command_limits = {cap, 1024};
+        capability.command = std::make_shared<Command>(trace, command_clock); capability.command_limits = {cap, 1024};
         capability.scope_gate = [facts, trace, scope = std::move(scope)](const OwnedJobScope& actual, const Json& input,
             const v3::ToolIdentity& identity, const JobExecutionPolicy& policy) {
             unsigned call = 0;
@@ -343,6 +362,38 @@ struct Rig {
 void Expire(const Ticket& ticket) {
     REQUIRE(ticket.request.policy.deadline_ms > 0);
     std::this_thread::sleep_until(ticket.after_register + std::chrono::milliseconds(ticket.request.policy.deadline_ms) + 25ms);
+}
+void CheckCapWindow(const Ticket& ticket, std::uint64_t host_cap,
+                    std::uint64_t model_cap, const char* path) {
+    std::lock_guard lock(ticket.trace->mutex);
+    REQUIRE(ticket.trace->limits);
+    REQUIRE(ticket.request.policy.deadline_ms == 5000);
+    REQUIRE(ticket.trace->before_budget != Clock::time_point{});
+    REQUIRE(ticket.after_register >= ticket.before_register);
+    REQUIRE(ticket.trace->before_budget >= ticket.after_register);
+    REQUIRE(ticket.trace->command_entered >= ticket.trace->before_budget);
+    const auto span = std::chrono::milliseconds(ticket.request.policy.deadline_ms);
+    const auto floor_remaining = [](Clock::time_point deadline, Clock::time_point now) {
+        if (deadline <= now) return std::uint64_t{0};
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
+    };
+    // Freeze occurs within Register; remaining is read between worker entry
+    // and actual command entry. These independent real-clock fences allow no
+    // added time or guessed scheduling tolerance, including on a slow Windows fs.
+    const auto lower = floor_remaining(ticket.before_register + span, ticket.trace->command_entered);
+    const auto upper = floor_remaining(ticket.after_register + span, ticket.trace->before_budget);
+    const auto lower_cap = (std::min)({host_cap, model_cap, lower});
+    const auto upper_cap = (std::min)({host_cap, model_cap, upper});
+    const auto actual = ticket.trace->limits->timeout_ms;
+    CHECK(actual > 0);
+    CHECK(actual >= lower_cap);
+    CHECK(actual <= upper_cap);
+    const Json observation = {{"path", path}, {"registration_budget_ms", ticket.request.policy.deadline_ms},
+        {"host_cap_ms", host_cap}, {"model_cap_ms", model_cap}, {"remaining_lower_ms", lower},
+        {"remaining_upper_ms", upper}, {"timeout_lower_ms", lower_cap}, {"timeout_upper_ms", upper_cap},
+        {"actual_timeout_ms", actual}};
+    std::fprintf(stderr, "[owned-job-deadline-cap-observation] %s\n", observation.dump().c_str());
+    std::fflush(stderr);
 }
 JobRecoveryPlan::Item Recovery(Rig& rig, const Ticket& ticket) {
     const auto plan = ToolJobCoordinator::PlanRecovery(Ledger(rig.Path()), JobRecoveryPolicy::Hold);
@@ -492,13 +543,15 @@ TEST_CASE("Owned actual command image takes remaining model and host budgets" * 
     auto input = probe.Input(rig.cwd, "model", false, 60000); input["timeout_ms"] = 1000;
     auto model = rig.Declare(std::move(input), 5000); rig.Register(model); rig.Adopt(model, 4000); rig.Confirm(model);
     REQUIRE(AwaitStarted(rig.cwd, "model")); rig.Finish(model);
-    { std::lock_guard lock(model.trace->mutex); REQUIRE(model.trace->limits); CHECK(model.trace->limits->timeout_ms == 1000);
+    CheckCapWindow(model, 4000, 1000, "model");
+    { std::lock_guard lock(model.trace->mutex); REQUIRE(model.trace->limits);
       REQUIRE(model.trace->raw); CHECK(model.trace->raw->outcome == "timed_out"); CHECK(model.trace->posts == 1); }
     CHECK_FALSE(fs::exists(rig.cwd / "model.done"));
     auto host = rig.Declare(probe.Input(rig.cwd, "host"), 5000);
     rig.Register(host); rig.Adopt(host, 3000); rig.Confirm(host); const auto completed = rig.Finish(host);
     CHECK(completed.state == "succeeded"); REQUIRE(AwaitStarted(rig.cwd, "host")); CHECK(Bytes(rig.cwd / "host.done") == "host");
-    { std::lock_guard lock(host.trace->mutex); REQUIRE(host.trace->limits); CHECK(host.trace->limits->timeout_ms == 3000);
+    CheckCapWindow(host, 3000, (std::numeric_limits<std::uint64_t>::max)(), "host");
+    { std::lock_guard lock(host.trace->mutex); REQUIRE(host.trace->limits);
       REQUIRE(host.trace->raw); CHECK(host.trace->raw->outcome == "succeeded"); CHECK(host.trace->posts == 1); }
     rig.Stop(); probe.Released(); Mark("runtime-budget", rig, queued);
 }

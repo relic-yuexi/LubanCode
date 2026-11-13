@@ -28,8 +28,30 @@ class OwnedDeadlineEvidenceTests(unittest.TestCase):
             '[doctest] test cases: 6 | 6 passed | 0 failed',
             '[doctest] assertions: 100 | 100 passed | 0 failed', 'Test Passed.',
             '[owned-job-deadline-queue-observation] ' + json.dumps(self.queue_observation()),
+            *('[owned-job-deadline-cap-observation] ' + json.dumps(row) for row in self.cap_observations()),
             *('[owned-job-deadline-path] ' + path for path in gate.PATHS),
             *('[owned-job-deadline-fact] ' + json.dumps(fact) for fact in (self.facts() if facts is None else facts))))
+
+    def cap_observations(self):
+        return [dict(path='model', registration_budget_ms=5000, host_cap_ms=4000, model_cap_ms=1000,
+                     remaining_lower_ms=4500, remaining_upper_ms=4600, timeout_lower_ms=1000,
+                     timeout_upper_ms=1000, actual_timeout_ms=1000),
+                dict(path='host', registration_budget_ms=5000, host_cap_ms=3000, model_cap_ms=2**64 - 1,
+                     remaining_lower_ms=1600, remaining_upper_ms=1620, timeout_lower_ms=1600,
+                     timeout_upper_ms=1620, actual_timeout_ms=1608)]
+
+    def test_model_and_host_caps_use_independent_clock_fences(self):
+        body = self.body()
+        for original, replacement in (('"actual_timeout_ms": 1608', '"actual_timeout_ms": 3000'),
+                                      ('"registration_budget_ms": 5000', '"registration_budget_ms": 0'),
+                                      ('"timeout_upper_ms": 1620', '"timeout_upper_ms": 3000'),
+                                      ('"remaining_upper_ms": 1620', '"remaining_upper_ms": true')):
+            self.reject(body.replace(original, replacement))
+        prefix = '[owned-job-deadline-cap-observation] '
+        lines = [line for line in body.splitlines() if not line.startswith(prefix)]
+        self.reject('\n'.join(lines))
+        self.reject(body + '\n' + next(line for line in body.splitlines() if line.startswith(prefix)))
+        self.reject(body.replace('"path": "model"', '"path": []'))
 
     def reject(self, body=None, command=None):
         with self.assertRaises(RuntimeError):

@@ -111,6 +111,10 @@ options.web_fetch->max_output_bytes = 16 * 1024;
 取消、重定向、解压能力与 Close 次序见[web_fetch 合同](sdk-web-fetch.md)。
 这项已进当前候选源码，远端验收状态见阶段进度。
 
+`web_search` 用宿主逐场传入服务、密钥与预算。支持 Tavily、Brave、Serper，
+不读 CLI 配置，不从恢复账取密钥。开场声明与关场合同见
+[显式网络搜索](sdk-web-search.md)。这片仍待本源三平台 CI。
+
 要随 SDK 安装搜索后端，先按仓库 manifest 校验资源，再显式交给 CMake。
 下面以 Linux x64 为例；macOS ARM64 用 `macos-arm64`，Windows x64 用 `windows-x64`。
 

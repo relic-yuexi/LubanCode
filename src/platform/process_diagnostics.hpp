@@ -76,6 +76,9 @@ enum class ProcessDiagnosticStage : std::uint32_t {
     ExitCodeRead,
     JobAccountingQueryBefore,
     JobAccountingQueryAfter,
+    JobProcessListQueryBefore,
+    JobProcessListQueryAfter,
+    JobProcessImageQueryAfter,
 };
 
 // Internal values from one successful JobObjectBasicAccountingInformation
@@ -90,6 +93,15 @@ struct ProcessDiagnosticJobAccounting {
 static_assert(std::is_trivial_v<ProcessDiagnosticJobAccounting>);
 static_assert(std::is_standard_layout_v<ProcessDiagnosticJobAccounting>);
 
+// Raw UTF-16 basename only; neither full paths nor command lines are retained.
+struct ProcessDiagnosticProcessImage {
+    std::array<std::uint16_t, 64> name;
+    std::uint32_t name_units;
+    bool truncated;
+};
+static_assert(std::is_trivial_v<ProcessDiagnosticProcessImage>);
+static_assert(std::is_standard_layout_v<ProcessDiagnosticProcessImage>);
+
 struct ProcessDiagnosticRecord {
     ProcessDiagnosticStage stage;
     std::int64_t steady_ns;
@@ -100,6 +112,8 @@ struct ProcessDiagnosticRecord {
     std::uint32_t system_error;
     // Valid only for JobAccountingQueryAfter with a successful native rc.
     ProcessDiagnosticJobAccounting job_accounting;
+    // Valid only for a successful JobProcessImageQueryAfter.
+    ProcessDiagnosticProcessImage process_image;
 };
 static_assert(std::is_trivial_v<ProcessDiagnosticRecord>);
 static_assert(std::is_standard_layout_v<ProcessDiagnosticRecord>);
@@ -130,7 +144,8 @@ public:
     void Record(ProcessDiagnosticStage stage, std::int64_t pid = -1,
                 std::int64_t pgid = -1, std::int64_t rc = 0,
                 std::uint32_t system_error = 0, std::int64_t detail = 0,
-                ProcessDiagnosticJobAccounting job_accounting = {}) noexcept {
+                ProcessDiagnosticJobAccounting job_accounting = {},
+                ProcessDiagnosticProcessImage process_image = {}) noexcept {
         const int saved_errno = errno;
         const auto index = reserved_.fetch_add(1, std::memory_order_relaxed);
         if (index >= kCapacity) {
@@ -142,7 +157,7 @@ public:
         slot.record = {stage,
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count(),
-            pid, pgid, rc, detail, system_error, job_accounting};
+            pid, pgid, rc, detail, system_error, job_accounting, process_image};
         slot.published.store(true, std::memory_order_release);
         errno = saved_errno;
     }
@@ -260,6 +275,9 @@ constexpr const char* ProcessDiagnosticStageName(ProcessDiagnosticStage stage) n
         LUBAN_PROCESS_DIAGNOSTIC_NAME(ExitCodeRead)
         LUBAN_PROCESS_DIAGNOSTIC_NAME(JobAccountingQueryBefore)
         LUBAN_PROCESS_DIAGNOSTIC_NAME(JobAccountingQueryAfter)
+        LUBAN_PROCESS_DIAGNOSTIC_NAME(JobProcessListQueryBefore)
+        LUBAN_PROCESS_DIAGNOSTIC_NAME(JobProcessListQueryAfter)
+        LUBAN_PROCESS_DIAGNOSTIC_NAME(JobProcessImageQueryAfter)
 #undef LUBAN_PROCESS_DIAGNOSTIC_NAME
     }
     return "UnknownStage";

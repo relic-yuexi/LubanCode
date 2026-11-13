@@ -322,7 +322,7 @@ void TerminalSessionController::StartTitleRefinement(const std::string& first_qu
     inputs.trajectory_wire = session_runtime_.wire_name();
     inputs.provider = detached.route.provider;
     if (titles_.refiner().Start(std::move(inputs))) {
-        // T11-A:起飞事实(title.requested)在真起飞后才记,不冒充发起。
+        // T11-A:Start 已接本次尝试，包括起飞失败终态；物理发送另看 prepared/sent。
         titles_.NoteTitleGenerationStarted(info.model, detached.route.provider);
     }
 }
@@ -412,9 +412,7 @@ void TerminalSessionController::DrainFinishedTitleRefinement() {
     }
     // usage 分账:记 cheap 台账;context_tracker 一个字不碰——标题采样不
     // 混主会话 context 占用。迟到被弃也照记:token 是真花了的。
-    model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, outcome->model,
-                                  outcome->accounting.usage, outcome->accounting.duration_ms,
-                                  outcome->accounting.usage_reported);
+    (void)lubancode::app::RecordTitleRefinementCall(model_router->ledger(), *outcome);
     // 采纳判定(代数对上/档子活着/落盘成功才换)在 SessionTitleAccount。
     const auto adopted = titles_.AdoptRefined(*outcome);
     if (adopted == lubancode::app::SessionTitleAccount::AdoptResult::WriteFailed) {
@@ -475,9 +473,7 @@ void TerminalSessionController::DrainFinishedTurnMemory() {
     if (!outcome.has_value()) {
         return;
     }
-    model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, outcome->model,
-                                  outcome->accounting.usage, outcome->accounting.duration_ms,
-                                  outcome->accounting.usage_reported);
+    lubancode::app::RecordTurnMemoryCall(model_router->ledger(), *outcome);
     if (outcome->session_generation != view_registry_.session_generation()) {
         // 换代(/clear、/resume)后的迟到:旧场的回合账不写进新场的卷里,
         // 宁缺毋滥(世代拒旧账,先例:审批 DenyStaleGenerations、标题精炼

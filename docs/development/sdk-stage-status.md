@@ -1,18 +1,106 @@
 # SDK 阶段进度与验收边界
 
-2026-10-09 补记：功能分支已到 `5aaad8b5`，本源
-[原生 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37494237839) 与
-[文档 CI](https://github.com/relic-yuexi/LubanCode/actions/runs/37494237819) 均成功。
-以下旧源失败记录保留，不能再将“功能分支停在 fd76b6a5”当当前状态。
-下一片补[工具实际派发门](sdk-tool-dispatch-gate.md)，候选尚待验收；
-真实 Managed 授权、完整 JournalStore 和 CLI 全功能对齐继续留账。
+2026-10-09 补记（#334 工具派发门）：功能分支已合入后续批，本片补[工具实际派发门](sdk-tool-dispatch-gate.md)，
 Sandbox 补入 [Boxed/NVX 参考核查](../architecture/sandbox-platform-design.md#12-boxed-与-nvx-参考核查)，只记参考边界，未交付后端。
+
+2026-10-09 续批：第 2 步[显式 web_search](sdk-web-search.md) 已随
+[#335](https://github.com/relic-yuexi/LubanCode/pull/335) 合入 `194f587b`，与验收源
+`d596e8e0` 同树。远端全量 Windows 791、Linux 789、macOS 792 项均过；
+三平台独立 SDK Lua ON/OFF 各 70/68 项均过，九册安装消费各 15 次真实 HTTP
+均过；ASan 169 项过，Workflow TSan 本片未触发。74 册产物及原日志已封存。
+[SDK 开场线程失败清理](sdk-opening-start-cleanup.md) 已随
+[#336](https://github.com/relic-yuexi/LubanCode/pull/336) 合入 `8a19edf4`，与验收源
+`49060155` 同树。全量 Windows 791、Linux 789、macOS 792 项均过，三平台
+测试名单与 #335 相同；独立 SDK ON/OFF 各 70/68 项、生命周期 12 案及五条
+真实失败路径、九套安装消费均过。ASan 170 来源、1881 CASE、77461 断言过，
+745 份源码及输入哈希与实际 Git 对象吻合；74 册产物已封存。未跑本地 CI。
+[采样参数与终止原因](sdk-model-sampling.md) 已随
+[#337](https://github.com/relic-yuexi/LubanCode/pull/337) 合入 `adab6fb3`，与验收源
+`108eed10` 同树。全量 Windows 793、Linux 791、macOS 794 项均过；只增两条
+采样登记，旧案例未减。独立 SDK ON/OFF 各 71/69 来源、九套安装消费各 37/34
+案例均过，实际 DLL 拒绝非法终止原因。三平台真实 Memory 抽取核过三种截断。
+ASan 171 来源、1887 CASE、77578 断言过；746 份输入哈希与 Git 对象吻合。
+74 册产物及 1925 份索引原件已封存，未跑本地 CI。
+[旁路采样看门狗关场](sdk-sampling-lifetime.md) 已随
+[#338](https://github.com/relic-yuexi/LubanCode/pull/338) 合入 `068db5d3`，与验收源
+`639a9dc2` 同树。全量 Windows 795、Linux 793、macOS 796 项均过，旧名单未减。
+三平台 SDK ON/OFF 各 72/70 来源、九套安装消费各 37/34 项及各 15 次真实 HTTP
+均过；SDK DLL 内六条故障路径与 CLI 采样 25 案均过。ASan 172 来源、1899 CASE、
+78519 断言过；747 份测试源码、附件及配置输入与 Git 原件吻合。77 册产物、1941 份索引原件
+逐大小和 SHA256 封存。TSan 本片跳过，不计通过。未跑本地 CI。
+[Memory 抽取共享底座](sdk-memory-extraction-core.md) 已随
+[#339](https://github.com/relic-yuexi/LubanCode/pull/339) 合入 `52b71aa8`，与验收源
+`5c463e9b` 同树。Windows/Linux/macOS 全 CLI 各 798/796/799 项均过，旧名单未减。
+三平台 SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 项及各 15 次真实 HTTP
+均过；实际 SDK DLL 与 CLI 内核两路各七案及标记齐。ASan 174 来源、1913 CASE、
+79290 断言过；749 份测试源码、私有附件及四份配置输入与 Git 原件吻合，清单
+不覆盖全部生产源码。77 册产物、1940 份原件与封存副本逐大小和 SHA256 核过。
+TSan 本片跳过，不计通过。未跑本地 CI。同步共享底座已交，自动 Memory owner、
+候选管理、写回与完整持久身份及来源仍欠账。
+[Memory 抽取线程启动失败](sdk-memory-worker-start-cleanup.md) 已随
+[#340](https://github.com/relic-yuexi/LubanCode/pull/340) 合入 `9da20137`，与验收源
+`e3d725fc` 同树。Windows/Linux/macOS 全 CLI 各 799/797/800 项均过，旧名单未减。
+三平台 SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 项及各 15 次真实 HTTP
+均过；新增五案与五标记在三平台全量及 ASan 齐。ASan 175 来源、1918 CASE、
+79663 断言过；750 份测试源码、私有附件与配置输入已核，名单不覆盖全部生产源码。
+77 册产物、1940 份原件与封存副本逐大小和 SHA256 核过。TSan 本片跳过，不计通过。
+未跑本地 CI。后台异常、可撤销旁路借用、持久回合身份与用量来源仍欠账。
+[Memory 后台异常收场](sdk-memory-worker-exception-cleanup.md) 已随
+[#341](https://github.com/relic-yuexi/LubanCode/pull/341) 合入 `16d02a22`，与验收源
+`db592938` 同树。Windows/Linux/macOS 全 CLI 各 800/798/801 项均过，各只添本片
+异常 source，旧名单未减。SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 案及
+各 15 次真实 HTTP 均过；新增七案七标记在三平台全量与 ASan 均实际执行。
+ASan 176 来源、1925 CASE、79929 断言过；751 份测试及 profile 输入与 Git 原件
+相符，这份名单不指生产依赖闭包。74 份产物、1925 份原件逐大小
+和 SHA256 核过。TSan 本片跳过，不计通过。未跑本地 CI。
+[Memory 持久触发身份](sdk-memory-durable-trigger-identity.md) 已随
+[#342](https://github.com/relic-yuexi/LubanCode/pull/342) 合入 `77b8817f`，与验收源
+`1b912d47` 同树。Windows/Linux/macOS 全 CLI 各 801/799/802 项均过，各只添本片
+身份 source，旧名单未减。新增七案七标记在三平台与 ASan 均实际执行。
+SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 案及各 15 次真实 HTTP 均过。
+ASan 177 来源、1932 CASE、81050 断言过；
+752 份测试及 profile 输入核对 Git 原件，不指生产依赖闭包。
+74 份产物、1925 份原件逐大小和 SHA256 核过。
+TSan 本片跳过，不计通过。未跑本地 CI。
+[旁路短借 owner](sdk-memory-bypass-lease-owner.md) 已随 #343 合入 `bf465cb7`，与验收源 `f5cfdbd0` 同树。
+Windows/Linux/macOS 全 CLI 各 802/800/803 项均过，旧名单保留；十六案十六标记在三平台和 ASan 齐。
+ASan 178 来源、1948 CASE、89295 断言过；753 份测试及 profile 输入已核 Git 原件。
+SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 案及各 15 次真实 HTTP 均过。
+TSan 十五条注册均运行：十三份 Workflow 有案，一份已退役为空，另有 owner 十六案十六标记；十三条实际编译路径已核线程插桩，空来源不算有效测试。75 份产物、1938 份原件逐大小和 SHA256 已核。未跑本地 CI。
+[标题精炼启动失败清理](sdk-title-start-cleanup.md) 已随 #344 合入 `163d793b`，与验收源 `83bfede6` 同树。
+Windows/Linux/macOS 全 CLI 各 803/801/804 项均过，旧名单保留；标题七案七标记在三平台和 ASan 齐。
+ASan 179 来源、1955 CASE、87224 断言过；754 份测试及 profile 输入已核 Git 原件。
+SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 案及各 15 次真实 HTTP 均过。
+TSan 保住十三条实际插桩路径与 owner 十六案；本片标题七案不在 TSan 来源，不称线程插桩已验。
+78 份产物、1947 份原件逐大小和 SHA256 已核。未跑本地 CI。
+旧源 `4497cfc7` 的 Windows Memory 批量提交失败原件保留；`83bfede6` 只补阶段诊断，不宣称生产读写竞争已修复。
+[标题后台函数体异常](sdk-title-worker-execution.md) 已随 #345 合入 `e55bba48`，与验收源 `4950ff79` 同树。
+Windows/Linux/macOS 全 CLI 各 803/801/804 项通过，名单与 #344 相同；标题十四案、两组七标记在三平台与 ASan 齐。
+ASan 179 来源、1962 CASE、84740 断言通过；754 份测试及 profile 输入已核 Git 原件。
+SDK ON/OFF 各 73/71 项、九套安装消费各 37/34 案及各 15 次真实 HTTP 均过。
+TSan 十三条实际插桩编译路径与 owner 十六案照留；标题十四案不在 TSan 注册来源，不称已由 TSan 执行。
+78 份产物、1947 份原件逐大小与 SHA256 已核。未跑本地 CI。
+结果发布、线程退出与闭包析构各有边界；七秒只圈取消后结果等待。
+[SDK Backend 回调与最终析构](sdk-backend-callback-owner.md) 已随 #346 合入 `784fd543`，与验收源 `695ea229` 同树。
+Windows/Linux/macOS 全 CLI 各 803/801/804 项，SDK ON/OFF 各 73/71 项，九套消费各 37/34 案与各 15 次真实 HTTP 均过，旧名单未减。
+生命周期十九案与七枚 owner 标记在十三处规范原件齐；后台回调、最后析构、控制块分配失败和观察口异常回滚都核过。
+ASan 179 来源、1969 CASE、89190 断言过；754 份测试与 profile 输入已核，不指完整生产源码闭包。
+普通 SDK 不带私有头与三个 owner 测试导出。TSan 本片按路径跳过，不计通过，不借前驱绿灯。
+74 份产物、1925 份原件已逐大小与 SHA256 封存；未跑本地 CI。
+[Memory 共用词法门控](sdk-memory-learning-gates.md) 已随 [#347](https://github.com/relic-yuexi/LubanCode/pull/347) 合入 `33a057865224`，与验收源 `e6e931ad` 同树。
+Windows/Linux/macOS 全 CLI 803/801/804 项均过；SDK Lua ON/OFF 73/71 案及九套移位消费均已核同源原件。
+SDK DLL 与 CLI 内核两路抽取各十案十标记，Backend 十九案七标记保住；三平台专门 Memory 门及全量 Memory 案均过。
+ASan 179 来源、1975 CASE；77 份产物、1940 份原件已逐大小与 SHA256 封存。
+TSan 本片跳过，不计通过；未跑本地 CI。
+下一片[SDK 用量快照](sdk-memory-usage-snapshot.md) 先交合同，尚未交付。
+sent 后物理交接、完整来源、公开自动 Memory owner 与 CLI 装配仍欠账。
+CLI 主入口与 one-shot 尚未迁完，SDK 与 CLI 全面对齐仍欠账。下文保留历史原账。
 
 核查日期：2026-10-06。已合基线为功能分支 `fd76b6a5`；[#333](https://github.com/relic-yuexi/LubanCode/pull/333) 的已验源 `c522a51c` 与合入头同树。
 
 目标：新宿主只调用公开 SDK，便能运行完整会话，不必复制内部运行栈。CLI 逐项迁入，原功能保住。现已能嵌入；CLI 主入口和 one-shot 仍用内部装配，尚未全部对齐。
 
-## 当前批：收口后再推进
+## 2026-10-06 批次记录：收口后再推进
 
 当前只留总 Draft [#234](https://github.com/relic-yuexi/LubanCode/pull/234)。
 功能分支停在已验 `fd76b6a5`。候选沿原 CI 分支收齐，不添实施 PR。

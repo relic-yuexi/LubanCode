@@ -27,6 +27,9 @@
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/turn_runtime.hpp"
 #include "sdk/adapters.hpp"
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+#include "sdk/backend_owner_test_hooks.hpp"
+#endif
 #include "sdk/approval.hpp"
 #include "sdk/callback_scope.hpp"
 #include "sdk/policy_callback_scope.hpp"
@@ -45,13 +48,31 @@
 #include "sdk/operation_ledger.hpp"
 #include "sdk/prepare_journal.hpp"
 #include "sdk/command_jobs.hpp"
+#ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
+#include "sdk/opening_test_hooks.hpp"
+#endif
 #include "tools/path_utils.hpp"
 #include "tools/search_ripgrep.hpp"
 #include "tools/web_fetch.hpp"
+#include "tools/web_search.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
 
 namespace lubancore {
+#ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
+namespace detail::testing {
+namespace {
+thread_local OpeningStartHookHandle opening_start_hook;
+}
+OpeningStartHookHandle ReplaceOpeningStartHook(OpeningStartHookHandle replacement) noexcept {
+    opening_start_hook.swap(replacement);
+    return replacement;
+}
+// Only core.cpp consumes this snapshot. OpenSession holds it outside its
+// registry-lock scope, including on a throw at the real thread creation point.
+OpeningStartHookHandle SnapshotOpeningStartHook() noexcept { return opening_start_hook; }
+} // namespace detail::testing
+#endif
 Result<web_fetch::v1::Capabilities> web_fetch::v1::DescribeCapabilities() {
     try { return web_fetch::v1::Capabilities{lubancode::tools::WebFetchSupportsGzip()}; }
     catch (...) { return std::unexpected(Error{"sdk.web_fetch.capabilities_unavailable", "cannot query the built-in transport"}); }
@@ -59,6 +80,12 @@ Result<web_fetch::v1::Capabilities> web_fetch::v1::DescribeCapabilities() {
 
 namespace detail {
 thread_local bool in_session_worker = false;
+CallbackScope::CallbackScope() noexcept : previous_(in_session_worker) {
+    in_session_worker = true;
+}
+CallbackScope::~CallbackScope() noexcept {
+    in_session_worker = previous_;
+}
 }
 namespace {
 namespace rt = lubancode::runtime;
@@ -307,6 +334,30 @@ struct Session::Impl final : rt::InteractionBroker {
             if (!lubancode::tools::ValidateWebFetchOptions(*web_fetch_options))
                 return std::unexpected(Failure("sdk.web_fetch.invalid_options"));
         }
+        std::optional<lubancode::tools::WebSearchOptions> web_search_options;
+        const bool has_web_search = std::find(options.builtin_tools.begin(), options.builtin_tools.end(), "web_search") != options.builtin_tools.end();
+        if (options.web_search && !has_web_search)
+            return std::unexpected(Failure("sdk.web_search.not_selected"));
+        if (has_web_search) {
+            if (!options.web_search) return std::unexpected(Failure("sdk.web_search.missing_options"));
+            const auto& selected = *options.web_search;
+            std::string provider;
+            switch (selected.provider) {
+            case web_search::v1::Provider::Tavily: provider = "tavily"; break;
+            case web_search::v1::Provider::Brave: provider = "brave"; break;
+            case web_search::v1::Provider::Serper: provider = "serper"; break;
+            default: return std::unexpected(Failure("sdk.web_search.invalid_options"));
+            }
+            if (selected.max_header_bytes > 512 * 1024 || selected.max_response_bytes > 8 * 1024 * 1024)
+                return std::unexpected(Failure("sdk.web_search.invalid_options"));
+            web_search_options = lubancode::tools::WebSearchOptions{
+                {provider, selected.api_key}, selected.endpoint,
+                {selected.connect_timeout_ms, selected.total_timeout_ms,
+                 static_cast<std::int64_t>(selected.max_header_bytes), static_cast<std::int64_t>(selected.max_response_bytes)},
+                selected.max_output_bytes, selected.max_query_bytes, selected.max_results};
+            if (!lubancode::tools::ValidateWebSearchOptions(*web_search_options))
+                return std::unexpected(Failure("sdk.web_search.invalid_options"));
+        }
         if (options.command_jobs) {
             const auto valid = detail::ValidateCommandJobOptions(*options.command_jobs);
             if (!valid) return std::unexpected(valid.error());
@@ -323,7 +374,7 @@ struct Session::Impl final : rt::InteractionBroker {
         // MCP launch can fail before registry_factory consumes prepared_registry;
         // later identity/ledger/Agent failures can likewise release the candidate
         // resources before the SDK-owned inline tool callback sources retire.
-        std::shared_ptr<Backend> initialization_backend(std::move(options.backend));
+        std::shared_ptr<Backend> initialization_backend;
         struct SourceScope {
             SessionOptions& options;
             ~SourceScope() {
@@ -334,6 +385,10 @@ struct Session::Impl final : rt::InteractionBroker {
                 options.extensions.clear();
             }
         } source_scope{options};
+        initialization_backend = detail::OwnBackend(options.backend);
+#if defined(LUBANCORE_PRIVATE_OPENING_TEST_HOOKS)
+        detail::testing::ObserveBackendOwner(initialization_backend);
+#endif
         auto identity = lubancode::workspace::ResolveWorkspaceIdentity(*cwd, lubancode::tools::Utf8ToPath(roots.data_root));
         if (!identity) return std::unexpected(Failure("sdk.workspace.failed", identity.error()));
         auto prepare_journal = std::make_shared<detail::SessionPrepareJournal>(identity->workspace_key, options.resume_session_id);
@@ -386,7 +441,8 @@ struct Session::Impl final : rt::InteractionBroker {
                 // local tool declaration and server spec has been validated.
                 search_runner = std::make_shared<lubancode::tools::BundledRipgrepRunner>(std::move(executable));
             }
-            auto tool = rt::assembly::CreateLocalTool(name, search_runner, web_fetch_options ? &*web_fetch_options : nullptr);
+            auto tool = rt::assembly::CreateLocalTool(name, search_runner,
+                web_fetch_options ? &*web_fetch_options : nullptr, web_search_options ? &*web_search_options : nullptr);
             if (!tool || prepared_registry->Find(name)) return std::unexpected(Failure("sdk.tool.unsupported_or_duplicate", name));
             if (name == "run_command" && (*job_plan)->enabled()) {
                 lubancode::tools::ToolRegistration registration;
@@ -658,6 +714,7 @@ struct Session::Impl final : rt::InteractionBroker {
         profile.system_prompt = options.system_prompt;
         profile.runtime.max_steps_per_turn = options.max_steps_per_turn;
         profile.runtime.context_window_tokens = options.context_window_tokens;
+        profile.lenient_tool_input = false;
         detail::SessionSubagents* child_module_ptr = nullptr;
         if ((*child_plan)->enabled()) {
             auto children = detail::SessionSubagents::Build(*child_plan,
@@ -686,8 +743,15 @@ struct Session::Impl final : rt::InteractionBroker {
         return {};
     }
 
-    void Start() {
+    void Start(
+#ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
+        const detail::testing::OpeningStartHookHandle& start_hook
+#endif
+    ) {
         std::lock_guard lock(mutex); // Publish the owned thread before Pump enters callbacks.
+#ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
+        if (start_hook && *start_hook) (*start_hook)();
+#endif
         worker = std::thread([this] { Pump(); });
     }
 
@@ -1873,6 +1937,9 @@ Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
                 --runtime->openings; runtime->opening_cv.notify_all();
             }
         } opening{impl_.get()};
+#ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
+        auto start_hook = detail::testing::SnapshotOpeningStartHook();
+#endif
         auto memory_factory = detail::MakeMemoryBlobFactory(std::move(options.memory_blob_provider));
         auto named_factory = detail::MakeNamedResultFactory(std::exchange(options.named_results, std::nullopt));
         if (!named_factory) return std::unexpected(named_factory.error());
@@ -1903,7 +1970,11 @@ Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
             if (!impl_->closed) {
                 result = std::shared_ptr<Session>(new Session(execution));
                 impl_->sessions.push_back(execution);
-                execution->Start();
+                execution->Start(
+#ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
+                    start_hook
+#endif
+                );
             }
         }
         if (!result) {
@@ -1912,6 +1983,7 @@ Result<std::shared_ptr<Session>> Runtime::OpenSession(SessionOptions options) {
         }
         return result;
     } catch (const std::exception& error) { return std::unexpected(Failure("sdk.session.open_failed", error.what())); }
+    catch (...) { return std::unexpected(Failure("sdk.session.open_failed", "unknown opening exception")); }
 }
 Result<void> Runtime::Shutdown() {
     // Also reject cross-session/runtime blocking lifecycle calls from a tool or

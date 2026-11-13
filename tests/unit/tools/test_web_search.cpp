@@ -5,6 +5,7 @@
 #include <doctest/doctest.h>
 
 #include <string>
+#include <limits>
 
 #include "config/config.hpp"
 #include "tools/web_search.hpp"
@@ -117,4 +118,44 @@ TEST_CASE("WebSearchTool: 元信息与参数校验") {
     CHECK(missing.is_error);
     CHECK(missing.content.find("test-key") == std::string::npos);
     CHECK(tool.execute({{"query", ""}}).is_error);
+}
+
+TEST_CASE("WebSearchTool: bounded dispatch handles cancellation overflow and private transport errors") {
+    using namespace lubancode;
+    struct Capture final : tools::WebSearchTransport {
+        unsigned calls = 0;
+        net::FullHttpRequest request;
+        bool fail = false;
+        std::expected<net::FullHttpResponse, net::FullHttpError> Send(
+            const net::FullHttpRequest& input, const net::FullHttpLimits&, const std::atomic<bool>*) override {
+            ++calls; request = input;
+            if (fail) return std::unexpected(net::FullHttpError{net::FullHttpErrorKind::NetworkFailed,
+                "private-fixture-key: transport detail"});
+            net::FullHttpResponse response;
+            response.status = 200;
+            response.body = R"({"results":[{"title":"first"},{"title":"second"},{"title":"third"}]})";
+            return response;
+        }
+    };
+    tools::WebSearchOptions options;
+    options.search = {"tavily", "private-fixture-key"}; options.max_results = 2;
+    auto transport = std::make_shared<Capture>();
+    tools::WebSearchTool tool(options, transport);
+    std::atomic<bool> cancelled{true};
+    tools::ToolExecutionContext context; context.cancel = &cancelled;
+    CHECK(tool.execute({{"query", "test"}}, context).error_code == "web_search.cancelled");
+    CHECK(transport->calls == 0);
+    cancelled = false;
+    CHECK(tool.execute({{"query", "test"}, {"count", "bad"}}, context).error_code == "web_search.invalid_count");
+    CHECK(transport->calls == 0);
+    const auto result = tool.execute({{"query", "test"},
+        {"count", (std::numeric_limits<std::uint64_t>::max)()}}, context);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("2. second") != std::string::npos);
+    CHECK(result.content.find("3. third") == std::string::npos);
+    CHECK(nlohmann::json::parse(transport->request.body)["max_results"] == 2);
+    transport->fail = true;
+    const auto failed = tool.execute({{"query", "test"}}, context);
+    CHECK(failed.content == "web_search.network_failed");
+    CHECK(failed.content.find("private-fixture-key") == std::string::npos);
 }

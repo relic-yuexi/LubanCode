@@ -98,6 +98,9 @@ except ImportError:
 REQUIRED = {
     "sdk.focused.lubancore_owned_file_paths",
     "sdk.focused.lubancore_model_input",
+    "sdk.focused.lubancore_model_sampling",
+    "sdk.focused.lubancore_sampling_lifetime",
+    "sdk.focused.lubancore_memory_extraction_core",
     "sdk.focused.v3_journal_owner",
     "sdk.focused.lubancore_journal_owner",
     "sdk.focused.lubancore_journal_owner_guards",
@@ -111,6 +114,7 @@ REQUIRED = {
     "sdk.focused.managed_session_reservation",
     "sdk.focused.lubancore_owned_job_deadline",
     "sdk.focused.lubancore_web_fetch",
+    "sdk.focused.lubancore_web_search",
     "sdk.focused.lubancore_authorization",
     "sdk.focused.package_manifest", "sdk.focused.lubancore_package_manifest",
     "sdk.focused.tool_job_coordinator",
@@ -715,6 +719,33 @@ def check_event_sink_registration(command, executable="lubancore_sdk_tests"):
             command[0].replace("\\", "/").split("/")[-1] not in (executable, executable + ".exe") or
             command[1] != "--source-file=*test_lubancore_event_sink.cpp"):
         raise RuntimeError("EventSink registration must run the single absolute native source")
+
+
+def check_opening_start_native(section, command):
+    if (not isinstance(command, list) or len(command) != 2 or
+            not all(isinstance(value, str) for value in command) or
+            not (command[0].startswith("/") or
+                 (ntpath.isabs(command[0]) and bool(ntpath.splitdrive(command[0])[0]))) or
+            command[0].replace("\\", "/").split("/")[-1].removesuffix(".exe") not in
+            ("lubancore_sdk_tests", "lubancode_tests") or
+            command[1] != "--source-file=*test_lubancore_lifecycle.cpp"):
+        raise RuntimeError("Opening startup must run the complete actual native lifecycle source")
+    check_native_command(section, command)
+    cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (19, 19, 0):
+        raise RuntimeError("Opening startup and original lifecycle roster must all pass")
+    assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
+            int(assertions[0][0]) != int(assertions[0][1]) or int(assertions[0][2]) != 0 or
+            section.splitlines().count("Test Passed.") != 1):
+        raise RuntimeError("Opening startup native assertions did not actually pass")
+    for path in ("standard", "nonstandard", "repeated", "isolation", "shutdown"):
+        if section.splitlines().count("[sdk-opening-start-path] " + path) != 1:
+            raise RuntimeError("Opening startup actual path did not finish once: " + path)
+
+    for path in ("background", "mutual", "late-deleter", "session-deleter", "exceptions", "nested", "allocation-rollback"):
+        if section.splitlines().count("[sdk-backend-owner-path] " + path) != 1:
+            raise RuntimeError("SDK Backend actual owner path did not finish once: " + path)
 
 
 def check_event_sink_native(section, command):
@@ -1477,6 +1508,40 @@ def main():
         if case.attrib["name"] == "sdk.focused.lubancore_event_sink":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_event_sink_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_lifecycle":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            check_opening_start_native(sections[0], registered["command"])
+        if case.attrib["name"] == "sdk.focused.lubancore_memory_extraction_core":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            if registered["command"][1:] != ["--source-file=*test_lubancore_memory_extraction_core.cpp"]:
+                raise RuntimeError("Memory extraction must run the actual shared-SDK native source")
+            check_native_command(sections[0], registered["command"])
+            if int(counts[0]) != 10:
+                raise RuntimeError("Memory extraction requires all ten actual shared-module cases")
+            for path in ("parser", "transcript", "prompt", "request", "usage", "finish", "native-connection", "learning-text-gate", "learning-evidence-gate", "learning-reason-names"):
+                if sections[0].splitlines().count("[memory-extraction-core-path] shared-sdk " + path) != 1:
+                    raise RuntimeError("Memory extraction actual shared-module path missing: " + path)
+        if case.attrib["name"] == "sdk.focused.lubancore_sampling_lifetime":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            if registered["command"][1:] != ["--source-file=*test_lubancore_sampling_lifetime.cpp"]:
+                raise RuntimeError("Sampling lifetime must run the actual shared-SDK native source")
+            check_native_command(sections[0], registered["command"])
+            if int(counts[0]) != 6:
+                raise RuntimeError("Sampling lifetime requires all six actual shared-module cases")
+            for path in ("startup", "exceptions", "preflight", "gates", "isolation", "cancellation"):
+                if sections[0].splitlines().count("[sample-lifetime-path] shared-sdk " + path) != 1:
+                    raise RuntimeError("Sampling lifetime actual shared-module path missing: " + path)
+        if case.attrib["name"] == "sdk.focused.lubancore_model_sampling":
+            registered = next(test for test in tests if test["name"] == case.attrib["name"])
+            if registered["command"][1:] != ["--source-file=*test_lubancore_model_sampling.cpp"]:
+                raise RuntimeError("Sampling must run the actual complete native source")
+            check_native_command(sections[0], registered["command"])
+            if int(counts[0]) != 11:
+                raise RuntimeError("Sampling native roster must contain all eleven cases")
+            for path in ("defaults", "effort", "finish", "invalid-request", "invalid-reply", "errors",
+                         "usage-cancelled", "usage-invalid-output", "usage-absent", "usage-no-reply", "usage-success"):
+                if sections[0].splitlines().count("[sdk-model-sampling-path] " + path) != 1:
+                    raise RuntimeError("Sampling actual path did not execute once: " + path)
         if case.attrib["name"] == "sdk.focused.lubancore_memory_blob_spi":
             registered = next(test for test in tests if test["name"] == case.attrib["name"])
             check_memory_blob_native(sections[0], registered["command"])

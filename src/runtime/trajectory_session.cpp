@@ -62,6 +62,27 @@ using trajectory::RecordReceipt;
 using trajectory::TrainingPolicy;
 using trajectory::Visibility;
 
+// Manager gates and new-side preparation run first. Only its actual cancellation
+// boundary revokes old recorder borrows; a refused clear keeps the old owner live.
+class BypassRetiringParticipant final : public trajectory::ClearParticipant {
+public:
+    BypassRetiringParticipant(std::shared_ptr<TrajectoryBypassLeaseOwner> owner,
+                              trajectory::ClearParticipant* inner)
+        : owner_(std::move(owner)), inner_(inner != nullptr ? inner : &empty_) {}
+    std::string CancelActiveTurn() override {
+        if (owner_) owner_->Retire();
+        return inner_->CancelActiveTurn();
+    }
+    std::vector<ChildClosure> CancelActiveChildren() override { return inner_->CancelActiveChildren(); }
+    std::vector<std::string> CancelQueuedItems() override { return inner_->CancelQueuedItems(); }
+    std::string ActiveRecordSelectionId() override { return inner_->ActiveRecordSelectionId(); }
+    void ResetInMemoryState() override { inner_->ResetInMemoryState(); }
+private:
+    std::shared_ptr<TrajectoryBypassLeaseOwner> owner_;
+    trajectory::NullClearParticipant empty_;
+    trajectory::ClearParticipant* inner_;
+};
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -72,16 +93,16 @@ using trajectory::Visibility;
 // §12.1 user-only 权限:workspace 层与 session 层目录都收紧;设不住须
 // 告警(errors 进 /doctor trajectory 的"最近 I/O 错误"账)。
 void HardenLedgerDirectories(const trajectory::TrajectoryDirectory& directory,
-                             std::vector<std::string>* errors) {
+                             const std::shared_ptr<TrajectoryDiagnostics>& errors) {
     if (trajectory::HardenDirectoryUserOnly(directory.workspace_dir())) {
         if (!trajectory::HardenDirectoryUserOnly(directory.session_dir())) {
-            errors->push_back("permissions:session_dir_harden_failed");
+            errors->Append("permissions:session_dir_harden_failed");
             platform::LogSink::Instance().Error(
                 "trajectory", "session 目录无法收紧为 user-only,敏感内容记录有泄露面");
         }
         return;
     }
-    errors->push_back("permissions:workspace_dir_harden_failed");
+    errors->Append("permissions:workspace_dir_harden_failed");
     platform::LogSink::Instance().Error("trajectory",
                                         "workspace 目录无法收紧为 user-only,敏感内容记录有泄露面");
 }
@@ -291,7 +312,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
                         ledger.AdoptSourceSystemV3_(resumed.source_v3_stream);
                     }
                 }
-                HardenLedgerDirectories(ledger.impl_->active->directory, &ledger.io_errors_);
+                HardenLedgerDirectories(ledger.impl_->active->directory, ledger.io_errors_);
                 return ledger;
             }
             // resume 失败回落普通开张:源场坏不拦人开新会话(明错留给
@@ -312,12 +333,24 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     TrajectorySessionLedger ledger;
     ledger.impl_ = std::make_unique<Impl>(std::move(impl));
     ledger.BindV3Books_();
-    HardenLedgerDirectories(ledger.impl_->active->directory, &ledger.io_errors_);
+    HardenLedgerDirectories(ledger.impl_->active->directory, ledger.io_errors_);
     return ledger;
 }
 
-TrajectorySessionLedger::TrajectorySessionLedger(TrajectorySessionLedger&&) noexcept = default;
-TrajectorySessionLedger::~TrajectorySessionLedger() = default;
+TrajectorySessionLedger::TrajectorySessionLedger(TrajectorySessionLedger&& other) noexcept
+    : command_counter_(other.command_counter_), io_errors_(std::move(other.io_errors_)),
+      environment_captured_(other.environment_captured_) {
+    other.RetireBypassLeases_();
+    // No allocation in this noexcept move. New binding lazily creates a fresh owner.
+    if (other.impl_) other.impl_->bypass_leases.reset();
+    impl_ = std::move(other.impl_);
+    record_selection_ = std::move(other.record_selection_);
+}
+TrajectorySessionLedger::~TrajectorySessionLedger() { RetireBypassLeases_(); }
+
+void TrajectorySessionLedger::RetireBypassLeases_() {
+    if (impl_ && impl_->bypass_leases) impl_->bypass_leases->Retire();
+}
 
 void TrajectorySessionLedger::BindV3Books_() {
     if (impl_ == nullptr) {
@@ -371,7 +404,7 @@ void TrajectorySessionLedger::AdoptSourceSystemV3_(const std::filesystem::path& 
     if (switched.change_event.status != v3::WriteReceipt::Status::Committed ||
         switched.system_message.status != v3::WriteReceipt::Status::Committed ||
         switched.apply_event.status != v3::WriteReceipt::Status::Committed) {
-        io_errors_.push_back("trajectory.v3_adopt_source_system_failed");
+        io_errors_->Append("trajectory.v3_adopt_source_system_failed");
         return;
     }
     impl_->v3_books->system_content = context.system_content;
@@ -403,7 +436,7 @@ std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
         auto bridge = std::make_unique<TrajectoryTurnBridge>(
             &*impl_->active->v3_main, &*impl_->v3_books, std::move(identity_scope),
             std::move(identity));
-        bridge->SetErrorSink(&io_errors_);
+        bridge->SetErrorSink(io_errors_);
         if (impl_->telemetry_wake != nullptr) {
             bridge->SetCommitWake(impl_->telemetry_wake,
                                   impl_->active->directory.v3_stream_path().filename().generic_string());
@@ -420,7 +453,7 @@ std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
     auto bridge = std::make_unique<TrajectoryTurnBridge>(*recorder, std::move(scope),
                                                          std::move(identity));
     // 桥按轮把落账错误推进账本的共享环(/doctor trajectory 从这读)。
-    bridge->SetErrorSink(&io_errors_);
+    bridge->SetErrorSink(io_errors_);
     // T1 committed wake:挂上后 main stream 每笔提交都投 wake(默认空)。
     if (impl_ != nullptr && impl_->telemetry_wake != nullptr) {
         bridge->SetCommitWake(impl_->telemetry_wake, "main.jsonl");
@@ -448,7 +481,7 @@ std::unique_ptr<TrajectoryBypassBridge> TrajectorySessionLedger::NewBypassBridge
         auto bridge = std::make_unique<TrajectoryBypassBridge>(
             &*impl_->active->v3_main, &*impl_->v3_books, std::move(identity_scope), std::move(identity),
             purpose);
-        bridge->SetErrorSink(&io_errors_);
+        bridge->SetErrorSink(io_errors_);
         if (impl_->telemetry_wake != nullptr) {
             bridge->SetCommitWake(
                 impl_->telemetry_wake,
@@ -463,16 +496,29 @@ std::unique_ptr<TrajectoryBypassBridge> TrajectorySessionLedger::NewBypassBridge
     trajectory::EventScope scope = impl_->active->main->base_scope();
     scope.visibility = {Visibility::HostOnly};
     scope.training_policy = TrainingPolicy::Metadata;
-    auto bridge =
-        std::make_unique<TrajectoryBypassBridge>(*recorder, std::move(scope), std::move(identity));
+    const auto id_namespace = "bypass-" + std::to_string(recorder->next_seq()) + "-" +
+                              std::to_string(++impl_->v2_bypass_binding_sequence);
+    auto bridge = std::make_unique<TrajectoryBypassBridge>(
+        *recorder, std::move(scope), std::move(identity), id_namespace);
     if (impl_->telemetry_wake != nullptr) {
         bridge->SetCommitWake(impl_->telemetry_wake, "main.jsonl");
     }
     return bridge;
 }
 
+std::unique_ptr<agent::LoopBoundaryRecorder> TrajectorySessionLedger::NewLeasedBypassRecorder(
+    TrajectoryTurnBridge::Identity identity, accounting::RequestPurpose purpose) {
+    if (!impl_) return TrajectoryBypassLeaseOwner::Rejected();
+    if (!impl_->bypass_leases) impl_->bypass_leases = std::make_shared<TrajectoryBypassLeaseOwner>();
+    auto bound = impl_->bypass_leases->Bind([&] { return NewBypassBridge(std::move(identity), purpose); });
+    if (!bound) return TrajectoryBypassLeaseOwner::Rejected();
+    return std::move(*bound);
+}
+
 void TrajectorySessionLedger::SetTelemetryWake(telemetry::CommitObserver* wake) {
     if (impl_ != nullptr) {
+        RetireBypassLeases_();
+        impl_->bypass_leases.reset();  // Future bridges bind the new observer.
         impl_->telemetry_wake = wake;
     }
 }
@@ -497,7 +543,8 @@ trajectory::CloseOutcome TrajectorySessionLedger::CloseSession(const std::string
     trajectory::CloseRequest request;
     request.reason = reason;
     trajectory::NullClearParticipant participant;
-    return impl_->manager->Close(request, &participant);
+    BypassRetiringParticipant retiring(impl_->bypass_leases, &participant);
+    return impl_->manager->Close(request, &retiring);
 }
 
 TrajectorySessionLedger::CwdChangeResult TrajectorySessionLedger::HandleCwdChange(
@@ -647,8 +694,10 @@ trajectory::ClearOutcome TrajectorySessionLedger::ClearSession(
         outcome.error_code = "clear.no_active_session";
         return outcome;
     }
-    const auto outcome = impl_->manager->Clear(request, participant);
+    BypassRetiringParticipant retiring(impl_->bypass_leases, participant);
+    const auto outcome = impl_->manager->Clear(request, &retiring);
     if (outcome.error_code.empty()) {
+        impl_->bypass_leases.reset();  // Actual successful scene switch, not an early refusal.
         // 账本跟着换场:active 指针(manager 内 std::optional 同址换值)、
         // run 号、选段器重置(新场不带旧 selection,§3.3.1)。
         impl_->active = impl_->manager->active();
@@ -735,7 +784,8 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
         trajectory::CloseRequest close;
         close.reason = "switch_to_resume";
         trajectory::NullClearParticipant participant;
-        const auto closed = manager.Close(close, &participant);
+        BypassRetiringParticipant retiring(impl_->bypass_leases, &participant);
+        const auto closed = manager.Close(close, &retiring);
         if (!closed.error_code.empty()) {
             summary.outcome.error_code = "resume." + closed.error_code;
             summary.outcome.message = "封旧场失败: " + closed.message;
@@ -757,6 +807,7 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
     if (!summary.outcome.error_code.empty()) {
         return summary;
     }
+    impl_->bypass_leases.reset();  // Resume has committed its actual new/continued owner.
     // 换场成功:账本指到落点场(v3 源=续接的源场,v2 源=迁移新场),选段
     // 器重置,history 折叠投影交出去。
     impl_->active = manager.active();
@@ -859,7 +910,7 @@ std::string TrajectorySessionLedger::CommitSoulSnapshot(const SessionSoulSnapsho
     }
     const auto written = WriteSessionSoulSnapshot(impl_->active->directory.session_dir(), snapshot);
     if (!written.has_value()) {
-        io_errors_.push_back("soul_snapshot.write_failed: " + written.error());
+        io_errors_->Append("soul_snapshot.write_failed: " + written.error());
         return written.error();
     }
     return std::string();
@@ -1077,10 +1128,11 @@ void TrajectorySessionLedger::BlockV3Execution(const std::string& reason) {
         return;  // 已阻断:保留首因
     }
     impl_->v3_books->execution_blocked = true;
+    impl_->v3_books->bypass_execution_blocked->store(true, std::memory_order_release);
     impl_->v3_books->execution_block_reason = reason;
     impl_->v3_books->execution_block_revision =
         impl_->v3_books->writer != nullptr ? impl_->v3_books->writer->context().revision : 0;
-    io_errors_.push_back("compact.execution_blocked:" + reason);
+    io_errors_->Append("compact.execution_blocked:" + reason);
 }
 
 bool TrajectorySessionLedger::V3ExecutionBlocked() const {
@@ -1258,7 +1310,7 @@ std::string TrajectorySessionLedger::CaptureEnvironment(const EnvironmentFacts& 
             trajectory::BuildEnvironmentCapturePayload(input, blobs, trajectory::Durability::PowerLoss);
         if (!capture.has_value()) {
             const std::string error = capture.error();
-            io_errors_.push_back(error);
+            io_errors_->Append(error);
             platform::LogSink::Instance().Error("trajectory", "环境快照落盘失败: " + error);
             return error;
         }
@@ -1275,7 +1327,7 @@ std::string TrajectorySessionLedger::CaptureEnvironment(const EnvironmentFacts& 
             std::move(captured), trajectory::Durability::PowerLoss);
         if (receipt.status != v3::WriteReceipt::Status::Committed) {
             const std::string error = "session.environment.captured:" + receipt.error_code;
-            io_errors_.push_back(error);
+            io_errors_->Append(error);
             return receipt.error_code;
         }
         environment_captured_ = true;
@@ -1319,7 +1371,7 @@ std::string TrajectorySessionLedger::CaptureEnvironment(const EnvironmentFacts& 
         trajectory::BuildEnvironmentCapturePayload(input, blobs, trajectory::Durability::PowerLoss);
     if (!capture.has_value()) {
         const std::string error = capture.error();
-        io_errors_.push_back(error);
+        io_errors_->Append(error);
         platform::LogSink::Instance().Error("trajectory", "环境快照落盘失败: " + error);
         return error;
     }
@@ -1333,7 +1385,7 @@ std::string TrajectorySessionLedger::CaptureEnvironment(const EnvironmentFacts& 
     request.payload = capture->event_payload;
     const auto receipt = recorder->Record(std::move(request), trajectory::Durability::PowerLoss);
     if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
-        io_errors_.push_back("run.environment.captured:" + receipt.error_code);
+        io_errors_->Append("run.environment.captured:" + receipt.error_code);
         return receipt.error_code;
     }
     environment_captured_ = true;
@@ -1373,7 +1425,7 @@ void TrajectorySessionLedger::NoteQueueDequeued(const std::string& item_id, cons
     request.payload = std::move(payload);
     const auto receipt = recorder->Record(std::move(request), trajectory::Durability::ProcessCrash);
     if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
-        io_errors_.push_back("control.queue.item.dequeued:" + receipt.error_code);
+        io_errors_->Append("control.queue.item.dequeued:" + receipt.error_code);
     }
 }
 
@@ -1403,7 +1455,7 @@ void TrajectorySessionLedger::NoteQueueExpired(const std::string& item_id, const
     request.payload = std::move(payload);
     const auto receipt = recorder->Record(std::move(request), trajectory::Durability::ProcessCrash);
     if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
-        io_errors_.push_back("control.queue.item.expired:" + receipt.error_code);
+        io_errors_->Append("control.queue.item.expired:" + receipt.error_code);
     }
 }
 
@@ -1431,11 +1483,11 @@ trajectory::WorkspaceDoctorReport TrajectorySessionLedger::BuildDoctorReport() c
     const trajectory::TrajectoryDirectory& directory = impl_->active->directory;
     return trajectory::BuildWorkspaceDoctorReport(
         directory.workspace_dir().parent_path(), directory.workspace_dir(), workspace_key(),
-        impl_->active->session_id(), io_errors_);
+        impl_->active->session_id(), io_errors_->Snapshot());
 }
 
 std::vector<std::string> TrajectorySessionLedger::recent_io_errors() const {
-    return io_errors_;
+    return io_errors_ != nullptr ? io_errors_->Snapshot() : std::vector<std::string>{};
 }
 
 // ---------------------------------------------------------------------------
