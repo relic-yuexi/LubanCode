@@ -14,16 +14,19 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
+#include "agent/turn_budget.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "runtime/event.hpp"
 #include "runtime/event_sink.hpp"
+#include "runtime/middleware_runtime.hpp"
 #include "runtime/turn_event_adapter.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
@@ -145,6 +148,227 @@ public:
 private:
     std::vector<std::string> sent_ok_;
 };
+
+class ModelSendGateBackend final : public FlakyBackend {
+public:
+    std::vector<nlohmann::json> actual_requests;
+    std::expected<void, api::Error> send_stream(const api::Request& request,
+        const std::function<void(const api::StreamEvent&)>& emit, const std::atomic<bool>* cancel) override {
+        actual_requests.push_back(runtime::BuildRequestSnapshotJson(request));
+        return FlakyBackend::send_stream(request, emit, cancel);
+    }
+};
+
+class ModelSendGateRecorder final : public agent::LoopBoundaryRecorder {
+public:
+    std::vector<api::Request> prepared;
+    std::vector<std::string> sent;
+    std::vector<std::pair<std::string, std::string>> failed;
+    std::vector<std::string> completed;
+    std::vector<std::string> cancelled;
+    std::vector<std::string> responses;
+    std::vector<bool> usage_reported;
+    std::string OnRequestPrepared(const api::Request& request, const agent::RequestPreparedContext&) override {
+        prepared.push_back(request);
+        return "gate-request-" + std::to_string(prepared.size());
+    }
+    bool OnRequestSent(const std::string& id) override { sent.push_back(id); return true; }
+    void OnResponseStarted(const std::string& id) override { responses.push_back(id); }
+    void OnUsageRecorded(const std::string&, const api::Usage&, bool reported, const std::string&,
+                         int, bool, bool, bool, const std::string&) override {
+        usage_reported.push_back(reported);
+    }
+    bool OnOutputCompleted(const std::string& id, const api::Message&, const std::string&,
+                           const std::string&) override { completed.push_back(id); return true; }
+    void OnOutputFailed(const std::string& id, const std::string& reason) override {
+        failed.emplace_back(id, reason);
+    }
+    void OnOutputCancelled(const std::string& id, agent::OutputCancelSource) override {
+        cancelled.push_back(id);
+    }
+};
+
+void CheckActualModelSendGate() {
+    std::vector<nlohmann::json> empty_gate_requests;
+    for (const std::string mode : {"empty", "allow", "deny", "empty-deny", "throw", "nonstd-throw", "retry-deny",
+                                   "retry-throw", "cancel"}) {
+        CAPTURE(mode);
+        const bool succeeds = mode == "empty" || mode == "allow";
+        const bool retry_denied = mode == "retry-deny" || mode == "retry-throw";
+        const bool has_first_send = succeeds || retry_denied;
+        bool gate_allowed = mode == "allow" || retry_denied;
+        const std::string secret = "private-policy-material-must-not-leak";
+        ModelSendGateBackend backend;
+        backend.script = {{{}, ConnectReset()}, {TextScript("permitted response"), std::nullopt}};
+        tools::ToolRegistry registry;
+        agent::Agent loop(backend, registry,
+            agent::AgentProfile{.request{.model = "gate-model"}, .system_prompt = "gate-system"});
+        ModelSendGateRecorder recorder;
+        agent::TurnBudgetAccount account(2);
+        auto budget = agent::MakeLocalTurnBudgetGate(&account);
+        std::atomic<bool> cancel{false};
+        std::vector<api::ModelRequestAttempt> gated_attempts;
+        std::vector<agent::ModelTurnBudgetSnapshot> gated_budgets;
+        std::vector<std::size_t> prepared_at_gate;
+        std::vector<std::size_t> sent_at_gate;
+        std::vector<api::Request> gate_requests;
+        std::vector<api::ModelRequestAttempt> terminal_attempts;
+        if (mode != "empty") {
+            agent::AgentWiring host;
+            host.on_model_send_gate = [&](const api::Request& request, const api::ModelRequestAttempt& attempt)
+                -> std::expected<void, std::string> {
+                gate_requests.push_back(request);
+                gated_attempts.push_back(attempt);
+                gated_budgets.push_back(account.SnapshotLock());
+                prepared_at_gate.push_back(recorder.prepared.size());
+                sent_at_gate.push_back(recorder.sent.size());
+                if (mode == "cancel") { cancel.store(true); return {}; }
+                if (gate_allowed) return {};
+                if (mode == "throw" || mode == "retry-throw") throw std::runtime_error(secret);
+                if (mode == "nonstd-throw") throw 7;
+                return std::unexpected(mode == "empty-deny" ? std::string() : secret);
+            };
+            loop.SetWiring(std::move(host));
+        }
+        int pre_request_calls = 0;
+        int backoffs = 0;
+        agent::TurnWiring turn;
+        turn.boundary_recorder = &recorder;
+        turn.turn_budget = &budget;
+        turn.on_pre_request_hooks = [&](const auto&, const auto&, const auto&, const auto&) {
+            ++pre_request_calls;
+            return std::string();
+        };
+        turn.wait_request_backoff = [&](std::chrono::milliseconds, const std::atomic<bool>*) {
+            ++backoffs;
+            if (retry_denied) gate_allowed = false; // Host revokes between actual send attempts.
+            return true;
+        };
+        turn.on_request_attempt = [&](const api::ModelRequestAttempt& attempt, api::RequestAttemptPhase phase) {
+            if (phase == api::RequestAttemptPhase::Exhausted) terminal_attempts.push_back(attempt);
+        };
+        const auto result = loop.Run("actual gated request", turn, &cancel);
+        const auto snapshot = account.SnapshotLock();
+        const std::size_t attempts = has_first_send ? 2 : 1;
+        CHECK(pre_request_calls == 1); // The old hook is not a per-retry gate.
+        CHECK(recorder.prepared.size() == attempts);
+        CHECK(backend.calls == (succeeds ? 2 : retry_denied ? 1 : 0));
+        CHECK(recorder.sent.size() == static_cast<std::size_t>(backend.calls));
+        CHECK(backoffs == (has_first_send ? 1 : 0));
+        CHECK(snapshot.reserved == 0);
+        CHECK(snapshot.attempted == (has_first_send ? 1 : 0));
+        CHECK(snapshot.completed == (succeeds ? 1 : 0));
+        if (mode != "empty") {
+            REQUIRE(gated_attempts.size() == attempts);
+            for (std::size_t i = 0; i < attempts; ++i) {
+                CHECK(gated_attempts[i].attempt == static_cast<int>(i + 1));
+                CHECK_FALSE(gated_attempts[i].saw_headers);
+                CHECK_FALSE(gated_attempts[i].saw_stream_event);
+                CHECK_FALSE(gated_attempts[i].history_commit_hash.empty());
+                CHECK(gated_attempts[i].logical_request_id == gated_attempts[0].logical_request_id);
+                CHECK(gated_attempts[i].history_commit_hash == gated_attempts[0].history_commit_hash);
+                CHECK(prepared_at_gate[i] == i + 1);
+                CHECK(sent_at_gate[i] == i);
+                CHECK(gated_budgets[i].reserved == (i == 0 ? 1 : 0));
+                CHECK(gated_budgets[i].attempted == (i == 0 ? 0 : 1));
+                CHECK(gate_requests[i].model == "gate-model");
+                CHECK(gate_requests[i].system == "gate-system");
+                CHECK(gate_requests[i].messages.size() == recorder.prepared[i].messages.size());
+                CHECK(runtime::BuildRequestSnapshotJson(gate_requests[i]) ==
+                      runtime::BuildRequestSnapshotJson(recorder.prepared[i]));
+                if (i < backend.actual_requests.size()) {
+                    CHECK(runtime::BuildRequestSnapshotJson(gate_requests[i]) == backend.actual_requests[i]);
+                }
+            }
+        }
+        if (succeeds) {
+            REQUIRE(result.has_value());
+            CHECK_FALSE(result->cancelled);
+            CHECK(recorder.failed.empty());
+            CHECK(recorder.cancelled.empty());
+            REQUIRE(recorder.completed.size() == 1);
+            CHECK(recorder.completed[0] == "gate-request-2");
+            REQUIRE(recorder.responses.size() == 1);
+            CHECK(recorder.responses[0] == "gate-request-2");
+            REQUIRE(backend.message_counts.size() == 2);
+            CHECK(backend.message_counts[0] == backend.message_counts[1]);
+            REQUIRE(loop.History().size() == 2);
+            REQUIRE_FALSE(loop.History().back().content.empty());
+            REQUIRE(std::holds_alternative<api::TextBlock>(loop.History().back().content.front()));
+            CHECK(std::get<api::TextBlock>(loop.History().back().content.front()).text == "permitted response");
+            if (mode == "empty") empty_gate_requests = backend.actual_requests;
+            else CHECK(backend.actual_requests == empty_gate_requests);
+        } else if (mode == "cancel") {
+            REQUIRE(result.has_value());
+            CHECK(result->cancelled);
+            CHECK(recorder.failed.empty());
+            CHECK(recorder.completed.empty());
+            CHECK(recorder.responses.empty());
+            REQUIRE(recorder.cancelled.size() == 1);
+            CHECK(recorder.cancelled[0] == "gate-request-1");
+            REQUIRE(recorder.usage_reported.size() == 1);
+            CHECK_FALSE(recorder.usage_reported[0]);
+        } else {
+            REQUIRE_FALSE(result.has_value());
+            const std::string code = mode == "throw" || mode == "retry-throw" || mode == "nonstd-throw"
+                ? "model.send.gate_exception" : "model.send.denied";
+            CHECK(result.error().find(code) != std::string::npos);
+            CHECK(result.error().find(secret) == std::string::npos);
+            REQUIRE(recorder.failed.size() == 1);
+            CHECK(recorder.failed[0].first == "gate-request-" + std::to_string(attempts));
+            CHECK(recorder.failed[0].second == code);
+            REQUIRE(terminal_attempts.size() == 1);
+            CHECK(terminal_attempts[0].error_code == "api." + code);
+            CHECK(recorder.completed.empty());
+            CHECK(recorder.responses.empty());
+            CHECK(recorder.usage_reported.empty());
+            CHECK(loop.History().size() == 1);
+            if (retry_denied) {
+                REQUIRE(recorder.sent.size() == 1);
+                CHECK(recorder.sent[0] == "gate-request-1");
+            }
+        }
+    }
+
+    // Existing trace and budget callbacks are outside the new gate catch.
+    for (const bool trace_throws : {true, false}) {
+        FlakyBackend backend;
+        backend.script = {{TextScript("must not be sent"), std::nullopt}};
+        tools::ToolRegistry registry;
+        agent::Agent loop(backend, registry,
+            agent::AgentProfile{.request{.model = "gate-model"}, .system_prompt = "gate-system"});
+        ModelSendGateRecorder recorder;
+        agent::TurnBudgetAccount account(2);
+        auto budget = agent::MakeLocalTurnBudgetGate(&account);
+        int gate_calls = 0;
+        agent::AgentWiring host;
+        host.on_model_send_gate = [&](const auto&, const auto&) -> std::expected<void, std::string> {
+            ++gate_calls;
+            return {};
+        };
+        loop.SetWiring(std::move(host));
+        agent::TurnWiring turn;
+        turn.boundary_recorder = &recorder;
+        if (trace_throws) {
+            turn.on_request_attempt = [](const auto&, auto) { throw std::runtime_error("original trace error"); };
+            CHECK_THROWS_WITH(loop.Run("trace failure", turn), "original trace error");
+            CHECK(gate_calls == 0);
+        } else {
+            budget.commit_sent = [&](const agent::ModelTurnPermit& permit) -> std::expected<int, std::string> {
+                account.AbortBeforeSendLock(permit);
+                throw std::runtime_error("original budget error");
+            };
+            turn.turn_budget = &budget;
+            CHECK_THROWS_WITH(loop.Run("budget failure", turn), "original budget error");
+            CHECK(gate_calls == 1);
+        }
+        CHECK(backend.calls == 0);
+        CHECK(recorder.sent.empty());
+        CHECK(recorder.failed.empty());
+        CHECK(account.SnapshotLock().attempted == 0);
+        CHECK(account.SnapshotLock().reserved == 0);
+    }
+}
 
 }  // namespace
 
@@ -418,6 +642,7 @@ TEST_CASE("恢复账:尝试相位从环里流出,started 连号、retrying 带�
 // ---------------------------------------------------------------------------
 
 TEST_CASE("发送前写账硬闸: sent 记不住,backend 零调用,无重试") {
+    CheckActualModelSendGate();
     FlakyBackend backend;
     backend.script = {{TextScript("不该被需要"), std::nullopt}};
     tools::ToolRegistry registry;

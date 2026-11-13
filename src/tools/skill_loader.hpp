@@ -20,6 +20,8 @@
 // tools 的东西,tools 不需要认得 cli/agent)。
 #pragma once
 
+#include <cstddef>
+#include <expected>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -49,6 +51,10 @@ struct SkillMeta {
     // 如 run_command、mcp__server__tool)。只作依赖声明:缺获准执行工具时
     // skill 工具回 capability_unavailable,不自动授予任何执行面(§六)。
     std::vector<std::string> requires_tools;
+    // Strict explicit-source scans freeze the declared directory mapping and
+    // canonical SKILL.md file. Legacy CLI scans leave these fields empty.
+    std::string source_dir_path;
+    std::string skill_path;
 };
 
 // 一只包的 skills 来源根(阶段 3 挂载):skills_dir = <包根>/skills。loader
@@ -79,6 +85,46 @@ struct ParsedSkillFile {
 // 对别家客户端遗留的“description: 值里另有冒号”坏 YAML 留一条扁平
 // key:value 回退,提高跨客户端兼容。结构彻底损坏时返回 std::nullopt。
 std::optional<ParsedSkillFile> ParseSkillMarkdown(const std::string& content);
+
+struct SkillFileError { std::string code; std::string message; };
+struct StrictSkillLimits {
+    static constexpr std::size_t root_entries = 4096;
+    static constexpr std::size_t candidates = 128;
+    static constexpr std::size_t selected_names = 128;
+    static constexpr std::size_t file_bytes = 1024 * 1024;
+    static constexpr std::size_t scan_bytes = 16 * 1024 * 1024;
+    static constexpr std::size_t frontmatter_bytes = 16 * 1024;
+    static constexpr std::size_t prompt_bytes = 64 * 1024;
+};
+struct StrictSkillReadPolicy {
+    std::filesystem::path source_root_path;
+    std::filesystem::path canonical_root_path;
+};
+struct StrictSkillScanResult {
+    std::vector<SkillMeta> skills;
+    StrictSkillReadPolicy read_policy;
+    std::string prompt_segment;
+    std::vector<std::string> diagnostics;
+};
+struct StrictSkillPaths {
+    std::filesystem::path directory;
+    std::filesystem::path skill_md;
+};
+
+// Internal, additive strict mode. No ambient discovery or loose YAML fallback.
+// A byte limit includes frontmatter; reads stop at limit+1, not file_size.
+std::expected<ParsedSkillFile, SkillFileError> ParseSkillMarkdownStrict(const std::string& content);
+std::expected<std::string, SkillFileError> ReadSkillFileBounded(
+    const std::filesystem::path& path, std::size_t max_bytes = StrictSkillLimits::file_bytes,
+    std::size_t* actual_bytes_read = nullptr);
+std::expected<StrictSkillScanResult, SkillFileError> ScanSkillsDirStrict(
+    const std::filesystem::path& root, const std::vector<std::string>& exact_names,
+    const std::string& source_note);
+// Recheck both declared-to-canonical mappings. Body file may link elsewhere
+// inside this root; attachment reads remain confined to its skill directory.
+std::expected<StrictSkillPaths, SkillFileError> ResolveStrictSkillPaths(
+    const SkillMeta& meta, const StrictSkillReadPolicy& policy);
+bool StrictSkillPathWithin(const std::filesystem::path& child, const std::filesystem::path& root);
 
 // Agent Skills 规范里的 name 语法:1-64 个 ASCII 小写字母/数字/横线，
 // 横线不顶头、不收尾、不连写。扫描层拿它做诊断；录制起草拿它硬校验。

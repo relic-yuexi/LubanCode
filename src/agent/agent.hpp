@@ -34,6 +34,7 @@
 #include "agent/resolved_prompt_builder.hpp"  // ResolvedPromptBase(Token 账本单 A1)
 #include "agent/runtime_profile.hpp"
 #include "api/backend.hpp"
+#include "api/model_request_recovery.hpp"
 #include "api/types.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
@@ -168,6 +169,10 @@ struct AgentProfile {
     // 假 = 本 Agent 不走原生路(Disabled/LegacyExpand/ProxyReference 行为
     // 与从前一字不差)。
     bool native_deferred_tools = false;
+    // 工具入参宽松兜底(坏 JSON 修补 + 执行前顶层 schema 浅检与数字串宽容转换):
+    // CLI/单发/网关等终端宿主默认开;LubanCore SDK 会话显式关掉,保留确定性
+    // 非启发式入参契约(Action 钩子原样观测/改写,工具自验入参)。
+    bool lenient_tool_input = true;
 };
 
 // 环境接线(批四·病十二:接线类的门收成一只)。这些都是"宿主把外面的
@@ -189,6 +194,15 @@ struct AgentWiring {
     // 主线程上串行置位会话快照的 locked 并持久化 blob,随后才允许发送。
     // 空 = 没接宿主的会话(单测/旁路)只锁自己的标志,零行为外溢。
     std::function<void()> on_session_soul_locked;
+    // Internal host admission immediately before each AgentLoop send attempt,
+    // including retries: after prepared, before committed budget/sent facts.
+    // Capture the original initiating execution scope and recheck every call;
+    // never substitute the current reader/caller or cache an earlier allow.
+    // Failure text stays private; the loop emits only its fixed failure code.
+    // Empty preserves trusted-local behavior. Other model-send paths are not
+    // covered. Host captures must outlive Run; do not reenter or mutate Agent.
+    std::function<std::expected<void, std::string>(const api::Request&, const api::ModelRequestAttempt&)>
+        on_model_send_gate;
 };
 
 class Agent {
@@ -296,6 +310,13 @@ public:
     // 跟字符串入口同义,只是调用方已经把本地图片装进 user_message 了。图片
     // 也须原样入 history,下一轮、重发、会话恢复才能带得上。
     std::expected<RunOutcome, std::string> Run(api::Message user_message, const TurnWiring& wiring,
+                                                const std::atomic<bool>* cancel = nullptr);
+
+    // Internal host seam: append only after the durable context admission has
+    // committed, then run that same history without admitting the user twice.
+    // The host serializes these calls with Run; this does not reset cache epochs.
+    void AppendAdmittedMessage(api::Message message) { context_.PushMessage(std::move(message)); }
+    std::expected<RunOutcome, std::string> RunAdmittedHistory(const TurnWiring& wiring,
                                                 const std::atomic<bool>* cancel = nullptr);
 
     const std::vector<api::Message>& history() const { return context_.durable_history(); }

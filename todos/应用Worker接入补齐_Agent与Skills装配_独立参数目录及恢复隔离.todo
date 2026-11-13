@@ -25,7 +25,7 @@
 | 能力裁剪、组件与工具选择、快照 | [工业化多协议接入](工业化多协议接入_能力裁剪与工具扩展统一设计.todo) | Agent/Skills实际生效，MCP接入与Lua后续边界 |
 | Provider、模型、密钥与覆盖 | [模型连接解耦](AppServer模型连接解耦_协议配置与会话隔离设计.todo) | 独立Worker启动快照和配置来源检查；不重复实现热切换 |
 | clientOperationId、查询、恢复、事件游标 | [AppServer接入SessionV3](AppServer接入SessionV3_统一入口与事件恢复设计.todo) | 发布最小幂等受理—终态查询闭环及故障测试 |
-| 可信项目映射、文件/进程/网络隔离 | [多租户隔离](多租户隔离_身份授权与隔离Worker落地设计.todo) | 单用户应用Worker也采用明确部署隔离档，验证子进程覆盖 |
+| 可信项目映射、文件/进程/网络隔离 | [多租户隔离（分布式路线图第三十章）](分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo) | 单用户应用Worker也采用明确部署隔离档，验证子进程覆盖 |
 | 提示部件、Soul、系统装配 | [System拼装Hook](System拼装Hook_Soul会话冻结与缓存边界.todo) | 业务正文替换与不可覆盖宿主规则的边界 |
 | Lua/process插件、权限、寿命 | [Extension Runtime](轻量可塑ExtensionRuntime与动态扩展API设计.todo) | 显式装配入口和启动拒绝行为，不另造manifest |
 

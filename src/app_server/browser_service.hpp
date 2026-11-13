@@ -168,6 +168,9 @@ public:
     //(终态 browser.paused),用户动作照走。测试直读。
     bool paused() const { return paused_.load(); }
 
+    // Nonblocking cancellation phase, safe to call before joining another
+    // domain that may be waiting for a browser action or approval.
+    void RequestShutdown();
     // 收线收尸:取消全部动作、冲事件、杀 sidecar 进程树。
     void Shutdown();
 
@@ -245,6 +248,7 @@ private:
     std::unique_ptr<mcp::StdioTransportAdapter> owned_transport_;
     std::atomic<bool> sidecar_alive_{false};
     std::atomic<bool> shutting_down_{false};
+    std::mutex shutdown_mutex_;
 
     // ---- RPC 配对账 ----
     struct PendingCall {

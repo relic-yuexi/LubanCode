@@ -6,6 +6,7 @@
 
 ## 欠账（要做）
 
+- [ ] **Async 派发失败时回调须在锁外退场**（出处：SDK #253 源审，2026-10-01）——`ToolJobCoordinator::Impl::DispatchJobLocked` 在 `jobs_mutex` 内复制 executor、创建线程；复制、分配或线程启动抛错时，临时闭包可能在锁内析构，析构若查询同一 coordinator 会自锁。须另补失败候选回收与故障注入回归。公开 SDK 当前拒绝后台命令；本轮验正常关停与实际回调退出，不把它外推到线程资源耗尽路径。
 - [ ] **恢复器生产入口接线**（出处：Workspace收官验收单移交）——`SessionManager::RecoverWorkspace` 库与测试册齐备，启动路未接；崩溃场 session.json 由 doctor 如实展示，"自动收口"待接 CLI 或启动路。够格时另立正单。
 - [ ] **Windows 读侧 FILE_SHARE_DELETE 开口**（出处：同上）——换名×并发读句柄的 `atomic.replace_failed` 微窗，调用方已有稳定码处置；要根除需 src/platform 改读侧开口，小单。
 - [ ] **mid-JSON 撕裂前缀恢复**（出处：同上）——现行为 fail-closed 整场拒收；"截到半行按前缀恢复"属合同变更，要做先过设计。

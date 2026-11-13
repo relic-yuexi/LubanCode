@@ -9,8 +9,8 @@
 //     "3xx 不跟""Secret 只在最终发包头"一类断言都靠这本账;
 //   - 连接数单独计数,供"零连接"断言用。
 //
-// 线程收尾:收连接的线程 detach(挂死类脚本会睡到进程退出,join 会拖死
-// 测试);共享状态放 shared_ptr,线程按值捕获,服务对象先走也不悬空。
+// 默认 Detached 沿旧收尾:监听/请求线 detach,共享状态放 shared_ptr。
+// 新验收可显式选 Owned:StopAndJoin 唤醒延迟、断开连接并收齐线程。
 #pragma once
 
 #include <atomic>
@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -46,7 +47,9 @@ struct FakeHttpRequest {
 
 class FakeHttpServer {
 public:
+    enum class ThreadMode { Detached, Owned };
     FakeHttpServer();
+    explicit FakeHttpServer(ThreadMode mode);
     ~FakeHttpServer();
 
     FakeHttpServer(const FakeHttpServer&) = delete;
@@ -60,11 +63,16 @@ public:
     // 收到的请求账(锁内拷贝快照)。
     std::vector<FakeHttpRequest> requests() const;
     int connection_count() const;
+    // Owned mode only: wake delays, stop sockets, join all fixture threads.
+    // Idempotent. The default Detached fixtures keep their historical behavior.
+    void StopAndJoin();
+    bool owned_threads_quiescent() const; // Query only after StopAndJoin returns.
 
 private:
     struct State;
     std::shared_ptr<State> state_;
     int port_ = 0;
+    std::thread listener_thread_;
 };
 
 }  // namespace lubancode::test_support

@@ -1,7 +1,9 @@
 // agent_task_coordinator.hpp 的实现。
 #include "tools/agent_task_coordinator.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <stdexcept>
 #include <utility>
 
 namespace lubancode::tools {
@@ -38,8 +40,10 @@ AgentRunIdentity IdentityOfSnapshot(const AgentTaskSnapshot& snapshot) {
 
 AgentDispatchHandle::AgentDispatchHandle(std::weak_ptr<AgentTaskCoordinator> coordinator,
                                          AgentRunIdentity identity,
-                                         std::shared_ptr<const SubagentDispatchEnv> env)
-    : coordinator_(std::move(coordinator)), identity_(std::move(identity)), env_(std::move(env)) {}
+                                         std::shared_ptr<const SubagentDispatchEnv> env,
+                                         std::optional<ToolInvocationIdentity> parent_invocation_cause)
+    : coordinator_(std::move(coordinator)), identity_(std::move(identity)), env_(std::move(env)),
+      parent_invocation_cause_(std::move(parent_invocation_cause)) {}
 
 Tool* AgentDispatchHandle::facade_tool() const {
     std::shared_ptr<AgentTaskCoordinator> coordinator = coordinator_.lock();
@@ -47,6 +51,10 @@ Tool* AgentDispatchHandle::facade_tool() const {
 }
 
 Tool::Result AgentDispatchHandle::Dispatch(const nlohmann::json& input) {
+    return Dispatch(input, ToolExecutionContext{});
+}
+
+Tool::Result AgentDispatchHandle::Dispatch(const nlohmann::json& input, const ToolExecutionContext& context) {
     std::shared_ptr<AgentTaskCoordinator> coordinator = coordinator_.lock();
     if (coordinator == nullptr) {
         // 协调器(随引擎)已退场:后台任务的尾巴派工稳定收口,不悬垂调用。
@@ -63,6 +71,16 @@ Tool::Result AgentDispatchHandle::Dispatch(const nlohmann::json& input) {
     }
     request.env = env_;
     request.fail_account = this;
+    request.foreground_cancel = context.cancel;
+    const auto& invocation = context.invocation;
+    // Do not merge partially populated identities with an ancestor. Preserve one
+    // complete value as supplied; strict tools still reject missing ownership.
+    if (!invocation.session_id.empty() || !invocation.operation_id.empty() ||
+        !invocation.turn_id.empty() || !invocation.action_id.empty() || invocation.attempt != 0) {
+        request.parent_invocation_cause = invocation;
+    } else {
+        request.parent_invocation_cause = parent_invocation_cause_;
+    }
     return coordinator->Dispatch(request);
 }
 
@@ -76,64 +94,130 @@ Tool::Result AgentTaskCoordinator::Dispatch(const AgentDispatchRequest& request)
     return engine_(request);
 }
 
-void AgentTaskCoordinator::TrackThread(int task_id, std::thread thread,
-                                        std::shared_ptr<std::atomic<bool>> exit_receipt) {
+void AgentTaskCoordinator::RequestClose() {
     std::lock_guard<std::mutex> lock(threads_mutex_);
-    if (closing_.load(std::memory_order_acquire)) {
-        // 收口竞速窗:派工引擎过 closing 检查后、本口入账前,JoinAllBounded
-        // 已经把线程表搬空——这只线程没人再收柄了。detach 放行(闭包自持
-        // 冻结 run_state 与 TaskRecord,晚归不悬垂),免得 joinable 的
-        // std::thread 挂在表里等协调器谢幕时 std::terminate。
-        thread.detach();
-        return;
+    closing_.store(true, std::memory_order_release);
+}
+
+void AgentTaskCoordinator::SetThreadFactoryForTesting(ThreadFactory factory) {
+    auto replacement = factory ? std::make_shared<const ThreadFactory>(std::move(factory)) : nullptr;
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        replacement.swap(thread_factory_);
     }
-    TaskThreadEntry entry;
-    entry.task_id = task_id;
-    entry.thread = std::move(thread);
-    entry.exit_receipt = std::move(exit_receipt);
-    threads_.push_back(std::move(entry));
+    // Retire arbitrary factory captures outside the ownership mutex.
+}
+
+bool AgentTaskCoordinator::StartThread(int task_id, ThreadBody body,
+                                       std::shared_ptr<std::atomic<bool>> exit_receipt) {
+    if (!body) throw std::invalid_argument("agent thread body missing");
+    auto entry = std::make_shared<TaskThreadEntry>();
+    entry->task_id = task_id;
+    entry->exit_receipt = std::move(exit_receipt);
+    std::shared_ptr<const ThreadFactory> factory;
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        if (closing_.load(std::memory_order_acquire)) return false;
+        // All owner-table allocations happen before a factory can create a
+        // thread. Close may take this entry, but waits for its handoff below.
+        threads_.push_back(entry);
+        factory = thread_factory_;
+    }
+    try {
+        entry->thread = factory ? (*factory)(std::move(body)) : std::thread(std::move(body));
+        if (!entry->thread.joinable()) throw std::runtime_error("agent thread factory returned no thread");
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> lock(threads_mutex_);
+            entry->starting = false;
+            auto found = std::find(threads_.begin(), threads_.end(), entry);
+            if (found != threads_.end()) threads_.erase(found);
+        }
+        threads_ready_.notify_all();
+        throw;
+    }
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        entry->starting = false;
+    }
+    threads_ready_.notify_all();
+    return true;
 }
 
 void AgentTaskCoordinator::ReapExitedThreads() {
     // 已收尾的 std::thread 收柄(原 LaunchBackground 的规矩)。AR-01 起对账
-    // 只认线程退出回执:worker 闭包最后一笔才置位,置位即 OS 线程已(或正
-    // 要)return,join 立即回。旧账按 TaskSettled(业务终态)判——监督器强收
+    // 只认线程退出回执:worker 闭包最后一笔才置位。它证明业务尾声走完,
+    // 不证明 capture 析构已退;锁外 join 仍须等实际线程退出。旧账按 TaskSettled(业务终态)判——监督器强收
     // 或父收树把台账翻成 Failed 时线程可能还在跑,那一路 join 会无期限押死
     // 派工线程;业务终态从此只用于展示,不用于证明线程结束。
-    std::lock_guard<std::mutex> lock(threads_mutex_);
-    for (std::size_t i = 0; i < threads_.size();) {
-        if (threads_[i].exit_receipt != nullptr && threads_[i].exit_receipt->load(std::memory_order_acquire) &&
-            threads_[i].thread.joinable()) {
-            threads_[i].thread.join();
-            threads_.erase(threads_.begin() + static_cast<std::ptrdiff_t>(i));
-            continue;
+    std::vector<std::shared_ptr<TaskThreadEntry>> finished;
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        finished.reserve(threads_.size());
+        for (std::size_t i = 0; i < threads_.size();) {
+            const auto& entry = threads_[i];
+            if (!entry->starting && !entry->reaping && entry->exit_receipt != nullptr &&
+                entry->exit_receipt->load(std::memory_order_acquire) && entry->thread.joinable() &&
+                entry->thread.get_id() != std::this_thread::get_id()) {
+                finished.push_back(entry);
+                entry->reaping = true;
+            }
+            ++i;
         }
-        ++i;
     }
+    try {
+        for (const auto& entry : finished) {
+            entry->thread.join();
+            {
+                std::lock_guard<std::mutex> lock(threads_mutex_);
+                entry->reaping = false;
+                auto found = std::find(threads_.begin(), threads_.end(), entry);
+                if (found != threads_.end()) threads_.erase(found);
+            }
+            threads_ready_.notify_all();
+        }
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> lock(threads_mutex_);
+            for (const auto& entry : finished) entry->reaping = false;
+        }
+        threads_ready_.notify_all();
+        throw;
+    }
+}
+
+bool AgentTaskCoordinator::HasReapingThreadForTesting() {
+    std::lock_guard<std::mutex> lock(threads_mutex_);
+    return std::any_of(threads_.begin(), threads_.end(), [](const auto& entry) { return entry->reaping; });
 }
 
 void AgentTaskCoordinator::JoinAllBounded() {
     // 退出兜底(原 ~AgentTool):先广播取消,再给每只后台线程一枚有界等窗
-    // ——等的是线程退出回执,不是台账终态。回执在手就 join(线程已退,join
-    // 立即回);窗口尽了还没等到就 detach 放它走——worker 闭包自持冻结
+    // ——等的是线程退出回执,不是台账终态。先等 startup/reaping 所有权
+    // 交接,回执在手后 join 仍等 capture 析构;两段均无硬截止。回执窗口
+    // 尽了还没等到就 detach 放它走——worker 闭包自持冻结
     // run_state(钉住协调器与台账)与 TaskRecord 的 shared_ptr,晚归不悬垂、
     // 不丢账,也不冻退出。
     ledger_.BroadcastCancel();
-    std::vector<TaskThreadEntry> entries;
+    std::vector<std::shared_ptr<TaskThreadEntry>> entries;
     {
         std::lock_guard<std::mutex> lock(threads_mutex_);
         entries = std::move(threads_);
         threads_.clear();
     }
     for (auto& entry : entries) {
-        auto& thread = entry.thread;
+        {
+            std::unique_lock<std::mutex> lock(threads_mutex_);
+            threads_ready_.wait(lock, [&] { return !entry->starting && !entry->reaping; });
+        }
+        auto& thread = entry->thread;
         if (!thread.joinable()) {
             continue;
         }
         const auto deadline = std::chrono::steady_clock::now() + shutdown_join_window_;
         bool exited = false;
         while (std::chrono::steady_clock::now() < deadline) {
-            if (entry.exit_receipt != nullptr && entry.exit_receipt->load(std::memory_order_acquire)) {
+            if (entry->exit_receipt != nullptr && entry->exit_receipt->load(std::memory_order_acquire)) {
                 exited = true;
                 break;
             }

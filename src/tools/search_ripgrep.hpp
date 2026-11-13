@@ -337,6 +337,10 @@ public:
     };
     explicit BundledRipgrepRunner(const Overrides& overrides);
 
+    // SDK startup may prepare its explicitly located runner before MCP/model
+    // startup. Run uses the same per-instance cached result, including failure.
+    std::expected<void, SearchBackendErrorInfo> Prepare();
+
     std::expected<RipgrepRunResult, SearchBackendErrorInfo>
     Run(const SearchRequest& request, const SearchPolicy& policy,
         const ToolExecutionContext& context) override;

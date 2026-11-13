@@ -8,6 +8,8 @@
 #include <expected>
 #include <filesystem>
 #include <optional>
+#include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -23,6 +25,18 @@ struct StoredEntry {
     MemoryEntry public_entry;
     nlohmann::json fingerprints = nlohmann::json::object();
 };
+
+// SDK read-only branch: one bounded, owned read view. No worker, queue, trace
+// file or catalog repair is started. CLI LoadCatalog keeps its permissive path.
+struct ProjectRecallSnapshot {
+    std::vector<StoredEntry> entries;
+    std::map<std::string, std::string> topics;
+    std::set<std::string> stale_ids;
+};
+std::expected<ProjectRecallSnapshot, std::string> ReadProjectRecallSnapshot(
+    const std::filesystem::path& memory_dir,
+    const std::filesystem::path& project_root, bool scan_all_topics = false,
+    bool verify_fingerprints = true);
 
 // 扫描某层主题目录(facts/preferences/feedback;用户层无 facts)。同 id
 // 撞车的两份都停成 conflict;读不动的记进 warnings。
@@ -51,6 +65,26 @@ struct MemoryWriteOutcome {
     std::string content_sha256;  // 写成文件后的正文指纹
     std::string committed_at;
 };
+
+// Value-owned preparation shared by the CLI upsert and the project commit gate.
+// Preparation never mutates a topic. The gate supplies a bounded read view and
+// bounded fingerprints; the legacy worker retains its existing read profile.
+struct PreparedUpsert {
+    StoredEntry entry;
+    std::string previous_file;
+    std::string topic_text;
+};
+PreparedUpsert PrepareUpsert(const SaveRequest& request,
+                            const std::vector<StoredEntry>& entries,
+                            nlohmann::json fingerprints, std::string committed_at);
+struct PreparedIndex {
+    std::string catalog;
+    std::string index;
+};
+PreparedIndex PrepareMemoryIndex(const std::vector<StoredEntry>& entries,
+                                bool user_layer, const std::string& generated_at);
+std::expected<SaveRequest, std::string> ParseUpsertJob(const nlohmann::json& job,
+                                                    bool strict = false);
 
 // worker 侧落盘操作(ProcessJob 消费;job 是 pending/<id>.json 的原样)。
 std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::json& job,

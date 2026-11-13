@@ -5,8 +5,12 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <memory>
 #include <string>
 
+#include "net/http_transport.hpp"
 #include "tools/tool.hpp"
 
 namespace lubancode::tools {
@@ -42,6 +46,30 @@ struct PreparedBody {
 PreparedBody PrepareFetchedBody(const std::string& content_type, const std::string& raw_body,
                                 std::size_t max_bytes);
 
+struct WebFetchOptions {
+    std::string user_agent = "lubancode";
+    std::int64_t connect_timeout_ms = 10'000;
+    std::int64_t total_timeout_ms = 30'000;
+    std::uint64_t max_header_bytes = 64 * 1024;
+    std::uint64_t max_download_bytes = 4 * 1024 * 1024;
+    std::uint64_t max_output_bytes = 100 * 1024;
+    std::uint32_t max_redirects = 5;
+};
+std::expected<void, std::string> ValidateWebFetchOptions(const WebFetchOptions& options);
+// Uses the same linked libcurl as the default one-hop transport; may throw on
+// initialization/query failure. The public SDK adapter retains that as an error.
+bool WebFetchSupportsGzip();
+
+// Internal one-hop seam. Implementations perform no automatic redirect, own
+// their returned bytes/counts, and retain no borrowed cancellation flag.
+// Shared implementations must support independent concurrent invocations.
+class WebFetchTransport {
+public:
+    virtual ~WebFetchTransport() = default;
+    virtual std::expected<net::FullHttpResponse, net::FullHttpError> Get(
+        const net::FullHttpRequest&, const net::FullHttpLimits&, const std::atomic<bool>* cancel) = 0;
+};
+
 class WebFetchTool : public Tool {
 public:
 
@@ -50,14 +78,17 @@ public:
     // user_agent 是 HTTP 请求头里报的身份(main.cpp 传 "lubancode/版本号");
     // 默认值只给单测和忘了传的调用方兜底。
     explicit WebFetchTool(std::string user_agent = "lubancode");
+    explicit WebFetchTool(WebFetchOptions options, std::shared_ptr<WebFetchTransport> transport = {});
 
     std::string name() const override;
     std::string description() const override;
     nlohmann::json input_schema() const override;
     Result execute(const nlohmann::json& input) override;
+    Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override;
 
 private:
-    std::string user_agent_;
+    WebFetchOptions options_;
+    std::shared_ptr<WebFetchTransport> transport_;
 };
 
 }  // namespace lubancode::tools

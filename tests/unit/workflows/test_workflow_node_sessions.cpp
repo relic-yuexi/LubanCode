@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
@@ -23,6 +24,7 @@
 #include <nlohmann/json.hpp>
 
 #include "accounting/session_usage_reader.hpp"  // ReadSessionUsage(读侧消费,不改)
+#include "platform/paths.hpp"
 #include "runtime/trajectory_session.hpp"
 #include "workflow/account.hpp"
 #include "workflow/host_executors.hpp"  // LlmExecutor(真执行器,走 SampleModel 边界)
@@ -78,6 +80,11 @@ std::optional<lubancode::runtime::TrajectorySessionLedger> OpenLedger(const fs::
     fs::create_directories(root / "repo", ec);
     auto ledger = lubancode::runtime::TrajectorySessionLedger::Open(std::move(options));
     if (!ledger.has_value()) {
+        std::cerr << "[workflow-session-open-failure] " << nlohmann::json{
+            {"error", ledger.error()},
+            {"root", lubancode::platform::PathToUtf8(root)},
+            {"workspaces_root", lubancode::platform::PathToUtf8(root / "workspaces")},
+            {"workspace_root", lubancode::platform::PathToUtf8(root / "repo")}}.dump() << '\n';
         return std::nullopt;
     }
     return std::move(*ledger);

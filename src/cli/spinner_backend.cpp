@@ -39,6 +39,11 @@ std::string SpinnerBackend::SerializeForDiagnostics(const lubancode::api::Reques
     return inner_.SerializeForDiagnostics(request);
 }
 
+std::expected<std::optional<lubancode::api::ModelInputSnapshot>, std::string>
+SpinnerBackend::PrepareModelInput(const lubancode::api::Request& request) const {
+    return inner_.PrepareModelInput(request);
+}
+
 lubancode::api::PreparedWireRequest SpinnerBackend::PrepareWireRequest(
     const lubancode::api::Request& request) const {
     return inner_.PrepareWireRequest(request);

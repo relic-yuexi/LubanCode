@@ -6,6 +6,7 @@
 //   - symlink/junction 一律记账不进哈希(包根只读、账要完整——发现可疑
 //     不等于执行,但必须看得见)。
 #include "package/inventory.hpp"
+#include "package/inventory_snapshot.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -52,21 +53,6 @@ bool HasEntry(const std::filesystem::path& dir, const char* name) {
     std::error_code ec;
     const std::filesystem::path candidate = dir / name;
     return std::filesystem::exists(candidate, ec) && !ec;
-}
-
-// code-bearing 的扩展名迹象(单子 §9.2 静态版):二进制库、可执行、脚本。
-// plugins/ 与 mcp/ 目录下的文件不问扩展名全算(组件本体),这里管的是散在
-// 别处的可执行迹象。
-bool HasCodeExtension(const std::string& rel_path) {
-    static const char* kExts[] = {".dll",  ".so",   ".dylib", ".exe", ".lua",  ".py",
-                                  ".js",   ".mjs",  ".cmd",   ".bat", ".ps1",  ".sh"};
-    const std::size_t dot = rel_path.rfind('.');
-    if (dot == std::string::npos) return false;
-    const std::string ext = rel_path.substr(dot);
-    for (const char* candidate : kExts) {
-        if (ext == candidate) return true;
-    }
-    return false;
 }
 
 // Levenshtein(小写化后比)。近似目录名检测用,量小(O(n*m),n,m<=64)。
@@ -361,8 +347,7 @@ void CollectFiles(const std::filesystem::path& root, std::vector<InventoryFile>&
             // channels/ 与 plugins//mcp/ 同罪:channel.yaml 的 runtime.command
             // 也声明了要 spawn 的可执行文件,走同一道信任门
             // (channel-manifest.md §5;catalog.cpp 的 code_trust 判定同款)。
-            file.code_bearing = HasCodeExtension(file.rel) || file.rel.rfind("plugins/", 0) == 0 ||
-                                file.rel.rfind("mcp/", 0) == 0 || file.rel.rfind("channels/", 0) == 0;
+            file.code_bearing = InventoryFileIsCodeBearing(file.rel);
             files.push_back(std::move(file));
         } else if (status.type() != std::filesystem::file_type::directory) {
             diagnostics.push_back({PackageDiagnostic::Kind::Warning, RelUtf8(root, current),
@@ -415,12 +400,12 @@ std::vector<PackageComponent> ListPackageComponents(const std::filesystem::path&
             }
         }
     };
-    scan_dir_components("skills", "SKILL.md", skills, true);
-    scan_dir_components("workflows", "workflow.yaml", workflows, true);
-    scan_dir_components("plugins", "plugin.json", plugins, true);
-    scan_dir_components("mcp", "mcp.yaml", mcp_servers, true);
+    scan_dir_components(kInventoryDirectoryLayouts[0].directory, kInventoryDirectoryLayouts[0].entry_file, skills, true);
+    scan_dir_components(kInventoryDirectoryLayouts[1].directory, kInventoryDirectoryLayouts[1].entry_file, workflows, true);
+    scan_dir_components(kInventoryDirectoryLayouts[2].directory, kInventoryDirectoryLayouts[2].entry_file, plugins, true);
+    scan_dir_components(kInventoryDirectoryLayouts[3].directory, kInventoryDirectoryLayouts[3].entry_file, mcp_servers, true);
     // 多渠道消息接入单阶段 1 追加第七类:channels/<local-id>/channel.yaml。
-    scan_dir_components("channels", "channel.yaml", channels, true);
+    scan_dir_components(kInventoryDirectoryLayouts[4].directory, kInventoryDirectoryLayouts[4].entry_file, channels, true);
 
     // agents/*.yaml:根下的一层文件即一份 Agent 定义(单子 §四)。
     {

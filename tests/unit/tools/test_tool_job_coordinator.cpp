@@ -144,7 +144,8 @@ struct Harness {
         writer.reset();
     }
 
-    // 恢复场景:丢掉旧协调器(等价进程重启,worker 已收场),续卷重建。
+    // 换宿主视角:旧协调器先正常收场,再续卷重建。模拟崩溃须另取
+    // 崩溃前账本;正常析构会持久取消未派任务,不能拿它冒充进程消失。
     void RebootCoordinator(JobAuthorizationGate gate = AllowAll, JobExecutor executor = nullptr,
                            ToolJobCoordinator::Options options = {}) {
         for (auto& gate_ptr : gates) {

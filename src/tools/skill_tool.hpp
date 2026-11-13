@@ -16,6 +16,7 @@
 
 #include <optional>
 #include <set>
+#include <utility>
 #include <vector>
 
 #include "tools/skill_loader.hpp"
@@ -35,10 +36,12 @@ public:
     // headless 装配递入,终端路缺省不执法——终端是全量注册+运行时审批,
     // 与本合同不同形,如实分家)。
     explicit SkillTool(std::vector<SkillMeta> skills,
-                       std::optional<std::set<std::string>> available_tools = std::nullopt)
-        : skills_(std::move(skills)), available_tools_(std::move(available_tools)) {}
+                       std::optional<std::set<std::string>> available_tools = std::nullopt,
+                       std::optional<StrictSkillReadPolicy> strict_read_policy = std::nullopt)
+        : skills_(std::move(skills)), available_tools_(std::move(available_tools)),
+          strict_read_policy_(std::move(strict_read_policy)) {}
 
-    void SetSkills(std::vector<SkillMeta> skills) { skills_ = std::move(skills); }
+    void SetSkills(std::vector<SkillMeta> skills);
 
     // 逐枚追踪单:加载技能只读 SKILL.md、把说明装进上下文,不落盘不改
     // 状态(真机实测 P2-3:Plan 模式按只读放行,靠的就是这档声明)。
@@ -63,9 +66,11 @@ private:
     // 回人话(越根/链接绕过/外链/打不开/超帽各说各的),content_out 装
     // 正文。静态:不碰 skills_。
     static Result ReadSkillResource(const SkillMeta& meta, const std::string& relative_path);
+    Result ReadStrictSkill(const SkillMeta& meta, const std::optional<std::string>& relative_path) const;
 
     std::vector<SkillMeta> skills_;
     std::optional<std::set<std::string>> available_tools_;
+    std::optional<StrictSkillReadPolicy> strict_read_policy_;
 };
 
 }  // namespace lubancode::tools

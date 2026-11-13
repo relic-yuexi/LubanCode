@@ -171,8 +171,26 @@ TEST_CASE("v3 VerifySession/VerifySessionDir: 主账与子账树都验,linked �
     REQUIRE(child_bridge.OnOutputCompleted(child_request, AssistantText("文档说入口在 main.cpp"),
                                            "end_turn", "resp-child"));
     child_bridge.EndTurn(true, false, "");
-    const std::string child_hash = (*child)->Finish(/*ok=*/true, "done");
+    const auto child_receipt = (*child)->Finish(runtime::SubagentExecutionOutcome::Succeeded, "done");
+    CHECK(child_receipt.execution == runtime::SubagentExecutionOutcome::Succeeded);
+    CHECK(child_receipt.confirmation == runtime::SubagentAppendConfirmation::Committed);
+    CHECK(child_receipt.seal == runtime::SubagentSealState::Closed);
+    REQUIRE(child_receipt.durable());
+    REQUIRE(child_receipt.terminal.has_value());
+    const std::string child_hash = child_receipt.terminal->hash;
     REQUIRE_FALSE(child_hash.empty());
+    const auto child_stream = ledger->session_dir() / "subagents" /
+        platform::Utf8ToPath(child_receipt.session_id) /
+        platform::Utf8ToPath(child_receipt.session_id + ".jsonl");
+    const auto child_source = trajectory::v3::ReadV3Ledger(child_stream);
+    REQUIRE(child_source.has_value());
+    CHECK(child_source->session_id == child_receipt.terminal->session_id);
+    CHECK(child_source->run_id == child_receipt.terminal->run_id);
+    const auto* terminal = child_source->FindEvent(child_receipt.terminal->event_id);
+    REQUIRE(terminal != nullptr);
+    CHECK(terminal->kind == trajectory::v3::EventKindV3::SessionEnded);
+    CHECK(terminal->seq == child_receipt.terminal->seq);
+    CHECK(terminal->line_hash == child_hash);
 
     {
         agent::ToolTraceEvent finished =

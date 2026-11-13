@@ -47,6 +47,8 @@ public:
     // HC-08 五口窄转发:这层不改协议、不攒状态,内芯说什么就是什么。
     // 未装配/不可得的语义由内芯自己负责(它握引用,装配方保活)。
     std::string SerializeForDiagnostics(const lubancode::api::Request& request) const override;
+    std::expected<std::optional<lubancode::api::ModelInputSnapshot>, std::string>
+    PrepareModelInput(const lubancode::api::Request& request) const override;
     lubancode::api::PreparedWireRequest PrepareWireRequest(
         const lubancode::api::Request& request) const override;
     std::optional<lubancode::api::WireMessageMap> BuildWireMessageMap(

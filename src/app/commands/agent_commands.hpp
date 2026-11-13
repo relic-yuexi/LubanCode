@@ -24,10 +24,9 @@
 namespace lubancode::package {
 struct PackageSnapshot;  // 现行包快照(provider 现取;定义在 package/mounting.hpp)
 }  // namespace lubancode::package
-namespace lubancode::app {
-struct McpServerRuntime;  // /agent doctor 的 MCP 面材料(定义在 app/tool_runtime.hpp)
-}  // namespace lubancode::app
-
+namespace lubancode::runtime::assembly {
+struct McpServerRuntime;
+}
 namespace lubancode::app {
 
 
@@ -105,7 +104,7 @@ struct AgentCommandContext {
     std::function<std::shared_ptr<const lubancode::package::PackageSnapshot>()> package_snapshot_provider;
     std::vector<lubancode::tools::SkillMeta>* skills = nullptr;
     lubancode::tools::ToolRegistry* registry = nullptr;
-    const std::vector<McpServerRuntime>* mcp_servers = nullptr;
+    const std::vector<runtime::assembly::McpServerRuntime>* mcp_servers = nullptr;
     // 会话主题(TUI 排版批 3:frame 三助手配色);空 = 没接(测试/空表),
     // handler 按批 2 CLI 裁量现起(管道/重定向自然降 plain)。
     const lubancode::cli::Theme* theme = nullptr;

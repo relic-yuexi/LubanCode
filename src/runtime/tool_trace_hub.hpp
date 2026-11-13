@@ -28,6 +28,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "agent/loop.hpp"
@@ -65,12 +66,31 @@ public:
     // 轮结束 Detach。
     void AttachTrajectory(ToolTrajectorySink* trajectory) { trajectory_ = trajectory; }
     void DetachTrajectory() { trajectory_ = nullptr; }
+    // Owner-thread binding exchange; callers stop using the old binding before
+    // replacing it. This does not add concurrent mutation to the hub contract.
+    ToolTrajectorySink* ExchangeTrajectory(ToolTrajectorySink* trajectory) noexcept {
+        return std::exchange(trajectory_, trajectory);
+    }
 
     // Workflow projection(可空):录制开启时由装配层挂上,只吃 execution_
     // id/outcome/error_code/摘要——不吃原始入参/结果正文(单子"WorkflowRecorder
     // 只作派生账")。
     using Projection = std::function<void(const agent::ToolTraceEvent&)>;
     void AttachProjection(Projection projection) { projection_ = std::move(projection); }
+    Projection ExchangeProjection(Projection projection) noexcept {
+        projection_.swap(projection);
+        return projection;
+    }
+    struct RoutingIdentity {
+        std::string thread_id;
+        std::string turn_id;
+    };
+    RoutingIdentity routing_identity() const { return {thread_id_, turn_id_}; }
+    RoutingIdentity ExchangeRoutingIdentity(RoutingIdentity identity) noexcept {
+        thread_id_.swap(identity.thread_id);
+        turn_id_.swap(identity.turn_id);
+        return identity;
+    }
 
     // AgentLoop 的 execution 发号口(IdAuthority 的 item id 同源;单子:
     // 不自造第二只计数器)。

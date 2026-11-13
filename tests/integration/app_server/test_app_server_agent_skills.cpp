@@ -739,12 +739,55 @@ TEST_CASE("skills 声明:thread/start 带冻结清单,漂移同场拒读") {
 
     const std::string thread_id = (*thread_response)["result"].value("threadId", std::string());
 
+    const auto run_turn = [&field, &thread_id](int request_id, const std::string& text) {
+        // Acceptance and completion share the original 60-second budget.
+        // A successful pipe write alone does not mean turn/start was accepted.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(60000);
+        const auto remaining_ms = [&deadline] {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()).count();
+            return remaining > 0 ? static_cast<int>(remaining) : 0;
+        };
+        const auto diagnostics = [&field] {
+            return json{{"responses", field.responses},
+                        {"events", field.events},
+                        {"modelRequestCount", field.model.requests().size()},
+                        {"serverStderr", field.proc->StderrText()}}.dump();
+        };
+        REQUIRE(field.Send(json{{"id", request_id}, {"method", "turn/start"},
+                               {"params", {{"threadId", thread_id}, {"text", text}}}}.dump()));
+        const bool accepted_response = field.PumpUntil(
+            [&] { return field.FindResponse(request_id) != nullptr; }, remaining_ms());
+        {
+            INFO("turn/start id=" << request_id << ": " << diagnostics());
+            REQUIRE(accepted_response);
+        }
+        const json response = *field.FindResponse(request_id);
+        INFO("turn/start response: " << response.dump());
+        INFO("turn/start diagnostics: " << diagnostics());
+        REQUIRE(response.contains("result"));
+        REQUIRE(response["result"].is_object());
+        CHECK(response["result"].value("threadId", "") == thread_id);
+        const std::string turn_id = response["result"].value("turnId", std::string());
+        REQUIRE_FALSE(turn_id.empty());
+        const bool completed = field.PumpUntil([&] {
+            for (const json& event : field.events) {
+                if (event.value("method", "") == "turn/completed" &&
+                    event["params"].is_object() &&
+                    event["params"].value("threadId", "") == thread_id &&
+                    event["params"].value("turnId", "") == turn_id) {
+                    return true;
+                }
+            }
+            return false;
+        }, remaining_ms());
+        INFO("turn completion id=" << request_id << ": " << diagnostics());
+        REQUIRE(completed);
+        return turn_id;
+    };
+
     // 回合一:加载 greet 成功;清单里没有 lurker(未声明不进)。
-    REQUIRE(field.Send(json{{"id", 3},
-                            {"method", "turn/start"},
-                            {"params", json{{"threadId", thread_id}, {"text", "加载 greet"}}}}
-                               .dump()));
-    REQUIRE(field.PumpUntil([&] { return field.FindEvent("turn/completed") != nullptr; }, 60000));
+    const std::string first_turn_id = run_turn(3, "加载 greet");
     {
         const auto requests = field.model.requests();
         REQUIRE(requests.size() == 2);
@@ -756,20 +799,8 @@ TEST_CASE("skills 声明:thread/start 带冻结清单,漂移同场拒读") {
     // 同场中途改 SKILL.md:下一回合再加载,漂移拒读(修改版正文不进上下文)。
     field.WriteFile(field.home_dir / ".lubancode" / "skills" / "greet" / "SKILL.md",
                     "---\nname: greet\ndescription: 问候技能。\n---\nGREET-BODY-V2-TAMPERED。\n");
-    REQUIRE(field.Send(json{{"id", 4},
-                            {"method", "turn/start"},
-                            {"params", json{{"threadId", thread_id}, {"text", "再加载 greet"}}}}
-                               .dump()));
-    const auto completed_count = [&field]() {
-        std::size_t count = 0;
-        for (const json& event : field.events) {
-            if (event.contains("method") && event["method"] == "turn/completed") {
-                ++count;
-            }
-        }
-        return count;
-    };
-    REQUIRE(field.PumpUntil([&] { return completed_count() >= 2; }, 60000));
+    const std::string second_turn_id = run_turn(4, "再加载 greet");
+    CHECK(second_turn_id != first_turn_id);
     {
         const auto requests = field.model.requests();
         REQUIRE(requests.size() == 4);

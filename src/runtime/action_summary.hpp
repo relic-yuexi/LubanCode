@@ -2,11 +2,13 @@
 
 #include <atomic>
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "api/backend.hpp"
 #include "trajectory/v3/writer.hpp"
+#include "trajectory/named_result_blobs.hpp"
 
 namespace lubancode::runtime {
 
@@ -36,6 +38,7 @@ struct ActionSummarySource {
     bool capture_complete = true;
     std::string capture_reason;
     std::size_t budget_bytes = 32768;
+    std::shared_ptr<trajectory::NamedResultCapability> named_results;
 };
 
 struct ActionSummaryResult {

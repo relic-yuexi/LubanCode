@@ -38,7 +38,8 @@ void StdioConnection::EmitEvent(std::string_view method, const nlohmann::json& p
     if (stamped.is_object()) {
         stamped[kSeqField] = runtime::ProcessIdAuthority().NextSeq();
     }
-    if (!outbox_.Push(SerializeMessage(MakeEvent(method, stamped)), EventMustKeep(method))) {
+    const bool queued = outbox_.Push(SerializeMessage(MakeEvent(method, stamped)), EventMustKeep(method));
+    if (!queued) {
         // 丢事件了(可丢事件撞满且合并救不下):补一条 queue/overflow
         // 通报(它自己是 must_keep)。params 从被丢事件的 params 里借
         // threadId/turnId,drop/coalesce 账用 outbox 的累计值。
@@ -56,6 +57,9 @@ void StdioConnection::EmitEvent(std::string_view method, const nlohmann::json& p
                      EventMustKeep(kEventQueueOverflow));
         Diagnose("出站队列溢出:累计丢 " + std::to_string(outbox_.dropped()) + " 条,合并救下 " +
                  std::to_string(outbox_.coalesced()) + " 条");
+    }
+    if (queued && event_queued_observer_for_test_) {
+        event_queued_observer_for_test_(method, stamped);
     }
 }
 

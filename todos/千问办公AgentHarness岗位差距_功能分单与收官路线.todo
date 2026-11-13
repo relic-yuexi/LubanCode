@@ -34,7 +34,7 @@ LubanCode 已有 Agent Harness 主骨架。会话、Turn/Event、工具、上下
 | 真实任务度量 | Trajectory、Insights、PTC/Evolution 指标 | GUI、记忆、交互、体验与单任务功耗的可执行量尺 | `Agent全链路度量_真实任务Harness回放与功耗评测.todo` |
 | GUI Agent | Browser Runtime 与 Windows GUI 示例包 | 核心观察/定位/动作/验证合同和跨应用泛化评测 | `GUIAgent核心_多模态理解定位执行与泛化评测.todo` |
 | 记忆效果 | 项目/用户记忆、BM25、review/auto、resume | 使用回执、收益归因、续接快照、漂移与在线评测 | `智能体记忆效果_个性化适配续接快照与在线评测.todo` |
-| 云端多租户 | App Server、Gateway、Workspace、Channel、Trajectory | ACL、Quota、Scheduler、RuntimeLease、fencing、节点恢复 | `多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo` |
+| 云端多租户 | App Server、Gateway、Workspace、Channel、Trajectory | ACL、Quota、Scheduler、RuntimeLease、fencing、节点恢复 | `分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo`（原集群畅想单已并入其第二十九章） |
 | 核心宿主边界 | CMake 四层 target、`SessionRuntime`、中立事件 | 稳定 Core API、宿主反向依赖清零、独立 SDK/示例宿主 | `LubanCore与CLI分离_核心库独立成宿主底座设计.todo` |
 | 扩展宿主 | Tool/Plugin/MCP/Package/Hooks | 六平面 Extension Runtime、grant、quarantine、generation | `轻量可塑ExtensionRuntime与动态扩展API设计.todo` |
 | 端云观测 | Trajectory、Telemetry、OTLP、Insights | 端云采集拓扑、中央查询、告警、容量与隐私运营 | `端云协同可观测架构与Telemetry插件设计.todo` |

@@ -14,6 +14,9 @@ namespace lubancode::api {
 
 class MessageAssembler {
 public:
+    MessageAssembler() = default;
+    explicit MessageAssembler(bool lenient_tool_args) : lenient_tool_args_(lenient_tool_args) {}
+
     // 喂一个事件:
     //   TextDelta         —— 拼进当前正在累积的文本块
     //   ThinkingDelta     —— 拼进当前正在累积的思考块(text + signature)
@@ -38,7 +41,7 @@ public:
 
     const std::string& stop_reason() const { return stop_reason_; }
     const Usage& usage() const { return usage_; }
-    // provider 是否明报过 usage(Token 账本单 A0):取终帧 MessageDone 的
+    // provider 是否明报过 usage：取 UsageSnapshot 或 MessageDone 的
     // 显式位,与"五项是否非零"分开。老 wire 路径没置位便是 false,消费端
     // 要兼容就退回 usage() 的非零推断。
     bool usage_seen() const { return usage_seen_; }
@@ -104,6 +107,7 @@ private:
     std::optional<OpenThinking> open_thinking_;
     std::string stop_reason_;
     Usage usage_;
+    bool usage_snapshot_seen_ = false;
     bool usage_seen_ = false;
     bool cache_read_seen_ = false;
     bool cache_creation_seen_ = false;
@@ -117,6 +121,7 @@ private:
     };
     std::vector<TruncationSuspect> truncation_suspects_;
     int idless_tool_calls_dropped_ = 0;
+    bool lenient_tool_args_ = true;
 
     void FinalizeCurrent();
 };

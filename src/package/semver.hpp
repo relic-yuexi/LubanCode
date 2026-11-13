@@ -24,7 +24,8 @@ struct SemVer {
     bool is_prerelease() const { return !prerelease.empty(); }
 };
 
-// 解析一个版本号。数字段超 int64、前导零(01 这种 SemVer 不许)、空段、
+// 解析一个版本号。主/次/补丁数字段受 int64 帽限制；纯数字预发布段不设
+// int64 帽，但不许前导零。前导零(01 这种 SemVer 不许)、空段、
 // 非法字符都算失败。输入先剥两端空白。
 std::optional<SemVer> ParseSemVer(std::string_view text);
 

@@ -6,6 +6,7 @@
 // Impl 定义挪 internal 头 trajectory_session_impl.hpp 跨件共用。
 
 #include "runtime/trajectory_session.hpp"
+#include "trajectory/v3/session_switch.hpp"
 #include "runtime/v3_tool_result_material.hpp"
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <clocale>
 #include <cstdlib>
 #include <ctime>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -60,6 +62,27 @@ using trajectory::RecordReceipt;
 using trajectory::TrainingPolicy;
 using trajectory::Visibility;
 
+// Manager gates and new-side preparation run first. Only its actual cancellation
+// boundary revokes old recorder borrows; a refused clear keeps the old owner live.
+class BypassRetiringParticipant final : public trajectory::ClearParticipant {
+public:
+    BypassRetiringParticipant(std::shared_ptr<TrajectoryBypassLeaseOwner> owner,
+                              trajectory::ClearParticipant* inner)
+        : owner_(std::move(owner)), inner_(inner != nullptr ? inner : &empty_) {}
+    std::string CancelActiveTurn() override {
+        if (owner_) owner_->Retire();
+        return inner_->CancelActiveTurn();
+    }
+    std::vector<ChildClosure> CancelActiveChildren() override { return inner_->CancelActiveChildren(); }
+    std::vector<std::string> CancelQueuedItems() override { return inner_->CancelQueuedItems(); }
+    std::string ActiveRecordSelectionId() override { return inner_->ActiveRecordSelectionId(); }
+    void ResetInMemoryState() override { inner_->ResetInMemoryState(); }
+private:
+    std::shared_ptr<TrajectoryBypassLeaseOwner> owner_;
+    trajectory::NullClearParticipant empty_;
+    trajectory::ClearParticipant* inner_;
+};
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -70,21 +93,23 @@ using trajectory::Visibility;
 // §12.1 user-only 权限:workspace 层与 session 层目录都收紧;设不住须
 // 告警(errors 进 /doctor trajectory 的"最近 I/O 错误"账)。
 void HardenLedgerDirectories(const trajectory::TrajectoryDirectory& directory,
-                             std::vector<std::string>* errors) {
+                             const std::shared_ptr<TrajectoryDiagnostics>& errors) {
     if (trajectory::HardenDirectoryUserOnly(directory.workspace_dir())) {
         if (!trajectory::HardenDirectoryUserOnly(directory.session_dir())) {
-            errors->push_back("permissions:session_dir_harden_failed");
+            errors->Append("permissions:session_dir_harden_failed");
             platform::LogSink::Instance().Error(
                 "trajectory", "session 目录无法收紧为 user-only,敏感内容记录有泄露面");
         }
         return;
     }
-    errors->push_back("permissions:workspace_dir_harden_failed");
+    errors->Append("permissions:workspace_dir_harden_failed");
     platform::LogSink::Instance().Error("trajectory",
                                         "workspace 目录无法收紧为 user-only,敏感内容记录有泄露面");
 }
 
 std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Open(Options options) {
+    if (options.resume_at_launch && options.journal_native_io_probe)
+        return std::unexpected("session.native_probe_resume_unsupported");
     std::filesystem::path home_dir;
     if (options.workspaces_root.empty()) {
         // 会话账是运行数据,落状态根(应用Worker接入单 §4.2):应用根语义
@@ -138,6 +163,12 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.recorder.event_schema_version = options.event_schema_version;
     // 接线点 1:v3 建场的首行基础 system(manager 侧 V3Writer::Start 用)。
     manager_options.v3_system_content = options.v3_system_content;
+    manager_options.v3_opening_participant = options.v3_opening_participant;
+    manager_options.memory_capability_factory = options.memory_capability_factory;
+    manager_options.named_result_factory = options.named_result_factory;
+    manager_options.recovery_capture = options.recovery_capture;
+    manager_options.recovery_factory = options.recovery_factory;
+    manager_options.journal_native_io_probe = std::move(options.journal_native_io_probe);
     // T08:主账写者的提交故障注入(测试专用;生产恒空)。
     manager_options.v3_main_io_fault = options.v3_main_io_fault;
     // 子代理空轨迹单 P0-C:main stream 同样走延迟开卷——正式 .jsonl 由
@@ -152,16 +183,38 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     impl.workspace_root_text = platform::PathToUtf8(options.workspace_root);
     impl.training_policy = options.training_policy;
     impl.subagent_start_fault = options.subagent_start_fault;
+    impl.subagent_close_fault = options.subagent_close_fault;
     impl.workflow_start_fault = options.workflow_start_fault;
     impl.workflow_node_start_fault = options.workflow_node_start_fault;
     impl.manager = std::make_unique<trajectory::SessionManager>(std::move(manager_options));
+
+    const bool explicit_finite_resume = options.recovery_capture.limits && options.require_v3_resume &&
+        options.resume_at_launch && !options.resume_source_session_id.empty();
+    bool source_layout_available = false;
+    if (options.require_v3_resume && options.resume_at_launch && !options.resume_source_session_id.empty()) {
+        const auto source = impl.manager->SessionDirOf(options.resume_source_session_id);
+        if (explicit_finite_resume) {
+            // Only inspect layout here. ResumeAsNew performs finite owned first
+            // line/schema/Verify before host admission, avoiding Probe's getline.
+            std::error_code ec;
+            source_layout_available = std::filesystem::exists(platform::FileIoPath(
+                source / (options.resume_source_session_id + ".jsonl")), ec) && !ec;
+            if (source_layout_available)
+                source_layout_available = !std::filesystem::exists(platform::FileIoPath(source / "main.jsonl"), ec) && !ec;
+        } else {
+            source_layout_available = trajectory::v3::FindV3SessionStream(source).has_value();
+        }
+    }
+    if (options.require_v3_resume && !source_layout_available)
+        return std::unexpected("resume.v3_source_required: explicit V3 source is unavailable");
 
     // --continue 启动路(§10.4):直接建 start_reason=resume 的新 session,
     // 不先造空 session。没有可恢复场(或源场验不过)回落普通开张,与旧路
     // --continue 的 quiet_if_none 语义一致;真出错(目录坏了开不出新场)
     // 照旧失败退出,不回退旧写口。
     if (options.resume_at_launch) {
-        const std::string latest = impl.manager->LatestResumableSessionId();
+        const std::string latest = explicit_finite_resume ? std::string()
+            : impl.manager->LatestResumableSessionId();
         // 显式指名的源不受 LatestResumable 的"running 不碰"连坐——那是
         // 自动挑最近场的筛子;接管硬杀场(running、无活锁)是常驻恢复的
         // 正路(V0 受理底线),可恢复性(活锁/one_shot/验卷)由 ResumeAsNew
@@ -187,6 +240,9 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
             resume.source_session_id = source_id;
             resume.interactive = false;  // 启动路没有旧 requested 可指
             const auto resumed = impl.manager->ResumeAsNew(resume);
+            if (options.require_v3_resume && !resumed.error_code.empty()) {
+                return std::unexpected(resumed.error_code + ": " + resumed.message);
+            }
             if (resumed.error_code.empty()) {
                 impl.active = impl.manager->active();
                 impl.main_run_id = impl.active->manifest.main_run_id;
@@ -212,15 +268,60 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
                 // v3 源:续接场沿用源场生效 system(§4.10 默认;v2 源的
                 // 迁移新场保持基础版,三步切换由后续按需走)。
                 if (resumed.source_is_v3) {
-                    ledger.AdoptSourceSystemV3_(resumed.source_v3_stream);
+                    if (options.v3_opening_participant) {
+                        // In-place embedded recovery already owns this effective
+                        // root. Do not manufacture a switch back to its own text.
+                        auto saved = v3::ReadV3Ledger(resumed.source_v3_stream);
+                        if (!saved) return std::unexpected("resume.system_adoption_failed: " + saved.error());
+                        const auto context = v3::ProjectModelContext(*saved);
+                        const auto* root = saved->FindMessage(context.system_message_id);
+                        if (!root || !root->system_meta || root->message.value("role", std::string()) != "system" ||
+                            !root->message.contains("content") || !root->message["content"].is_string()) {
+                            return std::unexpected("resume.system_adoption_failed: effective system metadata missing");
+                        }
+                        std::uint64_t settings_version = 1;  // legacy roots did not require this key
+                        if (root->system_meta->contains("settingsVersion")) {
+                            const auto& version = root->system_meta->at("settingsVersion");
+                            if ((!version.is_number_unsigned() && !version.is_number_integer()) ||
+                                (version.is_number_integer() && !version.is_number_unsigned() && version.get<std::int64_t>() < 1) ||
+                                (version.is_number_unsigned() && version.get<std::uint64_t>() == 0)) {
+                                return std::unexpected("resume.system_adoption_failed: invalid settingsVersion");
+                            }
+                            settings_version = version.get<std::uint64_t>();
+                        }
+                        auto& books = *ledger.impl_->v3_books;
+                        books.system_content = context.system_content;
+                        books.settings_version = settings_version;
+                        if (!options.v3_system_content.empty() && options.v3_system_content != books.system_content) {
+                            if (books.settings_version == std::numeric_limits<std::uint64_t>::max()) {
+                                return std::unexpected("resume.system_adoption_failed: settingsVersion exhausted");
+                            }
+                            nlohmann::json change{{"cause", "system_prompt_changed"},
+                                {"settingsVersion", books.settings_version + 1}, {"systemChanged", true}};
+                            const auto switched = books.writer->SwitchSystem(options.v3_system_content,
+                                std::move(change), v3::MessageOrigin::SessionRuntime, trajectory::Durability::PowerLoss);
+                            if (switched.change_event.status != v3::WriteReceipt::Status::Committed ||
+                                switched.system_message.status != v3::WriteReceipt::Status::Committed ||
+                                switched.apply_event.status != v3::WriteReceipt::Status::Committed) {
+                                return std::unexpected("resume.system_adoption_failed: system transition not committed");
+                            }
+                            books.system_content = options.v3_system_content;
+                            ++books.settings_version;
+                        }
+                    } else {
+                        ledger.AdoptSourceSystemV3_(resumed.source_v3_stream);
+                    }
                 }
-                HardenLedgerDirectories(ledger.impl_->active->directory, &ledger.io_errors_);
+                HardenLedgerDirectories(ledger.impl_->active->directory, ledger.io_errors_);
                 return ledger;
             }
             // resume 失败回落普通开张:源场坏不拦人开新会话(明错留给
             // /doctor trajectory 查),与旧路 --continue 找不到档不报错同门。
             }
         }
+    }
+    if (options.require_v3_resume) {
+        return std::unexpected("resume.failed: " + impl.launch_resume_soul_error);
     }
     auto active = impl.manager->LaunchSession();
     if (!active.has_value()) {
@@ -232,12 +333,24 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     TrajectorySessionLedger ledger;
     ledger.impl_ = std::make_unique<Impl>(std::move(impl));
     ledger.BindV3Books_();
-    HardenLedgerDirectories(ledger.impl_->active->directory, &ledger.io_errors_);
+    HardenLedgerDirectories(ledger.impl_->active->directory, ledger.io_errors_);
     return ledger;
 }
 
-TrajectorySessionLedger::TrajectorySessionLedger(TrajectorySessionLedger&&) noexcept = default;
-TrajectorySessionLedger::~TrajectorySessionLedger() = default;
+TrajectorySessionLedger::TrajectorySessionLedger(TrajectorySessionLedger&& other) noexcept
+    : command_counter_(other.command_counter_), io_errors_(std::move(other.io_errors_)),
+      environment_captured_(other.environment_captured_) {
+    other.RetireBypassLeases_();
+    // No allocation in this noexcept move. New binding lazily creates a fresh owner.
+    if (other.impl_) other.impl_->bypass_leases.reset();
+    impl_ = std::move(other.impl_);
+    record_selection_ = std::move(other.record_selection_);
+}
+TrajectorySessionLedger::~TrajectorySessionLedger() { RetireBypassLeases_(); }
+
+void TrajectorySessionLedger::RetireBypassLeases_() {
+    if (impl_ && impl_->bypass_leases) impl_->bypass_leases->Retire();
+}
 
 void TrajectorySessionLedger::BindV3Books_() {
     if (impl_ == nullptr) {
@@ -258,6 +371,8 @@ void TrajectorySessionLedger::BindV3Books_() {
             impl_->v3_books->settings_version = 1;
         }
         impl_->v3_books->writer = writer;
+        impl_->v3_books->named_results = impl_->active->named_result_capability.share();
+        impl_->v3_books->requires_named_owner = true;
     } else {
         impl_->v3_books.reset();
     }
@@ -289,7 +404,7 @@ void TrajectorySessionLedger::AdoptSourceSystemV3_(const std::filesystem::path& 
     if (switched.change_event.status != v3::WriteReceipt::Status::Committed ||
         switched.system_message.status != v3::WriteReceipt::Status::Committed ||
         switched.apply_event.status != v3::WriteReceipt::Status::Committed) {
-        io_errors_.push_back("trajectory.v3_adopt_source_system_failed");
+        io_errors_->Append("trajectory.v3_adopt_source_system_failed");
         return;
     }
     impl_->v3_books->system_content = context.system_content;
@@ -300,6 +415,14 @@ trajectory::TrajectoryRecorder* TrajectorySessionLedger::main() {
     return impl_ != nullptr && impl_->active != nullptr && impl_->active->main.has_value()
                ? &*impl_->active->main
                : nullptr;
+}
+
+std::shared_ptr<trajectory::MemoryCapability> TrajectorySessionLedger::memory_capability() const {
+    return impl_ && impl_->active ? impl_->active->memory_capability.share() : nullptr;
+}
+
+std::shared_ptr<trajectory::NamedResultCapability> TrajectorySessionLedger::named_result_capability() const {
+    return impl_ && impl_->active ? impl_->active->named_result_capability.share() : nullptr;
 }
 
 std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
@@ -313,7 +436,7 @@ std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
         auto bridge = std::make_unique<TrajectoryTurnBridge>(
             &*impl_->active->v3_main, &*impl_->v3_books, std::move(identity_scope),
             std::move(identity));
-        bridge->SetErrorSink(&io_errors_);
+        bridge->SetErrorSink(io_errors_);
         if (impl_->telemetry_wake != nullptr) {
             bridge->SetCommitWake(impl_->telemetry_wake,
                                   impl_->active->directory.v3_stream_path().filename().generic_string());
@@ -330,7 +453,7 @@ std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
     auto bridge = std::make_unique<TrajectoryTurnBridge>(*recorder, std::move(scope),
                                                          std::move(identity));
     // 桥按轮把落账错误推进账本的共享环(/doctor trajectory 从这读)。
-    bridge->SetErrorSink(&io_errors_);
+    bridge->SetErrorSink(io_errors_);
     // T1 committed wake:挂上后 main stream 每笔提交都投 wake(默认空)。
     if (impl_ != nullptr && impl_->telemetry_wake != nullptr) {
         bridge->SetCommitWake(impl_->telemetry_wake, "main.jsonl");
@@ -358,7 +481,7 @@ std::unique_ptr<TrajectoryBypassBridge> TrajectorySessionLedger::NewBypassBridge
         auto bridge = std::make_unique<TrajectoryBypassBridge>(
             &*impl_->active->v3_main, &*impl_->v3_books, std::move(identity_scope), std::move(identity),
             purpose);
-        bridge->SetErrorSink(&io_errors_);
+        bridge->SetErrorSink(io_errors_);
         if (impl_->telemetry_wake != nullptr) {
             bridge->SetCommitWake(
                 impl_->telemetry_wake,
@@ -373,16 +496,29 @@ std::unique_ptr<TrajectoryBypassBridge> TrajectorySessionLedger::NewBypassBridge
     trajectory::EventScope scope = impl_->active->main->base_scope();
     scope.visibility = {Visibility::HostOnly};
     scope.training_policy = TrainingPolicy::Metadata;
-    auto bridge =
-        std::make_unique<TrajectoryBypassBridge>(*recorder, std::move(scope), std::move(identity));
+    const auto id_namespace = "bypass-" + std::to_string(recorder->next_seq()) + "-" +
+                              std::to_string(++impl_->v2_bypass_binding_sequence);
+    auto bridge = std::make_unique<TrajectoryBypassBridge>(
+        *recorder, std::move(scope), std::move(identity), id_namespace);
     if (impl_->telemetry_wake != nullptr) {
         bridge->SetCommitWake(impl_->telemetry_wake, "main.jsonl");
     }
     return bridge;
 }
 
+std::unique_ptr<agent::LoopBoundaryRecorder> TrajectorySessionLedger::NewLeasedBypassRecorder(
+    TrajectoryTurnBridge::Identity identity, accounting::RequestPurpose purpose) {
+    if (!impl_) return TrajectoryBypassLeaseOwner::Rejected();
+    if (!impl_->bypass_leases) impl_->bypass_leases = std::make_shared<TrajectoryBypassLeaseOwner>();
+    auto bound = impl_->bypass_leases->Bind([&] { return NewBypassBridge(std::move(identity), purpose); });
+    if (!bound) return TrajectoryBypassLeaseOwner::Rejected();
+    return std::move(*bound);
+}
+
 void TrajectorySessionLedger::SetTelemetryWake(telemetry::CommitObserver* wake) {
     if (impl_ != nullptr) {
+        RetireBypassLeases_();
+        impl_->bypass_leases.reset();  // Future bridges bind the new observer.
         impl_->telemetry_wake = wake;
     }
 }
@@ -407,7 +543,8 @@ trajectory::CloseOutcome TrajectorySessionLedger::CloseSession(const std::string
     trajectory::CloseRequest request;
     request.reason = reason;
     trajectory::NullClearParticipant participant;
-    return impl_->manager->Close(request, &participant);
+    BypassRetiringParticipant retiring(impl_->bypass_leases, &participant);
+    return impl_->manager->Close(request, &retiring);
 }
 
 TrajectorySessionLedger::CwdChangeResult TrajectorySessionLedger::HandleCwdChange(
@@ -557,8 +694,10 @@ trajectory::ClearOutcome TrajectorySessionLedger::ClearSession(
         outcome.error_code = "clear.no_active_session";
         return outcome;
     }
-    const auto outcome = impl_->manager->Clear(request, participant);
+    BypassRetiringParticipant retiring(impl_->bypass_leases, participant);
+    const auto outcome = impl_->manager->Clear(request, &retiring);
     if (outcome.error_code.empty()) {
+        impl_->bypass_leases.reset();  // Actual successful scene switch, not an early refusal.
         // 账本跟着换场:active 指针(manager 内 std::optional 同址换值)、
         // run 号、选段器重置(新场不带旧 selection,§3.3.1)。
         impl_->active = impl_->manager->active();
@@ -566,7 +705,7 @@ trajectory::ClearOutcome TrajectorySessionLedger::ClearSession(
             impl_->main_run_id = impl_->active->manifest.main_run_id;
         }
         BindV3Books_();
-        impl_->child_terminal_hashes.clear();
+        impl_->child_terminals = std::make_shared<SubagentTerminalRegistry>();
         record_selection_ = nullptr;  // 惰性重建(RecordSelectionController)
         environment_captured_ = false;  // 新 run 须重采环境快照
     }
@@ -645,7 +784,8 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
         trajectory::CloseRequest close;
         close.reason = "switch_to_resume";
         trajectory::NullClearParticipant participant;
-        const auto closed = manager.Close(close, &participant);
+        BypassRetiringParticipant retiring(impl_->bypass_leases, &participant);
+        const auto closed = manager.Close(close, &retiring);
         if (!closed.error_code.empty()) {
             summary.outcome.error_code = "resume." + closed.error_code;
             summary.outcome.message = "封旧场失败: " + closed.message;
@@ -667,6 +807,7 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
     if (!summary.outcome.error_code.empty()) {
         return summary;
     }
+    impl_->bypass_leases.reset();  // Resume has committed its actual new/continued owner.
     // 换场成功:账本指到落点场(v3 源=续接的源场,v2 源=迁移新场),选段
     // 器重置,history 折叠投影交出去。
     impl_->active = manager.active();
@@ -680,7 +821,7 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
     // 按账面现行版本重采。
     impl_->v3_books.reset();
     BindV3Books_();
-    impl_->child_terminal_hashes.clear();
+    impl_->child_terminals = std::make_shared<SubagentTerminalRegistry>();
     record_selection_ = nullptr;
     environment_captured_ = false;
     // v3 源:续接场沿用源场生效 system(§4.10 默认,三步切换补账——本场
@@ -769,7 +910,7 @@ std::string TrajectorySessionLedger::CommitSoulSnapshot(const SessionSoulSnapsho
     }
     const auto written = WriteSessionSoulSnapshot(impl_->active->directory.session_dir(), snapshot);
     if (!written.has_value()) {
-        io_errors_.push_back("soul_snapshot.write_failed: " + written.error());
+        io_errors_->Append("soul_snapshot.write_failed: " + written.error());
         return written.error();
     }
     return std::string();
@@ -921,6 +1062,9 @@ std::optional<TrajectorySessionLedger::V3ResultStoreStats> TrajectorySessionLedg
     if (impl_ == nullptr || impl_->active == nullptr || !impl_->active->is_v3()) {
         return std::nullopt;  // 非 v3 场:调用方走旧 artifact 口径
     }
+    if (auto cap = named_result_capability(); cap && cap->external()) {
+        return std::nullopt; // File-only statistics cannot report a remote namespace as zero.
+    }
     V3ResultStoreStats stats;
     std::error_code ec;
     const std::filesystem::path artifacts = session_dir() / "artifacts";
@@ -984,10 +1128,11 @@ void TrajectorySessionLedger::BlockV3Execution(const std::string& reason) {
         return;  // 已阻断:保留首因
     }
     impl_->v3_books->execution_blocked = true;
+    impl_->v3_books->bypass_execution_blocked->store(true, std::memory_order_release);
     impl_->v3_books->execution_block_reason = reason;
     impl_->v3_books->execution_block_revision =
         impl_->v3_books->writer != nullptr ? impl_->v3_books->writer->context().revision : 0;
-    io_errors_.push_back("compact.execution_blocked:" + reason);
+    io_errors_->Append("compact.execution_blocked:" + reason);
 }
 
 bool TrajectorySessionLedger::V3ExecutionBlocked() const {
@@ -1165,7 +1310,7 @@ std::string TrajectorySessionLedger::CaptureEnvironment(const EnvironmentFacts& 
             trajectory::BuildEnvironmentCapturePayload(input, blobs, trajectory::Durability::PowerLoss);
         if (!capture.has_value()) {
             const std::string error = capture.error();
-            io_errors_.push_back(error);
+            io_errors_->Append(error);
             platform::LogSink::Instance().Error("trajectory", "环境快照落盘失败: " + error);
             return error;
         }
@@ -1182,7 +1327,7 @@ std::string TrajectorySessionLedger::CaptureEnvironment(const EnvironmentFacts& 
             std::move(captured), trajectory::Durability::PowerLoss);
         if (receipt.status != v3::WriteReceipt::Status::Committed) {
             const std::string error = "session.environment.captured:" + receipt.error_code;
-            io_errors_.push_back(error);
+            io_errors_->Append(error);
             return receipt.error_code;
         }
         environment_captured_ = true;
@@ -1226,7 +1371,7 @@ std::string TrajectorySessionLedger::CaptureEnvironment(const EnvironmentFacts& 
         trajectory::BuildEnvironmentCapturePayload(input, blobs, trajectory::Durability::PowerLoss);
     if (!capture.has_value()) {
         const std::string error = capture.error();
-        io_errors_.push_back(error);
+        io_errors_->Append(error);
         platform::LogSink::Instance().Error("trajectory", "环境快照落盘失败: " + error);
         return error;
     }
@@ -1240,7 +1385,7 @@ std::string TrajectorySessionLedger::CaptureEnvironment(const EnvironmentFacts& 
     request.payload = capture->event_payload;
     const auto receipt = recorder->Record(std::move(request), trajectory::Durability::PowerLoss);
     if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
-        io_errors_.push_back("run.environment.captured:" + receipt.error_code);
+        io_errors_->Append("run.environment.captured:" + receipt.error_code);
         return receipt.error_code;
     }
     environment_captured_ = true;
@@ -1280,7 +1425,7 @@ void TrajectorySessionLedger::NoteQueueDequeued(const std::string& item_id, cons
     request.payload = std::move(payload);
     const auto receipt = recorder->Record(std::move(request), trajectory::Durability::ProcessCrash);
     if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
-        io_errors_.push_back("control.queue.item.dequeued:" + receipt.error_code);
+        io_errors_->Append("control.queue.item.dequeued:" + receipt.error_code);
     }
 }
 
@@ -1310,7 +1455,7 @@ void TrajectorySessionLedger::NoteQueueExpired(const std::string& item_id, const
     request.payload = std::move(payload);
     const auto receipt = recorder->Record(std::move(request), trajectory::Durability::ProcessCrash);
     if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
-        io_errors_.push_back("control.queue.item.expired:" + receipt.error_code);
+        io_errors_->Append("control.queue.item.expired:" + receipt.error_code);
     }
 }
 
@@ -1338,11 +1483,11 @@ trajectory::WorkspaceDoctorReport TrajectorySessionLedger::BuildDoctorReport() c
     const trajectory::TrajectoryDirectory& directory = impl_->active->directory;
     return trajectory::BuildWorkspaceDoctorReport(
         directory.workspace_dir().parent_path(), directory.workspace_dir(), workspace_key(),
-        impl_->active->session_id(), io_errors_);
+        impl_->active->session_id(), io_errors_->Snapshot());
 }
 
 std::vector<std::string> TrajectorySessionLedger::recent_io_errors() const {
-    return io_errors_;
+    return io_errors_ != nullptr ? io_errors_->Snapshot() : std::vector<std::string>{};
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -127,6 +128,17 @@ struct UnknownContent {
 using ToolContentBlock =
     std::variant<TextContent, ImageContent, AudioContent, ResourceLinkContent, EmbeddedTextResourceContent,
                  EmbeddedBlobResourceContent, UnknownContent>;
+
+// The result store preserves these blocks in a separate raw_payload channel.
+// Budget that representation as well as its compatibility text projection.
+// Empty blocks and one identical TextContent need no extra native material.
+inline bool HasNativePayloadBeyondProjection(std::string_view projection,
+                                            const std::vector<ToolContentBlock>& blocks) {
+    if (blocks.empty()) return false;
+    if (blocks.size() != 1) return true;
+    const auto* text = std::get_if<TextContent>(&blocks.front());
+    return text == nullptr || std::string_view(text->text) != projection;
+}
 
 // 富结果正文(MCP 富结果单"富结果只留一份真账"):块序即真序,
 // text -> image -> text 不得归并。structured_content 用 optional 保存,

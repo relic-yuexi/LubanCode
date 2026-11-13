@@ -103,6 +103,7 @@ struct TrajectoryRecorder::Impl {
     bool run_terminal = false;
     bool session_ended = false;
     bool closed = false;
+    bool close_broken = false;
     // P0-C 延迟开卷:defer_stream_create 的 stream 在首枚提交事务里才
     // 独占创建文件;true = writer 还没开过。
     bool stream_pending = false;
@@ -1029,11 +1030,18 @@ std::expected<std::string, std::string> TrajectoryRecorder::Close() {
         impl_->writer = JournalWriter{};
         return std::unexpected("io.no_stream: 首枚事件未提交,stream 未开卷");
     }
-    // 先算整本 hash(§8.3),再放掉句柄:封了口的账不该再攥着文件——
-    // Windows 下攥着句柄的文件删不掉、搬不动(/delete、/archive 要用)。
-    auto sha = JournalWriter::ComputeJournalSha256(impl_->stream_path);
+    // Consume the real fclose result before releasing the writer object.
+    const bool closed = impl_->writer.Close();
+    impl_->close_broken = !closed;
     impl_->writer = JournalWriter{};
-    return sha;
+    if (!closed) return std::unexpected("io.close_failed: 日志写句柄关闭失败或已有写入错误");
+    if (impl_->options.inject_close_failure) {
+        if (const auto injected = impl_->options.inject_close_failure()) {
+            impl_->close_broken = true;
+            return std::unexpected(*injected);
+        }
+    }
+    return JournalWriter::ComputeJournalSha256(impl_->stream_path);
 }
 
 bool DiscardUncommittedStream(const std::filesystem::path& stream_path) {
@@ -1070,7 +1078,7 @@ std::string TrajectoryRecorder::last_event_hash() const {
 
 bool TrajectoryRecorder::broken() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    return impl_->writer.broken();
+    return impl_->writer.broken() || impl_->close_broken;
 }
 
 }  // namespace lubancode::trajectory

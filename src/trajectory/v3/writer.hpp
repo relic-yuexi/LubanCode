@@ -26,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include "trajectory/journal.hpp"
+#include "trajectory/journal_owner.hpp"
 #include "trajectory/v3/envelope.hpp"
 #include "trajectory/v3/schema3.hpp"
 
@@ -46,6 +47,9 @@ struct WriteReceipt {
     std::string line_hash;
     std::string error_code;     // 稳定错误码
     std::string error_message;  // 人话(io 细节/缺哪个字段)
+    // Owned mechanical witness only when this V3 call reached Journal I/O.
+    // Other producers sharing WriteReceipt leave it empty until wired.
+    std::optional<trajectory::JournalAppendReceipt> journal_append;
 };
 
 // 时间注入(单测喂固定钟)。
@@ -63,9 +67,19 @@ struct V3WriterOptions {
     // "未知",不许暗填 main_session。
     std::string launch_cwd;
     std::string run_kind;
-    // 注入提交失败(测试专用;生产恒空):返回稳定码则该枚提交按 IoFailed
-    // 收(writer 句柄随后 broken)。锁内调用,须廉价无副作用。
+    // 注入未确认提交(测试专用;生产恒空):保首枚真实原回执(当前为
+    // Rejected/v3writer.injected),并置 broken;已断句柄后续调用 IoFailed。
+    // 锁内调用,须廉价无副作用。
     std::function<std::optional<std::string>()> inject_io_failure;
+    // Test-only checked Close failure after the real journal handle is closed.
+    std::function<std::optional<std::string>()> inject_close_failure;
+    // Internal Start-only after-native test seam; empty retains original Open.
+    // Continue entry points reject it before reading or opening the old stream.
+    std::shared_ptr<trajectory::JournalNativeIoProbe> journal_native_io_probe;
+    // Internal completion-boundary test seam. Runs after actual committed
+    // Journal I/O and before V3 in-memory completion; a throw freezes the owner.
+    // Never exposed by public SDK SessionOptions; no fake native observation.
+    std::function<void()> after_native_append;
 };
 
 // 链节点(schema 文档 §2.4)。
@@ -178,6 +192,22 @@ public:
     static std::expected<V3Writer, std::string> Continue(
         const std::filesystem::path& jsonl_path, V3WriterOptions options = V3WriterOptions{},
         const V3Clock* clock = nullptr);
+    static std::expected<V3Writer, std::string> ContinueOwnedPrefix(
+        const std::filesystem::path& jsonl_path, std::string_view prefix,
+        const JournalFileAnchor& anchor, V3WriterOptions options = V3WriterOptions{},
+        const V3Clock* clock = nullptr);
+
+    // Immutable owned bytes/native anchor, independent of this live writer.
+    static std::expected<V3Writer, std::string> ContinueCaptured(
+        const JournalReadHandle&, V3WriterOptions options = V3WriterOptions{},
+        const V3Clock* clock = nullptr);
+    std::expected<JournalReadHandle, std::string> CaptureJournal(
+        std::optional<std::size_t> max_bytes = {}) const;
+
+    // 只关写句柄,不代写 session.ended。封口事实须由领域先落稳。
+    // 可重复调用,保第一次 checked 结果;保留身份、路径与上下文查询,
+    // 此后提交拒绝。重复调用不再执行 native close 或外层测试注入。
+    std::expected<void, std::string> Close();
 
     // ---- 底层两类行 ----
 
@@ -222,6 +252,8 @@ public:
     // 三步全过内存才换根;第 2 步后崩溃,恢复仍用旧根(变更未完成)。
     // settings_version/soul 等缘由进 change 元数据;system_changed=false
     // 表示设置变了但正文未变,仍走三步留档,不制造假版本差异(链重接)。
+    // Opaque hostBindings are inherited from the effective system root only;
+    // cause/settingsVersion and other change metadata are never inherited.
     struct SwitchSystemResult {
         WriteReceipt change_event;
         WriteReceipt system_message;
@@ -243,7 +275,8 @@ public:
                                 const std::vector<std::string>& input_message_refs,
                                 nlohmann::json provider_snapshot,  // provider/model/wire/参数/工具定义引用
                                 std::optional<std::string> compact_id = std::nullopt,
-                                Durability durability = Durability::ProcessCrash);
+                                Durability durability = Durability::ProcessCrash,
+                                std::optional<std::string> parent_turn_id = std::nullopt);
 
     // ---- 流式(§4.43) ----
 
@@ -315,8 +348,8 @@ public:
     std::string NewHookDispatchId();   // hookdispatch-<n>,挂点触发身份(§4.22)
     std::string NewTaskId();           // task-<n>,委派任务身份(§4.31)
 
-    // 关账文件句柄(幂等)。封口后不再写的场调用:Windows 上开着的句柄
-    // 挡住目录删除。此后提交一律拒(v3writer.broken)。
+    // 无返回值关柄入口沿用 Close:正常关闭只标 closed,后续提交拒绝。
+    // 需要核关闭失败的领域路径调用上面的 checked Close。
     void CloseFile();
 
     // ---- 观测 ----
@@ -325,6 +358,13 @@ public:
     std::uint64_t next_seq() const;
     std::string last_line_hash() const;
     bool broken() const;
+    bool closed() const;
+    // Copy the first native uncertainty under the original Impl mutex. No I/O,
+    // writer borrow or retroactive success after Close/recovery verification.
+    std::optional<trajectory::JournalAppendReceipt> first_unconfirmed_journal_append() const;
+    // Separate Core completion uncertainty. Its native field may truthfully be
+    // Committed; it never masquerades as an unconfirmed native append.
+    std::optional<trajectory::JournalOwnerUnconfirmed> first_unconfirmed_journal_completion() const;
     const ContextView& context() const;  // 当前内存视图(链/版本/当前 system)
     // 本账上是否已有该 messageId(PrepareRequest 引用先落稳的判据)。
     bool HasMessageId(std::string_view message_id) const;
@@ -335,6 +375,9 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     explicit V3Writer(std::unique_ptr<Impl> impl);
+    static std::expected<V3Writer, std::string> ContinueOwnedMaterial(
+        const std::filesystem::path&, std::string_view, const JournalFileAnchor&,
+        const JournalReadHandle*, V3WriterOptions, const V3Clock*);
 };
 
 // ---------------------------------------------------------------------------
@@ -353,6 +396,9 @@ struct V3VerifyReport {
 // 逐行验:严格解析、语义校验、seq 从 1 连续、prevHash/lineHash 衔接;
 // 四类提交事件重放链状态。失败给首错。
 V3VerifyReport VerifyV3File(const std::filesystem::path& path);
+// Same verification/replay over an owned, already split input. The caller
+// checks complete newlines and bounds before constructing these lines.
+V3VerifyReport VerifyV3Lines(const std::vector<std::string>& lines);
 
 // 重放一枚提交事件到视图(Continue/VerifyV3File/读取侧 P2 共用同一份
 // 链重放,单一事实来源)。返回错误码或空串。

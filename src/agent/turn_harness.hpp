@@ -174,6 +174,10 @@ struct DriveReport {
     bool time_budget_exhausted = false;   // 任一轮撞时间成本闸(P2-6)
     bool token_budget_exhausted = false;  // 任一轮撞 token 成本闸(P2-6)
     bool wall_clock = false;      // 轮间查到墙钟到点
+    // Sticky across initial, queued and Stop rounds. A settled unknown tool
+    // outcome stops every automatic continuation; it is not a user cancel.
+    bool side_effect_indeterminate = false;
+    std::string side_effect_error;
     std::string error;            // !ok 时的错误文案
     std::string stop_reason;      // 最后一轮正常收口的 stop_reason
     int steps_used = 0;           // 全部轮次(含 Stop 续跑轮)的模型请求数合计
@@ -185,7 +189,8 @@ struct DriveReport {
     // 最后一个正常收口轮的原始 RunOutcome。length_empty_output 这类"轮内
     // 状态"从这取——主回合读它还原 RunOutcome;Stop 续跑轮的 outcome 只并
     // 步数/预算/打断三笔进上面的字段,不覆盖这只(合流前主回合正是这么
-    // 读的:续跑轮的 length_empty 不改主轮的账)。
+    // 读的:续跑轮的 length_empty 不改主轮的账)。未知副作用续轮例外:
+    // 保留真实失败轮,不能把初轮成功当作未知收场的原始事实。
     std::optional<RunOutcome> final_round;
 };
 

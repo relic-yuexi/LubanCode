@@ -1,14 +1,6 @@
-// tool deferral 的全局插件对账(真机实测单 P1-3):用户全局目录
-// <主目录>/.lubancode/plugins 真装了插件、工具总数越过阈值时,tool_search
-// 延迟挂载确实启用——这是产品行为,该有人对账,只是不归单测管(单测册
-// test_tool_runtime.cpp 把主目录钉在空临时目录,读不到用户家目录,用户装
-// 0、1、10 枚结果都不变;本册反着来:主目录想装几枚装几枚,验装配链对
-// 插件数敏感)。
-//
-// 插件用 process 形态(plugin.json):装配只解析 manifest、造 adapter,不
-// 起子进程,command 填什么都不会被执行;一枚 manifest 可声明多枚工具,
-// 压阈值的余量比一文件一工具的 Lua 插件宽。主目录侧扫描无信任门(信任
-// 门只管项目级),manifest 合法即挂。
+// 用显式插件根验 ToolRuntime 的延迟挂载与 token 预算门。
+// 每场独占临时目录，不读取或修改 HOME、USERPROFILE、进程 cwd。
+// process 插件只解析清单；此册不调用插件，不启动模型服务。
 
 #include <doctest/doctest.h>
 
@@ -28,6 +20,7 @@
 #include "api/backend.hpp"
 #include "app/tool_runtime.hpp"
 #include "platform/paths.hpp"
+#include "tool_assembly_fixture.hpp"
 
 namespace {
 
@@ -57,58 +50,14 @@ const std::vector<lubancode::tools::SkillMeta>& NoSkills() {
     return skills;
 }
 
-// 用户目录闸:与单测册 test_tool_runtime.cpp 同一条路(构造改
-// USERPROFILE/HOME、析构还原),那边的注释这里不重抄,详见彼处。集成册
-// 用它不是隔离,是摆布:主目录指到调用方造好的临时目录(装了几枚插件
-// 是调用方的事,这里不动目录一根汗毛),跑完还原环境,真家目录不碰。
-class ScopedHomeEnv {
-public:
-    explicit ScopedHomeEnv(const std::filesystem::path& home) : home_(home) {
-        const std::string value = lubancode::platform::PathToUtf8(home_);
-#ifdef _WIN32
-        const auto raw = lubancode::platform::GetEnvVar("USERPROFILE");
-        old_utf8_ = raw.has_value() ? std::optional<std::string>(lubancode::platform::AcpBytesToUtf8(*raw))
-                                    : std::nullopt;
-        SetWindowsUserProfile(value);
-#else
-        const char* raw = std::getenv("HOME");
-        old_utf8_ = raw != nullptr ? std::optional<std::string>(raw) : std::nullopt;
-        setenv("HOME", value.c_str(), /*replace=*/1);
-#endif
-    }
-    ~ScopedHomeEnv() {
-#ifdef _WIN32
-        SetWindowsUserProfile(old_utf8_.value_or(std::string()));  // 空串即移除
-#else
-        if (old_utf8_.has_value()) {
-            setenv("HOME", old_utf8_->c_str(), /*replace=*/1);
-        } else {
-            unsetenv("HOME");
-        }
-#endif
-    }
-    ScopedHomeEnv(const ScopedHomeEnv&) = delete;
-    ScopedHomeEnv& operator=(const ScopedHomeEnv&) = delete;
+using lubancode::test_support::ToolAssemblyFixture;
 
-private:
-#ifdef _WIN32
-    static void SetWindowsUserProfile(const std::string& utf8_value) {
-        const std::wstring entry = L"USERPROFILE=" + lubancode::platform::Utf8ToWide(utf8_value);
-        _wputenv(entry.c_str());
-    }
-#endif
-
-    std::filesystem::path home_;
-    std::optional<std::string> old_utf8_;
-};
-
-// 往 <home>/.lubancode/plugins/ 装 count 枚 process 插件,每枚声明
+// 往显式 plugins 根装 count 枚 process 插件,每枚声明
 // tools_per_plugin 件工具。工具名带插件序号,跨插件不重名(重名会被
 // ScanPluginDirectories 整件拒掉)。description 可调:预算门册要拿"描述
 // 薄/肥"两种本金形状对账(P4),枚数册用默认薄描述。
-void InstallGlobalPlugins(const std::filesystem::path& home, int count, int tools_per_plugin,
+void InstallPlugins(const std::filesystem::path& plugins, int count, int tools_per_plugin,
                           const std::string& description = "deferral 对账用的占位工具") {
-    const std::filesystem::path plugins = home / ".lubancode" / "plugins";
     for (int i = 0; i < count; ++i) {
         const std::filesystem::path dir = plugins / ("defl_" + std::to_string(i));
         std::error_code ec;
@@ -136,10 +85,8 @@ void InstallGlobalPlugins(const std::filesystem::path& home, int count, int tool
 // 一轮三档共用:装 count 枚、构造、还账。
 void CheckDeferralForPluginCount(int count) {
     CAPTURE(count);
-    const std::filesystem::path home =
-        std::filesystem::temp_directory_path() / ("lubancode_deferral_home_" + std::to_string(count));
-    InstallGlobalPlugins(home, count, /*tools_per_plugin=*/3);
-    ScopedHomeEnv home_guard(home);
+    ToolAssemblyFixture fixture;
+    InstallPlugins(fixture.Plugins(), count, /*tools_per_plugin=*/3);
     lubancode::config::Config config = EmptyConfig();
     // 动态工具 P4:启用判定从"枚数门"一道改成"枚数门 + token 预算门"
     // 双闸(ShouldDeferTools)。本册对账的是枚数门那一道——预算门显式关
@@ -147,8 +94,8 @@ void CheckDeferralForPluginCount(int count) {
     // 在一本册里;预算门的产品行为在下面那册单独对账。
     config.tool_search_token_floor = 0;
     NullBackend backend;
-    lubancode::app::ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
-                                         /*skills_segment=*/"", /*cwd_utf8=*/"/tmp",
+    lubancode::app::ToolRuntime runtime(config, backend, NoSkills(),
+                                         /*skills_segment=*/"", fixture.Plan(),
                                          lubancode::app::ToolRuntime::Options{});
 
     // 插件真挂上了(manifest 一枚不落),不是空转的断言。
@@ -186,8 +133,6 @@ void CheckDeferralForPluginCount(int count) {
         CHECK(runtime.sub_registry().Find("tool_search") == nullptr);
         CHECK(runtime.main_tool_filter()(*runtime.main_registry().Find("read_file")));
     }
-    std::error_code ec;
-    std::filesystem::remove_all(home, ec);
 }
 
 }  // namespace
@@ -210,10 +155,8 @@ TEST_CASE("全局插件数与 tool deferral:0、1 枚不触发,10 枚越线触�
 // 对账,发现/调用/前缀三拍在单测册(test_request_prefix/test_loop)钉。
 // ---------------------------------------------------------------------------
 TEST_CASE("deferred_tool_mode=proxy_reference: 装配落位——双壳常驻、双 resolver、闸分家") {
-    const std::filesystem::path home =
-        std::filesystem::temp_directory_path() / "lubancode_deferral_home_proxy";
-    InstallGlobalPlugins(home, /*count=*/10, /*tools_per_plugin=*/3);  // 30 枚插件工具,越线
-    ScopedHomeEnv home_guard(home);
+    ToolAssemblyFixture fixture;
+    InstallPlugins(fixture.Plugins(), /*count=*/10, /*tools_per_plugin=*/3);  // 30 枚插件工具,越线
     NullBackend backend;
 
     // ---- proxy 档 ----
@@ -223,8 +166,8 @@ TEST_CASE("deferred_tool_mode=proxy_reference: 装配落位——双壳常驻、
         // 薄插件只按枚数门越线,deferral 起来后模式装配才有得验。
         config.tool_search_token_floor = 0;
         config.deferred_tool_mode = "proxy_reference";
-        ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
-                            /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
+        ToolRuntime runtime(config, backend, NoSkills(),
+                            /*skills_segment=*/"", fixture.Plan(), ToolRuntime::Options{});
         CHECK(runtime.main_deferral());
         CHECK(runtime.main_proxy_enabled());
         CHECK(runtime.sub_proxy_enabled());
@@ -267,8 +210,8 @@ TEST_CASE("deferred_tool_mode=proxy_reference: 装配落位——双壳常驻、
         lubancode::config::Config config = EmptyConfig();
         config.tool_search_token_floor = 0;  // 同上:预算门关掉,让"压过"有得验
         config.deferred_tool_mode = "disabled";
-        ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
-                            /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
+        ToolRuntime runtime(config, backend, NoSkills(),
+                            /*skills_segment=*/"", fixture.Plan(), ToolRuntime::Options{});
         CHECK_FALSE(runtime.main_deferral());
         CHECK_FALSE(runtime.sub_deferral());
         CHECK(runtime.main_registry().Find("tool_search") == nullptr);
@@ -285,8 +228,8 @@ TEST_CASE("deferred_tool_mode=proxy_reference: 装配落位——双壳常驻、
     {
         lubancode::config::Config config = EmptyConfig();
         config.tool_search_token_floor = 0;  // 同上:模式落位册,启用门槛只留枚数门
-        ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
-                            /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
+        ToolRuntime runtime(config, backend, NoSkills(),
+                            /*skills_segment=*/"", fixture.Plan(), ToolRuntime::Options{});
         CHECK(runtime.main_deferral());
         CHECK(runtime.main_proxy_enabled());
         CHECK(runtime.main_registry().Find("tool_search") != nullptr);
@@ -299,8 +242,8 @@ TEST_CASE("deferred_tool_mode=proxy_reference: 装配落位——双壳常驻、
         lubancode::config::Config config = EmptyConfig();
         config.tool_search_token_floor = 0;
         config.deferred_tool_mode = "legacy_expand";
-        ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
-                            /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
+        ToolRuntime runtime(config, backend, NoSkills(),
+                            /*skills_segment=*/"", fixture.Plan(), ToolRuntime::Options{});
         CHECK(runtime.main_deferral());
         CHECK_FALSE(runtime.main_proxy_enabled());
         CHECK(runtime.main_registry().Find("tool_search") != nullptr);
@@ -308,8 +251,6 @@ TEST_CASE("deferred_tool_mode=proxy_reference: 装配落位——双壳常驻、
         CHECK(runtime.main_tool_ref_resolver() == nullptr);
     }
 
-    std::error_code ec;
-    std::filesystem::remove_all(home, ec);
 }
 
 // ---------------------------------------------------------------------------
@@ -322,17 +263,15 @@ TEST_CASE("deferred_tool_mode=proxy_reference: 装配落位——双壳常驻、
 // 0 可关掉这道门(回到 P4 之前的现状,上面那册的口径)。
 // ---------------------------------------------------------------------------
 TEST_CASE("P4 token 预算门: 枚数过了但延迟本金不够,不启用;本金过线才启用;floor=0 关门") {
-    const std::filesystem::path thin_home =
-        std::filesystem::temp_directory_path() / "lubancode_deferral_home_floor_thin";
-    const std::filesystem::path fat_home =
-        std::filesystem::temp_directory_path() / "lubancode_deferral_home_floor_fat";
+    ToolAssemblyFixture thin_fixture;
+    ToolAssemblyFixture fat_fixture;
     // 肥描述:55 个汉字,每枚描述约 82 token(EstimateUtf8Tokens 非ASCII
     // 1.5/字),加名字与 schema,30 枚本金约 2600 > 默认 floor 1500。
     const std::string fat_description =
         "远程服务里的示例只读工具,用于预算门场景的延迟本金测量,描述写得长一些才好把声明字节撑过默认预算线,"
         "模拟真实 MCP 工具里那种带用法说明、参数注意事项与错误码表的完整描述文本,再补一句占用说明凑足长度";
-    InstallGlobalPlugins(thin_home, /*count=*/10, /*tools_per_plugin=*/3);  // 默认薄描述
-    InstallGlobalPlugins(fat_home, /*count=*/10, /*tools_per_plugin=*/3, fat_description);
+    InstallPlugins(thin_fixture.Plugins(), /*count=*/10, /*tools_per_plugin=*/3);  // 默认薄描述
+    InstallPlugins(fat_fixture.Plugins(), /*count=*/10, /*tools_per_plugin=*/3, fat_description);
     NullBackend backend;
 
     // 延迟声明本金:与生产 DeferredDeclarationTokens 同一把尺(agent::
@@ -354,10 +293,10 @@ TEST_CASE("P4 token 预算门: 枚数过了但延迟本金不够,不启用;本�
     // ——不启用,全量常驻(这就是 P4 重定的落点:从"枚数到就开"改成
     // "本金够才开")。
     {
-        ScopedHomeEnv home_guard(thin_home);
+        const auto& fixture = thin_fixture;
         lubancode::config::Config config = EmptyConfig();  // 默认 floor 1500
-        ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
-                            /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
+        ToolRuntime runtime(config, backend, NoSkills(),
+                            /*skills_segment=*/"", fixture.Plan(), ToolRuntime::Options{});
         REQUIRE(runtime.process_manifests().size() == 10);
         const std::size_t thin_principal = deferred_principal(runtime.main_registry());
         CHECK(runtime.main_registry().All().size() >
@@ -374,10 +313,10 @@ TEST_CASE("P4 token 预算门: 枚数过了但延迟本金不够,不启用;本�
 
     // 肥描述插件 + 同一份默认配置:本金过线,两道门都过,照旧启用。
     {
-        ScopedHomeEnv home_guard(fat_home);
+        const auto& fixture = fat_fixture;
         lubancode::config::Config config = EmptyConfig();
-        ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
-                            /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
+        ToolRuntime runtime(config, backend, NoSkills(),
+                            /*skills_segment=*/"", fixture.Plan(), ToolRuntime::Options{});
         const std::size_t fat_principal = deferred_principal(runtime.main_registry());
         CHECK(fat_principal >= static_cast<std::size_t>(config.tool_search_token_floor));  // 本金:过了
         CHECK(runtime.main_deferral());
@@ -388,16 +327,13 @@ TEST_CASE("P4 token 预算门: 枚数过了但延迟本金不够,不启用;本�
     // 薄描述插件 + 显式 floor=0:预算门关掉,只看枚数(P4 之前的现状,
     // 用户可控回退)。
     {
-        ScopedHomeEnv home_guard(thin_home);
+        const auto& fixture = thin_fixture;
         lubancode::config::Config config = EmptyConfig();
         config.tool_search_token_floor = 0;
-        ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
-                            /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
+        ToolRuntime runtime(config, backend, NoSkills(),
+                            /*skills_segment=*/"", fixture.Plan(), ToolRuntime::Options{});
         CHECK(runtime.main_deferral());
         CHECK(runtime.main_registry().Find("tool_search") != nullptr);
     }
 
-    std::error_code ec;
-    std::filesystem::remove_all(thin_home, ec);
-    std::filesystem::remove_all(fat_home, ec);
 }

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <set>
 
 #include <yaml-cpp/yaml.h>
 
@@ -192,7 +193,7 @@ std::string SplitTitleFromBody(const std::string& body, const MemoryEntry& entry
 
 }  // namespace
 
-std::expected<ParsedTopic, std::string> Parse(const std::string& text) {
+std::expected<ParsedTopic, std::string> Parse(const std::string& text, bool strict_metadata) {
     // 只认文件开头第一对 ---:首行必须是单独一行 ---,结束符是其后第一条
     // 单独的 --- 线;正文里的水平线不影响(扫描在第一条就停了)。
     if (FindDelimiterLine(text, 0) != 0) {
@@ -215,6 +216,68 @@ std::expected<ParsedTopic, std::string> Parse(const std::string& text) {
     if (!root.IsMap()) return std::unexpected("front matter 顶层须是映射");
     const YAML::Node meta = root["metadata"];
     if (!meta.IsDefined() || !meta.IsMap()) return std::unexpected("front matter 缺 metadata 映射");
+    if (strict_metadata) {
+        const auto scalar = [](const YAML::Node& node) {
+            return node.IsScalar() && node.Scalar().find('\0') == std::string::npos &&
+                   platform::IsValidUtf8(node.Scalar());
+        };
+        const auto unique_map = [&](const YAML::Node& node) {
+            if (!node.IsMap()) return false;
+            std::set<std::string> keys;
+            for (const auto& pair : node)
+                if (!scalar(pair.first) || !keys.insert(pair.first.Scalar()).second) return false;
+            return true;
+        };
+        if (!unique_map(root) || !unique_map(meta)) return std::unexpected("memory.read.invalid_metadata");
+        for (const auto* key : {"name", "description"})
+            if (root[key].IsDefined() && !scalar(root[key])) return std::unexpected("memory.read.invalid_metadata");
+        for (const auto* key : {"node_type", "type", "id", "confidence", "status", "created", "modified", "last_verified"})
+            if (meta[key].IsDefined() && !scalar(meta[key])) return std::unexpected("memory.read.invalid_metadata");
+        const auto known = [&](const YAML::Node& node, std::initializer_list<const char*> values) {
+            if (!node.IsDefined()) return true;
+            if (!scalar(node)) return false;
+            return std::any_of(values.begin(), values.end(), [&](const char* value) { return node.Scalar() == value; });
+        };
+        if (!known(meta["status"], {"active", "stale", "conflict", "archived"}) ||
+            !known(meta["confidence"], {"user-stated", "verified", "inferred"}))
+            return std::unexpected("memory.read.invalid_metadata");
+        for (const auto* key : {"expires", "occurred_at"}) {
+            const auto date = meta[key];
+            if (date.IsDefined() && !date.IsNull() &&
+                (!scalar(date) || (!date.Scalar().empty() && !LooksLikeMemoryDate(date.Scalar()))))
+                return std::unexpected("memory.read.invalid_metadata");
+        }
+        const auto scope = meta["scope"];
+        if (scope.IsDefined()) {
+            if (!unique_map(scope)) return std::unexpected("memory.read.invalid_metadata");
+            for (const auto* key : {"level", "kind", "value"})
+                if (scope[key].IsDefined() && !scalar(scope[key])) return std::unexpected("memory.read.invalid_metadata");
+            if (!known(scope["level"], {"project", "user"}) || !known(scope["kind"], {"project", "subtree", "path", "user"}))
+                return std::unexpected("memory.read.invalid_metadata");
+        }
+        for (const auto* key : {"keywords", "origin_session_ids"}) {
+            const auto values = meta[key];
+            if (!values.IsDefined()) continue;
+            if (!values.IsSequence() || values.size() > 128) return std::unexpected("memory.read.invalid_metadata");
+            for (const auto& value : values)
+                if (!scalar(value)) return std::unexpected("memory.read.invalid_metadata");
+        }
+        const auto evidence = meta["evidence"];
+        if (evidence.IsDefined()) {
+            if (!evidence.IsSequence() || evidence.size() > 24) return std::unexpected("memory.read.invalid_metadata");
+            for (const auto& item : evidence) {
+                if (!unique_map(item) || !scalar(item["path"]) || item["path"].Scalar().empty() ||
+                    (item["symbol"].IsDefined() && !scalar(item["symbol"])))
+                    return std::unexpected("memory.read.invalid_metadata");
+            }
+        }
+        const auto fingerprints = meta["fingerprints"];
+        if (fingerprints.IsDefined()) {
+            if (!unique_map(fingerprints) || fingerprints.size() > 24) return std::unexpected("memory.read.invalid_metadata");
+            for (const auto& pair : fingerprints)
+                if (!scalar(pair.second)) return std::unexpected("memory.read.invalid_metadata");
+        }
+    }
     int schema = 0;
     if (meta["schema"].IsDefined()) {
         try {

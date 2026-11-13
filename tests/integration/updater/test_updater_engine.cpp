@@ -1212,7 +1212,10 @@ TEST_CASE("engine.plan:预演不动安装") {
 namespace {
 
 std::string FindMainExe() {
-#ifdef LUBANCODE_BINARY_DIR
+#ifdef LUBANCODE_UPDATER_MAIN_EXE
+    const fs::path candidate = lubancode::platform::Utf8ToPath(LUBANCODE_UPDATER_MAIN_EXE);
+    if (fs::is_regular_file(candidate)) return lubancode::platform::PathToUtf8(candidate);
+#elif defined(LUBANCODE_BINARY_DIR)
     const fs::path binary_dir = fs::path(LUBANCODE_BINARY_DIR);
     std::error_code ec;
     for (const char* name :
@@ -1226,6 +1229,24 @@ std::string FindMainExe() {
     return std::string();
 }
 
+#ifdef _WIN32
+std::vector<ZipEntry> MainExeRuntimeFiles(const fs::path& exe) {
+    std::ifstream list(lubancode::platform::Utf8ToPath(LUBANCODE_UPDATER_RUNTIME_LIST));
+    if (!list.is_open()) throw std::runtime_error("Updater runtime dependency list is missing");
+    std::vector<ZipEntry> files;
+    std::string name;
+    while (std::getline(list, name)) {
+        if (!name.empty() && name.back() == '\r') name.pop_back();
+        if (name.empty()) continue;
+        const fs::path filename = lubancode::platform::Utf8ToPath(name);
+        if (filename != filename.filename()) throw std::runtime_error("Invalid runtime DLL name: " + name);
+        files.push_back(ZipEntry{name, 0100644, ReadFile(exe.parent_path() / filename)});
+    }
+    if (list.bad()) throw std::runtime_error("Updater runtime dependency list could not be read");
+    return files;
+}
+#endif
+
 }  // namespace
 
 TEST_CASE("engine.probe:真 EXE 探针 + 真主程序端到端更新") {
@@ -1234,7 +1255,7 @@ TEST_CASE("engine.probe:真 EXE 探针 + 真主程序端到端更新") {
 
     // 探针:无期望版本只认 "lubancode " 头;拿到真版本再精确对。
     const auto headed = lubancode::updater::ProbeExe(fs::path(exe));
-    REQUIRE(headed.ok);
+    REQUIRE_MESSAGE(headed.ok, headed.detail);
     CHECK(headed.detail.rfind("lubancode ", 0) == 0);
     const std::string version = headed.detail.substr(std::strlen("lubancode "));
     REQUIRE_FALSE(version.empty());
@@ -1254,6 +1275,15 @@ TEST_CASE("engine.probe:真 EXE 探针 + 真主程序端到端更新") {
         return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     }();
     const std::string rg_bytes = "#!fake ripgrep\n";
+    std::vector<ZipEntry> package_files{
+        ZipEntry{kExeName, 0100755, exe_bytes},
+        ZipEntry{RgPath(), 0100755, rg_bytes},
+    };
+#ifdef _WIN32
+    for (auto& file : MainExeRuntimeFiles(lubancode::platform::Utf8ToPath(exe))) {
+        package_files.push_back(std::move(file));
+    }
+#endif
 
     nlohmann::json manifest = nlohmann::json::object();
     manifest["schema"] = 1;
@@ -1262,27 +1292,25 @@ TEST_CASE("engine.probe:真 EXE 探针 + 真主程序端到端更新") {
     manifest["platform"] = "test-x64";
     manifest["channel"] = "stable";
     manifest["algo"] = "sha256";
-    manifest["file_count"] = 2;
-    manifest["files"] = nlohmann::json::array({
-        nlohmann::json{{"path", kExeName},
-                       {"size", exe_bytes.size()},
-                       {"sha256", lubancode::platform::Sha256Hex(exe_bytes)}},
-        nlohmann::json{{"path", RgPath()},
-                       {"size", rg_bytes.size()},
-                       {"sha256", lubancode::platform::Sha256Hex(rg_bytes)}},
-    });
-    const std::string zip = BuildStoredZip({
-        ZipEntry{"manifest.json", 0100644, lubancode::updater::CanonicalJsonDump(manifest)},
-        ZipEntry{kExeName, 0100755, exe_bytes},
-        ZipEntry{RgPath(), 0100755, rg_bytes},
-    });
+    manifest["file_count"] = package_files.size();
+    manifest["files"] = nlohmann::json::array();
+    for (const auto& file : package_files) {
+        manifest["files"].push_back(nlohmann::json{{"path", file.name},
+                                                  {"size", file.data.size()},
+                                                  {"sha256", lubancode::platform::Sha256Hex(file.data)}});
+    }
+    auto archive_entries = package_files;
+    archive_entries.insert(archive_entries.begin(),
+        ZipEntry{"manifest.json", 0100644, lubancode::updater::CanonicalJsonDump(manifest)});
+    const std::string zip = BuildStoredZip(archive_entries);
     const std::string digest_hex = lubancode::platform::Sha256Hex(zip);
     const std::string dirname = version + "-" + digest_hex.substr(0, 8);
     const fs::path archive = root.parent_path() / (root.filename().string() + "-real.zip");
     WriteFile(archive, zip);
 
     Lines out;
-    CHECK(RunUpdaterEngine(UpdateArgs(root, archive, version, digest_hex), out.sink(), nullptr) == 0);
+    const int update_result = RunUpdaterEngine(UpdateArgs(root, archive, version, digest_hex), out.sink(), nullptr);
+    CHECK_MESSAGE(update_result == 0, out.joined());
     CHECK(out.contains("[commit] " + version + " 已上线"));
     const auto pointer = ReadJson(root / "current.json");
     REQUIRE(pointer.has_value());
@@ -1291,5 +1319,9 @@ TEST_CASE("engine.probe:真 EXE 探针 + 真主程序端到端更新") {
     REQUIRE(state.has_value());
     CHECK((*state)["version"] == version);
     CHECK(ReadFile(root / "versions" / dirname / kExeName) == exe_bytes);
+    for (const auto& file : package_files) {
+        CHECK_MESSAGE(ReadFile(root / "versions" / dirname / lubancode::platform::Utf8ToPath(file.name)) == file.data,
+                      file.name);
+    }
     CHECK(LedgerField(LedgerFiles(root)[0], "state") == std::optional<std::string>("committed"));
 }

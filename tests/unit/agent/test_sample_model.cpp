@@ -520,3 +520,35 @@ TEST_CASE("bounded auxiliary sampling refuses an overriding output cap") {
     CHECK(result.error.api_code == "output_limit_unenforceable");
     CHECK(backend.calls == 0);
 }
+
+#include "sample_lifetime_checks.hpp"
+namespace {
+sample_lifetime_fixture::Port EnginePort() {
+    return {lubancode::agent::SampleModel,
+            lubancode::agent::testing::ReplaceWatchdogHooks,"cli-engine"};
+}
+}
+
+TEST_CASE("Sampling lifetime: Startup in actual CLI engine") {
+    sample_lifetime_fixture::Startup(EnginePort());
+}
+
+TEST_CASE("Sampling lifetime: Exceptions in actual CLI engine") {
+    sample_lifetime_fixture::Exceptions(EnginePort());
+}
+
+TEST_CASE("Sampling lifetime: Preflight in actual CLI engine") {
+    sample_lifetime_fixture::Preflight(EnginePort());
+}
+
+TEST_CASE("Sampling lifetime: Gates in actual CLI engine") {
+    sample_lifetime_fixture::Gates(EnginePort());
+}
+
+TEST_CASE("Sampling lifetime: Isolation in actual CLI engine") {
+    sample_lifetime_fixture::Isolation(EnginePort());
+}
+
+TEST_CASE("Sampling lifetime: Cancellation in actual CLI engine") {
+    sample_lifetime_fixture::Cancellation(EnginePort());
+}

@@ -192,7 +192,7 @@ struct Wiring {
         tools::AgentTool::Hooks hooks;
         hooks.on_tool_trace = [this](const agent::ToolTraceEvent& event) { hub.OnTrace(event); };
         hooks.trajectory_spawn = [this](const std::string& task_label, const std::string& parent_run_id,
-                                        SubagentSpawnFailure* failure_out) {
+                                        SubagentSpawnFailure* failure_out, runtime::SubagentDispatchMode) {
             const std::string parent_call_id = hub.current_agent_call_id();
             auto child = ledger->SpawnSubagent(parent_call_id, task_label, parent_run_id);
             if (!child.has_value()) {
@@ -208,8 +208,8 @@ struct Wiring {
             }
             return std::move(*child);
         };
-        hooks.trajectory_child_finished = [this](const std::string& run_id, const std::string& hash) {
-            main_bridge->NoteChildTerminal(run_id, hash);
+        hooks.trajectory_child_finished = [this](const SubagentTerminalReceipt& receipt) {
+            main_bridge->NoteChildTerminal(receipt);
         };
         tool = std::make_unique<tools::AgentTool>(backend, sub_registry, "/work/dir");
         tool->SetHooks(std::move(hooks));

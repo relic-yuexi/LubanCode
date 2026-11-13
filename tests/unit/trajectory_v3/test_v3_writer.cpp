@@ -8,6 +8,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -60,6 +61,71 @@ std::vector<std::string> ReadLines(const std::filesystem::path& path) {
 }
 
 }  // namespace
+
+TEST_CASE("V3Writer: effective host binding survives switches and Continue") {
+    Harness harness("host-bindings");
+    const nlohmann::json bindings{{"skills", {{"schemaVersion", 1}, {"sha256", "plan-a"}}}};
+    auto writer = V3Writer::Start(harness.jsonl, "20260910-120000-AAAAAA", "run-000001",
+        "original", {{"settingsVersion", 7}, {"hostBindings", bindings}, {"initialOnly", "old"}});
+    REQUIRE(writer.has_value());
+    const auto first_root = writer->context().system_message_ref;
+    const auto switched = writer->SwitchSystem("replacement",
+        {{"cause", "system_prompt_changed"}, {"settingsVersion", 8}, {"systemChanged", true},
+         {"hostBindings", {{"skills", "caller-must-not-replace"}}}});
+    REQUIRE(switched.change_event.status == WriteReceipt::Status::Committed);
+    REQUIRE(switched.system_message.status == WriteReceipt::Status::Committed);
+    REQUIRE(switched.apply_event.status == WriteReceipt::Status::Committed);
+    auto rows = ReadLines(harness.jsonl);
+    REQUIRE(rows.size() == 5);
+    const auto change = nlohmann::json::parse(rows[2]);
+    const auto system = nlohmann::json::parse(rows[3]);
+    const auto applied = nlohmann::json::parse(rows[4]);
+    CHECK(change["payload"]["oldSystemMessageRef"] == first_root);
+    CHECK(change["payload"]["hostBindings"] == bindings);
+    CHECK(system["systemMeta"]["hostBindings"] == bindings);
+    CHECK(system["systemMeta"]["settingsVersion"] == 8);
+    CHECK(system["systemMeta"]["cause"] == "system_prompt_changed");
+    CHECK_FALSE(system["systemMeta"].contains("initialOnly"));
+    CHECK(applied["payload"]["hostBindings"] == bindings);
+    REQUIRE(writer->Close().has_value());
+    auto continued = V3Writer::Continue(harness.jsonl);
+    REQUIRE(continued.has_value());
+    const auto next = continued->SwitchSystem("third",
+        {{"cause", "system_prompt_changed"}, {"settingsVersion", 9}, {"systemChanged", true}});
+    REQUIRE(next.apply_event.status == WriteReceipt::Status::Committed);
+    rows = ReadLines(harness.jsonl);
+    REQUIRE(rows.size() == 8);
+    CHECK(nlohmann::json::parse(rows[6])["systemMeta"]["hostBindings"] == bindings);
+    CHECK(nlohmann::json::parse(rows[6])["systemMeta"]["settingsVersion"] == 9);
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
+
+TEST_CASE("V3Writer: an unadopted system cannot supply host bindings") {
+    Harness harness("unadopted-host-bindings");
+    const nlohmann::json bindings{{"skills", "adopted-plan"}};
+    auto writer = V3Writer::Start(harness.jsonl, "20260910-120000-AAAAAA", "run-000001",
+        "adopted", {{"settingsVersion", 1}, {"hostBindings", bindings}});
+    REQUIRE(writer.has_value());
+    const auto adopted_id = writer->context().system_message_ref;
+    MessageDraft pending;
+    pending.origin = MessageOrigin::SessionRuntime;
+    pending.message = {{"role", "system"}, {"content", "unadopted"}};
+    pending.system_meta = nlohmann::json{{"cause", "initial"}, {"changeEventRef", nullptr},
+        {"systemChanged", false}, {"settingsVersion", 99},
+        {"hostBindings", {{"skills", "unadopted-plan"}}}};
+    REQUIRE(writer->AppendMessage(std::move(pending), Durability::PowerLoss).status == WriteReceipt::Status::Committed);
+    REQUIRE(writer->Close().has_value());
+    auto continued = V3Writer::Continue(harness.jsonl);
+    REQUIRE(continued.has_value());
+    REQUIRE(continued->context().system_message_ref == adopted_id);
+    REQUIRE(continued->SwitchSystem("next", {{"cause", "system_prompt_changed"},
+        {"settingsVersion", 2}, {"systemChanged", true}}).apply_event.status == WriteReceipt::Status::Committed);
+    const auto rows = ReadLines(harness.jsonl);
+    REQUIRE(rows.size() == 6);
+    CHECK(nlohmann::json::parse(rows[3])["payload"]["oldSystemMessageRef"] == adopted_id);
+    CHECK(nlohmann::json::parse(rows[4])["systemMeta"]["hostBindings"] == bindings);
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
 
 TEST_CASE("开卷:首行 system,seq=1,turnId=null,不造空回合") {
     Harness harness("start");
@@ -118,6 +184,57 @@ TEST_CASE("哈希链承继 v2:衔接、确定性、VerifyV3File 全绿") {
     // 再开一次同路径的卷:create-new 拒绝。
     auto again = V3Writer::Start(harness.jsonl, "x", "y", "z");
     CHECK(!again.has_value());
+}
+
+TEST_CASE("关柄:保留只读身份,拒绝迟到提交,对象存活时也能改名续接") {
+    Harness harness("close");
+    auto writer = harness.Start();
+    REQUIRE(writer.has_value());
+    const auto before = ReadLines(harness.jsonl);
+    const auto next_seq = writer->next_seq();
+    const std::string last_hash = writer->last_line_hash();
+    const std::string system_id = writer->context().system_message_ref;
+
+    REQUIRE(writer->Close().has_value());
+    REQUIRE(writer->Close().has_value());  // 重复关闭不碰已释放的句柄。
+    CHECK_FALSE(writer->broken());
+    CHECK(writer->path() == harness.jsonl);
+    CHECK(writer->session_id() == "20260910-120000-AAAAAA");
+    CHECK(writer->run_id() == "run-000001");
+    CHECK(writer->context().system_message_ref == system_id);
+    CHECK(writer->HasMessageId(system_id));
+
+    MessageDraft user;
+    user.turn_id = "turn-000001";
+    user.purpose = MessagePurpose::Conversation;
+    user.origin = MessageOrigin::Human;
+    user.message = nlohmann::json{{"role", "user"}, {"content", "迟到输入"}};
+    const auto late_message = writer->AppendMessage(user, Durability::PowerLoss);
+    CHECK(late_message.status == WriteReceipt::Status::Rejected);
+    CHECK(late_message.error_code == "v3writer.closed");
+    EventDraft late;
+    late.kind = EventKindV3::SessionEnded;
+    late.payload = nlohmann::json{{"reason", "exit"}, {"closeQuality", "clean"}};
+    const auto late_event = writer->AppendEvent(std::move(late), Durability::PowerLoss);
+    CHECK(late_event.status == WriteReceipt::Status::Rejected);
+    CHECK(late_event.error_code == "v3writer.closed");
+    CHECK(writer->next_seq() == next_seq);
+    CHECK(writer->last_line_hash() == last_hash);
+    CHECK(writer->context().revision == 1);
+    CHECK(ReadLines(harness.jsonl) == before);
+
+    // Windows 不允许改名仍被写句柄占用的文件;这里故意不析构 writer。
+    const auto moved = harness.dir / "closed.jsonl";
+    std::error_code ec;
+    std::filesystem::rename(harness.jsonl, moved, ec);
+    INFO(ec.message());
+    REQUIRE_FALSE(ec);
+    auto continued = V3Writer::Continue(moved);
+    REQUIRE(continued.has_value());
+    const auto accepted = continued->AppendMessage(std::move(user), Durability::PowerLoss);
+    CHECK(accepted.status == WriteReceipt::Status::Committed);
+    CHECK(accepted.seq == next_seq);
+    CHECK(VerifyV3File(moved).ok);
 }
 
 TEST_CASE("prepared:引用先落稳才许落,空缺引用拒收") {

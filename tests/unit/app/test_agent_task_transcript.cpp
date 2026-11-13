@@ -10,11 +10,13 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <chrono>
 #include <expected>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -195,7 +197,12 @@ TEST_CASE("端到端:TaskTranscriptLines 的工具顶格、留口气,展开档�
     StubBackend backend;
     tools::ToolRegistry registry;
     auto agent_tool = std::make_unique<tools::AgentTool>(backend, registry, "/work/dir");
-    auto task = agent_tool->ledger().Register(tools::AgentTaskSnapshot{});
+    // 这场直写已完成结果，没有活执行。固定终态时间，重复看图不借运行中活钟。
+    tools::AgentTaskSnapshot completed;
+    completed.state = tools::AgentTaskState::Done;
+    completed.start_time = std::chrono::steady_clock::time_point{std::chrono::seconds(1)};
+    completed.end_time = completed.start_time + std::chrono::seconds(2);
+    auto task = agent_tool->ledger().Register(std::move(completed));
     task->snapshot.agent_type = "general-purpose";
     task->snapshot.title = "查构建";
     task->snapshot.prompt = "查一下构建";

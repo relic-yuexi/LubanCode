@@ -31,7 +31,10 @@
 #pragma once
 
 #include <expected>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -102,6 +105,41 @@ struct AtomicWriteReceipt {
 std::expected<AtomicWriteReceipt, AtomicWriteError> AtomicWriteFile(
     const std::filesystem::path& target, std::string_view bytes,
     WriteDurability durability = WriteDurability::AtomicVisibility);
+
+// Internal create-new publication. Native observations never borrow handles.
+// A controlled flush refusal is separate from an attempted OS call/result.
+enum class ImmutableErrorDomain { None, Errno, Win32 };
+struct ImmutableIoObservation {
+    bool attempted = false, succeeded = false, injected_failure = false;
+    std::optional<std::int64_t> result;
+    std::size_t requested_bytes = 0, written_bytes = 0;
+    ImmutableErrorDomain error_domain = ImmutableErrorDomain::None;
+    std::int64_t native_error = 0;
+    bool operator==(const ImmutableIoObservation&) const = default;
+};
+struct ImmutableWriteReceipt {
+    WriteDurability requested = WriteDurability::AtomicVisibility;
+    WriteOutcome outcome = WriteOutcome::NotCommitted;
+    std::filesystem::path target, temporary, confirmed_parent;
+    // This call confirms the file and its immediate parent only, not namespace
+    // establishment of a newly created ancestor chain.
+    bool ancestor_chain_confirmed = false;
+    ImmutableIoObservation temp_open, body, flush, file_sync, file_close;
+    ImmutableIoObservation publish, parent_open, parent_sync, parent_close, cleanup;
+    std::string error_code, message;
+    bool operator==(const ImmutableWriteReceipt&) const = default;
+    bool ok() const noexcept {
+        return error_code.empty() && (outcome == WriteOutcome::CommittedDurabilityNotRequested ||
+                                     outcome == WriteOutcome::CommittedDurable);
+    }
+};
+
+// Parent must already be a directory. Creates an exclusive same-directory temp,
+// then link/MoveFileEx without replace-existing. No readback, retries or target
+// deletion. A thrown call has no returned witness and must be treated as unknown.
+// File/parent handles are closed synchronously before the returned receipt.
+ImmutableWriteReceipt CreateImmutableFileDetailed(const std::filesystem::path& target,
+    std::string_view bytes, WriteDurability durability = WriteDurability::ProcessCrashDurability);
 
 // ---- 测试注入面(仅 tests/ 使用,生产代码不得调用) -------------------------
 // 失败注入分阶段(FD-04 验收):注入只替代对应的真实刷盘动作,其余阶段照

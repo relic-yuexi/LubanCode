@@ -19,9 +19,11 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -61,6 +63,8 @@ public:
     // 出站(假 sidecar -> app-server)的落点:由夹具绑到
     // BrowserService::OnSidecarLine。
     std::function<void(const std::string&)> feed;
+    // Set before starting the action worker. Existing tests keep manual replies.
+    bool acknowledge_cancellation = false;
 
     bool WriteLine(const std::string& line) override {
         nlohmann::json message;
@@ -74,8 +78,15 @@ public:
         }
         const std::string method = message.value("method", std::string());
         if (method == "cancelled") {
-            std::lock_guard<std::mutex> lock(mutex_);
-            cancelled_requests.push_back(message["params"].value("requestId", std::int64_t{0}));
+            const auto request_id = message["params"].value("requestId", std::int64_t{0});
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                cancelled_requests.push_back(request_id);
+            }
+            cv_.notify_all();
+            if (acknowledge_cancellation) {
+                Respond(request_id, nlohmann::json{{"cancelled", true}, {"code", "browser.cancelled"}});
+            }
             return true;
         }
         if (!message.contains("id")) {
@@ -86,6 +97,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             requests.push_back(message);
         }
+        cv_.notify_all();
         Handler handler;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -148,9 +160,24 @@ public:
         return cancelled_requests;
     }
 
+    bool WaitForRequest(const std::string& method) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(5), [&] {
+            return std::any_of(requests.begin(), requests.end(), [&](const auto& request) {
+                return request.value("method", std::string()) == method;
+            });
+        });
+    }
+
+    bool WaitForCancellation() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(5), [&] { return !cancelled_requests.empty(); });
+    }
+
 private:
     std::atomic<bool> alive_{true};
     mutable std::mutex mutex_;
+    std::condition_variable cv_;
     std::map<std::string, Handler> handlers;
     std::vector<nlohmann::json> requests;
     std::vector<std::int64_t> cancelled_requests;
@@ -175,7 +202,8 @@ struct BrowserHarness {
 
     // screencast_queue_capacity:0 = 用 BrowserService 缺省(8);测试想逼出
     // "慢消费者丢帧"时传个小数,确定性地撞满。
-    explicit BrowserHarness(int screencast_queue_capacity = 0) {
+    explicit BrowserHarness(int screencast_queue_capacity = 0,
+                            app_server::Server::BackendFactory backend_factory = {}) {
         // 截图 artifact 落临时目录(测试自己收尾)。
         const std::filesystem::path temp = std::filesystem::temp_directory_path() /
                                            ("lubancode-browser-test-" +
@@ -184,12 +212,13 @@ struct BrowserHarness {
         artifact_dir = platform::PathToUtf8(temp);
 
         app_server::ServerOptions options;
-        options.cwd = "/test/cwd";
+        options.cwd = backend_factory ? artifact_dir : "/test/cwd";
+        if (backend_factory) options.session_model = "browser-shutdown-test";
         options.browser_sidecar_command = "node"; // 有命令才会走 EnsureSidecar 的成功路(测试注入 transport 后不 spawn)
         options.browser_artifact_dir = artifact_dir;
         options.browser_screencast_queue_capacity = screencast_queue_capacity;
-        server = std::make_unique<app_server::Server>(
-            std::move(options), []() -> std::unique_ptr<api::Backend> { return nullptr; }, nullptr);
+        if (!backend_factory) backend_factory = []() -> std::unique_ptr<api::Backend> { return nullptr; };
+        server = std::make_unique<app_server::Server>(std::move(options), std::move(backend_factory), nullptr);
         server->browser_service().AttachTransportForTest(&sidecar);
         sidecar.feed = [this](const std::string& line) { server->browser_service().OnSidecarLine(line); };
         // 假连接:writer 收行,reader 恒 EOF(测试手动驱动 ProcessLine)。
@@ -263,7 +292,7 @@ struct BrowserHarness {
         for (const std::string& line : io.written) {
             const nlohmann::json parsed = nlohmann::json::parse(line);
             if (parsed.contains("method") && parsed["method"] == method) {
-                return parsed;
+                return std::optional<nlohmann::json>{std::in_place, parsed};
             }
         }
         return std::nullopt;
@@ -286,7 +315,7 @@ struct BrowserHarness {
         for (const std::string& line : io.written) {
             const nlohmann::json parsed = nlohmann::json::parse(line);
             if (parsed.contains("id") && parsed["id"] == id) {
-                return parsed;
+                return std::optional<nlohmann::json>{std::in_place, parsed};
             }
         }
         return std::nullopt;
@@ -299,7 +328,7 @@ struct BrowserHarness {
             const nlohmann::json parsed = nlohmann::json::parse(line);
             if (parsed.value("method", std::string()) == "browser/action/completed" &&
                 parsed["params"].value("actionId", std::string()) == action_id) {
-                return parsed;
+                return std::optional<nlohmann::json>{std::in_place, parsed};
             }
         }
         return std::nullopt;
@@ -332,7 +361,7 @@ struct BrowserHarness {
                 if (parsed.value("method", std::string()) == "permission/request") {
                     const std::string rid = parsed["params"].value("requestId", std::string());
                     if (std::find(answered.begin(), answered.end(), rid) == answered.end()) {
-                        return parsed;
+                        return std::optional<nlohmann::json>{std::in_place, parsed};
                     }
                 }
             }
@@ -647,6 +676,72 @@ TEST_CASE("取消:sidecar 在飞时取消,cancelled 通知真发到 sidecar") {
     // cancelled 通知确实发给了 sidecar(TakeCancellations 被上面的 handler
     // 消费过一次——重取非空与否不定,这里钉 handler 的退出路径即可)。
     CHECK((*completed)["params"]["error"]["code"] == "browser.cancelled");
+}
+
+TEST_CASE("browser shutdown: request cancellation still requires joining owned workers") {
+    BrowserHarness harness;
+    harness.sidecar.acknowledge_cancellation = true;
+    // No action handler: the request stays in flight until the cancellation
+    // notice is acknowledged. The observed request is our execution barrier.
+    harness.Feed(R"({"id":551,"method":"browser/action","params":{"kind":"wait","ms":60000,"timeoutMs":60000}})");
+    const auto response = harness.FindResponse(551);
+    REQUIRE(response.has_value());
+    REQUIRE(response->contains("result"));
+    const auto action_id = (*response)["result"]["actionId"].get<std::string>();
+    REQUIRE(harness.sidecar.WaitForRequest("action"));
+
+    harness.server->browser_service().RequestShutdown();
+    REQUIRE(harness.sidecar.WaitForCancellation());
+    harness.server->browser_service().Shutdown();
+    CHECK(harness.server->browser_service().active_action_count() == 0);
+    const auto completed = harness.FindActionCompleted(action_id);
+    REQUIRE(completed.has_value());
+    CHECK((*completed)["params"]["cancelled"] == true);
+    // Leaving scope calls Shutdown again. Skipping the join because the earlier
+    // request set the stop flag would destroy a joinable std::thread here.
+}
+
+TEST_CASE("server shutdown: browser cancellation precedes joining a waiting Agent") {
+    struct State {
+        FakeSidecar* sidecar = nullptr;
+        std::promise<void> entered;
+        std::atomic<bool> saw_browser_cancellation{false};
+    };
+    class AwaitBrowserCancellation final : public api::Backend {
+    public:
+        explicit AwaitBrowserCancellation(State& state) : state_(state) {}
+        std::expected<void, api::Error> send_stream(
+            const api::Request&, const std::function<void(const api::StreamEvent&)>&,
+            const std::atomic<bool>*) override {
+            state_.entered.set_value();
+            // Bounded only to turn an inverted shutdown order into a test
+            // failure rather than hang CI. Progress is driven by a real notice.
+            state_.saw_browser_cancellation.store(state_.sidecar->WaitForCancellation());
+            return std::unexpected(api::Error{api::ErrorKind::Cancelled, "shutdown"});
+        }
+    private:
+        State& state_;
+    };
+    State state;
+    auto entered = state.entered.get_future();
+    BrowserHarness harness(0, [&] { return std::make_unique<AwaitBrowserCancellation>(state); });
+    state.sidecar = &harness.sidecar;
+    harness.sidecar.acknowledge_cancellation = true;
+    // This user-owned action has no threadId. Per-thread cancellation alone
+    // cannot release the dependency; shutdown must signal the whole domain.
+    harness.Feed(R"({"id":552,"method":"browser/action","params":{"kind":"wait","ms":60000,"timeoutMs":60000}})");
+    REQUIRE(harness.sidecar.WaitForRequest("action"));
+    std::string error;
+    const auto start = harness.server->HandleThreadStart(nlohmann::json::object(), error);
+    REQUIRE(error.empty());
+    const auto accepted = harness.server->AcceptTurnStart(start["threadId"], "wait for browser", {}, error);
+    REQUIRE(error.empty());
+    REQUIRE(accepted.is_object());
+    REQUIRE(entered.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+
+    harness.server->Shutdown();
+    CHECK(state.saw_browser_cancellation.load());
+    CHECK(harness.server->browser_service().active_action_count() == 0);
 }
 
 TEST_CASE("取消:动作收口后再取消报 stale") {

@@ -13,6 +13,7 @@
 #include <thread>
 
 #include "memory/internal.hpp"
+#include "memory/project_commit.hpp"
 #include "memory/topic_store.hpp"  // store::ProcessUpsert/Forget/Verify
 #include "platform/process.hpp"
 #include "trajectory/safety.hpp"   // P0-4:全局目录 user-only 收紧
@@ -22,6 +23,15 @@ namespace lubancode::memory::queue {
 namespace {
 
 namespace fs = std::filesystem;
+
+std::string ProjectCommitError(const ProjectCommitReceipt& receipt) {
+    if (receipt.state == ProjectCommitState::Committed) return {};
+    if (receipt.state == ProjectCommitState::Indeterminate) {
+        return "memory.commit.indeterminate: 部分写入/结果未确认，不能自动重试; " +
+               receipt.error_code + ": " + receipt.error;
+    }
+    return receipt.error_code + ": " + receipt.error;
+}
 
 // 只读探测 worker.lock 是否被持有(SV-01):与 OwnerLock::TryAcquire 共用
 // 同一份身份裁决——持有者活着就在,不认 mtime 年龄,活 worker 干满三十秒
@@ -103,13 +113,8 @@ std::expected<void, std::string> WriteMemorySaveResult(const fs::path& lifecycle
 // 回执读取(收执侧/重试侧共用):committed = outcome 有 committed_at 且无
 // stable_error_code;failed = outcome 带 stable_error_code。status 恒为
 // completed(指这枚回执落齐了,不是指业务成功)。
-struct MemorySaveReceipt {
-    bool exists = false;
-    bool committed = false;
-    std::string error;
-    std::string memory_id;
-    std::string workspace_key;
-};
+}  // namespace
+
 MemorySaveReceipt ReadMemorySaveReceipt(const fs::path& lifecycle_root, const std::string& operation_id) {
     MemorySaveReceipt receipt;
     const fs::path result_path = lifecycle_root / Utf8Path(operation_id) / "result.json";
@@ -123,6 +128,14 @@ MemorySaveReceipt ReadMemorySaveReceipt(const fs::path& lifecycle_root, const st
     }
     if (!result.is_object()) return receipt;
     receipt.exists = true;
+    if (result.contains("commit_schema")) {
+        const auto confirmed = ConfirmProjectCommitReceipt(lifecycle_root, operation_id);
+        receipt.workspace_key = confirmed.workspace_key;
+        receipt.committed = confirmed.state == ProjectCommitState::Committed;
+        receipt.memory_id = confirmed.memory_id;
+        receipt.error = ProjectCommitError(confirmed);
+        return receipt;
+    }
     receipt.workspace_key = result.value("workspace_key", std::string());
     const nlohmann::json outcome =
         result.contains("outcome") && result["outcome"].is_object() ? result["outcome"] : nlohmann::json::object();
@@ -136,6 +149,8 @@ MemorySaveReceipt ReadMemorySaveReceipt(const fs::path& lifecycle_root, const st
     }
     return receipt;
 }
+
+namespace {
 
 // ---- /memory jobs 的台账小工具 ----
 
@@ -467,6 +482,20 @@ std::expected<void, std::string> ProcessJob(const fs::path& job_path,
     const fs::path lifecycle_root = LifecycleRootForMemoryDir(memory_dir, home_lubancode);
     const std::string operation_id =
         "memsave-" + PathUtf8(job_path.filename().replace_extension());
+    if (!user_job && job.value("operation", std::string()) == "upsert") {
+        auto request = store::ParseUpsertJob(job, true);
+        if (!request) return std::unexpected(request.error());
+        ProjectCommitContext context;
+        context.project_root = project_root;
+        context.memory_directory = memory_dir;
+        context.lifecycle_root = lifecycle_root;
+        context.workspace_key = job.value("workspace_key", std::string());
+        context.operation_id = operation_id;
+        context.source_event_ref = job.value("source_event_ref", std::string());
+        const auto committed = CommitProjectUpsert(context, *request);
+        if (committed.state == ProjectCommitState::Committed) return {};
+        return std::unexpected(ProjectCommitError(committed));
+    }
     if (!lifecycle_root.empty()) {
         const auto existing = ReadMemorySaveReceipt(lifecycle_root, operation_id);
         if (existing.committed) {
@@ -778,7 +807,16 @@ std::vector<ProjectMemory::MemoryWriteCompletion> MemoryWriteQueue::DrainWriteCo
             const nlohmann::json outcome = result.contains("outcome") && result["outcome"].is_object()
                                                ? result["outcome"]
                                                : nlohmann::json::object();
-            if (outcome.contains("stable_error_code")) {
+            if (result.contains("commit_schema")) {
+                const auto confirmed = ConfirmProjectCommitReceipt(item.lifecycle_root, item.operation_id);
+                if (confirmed.state == ProjectCommitState::Committed) {
+                    completion.outcome = "committed";
+                    completion.memory_id = confirmed.memory_id;
+                } else {
+                    completion.outcome = "failed";
+                    completion.error = ProjectCommitError(confirmed);
+                }
+            } else if (outcome.contains("stable_error_code")) {
                 completion.outcome = "failed";
                 completion.error = outcome.value("error", outcome.value("stable_error_code", std::string("unknown")));
             } else if (outcome.contains("committed_at")) {

@@ -1,9 +1,33 @@
+# One testing-only, standard-library executable serves CLI-only, SDK-only and
+# combined fixtures. No library links or install rule belong to this target.
+add_executable(lubancore_command_limits_probe support/command_limits_probe.cpp)
+target_compile_features(lubancore_command_limits_probe PRIVATE cxx_std_23)
+set_target_properties(lubancore_command_limits_probe PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+if(MSVC)
+  set_property(TARGET lubancore_command_limits_probe PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
+
+if(NOT LUBANCODE_BUILD_CLI)
+  if(LUBANCODE_BUILD_SDK)
+    include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
+  endif()
+  return()
+endif()
+
 # 测试源码按“种类/领域”落位。目录便是清单：添一册 test_*.cpp，
 # CMake 会自动编进总测试二进制，并另登一条可单跑的 CTest。
 file(GLOB_RECURSE LUBANCODE_TEST_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/unit/*/test_*.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/integration/*/test_*.cpp")
 list(SORT LUBANCODE_TEST_SOURCES)
+if(NOT LUBANCODE_BUILD_SDK)
+  list(FILTER LUBANCODE_TEST_SOURCES EXCLUDE REGEX "/(unit|integration)/sdk/")
+endif()
+# This source gets its own CLI-only executable below. Keep the Runner client
+# edge out of the App/SDK aggregate, including when both hosts are enabled.
+list(FILTER LUBANCODE_TEST_SOURCES EXCLUDE REGEX "/unit/job_runner/test_runner_release_diagnostic\\.cpp$")
 
 # glob 兜底(2026-08-28):examples 域的册在主树 configure 偶发漏收
 # (同 cmake 同 pattern 的独立项目能收,工头 worktree 也能收;增量与全新
@@ -59,6 +83,11 @@ endforeach()
 list(LENGTH LUBANCODE_TEST_SOURCES LUBANCODE_TEST_SOURCE_COUNT)
 message(STATUS "lubancode: 收录 ${LUBANCODE_TEST_SOURCE_COUNT} 册测试")
 
+set(LUBANCODE_TEST_COMPILE_SOURCES "${LUBANCODE_TEST_SOURCES}")
+if(LUBANCODE_ASAN_TEST_PROFILE)
+  include("${CMAKE_SOURCE_DIR}/cmake/LubanCodeAsanTests.cmake")
+endif()
+
 add_executable(lubancode_tests
   support/main.cpp
   support/api_fixture.cpp
@@ -74,15 +103,53 @@ add_executable(lubancode_tests
   # 多渠道消息接入单阶段 1:纯内存 Channel Bridge v1 假 sidecar,供
   # tests/unit/channel 冒烟测试与未来真渠道适配器 conformance suite 复用。
   support/fake_channel_sidecar.cpp
-  ${LUBANCODE_TEST_SOURCES}
+  ${LUBANCODE_TEST_COMPILE_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCORE_TEST_COMMAND_LIMITS_PROBE="$<TARGET_FILE:lubancore_command_limits_probe>")
+add_dependencies(lubancode_tests lubancore_command_limits_probe)
+if(TARGET luban_job_runner_client)
+  # Use the same production Process owner without adding its platform objects
+  # to the App/SDK aggregate. SDK-only and Runner-only return before this block.
+  add_executable(luban_runner_release_tests
+    support/main.cpp
+    unit/job_runner/test_runner_release_diagnostic.cpp)
+  target_link_libraries(luban_runner_release_tests PRIVATE luban_job_runner_client doctest::doctest)
+  target_compile_features(luban_runner_release_tests PRIVATE cxx_std_23)
+  add_test(NAME unit.job_runner.runner_release_diagnostic
+    COMMAND luban_runner_release_tests "--source-file=*test_runner_release_diagnostic.cpp")
+  set_tests_properties(unit.job_runner.runner_release_diagnostic PROPERTIES
+    LABELS "unit;job_runner;unit.job_runner" TIMEOUT 180
+    ENVIRONMENT "LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS=0")
+endif()
+if(LUBANCODE_BUILD_SDK)
+  target_link_libraries(lubancode_tests PRIVATE lubancore_sdk)
+  target_compile_definitions(lubancode_tests PRIVATE LUBANCORE_TEST_MODEL_SAMPLING=1)
+  # Scoped pending/reference tests call private implementation symbols. Compile
+  # the real source locally rather than exporting a new private SDK DLL ABI.
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/approval.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/memory.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/action_dispatch.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/operation_ledger.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/job_operations.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/adapters.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/command_jobs.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/command_jobs_opening.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/named_results.cpp")
+  if(WIN32)
+    add_custom_command(TARGET lubancode_tests POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_RUNTIME_DLLS:lubancode_tests> $<TARGET_FILE_DIR:lubancode_tests>
+      COMMAND_EXPAND_LISTS)
+  endif()
+endif()
 # QQ 机器人接入单 Q1:mock WS/TLS 服务端夹具直接用 mbedTLS(服务端握手与
 # 自签证书生成),engine 对 mbedtls 是 PRIVATE 链,这里显式补上(include
 # 路径随 target 的 PUBLIC usage 递)。
 target_link_libraries(lubancode_tests PRIVATE mbedtls)
 # 更新器 C++ 化批一第③单:miniz 冒烟册(tests/unit/updater)直接用
-# mz_zip_writer/mz_zip_reader 造一枚 zip 再读回——engine 对 miniz 是
+# mz_zip_writer/mz_zip_reader 造一枚 zip 再读回——updater 对 miniz 是
 # PRIVATE 链,这里照 mbedTLS 的先例显式补上。
 target_link_libraries(lubancode_tests PRIVATE miniz)
 # 批二余款:测试共用的回合事件录音器(Callbacks 显示回调退役,观察点
@@ -215,6 +282,37 @@ target_compile_features(updater_probe_stub PRIVATE cxx_std_23)
 add_dependencies(lubancode_tests updater_probe_stub)
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_UPDATER_PROBE_STUB_EXE="$<TARGET_FILE:updater_probe_stub>")
+
+# The real updater fixture must carry the EXE's actual app-local PE closure.
+# Scan after building the EXE; unrelated DLLs beside it do not belong in its ZIP.
+if(WIN32)
+  if(MSVC)
+    get_filename_component(_updater_linker_dir "${CMAKE_LINKER}" DIRECTORY)
+    find_program(_updater_pe_command NAMES dumpbin HINTS "${_updater_linker_dir}" REQUIRED)
+    set(_updater_pe_tool "dumpbin")
+  else()
+    if(NOT CMAKE_OBJDUMP)
+      message(FATAL_ERROR "Windows updater fixture requires a PE dependency inspector")
+    endif()
+    set(_updater_pe_command "${CMAKE_OBJDUMP}")
+    set(_updater_pe_tool "objdump")
+  endif()
+  set(_updater_runtime_list "${CMAKE_CURRENT_BINARY_DIR}/updater-runtime-$<CONFIG>.txt")
+  add_custom_target(updater_fixture_runtime_files
+    COMMAND "${CMAKE_COMMAND}"
+      "-DUPDATER_PROBE_EXE=$<TARGET_FILE:lubancode>"
+      "-DUPDATER_RUNTIME_LIST=${_updater_runtime_list}"
+      "-DCMAKE_GET_RUNTIME_DEPENDENCIES_PLATFORM=windows+pe"
+      "-DCMAKE_GET_RUNTIME_DEPENDENCIES_TOOL=${_updater_pe_tool}"
+      "-DCMAKE_GET_RUNTIME_DEPENDENCIES_COMMAND=${_updater_pe_command}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/support/updater_runtime_files.cmake"
+    DEPENDS lubancode
+    VERBATIM)
+  add_dependencies(lubancode_tests updater_fixture_runtime_files)
+  target_compile_definitions(lubancode_tests PRIVATE
+    LUBANCODE_UPDATER_MAIN_EXE="$<TARGET_FILE:lubancode>"
+    LUBANCODE_UPDATER_RUNTIME_LIST="${_updater_runtime_list}")
+endif()
 
 # 2) 真 rg 分期入位:LUBANCODE_BUNDLED_RG_DIR 指向已过哈希/版本门的 rg
 #    目录(scripts/fetch_ripgrep.sh 的产物,如 build/rg-stage/libexec)。
@@ -359,6 +457,11 @@ foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)
   else()
     set(test_timeout 180)
   endif()
+  # This real multi-session Journal/child source also runs in the SDK suite.
+  # Windows native durability I/O needs the same 300s budget as that registration.
+  if(WIN32 AND test_name STREQUAL "unit.runtime.child_history_adoption")
+    set(test_timeout 300)
+  endif()
   list(FIND LUBANCODE_TESTS_V3_DEFAULT_BOOKS "${test_name}" _v3_default_idx)
   if(_v3_default_idx EQUAL -1)
     # 未迁移域:显式钉 0,保住 v2 老册的行为断言(见上方分账注释)。
@@ -373,7 +476,35 @@ foreach(test_entry IN LISTS LUBANCODE_TEST_ENTRIES)
       LABELS "${test_kind};${test_domain};${test_kind}.${test_domain};v3-default"
       TIMEOUT "${test_timeout}")
   endif()
+  # Keep external CTest load out of the fixed shell-start/timeout measurement.
+  # This also applies to CLI-only builds; the source's four-context case stays concurrent.
+  if(WIN32 AND test_name STREQUAL "unit.tools.run_command_execution_limits")
+    set_tests_properties("${test_name}" PROPERTIES RUN_SERIAL TRUE)
+  endif()
+  if(test_name STREQUAL "integration.sdk.lubancore_web_fetch" OR test_name STREQUAL "integration.sdk.lubancore_web_search")
+    set_property(TEST "${test_name}" APPEND PROPERTY ENVIRONMENT "NO_PROXY=127.0.0.1" "no_proxy=127.0.0.1")
+  endif()
 endforeach()
+
+# Reuse the SDK test graph in both combined and SDK-only configurations.
+if(LUBANCODE_BUILD_SDK)
+  # Private production-reader fixture; keep detail symbols out of the SDK ABI.
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/sdk/results.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/subagents.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/lua_build_profile.cpp")
+  target_compile_definitions(lubancode_tests PRIVATE LUBANCORE_CONSUMER_WITH_LUA=1)
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/actions.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/todo_write.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/agentic_rag.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/web_fetch.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/web_search.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/command_jobs.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/named_results.cpp")
+  target_sources(lubancode_tests PRIVATE "${CMAKE_SOURCE_DIR}/examples/sdk-consumer/journal_owner.cpp")
+  include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreTests.cmake")
+  include("${CMAKE_SOURCE_DIR}/cmake/LubanCoreHostTests.cmake")
+endif()
 
 # 工具文案语言档端到端驱动(不进 ctest,验收手动跑):
 #   tool_text_lang_driver <zh-CN|en>

@@ -96,7 +96,7 @@
 | goal 验收族(§4.67.6 G2) | `goal.checkpoint.recorded`、`goal.evidence.recorded`(收口事实行,不改活动 head)、`goal.evaluation.requested`(材料版本冻结:evaluationId/contractRevision/evidenceSetHash)、`goal.evaluation.completed`(判词到手,不等于目标已完成)、`goal.evaluation.rejected`(候选被拒,带 reason)——全部不带 status |
 | goal 等待/usage 族(§4.67.6/§4.67.7 G3) | `goal.wait.registered`(登记后台等待:taskRefs/notifyDedupeKey/inspectionPlan;等待是否生效仍看 applied)、`goal.wait.resolved`(等待解除:deliveryKey 去重 + reason;迟到解除不改账)、`goal.usage.recorded`(逐 requestId 的 usage 归属与计量来源;(sessionId,requestId) 去重,投影累计不重复计费)——全部不带 status |
 | workflow 编排 | `workflow.definition.loaded`、`workflow.segment.opened`、`workflow.inputs.committed`、`workflow.node.reserved`、`workflow.node.dispatched`、`workflow.node.waiting`、`workflow.node.retrying`、`workflow.node.completed`、`workflow.node.failed`、`workflow.node.cancelled`、`workflow.node.skipped`、`workflow.output.committed`、`workflow.checkpoint.committed`、`workflow.branch.started`、`workflow.join.completed`、`workflow.loop.iteration.started`、`workflow.loop.iteration.completed`、`workflow.run.completed`、`workflow.run.failed`、`workflow.run.cancelled` |
-| 异步工具(异步工具单 P0;合同与 fixture 已验,生产未接) | `tool.job.registered`、`tool.job.dispatched`、`tool.job.observed`、`tool.job.cancel_requested`、`tool.delivery.prepared`、`tool.delivery.acknowledged`、`tool.delivery.uncertain`、`tool.capability.recorded` |
+| 异步工具(异步工具单 P0;合同与 fixture 已验,生产未接) | `tool.job.registered`、`tool.job.adopted`、`tool.job.dispatched`、`tool.job.observed`、`tool.job.cancel_requested`、`tool.delivery.prepared`、`tool.delivery.acknowledged`、`tool.delivery.uncertain`、`tool.capability.recorded` |
 | Gateway 常驻(常驻总装 V0;合同与 fixture 已验,生产装配归 V1) | `gateway.work.bound`(work↔turn 绑定事实:恢复器凭 workId 反查原轮,不另派新轮)、`reply.selection.committed`(对外回复的选定事实:原件先落稳、选择事实后提交,resume 后 selectionId 不变) |
 | 提示组合(应用Worker接入单 §五 134) | `prompt.composition.applied`(部署档组合系统提示的可追溯事实:组合次序、各段渲染正文 hash、来源层与最终快照 ID;业务文本伪装不了宿主权限——来源逐段在账) |
 | 记忆(记忆抽取取消误报 ESC 单 Bug 2) | `memory.extraction.assessed`(回合收尾的抽取门控与结果评估:turnId 挂触发主回合;载荷 camelCase——trigger/decision/skipReason 或 extractOutcome+errorCode+extractWallMs+foregroundTailMs+userTextStats/usage)、`memory.write.receipted`(四路写路 save/forget/accept 的排队/被拒回执:source/operation/outcome/layer/jobId 或 errorCode)——全部不带 status,v2 同名事件的 v3 对应 |
@@ -104,6 +104,13 @@
 | 渠道远端审批(QQ 接入单 Q6 §12.2) | `channel.approval.requested`(宿主发出的审批卡事实:tokenHash/tool/argsSha256/身份摘要/deadlineMs,token 只入 hash、参数只入 hash——脱敏由宿主摘要层保证)、`channel.approval.resolved`(裁决事实:decision ∈ approved/declined/timeout/cancelled/card_failed,by=操作者或收口原因;interactionId 是平台回调身份)——全部不带 status(账不裁决,决议生效在审批 broker) |
 | T11 五域遗漏事实(Session v3 旧设计清理单 V3-GAP-06) | `session.environment.captured`(本场 run 环境取材事实:snapshotRef 指脱敏快照 blob + replayLevel + gaps[] + configRedacted;捕获时间即信封 timestamp,没采集的场按缺件读,不拿今天环境补昨天事实)、`approval.mode.applied`(审批档位事实:mode/source/policyVersion/oldMode;source ∈ launch/user_toggle/resume_recomputed——档位变更与单次审批分家,恢复有效档 = 源场档与当前策略较严者,账不裁决)、`tool.verification.recorded`(验证事实:verificationId/kind/passed/producer,关联工具走信封 actionId,产物 artifactRefs/subjectVersion 按需)、`tool.verification.invalidated`(失效观察:verificationId/reason,append-only 不改旧 recorded 行)、`tool.observation.late`(迟到响应观察:cause + 可选 jsonrpcRequestId/server;不改已提交终态)、`recovery.note.recorded`(恢复注记:note;未知副作用/恢复结论缘由的 append-only 观察)、`context.pressure.recorded`(发送前容量压力与预算裁决:phase=preflight,verdict ∈ reserve_clamped/exceeded_denied/max_tokens_degraded,四项数字账与 v2 同名事件同口径 + remainingTokens;禁携带累计用量——usage 唯一 owner 在 assistant message)——全部不带 status |
 
+
+SDK 项目召回另把完整格式段（正文、来源与护栏）存为一条隐藏 `context_runtime` user 消息，
+沿 `AdmitMessages` 接纳。每条 `memory.recall.injected` 以 `contextMessageRef` 引用这条完整消息；
+`contentSha256`、`injectedBytes` 仍描述该条真实正文片段。片段不再单独入模型链：至多 512 字节
+用 `snapshotInline`，其余存共有内容寻址 blob，以 `snapshotRef` 引用。恢复逐轮报告须核实际
+消息、采用链、片段与 blob 字节，摘要自哈希不能证明采用。详见 [SDK Memory 召回合同](../development/sdk-memory-recall.md)。
+这批正在接入，原生证据尚待远端 CI；CLI 原来的 `messageRef` 与派工记录口照常。
 
 ### 2.2 kind → status 固定映射(§4.14)
 
@@ -119,9 +126,9 @@
 | `.cancelled` | `cancelled` |
 | `.rejected` | `rejected` |
 | `.unknown` | `unknown` |
-| 其余(`session.started`、`system.change`、`model.request.prepared`、`model.response.started`/`.delta`、`compact.requested`、`compact.range.retreated`、`context.*.applied`、`state.goal.applied`、`goal.checkpoint.recorded`、`goal.evidence.recorded`、`goal.evaluation.requested`/`.completed`/`.rejected`、`goal.wait.registered`/`.resolved`、`goal.usage.recorded`、`input.*`、`resume.source.attached`、`subagent.observed`、`command.received`、`hook.dispatch.requested`、`hook.skipped`、`title.*`、`session.title.applied`、`tool.result.persisted`/`persist_failed`/`selected`、`hook.effects.applied`/`rejected`、`model.usage.appended`、workflow 事实记录族:`workflow.definition.loaded`/`workflow.segment.opened`/`workflow.inputs.committed`/`workflow.node.reserved`/`workflow.node.dispatched`/`workflow.node.retrying`/`workflow.node.skipped`/`workflow.output.committed`/`workflow.checkpoint.committed`)、异步工具事实族(单 P0):`tool.job.registered`/`dispatched`/`observed`/`cancel_requested`、`tool.delivery.prepared`/`acknowledged`/`uncertain`、`tool.capability.recorded`、Gateway 常驻事实族(常驻总装 V0):`gateway.work.bound`、`reply.selection.committed`、提示组合事实族(应用Worker接入单):`prompt.composition.applied`、记忆事实族(取消误报 ESC 单 Bug 2):`memory.extraction.assessed`、`memory.write.receipted`、记忆事实族续(T08/V3-GAP-03):`memory.recall.injected`、`memory.save.requested`、渠道审批事实族(Q6):`channel.approval.requested`/`resolved`、T11 五域事实族(Session v3 旧设计清理单):`session.environment.captured`、`approval.mode.applied`、`tool.verification.recorded`/`invalidated`、`tool.observation.late`、`recovery.note.recorded`、`context.pressure.recorded` | 不携带 status 字段 |
+| 其余(`session.started`、`system.change`、`model.request.prepared`、`model.response.started`/`.delta`、`compact.requested`、`compact.range.retreated`、`context.*.applied`、`state.goal.applied`、`goal.checkpoint.recorded`、`goal.evidence.recorded`、`goal.evaluation.requested`/`.completed`/`.rejected`、`goal.wait.registered`/`.resolved`、`goal.usage.recorded`、`input.*`、`resume.source.attached`、`subagent.observed`、`command.received`、`hook.dispatch.requested`、`hook.skipped`、`title.*`、`session.title.applied`、`tool.result.persisted`/`persist_failed`/`selected`、`hook.effects.applied`/`rejected`、`model.usage.appended`、workflow 事实记录族:`workflow.definition.loaded`/`workflow.segment.opened`/`workflow.inputs.committed`/`workflow.node.reserved`/`workflow.node.dispatched`/`workflow.node.retrying`/`workflow.node.skipped`/`workflow.output.committed`/`workflow.checkpoint.committed`)、异步工具事实族(单 P0):`tool.job.registered`/`adopted`/`dispatched`/`observed`/`cancel_requested`、`tool.delivery.prepared`/`acknowledged`/`uncertain`、`tool.capability.recorded`、Gateway 常驻事实族(常驻总装 V0):`gateway.work.bound`、`reply.selection.committed`、提示组合事实族(应用Worker接入单):`prompt.composition.applied`、记忆事实族(取消误报 ESC 单 Bug 2):`memory.extraction.assessed`、`memory.write.receipted`、记忆事实族续(T08/V3-GAP-03):`memory.recall.injected`、`memory.save.requested`、渠道审批事实族(Q6):`channel.approval.requested`/`resolved`、T11 五域事实族(Session v3 旧设计清理单):`session.environment.captured`、`approval.mode.applied`、`tool.verification.recorded`/`invalidated`、`tool.observation.late`、`recovery.note.recorded`、`context.pressure.recorded` | 不携带 status 字段 |
 
-异步工具族(单 P0)整体 statusless:`registered`/`dispatched`/`acknowledged` 只表示事件已发生,不等于业务 job 已完成;执行与投递状态由 payload(`observedStatus`)与读取侧投影表达。**unknown 是执行投影状态**(`registered → queued → running → succeeded/failed/cancelled`,`running` 查不明为 `unknown`;审批未过停 `awaiting_approval`),不硬塞信封 status——后缀 `registered`/`dispatched`/`observed`/`acknowledged`/`uncertain`/`prepared`/`recorded` 均不在 §2.2 生命周期表。
+异步工具族(单 P0)整体 statusless:`registered`/`adopted`/`dispatched`/`acknowledged` 只表示事件已发生,不等于业务 job 已完成;执行与投递状态由 payload(`observedStatus`)与读取侧投影表达。**unknown 是执行投影状态**(`registered → queued → running → succeeded/failed/cancelled`,`running` 查不明为 `unknown`;审批未过停 `awaiting_approval`),不硬塞信封 status——后缀 `registered`/`dispatched`/`observed`/`acknowledged`/`uncertain`/`prepared`/`recorded` 均不在 §2.2 生命周期表。
 
 生命周期规则(§4.14):同一操作可以多条 event,各持自己的 eventId/seq,共用操作身份;每次尝试最多一个执行终态;终态后迟到响应另记观察事件不改旧终态;`pending` 是"在等"、`running` 是"在执行";崩溃后见 `started` 无终态只能判"可能已执行"。
 
@@ -279,6 +286,18 @@ P1 五处定案之外,P2 落地的运行时口径(载荷合同零改动,只钉�
 5. **模型可见面**:job_get/job_wait/job_cancel 三枚工具(`src/tools/job_tools.*`)挂宿主注册表;job_wait 的结果 JSON 里已完成 job 的业务结果(results)排在自身状态(statuses)之前。start 不单设——白名单工具的普通调用由闸门接单即配。
 6. **宿主接线**:终端(interactive_session/turn_runner)、one-shot(one_shot + headless_executor 网关路)、AppServer(Detached 面)、子代理(agent_tool 任务域寿命,不承诺跨进程存活)经 `AttachDefaultAsyncToolRuntime`/`AsyncToolRuntime::Create` 接同一套闸门与规划器,不各造;生产缺省零策略(tools 白名单空 = 全 inline,权鉴 fail-closed,不派发),行为与从前一字不差。Workflow agent 节点同款接线;llm 采样节点无工具环(单次 SampleModel 请求,无批次/续接边界),不适用闸门——留账 P3 与原生试点一起评估。
 
+
+### 四.3 内部 owned Job：父句柄与业务 attempt 1
+
+J2b 添无 `status` 的 `tool.job.adopted`，布局固定为 `parent_admission_job_business_v1`。只供内部显式登记域；公开 SDK 后台门尚未开启。完整合同见 [Owned Job 接管与执行](../development/job-owned-adoption.md)。
+
+原 `preparedOnly=true` Pending/Registered 不回写。采用事件绑定同场五键来源：assistant、父 Pending、声明采用、业务 Pending、Registered；另存实际父/业务 Action、原 provider 来源、原始/有效参数摘要、ToolIdentity、Policy、owner 和正数命令限额。单行 schema 验形状，共用 reader 再验实际行、顺序、hash 与参数。陌生布局或错源拒绝。
+
+父 Action 回真实接单句柄，Job Action 从 attempt 1 记业务。Job 的 provider ID 只作因果来源，不能抢父回复映射、不能欠原 provider 第二份结果。未采用的 prepared 窗同样遵守这条规则。history、resume、compact 共用 `provider_reply_required` 区分；业务 snapshot 仍保实际终态，原文和观测缺口另记。
+
+`tool.job.dispatched` 带采用事件五键与父真实 terminal/persisted/selected/tool-message/admission 五键，父句柄须同 Job、同采用事件。Started、终态、raw 与 Post 均归业务 Action/attempt 1；Observed 的 `postEventRef` 指真实同场 HookCompleted 五键。`startupFailed=true` 只准真实线程启动失败：failed 观测，不冒 raw 或 Post。执行已成功而后续写入未确认，保成功与缺口，不重写终态。
+
+本版读此布局一律被动 Hold，默认 Legacy 也不重派或补消息。无新布局的旧 Job 保原语义。盘上 owner/采用事实不给下一进程权限；公开宿主启用前还须声明兼容本协议。
 
 ## 五、usage 唯一 owner 表(§4.12 定案)
 

@@ -1107,7 +1107,9 @@ std::string BuildTurnContext(const Options& options, const ProjectIdentity& iden
                              const std::vector<std::string>& retrieval_hints,
                              MemoryAccounting* accounting, const std::string& query,
                              const fs::path& cwd, QueryOrigin origin, bool force_retrieval,
-                             const std::string& target_run_id, const std::string& turn_id) {
+                             const std::string& target_run_id, const std::string& turn_id,
+                             const store::ProjectRecallSnapshot* read_view,
+                             RecallTrace* owned_trace) {
     // 授权闸:全局没授权,或本场关着,一个字节都不进 prompt。
     if (!options.global_allowed || !options.enabled) return {};
 
@@ -1115,6 +1117,11 @@ std::string BuildTurnContext(const Options& options, const ProjectIdentity& iden
     trace.at = NowIsoUtc();
     trace.workspace_key = identity.workspace_key;
     trace.query_origin = QueryOriginName(origin);
+    struct TraceValue {
+        RecallTrace& source;
+        RecallTrace* target;
+        ~TraceValue() { if (target) { *target = source; target->valid = true; } }
+    } trace_value{trace, owned_trace};
 
     // 注入文案中英成对(记忆幻觉根治单):源头 src/prompts/tools/<语言>/
     // memory.md,C++ 兜底与 zh-CN 档同文——查表失败(嵌入表缺键)也不改
@@ -1152,14 +1159,14 @@ std::string BuildTurnContext(const Options& options, const ProjectIdentity& iden
     // 确需事实的合成回流由调用方显式传 force_retrieval。
     if (origin != QueryOrigin::User && !force_retrieval) {
         trace.skipped = true;
-        WriteRecallTrace(memory_dir, trace);
+        if (!read_view) WriteRecallTrace(memory_dir, trace);
         return {};
     }
     if (!options.use) {
         // 本场召回子开关关着:留一份"没跑"的账;学习说明照旧给(只有一段
         // 头,不含任何召回正文)。
         trace.skipped = true;
-        WriteRecallTrace(memory_dir, trace);
+        if (!read_view) WriteRecallTrace(memory_dir, trace);
         return capability_header();
     }
 
@@ -1168,7 +1175,7 @@ std::string BuildTurnContext(const Options& options, const ProjectIdentity& iden
     // 现象就此钉死。用户级记忆(全局另设授权)开着时两层各查一份,同 id/
     // 同证据去重,项目层压过用户层;总条数与总字节预算不因多一层翻倍。
     std::string catalog_error;
-    auto stored = store::LoadCatalog(memory_dir, &catalog_error);
+    auto stored = read_view ? read_view->entries : store::LoadCatalog(memory_dir, &catalog_error);
     if (options.user_enabled) {
         const auto user_stored = store::LoadCatalog(user_memory_dir, nullptr, "user");
         stored.insert(stored.end(), user_stored.begin(), user_stored.end());
@@ -1291,7 +1298,8 @@ std::string BuildTurnContext(const Options& options, const ProjectIdentity& iden
             }
         }
         if (traced.layer != "user" && stored_hit != nullptr &&
-            !store::FingerprintsCurrent(*stored_hit, identity.project_root)) {
+            (read_view ? read_view->stale_ids.contains(entry.id)
+                       : !store::FingerprintsCurrent(*stored_hit, identity.project_root))) {
             traced.stale_blocked = true;
             trace.entries.push_back(std::move(traced));
             sections.push_back(RecallSection{
@@ -1303,7 +1311,8 @@ std::string BuildTurnContext(const Options& options, const ProjectIdentity& iden
         // 先按主题上限把整篇读进来(元数据头另算余量;front matter 带指纹
         // 表会比旧 JSON 头长些),剥掉元数据后再按预算拼载荷。去重键算整篇
         // 正文,不随载荷选段变——同正文的两条,任一轮都只注一条。
-        std::string topic = ReadBounded(topic_dir / Utf8Path(entry.file), kMaxTopicBytes + 8192);
+        std::string topic = read_view ? read_view->topics.at(entry.file)
+                                     : ReadBounded(topic_dir / Utf8Path(entry.file), kMaxTopicBytes + 8192);
         topic = Trim(frontmatter::StripTopicMetadata(std::move(topic)));
         if (topic.empty()) {
             traced.drop_reason = "empty_payload";
@@ -1493,7 +1502,7 @@ std::string BuildTurnContext(const Options& options, const ProjectIdentity& iden
         seen_ids.insert(entry.id);
         if (!candidate.fact_key.empty()) seen_fact.insert(candidate.fact_key);
     }
-    WriteRecallTrace(memory_dir, trace);
+    if (!read_view) WriteRecallTrace(memory_dir, trace);
     // 时间线拼装:带 occurred_at 的段(≥2 时)按时间升序排成一条连续时间
     // 线放在最前(同分按 topic id,可复算);没有时间字段的段不参与排序,
     // 按排级序续后——选段与预算仍按检索分定,trace 记的排级账不受影响。

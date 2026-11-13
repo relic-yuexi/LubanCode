@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <limits>
+#include <stdexcept>
 #include <string_view>
 #include <utility>
 
@@ -65,13 +67,16 @@ LuaProfile HookDefaultImpl() {
 void* GuardedAlloc(void* ud, void* ptr, std::size_t osize, std::size_t nsize) {
     auto* guard = static_cast<LuaGuard*>(ud);
     if (nsize == 0) {
-        if (guard->memory_used >= osize) {
+        if (ptr != nullptr && guard->memory_used >= osize) {
             guard->memory_used -= osize;
         }
         std::free(ptr);
         return nullptr;
     }
-    if (guard->memory_cap > 0 && guard->memory_used + nsize > guard->memory_cap) {
+    const std::size_t old_size = ptr != nullptr ? osize : 0;
+    const std::size_t retained = guard->memory_used >= old_size ? guard->memory_used - old_size : 0;
+    if (guard->memory_cap > 0 &&
+        (retained > guard->memory_cap || nsize > guard->memory_cap - retained)) {
         // 内存帽落锤:记账分型(预算错误的稳定码映射用)。
         guard->budget_hit = true;
         guard->last_budget_kind = LuaGuard::BudgetKind::Memory;
@@ -80,25 +85,20 @@ void* GuardedAlloc(void* ud, void* ptr, std::size_t osize, std::size_t nsize) {
     void* next = std::realloc(ptr, nsize);
     if (next != nullptr) {
         // realloc 成功才记账;失败按没动算(Lua 会走 OOM)。
-        if (guard->memory_used >= osize) {
-            guard->memory_used -= osize;
-        }
-        guard->memory_used += nsize;
+        guard->memory_used = retained + nsize;
     }
     return next;
 }
 
 // instruction hook(LUA_MASKCOUNT):数指令、查取消、查预算、查墙钟。luaL_error
 // 是 longjmp 路子,pcall 接得住——宿主栈不破。
-// guard 的通道:lua_sethook 没有 ud 参数,hook 也不是 C closure(upvalue
-// 那条路不通),所以把 guard 塞进 registry 的固定 light userdata 键里。
-const char* kGuardRegistryKey = "lubancode.lua.guard";
+// allocator 已拥有这枚 guard。直接借其 userdata，不在低内存 hook 或
+// state 初始化阶段分配 registry 键。
 
 void GuardHook(lua_State* L, lua_Debug*) {
-    lua_pushstring(L, kGuardRegistryKey);
-    lua_rawget(L, LUA_REGISTRYINDEX);
-    auto* guard = static_cast<LuaGuard*>(lua_touserdata(L, -1));
-    lua_pop(L, 1);
+    void* allocator_data = nullptr;
+    lua_getallocf(L, &allocator_data);
+    auto* guard = static_cast<LuaGuard*>(allocator_data);
     if (guard == nullptr) {
         return;
     }
@@ -110,11 +110,8 @@ void GuardHook(lua_State* L, lua_Debug*) {
     if (guard->instruction_budget > 0 && guard->instructions_used >= guard->instruction_budget) {
         guard->budget_hit = true;
         guard->last_budget_kind = LuaGuard::BudgetKind::Instruction;
-        // luaL_error 走 lua_pushfstring,格式符只认 Lua 白名单(%d/%s/%f/%p/%I),
-        // C 的 %llu 不行——预算数先拼进字符串再交。
-        luaL_error(L, ("cpu 指令预算耗尽(约 " + std::to_string(guard->instruction_budget) +
-                       " 条虚拟机指令):改小输入或拆小任务")
-                          .c_str());
+        // 不把临时 std::string 带过 luaL_error 的 longjmp 边界。
+        luaL_error(L, "cpu 指令预算耗尽:改小输入或拆小任务");
         return;
     }
     // 墙钟(LuaHook 单 P0-A 第四道墙):只管本 state 跑野的脚本;阻塞
@@ -141,10 +138,6 @@ lua_State* NewGuardedLuaState(const LuaProfile& profile, std::unique_ptr<LuaGuar
     if (L == nullptr) {
         return nullptr;
     }
-    // registry 里塞 light userdata(hook 的取货口)。
-    lua_pushstring(L, kGuardRegistryKey);
-    lua_pushlightuserdata(L, guard.get());
-    lua_rawset(L, LUA_REGISTRYINDEX);
     // 墙钟也是指令 hook 查的:任一道时间墙立着,hook 就得挂。
     if (profile.instruction_budget > 0 || profile.wall_budget > std::chrono::milliseconds(0)) {
         lua_sethook(L, GuardHook, LUA_MASKCOUNT, kHookStride);
@@ -219,11 +212,16 @@ void ApplyWhitelistLuaProfile(lua_State* L) {
 void OpenLuaLibraries(lua_State* L, const LuaProfile& profile) {
     if (profile.level == LuaProfile::Level::Whitelisted) {
         ApplyWhitelistLuaProfile(L);
-        return;
+    } else {
+        luaL_openlibs(L);
+        if (profile.level == LuaProfile::Level::Pure) ApplyPureLuaProfile(L);
     }
-    luaL_openlibs(L);
-    if (profile.level == LuaProfile::Level::Pure) {
-        ApplyPureLuaProfile(L);
+    if (!profile.allow_print) { lua_pushnil(L); lua_setglobal(L, "print"); }
+    if (!profile.allow_error_catching) {
+        // Remove these before the script can save aliases or compile a chunk.
+        // C++ still owns the protected call that catches errors and guard exits.
+        lua_pushnil(L); lua_setglobal(L, "pcall");
+        lua_pushnil(L); lua_setglobal(L, "xpcall");
     }
 }
 
@@ -236,54 +234,112 @@ std::string PathToUtf8(const std::filesystem::path& path) {
 
 }  // namespace
 
-// JSON -> lua 值,压到栈顶。字符串按字节原样搬(lua 字符串就是字节串,
-// UTF-8 中文不过手不转码)。null 压 nil——出现在表值里等于"这个键不存在",
-// 跟 lua 自己的语义一致。
-void PushJsonToLua(lua_State* L, const nlohmann::json& value) {
+namespace {
+
+// 所有 C++ 容器在 lua_pcall 外持有。回调只读借值指令表，Lua OOM
+// longjmp 不会跳过 JSON iterator proxy、vector 或 string 的析构。
+struct JsonPushStep {
+    enum class Kind { Null, Boolean, Integer, Unsigned, Number, String, Array, Object, ArraySet, ObjectSet };
+    Kind kind;
+    const std::string* text = nullptr;
+    std::int64_t integer = 0;
+    std::uint64_t unsigned_integer = 0;
+    double number = 0;
+    int count = 0;
+};
+struct JsonPushPlan {
+    std::vector<JsonPushStep> steps;
+    int stack_slots = 8;
+    void push_back(JsonPushStep step) { steps.push_back(step); }
+};
+
+void PrepareJsonPush(const nlohmann::json& value, JsonPushPlan& plan, int depth = 0) {
+    if (depth > ((std::numeric_limits<int>::max)() - 8) / 3)
+        throw std::runtime_error("JSON 入参超出 Lua 栈容量");
+    plan.stack_slots = (std::max)(plan.stack_slots, depth * 3 + 8);
+    using Kind = JsonPushStep::Kind;
     switch (value.type()) {
-        case nlohmann::json::value_t::null:
-            lua_pushnil(L);
-            break;
+        case nlohmann::json::value_t::null: plan.push_back({Kind::Null}); break;
         case nlohmann::json::value_t::boolean:
-            lua_pushboolean(L, value.get<bool>() ? 1 : 0);
-            break;
+            plan.push_back({Kind::Boolean, nullptr, value.get<bool>() ? 1 : 0}); break;
         case nlohmann::json::value_t::number_integer:
-            lua_pushinteger(L, static_cast<lua_Integer>(value.get<std::int64_t>()));
-            break;
-        case nlohmann::json::value_t::number_unsigned:
-            lua_pushinteger(L, static_cast<lua_Integer>(value.get<std::uint64_t>()));
-            break;
-        case nlohmann::json::value_t::number_float:
-            lua_pushnumber(L, static_cast<lua_Number>(value.get<double>()));
-            break;
-        case nlohmann::json::value_t::string: {
-            const auto& s = value.get_ref<const std::string&>();
-            lua_pushlstring(L, s.data(), s.size());
-            break;
+            plan.push_back({Kind::Integer, nullptr, value.get<std::int64_t>()}); break;
+        case nlohmann::json::value_t::number_unsigned: {
+            JsonPushStep step{Kind::Unsigned}; step.unsigned_integer = value.get<std::uint64_t>();
+            plan.push_back(step); break;
         }
+        case nlohmann::json::value_t::number_float: {
+            JsonPushStep step{Kind::Number}; step.number = value.get<double>(); plan.push_back(step); break;
+        }
+        case nlohmann::json::value_t::string:
+            plan.push_back({Kind::String, &value.get_ref<const std::string&>()}); break;
         case nlohmann::json::value_t::array: {
-            lua_createtable(L, static_cast<int>(value.size()), 0);
-            lua_Integer index = 1;
+            if (value.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+                throw std::runtime_error("JSON 数组超出 Lua 容量");
+            JsonPushStep step{Kind::Array}; step.count = static_cast<int>(value.size()); plan.push_back(step);
+            std::int64_t index = 1;
             for (const auto& element : value) {
-                PushJsonToLua(L, element);
-                lua_rawseti(L, -2, index);
-                ++index;
+                PrepareJsonPush(element, plan, depth + 1);
+                plan.push_back({Kind::ArraySet, nullptr, index++});
             }
             break;
         }
         case nlohmann::json::value_t::object: {
-            lua_createtable(L, 0, static_cast<int>(value.size()));
-            for (const auto& [key, element] : value.items()) {
-                lua_pushlstring(L, key.data(), key.size());
-                PushJsonToLua(L, element);
-                lua_rawset(L, -3);
+            if (value.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
+                throw std::runtime_error("JSON 对象超出 Lua 容量");
+            JsonPushStep step{Kind::Object}; step.count = static_cast<int>(value.size()); plan.push_back(step);
+            for (auto item = value.begin(); item != value.end(); ++item) {
+                plan.push_back({Kind::String, &item.key()});
+                PrepareJsonPush(item.value(), plan, depth + 1);
+                plan.push_back({Kind::ObjectSet});
             }
             break;
         }
-        default:  // binary/discarded 不该出现在模型入参里,兜底成 nil
-            lua_pushnil(L);
-            break;
+        default: plan.push_back({Kind::Null}); break;
     }
+}
+
+// 此帧只有 POD/引用。逐层栈空间也在受保护边界内申请。
+void PushPreparedJson(lua_State* L, const JsonPushPlan& plan) {
+    if (lua_checkstack(L, plan.stack_slots) == 0) luaL_error(L, "JSON 入参 Lua 栈不足");
+    for (std::size_t index = 0; index < plan.steps.size(); ++index) {
+        const JsonPushStep& step = plan.steps[index];
+        using Kind = JsonPushStep::Kind;
+        switch (step.kind) {
+            case Kind::Null: lua_pushnil(L); break;
+            case Kind::Boolean: lua_pushboolean(L, step.integer != 0); break;
+            case Kind::Integer: lua_pushinteger(L, static_cast<lua_Integer>(step.integer)); break;
+            case Kind::Unsigned: lua_pushinteger(L, static_cast<lua_Integer>(step.unsigned_integer)); break;
+            case Kind::Number: lua_pushnumber(L, static_cast<lua_Number>(step.number)); break;
+            case Kind::String: lua_pushlstring(L, step.text->data(), step.text->size()); break;
+            case Kind::Array: lua_createtable(L, step.count, 0); break;
+            case Kind::Object: lua_createtable(L, 0, step.count); break;
+            case Kind::ArraySet: lua_rawseti(L, -2, static_cast<lua_Integer>(step.integer)); break;
+            case Kind::ObjectSet: lua_rawset(L, -3); break;
+        }
+    }
+}
+
+int PushJsonCallback(lua_State* L) {
+    const auto* plan = static_cast<const JsonPushPlan*>(lua_touserdata(L, 1));
+    PushPreparedJson(L, *plan);
+    return 1;
+}
+
+}  // namespace
+
+// 原共享入口保留相同栈效果。转换表在受保护调用外销毁，之后才向已有
+// Lua 调用链抛回错误；standalone Run 把搬运和 execute 一并放在其外层 pcall。
+void PushJsonToLua(lua_State* L, const nlohmann::json& value) {
+    int status = LUA_OK;
+    {
+        JsonPushPlan plan;
+        PrepareJsonPush(value, plan);
+        lua_pushcfunction(L, PushJsonCallback);
+        lua_pushlightuserdata(L, &plan);
+        status = lua_pcall(L, 1, 1, 0);
+    }
+    if (status != LUA_OK) lua_error(L);
 }
 
 // lua 值 -> JSON。表按"键是不是恰好 1..n 的连续整数"判定数组/对象;对象键
@@ -383,25 +439,81 @@ nlohmann::json LuaValueToJson(lua_State* L, int index, int depth, std::string& e
 
 namespace {
 
-// 读取表字段成字符串(栈顶是那张表)。missing_ok 时字段缺失返回空串。
-std::expected<std::string, std::string> GetStringField(lua_State* L, const char* field, bool missing_ok) {
-    lua_getfield(L, -1, field);
-    if (lua_isnil(L, -1)) {
-        lua_pop(L, 1);
-        if (missing_ok) {
-            return std::string();
+// 这里的 owner 均在 Lua 受保护边界外。C callback 只借 POD/源码与画像。
+struct LuaStateCloser { void operator()(lua_State* state) const { if (state) lua_close(state); } };
+using OwnedLuaState = std::unique_ptr<lua_State, LuaStateCloser>;
+
+class LuaCallScope {
+public:
+    LuaCallScope(lua_State* state, LuaGuard* guard, const LuaProfile& profile,
+                 const std::atomic<bool>* cancel = nullptr)
+        : state_(state), guard_(guard), top_(lua_gettop(state)) {
+        if (guard_) {
+            guard_->instructions_used = 0;
+            guard_->budget_hit = false;
+            guard_->last_budget_kind = LuaGuard::BudgetKind::None;
+            guard_->cancel = cancel;
+            guard_->wall_deadline = profile.wall_budget > std::chrono::milliseconds(0)
+                ? std::chrono::steady_clock::now() + profile.wall_budget
+                : std::chrono::steady_clock::time_point{};
         }
-        return std::unexpected(std::string("表里缺 ") + field + " 字段");
     }
-    if (lua_type(L, -1) != LUA_TSTRING) {
-        lua_pop(L, 1);
-        return std::unexpected(std::string(field) + " 字段不是字符串");
+    ~LuaCallScope() {
+        if (guard_) { guard_->cancel = nullptr; guard_->wall_deadline = {}; }
+        lua_settop(state_, top_);
     }
-    std::size_t len = 0;
-    const char* s = lua_tolstring(L, -1, &len);
-    std::string out(s, len);
-    lua_pop(L, 1);
-    return out;
+    LuaCallScope(const LuaCallScope&) = delete;
+    LuaCallScope& operator=(const LuaCallScope&) = delete;
+private:
+    lua_State* state_;
+    LuaGuard* guard_;
+    int top_;
+};
+
+std::string LuaErrorText(lua_State* state) {
+    // lua_tolstring 对 number 会分配，错误口只读已存在的 string。
+    if (lua_type(state, -1) != LUA_TSTRING) return "(没有字符串错误信息)";
+    std::size_t bytes = 0;
+    const char* text = lua_tolstring(state, -1, &bytes);
+    return text ? std::string(text, bytes) : "(没有错误信息)";
+}
+
+struct LuaLoadContext {
+    const std::string* script;
+    const std::string* stem;
+    const LuaProfile* profile;
+    const char* phase = "开库";
+    int execute_ref = LUA_NOREF;
+};
+
+int LoadLuaToolCallback(lua_State* state) {
+    auto* context = static_cast<LuaLoadContext*>(lua_touserdata(state, 1));
+    OpenLuaLibraries(state, *context->profile);
+    context->phase = "编译";
+    if (luaL_loadbuffer(state, context->script->data(), context->script->size(),
+                        context->stem->c_str()) != LUA_OK) return lua_error(state);
+    context->phase = "执行";
+    lua_call(state, 0, 1);
+    if (!lua_istable(state, -1))
+        return luaL_error(state, "脚本的返回值不是表(要 return { name=..., execute=... } 这样一张表)");
+    context->phase = "定义";
+    // getfield 可执行 __index；连同引用表分配都在本次 pcall/budget 内。
+    lua_getfield(state, 2, "name");
+    lua_getfield(state, 2, "description");
+    lua_getfield(state, 2, "input_schema");
+    lua_getfield(state, 2, "execute");
+    if (!lua_isfunction(state, -1)) return luaL_error(state, "execute 字段不是函数");
+    context->execute_ref = luaL_ref(state, LUA_REGISTRYINDEX);
+    return 3;  // name / description / input_schema；不把定义表带出。
+}
+
+struct LuaExecuteContext { int execute_ref; const JsonPushPlan* input; };
+int ExecuteLuaToolCallback(lua_State* state) {
+    const auto* context = static_cast<const LuaExecuteContext*>(lua_touserdata(state, 1));
+    lua_rawgeti(state, LUA_REGISTRYINDEX, context->execute_ref);
+    PushPreparedJson(state, *context->input);
+    lua_call(state, 1, 1);
+    return 1;
 }
 
 }  // namespace
@@ -420,93 +532,59 @@ LuaTool::~LuaTool() {
 std::expected<std::unique_ptr<LuaTool>, std::string> LuaTool::LoadFromScript(
     const std::string& script, const std::string& stem, const LuaProfile& profile) {
     std::unique_ptr<LuaGuard> guard;
-    lua_State* L = NewGuardedLuaState(profile, guard);
-    if (L == nullptr) {
-        return std::unexpected("lua_newstate 失败(内存不够?)");
-    }
-    // 出错路径统一走这个收尾;成功路径把 L 移交给 LuaTool 后置空。
-    const auto fail = [&L](std::string message) {
-        lua_close(L);
-        L = nullptr;
-        return std::unexpected(std::move(message));
-    };
+    OwnedLuaState state(NewGuardedLuaState(profile, guard));
+    if (!state) return std::unexpected("lua_newstate 失败(内存不够?)");
+    lua_State* L = state.get();
+    LuaCallScope call_scope(L, guard.get(), profile);
+    try {
+        LuaLoadContext context{&script, &stem, &profile};
+        lua_pushcfunction(L, LoadLuaToolCallback);
+        lua_pushlightuserdata(L, &context);
+        if (lua_pcall(L, 1, 3, 0) != LUA_OK)
+            return std::unexpected(std::string("脚本") + context.phase + "失败: " + LuaErrorText(L));
 
-    // 工具插件照旧三档画像开库(Pure/Trusted;白名单档是 hook state 的)。
-    luaL_openlibs(L);
-    if (profile.level == LuaProfile::Level::Pure) {
-        ApplyPureLuaProfile(L);
-    }
-
-    // 编译 + 执行整个 chunk,期望返回一张表。
-    if (luaL_loadbuffer(L, script.data(), script.size(), stem.c_str()) != LUA_OK) {
-        std::string message = lua_tostring(L, -1) != nullptr ? lua_tostring(L, -1) : "(没有错误信息)";
-        return fail("脚本编译失败: " + message);
-    }
-    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
-        std::string message = lua_tostring(L, -1) != nullptr ? lua_tostring(L, -1) : "(没有错误信息)";
-        return fail("脚本执行失败: " + message);
-    }
-    if (!lua_istable(L, -1)) {
-        return fail("脚本的返回值不是表(要 return { name=..., execute=... } 这样一张表)");
-    }
-
-    auto name_result = GetStringField(L, "name", /*missing_ok=*/false);
-    if (!name_result.has_value()) {
-        return fail(name_result.error());
-    }
-    if (name_result->empty()) {
-        return fail("name 字段是空串");
-    }
-    auto description_result = GetStringField(L, "description", /*missing_ok=*/true);
-    if (!description_result.has_value()) {
-        return fail(description_result.error());
-    }
-
-    // input_schema:JSON 字符串或 lua 表都认;没写就给一张最宽的对象 schema。
-    nlohmann::json schema = nlohmann::json{{"type", "object"}};
-    lua_getfield(L, -1, "input_schema");
-    if (lua_type(L, -1) == LUA_TSTRING) {
-        std::size_t len = 0;
-        const char* s = lua_tolstring(L, -1, &len);
-        nlohmann::json parsed = nlohmann::json::parse(std::string_view(s, len), /*cb=*/nullptr,
-                                                       /*allow_exceptions=*/false);
-        if (parsed.is_discarded()) {
-            lua_pop(L, 1);
-            return fail("input_schema 不是合法 JSON");
+        if (lua_type(L, 1) != LUA_TSTRING) return std::unexpected("name 字段不是字符串");
+        std::size_t bytes = 0;
+        const char* name_data = lua_tolstring(L, 1, &bytes);
+        std::string name(name_data, bytes);
+        if (name.empty()) return std::unexpected("name 字段是空串");
+        std::string description;
+        if (!lua_isnil(L, 2)) {
+            if (lua_type(L, 2) != LUA_TSTRING) return std::unexpected("description 字段不是字符串");
+            const char* description_data = lua_tolstring(L, 2, &bytes);
+            description.assign(description_data, bytes);
         }
-        schema = std::move(parsed);
-    } else if (lua_istable(L, -1)) {
-        std::string conv_error;
-        schema = LuaValueToJson(L, -1, 0, conv_error);
-        if (!conv_error.empty()) {
-            lua_pop(L, 1);
-            return fail("input_schema 表转 JSON 失败: " + conv_error);
+        // checkstack 只返回失败，不抛 Lua 错误。转换中的 rawget/next 与
+        // 已为 string 的 tolstring 不分配 Lua 对象，也不执行 metamethod。
+        if (lua_checkstack(L, kMaxDepth * 3 + 8) == 0)
+            return std::unexpected("input_schema 转换 Lua 栈不足");
+        nlohmann::json schema = nlohmann::json{{"type", "object"}};
+        if (lua_type(L, 3) == LUA_TSTRING) {
+            const char* schema_data = lua_tolstring(L, 3, &bytes);
+            schema = nlohmann::json::parse(std::string_view(schema_data, bytes), nullptr, false);
+            if (schema.is_discarded()) return std::unexpected("input_schema 不是合法 JSON");
+        } else if (lua_istable(L, 3)) {
+            std::string error;
+            schema = LuaValueToJson(L, 3, 0, error);
+            if (!error.empty()) return std::unexpected("input_schema 表转 JSON 失败: " + error);
+        } else if (!lua_isnil(L, 3)) {
+            return std::unexpected("input_schema 字段要么是 JSON 字符串要么是表");
         }
-    } else if (!lua_isnil(L, -1)) {
-        lua_pop(L, 1);
-        return fail("input_schema 字段要么是 JSON 字符串要么是表");
-    }
-    lua_pop(L, 1);
 
-    lua_getfield(L, -1, "execute");
-    if (!lua_isfunction(L, -1)) {
-        lua_pop(L, 1);
-        return fail("execute 字段不是函数");
+        auto tool = std::unique_ptr<LuaTool>(new LuaTool());
+        tool->execute_ref_ = context.execute_ref;
+        tool->stem_ = stem;
+        tool->full_name_ = "plugin__" + stem + "__" + name;
+        tool->description_ = "[plugin:" + stem + "] " + description;
+        tool->schema_ = std::move(schema);
+        tool->profile_ = profile;
+        // 先做完可能抛错的 C++ 装配，再移交 VM/allocator owner。
+        tool->guard_ = std::move(guard);
+        tool->lua_ = state.release();
+        return tool;
+    } catch (const std::exception& error) {
+        return std::unexpected(std::string("lua 工具装载失败: ") + error.what());
     }
-    const int execute_ref = luaL_ref(L, LUA_REGISTRYINDEX);  // 顺手把函数从栈上收进注册表
-    lua_pop(L, 1);                                            // 弹掉那张表,栈清空
-
-    auto tool = std::unique_ptr<LuaTool>(new LuaTool());
-    tool->lua_ = L;
-    tool->execute_ref_ = execute_ref;
-    tool->stem_ = stem;
-    tool->full_name_ = "plugin__" + stem + "__" + *name_result;
-    tool->description_ = "[plugin:" + stem + "] " + *description_result;
-    tool->schema_ = std::move(schema);
-    tool->profile_ = profile;
-    tool->guard_ = std::move(guard);
-    L = nullptr;  // 所有权移交,fail 那条路走不到了
-    return tool;
 }
 
 std::expected<std::unique_ptr<LuaTool>, std::string> LuaTool::LoadFromFile(
@@ -539,73 +617,87 @@ Tool::Result LuaTool::Run(const nlohmann::json& input, const std::atomic<bool>* 
     // ToolRuntime 的 sub registry 会被多只后台子代理共享。Lua state 不具备
     // 线程安全语义,同一工具的栈操作须串行；不同 LuaTool 各有 state 和锁,
     // 仍能彼此并行。
-    const std::lock_guard<std::mutex> lock(execute_mutex_);
-    // 每次执行换一轮账:指令计数清零(预算是单次调用的),取消旗灌进
-    // guard(hook 查的就是它)。内存账不清——state 是长命的,累计口径
-    // 才是真实的占用。
-    if (guard_ != nullptr) {
-        guard_->instructions_used = 0;
-        guard_->budget_hit = false;
-        guard_->cancel = effective_cancel;
+    if (effective_cancel && effective_cancel->load()) {
+        Result cancelled{"用户取消(ESC):lua 脚本未启动", true};
+        cancelled.outcome = "plugin_exception";
+        cancelled.error_code = "plugin.lua_error";
+        return cancelled;
     }
-    lua_rawgeti(lua_, LUA_REGISTRYINDEX, execute_ref_);
-    PushJsonToLua(lua_, input);
-    if (lua_pcall(lua_, 1, 1, 0) != LUA_OK) {
-        std::string message =
-            lua_tostring(lua_, -1) != nullptr ? lua_tostring(lua_, -1) : "(没有错误信息)";
-        lua_pop(lua_, 1);
-        // 逐枚追踪单:compile/load 与 runtime error 分开(单子"Lua
-        // compile/load/runtime error 分开"——load 段在 LoadFromFile,这里
-        // 是 runtime 段),稳定码不靠中文正文分辨。
-        Result lua_error{"lua 执行出错: " + message, true};
+    const std::lock_guard<std::mutex> lock(execute_mutex_);
+    if (effective_cancel && effective_cancel->load()) {
+        Result cancelled{"用户取消(ESC):lua 脚本未启动", true};
+        cancelled.outcome = "plugin_exception";
+        cancelled.error_code = "plugin.lua_error";
+        return cancelled;
+    }
+    LuaCallScope call_scope(lua_, guard_.get(), profile_, effective_cancel);
+    try {
+        JsonPushPlan input_plan;
+        PrepareJsonPush(input, input_plan);
+        LuaExecuteContext context{execute_ref_, &input_plan};
+        lua_pushcfunction(lua_, ExecuteLuaToolCallback);
+        lua_pushlightuserdata(lua_, &context);
+        if (lua_pcall(lua_, 1, 1, 0) != LUA_OK) {
+            Result lua_error{"lua 执行出错: " + LuaErrorText(lua_), true};
+            lua_error.outcome = "plugin_exception";
+            lua_error.error_code = "plugin.lua_error";
+            return lua_error;
+        }
+        if (lua_checkstack(lua_, kMaxDepth * 3 + 8) == 0) {
+            Result lua_error{"lua 返回值转换栈不足", true};
+            lua_error.outcome = "plugin_exception";
+            lua_error.error_code = "plugin.lua_error";
+            return lua_error;
+        }
+
+        // 返回值字符串化:字符串原样收,数字/布尔转文本,表转 JSON,nil 算错
+        // (execute 忘了 return,多半是插件写岔了,明说比静默空串好排查)。
+        Result out;
+        switch (lua_type(lua_, -1)) {
+            case LUA_TSTRING: {
+                std::size_t len = 0;
+                const char* s = lua_tolstring(lua_, -1, &len);
+                out.SetText(std::string(s, len));
+                break;
+            }
+            case LUA_TNUMBER:
+                if (lua_isinteger(lua_, -1) != 0) {
+                    out.SetText(std::to_string(static_cast<std::int64_t>(lua_tointeger(lua_, -1))));
+                } else {
+                    out.SetText(std::to_string(static_cast<double>(lua_tonumber(lua_, -1))));
+                }
+                break;
+            case LUA_TBOOLEAN:
+                out.SetText(lua_toboolean(lua_, -1) != 0 ? "true" : "false");
+                break;
+            case LUA_TTABLE: {
+                std::string conv_error;
+                const nlohmann::json converted = LuaValueToJson(lua_, -1, 0, conv_error);
+                if (!conv_error.empty()) {
+                    out.SetText("lua 返回的表转不成 JSON: " + conv_error);
+                    out.is_error = true;
+                } else {
+                    out.SetText(converted.dump());
+                }
+                break;
+            }
+            case LUA_TNIL:
+                out.SetText("lua 的 execute 没有返回值(要 return 一个字符串)");
+                out.is_error = true;
+                break;
+            default:
+                out.SetText(std::string("lua 的 execute 返回了没法字符串化的类型: ") +
+                            lua_typename(lua_, lua_type(lua_, -1)));
+                out.is_error = true;
+                break;
+        }
+        return out;
+    } catch (const std::exception& error) {
+        Result lua_error{std::string("lua 执行出错: ") + error.what(), true};
         lua_error.outcome = "plugin_exception";
         lua_error.error_code = "plugin.lua_error";
         return lua_error;
     }
-
-    // 返回值字符串化:字符串原样收,数字/布尔转文本,表转 JSON,nil 算错
-    // (execute 忘了 return,多半是插件写岔了,明说比静默空串好排查)。
-    Result out;
-    switch (lua_type(lua_, -1)) {
-        case LUA_TSTRING: {
-            std::size_t len = 0;
-            const char* s = lua_tolstring(lua_, -1, &len);
-            out.SetText(std::string(s, len));
-            break;
-        }
-        case LUA_TNUMBER:
-            if (lua_isinteger(lua_, -1) != 0) {
-                out.SetText(std::to_string(static_cast<std::int64_t>(lua_tointeger(lua_, -1))));
-            } else {
-                out.SetText(std::to_string(static_cast<double>(lua_tonumber(lua_, -1))));
-            }
-            break;
-        case LUA_TBOOLEAN:
-            out.SetText(lua_toboolean(lua_, -1) != 0 ? "true" : "false");
-            break;
-        case LUA_TTABLE: {
-            std::string conv_error;
-            const nlohmann::json converted = LuaValueToJson(lua_, -1, 0, conv_error);
-            if (!conv_error.empty()) {
-                out.SetText("lua 返回的表转不成 JSON: " + conv_error);
-                out.is_error = true;
-            } else {
-                out.SetText(converted.dump());
-            }
-            break;
-        }
-        case LUA_TNIL:
-            out.SetText("lua 的 execute 没有返回值(要 return 一个字符串)");
-            out.is_error = true;
-            break;
-        default:
-            out.SetText(std::string("lua 的 execute 返回了没法字符串化的类型: ") +
-                        lua_typename(lua_, lua_type(lua_, -1)));
-            out.is_error = true;
-            break;
-    }
-    lua_pop(lua_, 1);
-    return out;
 }
 
 // ---------------------------------------------------------------------------

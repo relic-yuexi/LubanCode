@@ -1004,7 +1004,7 @@ void BrowserService::KillSidecarForTest() {
     sidecar_alive_.store(false);
 }
 
-void BrowserService::Shutdown() {
+void BrowserService::RequestShutdown() {
     if (shutting_down_.exchange(true)) {
         return;
     }
@@ -1016,6 +1016,12 @@ void BrowserService::Shutdown() {
         }
     }
     action_cv_.notify_all();
+    screencast_cv_.notify_all();
+}
+
+void BrowserService::Shutdown() {
+    RequestShutdown();
+    std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex_);
     if (action_worker_.joinable()) {
         action_worker_.join();
     }

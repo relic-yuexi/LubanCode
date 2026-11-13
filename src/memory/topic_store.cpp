@@ -6,6 +6,7 @@
 #include "memory/topic_store.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <fstream>
 #include <iomanip>
@@ -18,6 +19,8 @@
 #include "memory/frontmatter.hpp"
 #include "memory/internal.hpp"
 #include "memory/recall_engine.hpp"  // recall::BuildContentIndexBag:catalog 词袋
+#include "platform/bounded_read.hpp"
+#include "platform/text_encoding.hpp"
 
 namespace lubancode::memory {
 
@@ -153,17 +156,63 @@ std::expected<store::StoredEntry, std::string> ParseStoredEntry(const nlohmann::
     return entry;
 }
 
-std::expected<store::StoredEntry, std::string> ParseTopicFile(const fs::path& path,
-                                                              const fs::path& memory_dir,
-                                                              const char* layer) {
-    const std::string text = ReadFile(path);
-    std::error_code ec;
-    const fs::path relative = fs::relative(path, memory_dir, ec);
-    const std::string relative_file = ec ? PathUtf8(path.filename()) : PathUtf8(relative);
+bool StrictMetadata(const nlohmann::json& meta) {
+    const auto text = [](const nlohmann::json& value) {
+        return value.is_string() && value.get_ref<const std::string&>().find('\0') == std::string::npos &&
+               platform::IsValidUtf8(value.get_ref<const std::string&>());
+    };
+    if (!meta.is_object() || !meta.contains("schema") || !meta["schema"].is_number_integer()) return false;
+    for (const auto* key : {"id", "kind", "title"})
+        if (!meta.contains(key) || !text(meta[key])) return false;
+    for (const auto* key : {"name", "summary", "status", "updated_at", "created_at", "confidence", "last_verified_at", "content_index"})
+        if (meta.contains(key) && !text(meta[key])) return false;
+    if (meta.contains("status") && meta["status"] != "active" && meta["status"] != "stale" &&
+        meta["status"] != "conflict" && meta["status"] != "archived") return false;
+    if (meta.contains("confidence") && meta["confidence"] != "user-stated" && meta["confidence"] != "verified" &&
+        meta["confidence"] != "inferred") return false;
+    for (const auto* key : {"expires_at", "occurred_at"}) {
+        if (!meta.contains(key) || meta[key].is_null()) continue;
+        if (!text(meta[key]) || (!meta[key].get_ref<const std::string&>().empty() &&
+                                !LooksLikeMemoryDate(meta[key].get_ref<const std::string&>()))) return false;
+    }
+    if (meta.contains("scope")) {
+        const auto& scope = meta["scope"];
+        if (!scope.is_object()) return false;
+        for (const auto* key : {"level", "kind", "value"})
+            if (scope.contains(key) && !text(scope[key])) return false;
+        if (scope.contains("level") && scope["level"] != "project" && scope["level"] != "user") return false;
+        if (scope.contains("kind") && scope["kind"] != "project" && scope["kind"] != "subtree" &&
+            scope["kind"] != "path" && scope["kind"] != "user") return false;
+    }
+    for (const auto* key : {"keywords", "paths", "source_sessions"}) {
+        if (!meta.contains(key)) continue;
+        if (!meta[key].is_array() || meta[key].size() > 128) return false;
+        for (const auto& item : meta[key])
+            if (!text(item) || (std::string_view(key) == "paths" && !IsSafeRelativePath(item.get<std::string>()))) return false;
+    }
+    if (meta.contains("evidence")) {
+        const auto& evidence = meta["evidence"];
+        if (!evidence.is_array() || evidence.size() > 24) return false;
+        for (const auto& item : evidence)
+            if (!item.is_object() || !item.contains("path") || !text(item["path"]) ||
+                !IsSafeRelativePath(item["path"].get<std::string>()) ||
+                (item.contains("symbol") && !text(item["symbol"]))) return false;
+    }
+    if (meta.contains("fingerprints")) {
+        const auto& fingerprints = meta["fingerprints"];
+        if (!fingerprints.is_object() || fingerprints.size() > 24) return false;
+        for (auto it = fingerprints.begin(); it != fingerprints.end(); ++it)
+            if (!IsSafeRelativePath(it.key()) || !text(nlohmann::json(it.key())) || !text(it.value())) return false;
+    }
+    return true;
+}
+
+std::expected<store::StoredEntry, std::string> ParseTopicText(
+    const std::string& text, const std::string& relative_file, const char* layer, bool strict = false) {
     // 双格式 reader:schema 3 走 front matter(YAML),schema 1/2 走 HTML
     // 注释里的严格 JSON。新写一律 schema 3,旧主题照读照召回。
     if (text.starts_with("---\n") || text.starts_with("---\r\n")) {
-        auto parsed = frontmatter::Parse(text);
+        auto parsed = frontmatter::Parse(text, strict);
         if (!parsed.has_value()) return std::unexpected(parsed.error());
         store::StoredEntry stored;
         stored.public_entry = std::move(parsed->entry);
@@ -201,6 +250,7 @@ std::expected<store::StoredEntry, std::string> ParseTopicFile(const fs::path& pa
     } catch (const nlohmann::json::exception& e) {
         return std::unexpected("记忆元数据不是合法 JSON: " + std::string(e.what()));
     }
+    if (strict && !StrictMetadata(meta)) return std::unexpected("memory.read.invalid_metadata");
     auto stored = ParseStoredEntry(meta, relative_file);
     if (stored.has_value()) {
         // 旧格式同款:正文剥掉元数据头与标题行再进 content。
@@ -208,6 +258,14 @@ std::expected<store::StoredEntry, std::string> ParseTopicFile(const fs::path& pa
             frontmatter::StripTitleHeading(frontmatter::StripTopicMetadata(text));
     }
     return stored;
+}
+
+std::expected<store::StoredEntry, std::string> ParseTopicFile(const fs::path& path,
+    const fs::path& memory_dir, const char* layer) {
+    std::error_code ec;
+    const fs::path relative = fs::relative(path, memory_dir, ec);
+    const std::string relative_file = ec ? PathUtf8(path.filename()) : PathUtf8(relative);
+    return ParseTopicText(ReadFile(path), relative_file, layer);
 }
 
 std::string EscapeMarkdownLabel(std::string value) {
@@ -406,6 +464,166 @@ std::string Slug(std::string value) {
 
 namespace store {
 
+std::expected<ProjectRecallSnapshot, std::string> ReadProjectRecallSnapshot(
+    const fs::path& memory_dir, const fs::path& project_root, bool scan_all_topics,
+    bool verify_fingerprints) {
+    constexpr std::size_t kCatalogBytes = 4 * 1024 * 1024;
+    constexpr std::size_t kTopicBytes = 16 * 1024;
+    constexpr std::size_t kTopicTotal = 24 * 1024 * 1024;
+    constexpr std::size_t kEvidenceBytes = 16 * 1024 * 1024;
+    constexpr std::size_t kEvidenceTotal = 64 * 1024 * 1024;
+    constexpr std::size_t kEntries = 1024, kDirectoryEntries = 4096;
+    ProjectRecallSnapshot result;
+    std::size_t topic_used = 0, evidence_used = 0, directory_entries = 0;
+    const auto failure = [](const char* code) { return std::unexpected(std::string(code)); };
+    const auto absent = [](const std::error_code& ec, const fs::file_status& status) {
+        return ec == std::errc::no_such_file_or_directory ||
+               (!ec && status.type() == fs::file_type::not_found);
+    };
+    const auto inside = [](const fs::path& child, const fs::path& root) {
+        auto c = child.begin(), r = root.begin();
+        for (; r != root.end(); ++r, ++c) if (c == child.end() || *c != *r) return false;
+        return true;
+    };
+    const auto read = [&](const fs::path& path, const fs::path& root, std::size_t cap,
+                          std::size_t total_cap, std::size_t& total) -> std::expected<std::string, std::string> {
+        std::error_code ec;
+        const auto status = fs::status(path, ec);
+        if (ec || !fs::is_regular_file(status)) return failure("memory.read.nonregular_or_missing");
+        const auto real = fs::canonical(path, ec);
+        if (ec || !inside(real, root)) return failure("memory.read.path_escape");
+        auto bytes = platform::ReadBoundedRegularFile(real, std::min(cap, total_cap - total));
+        if (!bytes) return std::unexpected("memory." + bytes.error());
+        total += bytes->size();
+        return bytes;
+    };
+    const auto text_ok = [](const std::string& text) {
+        return text.find('\0') == std::string::npos && platform::IsValidUtf8(text);
+    };
+    std::error_code ec;
+    const auto root_status = fs::symlink_status(memory_dir, ec);
+    if (absent(ec, root_status)) return result;
+    if (ec) return failure("memory.read.invalid_root");
+    const auto followed_root = fs::status(memory_dir, ec);
+    if (ec || !fs::is_directory(followed_root)) return failure("memory.read.invalid_root");
+    const auto real_root = fs::canonical(memory_dir, ec);
+    if (ec) return failure("memory.read.invalid_root");
+    const auto real_project = fs::canonical(project_root, ec);
+    if (ec) return failure("memory.read.invalid_project");
+    try {
+        const auto state_path = memory_dir / ".state";
+        ec.clear();
+        const auto state_status = fs::symlink_status(state_path, ec);
+        if (!absent(ec, state_status)) {
+            if (ec || !fs::is_directory(fs::status(state_path, ec)) || ec) return failure("memory.read.invalid_directory");
+            const auto state_real = fs::canonical(state_path, ec);
+            if (ec || !inside(state_real, real_root)) return failure("memory.read.path_escape");
+        }
+        const auto catalog_path = memory_dir / ".state" / "catalog.json";
+        ec.clear();
+        const auto catalog_status = fs::symlink_status(catalog_path, ec);
+        const bool use_catalog = !absent(ec, catalog_status);
+        if (use_catalog) {
+            auto bytes = read(catalog_path, real_root, kCatalogBytes, kTopicTotal, topic_used);
+            if (!bytes) return std::unexpected(bytes.error());
+            if (!text_ok(*bytes)) return failure("memory.read.invalid_text");
+            const auto catalog = nlohmann::json::parse(*bytes, nullptr, false);
+            if (!catalog.is_object() || !catalog.contains("entries") || !catalog["entries"].is_array())
+                return failure("memory.read.invalid_catalog");
+            if (catalog["entries"].size() > kEntries) return failure("memory.read.limit_exceeded");
+            for (const auto& item : catalog["entries"]) {
+                if (!StrictMetadata(item) || !item.contains("file") || !item["file"].is_string() ||
+                    !text_ok(item["file"].get<std::string>())) return failure("memory.read.invalid_catalog");
+                auto parsed = ParseStoredEntry(item, item["file"].get<std::string>());
+                if (!parsed || parsed->public_entry.scope.level != "project") return failure("memory.read.invalid_catalog");
+                if (!scan_all_topics) result.entries.push_back(std::move(*parsed));
+            }
+        }
+        if (!use_catalog || scan_all_topics) {
+            for (const auto* folder : {"facts", "preferences", "feedback"}) {
+                const auto path = memory_dir / folder;
+                ec.clear();
+                const auto status = fs::symlink_status(path, ec);
+                if (absent(ec, status)) continue;
+                if (ec || !fs::is_directory(fs::status(path, ec)) || ec) return failure("memory.read.invalid_directory");
+                const auto real = fs::canonical(path, ec);
+                if (ec || !inside(real, real_root)) return failure("memory.read.path_escape");
+                fs::directory_iterator iterator(real, ec), end;
+                if (ec) return failure("memory.read.failed");
+                while (iterator != end) {
+                    if (++directory_entries > kDirectoryEntries) return failure("memory.read.limit_exceeded");
+                    const auto item_path = iterator->path();
+                    if (item_path.extension() == ".md") {
+                        if (result.entries.size() >= kEntries) return failure("memory.read.limit_exceeded");
+                        auto bytes = read(item_path, real_root, kTopicBytes, kTopicTotal, topic_used);
+                        if (!bytes) return std::unexpected(bytes.error());
+                        if (!text_ok(*bytes)) return failure("memory.read.invalid_text");
+                        const auto file = std::string(folder) + "/" + PathUtf8(item_path.filename());
+                        if (!text_ok(file)) return failure("memory.read.invalid_text");
+                        auto parsed = ParseTopicText(*bytes, file, "project", true);
+                        if (!parsed) return failure("memory.read.invalid_topic");
+                        result.topics.emplace(file, std::move(*bytes));
+                        result.entries.push_back(std::move(*parsed));
+                    }
+                    iterator.increment(ec);
+                    if (ec) return failure("memory.read.failed");
+                }
+            }
+        }
+        std::set<std::string> seen_ids, seen_files;
+        for (auto& stored : result.entries) {
+            const auto& entry = stored.public_entry;
+            if (!seen_ids.insert(entry.id).second || !seen_files.insert(entry.file).second)
+                return failure("memory.read.duplicate_topic");
+            if (!result.topics.contains(entry.file)) {
+                auto bytes = read(memory_dir / Utf8Path(entry.file), real_root, kTopicBytes, kTopicTotal, topic_used);
+                if (!bytes) return std::unexpected(bytes.error());
+                if (!text_ok(*bytes)) return failure("memory.read.invalid_text");
+                auto parsed = ParseTopicText(*bytes, entry.file, "project", true);
+                if (!parsed || parsed->public_entry.id != entry.id) return failure("memory.read.invalid_topic");
+                result.topics.emplace(entry.file, std::move(*bytes));
+                // The bounded topic bytes, not a possibly stale catalog, own
+                // scope/status/expiry/evidence and ranking. The catalog chooses
+                // the roster only. No repaired index is written to disk.
+                stored = std::move(*parsed);
+            }
+            stored.public_entry.content_index = recall::BuildContentIndexBag(entry.content);
+            if (entry.paths.size() > 24 || entry.evidence.size() > 24 || entry.keywords.size() > 16 ||
+                !text_ok(entry.id + entry.file + entry.title + entry.summary + entry.content_index + entry.scope.kind + entry.scope.value))
+                return failure("memory.read.invalid_topic");
+            if (entry.scope.level != "project" || !ValidateScope(entry.scope) ||
+                (entry.status != "active" && entry.status != "stale" && entry.status != "conflict" && entry.status != "archived") ||
+                (entry.confidence != "verified" && entry.confidence != "user-stated" && entry.confidence != "inferred"))
+                return failure("memory.read.invalid_topic");
+            for (const auto& path : entry.paths)
+                if (!IsSafeRelativePath(path) || !text_ok(path)) return failure("memory.read.invalid_topic");
+            for (const auto& evidence : entry.evidence)
+                if (!IsSafeRelativePath(evidence.path) || !text_ok(evidence.path + evidence.symbol)) return failure("memory.read.invalid_topic");
+            if (!stored.fingerprints.is_object() || stored.fingerprints.size() > 24)
+                return failure("memory.read.invalid_fingerprints");
+            for (auto it = stored.fingerprints.begin(); it != stored.fingerprints.end(); ++it) {
+                if (!IsSafeRelativePath(it.key()) || !text_ok(it.key()) || !it.value().is_string() || !text_ok(it.value().get<std::string>()))
+                    return failure("memory.read.invalid_fingerprints");
+                if (!verify_fingerprints) continue;
+                const auto path = project_root / Utf8Path(it.key());
+                ec.clear();
+                const auto status = fs::symlink_status(path, ec);
+                if (absent(ec, status)) { result.stale_ids.insert(entry.id); continue; }
+                auto bytes = read(path, real_project, kEvidenceBytes, kEvidenceTotal, evidence_used);
+                if (!bytes) return std::unexpected(bytes.error());
+                std::uint64_t hash = 14695981039346656037ULL;
+                for (const auto byte : *bytes) { hash ^= static_cast<unsigned char>(byte); hash *= 1099511628211ULL; }
+                std::ostringstream actual;
+                actual << "fnv1a64:" << std::hex << std::setfill('0') << std::setw(16) << hash;
+                if (actual.str() != it.value().get<std::string>()) result.stale_ids.insert(entry.id);
+            }
+        }
+    } catch (const std::exception&) {
+        return failure("memory.read.invalid_metadata");
+    }
+    return result;
+}
+
 std::vector<StoredEntry> ScanTopics(const fs::path& memory_dir, std::vector<std::string>* warnings,
                                     const char* layer) {
     std::vector<StoredEntry> entries;
@@ -576,9 +794,33 @@ bool LayerHasEntry(const fs::path& memory_dir, const std::string& id) {
     return false;
 }
 
-std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::json& job,
-                                                             const fs::path& memory_dir,
-                                                             const fs::path& project_root) {
+std::expected<SaveRequest, std::string> ParseUpsertJob(const nlohmann::json& job, bool strict) {
+    if (!job.is_object()) return std::unexpected("memory.commit.invalid_job");
+    if (strict) {
+        for (const auto* key : {"kind", "id", "title", "summary", "content", "source_session",
+                                "confidence", "expires_at", "occurred_at"})
+            if (job.contains(key) && !job[key].is_string())
+                return std::unexpected("memory.commit.invalid_job");
+        for (const auto* key : {"keywords", "paths"}) {
+            if (!job.contains(key)) continue;
+            if (!job[key].is_array()) return std::unexpected("memory.commit.invalid_job");
+            for (const auto& item : job[key])
+                if (!item.is_string()) return std::unexpected("memory.commit.invalid_job");
+        }
+        if (job.contains("scope")) {
+            if (!job["scope"].is_object()) return std::unexpected("memory.commit.invalid_job");
+            for (const auto* key : {"level", "kind", "value"})
+                if (job["scope"].contains(key) && !job["scope"][key].is_string())
+                    return std::unexpected("memory.commit.invalid_job");
+        }
+        if (job.contains("evidence")) {
+            if (!job["evidence"].is_array()) return std::unexpected("memory.commit.invalid_job");
+            for (const auto& item : job["evidence"])
+                if (!item.is_object() || !item.contains("path") || !item["path"].is_string() ||
+                    (item.contains("symbol") && !item["symbol"].is_string()))
+                    return std::unexpected("memory.commit.invalid_job");
+        }
+    }
     SaveRequest request;
     auto kind = ParseMemoryKind(job.value("kind", std::string()));
     if (!kind.has_value()) return std::unexpected(kind.error());
@@ -615,12 +857,16 @@ std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::jso
         return std::unexpected(valid.error());
     }
 
-    std::vector<StoredEntry> entries = ScanTopics(memory_dir);
+    return request;
+}
+
+PreparedUpsert PrepareUpsert(const SaveRequest& request, const std::vector<StoredEntry>& entries,
+                            nlohmann::json fingerprints, std::string committed_at) {
     std::string id = request.id;
     if (id.empty()) id = MemoryKindName(request.kind) + "." + Slug(request.title);
 
-    StoredEntry* existing = nullptr;
-    for (auto& entry : entries) {
+    const StoredEntry* existing = nullptr;
+    for (const auto& entry : entries) {
         if (entry.public_entry.id == id) {
             existing = &entry;
             break;
@@ -638,7 +884,7 @@ std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::jso
     updated.public_entry.keywords = request.keywords;
     updated.public_entry.paths = request.paths;
     updated.public_entry.status = "active";
-    updated.public_entry.updated_at = NowIsoUtc();
+    updated.public_entry.updated_at = std::move(committed_at);
     // 保存即一次核验:盖 last_verified_at。schema 3 新字段一并落定:name 从
     // id 切出来,created_at 保住旧值(老主题用其 updated_at 补)。
     updated.public_entry.last_verified_at = updated.public_entry.updated_at;
@@ -671,8 +917,43 @@ std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::jso
     updated.public_entry.schema = 3;
     updated.public_entry.name = NameFromId(id, MemoryKindName(request.kind));
     updated.public_entry.file = CanonicalTopicFile(request.kind, updated.public_entry.name);
+    updated.fingerprints = std::move(fingerprints);
+    const auto body = ApplyTimeAnchor(request.content, updated.public_entry.occurred_at);
+    const auto text = BuildTopicText(updated, body);
+    // The derived catalog must see the same schema-3 normalization as a later
+    // ScanTopics (notably paths merged into evidence). Legacy rebuild and the
+    // new gate therefore index the same typed entry and body.
+    if (auto parsed = frontmatter::Parse(text); parsed) {
+        const auto file = updated.public_entry.file;
+        updated.public_entry = std::move(parsed->entry);
+        updated.public_entry.file = file;
+        updated.public_entry.content = std::move(parsed->body);
+    } else {
+        updated.public_entry.content = body;
+    }
+    return PreparedUpsert{std::move(updated), previous_file, text};
+}
+
+PreparedIndex PrepareMemoryIndex(const std::vector<StoredEntry>& entries,
+                                bool user_layer, const std::string& generated_at) {
+    nlohmann::json catalog{{"schema", 1}, {"generated_at", generated_at}, {"entries", nlohmann::json::array()}};
+    for (const auto& entry : entries) {
+        auto item = EntryMetadata(entry);
+        item["file"] = entry.public_entry.file;
+        catalog["entries"].push_back(std::move(item));
+    }
+    return {catalog.dump(2) + "\n", BuildIndex(entries, user_layer ? "user" : "project")};
+}
+
+std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::json& job,
+                                                             const fs::path& memory_dir,
+                                                             const fs::path& project_root) {
+    auto parsed = ParseUpsertJob(job);
+    if (!parsed) return std::unexpected(parsed.error());
+    const auto& request = *parsed;
+    auto entries = ScanTopics(memory_dir);
     // 指纹盖住证据路径 ∪ paths(schema 3 里两者本就该是一份)。
-    updated.fingerprints = nlohmann::json::object();
+    auto fingerprints = nlohmann::json::object();
     std::vector<std::string> fingerprint_paths = request.paths;
     for (const MemoryEvidence& proof : request.evidence) {
         if (std::find(fingerprint_paths.begin(), fingerprint_paths.end(), proof.path) ==
@@ -682,13 +963,14 @@ std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::jso
     }
     for (const std::string& relative : fingerprint_paths) {
         const std::string hash = FileFingerprint(project_root / Utf8Path(relative));
-        if (!hash.empty()) updated.fingerprints[relative] = hash;
+        if (!hash.empty()) fingerprints[relative] = hash;
     }
 
+    const auto prepared = PrepareUpsert(request, entries, std::move(fingerprints), NowIsoUtc());
+    const auto& updated = prepared.entry;
+    const auto& previous_file = prepared.previous_file;
     const fs::path topic = memory_dir / Utf8Path(updated.public_entry.file);
-    auto written = AtomicWrite(topic,
-                               BuildTopicText(updated, ApplyTimeAnchor(request.content,
-                                                                       updated.public_entry.occurred_at)));
+    auto written = AtomicWrite(topic, prepared.topic_text);
     if (!written.has_value()) return std::unexpected(written.error());
     // 旧文件名不同(老格式或换名)才清;同一把项目锁里先写新再删旧,中途
     // 失败旧文件仍在,新文件不半截落地。
@@ -1000,16 +1282,15 @@ std::expected<void, std::string> RebuildMemoryIndex(const fs::path& memory_dir, 
     std::vector<std::string> warnings;
     const char* layer = user_layer ? "user" : "project";
     const auto entries = store::ScanTopics(memory_dir, &warnings, layer);
-    nlohmann::json catalog{{"schema", 1}, {"generated_at", NowIsoUtc()}, {"entries", nlohmann::json::array()}};
-    for (const auto& entry : entries) {
-        nlohmann::json item = EntryMetadata(entry);
-        item["file"] = entry.public_entry.file;
-        catalog["entries"].push_back(std::move(item));
+    auto prepared = store::PrepareMemoryIndex(entries, user_layer, NowIsoUtc());
+    if (!warnings.empty()) {
+        auto catalog = nlohmann::json::parse(prepared.catalog);
+        catalog["warnings"] = warnings;
+        prepared.catalog = catalog.dump(2) + "\n";
     }
-    if (!warnings.empty()) catalog["warnings"] = warnings;
-    auto catalog_write = AtomicWrite(memory_dir / ".state" / "catalog.json", catalog.dump(2) + "\n");
+    auto catalog_write = AtomicWrite(memory_dir / ".state" / "catalog.json", prepared.catalog);
     if (!catalog_write.has_value()) return catalog_write;
-    return AtomicWrite(memory_dir / "index.md", BuildIndex(entries, layer));
+    return AtomicWrite(memory_dir / "index.md", prepared.index);
 }
 
 }  // namespace lubancode::memory

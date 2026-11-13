@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""src/cli/grapheme.cpp 两张区间表的机器生成器(conhost 原生几何分叉与宽表机器生成单)。
+"""src/text/grapheme.cpp 两张区间表的机器生成器(conhost 原生几何分叉与宽表机器生成单)。
 
 表一 kExtendRanges:auxiliary/GraphemeBreakProperty.txt 的 GCB=Extend 全量
   区间(UAX#29 分段用;含变体选择符、ZWNJ 与 emoji 肤色修饰。注意不是
@@ -44,7 +44,7 @@ SOURCES = {
     "EastAsianWidth.txt": "https://www.unicode.org/Public/15.1.0/ucd/EastAsianWidth.txt",
     "emoji-data.txt": "https://www.unicode.org/Public/15.1.0/ucd/emoji/emoji-data.txt",
 }
-GRAPHEME_CPP = Path(__file__).resolve().parent.parent / "src" / "cli" / "grapheme.cpp"
+GRAPHEME_CPP = Path(__file__).resolve().parent.parent / "src" / "text" / "grapheme.cpp"
 
 # EastAsianWidth.txt 头注释规定的"未赋值码位默认 W"段(规范的一部分,不是
 # 本脚本的私货;平面 2/3 整面与 CJK 三段)。

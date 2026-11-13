@@ -61,4 +61,9 @@ std::expected<RunOutcome, std::string> Agent::Run(api::Message user_message, con
     return AgentLoop::Run(*this, std::move(user_message), wiring, cancel);
 }
 
+std::expected<RunOutcome, std::string> Agent::RunAdmittedHistory(const TurnWiring& wiring,
+                                                              const std::atomic<bool>* cancel) {
+    return AgentLoop::Run(*this, {}, wiring, cancel, true);
+}
+
 }  // namespace lubancode::agent

@@ -693,7 +693,13 @@ TEST_CASE("开关开: 子代理走五步,父账 spawn/linked、子账派生来�
     REQUIRE(child_bridge.OnOutputCompleted(child_request, AssistantText("文档说入口在 main.cpp"),
                                            "end_turn", "resp-child"));
     child_bridge.EndTurn(true, false, "");
-    const std::string child_hash = (*child)->Finish(/*ok=*/true, "done");
+    const auto child_receipt = (*child)->Finish(runtime::SubagentExecutionOutcome::Succeeded, "done");
+    CHECK(child_receipt.execution == runtime::SubagentExecutionOutcome::Succeeded);
+    CHECK(child_receipt.confirmation == runtime::SubagentAppendConfirmation::Committed);
+    CHECK(child_receipt.seal == runtime::SubagentSealState::Closed);
+    REQUIRE(child_receipt.durable());
+    REQUIRE(child_receipt.terminal.has_value());
+    const std::string child_hash = child_receipt.terminal->hash;
     REQUIRE_FALSE(child_hash.empty());
 
     // 父侧收尾:执行终态 + 结果回喂(agent 调用的 tool 消息)。
@@ -738,6 +744,13 @@ TEST_CASE("开关开: 子代理走五步,父账 spawn/linked、子账派生来�
         const auto child_kinds = KindsOf(child_rows);
         CHECK(std::find(child_kinds.begin(), child_kinds.end(), "task.started") != child_kinds.end());
         CHECK(std::find(child_kinds.begin(), child_kinds.end(), "session.ended") != child_kinds.end());
+        const auto& terminal = child_rows.back();
+        CHECK(terminal.value("kind", std::string()) == "session.ended");
+        CHECK(terminal.value("sessionId", std::string()) == child_receipt.terminal->session_id);
+        CHECK(terminal.value("runId", std::string()) == child_receipt.terminal->run_id);
+        CHECK(terminal.value("eventId", std::string()) == child_receipt.terminal->event_id);
+        CHECK(terminal.value("seq", 0ULL) == child_receipt.terminal->seq);
+        CHECK(terminal.value("lineHash", std::string()) == child_hash);
         CHECK(lubancode::trajectory::v3::VerifyV3File(child_stream).ok);
     }
     CHECK(found_child);

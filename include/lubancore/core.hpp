@@ -1,0 +1,298 @@
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <lubancore/api.hpp>
+#include <lubancore/events.hpp>
+#include <lubancore/extensions.hpp>
+#include <lubancore/results.hpp>
+#include <lubancore/skills.hpp>
+#include <lubancore/subagents.hpp>
+#include <lubancore/memory.hpp>
+#include <lubancore/memory_blobs.hpp>
+#include <lubancore/lua.hpp>
+#include <lubancore/web_fetch.hpp>
+#include <lubancore/web_search.hpp>
+#include <lubancore/jobs.hpp>
+#include <lubancore/named_results.hpp>
+
+// Experimental C++23 API. Consumer and library must use a compatible compiler,
+// standard library and (on Windows) CRT. No stable cross-toolchain ABI is promised.
+namespace lubancore {
+
+struct ToolCall { std::string id; std::string name; std::string input_json; };
+struct ToolReply { std::string call_id; std::string text; bool is_error = false; };
+struct Message {
+    std::string role;
+    std::string text;
+    std::vector<ToolCall> tool_calls;
+    std::vector<ToolReply> tool_replies;
+};
+struct ToolDefinition { std::string name; std::string description; std::string input_schema_json; };
+struct ModelRequest {
+    std::string model;
+    std::string system;
+    std::vector<Message> messages;
+    std::vector<ToolDefinition> tools;
+    std::optional<int> max_output_tokens;
+    // Empty preserves the default. UTF-8, no NUL, at most 256 bytes;
+    // provider-specific effort names are forwarded without a whitelist.
+    std::string reasoning_effort;
+};
+struct Usage { std::int64_t input_tokens = 0; std::int64_t output_tokens = 0; };
+struct ModelReply {
+    std::string text;
+    std::vector<ToolCall> tool_calls;
+    std::optional<Usage> usage;
+    // Empty preserves text/tool inference; otherwise the provider's actual
+    // finish reason. UTF-8, no NUL, at most 256 bytes.
+    std::string stop_reason;
+};
+
+// Text/tool-call injection surface, useful for an embedded provider or fixture.
+// Unsupported rich history is rejected explicitly, never silently flattened.
+class Backend {
+public:
+    virtual ~Backend() = default;
+    virtual Result<ModelReply> Generate(const ModelRequest&, Cancellation) = 0;
+};
+
+enum class Wire { Anthropic, ChatCompletions, Responses, Gemini };
+struct Connection {
+    Wire wire = Wire::ChatCompletions;
+    std::string base_url;
+    std::string api_key;
+    int connect_timeout_ms = 10000;
+    int idle_timeout_seconds = 60;
+    int request_timeout_seconds = 300;
+};
+struct ToolResult { std::string text; bool is_error = false; };
+struct ToolContext { std::string cwd; Cancellation cancellation; };
+struct Tool {
+    std::string name;
+    std::string description;
+    std::string input_schema_json = R"({"type":"object","properties":{}})";
+    // Custom tools conservatively require external-effect approval by default.
+    bool requires_approval = true;
+    std::function<Result<ToolResult>(const std::string&, const ToolContext&)> execute;
+};
+struct McpServer {
+    // Text results may continue the model loop. Image/audio/blob captures are
+    // retained locally, but the current media capacity guard ends the operation
+    // explicitly; the SDK does not supply a media token estimation policy.
+    std::string name;
+    std::string command;
+    std::vector<std::string> arguments;
+    // An explicit complete child environment. No ambient parent env is inherited.
+    std::vector<std::pair<std::string, std::string>> environment;
+    // Exact discovered tool names, without the mcp__<server>__ prefix.
+    std::vector<std::string> tools;
+    int startup_timeout_ms = 30000;
+    int call_timeout_ms = 120000;
+};
+struct RuntimeOptions {
+    // Required absolute UTF-8 paths. data_root is the owned persistence root;
+    // resource_root identifies installed resources (no ambient home lookup).
+    // An admitted search uses only resource_root/libexec/rg (rg.exe on Windows),
+    // prepares it before session startup, and requires the bundled rg version.
+    std::string data_root;
+    std::string resource_root;
+};
+// Finite, positive per-opening read budgets. Same-ID resume can raise them;
+// they do not change saved Memory plans, authorization or per-entity Memory caps.
+struct RecoveryStreamReadLimits {
+    std::size_t max_bytes = 0, max_lines = 0, max_line_bytes = 0;
+};
+struct RecoveryReadLimits {
+    RecoveryStreamReadLimits journal{128u * 1024u * 1024u, 262144u, 8u * 1024u * 1024u};
+    RecoveryStreamReadLimits operations{16u * 1024u * 1024u, 65536u, 256u * 1024u};
+    std::size_t result_total_bytes = 128u * 1024u * 1024u;
+    std::size_t view_total_bytes = 384u * 1024u * 1024u;
+    std::size_t result_directory_entries = 4096u, view_directory_entries = 8192u;
+    std::size_t directory_name_bytes = 1024u, directory_name_total_bytes = 8u * 1024u * 1024u;
+};
+struct SessionOptions {
+    std::string cwd; // required absolute existing directory; never process chdir
+    std::string model;
+    // On resume, empty preserves the saved effective system prompt. Nonempty is
+    // an explicit replacement recorded through the existing V3 system transition.
+    std::string system_prompt;
+    // Exactly one of backend and connection must be set. Ownership is per session.
+    std::unique_ptr<Backend> backend;
+    std::optional<Connection> connection;
+    // Empty creates a new V3 session. Nonempty strictly resumes that same V3 ID.
+    std::string resume_session_id;
+    // Explicit admission. read_file/write_file/edit_file/run_command/search,
+    // todo_write, web_fetch (bounded HTTP(S)), and web_search (explicit credentials).
+    // Search defaults to this session's cwd; null/empty paths do the same.
+    // run_command is foreground unless command_jobs and execution_mode explicitly opt in.
+    std::vector<std::string> builtin_tools;
+    std::vector<Tool> custom_tools;
+    // Omitted is off for a new Session; resume inherits its frozen declaration.
+    std::optional<jobs::v1::CommandOptions> command_jobs;
+    std::vector<McpServer> mcp_servers;
+    // Explicit local selection, frozen per session. SKILL.md drift is rejected;
+    // ordinary attachments are read live on demand. Never discovers HOME/cwd.
+    std::optional<skills::v1::Selection> skills;
+    // Explicit trusted project recall. Empty defaults off; on resume it preserves
+    // the saved Memory plan. An explicit resume value must match that plan.
+    std::optional<memory::v1::RecallOptions> memory;
+    // Omitted is off for a new Session, or inherits the frozen resume plan.
+    std::optional<memory::v1::WriteOptions> memory_write;
+    // Omitted is off for a new Session, or preserves its frozen resume plan.
+    // Foreground main dispatch only, depth one, explicit host step/second budgets.
+    std::optional<subagents::v1::Options> subagents;
+    // Explicit trusted C++ registrations, frozen per session until Close.
+    std::vector<extensions::v1::Registration> extensions;
+    // Outbound result projection identity. New sessions default to Preview/v1;
+    // omitted on resume preserves the saved mode/version. An explicit resume
+    // value must match, including legacy Preview/v1. Local queries still read
+    // trusted materials; this option never grants the host's Node permission.
+    std::optional<results::v1::SessionResultOptions> result_policy;
+    ApprovalMode approval_mode = ApprovalMode::Confirm;
+    std::chrono::milliseconds approval_timeout{300000};
+    int max_steps_per_turn = 0;
+    std::size_t context_window_tokens = 128000;
+    // Explicit trusted standalone scripts; off on new Sessions, inherited from
+    // a matching frozen plan on resume. All three execution budgets are required.
+    std::optional<lua::v1::Selection> lua;
+    RecoveryReadLimits recovery_read_limits{};
+    // Explicit trusted, per-Session subscription queue provider; null uses the
+    // original bounded in-memory queue. Each Subscribe owns an independent queue.
+    std::unique_ptr<events::v1::EventSink> event_sink;
+    // Memory-fragment CAS only; null keeps File. Does not enable recall/save.
+    std::unique_ptr<memory_blobs::v1::Provider> memory_blob_provider;
+    // Limits only: builtin_tools must explicitly select web_fetch. Omitted
+    // uses bounded defaults. Resume selects tools/limits afresh, as other builtins.
+    std::optional<web_fetch::v1::Options> web_fetch;
+    // Complete named tool-result storage bundle. Null keeps File; same-ID
+    // external resume requires the matching provider and frozen binding.
+    std::optional<named_results::v1::Options> named_results;
+    // Requires explicit builtin_tools selection of web_search and a credential.
+    // Fresh on every opening, including resume; never saved in session plans.
+    std::optional<web_search::v1::Options> web_search;
+};
+// operation_id is Session scoped; external callers address (session_id, operation_id).
+struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };
+enum class OperationState { Accepted, Running, Succeeded, Failed, Cancelled, Indeterminate };
+struct Operation {
+    std::string operation_id;
+    std::string turn_id;
+    OperationState state = OperationState::Accepted;
+    std::string final_text;
+    std::string error;
+    bool result_persisted = false;
+};
+class LUBANCORE_API EventStream {
+public:
+    ~EventStream();
+    EventStream(const EventStream&) = delete;
+    EventStream& operator=(const EventStream&) = delete;
+    // nullopt = timeout. Closed/overflow streams return an explicit error.
+    // One or more callers may wait; each event is consumed once per subscription.
+    Result<std::optional<Event>> Next(std::chrono::milliseconds timeout);
+    // Wakes and waits for in-flight Next calls. Host queues close synchronously;
+    // no detached threads are created.
+    void Close();
+    // Same cooperative retirement, with the actual provider Close receipt.
+    // Repeated calls retain that result; overflow remains a delivery error only.
+    Result<void> CloseChecked();
+private:
+    struct Impl;
+    explicit EventStream(std::shared_ptr<Impl>);
+    std::shared_ptr<Impl> impl_;
+    friend class Session;
+};
+
+class LUBANCORE_API Session {
+public:
+    // Dropping the final public handle closes and joins this session. Closed
+    // handles retain query snapshots; Runtime does not retain discarded handles.
+    ~Session();
+    Session(const Session&) = delete;
+    Session& operator=(const Session&) = delete;
+    std::string id() const;
+    // Durable acceptance only. Execution and completion happen on the owned worker.
+    // Required nonempty key: same payload repeats return the original operation.
+    Result<Receipt> Submit(std::string client_operation_id, std::string text);
+    Result<std::shared_ptr<EventStream>> Subscribe(std::size_t capacity = 4096);
+    std::vector<Approval> PendingApprovals() const;
+    Result<void> ResolveApproval(std::string request_id, ApprovalDecision, std::string reason = {});
+    Result<void> Cancel(std::string operation_id);
+    Result<std::vector<jobs::v1::JobView>> ListJobs(std::optional<std::string> parent_operation_id = std::nullopt) const;
+    Result<jobs::v1::JobView> ReadJob(jobs::v1::Identity) const;
+    Result<jobs::v1::JobView> WaitJob(jobs::v1::Identity, std::chrono::milliseconds timeout) const;
+    Result<void> CancelJob(jobs::v1::Identity);
+    // Trusted local cached preview, max_bytes in 1..4096. Not an outbound policy
+    // seal; a Worker must use ResultProjector before transport. No Full Job API.
+    Result<jobs::v1::Preview> ReadJobPreview(jobs::v1::Identity, std::size_t max_bytes = 4096) const;
+    Result<Operation> ReadOperation(std::string operation_id) const;
+    Result<Operation> WaitResult(std::string operation_id, std::chrono::milliseconds timeout) const;
+    // Completed operations only. The frozen V3 result index survives event
+    // overflow, Close and same-ID resume, and never reruns tools. A failed index
+    // returns an error, not an empty list. Later operations may run concurrently.
+    Result<std::vector<results::v1::ToolResultSummary>> ListToolResults(std::string operation_id) const;
+    // Exact six-part identity from ListToolResults; no user paths or offsets.
+    // Multi-channel captured material, not the model's shortened preview. Text
+    // shares one bounded budget; binary/raw_payload stays metadata-only. Capture
+    // completeness and artifact gaps are separate. TooLarge never returns a
+    // partial prefix as a complete result. Closed handles retain this query.
+    Result<results::v1::SavedSnapshot> ReadToolResult(
+        results::v1::ToolResultIdentity identity,
+        results::v1::ToolResultReadOptions options = {}) const;
+    // Frozen selected/overridden middleware plan, retained as pure JSON after
+    // Close. This does not serialize or restore arbitrary extension state.
+    Result<std::string> DescribeExtensions() const;
+    Result<skills::v1::Snapshot> DescribeSkills() const;
+    Result<subagents::v1::Snapshot> DescribeSubagents() const;
+    // Checked, owned historical projections. Close retains them without a writer.
+    Result<std::vector<subagents::v1::Report>> GetSubagentReports(const std::string& operation_id) const;
+    Result<memory::v1::Snapshot> DescribeMemory() const;
+    // Searches this Session only, even when another Session uses the same ID string.
+    Result<memory::v1::RecallReport> GetMemoryRecall(const std::string& operation_id) const;
+    Result<memory::v1::WriteSnapshot> DescribeMemoryWrite() const;
+    // Owned declaration only. Close keeps this value; resume creates fresh VMs.
+    Result<lua::v1::Snapshot> DescribeLua() const;
+    // Pure owned values after operation completion, including after Close.
+    Result<std::vector<memory::v1::SaveReport>> GetMemorySaves(const std::string& operation_id) const;
+    // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
+    // Cooperative custom tools/backends MUST return after cancellation; Close waits
+    // for them and never destroys live borrowed state or pretends a timeout stopped it.
+    // Blocking lifecycle methods are rejected inside any SDK backend/tool callback;
+    // do not destroy owning Runtime/Session handles from these callbacks.
+    Result<void> Close();
+private:
+    struct Impl;
+    explicit Session(std::shared_ptr<Impl>);
+    std::shared_ptr<Impl> impl_;
+    friend class Runtime;
+};
+
+class LUBANCORE_API Runtime {
+public:
+    static Result<std::unique_ptr<Runtime>> Create(RuntimeOptions);
+    ~Runtime();
+    Runtime(const Runtime&) = delete;
+    Runtime& operator=(const Runtime&) = delete;
+    Result<std::shared_ptr<Session>> OpenSession(SessionOptions);
+    // Closes all live sessions and preserves the first close error, including
+    // errors from sessions whose final public handle has already been dropped.
+    Result<void> Shutdown();
+private:
+    struct Impl;
+    explicit Runtime(std::unique_ptr<Impl>);
+    std::unique_ptr<Impl> impl_;
+};
+
+LUBANCORE_API std::string Version();
+} // namespace lubancore

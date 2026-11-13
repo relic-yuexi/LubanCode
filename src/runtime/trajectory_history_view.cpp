@@ -41,7 +41,7 @@ std::map<std::string, std::string> ProviderCallToAction(
     const std::vector<trajectory::v3::ToolActionSnapshot>& snapshots) {
     std::map<std::string, std::string> mapping;
     for (const auto& action : snapshots) {
-        if (action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
+        if (action.provider_reply_required && action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
             mapping[*action.provider_tool_call_id] = action.tool_call_id;
         }
     }

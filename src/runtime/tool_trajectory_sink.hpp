@@ -32,6 +32,9 @@ struct ToolResultsCommitReceipt {
     std::string error_code;
     // 降级明细(稳定码逐枚列;Degraded 时至少一枚)。
     std::vector<std::string> degraded_codes;
+    // Owned evidence that an executed child handoff is unconfirmed. Ordinary
+    // tools default to the original failure behavior.
+    bool side_effect_indeterminate = false;
 
     // 放行判定:Committed/Degraded 放行(降级是约定路径);Failed 拦。
     bool ok() const { return status != Status::Failed; }

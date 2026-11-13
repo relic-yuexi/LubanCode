@@ -3,13 +3,28 @@
 // 一切——参数解析、配置向导、装配、交互循环、单发——都在 src/app/ 各
 // 件里(分层与搬家账目见 todos/重构maincpp.todo)。
 
+#include <cstdio>
 #include <string>
 #include <vector>
 
 #include "app/cli_app.hpp"
 #include "cli/ui_trace.hpp"  // ui_trace::EnableFromEnv(混屏取证,默认关)
 #include "platform/console.hpp"
+#include "platform/log_sink.hpp"
 #include "platform/paths.hpp"
+
+namespace {
+void InstallCliDiagnostics() {
+    // Preserve CLI diagnostics for ordinary, one-shot and AppServer entry paths.
+    // The engine has no implicit stderr fallback when embedded by another host.
+    lubancode::platform::LogSink::Instance().SetWriter([](const lubancode::platform::LogRecord& record) {
+        if (record.level == lubancode::platform::LogLevel::Warn ||
+            record.level == lubancode::platform::LogLevel::Error) {
+            std::fprintf(stderr, "[%s] %s\n", record.component.c_str(), record.message.c_str());
+        }
+    });
+}
+} // namespace
 
 #ifdef _WIN32
 
@@ -19,6 +34,7 @@
 // 才能跟程序内部统一按 UTF-8 处理的字符串对上。这是全程序最后一处
 // #ifdef _WIN32(平台差异其余都收进 platform/ 了)。
 int wmain(int argc, wchar_t** argv) {
+    InstallCliDiagnostics();
     lubancode::platform::SetupConsoleUtf8();
     lubancode::cli::ui_trace::EnableFromEnv();
 
@@ -34,6 +50,7 @@ int wmain(int argc, wchar_t** argv) {
 
 // POSIX 下 argv 天然就是字节串(约定 UTF-8),直通。
 int main(int argc, char** argv) {
+    InstallCliDiagnostics();
     lubancode::cli::ui_trace::EnableFromEnv();
     std::vector<std::string> args(argv, argv + argc);
     return lubancode::app::RunCli(args);

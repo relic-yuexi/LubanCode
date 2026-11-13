@@ -179,7 +179,7 @@ bool ContainsSymlinkOrReparse(const std::filesystem::path& root, const std::file
     for (; child_it != canonical_child.end(); ++child_it) {
         probe /= *child_it;
 #ifdef _WIN32
-        const DWORD attrs = GetFileAttributesW(probe.c_str());
+        const DWORD attrs = GetFileAttributesW(platform::FileIoPath(probe).c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES) {
             continue;  // 不存在:后续分量更不存在,继续走无害
         }

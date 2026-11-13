@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "platform/atomic_write.hpp"
+#include "platform/paths.hpp"
 
 using lubancode::platform::AtomicWriteFile;
 using lubancode::platform::WriteDurability;
@@ -55,7 +56,7 @@ std::set<std::string> TempLeftovers(const std::filesystem::path& dir) {
     std::set<std::string> found;
     std::error_code ec;
     for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        const std::string name = entry.path().filename().string();
+        const std::string name = lubancode::platform::PathToUtf8(entry.path().filename());
         if (name.find(".tmp") != std::string::npos) {
             found.insert(name);
         }
@@ -363,4 +364,382 @@ TEST_CASE("AtomicWriteFile: 替换失败的短拒分类——Windows 记可重�
     CHECK(result.error().failure_kind == WriteFailureKind::Permanent);
 #endif
     CHECK(std::filesystem::is_directory(target));
+}
+
+TEST_CASE("FileIoPath: short paths retain their original spelling") {
+    namespace fs = std::filesystem;
+    using lubancode::platform::FileIoPath;
+    const fs::path relative = fs::path("short") / "state.json";
+    REQUIRE(fs::absolute(relative).native().size() < 248);
+    CHECK(FileIoPath(relative).native() == relative.native());
+    CHECK(FileIoPath(fs::path{}).empty());
+#ifndef _WIN32
+    const fs::path long_path = fs::path("/tmp") / std::string(200, 'a') / std::string(100, 'b');
+    CHECK(FileIoPath(long_path).native() == long_path.native());
+#endif
+}
+
+#ifdef _WIN32
+namespace {
+// The disk witness uses an explicit native path, independently of FileIoPath.
+// A helper that points at the wrong file cannot make these content checks pass.
+std::filesystem::path ExplicitWindowsPath(std::filesystem::path path) {
+    path = std::filesystem::absolute(path).lexically_normal();
+    path.make_preferred();
+    const auto native = path.native();
+    return std::filesystem::path(native.starts_with(L"\\\\")
+        ? L"\\\\?\\UNC\\" + native.substr(2) : L"\\\\?\\" + native);
+}
+
+struct LongAtomicRoot {
+    std::filesystem::path path;
+    explicit LongAtomicRoot(const char* name) : path(MakeTempRoot(name)) {}
+    ~LongAtomicRoot() {
+        std::error_code ignored;
+        std::filesystem::remove_all(ExplicitWindowsPath(path), ignored);
+    }
+};
+} // namespace
+
+TEST_CASE("FileIoPath: Windows UNC and explicit namespaces preserve their meaning") {
+    namespace fs = std::filesystem;
+    using lubancode::platform::FileIoPath;
+    const std::wstring tail = std::wstring(100, L'a') + L"\\" + std::wstring(100, L'b') +
+                              L"\\" + std::wstring(60, L'c') + L"\\state.json";
+    const fs::path unc(L"\\\\server\\share\\" + tail);
+    CHECK(FileIoPath(unc).native() == L"\\\\?\\UNC\\server\\share\\" + tail);
+    const fs::path extended(L"\\\\?\\C:\\already\\file.");
+    const fs::path device(L"\\\\.\\NUL");
+    CHECK(FileIoPath(extended).native() == extended.native());
+    CHECK(FileIoPath(device).native() == device.native());
+    for (const auto& path : {fs::path(L"C:\\" + tail + L"."), fs::path(L"C:\\" + tail + L" "),
+                            fs::path(L"C:\\parent.\\" + tail), fs::path(L"C:\\parent \\" + tail)}) {
+        CHECK(FileIoPath(path).native() == path.native());
+    }
+    for (const auto* reserved : {L"NUL.txt", L"CoM1", L"LPT9.log", L"COM¹.txt", L"NUL:stream"}) {
+        const fs::path path = fs::path(L"C:\\" + tail) / reserved;
+        CHECK(FileIoPath(path).native() == path.native());
+    }
+    const fs::path ordinary = fs::path(L"C:\\" + tail) / L"COM10.txt";
+    CHECK(FileIoPath(ordinary).native() == ExplicitWindowsPath(ordinary).native());
+    const fs::path relative = fs::path("relative-long-path") / fs::path(tail);
+    REQUIRE_FALSE(relative.is_absolute());
+    CHECK(FileIoPath(relative).native() == ExplicitWindowsPath(relative).native());
+}
+
+TEST_CASE("AtomicWriteFile: Windows long logical paths create replace and clean up real files") {
+    namespace fs = std::filesystem;
+    LongAtomicRoot root("long-native-io");
+    auto parent = root.path;
+    unsigned level = 0;
+    while (parent.native().size() < 285) parent /= std::string(32, 'd') + std::to_string(++level);
+    const auto target = parent / lubancode::platform::Utf8ToPath("完整结果.txt");
+    REQUIRE(target.native().size() > 260);
+    REQUIRE_FALSE(target.native().starts_with(L"\\\\?\\"));
+    const auto native_target = ExplicitWindowsPath(target);
+    const auto native_parent = ExplicitWindowsPath(parent);
+
+    const auto created = AtomicWriteFile(target, "original long-path bytes");
+    REQUIRE_MESSAGE(created.has_value(), (created ? "" : created.error().message));
+    REQUIRE(fs::is_regular_file(native_target));
+    CHECK(ReadAll(native_target) == "original long-path bytes");
+    const auto replaced = AtomicWriteFile(target, "replacement long-path bytes", WriteDurability::ProcessCrashDurability);
+    REQUIRE_MESSAGE(replaced.has_value(), (replaced ? "" : replaced.error().message));
+    CHECK(replaced->outcome == WriteOutcome::CommittedDurable);
+    CHECK(ReadAll(native_target) == "replacement long-path bytes");
+    CHECK(TempLeftovers(native_parent).empty());
+
+    HookGuard guard;
+    lubancode::platform::SetFileFlushFailureForTest(true);
+    const auto failed = AtomicWriteFile(target, "must not replace", WriteDurability::ProcessCrashDurability);
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error().code == "atomic.tmp_write_failed");
+    CHECK(failed.error().outcome == WriteOutcome::NotCommitted);
+    CHECK(ReadAll(native_target) == "replacement long-path bytes");
+    CHECK(TempLeftovers(native_parent).empty());
+    lubancode::platform::SetFileFlushFailureForTest(false);
+
+    const auto occupied = parent / "occupied";
+    REQUIRE(fs::create_directory(ExplicitWindowsPath(occupied)));
+    const auto rejected = AtomicWriteFile(occupied, "not a directory");
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == "atomic.replace_failed");
+    CHECK(fs::is_directory(ExplicitWindowsPath(occupied)));
+    CHECK(TempLeftovers(native_parent).empty());
+}
+
+TEST_CASE("AtomicWriteFile: Windows temporary suffix can cross MAX_PATH before the target does") {
+    namespace fs = std::filesystem;
+    LongAtomicRoot root("long-temp-only");
+    constexpr std::size_t target_length = 255;
+    REQUIRE(root.path.native().size() + 12 < target_length);
+    const auto filename_length = target_length - root.path.native().size() - 1;
+    REQUIRE(filename_length < 240); // every component, including its temp suffix, stays legal
+    const auto target = root.path / (std::string(filename_length - 4, 'f') + ".txt");
+    REQUIRE(target.native().size() == target_length);
+    REQUIRE(target.native().size() < 260);
+    REQUIRE(target.native().size() + std::string(".1-0.tmp").size() >= 260);
+
+    REQUIRE(AtomicWriteFile(target, "before").has_value());
+    REQUIRE(AtomicWriteFile(target, "after", WriteDurability::ProcessCrashDurability).has_value());
+    // The logical target itself is below MAX_PATH; only the writer's temporary
+    // filename needs the extended form. Read the original spelling directly.
+    CHECK(ReadAll(target) == "after");
+    CHECK(TempLeftovers(root.path).empty());
+}
+#endif
+
+// The original nineteen CASE declarations above remain unchanged. These six
+// exercise the internal SDK plan retry seam, not a global AtomicWrite policy.
+#include <chrono>
+#include <iostream>
+#include "sdk/plan_write.hpp"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+namespace {
+using PlanClock = std::chrono::steady_clock;
+using PlanWriteResult = std::expected<lubancode::platform::AtomicWriteReceipt,
+                                      lubancode::platform::AtomicWriteError>;
+using lubancore::detail::WriteFrozenPlanWithRetry;
+
+lubancode::platform::AtomicWriteError PlanRejected(unsigned attempt = 1) {
+    return {"atomic.replace_failed", "original short rejection " + std::to_string(attempt),
+            WriteOutcome::NotCommitted, WriteFailureKind::TransientReject};
+}
+
+struct PlanRetryRoot {
+    std::filesystem::path path;
+    explicit PlanRetryRoot(const char* name) : path(MakeTempRoot(name)) {}
+    ~PlanRetryRoot() { std::error_code error; std::filesystem::remove_all(path, error); }
+};
+
+#ifdef _WIN32
+struct PlanBlockingHandle {
+    HANDLE value = INVALID_HANDLE_VALUE;
+    ~PlanBlockingHandle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+    bool Close() {
+        if (value == INVALID_HANDLE_VALUE) return false;
+        if (!CloseHandle(value)) return false;
+        value = INVALID_HANDLE_VALUE;
+        return true;
+    }
+};
+#endif
+} // namespace
+
+TEST_CASE("SDK frozen plan: typed short rejection retries identical bytes then commits durably") {
+    PlanRetryRoot root("sdk-plan-retry-success");
+    const auto target = root.path / "plan.json";
+    const std::string frozen = R"({"sessionId":"this-session","schemaVersion":1})";
+    WriteAll(target, "old plan");
+    unsigned calls = 0, waits = 0;
+    auto time = PlanClock::time_point{};
+    const auto saved = WriteFrozenPlanWithRetry(target, frozen,
+        [&](const auto& path, std::string_view bytes, WriteDurability durability) -> PlanWriteResult {
+            CHECK(path == target);
+            CHECK(bytes == frozen);
+            CHECK(durability == WriteDurability::ProcessCrashDurability);
+            if (++calls == 1) return std::unexpected(PlanRejected());
+            return AtomicWriteFile(path, bytes, durability);
+        }, [&] { return time; }, [&](PlanClock::duration duration) {
+            CHECK(duration == std::chrono::milliseconds(20));
+            CHECK(ReadAll(target) == "old plan");
+            ++waits; time += duration;
+        });
+    REQUIRE(saved.has_value());
+    REQUIRE(saved->outcome == WriteOutcome::CommittedDurable);
+    CHECK(calls == 2); CHECK(waits == 1);
+    CHECK(ReadAll(target) == frozen);
+    CHECK(TempLeftovers(root.path).empty());
+    std::cout << "[sdk-plan-retry] retry-success\n";
+}
+
+TEST_CASE("SDK frozen plan: permanent refusal and real pre-commit flush failure stop immediately") {
+    PlanRetryRoot root("sdk-plan-permanent");
+    const auto target = root.path / "plan.json";
+    WriteAll(target, "old plan");
+    unsigned calls = 0, waits = 0;
+    const lubancode::platform::AtomicWriteError permanent{
+        "atomic.tmp_open_failed", "original temporary open error", WriteOutcome::NotCommitted,
+        WriteFailureKind::Permanent};
+    const auto refused = WriteFrozenPlanWithRetry(target, "new plan",
+        [&](const auto&, auto, auto) -> PlanWriteResult { ++calls; return std::unexpected(permanent); },
+        [] { return PlanClock::time_point{}; }, [&](auto) { ++waits; });
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == permanent.code); CHECK(refused.error().message == permanent.message);
+    CHECK(refused.error().failure_kind == WriteFailureKind::Permanent);
+    CHECK(refused.error().outcome == WriteOutcome::NotCommitted);
+    CHECK(calls == 1); CHECK(waits == 0);
+    HookGuard hooks;
+    lubancode::platform::SetFileFlushFailureForTest(true);
+    calls = 0;
+    const auto failed = WriteFrozenPlanWithRetry(target, "new plan",
+        [&](const auto& path, auto bytes, auto durability) { ++calls; return AtomicWriteFile(path, bytes, durability); },
+        [] { return PlanClock::time_point{}; }, [&](auto) { ++waits; });
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error().code == "atomic.tmp_write_failed");
+    CHECK(failed.error().failure_kind == WriteFailureKind::Permanent);
+    CHECK(failed.error().outcome == WriteOutcome::NotCommitted);
+    CHECK(calls == 1); CHECK(waits == 0);
+    CHECK(ReadAll(target) == "old plan");
+    CHECK(TempLeftovers(root.path).empty());
+    std::cout << "[sdk-plan-retry] permanent-stop\n";
+}
+
+TEST_CASE("SDK frozen plan: any committed outcome stops and actual post-replace uncertainty stays visible") {
+    PlanRetryRoot root("sdk-plan-committed");
+    const auto target = root.path / "plan.json";
+    WriteAll(target, "old plan");
+    for (const auto outcome : {WriteOutcome::CommittedDurabilityNotRequested,
+                               WriteOutcome::CommittedDurabilityUnconfirmed, WriteOutcome::CommittedDurable}) {
+        unsigned calls = 0, waits = 0;
+        auto error = PlanRejected(); error.outcome = outcome;
+        const auto refused = WriteFrozenPlanWithRetry(target, "new plan",
+            [&](const auto&, auto, auto) -> PlanWriteResult { ++calls; return std::unexpected(error); },
+            [] { return PlanClock::time_point{}; }, [&](auto) { ++waits; });
+        REQUIRE_FALSE(refused.has_value());
+        CHECK(refused.error().code == error.code); CHECK(refused.error().message == error.message);
+        CHECK(refused.error().outcome == outcome);
+        CHECK(refused.error().failure_kind == WriteFailureKind::TransientReject);
+        CHECK(calls == 1); CHECK(waits == 0);
+        // Even an unusual successful receipt is returned once, never retried.
+        // Each of the three real plan owners separately requires Durable before binding.
+        const auto receipt = WriteFrozenPlanWithRetry(target, "new plan",
+            [&](const auto&, auto, auto) -> PlanWriteResult { ++calls; return lubancode::platform::AtomicWriteReceipt{outcome}; },
+            [] { return PlanClock::time_point{}; }, [&](auto) { ++waits; });
+        REQUIRE(receipt.has_value()); CHECK(receipt->outcome == outcome);
+        CHECK(calls == 2); CHECK(waits == 0);
+    }
+    HookGuard hooks;
+    lubancode::platform::SetDirectoryFlushFailureForTest(true);
+    unsigned calls = 0, waits = 0;
+    const auto failed = WriteFrozenPlanWithRetry(target, "new plan",
+        [&](const auto& path, auto bytes, auto durability) { ++calls; return AtomicWriteFile(path, bytes, durability); },
+        [] { return PlanClock::time_point{}; }, [&](auto) { ++waits; });
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(failed.error().code == "atomic.durability_flush_failed");
+    CHECK(failed.error().outcome == WriteOutcome::CommittedDurabilityUnconfirmed);
+    CHECK(calls == 1); CHECK(waits == 0);
+    CHECK(ReadAll(target) == "new plan"); // No rollback or second publication.
+    CHECK(TempLeftovers(root.path).empty());
+    std::cout << "[sdk-plan-retry] committed-stop\n";
+}
+
+TEST_CASE("SDK frozen plan: attempt budget returns the last original error without touching target") {
+    PlanRetryRoot root("sdk-plan-attempts");
+    const auto target = root.path / "plan.json";
+    WriteAll(target, "old plan");
+    unsigned calls = 0, waits = 0;
+    const auto failed = WriteFrozenPlanWithRetry(target, "new plan",
+        [&](const auto& path, auto bytes, auto durability) -> PlanWriteResult {
+            CHECK(path == target); CHECK(bytes == "new plan");
+            CHECK(durability == WriteDurability::ProcessCrashDurability);
+            return std::unexpected(PlanRejected(++calls));
+        }, [] { return PlanClock::time_point{}; }, [&](PlanClock::duration duration) {
+            CHECK(duration == std::chrono::milliseconds(20)); ++waits;
+        });
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(calls == 51); CHECK(waits == 50);
+    CHECK(failed.error().code == "atomic.replace_failed");
+    CHECK(failed.error().message == "original short rejection 51");
+    CHECK(failed.error().failure_kind == WriteFailureKind::TransientReject);
+    CHECK(failed.error().outcome == WriteOutcome::NotCommitted);
+    CHECK(ReadAll(target) == "old plan"); CHECK(TempLeftovers(root.path).empty());
+    std::cout << "[sdk-plan-retry] attempt-budget\n";
+}
+
+TEST_CASE("SDK frozen plan: deadline bounds rescheduling and clamps the remaining wait") {
+    PlanRetryRoot root("sdk-plan-deadline");
+    const auto target = root.path / "plan.json";
+    WriteAll(target, "old plan");
+    for (const auto elapsed : {std::chrono::milliseconds(1000), std::chrono::milliseconds(990)}) {
+        unsigned calls = 0, waits = 0;
+        auto time = PlanClock::time_point{};
+        const auto failed = WriteFrozenPlanWithRetry(target, "new plan",
+            [&](const auto&, auto, auto) -> PlanWriteResult { ++calls; time += elapsed; return std::unexpected(PlanRejected()); },
+            [&] { return time; }, [&](PlanClock::duration duration) {
+                CHECK(duration == std::chrono::milliseconds(10)); ++waits; time += duration;
+            });
+        REQUIRE_FALSE(failed.has_value()); CHECK(calls == 1);
+        CHECK(waits == (elapsed == std::chrono::milliseconds(990) ? 1 : 0));
+        CHECK(failed.error().code == "atomic.replace_failed");
+        CHECK(failed.error().message == "original short rejection 1");
+        CHECK(failed.error().failure_kind == WriteFailureKind::TransientReject);
+        CHECK(failed.error().outcome == WriteOutcome::NotCommitted);
+    }
+    CHECK(ReadAll(target) == "old plan"); CHECK(TempLeftovers(root.path).empty());
+    std::cout << "[sdk-plan-retry] deadline-budget\n";
+}
+
+TEST_CASE("SDK frozen plan: native sharing rejection releases the actual handle before durable retry") {
+    PlanRetryRoot root("sdk-plan-native");
+    const auto target = root.path / "plan.json";
+    const std::string frozen = R"({"sessionId":"native-session","schemaVersion":1})";
+    WriteAll(target, "old plan"); REQUIRE(ReadAll(target) == "old plan");
+#ifdef _WIN32
+    PlanBlockingHandle held;
+    const auto native = lubancode::platform::FileIoPath(target);
+    held.value = CreateFileW(native.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(held.value != INVALID_HANDLE_VALUE);
+    // DELETE-open and replacement are distinct native calls. The held handle
+    // rejects deletion with 32; MoveFileExW may report 5 for that same denial.
+    PlanBlockingHandle delete_probe;
+    delete_probe.value = CreateFileW(native.c_str(), DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const DWORD delete_error = delete_probe.value == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    REQUIRE(delete_probe.value == INVALID_HANDLE_VALUE);
+    REQUIRE(delete_error == ERROR_SHARING_VIOLATION);
+    unsigned calls = 0, waits = 0;
+    DWORD replacement_error = ERROR_SUCCESS;
+    bool sharing_verified = false;
+    const auto saved = WriteFrozenPlanWithRetry(target, frozen,
+        [&](const auto& path, auto bytes, auto durability) -> PlanWriteResult {
+            ++calls; CHECK(path == target); CHECK(bytes == frozen);
+            CHECK(durability == WriteDurability::ProcessCrashDurability);
+            auto result = AtomicWriteFile(path, bytes, durability);
+            if (calls == 1) {
+                const auto diagnostic = result ? std::string("unexpected success") : result.error().message;
+                INFO(diagnostic);
+                REQUIRE_FALSE(result.has_value());
+                REQUIRE(result.error().code == "atomic.replace_failed");
+                REQUIRE(result.error().failure_kind == WriteFailureKind::TransientReject);
+                REQUIRE(result.error().outcome == WriteOutcome::NotCommitted);
+                const std::string prefix = "原子替换失败: 原子替换文件失败，Windows 错误码 ";
+                const auto access_denied = prefix + std::to_string(ERROR_ACCESS_DENIED);
+                const auto sharing_denied = prefix + std::to_string(ERROR_SHARING_VIOLATION);
+                REQUIRE((result.error().message == access_denied || result.error().message == sharing_denied));
+                replacement_error = result.error().message == access_denied ? ERROR_ACCESS_DENIED : ERROR_SHARING_VIOLATION;
+                REQUIRE(ReadAll(target) == "old plan");
+                REQUIRE(TempLeftovers(root.path).empty());
+                sharing_verified = true;
+            }
+            return result;
+        }, [] { return PlanClock::now(); }, [&](PlanClock::duration duration) {
+            REQUIRE(sharing_verified); REQUIRE(held.value != INVALID_HANDLE_VALUE);
+            REQUIRE(duration > PlanClock::duration::zero());
+            REQUIRE(duration <= std::chrono::milliseconds(20));
+            REQUIRE(held.Close()); ++waits;
+        });
+    REQUIRE(saved.has_value()); REQUIRE(saved->outcome == WriteOutcome::CommittedDurable);
+    REQUIRE(calls == 2); REQUIRE(waits == 1);
+    REQUIRE(held.value == INVALID_HANDLE_VALUE);
+    REQUIRE(ReadAll(target) == frozen); REQUIRE(TempLeftovers(root.path).empty());
+    std::cout << "[sdk-plan-native-error] delete-open=" << delete_error << " replace=" << replacement_error << '\n';
+    std::cout << "[sdk-plan-retry] windows-sharing-recovery\n";
+#else
+    const auto saved = lubancore::detail::WriteFrozenPlan(target, frozen);
+    REQUIRE(saved.has_value()); REQUIRE(saved->outcome == WriteOutcome::CommittedDurable);
+    REQUIRE(ReadAll(target) == frozen); REQUIRE(TempLeftovers(root.path).empty());
+#endif
+    std::cout << "[sdk-plan-retry] native-write\n";
 }

@@ -91,6 +91,7 @@ private:
     // 各的)。置位即收整棵进程树,结果分型 cancelled(与超时分开记账)。
     // deadline:本调用的墙钟死线(ToolExecutionContext 递进来;空 = 没预算)。
     Result Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel,
+               const CommandExecutionLimits* limits = nullptr,
                std::optional<std::chrono::steady_clock::time_point> deadline = std::nullopt);
 
     const std::atomic<bool>* cancel_ = nullptr;

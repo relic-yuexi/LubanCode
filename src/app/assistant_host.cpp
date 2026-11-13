@@ -928,9 +928,10 @@ int RunAssistantMode(const AssistantCliArgs& args) {
     // 活配置装配:一场 thread 一次,吃当时的快照(首配后新场用新账)。
     // 无部署档 = 显式零工具默认档(与 RunAppServerMode 同规矩;助理的
     // 工具面扩编是后续批次,不冒充)。
-    server_options.assembly_factory = [config_state]() {
+    server_options.assembly_factory = [config_state](const std::string& cwd_utf8) {
         auto snapshot = std::make_shared<config::Config>(config_state->Snapshot().config);
         app_server::SessionAssemblyRequest request;
+        request.cwd_utf8 = cwd_utf8;
         request.config = snapshot.get();
         request.backend_factory = [snapshot]() { return BuildBackend(*snapshot); };
         request.system_prompt = app_server::kAppServerDefaultSystemPrompt;

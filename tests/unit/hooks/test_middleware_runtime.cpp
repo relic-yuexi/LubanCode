@@ -6,7 +6,9 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "hooks/dispatcher.hpp"
@@ -163,7 +165,7 @@ TEST_CASE("PreUser:steer 输入按 deliveryMode 匹配,direct 不误伤") {
     auto def = BuiltinDef(HookPoint::PreUser, "steer.annotate",
                           [](const InvocationCtx&, const nlohmann::json& input, NextCall& next) {
                               HandlerReturn out;
-                              out.output = next(input).value;
+                              out.output = next(std::optional<nlohmann::json>{std::in_place, input}).value;
                               out.effects.push_back(Effect{EffectType::ContextAppend,
                                                            nlohmann::json{{"text", "steer 上下文"}}});
                               return out;
@@ -195,7 +197,7 @@ TEST_CASE("PostUser:追加隐藏上下文,失败阻断且原 user 保留") {
         BuiltinDef(HookPoint::PostUser, "memory.recall",
                    [](const InvocationCtx&, const nlohmann::json& input, NextCall& next) {
                        HandlerReturn out;
-                       out.output = next(input).value;
+                       out.output = next(std::optional<nlohmann::json>{std::in_place, input}).value;
                        out.effects.push_back(Effect{EffectType::ContextAppend,
                                                     nlohmann::json{{"text", "召回的记忆"}}});
                        return out;
@@ -300,7 +302,8 @@ TEST_CASE("Esc 取消:取消旗置位时 dispatch 收口 skipped_cancelled,不�
                                   [&runs](const InvocationCtx&, const nlohmann::json& input,
                                           NextCall& next) {
                                       ++runs;
-                                      return HandlerReturn::Value(next(input).value);
+                                      return HandlerReturn::Value(
+                                          next(std::optional<nlohmann::json>{std::in_place, input}).value);
                                   }));
     auto published = pool.Publish();
     REQUIRE(published.has_value());

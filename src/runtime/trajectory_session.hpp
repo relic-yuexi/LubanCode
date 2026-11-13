@@ -24,6 +24,7 @@
 // Trajectory——开不出账就会话明败,不回退旧 SessionStore(旧件退役待
 // P0-5/P0-6,本批不再消费)。
 #pragma once
+#include "runtime/trajectory_diagnostics.hpp"
 
 #include "approval_mode.hpp"
 
@@ -66,6 +67,7 @@
 #include "workspace/identity.hpp"
 
 namespace lubancode::runtime {
+namespace testing { struct MemoryDurableLegacyFixtureAccess; }
 
 // ---------------------------------------------------------------------------
 // /record 选段器(§14.3:从"第二只录音笔"改成"轨迹选段器")
@@ -161,6 +163,7 @@ public:
         // 可恢复的;没有任何可恢复场时回落普通开张
         // (quiet_if_none 语义,与旧路 --continue 一致)。
         bool resume_at_launch = false;
+        bool require_v3_resume = false;
         std::string resume_source_session_id;
         // 单发轨迹断档单:one_shot 一场置 true——main run 写 run_kind=
         // one_shot(manifest/信封/run.started 三处同源),resume 候选排除。
@@ -173,10 +176,20 @@ public:
         // 宿主还不知道最终 system,第一次模型请求带上真 system 时走 §4.3
         // 三步切换(旧 system -> change 事件 -> 新 system)。
         std::string v3_system_content;
+        trajectory::V3OpeningParticipant v3_opening_participant;
+        std::shared_ptr<trajectory::MemoryCapabilityFactory> memory_capability_factory;
+        std::shared_ptr<trajectory::NamedResultFactory> named_result_factory;
+        trajectory::RecoveryCaptureRequest recovery_capture;
+        trajectory::SessionRecoveryFactory recovery_factory;
+        // Internal test-only, one fresh journal: observes actual native IO. Never public SDK input.
+        std::shared_ptr<trajectory::JournalNativeIoProbe> journal_native_io_probe;
         // 故障注入(测试专用;生产恒空 = 零行为):子账首枚 run.started
         // 提交前问一次,返回稳定码即按该码注入一次失败(子代理空轨迹单
         // 5.1 的 fault injection)。只作用于子账,不影响 main。
         std::function<std::optional<std::string>()> subagent_start_fault;
+        // Test-only, empty in production: report a failure after the child
+        // writer's actual checked Close. Never applies to the parent writer.
+        std::function<std::optional<std::string>()> subagent_close_fault;
         // v3 主账写者的提交故障注入(测试专用;生产恒空 = 零行为):非空
         // 稳定码即该枚提交按 IoFailed 收,写者随后 broken——T08(V3-GAP-03)
         // 召回快照 fail-closed 的测试缝,经 SessionManager 递进 writer。
@@ -201,6 +214,8 @@ public:
 
     // main stream(轮次桥从这只造)。
     trajectory::TrajectoryRecorder* main();
+    std::shared_ptr<trajectory::MemoryCapability> memory_capability() const;
+    std::shared_ptr<trajectory::NamedResultCapability> named_result_capability() const;
     // v3 主账写者(v2 场 nullptr)。异步工具 P2 的会话级运行时从这取
     // 共享写者;互斥锁见 v3_tool_results_mutex。
     trajectory::v3::V3Writer* v3_main_writer();
@@ -258,10 +273,17 @@ public:
 
     // 父账边界:子代理 finished 时补的边界引用(child run id + 子账终态
     // hash),由主桥的 OnToolTrace 落——这里只给查口。
+    std::optional<SubagentTerminalReceipt> ChildTerminalReceipt(const std::string& agent_run_id) const;
+    // Legacy hash projection; empty means no confirmed complete handoff.
     std::optional<std::string> ChildTerminalHash(const std::string& agent_run_id) const;
 
     // 正常封口(/exit 与 EOF):turn 收齐后 run terminal + session.ended +
     // session.json closed。恢复器/replay 是 P0-3 的活,这里只留封口。
+    // Front-thread factory for asynchronous Memory/Title. Returns a non-null
+    // rejection when a connected scene cannot bind, never unrecorded permission.
+    std::unique_ptr<agent::LoopBoundaryRecorder> NewLeasedBypassRecorder(
+        TrajectoryTurnBridge::Identity identity, accounting::RequestPurpose purpose);
+
     trajectory::CloseOutcome CloseSession(const std::string& reason);
 
     // ---- P0-1(§4.5):cwd 变化对账 ----
@@ -572,17 +594,20 @@ public:
     void SetTelemetryWake(telemetry::CommitObserver* wake);
 
 private:
+    friend struct testing::MemoryDurableLegacyFixtureAccess;
     TrajectorySessionLedger() = default;
     struct Impl;
     std::unique_ptr<Impl> impl_;
     std::unique_ptr<RecordSelectionController> record_selection_;
     std::uint64_t command_counter_ = 0;
     // P0-4:落账错误共享环(桥逐轮推进;doctor 从这读,见 recent_io_errors)。
-    std::vector<std::string> io_errors_;
+    // Shared storage survives a ledger move; snapshots and every producer share its lock.
+    std::shared_ptr<TrajectoryDiagnostics> io_errors_ = std::make_shared<TrajectoryDiagnostics>();
     bool environment_captured_ = false;
 
     // committed wake 的账本侧漏斗:main stream 上的提交经这投。
     void NotifyCommitted_() const;
+    void RetireBypassLeases_();
     // 接线点 1:active 是 v3 场时把 v3 共享账绑到当前主账写者(clear/
     // resume 换场后 active 指针会换,books 必须跟着重绑,不然悬空);
     // v2 场清掉。

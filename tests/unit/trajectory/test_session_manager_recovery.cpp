@@ -10,7 +10,10 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -18,6 +21,7 @@
 #include "trajectory/journal.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/session_manager.hpp"
+#include "trajectory/v3/reader.hpp"
 #include "workspace/identity.hpp"
 
 using namespace lubancode::trajectory;
@@ -55,6 +59,26 @@ SessionManagerOptions Opts(const std::filesystem::path& root) {
     options.lubancode_version = "0.26.128-test";
     return options;
 }
+
+struct OpeningRoot {
+    std::filesystem::path path;
+    explicit OpeningRoot(const char* tag) : path(MakeRoot(tag)) {}
+    ~OpeningRoot() {
+        std::error_code error;
+        std::filesystem::remove_all(path, error);
+    }
+};
+
+struct MutatingOpeningClock : FakeClock {
+    mutable std::function<void()> before_lock;
+    SessionLockOwner LockOwner() const override {
+        if (before_lock) {
+            auto hook = std::exchange(before_lock, {});
+            hook();
+        }
+        return SessionManagerClock::LockOwner();
+    }
+};
 
 std::vector<nlohmann::json> Events(const std::filesystem::path& stream) {
     const auto lines = ReadJournalLines(stream);
@@ -666,4 +690,160 @@ TEST_CASE("v3 场过恢复器: 原样保留,不误办") {
         CHECK_FALSE(entry.session_json_corrected);
     }
     CHECK(saw_keep);
+}
+
+TEST_CASE("SessionManager: opening participant runs with lock before the first V3 row") {
+    OpeningRoot root("opening-gate");
+    FakeClock clock;
+    auto options = Opts(root.path);
+    int mode = 0;
+    SUBCASE("host rejects its plan") { mode = 0; }
+    SUBCASE("reserved system metadata is rejected") { mode = 1; }
+    SUBCASE("hostBindings must be an object") { mode = 2; }
+    SUBCASE("metadata must be an object") { mode = 3; }
+    SUBCASE("a throwing participant is rejected") { mode = 4; }
+    int calls = 0;
+    std::filesystem::path observed_dir;
+    std::string observed_id;
+    options.v3_opening_participant = [&](const V3OpeningContext& context)
+        -> std::expected<nlohmann::json, std::string> {
+        ++calls;
+        observed_dir = context.session_dir;
+        observed_id = context.session_id;
+        CHECK(context.source == nullptr);
+        CHECK(SessionLock::Inspect(context.session_dir).has_value());
+        CHECK_FALSE(std::filesystem::exists(context.session_dir / (context.session_id + ".jsonl")));
+        if (mode == 0) return std::unexpected("host.plan_rejected");
+        if (mode == 1) return nlohmann::json{{"settingsVersion", 99}};
+        if (mode == 2) return nlohmann::json{{"hostBindings", "bad"}};
+        if (mode == 3) return nlohmann::json::array();
+        throw std::runtime_error("host failure");
+    };
+    SessionManager manager(options, &clock);
+    const auto opened = manager.LaunchSession();
+    CHECK_FALSE(opened.has_value());
+    REQUIRE(calls == 1);
+    CHECK(manager.active() == nullptr);
+    CHECK_FALSE(std::filesystem::exists(observed_dir / (observed_id + ".jsonl")));
+    CHECK_FALSE(SessionLock::Inspect(observed_dir).has_value());
+    REQUIRE_FALSE(opened.has_value());
+    CHECK(opened.error().find("session.opening_failed: ") == 0);
+    if (mode == 0) CHECK(opened.error().find("host.plan_rejected") != std::string::npos);
+    if (mode == 1 || mode == 2) CHECK(opened.error().find("opening.reserved_metadata") != std::string::npos);
+    if (mode == 3) CHECK(opened.error().find("opening.metadata_not_object") != std::string::npos);
+    if (mode == 4) CHECK(opened.error().find("opening.participant_exception") != std::string::npos);
+}
+
+TEST_CASE("SessionManager: resume host gate precedes Continue and approval append") {
+    OpeningRoot root("resume-opening-gate");
+    FakeClock clock;
+    auto options = Opts(root.path);
+    const nlohmann::json bindings{{"skills", {{"schemaVersion", 1}, {"sha256", "frozen-plan"}}}};
+    options.v3_opening_participant = [bindings](const V3OpeningContext&)
+        -> std::expected<nlohmann::json, std::string> { return nlohmann::json{{"hostBindings", bindings}}; };
+    std::string source_id;
+    std::filesystem::path stream;
+    {
+        SessionManager source(options, &clock);
+        const auto active = source.LaunchSession();
+        REQUIRE(active.has_value());
+        source_id = (*active)->session_id();
+        stream = (*active)->directory.v3_stream_path();
+        const auto rows = Events(stream);
+        REQUIRE(rows.size() == 3);  // system, session.started, launch approval baseline
+        CHECK(rows[0]["systemMeta"]["hostBindings"] == bindings);
+        CHECK(rows[2]["kind"] == "approval.mode.applied");
+        NullClearParticipant participant;
+        REQUIRE(source.Close(CloseRequest{}, &participant).error_code.empty());
+    }
+    const auto before = ReadJournalLines(stream);
+    REQUIRE(before.has_value());
+    int mode = 0;
+    SUBCASE("matching host binding resumes the same session") { mode = 0; }
+    SUBCASE("plan validation rejects without append") { mode = 1; }
+    SUBCASE("different host binding rejects without append") { mode = 2; }
+    int calls = 0;
+    options.v3_opening_participant = [&](const V3OpeningContext& context)
+        -> std::expected<nlohmann::json, std::string> {
+        ++calls;
+        CHECK(context.session_id == source_id);
+        CHECK(SessionLock::Inspect(context.session_dir).has_value());
+        CHECK(context.source != nullptr);
+        if (!context.source) return std::unexpected("test.missing_source");
+        CHECK(context.source->lines == before->size());
+        CHECK(context.source->session_id == source_id);
+        if (mode == 1) return std::unexpected("host.plan_changed");
+        if (mode == 2) return nlohmann::json{{"hostBindings", {{"skills", "other-plan"}}}};
+        return nlohmann::json{{"hostBindings", bindings}};
+    };
+    SessionManager resumed(options, &clock);
+    ResumeRequest request;
+    request.source_session_id = source_id;
+    const auto outcome = resumed.ResumeAsNew(request);
+    CHECK(calls == 1);
+    const auto after = ReadJournalLines(stream);
+    REQUIRE(after.has_value());
+    if (mode == 0) {
+        REQUIRE(outcome.error_code.empty());
+        REQUIRE(resumed.active() != nullptr);
+        CHECK(resumed.active()->session_id() == source_id);
+        REQUIRE(after->size() == before->size() + 1);
+        CHECK(std::equal(before->begin(), before->end(), after->begin()));
+        CHECK(nlohmann::json::parse(after->back())["kind"] == "approval.mode.applied");
+    } else {
+        CHECK(outcome.error_code == "resume.opening_failed");
+        CHECK(resumed.active() == nullptr);
+        CHECK(*after == *before);
+        CHECK_FALSE(SessionLock::Inspect(stream.parent_path()).has_value());
+        CHECK(outcome.message == (mode == 1 ? "host.plan_changed" : "opening.host_bindings_mismatch"));
+    }
+}
+
+TEST_CASE("SessionManager: a valid tail change after history folding rejects before the host gate") {
+    OpeningRoot root("resume-opening-tail-fence");
+    MutatingOpeningClock clock;
+    auto options = Opts(root.path);
+    std::string source_id;
+    std::filesystem::path stream;
+    {
+        SessionManager source(options, &clock);
+        const auto active = source.LaunchSession();
+        REQUIRE(active.has_value());
+        source_id = (*active)->session_id();
+        stream = (*active)->directory.v3_stream_path();
+        NullClearParticipant participant;
+        REQUIRE(source.Close(CloseRequest{}, &participant).error_code.empty());
+    }
+    const auto before = ReadJournalLines(stream);
+    REQUIRE(before.has_value());
+    int calls = 0;
+    options.v3_opening_participant = [&](const V3OpeningContext&)
+        -> std::expected<nlohmann::json, std::string> {
+        ++calls;
+        return nlohmann::json::object();
+    };
+    SessionManager resumed(options, &clock);
+    clock.before_lock = [&] {
+        auto writer = v3::V3Writer::Continue(stream);
+        REQUIRE(writer.has_value());
+        v3::MessageDraft late;
+        late.turn_id = "turn-000099";
+        late.message = {{"role", "user"}, {"content", "late valid row"}};
+        REQUIRE(writer->AppendMessage(std::move(late), Durability::PowerLoss).status ==
+            v3::WriteReceipt::Status::Committed);
+        REQUIRE(writer->Close().has_value());
+    };
+    ResumeRequest request;
+    request.source_session_id = source_id;
+    const auto outcome = resumed.ResumeAsNew(request);
+    CHECK(outcome.error_code == "resume.source_changed");
+    CHECK(calls == 0);
+    CHECK(resumed.active() == nullptr);
+    CHECK_FALSE(SessionLock::Inspect(stream.parent_path()).has_value());
+    const auto after = ReadJournalLines(stream);
+    REQUIRE(after.has_value());
+    REQUIRE(after->size() == before->size() + 1);
+    CHECK(std::equal(before->begin(), before->end(), after->begin()));
+    CHECK(nlohmann::json::parse(after->back())["type"] == "message");
+    CHECK(v3::VerifyV3File(stream).ok);
 }

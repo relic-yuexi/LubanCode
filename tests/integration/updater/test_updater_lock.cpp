@@ -16,6 +16,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -106,6 +109,136 @@ bool WaitForLockFile(const std::filesystem::path& lock_file, int wait_ms) {
     std::error_code ec;
     return std::filesystem::exists(lock_file, ec);
 }
+
+// Only this synthetic fixture is read. Keep original bytes bounded even on failure.
+struct BoundedBytes {
+    bool opened = false;
+    bool failed = false;
+    bool truncated = false;
+    std::string bytes;
+};
+
+BoundedBytes ReadBoundedBytes(const std::filesystem::path& file, std::size_t cap) {
+    BoundedBytes result;
+    std::ifstream in(file, std::ios::binary);
+    if (!in.is_open()) return result;
+    result.opened = true;
+    result.bytes.resize(cap + 1);
+    in.read(result.bytes.data(), static_cast<std::streamsize>(result.bytes.size()));
+    result.bytes.resize(static_cast<std::size_t>(in.gcount()));
+    result.failed = in.bad();
+    result.truncated = result.bytes.size() > cap;
+    if (result.truncated) result.bytes.resize(cap);
+    return result;
+}
+
+std::string HexBytes(const std::string& bytes) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string hex;
+    hex.reserve(bytes.size() * 2);
+    for (const unsigned char byte : bytes) {
+        hex.push_back(digits[byte >> 4]);
+        hex.push_back(digits[byte & 15]);
+    }
+    return hex;
+}
+
+std::string DescribeBytes(const BoundedBytes& value) {
+    return "opened=" + std::to_string(value.opened) + " failed=" +
+           std::to_string(value.failed) + " truncated=" + std::to_string(value.truncated) +
+           " bytes=" + std::to_string(value.bytes.size()) + " hex=" + HexBytes(value.bytes);
+}
+
+struct ReadyObservation {
+    BoundedBytes lock;
+    BoundedBytes events;
+    bool acquire_seen = false;
+    bool release_seen = false;
+    bool same_pid_record = false;
+    bool handle_alive = false;
+    lubancode::platform::BackgroundProcessHandle::Completion completion;
+};
+
+ReadyObservation ObserveRacer(const LayoutPaths& paths, const std::filesystem::path& events,
+                              const BackgroundRacer& racer) {
+    ReadyObservation result;
+    result.lock = ReadBoundedBytes(InstallLockPath(paths), 4096);
+    result.events = ReadBoundedBytes(events, 16384);
+    if (result.events.opened && !result.events.failed && !result.events.truncated) {
+        // A partial final JSON line is not an acknowledgement.
+        std::size_t begin = 0;
+        for (auto end = result.events.bytes.find('\n'); end != std::string::npos;
+             end = result.events.bytes.find('\n', begin)) {
+            const auto line = nlohmann::json::parse(result.events.bytes.substr(begin, end - begin),
+                                                   nullptr, false);
+            if (line.is_object() && line.contains("t") && line["t"].is_number_integer() &&
+                line.contains("event") && line["event"].is_string()) {
+                if (line["event"] == "acquire") result.acquire_seen = true;
+                if (line["event"] == "release") result.release_seen = true;
+            }
+            begin = end + 1;
+        }
+    }
+    if (result.lock.opened && !result.lock.failed && !result.lock.truncated) {
+        const auto record = nlohmann::json::parse(result.lock.bytes, nullptr, false);
+        result.same_pid_record = record.is_object() && record.contains("pid") &&
+            record["pid"].is_number_integer() && record["pid"] == racer.pid &&
+            record.contains("acquired_at_utc") && record["acquired_at_utc"].is_string() &&
+            record.contains("start_token") && record["start_token"].is_string();
+    }
+    result.handle_alive = racer.handle->IsAlive();
+    result.completion = racer.handle->Peek();
+    return result;
+}
+
+bool WaitForRacerAcquire(const LayoutPaths& paths, const std::filesystem::path& events,
+                         const BackgroundRacer& racer, int wait_ms, ReadyObservation* observed) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+    for (;;) {
+        *observed = ObserveRacer(paths, events, racer);
+        if (observed->acquire_seen && !observed->release_seen && observed->same_pid_record &&
+            observed->handle_alive) return true;
+        if (!observed->handle_alive || std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+}
+
+std::string DescribeRacer(const BackgroundRacer& racer, const ReadyObservation& value) {
+    return "pid=" + std::to_string(racer.pid) + " handle_alive=" +
+           std::to_string(value.handle_alive) + " completion_known=" +
+           std::to_string(value.completion.known) + " exit=" +
+           std::to_string(value.completion.exit_code) + " signal=" +
+           std::to_string(value.completion.signal) + " terminated=" +
+           std::to_string(value.completion.terminated_by_stop) + " acquire=" +
+           std::to_string(value.acquire_seen) + " release=" + std::to_string(value.release_seen) +
+           " same_pid_record=" + std::to_string(value.same_pid_record) +
+           " lock{" + DescribeBytes(value.lock) + "} events{" + DescribeBytes(value.events) + "}";
+}
+
+// Fatal assertions must not strand the process this test owns. No PID lookup or foreign kill.
+struct ScopedRacerCleanup {
+    std::shared_ptr<lubancode::platform::BackgroundProcessHandle> handle;
+    bool exit_wait_expired = false;
+    bool WaitForExit() {
+        const bool exited = handle->Wait(30000);
+        exit_wait_expired = !exited;
+        return exited;
+    }
+    ~ScopedRacerCleanup() {
+        try {
+            if (handle && (exit_wait_expired || !handle->Wait(30000))) {
+                if (!handle->TerminateTree(0)) {
+                    std::fprintf(stderr, "updater-lock cleanup failed: %s\n",
+                                 handle->last_terminate_error.c_str());
+                }
+            }
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "updater-lock cleanup exception: %s\n", error.what());
+        } catch (...) {
+            std::fprintf(stderr, "updater-lock cleanup exception: unknown\n");
+        }
+    }
+};
 
 // ---- racer 事件流(与 gateway 竞争册同款) ----
 
@@ -278,23 +411,36 @@ TEST_CASE("活拒: 真子进程持锁,RefusedAliveHolder 对得上 pid;退出后
     // racer 持锁 4 秒(rounds=1, hold=4000)。
     auto holder_started = StartRacer(root, 1, 4000);
     REQUIRE(holder_started.has_value());
+    ScopedRacerCleanup cleanup{holder_started->handle};
     const unsigned long holder_pid = holder_started->pid;
-    REQUIRE(WaitForLockFile(InstallLockPath(paths), 10000));
+    ReadyObservation ready_observation;
+    const bool ready = WaitForRacerAcquire(paths, root / "events.jsonl", *holder_started, 10000,
+                                           &ready_observation);
+    INFO("racer readiness: ", DescribeRacer(*holder_started, ready_observation));
+    REQUIRE(ready);
 
     InstallRootLock mine;
     const auto refused = InstallRootLock::TryAcquire(paths, &mine);
+    const auto refused_observation = ObserveRacer(paths, root / "events.jsonl", *holder_started);
+    INFO("refused status=", static_cast<int>(refused.status), " detail=", refused.detail,
+         " holder_pid=", refused.holder_pid);
+    INFO("after refused: ", DescribeRacer(*holder_started, refused_observation));
     REQUIRE(refused.status == Status::RefusedAliveHolder);
     CHECK(refused.holder_pid == holder_pid);
     CHECK_FALSE(mine.holds());
     CHECK(std::filesystem::exists(InstallLockPath(paths)));  // 别人的锁不动
+    CHECK(refused_observation.lock.bytes == ready_observation.lock.bytes);
+    CHECK_FALSE(refused_observation.lock.failed);
+    CHECK_FALSE(refused_observation.lock.truncated);
 
     // 等持锁子进程退干净,再抢就成功。
-    REQUIRE(holder_started->handle->Wait(30000));
+    REQUIRE(cleanup.WaitForExit());
     InstallRootLock retry;
     const auto again = InstallRootLock::TryAcquire(paths, &retry);
     REQUIRE(again.status == Status::Acquired);
     CHECK_FALSE(again.cleared_stale);  // 正常释放不是陈锁
     retry.Release();
+    std::puts("[updater-lock-ready] alive-holder-after-acquire");
 }
 
 TEST_CASE("坏锁保守拒: 半截 JSON 不删不动") {

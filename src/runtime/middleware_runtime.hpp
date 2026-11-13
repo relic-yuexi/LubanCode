@@ -118,6 +118,10 @@ struct PreRequestBudget {
     std::uint64_t effective_output_limit_tokens = 0;
     std::uint64_t protocol_headroom_tokens = 0;
     bool output_limit_overridden = false;  // extra_body/应急写侧覆盖生效
+    // Source metadata, outside the bytes/4 input object. SDK output limits are
+    // requested Generate arguments, not an independently observed provider cap.
+    std::string model_input_snapshot_scope;
+    std::string output_limit_scope;
 };
 
 // request_snapshot:引擎冻结的最终模型输入快照(BuildRequestSnapshotJson

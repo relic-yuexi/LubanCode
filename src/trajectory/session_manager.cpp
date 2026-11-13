@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <exception>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -17,7 +18,10 @@
 #include "platform/log_sink.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
+#include "platform/text_encoding.hpp"
 #include "trajectory/safety.hpp"
+#include "trajectory/named_result_opening.hpp"
+#include "trajectory/managed_session_ownership.hpp"
 #include "trajectory/v3/reader.hpp"
 #include "trajectory/v3/session_switch.hpp"
 #include "workspace/identity.hpp"
@@ -26,6 +30,106 @@
 
 namespace lubancode::trajectory {
 namespace {
+
+constexpr char kManagedOperationUnavailable[] = "managed.manager.operation_unavailable";
+
+bool ManagedAuditId(const std::string& value) {
+    return !value.empty() && value.size() <= 512 && platform::IsValidUtf8(value) &&
+        std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; });
+}
+
+bool ValidManagedCreation(const ManagedSessionCreationAudit& value,
+                          const ManagedSessionOwnership& ownership) {
+    return ManagedAuditId(value.tenant_id) && value.tenant_id == ownership.tenant_id &&
+        ManagedAuditId(value.user_id) && ManagedAuditId(value.credential_id) &&
+        (value.actor_kind == "user" || value.actor_kind == "agent" || value.actor_kind == "service") &&
+        value.opening_policy_revision != 0;
+}
+
+nlohmann::json ManagedCreationMetadata(const ManagedSessionOwnership& owner,
+                                     const ManagedSessionCreationAudit& creator) {
+    return {{"schemaVersion", 1}, {"mode", "Managed"}, {"tenantId", owner.tenant_id},
+        {"projectId", owner.project_id}, {"workspaceKey", owner.workspace_key},
+        {"sessionId", owner.session_id}, {"bindingVersion", owner.binding_version},
+        {"creationSubject", {{"tenantId", creator.tenant_id}, {"userId", creator.user_id},
+            {"actorKind", creator.actor_kind}, {"credentialId", creator.credential_id}}},
+        {"openingPolicyRevision", creator.opening_policy_revision}};
+}
+
+std::expected<void, std::string> CheckManagedPublication(
+    const TrajectoryDirectory& directory, const SessionLock& lock,
+    const ManagedSessionOwnershipPublication& publication) {
+    if (!lock.holds()) return std::unexpected("managed.ownership.lock_required");
+    if (publication.knowledge != ManagedSessionOwnershipPublication::Knowledge::Committed ||
+        publication.requested != platform::WriteDurability::ProcessCrashDurability ||
+        !publication.native || !publication.native->has_value() ||
+        publication.native->value().outcome != platform::WriteOutcome::CommittedDurable)
+        return std::unexpected("managed.session.durable_publication_required");
+    auto capture = CaptureManagedSessionOwnershipLocked(directory.session_dir(), lock);
+    if (!capture) return std::unexpected(capture.error());
+    auto matching = CheckManagedSessionOwnership(*capture, publication.expected);
+    if (!matching) return std::unexpected(matching.error());
+    if (capture->bytes != publication.publication_bytes)
+        return std::unexpected("managed.ownership.source_changed");
+    return {};
+}
+
+// LocalTrusted callers may supply a relative storage root. Resolve only the
+// path spelling here; marked/bad metadata never becomes an absent capture.
+std::expected<ManagedSessionOwnershipCapture, std::string> CaptureLocalSession(
+    const std::filesystem::path& directory) {
+    std::error_code error;
+    auto path = std::filesystem::absolute(directory, error).lexically_normal();
+    if (error) return std::unexpected("managed.ownership.invalid_directory");
+    auto capture = CaptureManagedSessionOwnership(path);
+    if (!capture) return std::unexpected(capture.error());
+    auto local = CheckLocalTrustedSessionOwnership(*capture);
+    if (!local) return std::unexpected(local.error());
+    return capture;
+}
+
+std::expected<SessionLock, std::string> AcquireLocalSessionLock(
+    const std::filesystem::path& directory, const SessionLockOwner& owner) {
+    auto before = CaptureLocalSession(directory);
+    if (!before) return std::unexpected(before.error());
+    auto lock = SessionLock::Acquire(before->session_dir, owner);
+    if (!lock) return std::unexpected(lock.error());
+    auto captured = CaptureManagedSessionOwnershipLocked(before->session_dir, *lock);
+    if (!captured) return std::unexpected(captured.error());
+    auto local = CheckLocalTrustedSessionOwnership(*captured);
+    if (!local) return std::unexpected(local.error());
+    auto same = CheckManagedSessionOwnershipCaptureUnchanged(*before, *captured);
+    if (!same) return std::unexpected(same.error());
+    return std::move(*lock);
+}
+
+std::expected<MemoryCapabilityLease, std::string> OpenLockedMemory(
+    const SessionManagerOptions& options, const std::string& workspace_key,
+    const std::filesystem::path& session_dir, const std::string& session_id) {
+    auto opened = OpenMemoryCapability({workspace_key, session_id}, session_dir / "artifacts",
+                                      options.memory_capability_factory);
+    if (!opened) return std::unexpected(opened.error().code + ": " + opened.error().message);
+    return std::move(*opened);
+}
+
+std::expected<nlohmann::json, std::string> InvokeOpeningParticipant(
+    const V3OpeningParticipant& participant, const V3OpeningContext& context) {
+    try {
+        auto extra = participant(context);
+        if (!extra) return std::unexpected(extra.error());
+        if (!extra->is_object()) return std::unexpected("opening.metadata_not_object");
+        for (auto it = extra->begin(); it != extra->end(); ++it) {
+            if (it.key() != "hostBindings" || !it.value().is_object()) {
+                return std::unexpected("opening.reserved_metadata");
+            }
+        }
+        return extra;
+    } catch (const std::exception&) {
+        return std::unexpected("opening.participant_exception");
+    } catch (...) {
+        return std::unexpected("opening.participant_exception");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 小工具
@@ -104,7 +208,7 @@ std::optional<nlohmann::json> ReadJsonFile(const std::filesystem::path& path) {
     if (json.is_discarded()) {
         return std::nullopt;
     }
-    return json;
+    return std::optional<nlohmann::json>{std::in_place, json};
 }
 
 // 恢复期允许的"折叠"迁移:session.json 落后或抢跑于 Journal 可证事实时,
@@ -680,6 +784,8 @@ bool SessionManager::EnsureWorkspace(std::string* error) {
 
 std::expected<void, std::string> SessionManager::RegisterCheckout(
     const workspace::WorkspaceIdentity& identity) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (managed_mode_) return std::unexpected(kManagedOperationUnavailable);
     if (identity.workspace_key != workspace_key_) {
         return std::unexpected("identity.key_mismatch: 登记 key=" + identity.workspace_key +
                                " 与本 workspace key=" + workspace_key_ + " 不合;跨 workspace 切换须封场换账");
@@ -704,6 +810,7 @@ std::string SessionManager::NextMainRunId() const {
     const std::filesystem::path sessions = workspace_dir_ / "sessions";
     if (std::filesystem::exists(sessions, ec)) {
         for (const auto& entry : std::filesystem::directory_iterator(sessions, ec)) {
+            if (!CaptureLocalSession(entry.path())) continue;
             const auto manifest = ReadSessionJson(entry.path());
             if (!manifest.has_value() || manifest->main_run_id.rfind("main-", 0) != 0) {
                 continue;
@@ -799,14 +906,40 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     if (!directory.has_value()) {
         return std::unexpected("session.create_failed: " + directory.error());
     }
-    auto lock_file = SessionLock::Acquire(directory->session_dir(), clock_->LockOwner());
+    auto lock_file = AcquireLocalSessionLock(directory->session_dir(), clock_->LockOwner());
     if (!lock_file.has_value()) {
         return std::unexpected("session.lock_failed: " + lock_file.error());
     }
+    return AssembleV3SessionLocked(*directory, manifest, *lock_file);
+}
+
+std::expected<ActiveSession, std::string> SessionManager::AssembleV3SessionLocked(
+    const TrajectoryDirectory& directory, const SessionManifest& manifest, SessionLock& lock_file,
+    std::shared_ptr<const ManagedSessionOwnershipPublication> managed_publication,
+    std::optional<nlohmann::json> managed_metadata) {
+    auto memory_capability = OpenLockedMemory(options_, workspace_key_, directory.session_dir(),
+                                              manifest.session_id);
+    if (!memory_capability) return std::unexpected("session.memory_open_failed: " + memory_capability.error());
+    auto named = OpenLockedNamedResults({workspace_key_, manifest.session_id}, directory.session_dir(), options_.named_result_factory);
+    if (!named) return std::unexpected(named.error());
     // 首行 system(§1.2/§4.3):正文是"建场此刻已知"的基础版,宿主递进
     // 完整拼装结果;settingsVersion 从 1 起,后续切换逐次 +1。开张失败按
     // P0-C 同款纪律清 0 字节残留(先放句柄,再按所有权凭据删目标名空文件)。
     nlohmann::json system_extra = nlohmann::json::object({{"settingsVersion", 1}});
+    if (options_.v3_opening_participant) {
+        auto opening = InvokeOpeningParticipant(options_.v3_opening_participant,
+            {directory.session_dir(), manifest.session_id, nullptr, memory_capability->share(), nullptr, named->lease.share()});
+        if (!opening) return std::unexpected("session.opening_failed: " + opening.error());
+        system_extra.update(*opening);
+    }
+    if (auto bound = MergeNamedResultBinding(system_extra, named->binding); !bound)
+        return std::unexpected(bound.error());
+    if (managed_publication) {
+        auto checked = CheckManagedPublication(directory, lock_file, *managed_publication);
+        if (!checked) return std::unexpected(checked.error());
+        if (!managed_metadata) return std::unexpected("managed.session.creation_invalid");
+        system_extra["managedSession"] = std::move(*managed_metadata);
+    }
     v3::V3WriterOptions writer_options;
     // 会话级事实随 session.started 落账(R2):列表投影的 cwd/run_kind
     // 以此为权威来源,v2 manifest 不再是唯一出处。
@@ -814,19 +947,25 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
     writer_options.run_kind = manifest.run_kind;
     // 测试专用的提交故障注入(生产恒空):armed 才点火,与 P0-C 同款纪律。
     writer_options.inject_io_failure = options_.v3_main_io_fault;
-    auto writer = v3::V3Writer::Start(directory->v3_stream_path(), manifest.session_id,
+    writer_options.journal_native_io_probe = std::move(options_.journal_native_io_probe);
+    auto writer = v3::V3Writer::Start(directory.v3_stream_path(), manifest.session_id,
                                       manifest.main_run_id, options_.v3_system_content,
                                       std::move(system_extra), std::move(writer_options));
     if (!writer.has_value()) {
+        if (managed_publication) memory_capability->CloseWrites();
+        named->lease.CloseWrites();
         { auto drop_lock = std::move(lock_file); }
-        (void)DiscardUncommittedStream(directory->v3_stream_path());
+        (void)DiscardUncommittedStream(directory.v3_stream_path());
         return std::unexpected("session.v3_start_failed: " + writer.error());
     }
     ActiveSession session;
-    session.directory = *directory;
+    session.directory = directory;
     session.v3_main = std::move(*writer);
     session.manifest = manifest;
-    session.lock = std::move(*lock_file);
+    session.lock = std::move(lock_file);
+    session.managed_publication = std::move(managed_publication);
+    session.memory_capability = std::move(*memory_capability);
+    session.named_result_capability = std::move(named->lease);
     // v3 没有 session.json 可翻:状态只住内存,封口/恢复按账面事实。
     session.status = SessionStatus::Running;
     // T11-B:建场基线——起手审批档落 approval.mode.applied(source=launch),
@@ -844,9 +983,61 @@ std::expected<ActiveSession, std::string> SessionManager::OpenV3SessionLocked(
         if (receipt.status != v3::WriteReceipt::Status::Committed) {
             platform::LogSink::Instance().Error(
                 "trajectory", "v3 审批档基线落账失败: " + receipt.error_code);
+            if (session.managed_publication)
+                return std::unexpected("managed.session.approval_baseline_failed: " + receipt.error_code);
         }
     }
     return session;
+}
+
+std::expected<ActiveSession*, std::string> SessionManager::LaunchManagedSession(
+    ManagedSessionDirectory admitted, ManagedSessionCreationAudit creation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (boundary_in_progress_) return std::unexpected("session.boundary_in_progress: clear/close 未收完");
+    if (active_) return std::unexpected("managed.session.active_exists");
+    // This transition is permanent even if validation or initialization fails.
+    // A caller must never silently retry the same Manager through LocalTrusted.
+    managed_mode_ = true;
+    try {
+        auto checked = CheckManagedPublication(admitted.directory_, admitted.lock_, admitted.publication_);
+        if (!checked) return std::unexpected(checked.error());
+        const auto& ownership = admitted.publication_.expected;
+        if (!ValidManagedCreation(creation, ownership))
+            return std::unexpected("managed.session.creation_invalid");
+        const auto registered = workspace::index::ResolveDirByWorkspaceKey(options_.workspaces_root, workspace_key_);
+        std::error_code error;
+        if (ownership.workspace_key != workspace_key_ || !registered ||
+            !std::filesystem::equivalent(admitted.directory_.workspace_dir(), *registered, error) || error ||
+            ownership.session_id != platform::PathToUtf8(admitted.directory_.session_dir().filename()))
+            return std::unexpected("managed.session.workspace_mismatch");
+        workspace_dir_ = *registered;
+        SessionManifest manifest;
+        manifest.schema_version = 2;
+        manifest.workspace_key = ownership.workspace_key;
+        manifest.session_id = ownership.session_id;
+        manifest.launch_cwd = options_.launch_cwd;
+        // A new Managed run is qualified by its frozen session ID. It must not
+        // read unrelated Local session manifests to allocate its first run.
+        manifest.main_run_id = "main-0001";
+        manifest.run_kind = RunKindName(options_.main_run_kind);
+        manifest.start_reason = "managed_launch";
+        manifest.status = SessionStatusName(SessionStatus::Preparing);
+        manifest.created_at_ms = clock_->WallMs();
+        manifest.lubancode_version = options_.lubancode_version;
+        manifest.approval_mode = options_.approval_mode;
+        manifest.event_schema_version = options_.recorder.event_schema_version;
+        auto metadata = ManagedCreationMetadata(ownership, creation);
+        auto publication = std::make_shared<const ManagedSessionOwnershipPublication>(std::move(admitted.publication_));
+        auto session = AssembleV3SessionLocked(admitted.directory_, manifest, admitted.lock_,
+                                               std::move(publication), std::move(metadata));
+        if (!session) return std::unexpected(session.error());
+        active_ = std::move(*session);
+        return &*active_;
+    } catch (const std::exception&) {
+        return std::unexpected("managed.session.open_failed");
+    } catch (...) {
+        return std::unexpected("managed.session.open_failed");
+    }
 }
 
 std::expected<ActiveSession*, std::string> SessionManager::LaunchSessionV3Locked() {
@@ -885,6 +1076,7 @@ std::expected<ActiveSession*, std::string> SessionManager::LaunchSessionV3Locked
 
 std::expected<ActiveSession*, std::string> SessionManager::LaunchSession() {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (managed_mode_) return std::unexpected(kManagedOperationUnavailable);
     if (boundary_in_progress_) {
         return std::unexpected("session.boundary_in_progress: clear/close 未收完");
     }
@@ -973,6 +1165,7 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
     }
     std::lock_guard<std::mutex> lock(mutex_);
     ClearOutcome outcome;
+    if (managed_mode_) { outcome.error_code = kManagedOperationUnavailable; return outcome; }
     const auto fail = [&outcome](std::string code, std::string message) {
         outcome.error_code = std::move(code);
         outcome.message = std::move(message);
@@ -984,6 +1177,7 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
     if (!active_.has_value() || active_->status != SessionStatus::Running) {
         return fail("clear.no_active_session", "没有可换的 active running session");
     }
+    if (options_.named_result_factory) return fail("named_result.cross_session_unsupported", "external named storage does not support clear");
     NullClearParticipant null_participant;
     if (participant == nullptr) {
         participant = &null_participant;
@@ -1029,10 +1223,13 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
         // 第 1 步失败:旧 session 仍可用,clear 返回失败(§3.3.1)。
         return fail("clear.step1_failed", new_directory.error());
     }
-    auto new_lock = SessionLock::Acquire(new_directory->session_dir(), clock_->LockOwner());
+    auto new_lock = AcquireLocalSessionLock(new_directory->session_dir(), clock_->LockOwner());
     if (!new_lock.has_value()) {
         return fail("clear.step1_failed", new_lock.error());
     }
+    auto memory_capability = OpenLockedMemory(options_, workspace_key_, new_directory->session_dir(),
+                                              new_manifest.session_id);
+    if (!memory_capability) return fail("clear.step1_failed", memory_capability.error());
     outcome.boundary_operation_id = NewStampId();
     const std::string create_op = NewStampId();
     LifecycleIntent intent;
@@ -1202,6 +1399,7 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
     new_session.main = std::move(*new_recorder);
     new_session.manifest = new_manifest;
     new_session.lock = std::move(*new_lock);
+    new_session.memory_capability = std::move(*memory_capability);
     if (const auto transition = TransitionSessionStatus(
             new_session.session_dir(), &new_session.manifest, SessionStatus::Running);
         !transition.has_value()) {
@@ -1214,6 +1412,8 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
     if (const auto sha = old.main->Close(); sha.has_value()) {
         outcome.old_journal_sha256 = *sha;
     }
+    old.memory_capability.CloseWrites();
+    old.named_result_capability.CloseWrites();
     old.lock.Release();
     active_ = std::move(new_session);
     outcome.active_switched = true;
@@ -1345,8 +1545,12 @@ ClearOutcome SessionManager::ClearV3Locked(const ClearRequest& request,
     outcome.old_session_ended_ref =
         EventRef{old.session_id(), ended_receipt.id, ended_receipt.line_hash};
     outcome.old_journal_sha256 = ended_receipt.line_hash;  // 封账行 hash(§8.3 同口径)
+    // 封口后先关写句柄,再推进换场。沿用 checked Close,关闭失败不能冒充
+    // 清场成功;保留旧场身份与只读上下文,也不把正常关闭标成 broken。
+    if (const auto closed = old.v3_main->Close(); !closed.has_value()) {
+        return fail("clear.step4_failed", closed.error());
+    }
     old.status = SessionStatus::Closed;  // 只住内存(v3 无 session.json 可翻)
-    old.v3_main->CloseFile();            // 已封口不再写;放句柄免挡 Windows 删目录
 
     // ---- 第 5 步:v3 无 session.json,跳——账面 session.ended 即终态。
 
@@ -1372,6 +1576,8 @@ ClearOutcome SessionManager::ClearV3Locked(const ClearRequest& request,
     outcome.new_command_completed_event_id = completed_receipt.id;
 
     // ---- 第 7 步:切 active,放旧锁;旧写者随换值自然关柄。
+    old.memory_capability.CloseWrites();
+    old.named_result_capability.CloseWrites();
     old.lock.Release();
     active_ = std::move(*session);
     outcome.new_session_running = true;
@@ -1419,12 +1625,17 @@ CloseOutcome SessionManager::CloseV3Locked(const CloseRequest& request,
                     "session.ended 落不了: " + receipt.error_code + " " + receipt.error_message);
     }
     outcome.journal_sha256 = receipt.line_hash;
+    // session.ended 落稳后先关写句柄,再交还独占锁。仅放锁不关柄时,
+    // Windows 仍拒绝删除/改名;管理器存活期间关闭的会话也应能管理。
+    // 保留 v3_main 对象,不让 ActiveSession::is_v3() 与只读查询丢身份。
+    if (const auto closed = session.v3_main->Close(); !closed.has_value()) {
+        return fail("close.step3_failed", closed.error());
+    }
     session.status = SessionStatus::Closed;
     // 封口即放锁(§3.3.2 同一口径:没有活 writer 的场不攥独占锁)。
+    session.memory_capability.CloseWrites();
+    session.named_result_capability.CloseWrites();
     session.lock.Release();
-    // 账文件句柄一并放:Windows 上开着的句柄挡住目录删除(DeleteSession、
-    // 清单测试直删目录)。已封口的场不再写。
-    session.v3_main->CloseFile();
     return outcome;
 }
 
@@ -1499,6 +1710,8 @@ CloseOutcome SessionManager::Close(const CloseRequest& request, ClearParticipant
         outcome.journal_sha256 = *sha;
     }
     // 封口即放锁:没有活 writer 的 session 不许再攥独占锁(§3.3.2)。
+    session.memory_capability.CloseWrites();
+    session.named_result_capability.CloseWrites();
     session.lock.Release();
     return outcome;
 }
@@ -1509,11 +1722,13 @@ CloseOutcome SessionManager::Close(const CloseRequest& request, ClearParticipant
 
 std::string SessionManager::LatestResumableSessionId() {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (managed_mode_) return {}; // No Managed recovery/read contract yet.
     return LatestResumableSessionIdLocked();
 }
 
 std::expected<void, std::string> SessionManager::UpdateApprovalMode(ApprovalMode mode) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (managed_mode_) return std::unexpected(kManagedOperationUnavailable);
     if (!active_.has_value()) {
         return std::unexpected("session.no_active_session: 没有可更新审批档的活动场");
     }
@@ -1567,7 +1782,7 @@ std::vector<ReplayMessage> EffectiveConversationFromV3(const v3::V3Ledger& ledge
                                                        const v3::ModelContext& context) {
     std::map<std::string, std::string> provider_call_to_action;
     for (const auto& action : v3::FoldToolActions(ledger)) {
-        if (action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
+        if (action.provider_reply_required && action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
             provider_call_to_action[*action.provider_tool_call_id] = action.tool_call_id;
         }
     }
@@ -1681,7 +1896,7 @@ struct V3FoldError {
 std::map<std::string, std::string> ProviderCallToActionMap(const v3::V3Ledger& ledger) {
     std::map<std::string, std::string> mapping;
     for (const auto& action : v3::FoldToolActions(ledger)) {
-        if (action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
+        if (action.provider_reply_required && action.provider_tool_call_id.has_value() && !action.provider_tool_call_id->empty()) {
             mapping[*action.provider_tool_call_id] = action.tool_call_id;
         }
     }
@@ -1721,7 +1936,27 @@ void AppendConversationText(const nlohmann::json& content, ReplayMessage* out) {
 // 键已带场名,原样沿用。
 std::expected<V3ResumeFold, V3FoldError> FoldV3ResumeChain(
     const v3::V3Ledger& own, const std::filesystem::path& own_stream) {
-    auto projection = v3::ProjectResume(own_stream);
+    struct RefusedLocalSource { std::string error; };
+    auto projection = [&]() -> std::expected<v3::ResumeProjection, std::string> {
+        try {
+            return v3::ProjectResume(own, [&](const std::string& session_id) {
+                if (!IsSafeSingleSegment(session_id))
+                    throw RefusedLocalSource{"managed.ownership.invalid_source"};
+                const auto directory = own_stream.parent_path().parent_path() /
+                    platform::Utf8ToPath(session_id);
+                std::error_code error;
+                const auto status = std::filesystem::symlink_status(directory, error);
+                if (error == std::errc::no_such_file_or_directory ||
+                    (!error && status.type() == std::filesystem::file_type::not_found))
+                    return directory / platform::Utf8ToPath(session_id + ".jsonl");
+                auto local = CaptureLocalSession(directory);
+                if (!local) throw RefusedLocalSource{local.error()};
+                return directory / platform::Utf8ToPath(session_id + ".jsonl");
+            });
+        } catch (const RefusedLocalSource& refused) {
+            return std::unexpected(refused.error);
+        }
+    }();
     if (!projection.has_value()) {
         return std::unexpected(V3FoldError{"corrupt", projection.error()});
     }
@@ -1918,6 +2153,7 @@ std::string SessionManager::LatestResumableSessionIdLocked() {
         if (active_.has_value() && id == active_->session_id()) {
             continue;  // 自己这场不作为 resume 源
         }
+        if (!CaptureLocalSession(entry.path())) continue;
         const auto manifest = ReadSessionJson(entry.path());
         if (!manifest.has_value()) {
             // v3 会话(session_switch 接线点 2):无 manifest,认
@@ -1973,6 +2209,7 @@ SessionManager::ResumeSourceProbe SessionManager::ProbeResumeSource(
     // 验账(七步 resume 仍全量验,这里只挡"一眼就过不了")。
     std::lock_guard<std::mutex> lock(mutex_);
     ResumeSourceProbe probe;
+    if (managed_mode_) { probe.error_code = kManagedOperationUnavailable; return probe; }
     const auto fail = [&probe](std::string code, std::string message) {
         probe.error_code = std::move(code);
         probe.message = std::move(message);
@@ -1992,6 +2229,8 @@ SessionManager::ResumeSourceProbe SessionManager::ProbeResumeSource(
     if (!std::filesystem::is_directory(source_dir)) {
         return fail("resume.source_not_found", "source session 目录不存在");
     }
+    const auto local = CaptureLocalSession(source_dir);
+    if (!local) return fail(local.error(), "LocalTrusted source ownership refused");
     // one_shot 两路认:先 v2 manifest,再 v3 session.started 的 runKind。
     if (const auto manifest = ReadSessionJson(source_dir); manifest.has_value()) {
         if (manifest->run_kind == RunKindName(RunKind::OneShot)) {
@@ -2056,6 +2295,11 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     }
     std::lock_guard<std::mutex> lock(mutex_);
     ResumeOutcome outcome;
+    if (managed_mode_) { outcome.error_code = kManagedOperationUnavailable; return outcome; }
+    if (options_.journal_native_io_probe) {
+        outcome.error_code = "resume.native_probe_unsupported";
+        return outcome;
+    }
     const auto fail = [&outcome](std::string code, std::string message) {
         outcome.error_code = std::move(code);
         outcome.message = std::move(message);
@@ -2104,6 +2348,8 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     if (!std::filesystem::is_directory(source_dir)) {
         return fail("resume.source_not_found", "source session 目录不存在");
     }
+    const auto local = CaptureLocalSession(source_dir);
+    if (!local) return fail(local.error(), "LocalTrusted source ownership refused");
     // 单发场不可 resume(单发轨迹断档单):单发语义不续,审计可读——/resume
     // <id> 指名要续也明拒,不折叠成新交互场。manifest 读不动照旧往下走,
     // 由后面的验账说话。
@@ -2133,7 +2379,38 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     std::uint64_t source_seq = 0;
     V3ResumeFold chain_fold;       // v3 源的链折算(第 6.5 步导入新场用)
     bool has_chain_fold = false;
-    const auto v3_probe = v3::ProbeV3SessionStream(source_dir);
+    std::optional<v3::V3Ledger> bounded_preflight;
+    v3::V3StreamProbe v3_probe;
+    std::error_code layout_error;
+    const auto logical_main = source_dir / (source_id + ".jsonl");
+    const bool bounded_same_id = options_.recovery_capture.limits &&
+        !std::filesystem::exists(platform::FileIoPath(source_dir / "main.jsonl"), layout_error) && !layout_error &&
+        std::filesystem::exists(platform::FileIoPath(logical_main), layout_error) && !layout_error;
+    if (bounded_same_id) {
+        // A finite SDK budget precedes the old getline/whole-file reader.
+        // Eligibility only: adopted facts are recaptured under the native lock.
+        const auto& limits = *options_.recovery_capture.limits;
+        auto captured = JournalFileAnchor::ReadExisting(logical_main,
+            (std::min)(limits.journal.max_bytes, limits.view_total_bytes));
+        if (!captured) return fail("resume.source_corrupt", captured.error());
+        auto closed = captured->anchor->Close();
+        if (!closed) return fail("resume.source_corrupt", closed.error());
+        const auto first_end = captured->bytes.find('\n');
+        const auto first = nlohmann::json::parse(captured->bytes.substr(0, first_end), nullptr, false);
+        if (!first.is_object() || !first.contains("schemaVersion") ||
+            !first["schemaVersion"].is_number_integer() || first["schemaVersion"] != 3)
+            return fail("resume.source_format_unknown", "bounded V3 first line is not schemaVersion 3");
+        auto raw = RecoveryStreamLines(captured->bytes, limits.journal, true);
+        if (!raw) return fail("resume.source_corrupt", raw.error());
+        auto ledger = v3::ReadV3LedgerOwned(logical_main, *raw);
+        if (!ledger) return fail("resume.source_corrupt", ledger.error());
+        bounded_preflight = std::move(*ledger);
+        v3_probe.status = v3::V3StreamProbe::Status::V3Stream;
+        v3_probe.stream = logical_main;
+    } else {
+        // CLI unset and legacy V2/AsNew keep the original layout reader.
+        v3_probe = v3::ProbeV3SessionStream(source_dir);
+    }
     if (v3_probe.status == v3::V3StreamProbe::Status::FormatConflict) {
         return fail("resume.source_format_conflict",
                     v3_probe.detail + ";两种主账并存须人工裁决,不自动选边");
@@ -2146,10 +2423,14 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     }
     if (v3_probe.status == v3::V3StreamProbe::Status::V3Stream) {
         const std::filesystem::path& v3_stream = v3_probe.stream;
-        auto ledger = v3::ReadV3Ledger(v3_stream);
+        auto ledger = bounded_preflight
+            ? std::expected<v3::V3Ledger, std::string>(std::move(*bounded_preflight))
+            : v3::ReadV3Ledger(v3_stream);
         if (!ledger.has_value()) {
             return fail("resume.source_corrupt", ledger.error());
         }
+        if (HasExternalNamedResultBinding(*ledger) && !options_.named_result_factory)
+            return fail("named_result.provider_required", "external named result provider is required");
         // v3 源的 one_shot(R2 写读接通后的真闸):session.started 的
         // runKind 是权威;老档没写该键 = 未知,放行走验卷(未知不等于单发)。
         // run_kind 顺路留底——续接源场时内存 manifest 的 run_kind 以此为
@@ -2348,6 +2629,8 @@ ResumeOutcome SessionManager::ResumeAsNewV3Locked(const ResumeRequest& request,
         outcome.message = std::move(message);
         return outcome;
     };
+    if (options_.named_result_factory)
+        return fail("named_result.cross_session_unsupported", "external named storage requires same-ID continuation");
     // 第 5 步(v3):开新 v3 场(首行 system + session.started)。
     auto session = OpenV3SessionLocked(
         "resume", previous_session_id.empty() ? std::optional<std::string>{}
@@ -2529,7 +2812,12 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
                                                     const std::string& source_run_id,
                                                     const std::string& source_run_kind,
                                                     ResumeOutcome outcome) {
-    const auto fail = [&outcome](std::string code, std::string message) {
+    JournalReadHandle opening_journal;
+    const auto fail = [&outcome, &opening_journal](std::string code, std::string message) {
+        if (opening_journal) {
+            const auto closed = opening_journal.Close();
+            if (!closed) message += ";" + closed.error();
+        }
         outcome.error_code = std::move(code);
         outcome.message = std::move(message);
         return outcome;
@@ -2541,21 +2829,145 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     // Acquire 撞上的是极小窗(拿到即拒,不硬闯)。
     const std::filesystem::path source_dir = SessionDirOf(source_id);
     if (active_.has_value() && active_->session_id() == source_id) {
+        active_->memory_capability.CloseWrites();
+        active_->named_result_capability.CloseWrites();
         active_->lock.Release();
         active_.reset();
     }
-    auto lock_file = SessionLock::Acquire(source_dir, clock_->LockOwner());
+    auto lock_file = AcquireLocalSessionLock(source_dir, clock_->LockOwner());
     if (!lock_file.has_value()) {
         return fail("resume.step5_failed", "源场独占锁拿不下: " + lock_file.error());
+    }
+    auto memory_capability = OpenLockedMemory(options_, workspace_key_, source_dir, source_id);
+    if (!memory_capability) return fail("resume.opening_failed", memory_capability.error());
+    (void)source_run_kind; // Lock-preflight values never become adopted facts.
+    auto capture = CaptureSessionRecovery(source_dir, workspace_key_, source_id,
+        options_.recovery_capture, options_.recovery_factory);
+    if (!capture) return fail(capture.error() == "recovery.prepare_source_changed"
+        ? "resume.source_changed" : "resume.source_corrupt", capture.error());
+    opening_journal = capture->main_journal;
+    auto source = v3::ReadV3LedgerCaptured(capture->main_journal, options_.recovery_capture.limits
+        ? std::optional(options_.recovery_capture.limits->journal) : std::nullopt);
+    if (!source) return fail("resume.source_corrupt", source.error());
+    if (source->session_id != source_id || source->run_id.empty())
+        return fail("resume.source_corrupt", "recovery.source_scope_mismatch");
+    const auto tail = source->LastEntry();
+    if (!tail) return fail("resume.source_corrupt", "recovery.empty_source");
+    const auto captured_tail_hash = tail->is_message
+        ? source->messages[tail->index].line_hash : source->events[tail->index].line_hash;
+    // Preserve the original host eligibility fence. These lock-preflight values
+    // may reject drift; they never supply the subsequently adopted fold.
+    if (options_.v3_opening_participant && (source->run_id != source_run_id ||
+        source->lines != outcome.source_event_count || tail->seq != outcome.source_event_count ||
+        captured_tail_hash != outcome.source_main_last_event_hash))
+        return fail("resume.source_changed", "source changed before the locked opening");
+    auto named = OpenLockedNamedResults({workspace_key_, source_id}, source_dir, options_.named_result_factory, &*source);
+    if (!named) return fail("resume.opening_failed", named.error());
+    const std::string locked_run_id = source->run_id;
+    std::string locked_run_kind;
+    for (const auto& event : source->events) {
+        if (event.kind != v3::EventKindV3::SessionStarted) continue;
+        const auto kind = event.payload.find("runKind");
+        if (kind != event.payload.end() && kind->is_string()) locked_run_kind = kind->get<std::string>();
+        break;
+    }
+    if (locked_run_kind == RunKindName(RunKind::OneShot))
+        return fail("resume.source_not_resumable", "one_shot source cannot be resumed");
+    auto folded = FoldV3ResumeChain(*source, outcome.source_v3_stream);
+    if (!folded) return fail(folded.error().code == "chain" ? "resume.source_chain_broken" : "resume.source_corrupt", folded.error().message);
+    outcome.source_verified = true;
+    outcome.source_event_count = source->lines;
+    outcome.source_main_last_event_hash = captured_tail_hash;
+    outcome.effective_conversation = std::move(folded->conversation);
+    ReplayState projection;
+    projection.session_id = source->session_id;
+    projection.run_id = source->run_id;
+    projection.effective_conversation = outcome.effective_conversation;
+    outcome.replay_version = "v3-context-chain-2";
+    outcome.imported_state_hash = ComputeReplayStateHash(projection);
+    outcome.control = ReplayControlState{};
+    outcome.source_title.reset();
+    outcome.source_title_event_id.clear();
+    outcome.source_title_seq = 0;
+    outcome.source_title_line_hash.clear();
+    outcome.source_approval_mode.reset();
+    for (const auto& event : source->events) {
+        if (event.kind == v3::EventKindV3::SessionTitleApplied) {
+            const auto title = event.payload.find("title");
+            if (title != event.payload.end() && title->is_string() &&
+                !title->get<std::string>().empty()) {
+                outcome.control.title = title->get<std::string>();
+                outcome.source_title = title->get<std::string>();
+                outcome.source_title_event_id = event.event_id;
+                outcome.source_title_seq = event.seq;
+                outcome.source_title_line_hash = event.line_hash;
+            }
+        } else if (event.kind == v3::EventKindV3::ApprovalModeApplied) {
+            const auto mode = event.payload.find("mode");
+            if (mode != event.payload.end() && mode->is_string()) {
+                outcome.source_approval_mode = ParseApprovalModeOrDefault(mode->get<std::string>());
+            }
+        } else if (event.kind == v3::EventKindV3::SessionContextWindowApplied) {
+            // 上下文预算单(P1):窗口预算折进 control(末枚胜,同标题
+            // 口径)。身份/来源照抄——恢复裁决在 runtime 侧,这里只交
+            // 事实,不裁"该不该套用"。
+            const auto window = event.payload.find("contextWindow");
+            const bool window_valid =
+                window != event.payload.end() &&
+                ((window->is_number_unsigned() && window->get<std::uint64_t>() > 0) ||
+                 (window->is_number_integer() && window->get<std::int64_t>() > 0));
+            if (window_valid) {
+                outcome.control.context_window = window->get<std::uint64_t>();
+                const auto read_string = [&event](const char* key) {
+                    const auto field = event.payload.find(key);
+                    return field != event.payload.end() && field->is_string()
+                               ? field->get<std::string>()
+                               : std::string();
+                };
+                outcome.control.context_window_provider = read_string("provider");
+                outcome.control.context_window_model = read_string("model");
+                outcome.control.context_window_source = read_string("source");
+            }
+        }
+    }
+    if (options_.v3_opening_participant) {
+        const auto* root = source->FindMessage(source->context.system_message_ref);
+        if (!root || !root->system_meta || root->message.value("role", std::string()) != "system" ||
+            !root->message.contains("content") || !root->message["content"].is_string()) {
+            return fail("resume.opening_failed", "opening.effective_system_missing");
+        }
+        if (root->system_meta->contains("settingsVersion")) {
+            const auto& version = root->system_meta->at("settingsVersion");
+            if ((!version.is_number_unsigned() && !version.is_number_integer()) ||
+                (version.is_number_integer() && !version.is_number_unsigned() && version.get<std::int64_t>() < 1) ||
+                (version.is_number_unsigned() && version.get<std::uint64_t>() == 0)) {
+                return fail("resume.opening_failed", "opening.invalid_settings_version");
+            }
+        }
+        auto opening = InvokeOpeningParticipant(options_.v3_opening_participant,
+            {source_dir, source_id, &*source, memory_capability->share(), &capture->view, named->lease.share()});
+        if (!opening) return fail("resume.opening_failed", opening.error());
+        const auto saved_bindings = root->system_meta && root->system_meta->contains("hostBindings")
+            ? root->system_meta->at("hostBindings") : nlohmann::json::object();
+        if (auto bound = MergeNamedResultBinding(*opening, named->binding); !bound)
+            return fail("resume.opening_failed", bound.error());
+        const auto expected_bindings = opening->contains("hostBindings")
+            ? opening->at("hostBindings") : nlohmann::json::object();
+        if (saved_bindings != expected_bindings) {
+            return fail("resume.opening_failed", "opening.host_bindings_mismatch");
+        }
     }
     v3::V3WriterOptions writer_options;
     // launch_cwd/run_kind 是 Start 时写 session.started 用的,续卷不写;
     // 故障注入照递(测试专用,生产恒空)。
     writer_options.inject_io_failure = options_.v3_main_io_fault;
-    auto writer = v3::V3Writer::Continue(outcome.source_v3_stream, std::move(writer_options));
+    auto writer = v3::V3Writer::ContinueCaptured(capture->main_journal, std::move(writer_options));
     if (!writer.has_value()) {
         return fail("resume.step5_failed", "源账续卷验不过: " + writer.error());
     }
+
+    auto anchor_closed = capture->main_journal.Close();
+    if (!anchor_closed) return fail("resume.step5_failed", anchor_closed.error());
 
     ActiveSession session;
     session.directory = TrajectoryDirectory::OpenExisting(source_dir);
@@ -2567,15 +2979,18 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     session.manifest.workspace_key = workspace_key_;
     session.manifest.session_id = source_id;
     session.manifest.launch_cwd = options_.launch_cwd;
-    session.manifest.main_run_id = source_run_id;
+    session.manifest.main_run_id = locked_run_id;
     session.manifest.run_kind =
-        source_run_kind.empty() ? RunKindName(options_.main_run_kind) : source_run_kind;
+        locked_run_kind.empty() ? RunKindName(options_.main_run_kind) : locked_run_kind;
     session.manifest.start_reason = "resume";
     session.manifest.status = SessionStatusName(SessionStatus::Running);
     session.manifest.created_at_ms = clock_->WallMs();
     session.manifest.lubancode_version = options_.lubancode_version;
     session.manifest.event_schema_version = options_.recorder.event_schema_version;
     session.lock = std::move(*lock_file);
+    session.memory_capability = std::move(*memory_capability);
+    session.named_result_capability = std::move(named->lease);
+    session.recovery_view = std::make_shared<const SessionRecoveryView>(std::move(capture->view));
     session.status = SessionStatus::Running;
 
     // 续接事实入账:lifecycle 的 resume_reference(§3.2 恢复引用账)。
@@ -2667,7 +3082,7 @@ ResumeOutcome SessionManager::ResumeInPlaceV3Locked(const ResumeRequest& request
     // 从账上恢复发号计数器),不另起。
     active_ = std::move(session);
     outcome.new_session_id = source_id;
-    outcome.new_main_run_id = source_run_id;
+    outcome.new_main_run_id = locked_run_id;
     outcome.new_run_started_event_id = std::string();  // v3 无 run.started,身份在账首行
     outcome.imported_history_count = 0;                // 不抄链,本账自足
     outcome.new_session_running = true;
@@ -2800,10 +3215,17 @@ void SessionManager::ContinueNewSide(const std::filesystem::path& next_dir,
     next_entry.session_id = next_id;
     next_entry.clear_continued = true;
 
-    auto next_lock = SessionLock::Acquire(next_dir, clock_->LockOwner());
+    auto next_lock = AcquireLocalSessionLock(next_dir, clock_->LockOwner());
     if (!next_lock.has_value()) {
         next_entry.status = SessionStatus::Incomplete;
         next_entry.notes.push_back("新账锁拿不到: " + next_lock.error());
+        report->sessions.push_back(std::move(next_entry));
+        return;
+    }
+    auto memory_capability = OpenLockedMemory(options_, workspace_key_, next_dir, next_id);
+    if (!memory_capability) {
+        next_entry.status = SessionStatus::Incomplete;
+        next_entry.notes.push_back("memory capability refused: " + memory_capability.error());
         report->sessions.push_back(std::move(next_entry));
         return;
     }
@@ -2931,6 +3353,7 @@ void SessionManager::ContinueNewSide(const std::filesystem::path& next_dir,
         session.main = std::move(*recorder);
         session.manifest = *manifest;
         session.lock = std::move(*next_lock);
+        session.memory_capability = std::move(*memory_capability);
         session.status = SessionStatus::Running;
         active_ = std::move(session);
         report->adopted_session_id = next_id;
@@ -2942,6 +3365,11 @@ SessionRecoveryEntry SessionManager::AbortEmptyPreparing(const std::filesystem::
                                                          const std::string& session_id) {
     SessionRecoveryEntry entry;
     entry.session_id = session_id;
+    const auto local = CaptureLocalSession(session_dir);
+    if (!local) {
+        entry.notes.push_back(local.error());
+        return entry;
+    }
     entry.aborted_before_start = true;
     const auto operation = RunLifecycleOp(
         LifecycleOperation::DeleteSession, session_id,
@@ -2971,6 +3399,7 @@ SessionRecoveryEntry SessionManager::AbortEmptyPreparing(const std::filesystem::
 WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy policy) {
     std::lock_guard<std::mutex> lock(mutex_);
     WorkspaceRecoveryReport report;
+    if (managed_mode_) { report.notes.push_back(kManagedOperationUnavailable); return report; }
     std::string error;
     if (!EnsureWorkspace(&error)) {
         return report;
@@ -2999,6 +3428,7 @@ WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy pol
                 continue;
             }
             const std::string id = platform::PathToUtf8(entry.path().filename());
+            if (!CaptureLocalSession(entry.path())) continue;
             scanned.emplace(id, Scanned{entry.path(), ScanStreamFacts(entry.path() / "main.jsonl")});
         }
     }
@@ -3016,6 +3446,7 @@ WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy pol
         const Scanned& scan = scanned.at(session_id);
         const std::filesystem::path& session_dir = scan.dir;
         MainJournalFacts facts = scan.facts;
+        if (!CaptureLocalSession(session_dir)) return;
 
         SessionRecoveryEntry entry;
         entry.session_id = session_id;
@@ -3078,7 +3509,7 @@ WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy pol
 
         // ---- 换账旧侧续办:clear_requested 已 durable、账未封 ----
         if (facts.clear_requested && !facts.session_ended && entry.status != SessionStatus::Corrupt) {
-            auto stale_lock = SessionLock::Acquire(session_dir, clock_->LockOwner());
+            auto stale_lock = AcquireLocalSessionLock(session_dir, clock_->LockOwner());
             if (!stale_lock.has_value()) {
                 entry.notes.push_back("旧账锁拿不到: " + stale_lock.error());
             } else {
@@ -3122,7 +3553,7 @@ WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy pol
             !facts.clear_requested_next_session_id.empty()) {
             const std::string next_id = facts.clear_requested_next_session_id;
             const auto next_it = scanned.find(next_id);
-            if (next_it != scanned.end()) {
+            if (next_it != scanned.end() && CaptureLocalSession(next_it->second.dir)) {
                 const MainJournalFacts& next_facts = next_it->second.facts;
                 if (next_facts.truncated_tail ||
                     (next_facts.journal_exists && !next_facts.verify_ok)) {
@@ -3198,6 +3629,7 @@ WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy pol
 
 std::expected<void, std::string> SessionManager::ArchiveSession(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (managed_mode_) return std::unexpected(kManagedOperationUnavailable);
     // §12.1:归档也是目录管理操作,先过单段名校验。
     if (!IsSafeSingleSegment(session_id)) {
         return std::unexpected("session.invalid_ref: session id 须是单段名(不带路径)");
@@ -3217,6 +3649,7 @@ std::expected<void, std::string> SessionManager::ArchiveSession(const std::strin
 
 std::expected<void, std::string> SessionManager::UnarchiveSession(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (managed_mode_) return std::unexpected(kManagedOperationUnavailable);
     if (!IsSafeSingleSegment(session_id)) {
         return std::unexpected("session.invalid_ref: session id 须是单段名(不带路径)");
     }
@@ -3231,6 +3664,7 @@ std::expected<void, std::string> SessionManager::UnarchiveSession(const std::str
 std::expected<void, std::string> SessionManager::DeleteSession(const std::string& session_id,
                                                                const std::string& reason) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (managed_mode_) return std::unexpected(kManagedOperationUnavailable);
     // §12.1:删除是毁档操作,用户递的名字先过单段名校验再拼路径。
     if (!IsSafeSingleSegment(session_id)) {
         return std::unexpected("session.invalid_ref: session id 须是单段名(不带路径)");
@@ -3250,10 +3684,15 @@ std::expected<void, std::string> SessionManager::DeleteSession(const std::string
 std::expected<void, std::string> SessionManager::RecordResumeReference(
     const std::string& source_session_id, const std::string& note) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (managed_mode_) return std::unexpected(kManagedOperationUnavailable);
+    if (!IsSafeSingleSegment(source_session_id))
+        return std::unexpected("session.invalid_ref");
     const std::filesystem::path source_dir = SessionDirOf(source_session_id);
     if (!std::filesystem::exists(source_dir)) {
         return std::unexpected("session.not_found: " + source_session_id);
     }
+    const auto local = CaptureLocalSession(source_dir);
+    if (!local) return std::unexpected(local.error());
     // resume source 通常须 closed/archived;无活 writer 的 incomplete 也可按
     // 已验证前缀 resume-as-new(§3.3.2)。这里只记引用,不校验投影。
     nlohmann::json parameters;
@@ -3379,6 +3818,12 @@ SessionAdminOutcome GuardAdminTargetPath(const std::filesystem::path& workspace_
         return SessionAdminOutcome{"session.path_escape",
                                    "规范化路径越出 workspace sessions 根: " +
                                        platform::PathToUtf8(canonical_session)};
+    }
+    const bool exists = std::filesystem::exists(session_dir, ec);
+    if (ec) return SessionAdminOutcome{"managed.ownership.invalid_directory", ec.message()};
+    if (exists) {
+        const auto local = CaptureLocalSession(session_dir);
+        if (!local) return SessionAdminOutcome{local.error(), "LocalTrusted target ownership refused"};
     }
     *session_dir_out = session_dir;
     return SessionAdminOutcome{};
@@ -3533,6 +3978,9 @@ SessionAdminOutcome DeleteV3SessionDir(const std::filesystem::path& workspace_di
     }
     // 勾四:incoming refs 核验(同 workspace 扫别场账 + memory 条目)。
     const IncomingSessionRefs refs = ScanIncomingSessionRefs(workspace_dir, session_id);
+    if (!refs.ownership_unreadable_sessions.empty())
+        return SessionAdminOutcome{"session.delete_references_unknown",
+                                   "LocalTrusted cannot read all peer session ownership"};
     if (!refs.empty()) {
         std::string detail;
         for (const std::string& id : refs.resume_referrers) {
@@ -3988,6 +4436,12 @@ IncomingSessionRefs ScanIncomingSessionRefs(const std::filesystem::path& workspa
             if (other_id == session_id) {
                 continue;  // 目标自己目录内的子账随整场删除,不算跨场引用
             }
+            if (!CaptureLocalSession(entry.path())) {
+                // Its body is outside LocalTrusted authority. Conservatively
+                // retain the target instead of declaring that no reference exists.
+                refs.ownership_unreadable_sessions.push_back(other_id);
+                continue;
+            }
             // 主账两形状都扫(v3 <id>.jsonl 与 v2 main.jsonl);resume 链可
             // 跨格式存在(v2 场 resume v3 源,反之亦然)。
             const auto v3_probe = v3::ProbeV3SessionStream(entry.path());
@@ -4071,9 +4525,11 @@ std::vector<DeleteRecoveryEntry> RecoverPendingDeletes(const std::filesystem::pa
         }
         const std::filesystem::path session_dir =
             workspace_dir / "sessions" / platform::Utf8ToPath(intent->session_id);
+        if (!IsSafeSingleSegment(intent->session_id)) continue;
+        const bool dir_exists = std::filesystem::exists(session_dir, ec);
+        if (ec || (dir_exists && !CaptureLocalSession(session_dir))) continue;
         const auto tombstone =
             ReadSessionTombstone(workspace_dir / "tombstones", intent->session_id);
-        const bool dir_exists = std::filesystem::exists(session_dir, ec);
 
         DeleteRecoveryEntry record;
         record.operation_id = intent->operation_id;

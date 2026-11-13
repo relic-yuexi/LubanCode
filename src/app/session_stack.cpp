@@ -2,9 +2,11 @@
 // 装配段逐字搬来(初始化列表进了 SessionStack 的构造函数,函数体进了
 // BuildSessionStack),行为一字未改——注释一并随行。
 #include "app/session_stack.hpp"
+#include "app/cli_tool_assembly.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <iostream>
 #include <utility>
 
 #include "agent/prompts.hpp"  // LoadSoulContentByName(魂的默认内容)
@@ -465,8 +467,10 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
         runtime_options.deferred_mode = resolution.mode;
         runtime_options.native_server_tool_search = resolution.server_tool_search;
     }
-    stack->tool_runtime.emplace(config, theme, stack->wrapped_backend, stack->skills, stack->skills_segment,
-                                CurrentDirUtf8(), std::move(runtime_options));
+    stack->tool_runtime.emplace(
+        config, stack->wrapped_backend, stack->skills, stack->skills_segment,
+        ResolveCliToolAssemblyPlan(CurrentDirUtf8()), std::move(runtime_options),
+        MakeCliToolAssemblyDiagnosticSink(theme, std::cout));
 
     // 动态工具 P1 修的装配次序 bug:延迟启停/模式先落账、再接子代理的线。
     // 从前 sub_deferral 在赋值之前就被下面的接线块读走(恒 false),子代理
