@@ -284,6 +284,23 @@ public:
     Result<std::vector<memory::v1::SaveReport>> GetMemorySaves(const std::string& operation_id) const;
     Result<memory::v1::LearningSnapshot> DescribeMemoryLearning() const;
     Result<memory::v1::LearningReport> GetMemoryLearning(const std::string& operation_id) const;
+
+    // Candidate review-box queries bound to this Session's admitted workspace and
+    // active learning plan; remain readable as pure owned values after Close.
+    Result<std::vector<memory::v1::LearningCandidate>> ListMemoryCandidates() const;
+    Result<memory::v1::LearningCandidate> GetMemoryCandidate(const std::string& candidate_id) const;
+    // Candidate mutators bound to this Session's admitted workspace and active
+    // learning plan; reject after Close with sdk.session.closed.
+    Result<memory::v1::LearningCandidate> EditMemoryCandidate(
+        const std::string& candidate_id,
+        const std::string& title,
+        const std::string& content);
+    Result<void> RejectMemoryCandidate(
+        const std::string& candidate_id,
+        const std::string& reason = {});
+    Result<memory::v1::CandidateAcceptReport> AcceptMemoryCandidate(const std::string& candidate_id);
+    // Pure owned accept receipts for this Session, including after Close and OpenSession recovery.
+    Result<std::vector<memory::v1::CandidateAcceptReport>> GetAcceptedMemoryCandidates() const;
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
     // Cooperative custom tools/backends MUST return after cancellation; Close waits
     // for them and never destroys live borrowed state or pretends a timeout stopped it.

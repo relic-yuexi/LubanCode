@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
+#include <utility>
 
 #include "agent/agent.hpp"
 #include "mcp/mcp_tool.hpp"
@@ -320,6 +321,7 @@ struct Session::Impl final : rt::InteractionBroker {
     bool closing = false;
     bool closed = false;
     std::size_t close_signals_inflight = 0;
+    std::size_t candidate_ops_inflight = 0;
     bool broken = false;
     std::optional<Error> close_error;
     std::shared_ptr<CloseErrors> close_errors;
@@ -1923,6 +1925,10 @@ struct Session::Impl final : rt::InteractionBroker {
             if (!joined && !close_error) close_error = joined.error();
         }
         if (memory_learning_module) memory_learning_module->JoinAndSettle();
+        {
+            std::unique_lock lock(mutex);
+            cv.wait(lock, [&] { return candidate_ops_inflight == 0; });
+        }
         if (service && service->runtime()) {
             const auto outcome = service->Close("sdk_close");
             if (!outcome.error_code.empty() && !close_error) close_error = Failure(outcome.error_code, outcome.message);
@@ -2049,6 +2055,149 @@ Result<memory::v1::LearningReport> Session::GetMemoryLearning(const std::string&
     }
     if (!impl_->memory_learning_module) return std::unexpected(Failure("sdk.memory_learning.report_not_ready"));
     return impl_->memory_learning_module->GetReport(operation_id);
+}
+namespace {
+struct CandidateMutatorAdmission {
+    std::shared_ptr<detail::SessionMemoryLearning> module;
+    bool write_enabled = false;
+    std::string write_plan_sha256;
+    bool write_indeterminate = false;
+};
+struct CandidateOpGuard {
+    std::mutex* mutex = nullptr;
+    std::condition_variable* cv = nullptr;
+    std::size_t* count = nullptr;
+    CandidateOpGuard(const CandidateOpGuard&) = delete;
+    CandidateOpGuard& operator=(const CandidateOpGuard&) = delete;
+    CandidateOpGuard(CandidateOpGuard&& other) noexcept
+        : mutex(std::exchange(other.mutex, nullptr)),
+          cv(std::exchange(other.cv, nullptr)),
+          count(std::exchange(other.count, nullptr)) {}
+    CandidateOpGuard(std::mutex* m, std::condition_variable* c, std::size_t* n)
+        : mutex(m), cv(c), count(n) {}
+    ~CandidateOpGuard() {
+        if (!mutex || !cv || !count) return;
+        std::lock_guard lock(*mutex);
+        --(*count);
+        cv->notify_all();
+    }
+};
+std::expected<std::pair<CandidateMutatorAdmission, CandidateOpGuard>, Error> EnterCandidateMutator(
+    std::mutex& mutex,
+    std::condition_variable& cv,
+    std::size_t& inflight,
+    bool closing,
+    bool closed,
+    const std::shared_ptr<std::atomic<bool>>& runtime_stopping,
+    const std::shared_ptr<detail::SessionMemoryLearning>& learning_module,
+    const memory::v1::LearningSnapshot& learning_snapshot,
+    const memory::v1::WriteSnapshot& write_snapshot,
+    bool write_indeterminate) {
+    std::lock_guard lock(mutex);
+    if (closing || closed || (runtime_stopping && runtime_stopping->load())) {
+        return std::unexpected(Failure("sdk.session.closed"));
+    }
+    if (!learning_module || learning_snapshot.mode == memory::v1::LearningMode::Off) {
+        return std::unexpected(Failure("sdk.memory_learning.disabled"));
+    }
+    ++inflight;
+    return std::pair<CandidateMutatorAdmission, CandidateOpGuard>{
+        CandidateMutatorAdmission{
+            learning_module,
+            write_snapshot.enabled,
+            write_snapshot.plan_sha256,
+            write_indeterminate,
+        },
+        CandidateOpGuard{&mutex, &cv, &inflight},
+    };
+}
+} // namespace
+
+Result<std::vector<memory::v1::LearningCandidate>> Session::ListMemoryCandidates() const {
+    std::shared_ptr<detail::SessionMemoryLearning> module;
+    {
+        std::lock_guard lock(impl_->mutex);
+        module = impl_->memory_learning_module;
+    }
+    if (!module) return std::unexpected(Failure("sdk.memory_learning.disabled"));
+    return module->ListCandidates();
+}
+
+Result<memory::v1::LearningCandidate> Session::GetMemoryCandidate(const std::string& candidate_id) const {
+    std::shared_ptr<detail::SessionMemoryLearning> module;
+    {
+        std::lock_guard lock(impl_->mutex);
+        module = impl_->memory_learning_module;
+    }
+    if (!module) return std::unexpected(Failure("sdk.memory_learning.disabled"));
+    return module->GetCandidate(candidate_id);
+}
+
+Result<memory::v1::LearningCandidate> Session::EditMemoryCandidate(
+    const std::string& candidate_id,
+    const std::string& title,
+    const std::string& content) {
+    auto entered = EnterCandidateMutator(
+        impl_->mutex,
+        impl_->cv,
+        impl_->candidate_ops_inflight,
+        impl_->closing,
+        impl_->closed,
+        impl_->runtime_stopping,
+        impl_->memory_learning_module,
+        impl_->memory_learning_snapshot,
+        impl_->memory_write_snapshot,
+        impl_->memory_write_indeterminate);
+    if (!entered) return std::unexpected(entered.error());
+    return entered->first.module->EditCandidate(candidate_id, title, content);
+}
+
+Result<void> Session::RejectMemoryCandidate(
+    const std::string& candidate_id,
+    const std::string& reason) {
+    auto entered = EnterCandidateMutator(
+        impl_->mutex,
+        impl_->cv,
+        impl_->candidate_ops_inflight,
+        impl_->closing,
+        impl_->closed,
+        impl_->runtime_stopping,
+        impl_->memory_learning_module,
+        impl_->memory_learning_snapshot,
+        impl_->memory_write_snapshot,
+        impl_->memory_write_indeterminate);
+    if (!entered) return std::unexpected(entered.error());
+    return entered->first.module->RejectCandidate(candidate_id, reason);
+}
+
+Result<memory::v1::CandidateAcceptReport> Session::AcceptMemoryCandidate(const std::string& candidate_id) {
+    auto entered = EnterCandidateMutator(
+        impl_->mutex,
+        impl_->cv,
+        impl_->candidate_ops_inflight,
+        impl_->closing,
+        impl_->closed,
+        impl_->runtime_stopping,
+        impl_->memory_learning_module,
+        impl_->memory_learning_snapshot,
+        impl_->memory_write_snapshot,
+        impl_->memory_write_indeterminate);
+    if (!entered) return std::unexpected(entered.error());
+    return entered->first.module->AcceptCandidate(
+        candidate_id,
+        entered->first.write_enabled,
+        entered->first.write_plan_sha256,
+        entered->first.write_indeterminate);
+}
+
+Result<std::vector<memory::v1::CandidateAcceptReport>> Session::GetAcceptedMemoryCandidates() const {
+    std::shared_ptr<detail::SessionMemoryLearning> module;
+    {
+        std::lock_guard lock(impl_->mutex);
+        module = impl_->memory_learning_module;
+    }
+    if (!module) return std::vector<memory::v1::CandidateAcceptReport>{};
+    return module->GetAcceptedCandidates();
 }
 Result<Receipt> Session::Submit(std::string key, std::string text) {
     if (key.empty()) return std::unexpected(Failure("sdk.operation.key_required"));

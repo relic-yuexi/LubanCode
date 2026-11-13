@@ -6,9 +6,11 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <lubancore/api.hpp>
 #include "memory/types.hpp"
+#include "platform/atomic_write.hpp"
 
 namespace lubancore::detail::testing {
 
@@ -22,6 +24,13 @@ using LearningCandidateStoreHook = std::function<std::expected<std::string, std:
     const std::filesystem::path& memory_dir, lubancode::memory::MemoryCandidate candidate)>;
 using LearningCandidateStoreHookHandle = std::shared_ptr<const LearningCandidateStoreHook>;
 
+using LearningCommitWriteHook = std::function<std::expected<
+    lubancode::platform::AtomicWriteReceipt, lubancode::platform::AtomicWriteError>(
+    const std::filesystem::path& path,
+    std::string_view content,
+    lubancode::platform::WriteDurability durability)>;
+using LearningCommitWriteHookHandle = std::shared_ptr<const LearningCommitWriteHook>;
+
 LUBANCORE_API LearningWorkerStartHookHandle ReplaceLearningWorkerStartHook(
     LearningWorkerStartHookHandle replacement) noexcept;
 LearningWorkerStartHookHandle SnapshotLearningWorkerStartHook() noexcept;
@@ -33,5 +42,9 @@ LearningWorkerExecutionHookHandle SnapshotLearningWorkerExecutionHook() noexcept
 LUBANCORE_API LearningCandidateStoreHookHandle ReplaceLearningCandidateStoreHook(
     LearningCandidateStoreHookHandle replacement) noexcept;
 LearningCandidateStoreHookHandle SnapshotLearningCandidateStoreHook() noexcept;
+
+LUBANCORE_API LearningCommitWriteHookHandle ReplaceLearningCommitWriteHook(
+    LearningCommitWriteHookHandle replacement) noexcept;
+LearningCommitWriteHookHandle SnapshotLearningCommitWriteHook() noexcept;
 
 } // namespace lubancore::detail::testing
