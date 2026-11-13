@@ -74,6 +74,8 @@ struct SaveStage {
     std::string outcome; // not_committed | visible | unconfirmed | durable
     bool operator==(const SaveStage&) const = default;
 };
+
+using SaveStageReceipt = SaveStage;
 // Owned metadata for one actual tool action. operation_id is Session scoped.
 // request_sha256 includes the gate target/source; save_request_sha256 identifies
 // the normalized SaveRequest before its requested-event reference exists.
@@ -157,6 +159,43 @@ struct LearningReport {
     std::string error;
     OperationUsage usage;
     bool model_called = false;
+};
+
+struct LearningCandidate {
+    std::string id;
+    std::string kind; // fact | preference | feedback
+    std::string title;
+    std::string summary;
+    std::string content;
+    std::vector<std::string> keywords;
+    std::vector<std::string> paths;
+    std::string confidence;
+    std::string task_type;
+    std::string created_at;
+    std::string occurred_at;
+    bool operator==(const LearningCandidate&) const = default;
+};
+
+struct CandidateAcceptReport {
+    std::string session_id;
+    std::string candidate_id;
+    std::string workspace_key;
+    std::string learning_plan_sha256;
+    std::string write_plan_sha256;
+    std::string commit_key;
+    std::string source_event_ref;
+    std::string save_request_sha256;
+    std::string request_sha256;
+    std::string state = "not_started"; // not_started | committed | indeterminate
+    std::string memory_id;
+    std::string memory_path;
+    std::string content_sha256;
+    std::string committed_at;
+    std::vector<SaveStageReceipt> stages;
+    bool duplicate = false;
+    std::string error_code;
+    std::string error;
+    bool operator==(const CandidateAcceptReport&) const = default;
 };
 
 } // namespace lubancore::memory::v1

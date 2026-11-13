@@ -27,6 +27,8 @@
 
 #include "memory/candidate_store.hpp"
 #include "memory/project_memory.hpp"
+#include "platform/atomic_write.hpp"
+#include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "sdk/memory_learning_test_hooks.hpp"
 #include "tools/path_utils.hpp"
@@ -50,8 +52,8 @@ using namespace std::chrono_literals;
 std::string Utf8(const fs::path& p) { return lubancode::tools::PathToUtf8(p); }
 
 void WriteText(const fs::path& p, const std::string& content) {
-    fs::create_directories(p.parent_path());
-    std::ofstream out(p, std::ios::binary | std::ios::trunc);
+    fs::create_directories(lubancode::platform::FileIoPath(p.parent_path()));
+    std::ofstream out(lubancode::platform::FileIoPath(p), std::ios::binary | std::ios::trunc);
     REQUIRE(out.is_open());
     out << content;
     out.close();
@@ -59,7 +61,7 @@ void WriteText(const fs::path& p, const std::string& content) {
 }
 
 std::string ReadText(const fs::path& p) {
-    std::ifstream in(p, std::ios::binary);
+    std::ifstream in(lubancode::platform::FileIoPath(p), std::ios::binary);
     REQUIRE(in.is_open());
     std::string value{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
     REQUIRE_FALSE(in.bad());
@@ -133,7 +135,7 @@ struct Fixture {
     }
     ~Fixture() {
         std::error_code ec;
-        fs::remove_all(root, ec);
+        fs::remove_all(lubancode::platform::FileIoPath(root), ec);
     }
     sdk::RuntimeOptions Roots() const { return {Utf8(root / "data"), Utf8(root / "resources")}; }
 };
@@ -278,6 +280,7 @@ public:
         (void)sdk::detail::testing::ReplaceLearningWorkerStartHook({});
         (void)sdk::detail::testing::ReplaceLearningWorkerExecutionHook({});
         (void)sdk::detail::testing::ReplaceLearningCandidateStoreHook({});
+        (void)sdk::detail::testing::ReplaceLearningCommitWriteHook({});
     }
     void SetStart(sdk::detail::testing::LearningWorkerStartHook fn) {
         (void)sdk::detail::testing::ReplaceLearningWorkerStartHook(
@@ -290,6 +293,10 @@ public:
     void SetCandidateStore(sdk::detail::testing::LearningCandidateStoreHook fn) {
         (void)sdk::detail::testing::ReplaceLearningCandidateStoreHook(
             std::make_shared<const sdk::detail::testing::LearningCandidateStoreHook>(std::move(fn)));
+    }
+    void SetCommitWrite(sdk::detail::testing::LearningCommitWriteHook fn) {
+        (void)sdk::detail::testing::ReplaceLearningCommitWriteHook(
+            std::make_shared<const sdk::detail::testing::LearningCommitWriteHook>(std::move(fn)));
     }
 };
 
@@ -1052,4 +1059,687 @@ TEST_CASE("SDK memory learning: same-ID zero-replay recovery and running recover
     }
 
     PrintPathMarker("same-id-zero-replay-recovery");
+}
+
+TEST_CASE("SDK memory learning: Off mode rejects candidate query, edit, reject, and accept") {
+    Fixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+
+    auto main_trace = std::make_shared<MainTrace>();
+    auto session = (*runtime)->OpenSession(MakeBaseOptions(fixture, main_trace));
+    REQUIRE(session.has_value());
+
+    const auto list_res = (*session)->ListMemoryCandidates();
+    REQUIRE_FALSE(list_res.has_value());
+    CHECK(list_res.error().code == "sdk.memory_learning.disabled");
+
+    const auto get_res = (*session)->GetMemoryCandidate("cand-1");
+    REQUIRE_FALSE(get_res.has_value());
+    CHECK(get_res.error().code == "sdk.memory_learning.disabled");
+
+    const auto edit_res = (*session)->EditMemoryCandidate("cand-1", "Title", "Content");
+    REQUIRE_FALSE(edit_res.has_value());
+    CHECK(edit_res.error().code == "sdk.memory_learning.disabled");
+
+    const auto reject_res = (*session)->RejectMemoryCandidate("cand-1", "reason");
+    REQUIRE_FALSE(reject_res.has_value());
+    CHECK(reject_res.error().code == "sdk.memory_learning.disabled");
+
+    const auto accept_res = (*session)->AcceptMemoryCandidate("cand-1");
+    REQUIRE_FALSE(accept_res.has_value());
+    CHECK(accept_res.error().code == "sdk.memory_learning.disabled");
+
+    const auto accepted_res = (*session)->GetAcceptedMemoryCandidates();
+    REQUIRE(accepted_res.has_value());
+    CHECK(accepted_res->empty());
+
+    REQUIRE((*session)->Close().has_value());
+    REQUIRE((*runtime)->Shutdown().has_value());
+    PrintPathMarker("candidate-off-mode-rejected");
+}
+
+TEST_CASE("SDK memory learning: candidate query, edit, validation, and reject") {
+    Fixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+
+    auto main_trace = std::make_shared<MainTrace>();
+    auto learn_trace = std::make_shared<LearningTrace>();
+    {
+        LearningTrace::Step step;
+        sdk::ModelReply r;
+        r.text = ValidExtractionPayload(
+            "Initial Ninja Rule",
+            "Prefer ninja builds",
+            "Use ninja for fast incremental builds.");
+        r.usage = sdk::Usage{19, 13, 5, 1, 2};
+        r.usage_observation = FiveFieldObservation(*r.usage);
+        r.provider_response_id = "learn-cand-edit";
+        step.reply = r;
+        learn_trace->script.push_back(step);
+    }
+    {
+        LearningTrace::Step step;
+        sdk::ModelReply r;
+        r.text = ValidExtractionPayload(
+            "Updated Ninja Rule",
+            "Prefer ninja builds always",
+            "Re-suggested after rejection.");
+        r.usage = sdk::Usage{17, 11, 3, 0, 1};
+        r.usage_observation = FiveFieldObservation(*r.usage);
+        r.provider_response_id = "learn-cand-readd-blocked";
+        step.reply = r;
+        learn_trace->script.push_back(step);
+    }
+
+    LearningOptions learn_opts;
+    learn_opts.mode = LearningMode::Review;
+    learn_opts.model = "extract-model";
+
+    auto session = (*runtime)->OpenSession(MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace));
+    REQUIRE(session.has_value());
+
+    // Initially empty workspace has no candidates yet.
+    const auto initial_list = (*session)->ListMemoryCandidates();
+    REQUIRE(initial_list.has_value());
+    CHECK(initial_list->empty());
+
+    auto r1 = (*session)->Submit("op-cand-1", DurablePrompt());
+    REQUIRE(r1.has_value());
+    REQUIRE((*session)->WaitResult(r1->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+    const auto rep1 = WaitForLearning(*session, r1->operation_id);
+    REQUIRE(rep1.stage == LearningStage::Completed);
+    REQUIRE(rep1.candidate_ids.size() == 1);
+    const std::string cand_id = rep1.candidate_ids.front();
+
+    // List and Get reflect extracted candidate fields.
+    const auto listed = (*session)->ListMemoryCandidates();
+    REQUIRE(listed.has_value());
+    REQUIRE(listed->size() == 1);
+    CHECK(listed->front().id == cand_id);
+    CHECK(listed->front().kind == "preference");
+    CHECK(listed->front().title == "Initial Ninja Rule");
+    CHECK(listed->front().confidence == "user-stated");
+
+    const auto fetched = (*session)->GetMemoryCandidate(cand_id);
+    REQUIRE(fetched.has_value());
+    CHECK(*fetched == listed->front());
+
+    // Malformed / path-escaping IDs and missing IDs fail cleanly.
+    const auto bad_escape = (*session)->GetMemoryCandidate("../rejected");
+    REQUIRE_FALSE(bad_escape.has_value());
+    CHECK(bad_escape.error().code == "sdk.memory_learning.invalid_input");
+
+    const auto bad_reserved = (*session)->GetMemoryCandidate("rejected");
+    REQUIRE_FALSE(bad_reserved.has_value());
+    CHECK(bad_reserved.error().code == "sdk.memory_learning.invalid_input");
+
+    const auto missing = (*session)->GetMemoryCandidate("cand-does-not-exist");
+    REQUIRE_FALSE(missing.has_value());
+    CHECK(missing.error().code == "sdk.memory_learning.candidate_not_found");
+
+    // Empty edit fails; valid edit updates title and content while keeping topic in inbox.
+    const auto empty_edit = (*session)->EditMemoryCandidate(cand_id, "", "");
+    REQUIRE_FALSE(empty_edit.has_value());
+    CHECK(empty_edit.error().code == "sdk.memory_learning.invalid_input");
+
+    const auto edited = (*session)->EditMemoryCandidate(
+        cand_id, "Updated Ninja Rule", "Always run cmake with Ninja generator.");
+    REQUIRE(edited.has_value());
+    CHECK(edited->id == cand_id);
+    CHECK(edited->title == "Updated Ninja Rule");
+    CHECK(edited->content == "Always run cmake with Ninja generator.");
+    CHECK(edited->kind == "preference");
+    CHECK(edited->confidence == "user-stated");
+
+    const auto after_edit = (*session)->GetMemoryCandidate(cand_id);
+    REQUIRE(after_edit.has_value());
+    CHECK(*after_edit == *edited);
+
+    // Reject removes candidate and blocks re-adding the same topic via rejected.json.
+    const auto rejected = (*session)->RejectMemoryCandidate(cand_id, "obsolete preference");
+    REQUIRE(rejected.has_value());
+    const auto after_reject = (*session)->GetMemoryCandidate(cand_id);
+    REQUIRE_FALSE(after_reject.has_value());
+    CHECK(after_reject.error().code == "sdk.memory_learning.candidate_not_found");
+    CHECK((*session)->ListMemoryCandidates()->empty());
+
+    auto r2 = (*session)->Submit("op-cand-2", DurablePrompt());
+    REQUIRE(r2.has_value());
+    REQUIRE((*session)->WaitResult(r2->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+    const auto rep2 = WaitForLearning(*session, r2->operation_id);
+    CHECK(rep2.stage == LearningStage::Failed);
+    CHECK(rep2.error_code == "sdk.memory_learning.candidate_store_failed");
+    CHECK((*session)->ListMemoryCandidates()->empty());
+
+    REQUIRE((*session)->Close().has_value());
+    REQUIRE((*runtime)->Shutdown().has_value());
+    PrintPathMarker("candidate-query-edit-reject");
+}
+
+TEST_CASE("SDK memory learning: accept preconditions and business rules") {
+    Fixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+
+    // First verify write_disabled rejection when memory_write is not enabled.
+    {
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningTrace::Step step;
+        sdk::ModelReply r;
+        r.text = ValidExtractionPayload();
+        r.usage = sdk::Usage{15, 11, 2, 0, 1};
+        r.usage_observation = FiveFieldObservation(*r.usage);
+        r.provider_response_id = "learn-no-write";
+        step.reply = r;
+        learn_trace->script.push_back(step);
+
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Review;
+        learn_opts.model = "extract-model";
+
+        auto session = (*runtime)->OpenSession(MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace));
+        REQUIRE(session.has_value());
+
+        auto rc = (*session)->Submit("op-no-write", DurablePrompt());
+        REQUIRE(rc.has_value());
+        REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+        const auto rep = WaitForLearning(*session, rc->operation_id);
+        REQUIRE(rep.candidate_ids.size() == 1);
+
+        const auto accept_res = (*session)->AcceptMemoryCandidate(rep.candidate_ids.front());
+        REQUIRE_FALSE(accept_res.has_value());
+        CHECK(accept_res.error().code == "sdk.memory_learning.write_disabled");
+        CHECK((*session)->ListMemoryCandidates()->size() == 1);
+
+        REQUIRE((*session)->Close().has_value());
+    }
+
+    // Second verify business rules with memory_write enabled:
+    // - inferred candidate rejected
+    // - fact candidate without paths rejected
+    // - feedback candidate with confidence != user-stated rejected
+    {
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningTrace::Step step;
+        sdk::ModelReply r;
+        r.text = Json{
+            {"task_type", "config"},
+            {"summary", "Mixed candidate rule validation"},
+            {"candidates", Json::array({
+                Json{
+                    {"kind", "preference"},
+                    {"title", "Inferred pref"},
+                    {"summary", "Inferred preference"},
+                    {"content", "Should not promote inferred confidence."},
+                    {"keywords", Json::array({"inferred"})},
+                    {"paths", Json::array({"cmake/LubanCore.cmake"})},
+                    {"confidence", "inferred"},
+                },
+                Json{
+                    {"kind", "fact"},
+                    {"title", "Fact missing evidence"},
+                    {"summary", "Fact without paths"},
+                    {"content", "Fact claims file behavior with empty paths."},
+                    {"keywords", Json::array({"missing-paths"})},
+                    {"paths", Json::array()},
+                    {"confidence", "verified"},
+                },
+                Json{
+                    {"kind", "feedback"},
+                    {"title", "Verified feedback"},
+                    {"summary", "Feedback without user-stated"},
+                    {"content", "Feedback requires user-stated confidence."},
+                    {"keywords", Json::array({"feedback"})},
+                    {"paths", Json::array({"cmake/LubanCore.cmake"})},
+                    {"confidence", "verified"},
+                },
+            })},
+            {"retrieval_terms", Json::array({"inferred"})},
+        }.dump();
+        r.usage = sdk::Usage{21, 15, 4, 1, 2};
+        r.usage_observation = FiveFieldObservation(*r.usage);
+        r.provider_response_id = "learn-rules";
+        step.reply = r;
+        learn_trace->script.push_back(step);
+
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Review;
+        learn_opts.model = "extract-model";
+
+        auto opts = MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace);
+        opts.memory_write = sdk::memory::v1::WriteOptions{true};
+        auto session = (*runtime)->OpenSession(std::move(opts));
+        REQUIRE(session.has_value());
+
+        auto rc = (*session)->Submit("op-rules", DurablePrompt());
+        REQUIRE(rc.has_value());
+        REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+        const auto rep = WaitForLearning(*session, rc->operation_id);
+        REQUIRE(rep.stage == LearningStage::Completed);
+        const auto cands = (*session)->ListMemoryCandidates();
+        REQUIRE(cands.has_value());
+        REQUIRE(cands->size() >= 3);
+
+        for (const auto& c : *cands) {
+            if (c.confidence == "inferred") {
+                const auto res = (*session)->AcceptMemoryCandidate(c.id);
+                REQUIRE_FALSE(res.has_value());
+                CHECK(res.error().code == "sdk.memory_learning.candidate_inferred");
+            } else if (c.kind == "fact" && c.paths.empty()) {
+                const auto res = (*session)->AcceptMemoryCandidate(c.id);
+                REQUIRE_FALSE(res.has_value());
+                CHECK(res.error().code == "sdk.memory_learning.candidate_missing_evidence");
+            } else if (c.kind == "feedback" && c.confidence != "user-stated") {
+                const auto res = (*session)->AcceptMemoryCandidate(c.id);
+                REQUIRE_FALSE(res.has_value());
+                CHECK(res.error().code == "sdk.memory_learning.candidate_invalid");
+            }
+        }
+        CHECK((*session)->GetAcceptedMemoryCandidates()->empty());
+        REQUIRE((*session)->Close().has_value());
+    }
+
+    REQUIRE((*runtime)->Shutdown().has_value());
+    PrintPathMarker("candidate-accept-validation");
+}
+
+TEST_CASE("SDK memory learning: accept commits through project gate, removes candidate, and recalls cleanly") {
+    Fixture fixture;
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+
+    std::string memory_id;
+    {
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningTrace::Step step;
+        sdk::ModelReply r;
+        r.text = Json{
+            {"task_type", "config"},
+            {"summary", "CMake ninja build rule fact"},
+            {"candidates", Json::array({
+                Json{
+                    {"kind", "fact"},
+                    {"title", "LubanCore build target fact"},
+                    {"summary", "LubanCore defines the core SDK target"},
+                    {"content", "Always verify cmake/LubanCore.cmake exports when changing Session API."},
+                    {"keywords", Json::array({"LubanCore", "Session", "cmake"})},
+                    {"paths", Json::array({"cmake/LubanCore.cmake"})},
+                    {"confidence", "verified"},
+                },
+            })},
+            {"retrieval_terms", Json::array({"LubanCore", "Session"})},
+        }.dump();
+        r.usage = sdk::Usage{23, 17, 6, 1, 3};
+        r.usage_observation = FiveFieldObservation(*r.usage);
+        r.provider_response_id = "learn-accept-fact";
+        step.reply = r;
+        learn_trace->script.push_back(step);
+
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Review;
+        learn_opts.model = "extract-model";
+
+        auto opts = MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace);
+        opts.memory_write = sdk::memory::v1::WriteOptions{true};
+        auto session = (*runtime)->OpenSession(std::move(opts));
+        REQUIRE(session.has_value());
+
+        auto rc = (*session)->Submit("op-accept", DurablePrompt());
+        REQUIRE(rc.has_value());
+        REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+        const auto rep = WaitForLearning(*session, rc->operation_id);
+        REQUIRE(rep.stage == LearningStage::Completed);
+        REQUIRE(rep.candidate_ids.size() == 1);
+        const std::string cand_id = rep.candidate_ids.front();
+
+        const auto accept = (*session)->AcceptMemoryCandidate(cand_id);
+        REQUIRE(accept.has_value());
+        CHECK(accept->state == "committed");
+        CHECK(accept->candidate_id == cand_id);
+        CHECK(accept->session_id == (*session)->id());
+        CHECK_FALSE(accept->workspace_key.empty());
+        CHECK_FALSE(accept->learning_plan_sha256.empty());
+        CHECK_FALSE(accept->write_plan_sha256.empty());
+        CHECK(accept->commit_key.starts_with("sdk-cand-"));
+        CHECK_FALSE(accept->memory_id.empty());
+        CHECK_FALSE(accept->memory_path.empty());
+        CHECK_FALSE(accept->content_sha256.empty());
+        CHECK_FALSE(accept->committed_at.empty());
+        REQUIRE_FALSE(accept->stages.empty());
+        CHECK(accept->stages.back() == sdk::memory::v1::SaveStageReceipt{"result", "durable"});
+        memory_id = accept->memory_id;
+
+        // Candidate was removed cleanly from the review box.
+        const auto after_get = (*session)->GetMemoryCandidate(cand_id);
+        REQUIRE_FALSE(after_get.has_value());
+        CHECK(after_get.error().code == "sdk.memory_learning.candidate_not_found");
+        CHECK((*session)->ListMemoryCandidates()->empty());
+
+        // Duplicate accept of same candidate rejects cleanly without duplicating commit.
+        const auto dup = (*session)->AcceptMemoryCandidate(cand_id);
+        REQUIRE_FALSE(dup.has_value());
+        CHECK(dup.error().code == "sdk.memory_learning.already_committed");
+
+        const auto accepted_list = (*session)->GetAcceptedMemoryCandidates();
+        REQUIRE(accepted_list.has_value());
+        REQUIRE(accepted_list->size() == 1);
+        CHECK(accepted_list->front() == *accept);
+
+        REQUIRE((*session)->Close().has_value());
+    }
+
+    // New session with recall enabled retrieves the committed topic from project memory.
+    {
+        auto main_trace = std::make_shared<MainTrace>();
+        auto opts = MakeBaseOptions(fixture, main_trace);
+        opts.memory = sdk::memory::v1::RecallOptions{};
+        auto recall_session = (*runtime)->OpenSession(std::move(opts));
+        REQUIRE(recall_session.has_value());
+
+        auto r = (*recall_session)->Submit("op-recall", "Check cmake/LubanCore.cmake Session exports.");
+        REQUIRE(r.has_value());
+        REQUIRE((*recall_session)->WaitResult(r->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+        const auto recall = (*recall_session)->GetMemoryRecall(r->operation_id);
+        REQUIRE(recall.has_value());
+        CHECK(recall->state == "admitted");
+        CHECK(std::any_of(recall->entries.begin(), recall->entries.end(), [&](const auto& entry) {
+            return entry.id == memory_id;
+        }));
+
+        REQUIRE((*recall_session)->Close().has_value());
+    }
+
+    REQUIRE((*runtime)->Shutdown().has_value());
+    PrintPathMarker("candidate-accept-commit-and-recall");
+}
+
+TEST_CASE("SDK memory learning: accept receipt durability, Close, and same-ID recovery") {
+    Fixture fixture;
+    std::string session_id;
+    std::string cand_id;
+    sdk::memory::v1::CandidateAcceptReport expected_accept;
+    fs::path lifecycle_dir;
+    std::string workspace_key;
+
+    {
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningTrace::Step step;
+        sdk::ModelReply r;
+        r.text = ValidExtractionPayload(
+            "Recovery Convention",
+            "Always persist durable receipts",
+            "Verify recovery without replay.");
+        r.usage = sdk::Usage{19, 13, 5, 1, 2};
+        r.usage_observation = FiveFieldObservation(*r.usage);
+        r.provider_response_id = "learn-accept-recover";
+        step.reply = r;
+        learn_trace->script.push_back(step);
+
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Review;
+        learn_opts.model = "extract-model";
+
+        auto opts = MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace);
+        opts.memory_write = sdk::memory::v1::WriteOptions{true};
+        auto session = (*runtime)->OpenSession(std::move(opts));
+        REQUIRE(session.has_value());
+        session_id = (*session)->id();
+        workspace_key = (*session)->DescribeMemoryLearning()->workspace_key;
+
+        auto rc = (*session)->Submit("op-recover", DurablePrompt());
+        REQUIRE(rc.has_value());
+        REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+        const auto rep = WaitForLearning(*session, rc->operation_id);
+        REQUIRE(rep.candidate_ids.size() == 1);
+        cand_id = rep.candidate_ids.front();
+
+        const auto accepted = (*session)->AcceptMemoryCandidate(cand_id);
+        REQUIRE(accepted.has_value());
+        REQUIRE(accepted->state == "committed");
+        expected_accept = *accepted;
+        lifecycle_dir = MemoryDir(*session).parent_path() / "lifecycle";
+
+        REQUIRE((*session)->Close().has_value());
+
+        // Post-Close: pure owned receipts and read-only queries remain available; mutators reject.
+        const auto post_close_accepted = (*session)->GetAcceptedMemoryCandidates();
+        REQUIRE(post_close_accepted.has_value());
+        REQUIRE(post_close_accepted->size() == 1);
+        CHECK(post_close_accepted->front() == expected_accept);
+
+        const auto post_close_list = (*session)->ListMemoryCandidates();
+        REQUIRE(post_close_list.has_value());
+        CHECK(post_close_list->empty());
+
+        const auto edit_closed = (*session)->EditMemoryCandidate(cand_id, "X", "Y");
+        REQUIRE_FALSE(edit_closed.has_value());
+        CHECK(edit_closed.error().code == "sdk.session.closed");
+
+        const auto reject_closed = (*session)->RejectMemoryCandidate(cand_id, "reason");
+        REQUIRE_FALSE(reject_closed.has_value());
+        CHECK(reject_closed.error().code == "sdk.session.closed");
+
+        const auto accept_closed = (*session)->AcceptMemoryCandidate(cand_id);
+        REQUIRE_FALSE(accept_closed.has_value());
+        CHECK(accept_closed.error().code == "sdk.session.closed");
+
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    // Same-ID OpenSession restores accepted receipts with 0 learning model replay.
+    {
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Review;
+        learn_opts.model = "extract-model";
+
+        auto opts = MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace);
+        opts.resume_session_id = session_id;
+        opts.memory_write = sdk::memory::v1::WriteOptions{true};
+        auto resumed = (*runtime)->OpenSession(std::move(opts));
+        REQUIRE(resumed.has_value());
+
+        CHECK(learn_trace->calls.load() == 0);
+        const auto restored = (*resumed)->GetAcceptedMemoryCandidates();
+        REQUIRE(restored.has_value());
+        REQUIRE(restored->size() == 1);
+        CHECK(restored->front() == expected_accept);
+
+        const auto dup = (*resumed)->AcceptMemoryCandidate(cand_id);
+        REQUIRE_FALSE(dup.has_value());
+        CHECK(dup.error().code == "sdk.memory_learning.already_committed");
+
+        REQUIRE((*resumed)->Close().has_value());
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    // Tampered snapshot or accept receipt is caught on OpenSession resume.
+    {
+        const fs::path snapshot_path =
+            lifecycle_dir / expected_accept.commit_key / "topic.snapshot.md";
+        const std::string original_snapshot = ReadText(snapshot_path);
+        WriteText(snapshot_path, original_snapshot + "\nTAMPERED\n");
+
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Review;
+        learn_opts.model = "extract-model";
+
+        auto opts = MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace);
+        opts.resume_session_id = session_id;
+        opts.memory_write = sdk::memory::v1::WriteOptions{true};
+        const auto tampered_open = (*runtime)->OpenSession(std::move(opts));
+        REQUIRE_FALSE(tampered_open.has_value());
+
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    PrintPathMarker("candidate-accept-resume-and-close");
+}
+
+TEST_CASE("SDK memory learning: accept stage failure marks indeterminate, keeps candidate, and stops") {
+    Fixture fixture;
+    ScopedHooks hooks;
+    std::string session_id;
+    std::string cand_topic_fail;
+    std::string cand_result_fail;
+
+    {
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        {
+            LearningTrace::Step step;
+            sdk::ModelReply r;
+            r.text = Json{
+                {"task_type", "config"},
+                {"summary", "Two candidates for commit stage tests"},
+                {"candidates", Json::array({
+                    Json{
+                        {"kind", "preference"},
+                        {"title", "Topic Fail Candidate"},
+                        {"summary", "Fails cleanly at Topic stage"},
+                        {"content", "Content for topic stage failure."},
+                        {"keywords", Json::array({"topic-fail"})},
+                        {"paths", Json::array({"cmake/LubanCore.cmake"})},
+                        {"confidence", "user-stated"},
+                    },
+                    Json{
+                        {"kind", "preference"},
+                        {"title", "Result Fail Candidate"},
+                        {"summary", "Fails at Result stage -> Indeterminate"},
+                        {"content", "Content for result stage failure."},
+                        {"keywords", Json::array({"result-fail"})},
+                        {"paths", Json::array({"cmake/LubanCore.cmake"})},
+                        {"confidence", "user-stated"},
+                    },
+                })},
+                {"retrieval_terms", Json::array({"topic-fail"})},
+            }.dump();
+            r.usage = sdk::Usage{23, 17, 5, 1, 2};
+            r.usage_observation = FiveFieldObservation(*r.usage);
+            r.provider_response_id = "learn-stage-fail";
+            step.reply = r;
+            learn_trace->script.push_back(step);
+        }
+
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Review;
+        learn_opts.model = "extract-model";
+
+        auto opts = MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace);
+        opts.memory_write = sdk::memory::v1::WriteOptions{true};
+        auto session = (*runtime)->OpenSession(std::move(opts));
+        REQUIRE(session.has_value());
+        session_id = (*session)->id();
+
+        auto rc = (*session)->Submit("op-stage-fail", DurablePrompt());
+        REQUIRE(rc.has_value());
+        REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+        const auto rep = WaitForLearning(*session, rc->operation_id);
+        REQUIRE(rep.candidate_ids.size() == 2);
+        cand_topic_fail = rep.candidate_ids[0];
+        cand_result_fail = rep.candidate_ids[1];
+
+        // 1) Inject Topic failure (NotCommitted): returns not_started, keeps candidate intact, does not stop.
+        hooks.SetCommitWrite([](
+            const fs::path& path,
+            std::string_view content,
+            lubancode::platform::WriteDurability durability)
+                -> std::expected<lubancode::platform::AtomicWriteReceipt, lubancode::platform::AtomicWriteError> {
+            const auto parent = path.parent_path().filename().string();
+            if ((parent == "preferences" || parent == "facts" || parent == "feedback") &&
+                path.extension() == ".md") {
+                return std::unexpected(lubancode::platform::AtomicWriteError{
+                    "atomic.replace_failed",
+                    "simulated topic write failure",
+                    lubancode::platform::WriteOutcome::NotCommitted,
+                    lubancode::platform::WriteFailureKind::Permanent,
+                });
+            }
+            return lubancode::platform::AtomicWriteFile(path, content, durability);
+        });
+
+        const auto topic_res = (*session)->AcceptMemoryCandidate(cand_topic_fail);
+        REQUIRE(topic_res.has_value());
+        CHECK(topic_res->state == "not_started");
+        CHECK_FALSE(topic_res->error_code.empty());
+        CHECK((*session)->GetMemoryCandidate(cand_topic_fail).has_value());
+
+        // 2) Inject Result write failure -> Indeterminate: keeps candidate intact and stops further accepts.
+        hooks.SetCommitWrite([](
+            const fs::path& path,
+            std::string_view content,
+            lubancode::platform::WriteDurability durability)
+                -> std::expected<lubancode::platform::AtomicWriteReceipt, lubancode::platform::AtomicWriteError> {
+            if (path.filename() == "result.json") {
+                return std::unexpected(lubancode::platform::AtomicWriteError{
+                    "atomic.replace_failed",
+                    "simulated result write failure",
+                    lubancode::platform::WriteOutcome::NotCommitted,
+                    lubancode::platform::WriteFailureKind::Permanent,
+                });
+            }
+            return lubancode::platform::AtomicWriteFile(path, content, durability);
+        });
+
+        const auto result_res = (*session)->AcceptMemoryCandidate(cand_result_fail);
+        REQUIRE(result_res.has_value());
+        CHECK(result_res->state == "indeterminate");
+        CHECK((*session)->GetMemoryCandidate(cand_result_fail).has_value());
+
+        // Clear hook; subsequent accepts still refuse cleanly with sdk.memory_learning.stopped.
+        hooks.SetCommitWrite({});
+        const auto stopped = (*session)->AcceptMemoryCandidate(cand_result_fail);
+        REQUIRE_FALSE(stopped.has_value());
+        CHECK(stopped.error().code == "sdk.memory_learning.stopped");
+
+        REQUIRE((*session)->Close().has_value());
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    // Same-ID recovery preserves the indeterminate stop state across restart.
+    {
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Review;
+        learn_opts.model = "extract-model";
+
+        auto opts = MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace);
+        opts.resume_session_id = session_id;
+        opts.memory_write = sdk::memory::v1::WriteOptions{true};
+        auto resumed = (*runtime)->OpenSession(std::move(opts));
+        REQUIRE(resumed.has_value());
+
+        const auto stopped_resumed = (*resumed)->AcceptMemoryCandidate(cand_result_fail);
+        REQUIRE_FALSE(stopped_resumed.has_value());
+        CHECK(stopped_resumed.error().code == "sdk.memory_learning.stopped");
+
+        REQUIRE((*resumed)->Close().has_value());
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    PrintPathMarker("candidate-accept-indeterminate-stop");
 }

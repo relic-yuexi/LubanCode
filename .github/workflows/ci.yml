@@ -2484,9 +2484,9 @@ jobs:
               if name == 'integration.sdk.lubancore_memory_save' and int(counts[0]) != 12:
                   raise SystemExit('ASan SDK memory-save native roster differs from 12 cases')
               if name == 'integration.sdk.lubancore_memory_learning':
-                  if int(counts[0]) != 12:
-                      raise SystemExit('ASan SDK memory-learning native roster differs from 12 cases')
-                  for path in ('off-default-and-unexpected-backend', 'auto-and-invalid-options-rejected', 'review-creates-candidates-and-isolates-usage', 'lexical-and-signal-gates', 'single-flight-busy-drop', 'worker-start-failure-pre-receipt', 'worker-exceptions-preserve-usage', 'five-field-usage-provenance-variants', 'candidate-store-failure-preserves-usage', 'cancellation-stops-publication-keeps-usage', 'concurrent-close-and-backend-destruction', 'same-id-zero-replay-recovery'):
+                  if int(counts[0]) != 18:
+                      raise SystemExit('ASan SDK memory-learning native roster differs from 18 cases')
+                  for path in ('off-default-and-unexpected-backend', 'auto-and-invalid-options-rejected', 'review-creates-candidates-and-isolates-usage', 'lexical-and-signal-gates', 'single-flight-busy-drop', 'worker-start-failure-pre-receipt', 'worker-exceptions-preserve-usage', 'five-field-usage-provenance-variants', 'candidate-store-failure-preserves-usage', 'cancellation-stops-publication-keeps-usage', 'concurrent-close-and-backend-destruction', 'same-id-zero-replay-recovery', 'candidate-off-mode-rejected', 'candidate-query-edit-reject', 'candidate-accept-validation', 'candidate-accept-commit-and-recall', 'candidate-accept-resume-and-close', 'candidate-accept-indeterminate-stop'):
                       marker = '[sdk-memory-learning-path] ' + path
                       if sections[0].splitlines().count(marker) != 1:
                           raise SystemExit('ASan SDK memory-learning path did not finish once: ' + path)
