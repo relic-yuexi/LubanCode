@@ -412,7 +412,13 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
         else CheckReturnedFaultNumbers(*complete, path);
         bool terminal = false;
         for (unsigned n = 0; n != 256 && !terminal; ++n) {
-            const auto event = (*events)->Next(50ms); REQUIRE(event);
+            const auto event = (*events)->Next(50ms);
+            if (!event) {
+                REQUIRE(ordinal != 0);
+                REQUIRE(control.refusals.load() == 1);
+                CHECK_FALSE(event.error().code.empty());
+                break;
+            }
             if (!event->has_value()) {
                 // A confirmed final can outlive failed transient notification.
                 // Actual worker retirement makes that omission observable; the
