@@ -1,5 +1,8 @@
 # SDK 阶段进度与验收边界
 
+2026-10-09 补记（#334 工具派发门）：功能分支已合入后续批，本片补[工具实际派发门](sdk-tool-dispatch-gate.md)，
+Sandbox 补入 [Boxed/NVX 参考核查](../architecture/sandbox-platform-design.md#12-boxed-与-nvx-参考核查)，只记参考边界，未交付后端。
+
 2026-10-09 续批：第 2 步[显式 web_search](sdk-web-search.md) 已随
 [#335](https://github.com/relic-yuexi/LubanCode/pull/335) 合入 `194f587b`，与验收源
 `d596e8e0` 同树。远端全量 Windows 791、Linux 789、macOS 792 项均过；
