@@ -3,6 +3,7 @@
 #include <atomic>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -15,6 +16,7 @@
 #include <nlohmann/json.hpp>
 #include "api/types.hpp"
 #include "config/config.hpp"
+#include "memory/project_commit.hpp"
 #include "memory/types.hpp"
 #include "trajectory/opening.hpp"
 #include "workspace/identity.hpp"
@@ -56,6 +58,42 @@ public:
     virtual std::expected<void, std::string> Remove(
         const std::filesystem::path& memory_dir,
         const std::string& candidate_id) = 0;
+};
+
+struct LearningQueueRecord {
+    std::string session_id;
+    std::string operation_id;
+    std::string turn_id;
+    std::string learning_turn_id;
+    std::size_t candidate_index = 0;
+    lubancode::memory::SaveRequest request;
+    memory::v1::LearningWriteAttempt attempt;
+};
+
+// Narrow durable queue seam for Auto-mode memory writeback.
+class LearningWriteQueue {
+public:
+    virtual ~LearningWriteQueue() = default;
+    virtual Result<void> Enqueue(const LearningQueueRecord& record) = 0;
+    virtual Result<void> Update(const LearningQueueRecord& record) = 0;
+    virtual Result<std::vector<LearningQueueRecord>> List() const = 0;
+    virtual Result<std::optional<LearningQueueRecord>> Get(const std::string& commit_key) const = 0;
+};
+
+// Narrow project commit seam for Auto-mode durable writeback and inspection.
+class LearningProjectCommitter {
+public:
+    virtual ~LearningProjectCommitter() = default;
+    virtual lubancode::memory::ProjectCommitReceipt Commit(
+        const lubancode::memory::ProjectCommitContext& context,
+        const lubancode::memory::SaveRequest& request,
+        std::function<bool()> cancelled) = 0;
+    virtual lubancode::memory::ProjectCommitReceipt Inspect(
+        const lubancode::memory::ProjectCommitContext& context,
+        const lubancode::memory::SaveRequest& request) const = 0;
+    virtual lubancode::memory::ProjectCommitReceipt Confirm(
+        const std::filesystem::path& lifecycle_root,
+        const std::string& operation_id) const = 0;
 };
 
 // One Session owns this module. All public reports are persisted per operation
@@ -135,7 +173,9 @@ public:
         const std::string& write_plan_sha256,
         bool write_indeterminate);
     Result<std::vector<memory::v1::CandidateAcceptReport>> GetAcceptedCandidates() const;
+    Result<void> RevokeAutoWrite(const std::string& reason);
     bool HasIndeterminateAccept() const;
+    bool HasIndeterminate() const;
 
     void CancelOperation(const std::string& operation_id);
     void RequestClose();
@@ -169,10 +209,15 @@ private:
         const lubancode::trajectory::v3::V3Ledger* source,
         bool require_complete) const;
     Result<void> CheckSavedAcceptReports();
+    Result<void> CheckSavedQueueAndAutoWrites();
     Result<void> PersistAcceptReport(const memory::v1::CandidateAcceptReport& report) const;
     Result<memory::v1::CandidateAcceptReport> DecodeAcceptReport(
         const std::string& commit_key, const std::string& bytes) const;
     Result<void> ValidateAcceptReport(const memory::v1::CandidateAcceptReport& report) const;
+    Result<void> ValidateWriteAttempt(
+        const std::string& operation_id,
+        const memory::v1::LearningWriteAttempt& attempt,
+        bool require_complete) const;
     void ReapFinishedWorkerLocked();
     std::shared_ptr<Backend> SnapshotBackend() const;
 
@@ -185,6 +230,8 @@ private:
     std::string provider_name_ = "sdk";
     std::optional<lubancode::config::Config> backend_config_;
     std::shared_ptr<LearningCandidateStore> candidate_store_;
+    std::shared_ptr<LearningWriteQueue> write_queue_;
+    std::shared_ptr<LearningProjectCommitter> project_committer_;
 
     mutable std::mutex backend_mutex_;
     std::shared_ptr<Backend> owned_backend_;
@@ -196,6 +243,10 @@ private:
     std::map<std::string, memory::v1::CandidateAcceptReport> accept_reports_;
     std::vector<std::string> accept_order_;
     bool accept_indeterminate_ = false;
+    std::atomic<bool> write_indeterminate_{false};
+    std::atomic<bool> auto_write_revoked_{false};
+    mutable std::mutex revoke_mutex_;
+    std::string auto_write_revoke_reason_;
 
     std::mutex worker_mutex_;
     std::shared_ptr<WorkerSlot> active_slot_;
