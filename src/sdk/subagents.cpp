@@ -199,7 +199,7 @@ Result<std::vector<subagents::v1::Report>> ReadSubagentReports(
     try {
         for (const auto& event : source.events) {
             if (event.kind != v3::EventKindV3::ToolExecutionStarted || event.turn_id != turn_id ||
-                event.payload.value("toolName", Json()) != "agent") continue;
+                !lubancode::api::usage_json::MemberStringEquals(event.payload, "toolName", "agent")) continue;
             if (event.session_id != session_id || event.run_id != source.run_id || !event.action_id ||
                 !event.payload.contains("attempt") || !event.payload["attempt"].is_number_unsigned() ||
                 event.payload["attempt"].get<std::uint64_t>() == 0)
@@ -399,7 +399,7 @@ Result<void> SessionSubagentPlan::CheckBinding(const v3::V3Ledger& ledger) const
     const Json expected{{"schemaVersion", 1}, {"sha256", snapshot_.plan_sha256}};
     const auto matches = [&](const v3::MessageLine* message) {
         const auto* binding = message ? Binding(*message) : nullptr;
-        if (!binding || *binding != expected || message->message.value("role", Json()) != "system" ||
+        if (!binding || *binding != expected || !lubancode::api::usage_json::MemberStringEquals(message->message, "role", "system") ||
             !message->message.contains("content") || !message->message["content"].is_string()) return false;
         if (message->system_meta->contains("settingsVersion")) {
             const auto& version = message->system_meta->at("settingsVersion");
@@ -479,11 +479,12 @@ Result<void> SessionSubagentPlan::CheckRecoveredChildren(const v3::V3Ledger& led
             return std::unexpected(Fail("sdk.subagent.report_invalid", "known final has no owned V3 turn source"));
         for (const auto& ref : fact.final_message_refs) {
             const auto* message = ledger.FindMessage(ref);
-            if (!message || !same_turn(*message) || message->message.value("role", Json()) != "assistant")
+            if (!message || !same_turn(*message) ||
+                !lubancode::api::usage_json::MemberStringEquals(message->message, "role", "assistant"))
                 return std::unexpected(Fail("sdk.subagent.report_invalid", "final message belongs to another V3 turn"));
         }
         const bool allow_unconsumed = fact.execution_status == "cancelled" ||
-            (fact.execution_status == "error" && result["error"] == "sdk.turn.limit_reached");
+            (fact.execution_status == "error" && result["error"].get_ref<const std::string&>() == "sdk.turn.limit_reached");
         // Establish the adoption's semantic source before checking accounting.
         // A rehashed but invalid prepared chain is still an adoption refusal;
         // saved usage cannot change that domain's established error priority.
@@ -630,8 +631,11 @@ tools::Tool::Result SessionSubagents::Execute(const Json& input, const tools::To
         if (!input.contains(key) || !input[key].is_string() || !Text(input[key].get<std::string>(), key == std::string("prompt") ? kMaxPlanBytes : 256))
             return refuse("title/prompt/type must be bounded UTF-8 text");
     if (input.contains("execution_mode") && (!input["execution_mode"].is_string() ||
-        (input["execution_mode"] != "foreground" && input["execution_mode"] != "auto"))) return refuse("only foreground or resolved foreground auto is supported");
-    if (input.contains("isolation") && input["isolation"] != "none") return refuse("worktree isolation is not admitted");
+        (input["execution_mode"].get_ref<const std::string&>() != "foreground" &&
+         input["execution_mode"].get_ref<const std::string&>() != "auto")))
+        return refuse("only foreground or resolved foreground auto is supported");
+    if (input.contains("isolation") && !lubancode::api::usage_json::StringEquals(input["isolation"], "none"))
+        return refuse("worktree isolation is not admitted");
     const auto snapshot = plan_->Describe();
     const auto found = std::find_if(snapshot.profiles.begin(), snapshot.profiles.end(),
         [&](const auto& p) { return p.requested.type == input["agent_type"].get<std::string>(); });

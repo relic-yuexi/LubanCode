@@ -405,7 +405,8 @@ ProjectCommitReceipt Run(const ProjectCommitContext& context, const SaveRequest&
             if (!saved_intent->has_value()) { fail("memory.commit.orphan_result"); return receipt; }
             const auto intent = OpenRecord(**saved_intent);
             if (!intent) { fail(intent.error()); return receipt; }
-            if (intent->at("operation") != "memory_save" || intent->at("session_id") != context.session_id ||
+            if (!intent->at("operation").is_string() || intent->at("operation").get_ref<const std::string&>() != "memory_save" ||
+                intent->at("session_id") != context.session_id ||
                 !intent->at("requested_at_ms").is_number_integer() || intent->at("requested_at_ms").get<std::int64_t>() < 0) {
                 fail("memory.commit.invalid_record"); return receipt;
             }
@@ -415,7 +416,8 @@ ProjectCommitReceipt Run(const ProjectCommitContext& context, const SaveRequest&
             if (!saved_result->has_value()) { fail("memory.commit.intent_unresolved"); return receipt; }
             const auto result = OpenRecord(**saved_result);
             if (!result) { fail(result.error()); return receipt; }
-            if (result->at("status") != "completed" || !result->at("completed_at_ms").is_number_integer() ||
+            if (!result->at("status").is_string() || result->at("status").get_ref<const std::string&>() != "completed" ||
+                !result->at("completed_at_ms").is_number_integer() ||
                 result->at("completed_at_ms").get<std::int64_t>() < 0) {
                 fail("memory.commit.invalid_record"); return receipt;
             }

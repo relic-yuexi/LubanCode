@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -139,13 +140,16 @@ TEST_CASE("usage observation requires one actual prepared/sent source across wri
 
 TEST_CASE("usage observation native append and semantic confirmation failures remain distinguishable on recovery") {
     Harness harness("usage-observation-fault");
-    bool fail_before = false, fail_after = false;
+    bool fail_before = false, fail_after = false, fail_after_allocation = false;
     V3WriterOptions options;
     options.inject_io_failure = [&]() -> std::optional<std::string> {
         if (fail_before) return std::string("usage observation append refused");
         return std::nullopt;
     };
-    options.after_native_append = [&] { if (fail_after) throw 19; };
+    options.after_native_append = [&] {
+        if (fail_after_allocation) throw std::bad_alloc{};
+        if (fail_after) throw 19;
+    };
     auto writer = harness.Start(std::move(options));
     REQUIRE(writer.has_value());
     REQUIRE(writer->PrepareRequest("request-000001", "turn-000001", "step-000001", "conversation",
@@ -164,6 +168,63 @@ TEST_CASE("usage observation native append and semantic confirmation failures re
     observation.status.reset();
     observation.payload = {{"version", 1}, {"numbers", nlohmann::json::array({3, 5, 7, 11, 13})},
         {"reportedByProvider", true}, {"incomplete", true}, {"providerResponseId", "real-id"}};
+    SUBCASE("prepared facts survive pre-I/O allocation refusal") {
+        struct Factory { const EventDraft& original; unsigned calls = 0; } factory{observation};
+        const auto receipt = writer->AppendPreparedEvent(+[](void* context) -> std::optional<EventDraft> {
+            auto& factory = *static_cast<Factory*>(context);
+            if (++factory.calls == 1) throw std::bad_alloc{};
+            return factory.original;
+        }, &factory, Durability::PowerLoss);
+        REQUIRE(receipt.has_value());
+        CHECK(receipt->status == WriteReceipt::Status::Committed);
+        REQUIRE(receipt->journal_append.has_value());
+        CHECK(receipt->journal_append->status == lubancode::trajectory::JournalAppendStatus::Committed);
+        CHECK(factory.calls == 2);
+        REQUIRE(writer->Close().has_value());
+        const auto ledger = ReadV3Ledger(harness.jsonl);
+        REQUIRE(ledger.has_value());
+        unsigned observations = 0;
+        for (const auto& event : ledger->events) {
+            if (event.kind != EventKindV3::ModelUsageObserved) continue;
+            ++observations;
+            CHECK(event.payload == observation.payload);
+        }
+        CHECK(observations == 1);
+        return;
+    }
+    SUBCASE("prepared facts never replay after native append allocation refusal") {
+        fail_after_allocation = true;
+        struct Factory { const EventDraft& original; unsigned calls = 0; } factory{observation};
+        const auto receipt = writer->AppendPreparedEvent(+[](void* context) -> std::optional<EventDraft> {
+            auto& factory = *static_cast<Factory*>(context);
+            ++factory.calls;
+            return factory.original;
+        }, &factory, Durability::PowerLoss);
+        REQUIRE(receipt.has_value());
+        CHECK(receipt->status == WriteReceipt::Status::IoFailed);
+        CHECK(receipt->error_code == "v3writer.completion_unconfirmed");
+        REQUIRE(receipt->journal_append.has_value());
+        CHECK(receipt->journal_append->status == lubancode::trajectory::JournalAppendStatus::Committed);
+        CHECK_FALSE(receipt->id.empty());
+        CHECK(factory.calls == 1);
+        CHECK(writer->broken());
+        writer.reset();
+        auto restored = V3Writer::Continue(harness.jsonl);
+        REQUIRE(restored.has_value());
+        CHECK(restored->AppendEvent(observation, Durability::PowerLoss).error_code ==
+              "v3writer.usage_observation_duplicate");
+        REQUIRE(restored->Close().has_value());
+        const auto ledger = ReadV3Ledger(harness.jsonl);
+        REQUIRE(ledger.has_value());
+        unsigned observations = 0;
+        for (const auto& event : ledger->events) {
+            if (event.kind != EventKindV3::ModelUsageObserved) continue;
+            ++observations;
+            CHECK(event.payload == observation.payload);
+        }
+        CHECK(observations == 1);
+        return;
+    }
     SUBCASE("before append") { fail_before = true; }
     SUBCASE("after actual append") { fail_after = true; }
     const auto receipt = writer->AppendEvent(observation, Durability::PowerLoss);

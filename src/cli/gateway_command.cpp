@@ -137,6 +137,13 @@ gateway::GatewayJobSchedulePatch JobSchedulePatchFromArgs(const GatewayCommandAr
         patch.set_notify_on_change = true;
         patch.notify_on_change = true;
     }
+    if (args.clear_watch) {
+        patch.set_watch_paths = true;
+        patch.watch_paths.clear();
+    } else if (!args.watch_paths.empty()) {
+        patch.set_watch_paths = true;
+        patch.watch_paths = args.watch_paths;
+    }
     return patch;
 }
 
@@ -167,6 +174,7 @@ nlohmann::json JobToJson(const gateway::AutomationJob& job) {
     item["misfire"] = gateway::ToString(job.misfire);
     item["deadline_ms"] = job.deadline_ms;
     item["notify_on_change"] = job.notify_on_change;
+    item["watch_paths"] = job.watch_paths;
     item["imported_from"] = job.imported_from.empty()
                                 ? nlohmann::json(nullptr)
                                 : nlohmann::json(job.imported_from);
@@ -195,6 +203,9 @@ nlohmann::json OccurrenceToJson(const gateway::AutomationOccurrence& occurrence)
                                                        : nlohmann::json(occurrence.session_id);
     item["turn_id"] =
         occurrence.turn_id.empty() ? nlohmann::json(nullptr) : nlohmann::json(occurrence.turn_id);
+    item["watch_sha"] = occurrence.watch_sha.empty() ? nlohmann::json(nullptr)
+                                                     : nlohmann::json(occurrence.watch_sha);
+    item["watch_skipped"] = occurrence.watch_skipped;
     return item;
 }
 

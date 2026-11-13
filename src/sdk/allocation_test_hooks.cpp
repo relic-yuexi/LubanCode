@@ -3,6 +3,8 @@
 #include <array>
 #include <cstdint>
 #include <initializer_list>
+#include <memory>
+#include <nlohmann/json.hpp>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -75,6 +77,7 @@ struct DelegatedStandardCall {
 };
 thread_local AllocationFailureControl* active_control = nullptr;
 thread_local AllocationFailureControl* prepared_control = nullptr;
+thread_local AllocationPhase allocation_phase = AllocationPhase::None;
 std::atomic<unsigned> active_borrows{0};
 bool imports_installed = false;
 
@@ -88,6 +91,7 @@ bool Refuse(AllocationKind kind) noexcept {
     const auto ordinal = active_control->allocations.fetch_add(1) + 1;
     if (!active_control->refuse_ordinal || ordinal != active_control->refuse_ordinal) return false;
     active_control->refusals.fetch_add(1);
+    active_control->refused_phase.store(static_cast<unsigned>(allocation_phase));
     return true;
 }
 void* RefusedScalar(std::size_t size) {
@@ -516,6 +520,58 @@ void* Allocate(std::size_t size, std::size_t alignment, AllocationKind kind) {
     }
     throw std::bad_alloc{};
 }
+template<typename Json>
+void* MakeJsonDocument(std::size_t depth) {
+    auto document = std::make_unique<Json>(Json::object());
+    auto* cursor = document.get();
+    for (std::size_t level = 0; level != depth; ++level) {
+        if ((level & 1U) == 0) {
+            (*cursor)["kind"] = level;
+            (*cursor)["child"] = Json::array();
+            cursor = &(*cursor)["child"];
+        } else {
+            cursor->push_back(Json::object());
+            cursor = &cursor->back();
+        }
+    }
+    if (cursor->is_object()) (*cursor)["leaf"] = depth;
+    else cursor->push_back(depth);
+    return document.release();
+}
+template<typename Json>
+bool InspectJsonDocument(const void* opaque, std::size_t depth) noexcept {
+    if (!opaque) return false;
+    const auto* cursor = static_cast<const Json*>(opaque);
+    for (std::size_t level = 0; level != depth; ++level) {
+        if ((level & 1U) == 0) {
+            if (!cursor->is_object()) return false;
+            const auto child = cursor->find("child");
+            const auto kind = cursor->find("kind");
+            if (child == cursor->end() || kind == cursor->end() || !kind->is_number_unsigned() ||
+                    kind->template get<std::size_t>() != level) return false;
+            cursor = &*child;
+        } else {
+            if (!cursor->is_array() || cursor->size() != 1) return false;
+            cursor = &cursor->front();
+        }
+    }
+    if (cursor->is_object()) {
+        const auto leaf = cursor->find("leaf");
+        return leaf != cursor->end() && leaf->is_number_unsigned() && leaf->template get<std::size_t>() == depth;
+    }
+    return cursor->is_array() && cursor->size() == 1 && cursor->front().is_number_unsigned() &&
+        cursor->front().template get<std::size_t>() == depth;
+}
+void* MakeJsonQualification(std::size_t depth, bool ordered) {
+    return ordered ? MakeJsonDocument<nlohmann::ordered_json>(depth) : MakeJsonDocument<nlohmann::json>(depth);
+}
+bool InspectJsonQualification(const void* opaque, std::size_t depth, bool ordered) noexcept {
+    return ordered ? InspectJsonDocument<nlohmann::ordered_json>(opaque, depth) : InspectJsonDocument<nlohmann::json>(opaque, depth);
+}
+void RetireJsonQualification(void* opaque, bool ordered) noexcept {
+    if (ordered) delete static_cast<nlohmann::ordered_json*>(opaque);
+    else delete static_cast<nlohmann::json*>(opaque);
+}
 void Release(void* pointer, std::size_t size, std::size_t alignment,
              AllocationKind kind, bool sized) noexcept {
     const auto bits = static_cast<unsigned>(kind);
@@ -549,6 +605,9 @@ void Release(void* pointer, std::size_t size, std::size_t alignment,
 AllocationQualificationPort GetAllocationQualificationPort() noexcept {
     return {Allocate, Release};
 }
+JsonRetirementQualificationPort GetJsonRetirementQualificationPort() noexcept {
+    return {MakeJsonQualification, InspectJsonQualification, RetireJsonQualification};
+}
 AllocationFailurePort GetAllocationFailurePort() noexcept {
     return {InstallImports, RestoreImports, BeginScope, EndScope, PrepareReturnedScope};
 }
@@ -571,6 +630,12 @@ void ActivateReturnedBackendAllocationScope() noexcept {
     active_control = prepared_control;
     prepared_control = nullptr;
     active_control->backend_returned.store(true);
+    allocation_phase = AllocationPhase::BackendReturned;
 }
-void RetireReturnedBackendAllocationScope() noexcept { EndScope(); }
+void RetireReturnedBackendAllocationScope() noexcept {
+    auto* control = active_control ? active_control : prepared_control;
+    if (control && control->require_returned_backend) control->worker_retired.store(true);
+    EndScope();
+}
+void SetAllocationPhase(AllocationPhase phase) noexcept { allocation_phase = phase; }
 }

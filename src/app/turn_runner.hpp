@@ -30,6 +30,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/loop.hpp"
+#include "agent/turn_harness.hpp"  // ContinuationSource:one-shot 收工前催验证的续投源
 #include "approval_mode.hpp"  // ApprovalMode:公共审批值域(收口审计单 P1)
 #include "skills/workflow_recorder.hpp"
 #include "api/types.hpp"
@@ -223,6 +224,17 @@ struct TurnContext {
     // 问话走审批通道(监听线程出菜单),换页事务/插行/重铺经 RunUiSync
     // 同一把提交锁。
     lubancode::app::SessionUiDispatcher* ui_dispatcher = nullptr;
+
+    // ---- one-shot 墙钟预算与收工前催验证单 ----
+    // 整场墙钟预算(单发持有,活过本轮)。非空 = 钉进 TurnWiring(步顶闸/
+    // 附注/工具死线),并起一只看门狗:死线前 10 秒仍有请求在飞就置停止
+    // 旗掐断,本轮按预算耗尽收场——Close 与 --output 导出还来得及做。
+    // 空(交互/peer/单测)= 不钉不起,一字不变。
+    lubancode::agent::WallClockBudget* wall_budget = nullptr;
+    // 续投源(单发的收工前催验证):一轮正常收口后问它要不要再跑一轮,
+    // 递进 DriveOptions.continuation;续跑消息走 Agent::Run 的字符串口,
+    // 正规 user 消息落账。空 = 单轮即收(交互会话照旧)。
+    lubancode::agent::ContinuationSource continuation;
 };
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记

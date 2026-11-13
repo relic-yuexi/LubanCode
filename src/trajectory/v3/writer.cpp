@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <new>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -311,6 +312,19 @@ struct V3Writer::Impl {
             receipt.error_message = "注入的提交失败(测试)";
             return receipt;
         }
+        // Own event decoding before native I/O. A decode allocation refusal
+        // must not strand an already returned usage fact behind a broken writer.
+        const bool message_line = json.at("type").get<std::string>() == "message";
+        std::optional<EventLine> prepared_event;
+        if (!message_line) {
+            std::string error_code, error_message;
+            prepared_event = EventLine::FromJsonStrict(json, &error_code, &error_message);
+            if (!prepared_event) {
+                receipt.error_code = std::move(error_code);
+                receipt.error_message = std::move(error_message);
+                return receipt;
+            }
+        }
         // All returned identity and diagnostic storage belongs to this call
         // before actual I/O. The lease keeps the owner gate through every
         // allocating V3 view update, then freezes before that gate is released.
@@ -331,7 +345,7 @@ struct V3Writer::Impl {
         }
         try {
             if (options.after_native_append) options.after_native_append();
-            if (json.at("type").get<std::string>() == "message") {
+            if (message_line) {
                 message_ids.insert(json.at("messageId").get<std::string>());
                 if (json.at("message").value("role", std::string()) == "system" &&
                     json.contains("systemMeta") && json["systemMeta"].contains("hostBindings")) {
@@ -340,11 +354,8 @@ struct V3Writer::Impl {
                 }
             } else {
                 // 事件落稳后统一重放内存视图(链/版本),便利 API 不各自手工维护。
-                std::string ec, msg;
-                if (auto event = EventLine::FromJsonStrict(json, &ec, &msg)) {
-                    ApplyCommitEventToView(context, *event);
-                    usage_observations.Record(*event);
-                }
+                ApplyCommitEventToView(context, *prepared_event);
+                usage_observations.Record(*prepared_event);
             }
             ++next_seq;
             last_hash = line_hash;
@@ -647,61 +658,17 @@ V3VerifyReport VerifyV3File(const std::filesystem::path& path) {
     return VerifyV3Lines(*lines);
 }
 
-V3VerifyReport VerifyV3Lines(const std::vector<std::string>& lines) {
-    UsageObservationSequence usage_observations;
-    V3VerifyReport report;
-    std::string prev_hash{std::string(kGenesisHash)};
-    ContextView view;
-    for (std::size_t i = 0; i < lines.size(); ++i) {
-        nlohmann::json line_json = nlohmann::json::parse(lines[i], nullptr, false);
-        if (line_json.is_discarded()) {
-            report.error_code = "v3writer.bad_json";
-            report.message = "第 " + std::to_string(i + 1) + " 行不是合法 JSON";
-            return report;
-        }
-        auto error = VerifyLine(line_json, prev_hash, static_cast<std::uint64_t>(i + 1));
-        if (error.has_value()) {
-            report.error_code = error->code;
-            report.message = "第 " + std::to_string(i + 1) + " 行: " + error->message;
-            return report;
-        }
-        if (line_json.at("type").get<std::string>() == "event") {
-            std::string ec, msg;
-            auto event = EventLine::FromJsonStrict(line_json, &ec, &msg);
-            if (event.has_value()) {
-                if (auto sequence_error = usage_observations.Check(*event)) {
-                    report.error_code = sequence_error->code;
-                    report.message = "line " + std::to_string(i + 1) + ": " + sequence_error->message;
-                    return report;
-                }
-                usage_observations.Record(*event);
-                std::string apply_error = ApplyCommitEventToView(view, *event);
-                if (!apply_error.empty()) {
-                    report.error_code = apply_error;
-                    report.message = "第 " + std::to_string(i + 1) + " 行: 链重放失败";
-                    return report;
-                }
-            }
-        }
-        prev_hash = line_json.at("lineHash").get<std::string>();
-    }
-    report.lines = lines.size();
-    report.context = std::move(view);
-    report.ok = !lines.empty();
-    if (!report.ok) {
-        report.error_code = "v3writer.empty";
-        report.message = "空卷";
-    }
-    return report;
-}
+namespace {
 
-std::optional<Schema3Error> VerifyLine(const nlohmann::json& line, std::string_view prev_hash,
-                                       std::uint64_t expect_seq) {
+std::optional<Schema3Error> VerifyLineInternal(const nlohmann::json& line, std::string_view prev_hash,
+                                               std::uint64_t expect_seq,
+                                               std::optional<MessageLine>* out_message,
+                                               std::optional<EventLine>* out_event) {
     std::string error_code, error_message;
     if (!line.is_object() || !line.contains("type") || !line.at("type").is_string()) {
         return Schema3Error{"v3writer.bad_type", "行缺 type"};
     }
-    const std::string type = line.at("type").get<std::string>();
+    const std::string& type = line.at("type").get_ref<const std::string&>();
     if (type == "message") {
         auto parsed = MessageLine::FromJsonStrict(line, &error_code, &error_message);
         if (!parsed.has_value()) {
@@ -710,6 +677,7 @@ std::optional<Schema3Error> VerifyLine(const nlohmann::json& line, std::string_v
         if (auto error = ValidateMessageLine(*parsed)) {
             return *error;
         }
+        if (out_message) *out_message = std::move(*parsed);
     } else if (type == "event") {
         auto parsed = EventLine::FromJsonStrict(line, &error_code, &error_message);
         if (!parsed.has_value()) {
@@ -718,6 +686,7 @@ std::optional<Schema3Error> VerifyLine(const nlohmann::json& line, std::string_v
         if (auto error = ValidateEventLine(*parsed)) {
             return *error;
         }
+        if (out_event) *out_event = std::move(*parsed);
     } else {
         return Schema3Error{"v3writer.bad_type", "type 只取 message/event"};
     }
@@ -726,22 +695,100 @@ std::optional<Schema3Error> VerifyLine(const nlohmann::json& line, std::string_v
         return Schema3Error{"v3writer.seq_gap", "seq 应为 " + std::to_string(expect_seq)};
     }
     if (!line.contains("prevHash") || !line.at("prevHash").is_string() ||
-        line.at("prevHash").get<std::string>() != prev_hash) {
+        line.at("prevHash").get_ref<const std::string&>() != prev_hash) {
         return Schema3Error{"v3writer.hash_chain_broken", "prevHash 与上一行 lineHash 不衔接"};
     }
-    nlohmann::json stripped = line;
-    stripped.erase("prevHash");
-    stripped.erase("lineHash");
-    auto canonical = CanonicalJsonDump(stripped);
+    auto canonical = CanonicalJsonDumpWithoutLineHashes(line);
     if (!canonical.has_value()) {
         return Schema3Error{"v3writer.canonical_failed", canonical.error()};
     }
     const std::string recomputed = ComputeLineHash(prev_hash, *canonical);
     if (!line.contains("lineHash") || !line.at("lineHash").is_string() ||
-        line.at("lineHash").get<std::string>() != recomputed) {
+        line.at("lineHash").get_ref<const std::string&>() != recomputed) {
         return Schema3Error{"v3writer.hash_mismatch", "lineHash 重算对不上"};
     }
     return std::nullopt;
+}
+
+VerifiedV3ParsedLines VerifyV3LinesImpl(const std::vector<std::string>& lines, bool retain_parsed) {
+    VerifiedV3ParsedLines out;
+    UsageObservationSequence usage_observations;
+    std::string prev_hash{std::string(kGenesisHash)};
+    ContextView view;
+    if (retain_parsed) {
+        out.is_message.reserve(lines.size());
+    }
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        nlohmann::json line_json = nlohmann::json::parse(lines[i], nullptr, false);
+        if (line_json.is_discarded()) {
+            out.report.error_code = "v3writer.bad_json";
+            out.report.message = "第 " + std::to_string(i + 1) + " 行不是合法 JSON";
+            return out;
+        }
+        std::optional<MessageLine> parsed_message;
+        std::optional<EventLine> parsed_event;
+        auto error = VerifyLineInternal(
+            line_json, prev_hash, static_cast<std::uint64_t>(i + 1),
+            retain_parsed ? &parsed_message : nullptr, &parsed_event);
+        if (error.has_value()) {
+            out.report.error_code = error->code;
+            out.report.message = "第 " + std::to_string(i + 1) + " 行: " + error->message;
+            return out;
+        }
+        if (parsed_event.has_value()) {
+            if (auto sequence_error = usage_observations.Check(*parsed_event)) {
+                out.report.error_code = sequence_error->code;
+                out.report.message = "line " + std::to_string(i + 1) + ": " + sequence_error->message;
+                return out;
+            }
+            usage_observations.Record(*parsed_event);
+            std::string apply_error = ApplyCommitEventToView(view, *parsed_event);
+            if (!apply_error.empty()) {
+                out.report.error_code = apply_error;
+                out.report.message = "第 " + std::to_string(i + 1) + " 行: 链重放失败";
+                return out;
+            }
+            if (retain_parsed) {
+                if (out.session_id.empty()) {
+                    out.session_id = parsed_event->session_id;
+                    out.run_id = parsed_event->run_id;
+                }
+                out.events.push_back(std::move(*parsed_event));
+                out.is_message.push_back(false);
+            }
+        } else if (retain_parsed && parsed_message.has_value()) {
+            if (out.session_id.empty()) {
+                out.session_id = parsed_message->session_id;
+                out.run_id = parsed_message->run_id;
+            }
+            out.messages.push_back(std::move(*parsed_message));
+            out.is_message.push_back(true);
+        }
+        prev_hash = line_json.at("lineHash").get_ref<const std::string&>();
+    }
+    out.report.lines = lines.size();
+    out.report.context = std::move(view);
+    out.report.ok = !lines.empty();
+    if (!out.report.ok) {
+        out.report.error_code = "v3writer.empty";
+        out.report.message = "空卷";
+    }
+    return out;
+}
+
+} // namespace
+
+V3VerifyReport VerifyV3Lines(const std::vector<std::string>& lines) {
+    return VerifyV3LinesImpl(lines, false).report;
+}
+
+VerifiedV3ParsedLines VerifyAndParseV3Lines(const std::vector<std::string>& lines) {
+    return VerifyV3LinesImpl(lines, true);
+}
+
+std::optional<Schema3Error> VerifyLine(const nlohmann::json& line, std::string_view prev_hash,
+                                       std::uint64_t expect_seq) {
+    return VerifyLineInternal(line, prev_hash, expect_seq, nullptr, nullptr);
 }
 
 std::expected<V3Writer, std::string> V3Writer::Continue(const std::filesystem::path& jsonl_path,
@@ -892,6 +939,28 @@ WriteReceipt V3Writer::AppendEvent(EventDraft draft, Durability durability) {
                             "句柄已断,停止提交"};
     }
     return impl_->CommitEvent(std::move(draft), durability);
+}
+
+std::optional<WriteReceipt> V3Writer::AppendPreparedEvent(EventDraftFactory prepare, void* context,
+                                                         Durability durability) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->broken) {
+        return WriteReceipt{WriteReceipt::Status::IoFailed, "", 0, "", "v3writer.broken",
+                            "句柄已断,停止提交"};
+    }
+    for (unsigned attempt = 0; ; ++attempt) {
+        try {
+            auto draft = prepare(context);
+            if (!draft) return std::nullopt;
+            // CommitEvent catches every exception after native append and returns
+            // its owned witness. Only pre-I/O bad_alloc can escape to this catch.
+            auto receipt = impl_->CommitEvent(std::move(*draft), durability);
+            // Never copy allocating receipt strings after a real append.
+            return std::optional<WriteReceipt>{std::in_place, std::move(receipt)};
+        } catch (const std::bad_alloc&) {
+            if (attempt != 0) throw;
+        }
+    }
 }
 
 WriteReceipt V3Writer::AdmitMessages(std::vector<std::string> message_ids,

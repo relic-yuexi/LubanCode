@@ -159,6 +159,7 @@ struct SessionApprovals::State {
         std::optional<ScopedApprovalOwner> scope;
         std::optional<rt::ChildApprovalScope> child;
         std::optional<jobs::v1::ApprovalScope> job;
+        bool retiring = false;
     };
     mutable std::mutex mutex;
     std::map<std::string, Entry> pending;
@@ -174,12 +175,24 @@ struct SessionApprovals::State {
     std::string operation_id;
     bool closed = false;
 
+    void DrainRetiring() noexcept {
+        for (;;) {
+            decltype(pending)::node_type retired;
+            {
+                std::lock_guard lock(mutex);
+                const auto it = std::find_if(pending.begin(), pending.end(),
+                    [](const auto& item) { return item.second.retiring; });
+                if (it == pending.end()) break;
+                retired = pending.extract(it);
+            }
+        }
+    }
     void Retire(const std::string& id, const Future* expected = nullptr) noexcept {
         decltype(pending)::node_type retired;
         {
             std::lock_guard lock(mutex);
             auto it = pending.find(id);
-            if (it == pending.end()) return;
+            if (it == pending.end() || it->second.retiring) return;
             if (expected && it->second.future.get() != expected) return;
             it->second.future->Resolve(std::nullopt);
             retired = pending.extract(it);
@@ -187,12 +200,16 @@ struct SessionApprovals::State {
         // Destroy the future/value anchors after releasing the host lock.
     }
     void CancelAll(bool close = false) noexcept {
-        decltype(pending) retired;
+        bool any = false;
         {
             std::lock_guard lock(mutex);
             if (close) closed = true;
-            for (auto& [id, entry] : pending) { (void)id; entry.future->Resolve(std::nullopt); }
-            pending.swap(retired);
+            for (auto& [id, entry] : pending) {
+                (void)id;
+                entry.future->Resolve(std::nullopt);
+                entry.retiring = true;
+                any = true;
+            }
             child_grants.clear();
             child_scopes.clear();
             child_admission_stopped = false;
@@ -201,6 +218,7 @@ struct SessionApprovals::State {
             run_id.clear();
             operation_id.clear();
         }
+        if (any) DrainRetiring();
     }
 };
 
@@ -357,7 +375,7 @@ bool SessionApprovals::JobAllowed(const jobs::v1::ApprovalScope& scope, const jo
 }
 
 void SessionApprovals::CloseJobScope(const jobs::v1::ApprovalScope& scope) noexcept {
-    decltype(state_->pending) retired;
+    bool any = false;
     {
         std::lock_guard lock(state_->mutex);
         if (state_->closed) return;
@@ -372,14 +390,16 @@ void SessionApprovals::CloseJobScope(const jobs::v1::ApprovalScope& scope) noexc
             // Ordinary parent and child grants keep their existing lifetime.
             state_->job_admission_stopped = true;
         }
-        for (auto it = state_->pending.begin(); it != state_->pending.end();) {
-            auto current = it++;
-            if (current->second.job && (*current->second.job == scope || state_->job_admission_stopped)) {
-                current->second.future->Resolve(std::nullopt);
-                retired.insert(state_->pending.extract(current));
+        for (auto& [id, entry] : state_->pending) {
+            (void)id;
+            if (!entry.retiring && entry.job && (*entry.job == scope || state_->job_admission_stopped)) {
+                entry.future->Resolve(std::nullopt);
+                entry.retiring = true;
+                any = true;
             }
         }
     }
+    if (any) state_->DrainRetiring();
 }
 
 bool SessionApprovals::Resolve(const std::string& request_id, const rt::ApprovalResponse& response) {
@@ -388,7 +408,7 @@ bool SessionApprovals::Resolve(const std::string& request_id, const rt::Approval
     {
         std::lock_guard lock(state_->mutex);
         auto it = state_->pending.find(request_id);
-        if (it == state_->pending.end()) return false;
+        if (it == state_->pending.end() || it->second.retiring) return false;
         if (it->second.future->expired()) {
             it->second.future->Resolve(std::nullopt);
         } else if (it->second.scope && !it->second.child && !it->second.job && response.decision == rt::InteractionDecision::AcceptForSession) {
@@ -422,7 +442,7 @@ bool SessionApprovals::ChildAllowed(const rt::ChildApprovalScope& scope, const s
 void SessionApprovals::CloseChildScope(const rt::ChildApprovalScope& scope) noexcept {
     // Only owned strings/future completions live in entries. Their final anchors
     // still retire after the host lock, following ordinary ticket cleanup.
-    decltype(state_->pending) retired;
+    bool any = false;
     {
         std::lock_guard lock(state_->mutex);
         if (state_->closed || state_->session_id != scope.host_session_id ||
@@ -449,14 +469,16 @@ void SessionApprovals::CloseChildScope(const rt::ChildApprovalScope& scope) noex
                 state_->child_admission_stopped = true;
             }
         }
-        for (auto it = state_->pending.begin(); it != state_->pending.end();) {
-            auto current = it++;
-            if (current->second.child && *current->second.child == scope) {
-                current->second.future->Resolve(std::nullopt);
-                retired.insert(state_->pending.extract(current)); // Node transfer does not allocate.
+        for (auto& [id, entry] : state_->pending) {
+            (void)id;
+            if (!entry.retiring && entry.child && *entry.child == scope) {
+                entry.future->Resolve(std::nullopt);
+                entry.retiring = true;
+                any = true;
             }
         }
     }
+    if (any) state_->DrainRetiring();
 }
 
 void SessionApprovals::Retire(const std::string& request_id) noexcept { state_->Retire(request_id); }
@@ -468,7 +490,7 @@ std::vector<Approval> SessionApprovals::Pending() const {
     std::lock_guard lock(state_->mutex);
     for (const auto& [id, entry] : state_->pending) {
         (void)id;
-        if (entry.future->pending() && !entry.future->expired()) result.push_back(entry.approval);
+        if (!entry.retiring && entry.future->pending() && !entry.future->expired()) result.push_back(entry.approval);
     }
     return result;
 }

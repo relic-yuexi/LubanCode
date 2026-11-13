@@ -265,16 +265,18 @@ std::optional<Schema3Error> ValidateUsage(const nlohmann::json& usage) {
     if (!usage.is_object()) {
         return Err("schema3.bad_type", "usage 应为 object 或 null");
     }
-    static const std::vector<std::string> kKnownKeys = {
+    static constexpr std::array<std::string_view, 5> kKnownKeys = {
         "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens",
     };
-    for (const auto& key : kKnownKeys) {
-        auto it = usage.find(key);
-        if (it == usage.end()) {
+    const auto& fields = usage.get_ref<const nlohmann::json::object_t&>();
+    for (const std::string_view key : kKnownKeys) {
+        const auto it = std::find_if(fields.begin(), fields.end(),
+                                     [key](const auto& kv) { return kv.first == key; });
+        if (it == fields.end()) {
             continue;
         }
-        if (!JsonIsNonNegativeInt(*it)) {
-            return Err("schema3.bad_usage", "usage." + key + " 应为非负整数");
+        if (!JsonIsNonNegativeInt(it->second)) {
+            return Err("schema3.bad_usage", "usage." + it->first + " 应为非负整数");
         }
     }
     return std::nullopt;
@@ -288,7 +290,7 @@ std::optional<Schema3Error> ValidateUsage(const nlohmann::json& usage) {
 // kind ∈ result_metadata|stdout|stderr|combined|raw_payload|report|image|blob。
 std::optional<Schema3Error> ValidateArtifactRef(std::string_view context,
                                                 const nlohmann::json& ref) {
-    static const std::vector<std::string> kKinds = {
+    static constexpr std::array<std::string_view, 8> kKinds = {
         "result_metadata", "stdout", "stderr", "combined", "raw_payload", "report", "image", "blob",
     };
     if (!ref.is_object()) {
@@ -306,7 +308,7 @@ std::optional<Schema3Error> ValidateArtifactRef(std::string_view context,
         return Err("schema3.bad_ref", std::string(context) + " artifactRef 字段类型错");
     }
     if (!ref["kind"].is_string() ||
-        std::find(kKinds.begin(), kKinds.end(), ref["kind"].get<std::string>()) == kKinds.end()) {
+        std::find(kKinds.begin(), kKinds.end(), std::string_view(ref["kind"].get_ref<const std::string&>())) == kKinds.end()) {
         return Err("schema3.bad_enum", std::string(context) + " artifactRef.kind 未知");
     }
     if (!ref["sha256"].is_string() || !IsHex64(ref["sha256"].get<std::string>())) {
@@ -574,12 +576,12 @@ std::optional<Schema3Error> CheckCapabilityVerdicts(std::string_view context,
         return Err("schema3.bad_type",
                    std::string(context) + " payload.verdicts 应为非空 object");
     }
-    static const std::unordered_set<std::string> kStatuses = {
+    static constexpr std::array<std::string_view, 3> kStatuses = {
         "unknown", "verified", "unsupported"};
     for (auto verdict = it->begin(); verdict != it->end(); ++verdict) {
         if (!verdict.value().is_object() || !verdict.value().contains("status") ||
             !verdict.value()["status"].is_string() ||
-            !kStatuses.count(verdict.value()["status"].get<std::string>())) {
+            std::find(kStatuses.begin(), kStatuses.end(), std::string_view(verdict.value()["status"].get_ref<const std::string&>())) == kStatuses.end()) {
             return Err("schema3.bad_enum",
                        std::string(context) + " verdicts." + verdict.key() +
                            ".status 应为 unknown|verified|unsupported(单 §4)");
@@ -618,12 +620,12 @@ std::optional<Schema3Error> CheckJobMode(std::string_view context, const nlohman
 // job 观测状态(单 §6 执行投影;unknown 是投影状态,不是信封 status)。
 std::optional<Schema3Error> CheckObservedStatus(std::string_view context,
                                                 const nlohmann::json& payload) {
-    static const std::unordered_set<std::string> kStatuses = {
+    static constexpr std::array<std::string_view, 8> kStatuses = {
         "registered", "queued", "running", "succeeded", "failed", "cancelled", "unknown",
         "awaiting_approval"};
     auto it = payload.find("observedStatus");
     if (it == payload.end() || !it->is_string() ||
-        !kStatuses.count(it->get<std::string>())) {
+        std::find(kStatuses.begin(), kStatuses.end(), std::string_view(it->get_ref<const std::string&>())) == kStatuses.end()) {
         return Err("schema3.bad_enum",
                    std::string(context) + " payload.observedStatus 应为 registered|queued|"
                                           "running|succeeded|failed|cancelled|unknown|"
@@ -1026,8 +1028,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (auto error = CheckStringField(kind_name, line.payload, "phase")) {
             return error;
         }
-        if (line.payload["phase"] != "before_started" &&
-            line.payload["phase"] != "during_execution") {
+        if (line.payload["phase"].get_ref<const std::string&>() != "before_started" &&
+            line.payload["phase"].get_ref<const std::string&>() != "during_execution") {
             return Err("schema3.bad_enum",
                        "cancelled.phase 应为 before_started|during_execution(§4.14)");
         }
@@ -1274,11 +1276,11 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             return Err("schema3.bad_type", "state.goal.applied 的 lifecycle 应为 string");
         }
         const std::string lifecycle = line.payload["lifecycle"].get<std::string>();
-        static const std::unordered_set<std::string> kGoalLifecycles = {
+        static constexpr std::array<std::string_view, 11> kGoalLifecycles = {
             "preparing", "active",    "waiting",        "paused",
             "awaiting_user", "blocked", "budget_exhausted", "suspended_by_policy",
             "achieved",  "cleared",   "failed"};
-        if (!kGoalLifecycles.count(lifecycle)) {
+        if (std::find(kGoalLifecycles.begin(), kGoalLifecycles.end(), std::string_view(lifecycle)) == kGoalLifecycles.end()) {
             return Err("schema3.bad_enum",
                        "state.goal.applied 的 lifecycle 枚举不认得: " + lifecycle);
         }
@@ -1394,9 +1396,9 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (!line.payload["decision"].is_string()) {
             return Err("schema3.bad_type", "goal.evaluation.completed 的 decision 应为 string");
         }
-        static const std::unordered_set<std::string> kDecisions = {
+        static constexpr std::array<std::string_view, 4> kDecisions = {
             "continue", "achieved", "blocked", "needs_user"};
-        if (!kDecisions.count(line.payload["decision"].get<std::string>())) {
+        if (std::find(kDecisions.begin(), kDecisions.end(), std::string_view(line.payload["decision"].get_ref<const std::string&>())) == kDecisions.end()) {
             return Err("schema3.bad_enum",
                        "goal.evaluation.completed 的 decision 枚举不认得: " +
                            line.payload["decision"].get<std::string>());
@@ -1706,7 +1708,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             line.request_id || line.parent_turn_id || line.compact_id || line.command_id ||
             line.hook_dispatch_id || line.task_id || line.title_generation_id || line.effects || line.effect_refs)
             return Err("schema3.bad_job_operation", "Job binding requires only business turn/step/action, attempt 1");
-        if (line.payload.size() != 14 || line.payload.value("layout", nlohmann::json()) != "session_owned_job_operation_v1" ||
+        if (line.payload.size() != 14 ||
+            !lubancode::api::usage_json::MemberStringEquals(line.payload, "layout", "session_owned_job_operation_v1") ||
             !line.payload.contains("version") || !line.payload.at("version").is_number_integer() || line.payload.at("version") != 1)
             return Err("schema3.bad_job_operation", "unknown Job operation layout/version");
         if (auto error = CheckStringField(kind_name, line.payload, "jobId")) return error;
@@ -1715,7 +1718,9 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             const auto ref = line.payload.find(key);
             if (ref == line.payload.end() || !ref->is_object() || ref->size() != 5 || !IsValidRef(*ref) ||
                 !ref->at("seq").is_number_integer() || ref->at("seq") <= 0 ||
-                ref->at("sessionId") == "" || ref->at("runId") == "" || ref->at("id") == "")
+                lubancode::api::usage_json::StringEquals(ref->at("sessionId"), "") ||
+                lubancode::api::usage_json::StringEquals(ref->at("runId"), "") ||
+                lubancode::api::usage_json::StringEquals(ref->at("id"), ""))
                 return Err("schema3.bad_job_operation", "Job binding requires canonical native five-key references");
         }
         for (const char* key : {"originalInputSha256", "effectiveInputSha256"})
@@ -1732,7 +1737,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             return Err("schema3.bad_operation_turn", "invalid main operation turn ID");
         if (line.payload.size() != 5 || !line.payload.contains("version") ||
             !line.payload.at("version").is_number_integer() || line.payload.at("version") != 1 ||
-            !line.payload.contains("layout") || line.payload.at("layout") != "sdk_main_operation_turn_v1")
+            !line.payload.contains("layout") ||
+            !lubancode::api::usage_json::StringEquals(line.payload.at("layout"), "sdk_main_operation_turn_v1"))
             return Err("schema3.bad_operation_turn", "unknown main operation anchor layout or version");
         for (const char* key : {"operationId", "inputId"}) {
             if (auto error = CheckStringField(kind_name, line.payload, key)) return error;
@@ -1753,8 +1759,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             if (line.payload.at(key).get<std::string>().find('\0') != std::string::npos)
                 return Err("schema3.bad_owned_job", "owned Job text contains NUL");
         }
-        if (line.payload.at("layout") != "parent_admission_job_business_v1" ||
-            line.payload.at("toolName") != "run_command" ||
+        if (!lubancode::api::usage_json::StringEquals(line.payload.at("layout"), "parent_admission_job_business_v1") ||
+            !lubancode::api::usage_json::StringEquals(line.payload.at("toolName"), "run_command") ||
             line.payload.at("parentActionId") == *line.action_id)
             return Err("schema3.bad_owned_job", "unknown owned Job layout or action role");
         for (const char* key : {"assistantMessageRef", "sourcePendingEventRef", "sourceAdmissionEventRef",
@@ -1797,8 +1803,10 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
         if (auto error = CheckExecutionPolicy(kind_name, line.payload)) return error;
         const auto& policy = line.payload.at("executionPolicy");
         if (!policy.contains("allow_background") || policy.at("allow_background") != true ||
-            !policy.contains("retry_policy") || policy.at("retry_policy") != "none" ||
-            !policy.contains("resume_policy") || policy.at("resume_policy") != "hold")
+            !policy.contains("retry_policy") ||
+            !lubancode::api::usage_json::StringEquals(policy.at("retry_policy"), "none") ||
+            !policy.contains("resume_policy") ||
+            !lubancode::api::usage_json::StringEquals(policy.at("resume_policy"), "hold"))
             return Err("schema3.bad_owned_job", "owned Job policy must explicitly allow background with no retry and passive recovery");
         const auto& limits = line.payload.at("commandLimits");
         for (const char* key : {"timeout_ms", "max_output_bytes"})
@@ -1857,8 +1865,10 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             if (!witness.is_object() || witness.size() != 2 ||
                 !witness.contains("version") || !witness.at("version").is_number_integer() ||
                 witness.at("version") != 1 || !witness.contains("reason") ||
-                !witness.at("reason").is_string() || witness.at("reason") != "registration_deadline_elapsed" ||
-                line.payload.at("observedStatus") != "cancelled" || line.payload.contains("startupFailed") ||
+                !witness.at("reason").is_string() ||
+                witness.at("reason").get_ref<const std::string&>() != "registration_deadline_elapsed" ||
+                !lubancode::api::usage_json::StringEquals(line.payload.at("observedStatus"), "cancelled") ||
+                line.payload.contains("startupFailed") ||
                 !line.payload.contains("parentAdmission") ||
                 line.payload.contains("resultRef") || line.payload.contains("resultVersion") ||
                 line.payload.contains("postEventRef"))
@@ -1868,7 +1878,8 @@ std::optional<Schema3Error> ValidateEventLine(const EventLine& line) {
             if (!line.payload.at("startupFailed").is_boolean())
                 return Err("schema3.bad_owned_job", "startupFailed must be boolean");
             if (line.payload.at("startupFailed") == true &&
-                (line.payload.at("observedStatus") != "failed" || line.payload.contains("resultRef") || line.payload.contains("postEventRef")))
+                (!lubancode::api::usage_json::StringEquals(line.payload.at("observedStatus"), "failed") ||
+                 line.payload.contains("resultRef") || line.payload.contains("postEventRef")))
                 return Err("schema3.bad_owned_job", "confirmed startup failure cannot claim raw or Post");
         }
         if (line.payload.contains("postEventRef")) {

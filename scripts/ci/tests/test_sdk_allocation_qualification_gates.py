@@ -1,5 +1,6 @@
 """Reject incomplete or substituted allocation qualification receipts; no native work."""
 import unittest
+import json
 from scripts.ci.check_sdk_focused import check_allocation_owner_native
 
 
@@ -16,7 +17,14 @@ class AllocationQualificationGateTests(unittest.TestCase):
             '[sdk-allocation-owner] qualified_paths=144 image=/actual build/liblubancore.so',
             *('[sdk-module-refusal] form=%d baseline=1 refused=1 host=0' % kind for kind in range(8)),
             '[sdk-module-refusal] qualified_forms=8 imports_restored=1',
-            *('[sdk-returned-allocation-baseline] path=%d allocations=%d refusals=0 retired=1 recovery_calls=0' % (path, 101 + path) for path in range(3))))
+            *('[sdk-json-retirement] ordered=%d depth=%d allocations=0 sentinel_refused=1' % (ordered, depth)
+              for ordered in (0, 1) for depth in (0, 32, 16384)),
+            *('[sdk-returned-allocation-baseline] path=%d allocations=%d refusals=0 retired=1 recovery_calls=0' % (path, 101 + path) for path in range(3)),
+            *('[sdk-returned-allocation-point] path=%d ordinal=%d allocations=%d phase=2 refusals=1 retired=1 recovery_calls=0 state=%d persisted=1 finals=1 observations=1 terminals=%d' % (path, ordinal, 101 + path, 2 if path == 0 else 4, int(path != 2))
+              for path in range(3) for ordinal in range(1, 102 + path)),
+            *('[sdk-returned-allocation-sweep] path=%d baseline=%d points=%d' % (path, 101 + path, 101 + path) for path in range(3)),
+            *('[sdk-returned-allocation-materials] path=%d ordinal=%d directory=%s' % (path, ordinal, json.dumps('/actual build/allocation-matrix/%d-%d/session' % (path, ordinal)))
+              for path in range(3) for ordinal in range(102 + path))))
 
     def test_native_commands_and_line_endings(self):
         for executable in ('/real build/lubancore_sdk_tests', 'C:/real build/lubancore_sdk_tests.exe', '/real build/lubancode_tests'):
@@ -25,8 +33,8 @@ class AllocationQualificationGateTests(unittest.TestCase):
                 value = check_allocation_owner_native(self.body(command).replace('\n', ending), command)
                 self.assertEqual(value['qualified_paths'], 144)
                 self.assertEqual(value['allocation_refusals'], 8)
-                self.assertEqual(value['refusal_scope'], 'module_port_qualification')
-                self.assertEqual(value['ordinary_session_allocation_matrix'], 'calibrated_not_swept')
+                self.assertEqual(value['refusal_scope'], 'module_port_qualification_and_actual_session_sweep')
+                self.assertEqual(value['ordinary_session_allocation_matrix'], 'swept')
                 self.assertEqual(value['returned_session_baselines'], {'0': 101, '1': 102, '2': 103})
 
     def test_each_route_must_appear_once(self):
@@ -102,3 +110,49 @@ class AllocationQualificationGateTests(unittest.TestCase):
     def test_malformed_extra_baseline_cannot_pass(self):
         with self.assertRaises(RuntimeError):
             check_allocation_owner_native(self.body() + '\n[sdk-returned-allocation-baseline] invalid', self.command)
+
+    def test_each_refusal_point_is_required_once(self):
+        for path in range(3):
+            for ordinal in (1, 101 + path):
+                marker = next(line for line in self.body().splitlines() if line.startswith('[sdk-returned-allocation-point] path=%d ordinal=%d ' % (path, ordinal)))
+                for body in (self.body().replace(marker + '\n', ''), self.body() + '\n' + marker):
+                    with self.assertRaises(RuntimeError):
+                        check_allocation_owner_native(body, self.command)
+
+    def test_refusal_point_requires_actual_phase_count_and_confirmation(self):
+        marker = next(line for line in self.body().splitlines() if line.startswith('[sdk-returned-allocation-point] path=0 ordinal=101 '))
+        for wrong in (marker.replace('allocations=101', 'allocations=100'), marker.replace('phase=2', 'phase=0'),
+                      marker.replace('phase=2', 'phase=10'), marker.replace('refusals=1', 'refusals=0'),
+                      marker.replace('retired=1', 'retired=0'), marker.replace('recovery_calls=0', 'recovery_calls=1'),
+                      marker.replace('state=2', 'state=5'), marker.replace('persisted=1', 'persisted=0'),
+                      marker.replace('finals=1', 'finals=0')):
+            with self.assertRaises(RuntimeError):
+                check_allocation_owner_native(self.body().replace(marker, wrong), self.command)
+
+    def test_sweep_summary_cannot_truncate_or_replace_a_path(self):
+        marker = '[sdk-returned-allocation-sweep] path=0 baseline=101 points=101'
+        for body in (self.body().replace(marker, ''), self.body() + '\n' + marker,
+                     self.body().replace(marker, marker.replace('points=101', 'points=100')),
+                     self.body().replace(marker, marker.replace('baseline=101', 'baseline=100'))):
+            with self.assertRaises(RuntimeError):
+                check_allocation_owner_native(body, self.command)
+
+    def test_each_original_material_directory_is_required_and_distinct(self):
+        marker = next(line for line in self.body().splitlines() if line.startswith('[sdk-returned-allocation-materials] path=0 ordinal=101 '))
+        for body in (self.body().replace(marker, ''), self.body() + '\n' + marker,
+                     self.body().replace(marker, marker.replace('0-101/session', '0-100/session')),
+                     self.body().replace(marker, marker.split('directory=')[0] + 'directory=""')):
+            with self.assertRaises(RuntimeError):
+                check_allocation_owner_native(body, self.command)
+
+    def test_retirement_requires_every_real_depth_and_armed_zero_allocation(self):
+        for ordered in (0, 1):
+            for depth in (0, 32, 16384):
+                marker = '[sdk-json-retirement] ordered=%d depth=%d allocations=0 sentinel_refused=1' % (ordered, depth)
+                for body in (self.body().replace(marker, ''), self.body() + '\n' + marker,
+                             self.body().replace(marker, marker.replace('allocations=0', 'allocations=1')),
+                             self.body().replace(marker, marker.replace('sentinel_refused=1', 'sentinel_refused=0')),
+                             self.body().replace(marker, marker.replace('depth=%d' % depth, 'depth=7')),
+                             self.body() + '\n[sdk-json-retirement] invalid'):
+                    with self.assertRaises(RuntimeError):
+                        check_allocation_owner_native(body, self.command)

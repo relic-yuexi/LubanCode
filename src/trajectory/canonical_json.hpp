@@ -25,6 +25,7 @@ namespace lubancode::trajectory {
 //   canonical_json.binary_unsupported  含 binary 值
 //   canonical_json.discarded           传入未初始化 json
 std::expected<std::string, std::string> CanonicalJsonDump(const nlohmann::json& value);
+std::expected<std::string, std::string> CanonicalJsonDumpWithoutLineHashes(const nlohmann::json& value);
 
 // UTF-8 合法性校验(规范序列化用;拒绝过长的 ASCII 编码与孤立项)。
 bool IsValidUtf8(std::string_view text);

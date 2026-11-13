@@ -266,6 +266,8 @@ if(MSVC)
 endif()
 
 # ---------------------------------------------------------------------------
+include(cmake/JsonRetirement.cmake)
+
 # Lua 5.4(M7 Lua 插件用):不管走没走 vcpkg,统一 FetchContent 拉源码
 # (跟下面 doctest 一个待遇)。lua 官方仓库没有 CMakeLists,这里自己包一层:
 # GLOB 根目录的 *.c,排除 lua.c(独立解释器入口)/onelua.c(单文件合并编译
@@ -443,7 +445,10 @@ else()
     src/platform/process_posix.cpp
     src/platform/dynamic_library_posix.cpp
     src/platform/peer_transport_posix.cpp
-    src/platform/file_in_use_posix.cpp)
+    src/platform/file_in_use_posix.cpp
+    # terminal 工具的 PTY 底座(posix_openpt 标准件,不用 forkpty,Linux 不必链 -lutil)。
+    # Windows 本单不做 ConPTY,无对应 _win 件。
+    src/platform/pty_posix.cpp)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -520,6 +525,8 @@ add_library(lubancode_engine STATIC
   src/api/gemini/events.cpp
   src/api/gemini/request.cpp
   src/api/assembler.cpp
+  # 工具入参兜底(开源模型坏 JSON 单):宽松解析纯函数,assembler 收尾时调。
+  src/api/tool_args_repair.cpp
   src/api/models.cpp
   src/api/types.cpp
   src/config/config.cpp
@@ -552,6 +559,11 @@ add_library(lubancode_engine STATIC
   src/tools/background_tasks.cpp
   src/tools/shell_info.cpp
   src/tools/background_output.cpp
+  # terminal 工具:按键记号解析 + 最小终端仿真器(纯逻辑,两平台都编)+ 会话工具
+  # (POSIX 实现在 #ifndef _WIN32 里,Windows 只编出"仅 POSIX"空壳,不注册)。
+  src/tools/terminal_keys.cpp
+  src/tools/terminal_screen.cpp
+  src/tools/terminal_session_tool.cpp
   src/tools/command_safety.cpp
   # AR-07 审批与 Plan 重复 shell 词法合并:无策略词法件(拆段/拆词/引号
   # 状态机/重定向/子表达式/脚本块/词形归一)自 command_safety 提炼,
@@ -681,6 +693,8 @@ add_library(lubancode_engine STATIC
   # 骨架拆解批三·harness 合流:主回合与子代理共用的续投外环/取消链/
   # 收场分型/Stop 续跑环。
   src/agent/turn_harness.cpp
+  # one-shot 墙钟预算与收工前催验证单:无人值守护栏(预算档位/催验证判据)。
+  src/agent/unattended_guard.cpp
   # 递归派工单 P0-1:结构化任务合同(parse/validate/canonicalize/render)。
   src/agent/task_spec.cpp
   # 监督器单 P0-0:进展合同——四本时钟、监督相位、健康态、空转指纹与判定尺。
@@ -1227,6 +1241,7 @@ add_library(lubancode_channel_host STATIC
   # V2:周期调度引擎(interval/cron/时区 DST/misfire,纯函数零 IO)。
   src/gateway/automation_store.cpp
   src/gateway/automation_schedule.cpp
+  src/gateway/heartbeat.cpp
   src/gateway/reply_outbox.cpp
   src/gateway/work_pump.cpp
   # 常驻总装 V4:服务安装与常驻运维——平台服务单元生成(schtasks XML/

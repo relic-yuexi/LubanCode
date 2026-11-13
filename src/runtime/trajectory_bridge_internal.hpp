@@ -7,12 +7,16 @@
 
 #include <cstdint>
 #include <string>
+#include <optional>
+#include <string_view>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
 #include "agent/loop.hpp"              // RequestPreparedContext
 #include "agent/prompt_manifest.hpp"   // RequestSnapshotMetadata
 #include "api/types.hpp"
+#include "api/usage_json.hpp"
 #include "runtime/trajectory_turn_bridge.hpp"  // TrajectoryTurnBridge::Identity
 
 namespace lubancode::runtime {
@@ -43,5 +47,37 @@ nlohmann::json MessageToBlocksJson(const api::Message& message);
 nlohmann::json BuildPreparedPayload(const api::Request& request, const agent::RequestPreparedContext& ctx,
                                     const TrajectoryTurnBridge::Identity& identity,
                                     const std::string& last_input_event_id);
+
+// The callback owns no heap storage and only rebuilds the original returned facts.
+// No model call or observer callback runs inside the writer's preparation boundary.
+inline std::optional<trajectory::v3::WriteReceipt> AppendUsageObservation(
+    trajectory::v3::V3Writer& writer, const std::string& request_id,
+    const std::string& turn_id, const std::string& step_id, const api::Usage& usage,
+    const ::lubancore::usage::v1::Observation* observation, bool reported,
+    std::string_view response_id, bool incomplete) {
+    struct Facts {
+        const std::string& request_id;
+        const std::string& turn_id;
+        const std::string& step_id;
+        const api::Usage& usage;
+        const ::lubancore::usage::v1::Observation* observation;
+        bool reported;
+        std::string_view response_id;
+        bool incomplete;
+    } facts{request_id, turn_id, step_id, usage, observation, reported, response_id, incomplete};
+    return writer.AppendPreparedEvent(+[](void* context) -> std::optional<trajectory::v3::EventDraft> {
+        const auto& facts = *static_cast<const Facts*>(context);
+        auto payload = api::usage_json::ObservationPayload(facts.usage, facts.observation,
+            facts.reported, facts.response_id, facts.incomplete);
+        if (!payload) return std::nullopt;
+        trajectory::v3::EventDraft draft;
+        draft.kind = trajectory::v3::EventKindV3::ModelUsageObserved;
+        draft.request_id = facts.request_id;
+        draft.turn_id = facts.turn_id;
+        draft.step_id = facts.step_id;
+        draft.payload = std::move(*payload);
+        return draft;
+    }, &facts, trajectory::Durability::ProcessCrash);
+}
 
 }  // namespace lubancode::runtime

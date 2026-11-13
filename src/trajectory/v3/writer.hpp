@@ -213,6 +213,11 @@ public:
 
     WriteReceipt AppendMessage(MessageDraft draft, Durability durability);
     WriteReceipt AppendEvent(EventDraft draft, Durability durability);
+    // Synchronous borrowed facts; reconstruct only after a pre-I/O allocation refusal.
+    // A returned native receipt is final for this call and must never be replayed.
+    using EventDraftFactory = std::optional<EventDraft> (*)(void*);
+    std::optional<WriteReceipt> AppendPreparedEvent(EventDraftFactory prepare, void* context,
+                                                   Durability durability);
 
     // ---- 上下文链 ----
 
@@ -399,6 +404,16 @@ V3VerifyReport VerifyV3File(const std::filesystem::path& path);
 // Same verification/replay over an owned, already split input. The caller
 // checks complete newlines and bounds before constructing these lines.
 V3VerifyReport VerifyV3Lines(const std::vector<std::string>& lines);
+
+struct VerifiedV3ParsedLines {
+    V3VerifyReport report;
+    std::string session_id;
+    std::string run_id;
+    std::vector<MessageLine> messages;
+    std::vector<EventLine> events;
+    std::vector<bool> is_message;
+};
+VerifiedV3ParsedLines VerifyAndParseV3Lines(const std::vector<std::string>& lines);
 
 // 重放一枚提交事件到视图(Continue/VerifyV3File/读取侧 P2 共用同一份
 // 链重放,单一事实来源)。返回错误码或空串。
