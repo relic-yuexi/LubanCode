@@ -236,9 +236,11 @@ struct ReturnedAllocationFixture {
     mutable bool archived = false;
     ReturnedAllocationFixture() {
         static std::atomic<unsigned> serial{0};
-        root = std::filesystem::path(LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT).parent_path() / "allocation-scratch" /
-            ("sdk-actual-returned-alloc-" +
-             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(serial.fetch_add(1)));
+        static const unsigned nonce =
+            static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count());
+        char folder[32]{};
+        std::snprintf(folder, sizeof(folder), "s-%08x-%08x", nonce, serial.fetch_add(1));
+        root = std::filesystem::path(LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT).parent_path() / "a" / folder;
         std::filesystem::create_directories(root / "cwd");
         std::filesystem::create_directories(root / "resources");
     }
@@ -775,7 +777,6 @@ TEST_CASE("SDK allocation ownership: real shared image and matching host release
     for (const auto warm_path : {ReturnedPath::Success, ReturnedPath::Cancel, ReturnedPath::Close}) {
         (void)RunReturnedSession(failure, warm_path, 0, false);
         (void)RunReturnedSession(failure, warm_path, 1, false);
-        (void)RunReturnedSession(failure, warm_path, 0, false);
     }
     for (const auto path : {ReturnedPath::Success, ReturnedPath::Cancel, ReturnedPath::Close}) {
         const auto baseline = RunReturnedSession(failure, path);
