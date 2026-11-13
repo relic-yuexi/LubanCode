@@ -15,6 +15,7 @@
 
 #include "runtime/turn_ingress.hpp"
 #include "channel/channel_commands.hpp"  // Q7 菜单/面板命令分派
+#include "gateway/heartbeat.hpp"
 #include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "runtime/channel_session_host.hpp"  // ChannelToolDenialText(Q6 拒绝文案)
@@ -1669,6 +1670,20 @@ bool ChannelWorkPump::RecoverChannelJobOccurrence(const gateway::AutomationOccur
         return store->SettleOccurrence(occurrence.occurrence_id, "needs_review",
                                        "generation_incomplete: " + plan.error, now_ms);
     }
+    // heartbeat(恢复路同款):HEARTBEAT_OK 语义静默或正文与上次已通知版本相同
+    // → 不入渠道 outbox,避免重启恢复后误发噪音消息。
+    std::string heartbeat_sha;
+    if (job->notify_on_change) {
+        const auto decision =
+            gateway::EvaluateHeartbeatReply(plan.text, job->last_observed_sha);
+        heartbeat_sha = decision.observed_sha;
+        if (decision.suppressed()) {
+            (void)store->RecordObservation(occurrence.occurrence_id, heartbeat_sha, false, false,
+                                           decision.update_last_observed_on_suppress, now_ms);
+            return store->SettleOccurrence(occurrence.occurrence_id, "succeeded",
+                                           decision.settle_detail, now_ms);
+        }
+    }
     const std::string target_str = gateway::MakeChannelDeliveryTarget(
         job->delivery_channel, job->delivery_account, job->delivery_conversation);
     if (!SelectionAlreadyCommitted(*ledger, plan.selection_id)) {
@@ -1699,6 +1714,10 @@ bool ChannelWorkPump::RecoverChannelJobOccurrence(const gateway::AutomationOccur
         (void)store->SettleOccurrence(occurrence.occurrence_id, "needs_review",
                                       "outbox_enqueue_failed", now_ms);
         return false;
+    }
+    if (job->notify_on_change) {
+        (void)store->RecordObservation(occurrence.occurrence_id, heartbeat_sha, true, true, true,
+                                       now_ms);
     }
     return store->SettleOccurrence(occurrence.occurrence_id, "succeeded",
                                    "recovered_enqueued_to_channel", now_ms);
@@ -1746,6 +1765,42 @@ bool ChannelWorkPump::RunOneChannelJob(std::int64_t now_ms, std::string* error) 
                                       "creator_not_admitted:" + route.reason, now_ms);
         return true;
     }
+    const std::filesystem::path workspace_root =
+        !options_.workspace_identity.identity_root.empty()
+            ? options_.workspace_identity.identity_root
+            : platform::Utf8ToPath(options_.cwd_utf8);
+    // 零 Token 前置探针:配置了 watch_paths 且工作区监控目标指纹未变 → 直接静默收口,
+    // 不开渠道任务场、不调模型、不发 IM 消息。
+    const bool has_watch = !job->watch_paths.empty();
+    gateway::WatchProbeResult watch_probe;
+    if (has_watch) {
+        watch_probe = gateway::ProbeWorkspaceWatch(workspace_root, job->watch_paths);
+        if (!job->last_watch_sha.empty() &&
+            watch_probe.fingerprint_sha == job->last_watch_sha) {
+            if (!store->RecordWatchCheck(occurrence_id, watch_probe.fingerprint_sha,
+                                         /*skipped=*/true, /*update_last_watch=*/false,
+                                         now_ms)) {
+                *error = "automation.append_failed: 渠道任务 watch_checked 落不了盘";
+                return false;
+            }
+            if (job->notify_on_change) {
+                (void)store->RecordObservation(
+                    occurrence_id, "watch:" + watch_probe.fingerprint_sha, false, false, false,
+                    now_ms);
+            }
+            return store->SettleOccurrence(occurrence_id, "succeeded",
+                                           "watch_unchanged_skipped", now_ms);
+        }
+    }
+    std::string turn_prompt = job->prompt;
+    if (job->notify_on_change) {
+        const gateway::WorkspaceHeartbeatChecklist checklist =
+            gateway::LoadWorkspaceHeartbeatChecklist(workspace_root);
+        turn_prompt = gateway::BuildHeartbeatTurnPrompt(
+            job->prompt, checklist, has_watch ? &watch_probe : nullptr);
+    } else if (has_watch && !watch_probe.summary.empty()) {
+        turn_prompt += "\n\n[前置探针观测摘要]\n" + watch_probe.summary;
+    }
     // 隔离任务场:同 job 同场(任务自己的上下文跨拍续),不进聊天会话
     // (§11.2 不自动带聊天史);重启经映射账 resume-as-new。
     const std::string session_key =
@@ -1760,7 +1815,7 @@ bool ChannelWorkPump::RunOneChannelJob(std::int64_t now_ms, std::string* error) 
             request.stored_session_id = *stored;
         }
     }
-    request.prompt = job->prompt;
+    request.prompt = std::move(turn_prompt);
     request.binding.work_id = occurrence_id;
     request.binding.source_kind = "automation";
     request.binding.source_id = job->job_id;
@@ -1795,10 +1850,52 @@ bool ChannelWorkPump::RunOneChannelJob(std::int64_t now_ms, std::string* error) 
         }
         const bool cancelled = claimed->cancel_requested ||
                                result.error.find("cancelled") != std::string::npos;
+        // heartbeat 检查失败不能静默吞掉:按渠道脱敏规则投递失败提示,不更新已通知水位。
+        if (job->notify_on_change && !cancelled) {
+            const TurnFailureNotice failure_notice =
+                MakeTurnFailureNotice(result.error_code, result.error);
+            const std::string notice_text =
+                "自动巡检失败(" + job->job_id + ", " + failure_notice.short_code + "): " +
+                failure_notice.text;
+            gateway::DurableReplyOutbox::ChannelTarget notice_target;
+            notice_target.channel_id = job->delivery_channel;
+            notice_target.account_id = job->delivery_account;
+            notice_target.conversation_id = job->delivery_conversation;
+            notice_target.reply_to_message_id = "";
+            notice_target.source_ref = "chanjob:" + job->delivery_channel + ":" +
+                                       job->delivery_account + ":" + job->job_id + ":" +
+                                       occurrence_id;
+            const auto notice_enq = options_.outbox->EnqueueChannel(
+                "notice-" + occurrence_id, notice_text, result.session_id, result.turn_id,
+                notice_target, now_ms);
+            const bool notice_accepted = notice_enq.accepted || notice_enq.duplicate;
+            (void)store->RecordObservation(occurrence_id, platform::Sha256Hex(notice_text), true,
+                                           notice_accepted, /*update_last_observed=*/false,
+                                           now_ms);
+        }
         const std::string outcome = cancelled ? "cancelled" : "failed";
         return store->SettleOccurrence(occurrence_id, outcome,
                                        "turn_failed: " + result.error_code + ": " + result.error,
                                        now_ms);
+    }
+    if (has_watch) {
+        if (!store->RecordWatchCheck(occurrence_id, watch_probe.fingerprint_sha,
+                                     /*skipped=*/false, /*update_last_watch=*/true, now_ms)) {
+            *error = "automation.append_failed: 渠道任务 watch_checked 落不了盘";
+            return false;
+        }
+    }
+    std::string heartbeat_sha;
+    if (job->notify_on_change) {
+        const auto decision =
+            gateway::EvaluateHeartbeatReply(result.reply_text, job->last_observed_sha);
+        heartbeat_sha = decision.observed_sha;
+        if (decision.suppressed()) {
+            (void)store->RecordObservation(occurrence_id, heartbeat_sha, false, false,
+                                           decision.update_last_observed_on_suppress, now_ms);
+            return store->SettleOccurrence(occurrence_id, "succeeded",
+                                           decision.settle_detail, now_ms);
+        }
     }
     // 结果投回创建会话(§11.3:绑定的账号/目标,不附陈旧 msg_id——锚在
     // 发送时按互动窗现取)。执行与投递分账:occurrence 落账 succeeded 是
@@ -1818,6 +1915,9 @@ bool ChannelWorkPump::RunOneChannelJob(std::int64_t now_ms, std::string* error) 
                                       now_ms);
         *error = "outbox.append_failed: 渠道任务结果入不了箱";
         return false;  // outbox 账写不进:停泵
+    }
+    if (job->notify_on_change) {
+        (void)store->RecordObservation(occurrence_id, heartbeat_sha, true, true, true, now_ms);
     }
     return store->SettleOccurrence(occurrence_id, "succeeded", "enqueued_to_channel_outbox",
                                    now_ms);

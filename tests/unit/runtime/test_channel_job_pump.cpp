@@ -892,3 +892,110 @@ TEST_CASE("撤销准入后到点:ProbeRoute 重验不过,occurrence 结算 cance
     CHECK(occurrences[0].outcome == "cancelled");
     CHECK(occurrences[0].detail.rfind("creator_not_admitted", 0) == 0);
 }
+
+TEST_CASE("IM 主动智能巡检全链:interval+notify_on_change+watch_paths 静默/短路/告警/失败不静默") {
+    EnvGuard v3pin("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
+    Q5Fixture fixture("proactive-hb");
+    {
+        std::ofstream init_file(fixture.ws_root / "status.txt",
+                                std::ios::binary | std::ios::trunc);
+        init_file << "ok";
+    }
+    const char* create_hb_input =
+        R"({"description":"盯 status.txt 是否有故障","interval_seconds":600,)"
+        R"("notify_on_change":true,"watch_paths":["status.txt"]})";
+    fixture.scripts = {
+        ToolUseScript("tu-hb-1", "create_reminder", create_hb_input),
+        TextScript("已开启主动巡检:每 10 分钟检查 status.txt,正常时不打扰。"),
+        TextScript("HEARTBEAT_OK"),
+        TextScript("告警:status.txt 检测到磁盘满故障,请尽快处理。"),
+    };
+    tools::ToolRegistry registry;
+    REQUIRE(fixture.OpenPumps(registry));
+
+    // 1) QQ 建主动巡检任务。
+    fixture.EmitAndIngest(MakeDmAt("in-hb-1", "pe-hb-1", "dm-a",
+                                   "每10分钟盯一下status.txt,有故障再发QQ告诉我", "m-hb-1",
+                                   fixture.now));
+    REQUIRE(fixture.Tick());
+    fixture.TickUntilQuiet();
+    REQUIRE(CountOf(fixture.counter_file, "model") == 2);
+    REQUIRE(fixture.sidecar.sent_messages().size() == 1);  // 仅建单确认回复
+
+    const auto jobs = fixture.store()->ListJobs();
+    REQUIRE(jobs.size() == 1);
+    const std::string job_id = jobs[0].job_id;
+    CHECK(jobs[0].schedule_kind == gateway::ScheduleKind::Interval);
+    CHECK(jobs[0].interval_seconds == 600);
+    CHECK(jobs[0].notify_on_change);
+    CHECK(jobs[0].watch_paths == std::vector<std::string>{"status.txt"});
+
+    // list_reminders 回执同步暴露 notifyOnChange / intervalSeconds / watchPaths。
+    {
+        runtime::ChannelAutomationBridge::TurnContext ctx;
+        ctx.channel_id = "qqbot";
+        ctx.account_id = "main";
+        ctx.conversation_id = "dm-a";
+        ctx.sender_id = "sender-dm-a";
+        const runtime::ChannelAutomationBridge::TurnScope scope(*fixture.bridge, ctx);
+        const auto listed = fixture.bridge->ListReminders();
+        REQUIRE(listed.ok);
+        REQUIRE(listed.payload["jobs"].size() == 1);
+        CHECK(listed.payload["jobs"][0]["notifyOnChange"] == true);
+        CHECK(listed.payload["jobs"][0]["intervalSeconds"] == 600);
+        CHECK(listed.payload["jobs"][0]["watchPaths"] == nlohmann::json::array({"status.txt"}));
+    }
+
+    // 2) 拍 1(+600s):首次无监控水位 -> 调模型 -> 模型回 HEARTBEAT_OK -> 静默不发 QQ!
+    fixture.now += 600000 + 1;
+    REQUIRE(fixture.Tick());
+    fixture.TickUntilQuiet(10);
+    CHECK(CountOf(fixture.counter_file, "model") == 3);
+    CHECK(fixture.sidecar.sent_messages().size() == 1);
+
+    // 3) 拍 2(+600s,status.txt 未改):前置探针直接短路跳过,零模型调用,零 QQ 消息!
+    fixture.now += 600000 + 1;
+    REQUIRE(fixture.Tick());
+    fixture.TickUntilQuiet(10);
+    CHECK(CountOf(fixture.counter_file, "model") == 3);
+    CHECK(fixture.sidecar.sent_messages().size() == 1);
+
+    // 4) 拍 3(+600s,status.txt 变故障):探针唤醒模型 -> 主动推送告警回原 QQ 会话!
+    {
+        std::ofstream err_file(fixture.ws_root / "status.txt",
+                               std::ios::binary | std::ios::trunc);
+        err_file << "error: disk full";
+    }
+    fixture.now += 600000 + 1;
+    REQUIRE(fixture.Tick());
+    fixture.TickUntilQuiet();
+    CHECK(CountOf(fixture.counter_file, "model") == 4);
+    REQUIRE(fixture.sidecar.sent_messages().size() == 2);
+    CHECK(fixture.sidecar.sent_messages()[1].params["conversation"]["id"] == "dm-a");
+    CHECK(fixture.sidecar.sent_messages()[1].params["parts"][0]["text"] ==
+          "告警:status.txt 检测到磁盘满故障,请尽快处理。");
+
+    // 5) 拍 4(+600s,status.txt 再改但模型报错):检查失败绝不静默吞掉,且内部错误细节脱敏!
+    {
+        std::ofstream err_file2(fixture.ws_root / "status.txt",
+                                std::ios::binary | std::ios::trunc);
+        err_file2 << "error: network unreachable";
+    }
+    fixture.now += 600000 + 1;
+    REQUIRE(fixture.Tick());
+    fixture.TickUntilQuiet();
+    CHECK(CountOf(fixture.counter_file, "model") == 5);
+    REQUIRE(fixture.sidecar.sent_messages().size() == 3);
+    const std::string fail_msg =
+        fixture.sidecar.sent_messages()[2].params["parts"][0]["text"].get<std::string>();
+    CHECK(fail_msg.find("自动巡检失败") != std::string::npos);
+    CHECK(fail_msg.find("script exhausted") == std::string::npos);  // 内部报错原文绝不外泄
+
+    const auto occs = fixture.store()->ListJobOccurrences(job_id);
+    REQUIRE(occs.size() == 4);
+    CHECK(occs[0].detail == "heartbeat_ok_suppressed");
+    CHECK(occs[1].detail == "watch_unchanged_skipped");
+    CHECK(occs[1].watch_skipped);
+    CHECK(occs[2].detail == "enqueued_to_channel_outbox");
+    CHECK(occs[3].outcome == "failed");
+}

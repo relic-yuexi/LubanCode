@@ -6,6 +6,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "gateway/heartbeat.hpp"
+#include "platform/paths.hpp"
 #include "platform/sha256.hpp"
 #include "runtime/session_work_scheduler.hpp"
 #include "trajectory/v3/reader.hpp"
@@ -97,6 +99,9 @@ bool GatewayAutomationPump::TickOnce(std::int64_t now_ms) {
             if (add.schedule.set_notify_on_change) {
                 spec.notify_on_change = add.schedule.notify_on_change;
             }
+            if (add.schedule.set_watch_paths) {
+                spec.watch_paths = add.schedule.watch_paths;
+            }
             (void)store_->CreateJob(spec, now_ms, add.idempotency_key);
         }
         for (const auto& run_now : commands.run_nows) {
@@ -124,6 +129,8 @@ bool GatewayAutomationPump::TickOnce(std::int64_t now_ms) {
             patch.deadline_ms = update.schedule.deadline_ms;
             patch.set_notify_on_change = update.schedule.set_notify_on_change;
             patch.notify_on_change = update.schedule.notify_on_change;
+            patch.set_watch_paths = update.schedule.set_watch_paths;
+            patch.watch_paths = update.schedule.watch_paths;
             (void)store_->UpdateJob(update.job_id, update.expected_revision, patch, now_ms,
                                     update.idempotency_key);
         }
@@ -302,18 +309,20 @@ std::optional<std::string> GatewayAutomationPump::RecoverOccurrence(
         *error = "automation.append_failed: needs_review 结算落不了盘";
         return std::nullopt;
     }
-    // heartbeat(恢复路同款):正文与上次已通知版本相同 → 不投递(§七
-    // "无变化默认安静")。检查失败到不了这里(失败不是"无变化",执行
-    // 路已另行投递失败通知)。
+    // heartbeat(恢复路同款):HEARTBEAT_OK 语义静默或正文与上次已通知版本相同
+    // → 不投递(§七"无变化默认安静")。检查失败到不了这里(失败不是"无变化",
+    // 执行路已另行投递失败通知)。
     const auto job = store_->FindJob(occurrence.job_id);
     std::string heartbeat_sha;
     if (job.has_value() && job->notify_on_change) {
-        heartbeat_sha = platform::Sha256Hex(plan.text);
-        if (!job->last_observed_sha.empty() && heartbeat_sha == job->last_observed_sha) {
+        const auto decision =
+            gateway::EvaluateHeartbeatReply(plan.text, job->last_observed_sha);
+        heartbeat_sha = decision.observed_sha;
+        if (decision.suppressed()) {
             (void)store_->RecordObservation(occurrence.occurrence_id, heartbeat_sha, false, false,
-                                            false, now_ms);
+                                            decision.update_last_observed_on_suppress, now_ms);
             if (store_->SettleOccurrence(occurrence.occurrence_id, "succeeded",
-                                         "unchanged_notification_suppressed", now_ms)) {
+                                         decision.settle_detail, now_ms)) {
                 return std::string("succeeded");
             }
             *error = "automation.append_failed: 结算落不了盘";
@@ -427,6 +436,47 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
         (void)store_->SettleOccurrence(occurrence_id, "failed", "job_missing", now_ms);
         return true;
     }
+    const std::filesystem::path workspace_root =
+        !options_.workspace_identity.identity_root.empty()
+            ? options_.workspace_identity.identity_root
+            : platform::Utf8ToPath(options_.cwd_utf8);
+    // 零 Token 前置探针:配置了 watch_paths 且工作区监控目标指纹未变 → 直接静默收口,
+    // 不拉起会话、不调模型。
+    const bool has_watch = !job->watch_paths.empty();
+    gateway::WatchProbeResult watch_probe;
+    if (has_watch) {
+        watch_probe = gateway::ProbeWorkspaceWatch(workspace_root, job->watch_paths);
+        if (!job->last_watch_sha.empty() &&
+            watch_probe.fingerprint_sha == job->last_watch_sha) {
+            if (!store_->RecordWatchCheck(occurrence_id, watch_probe.fingerprint_sha,
+                                          /*skipped=*/true, /*update_last_watch=*/false,
+                                          now_ms)) {
+                *error = "automation.append_failed: watch_checked 落不了盘";
+                return false;
+            }
+            if (job->notify_on_change) {
+                (void)store_->RecordObservation(
+                    occurrence_id, "watch:" + watch_probe.fingerprint_sha, false, false, false,
+                    now_ms);
+            }
+            if (!store_->SettleOccurrence(occurrence_id, "succeeded",
+                                          "watch_unchanged_skipped", now_ms)) {
+                *error = "automation.append_failed: 结算落不了盘";
+                return false;
+            }
+            return true;
+        }
+    }
+    // 执行期拼装提示词(不污染盘上 job.prompt 原文)。
+    std::string turn_prompt = job->prompt;
+    if (job->notify_on_change) {
+        const gateway::WorkspaceHeartbeatChecklist checklist =
+            gateway::LoadWorkspaceHeartbeatChecklist(workspace_root);
+        turn_prompt = gateway::BuildHeartbeatTurnPrompt(
+            job->prompt, checklist, has_watch ? &watch_probe : nullptr);
+    } else if (has_watch && !watch_probe.summary.empty()) {
+        turn_prompt += "\n\n[前置探针观测摘要]\n" + watch_probe.summary;
+    }
     // 执行(共用 headless 装配)。
     HeadlessExecutor::Options executor_options;
     executor_options.workspaces_root = options_.workspaces_root;
@@ -462,7 +512,7 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
     bool domain_bound = false;
     std::atomic<bool> cancel_flag{claimed->cancel_requested};
     const auto result = executor.Execute(
-        job->prompt, binding,
+        turn_prompt, binding,
         [this, occurrence_id, now_ms, &domain_bound](const std::string& session_id,
                                                      const std::string& turn_id) {
             // 领域绑定先于 V3 work.bound(恢复器优先走领域行定位原场)。
@@ -481,18 +531,26 @@ bool GatewayAutomationPump::RunOneOccurrence(std::int64_t now_ms, std::string* e
             }
             return true;
         }
-        // heartbeat(notify_on_change):正文与上次已通知版本相同 → 不投
-        // 递(§七"无变化默认安静");记观察账(不更新已通知版本)。
+        if (has_watch) {
+            if (!store_->RecordWatchCheck(occurrence_id, watch_probe.fingerprint_sha,
+                                          /*skipped=*/false, /*update_last_watch=*/true,
+                                          now_ms)) {
+                *error = "automation.append_failed: watch_checked 落不了盘";
+                return false;
+            }
+        }
+        // heartbeat(notify_on_change):HEARTBEAT_OK 语义静默或正文与上次已通知版本
+        // 相同 → 不投递(§七"无变化默认安静");记观察账。
         std::string heartbeat_sha;
         if (job->notify_on_change) {
-            heartbeat_sha = platform::Sha256Hex(result.reply_text);
-            const bool unchanged =
-                !job->last_observed_sha.empty() && heartbeat_sha == job->last_observed_sha;
-            if (unchanged) {
+            const auto decision =
+                gateway::EvaluateHeartbeatReply(result.reply_text, job->last_observed_sha);
+            heartbeat_sha = decision.observed_sha;
+            if (decision.suppressed()) {
                 (void)store_->RecordObservation(occurrence_id, heartbeat_sha, false, false,
-                                                false, now_ms);
+                                                decision.update_last_observed_on_suppress, now_ms);
                 if (!store_->SettleOccurrence(occurrence_id, "succeeded",
-                                              "unchanged_notification_suppressed", now_ms)) {
+                                              decision.settle_detail, now_ms)) {
                     *error = "automation.append_failed: 结算落不了盘";
                     return false;
                 }

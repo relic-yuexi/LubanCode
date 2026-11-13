@@ -265,6 +265,12 @@ ThinkEffortCapability ResolveThinkEffortCapability(const lubancode::config::Mode
         }
         from_provider = !levels.empty();
     }
+    out.default_effort = entry != nullptr ? entry->default_think : std::string();
+    if (from_provider) {
+        out.source = ThinkEffortSource::Provider;
+    } else if (entry != nullptr) {
+        out.source = ThinkEffortSource::Catalog;
+    }
 
     // Disabled(关思考)只在声明可关时提供(§5.2):none 在声明表里,或
     // reasoning 声明了开关(supports_toggle / 方言有开关形状)。目录声明
@@ -383,6 +389,8 @@ ContextWindowPanelCore::ContextWindowPanelCore(std::size_t window_count, std::si
       effort_start_(effort_start) {
     state_.window_index = window_count_ > 0 ? (window_start < window_count_ ? window_start : 0) : 0;
     state_.effort_index = effort_count_ > 0 ? (effort_start < effort_count_ ? effort_start : 0) : 0;
+    // 没有窗口行(/effort 单行面板)时焦点恒在思考行。
+    state_.focus = window_count_ == 0 ? 1u : 0u;
 }
 
 const ContextWindowPanelCore::State& ContextWindowPanelCore::HandleKey(const KeyEvent& event) {
@@ -395,7 +403,9 @@ const ContextWindowPanelCore::State& ContextWindowPanelCore::HandleKey(const Key
         case KeyKind::Tab:
         case KeyKind::ShiftTab:
             // 上下在两行间切换(本面板恒两行,循环切)。
-            state_.focus = state_.focus == 0 ? 1u : 0u;
+            if (window_count_ > 0) {
+                state_.focus = state_.focus == 0 ? 1u : 0u;
+            }
             break;
         case KeyKind::Left:
             // 左右循环切当前行的候选(§三:只有一个候选时不改变状态)。
@@ -437,6 +447,69 @@ const ContextWindowPanelCore::State& ContextWindowPanelCore::HandleKey(const Key
 // ---------------------------------------------------------------------------
 // 渲染(§三布局)
 // ---------------------------------------------------------------------------
+
+namespace {
+
+std::string EffortSourceText(ThinkEffortSource source) {
+    switch (source) {
+        case ThinkEffortSource::Catalog:
+            return tr("effort.source_catalog");
+        case ThinkEffortSource::Provider:
+            return tr("effort.source_provider");
+        case ThinkEffortSource::None:
+            break;
+    }
+    return tr("effort.source_none");
+}
+
+std::string EffortDefaultText(const ThinkEffortCapability& capability) {
+    if (capability.default_effort.empty()) {
+        return tr("effort.default_none");
+    }
+    return FormatThinkEffortLabel(capability.default_effort);
+}
+
+}  // namespace
+
+std::vector<std::string> BuildEffortOverviewLines(const std::string& model_title,
+                                                  const ThinkEffortCapability& capability) {
+    std::vector<std::string> lines;
+    lines.push_back(model_title);
+    lines.push_back(trf("effort.current_line", FormatThinkEffortLabel(capability.current_effort)));
+    lines.push_back(trf("effort.default_line", EffortDefaultText(capability)));
+    lines.push_back(trf("effort.source_line", EffortSourceText(capability.source)));
+    switch (capability.control) {
+        case ThinkEffortControl::NotSupported:
+            lines.push_back(tr("cw_panel.not_supported"));
+            return lines;
+        case ThinkEffortControl::AlwaysOn:
+            lines.push_back(tr("cw_panel.always_on"));
+            return lines;
+        case ThinkEffortControl::Unknown:
+            lines.push_back(tr("cw_panel.unknown_caps"));
+            return lines;
+        case ThinkEffortControl::Adjustable:
+            break;
+    }
+    lines.push_back(tr("effort.levels_header"));
+    for (const ThinkEffortOption& option : capability.options) {
+        std::string line = "  - " + option.label;
+        if (!option.value.empty() && option.value != option.label) {
+            line += " (" + option.value + ")";
+        }
+        if (AsciiIEqual(option.value, capability.current_effort)) {
+            line += "  [" + std::string(tr("effort.mark_current")) + "]";
+        }
+        if (option.is_default) {
+            line += " " + std::string(tr("cw_panel.default_suffix"));
+        }
+        if (option.unverified) {
+            line += " (" + std::string(tr("cw_panel.unverified")) + ")";
+        }
+        lines.push_back(std::move(line));
+    }
+    return lines;
+}
 
 ContextWindowPanelFrame BuildContextWindowPanelFrame(const ContextWindowPanelView& view, int width) {
     ContextWindowPanelFrame frame;
@@ -500,14 +573,21 @@ ContextWindowPanelFrame BuildContextWindowPanelFrame(const ContextWindowPanelVie
 
     push(view.model_title);
     push("");
-    push(std::string(view.focus == 0 ? "> " : "  ") + std::string(tr("cw_panel.context_label")));
-    push(view.window.limit_known
-             ? "  " + trf("cw_panel.context_limit", FormatContextLimitHint(view.window.declared_limit))
-             : "  " + std::string(tr("cw_panel.context_desc")));
-    push(window_cyclable ? "  < " + window_value_text() + " >" : "  " + window_value_text());
-    push("");
+    if (!view.effort_only) {
+        push(std::string(view.focus == 0 ? "> " : "  ") + std::string(tr("cw_panel.context_label")));
+        push(view.window.limit_known
+                 ? "  " + trf("cw_panel.context_limit", FormatContextLimitHint(view.window.declared_limit))
+                 : "  " + std::string(tr("cw_panel.context_desc")));
+        push(window_cyclable ? "  < " + window_value_text() + " >" : "  " + window_value_text());
+        push("");
+    }
     push(std::string(view.focus == 1 ? "> " : "  ") + std::string(tr("cw_panel.effort_label")));
     push("  " + std::string(tr("cw_panel.effort_desc")));
+    if (view.effort_only) {
+        // 默认值与声明来源:选之前就该看见这档从哪来、默认是谁。
+        push("  " + trf("effort.default_line", EffortDefaultText(view.effort)));
+        push("  " + trf("effort.source_line", EffortSourceText(view.effort.source)));
+    }
     push(effort_cyclable ? "  < " + effort_value_text() + " >" : "  " + effort_value_text());
     push("");
 
@@ -523,7 +603,13 @@ ContextWindowPanelFrame BuildContextWindowPanelFrame(const ContextWindowPanelVie
             view.effort_index < view.effort.options.size() ? view.effort_index : 0;
         return view.effort.options[index].label;
     };
-    {
+    if (view.effort_only) {
+        std::string selected = trf("cw_panel.selected_effort", effort_selected_text());
+        if (view.effort_index != view.original_effort_index) {
+            selected += "  [" + std::string(tr("cw_panel.unsaved")) + "]";
+        }
+        push(std::move(selected));
+    } else {
         const std::size_t window_index =
             view.window_index < view.window.values.size() ? view.window_index : 0;
         std::string selected = trf("cw_panel.selected",

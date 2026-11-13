@@ -4,6 +4,7 @@
 // 怎么兑现;参数冲突与缺值的直接测试就钉在这层。
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -46,7 +47,28 @@ struct CliOptions {
     // cli.output_mode_mismatch。缺值/空值在解析层退 BadOutput。
     std::string output_path;     // 空 = 没给
     bool output_given = false;
+    // one-shot 墙钟预算单:--time-budget <秒>——整场墙钟预算(正整数秒),
+    // 只在单发模式生效。缺值/非正整数在解析层退 BadTimeBudget;与环境
+    // 变量 LUBANCODE_TIME_BUDGET_SECS 的优先级由 ResolveTimeBudgetSecs 定
+    //(选项优先)。
+    int time_budget_secs = 0;
+    bool time_budget_given = false;
 };
+
+// 墙钟预算秒数的合法区间:1 秒 ~ 7 天(再长就不是"预算"了)。
+inline constexpr int kMaxTimeBudgetSecs = 7 * 24 * 3600;
+
+// 纯函数:解析一枚预算秒数。只认十进制正整数(可带首尾空白),越界/
+// 带小数/带单位一律 nullopt,不猜。
+std::optional<int> ParseTimeBudgetSecs(const std::string& text);
+
+// 预算定稿:选项优先,其次环境变量(值由调用方读好递进来,本层不碰环境)。
+// 环境变量值认不得就当没给,warning 里写明(调用方上 stderr)。
+struct TimeBudgetResolution {
+    std::optional<int> secs;  // 空 = 没预算
+    std::string warning;      // 非空 = 环境变量值认不得被忽略
+};
+TimeBudgetResolution ResolveTimeBudgetSecs(const CliOptions& options, const std::optional<std::string>& env_value);
 
 // `lubancode plugin init <模板> [名字]` 子命令(plugins 单第 3 步:Python
 // scaffold)。模板 v1 只认 "python";名字缺省取模板名。落盘动作交 RunCli
@@ -123,6 +145,8 @@ struct GatewayCliArgs {
     std::string misfire;              // --misfire(coalesce|skip;缺省 coalesce)
     long long deadline_ms = 0;        // --deadline(0 = 不设)
     bool heartbeat = false;           // --heartbeat(notify_on_change)
+    std::vector<std::string> watch_paths;  // --watch <相对路径>(可重复,最多 16 项)
+    bool clear_watch = false;         // --clear-watch(update 清空 watch_paths)
     long long expected_revision = 0;  // --rev(update/pause/resume/cancel 的 CAS)
     std::string source_session_id;    // import-loop 位置参数(原 /loop 会话)
     std::string source_task_id;       // import-loop --task(原 loop-N)
@@ -246,6 +270,7 @@ enum class CliAction {
     BadEvolveTest,            // evolve test 参数不对:人话已塞进 error_text
     RunTrajectory,            // trajectory 子命令:verify/replay/harness-replay 后退(P0-3)
     BadTrajectory,            // trajectory 参数不对:人话已塞进 error_text
+    BadTimeBudget,            // --time-budget 缺值/非正整数:人话已塞进 error_text(墙钟预算单)
     BadOutput,                // --output 缺值/空值:人话已塞进 error_text(Harbor JSONL 单)
     RunGateway,               // gateway 子命令:run/status/stop(总装单 G1)
     BadGateway,               // gateway 参数不对:人话已塞进 error_text

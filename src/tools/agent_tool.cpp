@@ -2336,6 +2336,14 @@ Tool::Result RunSubagentTask(const std::shared_ptr<const AgentRunState>& state, 
     if (resolved != nullptr && !resolved->soul) {
         task_agent_profile.soul.clear();
     }
+    // 子代理自成一个缓存分组:key 取子账会话 id(无账的旧调用方不发)。
+    // 先清掉可能从父皮拷来的活口,免得子代理借用主会话的 key。
+    task_agent_profile.prompt_cache_key_provider = nullptr;
+    if (trajectory != nullptr) {
+        task_agent_profile.prompt_cache_key_provider = [key = "lubancode-" + trajectory->session_id()]() {
+            return key;
+        };
+    }
     // 只消费孩子自己的包装与转发表。effective_registry/child_env 指向的
     // 表原址不变，底层 backend、工具原件及 MCP 仍借 caller；协调器不替
     // caller 拥有这些资源。Agent 的构造/失败清理/先销毁与主场共用。

@@ -85,6 +85,8 @@ struct AutomationJob {
     std::int64_t schedule_cursor_ms = 0;  // 生成游标:此时刻(含)之前的拍已消化
     bool notify_on_change = false;        // heartbeat 口:结果未变不投递
     std::string last_observed_sha;        // heartbeat:上次已投递正文 hash
+    std::vector<std::string> watch_paths; // 主动巡检前置探针:工作区内相对路径清单
+    std::string last_watch_sha;           // 前置探针上次已检指纹(未变则零 Token 跳过)
     std::string session_policy = "fresh";  // fresh|continuation(continuation 归 V3 渠道线,本批明拒)
     std::string imported_from;            // 非空 = /loop 显式导入("loop:<sessionId>:<taskId>")
     // ---- Q5 渠道面(§11.2 "创建者与渠道目标取真实入站上下文") ----
@@ -133,6 +135,9 @@ struct AutomationOccurrence {
     std::string observed_sha;
     bool observed_changed = false;
     bool observed_delivered = false;
+    // 前置探针账(occurrence.watch_checked 行;watch_paths 用):
+    std::string watch_sha;
+    bool watch_skipped = false;
 };
 
 // /loop 导入 receipt(§十 V2 第五件事):显式导入的唯一凭据。无 receipt
@@ -192,6 +197,7 @@ public:
         MisfirePolicy misfire = MisfirePolicy::Coalesce;
         std::int64_t deadline_ms = 0;
         bool notify_on_change = false;
+        std::vector<std::string> watch_paths;
         std::string session_policy = "fresh";  // 只认 fresh(continuation 归 V3,明拒)
         // Q5 渠道面(全空 = 本地任务)。
         std::string owner_channel;
@@ -242,6 +248,8 @@ public:
         std::int64_t deadline_ms = 0;
         bool set_notify_on_change = false;
         bool notify_on_change = false;
+        bool set_watch_paths = false;
+        std::vector<std::string> watch_paths;
     };
     // expected_revision 必须等于当前 revision(CAS;0 = 拒,必须显式)。
     // 排队中的 occurrence 固定建账 revision,不受 update 影响。
@@ -305,6 +313,10 @@ public:
     bool RecordObservation(const std::string& occurrence_id, const std::string& result_sha,
                            bool changed, bool delivered, bool update_last_observed,
                            std::int64_t now_ms);
+    // 前置变化探针账:occurrence.watch_checked 行;update_last_watch 时同步
+    // job 的 last_watch_sha(模型执行失败时不得置 true,保证下拍重检)。
+    bool RecordWatchCheck(const std::string& occurrence_id, const std::string& watch_sha,
+                          bool skipped, bool update_last_watch, std::int64_t now_ms);
 
     // ---- 只读投影(status/测试用) ------------------------------------------
     std::vector<AutomationJob> ListJobs() const;

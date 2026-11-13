@@ -1,5 +1,8 @@
 # SDK 阶段进度与验收边界
 
+2026-10-09 补记（#334 工具派发门）：功能分支已合入后续批，本片补[工具实际派发门](sdk-tool-dispatch-gate.md)，
+Sandbox 补入 [Boxed/NVX 参考核查](../architecture/sandbox-platform-design.md#12-boxed-与-nvx-参考核查)，只记参考边界，未交付后端。
+
 `95a927ee` 本轮 Linux 主腿已失败：SDK focused 实跑 74 项，72 过、
 子 Agent 接纳链判错优先级与真实分配探针未过。原 job 日志 SHA-256
 `7111d402bf7a147d0f43d65d58f2fec0fec8f2964e01588e9853d83b7d3c37b7`。

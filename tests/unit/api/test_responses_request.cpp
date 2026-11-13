@@ -45,6 +45,17 @@ TEST_CASE("stream 恒为 true,store 恒为 false") {
     CHECK(body.at("store") == false);
 }
 
+TEST_CASE("prompt_cache_key 非空才落线,extra_body 同名键仍可覆盖") {
+    Request request;
+    CHECK_FALSE(BuildRequestJson(request).contains("prompt_cache_key"));
+
+    request.prompt_cache_key = "lubancode-sess-1";
+    CHECK(BuildRequestJson(request).at("prompt_cache_key") == "lubancode-sess-1");
+
+    request.extra_body = nlohmann::json{{"prompt_cache_key", "custom"}};
+    CHECK(BuildRequestJson(request).at("prompt_cache_key") == "custom");
+}
+
 TEST_CASE("max_tokens 映射成 max_output_tokens") {
     Request request;
     request.max_tokens = 2048;
@@ -631,6 +642,37 @@ TEST_CASE("Responses native reasoning survives stream assembly and both replay l
     CHECK(std::get<ThinkingDelta>(events[0]).responses_item == native);
 }
 
+
+TEST_CASE("Responses 回传 reasoning 需要 encrypted_content,并按需索取 include") {
+    const auto bare = nlohmann::json::parse(R"({"type":"reasoning","id":"rs_1","summary":[]})");
+    Request request;
+    request.model = "test";
+    request.reasoning_effort = "medium";
+    Message assistant;
+    assistant.role = Role::Assistant;
+    ThinkingBlock thinking{"t"};
+    thinking.responses_item = bare;
+    assistant.content.push_back(thinking);
+    assistant.content.push_back(TextBlock{"answer"});
+    request.messages.push_back(assistant);
+
+    auto body = BuildRequestJson(request);
+    REQUIRE(body["input"].size() == 1);  // 裸 rs_ 条目不回传
+    CHECK(body["input"][0]["type"] == "message");
+    REQUIRE(body.contains("include"));
+    CHECK(body["include"][0] == "reasoning.encrypted_content");
+
+    std::get<ThinkingBlock>(request.messages[0].content[0]).responses_item["encrypted_content"] = "blob";
+    body = BuildRequestJson(request);
+    REQUIRE(body["input"].size() == 2);
+    CHECK(body["input"][0]["type"] == "reasoning");
+
+    request.reasoning_history = ReasoningHistoryMode::Disabled;
+    CHECK_FALSE(BuildRequestJson(request).contains("include"));
+    request.reasoning_history = ReasoningHistoryMode::ProviderDefault;
+    request.reasoning_effort.clear();
+    CHECK_FALSE(BuildRequestJson(request).contains("include"));
+}
 
 TEST_CASE("Responses legacy text alone cannot fabricate a server reasoning item") {
     Request request;

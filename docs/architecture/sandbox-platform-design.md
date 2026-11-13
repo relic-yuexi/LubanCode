@@ -252,3 +252,27 @@ P1 的合同闭环不自动证明强隔离可发布；P3 是对恶意代码开�
 性能报告至少列 cold/warm P50/P95/P99、并发 1/10/50/100、真实 Python/Node/C++ 任务、成功率、取消清理时延、恢复时延、每任务成本。记录硬件、内核、后端版本、模板与网络距离。目标数值待基线实测后定，不借上游宣传数字签收。
 
 第一条可演示链路：Windows 上启动 LubanCode → 创建 Linux 沙箱 → 受控上传工作区 → read/edit/search/exec 同处运行 → 断网后查询原 exec → 导出带基线摘要的 patch → 核验并采纳 → 服务端确认销毁。这条链通了，再扩三端原生环境与批量训练。
+
+## 12. Boxed 与 NVX 参考核查
+
+2026-10-09 核查官方材料。Boxed 锁到
+[`0909a954`](https://github.com/akshayaggarwal99/boxed/tree/0909a95458c652e71330154f9f21c97cd68a91ba)，
+NVX `dev` 锁到
+[`d3eb15fd`](https://github.com/microsoft/nvx/tree/d3eb15fd0ce7faa0cde9108326393b780128fd30)。
+下述只作设计依据，未部署、未测隔离或性能。
+
+| 参考 | 已有范围与限制 | 本项目采用的切面 |
+| --- | --- | --- |
+| [Boxed README](https://github.com/akshayaggarwal99/boxed/blob/0909a95458c652e71330154f9f21c97cd68a91ba/README.md) | Driver 抽象、Docker 实现、控制面与 guest agent 分工、产物回传；Firecracker/Wasm driver 尚未实现；网络开关请求在出口策略未有前拒绝 | 生命周期 provider 与执行后端分开；显式能力准入，不靠后端名称许诺隔离；网络缺项拒绝，不能退回宿主 |
+| [NVX README](https://github.com/microsoft/nvx/blob/d3eb15fd0ce7faa0cde9108326393b780128fd30/README.md) | OpenVMM 上的 Linux guest；Linux KVM/MSHV、Windows WHP 宿主路径 | 作为本地 MicroVM 后端候选；宿主 OS、guest OS 和虚拟化前提分别探测。Windows 宿主不等于 Windows guest，不补写未证实的 macOS 支持 |
+| [NVX 文件系统与 agent 架构](https://github.com/microsoft/nvx/blob/d3eb15fd0ce7faa0cde9108326393b780128fd30/doc/design/sandbox-filesystem-and-agent-architecture.md) | 一份 workload 配一只 microVM；只读 EROFS 下层、独立 scratch/overlay；监督者留在 workload namespace 外。该页将已实现底座与 Proposed 生产服务分开 | 模板与可写层分开；取消由外侧 owner 收拢；快照先注明种类、版本和恢复前提，再单验恢复。提案不记成可用能力 |
+
+扩展先守已有 `ExecutionBinding / IExecutionBackend / ISandboxProvider` 分工。
+接 Boxed REST 或 NVX 本机 harness，各做适配；公开 SDK 不带 Docker socket、
+OpenVMM 句柄或后端私有参数。Provider 的配置由可信宿主装配，模型只给任务参数。
+能力以版本化字段表达；未知字段不授予权限，必需能力缺项便拒绝。
+
+顺序仍按第 11 节。先补全工具实际派发点和执行域，再接一只后端跑文件、
+搜索、命令及后台任务闭环。共用[工具实际调用门](../development/sdk-tool-dispatch-gate.md)
+只提供最后重查位置；尚未重定向工具，不能勾 P1。Boxed/NVX 不直接塞进 Core
+依赖闭包，预热池、热快照和跨节点调度各走后续验收门。
