@@ -1783,11 +1783,14 @@ struct Session::Impl final : rt::InteractionBroker {
             bool skip = false;
             {
                 std::unique_lock lock(mutex);
-                const auto ready = [&] { return closing || broken || memory_write_indeterminate || NamedPublicationUnconfirmed() ||
+                const auto ready = [&] { return closing || broken || memory_write_indeterminate ||
+                    (memory_learning_module && memory_learning_module->HasIndeterminate()) || NamedPublicationUnconfirmed() ||
                     (command_jobs && command_jobs->indeterminate()) || service->pending_input_count() > 0; };
                 if (command_jobs && command_jobs->HasPending()) cv.wait_for(lock, std::chrono::milliseconds(10), ready);
                 else cv.wait(lock, ready);
-                if (broken || memory_write_indeterminate || NamedPublicationUnconfirmed() || (command_jobs && command_jobs->indeterminate()) ||
+                if (broken || memory_write_indeterminate ||
+                    (memory_learning_module && memory_learning_module->HasIndeterminate()) ||
+                    NamedPublicationUnconfirmed() || (command_jobs && command_jobs->indeterminate()) ||
                     (closing && service->pending_input_count() == 0)) break;
                 if (service->pending_input_count() == 0 && command_jobs) {
                     lock.unlock(); command_jobs->PumpAndPublish(); continue;
@@ -2199,6 +2202,18 @@ Result<std::vector<memory::v1::CandidateAcceptReport>> Session::GetAcceptedMemor
     if (!module) return std::vector<memory::v1::CandidateAcceptReport>{};
     return module->GetAcceptedCandidates();
 }
+Result<void> Session::RevokeAutoMemoryLearning(const std::string& reason) {
+    std::shared_ptr<detail::SessionMemoryLearning> module;
+    {
+        std::lock_guard lock(impl_->mutex);
+        if (impl_->closing || impl_->closed || impl_->runtime_stopping->load()) {
+            return std::unexpected(Failure("sdk.session.closed"));
+        }
+        module = impl_->memory_learning_module;
+    }
+    if (!module) return std::unexpected(Failure("sdk.memory_learning.disabled"));
+    return module->RevokeAutoWrite(reason);
+}
 Result<Receipt> Session::Submit(std::string key, std::string text) {
     if (key.empty()) return std::unexpected(Failure("sdk.operation.key_required"));
     if (!lubancode::platform::IsValidUtf8(key) || !lubancode::platform::IsValidUtf8(text)) {
@@ -2209,6 +2224,10 @@ Result<Receipt> Session::Submit(std::string key, std::string text) {
     if (impl_->NamedPublicationUnconfirmed()) return std::unexpected(Failure(kNamedPublicationUnconfirmed));
     if (impl_->memory_write_indeterminate) return std::unexpected(Failure("sdk.memory_write.indeterminate",
         "A previous project write needs explicit inspection; this Session cannot continue automatically"));
+    if (impl_->memory_learning_module && impl_->memory_learning_module->HasIndeterminate()) {
+        return std::unexpected(Failure("sdk.memory_learning.indeterminate",
+            "A previous memory learning write needs explicit inspection; this Session cannot continue automatically"));
+    }
     if (impl_->broken) return std::unexpected(Failure("sdk.storage.broken"));
     if (impl_->command_jobs && impl_->command_jobs->indeterminate())
         return std::unexpected(Failure("sdk.job.indeterminate"));

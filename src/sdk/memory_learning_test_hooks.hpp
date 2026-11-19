@@ -31,6 +31,11 @@ using LearningCommitWriteHook = std::function<std::expected<
     lubancode::platform::WriteDurability durability)>;
 using LearningCommitWriteHookHandle = std::shared_ptr<const LearningCommitWriteHook>;
 
+using LearningAutoAdmissionHook = std::function<void(
+    const std::string& operation_id,
+    const std::string& commit_key)>;
+using LearningAutoAdmissionHookHandle = std::shared_ptr<const LearningAutoAdmissionHook>;
+
 LUBANCORE_API LearningWorkerStartHookHandle ReplaceLearningWorkerStartHook(
     LearningWorkerStartHookHandle replacement) noexcept;
 LearningWorkerStartHookHandle SnapshotLearningWorkerStartHook() noexcept;
@@ -46,5 +51,9 @@ LearningCandidateStoreHookHandle SnapshotLearningCandidateStoreHook() noexcept;
 LUBANCORE_API LearningCommitWriteHookHandle ReplaceLearningCommitWriteHook(
     LearningCommitWriteHookHandle replacement) noexcept;
 LearningCommitWriteHookHandle SnapshotLearningCommitWriteHook() noexcept;
+
+LUBANCORE_API LearningAutoAdmissionHookHandle ReplaceLearningAutoAdmissionHook(
+    LearningAutoAdmissionHookHandle replacement) noexcept;
+LearningAutoAdmissionHookHandle SnapshotLearningAutoAdmissionHook() noexcept;
 
 } // namespace lubancore::detail::testing

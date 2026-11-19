@@ -26,7 +26,9 @@
 #include <nlohmann/json.hpp>
 
 #include "memory/candidate_store.hpp"
+#include "memory/project_commit.hpp"
 #include "memory/project_memory.hpp"
+#include "memory/topic_store.hpp"
 #include "platform/atomic_write.hpp"
 #include "platform/paths.hpp"
 #include "platform/sha256.hpp"
@@ -281,6 +283,7 @@ public:
         (void)sdk::detail::testing::ReplaceLearningWorkerExecutionHook({});
         (void)sdk::detail::testing::ReplaceLearningCandidateStoreHook({});
         (void)sdk::detail::testing::ReplaceLearningCommitWriteHook({});
+        (void)sdk::detail::testing::ReplaceLearningAutoAdmissionHook({});
     }
     void SetStart(sdk::detail::testing::LearningWorkerStartHook fn) {
         (void)sdk::detail::testing::ReplaceLearningWorkerStartHook(
@@ -297,6 +300,10 @@ public:
     void SetCommitWrite(sdk::detail::testing::LearningCommitWriteHook fn) {
         (void)sdk::detail::testing::ReplaceLearningCommitWriteHook(
             std::make_shared<const sdk::detail::testing::LearningCommitWriteHook>(std::move(fn)));
+    }
+    void SetAutoAdmission(sdk::detail::testing::LearningAutoAdmissionHook fn) {
+        (void)sdk::detail::testing::ReplaceLearningAutoAdmissionHook(
+            std::make_shared<const sdk::detail::testing::LearningAutoAdmissionHook>(std::move(fn)));
     }
 };
 
@@ -410,11 +417,18 @@ TEST_CASE("SDK memory learning: Auto and invalid options rejected") {
     {
         LearningOptions auto_opts;
         auto_opts.mode = LearningMode::Auto;
-        auto_opts.model = "extract-model";
         auto learn_trace = std::make_shared<LearningTrace>();
         auto res = (*runtime)->OpenSession(MakeBaseOptions(fixture, std::make_shared<MainTrace>(), auto_opts, learn_trace));
         REQUIRE_FALSE(res.has_value());
-        CHECK(res.error().code == "sdk.memory_learning.auto_unsupported");
+        CHECK(res.error().code == "sdk.memory_learning.invalid_options");
+    }
+    {
+        LearningOptions auto_missing_backend;
+        auto_missing_backend.mode = LearningMode::Auto;
+        auto_missing_backend.model = "extract-model";
+        auto res = (*runtime)->OpenSession(MakeBaseOptions(fixture, std::make_shared<MainTrace>(), auto_missing_backend));
+        REQUIRE_FALSE(res.has_value());
+        CHECK(res.error().code == "sdk.memory_learning.missing_backend");
     }
     {
         LearningOptions missing_model;
@@ -1742,4 +1756,944 @@ TEST_CASE("SDK memory learning: accept stage failure marks indeterminate, keeps 
     }
 
     PrintPathMarker("candidate-accept-indeterminate-stop");
+}
+
+TEST_CASE("SDK memory learning: Auto eligibility gate commits eligible items and routes others to candidate review") {
+    Fixture fixture;
+    std::string session_id;
+    std::string op1_id;
+
+    {
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        // Turn 1: verified fact+paths (auto), user-stated feedback (auto), inferred preference (review fallback).
+        {
+            LearningTrace::Step step;
+            sdk::ModelReply r;
+            r.text = Json{
+                {"task_type", "config"},
+                {"summary", "Mixed auto-eligible and fallback candidates"},
+                {"candidates", Json::array({
+                    Json{
+                        {"kind", "fact"},
+                        {"title", "Auto Verified Fact"},
+                        {"summary", "Fact with verified confidence and path"},
+                        {"content", "Verify CMake targets in cmake/LubanCore.cmake."},
+                        {"keywords", Json::array({"cmake", "fact"})},
+                        {"paths", Json::array({"cmake/LubanCore.cmake"})},
+                        {"confidence", "verified"},
+                    },
+                    Json{
+                        {"kind", "feedback"},
+                        {"title", "Auto User Feedback"},
+                        {"summary", "User-stated feedback auto commits"},
+                        {"content", "Never skip ninja checks before submitting patches."},
+                        {"keywords", Json::array({"ninja", "feedback"})},
+                        {"paths", Json::array()},
+                        {"confidence", "user-stated"},
+                    },
+                    Json{
+                        {"kind", "preference"},
+                        {"title", "Fallback Inferred Preference"},
+                        {"summary", "Inferred preference must fall back to review"},
+                        {"content", "Prefer concise build summaries."},
+                        {"keywords", Json::array({"summary"})},
+                        {"paths", Json::array({"cmake/LubanCore.cmake"})},
+                        {"confidence", "inferred"},
+                    },
+                })},
+                {"retrieval_terms", Json::array({"LubanCore", "ninja"})},
+            }.dump();
+            r.usage = sdk::Usage{25, 19, 4, 1, 2};
+            r.usage_observation = FiveFieldObservation(*r.usage);
+            r.provider_response_id = "learn-auto-mix-1";
+            step.reply = r;
+            learn_trace->script.push_back(step);
+        }
+        // Turn 2: verified fact WITHOUT paths (fallback), verified feedback (fallback), verified preference (auto).
+        {
+            LearningTrace::Step step;
+            sdk::ModelReply r;
+            r.text = Json{
+                {"task_type", "config"},
+                {"summary", "Edge eligibility cases"},
+                {"candidates", Json::array({
+                    Json{
+                        {"kind", "fact"},
+                        {"title", "Fallback Fact No Paths"},
+                        {"summary", "Fact without paths cannot auto commit"},
+                        {"content", "Fact missing evidence paths."},
+                        {"keywords", Json::array({"fact"})},
+                        {"paths", Json::array()},
+                        {"confidence", "verified"},
+                    },
+                    Json{
+                        {"kind", "feedback"},
+                        {"title", "Fallback Verified Feedback"},
+                        {"summary", "Feedback with verified instead of user-stated falls back"},
+                        {"content", "Feedback needing user-stated confidence."},
+                        {"keywords", Json::array({"feedback"})},
+                        {"paths", Json::array()},
+                        {"confidence", "verified"},
+                    },
+                    Json{
+                        {"kind", "preference"},
+                        {"title", "Auto Verified Preference"},
+                        {"summary", "Preference with verified confidence auto commits"},
+                        {"content", "Always keep Auto mode scope restricted to project."},
+                        {"keywords", Json::array({"preference"})},
+                        {"paths", Json::array()},
+                        {"confidence", "verified"},
+                    },
+                })},
+                {"retrieval_terms", Json::array({"project"})},
+            }.dump();
+            r.usage = sdk::Usage{21, 15, 3, 1, 1};
+            r.usage_observation = FiveFieldObservation(*r.usage);
+            r.provider_response_id = "learn-auto-mix-2";
+            step.reply = r;
+            learn_trace->script.push_back(step);
+        }
+        // Turn 3: empty confidence preference -> must fall back to review candidate store.
+        {
+            LearningTrace::Step step;
+            sdk::ModelReply r;
+            r.text = Json{
+                {"task_type", "config"},
+                {"summary", "Empty confidence fallback"},
+                {"candidates", Json::array({
+                    Json{
+                        {"kind", "preference"},
+                        {"title", "Fallback Empty Confidence Preference"},
+                        {"summary", "Empty confidence preference falls back"},
+                        {"content", "Candidate with empty confidence string."},
+                        {"keywords", Json::array({"empty"})},
+                        {"paths", Json::array()},
+                        {"confidence", ""},
+                    },
+                })},
+                {"retrieval_terms", Json::array({"empty"})},
+            }.dump();
+            r.usage = sdk::Usage{17, 11, 2, 0, 1};
+            r.usage_observation = FiveFieldObservation(*r.usage);
+            r.provider_response_id = "learn-auto-mix-3";
+            step.reply = r;
+            learn_trace->script.push_back(step);
+        }
+
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Auto;
+        learn_opts.model = "extract-model";
+
+        auto session = (*runtime)->OpenSession(MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace));
+        REQUIRE(session.has_value());
+        session_id = (*session)->id();
+        CHECK((*session)->DescribeMemoryLearning()->mode == LearningMode::Auto);
+        CHECK((*session)->DescribeMemoryLearning()->auto_write_enabled);
+
+        auto r1 = (*session)->Submit("op-auto-1", DurablePrompt());
+        REQUIRE(r1.has_value());
+        op1_id = r1->operation_id;
+        REQUIRE((*session)->WaitResult(r1->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+        const auto rep1 = WaitForLearning(*session, r1->operation_id);
+        REQUIRE(rep1.stage == LearningStage::Completed);
+        CHECK(rep1.candidate_ids.size() == 1);
+        REQUIRE(rep1.auto_writes.size() == 3);
+
+        CHECK(rep1.auto_writes[0].queue_stage == "completed");
+        CHECK(rep1.auto_writes[0].worker_stage == "finished");
+        CHECK(rep1.auto_writes[0].admission_stage == "admitted");
+        CHECK(rep1.auto_writes[0].commit_state == "committed");
+        CHECK(rep1.auto_writes[0].commit_key.starts_with("sdk-learn-"));
+        CHECK_FALSE(rep1.auto_writes[0].source_event_ref.empty());
+        CHECK_FALSE(rep1.auto_writes[0].stages.empty());
+        CHECK(rep1.auto_writes[0].stages.back() == sdk::memory::v1::SaveStageReceipt{"result", "durable"});
+
+        CHECK(rep1.auto_writes[1].queue_stage == "completed");
+        CHECK(rep1.auto_writes[1].commit_state == "committed");
+
+        CHECK(rep1.auto_writes[2].queue_stage == "not_queued");
+        CHECK(rep1.auto_writes[2].admission_stage == "denied");
+        CHECK(rep1.auto_writes[2].commit_state == "not_started");
+        CHECK(rep1.auto_writes[2].fallback_candidate_id == rep1.candidate_ids.front());
+
+        auto r2 = (*session)->Submit("op-auto-2", DurablePrompt());
+        REQUIRE(r2.has_value());
+        REQUIRE((*session)->WaitResult(r2->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+        const auto rep2 = WaitForLearning(*session, r2->operation_id);
+        REQUIRE(rep2.stage == LearningStage::Completed);
+        CHECK(rep2.candidate_ids.size() == 2);
+        REQUIRE(rep2.auto_writes.size() == 3);
+        CHECK(rep2.auto_writes[0].queue_stage == "not_queued");
+        CHECK(rep2.auto_writes[0].fallback_candidate_id == rep2.candidate_ids[0]);
+        CHECK(rep2.auto_writes[1].queue_stage == "not_queued");
+        CHECK(rep2.auto_writes[1].fallback_candidate_id == rep2.candidate_ids[1]);
+        CHECK(rep2.auto_writes[2].queue_stage == "completed");
+        CHECK(rep2.auto_writes[2].commit_state == "committed");
+
+        auto r3 = (*session)->Submit("op-auto-3", DurablePrompt());
+        REQUIRE(r3.has_value());
+        REQUIRE((*session)->WaitResult(r3->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+        const auto rep3 = WaitForLearning(*session, r3->operation_id);
+        REQUIRE(rep3.stage == LearningStage::Completed);
+        CHECK(rep3.candidate_ids.size() == 1);
+        REQUIRE(rep3.auto_writes.size() == 1);
+        CHECK(rep3.auto_writes[0].queue_stage == "not_queued");
+        CHECK(rep3.auto_writes[0].fallback_candidate_id == rep3.candidate_ids.front());
+
+        // All 3 committed topics exist in project memory; 4 ineligible candidates live in candidate store.
+        const auto mem_dir = MemoryDir(*session);
+        CHECK(fs::exists(mem_dir / "facts" / "auto-verified-fact.md"));
+        CHECK(fs::exists(mem_dir / "feedback" / "auto-user-feedback.md"));
+        CHECK(fs::exists(mem_dir / "preferences" / "auto-verified-preference.md"));
+
+        const auto cands = (*session)->ListMemoryCandidates();
+        REQUIRE(cands.has_value());
+        CHECK(cands->size() == 4);
+
+        REQUIRE((*session)->Close().has_value());
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    // Same-ID recovery preserves Auto receipts with zero model replay.
+    {
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Auto;
+        learn_opts.model = "extract-model";
+
+        auto opts = MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace);
+        opts.resume_session_id = session_id;
+        auto resumed = (*runtime)->OpenSession(std::move(opts));
+        REQUIRE(resumed.has_value());
+        CHECK(learn_trace->calls.load() == 0);
+        const auto rep1 = (*resumed)->GetMemoryLearning(op1_id);
+        REQUIRE(rep1.has_value());
+        CHECK(rep1->stage == LearningStage::Completed);
+        CHECK(rep1->auto_writes.size() == 3);
+        CHECK(rep1->auto_writes[0].commit_state == "committed");
+
+        REQUIRE((*resumed)->Close().has_value());
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    PrintPathMarker("auto-eligibility-and-fallback");
+}
+
+TEST_CASE("SDK memory learning: Auto denied option and mid-flight revocation block commit without candidate fallback") {
+    Fixture fixture;
+    ScopedHooks hooks;
+
+    // 1) Frozen auto_write_enabled = false denies commit after enqueueing without silent fallback.
+    {
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Auto;
+        learn_opts.model = "extract-model";
+        learn_opts.auto_write_enabled = false;
+
+        auto session = (*runtime)->OpenSession(MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace));
+        REQUIRE(session.has_value());
+
+        auto rc = (*session)->Submit("op-denied", DurablePrompt());
+        REQUIRE(rc.has_value());
+        REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+        const auto rep = WaitForLearning(*session, rc->operation_id);
+        REQUIRE(rep.stage == LearningStage::Failed);
+        CHECK(rep.error_code == "sdk.memory_learning.auto_write_denied");
+        REQUIRE(rep.auto_writes.size() == 1);
+        CHECK(rep.auto_writes[0].queue_stage == "queued");
+        CHECK(rep.auto_writes[0].worker_stage == "finished");
+        CHECK(rep.auto_writes[0].admission_stage == "denied");
+        CHECK(rep.auto_writes[0].commit_state == "not_started");
+        CHECK(rep.auto_writes[0].fallback_candidate_id.empty());
+        CHECK((*session)->ListMemoryCandidates()->empty());
+        CHECK(rep.candidate_ids.empty());
+
+        // Denial does not leave partial topic mutation, so subsequent Submit succeeds.
+        auto r_next = (*session)->Submit("op-after-deny", "好的");
+        REQUIRE(r_next.has_value());
+        REQUIRE((*session)->WaitResult(r_next->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+
+        REQUIRE((*session)->Close().has_value());
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    // 2) Live RevokeAutoMemoryLearning after queue persistence and before commit.
+    std::string revoked_session_id;
+    std::string revoked_op_id;
+    std::string revoked_commit_key;
+    {
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Auto;
+        learn_opts.model = "extract-model";
+
+        auto session = (*runtime)->OpenSession(MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace));
+        REQUIRE(session.has_value());
+        revoked_session_id = (*session)->id();
+        std::shared_ptr<sdk::Session> raw_session = *session;
+
+        bool saw_queued_file = false;
+        hooks.SetAutoAdmission([&](const std::string& op_id, const std::string& commit_key) {
+            revoked_op_id = op_id;
+            revoked_commit_key = commit_key;
+            const fs::path qpath =
+                SessionDir(raw_session) / "sdk-memory-learning-queue" / (commit_key + ".json");
+            saw_queued_file = fs::exists(lubancode::platform::FileIoPath(qpath));
+            REQUIRE(raw_session->RevokeAutoMemoryLearning("operator_revoked").has_value());
+        });
+
+        auto rc = (*session)->Submit("op-revoke", DurablePrompt());
+        REQUIRE(rc.has_value());
+        REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+        const auto rep = WaitForLearning(*session, rc->operation_id);
+        hooks.SetAutoAdmission({});
+        CHECK(revoked_op_id == rc->operation_id);
+
+        CHECK(saw_queued_file);
+        REQUIRE(rep.stage == LearningStage::Failed);
+        CHECK(rep.error_code == "sdk.memory_learning.auto_write_revoked");
+        REQUIRE(rep.auto_writes.size() == 1);
+        CHECK(rep.auto_writes[0].queue_stage == "queued");
+        CHECK(rep.auto_writes[0].worker_stage == "finished");
+        CHECK(rep.auto_writes[0].admission_stage == "revoked");
+        CHECK(rep.auto_writes[0].commit_state == "not_started");
+        CHECK(rep.auto_writes[0].error == "operator_revoked");
+        CHECK(rep.auto_writes[0].fallback_candidate_id.empty());
+        CHECK((*session)->ListMemoryCandidates()->empty());
+        CHECK_FALSE(fs::exists(
+            lubancode::platform::FileIoPath(MemoryDir(*session).parent_path() / "lifecycle" / revoked_commit_key / "intent.json")));
+
+        REQUIRE((*session)->Close().has_value());
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    // Resume after live revocation: zero replay, keeps revoked state, Submit stays healthy.
+    {
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Auto;
+        learn_opts.model = "extract-model";
+
+        auto opts = MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace);
+        opts.resume_session_id = revoked_session_id;
+        auto resumed = (*runtime)->OpenSession(std::move(opts));
+        REQUIRE(resumed.has_value());
+        CHECK(learn_trace->calls.load() == 0);
+        const auto rep = (*resumed)->GetMemoryLearning(revoked_op_id);
+        REQUIRE(rep.has_value());
+        CHECK(rep->stage == LearningStage::Failed);
+        REQUIRE(rep->auto_writes.size() == 1);
+        CHECK(rep->auto_writes[0].admission_stage == "revoked");
+        CHECK(rep->auto_writes[0].commit_state == "not_started");
+
+        auto r_next = (*resumed)->Submit("op-post-revoke", "好的");
+        REQUIRE(r_next.has_value());
+        REQUIRE((*resumed)->WaitResult(r_next->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+
+        REQUIRE((*resumed)->Close().has_value());
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    PrintPathMarker("auto-authorization-revocation");
+}
+
+TEST_CASE("SDK memory learning: queued-but-uncommitted crash recovery preserves facts, prevents replay, and fences Submit") {
+    Fixture fixture;
+    ScopedHooks hooks;
+    std::string session_id;
+    std::string crash_op_id;
+    std::string captured_commit_key;
+    std::string crash_queue_bytes;
+    std::string crash_report_bytes;
+    fs::path session_dir;
+    fs::path memory_dir;
+    fs::path lifecycle_dir;
+
+    {
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Auto;
+        learn_opts.model = "extract-model";
+
+        auto session = (*runtime)->OpenSession(MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace));
+        REQUIRE(session.has_value());
+        session_id = (*session)->id();
+        session_dir = SessionDir(*session);
+        memory_dir = MemoryDir(*session);
+        lifecycle_dir = memory_dir.parent_path() / "lifecycle";
+
+        // Snapshot exact durable bytes right after Enqueue (queue_stage = queued) and before Commit.
+        hooks.SetAutoAdmission([&](const std::string& op_id, const std::string& commit_key) {
+            crash_op_id = op_id;
+            captured_commit_key = commit_key;
+            crash_queue_bytes =
+                ReadText(session_dir / "sdk-memory-learning-queue" / (commit_key + ".json"));
+            crash_report_bytes =
+                ReadText(session_dir / "sdk-memory-learnings" / (op_id + ".json"));
+        });
+
+        auto rc = (*session)->Submit("op-crash", DurablePrompt());
+        REQUIRE(rc.has_value());
+        REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+        const auto rep = WaitForLearning(*session, rc->operation_id);
+        REQUIRE(rep.stage == LearningStage::Completed);
+        hooks.SetAutoAdmission({});
+
+        REQUIRE((*session)->Close().has_value());
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    // Restore exact pre-commit crash point on disk (queued + Running report + no lifecycle/topic).
+    REQUIRE_FALSE(crash_op_id.empty());
+    REQUIRE_FALSE(captured_commit_key.empty());
+    WriteText(session_dir / "sdk-memory-learning-queue" / (captured_commit_key + ".json"), crash_queue_bytes);
+    WriteText(session_dir / "sdk-memory-learnings" / (crash_op_id + ".json"), crash_report_bytes);
+    {
+        std::error_code ec;
+        fs::remove_all(lubancode::platform::FileIoPath(lifecycle_dir / captured_commit_key), ec);
+        fs::remove_all(lubancode::platform::FileIoPath(memory_dir), ec);
+    }
+
+    // Reopen with same session ID: zero replay, honest Indeterminate + queued/not_started, Submit fenced.
+    {
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Auto;
+        learn_opts.model = "extract-model";
+
+        auto opts = MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace);
+        opts.resume_session_id = session_id;
+        auto resumed = (*runtime)->OpenSession(std::move(opts));
+        REQUIRE(resumed.has_value());
+        CHECK(main_trace->calls.load() == 0);
+        CHECK(learn_trace->calls.load() == 0);
+
+        const auto rep = (*resumed)->GetMemoryLearning(crash_op_id);
+        REQUIRE(rep.has_value());
+        CHECK(rep->stage == LearningStage::Indeterminate);
+        CHECK(rep->error_code == "sdk.memory_learning.interrupted");
+        REQUIRE(rep->auto_writes.size() == 1);
+        CHECK(rep->auto_writes[0].commit_key == captured_commit_key);
+        CHECK(rep->auto_writes[0].queue_stage == "queued");
+        CHECK(rep->auto_writes[0].worker_stage == "running");
+        CHECK(rep->auto_writes[0].commit_state == "not_started");
+        CHECK((*resumed)->ListMemoryCandidates()->empty());
+        CHECK_FALSE(fs::exists(memory_dir / "preferences" / "project-build-convention.md"));
+
+        const auto fenced = (*resumed)->Submit("op-after-crash", DurablePrompt());
+        REQUIRE_FALSE(fenced.has_value());
+        CHECK(fenced.error().code == "sdk.memory_learning.indeterminate");
+
+        REQUIRE((*resumed)->Close().has_value());
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    // Forged committed claim without lifecycle receipt is rejected on OpenSession.
+    {
+        auto forged_doc = Json::parse(ReadText(session_dir / "sdk-memory-learnings" / (crash_op_id + ".json")));
+        auto qdoc = Json::parse(crash_queue_bytes);
+        auto forged_attempt = qdoc.at("attempt");
+        forged_attempt["queueStage"] = "completed";
+        forged_attempt["admissionStage"] = "admitted";
+        forged_attempt["commitState"] = "committed";
+        forged_attempt["memoryId"] = "preference.project-build-convention";
+        forged_doc["stage"] = "completed";
+        forged_doc["autoWrites"] = Json::array({forged_attempt});
+        forged_doc.erase("sha256");
+        forged_doc["sha256"] = lubancode::platform::Sha256Hex(forged_doc.dump());
+        WriteText(session_dir / "sdk-memory-learnings" / (crash_op_id + ".json"), forged_doc.dump());
+
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Auto;
+        learn_opts.model = "extract-model";
+        auto opts = MakeBaseOptions(
+            fixture, std::make_shared<MainTrace>(), learn_opts, std::make_shared<LearningTrace>());
+        opts.resume_session_id = session_id;
+        const auto bad = (*runtime)->OpenSession(std::move(opts));
+        REQUIRE_FALSE(bad.has_value());
+
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    PrintPathMarker("auto-queued-crash-recovery");
+}
+
+TEST_CASE("SDK memory learning: Auto CAS conflict does not clobber existing topic and preserves conflict state") {
+    Fixture fixture;
+
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+    auto main_trace = std::make_shared<MainTrace>();
+    auto learn_trace = std::make_shared<LearningTrace>();
+    {
+        LearningTrace::Step step;
+        sdk::ModelReply r;
+        r.text = ValidExtractionPayload(
+            "Shared Slug",
+            "Auto attempt targeting an occupied topic file with different id",
+            "Clobber check content.");
+        r.usage = sdk::Usage{19, 11, 2, 0, 1};
+        r.usage_observation = FiveFieldObservation(*r.usage);
+        r.provider_response_id = "learn-cas-1";
+        step.reply = r;
+        learn_trace->script.push_back(step);
+    }
+
+    LearningOptions learn_opts;
+    learn_opts.mode = LearningMode::Auto;
+    learn_opts.model = "extract-model";
+
+    auto session = (*runtime)->OpenSession(MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace));
+    REQUIRE(session.has_value());
+
+    // Pre-seed topic file preferences/shared-slug.md with a distinct memory id so PrepareUpsert hits topic_conflict.
+    const fs::path mem_dir = MemoryDir(*session);
+    const fs::path existing_topic = mem_dir / "preferences" / "shared-slug.md";
+    {
+        mem::SaveRequest seed;
+        seed.kind = mem::MemoryKind::Preference;
+        seed.id = "preference.other-owner-id";
+        seed.title = "Other Owner";
+        seed.summary = "Existing occupied topic file";
+        seed.content = "Original existing body.";
+        seed.confidence = "user-stated";
+        seed.source_session = (*session)->id();
+        seed.scope.level = "project";
+        seed.scope.kind = "project";
+        const mem::ProjectCommitContext seed_gate{
+            fixture.root / "repo",
+            mem_dir,
+            mem_dir.parent_path() / "lifecycle",
+            (*session)->DescribeMemoryLearning()->workspace_key,
+            "seed-other-owner",
+            (*session)->id(),
+            "seed-other-owner",
+        };
+        REQUIRE(mem::CommitProjectUpsert(seed_gate, seed).state == mem::ProjectCommitState::Committed);
+        fs::rename(mem_dir / "preferences" / "other-owner-id.md", existing_topic);
+        REQUIRE(mem::RebuildMemoryIndex(mem_dir).has_value());
+    }
+    const std::string original_content = ReadText(existing_topic);
+
+    auto rc = (*session)->Submit("op-cas", DurablePrompt());
+    REQUIRE(rc.has_value());
+    REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+    const auto rep = WaitForLearning(*session, rc->operation_id);
+
+    REQUIRE(rep.stage == LearningStage::Failed);
+    CHECK(rep.error_code == "memory.commit.topic_conflict");
+    REQUIRE(rep.auto_writes.size() == 1);
+    CHECK(rep.auto_writes[0].queue_stage == "failed");
+    CHECK(rep.auto_writes[0].admission_stage == "admitted");
+    CHECK(rep.auto_writes[0].commit_state == "not_started");
+    CHECK(rep.auto_writes[0].error_code == "memory.commit.topic_conflict");
+    CHECK(ReadText(existing_topic) == original_content);
+    CHECK((*session)->ListMemoryCandidates()->empty());
+
+    REQUIRE((*session)->Close().has_value());
+    REQUIRE((*runtime)->Shutdown().has_value());
+
+    PrintPathMarker("auto-cas-conflict");
+}
+
+TEST_CASE("SDK memory learning: Auto exercises and validates all 7 ProjectCommitStage failures") {
+    struct StageCase {
+        const char* name;
+        bool expect_indeterminate;
+        bool seed_rename_source;
+    };
+    const std::array<StageCase, 7> cases{{
+        {"intent", false, false},
+        {"snapshot", false, false},
+        {"topic", false, false},
+        {"cleanup", true, true},
+        {"catalog", true, false},
+        {"index", true, false},
+        {"result", true, false},
+    }};
+
+    for (const auto& sc : cases) {
+        CAPTURE(sc.name);
+        Fixture fixture;
+        ScopedHooks hooks;
+        std::string session_id;
+
+        {
+            auto runtime = sdk::Runtime::Create(fixture.Roots());
+            REQUIRE(runtime.has_value());
+            auto main_trace = std::make_shared<MainTrace>();
+            auto learn_trace = std::make_shared<LearningTrace>();
+            {
+                LearningTrace::Step step;
+                sdk::ModelReply r;
+                r.text = ValidExtractionPayload(
+                    std::string("Stage Target ") + sc.name,
+                    std::string("Testing failure at stage ") + sc.name,
+                    "Stage test body.");
+                r.usage = sdk::Usage{19, 11, 2, 0, 1};
+                r.usage_observation = FiveFieldObservation(*r.usage);
+                r.provider_response_id = std::string("learn-stage-") + sc.name;
+                step.reply = r;
+                learn_trace->script.push_back(step);
+            }
+
+            LearningOptions learn_opts;
+            learn_opts.mode = LearningMode::Auto;
+            learn_opts.model = "extract-model";
+
+            auto session = (*runtime)->OpenSession(MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace));
+            REQUIRE(session.has_value());
+            session_id = (*session)->id();
+            const fs::path mem_dir = MemoryDir(*session);
+
+            if (sc.seed_rename_source) {
+                mem::SaveRequest seed;
+                seed.kind = mem::MemoryKind::Preference;
+                seed.id = "preference.stage-target-cleanup";
+                seed.title = "Legacy Cleanup Source";
+                seed.summary = "Old topic file to trigger cleanup unlink";
+                seed.content = "Old topic content.";
+                seed.confidence = "user-stated";
+                seed.source_session = session_id;
+                seed.scope.level = "project";
+                seed.scope.kind = "project";
+                const mem::ProjectCommitContext seed_gate{
+                    fixture.root / "repo",
+                    mem_dir,
+                    mem_dir.parent_path() / "lifecycle",
+                    (*session)->DescribeMemoryLearning()->workspace_key,
+                    "seed-cleanup-source",
+                    session_id,
+                    "seed-cleanup-source",
+                };
+                REQUIRE(mem::CommitProjectUpsert(seed_gate, seed).state == mem::ProjectCommitState::Committed);
+                fs::rename(
+                    mem_dir / "preferences" / "stage-target-cleanup.md",
+                    mem_dir / "preferences" / "legacy-cleanup-source.md");
+                REQUIRE(mem::RebuildMemoryIndex(mem_dir).has_value());
+            }
+
+            const std::string fail_stage = sc.name;
+            hooks.SetCommitWrite([fail_stage](
+                const fs::path& path,
+                std::string_view content,
+                lubancode::platform::WriteDurability durability)
+                    -> std::expected<lubancode::platform::AtomicWriteReceipt, lubancode::platform::AtomicWriteError> {
+                const auto fname = path.filename().string();
+                const auto parent = path.parent_path().filename().string();
+                bool match = false;
+                if (fail_stage == "intent") match = (fname == "intent.json");
+                else if (fail_stage == "snapshot") match = (fname == "topic.snapshot.md");
+                else if (fail_stage == "topic") {
+                    match = ((parent == "preferences" || parent == "facts" || parent == "feedback") &&
+                             path.extension() == ".md");
+                } else if (fail_stage == "cleanup") match = (fname == ".memory-commit-cleanup.json");
+                else if (fail_stage == "catalog") match = (fname == "catalog.json");
+                else if (fail_stage == "index") match = (fname == "index.md");
+                else if (fail_stage == "result") match = (fname == "result.json");
+                if (match) {
+                    return std::unexpected(lubancode::platform::AtomicWriteError{
+                        "atomic.replace_failed",
+                        "simulated failure at stage " + fail_stage,
+                        lubancode::platform::WriteOutcome::NotCommitted,
+                        lubancode::platform::WriteFailureKind::Permanent,
+                    });
+                }
+                return lubancode::platform::AtomicWriteFile(path, content, durability);
+            });
+
+            auto rc = (*session)->Submit(std::string("op-stage-") + sc.name, DurablePrompt());
+            REQUIRE(rc.has_value());
+            REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+            const auto rep = WaitForLearning(*session, rc->operation_id);
+            hooks.SetCommitWrite({});
+
+            REQUIRE(rep.auto_writes.size() == 1);
+            if (sc.expect_indeterminate) {
+                CHECK(rep.stage == LearningStage::Indeterminate);
+                CHECK(rep.auto_writes[0].commit_state == "indeterminate");
+                CHECK(rep.auto_writes[0].queue_stage == "indeterminate");
+                const auto fenced = (*session)->Submit("op-after-indet", "好的");
+                REQUIRE_FALSE(fenced.has_value());
+                CHECK(fenced.error().code == "sdk.memory_learning.indeterminate");
+            } else {
+                CHECK(rep.stage == LearningStage::Failed);
+                CHECK(rep.auto_writes[0].commit_state == "not_started");
+                CHECK(rep.auto_writes[0].queue_stage == "failed");
+            }
+            CHECK((*session)->ListMemoryCandidates()->empty());
+
+            REQUIRE((*session)->Close().has_value());
+            REQUIRE((*runtime)->Shutdown().has_value());
+        }
+
+        // Same-ID recovery preserves outcome across restart without replay.
+        {
+            auto runtime = sdk::Runtime::Create(fixture.Roots());
+            REQUIRE(runtime.has_value());
+            auto main_trace = std::make_shared<MainTrace>();
+            auto learn_trace = std::make_shared<LearningTrace>();
+            LearningOptions learn_opts;
+            learn_opts.mode = LearningMode::Auto;
+            learn_opts.model = "extract-model";
+            auto opts = MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace);
+            opts.resume_session_id = session_id;
+            auto resumed = (*runtime)->OpenSession(std::move(opts));
+            REQUIRE(resumed.has_value());
+            CHECK(learn_trace->calls.load() == 0);
+
+            if (sc.expect_indeterminate) {
+                const auto fenced = (*resumed)->Submit("op-after-restart", "好的");
+                REQUIRE_FALSE(fenced.has_value());
+                CHECK(fenced.error().code == "sdk.memory_learning.indeterminate");
+            }
+            REQUIRE((*resumed)->Close().has_value());
+            REQUIRE((*runtime)->Shutdown().has_value());
+        }
+    }
+
+    PrintPathMarker("auto-all-stage-failures");
+}
+
+TEST_CASE("SDK memory learning: duplicate commit key confirms without rewriting topic") {
+    Fixture fixture;
+    ScopedHooks hooks;
+
+    auto runtime = sdk::Runtime::Create(fixture.Roots());
+    REQUIRE(runtime.has_value());
+    auto main_trace = std::make_shared<MainTrace>();
+    auto learn_trace = std::make_shared<LearningTrace>();
+
+    LearningOptions learn_opts;
+    learn_opts.mode = LearningMode::Auto;
+    learn_opts.model = "extract-model";
+
+    auto session = (*runtime)->OpenSession(MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace));
+    REQUIRE(session.has_value());
+    const fs::path sdir = SessionDir(*session);
+    const fs::path mem_dir = MemoryDir(*session);
+    const fs::path lifecycle_dir = mem_dir.parent_path() / "lifecycle";
+    const std::string wk = (*session)->DescribeMemoryLearning()->workspace_key;
+    const std::string sid = (*session)->id();
+
+    // Before committer runs, pre-commit the identical commit_key and saveRequest directly so
+    // the worker hits an already-committed duplicate commit key without rewriting the topic.
+    bool precommitted = false;
+    hooks.SetAutoAdmission([&](const std::string&, const std::string& commit_key) {
+        if (!precommitted) {
+            precommitted = true;
+            const auto qdoc = Json::parse(ReadText(sdir / "sdk-memory-learning-queue" / (commit_key + ".json")));
+            auto parsed_req = mem::store::ParseUpsertJob(qdoc.at("saveRequest"), true);
+            REQUIRE(parsed_req.has_value());
+            const std::string source_ref = qdoc.at("attempt").at("sourceEventRef").get<std::string>();
+            const mem::ProjectCommitContext gate{
+                fixture.root / "repo", mem_dir, lifecycle_dir, wk, commit_key, sid, source_ref};
+            const auto pre = mem::CommitProjectUpsert(gate, *parsed_req);
+            REQUIRE(pre.state == mem::ProjectCommitState::Committed);
+        }
+    });
+
+    auto rc = (*session)->Submit("op-dup", DurablePrompt());
+    REQUIRE(rc.has_value());
+    REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+    const auto rep = WaitForLearning(*session, rc->operation_id);
+    hooks.SetAutoAdmission({});
+    CHECK(precommitted);
+
+    REQUIRE(rep.stage == LearningStage::Completed);
+    REQUIRE(rep.auto_writes.size() == 1);
+    CHECK(rep.auto_writes[0].commit_state == "committed");
+    CHECK(rep.auto_writes[0].queue_stage == "completed");
+    CHECK(rep.auto_writes[0].duplicate);
+    CHECK(rep.auto_writes[0].stages.back() == sdk::memory::v1::SaveStageReceipt{"result", "durable"});
+
+    // Duplicate Submit key also returns duplicate receipt without re-running learning.
+    auto dup_submit = (*session)->Submit("op-dup", DurablePrompt());
+    REQUIRE(dup_submit.has_value());
+    CHECK(dup_submit->duplicate);
+    CHECK(learn_trace->calls.load() == 1);
+
+    REQUIRE((*session)->Close().has_value());
+    REQUIRE((*runtime)->Shutdown().has_value());
+    PrintPathMarker("auto-duplicate-commit-key");
+}
+
+TEST_CASE("SDK memory learning: Auto handles queued and mid-commit Close races without blocking queries") {
+    // 1) Queued-before-commit Close() cancellation keeps queue_stage=queued, worker_stage=cancelled, no topic write.
+    {
+        Fixture fixture;
+        std::mutex sync_mu;
+        std::condition_variable sync_cv;
+        bool queued_reached = false;
+        bool close_dispatched = false;
+        ScopedHooks hooks;
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Auto;
+        learn_opts.model = "extract-model";
+
+        auto session = (*runtime)->OpenSession(MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace));
+        REQUIRE(session.has_value());
+        std::shared_ptr<sdk::Session> raw_session = *session;
+        const fs::path mem_dir = MemoryDir(*session);
+
+        hooks.SetAutoAdmission([&](const std::string&, const std::string&) {
+            {
+                std::lock_guard lock(sync_mu);
+                queued_reached = true;
+            }
+            sync_cv.notify_all();
+            {
+                std::unique_lock lock(sync_mu);
+                sync_cv.wait_for(lock, 15s, [&] { return close_dispatched; });
+            }
+            while (true) {
+                auto probe = raw_session->Submit("probe-closing-1", "x");
+                if (!probe && probe.error().code == "sdk.session.closed") break;
+                std::this_thread::sleep_for(5ms);
+            }
+            std::this_thread::sleep_for(50ms);
+        });
+
+        auto rc = (*session)->Submit("op-cancel-queued", DurablePrompt());
+        REQUIRE(rc.has_value());
+        REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+
+        {
+            std::unique_lock lock(sync_mu);
+            REQUIRE(sync_cv.wait_for(lock, 15s, [&] { return queued_reached; }));
+        }
+
+        sdk::Result<void> close_result;
+        std::thread closer([&] {
+            {
+                std::lock_guard lock(sync_mu);
+                close_dispatched = true;
+            }
+            sync_cv.notify_all();
+            close_result = raw_session->Close();
+        });
+        closer.join();
+        hooks.SetAutoAdmission({});
+        REQUIRE(close_result.has_value());
+
+        const auto post_close = (*session)->GetMemoryLearning(rc->operation_id);
+        REQUIRE(post_close.has_value());
+        CHECK(post_close->stage == LearningStage::Cancelled);
+        REQUIRE(post_close->auto_writes.size() == 1);
+        CHECK(post_close->auto_writes[0].queue_stage == "queued");
+        CHECK(post_close->auto_writes[0].worker_stage == "cancelled");
+        CHECK(post_close->auto_writes[0].commit_state == "not_started");
+        CHECK_FALSE(fs::exists(mem_dir / "preferences" / "project-build-convention.md"));
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    // 2) Concurrent Close() interrupting mid-commit after Snapshot before Topic cleanly stops before Topic.
+    {
+        Fixture fixture;
+        std::mutex sync_mu;
+        std::condition_variable sync_cv;
+        bool snapshot_reached = false;
+        bool close_dispatched = false;
+        ScopedHooks hooks;
+
+        auto runtime = sdk::Runtime::Create(fixture.Roots());
+        REQUIRE(runtime.has_value());
+        auto main_trace = std::make_shared<MainTrace>();
+        auto learn_trace = std::make_shared<LearningTrace>();
+        LearningOptions learn_opts;
+        learn_opts.mode = LearningMode::Auto;
+        learn_opts.model = "extract-model";
+
+        auto session = (*runtime)->OpenSession(MakeBaseOptions(fixture, main_trace, learn_opts, learn_trace));
+        REQUIRE(session.has_value());
+        std::shared_ptr<sdk::Session> raw_session = *session;
+
+        hooks.SetCommitWrite([&](
+            const fs::path& path,
+            std::string_view content,
+            lubancode::platform::WriteDurability durability) {
+            if (path.filename() == "topic.snapshot.md") {
+                {
+                    std::lock_guard lock(sync_mu);
+                    snapshot_reached = true;
+                }
+                sync_cv.notify_all();
+                {
+                    std::unique_lock lock(sync_mu);
+                    sync_cv.wait_for(lock, 15s, [&] { return close_dispatched; });
+                }
+                while (true) {
+                    auto probe = raw_session->Submit("probe-closing-2", "x");
+                    if (!probe && probe.error().code == "sdk.session.closed") break;
+                    std::this_thread::sleep_for(5ms);
+                }
+                std::this_thread::sleep_for(50ms);
+            }
+            return lubancode::platform::AtomicWriteFile(path, content, durability);
+        });
+
+        auto rc = (*session)->Submit("op-close-midcommit", DurablePrompt());
+        REQUIRE(rc.has_value());
+        REQUIRE((*session)->WaitResult(rc->operation_id, 15s)->state == sdk::OperationState::Succeeded);
+
+        {
+            std::unique_lock lock(sync_mu);
+            REQUIRE(sync_cv.wait_for(lock, 15s, [&] { return snapshot_reached; }));
+        }
+
+        sdk::Result<void> close_result;
+        std::thread closer([&] {
+            {
+                std::lock_guard lock(sync_mu);
+                close_dispatched = true;
+            }
+            sync_cv.notify_all();
+            close_result = raw_session->Close();
+        });
+        closer.join();
+        hooks.SetCommitWrite({});
+        REQUIRE(close_result.has_value());
+
+        const auto post_close = (*session)->GetMemoryLearning(rc->operation_id);
+        REQUIRE(post_close.has_value());
+        CHECK(post_close->stage == LearningStage::Cancelled);
+        REQUIRE(post_close->auto_writes.size() == 1);
+        CHECK(post_close->auto_writes[0].commit_state == "not_started");
+        CHECK(post_close->auto_writes[0].queue_stage == "queued");
+        CHECK(post_close->auto_writes[0].worker_stage == "cancelled");
+        CHECK_FALSE(fs::exists(MemoryDir(*session) / "preferences" / "project-build-convention.md"));
+
+        REQUIRE((*runtime)->Shutdown().has_value());
+    }
+
+    PrintPathMarker("auto-close-races");
 }

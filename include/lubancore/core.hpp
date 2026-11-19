@@ -187,11 +187,11 @@ struct SessionOptions {
     // Requires explicit builtin_tools selection of web_search and a credential.
     // Fresh on every opening, including resume; never saved in session plans.
     std::optional<web_search::v1::Options> web_search;
-    // Automatic memory learning (Slice 1 supports Off and Review; Auto is
-    // explicitly rejected). Omitted defaults to Off on new Sessions, and inherits
-    // the frozen plan on resume; explicit resume options must match. When
-    // Review is active, provide exclusively one of memory_learning_backend or
-    // memory_learning_connection (never borrows the main Session Backend).
+    // Automatic memory learning (Off, Review, or Auto). Omitted defaults to Off
+    // on new Sessions, and inherits the frozen plan on resume; explicit resume
+    // options must match. When Review or Auto is active, provide exclusively one
+    // of memory_learning_backend or memory_learning_connection (never borrows
+    // the main Session Backend).
     std::optional<memory::v1::LearningOptions> memory_learning;
     std::unique_ptr<Backend> memory_learning_backend;
     std::optional<Connection> memory_learning_connection;
@@ -301,6 +301,10 @@ public:
     Result<memory::v1::CandidateAcceptReport> AcceptMemoryCandidate(const std::string& candidate_id);
     // Pure owned accept receipts for this Session, including after Close and OpenSession recovery.
     Result<std::vector<memory::v1::CandidateAcceptReport>> GetAcceptedMemoryCandidates() const;
+    // Revokes live Auto memory writeback admission for this Session without
+    // modifying the frozen opening plan; queued-before-commit items re-checked
+    // after revocation record admission_stage = "revoked" and never commit.
+    Result<void> RevokeAutoMemoryLearning(const std::string& reason = {});
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
     // Cooperative custom tools/backends MUST return after cancellation; Close waits
     // for them and never destroys live borrowed state or pretends a timeout stopped it.
