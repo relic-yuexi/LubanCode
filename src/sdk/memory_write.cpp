@@ -27,6 +27,12 @@ using Report = memory::v1::SaveReport;
 constexpr auto kPlanFile = "sdk-memory-write-plan.json";
 constexpr std::size_t kPlanCap = 4096, kReportCap = 524288, kTotalCap = 67108864, kCallCap = 64;
 Error Fail(std::string code, std::string message = {}) { return {std::move(code), std::move(message)}; }
+bool JsonMemberStrEq(const Json& object, const char* key, const char* expected) noexcept {
+    if (!object.is_object()) return false;
+    for (const auto& [name, value] : object.get_ref<const Json::object_t&>())
+        if (name == key) return value.is_string() && value.get_ref<const std::string&>() == expected;
+    return false;
+}
 const char* WriteOutcomeName(lubancode::platform::WriteOutcome outcome) {
     switch (outcome) {
     case lubancode::platform::WriteOutcome::NotCommitted: return "NotCommitted";
@@ -400,7 +406,7 @@ Result<void> SessionMemoryWrite::ValidateReports(const std::string& operation, c
         for (const auto& event : source.events) {
             if (event.kind == v3::EventKindV3::ToolExecutionStarted && event.action_id == r.action_id &&
                 event.turn_id == turn && event.payload.value("attempt", Json()) == r.attempt &&
-                event.payload.value("toolName", Json()) == "memory_save") {
+                JsonMemberStrEq(event.payload, "toolName", "memory_save")) {
                 if (started) return bad("duplicate start");
                 started = &event;
             }
@@ -468,8 +474,8 @@ Result<void> SessionMemoryWrite::ValidateReports(const std::string& operation, c
             for (const auto& message : source.messages) {
                 if (message.session_id != source.session_id || message.run_id != started->run_id ||
                     message.action_id != r.action_id || message.turn_id != turn || !message.result_selection_ref ||
-                    message.message.value("role", Json()) != "tool" ||
-                    message.message.value("tool_call_id", Json()) != r.action_id) continue;
+                    !JsonMemberStrEq(message.message, "role", "tool") ||
+                    !JsonMemberStrEq(message.message, "tool_call_id", r.action_id.c_str())) continue;
                 const auto* selected = source.FindEvent(*message.result_selection_ref);
                 if (!selected || selected->kind != v3::EventKindV3::ToolResultSelected || selected->action_id != r.action_id ||
                     selected->session_id != source.session_id || selected->run_id != started->run_id ||

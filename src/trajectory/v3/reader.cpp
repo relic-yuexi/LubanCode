@@ -21,8 +21,8 @@ namespace lubancode::trajectory::v3 {
 
 namespace {
 
-// 逐行读原始文本(与 writer.cpp ReadRawLines 同规则;验卷已拒截断尾)。
-std::optional<std::vector<std::string>> ReadRawLines(const std::filesystem::path& path) {
+// 逐行读原始文本(与 writer.cpp ReadRawLines 同规则;检测崩溃截断尾)。
+std::optional<std::vector<std::string>> ReadRawLines(const std::filesystem::path& path, bool* truncated_tail) {
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
         return std::nullopt;
@@ -33,6 +33,7 @@ std::optional<std::vector<std::string>> ReadRawLines(const std::filesystem::path
     while (start < data.size()) {
         std::size_t end = data.find('\n', start);
         if (end == std::string::npos) {
+            *truncated_tail = true;
             break;
         }
         if (end > start) {
@@ -164,44 +165,33 @@ std::optional<V3Ledger::Entry> V3Ledger::LastEntry() const {
 
 namespace {
 
-std::expected<V3Ledger, std::string> ReadVerifiedV3Lines(
-    const std::filesystem::path& jsonl, const std::vector<std::string>& raw,
-    V3VerifyReport report, bool ledger_only = false) {
-    if (!report.ok) {
-        return std::unexpected("v3reader.verify_failed: " + report.error_code + " " + report.message);
+std::expected<V3Ledger, std::string> ReadVerifiedV3Parsed(
+    const std::filesystem::path& jsonl, VerifiedV3ParsedLines parsed, bool ledger_only = false) {
+    if (!parsed.report.ok) {
+        return std::unexpected("v3reader.verify_failed: " + parsed.report.error_code + " " + parsed.report.message);
     }
     V3Ledger ledger;
     ledger.path = jsonl;
-    ledger.lines = report.lines;
-    ledger.context = std::move(report.context);
-    std::string error_code, error_message;
-    for (const auto& line : raw) {
-        auto json = nlohmann::json::parse(line, nullptr, false);
-        if (json.is_discarded()) {
-            return std::unexpected("v3reader.bad_json");
-        }
-        if (ledger.session_id.empty()) {
-            ledger.session_id = json.value("sessionId", "");
-            ledger.run_id = json.value("runId", "");
-        }
-        if (json.at("type").get<std::string>() == "message") {
-            auto parsed = MessageLine::FromJsonStrict(json, &error_code, &error_message);
-            if (!parsed.has_value()) {
-                return std::unexpected("v3reader.parse_failed: " + error_code + " " + error_message);
-            }
-            V3Ledger::Entry entry{parsed->seq, true, ledger.messages.size()};
-            ledger.message_index.emplace(parsed->message_id, ledger.messages.size());
-            ledger.messages.push_back(std::move(*parsed));
-            ledger.timeline.push_back(entry);
+    ledger.lines = parsed.report.lines;
+    ledger.context = std::move(parsed.report.context);
+    ledger.session_id = std::move(parsed.session_id);
+    ledger.run_id = std::move(parsed.run_id);
+    ledger.messages = std::move(parsed.messages);
+    ledger.events = std::move(parsed.events);
+    ledger.timeline.reserve(parsed.is_message.size());
+    std::size_t msg_idx = 0;
+    std::size_t evt_idx = 0;
+    for (const bool is_msg : parsed.is_message) {
+        if (is_msg) {
+            const auto& msg = ledger.messages[msg_idx];
+            ledger.message_index.emplace(msg.message_id, msg_idx);
+            ledger.timeline.push_back(V3Ledger::Entry{msg.seq, true, msg_idx});
+            ++msg_idx;
         } else {
-            auto parsed = EventLine::FromJsonStrict(json, &error_code, &error_message);
-            if (!parsed.has_value()) {
-                return std::unexpected("v3reader.parse_failed: " + error_code + " " + error_message);
-            }
-            V3Ledger::Entry entry{parsed->seq, false, ledger.events.size()};
-            ledger.event_index.emplace(parsed->event_id, ledger.events.size());
-            ledger.events.push_back(std::move(*parsed));
-            ledger.timeline.push_back(entry);
+            const auto& evt = ledger.events[evt_idx];
+            ledger.event_index.emplace(evt.event_id, evt_idx);
+            ledger.timeline.push_back(V3Ledger::Entry{evt.seq, false, evt_idx});
+            ++evt_idx;
         }
     }
     // 每版链历史:重放提交事件,revision 前进即快照(单次请求输入回放对表)。
@@ -247,17 +237,20 @@ std::expected<V3Ledger, std::string> ReadVerifiedV3Lines(
 } // namespace
 
 std::expected<V3Ledger, std::string> ReadV3Ledger(const std::filesystem::path& jsonl) {
-    auto report = VerifyV3File(jsonl);
-    if (!report.ok)
-        return std::unexpected("v3reader.verify_failed: " + report.error_code + " " + report.message);
-    auto raw = ReadRawLines(jsonl);
-    if (!raw) return std::unexpected("v3reader.open_failed: " + jsonl.string());
-    return ReadVerifiedV3Lines(jsonl, *raw, std::move(report));
+    bool truncated = false;
+    auto raw = ReadRawLines(jsonl, &truncated);
+    if (!raw) {
+        return std::unexpected("v3reader.verify_failed: v3writer.open_failed v3 卷读不开");
+    }
+    if (truncated) {
+        return std::unexpected("v3reader.verify_failed: v3writer.truncated_tail 尾行缺换行(崩溃截断);删尾修复归 §4.60,写入侧不偷偷裁");
+    }
+    return ReadVerifiedV3Parsed(jsonl, VerifyAndParseV3Lines(*raw), false);
 }
 
 std::expected<V3Ledger, std::string> ReadV3LedgerOwned(
     const std::filesystem::path& jsonl, const std::vector<std::string>& lines) {
-    return ReadVerifiedV3Lines(jsonl, lines, VerifyV3Lines(lines), true);
+    return ReadVerifiedV3Parsed(jsonl, VerifyAndParseV3Lines(lines), true);
 }
 
 std::expected<V3Ledger, std::string> ReadV3LedgerCaptured(
@@ -311,7 +304,7 @@ std::expected<V3Ledger, std::string> ReadV3LedgerBounded(
         }
         begin = end + 1;
     }
-    return ReadVerifiedV3Lines(jsonl, lines, VerifyV3Lines(lines), true);
+    return ReadVerifiedV3Parsed(jsonl, VerifyAndParseV3Lines(lines), true);
 }
 
 // ---------------------------------------------------------------------------

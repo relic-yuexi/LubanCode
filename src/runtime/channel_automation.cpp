@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "channel/qq/qq_proto.hpp"  // ParseLooseInt64(模型数值字段宽松解析)
+#include "gateway/heartbeat.hpp"
 #include "runtime/time_context.hpp"
 
 namespace lubancode::runtime {
@@ -29,14 +30,22 @@ constexpr std::int64_t kMaxOnceLeadMs = 3650LL * 24 * 3600 * 1000;
 // job 执行正文的自包含包装:隔离场没有聊天史,任务规格必须自带全部上下文。
 std::string ComposeJobPrompt(const std::string& description, const std::string& channel_id,
                              const std::string& account_id, const std::string& conversation_id,
-                             const std::string& sender_id) {
+                             const std::string& sender_id, bool notify_on_change) {
     std::string prompt = "这是用户经 " + channel_id + "/" + account_id + " 会话 " + conversation_id +
                          " 设置的定时任务(创建者 " + sender_id + ")。\n" +
-                         "任务描述:" + description +
-                         "\n"
-                         "到点执行:按任务描述完成工作或组织提醒内容,输出直接发给该用户的最终正文"
-                         "(简短明确的中文;不要客套,不要调用任何投递工具——宿主会把你的最终回复"
-                         "投回原会话)。";
+                         "任务描述:" + description + "\n";
+    if (notify_on_change) {
+        prompt +=
+            "到点巡检:按任务描述检查状态或在授权范围内执行必要核查。"
+            "若一切正常、无新增异常且无需打扰用户,只输出 HEARTBEAT_OK(不要附带任何其他文字);"
+            "若发现需要通知用户的变化或异常,输出直接发给该用户的简短明确中文汇报"
+            "(不要调用任何投递工具——宿主会把非 HEARTBEAT_OK 的回复自动投回原会话)。";
+    } else {
+        prompt +=
+            "到点执行:按任务描述完成工作或组织提醒内容,输出直接发给该用户的最终正文"
+            "(简短明确的中文;不要客套,不要调用任何投递工具——宿主会把你的最终回复"
+            "投回原会话)。";
+    }
     return prompt;
 }
 
@@ -124,20 +133,62 @@ ChannelAutomationBridge::ToolOutcome ChannelAutomationBridge::CreateReminder(
         outcome.error = "description 超长(上限 4000 字节),请精简任务描述。";
         return outcome;
     }
-    // 三种时间规格互斥；相对时间由宿主计算。
+    // 四种时间规格互斥；相对时间由宿主计算。
     const bool has_at = input.contains("at_ms");
     const bool has_delay = input.contains("delay_seconds");
     const bool has_cron = input.contains("cron");
-    if (int(has_at) + int(has_delay) + int(has_cron) != 1) {
+    const bool has_interval = input.contains("interval_seconds");
+    if (int(has_at) + int(has_delay) + int(has_cron) + int(has_interval) != 1) {
         outcome.error_code = "channel_job.bad_input";
-        outcome.error = "时间规格须且只须给一项:delay_seconds(几秒后)、at_ms(UTC 毫秒)或 cron(周期)。"
-                        "缺时间或歧义时先向用户问清,不要猜。";
+        outcome.error =
+            "时间规格须且只须给一项:delay_seconds(几秒后)、at_ms(UTC 毫秒)、"
+            "interval_seconds(固定周期秒数)或 cron(周期)。缺时间或歧义时先向用户问清,不要猜。";
         return outcome;
     }
     if (has_cron && (!input["cron"].is_string() || input["cron"].get<std::string>().empty())) {
         outcome.error_code = "channel_job.bad_input";
         outcome.error = "cron 须为非空五字段表达式。";
         return outcome;
+    }
+    bool notify_on_change = false;
+    if (input.contains("notify_on_change")) {
+        if (!input["notify_on_change"].is_boolean()) {
+            outcome.error_code = "channel_job.bad_input";
+            outcome.error = "notify_on_change 须为布尔值。";
+            return outcome;
+        }
+        notify_on_change = input["notify_on_change"].get<bool>();
+    } else if (input.contains("heartbeat")) {
+        if (!input["heartbeat"].is_boolean()) {
+            outcome.error_code = "channel_job.bad_input";
+            outcome.error = "heartbeat 须为布尔值。";
+            return outcome;
+        }
+        notify_on_change = input["heartbeat"].get<bool>();
+    }
+    std::vector<std::string> watch_paths;
+    if (input.contains("watch_paths")) {
+        if (!input["watch_paths"].is_array()) {
+            outcome.error_code = "channel_job.bad_input";
+            outcome.error = "watch_paths 须为工作区内相对路径字符串数组。";
+            return outcome;
+        }
+        std::vector<std::string> raw_paths;
+        raw_paths.reserve(input["watch_paths"].size());
+        for (const auto& elem : input["watch_paths"]) {
+            if (!elem.is_string()) {
+                outcome.error_code = "channel_job.bad_input";
+                outcome.error = "watch_paths 数组元素须全为字符串。";
+                return outcome;
+            }
+            raw_paths.push_back(elem.get<std::string>());
+        }
+        const std::string watch_err = gateway::ValidateWatchPaths(raw_paths, &watch_paths);
+        if (!watch_err.empty()) {
+            outcome.error_code = "channel_job.bad_input";
+            outcome.error = watch_err;
+            return outcome;
+        }
     }
     std::string timezone = "UTC";
     if (input.contains("timezone") && input["timezone"].is_string() &&
@@ -146,8 +197,10 @@ ChannelAutomationBridge::ToolOutcome ChannelAutomationBridge::CreateReminder(
     }
     gateway::AutomationStore::JobSpec spec;
     spec.prompt = ComposeJobPrompt(description, ctx->channel_id, ctx->account_id,
-                                   ctx->conversation_id, ctx->sender_id);
+                                   ctx->conversation_id, ctx->sender_id, notify_on_change);
     spec.timezone = timezone;
+    spec.notify_on_change = notify_on_change;
+    spec.watch_paths = watch_paths;
     spec.owner_channel = ctx->channel_id;
     spec.owner_account = ctx->account_id;
     spec.owner_sender = ctx->sender_id;
@@ -188,6 +241,15 @@ ChannelAutomationBridge::ToolOutcome ChannelAutomationBridge::CreateReminder(
         }
         spec.kind = gateway::ScheduleKind::Once;
         spec.due_at_ms = *at_ms;
+    } else if (has_interval) {
+        const auto seconds = channel::qq::ParseLooseInt64(input["interval_seconds"]);
+        if (!seconds || *seconds <= 0 || *seconds > kMaxOnceLeadMs / 1000) {
+            outcome.error_code = "channel_job.bad_input";
+            outcome.error = "interval_seconds 须为正整数且不超过十年。";
+            return outcome;
+        }
+        spec.kind = gateway::ScheduleKind::Interval;
+        spec.interval_seconds = *seconds;
     } else {
         spec.kind = gateway::ScheduleKind::Cron;
         spec.cron_expr = input["cron"].get<std::string>();
@@ -210,7 +272,14 @@ ChannelAutomationBridge::ToolOutcome ChannelAutomationBridge::CreateReminder(
     payload["jobId"] = receipt.job_id;
     payload["kind"] = gateway::ToString(spec.kind);
     payload["timezone"] = timezone;
+    payload["notifyOnChange"] = spec.notify_on_change;
     payload["duplicate"] = receipt.duplicate;
+    if (spec.kind == gateway::ScheduleKind::Interval) {
+        payload["intervalSeconds"] = spec.interval_seconds;
+    }
+    if (!spec.watch_paths.empty()) {
+        payload["watchPaths"] = spec.watch_paths;
+    }
     gateway::ScheduleSpec schedule;
     schedule.kind = spec.kind;
     schedule.due_at_ms = spec.due_at_ms;
@@ -257,6 +326,13 @@ ChannelAutomationBridge::ToolOutcome ChannelAutomationBridge::ListReminders() {
         item["state"] = gateway::ToString(job.state);
         item["kind"] = gateway::ToString(job.schedule_kind);
         item["timezone"] = job.timezone;
+        item["notifyOnChange"] = job.notify_on_change;
+        if (job.schedule_kind == gateway::ScheduleKind::Interval) {
+            item["intervalSeconds"] = job.interval_seconds;
+        }
+        if (!job.watch_paths.empty()) {
+            item["watchPaths"] = job.watch_paths;
+        }
         item["revision"] = job.revision;
         item["prompt"] = job.prompt;
         if (job.state == gateway::AutomationJobState::Active) {
@@ -374,11 +450,12 @@ public:
         : bridge_(std::move(bridge)) {}
     std::string name() const override { return kChannelCreateReminderTool; }
     std::string description() const override {
-        return "为当前聊天用户设置一笔定时任务/提醒。几分钟后等相对时间必须用 delay_seconds"
-               "（五分钟=300），宿主从来信时刻计算，不要猜测或试探 at_ms。绝对时间"
-               "(含时区)折算成 at_ms(单次,UTC 毫秒)或五字段 cron(周期),并显式传 timezone"
-               "(IANA 名,如 Asia/Shanghai)。时间已过或含糊时先问用户,不要猜。创建成功回执带"
-               " jobId 与下次触发时间,向用户复述完整日期、时间、时区。";
+        return "为当前聊天用户设置一笔定时任务、提醒或主动巡检。几分钟后等单次相对时间必须用 "
+               "delay_seconds（五分钟=300）；每隔固定秒数的周期巡检用 interval_seconds"
+               "（如每半小时=1800）；绝对时间(含时区)折算成 at_ms(单次,UTC 毫秒)或五字段 cron"
+               "(周期),并显式传 timezone(IANA 名,如 Asia/Shanghai)。若用户希望"
+               "\"平时静默、有变化或异常才通知\",传 notify_on_change=true,可选传 watch_paths"
+               "(工作区内相对路径数组,文件未变时零模型消耗跳过)。时间已过或含糊时先问用户,不要猜。";
     }
     nlohmann::json input_schema() const override {
         return nlohmann::json::object({
@@ -386,17 +463,27 @@ public:
             {"properties",
              nlohmann::json::object({
                  {"description", nlohmann::json::object({{"type", "string"},
-                                                          {"description", "任务/提醒内容"}})},
+                                                          {"description", "任务/提醒/巡检内容"}})},
                  {"at_ms", nlohmann::json::object({{"type", "integer"},
                                                    {"description", "单次触发时刻(UTC 毫秒)"}})},
                  {"delay_seconds", nlohmann::json::object({{"type", "integer"},
                      {"minimum", 1}, {"maximum", kMaxOnceLeadMs / 1000},
-                     {"description", "从本条消息接收时刻起延时秒数；五分钟后传 300。与 at_ms、cron 三选一"}})},
+                     {"description", "单次延时秒数(五分钟后传 300);与 at_ms/interval_seconds/cron 四选一"}})},
+                 {"interval_seconds", nlohmann::json::object({{"type", "integer"},
+                     {"minimum", 1}, {"maximum", kMaxOnceLeadMs / 1000},
+                     {"description", "固定周期秒数(如每 30 分钟巡检传 1800);与 at_ms/delay_seconds/cron 四选一"}})},
                  {"cron",
                   nlohmann::json::object({{"type", "string"},
                                           {"description", "周期表达式(分 时 日 月 周,五字段)"}})},
                  {"timezone",
                   nlohmann::json::object({{"type", "string"}, {"description", "IANA 时区名"}})},
+                 {"notify_on_change",
+                  nlohmann::json::object({{"type", "boolean"},
+                                          {"description", "主动巡检模式:无事发生(HEARTBEAT_OK 或未变化)时不发消息打扰用户"}})},
+                 {"watch_paths",
+                  nlohmann::json::object({{"type", "array"},
+                                          {"items", nlohmann::json::object({{"type", "string"}})},
+                                          {"description", "工作区内相对路径列表(最多 16 项):目标文件/目录未变化时零 Token 短路跳过"}})},
              })},
             {"required", nlohmann::json::array({"description"})},
         });

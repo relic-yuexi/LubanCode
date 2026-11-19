@@ -21,6 +21,12 @@ using Json = nlohmann::json;
 constexpr std::size_t kPlanBytes = 4 * 1024 * 1024;
 constexpr const char* kPlanFile = "sdk-extension-plan.json";
 Error Invalid(std::string message) { return {"sdk.action.plan_invalid", std::move(message)}; }
+bool JsonMemberStrEq(const Json& object, const char* key, const char* expected) noexcept {
+    if (!object.is_object()) return false;
+    for (const auto& [name, value] : object.get_ref<const Json::object_t&>())
+        if (name == key) return value.is_string() && value.get_ref<const std::string&>() == expected;
+    return false;
+}
 
 Result<void> OwnedDirectory(const fs::path& root, const fs::path& directory) {
     auto r = root.begin(), p = directory.begin();
@@ -128,7 +134,7 @@ Result<void> SessionActionOpening::CheckBinding(const v3::V3Ledger& ledger) cons
     const Json expected{{"schemaVersion", 1}, {"sha256", plan_hash_}};
     const auto matches = [&](const v3::MessageLine* message) {
         const auto* bound = message ? Binding(*message) : nullptr;
-        return message && message->session_id == resume_id_ && message->message.value("role", Json()) == "system" && bound && *bound == expected;
+        return message && message->session_id == resume_id_ && JsonMemberStrEq(message->message, "role", "system") && bound && *bound == expected;
     };
     if (ledger.session_id != resume_id_ || ledger.messages.empty() || ledger.messages.front().seq != 1 || !matches(&ledger.messages.front()))
         return std::unexpected(Invalid("initial system has no matching owned Action binding"));
