@@ -742,6 +742,7 @@ add_library(lubancode_engine STATIC
   src/agent/sample_model.cpp
   src/agent/memory_extraction.cpp
   src/agent/memory_learning_gates.cpp
+  src/agent/memory_learning_owner.cpp
   src/agent/prefix.cpp
   src/agent/compact.cpp
   src/agent/context_budget.cpp
