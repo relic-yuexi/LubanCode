@@ -28,6 +28,12 @@ constexpr std::size_t kMaxPlan = 256 * 1024;
 constexpr const char* kPlanFile = "sdk-lua-plan.json";
 
 Error Fail(std::string code, std::string text = {}) { return {std::move(code), std::move(text)}; }
+bool JsonMemberStrEq(const Json& object, const char* key, const char* expected) noexcept {
+    if (!object.is_object()) return false;
+    for (const auto& [name, value] : object.get_ref<const Json::object_t&>())
+        if (name == key) return value.is_string() && value.get_ref<const std::string&>() == expected;
+    return false;
+}
 bool Text(const std::string& value, std::size_t cap, bool empty = false) {
     return (empty || !value.empty()) && value.size() <= cap &&
         value.find('\0') == std::string::npos && platform::IsValidUtf8(value);
@@ -137,7 +143,7 @@ Result<std::shared_ptr<SessionLua>> SessionLua::Prepare(
             const auto& plan = owner->saved_plan_;
             if (!plan.is_object() || plan.value("schemaVersion", Json()) != 1 ||
                 plan.value("sessionId", Json()) != owner->resume_id_ ||
-                plan.value("profile", Json()) != "Whitelisted" || plan.value("stdio", Json()) != false ||
+                !JsonMemberStrEq(plan, "profile", "Whitelisted") || plan.value("stdio", Json()) != false ||
                 plan.value("protectedCalls", Json()) != false ||
                 !plan.contains("enabled") || !plan["enabled"].is_boolean() || plan.dump() != owner->saved_bytes_)
                 return std::unexpected(Fail("sdk.lua.plan_invalid", "saved plan is invalid or noncanonical"));
@@ -217,7 +223,7 @@ Result<void> SessionLua::CheckBinding(const v3::V3Ledger& ledger) const {
     const auto matches = [&](const v3::MessageLine* message) {
         const auto* binding = message ? Binding(*message) : nullptr;
         return binding && *binding == expected && message->session_id == resume_id_ &&
-            message->message.value("role", Json()) == "system";
+            JsonMemberStrEq(message->message, "role", "system");
     };
     if (ledger.messages.empty() || ledger.messages.front().seq != 1 || !matches(&ledger.messages.front()))
         return std::unexpected(Fail("sdk.lua.plan_invalid", "initial system binding differs"));

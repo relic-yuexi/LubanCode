@@ -1,0 +1,35 @@
+# SDK 自动 Memory owner 短合同
+
+2026-10-11。第 2 步剩余交付。共享抽取、词法门控与旁路可撤销借用已有实现；五项数字来源及真实 Session 分配失败矩阵尚待同源远端验收。本合同先落盘，前驱验收后按下面四片接线。合同不算功能交付。
+
+## 公开什么
+
+公开学习与召回、显式保存分开配置。新 Session 默认为 Off，Review 只产待审候选，Auto 按原规则发写请求。配置持值，Backend 另交独占 owner；模型、effort、预算、有效权限与资源声明冻结进场次计划。不给 SDK 偷读 HOME、CLI 配置或环境开关。恢复省略配置便沿已存计划；显式配置须匹配。凭据与 Backend 不落计划，同 ID 再开须重新交匹配 Backend。
+
+拟交入口为 `memory::v1::LearningMode / LearningOptions / LearningSnapshot / LearningReport`、`SessionOptions::memory_learning`、独立 `memory_learning_backend / memory_learning_connection`、`Session::DescribeMemoryLearning()` 与 `GetMemoryLearning(operation_id)`。启用时 Backend 与 Connection 二选一，不能借主会话 Backend 并发抽取。选项只持配置，报告复用公开用量事实类型；后续候选接口只认 Session 已准入的项目与学习计划，不能让调用方另塞任意路径。
+
+第一片交真实 Review 学习 owner 与逐操作报告，不挂空开关。Off 不起线程、不造模型调用；Review 接实际共享抽取与候选落盘。Auto 尚未接入时须明确拒绝，不降成 Review。随后第二片交候选查询、编辑、拒绝与接受，第三片交 Auto 耐久写回，第四片迁 CLI 调度与收货。四片验收后才能记自动 Memory 完整交付。
+
+学习报告按 session / operation / 原触发 turn 归号，持学习计划、请求与来源引用、阶段、错误及独立 Usage。主操作已交终态，晚归学习不改写原终态、不替旧 Usage 补假完整。模型已调用而正文、解析、候选或提交失败，实际请求与五项数字仍照记。报告须区分无调用、明确报零、缺字段、拒绝来源与未知提交；使用前驱共享来源投影，不能另造解析器。
+
+## 谁拥有
+
+Session 持学习控制器、独占 Backend、回调守卫、取消旗、worker、冻结转写与提示、实际旁路 recorder 和待收结果。复用 `agent::memory_extraction` 与 `agent::memory_learning_gates`，不链接 `app` 或终端。回调借用沿已交 SDK Backend 守卫；旁路沿实际 ledger 的可撤销短门。模型执行不占 Session API 锁或 writer 短门。
+
+同场在途至多一枚，结果未收也占位；忙时按原 `in_flight_dropped` 记让位，不冒称网络失败。所有触发材料在派发前冻结：用户正文、最终答复、同轮工具证据、变更事实、提示与任务分型。保住 CLI 原门控次序、转写字节帽、UTF-8 截断、三条候选上限、正文预算、输出终态分类及 45 秒抽取预算。先持久确认触发轮身份，再发模型请求。
+
+候选与写回由 Session 收货点结算。候选存储、写请求队列、实际提交各有内部窄接口和本地参考实现；接口回执须含真实阶段，后续 SPI 替换不能改报告口径。这片不引入数据库，不把现有 CLI `ProjectMemory` 连同宿主状态塞进 SDK。
+
+## 怎样关场与恢复
+
+线程创建前预置失败回执。创建失败便释放 Backend 与回调，不调用模型，不留运行态；已起线程的所有异常出口都交可收失败并退借用。Close 先停准入、拉取消，再等实际 worker、回调与 Backend 退场，最后撤写口、关 ledger。禁止 detach 或用控制器旗代替真实析构；Backend 不响应取消时遵守现有同步契约，不能报已经关场。
+
+Close 不等新审批，也不在锁内 join。已确认候选、入队或提交仍须保留原回执；未确认结果标 unknown / indeterminate。队列落盘、worker 跟踪、权限准入、实际耐久提交各记一层。只有 commit 回执确认，才写 committed。取消与换代后拒绝旧权限及正文发布，已花用量仍沿原触发轮收账。
+
+恢复读取学习计划、请求、候选与提交原件，核同一场次和原触发轮。已提交键不重写，未确认请求不自动重发模型、不自动重提写回；查询给出未确认事实。存储与 ledger 冲突、缺原件或来源不齐须拒绝完整声明。候选接受沿显式写入的实际 gate / CAS / commit 路；Auto 另核原 verified / evidence / user-stated 规则，inferred 仍只进候审。未来 Managed 接入沿 D6 身份与逐操作授权，不另造身份体系。
+
+## 每片必需验收
+
+保留现有 CLI 抽取、门控、启动失败、后台异常、迟到旁路、候选与写队列案例。真实 SDK DLL 加原生 owner 检查：Off 零调用、Review 实际候选、忙时让位、创建失败、标准与未知异常、取消、并发 Close、回调撤销、Backend 析构、五项数字及原触发身份、候选落盘失败、同 ID 零重发恢复。Auto 再核授权撤销、真实入队但未提交、CAS 冲突、各耐久阶段失败、已提交重复键与关场竞争。CLI 迁移须核原命令行为、文案及独立用量账。
+
+每片收同源 Windows/Linux/macOS 全 CLI、SDK Lua ON/OFF、移位安装消费与 ASan 原件；精确来源名单与既有检查不减。TSan 只按实际执行记账。只验远端，不跑本地 CI、configure、构建、原生测试或 HTTP 验收。

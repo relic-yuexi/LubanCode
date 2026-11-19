@@ -207,8 +207,8 @@ std::string EventRangeForMessages(const std::vector<NormalizedEvent>& ledger, st
 // ```json manifest 的闭合围栏收尾,其后才是被并入保留下来的原始输入。
 // 剥得出给 {prior, rest};剥不出给 nullopt(整条当普通原始消息)。
 std::optional<std::pair<std::string, std::string>> SplitPriorArchive(const std::string& text) {
-    static const std::string kPrefix = "[对话存档,此前内容已压缩]";
-    if (text.rfind(kPrefix, 0) != 0) {
+    static constexpr std::string_view kPrefix = "[对话存档,此前内容已压缩]";
+    if (std::string_view(text).substr(0, kPrefix.size()) != kPrefix) {
         return std::nullopt;
     }
     const std::size_t json_fence = text.find("```json");

@@ -267,16 +267,19 @@ TEST_CASE("failure audit FA-03: prepared and sent write gates") {
 }
 
 TEST_CASE("failure audit control: assistant write failure blocks tool execution") {
-    // A tool-only response has no streamed text writes. After backend return:
-    // usage observation, lazy stream start, completion event, assistant row,
-    // then context admission. Each failed publication must fence tool work.
-    for (const int terminal_write : {1, 3, 4, 5}) {
+    // MessageStart already commits the stream start inside Reply. After return:
+    // usage observation, completion event, assistant row, context admission.
+    // Refuse each actual write; a fifth write would belong to tool work.
+    for (const int terminal_write : {1, 2, 3, 4}) {
         CAPTURE(terminal_write);
         Audit audit;
+        const int admitted_before = KindCount(audit.Rows(), "context.input.applied");
+        REQUIRE(admitted_before > 0);
         audit.Inject();
         AuditBackend backend;
         backend.emit = [&audit, terminal_write](int, const auto& sink) -> std::expected<void, api::Error> {
             Reply(sink, true);
+            REQUIRE(KindCount(audit.Rows(), "model.response.started") == 1);
             audit.fail_at = audit.writes + terminal_write;
             return {};
         };
@@ -294,11 +297,12 @@ TEST_CASE("failure audit control: assistant write failure blocks tool execution"
             ? "model.usage.observed:" : "model.response.completed:") == 0);
         const auto rows = audit.Rows();
         CHECK(KindCount(rows, "model.usage.observed") == (terminal_write == 1 ? 0 : 1));
-        CHECK(KindCount(rows, "model.response.started") == (terminal_write == 1 ? 0 : 1));
-        CHECK(KindCount(rows, "model.response.completed") == (terminal_write >= 4 ? 1 : 0));
+        CHECK(KindCount(rows, "model.response.started") == 1);
+        CHECK(KindCount(rows, "model.response.completed") == (terminal_write >= 3 ? 1 : 0));
         CHECK(std::count_if(rows.begin(), rows.end(), [](const Json& row) {
             return row.value("type", "") == "message" && row.at("message").value("role", "") == "assistant";
-        }) == (terminal_write == 5 ? 1 : 0));
+        }) == (terminal_write == 4 ? 1 : 0));
+        CHECK(KindCount(rows, "context.input.applied") == admitted_before);
         CHECK(audit.ledger->v3_main_writer()->broken());
         audit.Report("control_output", {{"run_ok", result.has_value()},
             {"tool_calls", counter->calls}, {"terminal_write", terminal_write}});

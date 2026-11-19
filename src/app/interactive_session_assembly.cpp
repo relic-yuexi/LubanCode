@@ -1404,6 +1404,11 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     // 的 tool_search 自己握 catalog,system 恒定)。legacy 路照旧现查现拼。
     // P3:native 同理不注——发现走 provider 服务端搜索,system 恒定,延迟
     // 定义照发由 provider 排出缓存前缀(§7.1)。
+    // 会话级 prompt_cache_key:取当前轨迹场 id,/clear 开新场即换,resume 沿用。
+    main_agent_profile.prompt_cache_key_provider = [this]() -> std::string {
+        const auto* ledger = session_runtime_.trajectory();
+        return ledger != nullptr ? "lubancode-" + ledger->session_id() : std::string();
+    };
     if (!main_proxy && !main_native) {
         main_agent_profile.deferred_index_provider = [this]() {
             // 发请求前现查现拼:tool_search 命中后的下一份请求,新挂载的工具

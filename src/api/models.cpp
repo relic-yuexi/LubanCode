@@ -1,6 +1,8 @@
 #include "api/models.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
@@ -203,6 +205,97 @@ std::expected<std::vector<ModelInfo>, Error> ListModels(config::Wire wire, const
         return std::unexpected(Error{ErrorKind::Parse, parsed.error(), status});
     }
     return *parsed;
+}
+
+namespace {
+
+bool EqualsIgnoreAsciiCase(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        char x = a[i];
+        char y = b[i];
+        if (x >= 'A' && x <= 'Z') x = static_cast<char>(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = static_cast<char>(y - 'A' + 'a');
+        if (x != y) return false;
+    }
+    return true;
+}
+
+// 一条模型条目里读窗口:按字段优先级取第一枚正整数。const json 查键先
+// contains(缺键 operator[] 是 UB)。
+std::optional<std::size_t> ContextWindowOfModelItem(const json& item) {
+    static constexpr const char* kWindowFields[] = {
+        "max_model_len",       // vLLM
+        "context_length",      // SGLang / OpenRouter 风格
+        "context_window",
+        "max_context_length",  // LM Studio
+    };
+    for (const char* field : kWindowFields) {
+        if (!item.contains(field)) continue;
+        const json& value = item.at(field);
+        if (value.is_number_unsigned()) {
+            const auto n = value.get<std::uint64_t>();
+            if (n > 0) return static_cast<std::size_t>(n);
+        } else if (value.is_number_integer()) {
+            const auto n = value.get<std::int64_t>();
+            if (n > 0) return static_cast<std::size_t>(n);
+        }
+        // 非正数、浮点、字符串:这枚字段不算,接着看下一枚。
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+std::optional<std::size_t> ParseModelContextWindowFromModelsResponse(const std::string& json_text,
+                                                                     const std::string& model_id) {
+    if (model_id.empty()) return std::nullopt;
+    json parsed;
+    try {
+        parsed = json::parse(json_text);
+    } catch (const json::parse_error&) {
+        return std::nullopt;
+    }
+    if (!parsed.is_object() || !parsed.contains("data") || !parsed.at("data").is_array()) {
+        return std::nullopt;
+    }
+    const json& data = parsed.at("data");
+    const json* exact = nullptr;
+    const json* loose = nullptr;
+    for (const auto& item : data) {
+        if (!item.is_object() || !item.contains("id") || !item.at("id").is_string()) continue;
+        const std::string id = item.at("id").get<std::string>();
+        if (id == model_id) {
+            exact = &item;
+            break;
+        }
+        if (loose == nullptr && EqualsIgnoreAsciiCase(id, model_id)) loose = &item;
+    }
+    const json* hit = exact != nullptr ? exact : loose;
+    if (hit == nullptr) return std::nullopt;
+    return ContextWindowOfModelItem(*hit);
+}
+
+std::optional<std::size_t> ProbeModelContextWindow(config::Wire wire, const std::string& base_url,
+                                                   const std::string& api_key, const std::string& model_id,
+                                                   const std::map<std::string, std::string>& extra_headers,
+                                                   int timeout_ms) {
+    if (wire != config::Wire::Responses && wire != config::Wire::ChatCompletions) return std::nullopt;
+    if (base_url.empty() || model_id.empty()) return std::nullopt;
+    const int budget_ms = std::clamp(timeout_ms, 1, 3000);
+    const std::map<std::string, std::string> header_map = ModelsRequestHeaders(wire, api_key, extra_headers);
+    cpr::Header headers;
+    for (const auto& [name, value] : header_map) {
+        headers[name] = value;
+    }
+    cpr::Response response =
+        cpr::Get(cpr::Url{ModelsUrl(wire, base_url)}, headers,
+                 cpr::ConnectTimeout{std::chrono::milliseconds(budget_ms)},
+                 cpr::Timeout{std::chrono::milliseconds(budget_ms)});
+    if (response.error || response.status_code < 200 || response.status_code >= 300) {
+        return std::nullopt;
+    }
+    return ParseModelContextWindowFromModelsResponse(response.text, model_id);
 }
 
 }  // namespace lubancode::api

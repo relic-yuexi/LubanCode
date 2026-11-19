@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -68,6 +69,22 @@ bool IsRetryableError(const Error& error);
 // 与压缩客户端(SampleModelV3CompactClient)共用这一张表,不各抄一份。
 bool IsInputContextOverflowCode(std::string_view api_code);
 
+// 自部署端点的 HTTP 超窗识别(Terminal-Bench 自部署单):vLLM/SGLang/
+// llama.cpp/Ollama 超窗时不给稳定码,只回 400/413 + 人话。状态码须是
+// 400/413,报文(大小写不敏感)含各家固定的"上下文装不下"句子才算;普通
+// 400(参数错、鉴权错)不误认。
+bool IsHttpContextOverflowBody(int http_status, std::string_view body);
+
+// 从超窗报文里读出服务端的真窗口:"maximum context length is N"(vLLM/
+// OpenAI)、"model's context length (N tokens)"(SGLang)、"n_ctx": N
+// (llama.cpp)。读不出正整数给空。
+std::optional<std::size_t> ParseContextLimitFromOverflowBody(std::string_view body);
+
+// 后端出口的补码:HttpStatus 错误且 IsHttpContextOverflowBody 命中、api_code
+// 尚空时,补成 "context_length_exceeded",让它与官方 provider 超窗走同一条
+// 恢复路(IsInputContextOverflowCode 那张表)。其余错误原样不动。
+void TagHttpContextOverflow(Error& error);
+
 // 重试阶梯:五次失败分别等 1~2s / 4~8s / 15~30s / 30~60s /
 // 60~120s,均匀抖动;单次等待不超过 2 分钟。attempt = 刚失败的
 // 那次尝试号(1 起)。
@@ -75,6 +92,23 @@ std::chrono::milliseconds BackoffMsForAttempt(int attempt);
 
 // 一条逻辑请求最多几次尝试(含首发):首发 + 5 次重试。
 constexpr int kMaxRequestAttempts = 6;
+
+// 代价高的网络失败(Terminal-Bench 超时单):kind == Network,且断在流已
+// 开始之后(error.stream_started,或本次尝试见过流事件 saw_stream_event),
+// 或无进展墙落锤(error.hard_timeout)。这类失败重发等于从头重生成整段
+// 长输出——开源长思考模型一步就是几百秒,走满六次长阶梯单步能耗三十多
+// 分钟。连接前失败、429/5xx、Api 稳定码不算,照旧走满阶梯。
+bool IsCostlyNetworkFailure(const Error& error, bool saw_stream_event);
+
+// 一条逻辑请求里,代价高的失败之后至多再重发几次(累计,不按连续算):
+// 第 1、2 次代价高的失败仍重发,第 3 次即收口。
+constexpr int kMaxCostlyFailureRetries = 2;
+
+// 恢复环的重发判据(纯函数,单测直接调):attempt = 刚失败的尝试号(1 起),
+// costly_failures = 连同本次在内,这条逻辑请求累计的代价高失败次数。
+// 不可重试、尝试用尽、代价高失败超出 kMaxCostlyFailureRetries 三者任一
+// 即不再重发。用户取消不归这里管(环里先判,压过一切)。
+bool ShouldRetryAfterFailure(const Error& error, int attempt, int costly_failures);
 
 struct RequestRecoveryHooks {
     // 恢复账出水口(空 = 没人记账,恢复照跑)。在发送线程上同步调。
