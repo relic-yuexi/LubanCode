@@ -139,8 +139,15 @@ if(TARGET lubancode_tests)
   if(CMAKE_DL_LIBS)
     target_link_libraries(lubancode_tests PRIVATE ${CMAKE_DL_LIBS})
   endif()
+  if(WIN32)
+    # tests/CMakeLists.txt stages runtime DLLs beside lubancode_tests.exe,
+    # so Windows loads that adjacent copy rather than the top-level build DLL.
+    set(_lubancore_tests_shared_module "$<TARGET_FILE_DIR:lubancode_tests>/$<TARGET_FILE_NAME:lubancore_sdk>")
+  else()
+    set(_lubancore_tests_shared_module "$<TARGET_FILE:lubancore_sdk>")
+  endif()
   target_compile_definitions(lubancode_tests PRIVATE
-    LUBANCORE_TEST_SHARED_MODULE="$<TARGET_FILE:lubancore_sdk>"
+    LUBANCORE_TEST_SHARED_MODULE="${_lubancore_tests_shared_module}"
     LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT="${CMAKE_BINARY_DIR}/test-evidence/sdk-focused/allocation-matrix")
   if(LUBANCODE_ASAN_TEST_PROFILE)
     add_dependencies(lubancode_tests lubancore_sdk_search_probe)
@@ -166,9 +173,9 @@ foreach(sdk_source IN LISTS LUBANCORE_FOCUSED_TEST_SOURCES)
   if(sdk_basename STREQUAL "test_lubancore_allocation_owner.cpp")
     # Actual three-path baselines contain thousands of points each. Preserve
     # every fresh Runtime and the original integration/ASan source registration.
-    set_tests_properties("${sdk_test}" PROPERTIES TIMEOUT 3600)
+    set_tests_properties("${sdk_test}" PROPERTIES TIMEOUT 3600 RESOURCE_LOCK "sdk-allocation-matrix")
     if(TEST "integration.sdk.lubancore_allocation_owner")
-      set_tests_properties("integration.sdk.lubancore_allocation_owner" PROPERTIES TIMEOUT 3600)
+      set_tests_properties("integration.sdk.lubancore_allocation_owner" PROPERTIES TIMEOUT 3600 RESOURCE_LOCK "sdk-allocation-matrix")
     endif()
   endif()
   if(sdk_basename STREQUAL "test_lubancore_web_fetch.cpp" OR sdk_basename STREQUAL "test_lubancore_web_search.cpp")
