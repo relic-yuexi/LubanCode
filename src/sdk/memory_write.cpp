@@ -390,6 +390,13 @@ lubancode::tools::Tool::Result SessionMemoryWrite::Save(
     return result;
 }
 
+bool SessionMemoryWrite::HasCommittedForOperation(const std::string& operation_id) const {
+    const auto found = reports_.find(operation_id);
+    if (found == reports_.end()) return false;
+    return std::any_of(found->second.begin(), found->second.end(),
+        [](const auto& report) { return report.state == "committed"; });
+}
+
 Result<void> SessionMemoryWrite::ValidateReports(const std::string& operation, const std::string& turn,
     const std::vector<Report>& reports, const v3::V3Ledger& source, bool require_adopted) const {
     const auto bad = [](std::string detail = {}) -> Result<void> { return std::unexpected(Fail("sdk.memory_write.report_invalid", std::move(detail))); };

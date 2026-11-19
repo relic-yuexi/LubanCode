@@ -159,6 +159,7 @@ REQUIRED = {
     "sdk.focused.lubancore_memory_recall",
     "sdk.focused.lubancore_memory_cas",
     "sdk.focused.lubancore_memory_save",
+    "sdk.focused.lubancore_memory_learning",
     "sdk.focused.lubancore_results",
     "sdk.focused.lubancore_result_projection",
     "sdk.focused.session_resources",
@@ -1731,6 +1732,26 @@ def main():
             check_memory_cas_paths(sections[0], os.name)
         if case.attrib["name"] == "sdk.focused.lubancore_memory_save" and int(counts[0]) != 12:
             raise RuntimeError("SDK memory-save native roster differs from 12 cases")
+        if case.attrib["name"] == "sdk.focused.lubancore_memory_learning":
+            if int(counts[0]) != 12:
+                raise RuntimeError("SDK memory-learning native roster differs from 12 cases")
+            for path in (
+                "off-default-and-unexpected-backend",
+                "auto-and-invalid-options-rejected",
+                "review-creates-candidates-and-isolates-usage",
+                "lexical-and-signal-gates",
+                "single-flight-busy-drop",
+                "worker-start-failure-pre-receipt",
+                "worker-exceptions-preserve-usage",
+                "five-field-usage-provenance-variants",
+                "candidate-store-failure-preserves-usage",
+                "cancellation-stops-publication-keeps-usage",
+                "concurrent-close-and-backend-destruction",
+                "same-id-zero-replay-recovery",
+            ):
+                marker = "[sdk-memory-learning-path] " + path
+                if sections[0].splitlines().count(marker) != 1:
+                    raise RuntimeError("SDK memory-learning native path did not finish once: " + path)
         if case.attrib["name"] == "sdk.focused.execution_owner" and int(counts[0]) != 7:
             raise RuntimeError("Shared execution-owner native roster differs from 7 cases")
         if case.attrib["name"] == "sdk.focused.subagent_terminal_receipt" and int(counts[0]) != 7:

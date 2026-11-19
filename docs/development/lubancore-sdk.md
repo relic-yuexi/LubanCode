@@ -267,6 +267,16 @@ ExtensionRuntime、后台命令、远端 Worker 或 Node 结果同步已交付�
 operation_id 只在 Session 内唯一，wire 按 `(session_id, operation_id)` 寻址。
 损坏 blob 拦住本次快照时，模型不再运行，未收稳完成账则留 Indeterminate，不能报持久失败。
 
+自动 Memory 学习首片现接入 [自动 Memory 学习 owner 合同](sdk-memory-learning-owner.md)。
+宿主通过 `SessionOptions::memory_learning`、`memory_learning_backend` 与 `memory_learning_connection`
+配置本场策略；`DescribeMemoryLearning()` 返回冻结计划与快照，`GetMemoryLearning(operation_id)` 返回逐操作
+`LearningReport`（关闭句柄后仍可查）。默认关闭（`LearningMode::Off`）；`LearningMode::Auto` 在本片明确
+返回 `sdk.memory_learning.auto_unsupported` 拒绝。`LearningMode::Review` 在主操作及 `RecordTurnFinal` 落盘后再
+启动单飞后台提取（忙碌新轮跳过并记 `in_flight_dropped`），经共用词法/信号/同轮已写门控后仅通过旁路 V3 请求写
+candidate store（pending，不直写正式 `MEMORY.md` 或 topic 文件），并独立记录五项用量与来源到
+`LearningReport::usage`，绝不污染主 `Operation::usage`。同 ID 恢复核对冻结计划且零模型重放（遗留 `running`
+状态恢复为 `Indeterminate`）。
+
 工具默认空表。可显式启用 `read_file`、`write_file`、`edit_file`、`run_command`、`search`，
 也可注入自定义工具，或按服务与工具名单挂 MCP。内置实现沿用共用装配，不另写一套工具。
 相对文件路径和命令 cwd 按会话目录解析，不调用进程级 chdir。命令只开放前台执行；

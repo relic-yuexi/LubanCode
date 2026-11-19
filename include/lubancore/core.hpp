@@ -50,39 +50,6 @@ struct ModelRequest {
     // provider-specific effort names are forwarded without a whitelist.
     std::string reasoning_effort;
 };
-struct Usage {
-    std::int64_t input_tokens = 0;
-    std::int64_t output_tokens = 0;
-    std::int64_t cache_read_tokens = 0;
-    std::int64_t cache_creation_tokens = 0;
-    std::int64_t output_reasoning_tokens = 0;
-};
-struct UsageSummary {
-    Usage total;
-    ::lubancore::usage::v1::Coverage coverage;
-};
-inline constexpr std::size_t kMaxUsageAttempts = 1024;
-struct UsageAttempt {
-    Usage usage;
-    std::string trajectory_request_id, provider_response_id, model;
-    std::string step_id, turn_id, purpose;
-    int cache_epoch = 0;
-    bool subordinate = false, incomplete = false;
-    bool reported_by_provider = false;
-    std::optional<::lubancore::usage::v1::Observation> observation;
-    std::string source_session_id, source_run_id;
-};
-struct OperationUsage {
-    // Separate direct and forwarded subordinate observations; never charge a
-    // child's forwarded totals to the direct request count. Samples are reports,
-    // not a claim about hidden provider retries or durable failed-attempt ACK.
-    UsageSummary direct;
-    UsageSummary subordinate;
-    // A complete list covers these admitted observations, not hidden network
-    // retries or a durable failed-attempt ACK. Legacy summaries remain unknown.
-    std::vector<UsageAttempt> attempts;
-    bool attempts_complete = false;
-};
 struct ModelReply {
     std::string text;
     std::vector<ToolCall> tool_calls;
@@ -220,6 +187,14 @@ struct SessionOptions {
     // Requires explicit builtin_tools selection of web_search and a credential.
     // Fresh on every opening, including resume; never saved in session plans.
     std::optional<web_search::v1::Options> web_search;
+    // Automatic memory learning (Slice 1 supports Off and Review; Auto is
+    // explicitly rejected). Omitted defaults to Off on new Sessions, and inherits
+    // the frozen plan on resume; explicit resume options must match. When
+    // Review is active, provide exclusively one of memory_learning_backend or
+    // memory_learning_connection (never borrows the main Session Backend).
+    std::optional<memory::v1::LearningOptions> memory_learning;
+    std::unique_ptr<Backend> memory_learning_backend;
+    std::optional<Connection> memory_learning_connection;
 };
 // operation_id is Session scoped; external callers address (session_id, operation_id).
 struct Receipt { std::string operation_id; std::string input_id; bool duplicate = false; };
@@ -307,6 +282,8 @@ public:
     Result<lua::v1::Snapshot> DescribeLua() const;
     // Pure owned values after operation completion, including after Close.
     Result<std::vector<memory::v1::SaveReport>> GetMemorySaves(const std::string& operation_id) const;
+    Result<memory::v1::LearningSnapshot> DescribeMemoryLearning() const;
+    Result<memory::v1::LearningReport> GetMemoryLearning(const std::string& operation_id) const;
     // Rejects new work, cancels/wakes pending work, joins worker, then closes files.
     // Cooperative custom tools/backends MUST return after cancellation; Close waits
     // for them and never destroys live borrowed state or pretends a timeout stopped it.

@@ -33,6 +33,7 @@ public:
         const std::vector<memory::v1::SaveReport>& reports,
         const lubancode::trajectory::v3::V3Ledger& source, bool require_adopted = false) const;
     bool HasIndeterminate() const { return indeterminate_; } // worker-owned; read after join/run
+    bool HasCommittedForOperation(const std::string& operation_id) const;
 
 private:
     nlohmann::json Plan(const std::string& session_id) const;

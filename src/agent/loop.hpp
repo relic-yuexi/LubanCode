@@ -153,6 +153,8 @@ public:
     // Borrow the actual journal authority; legacy or unbound recorders stay unknown.
     virtual std::string_view UsageSourceSessionId() const { return {}; }
     virtual std::string_view UsageSourceRunId() const { return {}; }
+    virtual std::string RequestTurnId(const std::string&) const { return {}; }
+    virtual std::string RequestStepId(const std::string&) const { return {}; }
     // nullopt = unsupported. Append confirmation is observation persistence,
     // not a typed failed-attempt ACK or proof of provider delivery.
     virtual std::optional<bool> OnUsageObservation(const std::string&, const api::Usage&,
