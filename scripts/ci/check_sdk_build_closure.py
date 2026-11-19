@@ -310,6 +310,13 @@ def main() -> int:
         return 0
     try:
         report = inspect(args.source_dir, args.build_dir, args.config, args.lua_profile)
+        if args.report:
+            try:
+                from .sdk_file_api_originals import preserve
+            except ImportError:
+                from sdk_file_api_originals import preserve
+            report["fileApiRaw"] = preserve(Path(report["fileApiIndex"]),
+                args.report.parent / (args.report.stem + "-file-api"), report["githubSha"])
     except (KeyError, OSError, TypeError, ValueError) as error:
         report = {"status": "failed", "violations": [str(error)]}
     if args.report:

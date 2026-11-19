@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <string>
@@ -33,6 +34,32 @@
 #include "tools/tool.hpp"
 
 using namespace lubancode;
+
+TEST_CASE("Task usage projections refuse overflowing totals and retain original fields") {
+    const auto check = [](auto value) {
+        constexpr auto max = std::numeric_limits<std::int64_t>::max();
+        constexpr auto min = std::numeric_limits<std::int64_t>::min();
+        value.input_tokens = max; value.cache_read_tokens = 1;
+        value.cache_creation_tokens = 0; value.output_tokens = 7;
+        CHECK_FALSE(value.total_input_tokens().has_value());
+        CHECK_FALSE(value.total_tokens().has_value());
+        CHECK(value.input_tokens == max); CHECK(value.cache_read_tokens == 1);
+        value.input_tokens = max - 2; value.cache_read_tokens = 1; value.cache_creation_tokens = 1;
+        REQUIRE(value.total_input_tokens().has_value()); CHECK(*value.total_input_tokens() == max);
+        CHECK_FALSE(value.total_tokens().has_value());
+        value.input_tokens = min; value.cache_read_tokens = -1;
+        CHECK_FALSE(value.total_input_tokens().has_value()); CHECK(value.input_tokens == min);
+        value.input_tokens = 11; value.cache_read_tokens = 13; value.cache_creation_tokens = 17;
+        value.output_tokens = 7; value.output_reasoning_tokens = max;
+        REQUIRE(value.total_tokens().has_value()); CHECK(*value.total_tokens() == 48);
+        CHECK(value.output_reasoning_tokens == max); // Already included in output; never add it twice.
+        value.input_tokens = 0; value.cache_read_tokens = 0; value.cache_creation_tokens = 0;
+        value.output_tokens = 0; REQUIRE(value.total_tokens().has_value()); CHECK(*value.total_tokens() == 0);
+    };
+    check(tools::TaskOutcome{});
+    check(tools::AgentTaskSnapshot{});
+    check(tools::AgentTaskSummary{});
+}
 
 namespace {
 
@@ -890,8 +917,8 @@ TEST_CASE("agent 工具:确认回调转发——父拒绝,子内工具收到拒�
 TEST_CASE("agent 工具:usage 累计到父回调,含请求次数") {
     FakeBackend backend;
     backend.scripts = {
-        ToolUseScript("toolu_usage", "fake_tool", api::Usage{100, 20, 0, 0}),
-        TextOnlyScript("好了", api::Usage{50, 30, 0, 0}),
+        ToolUseScript("toolu_usage", "fake_tool", api::Usage{100, 20, 3, 5, 7}),
+        TextOnlyScript("好了", api::Usage{50, 30, 11, 13, 17}),
     };
     tools::ToolRegistry sub_registry;
     sub_registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"工具结果", false}, false));
@@ -917,6 +944,41 @@ TEST_CASE("agent 工具:usage 累计到父回调,含请求次数") {
     // 子代理的逐步身份也跟着转上来(步号在子代理自己的 Run() 里数)。
     CHECK(reports[0].step_index == 0);
     CHECK(reports[1].step_index == 1);
+    const auto snapshots = agent_tool.TaskSnapshots();
+    REQUIRE(snapshots.size() == 1);
+    const auto& snapshot = snapshots.front();
+    CHECK(snapshot.input_tokens == 150); CHECK(snapshot.output_tokens == 50);
+    CHECK(snapshot.cache_read_tokens == 14); CHECK(snapshot.cache_creation_tokens == 18);
+    CHECK(snapshot.output_reasoning_tokens == 24); CHECK(snapshot.usage_coverage.samples == 2);
+    CHECK(snapshot.outcome.output_reasoning_tokens == 24); CHECK(snapshot.outcome.usage_coverage.samples == 2);
+    for (const auto& field : snapshot.usage_coverage.fields) {
+        CHECK(field.included == 2); CHECK(field.omitted == 0); CHECK_FALSE(field.arithmetic_overflow);
+    }
+}
+
+TEST_CASE("agent 工具:子场 reasoning 溢出保前缀且不吞其它四项") {
+    FakeBackend backend;
+    backend.scripts = {
+        ToolUseScript("toolu_overflow", "fake_tool", api::Usage{1, 2, 3, 5, std::numeric_limits<std::int64_t>::max()}),
+        TextOnlyScript("好了", api::Usage{1, 2, 3, 5, 1}),
+    };
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"结果", false}, false));
+    tools::AgentTool tool(backend, registry, "/work/dir");
+    CHECK_FALSE(tool.execute(nlohmann::json{{"title", "用量边界"}, {"prompt", "调用工具再收场"}}).is_error);
+    const auto snapshots = tool.TaskSnapshots(); REQUIRE(snapshots.size() == 1);
+    const auto& snapshot = snapshots.front();
+    CHECK(snapshot.input_tokens == 2); CHECK(snapshot.output_tokens == 4);
+    CHECK(snapshot.cache_read_tokens == 6); CHECK(snapshot.cache_creation_tokens == 10);
+    CHECK(snapshot.output_reasoning_tokens == std::numeric_limits<std::int64_t>::max());
+    CHECK(snapshot.usage_coverage.samples == 2);
+    const auto& reasoning = snapshot.usage_coverage.fields[4];
+    CHECK(reasoning.included == 1); CHECK(reasoning.omitted == 1); CHECK(reasoning.arithmetic_overflow);
+    CHECK(snapshot.outcome.usage_coverage.fields[4].arithmetic_overflow);
+    for (std::size_t i = 0; i < 4; ++i) {
+        CHECK(snapshot.usage_coverage.fields[i].included == 2);
+        CHECK_FALSE(snapshot.usage_coverage.fields[i].arithmetic_overflow);
+    }
 }
 
 TEST_CASE("agent 工具:不设 Hooks 也不崩(默认允许确认、不打印、不转发 usage)") {

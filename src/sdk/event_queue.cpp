@@ -26,51 +26,82 @@ Error Thrown(const std::exception& error, bool close = false) {
 class DefaultEventQueue final : public events::v1::EventQueue {
 public:
     explicit DefaultEventQueue(std::size_t limit) : capacity(limit) {}
+    ~DefaultEventQueue() override { FreeNodes(TakeNodes()); }
     Result<void> Push(Event event) override {
-        std::lock_guard lock(mutex);
-        if (closed) return {};
         const auto cost = event.text.size() + event.payload_json.size() +
             (event.approval ? event.approval->input_json.size() : 0);
-        if (events.size() >= capacity || cost > 16 * 1024 * 1024 || bytes > 16 * 1024 * 1024 - cost) {
-            error = "sdk.events.overflow";
-            closed = true;
-            events.clear();
-            bytes = 0;
+        NodeDropper retired;
+        {
+            std::lock_guard lock(mutex);
+            if (closed) return {};
+            if (count >= capacity || cost > 16 * 1024 * 1024 || bytes > 16 * 1024 * 1024 - cost) {
+                error = "sdk.events.overflow";
+                closed = true;
+                retired.list = TakeNodes();
+                cv.notify_all();
+                return std::unexpected(Error{error, {}});
+            }
+            auto node = std::make_unique<Node>(Node{std::move(event), nullptr});
+            if (tail) { tail->next = std::move(node); tail = tail->next.get(); }
+            else { head = std::move(node); tail = head.get(); }
+            ++count;
+            bytes += cost;
             cv.notify_all();
-            return std::unexpected(Error{error, {}});
-        } else { events.push_back(event); bytes += cost; }
-        cv.notify_all();
-        return {};
+            return {};
+        }
     }
     Result<std::optional<Event>> Next(std::chrono::milliseconds timeout) override {
         std::unique_lock lock(mutex);
         ++active_reads;
-        cv.wait_for(lock, timeout, [&] { return closed || !events.empty(); });
+        cv.wait_for(lock, timeout, [&] { return closed || head != nullptr; });
         --active_reads;
         cv.notify_all();
         if (closed) return std::unexpected(Error{error, {}});
-        if (events.empty()) return std::optional<Event>{};
-        Event event = std::move(events.front());
-        events.pop_front();
+        if (!head) return std::optional<Event>{};
+        auto node = std::move(head);
+        head = std::move(node->next);
+        if (!head) tail = nullptr;
+        --count;
+        Event event = std::move(node->event);
         bytes -= event.text.size() + event.payload_json.size() + (event.approval ? event.approval->input_json.size() : 0);
         return std::optional<Event>{std::move(event)};
     }
     Result<void> Close() override {
-        std::unique_lock lock(mutex);
-        closed = true;
-        cv.notify_all();
-        cv.wait(lock, [&] { return active_reads == 0; });
-        events.clear();
-        bytes = 0;
+        NodeDropper retired;
+        {
+            std::unique_lock lock(mutex);
+            closed = true;
+            cv.notify_all();
+            cv.wait(lock, [&] { return active_reads == 0; });
+            retired.list = TakeNodes();
+        }
         return {};
     }
 private:
+    struct Node {
+        Event event;
+        std::unique_ptr<Node> next;
+    };
+    static void FreeNodes(std::unique_ptr<Node> list) noexcept {
+        while (list) list = std::move(list->next);
+    }
+    struct NodeDropper {
+        std::unique_ptr<Node> list;
+        ~NodeDropper() { FreeNodes(std::move(list)); }
+    };
+    std::unique_ptr<Node> TakeNodes() noexcept {
+        tail = nullptr;
+        count = 0;
+        bytes = 0;
+        return std::move(head);
+    }
     std::mutex mutex;
     std::condition_variable cv;
-    std::deque<Event> events;
-    std::size_t capacity, active_reads = 0, bytes = 0;
+    std::unique_ptr<Node> head;
+    Node* tail = nullptr;
+    std::size_t capacity, count = 0, active_reads = 0, bytes = 0;
     bool closed = false;
-    std::string error = "sdk.events.closed";
+    const char* error = "sdk.events.closed";
 };
 }
 
@@ -152,7 +183,7 @@ EventQueueState::EventQueueState(std::shared_ptr<EventDeliveryOwner> owner,
     std::lock_guard lock(owner_->mutex_);
     ++owner_->queues_;
 }
-EventQueueState::~EventQueueState() { (void)Retire(); }
+EventQueueState::~EventQueueState() { try { (void)Retire(); } catch (...) {} }
 void EventQueueState::Push(const Event& event) {
     events::v1::EventQueue* queue;
     { std::lock_guard lock(mutex_); if (closed_) return; ++calls_; queue = queue_.get(); }

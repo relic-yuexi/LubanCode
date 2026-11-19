@@ -564,7 +564,15 @@ TEST_CASE("Owned late real worker skips command and close joins its actual threa
     });
     ReleaseOnExit release{gate};
     auto target = rig.Declare(probe.Input(rig.cwd, "late"), 3000);
-    rig.Register(target); rig.Adopt(target, 3000); rig.Confirm(target); REQUIRE(gate->Await());
+    rig.Register(target); rig.Adopt(target, 3000); rig.Confirm(target);
+    const auto before_wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        Clock::now() - target.before_register).count();
+    const bool worker_entered = gate->Await();
+    const auto entry_state = rig.coordinator->SnapshotOwnedJob(target.request.owner, target.registered.facts->job_id);
+    INFO("registration-to-worker-wait-ms=" << before_wait_ms << "; threads=" << rig.threads.load()
+        << "; state=" << entry_state.state << "; gap=" << entry_state.gap
+        << "; command-not-invoked=" << entry_state.command_not_invoked);
+    REQUIRE(worker_entered);
     const auto running = rig.coordinator->SnapshotOwnedJob(target.request.owner, target.registered.facts->job_id);
     REQUIRE(running.started_receipt); REQUIRE(running.dispatched_receipt); CHECK(rig.quota->running.load() == 1);
     Expire(target);
@@ -611,7 +619,15 @@ TEST_CASE("Owned deadline history holds native facts and rejects changed receipt
     });
     ReleaseOnExit release{gate};
     auto target = rig.Declare(probe.Input(rig.cwd, "history"), 3000);
-    rig.Register(target); rig.Adopt(target, 3000); rig.Confirm(target); REQUIRE(gate->Await());
+    rig.Register(target); rig.Adopt(target, 3000); rig.Confirm(target);
+    const auto before_wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        Clock::now() - target.before_register).count();
+    const bool worker_entered = gate->Await();
+    const auto entry_state = rig.coordinator->SnapshotOwnedJob(target.request.owner, target.registered.facts->job_id);
+    INFO("registration-to-worker-wait-ms=" << before_wait_ms << "; threads=" << rig.threads.load()
+        << "; state=" << entry_state.state << "; gap=" << entry_state.gap
+        << "; command-not-invoked=" << entry_state.command_not_invoked);
+    REQUIRE(worker_entered);
     Expire(target); gate->Release(); rig.Finish(target); NotInvoked(rig, target, true);
     // A real, bound admission without Confirm must remain incomplete on Hold.
     auto pending = rig.Declare(probe.Input(rig.cwd, "unconfirmed"), 0);

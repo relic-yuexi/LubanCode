@@ -29,6 +29,12 @@ using Json = nlohmann::json;
 constexpr auto kPlanFile = "sdk-memory-plan.json";
 constexpr std::size_t kPlanBytes = 4096, kReportBytes = 512 * 1024;
 Error Fail(std::string code, std::string message = {}) { return {std::move(code), std::move(message)}; }
+bool JsonMemberStrEq(const Json& object, const char* key, const char* expected) noexcept {
+    if (!object.is_object()) return false;
+    for (const auto& [name, value] : object.get_ref<const Json::object_t&>())
+        if (name == key) return value.is_string() && value.get_ref<const std::string&>() == expected;
+    return false;
+}
 bool Inside(const fs::path& path, const fs::path& root) {
     auto p = path.begin(), r = root.begin();
     for (; r != root.end(); ++r, ++p) if (p == path.end() || *p != *r) return false;
@@ -372,7 +378,7 @@ Result<void> SessionMemory::ValidateReport(const memory::v1::RecallReport& repor
             has_recall_fact = true;
     for (const auto& message : source.messages) {
         if (message.turn_id != report.turn_id || message.origin != v3::MessageOrigin::ContextRuntime ||
-            message.display != v3::DisplayMode::Hidden || message.message.value("role", Json()) != "user") continue;
+            message.display != v3::DisplayMode::Hidden || !JsonMemberStrEq(message.message, "role", "user")) continue;
         for (const auto& event : source.events) {
             if (event.kind != v3::EventKindV3::ContextInputApplied) continue;
             const auto refs = event.payload.find("addedMessageRefs");
@@ -391,7 +397,7 @@ Result<void> SessionMemory::ValidateReport(const memory::v1::RecallReport& repor
     const auto* message = source.FindMessage(report.context_message_id);
     if (!message || message->session_id != report.session_id || message->turn_id != report.turn_id ||
         message->origin != v3::MessageOrigin::ContextRuntime || message->display != v3::DisplayMode::Hidden ||
-        message->message.value("role", Json()) != "user" || !message->message.contains("content") ||
+        !JsonMemberStrEq(message->message, "role", "user") || !message->message.contains("content") ||
         !message->message["content"].is_string()) return bad();
     const auto& text = message->message["content"].get_ref<const std::string&>();
     if (text.empty() || text.size() != report.bytes || lubancode::platform::Sha256Hex(text) != report.context_sha256) return bad();
@@ -409,7 +415,7 @@ Result<void> SessionMemory::ValidateReport(const memory::v1::RecallReport& repor
             event.payload.value("contextMessageRef", Json()) != report.context_message_id) continue;
         const auto& payload = event.payload;
         if (event.session_id != report.session_id || event.turn_id != report.turn_id ||
-            payload.value("memoryLevel", Json()) != "project" || !payload.contains("memoryId") ||
+            !JsonMemberStrEq(payload, "memoryLevel", "project") || !payload.contains("memoryId") ||
             !payload["memoryId"].is_string() || payload.contains("snapshotInline") == payload.contains("snapshotRef") ||
             !payload.contains("contentSha256") || !payload["contentSha256"].is_string()) return bad();
         const auto id = payload["memoryId"].get<std::string>();

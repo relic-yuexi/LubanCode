@@ -13,12 +13,15 @@
     "max_tokens": 2048
   },
   "expected_events": [
+    "ProviderResponseIdentity",
+    "UsageSnapshot",
     "MessageStart",
     "ThinkingDelta",
     "ThinkingDelta",
     "ContentBlockDone",
     "TextDelta",
     "ContentBlockDone",
+    "UsageSnapshot",
     "MessageDone"
   ],
   "expected_replay": ["thinking 块按原字节回传,signature(空串)随块带"],

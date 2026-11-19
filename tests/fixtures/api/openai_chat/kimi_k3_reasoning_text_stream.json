@@ -10,9 +10,12 @@
     "reasoning_effort": "high"
   },
   "expected_events": [
+    "ProviderResponseIdentity",
     "MessageStart",
     "ThinkingDelta",
+    "ProviderResponseIdentity",
     "TextDelta",
+    "ProviderResponseIdentity",
     "MessageDone"
   ],
   "expected_replay": [

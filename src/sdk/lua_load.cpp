@@ -23,6 +23,12 @@ constexpr std::size_t kMaxScript = 1024 * 1024;
 constexpr std::size_t kMaxTotalScripts = 16 * 1024 * 1024;
 constexpr std::size_t kMaxScripts = 128;
 Error Fail(std::string code, std::string text = {}) { return {std::move(code), std::move(text)}; }
+bool JsonMemberStrEq(const Json& object, const char* key, const char* expected) noexcept {
+    if (!object.is_object()) return false;
+    for (const auto& [name, value] : object.get_ref<const Json::object_t&>())
+        if (name == key) return value.is_string() && value.get_ref<const std::string&>() == expected;
+    return false;
+}
 bool Text(const std::string& value, std::size_t cap, bool empty = false) {
     return (empty || !value.empty()) && value.size() <= cap &&
         value.find('\0') == std::string::npos && platform::IsValidUtf8(value);
@@ -98,7 +104,7 @@ Result<void> SessionLua::Load(const lua::v1::Selection& selection) {
         const auto description = (*tool)->description();
         const auto schema = (*tool)->input_schema();
         if (actual_name != script.tool_name || !Name(actual_name) || !Text(description, kMaxPlan, true) ||
-            !schema.is_object() || schema.value("type", Json()) != "object")
+            !JsonMemberStrEq(schema, "type", "object"))
             return std::unexpected(Fail("sdk.lua.invalid_definition", "actual name, description or object schema differs"));
         const auto schema_bytes = schema.dump(-1, ' ', false, Json::error_handler_t::replace);
         if (!Text(schema_bytes, kMaxPlan) || Json::parse(schema_bytes, nullptr, false) != schema)

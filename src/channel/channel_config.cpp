@@ -529,7 +529,7 @@ bool ParseMenuConfig(const nlohmann::json& value, const std::string& path,
         return false;
     }
     if (value.contains("preset")) {
-        if (!value["preset"].is_string() || value["preset"] != "assistant" || value.contains("items")) {
+        if (!value["preset"].is_string() || value["preset"].get_ref<const std::string&>() != "assistant" || value.contains("items")) {
             *error = path + ".preset 只认 assistant，且不能与 items 同写";
             return false;
         }

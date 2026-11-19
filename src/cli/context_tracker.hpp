@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "api/types.hpp"
@@ -149,6 +150,17 @@ public:
     bool usage_stale() const { return usage_stale_; }
 
     std::size_t current_tokens() const { return current_tokens_; }
+    std::optional<std::size_t> current_tokens_projection() const {
+        return current_tokens_known_ ? std::optional<std::size_t>(current_tokens_) : std::nullopt;
+    }
+    std::int64_t current_tokens_for_status() const {
+        return current_tokens_known_ && std::in_range<std::int64_t>(current_tokens_)
+            ? static_cast<std::int64_t>(current_tokens_) : -1;
+    }
+    std::int64_t window_tokens_for_status() const {
+        return std::in_range<std::int64_t>(window_tokens_)
+            ? static_cast<std::int64_t>(window_tokens_) : -1;
+    }
     std::size_t window_tokens() const { return window_tokens_; }
 
     // 最近一次请求的缓存命中量(usage.cache_read_tokens),跟 current_tokens
@@ -159,11 +171,14 @@ public:
     // 最近一次请求的完整输入(TotalInputTokens),命中率分母用——只取输入,
     // 不把 output 混进去。0 = 还没实测过。
     std::int64_t last_total_input_tokens() const { return last_input_tokens_; }
+    std::optional<std::int64_t> last_total_input_projection() const {
+        return last_input_known_ ? std::optional<std::int64_t>(last_input_tokens_) : std::nullopt;
+    }
 
     // 最近一次请求的缓存命中率(百分比,四舍五入)。分母只取输入;没实测
     // (总输入为 0)时返回 -1,调用方写"服务端未回报",不许拿 0 冒充真未命中。
     int last_cache_hit_percent() const {
-        if (last_input_tokens_ <= 0) {
+        if (!last_input_known_ || last_input_tokens_ <= 0 || last_cache_read_tokens_ < 0 || last_cache_read_tokens_ > last_input_tokens_) {
             return -1;
         }
         const double ratio = static_cast<double>(last_cache_read_tokens_) /
@@ -182,10 +197,16 @@ public:
 
     std::int64_t session_cache_read_total() const { return session_cache_read_total_; }
     std::int64_t session_input_total() const { return session_input_total_; }
+    std::optional<std::int64_t> session_input_projection() const {
+        return session_input_known_ ? std::optional<std::int64_t>(session_input_total_) : std::nullopt;
+    }
+    std::optional<std::int64_t> session_cache_read_projection() const {
+        return session_cache_read_known_ ? std::optional<std::int64_t>(session_cache_read_total_) : std::nullopt;
+    }
 
     // 本场(会话启动至今)缓存命中率(百分比);一次实测都没有返回 -1。
     int session_cache_hit_percent() const {
-        if (session_input_total_ <= 0) {
+        if (!session_input_known_ || !session_cache_read_known_ || session_input_total_ <= 0 || session_cache_read_total_ < 0 || session_cache_read_total_ > session_input_total_) {
             return -1;
         }
         const double ratio = static_cast<double>(session_cache_read_total_) /
@@ -240,11 +261,12 @@ public:
         std::size_t total_messages = 0;
         std::int64_t wire_common_prefix_bytes = -1;
         CacheMissKind miss_kind = CacheMissKind::Unknown;
+        bool input_tokens_known = true;
         // 该次请求命中率(百分比,四舍五入);input 为 0(含未回报)、读取
         // 明细未报(cache_read_reported=false 且数字为 0——读取量未知)或
         // 样本异常时返回 -1:这三种都不是"0% 命中",不许冒充。
         int hit_percent() const {
-            if (input_tokens <= 0 || anomalous) {
+            if (!input_tokens_known || input_tokens <= 0 || anomalous || cache_read_tokens < 0 || cache_read_tokens > input_tokens) {
                 return -1;
             }
             if (cache_read_tokens <= 0 && !cache_read_reported) {
@@ -322,6 +344,7 @@ private:
     void RegisterTurnIfMissing(const std::string& turn_id);
 
     std::size_t current_tokens_ = 0;
+    bool current_tokens_known_ = true;
     bool current_estimated_ = false;
     std::size_t window_tokens_;
     // 预算来路与身份(§三):随窗口值一并记账,恢复裁决与显示标注读它。
@@ -334,10 +357,13 @@ private:
     bool drop_usage_until_next_turn_ = false;
     std::int64_t last_cache_read_tokens_ = 0;
     std::int64_t last_input_tokens_ = 0;
+    bool last_input_known_ = true;
     bool usage_stale_ = false;
     std::optional<bool> server_prefix_caching_;
     std::int64_t session_cache_read_total_ = 0;
     std::int64_t session_input_total_ = 0;
+    bool session_input_known_ = true;
+    bool session_cache_read_known_ = true;
     std::vector<CacheRequestRecord> cache_history_;
     // 请求总账(不被环形缓冲挤掉)与用户轮次登记账(有界,只留最近
     // kMaxTurnLabels 个——12 笔请求至多跨 12 个轮次,32 留足余量)。

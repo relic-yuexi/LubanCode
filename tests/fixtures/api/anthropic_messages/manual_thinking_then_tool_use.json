@@ -13,6 +13,8 @@
     "tools": [{"name": "get_weather"}]
   },
   "expected_events": [
+    "ProviderResponseIdentity",
+    "UsageSnapshot",
     "MessageStart",
     "ThinkingDelta",
     "ThinkingDelta",
@@ -20,6 +22,7 @@
     "ToolUseStart",
     "ToolUseInputDelta",
     "ContentBlockDone",
+    "UsageSnapshot",
     "MessageDone"
   ],
   "expected_replay": ["第二轮回传 thinking 块(带 signature)+ tool_use 块 + tool_result 块"],

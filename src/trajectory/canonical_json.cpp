@@ -59,7 +59,7 @@ std::string FormatFloat(double value) {
 }
 
 bool DumpValue(const nlohmann::json& value, std::string* out, std::string* error_code,
-               std::string* message) {
+               std::string* message, bool skip_line_hashes = false) {
     switch (value.type()) {
         case nlohmann::json::value_t::null:
             out->append("null");
@@ -101,7 +101,7 @@ bool DumpValue(const nlohmann::json& value, std::string* out, std::string* error
                     out->push_back(',');
                 }
                 first = false;
-                if (!DumpValue(item, out, error_code, message)) {
+                if (!DumpValue(item, out, error_code, message, false)) {
                     return false;
                 }
             }
@@ -109,25 +109,19 @@ bool DumpValue(const nlohmann::json& value, std::string* out, std::string* error
             return true;
         }
         case nlohmann::json::value_t::object: {
-            // 显式收集 key 并按字节序排序:不依赖 json 对象容器的内部序,
-            // ordered_json 输入也能出同一份规范字节。
-            std::vector<std::reference_wrapper<const std::string>> keys;
-            keys.reserve(value.size());
-            for (auto it = value.begin(); it != value.end(); ++it) {
-                keys.emplace_back(it.key());
-            }
-            std::sort(keys.begin(), keys.end(),
-                      [](const auto& a, const auto& b) { return a.get().compare(b.get()) < 0; });
             out->push_back('{');
             bool first = true;
-            for (const auto& key_ref : keys) {
+            for (auto it = value.begin(); it != value.end(); ++it) {
+                if (skip_line_hashes && (it.key() == "prevHash" || it.key() == "lineHash")) {
+                    continue;
+                }
                 if (!first) {
                     out->push_back(',');
                 }
                 first = false;
-                AppendEscaped(out, key_ref.get());
+                AppendEscaped(out, it.key());
                 out->push_back(':');
-                if (!DumpValue(value.at(key_ref.get()), out, error_code, message)) {
+                if (!DumpValue(it.value(), out, error_code, message, false)) {
                     return false;
                 }
             }
@@ -202,6 +196,17 @@ std::expected<std::string, std::string> CanonicalJsonDump(const nlohmann::json& 
     std::string error_code;
     std::string message;
     if (!DumpValue(value, &out, &error_code, &message)) {
+        return std::unexpected(error_code + ": " + message);
+    }
+    return out;
+}
+
+std::expected<std::string, std::string> CanonicalJsonDumpWithoutLineHashes(const nlohmann::json& value) {
+    std::string out;
+    out.reserve(512);
+    std::string error_code;
+    std::string message;
+    if (!DumpValue(value, &out, &error_code, &message, value.is_object())) {
         return std::unexpected(error_code + ": " + message);
     }
     return out;

@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import json
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from scripts.ci import check_sdk_build_closure as closure
 from scripts.ci.tests import test_sdk_only_boundary as file_api_fixtures
+from scripts.ci.sdk_file_api_originals import preserve
 
 
 def complete_channel_hosts(targets):
@@ -408,6 +414,63 @@ class FileApiClosureTests(unittest.TestCase):
                 self.assertEqual(report["status"], "failed")
                 self.assertTrue(any("host/resource target" in v for v in report["violations"]))
                 self.fixture.targets = original
+
+
+class FileApiOriginalsTests(unittest.TestCase):
+    def test_exact_referenced_bytes_all_configurations_and_cycles_are_preserved(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            reply = root / "reply"
+            reply.mkdir()
+            originals = {
+                "index.json": b'{ "reply": {"codemodel": {"jsonFile": "model.json"}, "cache": {"jsonFile": "cache.json"}} }\n',
+                "model.json": b'{"configurations": [{"targets": [{"jsonFile": "target.json"}]}, {"directories": [{"jsonFile": "directory.json"}]}]}\n',
+                "target.json": b'{"name":"sdk", "back": {"jsonFile":"model.json"}}\n',
+                "directory.json": b'{"name":"second configuration"}\n',
+                "cache.json": b'{"entries":[]}\n',
+            }
+            for name, raw in originals.items():
+                (reply / name).write_bytes(raw)
+            (reply / "unreferenced.json").write_bytes(b'{}')
+            destination = root / "evidence"
+            receipt = preserve(reply / "index.json", destination, "actual-ci-merge")
+            self.assertEqual(receipt["acceptance"], "not_evaluated")
+            self.assertEqual(receipt["githubSha"], "actual-ci-merge")
+            self.assertEqual({item["name"] for item in receipt["files"]}, set(originals))
+            for item in receipt["files"]:
+                raw = originals[item["name"]]
+                self.assertEqual((destination / item["name"]).read_bytes(), raw)
+                self.assertEqual(item["bytes"], len(raw))
+                self.assertEqual(item["sha256"], hashlib.sha256(raw).hexdigest())
+            with self.assertRaises(ValueError):
+                preserve(reply / "index.json", destination, "replacement")
+            self.assertEqual((destination / "index.json").read_bytes(), originals["index.json"])
+
+    def test_missing_external_malformed_and_manifest_references_never_publish(self):
+        for reference in ("missing.json", "../outside.json", "C:/outside.json",
+                          "nested\\target.json", "index.json:stream", None, "broken.json", "manifest.json"):
+            with self.subTest(reference=reference), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                reply = root / "reply"
+                reply.mkdir()
+                (reply / "index.json").write_text(json.dumps({"jsonFile": reference}), encoding="utf-8")
+                (reply / "broken.json").write_bytes(b'{broken')
+                (reply / "manifest.json").write_bytes(b'{}')
+                with self.assertRaises(ValueError):
+                    preserve(reply / "index.json", root / "evidence", "merge")
+                self.assertFalse((root / "evidence").exists())
+
+    def test_linked_reference_is_rejected_before_copy(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "index.json").write_bytes(b'{"jsonFile":"linked.json"}')
+            (root / "linked.json").write_bytes(b'{}')
+            # Keep this rejection fixture available on Windows without granting
+            # symlink-creation privileges to the CI runner.
+            with patch.object(Path, "is_symlink", lambda path: path.name == "linked.json"):
+                with self.assertRaises(ValueError):
+                    preserve(root / "index.json", root / "evidence", "merge")
+            self.assertFalse((root / "evidence").exists())
 
 
 if __name__ == "__main__":

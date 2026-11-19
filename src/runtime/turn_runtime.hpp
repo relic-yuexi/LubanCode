@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -25,6 +26,7 @@
 
 #include "runtime/interaction.hpp"  // ToolHookDecision:hooks 决策的中立表态
 #include "api/types.hpp"       // UsageReport/Message:usage 与 prompt 的领域形状
+#include "api/usage_totals.hpp"
 #include "approval_mode.hpp"   // ApprovalMode:公共审批值域(收口审计单 P1)
 #include "config/command_permission.hpp"  // ClassifyCommandByPermissions:permissions 叠加(问题 7 拆出,不再借 config.hpp)
 #include "hooks/dispatcher.hpp"
@@ -163,19 +165,21 @@ struct StepUsageRecord {
     std::int64_t api_duration_ms = 0;
     std::string stop_reason;
 
-    std::int64_t total_input_tokens() const {
-        return input_tokens + cache_read_tokens + cache_creation_tokens;
+    std::optional<std::int64_t> total_input_tokens() const {
+        return api::CheckedTotalInputTokens(api::Usage{input_tokens, output_tokens, cache_read_tokens,
+            cache_creation_tokens, reasoning_tokens});
     }
 
     // 本步命中率(百分比);没实测(reported=false 或总输入 0)或账目自相
     // 矛盾(anomalous——负数、R>T 一类,比例算出来只会骗人)返回 -1,
     // 显示层写"服务端未回报/样本异常",不许拿 0 冒充真未命中。
     int cache_hit_percent() const {
-        if (!reported || anomalous || total_input_tokens() <= 0) {
+        const auto input = total_input_tokens();
+        if (!reported || anomalous || !input || *input <= 0 || cache_read_tokens < 0 || cache_read_tokens > *input) {
             return -1;
         }
         const double ratio =
-            static_cast<double>(cache_read_tokens) / static_cast<double>(total_input_tokens()) * 100.0;
+            static_cast<double>(cache_read_tokens) / static_cast<double>(*input) * 100.0;
         return static_cast<int>(ratio + 0.5);
     }
 };
@@ -219,44 +223,34 @@ struct TurnUsageStats {
         steps.push_back(std::move(record));
     }
 
-    int request_count() const { return static_cast<int>(steps.size()); }
+    std::size_t request_count() const { return steps.size(); }
 
-    std::int64_t input_tokens() const {
-        std::int64_t total = 0;
-        for (const auto& step : steps) total += step.input_tokens;
+    std::optional<std::int64_t> Sum(std::int64_t StepUsageRecord::* field) const {
+        std::optional<std::int64_t> total = 0;
+        for (const auto& step : steps) {
+            total = api::usage_observation::CheckedAdd(*total, step.*field);
+            if (!total) return std::nullopt;
+        }
         return total;
     }
 
-    std::int64_t cache_read_tokens() const {
-        std::int64_t total = 0;
-        for (const auto& step : steps) total += step.cache_read_tokens;
-        return total;
-    }
+    std::optional<std::int64_t> input_tokens() const { return Sum(&StepUsageRecord::input_tokens); }
+    std::optional<std::int64_t> cache_read_tokens() const { return Sum(&StepUsageRecord::cache_read_tokens); }
+    std::optional<std::int64_t> cache_creation_tokens() const { return Sum(&StepUsageRecord::cache_creation_tokens); }
+    std::optional<std::int64_t> output_tokens() const { return Sum(&StepUsageRecord::output_tokens); }
 
-    std::int64_t cache_creation_tokens() const {
-        std::int64_t total = 0;
-        for (const auto& step : steps) total += step.cache_creation_tokens;
-        return total;
-    }
-
-    std::int64_t output_tokens() const {
-        std::int64_t total = 0;
-        for (const auto& step : steps) total += step.output_tokens;
-        return total;
-    }
 
     // 输出里 reasoning 的拆账合计(含在 output_tokens 里,不是另加的一笔;
     // provider 没拆账就是 0——与"reasoning 真为零"分不清,显示层措辞按
     // "未拆账"处理,不猜)。
-    std::int64_t reasoning_tokens() const {
-        std::int64_t total = 0;
-        for (const auto& step : steps) total += step.reasoning_tokens;
-        return total;
-    }
+    std::optional<std::int64_t> reasoning_tokens() const { return Sum(&StepUsageRecord::reasoning_tokens); }
 
     // 完整输入(input + cache_read + cache_creation)。
-    std::int64_t total_input_tokens() const {
-        return input_tokens() + cache_read_tokens() + cache_creation_tokens();
+    std::optional<std::int64_t> total_input_tokens() const {
+        const auto input = input_tokens(), read = cache_read_tokens(), write = cache_creation_tokens();
+        if (!input || !read || !write) return std::nullopt;
+        for (const auto& step : steps) if (!step.total_input_tokens()) return std::nullopt;
+        return api::CheckedTotalInputTokens(api::Usage{*input, 0, *read, *write, 0});
     }
 
     // 整轮命中率(百分比,四舍五入);分母只取输入,按 token 总和重算。
@@ -270,8 +264,13 @@ struct TurnUsageStats {
             if (step.anomalous) {
                 continue;
             }
-            read += step.cache_read_tokens;
-            input += step.total_input_tokens();
+            const auto step_input = step.total_input_tokens();
+            if (!step_input || step.cache_read_tokens < 0 || step.cache_read_tokens > *step_input) return -1;
+            const auto next_read = api::usage_observation::CheckedAdd(read, step.cache_read_tokens);
+            const auto next_input = api::usage_observation::CheckedAdd(input, *step_input);
+            if (!next_read || !next_input) return -1;
+            read = *next_read;
+            input = *next_input;
         }
         if (input <= 0) {
             return -1;
@@ -390,7 +389,7 @@ PromptGate EmitPreTurn(hooks::HookDispatcher* dispatcher, const std::string& tur
 // PostTurn:终局只观察(Stop 判续跑则本事件不触发——触发点在终局收口,
 // 由装配层保证恰好一次)。summary 载荷由调用方拼好递进,这里只封包。
 void EmitPostTurn(hooks::HookDispatcher* dispatcher, const std::string& turn_id, const std::string& final_text,
-                  int steps, int actions, std::int64_t input_tokens, std::int64_t output_tokens,
+                  std::size_t steps, int actions, std::optional<std::int64_t> input_tokens, std::optional<std::int64_t> output_tokens,
                   std::int64_t duration_ms, bool cancelled);
 
 // PreStep:每次 Step 请求构建前(steer 注入合批之后)。否决语义 = 终止本

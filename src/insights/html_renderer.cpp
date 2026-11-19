@@ -62,6 +62,10 @@ std::string FormatTokens(std::int64_t value) {
     return buffer;
 }
 
+std::string FormatTokens(std::optional<std::int64_t> value) {
+    return value ? FormatTokens(*value) : "未知（溢出）";
+}
+
 std::string FormatNumber(std::int64_t value) {
     return std::to_string(value);
 }
@@ -273,17 +277,23 @@ std::string RenderInsightsHtml(const InsightsReport& report,
         page << "<table>\n"
              << "<tr><th>输入</th><th>cache 读</th><th>cache 写</th><th>输出</th>"
              << "<th>推理(已含在输出)</th><th>费用</th></tr>\n"
-             << "<tr><td>" << FormatTokens(agg.input_tokens) << "</td><td>"
-             << FormatTokens(agg.cache_read_tokens)
+             << "<tr><td>" << FormatTokens(usage_projection::Value(agg.input_tokens, agg.knowledge.input_tokens)) << "</td><td>"
+             << FormatTokens(usage_projection::Value(agg.cache_read_tokens, agg.knowledge.cache_read_tokens))
              << (agg.cache_read_ratio_percent.has_value()
                      ? "(" + std::to_string(*agg.cache_read_ratio_percent) + "%,分母=实测输入合计)"
-                     : "(比例 unknown:实测输入为 0)")
-             << "</td><td>" << FormatTokens(agg.cache_creation_tokens) << "</td><td>"
-             << FormatTokens(agg.output_tokens) << "</td><td>" << FormatTokens(agg.reasoning_tokens)
-             << "</td><td>not_priced(" << EscapeHtml(extras.pricing_note.empty()
-                                                         ? std::string("未配价格表")
-                                                         : extras.pricing_note)
-             << ";逐笔费用看 /usage)</td></tr>\n</table>\n"
+                     : (usage_projection::Input(agg)
+                            ? "(比例 unknown:实测输入为 0)"
+                            : "(比例 unknown:输入溢出)"))
+             << "</td><td>" << FormatTokens(usage_projection::Value(agg.cache_creation_tokens, agg.knowledge.cache_creation_tokens)) << "</td><td>"
+             << FormatTokens(usage_projection::Value(agg.output_tokens, agg.knowledge.output_tokens)) << "</td><td>" << FormatTokens(usage_projection::Value(agg.reasoning_tokens, agg.knowledge.reasoning_tokens))
+             << "</td><td>"
+             << (!report.usage.knowledge.cost_micros
+                     ? std::string("未知（溢出）")
+                     : "not_priced(" + EscapeHtml(extras.pricing_note.empty()
+                                                     ? std::string("未配价格表")
+                                                     : extras.pricing_note) +
+                           ";逐笔费用看 /usage)")
+             << "</td></tr>\n</table>\n"
              << "<p class=\"muted\">模型/用途/主子执行/重试/compact 的逐笔分账在 Journal 里,"
                 "摘要 schema 未带,本表不猜;逐笔账看 /usage --by。</p>\n";
         if (!agg.cache_epochs.empty()) {
@@ -291,8 +301,7 @@ std::string RenderInsightsHtml(const InsightsReport& report,
                  << "<tr><th>session/run</th><th>epoch</th><th>请求</th><th>cache 上报覆盖</th>"
                     "<th>完整输入</th><th>cache 读</th><th>命中率</th></tr>\n";
             for (const auto& epoch : agg.cache_epochs) {
-                const std::int64_t total_input = epoch.input_tokens + epoch.cache_read_tokens +
-                                                 epoch.cache_creation_tokens;
+                const auto total_input = usage_projection::Input(epoch);
                 page << "<tr><td>" << EscapeHtml(epoch.session_id + "/" + epoch.run_id)
                      << "</td><td>"
                      << (epoch.cache_epoch > 0 ? std::to_string(epoch.cache_epoch)
@@ -301,10 +310,10 @@ std::string RenderInsightsHtml(const InsightsReport& report,
                      << FormatNumber(epoch.requests_cache_reported) << "/"
                      << FormatNumber(epoch.requests_total) << "</td><td>"
                      << FormatTokens(total_input) << "</td><td>"
-                     << FormatTokens(epoch.cache_read_tokens) << "</td><td>"
+                     << FormatTokens(usage_projection::Value(epoch.cache_read_tokens, epoch.knowledge.cache_read_tokens)) << "</td><td>"
                      << (epoch.cache_read_ratio_percent.has_value()
                              ? std::to_string(*epoch.cache_read_ratio_percent) + "%"
-                             : std::string("该 provider 未报缓存"))
+                             : (!usage_projection::Input(epoch) ? std::string("未知（溢出）") : std::string("该 provider 未报缓存")))
                      << "</td></tr>\n";
             }
             page << "</table>\n";
@@ -526,8 +535,8 @@ std::string RenderInsightsHtml(const InsightsReport& report,
                  << EscapeHtml(workspace) << "</td><td>" << EscapeHtml(session.source.integrity)
                  << "</td><td>" << FormatNumber(static_cast<std::int64_t>(session.work.turns))
                  << "</td><td>" << FormatNumber(static_cast<std::int64_t>(session.work.tool_calls))
-                 << "</td><td>" << FormatTokens(session.usage.input_tokens) << "</td><td>"
-                 << FormatTokens(session.usage.output_tokens) << "</td><td>"
+                 << "</td><td>" << FormatTokens(usage_projection::Value(session.usage.input_tokens, session.usage.knowledge.input_tokens)) << "</td><td>"
+                 << FormatTokens(usage_projection::Value(session.usage.output_tokens, session.usage.knowledge.output_tokens)) << "</td><td>"
                  << EscapeHtml(session.work.outcome.empty() ? std::string("-") : session.work.outcome)
                  << "</td><td>"
                  << EscapeHtml(cats.empty() ? std::string("-") : cats) << "</td></tr>\n";

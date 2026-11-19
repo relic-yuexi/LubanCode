@@ -6,7 +6,10 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <new>
+#include <stdexcept>
 #include <variant>
 #include <vector>
 
@@ -15,6 +18,7 @@
 #include "runtime/event_sink.hpp"
 #include "runtime/turn_event_adapter.hpp"
 #include "agent/loop.hpp"
+#include "agent/token_calibrator.hpp"
 #include "tools/session_utils.hpp"
 #include "api/anthropic/client.hpp"
 #include "api/backend.hpp"
@@ -23,6 +27,7 @@
 #include "api/types.hpp"
 #include "api/chat/request.hpp"
 #include "api/model_input_snapshot.hpp"
+#include "api/usage_event_projection.hpp"
 #include "hooks/middleware_builtins.hpp"
 #include "trajectory/v3/result_store.hpp"
 #include "tools/registry.hpp"
@@ -30,6 +35,115 @@
 #include "tools/tool_search.hpp"  // ToolSearchTool/ToolInvokeTool:P1 代理对的两枚壳
 
 using namespace lubancode;
+
+TEST_CASE("actual loop calibration admits complete input facts without borrowing legacy reporting flags") {
+    class CalibrationBackend final : public api::Backend {
+    public:
+        api::UsageSnapshot snapshot;
+        int calls = 0;
+        std::expected<void, api::Error> send_stream(const api::Request&,
+            const std::function<void(const api::StreamEvent&)>& emit, const std::atomic<bool>* = nullptr) override {
+            ++calls;
+            emit(snapshot);
+            emit(api::TextDelta{"done"});
+            api::MessageDone done;
+            done.stop_reason = "end_turn";
+            done.usage = snapshot.usage;
+            done.usage_reported = true;
+            done.usage_observation = snapshot.usage_observation;
+            emit(done);
+            return {};
+        }
+    };
+    for (int scenario = 0; scenario < 7; ++scenario) {
+        INFO(scenario);
+        nlohmann::json wire{{"input_tokens", 3000}, {"output_tokens", 5},
+            {"cache_read_input_tokens", 11}, {"cache_creation_input_tokens", 13}};
+        if (scenario == 1) wire.erase("cache_creation_input_tokens");
+        if (scenario == 2) wire["cache_read_input_tokens"] = "11";
+        if (scenario == 5) {
+            wire["cache_read_input_tokens"] = 0;
+            wire["cache_creation_input_tokens"] = 0;
+        }
+        auto source = api::usage_wire::Anthropic(wire);
+        REQUIRE(source.has_value());
+        if (scenario == 3) source->observation.fields[0].origin = ::lubancore::usage::v1::Origin::Inferred;
+        CalibrationBackend backend;
+        backend.snapshot = api::usage_wire::Nonterminal(*source);
+        if (scenario == 4) backend.snapshot.usage_observation.reset();
+        if (scenario == 6) backend.snapshot.usage_observation->provider_namespace.clear();
+        tools::ToolRegistry registry;
+        agent::TokenCalibrator calibrator;
+        agent::Agent loop(backend, registry, agent::AgentProfile{.provider = "precision-fixture",
+            .request{.model = "test-model"}, .system_prompt = "system prompt"});
+        agent::TurnWiring wiring;
+        wiring.token_calibrator = &calibrator;
+        const auto result = loop.Run(std::string(12000, 'a'), wiring);
+        REQUIRE(result.has_value());
+        CHECK(backend.calls == 1);
+        const auto status = calibrator.StatusOf("precision-fixture", "test-model");
+        CHECK(status.sample_count == ((scenario == 0 || scenario == 5) ? 1 : 0));
+    }
+}
+
+TEST_CASE("Five-field attempt facts: actual transport unwinding owns seen numbers and preserves original exceptions") {
+    class ThrowingTransport final : public api::Backend {
+    public:
+        int fault = 0, calls = 0;
+        int source_kind = 0;
+        std::expected<void, api::Error> send_stream(const api::Request&,
+            const std::function<void(const api::StreamEvent&)>& emit, const std::atomic<bool>* = nullptr) override {
+            ++calls;
+            if (source_kind == 1) {
+                auto source = api::usage_wire::LegacyBackend(api::Usage{17, 9, 11, 13, 2});
+                emit(api::usage_wire::Nonterminal(*source));
+            } else if (source_kind == 2) {
+                api::MessageDone legacy; legacy.usage = api::Usage{17, 9, 11, 13, 2};
+                emit(legacy);
+            }
+            if (fault == 0) throw std::runtime_error("original transport");
+            if (fault == 1) throw std::bad_alloc{};
+            throw 17;
+        }
+    };
+    for (const int fault : {0, 1, 2}) for (const int source_kind : {0, 1, 2})
+        for (const bool observer_throws : {false, true}) {
+            ThrowingTransport backend; backend.fault = fault; backend.source_kind = source_kind;
+            tools::ToolRegistry registry;
+            agent::Agent loop(backend, registry,
+                agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+            runtime::IdAuthority ids;
+            runtime::TurnEventAdapter events("unwind-fixture", ids);
+            int captures = 0, published = 0;
+            api::Usage owned;
+            events.ObserveUsage([&](const api::Usage& usage, const ::lubancore::usage::v1::Observation* observation,
+                                   bool subordinate, bool incomplete, const runtime::UsageAttemptContext& context) {
+                ++captures; owned = usage;
+                CHECK_FALSE(subordinate); CHECK(incomplete);
+                CHECK(context.trajectory_request_id.empty()); CHECK(context.provider_response_id.empty());
+                CHECK(context.model == "test-model"); CHECK(context.purpose == "main_turn");
+                if (source_kind == 1) {
+                    REQUIRE(observation); CHECK(observation->provider_namespace == "lubancore.backend.legacy");
+                } else CHECK(observation == nullptr);
+                if (observer_throws) throw std::logic_error("secondary observer");
+            });
+            events.Attach([&](const runtime::ServerEvent& event) {
+                if (event.kind == runtime::ServerEventKind::UsageUpdated) ++published;
+            });
+            agent::TurnWiring wiring; wiring.events = &events;
+            int caught = -1;
+            try { (void)loop.Run("facts", wiring); }
+            catch (const std::bad_alloc&) { caught = 1; }
+            catch (const std::runtime_error& error) { caught = 0; CHECK(std::string(error.what()) == "original transport"); }
+            catch (int value) { caught = 2; CHECK(value == 17); }
+            CHECK(caught == fault); CHECK(backend.calls == 1); CHECK(published == 0);
+            CHECK(captures == (source_kind != 0 ? 1 : 0));
+            if (source_kind != 0) {
+                CHECK(owned.input_tokens == 17); CHECK(owned.output_tokens == 9); CHECK(owned.cache_read_tokens == 11);
+                CHECK(owned.cache_creation_tokens == 13); CHECK(owned.output_reasoning_tokens == 2);
+            }
+        }
+}
 
 namespace {
 
@@ -162,6 +276,7 @@ public:
                 }
                 break;
             case runtime::ServerEventKind::UsageUpdated: {
+                usage_payloads.push_back(event.payload);
                 api::UsageReport report;
                 report.usage.input_tokens = event.payload.value("input_tokens", std::int64_t{0});
                 report.usage.output_tokens = event.payload.value("output_tokens", std::int64_t{0});
@@ -179,6 +294,7 @@ public:
     std::string thinking;
     std::vector<std::string> started_tools;
     std::vector<api::UsageReport> reports;
+    std::vector<nlohmann::json> usage_payloads;
 };
 
 // 一轮录音装配:本地适配器 + 录音 sink,wiring.events 直连。
@@ -825,14 +941,16 @@ class CancelSourceRecorder final : public agent::LoopBoundaryRecorder {
 public:
     std::optional<agent::OutputCancelSource> cancel_source;
     int prepared_count = 0;
+    std::vector<std::string> usage_response_ids, completed_response_ids;
     std::string OnRequestPrepared(const api::Request&, const agent::RequestPreparedContext&) override {
         return "req-" + std::to_string(++prepared_count);
     }
     bool OnRequestSent(const std::string&) override { return true; }
-    void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
-                         bool, bool, const std::string&) override {}
+    void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string& id, int, bool,
+                         bool, bool, const std::string&) override { usage_response_ids.push_back(id); }
     bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
-                           const std::string&) override {
+                           const std::string& id) override {
+        completed_response_ids.push_back(id);
         return true;
     }
     void OnOutputFailed(const std::string&, const std::string&) override {}
@@ -840,6 +958,31 @@ public:
         cancel_source = source;
     }
 };
+
+TEST_CASE("Five-field response identity: durable boundaries prefer actual reply ID and preserve absence") {
+    for (const bool reply_id : {false, true}) for (const bool start_id : {false, true}) {
+        FakeBackend backend;
+        auto source = api::usage_wire::LegacyBackend(api::Usage{3, 7, 11, 13, 2}); REQUIRE(source);
+        auto snapshot = api::usage_wire::Nonterminal(*source);
+        if (reply_id) snapshot.provider_response_id = "actual-reply-id";
+        backend.scripts = {{api::MessageStart{start_id ? "start-id" : "", "model"},
+            snapshot, api::TextDelta{"answer"}, api::MessageDone{"end_turn"}}};
+        tools::ToolRegistry registry;
+        agent::Agent loop(backend, registry,
+            agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+        CancelSourceRecorder boundary;
+        RecordedTurn turn;
+        agent::TurnWiring wiring; wiring.events = &turn.adapter; wiring.boundary_recorder = &boundary;
+        const auto result = loop.Run("question", wiring); REQUIRE(result);
+        CHECK_FALSE(result->cancelled); CHECK(backend.captured_requests.size() == 1);
+        const std::string expected = reply_id ? "actual-reply-id" : (start_id ? "start-id" : "");
+        REQUIRE(boundary.usage_response_ids.size() == 1); REQUIRE(boundary.completed_response_ids.size() == 1);
+        CHECK(boundary.usage_response_ids.front() == expected);
+        CHECK(boundary.completed_response_ids.front() == expected);
+        REQUIRE(turn.recorder.usage_payloads.size() == 1);
+        CHECK(turn.recorder.usage_payloads.front().at("provider_response_id") == expected);
+    }
+}
 
 // 真按键的形状:取消分型回来时,交互层取消链确实升着(按键监听在流中途
 // 置位)——这是全库唯一合法升旗人。
@@ -2944,4 +3087,101 @@ TEST_CASE("T12-D: provider 输入超窗发 SendOverflow 压力,原请求不重�
 
     // 分账面:别的 Api 稳定码不冒充超窗(overloaded 一类走恢复环自己的路)。
     CHECK_FALSE(api::IsInputContextOverflowCode("server_error"));
+}
+
+
+TEST_CASE("Five-field attempt facts: cancelled or rejected replies publish once before return") {
+    for (const bool cancelled : {false, true}) {
+        FakeBackend backend;
+        api::UsageSnapshot snapshot{api::Usage{17, 9, 3, 5, 7}, true, true, true};
+        snapshot.provider_response_id = "actual-provider-id";
+        backend.scripts = {{snapshot, api::StreamError{"rejected body", "model.payload.invalid"}}};
+        if (cancelled) backend.cancel_after_event_index = 0;
+        tools::ToolRegistry registry;
+        agent::Agent loop(backend, registry,
+            agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+        RecordedTurn turn;
+        agent::TurnWiring wiring; wiring.events = &turn.adapter;
+        const auto result = loop.Run("facts", wiring);
+        if (cancelled) { REQUIRE(result); CHECK(result->cancelled); }
+        else CHECK_FALSE(result);
+        REQUIRE(turn.recorder.usage_payloads.size() == 1);
+        const auto& payload = turn.recorder.usage_payloads.front();
+        CHECK(payload.at("input_tokens") == 17); CHECK(payload.at("output_tokens") == 9);
+        CHECK(payload.at("cache_read_tokens") == 3); CHECK(payload.at("cache_creation_tokens") == 5);
+        CHECK(payload.at("reasoning_tokens") == 7);
+        CHECK(payload.at("provider_response_id") == "actual-provider-id");
+        CHECK(payload.at("reported_by_provider") == true);
+        CHECK(payload.at("attempt_succeeded") == false);
+        CHECK(payload.at("stop_reason") == "");
+        CHECK(backend.captured_requests.size() == 1);
+    }
+}
+
+TEST_CASE("Five-field attempt facts: an identity-only cancelled reply never invents usage") {
+    FakeBackend backend;
+    backend.scripts = {{api::ProviderResponseIdentity{"identity-only"}}};
+    backend.cancel_after_event_index = 0;
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+        agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+    RecordedTurn turn;
+    agent::TurnWiring wiring; wiring.events = &turn.adapter;
+    const auto result = loop.Run("facts", wiring);
+    REQUIRE(result); CHECK(result->cancelled);
+    REQUIRE(turn.recorder.usage_payloads.size() == 1);
+    const auto& payload = turn.recorder.usage_payloads.front();
+    CHECK(payload.at("provider_response_id") == "identity-only");
+    CHECK(payload.at("reported_by_provider") == false);
+    CHECK(payload.at("attempt_succeeded") == false);
+    CHECK_FALSE(payload.contains("usage_observation"));
+    CHECK(payload.at("input_tokens") == 0);
+}
+
+
+TEST_CASE("Five-field attempt facts: retry preserves separate facts without a second success event") {
+    FakeBackend backend;
+    api::UsageSnapshot failed{api::Usage{17, 9, 3, 5, 7}, true};
+    failed.provider_response_id = "failed-attempt";
+    api::MessageDone succeeded{"end_turn", api::Usage{2, 1}};
+    succeeded.usage_reported = true;
+    succeeded.provider_response_id = "successful-attempt";
+    backend.scripts = {{failed, api::StreamError{"temporary", "server_error"}},
+                       {api::TextDelta{"done"}, api::ContentBlockDone{0}, succeeded}};
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+        agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+    RecordedTurn turn;
+    std::vector<std::string> source_ids, source_purposes, source_models;
+    turn.adapter.ObserveUsage([&](const api::Usage&, const ::lubancore::usage::v1::Observation*, bool subordinate,
+                                  bool, const runtime::UsageAttemptContext& context) {
+        CHECK_FALSE(subordinate); CHECK(context.trajectory_request_id.empty());
+        source_ids.emplace_back(context.provider_response_id);
+        source_purposes.emplace_back(context.purpose);
+        source_models.emplace_back(context.model);
+    });
+    agent::TurnWiring wiring; wiring.events = &turn.adapter;
+    int waits = 0;
+    wiring.wait_request_backoff = [&](std::chrono::milliseconds, const std::atomic<bool>*) {
+        ++waits; return true;
+    };
+    int hooks = 0;
+    wiring.on_post_step_hook = [&](const api::UsageReport& report) {
+        ++hooks; CHECK(report.usage.input_tokens == 2); CHECK(report.attempts == 2);
+    };
+    const auto result = loop.Run("facts", wiring);
+    REQUIRE(result); CHECK_FALSE(result->cancelled); CHECK(waits == 1); CHECK(hooks == 1);
+    REQUIRE(turn.recorder.usage_payloads.size() == 2);
+    const auto& first = turn.recorder.usage_payloads[0];
+    const auto& second = turn.recorder.usage_payloads[1];
+    CHECK(first.at("input_tokens") == 17); CHECK(first.at("attempts") == 1);
+    CHECK(first.at("provider_response_id") == "failed-attempt");
+    CHECK(first.at("attempt_succeeded") == false);
+    CHECK(second.at("input_tokens") == 2); CHECK(second.at("attempts") == 2);
+    CHECK(second.at("provider_response_id") == "successful-attempt");
+    CHECK(second.at("attempt_succeeded") == true);
+    CHECK(backend.captured_requests.size() == 2);
+    CHECK(source_ids == std::vector<std::string>{"failed-attempt", "successful-attempt"});
+    CHECK(source_purposes == std::vector<std::string>{"main_turn", "main_turn"});
+    CHECK(source_models == std::vector<std::string>{"test-model", "test-model"});
 }

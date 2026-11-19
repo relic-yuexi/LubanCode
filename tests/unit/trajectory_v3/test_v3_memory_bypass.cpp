@@ -240,6 +240,21 @@ TEST_CASE("v3 旁路全流(成功例): 消息行 + prepared/sent/started/complet
     CHECK(prepared->value("turnId", std::string()) == bypass_turn);
     CHECK(prepared->value("stepId", std::string()).empty() == false);
 
+    const auto* observed = FindLine(lines, "event", "kind", "model.usage.observed");
+    REQUIRE(observed != nullptr);
+    CHECK(observed->value("requestId", std::string()) == request_id);
+    CHECK(observed->at("turnId") == prepared->at("turnId"));
+    CHECK(observed->at("stepId") == prepared->at("stepId"));
+    CHECK(observed->at("payload").at("numbers") == nlohmann::json::array({812, 96, 0, 0, 0}));
+    CHECK(observed->at("payload").at("providerResponseId") == "resp-mem-1");
+    CHECK(observed->at("payload").at("reportedByProvider") == true);
+    CHECK(observed->at("payload").at("incomplete") == false);
+    CHECK_FALSE(observed->at("payload").contains("observation")); // Legacy Backend did not supply raw material.
+    int observations = 0;
+    for (const auto& line : lines)
+        if (line.value("kind", std::string()) == "model.usage.observed") ++observations;
+    CHECK(observations == 1);
+
     // 4) sent → started → completed 单一终态链。
     int sent_count = 0;
     int started_count = 0;
@@ -283,6 +298,8 @@ TEST_CASE("v3 旁路全流(成功例): 消息行 + prepared/sent/started/complet
     CHECK(assistant->at("usage").value("outputTokens", std::int64_t{0}) == 96);
     CHECK(assistant->value("provider", std::string()) == "kimi");
     CHECK(assistant->value("model", std::string()) == "cheap-model");
+    CHECK(assistant->at("responseModel").is_null());
+    CHECK(assistant->at("message").at("provider_response_id") == "resp-mem-1");
 
     // 6) 链投影:旁路输入输出一个不进 conversation(主链只有根 system + 主回合 user)。
     auto read_back = trajectory::v3::ReadV3Ledger(*stream);
@@ -326,6 +343,9 @@ TEST_CASE("v3 旁路超时例: cancelled(internal_cancel) + usage appended,不�
     const auto stream = trajectory::v3::FindV3SessionStream(ledger.session_dir());
     REQUIRE(stream.has_value());
     const auto lines = StreamLines(*stream);
+
+    // No callback or returned source facts: do not fabricate an observation for a timer.
+    CHECK(FindLine(lines, "event", "kind", "model.usage.observed") == nullptr);
 
     const auto* prepared = FindLine(lines, "event", "kind", "model.request.prepared");
     REQUIRE(prepared != nullptr);

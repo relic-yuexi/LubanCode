@@ -10,6 +10,7 @@ TEST_CASE("SDK Memory extraction: actual request inside shared module") { memory
 TEST_CASE("SDK Memory extraction: usage provenance inside shared module") { memory_extraction_fixture::Usage(SharedPort(),"shared-sdk"); }
 TEST_CASE("SDK Memory extraction: finish and cancellation inside shared module") { memory_extraction_fixture::Finish(SharedPort(),"shared-sdk"); }
 TEST_CASE("SDK Memory extraction: native Connection inside shared module") { memory_extraction_fixture::NativeConnection(SharedPort(),"shared-sdk"); }
+TEST_CASE("SDK Memory extraction: actual native Connection faults retain source facts") { memory_extraction_fixture::NativeConnectionFaults(SharedPort(),"shared-sdk"); }
 
 TEST_CASE("SDK Memory extraction: shared learning text gate") { memory_extraction_fixture::LearningTextGate(SharedPort(),"shared-sdk"); }
 TEST_CASE("SDK Memory extraction: shared learning evidence gate") { memory_extraction_fixture::LearningEvidenceGate(SharedPort(),"shared-sdk"); }

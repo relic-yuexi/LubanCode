@@ -11,6 +11,8 @@
     "tools": [{"name": "tool_search_tool_regex_20251119"}, {"name": "mcp__github__search_issues", "defer_loading": true}]
   },
   "expected_events": [
+    "ProviderResponseIdentity",
+    "UsageSnapshot",
     "MessageStart",
     "TextDelta",
     "ContentBlockDone",
@@ -22,6 +24,7 @@
     "ToolUseStart",
     "ToolUseInputDelta",
     "ContentBlockDone",
+    "UsageSnapshot",
     "MessageDone"
   ],
   "expected_replay": [

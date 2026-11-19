@@ -2,6 +2,7 @@
 #include "sdk/prepare_journal.hpp"
 #include "sdk/operation_ledger.hpp"
 #include "sdk/plan_write.hpp"
+#include "sdk/usage_result.hpp"
 
 #include <algorithm>
 #include <array>
@@ -168,24 +169,46 @@ subagents::v1::LiveTerminalReceipt CopyChildReceipt(const lubancode::runtime::Su
 
 Result<std::vector<subagents::v1::Report>> ReadSubagentReports(
     const v3::V3Ledger& source, const fs::path& directory, const std::string& session_id,
-    const std::string& operation_id, const std::string& turn_id, bool require_complete, bool allow_unconsumed) {
+    const std::string& operation_id, const std::string& turn_id, bool require_complete, bool allow_unconsumed,
+    const OperationUsage* usage) {
     const auto bad = [](std::string why) -> Result<std::vector<subagents::v1::Report>> {
         return std::unexpected(Fail("sdk.subagent.report_invalid", std::move(why)));
     };
     if (source.session_id != session_id) return bad("verified parent belongs to another Session");
     std::vector<subagents::v1::Report> reports;
     std::set<std::pair<std::string, std::uint64_t>> seen;
+    std::vector<bool> bound(usage ? usage->attempts.size() : 0, false);
+    std::string_view usage_error;
+    const auto usage_bad = [](std::string_view why) -> Result<std::vector<subagents::v1::Report>> {
+        return std::unexpected(Fail("sdk.usage.result_invalid", std::string(why)));
+    };
+    const auto checked_child = [&](const v3::V3Ledger& child) {
+        if (!usage) return;
+        std::set<std::string> requests;
+        for (std::size_t i = 0; i < usage->attempts.size(); ++i) {
+            const auto& record = usage->attempts[i];
+            if (!record.subordinate || record.source_session_id != child.session_id || record.source_run_id != child.run_id) continue;
+            const auto checked = usage_result::ValidateRequestBinding(record, child);
+            if (!checked) { usage_error = checked.error(); return; }
+            if (bound[i] || !requests.insert(record.trajectory_request_id).second) {
+                usage_error = "sdk.usage.child_request_ambiguous"; return;
+            }
+            bound[i] = true;
+        }
+    };
     try {
         for (const auto& event : source.events) {
             if (event.kind != v3::EventKindV3::ToolExecutionStarted || event.turn_id != turn_id ||
-                event.payload.value("toolName", Json()) != "agent") continue;
+                !lubancode::api::usage_json::MemberStringEquals(event.payload, "toolName", "agent")) continue;
             if (event.session_id != session_id || event.run_id != source.run_id || !event.action_id ||
                 !event.payload.contains("attempt") || !event.payload["attempt"].is_number_unsigned() ||
                 event.payload["attempt"].get<std::uint64_t>() == 0)
                 return bad("started child action owner or attempt differs");
             const auto attempt = event.payload["attempt"].get<std::uint64_t>();
             if (!seen.emplace(*event.action_id, attempt).second) return bad("duplicate started child action");
-            const auto checked = v3::ValidateChildAdoption(source, directory, turn_id, *event.action_id, attempt);
+            const auto checked = usage ? v3::ValidateChildAdoption(source, directory, turn_id, *event.action_id, attempt, {}, checked_child) :
+                v3::ValidateChildAdoption(source, directory, turn_id, *event.action_id, attempt);
+            if (!usage_error.empty()) return usage_bad(usage_error);
             // A schema/plan refusal reached no child spawn. Its ordinary tool
             // result remains queryable; it is not an invented child report.
             if (checked.state == v3::ChildAdoptionState::NotApplicable) continue;
@@ -225,6 +248,8 @@ Result<std::vector<subagents::v1::Report>> ReadSubagentReports(
             reports.push_back(std::move(report));
         }
     } catch (const std::exception& error) { return bad(error.what()); }
+    if (usage) for (std::size_t i = 0; i < usage->attempts.size(); ++i)
+        if (usage->attempts[i].subordinate && !bound[i]) return usage_bad("sdk.usage.child_source_unavailable");
     return reports;
 }
 
@@ -374,7 +399,7 @@ Result<void> SessionSubagentPlan::CheckBinding(const v3::V3Ledger& ledger) const
     const Json expected{{"schemaVersion", 1}, {"sha256", snapshot_.plan_sha256}};
     const auto matches = [&](const v3::MessageLine* message) {
         const auto* binding = message ? Binding(*message) : nullptr;
-        if (!binding || *binding != expected || message->message.value("role", Json()) != "system" ||
+        if (!binding || *binding != expected || !lubancode::api::usage_json::MemberStringEquals(message->message, "role", "system") ||
             !message->message.contains("content") || !message->message["content"].is_string()) return false;
         if (message->system_meta->contains("settingsVersion")) {
             const auto& version = message->system_meta->at("settingsVersion");
@@ -454,12 +479,37 @@ Result<void> SessionSubagentPlan::CheckRecoveredChildren(const v3::V3Ledger& led
             return std::unexpected(Fail("sdk.subagent.report_invalid", "known final has no owned V3 turn source"));
         for (const auto& ref : fact.final_message_refs) {
             const auto* message = ledger.FindMessage(ref);
-            if (!message || !same_turn(*message) || message->message.value("role", Json()) != "assistant")
+            if (!message || !same_turn(*message) ||
+                !lubancode::api::usage_json::MemberStringEquals(message->message, "role", "assistant"))
                 return std::unexpected(Fail("sdk.subagent.report_invalid", "final message belongs to another V3 turn"));
         }
         const bool allow_unconsumed = fact.execution_status == "cancelled" ||
-            (fact.execution_status == "error" && result["error"] == "sdk.turn.limit_reached");
-        auto reports = ReadSubagentReports(ledger, resume_dir_, resume_id_, fact.operation_id, fact.turn_id, true, allow_unconsumed);
+            (fact.execution_status == "error" && result["error"].get_ref<const std::string&>() == "sdk.turn.limit_reached");
+        // Establish the adoption's semantic source before checking accounting.
+        // A rehashed but invalid prepared chain is still an adoption refusal;
+        // saved usage cannot change that domain's established error priority.
+        const auto adoption = ReadSubagentReports(ledger, resume_dir_, resume_id_, fact.operation_id, fact.turn_id,
+            true, allow_unconsumed);
+        if (!adoption) return std::unexpected(adoption.error());
+        std::optional<OperationUsage> usage;
+        if (const auto saved = result.find("usage"); saved != result.end()) {
+            auto decoded = usage_result::Decode(*saved);
+            if (!decoded) return std::unexpected(Fail("sdk.usage.result_invalid", std::string(decoded.error())));
+            usage = std::move(*decoded);
+            std::set<std::string> requests;
+            for (const auto& record : usage->attempts) {
+                if (record.subordinate) continue;
+                if (record.source_session_id != resume_id_ || record.source_run_id != ledger.run_id ||
+                    record.turn_id != fact.turn_id || !requests.insert(record.trajectory_request_id).second)
+                    return std::unexpected(Fail("sdk.usage.result_invalid", "direct usage owner differs before opening"));
+                const auto bound = usage_result::ValidateRequestBinding(record, ledger);
+                if (!bound) return std::unexpected(Fail("sdk.usage.result_invalid", std::string(bound.error())));
+            }
+        }
+        // Both the prepare read and locked opening repeat this check before any
+        // old system transfer. Rejecting usage must leave the parent untouched.
+        auto reports = ReadSubagentReports(ledger, resume_dir_, resume_id_, fact.operation_id, fact.turn_id,
+            true, allow_unconsumed, usage ? &*usage : nullptr);
         if (!reports) return std::unexpected(reports.error());
     }
     return {};
@@ -581,8 +631,11 @@ tools::Tool::Result SessionSubagents::Execute(const Json& input, const tools::To
         if (!input.contains(key) || !input[key].is_string() || !Text(input[key].get<std::string>(), key == std::string("prompt") ? kMaxPlanBytes : 256))
             return refuse("title/prompt/type must be bounded UTF-8 text");
     if (input.contains("execution_mode") && (!input["execution_mode"].is_string() ||
-        (input["execution_mode"] != "foreground" && input["execution_mode"] != "auto"))) return refuse("only foreground or resolved foreground auto is supported");
-    if (input.contains("isolation") && input["isolation"] != "none") return refuse("worktree isolation is not admitted");
+        (input["execution_mode"].get_ref<const std::string&>() != "foreground" &&
+         input["execution_mode"].get_ref<const std::string&>() != "auto")))
+        return refuse("only foreground or resolved foreground auto is supported");
+    if (input.contains("isolation") && !lubancode::api::usage_json::StringEquals(input["isolation"], "none"))
+        return refuse("worktree isolation is not admitted");
     const auto snapshot = plan_->Describe();
     const auto found = std::find_if(snapshot.profiles.begin(), snapshot.profiles.end(),
         [&](const auto& p) { return p.requested.type == input["agent_type"].get<std::string>(); });

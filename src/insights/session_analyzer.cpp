@@ -7,10 +7,22 @@
 #include "accounting/usage_aggregate.hpp"
 #include "accounting/usage_projector.hpp"
 #include "accounting/session_usage_reader.hpp"
+#include "api/usage_observation.hpp"
 #include "insights/derived_store.hpp"
 
 namespace lubancode::insights {
 namespace {
+
+void AccumulateUsageShape(FeatureSignalInput& input, const accounting::UsageSample& sample) {
+    const bool main = sample.run_kind == "main_session" || sample.run_kind == "one_shot";
+    auto& prefix = main ? input.main_tokens : input.subagent_tokens;
+    auto& known = main ? input.main_tokens_known : input.subagent_tokens_known;
+    if (!known) return;
+    const auto shape = sample.BilledShapeProjection();
+    const auto sum = shape ? api::usage_observation::CheckedAdd(prefix, *shape) : std::nullopt;
+    if (sum) prefix = *sum;
+    else known = false;
+}
 
 // "YYYYMMDD" -> days 计;形状不合给 nullopt(不猜日期)。
 std::optional<std::int64_t> DaysOf(const std::string& yyyymmdd) {
@@ -65,11 +77,7 @@ void AnalyzeSessionV3(SessionAnalyzeResult& result, const std::filesystem::path&
             if (sample.usage.has_value()) {
                 summary.coverage.requests_with_usage += 1;
                 summary.usage.requests_with_usage += 1;
-                summary.usage.input_tokens += sample.usage->input_tokens;
-                summary.usage.cache_read_tokens += sample.usage->cache_read_tokens;
-                summary.usage.cache_creation_tokens += sample.usage->cache_creation_tokens;
-                summary.usage.output_tokens += sample.usage->output_tokens;
-                summary.usage.reasoning_tokens += sample.usage->output_reasoning_tokens;
+                usage_projection::AddUsage(summary.usage, *sample.usage);
             }
         }
     }
@@ -81,13 +89,7 @@ void AnalyzeSessionV3(SessionAnalyzeResult& result, const std::filesystem::path&
     FeatureSignalInput signal_input;
     signal_input.session_id = result.gate.session_id;
     for (const auto& sample : samples) {
-        const std::int64_t shape = sample.total_billed_shape_tokens;
-        // one_shot 的 main run 与交互 main 同类(与 v2 半场同口径)。
-        if (sample.run_kind == "main_session" || sample.run_kind == "one_shot") {
-            signal_input.main_tokens += shape;
-        } else {
-            signal_input.subagent_tokens += shape;
-        }
+        AccumulateUsageShape(signal_input, sample);
     }
 
     // 工作账:主账 turn 按 conversation 消息的 turnId 分组(空 turnId 的
@@ -231,22 +233,9 @@ SessionAnalyzeResult AnalyzeSession(const std::filesystem::path& session_dir,
                 if (sample.usage.has_value()) {
                     summary.coverage.requests_with_usage += 1;
                     summary.usage.requests_with_usage += 1;
-                    summary.usage.input_tokens += sample.usage->input_tokens;
-                    summary.usage.cache_read_tokens += sample.usage->cache_read_tokens;
-                    summary.usage.cache_creation_tokens +=
-                        sample.usage->cache_creation_tokens;
-                    summary.usage.output_tokens += sample.usage->output_tokens;
-                    summary.usage.reasoning_tokens += sample.usage->output_reasoning_tokens;
+                    usage_projection::AddUsage(summary.usage, *sample.usage);
                 }
-                const std::int64_t shape = sample.total_billed_shape_tokens;
-                // one_shot 的 main run 与交互 main 同类(单发轨迹断档单):
-                // 单发一场就是该进程的主会话,token 计入 main 侧,不冒充
-                // 子代理(subagent 收窄建议的分母别被单发重会话灌歪)。
-                if (sample.run_kind == "main_session" || sample.run_kind == "one_shot") {
-                    signal_input.main_tokens += shape;
-                } else {
-                    signal_input.subagent_tokens += shape;
-                }
+                AccumulateUsageShape(signal_input, sample);
             }
         }
         summary.coverage.runs_analyzed += 1;
@@ -325,17 +314,30 @@ SessionAnalyzeResult AnalyzeSession(const std::filesystem::path& session_dir,
         std::int64_t tool_count = 0;
         std::int64_t input_sum = 0;
         std::int64_t input_count = 0;
+        bool tool_mean_known = true;
+        bool input_mean_known = true;
         for (const auto& view : audit_input.requests) {
             if (view.snapshot.has_value()) {
-                tool_tokens += view.snapshot->request_shape.tool_definition_tokens_estimated;
+                if (tool_mean_known) {
+                    const auto sum = api::usage_observation::CheckedAdd(tool_tokens,
+                        view.snapshot->request_shape.tool_definition_tokens_estimated);
+                    if (sum) tool_tokens = *sum;
+                    else tool_mean_known = false;
+                }
                 tool_count += 1;
             }
-            if (view.usage_reported && view.total_input_tokens > 0) {
-                input_sum += view.total_input_tokens;
+            if (view.usage_reported && !view.total_input_known) input_mean_known = false;
+            if (view.usage_reported && view.total_input_known && view.total_input_tokens > 0) {
+                if (input_mean_known) {
+                    const auto sum = api::usage_observation::CheckedAdd(input_sum,
+                                                                      view.total_input_tokens);
+                    if (sum) input_sum = *sum;
+                    else input_mean_known = false;
+                }
                 input_count += 1;
             }
         }
-        if (tool_count > 0 && input_count > 0) {
+        if (tool_mean_known && input_mean_known && tool_count > 0 && input_count > 0) {
             signal_input.tool_definition_tokens = tool_tokens / tool_count;
             signal_input.total_input_tokens = input_sum / input_count;
         }
@@ -355,13 +357,17 @@ SessionAnalyzeResult AnalyzeSession(const std::filesystem::path& session_dir,
             epoch.requests_cache_unknown =
                 static_cast<std::uint64_t>(row.requests_cache_unknown);
             epoch.input_tokens = row.totals.input_tokens;
+            epoch.knowledge.input_tokens = row.totals.input_known;
             epoch.cache_read_tokens = row.totals.cache_read_tokens;
+            epoch.knowledge.cache_read_tokens = row.totals.cache_read_known;
             epoch.cache_creation_tokens = row.totals.cache_creation_tokens;
+            epoch.knowledge.cache_creation_tokens = row.totals.cache_creation_known;
             summary.cache_epochs.push_back(std::move(epoch));
         }
         signal_input.unexpected_miss_candidates =
             aggregate.cache.unexpected_miss_candidates;
         signal_input.cache_read_tokens = aggregate.totals.cache_read_tokens;
+        signal_input.cache_read_known = aggregate.totals.cache_read_known;
     }
 
     result.signals = DetectFeatureSignals(signal_input);

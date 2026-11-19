@@ -44,6 +44,10 @@ struct Directory {
                 std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
              std::to_string(++serial));
         REQUIRE(std::filesystem::create_directories(root));
+        // The owned reader returns canonical paths. macOS temp_directory_path
+        // may spell /private/var as /var; establish one spelling before any
+        // writer or expected child path borrows this root.
+        root = std::filesystem::canonical(root);
     }
     ~Directory() { std::error_code error; std::filesystem::remove_all(root, error); }
 };

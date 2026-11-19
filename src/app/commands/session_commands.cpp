@@ -1,4 +1,5 @@
 #include <limits>
+#include <utility>
 // session_commands.hpp 的实现:上下文/压缩/会话存档命令的函数体。
 #include "app/commands/session_commands.hpp"
 
@@ -254,7 +255,7 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
-            context_tracker.window_tokens(), context_tracker.current_tokens(), theme,
+            context_tracker.window_tokens(), context_tracker.current_tokens_projection(), theme,
             /*bar_width=*/16, context_tracker.last_cache_hit_percent(), breakdown_detail,
             context_tracker.current_estimated());
         // 占用卡片(核心,第一组):系统/工具/历史条形图 + 已用/触发线/剩余。
@@ -275,13 +276,14 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         // 缓存卡片(第二组):前缀 epoch 与最近一次请求的命中率。
         // 命中跌下去时,用户看得出是主动换了哪根梁(epoch 断因在回合统计
         // 行/逐步流水账里),不再笼统赖服务端。没实测过就明说。
-        if (context_tracker.last_total_input_tokens() > 0) {
+        const auto last_input = context_tracker.last_total_input_projection();
+        if (!last_input || *last_input > 0) {
             std::vector<frame::Field> cache_fields;
             const int hit_percent = context_tracker.last_cache_hit_percent();
             cache_fields.push_back(SentenceField(
                 trf("cmd.context.epoch", cache_epoch,
                     lubancode::cli::FormatTokenCount(context_tracker.last_cache_read_tokens()),
-                    lubancode::cli::FormatTokenCount(context_tracker.last_total_input_tokens()),
+                    lubancode::cli::FormatTokenCount(last_input),
                     hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?"))));
             // 前缀缓存守恒单 §五 D:epoch 只数本地前缀断点(压缩/换梁也算),
             // 不等于服务端缓存失效次数;本地指纹稳定也不保证服务端命中——
@@ -291,12 +293,13 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
             // 会话累计总账:Σ命中 / Σ输入。跟单轮口径分开,并明确标注
             // "会话累计"——它回答"整个 session 发了多少输入、多少走了
             // 缓存读",不是"每轮都这么多"。
-            if (context_tracker.session_input_total() > 0) {
+            const auto session_input = context_tracker.session_input_projection();
+            if (!session_input || *session_input > 0) {
                 const int session_percent = context_tracker.session_cache_hit_percent();
                 cache_fields.push_back(SentenceField(
                     trf("cmd.context.cache_session",
-                        lubancode::cli::FormatTokenCount(context_tracker.session_cache_read_total()),
-                        lubancode::cli::FormatTokenCount(context_tracker.session_input_total()),
+                        lubancode::cli::FormatTokenCount(context_tracker.session_cache_read_projection()),
+                        lubancode::cli::FormatTokenCount(session_input),
                         session_percent >= 0 ? std::to_string(session_percent) : std::string("?"))));
             }
             EmitFrameLines(frame::RenderKeyValues(trf("cmd.context.group.cache"), cache_fields, theme,
@@ -494,14 +497,18 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                 const std::size_t window = context_tracker.window_tokens();
                 if (window > 0) {
                     const std::size_t line = lubancode::agent::AutoCompactTriggerLine(window);
-                    const auto used = static_cast<std::int64_t>(context_tracker.current_tokens());
+                    const auto used = context_tracker.current_tokens_projection();
+                    const auto count_text = [](std::size_t value) {
+                        return std::in_range<std::int64_t>(value)
+                            ? lubancode::cli::FormatTokenCount(static_cast<std::int64_t>(value))
+                            : std::to_string(value);
+                    };
                     fields.push_back(SentenceField(
-                        trf("cmd.context.next_line", lubancode::cli::FormatTokenCount(line),
-                            used >= 0 ? lubancode::cli::FormatTokenCount(used) : std::string("0"),
-                            used >= static_cast<std::int64_t>(line)
-                                ? tr("cmd.context.next_line_over")
-                                : lubancode::cli::FormatTokenCount(
-                                      static_cast<std::int64_t>(line) - used))));
+                        trf("cmd.context.next_line", count_text(line),
+                            used ? count_text(*used) : lubancode::cli::FormatTokenCount(std::nullopt),
+                            !used ? lubancode::cli::FormatTokenCount(std::nullopt)
+                                : *used >= line ? tr("cmd.context.next_line_over")
+                                    : count_text(line - *used))));
                 }
             }
             if (!fields.empty()) {

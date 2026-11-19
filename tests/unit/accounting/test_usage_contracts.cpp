@@ -1,6 +1,9 @@
 // UsageSample 与 purpose 合同测试(Token 账本单 §15.1 A0)。
 #include <doctest/doctest.h>
 
+#include <cstdint>
+#include <initializer_list>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -84,6 +87,90 @@ TEST_CASE("UsageSample round-trip") {
     CHECK(parsed->request_outcome == "completed");
     // 再来一遍:ToJson 字节稳定。
     CHECK(parsed->ToJson() == json);
+
+    SUBCASE("stored signed and unsigned integer boundaries retain source identity") {
+        const auto max64 = std::numeric_limits<std::int64_t>::max();
+        const auto max_int = std::numeric_limits<int>::max();
+        for (const char* field : {"input_tokens", "cache_read_tokens", "cache_creation_tokens",
+                                  "output_tokens", "reasoning_tokens"}) {
+            CAPTURE(field);
+            auto boundary = MakeSample().ToJson();
+            for (auto& value : boundary["usage"]) value = 0;
+            boundary["usage"][field] = static_cast<std::uint64_t>(max64);
+            const bool output = std::string(field) == "output_tokens" ||
+                                std::string(field) == "reasoning_tokens";
+            if (std::string(field) == "reasoning_tokens") {
+                boundary["usage"]["output_tokens"] = static_cast<std::uint64_t>(max64);
+            }
+            boundary["total_input_tokens"] = output ? 0 : max64;
+            boundary["total_billed_shape_tokens"] = static_cast<std::uint64_t>(max64);
+            boundary["attempt"] = static_cast<std::uint64_t>(max_int);
+            boundary["cache_epoch"] = static_cast<std::uint64_t>(max_int);
+            boundary["schema_version"] = std::uint64_t{1};
+            const auto restored = UsageSample::FromJsonStrict(boundary, &error);
+            REQUIRE(restored.has_value());
+            CHECK(restored->attempt == max_int);
+            CHECK(restored->cache_epoch == max_int);
+            CHECK(restored->ToJson() == boundary);
+            REQUIRE(restored->source_event.has_value());
+            CHECK(restored->source_event->event_id == sample.source_event->event_id);
+            CHECK(restored->source_event->event_hash == sample.source_event->event_hash);
+        }
+        auto boundary = json;
+        boundary["cache_epoch"] = std::numeric_limits<int>::min();
+        const auto restored = UsageSample::FromJsonStrict(boundary, &error);
+        REQUIRE(restored.has_value());
+        CHECK(restored->cache_epoch == std::numeric_limits<int>::min());
+    }
+
+    SUBCASE("nullable totals preserve five facts and provenance across both versions") {
+        for (const bool input_overflow : {false, true}) {
+            CAPTURE(input_overflow);
+            auto boundary = MakeSample();
+            boundary.usage = api::Usage{};
+            boundary.usage->input_tokens = std::numeric_limits<std::int64_t>::max();
+            boundary.usage->cache_read_tokens = input_overflow ? 1 : 0;
+            boundary.usage->output_tokens = 1;
+            boundary.usage->output_reasoning_tokens = 1;
+            boundary.RefreshTotals();
+            const auto encoded = boundary.ToJson();
+            CHECK(encoded.at("schema_version") == 2);
+            CHECK(encoded.at("total_input_tokens").is_null() == input_overflow);
+            CHECK(encoded.at("total_billed_shape_tokens").is_null());
+            const auto restored = UsageSample::FromJsonStrict(encoded, &error);
+            REQUIRE(restored.has_value());
+            CHECK(restored->TotalInputProjection().has_value() == !input_overflow);
+            CHECK(!restored->BilledShapeProjection());
+            CHECK(restored->ToJson() == encoded);
+            REQUIRE(restored->source_event.has_value());
+            CHECK(restored->source_event->event_id == boundary.source_event->event_id);
+            CHECK(restored->source_event->event_hash == boundary.source_event->event_hash);
+            CHECK(restored->provider_response_id == boundary.provider_response_id);
+            CHECK(restored->request_id == boundary.request_id);
+            for (const char* key : {"total_input_tokens", "total_billed_shape_tokens"}) {
+                auto missing = encoded;
+                missing.erase(key);
+                CHECK(!UsageSample::FromJsonStrict(missing, &error));
+            }
+            auto fabricated = encoded;
+            fabricated["total_billed_shape_tokens"] = 0;
+            CHECK(!UsageSample::FromJsonStrict(fabricated, &error));
+            auto legacy = encoded;
+            legacy["schema_version"] = 1;
+            legacy.erase("total_input_tokens");
+            legacy.erase("total_billed_shape_tokens");
+            const auto upgraded = UsageSample::FromJsonStrict(legacy, &error);
+            REQUIRE(upgraded.has_value());
+            CHECK(upgraded->ToJson() == encoded);
+            legacy["total_billed_shape_tokens"] = 0;
+            CHECK(!UsageSample::FromJsonStrict(legacy, &error));
+        }
+        auto exact = MakeSample().ToJson();
+        exact["schema_version"] = 2;
+        REQUIRE(UsageSample::FromJsonStrict(exact, &error).has_value());
+        exact["total_input_tokens"] = nullptr;
+        CHECK(!UsageSample::FromJsonStrict(exact, &error));
+    }
 }
 
 TEST_CASE("unknown 与 0 分开:没报的 sample 不带 token 字段") {
@@ -143,6 +230,43 @@ TEST_CASE("非法 sample 拒收") {
     json = mismatch.ToJson();
     json["schema"] = "lubancode.usage.samp";
     CHECK(!UsageSample::FromJsonStrict(json, &error).has_value());
+
+    SUBCASE("stored integer admission rejects overflow and type coercion") {
+        const auto too_big64 = static_cast<std::uint64_t>(
+                                   std::numeric_limits<std::int64_t>::max()) + 1;
+        const auto too_big_int = static_cast<std::int64_t>(
+                                     std::numeric_limits<int>::max()) + 1;
+        for (const char* field : {"input_tokens", "cache_read_tokens", "cache_creation_tokens",
+                                  "output_tokens", "reasoning_tokens"}) {
+            CAPTURE(field);
+            for (const auto& invalid : {nlohmann::json(too_big64),
+                                       nlohmann::json(std::numeric_limits<std::uint64_t>::max()),
+                                       nlohmann::json(1.0), nlohmann::json("1"),
+                                       nlohmann::json(true)}) {
+                auto bad_json = MakeSample().ToJson();
+                bad_json["usage"][field] = invalid;
+                CHECK(!UsageSample::FromJsonStrict(bad_json, &error).has_value());
+            }
+        }
+        for (const char* field : {"schema_version", "attempt", "cache_epoch"}) {
+            CAPTURE(field);
+            for (const auto& invalid : {nlohmann::json(too_big_int),
+                                       nlohmann::json(-too_big_int - 1),
+                                       nlohmann::json(std::uint64_t{4294967297}),
+                                       nlohmann::json(1.0), nlohmann::json("1"),
+                                       nlohmann::json(true)}) {
+                auto bad_json = MakeSample().ToJson();
+                bad_json[field] = invalid;
+                CHECK(!UsageSample::FromJsonStrict(bad_json, &error).has_value());
+            }
+        }
+        for (const char* field : {"total_input_tokens", "total_billed_shape_tokens"}) {
+            CAPTURE(field);
+            auto bad_json = MakeSample().ToJson();
+            bad_json[field] = too_big64;
+            CHECK(!UsageSample::FromJsonStrict(bad_json, &error).has_value());
+        }
+    }
 }
 
 TEST_CASE("CostEstimate 四态与整数 micros") {
@@ -167,4 +291,29 @@ TEST_CASE("CostEstimate 四态与整数 micros") {
     REQUIRE(parsed.has_value());
     CHECK(parsed->micros == 284000);
     CHECK(parsed->price_table_id == cost.price_table_id);
+
+    SUBCASE("cost micros admits exact signed bounds and rejects unsigned overflow") {
+        for (const auto micros : {std::numeric_limits<std::int64_t>::min(),
+                                  std::int64_t{0}, std::numeric_limits<std::int64_t>::max()}) {
+            auto boundary = cost.ToJson();
+            boundary["micros"] = micros;
+            const auto restored = CostEstimate::FromJsonStrict(boundary, &error);
+            REQUIRE(restored.has_value());
+            CHECK(restored->micros == micros);
+        }
+        auto boundary = cost.ToJson();
+        boundary["micros"] = static_cast<std::uint64_t>(
+            std::numeric_limits<std::int64_t>::max());
+        const auto restored = CostEstimate::FromJsonStrict(boundary, &error);
+        REQUIRE(restored.has_value());
+        CHECK(restored->micros == std::numeric_limits<std::int64_t>::max());
+        for (const auto& invalid : {
+                 nlohmann::json(static_cast<std::uint64_t>(
+                                    std::numeric_limits<std::int64_t>::max()) + 1),
+                 nlohmann::json(std::numeric_limits<std::uint64_t>::max()),
+                 nlohmann::json(1.0), nlohmann::json("1"), nlohmann::json(true)}) {
+            boundary["micros"] = invalid;
+            CHECK(!CostEstimate::FromJsonStrict(boundary, &error).has_value());
+        }
+    }
 }

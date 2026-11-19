@@ -2,6 +2,7 @@
 """Run all SDK test files and reject missing, skipped or empty native tests."""
 
 import argparse
+import hashlib
 import json
 import ntpath
 import os
@@ -96,6 +97,7 @@ except ImportError:
         from scripts.ci import sdk_owned_file_paths as owned_file_paths
 
 REQUIRED = {
+    "sdk.focused.usage_numeric_allocations",
     "sdk.focused.lubancore_owned_file_paths",
     "sdk.focused.lubancore_model_input",
     "sdk.focused.lubancore_model_sampling",
@@ -149,6 +151,7 @@ REQUIRED = {
     "sdk.focused.lubancore_event_sink",
     "sdk.focused.lubancore_builtin_search",
     "sdk.focused.lubancore_lifecycle",
+    "sdk.focused.lubancore_allocation_owner",
     "sdk.focused.lubancore_host_boundary",
     "sdk.focused.lubancore_history",
     "sdk.focused.lubancore_extensions",
@@ -172,6 +175,132 @@ REQUIRED = {
 
 LUA_PATHS = ("off-and-visible", "four-sessions", "approval", "cancel-and-close",
              "invalid-budget", "bad-declarations", "resume-fresh-vm", "resume-drift", "owned-opening")
+
+
+def check_allocation_owner_native(section: str, registered: list[str]):
+    check_native_command(section, registered)
+    if len(registered) != 2 or registered[1] != "--source-file=*test_lubancore_allocation_owner.cpp":
+        raise RuntimeError("Allocation qualification did not run its original native source")
+    cases = re.findall(r"\[doctest\] test cases:\s+(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    assertions = re.findall(r"\[doctest\] assertions:\s+(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
+    if cases != [("1", "1", "0")] or len(assertions) != 1:
+        raise RuntimeError("Allocation qualification native CASE/summary was skipped, failed or duplicated")
+    total, passed, failed = map(int, assertions[0])
+    if not total or total != passed or failed or section.count("Test Passed.") != 1:
+        raise RuntimeError("Allocation qualification native assertions did not pass")
+    routes = [tuple(map(int, row)) for row in re.findall(
+        r"\[sdk-allocation-owner-route\] (\d+) ([01]) (\d+) (\d+)(?:\r?\n|$)", section)]
+    expected = {(kind, sized, size, route) for kind in range(8)
+                for sized in (0, 1) for size in (0, 1, 257) for route in range(3)}
+    if len(routes) != len(expected) or set(routes) != expected:
+        raise RuntimeError("Allocation qualification native routes are missing, duplicated or foreign")
+    summaries = re.findall(r"\[sdk-allocation-owner\] qualified_paths=(\d+) image=([^\r\n]+)", section)
+    if len(summaries) != 1 or int(summaries[0][0]) != len(expected) or not summaries[0][1].strip():
+        raise RuntimeError("Allocation qualification native image/summary is missing or duplicated")
+    refusals = re.findall(r"^\[sdk-module-refusal\] form=(\d+) baseline=(\d+) refused=(\d+) host=(\d+)\r?$", section, re.M)
+    expected_refusals = {(str(kind), "1", "1", "0") for kind in range(8)}
+    if len(refusals) != 8 or set(refusals) != expected_refusals:
+        raise RuntimeError("SDK module refusal qualification is missing, duplicated, foreign or intercepted the host")
+    if section.splitlines().count("[sdk-module-refusal] qualified_forms=8 imports_restored=1") != 1:
+        raise RuntimeError("SDK module refusal imports were not confirmed restored exactly once")
+    if sum(line.startswith("[sdk-module-refusal]") for line in section.splitlines()) != 9:
+        raise RuntimeError("SDK module refusal qualification contains malformed or extra markers")
+    retirements = re.findall(r"^\[sdk-json-retirement\] ordered=([01]) depth=(\d+) allocations=0 sentinel_refused=1\r?$", section, re.M)
+    expected_retirements = {(str(ordered), str(depth)) for ordered in (0, 1) for depth in (0, 32, 16384)}
+    if (len(retirements) != 6 or set(retirements) != expected_retirements or
+            sum(line.startswith("[sdk-json-retirement]") for line in section.splitlines()) != 6):
+        raise RuntimeError("SDK JSON retirement qualification is missing, allocated, disarmed, duplicated or malformed")
+    baselines = re.findall(r"^\[sdk-returned-allocation-baseline\] path=([012]) allocations=(\d+) refusals=0 retired=1 recovery_calls=0\r?$", section, re.M)
+    if (len(baselines) != 3 or {path for path, _ in baselines} != {"0", "1", "2"}
+            or any(int(count) <= 0 for _, count in baselines)
+            or sum(line.startswith("[sdk-returned-allocation-baseline]") for line in section.splitlines()) != 3):
+        raise RuntimeError("SDK actual returned-Session baselines are missing, empty, duplicated or incomplete")
+    baseline_counts = {path: int(count) for path, count in baselines}
+    points = re.findall(r"^\[sdk-returned-allocation-point\] path=([012]) ordinal=(\d+) allocations=(\d+) phase=(\d+) refusals=1 retired=1 recovery_calls=0 state=([2345]) persisted=([01]) finals=([01]) observations=([01]) terminals=([01])\r?$", section, re.M)
+    expected_points = {(path, ordinal) for path, count in baseline_counts.items() for ordinal in range(1, count + 1)}
+    if (len(points) != len(expected_points) or {(row[0], int(row[1])) for row in points} != expected_points
+            or sum(line.startswith("[sdk-returned-allocation-point]") for line in section.splitlines()) != len(points)):
+        raise RuntimeError("SDK actual returned-Session refusal sweep omitted, duplicated or substituted a point")
+    for path, ordinal, allocations, phase, state, persisted, finals, observations, terminals in points:
+        if (int(allocations) < int(ordinal) or not 1 <= int(phase) <= 9 or
+                (persisted == "1" and (finals != "1" or state == "5")) or
+                (persisted == "0" and state != "5") or (path != "0" and state == "2") or
+                (path == "2" and terminals != "0")):
+            raise RuntimeError("SDK actual returned-Session refusal point has inconsistent count/phase/confirmation")
+    sweeps = re.findall(r"^\[sdk-returned-allocation-sweep\] path=([012]) baseline=(\d+) points=(\d+)\r?$", section, re.M)
+    if (len(sweeps) != 3 or set(sweeps) != {(path, str(count), str(count)) for path, count in baseline_counts.items()}
+            or sum(line.startswith("[sdk-returned-allocation-sweep]") for line in section.splitlines()) != 3):
+        raise RuntimeError("SDK actual returned-Session refusal sweep is partial or differs from its own baseline")
+    materials = re.findall(r"^\[sdk-returned-allocation-materials\] path=([012]) ordinal=(\d+) directory=(.+)\r?$", section, re.M)
+    expected_materials = expected_points | {(path, 0) for path in baseline_counts}
+    if (len(materials) != len(expected_materials) or {(path, int(ordinal)) for path, ordinal, _ in materials} != expected_materials
+            or sum(line.startswith("[sdk-returned-allocation-materials]") for line in section.splitlines()) != len(materials)):
+        raise RuntimeError("SDK actual returned-Session original materials are missing or duplicated")
+    material_paths = []
+    for path, ordinal, encoded in materials:
+        directory = json.loads(encoded)
+        if not isinstance(directory, str) or not directory.strip():
+            raise RuntimeError("SDK actual returned-Session original material directory is malformed")
+        material_paths.append({"path": path, "ordinal": int(ordinal), "directory": directory})
+    if len({row["directory"] for row in material_paths}) != len(material_paths):
+        raise RuntimeError("SDK actual returned-Session points borrowed the same original material directory")
+    return {"qualified_paths": len(routes), "actual_image": summaries[0][1],
+            "allocation_refusals": 8, "refusal_scope": "module_port_qualification_and_actual_session_sweep",
+            "returned_session_baselines": baseline_counts,
+            "returned_session_points": [dict(zip(("path", "ordinal", "allocations", "phase", "state", "persisted", "finals", "observations", "terminals"), map(int, row))) for row in points],
+            "returned_session_materials": material_paths,
+            "ordinary_session_allocation_matrix": "swept"}
+
+
+def check_allocation_owner_materials(details, build):
+    root = (build / "test-evidence" / "sdk-focused" / "allocation-matrix").resolve()
+    receipts = []
+    for entry in details["returned_session_materials"]:
+        directory = Path(entry["directory"]).resolve()
+        if directory == root or not directory.is_relative_to(root) or directory.is_symlink():
+            raise RuntimeError("SDK allocation material borrowed a foreign directory")
+        files = {}
+        for name in ("query.json", "recovered.json", "main.jsonl", "operations.jsonl", "result.json"):
+            source = directory / name
+            if not source.exists() and name == "result.json":
+                continue
+            if source.is_symlink() or not source.is_file():
+                raise RuntimeError("SDK allocation original material is missing or substituted: " + str(source))
+            raw = source.read_bytes()
+            files[name] = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        query = json.loads((directory / "query.json").read_bytes())
+        recovered = json.loads((directory / "recovered.json").read_bytes())
+        operations = [json.loads(line) for line in (directory / "operations.jsonl").read_bytes().splitlines() if line.strip()]
+        ledger = [json.loads(line) for line in (directory / "main.jsonl").read_bytes().splitlines() if line.strip()]
+        finals = [row for row in operations if row.get("kind") == "operation.final" and row.get("operationId") == query["operationId"]]
+        observations = [row for row in ledger if row.get("kind") == "model.usage.observed"]
+        result = json.loads((directory / "result.json").read_bytes()) if "result.json" in files else None
+        if (len(finals) > 1 or len(observations) > 1 or query["operationId"] != recovered["operationId"] or
+                query.get("usage", {}).get("direct", {}).get("total") != [11, 7, 13, 17, 3] or
+                query.get("usage", {}).get("direct", {}).get("samples") != 1 or
+                query["resultPersisted"] != bool(finals and result and result.get("complete")) or
+                query["resultPersisted"] != recovered["resultPersisted"]):
+            raise RuntimeError("SDK allocation actual original confirmation/usage/recovery differs")
+        if entry["ordinal"]:
+            point = next(row for row in details["returned_session_points"] if row["path"] == int(entry["path"]) and row["ordinal"] == entry["ordinal"])
+            if (point["state"] != query["state"] or bool(point["persisted"]) != query["resultPersisted"] or
+                    point["finals"] != len(finals) or point["observations"] != len(observations)):
+                raise RuntimeError("SDK allocation point receipt differs from its actual original materials")
+        for observation in observations:
+            if (observation.get("sessionId") != directory.name or observation.get("turnId") != query["turnId"] or
+                    observation.get("payload", {}).get("numbers") != [11, 7, 13, 17, 3]):
+                raise RuntimeError("SDK allocation original usage observation differs from actual public query")
+        if finals and result:
+            if (result.get("operationId") != query["operationId"] or result.get("turnId") != query["turnId"] or
+                    finals[0].get("turnId") != query["turnId"] or result.get("usage") != query.get("usage") or
+                    result.get("usage") != recovered.get("usage") or result.get("finalText") != query["finalText"] or
+                    query["state"] != recovered["state"] or query["turnId"] != recovered["turnId"] or
+                    query["finalText"] != recovered["finalText"]):
+                raise RuntimeError("SDK allocation original result/query/recovery differs")
+        elif recovered["state"] != 5 or recovered["resultPersisted"] or recovered["finalText"] or "usage" in recovered:
+            raise RuntimeError("SDK allocation recovery invented a missing original result")
+        receipts.append({**entry, "files": files, "finals": len(finals), "observations": len(observations)})
+    return receipts
 
 
 def check_native_command(section: str, registered: list[str]):
@@ -732,7 +861,7 @@ def check_opening_start_native(section, command):
         raise RuntimeError("Opening startup must run the complete actual native lifecycle source")
     check_native_command(section, command)
     cases = re.findall(r"\[doctest\] test cases:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
-    if len(cases) != 1 or tuple(map(int, cases[0])) != (19, 19, 0):
+    if len(cases) != 1 or tuple(map(int, cases[0])) != (22, 22, 0):
         raise RuntimeError("Opening startup and original lifecycle roster must all pass")
     assertions = re.findall(r"\[doctest\] assertions:\s*(\d+)\s*\|\s*(\d+) passed\s*\|\s*(\d+) failed", section)
     if (len(assertions) != 1 or int(assertions[0][0]) <= 0 or
@@ -746,6 +875,9 @@ def check_opening_start_native(section, command):
     for path in ("background", "mutual", "late-deleter", "session-deleter", "exceptions", "nested", "allocation-rollback"):
         if section.splitlines().count("[sdk-backend-owner-path] " + path) != 1:
             raise RuntimeError("SDK Backend actual owner path did not finish once: " + path)
+    for path in ("callback", "cancellation", "retired", "recovery", "invalid-material-recovery", "callback-exception-recovery", "result-persistence-failure-recovery"):
+        if section.splitlines().count("[sdk-usage-close-path] " + path) != 1:
+            raise RuntimeError("Five-field Close actual path did not finish once: " + path)
 
 
 def check_event_sink_native(section, command):
@@ -1357,8 +1489,9 @@ def main():
         props = {p["name"]: p["value"] for p in test.get("properties", [])}
         if job_stem == owned_file_paths.STEM and (type(props.get("TIMEOUT")) not in (int, float) or props["TIMEOUT"] != 300):
             raise RuntimeError("Owned file paths source must retain its original300s timeout")
-        if (props.get("DISABLED") or "sdk-focused" not in props.get("LABELS", [])
-                or not 0 < float(props.get("TIMEOUT", 0)) <= 300):
+        allocation_owner = test["name"] == "sdk.focused.lubancore_allocation_owner"
+        timeout_ok = float(props.get("TIMEOUT", 0)) == 3600 if allocation_owner else 0 < float(props.get("TIMEOUT", 0)) <= 300
+        if (props.get("DISABLED") or "sdk-focused" not in props.get("LABELS", []) or not timeout_ok):
             raise RuntimeError("SDK test is disabled, mislabeled or unbounded: " + test["name"])
         if test["name"] in ("sdk.focused.tool_job_coordinator", "sdk.focused.tool_job_start_transaction", "sdk.focused.tool_job_hold_recovery"):
             source = "test_" + test["name"].removeprefix("sdk.focused.") + ".cpp"
@@ -1451,6 +1584,10 @@ def main():
         if len(commands) != 1:
             raise RuntimeError("SDK source has no unique registered command: " + case.attrib["name"])
         check_native_command(sections[0], commands[0])
+        if case.attrib["name"] == "sdk.focused.lubancore_allocation_owner":
+            details = check_allocation_owner_native(sections[0], commands[0])
+            details["material_receipts"] = check_allocation_owner_materials(details, build)
+            (evidence / "allocation-qualification.json").write_text(json.dumps(details, indent=2) + "\n", encoding="utf-8")
         job_stem = case.attrib["name"].removeprefix("sdk.focused.")
         if job_stem in command_jobs.SOURCES:
             command_job_reports[case.attrib["name"]] = command_jobs.check_native(sections[0], commands[0], job_stem, os.name)
@@ -1516,9 +1653,9 @@ def main():
             if registered["command"][1:] != ["--source-file=*test_lubancore_memory_extraction_core.cpp"]:
                 raise RuntimeError("Memory extraction must run the actual shared-SDK native source")
             check_native_command(sections[0], registered["command"])
-            if int(counts[0]) != 10:
-                raise RuntimeError("Memory extraction requires all ten actual shared-module cases")
-            for path in ("parser", "transcript", "prompt", "request", "usage", "finish", "native-connection", "learning-text-gate", "learning-evidence-gate", "learning-reason-names"):
+            if int(counts[0]) != 11:
+                raise RuntimeError("Memory extraction requires all eleven actual shared-module cases")
+            for path in ("parser", "transcript", "prompt", "request", "usage", "finish", "native-connection", "native-connection-faults", "learning-text-gate", "learning-evidence-gate", "learning-reason-names"):
                 if sections[0].splitlines().count("[memory-extraction-core-path] shared-sdk " + path) != 1:
                     raise RuntimeError("Memory extraction actual shared-module path missing: " + path)
         if case.attrib["name"] == "sdk.focused.lubancore_sampling_lifetime":
@@ -1536,8 +1673,8 @@ def main():
             if registered["command"][1:] != ["--source-file=*test_lubancore_model_sampling.cpp"]:
                 raise RuntimeError("Sampling must run the actual complete native source")
             check_native_command(sections[0], registered["command"])
-            if int(counts[0]) != 11:
-                raise RuntimeError("Sampling native roster must contain all eleven cases")
+            if int(counts[0]) != 20:
+                raise RuntimeError("Sampling native roster must contain all twenty cases")
             for path in ("defaults", "effort", "finish", "invalid-request", "invalid-reply", "errors",
                          "usage-cancelled", "usage-invalid-output", "usage-absent", "usage-no-reply", "usage-success"):
                 if sections[0].splitlines().count("[sdk-model-sampling-path] " + path) != 1:

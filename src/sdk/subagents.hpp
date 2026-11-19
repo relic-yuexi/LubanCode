@@ -14,6 +14,7 @@
 #include "tools/agent_tool.hpp"
 #include "trajectory/opening.hpp"
 
+namespace lubancore { struct OperationUsage; }
 namespace lubancore::detail {
 class SessionPrepareJournal;
 
@@ -22,7 +23,8 @@ class SessionPrepareJournal;
 Result<std::vector<subagents::v1::Report>> ReadSubagentReports(
     const lubancode::trajectory::v3::V3Ledger& ledger, const std::filesystem::path& session_dir,
     const std::string& session_id, const std::string& operation_id,
-    const std::string& turn_id, bool require_complete, bool allow_unconsumed = false);
+    const std::string& turn_id, bool require_complete, bool allow_unconsumed = false,
+    const OperationUsage* usage = nullptr);
 subagents::v1::LiveTerminalReceipt CopyChildReceipt(const lubancode::runtime::SubagentTerminalReceipt& receipt);
 
 // Initialization-only value owner. Its opening callback runs under the existing

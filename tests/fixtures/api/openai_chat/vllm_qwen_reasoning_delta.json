@@ -8,10 +8,17 @@
   "captured_at": "2026-08-27",
   "request_expectation": {},
   "expected_events": [
+    "ProviderResponseIdentity",
     "MessageStart",
+    "ProviderResponseIdentity",
     "ThinkingDelta",
+    "ProviderResponseIdentity",
     "ThinkingDelta",
+    "ProviderResponseIdentity",
     "TextDelta",
+    "ProviderResponseIdentity",
+    "ProviderResponseIdentity",
+    "UsageSnapshot",
     "MessageDone"
   ],
   "expected_replay": ["vLLM/Qwen 端 delta 叫 reasoning;回传字段由部署端声明(reasoning_replay_field)"],

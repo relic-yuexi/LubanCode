@@ -31,6 +31,9 @@ bool HasBinaryControls(std::string_view text) {
         return (ch < 0x20 && ch != '\n' && ch != '\r' && ch != '\t') || ch == 0x7f;
     });
 }
+bool JsonStrEq(const nlohmann::json& value, const char* expected) noexcept {
+    return value.is_string() && value.get_ref<const std::string&>() == expected;
+}
 
 std::string RedactResult(std::string_view text, const runtime::SecretRedactor& secrets) {
     // 共享扫描器的 PrivateKey 命中只覆盖头行。远端出口不能只藏 PEM
@@ -291,8 +294,8 @@ std::expected<FrozenToolResult, ResultSyncError> FrozenToolResult::RestoreSavedP
         p["previewMaxBytes"] > kMaxResultPreviewBytes || !p["nodeAllowsFull"].is_boolean() ||
         !p["captureComplete"].is_boolean() || !p["truncated"].is_boolean() ||
         !(p["originalBytes"].is_null() || p["originalBytes"].is_number_unsigned()) ||
-        (p["mode"] != "preview" && p["mode"] != "full") ||
-        (p["contentKind"] != "text" && p["contentKind"] != "binary")) return bad();
+        (!JsonStrEq(p["mode"], "preview") && !JsonStrEq(p["mode"], "full")) ||
+        (!JsonStrEq(p["contentKind"], "text") && !JsonStrEq(p["contentKind"], "binary"))) return bad();
     if (p["sessionId"].get_ref<const std::string&>() != expected_identity.session_id ||
         p["operationId"].get_ref<const std::string&>() != expected_identity.operation_id ||
         p["turnId"].get_ref<const std::string&>() != expected_identity.turn_id ||
@@ -301,16 +304,16 @@ std::expected<FrozenToolResult, ResultSyncError> FrozenToolResult::RestoreSavedP
         p["resultId"].get_ref<const std::string&>() != expected_identity.result_id)
         return std::unexpected(ResultSyncError::SessionMismatch);
     if (p.contains("text")) {
-        if (!p["text"].is_string() || !p["redacted"].is_boolean() || p["status"] != "ready" ||
-            p["contentKind"] != "text" || p["captureComplete"] != true) return bad();
+        if (!p["text"].is_string() || !p["redacted"].is_boolean() || !JsonStrEq(p["status"], "ready") ||
+            !JsonStrEq(p["contentKind"], "text") || p["captureComplete"] != true) return bad();
         const auto& text = p["text"].get_ref<const std::string&>();
         if (!platform::IsValidUtf8(text) || HasBinaryControls(text) || text.size() > kMaxFullResultBytes ||
-            (p["mode"] == "preview" && text.size() > p["previewMaxBytes"].get<std::size_t>()) ||
-            (p["mode"] == "full" && p["truncated"] != false)) return bad();
-    } else if (p["mode"] != "preview" || p["truncated"] != true ||
-        !((p["status"] == "metadata_only" && p["contentKind"] == "binary") ||
-          (p["status"] == "capture_incomplete" && p["contentKind"] == "text" && p["captureComplete"] == false))) return bad();
-    FrozenToolResult frozen(p, p["mode"] == "full" ? ResultSyncMode::Full : ResultSyncMode::Preview);
+            (JsonStrEq(p["mode"], "preview") && text.size() > p["previewMaxBytes"].get<std::size_t>()) ||
+            (JsonStrEq(p["mode"], "full") && p["truncated"] != false)) return bad();
+    } else if (!JsonStrEq(p["mode"], "preview") || p["truncated"] != true ||
+        !((JsonStrEq(p["status"], "metadata_only") && JsonStrEq(p["contentKind"], "binary")) ||
+          (JsonStrEq(p["status"], "capture_incomplete") && JsonStrEq(p["contentKind"], "text") && p["captureComplete"] == false))) return bad();
+    FrozenToolResult frozen(p, JsonStrEq(p["mode"], "full") ? ResultSyncMode::Full : ResultSyncMode::Preview);
     auto checked = frozen.ForTransmission(node, session, known_secrets);
     if (!checked) return std::unexpected(checked.error());
     return frozen;

@@ -418,8 +418,13 @@ TEST_CASE("SDK results: a failed verified-ledger index is an explicit query erro
     REQUIRE(receipt.has_value());
     const auto completed = (*opened)->WaitResult(receipt->operation_id, 30s);
     REQUIRE(completed.has_value());
-    CHECK(completed->state == sdk::OperationState::Succeeded);
-    CHECK(completed->result_persisted);
+    // The corrupt main also prevents validating returned usage ownership.
+    // Keep the actual counters, but never publish a confirmed success/result.
+    CHECK(completed->state == sdk::OperationState::Indeterminate);
+    CHECK_FALSE(completed->result_persisted);
+    CHECK(completed->error.find("sdk.usage.binding_unconfirmed") != std::string::npos);
+    REQUIRE(completed->usage);
+    CHECK_FALSE(completed->usage->attempts_complete);
     REQUIRE(corrupt->calls.load() == 1);
     CHECK(models->load() == 2);
     REQUIRE(corrupt->bytes_before > 0);

@@ -10,6 +10,8 @@
 
 #include "api/sse_framing.hpp"
 #include "api/types.hpp"
+#include "api/usage_delivery_owner.hpp"
+#include "api/anthropic/usage_accounting.hpp"
 
 namespace lubancode::api::anthropic {
 
@@ -54,27 +56,21 @@ public:
           parse_server_tool_search_(parse_server_tool_search) {}
 
     std::vector<StreamEvent> Consume(const SseFrame& frame);
+    std::optional<UsageSnapshot> PendingUsage() const noexcept { return numeric_delivery_.Pending(); }
+    void UsageDelivered(const StreamEvent& event) noexcept { numeric_delivery_.Delivered(event); }
     std::vector<StreamEvent> Finish();
     bool recovered_tagged_thinking() const { return recovered_tagged_thinking_; }
 
 private:
     enum class TaggedThinkingState { Probe, Passthrough, Thinking, AwaitingAnswer, AfterThinking, Failed };
 
-    // usage 快照:每字段独立记"出现过没有"——nullopt = 这条流还没报过它,
-    // 合并出口上与"明报零"分家(旗标另记)。
-    struct UsageSnapshot {
-        std::optional<std::int64_t> input_tokens;
-        std::optional<std::int64_t> output_tokens;
-        std::optional<std::int64_t> cache_read;
-        std::optional<std::int64_t> cache_creation;
-    };
-
     std::vector<StreamEvent> ConsumeParsed(StreamEvent event);
     std::vector<StreamEvent> ConsumeText(std::string text);
     std::vector<StreamEvent> CloseOpenProbe();
     // 吸收一帧 usage 对象进快照(字段级覆盖);message_start 到来时先调
     // ResetUsageState 清旧账。
-    void AbsorbUsageObject(const nlohmann::json& usage);
+    void AbsorbUsageObject(const nlohmann::json& usage,
+        const std::vector<::lubancore::usage::v1::RawField>* lexical = nullptr);
     void ResetUsageState();
 
     bool recover_tagged_thinking_ = false;
@@ -82,12 +78,13 @@ private:
     bool recovered_tagged_thinking_ = false;
     TaggedThinkingState tagged_state_ = TaggedThinkingState::Probe;
     std::string pending_;
-    // ---- usage 快照账(C1) ----
-    UsageSnapshot usage_snapshot_;
-    bool usage_seen_ = false;           // 任一帧真出现过 usage 对象(明报全零也算)
-    bool cache_read_seen_ = false;      // cache_read_input_tokens 字段出现过
-    bool cache_creation_seen_ = false;  // cache_creation_input_tokens 字段出现过
-    std::string usage_anomaly_;         // 负数一类自相矛盾的账(空 = 自洽)
+    usage_wire::AnthropicAccounting accounting_;
+    bool usage_seen_=false;
+    std::optional<std::string> provider_response_id_;
+    usage_wire::NumericDeliveryOwner numeric_delivery_;
+    bool failed_ = false;
+    StreamError Fail(StreamError error) { failed_ = true; return error; }
+
 };
 
 }  // namespace lubancode::api::anthropic

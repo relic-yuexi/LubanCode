@@ -326,6 +326,8 @@ enum class EventKindV3 {
     ContextPressureRecorded,
     // Internal Job Operation provenance; no live authority or execution.
     SdkJobOperationBound,
+    // Per-request observation, never an additional charge or failed-attempt ACK.
+    ModelUsageObserved,
 };
 
 const char* EventKindV3Name(EventKindV3 kind);

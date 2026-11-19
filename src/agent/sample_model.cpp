@@ -10,6 +10,7 @@
 #include <thread>
 #include <utility>
 
+#include "api/usage_aggregation.hpp"
 #include "tools/schema_check.hpp"  // output_schema 复检:与工具入参同一只校验器
 namespace lubancode::agent {
 #ifdef LUBANCODE_PRIVATE_SAMPLE_TEST_HOOKS
@@ -243,6 +244,33 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     const bool cancel_after_complete =
         !sent.has_value() && sent.error().kind == api::ErrorKind::Cancelled && !stream_error &&
         !assembler.stop_reason().empty();
+    // Own fixed numbers before attribution, body copies or material allocation.
+    SampleResult result;
+    const api::Usage& usage = assembler.usage();
+    result.usage = usage;
+    result.usage_reported = assembler.usage_seen() || usage.input_tokens > 0 || usage.output_tokens > 0 ||
+                           usage.cache_read_tokens > 0 || usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
+    result.cache_read_reported = assembler.cache_read_seen();
+    result.cache_creation_reported = assembler.cache_creation_seen();
+    const std::string_view actual_response_id = assembler.provider_response_id()
+        ? std::string_view(*assembler.provider_response_id()) : std::string_view(assembler_response_id);
+    const bool source_observed = assembler.usage_seen() || !actual_response_id.empty() ||
+        usage.input_tokens != 0 || usage.output_tokens != 0 || usage.cache_read_tokens != 0 ||
+        usage.cache_creation_tokens != 0 || usage.output_reasoning_tokens != 0 ||
+        (sent.has_value() && !stream_error);
+    bool observation_failed = false;
+    if (source_observed && options.boundary_recorder != nullptr && !recorded_request_id.empty()) {
+        try {
+            const auto receipt = options.boundary_recorder->OnUsageObservation(recorded_request_id,
+                usage, assembler.usage_observation() ? &*assembler.usage_observation() : nullptr,
+                result.usage_reported, actual_response_id,
+                (!sent.has_value() && !cancel_after_complete) || stream_error || assembler.stop_reason().empty());
+            observation_failed = receipt.has_value() && !*receipt;
+        } catch (...) {
+            // Preserve the transport/cancellation error; stop success if the source cannot be kept.
+            observation_failed = true;
+        }
+    }
     OutputCancelSource cancel_source = OutputCancelSource::StreamError;  // 谁的旗都没升=来源未知
     bool local_deadline_hit = false;
     if (dual_cancel) {
@@ -278,15 +306,9 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
         }
     }
 
-    SampleResult result;
     // usage 半截也出账(旧口径:六处都是先记账再判错)。
-    const api::Usage& usage = assembler.usage();
-    result.usage = usage;
-    result.usage_reported = assembler.usage_seen() || usage.input_tokens > 0 || usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
-                           usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
-    result.cache_read_reported = assembler.cache_read_seen();
-    result.cache_creation_reported = assembler.cache_creation_seen();
     result.usage_anomaly = assembler.usage_anomaly();
+    result.usage_observation = assembler.usage_observation();
     // 半截流(无 ContentBlockDone/MessageDone 收尾)先催收再取,文本不丢
     // ——llm 节点旧路按裸 TextDelta 累加,这里不许比它少一个字。已收尾时
     // 催收是空操作。
@@ -299,7 +321,7 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     result.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - started)
                              .count();
-    result.provider_response_id = assembler_response_id;
+    result.provider_response_id = assembler.provider_response_id().value_or(assembler_response_id);
     result.stop_reason = assembler.stop_reason();
 
     // 轨迹收口(Token 账本单 A1,§6.1.1/§7.3):usage owner 先落(没报也
@@ -327,6 +349,8 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
             }
         } else if (stream_error) {
             options.boundary_recorder->OnOutputFailed(recorded_request_id, stream_error_message);
+        } else if (observation_failed) {
+            options.boundary_recorder->OnOutputFailed(recorded_request_id, "usage observation persistence failed");
         } else {
             // 含"完成与 deadline 同场"的裁决胜者:完整成功响应照走 completed。
             options.boundary_recorder->OnOutputCompleted(recorded_request_id, assistant,
@@ -343,6 +367,11 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     if (stream_error) {
         result.ok = false;
         result.error = api::Error{api::ErrorKind::Api, stream_error_message, 0, stream_error_code};
+        return result;
+    }
+    if (observation_failed) {
+        result.error = api::Error{api::ErrorKind::Api, "usage observation persistence failed", 0,
+                                 "sample.usage_observation_failed"};
         return result;
     }
     result.ok = true;
@@ -370,11 +399,8 @@ void AddSampleAccounting(BackgroundCallAccounting* accounting, const SampleResul
     if (accounting == nullptr) {
         return;
     }
-    accounting->usage.input_tokens += result.usage.input_tokens;
-    accounting->usage.cache_read_tokens += result.usage.cache_read_tokens;
-    accounting->usage.cache_creation_tokens += result.usage.cache_creation_tokens;
-    accounting->usage.output_tokens += result.usage.output_tokens;
-    accounting->usage.output_reasoning_tokens += result.usage.output_reasoning_tokens;
+    api::usage_aggregation::Add(accounting->usage, accounting->usage_coverage, result.usage,
+                              result.usage_observation ? &*result.usage_observation : nullptr);
     accounting->usage_reported =
         accounting->usage_reported || result.usage_reported;
 }

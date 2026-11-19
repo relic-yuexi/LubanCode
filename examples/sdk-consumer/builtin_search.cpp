@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <exception>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -51,12 +52,18 @@ void Write(const fs::path& path, const std::string& text) {
 }
 struct Fixture {
     fs::path root;
+    int exceptions = std::uncaught_exceptions();
     explicit Fixture(const fs::path& base) {
         root = base / ("builtin-search-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         fs::create_directories(root / "project");
         fs::create_directories(root / "decoy");
     }
-    ~Fixture() { std::error_code ignored; fs::remove_all(root, ignored); }
+    ~Fixture() {
+        // Runtime/Session owners retire first during stack unwinding. Retain the
+        // actual failed ledger/artifacts for the remote caller's finally block.
+        if (std::uncaught_exceptions() > exceptions) return;
+        std::error_code ignored; fs::remove_all(root, ignored);
+    }
 };
 struct CwdGuard {
     fs::path previous = fs::current_path();

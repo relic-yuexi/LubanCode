@@ -22,6 +22,12 @@ const Json* Binding(const v3::MessageLine& message) {
     const auto item = host->find("namedResults");
     return item == host->end() ? nullptr : &*item;
 }
+bool JsonMemberStrEq(const Json& object, const char* key, const char* expected) noexcept {
+    if (!object.is_object()) return false;
+    for (const auto& [name, value] : object.get_ref<const Json::object_t&>())
+        if (name == key) return value.is_string() && value.get_ref<const std::string&>() == expected;
+    return false;
+}
 std::expected<std::optional<std::string>, std::string> ReadPlan(const std::filesystem::path& directory) {
     const auto path = directory / kPlan;
     if (!platform::IsUnlinkedOwnedPath(directory, path))
@@ -40,7 +46,7 @@ std::expected<void, std::string> CheckBinding(const v3::V3Ledger& source,
     const auto matches = [&](const v3::MessageLine* message) {
         const auto* binding = message ? Binding(*message) : nullptr;
         return message && message->session_id == scope.session_id && message->run_id == source.run_id &&
-            message->message.value("role", Json()) == "system" && binding && *binding == expected;
+            JsonMemberStrEq(message->message, "role", "system") && binding && *binding == expected;
     };
     if (source.session_id != scope.session_id || source.run_id.empty() || source.messages.empty() || source.messages.front().seq != 1 ||
         !matches(&source.messages.front())) return std::unexpected("named_result.initial_binding_mismatch");

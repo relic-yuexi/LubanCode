@@ -1,6 +1,8 @@
 // Finding / SessionSummary / Report 合同测试(Token 账本单 §15.1 A0)。
 #include <doctest/doctest.h>
 
+#include <array>
+#include <limits>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -112,6 +114,64 @@ TEST_CASE("Finding round-trip 与坏形拒收") {
 }
 
 TEST_CASE("session summary round-trip,terminal hash 与 analyzer version 是 stale 依据") {
+    SUBCASE("nullable summary buckets retain source hashes and reject v1 coercion") {
+        const auto flags = std::array{&usage_projection::Knowledge::input_tokens,
+            &usage_projection::Knowledge::cache_read_tokens,
+            &usage_projection::Knowledge::cache_creation_tokens,
+            &usage_projection::Knowledge::output_tokens,
+            &usage_projection::Knowledge::reasoning_tokens,
+            &usage_projection::Knowledge::cost_micros};
+        const auto keys = std::array{"input_tokens", "cache_read_tokens", "cache_creation_tokens",
+                                     "output_tokens", "reasoning_tokens", "micros"};
+        for (std::size_t index = 0; index < flags.size(); ++index) {
+            auto boundary = MakeSummary();
+            boundary.usage.knowledge.*flags[index] = false;
+            auto encoded = boundary.ToJson();
+            CHECK(encoded["schema_version"] == 2);
+            const auto& value = index == 5 ? encoded["usage"]["cost"][keys[index]]
+                                           : encoded["usage"][keys[index]];
+            CHECK(value.is_null());
+            std::string error;
+            const auto restored = SessionInsightSummary::FromJsonStrict(encoded, &error);
+            REQUIRE(restored.has_value());
+            CHECK(!(restored->usage.knowledge.*flags[index]));
+            CHECK(restored->source.stream_terminal_hashes == boundary.source.stream_terminal_hashes);
+            CHECK(restored->source.session_id == boundary.source.session_id);
+            CHECK(restored->ToJson() == encoded);
+            encoded["schema_version"] = 1;
+            CHECK(!SessionInsightSummary::FromJsonStrict(encoded, &error));
+            encoded["schema_version"] = 2;
+            if (index == 5) encoded["usage"]["cost"].erase(keys[index]);
+            else encoded["usage"].erase(keys[index]);
+            CHECK(!SessionInsightSummary::FromJsonStrict(encoded, &error));
+        }
+        auto epoch = MakeSummary();
+        SummaryCacheEpoch row;
+        row.run_id = "main-0001";
+        row.cache_read_tokens = 123;
+        row.knowledge.cache_read_tokens = false;
+        epoch.cache_epochs.push_back(row);
+        std::string error;
+        const auto restored = SessionInsightSummary::FromJsonStrict(epoch.ToJson(), &error);
+        REQUIRE(restored.has_value());
+        REQUIRE(restored->cache_epochs.size() == 1);
+        CHECK(!restored->cache_epochs[0].knowledge.cache_read_tokens);
+        CHECK(restored->ToJson() == epoch.ToJson());
+        auto aliased = MakeSummary().ToJson();
+        aliased["schema_version"] = std::uint64_t{4294967297};
+        CHECK(!SessionInsightSummary::FromJsonStrict(aliased, &error));
+        for (const auto& invalid : {
+                 nlohmann::json(static_cast<std::uint64_t>(
+                     std::numeric_limits<std::int64_t>::max()) + 1),
+                 nlohmann::json(1.0), nlohmann::json(true), nlohmann::json("1")}) {
+            auto bad = MakeSummary().ToJson();
+            bad["usage"]["input_tokens"] = invalid;
+            CHECK(!SessionInsightSummary::FromJsonStrict(bad, &error));
+            bad = MakeSummary().ToJson();
+            bad["usage"]["cost"]["micros"] = invalid;
+            CHECK(!SessionInsightSummary::FromJsonStrict(bad, &error));
+        }
+    }
     const SessionInsightSummary summary = MakeSummary();
     const nlohmann::json json = summary.ToJson();
     std::string error;
@@ -136,6 +196,34 @@ TEST_CASE("session summary round-trip,terminal hash 与 analyzer version 是 sta
 }
 
 TEST_CASE("report round-trip 与 unknown 单列") {
+    SUBCASE("nullable report and nested summary restore both version boundaries") {
+        InsightsReport boundary;
+        boundary.generated_at = "2026-08-30T00:00:00Z";
+        boundary.usage.knowledge.output_tokens = false;
+        auto summary = MakeSummary();
+        summary.usage.knowledge.input_tokens = false;
+        boundary.sessions.push_back(summary);
+        const auto encoded = boundary.ToJson();
+        CHECK(encoded["schema_version"] == 2);
+        CHECK(encoded["sessions"][0]["schema_version"] == 2);
+        std::string error;
+        const auto restored = InsightsReport::FromJsonStrict(encoded, &error);
+        REQUIRE(restored.has_value());
+        CHECK(!restored->usage.knowledge.output_tokens);
+        REQUIRE(restored->sessions.size() == 1);
+        CHECK(!restored->sessions[0].usage.knowledge.input_tokens);
+        CHECK(restored->ToJson() == encoded);
+        auto bad = encoded;
+        bad["schema_version"] = 1;
+        CHECK(!InsightsReport::FromJsonStrict(bad, &error));
+        bad["usage"]["output_tokens"] = 0;
+        CHECK(!InsightsReport::FromJsonStrict(bad, &error));
+        bad = encoded;
+        bad["usage"]["input_tokens"] = static_cast<std::uint64_t>(
+            std::numeric_limits<std::int64_t>::max()) + 1;
+        CHECK(!InsightsReport::FromJsonStrict(bad, &error));
+        CHECK(MakeSummary().ToJson()["schema_version"] == 1);
+    }
     InsightsReport report;
     report.generated_at = "2026-08-30T00:00:00Z";
     report.scope.workspace_key = "ws-000000000000";

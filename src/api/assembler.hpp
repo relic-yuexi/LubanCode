@@ -52,6 +52,10 @@ public:
     // provider 账目自相矛盾的人话(空 = 自洽):数字照攒,矛盾由消费端
     // 排除出精确比例并点名,不掩盖。
     const std::string& usage_anomaly() const { return usage_anomaly_; }
+    const std::optional<::lubancore::usage::v1::Observation>& usage_observation() const {
+        return usage_observation_;
+    }
+    const std::optional<std::string>& provider_response_id() const { return provider_response_id_; }
 
     // 入参兜底(开源模型坏 JSON 单):本地 tool_use 的入参先严格 parse,失败
     // 再宽松修补(tool_args_repair);修成的块带 input_repair,修不成的带
@@ -112,6 +116,8 @@ private:
     bool cache_read_seen_ = false;
     bool cache_creation_seen_ = false;
     std::string usage_anomaly_;
+    std::optional<::lubancore::usage::v1::Observation> usage_observation_;
+    std::optional<std::string> provider_response_id_;
     std::string parse_error_;
     // 截断嫌疑块(入参修不成,或靠补齐末尾才救回):content_ 下标 + 原文。
     // MessageDone 见长度截断即改判 input_error;收口即清。
