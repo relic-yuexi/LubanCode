@@ -63,6 +63,7 @@ lubancode delete <id|标题> [--force]
 | `--yes` | 起手即用 `yolo`，自动放行所有需要确认的工具。 |
 | `--continue` | 进入交互界面前恢复本目录最近一场会话；没有便开新会话。 |
 | `--output <path>` | 单发模式结束后导出 Harness v1 JSONL；交互模式、app-server 与别的子命令带上会拒绝。常与脚本中的 `--yes` 合用。 |
+| `--time-budget <秒>` | 单发整场墙钟预算（正整数秒；也可设环境变量 `LUBANCODE_TIME_BUDGET_SECS`，选项优先）。有预算时提示里报总时长，剩余不足 25% 或 120 秒各提醒一回，`run_command` 单次超时封顶到"剩余减 30 秒"（最少 5 秒），剩 20 秒即不再发请求、照常收口导出。只认带任务正文的单发形态。 |
 | `--config` | 打印最终配置、字段来源、权限摘要和模型目录命中情况；密钥打码。 |
 | `--system-prompt <file>` | 用 UTF-8 `.md/.txt` 替换人格段；运行所需环境与工具规则仍会追加。 |
 | `--reset-system-prompt` | 把 `~/.lubancode/system_prompt.md` 还原成内置版，旧文件留作 `.bak`。 |

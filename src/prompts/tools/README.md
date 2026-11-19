@@ -51,6 +51,7 @@ std::string ReadFileTool::description() const {
 - edit_file、search(文件工具批余量)
 - run_command、background_output、stop_background;批3-5(0.26.21):agent、agent_message(含 persona.general/persona.explore)、ask_user、todo_write、lsp、context_search、context_read(命令族批)
 - 清底批(全部迁完):web_search、web_fetch、tool_search、skill、list_sessions、send_session_message、worktree、memory_save、programmatic_tool_calling
+- 新工具随生随建:terminal(POSIX 交互终端;Windows 不注册,档照常嵌入)
 
 run_command 的描述与 command/shell 两个参数的平台分档文案,档里单列
 `(POSIX)` 节(如 `## description (POSIX)`),cpp 侧键名随 `#ifdef` 走;

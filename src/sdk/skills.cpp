@@ -27,6 +27,12 @@ constexpr const char* kPlanFile = "sdk-skills-plan.json";
 Error Fail(std::string code, std::string message = {}) {
     return {std::move(code), std::move(message)};
 }
+bool JsonMemberStrEq(const Json& object, const char* key, const char* expected) noexcept {
+    if (!object.is_object()) return false;
+    for (const auto& [name, value] : object.get_ref<const Json::object_t&>())
+        if (name == key) return value.is_string() && value.get_ref<const std::string&>() == expected;
+    return false;
+}
 bool Inside(const fs::path& root, const fs::path& path) {
     auto r = root.begin();
     auto p = path.begin();
@@ -219,7 +225,7 @@ Result<void> SessionSkills::CheckBinding(const v3::V3Ledger& ledger) const {
     if (ledger.session_id != resume_id_) return std::unexpected(Fail("sdk.skill.plan_invalid", "journal identity mismatch"));
     const auto* effective = ledger.FindMessage(ledger.context.system_message_ref);
     if (!effective || !effective->system_meta || !effective->system_meta->is_object() ||
-        effective->message.value("role", Json()) != "system" ||
+        !JsonMemberStrEq(effective->message, "role", "system") ||
         !effective->message.contains("content") || !effective->message["content"].is_string())
         return std::unexpected(Fail("sdk.skill.plan_invalid", "effective system is not a text root"));
     if (effective->system_meta->contains("settingsVersion")) {

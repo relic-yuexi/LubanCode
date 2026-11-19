@@ -166,10 +166,14 @@ bool StrictMetadata(const nlohmann::json& meta) {
         if (!meta.contains(key) || !text(meta[key])) return false;
     for (const auto* key : {"name", "summary", "status", "updated_at", "created_at", "confidence", "last_verified_at", "content_index"})
         if (meta.contains(key) && !text(meta[key])) return false;
-    if (meta.contains("status") && meta["status"] != "active" && meta["status"] != "stale" &&
-        meta["status"] != "conflict" && meta["status"] != "archived") return false;
-    if (meta.contains("confidence") && meta["confidence"] != "user-stated" && meta["confidence"] != "verified" &&
-        meta["confidence"] != "inferred") return false;
+    if (meta.contains("status")) {
+        const auto& status = meta["status"].get_ref<const std::string&>();
+        if (status != "active" && status != "stale" && status != "conflict" && status != "archived") return false;
+    }
+    if (meta.contains("confidence")) {
+        const auto& confidence = meta["confidence"].get_ref<const std::string&>();
+        if (confidence != "user-stated" && confidence != "verified" && confidence != "inferred") return false;
+    }
     for (const auto* key : {"expires_at", "occurred_at"}) {
         if (!meta.contains(key) || meta[key].is_null()) continue;
         if (!text(meta[key]) || (!meta[key].get_ref<const std::string&>().empty() &&
@@ -180,9 +184,14 @@ bool StrictMetadata(const nlohmann::json& meta) {
         if (!scope.is_object()) return false;
         for (const auto* key : {"level", "kind", "value"})
             if (scope.contains(key) && !text(scope[key])) return false;
-        if (scope.contains("level") && scope["level"] != "project" && scope["level"] != "user") return false;
-        if (scope.contains("kind") && scope["kind"] != "project" && scope["kind"] != "subtree" &&
-            scope["kind"] != "path" && scope["kind"] != "user") return false;
+        if (scope.contains("level")) {
+            const auto& level = scope["level"].get_ref<const std::string&>();
+            if (level != "project" && level != "user") return false;
+        }
+        if (scope.contains("kind")) {
+            const auto& kind = scope["kind"].get_ref<const std::string&>();
+            if (kind != "project" && kind != "subtree" && kind != "path" && kind != "user") return false;
+        }
     }
     for (const auto* key : {"keywords", "paths", "source_sessions"}) {
         if (!meta.contains(key)) continue;

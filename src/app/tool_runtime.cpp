@@ -26,6 +26,7 @@
 #include "tools/lsp_tool.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/run_command.hpp"
+#include "tools/terminal_session_tool.hpp"  // POSIX 交互终端(PTY 会话);Windows 不注册
 #include "tools/tool_search.hpp"
 
 namespace lubancode::app {
@@ -120,8 +121,14 @@ lubancode::memory::Options MemoryOptionsFromConfig(const lubancode::config::Memo
 
 lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode::tools::SkillMeta>& skills,
                                                      const lubancode::config::SearchConfig& search_config) {
-    return runtime::assembly::BuildBaseToolRegistry(skills, search_config,
-                                                   "lubancode/" + std::string(kVersion));
+    auto registry = runtime::assembly::BuildBaseToolRegistry(
+        skills, search_config, "lubancode/" + std::string(kVersion));
+#ifndef _WIN32
+    // terminal:PTY 交互会话(vim/REPL/安装向导/ssh/gdb)。会话台账是进程级
+    // 单例,属宿主工具表扩展;Windows 本单不做 ConPTY,不挂。
+    registry.Register(std::make_unique<lubancode::tools::TerminalSessionTool>());
+#endif
+    return registry;
 }
 
 lubancode::tools::ToolRegistry BuildExploreToolRegistry(const lubancode::config::SearchConfig& search_config) {

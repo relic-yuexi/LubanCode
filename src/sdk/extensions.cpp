@@ -34,6 +34,12 @@ Result<Json> ParseJson(const std::string& source, const char* description) {
 bool IsPrompt(const Json& value) {
     return value.is_object() && value.size() == 1 && value.contains("prompt") && value["prompt"].is_string();
 }
+bool JsonMemberStrEq(const Json& object, const char* key, const char* expected) noexcept {
+    if (!object.is_object()) return false;
+    for (const auto& [name, value] : object.get_ref<const Json::object_t&>())
+        if (name == key) return value.is_string() && value.get_ref<const std::string&>() == expected;
+    return false;
+}
 
 namespace ac = mw::action_contract;
 using ac::ActionPoint;
@@ -54,8 +60,8 @@ bool StringField(const Json& value, const char* key) {
 bool IsEstimate(const Json& value) {
     if (!value.is_object() || !StringField(value, "estimator") || !value.contains("estimatorVersion") ||
         !NonNegativeInteger(value["estimatorVersion"]) || value["estimatorVersion"] == 0 ||
-        value.value("scope", Json()) != "model_input_json_utf8_v1" ||
-        value.value("encoding", Json()) != "utf-8" || !StringField(value, "rounding") ||
+        !JsonMemberStrEq(value, "scope", "model_input_json_utf8_v1") ||
+        !JsonMemberStrEq(value, "encoding", "utf-8") || !StringField(value, "rounding") ||
         !value.contains("inputUtf8Bytes") || !NonNegativeInteger(value["inputUtf8Bytes"]) ||
         !value.contains("estimatedInputTokens") || !NonNegativeInteger(value["estimatedInputTokens"]) ||
         !value.contains("coverage") || !value["coverage"].is_string() ||

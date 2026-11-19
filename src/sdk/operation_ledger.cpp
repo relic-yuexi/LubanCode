@@ -81,7 +81,8 @@ Result<void> ValidateOperationLedger(const fs::path& session_dir) {
         if (!ValidId(id)) return invalid("invalid operation ID");
         const auto found = stages.find(id);
         if (kind == "operation.accepted") {
-            if (found != stages.end() || !is_string(row, "inputId") || row.at("inputId") == "" ||
+            if (found != stages.end() || !is_string(row, "inputId") ||
+                row.at("inputId").get_ref<const std::string&>().empty() ||
                 !is_string(row, "clientOperationId") || !is_string(row, "payloadHash")) {
                 return invalid("invalid or duplicate operation acceptance");
             }
@@ -100,7 +101,7 @@ Result<void> ValidateOperationLedger(const fs::path& session_dir) {
         } else if (kind == "operation.final") {
             if (found == stages.end() || found->second != Stage::Dispatched ||
                 !is_string(row, "turnId") || !is_string(row, "executionStatus") ||
-                row.at("executionStatus") == "" || !row.contains("finalMessageRefs") ||
+                row.at("executionStatus").get_ref<const std::string&>().empty() || !row.contains("finalMessageRefs") ||
                 !row.at("finalMessageRefs").is_array() || !row.contains("usageReported") ||
                 !row.at("usageReported").is_boolean()) {
                 return invalid("invalid final or missing preceding dispatch");

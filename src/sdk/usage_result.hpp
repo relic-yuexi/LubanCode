@@ -23,9 +23,9 @@ inline std::expected<void, std::string_view> ValidateRequestBinding(const UsageA
         prepared = &event;
     }
     if (!prepared || prepared->session_id != ledger.session_id || prepared->run_id != ledger.run_id ||
-        prepared->turn_id != record.turn_id || prepared->payload.value("model", Json()) != record.model ||
-        prepared->payload.value("requestPurpose", Json()) != record.purpose ||
-        prepared->payload.value("producerStepId", Json()) != record.step_id)
+        prepared->turn_id != record.turn_id || !api::usage_json::MemberStringEquals(prepared->payload, "model", record.model) ||
+        !api::usage_json::MemberStringEquals(prepared->payload, "requestPurpose", record.purpose) ||
+        !api::usage_json::MemberStringEquals(prepared->payload, "producerStepId", record.step_id))
         return std::unexpected("sdk.usage.request_prepared_mismatch");
     const auto prefix = prepared->payload.find("prefixAccount");
     if (prefix == prepared->payload.end() || !prefix->is_object() || prefix->value("cacheEpoch", Json()) != record.cache_epoch)
@@ -55,7 +55,8 @@ inline std::expected<void, std::string_view> ValidateRequestBinding(const UsageA
             return std::unexpected("sdk.usage.observation_material_mismatch");
     } else if (observed->payload.contains("observation")) return std::unexpected("sdk.usage.observation_material_mismatch");
     for (const auto& message : ledger.messages) {
-        if (message.request_id != record.trajectory_request_id || message.message.value("role", Json()) != "assistant") continue;
+        if (message.request_id != record.trajectory_request_id ||
+            !api::usage_json::MemberStringEquals(message.message, "role", "assistant")) continue;
         if (message.session_id != ledger.session_id || message.run_id != ledger.run_id || message.turn_id != record.turn_id)
             return std::unexpected("sdk.usage.response_owner_mismatch");
         if (const auto id = message.message.find("provider_response_id"); id != message.message.end()) {

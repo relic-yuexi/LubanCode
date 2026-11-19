@@ -156,16 +156,17 @@ struct ReturnedGate {
     bool released = false;
     std::atomic<bool> entered{false}, cancelled{false}, prepared{false}, destroyed{false}, timed_out{false};
     std::atomic<unsigned> calls{0};
+    void Notify() { std::lock_guard lock(mutex); cv.notify_all(); }
     void Release() { std::lock_guard lock(mutex); released = true; cv.notify_all(); }
 };
 struct ReleaseReturnedGate {
     std::shared_ptr<ReturnedGate> gate;
     ~ReleaseReturnedGate() { gate->Release(); }
 };
-bool WaitReturnedFlag(const std::atomic<bool>& flag) {
+bool WaitReturnedFlag(ReturnedGate& gate, const std::atomic<bool>& flag) {
     const auto deadline = std::chrono::steady_clock::now() + 10s;
-    while (!flag.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(2ms);
-    return flag.load();
+    std::unique_lock lock(gate.mutex);
+    return gate.cv.wait_until(lock, deadline, [&] { return flag.load(); });
 }
 class ReturnedAllocationBackend final : public sdk::Backend {
 public:
@@ -197,12 +198,14 @@ public:
     }
     ~ReturnedAllocationBackend() override { gate_->destroyed.store(true); }
     sdk::Result<sdk::ModelReply> Generate(const sdk::ModelRequest&, sdk::Cancellation cancel) override {
-        gate_->calls.fetch_add(1); gate_->entered.store(true);
+        gate_->calls.fetch_add(1);
         const auto deadline = std::chrono::steady_clock::now() + 20s;
         std::unique_lock lock(gate_->mutex);
+        gate_->entered.store(true);
+        gate_->cv.notify_all();
         while (!gate_->released && std::chrono::steady_clock::now() < deadline) {
-            if (cancel.requested()) gate_->cancelled.store(true);
-            gate_->cv.wait_for(lock, 2ms);
+            if (cancel.requested() && !gate_->cancelled.exchange(true)) gate_->cv.notify_all();
+            gate_->cv.wait_for(lock, 1ms);
         }
         gate_->cancelled.store(cancel.requested());
         if (!gate_->released) gate_->timed_out.store(true);
@@ -230,10 +233,14 @@ struct ReturnedAllocationFixture {
     std::filesystem::path root;
     std::filesystem::path material_source, material_target;
     std::string material_operation_id;
+    mutable bool archived = false;
     ReturnedAllocationFixture() {
         static std::atomic<unsigned> serial{0};
-        root = std::filesystem::temp_directory_path() / ("sdk-actual-returned-alloc-" +
-            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" + std::to_string(serial.fetch_add(1)));
+        static const unsigned nonce =
+            static_cast<unsigned>(std::chrono::steady_clock::now().time_since_epoch().count());
+        char folder[32]{};
+        std::snprintf(folder, sizeof(folder), "s-%08x-%08x", nonce, serial.fetch_add(1));
+        root = std::filesystem::path(LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT).parent_path() / "a" / folder;
         std::filesystem::create_directories(root / "cwd");
         std::filesystem::create_directories(root / "resources");
     }
@@ -248,9 +255,10 @@ struct ReturnedAllocationFixture {
             if (std::filesystem::is_symlink(source)) throw std::runtime_error("allocation evidence is a symbolic link");
             std::filesystem::copy_file(source, material_target / name, std::filesystem::copy_options::overwrite_existing);
         }
+        archived = true;
     }
     ~ReturnedAllocationFixture() {
-        try { Archive(); } // Also retain the original failed point after owners retire.
+        try { if (!archived) Archive(); } // Also retain the original failed point after owners retire.
         catch (...) { } // A failed assertion/exception must remain the native failure.
         std::error_code ec; std::filesystem::remove_all(root, ec);
     }
@@ -346,7 +354,8 @@ void CheckReturnedFaultNumbers(const sdk::Operation& operation, ReturnedPath pat
     }
 }
 ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationFailurePort port,
-                                        ReturnedPath path, std::uint64_t ordinal = 0) {
+                                        ReturnedPath path, std::uint64_t ordinal = 0,
+                                        bool record_materials = true) {
     ReturnedAllocationFixture fixture;
     lubancore::detail::testing::AllocationFailureControl control;
     control.require_returned_backend = true;
@@ -368,16 +377,20 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
     options.backend = std::make_unique<ReturnedAllocationBackend>(gate, port, control);
     auto opened = (*runtime)->OpenSession(std::move(options)); REQUIRE(opened);
     auto session = std::move(*opened); const auto id = session->id();
-    fixture.material_source = fixture.SessionDir(id);
-    fixture.material_target = std::filesystem::path(LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT) /
-        (std::to_string(static_cast<unsigned>(path)) + "-" + std::to_string(ordinal)) / id;
-    std::filesystem::create_directories(fixture.material_target);
+    if (record_materials) {
+        fixture.material_source = fixture.SessionDir(id);
+        fixture.material_target = std::filesystem::path(LUBANCORE_TEST_ALLOCATION_EVIDENCE_ROOT) /
+            (std::to_string(static_cast<unsigned>(path)) + "-" + std::to_string(ordinal)) / id;
+        std::filesystem::create_directories(fixture.material_target);
+    }
     auto events = session->Subscribe(); REQUIRE(events);
     ReturnedAllocationRun run;
+    bool close_faulted = false;
+    std::optional<std::string> close_error_code;
     std::future<sdk::Result<void>> closing;
     ReleaseReturnedGate release{gate}; // Unblocks before future/session destruction on every assertion failure.
     const auto receipt = session->Submit("actual-allocation-calibration", "calibrate the real SDK reply return");
-    REQUIRE(receipt); REQUIRE(WaitReturnedFlag(gate->entered));
+    REQUIRE(receipt); REQUIRE(WaitReturnedFlag(*gate, gate->entered));
     fixture.material_operation_id = receipt->operation_id;
     CHECK_FALSE(control.backend_returned.load()); CHECK(control.allocations.load() == 0);
     if (path == ReturnedPath::Close) {
@@ -386,11 +399,11 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
             if (!scope.active) return sdk::Result<void>(std::unexpected(sdk::Error{"fixture.scope", "Close allocation borrow failed"}));
             return owner->Close();
         });
-        REQUIRE(WaitReturnedFlag(gate->cancelled));
+        REQUIRE(WaitReturnedFlag(*gate, gate->cancelled));
         CHECK(closing.wait_for(20ms) == std::future_status::timeout);
         CHECK(control.allocations.load() == 0); CHECK_FALSE(control.backend_returned.load());
     } else if (path == ReturnedPath::Cancel) {
-        REQUIRE(session->Cancel(receipt->operation_id)); REQUIRE(WaitReturnedFlag(gate->cancelled));
+        REQUIRE(session->Cancel(receipt->operation_id)); gate->Notify(); REQUIRE(WaitReturnedFlag(*gate, gate->cancelled));
     }
     gate->Release();
     if (path == ReturnedPath::Close) {
@@ -398,13 +411,21 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
         try {
             const auto closed = closing.get();
             if (!ordinal) REQUIRE(closed);
-            else if (!closed) CHECK_FALSE(closed.error().code.empty());
+            else if (!closed) {
+                CHECK_FALSE(closed.error().code.empty());
+                close_faulted = true;
+                close_error_code = closed.error().code;
+            }
         } catch (const std::bad_alloc&) {
             REQUIRE(ordinal != 0); REQUIRE(control.refusals.load() == 1);
+            close_faulted = true;
             // The actual Close borrow has unwound. Retry the actual API with
             // ordinary allocation restored, never substitute a retirement flag.
             const auto retired = session->Close();
-            if (!retired) CHECK_FALSE(retired.error().code.empty());
+            if (!retired) {
+                CHECK_FALSE(retired.error().code.empty());
+                close_error_code = retired.error().code;
+            }
         }
     } else {
         const auto complete = session->WaitResult(receipt->operation_id, 15s); REQUIRE(complete);
@@ -412,7 +433,13 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
         else CheckReturnedFaultNumbers(*complete, path);
         bool terminal = false;
         for (unsigned n = 0; n != 256 && !terminal; ++n) {
-            const auto event = (*events)->Next(50ms); REQUIRE(event);
+            const auto event = (*events)->Next((ordinal && control.worker_retired.load()) ? 0ms : 50ms);
+            if (!event) {
+                REQUIRE(ordinal != 0);
+                REQUIRE(control.refusals.load() == 1);
+                CHECK_FALSE(event.error().code.empty());
+                break;
+            }
             if (!event->has_value()) {
                 // A confirmed final can outlive failed transient notification.
                 // Actual worker retirement makes that omission observable; the
@@ -437,11 +464,19 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
             OwnedRefusalScope scope{port, port.begin(control)}; REQUIRE(scope.active);
             const auto closed = session->Close();
             if (!ordinal) REQUIRE(closed);
-            else if (!closed) CHECK_FALSE(closed.error().code.empty());
+            else if (!closed) {
+                CHECK_FALSE(closed.error().code.empty());
+                close_faulted = true;
+                close_error_code = closed.error().code;
+            }
         } catch (const std::bad_alloc&) {
             REQUIRE(ordinal != 0); REQUIRE(control.refusals.load() == 1);
+            close_faulted = true;
             const auto retired = session->Close();
-            if (!retired) CHECK_FALSE(retired.error().code.empty());
+            if (!retired) {
+                CHECK_FALSE(retired.error().code.empty());
+                close_error_code = retired.error().code;
+            }
         }
     }
     CHECK(control.backend_returned.load()); CHECK(gate->prepared.load());
@@ -455,7 +490,7 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
     if (!ordinal) CheckReturnedOperation(*operation, path);
     else CheckReturnedFaultNumbers(*operation, path);
     run.state = operation->state; run.persisted = operation->result_persisted;
-    WriteAllocationMaterial(fixture.material_target / "query.json", OperationMaterial(*operation));
+    if (record_materials) WriteAllocationMaterial(fixture.material_target / "query.json", OperationMaterial(*operation));
     const auto directory = fixture.SessionDir(id);
     std::ifstream final_file(directory / "operations.jsonl", std::ios::binary); REQUIRE(final_file);
     nlohmann::json final_record;
@@ -515,13 +550,13 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
     auto resumed = (*runtime)->OpenSession(std::move(recovery_options));
     if (!resumed) {
         const nlohmann::json error{{"code", resumed.error().code}, {"message", resumed.error().message}};
-        WriteAllocationMaterial(fixture.material_target / "recovery-error.json", error);
+        if (record_materials) WriteAllocationMaterial(fixture.material_target / "recovery-error.json", error);
         std::cerr << "SDK_ALLOCATION_RECOVERY_ERROR " << error.dump() << '\n';
     }
     REQUIRE(resumed);
     CHECK((*resumed)->id() == id);
     const auto recovered = (*resumed)->ReadOperation(receipt->operation_id); REQUIRE(recovered);
-    WriteAllocationMaterial(fixture.material_target / "recovered.json", OperationMaterial(*recovered));
+    if (record_materials) WriteAllocationMaterial(fixture.material_target / "recovered.json", OperationMaterial(*recovered));
     if (!ordinal) CheckReturnedOperation(*recovered, path);
     CHECK(recovered->operation_id == operation->operation_id);
     CHECK(recovered->result_persisted == operation->result_persisted);
@@ -536,11 +571,22 @@ ReturnedAllocationRun RunReturnedSession(lubancore::detail::testing::AllocationF
         CHECK_FALSE(recovered->result_persisted); CHECK(recovered->final_text.empty());
         CHECK_FALSE(recovered->usage); CHECK_FALSE(recovered->error.empty());
     }
-    REQUIRE((*resumed)->Close()); REQUIRE((*runtime)->Shutdown()); CHECK(replays.load() == 0);
+    REQUIRE((*resumed)->Close());
+    const auto shutdown = (*runtime)->Shutdown();
+    if (!ordinal) {
+        REQUIRE(shutdown);
+    } else if (!shutdown) {
+        REQUIRE(close_faulted);
+        CHECK_FALSE(shutdown.error().code.empty());
+        if (close_error_code) CHECK(shutdown.error().code == *close_error_code);
+    }
+    CHECK(replays.load() == 0);
     REQUIRE(tools.load() == 0);
-    fixture.Archive();
-    std::cout << "[sdk-returned-allocation-materials] path=" << static_cast<unsigned>(path)
-              << " ordinal=" << ordinal << " directory=" << nlohmann::json(platform::PathToUtf8(fixture.material_target)).dump() << '\n';
+    if (record_materials) {
+        fixture.Archive();
+        std::cout << "[sdk-returned-allocation-materials] path=" << static_cast<unsigned>(path)
+                  << " ordinal=" << ordinal << " directory=" << nlohmann::json(platform::PathToUtf8(fixture.material_target)).dump() << '\n';
+    }
     return run;
 }
 }
@@ -727,6 +773,10 @@ TEST_CASE("SDK allocation ownership: real shared image and matching host release
         std::cout << "[sdk-json-retirement] ordered=" << ordered << " depth=" << depth
                   << " allocations=" << retirement_allocations << " sentinel_refused=" << armed.refusals.load()
                   << '\n' << std::flush;
+    }
+    for (const auto warm_path : {ReturnedPath::Success, ReturnedPath::Cancel, ReturnedPath::Close}) {
+        (void)RunReturnedSession(failure, warm_path, 0, false);
+        (void)RunReturnedSession(failure, warm_path, 1, false);
     }
     for (const auto path : {ReturnedPath::Success, ReturnedPath::Cancel, ReturnedPath::Close}) {
         const auto baseline = RunReturnedSession(failure, path);

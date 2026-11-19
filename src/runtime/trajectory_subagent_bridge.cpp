@@ -157,8 +157,10 @@ public:
                          std::shared_ptr<SubagentTerminalRegistry> registry,
                          std::optional<SubagentSpawnProvenance> provenance)
         : writer_(std::move(writer)), books_(std::move(books)), bridge_(std::move(bridge)),
-          run_id_(writer_->run_id()), registry_(std::move(registry)), provenance_(std::move(provenance)) {}
+          run_id_(writer_->run_id()), session_id_(writer_->session_id()),
+          registry_(std::move(registry)), provenance_(std::move(provenance)) {}
     const std::string& run_id() const override { return run_id_; }
+    const std::string& session_id() const override { return session_id_; }
     TrajectoryTurnBridge& turn_bridge() override { return *bridge_; }
     std::optional<SubagentSpawnProvenance> ParentSpawn() const override { return provenance_; }
     std::optional<ChildApprovalParent> approval_parent() const override {
@@ -234,6 +236,7 @@ private:
     std::unique_ptr<V3SessionBooks> books_;
     std::unique_ptr<TrajectoryTurnBridge> bridge_;
     std::string run_id_;
+    std::string session_id_;
     std::shared_ptr<SubagentTerminalRegistry> registry_;
     std::mutex finish_mutex_;
     std::optional<SubagentTerminalReceipt> finished_;

@@ -19,6 +19,12 @@ std::string Failure(const mw::DispatchOutcome& outcome) {
     return outcome.kind == mw::DispatchOutcome::Kind::Denied
         ? outcome.deny_code + ": " + outcome.deny_message : outcome.error_code + ": " + outcome.error_detail;
 }
+bool JsonMemberStrEq(const Json& object, const char* key, const char* expected) noexcept {
+    if (!object.is_object()) return false;
+    for (const auto& [name, value] : object.get_ref<const Json::object_t&>())
+        if (name == key) return value.is_string() && value.get_ref<const std::string&>() == expected;
+    return false;
+}
 } // namespace
 
 lubancode::agent::TurnWiring::ActionPreDecision RunPreAction(
@@ -47,7 +53,7 @@ lubancode::agent::TurnWiring::ActionPreDecision RunPreAction(
     }
     if (candidate != trigger.input) result.hook.updated_input = candidate["arguments"];
     for (const auto& record : outcome.records) for (const auto& effect : record.effects)
-        if (effect.applied && effect.type == "admission.decision" && effect.payload.value("decision", Json()) == "ask") {
+        if (effect.applied && effect.type == "admission.decision" && JsonMemberStrEq(effect.payload, "decision", "ask")) {
             result.hook.decision = lubancode::runtime::ToolHookDecision::Decision::Ask;
             result.hook.reason = effect.payload.value("reason", std::string());
         }

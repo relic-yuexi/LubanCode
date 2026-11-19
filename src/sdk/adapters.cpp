@@ -41,6 +41,10 @@ namespace api = lubancode::api;
 namespace tools = lubancode::tools;
 using Json = nlohmann::json;
 
+bool JsonStrEq(const Json& value, const char* expected) noexcept {
+    return value.is_string() && value.get_ref<const std::string&>() == expected;
+}
+
 bool ValidSamplingValue(const std::string& value) {
     return value.size() <= 256 && value.find('\0') == std::string::npos &&
            lubancode::platform::IsValidUtf8(value);
@@ -304,7 +308,7 @@ public:
                     return Result::Error("sdk.tool.invalid_input: NUL or invalid UTF-8");
                 }
             }
-            if (path == input.end() || path->is_null() || *path == "") effective["path"] = cwd_;
+            if (path == input.end() || path->is_null() || JsonStrEq(*path, "")) effective["path"] = cwd_;
         }
         if (command) {
             if (!input.is_object()) return Result::Error("sdk.job.invalid_input");
@@ -314,7 +318,7 @@ public:
             if (input.contains("run_in_background") && input.at("run_in_background") != false)
                 return Result::Error("sdk.job.detached_unsupported");
             if ((!command_jobs_ && (input.contains("execution_mode") || input.contains("job_budget_ms"))) ||
-                (input.contains("execution_mode") && input.at("execution_mode") != "foreground") || input.contains("job_budget_ms"))
+                (input.contains("execution_mode") && !JsonStrEq(input.at("execution_mode"), "foreground")) || input.contains("job_budget_ms"))
                 return Result::Error("sdk.job.main_admission_required: command Jobs require the actual main declaration");
         }
         const char* key = command ? "cwd" : "path";
@@ -328,7 +332,7 @@ public:
             effective[key] = cwd_;
         }
         // Empty/null command cwd must not fall through to process-global cwd.
-        if (command && effective.contains(key) && (effective.at(key).is_null() || effective.at(key) == "")) {
+        if (command && effective.contains(key) && (effective.at(key).is_null() || JsonStrEq(effective.at(key), ""))) {
             effective[key] = cwd_;
         }
         return inner_->execute(effective, context);

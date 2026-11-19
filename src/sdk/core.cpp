@@ -805,6 +805,7 @@ struct Session::Impl final : rt::InteractionBroker {
         profile.system_prompt = options.system_prompt;
         profile.runtime.max_steps_per_turn = options.max_steps_per_turn;
         profile.runtime.context_window_tokens = options.context_window_tokens;
+        profile.lenient_tool_input = false;
         detail::SessionSubagents* child_module_ptr = nullptr;
         if ((*child_plan)->enabled()) {
             auto children = detail::SessionSubagents::Build(*child_plan,
@@ -1911,7 +1912,7 @@ struct Session::Impl final : rt::InteractionBroker {
 };
 
 Session::Session(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
-Session::~Session() { (void)impl_->Close(); }
+Session::~Session() { try { (void)impl_->Close(); } catch (...) {} }
 std::string Session::id() const { return impl_->session_id; }
 Result<void> Session::Close() { return impl_->Close(); }
 Result<std::string> Session::DescribeExtensions() const {
@@ -2121,7 +2122,7 @@ struct Runtime::Impl {
     std::shared_ptr<CloseErrors> close_errors = std::make_shared<CloseErrors>();
 };
 Runtime::Runtime(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
-Runtime::~Runtime() { (void)Shutdown(); }
+Runtime::~Runtime() { try { (void)Shutdown(); } catch (...) {} }
 Result<std::unique_ptr<Runtime>> Runtime::Create(RuntimeOptions options) {
     try {
         auto data = AbsoluteDirectory(options.data_root, true);

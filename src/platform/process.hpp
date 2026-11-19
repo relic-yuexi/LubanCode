@@ -15,15 +15,17 @@
 // 语义要点(两平台对齐):
 //   - 超时/关停都要把整棵进程树杀干净(Windows: Job Object 的
 //     KILL_ON_JOB_CLOSE;POSIX: setpgid 进程组 + killpg SIGTERM→SIGKILL)。
-//   - 输出上限:一次性捕获超过 max_output_bytes 截断保留前段、置
-//     output_truncated、杀树,但继续读空管道到 EOF(不读的话子进程会卡在
-//     写上死不掉)。
+//   - 输出上限:一次性捕获超过 max_output_bytes 有两种收法(OutputOverflow):
+//     KillTree(缺省)截断保留前段、置 output_truncated、杀树,但继续读空
+//     管道到 EOF(不读的话子进程会卡在写上死不掉);KeepHeadTail 不杀,
+//     首尾各留一半、中间记省略字节数,命令照常跑完(run_command 用)。
 //   - env 注入:UTF-8 键值对,同名覆盖当前进程环境。
 #pragma once
 
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -48,13 +50,125 @@ struct ProcessResult {
     bool timed_out = false;
     bool cancelled = false;          // 进程生命线单:cancel 旗置位,树已收,cancelled 与超时分开记账
     bool spawn_failed = false;
-    bool output_truncated = false;   // 输出超过上限被截断,进程树已被强制终止
+    // 输出超过上限被截断。KillTree 模式下进程树已被强制终止;KeepHeadTail
+    // 模式下命令照常跑完,output 是"首段 + 省略标记 + 尾段"。
+    bool output_truncated = false;
+    std::uint64_t omitted_bytes = 0;  // KeepHeadTail 模式中间省掉的字节数(其余模式恒 0)
     std::string spawn_error;
 };
 
-// 单次执行捕获输出的默认上限(字节)。超过就截断、杀掉整棵进程树,防止
-// 一条命令把内存吃光(比如 ping -t、dir /s C:\)。
+// 单次执行捕获输出的默认上限(字节)。KillTree 模式超过就截断、杀掉整棵
+// 进程树,防止一条命令把内存吃光(比如 ping -t、dir /s C:\);KeepHeadTail
+// 模式内存同样封在这个数上,只是不杀。
 constexpr std::size_t kDefaultMaxOutputBytes = 2 * 1024 * 1024;
+
+// 输出超上限怎么收(Terminal-Bench 加固单):
+//   KillTree     —— 历史行为:截前段、杀树。hooks 等调用方不动。
+//   KeepHeadTail —— 不杀,前一半 + 后一半(环形)留住,中间记省略字节数。
+//                   编译报错多在尾巴,砍尾等于白跑;run_command 前台用它。
+enum class OutputOverflow {
+    KillTree,
+    KeepHeadTail,
+};
+
+// KeepHeadTail 的捕获器(纯数据结构,两平台共用一份,便于确定性测试)。
+// 帽 max_bytes 一分为二:前 head_cap 字节照收,之后的字节进尾巴缓冲,只
+// 留最后 tail_cap 字节(摊还 O(1):缓冲涨到两倍帽才裁一次)。总量不超帽
+// 时 Finish 原样拼回,一字不少;超帽时拼"首段 + ASCII 省略标记 + 尾段"。
+// 标记只用 ASCII——Windows cmd 路的输出还要过一道 ACP→UTF-8 转换,
+// 中文标记会被当 GBK 解坏。首段刀口退到 UTF-8 整字边界,尾段起头跳过悬空
+// 的续字节,不往外递半个汉字。
+class HeadTailCapture {
+public:
+    explicit HeadTailCapture(std::size_t max_bytes)
+        : max_(max_bytes), head_cap_(max_bytes / 2), tail_cap_(max_bytes - max_bytes / 2) {}
+
+    void Append(const char* data, std::size_t n) {
+        if (head_.size() < head_cap_) {
+            const std::size_t room = head_cap_ - head_.size();
+            const std::size_t take = n < room ? n : room;  // 不用 std::min:windows.h 的 min 宏会咬它
+            head_.append(data, take);
+            data += take;
+            n -= take;
+            total_ += take;
+        }
+        if (n == 0) {
+            return;
+        }
+        tail_.append(data, n);
+        total_ += n;
+        if (tail_.size() > 2 * tail_cap_) {
+            tail_.erase(0, tail_.size() - tail_cap_);
+        }
+    }
+
+    std::uint64_t total_bytes() const { return total_; }
+    bool overflowed() const { return total_ > static_cast<std::uint64_t>(max_); }
+
+    // 收口。omitted_bytes 非空时回填中间省掉的字节数(含两头对齐退掉的零头)。
+    std::string Finish(std::uint64_t* omitted_bytes = nullptr) const {
+        if (!overflowed()) {
+            if (omitted_bytes != nullptr) {
+                *omitted_bytes = 0;
+            }
+            return head_ + tail_;  // 没超帽:尾巴缓冲从没裁过,拼回即全文
+        }
+        std::string head = head_;
+        TrimIncompleteUtf8Tail(head);
+        std::size_t tail_from = tail_.size() > tail_cap_ ? tail_.size() - tail_cap_ : 0;
+        for (int i = 0; i < 3 && tail_from < tail_.size(); ++i) {
+            const auto c = static_cast<unsigned char>(tail_[tail_from]);
+            if (c < 0x80 || c > 0xBF) {
+                break;
+            }
+            ++tail_from;  // 续字节起头:前半个字已被省掉,跳过
+        }
+        const std::size_t tail_len = tail_.size() - tail_from;
+        const std::uint64_t omitted = total_ - head.size() - tail_len;
+        if (omitted_bytes != nullptr) {
+            *omitted_bytes = omitted;
+        }
+        std::string out;
+        out.reserve(head.size() + tail_len + 64);
+        out += head;
+        out += "\n\n[... ";
+        out += std::to_string(omitted);
+        out += " bytes omitted ...]\n\n";
+        out.append(tail_, tail_from, tail_len);
+        return out;
+    }
+
+private:
+    // 首段末尾若是没写完的多字节序列(引导字节在、续字节不够),整段退掉。
+    static void TrimIncompleteUtf8Tail(std::string& s) {
+        const std::size_t size = s.size();
+        for (std::size_t back = 1; back <= 4 && back <= size; ++back) {
+            const auto c = static_cast<unsigned char>(s[size - back]);
+            if (c >= 0x80 && c <= 0xBF) {
+                continue;  // 续字节,接着往前找引导字节
+            }
+            std::size_t need = 1;
+            if (c >= 0xF0 && c <= 0xF7) {
+                need = 4;
+            } else if (c >= 0xE0) {
+                need = c <= 0xEF ? 3 : 1;
+            } else if (c >= 0xC0) {
+                need = 2;
+            }
+            if (back < need) {
+                s.resize(size - back);
+            }
+            return;
+        }
+    }
+
+    std::size_t max_;
+    std::size_t head_cap_;
+    std::size_t tail_cap_;
+    std::uint64_t total_ = 0;
+    std::string head_;
+    std::string tail_;
+};
 
 using EnvPairs = std::vector<std::pair<std::string, std::string>>;
 
@@ -175,22 +289,26 @@ ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms,
 // cwd_utf8 非空则走操作系统参数(Windows lpCurrentDirectory;POSIX exec 前
 // chdir,失败回 spawn_failed)——不向命令文本拼 cd,验收口径"cwd 不再拼
 // 进 shell 字符串"的前台半边。
+// overflow:输出超帽的收法(见 OutputOverflow),缺省 KillTree 与旧行为一致。
 ProcessResult RunProcess(const std::vector<std::string>& argv, int timeout_ms, const std::atomic<bool>* cancel,
                           const EnvPairs& extra_env = {}, std::size_t max_output_bytes = kDefaultMaxOutputBytes,
-                          const std::string& cwd_utf8 = std::string());
+                          const std::string& cwd_utf8 = std::string(),
+                          OutputOverflow overflow = OutputOverflow::KillTree);
 #ifdef _WIN32
 ProcessResult RunProcess(const std::wstring& cmdline, int timeout_ms, const std::atomic<bool>* cancel,
                          const EnvPairs& extra_env = {}, std::size_t max_output_bytes = kDefaultMaxOutputBytes,
-                         const std::string& cwd_utf8 = std::string());
+                         const std::string& cwd_utf8 = std::string(),
+                         OutputOverflow overflow = OutputOverflow::KillTree);
 #endif
 ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms, const std::atomic<bool>* cancel,
                               const EnvPairs& extra_env = {}, std::size_t max_output_bytes = kDefaultMaxOutputBytes,
-                              const std::string& cwd_utf8 = std::string());
+                              const std::string& cwd_utf8 = std::string(),
+                              OutputOverflow overflow = OutputOverflow::KillTree);
 
 // 按平台默认 shell 跑一条命令:Windows 是 `cmd.exe /d /s /c "<command>"`
 // (输出按系统 ANSI 代码页转成 UTF-8,原因见 paths.hpp 的 AcpBytesToUtf8),
 // POSIX 是 `/bin/sh -c '<command>'`(输出天然 UTF-8 直通)。hooks 与
-// run_command 的 cmd/sh 分支共用。
+// run_command 的 cmd 分支共用(run_command 的 POSIX 分支按 shell 选择直调 RunProcess)。
 ProcessResult RunShellCommand(const std::string& command_utf8, int timeout_ms,
                                const EnvPairs& extra_env = {},
                                std::size_t max_output_bytes = kDefaultMaxOutputBytes);

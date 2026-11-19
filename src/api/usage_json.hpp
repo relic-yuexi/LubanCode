@@ -14,6 +14,17 @@ inline const nlohmann::json* Member(const nlohmann::json& object, const char* ke
     const auto found = object.find(key);
     return found == object.end() ? nullptr : &*found;
 }
+inline bool StringEquals(const nlohmann::json& value, std::string_view expected) noexcept {
+    return value.is_string() && value.get_ref<const std::string&>() == expected;
+}
+inline bool MemberStringEquals(const nlohmann::json& object, std::string_view key,
+                               std::string_view expected) noexcept {
+    if (!object.is_object()) return false;
+    for (const auto& [name, value] : object.get_ref<const nlohmann::json::object_t&>()) {
+        if (name == key) return StringEquals(value, expected);
+    }
+    return false;
+}
 inline bool Unsigned(const nlohmann::json* value, std::uint64_t limit) {
     if (!value) return false;
     if (value->is_number_unsigned()) return value->get<std::uint64_t>() <= limit;
