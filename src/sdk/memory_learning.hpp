@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <expected>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include <lubancore/core.hpp>
+#include <nlohmann/json.hpp>
 #include "api/types.hpp"
 #include "config/config.hpp"
 #include "memory/types.hpp"
@@ -37,6 +39,23 @@ public:
     virtual std::expected<std::string, std::string> Add(
         const std::filesystem::path& memory_dir,
         lubancode::memory::MemoryCandidate candidate) = 0;
+    virtual std::expected<std::vector<lubancode::memory::MemoryCandidate>, std::string> List(
+        const std::filesystem::path& memory_dir) = 0;
+    virtual std::expected<std::optional<lubancode::memory::MemoryCandidate>, std::string> Get(
+        const std::filesystem::path& memory_dir,
+        const std::string& candidate_id) = 0;
+    virtual std::expected<lubancode::memory::MemoryCandidate, std::string> Edit(
+        const std::filesystem::path& memory_dir,
+        const std::string& candidate_id,
+        const std::string& title,
+        const std::string& content) = 0;
+    virtual std::expected<void, std::string> Reject(
+        const std::filesystem::path& memory_dir,
+        const std::string& candidate_id,
+        const std::string& reason) = 0;
+    virtual std::expected<void, std::string> Remove(
+        const std::filesystem::path& memory_dir,
+        const std::string& candidate_id) = 0;
 };
 
 // One Session owns this module. All public reports are persisted per operation
@@ -103,6 +122,21 @@ public:
     void PopulateNotAttempted(const std::string& operation_id, const std::string& turn_id);
     Result<memory::v1::LearningReport> GetReport(const std::string& operation_id) const;
 
+    Result<std::vector<memory::v1::LearningCandidate>> ListCandidates() const;
+    Result<memory::v1::LearningCandidate> GetCandidate(const std::string& candidate_id) const;
+    Result<memory::v1::LearningCandidate> EditCandidate(
+        const std::string& candidate_id,
+        const std::string& title,
+        const std::string& content);
+    Result<void> RejectCandidate(const std::string& candidate_id, const std::string& reason);
+    Result<memory::v1::CandidateAcceptReport> AcceptCandidate(
+        const std::string& candidate_id,
+        bool write_enabled,
+        const std::string& write_plan_sha256,
+        bool write_indeterminate);
+    Result<std::vector<memory::v1::CandidateAcceptReport>> GetAcceptedCandidates() const;
+    bool HasIndeterminateAccept() const;
+
     void CancelOperation(const std::string& operation_id);
     void RequestClose();
     // Joins any live worker thread outside Session::Impl::mutex before closing
@@ -134,6 +168,11 @@ private:
         const memory::v1::LearningReport& report,
         const lubancode::trajectory::v3::V3Ledger* source,
         bool require_complete) const;
+    Result<void> CheckSavedAcceptReports();
+    Result<void> PersistAcceptReport(const memory::v1::CandidateAcceptReport& report) const;
+    Result<memory::v1::CandidateAcceptReport> DecodeAcceptReport(
+        const std::string& commit_key, const std::string& bytes) const;
+    Result<void> ValidateAcceptReport(const memory::v1::CandidateAcceptReport& report) const;
     void ReapFinishedWorkerLocked();
     std::shared_ptr<Backend> SnapshotBackend() const;
 
@@ -152,6 +191,11 @@ private:
 
     mutable std::mutex reports_mutex_;
     std::map<std::string, Result<memory::v1::LearningReport>> reports_;
+
+    mutable std::mutex accept_mutex_;
+    std::map<std::string, memory::v1::CandidateAcceptReport> accept_reports_;
+    std::vector<std::string> accept_order_;
+    bool accept_indeterminate_ = false;
 
     std::mutex worker_mutex_;
     std::shared_ptr<WorkerSlot> active_slot_;

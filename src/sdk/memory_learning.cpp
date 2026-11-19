@@ -13,9 +13,12 @@
 #include "agent/memory_learning_gates.hpp"
 #include "api/usage_json.hpp"
 #include "memory/candidate_store.hpp"
+#include "memory/project_commit.hpp"
 #include "memory/project_memory.hpp"
+#include "memory/topic_store.hpp"
 #include "platform/atomic_write.hpp"
 #include "platform/bounded_read.hpp"
+#include "platform/owned_file_path.hpp"
 #include "platform/sha256.hpp"
 #include "platform/text_encoding.hpp"
 #include "runtime/assembly/backend.hpp"
@@ -38,6 +41,7 @@ std::mutex learning_hooks_mutex;
 LearningWorkerStartHookHandle learning_start_hook;
 LearningWorkerExecutionHookHandle learning_execution_hook;
 LearningCandidateStoreHookHandle learning_candidate_hook;
+LearningCommitWriteHookHandle learning_commit_write_hook;
 } // namespace
 
 LearningWorkerStartHookHandle ReplaceLearningWorkerStartHook(
@@ -70,6 +74,16 @@ LearningCandidateStoreHookHandle SnapshotLearningCandidateStoreHook() noexcept {
     std::lock_guard lock(learning_hooks_mutex);
     return learning_candidate_hook;
 }
+LearningCommitWriteHookHandle ReplaceLearningCommitWriteHook(
+    LearningCommitWriteHookHandle replacement) noexcept {
+    std::lock_guard lock(learning_hooks_mutex);
+    learning_commit_write_hook.swap(replacement);
+    return replacement;
+}
+LearningCommitWriteHookHandle SnapshotLearningCommitWriteHook() noexcept {
+    std::lock_guard lock(learning_hooks_mutex);
+    return learning_commit_write_hook;
+}
 } // namespace testing
 #endif
 
@@ -81,14 +95,18 @@ namespace v3 = lubancode::trajectory::v3;
 namespace extract = lubancode::agent::memory_extraction;
 namespace gates = lubancode::agent::memory_learning_gates;
 using Json = nlohmann::json;
+using memory::v1::CandidateAcceptReport;
+using memory::v1::LearningCandidate;
 using memory::v1::LearningMode;
 using memory::v1::LearningOptions;
 using memory::v1::LearningReport;
 using memory::v1::LearningSnapshot;
 using memory::v1::LearningStage;
+using memory::v1::SaveStageReceipt;
 
 constexpr auto kPlanFile = "sdk-memory-learning-plan.json";
 constexpr auto kReportsDir = "sdk-memory-learnings";
+constexpr auto kAcceptsDir = "sdk-memory-accepts";
 constexpr std::size_t kPlanCap = 4096;
 constexpr std::size_t kReportCap = 524288;
 constexpr std::size_t kTotalCap = 67108864;
@@ -115,6 +133,127 @@ bool Inside(const fs::path& path, const fs::path& root) {
         if (p == path.end() || *p != *r) return false;
     }
     return true;
+}
+
+bool SafeCandidateId(const std::string& value) {
+    return SafeId(value) && value != "." && value != ".." &&
+           value.find("..") == std::string::npos && value != "rejected";
+}
+
+const char* CommitStateName(mem::ProjectCommitState value) {
+    switch (value) {
+    case mem::ProjectCommitState::NotStarted: return "not_started";
+    case mem::ProjectCommitState::Committed: return "committed";
+    case mem::ProjectCommitState::Indeterminate: return "indeterminate";
+    }
+    return "indeterminate";
+}
+
+const char* CommitStageName(mem::ProjectCommitStage stage) {
+    switch (stage) {
+    case mem::ProjectCommitStage::Intent: return "intent";
+    case mem::ProjectCommitStage::Snapshot: return "snapshot";
+    case mem::ProjectCommitStage::Topic: return "topic";
+    case mem::ProjectCommitStage::Cleanup: return "cleanup";
+    case mem::ProjectCommitStage::Catalog: return "catalog";
+    case mem::ProjectCommitStage::Index: return "index";
+    case mem::ProjectCommitStage::Result: return "result";
+    }
+    return "invalid";
+}
+
+const char* CommitOutcomeName(lubancode::platform::WriteOutcome outcome) {
+    switch (outcome) {
+    case lubancode::platform::WriteOutcome::NotCommitted: return "not_committed";
+    case lubancode::platform::WriteOutcome::CommittedDurabilityNotRequested: return "visible";
+    case lubancode::platform::WriteOutcome::CommittedDurabilityUnconfirmed: return "unconfirmed";
+    case lubancode::platform::WriteOutcome::CommittedDurable: return "durable";
+    }
+    return "invalid";
+}
+
+LearningCandidate CandidateToPublic(const mem::MemoryCandidate& c) {
+    return {
+        .id = c.id,
+        .kind = mem::MemoryKindName(c.kind),
+        .title = c.title,
+        .summary = c.summary,
+        .content = c.content,
+        .keywords = c.keywords,
+        .paths = c.paths,
+        .confidence = c.confidence,
+        .task_type = c.task_type,
+        .created_at = c.created_at,
+        .occurred_at = c.occurred_at,
+    };
+}
+
+Json SaveRequestJson(const mem::SaveRequest& r) {
+    Json evidence = Json::array();
+    for (const auto& e : r.evidence) {
+        evidence.push_back({{"path", e.path}, {"symbol", e.symbol}});
+    }
+    return {
+        {"kind", mem::MemoryKindName(r.kind)},
+        {"id", r.id},
+        {"title", r.title},
+        {"summary", r.summary},
+        {"content", r.content},
+        {"keywords", r.keywords},
+        {"paths", r.paths},
+        {"source_session", r.source_session},
+        {"confidence", r.confidence},
+        {"scope", {{"level", r.scope.level}, {"kind", r.scope.kind}, {"value", r.scope.value}}},
+        {"evidence", std::move(evidence)},
+        {"expires_at", r.expires_at},
+        {"occurred_at", r.occurred_at},
+    };
+}
+
+Json AcceptReportJson(const CandidateAcceptReport& r) {
+    Json stages = Json::array();
+    for (const auto& s : r.stages) {
+        stages.push_back({{"stage", s.stage}, {"outcome", s.outcome}});
+    }
+    return {
+        {"sessionId", r.session_id},
+        {"candidateId", r.candidate_id},
+        {"workspaceKey", r.workspace_key},
+        {"learningPlanSha256", r.learning_plan_sha256},
+        {"writePlanSha256", r.write_plan_sha256},
+        {"commitKey", r.commit_key},
+        {"sourceEventRef", r.source_event_ref},
+        {"saveRequestSha256", r.save_request_sha256},
+        {"requestSha256", r.request_sha256},
+        {"state", r.state},
+        {"memoryId", r.memory_id},
+        {"memoryPath", r.memory_path},
+        {"contentSha256", r.content_sha256},
+        {"committedAt", r.committed_at},
+        {"stages", std::move(stages)},
+        {"duplicate", r.duplicate},
+        {"errorCode", r.error_code},
+        {"error", r.error},
+    };
+}
+
+std::string CandidateSourceEventRef(
+    const std::string& workspace_key,
+    const std::string& session_id,
+    const std::string& candidate_id) {
+    return "workspace_key=" + workspace_key + "/session_id=" + session_id + "/candidate_id=" + candidate_id;
+}
+
+std::string CandidateCommitKey(
+    const std::string& session_id,
+    const std::string& candidate_id,
+    const std::string& save_request_sha256) {
+    const Json key{
+        {"session", session_id},
+        {"candidate", candidate_id},
+        {"saveRequestSha256", save_request_sha256},
+    };
+    return "sdk-cand-" + lubancode::platform::Sha256Hex(key.dump());
 }
 
 const char* ModeName(LearningMode mode) {
@@ -174,36 +313,41 @@ const char* WriteOutcomeName(lubancode::platform::WriteOutcome outcome) {
 }
 
 Result<std::optional<std::string>> ReadOwned(const fs::path& path, const fs::path& root, std::size_t cap) {
+    if (!lubancode::platform::IsUnlinkedOwnedPath(root, path))
+        return std::unexpected(Fail("sdk.memory_learning.path_escape"));
+    const auto io_path = lubancode::platform::FileIoPath(path);
     std::error_code ec;
-    const auto status = fs::symlink_status(path, ec);
+    const auto status = fs::symlink_status(io_path, ec);
     if (ec == std::errc::no_such_file_or_directory || (!ec && status.type() == fs::file_type::not_found))
         return std::optional<std::string>{};
-    if (ec || fs::is_symlink(status) || !fs::is_regular_file(status))
+    if (ec || fs::is_symlink(status) || !fs::is_regular_file(status) ||
+        !lubancode::platform::RejectReparsePoint(io_path))
         return std::unexpected(Fail("sdk.memory_learning.invalid_file"));
-    const auto real = fs::canonical(path, ec);
-    const auto owned = fs::canonical(root, ec);
-    if (ec || !Inside(real, owned))
-        return std::unexpected(Fail("sdk.memory_learning.path_escape"));
-    auto bytes = lubancode::platform::ReadBoundedRegularFile(real, cap);
+    auto bytes = lubancode::platform::ReadBoundedRegularFile(io_path, cap);
     if (!bytes) return std::unexpected(Fail("sdk.memory_learning." + bytes.error()));
+    if (!lubancode::platform::IsUnlinkedOwnedPath(root, path))
+        return std::unexpected(Fail("sdk.memory_learning.path_escape"));
     if (!SafeText(*bytes)) return std::unexpected(Fail("sdk.memory_learning.invalid_text"));
     return std::optional<std::string>{std::move(*bytes)};
 }
 
 Result<void> Directory(const fs::path& path, const fs::path& root, bool create) {
+    if (!lubancode::platform::IsUnlinkedOwnedPath(root, path))
+        return std::unexpected(Fail("sdk.memory_learning.path_escape"));
+    const auto io_path = lubancode::platform::FileIoPath(path);
     std::error_code ec;
-    const auto status = fs::symlink_status(path, ec);
+    const auto status = fs::symlink_status(io_path, ec);
     if (ec == std::errc::no_such_file_or_directory || (!ec && status.type() == fs::file_type::not_found)) {
         if (!create) return {};
         ec.clear();
-        fs::create_directory(path, ec);
+        fs::create_directory(io_path, ec);
         if (ec) return std::unexpected(Fail("sdk.memory_learning.mkdir_failed"));
-    } else if (ec || fs::is_symlink(status) || !fs::is_directory(status)) {
+    } else if (ec || fs::is_symlink(status) || !fs::is_directory(status) ||
+               !lubancode::platform::RejectReparsePoint(io_path)) {
         return std::unexpected(Fail("sdk.memory_learning.invalid_directory"));
     }
-    const auto real = fs::canonical(path, ec);
-    const auto owned = fs::canonical(root, ec);
-    if (ec || !Inside(real, owned)) return std::unexpected(Fail("sdk.memory_learning.path_escape"));
+    if (!lubancode::platform::IsUnlinkedOwnedPath(root, path))
+        return std::unexpected(Fail("sdk.memory_learning.path_escape"));
     return {};
 }
 
@@ -398,7 +542,8 @@ public:
     std::expected<std::string, std::string> Add(
         const fs::path& memory_dir,
         mem::MemoryCandidate candidate) override {
-        if (auto dir_ok = EnsureContainment(memory_dir); !dir_ok) {
+        std::lock_guard lock(mutex_);
+        if (auto dir_ok = EnsureContainment(memory_dir, true); !dir_ok) {
             return std::unexpected(dir_ok.error());
         }
 #ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
@@ -409,13 +554,114 @@ public:
         return mem::candidates::AddCandidate(memory_dir, std::move(candidate));
     }
 
+    std::expected<std::vector<mem::MemoryCandidate>, std::string> List(
+        const fs::path& memory_dir) override {
+        std::lock_guard lock(mutex_);
+        auto dir_ok = EnsureContainment(memory_dir, false);
+        if (!dir_ok) return std::unexpected(dir_ok.error());
+        if (!*dir_ok) return std::vector<mem::MemoryCandidate>{};
+        auto list = mem::candidates::ListCandidates(memory_dir);
+        std::sort(list.begin(), list.end(), [](const mem::MemoryCandidate& a, const mem::MemoryCandidate& b) {
+            if (a.created_at != b.created_at) return a.created_at < b.created_at;
+            return a.id < b.id;
+        });
+        return list;
+    }
+
+    std::expected<std::optional<mem::MemoryCandidate>, std::string> Get(
+        const fs::path& memory_dir,
+        const std::string& candidate_id) override {
+        std::lock_guard lock(mutex_);
+        if (!SafeCandidateId(candidate_id)) return std::unexpected("invalid candidate_id");
+        auto dir_ok = EnsureContainment(memory_dir, false);
+        if (!dir_ok) return std::unexpected(dir_ok.error());
+        if (!*dir_ok) return std::optional<mem::MemoryCandidate>{};
+        return mem::candidates::GetCandidate(memory_dir, candidate_id);
+    }
+
+    std::expected<mem::MemoryCandidate, std::string> Edit(
+        const fs::path& memory_dir,
+        const std::string& candidate_id,
+        const std::string& title,
+        const std::string& content) override {
+        std::lock_guard lock(mutex_);
+        if (!SafeCandidateId(candidate_id)) return std::unexpected("invalid candidate_id");
+        auto dir_ok = EnsureContainment(memory_dir, false);
+        if (!dir_ok) return std::unexpected(dir_ok.error());
+        if (!*dir_ok || !mem::candidates::GetCandidate(memory_dir, candidate_id).has_value()) {
+            return std::unexpected("candidate_not_found");
+        }
+        auto edited = mem::candidates::EditCandidate(memory_dir, candidate_id, title, content);
+        if (!edited) return std::unexpected(edited.error());
+        auto updated = mem::candidates::GetCandidate(memory_dir, candidate_id);
+        if (!updated.has_value()) return std::unexpected("candidate_not_found");
+        return *updated;
+    }
+
+    std::expected<void, std::string> Reject(
+        const fs::path& memory_dir,
+        const std::string& candidate_id,
+        const std::string& reason) override {
+        std::lock_guard lock(mutex_);
+        if (!SafeCandidateId(candidate_id)) return std::unexpected("invalid candidate_id");
+        auto dir_ok = EnsureContainment(memory_dir, false);
+        if (!dir_ok) return std::unexpected(dir_ok.error());
+        if (!*dir_ok || !mem::candidates::GetCandidate(memory_dir, candidate_id).has_value()) {
+            return std::unexpected("candidate_not_found");
+        }
+        return mem::candidates::RejectCandidate(memory_dir, candidate_id, reason);
+    }
+
+    std::expected<void, std::string> Remove(
+        const fs::path& memory_dir,
+        const std::string& candidate_id) override {
+        std::lock_guard lock(mutex_);
+        if (!SafeCandidateId(candidate_id)) return std::unexpected("invalid candidate_id");
+        auto dir_ok = EnsureContainment(memory_dir, false);
+        if (!dir_ok) return std::unexpected(dir_ok.error());
+        if (!*dir_ok) return {};
+        mem::candidates::RemoveCandidateFile(memory_dir, candidate_id);
+        std::error_code ec;
+        if (fs::exists(memory_dir / "memory-candidates" / (candidate_id + ".json"), ec)) {
+            return std::unexpected("failed to remove accepted candidate file");
+        }
+        return {};
+    }
+
 private:
-    std::expected<void, std::string> EnsureContainment(const fs::path& memory_dir) const {
+    std::expected<bool, std::string> EnsureContainment(
+        const fs::path& memory_dir,
+        bool create_if_missing) const {
         std::error_code ec;
         const auto root = fs::canonical(owned_root_ / "workspaces", ec);
         if (ec) return std::unexpected("owned workspaces root unavailable");
         auto status = fs::symlink_status(memory_dir, ec);
         if (ec == std::errc::no_such_file_or_directory || (!ec && status.type() == fs::file_type::not_found)) {
+            if (!create_if_missing) {
+                fs::path probe = memory_dir.parent_path();
+                while (!probe.empty() && probe != probe.parent_path()) {
+                    ec.clear();
+                    const auto pstatus = fs::symlink_status(probe, ec);
+                    if (ec == std::errc::no_such_file_or_directory ||
+                        (!ec && pstatus.type() == fs::file_type::not_found)) {
+                        probe = probe.parent_path();
+                        continue;
+                    }
+                    if (ec || fs::is_symlink(pstatus) || !fs::is_directory(pstatus)) {
+                        return std::unexpected("project memory directory ancestor is invalid or symlinked");
+                    }
+                    const auto preal = fs::canonical(probe, ec);
+                    if (ec || !Inside(preal, root)) {
+                        return std::unexpected("project memory directory escapes owned root");
+                    }
+                    break;
+                }
+                const auto weak = fs::weakly_canonical(memory_dir, ec);
+                if (ec || !Inside(weak, root)) {
+                    return std::unexpected("project memory directory escapes owned root");
+                }
+                return false;
+            }
             ec.clear();
             fs::create_directories(memory_dir, ec);
             if (ec) return std::unexpected("cannot create project memory directory");
@@ -428,9 +674,22 @@ private:
         if (ec || !Inside(real, root)) {
             return std::unexpected("project memory directory escapes owned root");
         }
-        return {};
+        const fs::path candidates_dir = memory_dir / "memory-candidates";
+        ec.clear();
+        const auto cstatus = fs::symlink_status(candidates_dir, ec);
+        if (ec != std::errc::no_such_file_or_directory && !(!ec && cstatus.type() == fs::file_type::not_found)) {
+            if (ec || fs::is_symlink(cstatus) || !fs::is_directory(cstatus)) {
+                return std::unexpected("candidate directory is invalid or symlinked");
+            }
+            const auto creal = fs::canonical(candidates_dir, ec);
+            if (ec || !Inside(creal, real)) {
+                return std::unexpected("candidate directory escapes project memory directory");
+            }
+        }
+        return true;
     }
 
+    mutable std::mutex mutex_;
     fs::path owned_root_;
 #ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
     testing::LearningCandidateStoreHookHandle hook_;
@@ -777,27 +1036,37 @@ Result<void> SessionMemoryLearning::CheckBinding(const v3::V3Ledger& source) con
 
 Result<void> SessionMemoryLearning::CheckSavedReports(const v3::V3Ledger& source) {
     const fs::path dir = session_dir_ / kReportsDir;
+    if (!lubancode::platform::IsUnlinkedOwnedPath(session_dir_, dir)) {
+        return std::unexpected(Fail("sdk.memory_learning.path_escape"));
+    }
+    const auto io_dir = lubancode::platform::FileIoPath(dir);
     std::error_code ec;
-    const auto dir_status = fs::symlink_status(dir, ec);
+    const auto dir_status = fs::symlink_status(io_dir, ec);
     if (ec == std::errc::no_such_file_or_directory || (!ec && dir_status.type() == fs::file_type::not_found))
         return {};
-    if (ec || fs::is_symlink(dir_status) || !fs::is_directory(dir_status))
+    if (ec || fs::is_symlink(dir_status) || !fs::is_directory(dir_status) ||
+        !lubancode::platform::RejectReparsePoint(io_dir))
         return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
-    const auto real_dir = fs::canonical(dir, ec);
-    const auto real_session = fs::canonical(session_dir_, ec);
-    if (ec || real_dir != real_session / kReportsDir)
-        return std::unexpected(Fail("sdk.memory_learning.path_escape"));
 
     std::size_t entries = 0;
     std::size_t total_bytes = 0;
-    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+    for (fs::directory_iterator it(io_dir, ec), end; !ec && it != end; it.increment(ec)) {
         if (++entries > kDirEntryCap) return std::unexpected(Fail("sdk.memory_learning.report_limit"));
-        const auto name = lubancode::tools::PathToUtf8(it->path().filename());
+        const fs::path entry_path = dir / it->path().filename();
+        if (entry_path.extension() == ".tmp") continue;
+        std::error_code item_ec;
+        const auto io_entry = lubancode::platform::FileIoPath(entry_path);
+        const auto item_status = fs::symlink_status(io_entry, item_ec);
+        if (item_ec || fs::is_symlink(item_status) || !fs::is_regular_file(item_status) ||
+            !lubancode::platform::RejectReparsePoint(io_entry)) {
+            return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
+        }
+        const auto name = lubancode::platform::PathToUtf8(entry_path.filename());
         if (name.size() <= 5 || name.substr(name.size() - 5) != ".json")
             return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
         const auto op_id = name.substr(0, name.size() - 5);
         if (!SafeId(op_id)) return std::unexpected(Fail("sdk.memory_learning.report_invalid"));
-        auto bytes = ReadOwned(it->path(), session_dir_, kReportCap);
+        auto bytes = ReadOwned(entry_path, session_dir_, kReportCap);
         if (!bytes) return std::unexpected(bytes.error());
         if (!*bytes) return std::unexpected(Fail("sdk.memory_learning.report_unavailable"));
         total_bytes += (*bytes)->size();
@@ -834,6 +1103,7 @@ std::expected<Json, std::string> SessionMemoryLearning::Open(const lubancode::tr
             return std::unexpected("sdk.memory_learning.plan_invalid");
         if (auto valid = CheckBinding(*context.source); !valid) return fail(valid.error());
         if (auto valid = CheckSavedReports(*context.source); !valid) return fail(valid.error());
+        if (auto valid = CheckSavedAcceptReports(); !valid) return fail(valid.error());
     } else {
         if (!resume_id_.empty()) return std::unexpected("sdk.memory_learning.resume_mismatch");
         auto prior = ReadOwned(session_dir_ / kPlanFile, owned_root_, kPlanCap);
@@ -1437,6 +1707,516 @@ void SessionMemoryLearning::ReleaseBackend() {
 SessionMemoryLearning::~SessionMemoryLearning() {
     RequestClose();
     JoinAndSettle();
+}
+
+Result<void> SessionMemoryLearning::PersistAcceptReport(const CandidateAcceptReport& report) const {
+    if (!SafeId(report.commit_key)) return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+    if (auto valid = Directory(session_dir_ / kAcceptsDir, session_dir_, true); !valid) return valid;
+    Json payload = AcceptReportJson(report);
+    payload["sha256"] = lubancode::platform::Sha256Hex(payload.dump());
+    const auto bytes = payload.dump();
+    if (bytes.size() > kReportCap) return std::unexpected(Fail("sdk.memory_learning.accept_report_limit"));
+    const auto path = session_dir_ / kAcceptsDir / (report.commit_key + ".json");
+    auto existing = ReadOwned(path, session_dir_, kReportCap);
+    if (!existing) return std::unexpected(existing.error());
+    const auto saved = lubancode::platform::AtomicWriteFile(
+        path, bytes, lubancode::platform::WriteDurability::ProcessCrashDurability);
+    if (!saved || saved->outcome != lubancode::platform::WriteOutcome::CommittedDurable) {
+        return std::unexpected(Fail("sdk.memory_learning.accept_report_write_failed",
+            saved ? "unconfirmed" : saved.error().message));
+    }
+    return {};
+}
+
+Result<CandidateAcceptReport> SessionMemoryLearning::DecodeAcceptReport(
+    const std::string& commit_key,
+    const std::string& bytes) const {
+    try {
+        auto value = Json::parse(bytes);
+        if (!value.is_object() || !value.contains("sha256") || !value["sha256"].is_string()) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+        }
+        const auto hash = value.at("sha256").get<std::string>();
+        value.erase("sha256");
+        if (lubancode::platform::Sha256Hex(value.dump()) != hash) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_report_tampered"));
+        }
+        for (const auto* key : {"sessionId", "candidateId", "workspaceKey", "learningPlanSha256",
+                "writePlanSha256", "commitKey", "sourceEventRef", "saveRequestSha256",
+                "requestSha256", "state", "memoryId", "memoryPath", "contentSha256",
+                "committedAt", "errorCode", "error"}) {
+            if (!value.contains(key) || !value.at(key).is_string()) {
+                return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+            }
+        }
+        if (!value.contains("duplicate") || !value.at("duplicate").is_boolean() ||
+            !value.contains("stages") || !value.at("stages").is_array()) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+        }
+        CandidateAcceptReport r;
+        r.session_id = value.at("sessionId").get<std::string>();
+        r.candidate_id = value.at("candidateId").get<std::string>();
+        r.workspace_key = value.at("workspaceKey").get<std::string>();
+        r.learning_plan_sha256 = value.at("learningPlanSha256").get<std::string>();
+        r.write_plan_sha256 = value.at("writePlanSha256").get<std::string>();
+        r.commit_key = value.at("commitKey").get<std::string>();
+        r.source_event_ref = value.at("sourceEventRef").get<std::string>();
+        r.save_request_sha256 = value.at("saveRequestSha256").get<std::string>();
+        r.request_sha256 = value.at("requestSha256").get<std::string>();
+        r.state = value.at("state").get<std::string>();
+        r.memory_id = value.at("memoryId").get<std::string>();
+        r.memory_path = value.at("memoryPath").get<std::string>();
+        r.content_sha256 = value.at("contentSha256").get<std::string>();
+        r.committed_at = value.at("committedAt").get<std::string>();
+        r.duplicate = value.at("duplicate").get<bool>();
+        r.error_code = value.at("errorCode").get<std::string>();
+        r.error = value.at("error").get<std::string>();
+        for (const auto& s : value.at("stages")) {
+            if (!s.is_object() || !s.contains("stage") || !s.contains("outcome") ||
+                !s.at("stage").is_string() || !s.at("outcome").is_string()) {
+                return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+            }
+            r.stages.push_back({s.at("stage").get<std::string>(), s.at("outcome").get<std::string>()});
+        }
+        if (r.commit_key != commit_key || AcceptReportJson(r) != value) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+        }
+        return r;
+    } catch (const std::exception&) {
+        return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+    }
+}
+
+Result<void> SessionMemoryLearning::ValidateAcceptReport(const CandidateAcceptReport& report) const {
+    if (legacy_ || snapshot_.mode == LearningMode::Off) {
+        return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+    }
+    if (!SafeId(report.session_id) || report.session_id != snapshot_.session_id ||
+        !SafeCandidateId(report.candidate_id) || report.workspace_key != snapshot_.workspace_key ||
+        report.learning_plan_sha256 != snapshot_.plan_sha256 || report.write_plan_sha256.empty() ||
+        !SafeText(report.write_plan_sha256) || !SafeId(report.commit_key) ||
+        report.source_event_ref != CandidateSourceEventRef(report.workspace_key, report.session_id, report.candidate_id) ||
+        report.save_request_sha256.empty() || !SafeText(report.save_request_sha256) ||
+        report.commit_key != CandidateCommitKey(report.session_id, report.candidate_id, report.save_request_sha256) ||
+        !SafeText(report.request_sha256) || !SafeText(report.memory_id) || !SafeText(report.memory_path) ||
+        !SafeText(report.content_sha256) || !SafeText(report.committed_at) ||
+        !SafeText(report.error_code) || !SafeText(report.error)) {
+        return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+    }
+    if (report.state != "committed" && report.state != "not_started" && report.state != "indeterminate") {
+        return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+    }
+    for (const auto& stage : report.stages) {
+        if (!SafeText(stage.stage) || !SafeText(stage.outcome)) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+        }
+    }
+
+    const fs::path lifecycle_root = session_dir_.parent_path().parent_path() / "lifecycle";
+    if (auto valid = Directory(lifecycle_root, session_dir_.parent_path().parent_path(), false); !valid) {
+        return valid;
+    }
+    const auto intent_bytes = ReadOwned(lifecycle_root / report.commit_key / "intent.json", lifecycle_root, kReportCap);
+    if (!intent_bytes) return std::unexpected(intent_bytes.error());
+
+    if (report.state == "committed") {
+        if (!intent_bytes->has_value()) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_receipt_missing"));
+        }
+        const auto intent = Json::parse(**intent_bytes, nullptr, false);
+        if (!intent.is_object() || !intent.contains("parameters") || !intent.at("parameters").is_object() ||
+            !lubancode::api::usage_json::MemberStringEquals(intent, "session_id", report.session_id) ||
+            !lubancode::api::usage_json::MemberStringEquals(intent, "workspace_key", report.workspace_key)) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_receipt_invalid"));
+        }
+        const auto& parameters = intent.at("parameters");
+        if (!lubancode::api::usage_json::MemberStringEquals(parameters, "source_event_ref", report.source_event_ref)) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_receipt_invalid"));
+        }
+        const auto parsed_request = mem::store::ParseUpsertJob(parameters, true);
+        if (!parsed_request ||
+            lubancode::platform::Sha256Hex(SaveRequestJson(*parsed_request).dump()) != report.save_request_sha256) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_receipt_mismatch"));
+        }
+        const mem::ProjectCommitContext gate{
+            identity_.project_root, memory_dir_, lifecycle_root,
+            snapshot_.workspace_key, report.commit_key, report.session_id, report.source_event_ref};
+        if (mem::ProjectCommitRequestSha256(gate, *parsed_request) != report.request_sha256) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_receipt_mismatch"));
+        }
+        const auto inspected = mem::InspectProjectCommitReceipt(gate, *parsed_request);
+        if (inspected.state != mem::ProjectCommitState::Committed || !inspected.error_code.empty() ||
+            inspected.memory_id != report.memory_id || inspected.memory_path != report.memory_path ||
+            inspected.content_sha256 != report.content_sha256 || inspected.committed_at != report.committed_at ||
+            !report.error.empty() || !report.error_code.empty() ||
+            report.stages.size() != inspected.stages.size() + 1 ||
+            report.stages.back() != SaveStageReceipt{"result", "durable"}) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_receipt_unconfirmed"));
+        }
+        for (std::size_t n = 0; n < inspected.stages.size(); ++n) {
+            if (report.stages[n] !=
+                SaveStageReceipt{CommitStageName(inspected.stages[n].stage), CommitOutcomeName(inspected.stages[n].outcome)}) {
+                return std::unexpected(Fail("sdk.memory_learning.accept_receipt_unconfirmed"));
+            }
+        }
+    } else if (report.state == "not_started") {
+        if (report.error_code.empty() ||
+            std::any_of(report.stages.begin(), report.stages.end(), [](const SaveStageReceipt& s) {
+                return s.stage == "topic" && s.outcome != "not_committed";
+            })) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_receipt_invalid"));
+        }
+        if (intent_bytes->has_value()) {
+            const auto intent = Json::parse(**intent_bytes, nullptr, false);
+            if (!intent.is_object() || !intent.contains("parameters") || !intent.at("parameters").is_object()) {
+                return std::unexpected(Fail("sdk.memory_learning.accept_receipt_invalid"));
+            }
+            const auto parsed_request = mem::store::ParseUpsertJob(intent.at("parameters"), true);
+            if (!parsed_request) return std::unexpected(Fail("sdk.memory_learning.accept_receipt_invalid"));
+            const mem::ProjectCommitContext gate{
+                identity_.project_root, memory_dir_, lifecycle_root,
+                snapshot_.workspace_key, report.commit_key, report.session_id, report.source_event_ref};
+            if (mem::InspectProjectCommitReceipt(gate, *parsed_request).state != mem::ProjectCommitState::NotStarted) {
+                return std::unexpected(Fail("sdk.memory_learning.accept_receipt_unconfirmed"));
+            }
+        }
+    } else if (report.error_code.empty()) {
+        return std::unexpected(Fail("sdk.memory_learning.accept_receipt_invalid"));
+    }
+
+    const auto snapshot = std::find_if(report.stages.begin(), report.stages.end(), [](const SaveStageReceipt& s) {
+        return s.stage == "snapshot" && s.outcome != "not_committed";
+    });
+    if (snapshot != report.stages.end() && !report.content_sha256.empty()) {
+        const auto bytes = ReadOwned(lifecycle_root / report.commit_key / "topic.snapshot.md", lifecycle_root, kReportCap);
+        if (!bytes || !*bytes || lubancode::platform::Sha256Hex(**bytes) != report.content_sha256) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_snapshot_mismatch"));
+        }
+    }
+    return {};
+}
+
+Result<void> SessionMemoryLearning::CheckSavedAcceptReports() {
+    const fs::path dir = session_dir_ / kAcceptsDir;
+    if (!lubancode::platform::IsUnlinkedOwnedPath(session_dir_, dir)) {
+        return std::unexpected(Fail("sdk.memory_learning.path_escape"));
+    }
+    const auto io_dir = lubancode::platform::FileIoPath(dir);
+    std::error_code ec;
+    const auto dir_status = fs::symlink_status(io_dir, ec);
+    if (ec == std::errc::no_such_file_or_directory || (!ec && dir_status.type() == fs::file_type::not_found)) {
+        return {};
+    }
+    if (ec || fs::is_symlink(dir_status) || !fs::is_directory(dir_status) ||
+        !lubancode::platform::RejectReparsePoint(io_dir)) {
+        return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+    }
+
+    std::vector<CandidateAcceptReport> loaded;
+    std::size_t entries = 0;
+    std::size_t total_bytes = 0;
+    for (fs::directory_iterator it(io_dir, ec), end; !ec && it != end; it.increment(ec)) {
+        if (++entries > kDirEntryCap) return std::unexpected(Fail("sdk.memory_learning.accept_report_limit"));
+        const fs::path entry_path = dir / it->path().filename();
+        if (entry_path.extension() == ".tmp") continue;
+        std::error_code item_ec;
+        const auto io_entry = lubancode::platform::FileIoPath(entry_path);
+        const auto item_status = fs::symlink_status(io_entry, item_ec);
+        if (item_ec || fs::is_symlink(item_status) || !fs::is_regular_file(item_status) ||
+            !lubancode::platform::RejectReparsePoint(io_entry)) {
+            return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+        }
+        const auto name = lubancode::platform::PathToUtf8(entry_path.filename());
+        if (name.size() <= 5 || name.substr(name.size() - 5) != ".json") {
+            return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+        }
+        const auto commit_key = name.substr(0, name.size() - 5);
+        if (!SafeId(commit_key)) return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+        auto bytes = ReadOwned(entry_path, session_dir_, kReportCap);
+        if (!bytes) return std::unexpected(bytes.error());
+        if (!*bytes) return std::unexpected(Fail("sdk.memory_learning.accept_report_unavailable"));
+        total_bytes += (*bytes)->size();
+        if (total_bytes > kTotalCap) return std::unexpected(Fail("sdk.memory_learning.accept_report_limit"));
+        auto decoded = DecodeAcceptReport(commit_key, **bytes);
+        if (!decoded) return std::unexpected(decoded.error());
+        if (auto valid = ValidateAcceptReport(*decoded); !valid) return std::unexpected(valid.error());
+        loaded.push_back(std::move(*decoded));
+    }
+    if (ec) return std::unexpected(Fail("sdk.memory_learning.accept_report_invalid"));
+
+    std::sort(loaded.begin(), loaded.end(), [](const CandidateAcceptReport& a, const CandidateAcceptReport& b) {
+        if (a.committed_at != b.committed_at) return a.committed_at < b.committed_at;
+        return a.commit_key < b.commit_key;
+    });
+
+    std::lock_guard lock(accept_mutex_);
+    accept_reports_.clear();
+    accept_order_.clear();
+    accept_indeterminate_ = false;
+    for (auto& item : loaded) {
+        if (item.state == "indeterminate") accept_indeterminate_ = true;
+        accept_order_.push_back(item.commit_key);
+        accept_reports_.insert_or_assign(item.commit_key, std::move(item));
+    }
+    return {};
+}
+
+Result<std::vector<LearningCandidate>> SessionMemoryLearning::ListCandidates() const {
+    if (legacy_ || snapshot_.mode == LearningMode::Off) {
+        return std::unexpected(Fail("sdk.memory_learning.disabled"));
+    }
+    if (!candidate_store_) return std::unexpected(Fail("sdk.memory_learning.candidate_store_unavailable"));
+    auto listed = candidate_store_->List(memory_dir_);
+    if (!listed) return std::unexpected(Fail("sdk.memory_learning.candidate_store_failed", listed.error()));
+    std::vector<LearningCandidate> out;
+    out.reserve(listed->size());
+    for (const auto& candidate : *listed) {
+        out.push_back(CandidateToPublic(candidate));
+    }
+    return out;
+}
+
+Result<LearningCandidate> SessionMemoryLearning::GetCandidate(const std::string& candidate_id) const {
+    if (legacy_ || snapshot_.mode == LearningMode::Off) {
+        return std::unexpected(Fail("sdk.memory_learning.disabled"));
+    }
+    if (!SafeCandidateId(candidate_id)) {
+        return std::unexpected(Fail("sdk.memory_learning.invalid_input", "invalid candidate_id"));
+    }
+    if (!candidate_store_) return std::unexpected(Fail("sdk.memory_learning.candidate_store_unavailable"));
+    auto found = candidate_store_->Get(memory_dir_, candidate_id);
+    if (!found) return std::unexpected(Fail("sdk.memory_learning.candidate_store_failed", found.error()));
+    if (!*found) return std::unexpected(Fail("sdk.memory_learning.candidate_not_found", candidate_id));
+    return CandidateToPublic(**found);
+}
+
+Result<LearningCandidate> SessionMemoryLearning::EditCandidate(
+    const std::string& candidate_id,
+    const std::string& title,
+    const std::string& content) {
+    if (legacy_ || snapshot_.mode == LearningMode::Off) {
+        return std::unexpected(Fail("sdk.memory_learning.disabled"));
+    }
+    if (!SafeCandidateId(candidate_id) || !SafeText(title) || !SafeText(content) ||
+        (title.empty() && content.empty())) {
+        return std::unexpected(Fail("sdk.memory_learning.invalid_input", "invalid candidate edit arguments"));
+    }
+    std::lock_guard lock(accept_mutex_);
+    if (!candidate_store_) return std::unexpected(Fail("sdk.memory_learning.candidate_store_unavailable"));
+    auto edited = candidate_store_->Edit(memory_dir_, candidate_id, title, content);
+    if (!edited) {
+        if (edited.error() == "candidate_not_found") {
+            return std::unexpected(Fail("sdk.memory_learning.candidate_not_found", candidate_id));
+        }
+        return std::unexpected(Fail("sdk.memory_learning.invalid_input", edited.error()));
+    }
+    return CandidateToPublic(*edited);
+}
+
+Result<void> SessionMemoryLearning::RejectCandidate(
+    const std::string& candidate_id,
+    const std::string& reason) {
+    if (legacy_ || snapshot_.mode == LearningMode::Off) {
+        return std::unexpected(Fail("sdk.memory_learning.disabled"));
+    }
+    if (!SafeCandidateId(candidate_id) || !SafeText(reason)) {
+        return std::unexpected(Fail("sdk.memory_learning.invalid_input", "invalid candidate reject arguments"));
+    }
+    std::lock_guard lock(accept_mutex_);
+    if (!candidate_store_) return std::unexpected(Fail("sdk.memory_learning.candidate_store_unavailable"));
+    auto rejected = candidate_store_->Reject(memory_dir_, candidate_id, reason);
+    if (!rejected) {
+        if (rejected.error() == "candidate_not_found") {
+            return std::unexpected(Fail("sdk.memory_learning.candidate_not_found", candidate_id));
+        }
+        return std::unexpected(Fail("sdk.memory_learning.candidate_store_failed", rejected.error()));
+    }
+    return {};
+}
+
+Result<CandidateAcceptReport> SessionMemoryLearning::AcceptCandidate(
+    const std::string& candidate_id,
+    bool write_enabled,
+    const std::string& write_plan_sha256,
+    bool write_indeterminate) {
+    if (legacy_ || snapshot_.mode == LearningMode::Off) {
+        return std::unexpected(Fail("sdk.memory_learning.disabled"));
+    }
+    if (!write_enabled || write_plan_sha256.empty()) {
+        return std::unexpected(Fail("sdk.memory_learning.write_disabled", "memory_write must be enabled to accept"));
+    }
+    if (!SafeCandidateId(candidate_id)) {
+        return std::unexpected(Fail("sdk.memory_learning.invalid_input", "invalid candidate_id"));
+    }
+
+    std::lock_guard lock(accept_mutex_);
+    if (accept_indeterminate_ || write_indeterminate) {
+        return std::unexpected(Fail("sdk.memory_learning.stopped",
+            "earlier project write or candidate accept entered indeterminate state"));
+    }
+    for (const auto& [existing_key, existing] : accept_reports_) {
+        if (existing.candidate_id != candidate_id) continue;
+        if (existing.state == "indeterminate") {
+            return std::unexpected(Fail("sdk.memory_learning.stopped",
+                "earlier accept for candidate entered indeterminate state: " + candidate_id));
+        }
+        if (existing.state == "committed") {
+            return std::unexpected(Fail("sdk.memory_learning.already_committed", candidate_id));
+        }
+    }
+    if (!candidate_store_) return std::unexpected(Fail("sdk.memory_learning.candidate_store_unavailable"));
+    auto found = candidate_store_->Get(memory_dir_, candidate_id);
+    if (!found) return std::unexpected(Fail("sdk.memory_learning.candidate_store_failed", found.error()));
+    if (!*found) return std::unexpected(Fail("sdk.memory_learning.candidate_not_found", candidate_id));
+    const auto& candidate = **found;
+
+    if (candidate.confidence == "inferred") {
+        return std::unexpected(Fail("sdk.memory_learning.candidate_inferred",
+            "inferred candidate requires stronger evidence before accept"));
+    }
+    if (candidate.kind == mem::MemoryKind::Feedback && candidate.confidence != "user-stated") {
+        return std::unexpected(Fail("sdk.memory_learning.candidate_invalid",
+            "feedback candidate must have user-stated confidence"));
+    }
+    if (candidate.kind == mem::MemoryKind::Fact && candidate.paths.empty()) {
+        return std::unexpected(Fail("sdk.memory_learning.candidate_missing_evidence",
+            "fact candidate requires file evidence"));
+    }
+
+    mem::SaveRequest req;
+    req.kind = candidate.kind;
+    req.title = candidate.title;
+    req.summary = candidate.summary;
+    req.content = candidate.content;
+    req.keywords = candidate.keywords;
+    req.paths = candidate.paths;
+    req.confidence = candidate.confidence;
+    req.source_session = snapshot_.session_id;
+    req.occurred_at = candidate.occurred_at;
+    for (const auto& path : candidate.paths) {
+        req.evidence.push_back(mem::MemoryEvidence{path, {}});
+    }
+    if (const auto valid_req = mem::store::ValidateSaveRequest(req); !valid_req) {
+        return std::unexpected(Fail("sdk.memory_learning.candidate_invalid", valid_req.error()));
+    }
+
+    CandidateAcceptReport report;
+    report.session_id = snapshot_.session_id;
+    report.candidate_id = candidate_id;
+    report.workspace_key = snapshot_.workspace_key;
+    report.learning_plan_sha256 = snapshot_.plan_sha256;
+    report.write_plan_sha256 = write_plan_sha256;
+    report.source_event_ref = CandidateSourceEventRef(snapshot_.workspace_key, snapshot_.session_id, candidate_id);
+    report.save_request_sha256 = lubancode::platform::Sha256Hex(SaveRequestJson(req).dump());
+    report.commit_key = CandidateCommitKey(snapshot_.session_id, candidate_id, report.save_request_sha256);
+
+    if (const auto it = accept_reports_.find(report.commit_key); it != accept_reports_.end()) {
+        if (it->second.state == "committed") {
+            return std::unexpected(Fail("sdk.memory_learning.already_committed", candidate_id));
+        }
+        if (it->second.state == "indeterminate") {
+            return std::unexpected(Fail("sdk.memory_learning.stopped", candidate_id));
+        }
+    }
+
+    const mem::ProjectCommitContext gate{
+        identity_.project_root,
+        memory_dir_,
+        session_dir_.parent_path().parent_path() / "lifecycle",
+        snapshot_.workspace_key,
+        report.commit_key,
+        snapshot_.session_id,
+        report.source_event_ref,
+    };
+    report.request_sha256 = mem::ProjectCommitRequestSha256(gate, req);
+
+#ifdef LUBANCORE_PRIVATE_OPENING_TEST_HOOKS
+    const auto write_hook = testing::SnapshotLearningCommitWriteHook();
+    const auto saved = write_hook
+        ? mem::commit_testing::CommitProjectUpsert(
+              gate,
+              req,
+              [&write_hook](
+                  const fs::path& p,
+                  std::string_view content,
+                  lubancode::platform::WriteDurability durability) {
+                  return (*write_hook)(p, content, durability);
+              })
+        : mem::CommitProjectUpsertWithCancellation(gate, req, [this] { return closing_.load(); });
+#else
+    const auto saved = mem::CommitProjectUpsertWithCancellation(gate, req, [this] { return closing_.load(); });
+#endif
+
+    report.state = CommitStateName(saved.state);
+    report.memory_id = saved.memory_id;
+    report.memory_path = saved.memory_path;
+    report.content_sha256 = saved.content_sha256;
+    report.committed_at = saved.committed_at;
+    report.duplicate = saved.duplicate;
+    report.error_code = saved.error_code;
+    report.error = saved.error;
+    for (const auto& stage : saved.stages) {
+        report.stages.push_back({CommitStageName(stage.stage), CommitOutcomeName(stage.outcome)});
+    }
+    if (!saved.request_sha256.empty() && saved.request_sha256 != report.request_sha256) {
+        report.state = "indeterminate";
+        report.error_code = "sdk.memory_learning.request_mismatch";
+        report.error = report.error_code;
+    }
+
+    const auto record_in_memory = [&] {
+        if (!accept_reports_.contains(report.commit_key)) {
+            accept_order_.push_back(report.commit_key);
+        }
+        accept_reports_.insert_or_assign(report.commit_key, report);
+    };
+
+    if (report.state == "committed") {
+        auto persisted = PersistAcceptReport(report);
+        if (!persisted) {
+            accept_indeterminate_ = true;
+            report.state = "indeterminate";
+            report.error_code = persisted.error().code;
+            report.error = persisted.error().message;
+            record_in_memory();
+            return std::unexpected(persisted.error());
+        }
+        auto removed = candidate_store_->Remove(memory_dir_, candidate_id);
+        if (!removed) {
+            accept_indeterminate_ = true;
+            report.state = "indeterminate";
+            report.error_code = "sdk.memory_learning.candidate_cleanup_failed";
+            report.error = removed.error();
+            record_in_memory();
+            return std::unexpected(Fail(report.error_code, report.error));
+        }
+        record_in_memory();
+        return report;
+    }
+
+    if (report.state == "indeterminate") {
+        accept_indeterminate_ = true;
+    }
+    (void)PersistAcceptReport(report);
+    record_in_memory();
+    return report;
+}
+
+Result<std::vector<CandidateAcceptReport>> SessionMemoryLearning::GetAcceptedCandidates() const {
+    std::lock_guard lock(accept_mutex_);
+    std::vector<CandidateAcceptReport> out;
+    out.reserve(accept_order_.size());
+    for (const auto& commit_key : accept_order_) {
+        if (const auto it = accept_reports_.find(commit_key); it != accept_reports_.end()) {
+            out.push_back(it->second);
+        }
+    }
+    return out;
+}
+
+bool SessionMemoryLearning::HasIndeterminateAccept() const {
+    std::lock_guard lock(accept_mutex_);
+    return accept_indeterminate_;
 }
 
 } // namespace lubancore::detail
