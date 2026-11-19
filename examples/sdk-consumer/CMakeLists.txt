@@ -1,0 +1,185 @@
+cmake_minimum_required(VERSION 3.24)
+project(lubancore_installed_consumer LANGUAGES CXX)
+
+# This project must remain buildable after copying just this directory elsewhere.
+# No add_subdirectory of LubanCode and no source/build-tree include directories.
+find_package(LubanCore CONFIG REQUIRED)
+find_package(Threads REQUIRED)
+
+add_executable(lubancore_consumer main.cpp authorization.cpp builtin_search.cpp builtin_memory.cpp builtin_memory_save.cpp subagents.cpp packages.cpp package_inventory.cpp lua.cpp lua_build_profile.cpp actions.cpp event_sink.cpp memory_blobs.cpp todo_write.cpp agentic_rag.cpp web_fetch.cpp web_search.cpp command_jobs.cpp named_results.cpp journal_owner.cpp)
+if(NOT DEFINED LubanCore_WITH_LUA OR NOT LubanCore_WITH_LUA MATCHES "^(ON|OFF)$")
+  message(FATAL_ERROR "Installed LubanCore must declare its Lua build profile")
+endif()
+target_compile_definitions(lubancore_consumer PRIVATE
+  LUBANCORE_CONSUMER_WITH_LUA=$<BOOL:${LubanCore_WITH_LUA}>)
+target_compile_features(lubancore_consumer PRIVATE cxx_std_23)
+target_link_libraries(lubancore_consumer PRIVATE LubanCore::Core Threads::Threads)
+if(MSVC)
+  target_compile_options(lubancore_consumer PRIVATE /utf-8 /W4)
+endif()
+if(WIN32)
+  add_custom_command(TARGET lubancore_consumer POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "$<TARGET_FILE:LubanCore::Core>" "$<TARGET_FILE_DIR:lubancore_consumer>"
+    VERBATIM)
+endif()
+
+enable_testing()
+add_test(NAME sdk.consumer.authorization
+  COMMAND lubancore_consumer authorization "${CMAKE_CURRENT_BINARY_DIR}/state-authorization")
+add_test(NAME sdk.consumer.packages
+  COMMAND lubancore_consumer packages "${CMAKE_CURRENT_BINARY_DIR}/state-packages")
+add_test(NAME sdk.consumer.package_inventory
+  COMMAND lubancore_consumer package-inventory "${CMAKE_CURRENT_BINARY_DIR}/state-package-inventory")
+add_test(NAME sdk.consumer.lua_build_profile
+  COMMAND lubancore_consumer lua-build-profile "${CMAKE_CURRENT_BINARY_DIR}/state-lua-build-profile")
+set_tests_properties(sdk.consumer.lua_build_profile PROPERTIES TIMEOUT 120)
+if(LubanCore_WITH_LUA)
+add_test(NAME sdk.consumer.lua
+  COMMAND lubancore_consumer lua "${CMAKE_CURRENT_BINARY_DIR}/state-lua")
+add_test(NAME sdk.consumer.lua_seed
+  COMMAND lubancore_consumer lua-seed "${CMAKE_CURRENT_BINARY_DIR}/state-lua-restart")
+add_test(NAME sdk.consumer.lua_resume
+  COMMAND lubancore_consumer lua-resume "${CMAKE_CURRENT_BINARY_DIR}/state-lua-restart")
+set_tests_properties(sdk.consumer.lua_seed PROPERTIES FIXTURES_SETUP sdk_lua_restart)
+set_tests_properties(sdk.consumer.lua_resume PROPERTIES FIXTURES_REQUIRED sdk_lua_restart)
+set_tests_properties(sdk.consumer.lua sdk.consumer.lua_seed sdk.consumer.lua_resume PROPERTIES TIMEOUT 120)
+endif()
+set(LUBANCORE_CONSUMER_RESOURCE_ROOT "" CACHE PATH "Explicit relocated installed SDK resource root for real search acceptance")
+if(NOT IS_ABSOLUTE "${LUBANCORE_CONSUMER_RESOURCE_ROOT}")
+  message(FATAL_ERROR "Set LUBANCORE_CONSUMER_RESOURCE_ROOT to the absolute relocated share/lubancore directory")
+endif()
+add_test(NAME sdk.consumer.builtin_search
+  COMMAND lubancore_consumer builtin-search "${CMAKE_CURRENT_BINARY_DIR}/state-builtin-search" "${LUBANCORE_CONSUMER_RESOURCE_ROOT}")
+add_test(NAME sdk.consumer.smoke
+  COMMAND lubancore_consumer smoke "${CMAKE_CURRENT_BINARY_DIR}/state-smoke")
+add_test(NAME sdk.consumer.isolation
+  COMMAND lubancore_consumer isolation "${CMAKE_CURRENT_BINARY_DIR}/state-isolation")
+add_test(NAME sdk.consumer.extensions
+  COMMAND lubancore_consumer extensions "${CMAKE_CURRENT_BINARY_DIR}/state-extensions")
+add_test(NAME sdk.consumer.actions
+  COMMAND lubancore_consumer actions "${CMAKE_CURRENT_BINARY_DIR}/state-actions")
+add_test(NAME sdk.consumer.event_sink
+  COMMAND lubancore_consumer event-sink "${CMAKE_CURRENT_BINARY_DIR}/state-event-sink")
+add_test(NAME sdk.consumer.memory_blobs
+  COMMAND lubancore_consumer memory-blobs "${CMAKE_CURRENT_BINARY_DIR}/state-memory-blobs")
+add_test(NAME sdk.consumer.todo_write
+  COMMAND lubancore_consumer todo-write "${CMAKE_CURRENT_BINARY_DIR}/state-todo-write")
+set_tests_properties(sdk.consumer.todo_write PROPERTIES TIMEOUT 120)
+add_test(NAME sdk.consumer.agentic_rag
+  COMMAND lubancore_consumer agentic-rag "${CMAKE_CURRENT_BINARY_DIR}/state-agentic-rag")
+set_tests_properties(sdk.consumer.agentic_rag PROPERTIES TIMEOUT 120)
+# CI owns the real loopback fixture and supplies these two values explicitly.
+# A copied manual consumer can still build before an HTTP fixture is started.
+set(LUBANCORE_CONSUMER_WEB_FETCH_BASE_URL "" CACHE STRING "Explicit loopback HTTP fixture URL for installed WebFetch acceptance")
+set(LUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE "" CACHE FILEPATH "Explicit owned fixture request ledger for WebFetch acceptance")
+if(LUBANCORE_CONSUMER_WEB_FETCH_BASE_URL OR LUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE)
+  if(NOT LUBANCORE_CONSUMER_WEB_FETCH_BASE_URL MATCHES "^http://127\\.0\\.0\\.1:([0-9]+)$")
+    message(FATAL_ERROR "WebFetch acceptance requires the explicit loopback fixture URL")
+  endif()
+  if(CMAKE_MATCH_1 LESS 1 OR CMAKE_MATCH_1 GREATER 65535)
+    message(FATAL_ERROR "WebFetch acceptance fixture port is invalid")
+  endif()
+  if(NOT IS_ABSOLUTE "${LUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE}" OR
+      NOT EXISTS "${LUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE}" OR
+      IS_DIRECTORY "${LUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE}")
+    message(FATAL_ERROR "WebFetch acceptance requires an existing absolute request ledger")
+  endif()
+  add_test(NAME sdk.consumer.web_fetch
+    COMMAND lubancore_consumer web-fetch "${CMAKE_CURRENT_BINARY_DIR}/state-web-fetch"
+      "${LUBANCORE_CONSUMER_WEB_FETCH_BASE_URL}" "${LUBANCORE_CONSUMER_WEB_FETCH_REQUESTS_FILE}")
+  set_tests_properties(sdk.consumer.web_fetch PROPERTIES TIMEOUT 120)
+endif()
+# Remote CI builds this example as a separate project before configuring this
+# consumer. With no option this directory still builds and runs independently.
+set(LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE "" CACHE FILEPATH "Explicit independently built installed-SDK RAG example for CI")
+if(LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE)
+  if(NOT IS_ABSOLUTE "${LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE}" OR
+      NOT EXISTS "${LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE}" OR
+      IS_DIRECTORY "${LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE}")
+    message(FATAL_ERROR "RAG demo must name an existing absolute independently built executable")
+  endif()
+  get_filename_component(_rag_demo_name "${LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE}" NAME)
+  if(NOT _rag_demo_name MATCHES "^lubancore_rag(\\.exe)?$")
+    message(FATAL_ERROR "RAG demo executable must be lubancore_rag")
+  endif()
+  add_test(NAME sdk.consumer.agentic_rag_demo
+    COMMAND "${LUBANCORE_CONSUMER_RAG_DEMO_EXECUTABLE}" --fixture "${CMAKE_CURRENT_BINARY_DIR}/state-agentic-rag-demo")
+  set_tests_properties(sdk.consumer.agentic_rag_demo PROPERTIES TIMEOUT 120)
+endif()
+add_test(NAME sdk.consumer.results
+  COMMAND lubancore_consumer results "${CMAKE_CURRENT_BINARY_DIR}/state-results")
+add_test(NAME sdk.consumer.skills_seed
+  COMMAND lubancore_consumer skills-seed "${CMAKE_CURRENT_BINARY_DIR}/state-skills")
+add_test(NAME sdk.consumer.skills_resume
+  COMMAND lubancore_consumer skills-resume "${CMAKE_CURRENT_BINARY_DIR}/state-skills")
+add_test(NAME sdk.consumer.memory_seed
+  COMMAND lubancore_consumer memory-seed "${CMAKE_CURRENT_BINARY_DIR}/state-memory")
+add_test(NAME sdk.consumer.memory_resume
+  COMMAND lubancore_consumer memory-resume "${CMAKE_CURRENT_BINARY_DIR}/state-memory")
+add_test(NAME sdk.consumer.memory_save_seed
+  COMMAND lubancore_consumer memory-save-seed "${CMAKE_CURRENT_BINARY_DIR}/state-memory-save")
+add_test(NAME sdk.consumer.memory_save_resume
+  COMMAND lubancore_consumer memory-save-resume "${CMAKE_CURRENT_BINARY_DIR}/state-memory-save")
+add_test(NAME sdk.consumer.subagents
+  COMMAND lubancore_consumer subagents "${CMAKE_CURRENT_BINARY_DIR}/state-subagents")
+add_test(NAME sdk.consumer.subagent_seed
+  COMMAND lubancore_consumer subagent-seed "${CMAKE_CURRENT_BINARY_DIR}/state-subagent-restart")
+add_test(NAME sdk.consumer.subagent_resume
+  COMMAND lubancore_consumer subagent-resume "${CMAKE_CURRENT_BINARY_DIR}/state-subagent-restart")
+add_test(NAME sdk.consumer.result_seed
+  COMMAND lubancore_consumer result-seed "${CMAKE_CURRENT_BINARY_DIR}/state-result-restart")
+add_test(NAME sdk.consumer.result_resume
+  COMMAND lubancore_consumer result-resume "${CMAKE_CURRENT_BINARY_DIR}/state-result-restart")
+add_test(NAME sdk.consumer.seed
+  COMMAND lubancore_consumer seed "${CMAKE_CURRENT_BINARY_DIR}/state-restart")
+add_test(NAME sdk.consumer.resume
+  COMMAND lubancore_consumer resume "${CMAKE_CURRENT_BINARY_DIR}/state-restart")
+add_test(NAME sdk.consumer.recovery_seed
+  COMMAND lubancore_consumer recovery-seed "${CMAKE_CURRENT_BINARY_DIR}/state-recovery")
+add_test(NAME sdk.consumer.recovery_resume
+  COMMAND lubancore_consumer recovery-resume "${CMAKE_CURRENT_BINARY_DIR}/state-recovery")
+set_tests_properties(sdk.consumer.seed PROPERTIES FIXTURES_SETUP sdk_restart)
+set_tests_properties(sdk.consumer.resume PROPERTIES FIXTURES_REQUIRED sdk_restart)
+set_tests_properties(sdk.consumer.recovery_seed PROPERTIES FIXTURES_SETUP sdk_recovery)
+set_tests_properties(sdk.consumer.recovery_resume PROPERTIES FIXTURES_REQUIRED sdk_recovery)
+set_tests_properties(sdk.consumer.result_seed PROPERTIES FIXTURES_SETUP sdk_result_restart)
+set_tests_properties(sdk.consumer.result_resume PROPERTIES FIXTURES_REQUIRED sdk_result_restart)
+set_tests_properties(sdk.consumer.skills_seed PROPERTIES FIXTURES_SETUP sdk_skills_restart)
+set_tests_properties(sdk.consumer.skills_resume PROPERTIES FIXTURES_REQUIRED sdk_skills_restart)
+set_tests_properties(sdk.consumer.memory_seed PROPERTIES FIXTURES_SETUP sdk_memory_restart)
+set_tests_properties(sdk.consumer.memory_resume PROPERTIES FIXTURES_REQUIRED sdk_memory_restart)
+set_tests_properties(sdk.consumer.memory_save_seed PROPERTIES FIXTURES_SETUP sdk_memory_save_restart)
+set_tests_properties(sdk.consumer.memory_save_resume PROPERTIES FIXTURES_REQUIRED sdk_memory_save_restart)
+set_tests_properties(sdk.consumer.subagent_seed PROPERTIES FIXTURES_SETUP sdk_child_restart)
+set_tests_properties(sdk.consumer.subagent_resume PROPERTIES FIXTURES_REQUIRED sdk_child_restart)
+set_tests_properties(sdk.consumer.authorization sdk.consumer.packages sdk.consumer.package_inventory sdk.consumer.builtin_search sdk.consumer.smoke sdk.consumer.isolation sdk.consumer.extensions sdk.consumer.actions sdk.consumer.event_sink sdk.consumer.memory_blobs sdk.consumer.results sdk.consumer.seed sdk.consumer.resume
+  sdk.consumer.recovery_seed sdk.consumer.recovery_resume sdk.consumer.result_seed sdk.consumer.result_resume
+  sdk.consumer.skills_seed sdk.consumer.skills_resume sdk.consumer.memory_seed sdk.consumer.memory_resume
+  sdk.consumer.memory_save_seed sdk.consumer.memory_save_resume
+  sdk.consumer.subagents sdk.consumer.subagent_seed sdk.consumer.subagent_resume PROPERTIES TIMEOUT 120)
+
+# Journal acceptance needs only the installed SDK and explicit retained state.
+add_test(NAME sdk.consumer.journal_owner
+  COMMAND lubancore_consumer journal-owner "${CMAKE_CURRENT_BINARY_DIR}/state-journal-owner")
+set_tests_properties(sdk.consumer.journal_owner PROPERTIES TIMEOUT 120)
+
+# CI supplies a relocated copy of the real producer-built private probe. This
+# helper is not installed as part of LubanCore and is never found through PATH.
+set(LUBANCORE_CONSUMER_COMMAND_PROBE "" CACHE FILEPATH "Explicit copied command_limits_probe for installed Command Jobs acceptance")
+if(LUBANCORE_CONSUMER_COMMAND_PROBE)
+  if(NOT IS_ABSOLUTE "${LUBANCORE_CONSUMER_COMMAND_PROBE}" OR
+      NOT EXISTS "${LUBANCORE_CONSUMER_COMMAND_PROBE}" OR IS_DIRECTORY "${LUBANCORE_CONSUMER_COMMAND_PROBE}")
+    message(FATAL_ERROR "Command Jobs requires an absolute existing private command probe")
+  endif()
+  get_filename_component(_command_probe_name "${LUBANCORE_CONSUMER_COMMAND_PROBE}" NAME)
+  if(NOT _command_probe_name MATCHES "^lubancore_command_limits_probe(\\.exe)?$")
+    message(FATAL_ERROR "Command Jobs requires the actual command_limits_probe target")
+  endif()
+  add_test(NAME sdk.consumer.command_jobs
+    COMMAND lubancore_consumer command-jobs "${CMAKE_CURRENT_BINARY_DIR}/state-command-jobs" "${LUBANCORE_CONSUMER_COMMAND_PROBE}")
+  set_tests_properties(sdk.consumer.command_jobs PROPERTIES TIMEOUT 120)
+  add_test(NAME sdk.consumer.named_results
+    COMMAND lubancore_consumer named-results "${CMAKE_CURRENT_BINARY_DIR}/state-named-results" "${LUBANCORE_CONSUMER_COMMAND_PROBE}")
+  set_tests_properties(sdk.consumer.named_results PROPERTIES TIMEOUT 120)
+endif()

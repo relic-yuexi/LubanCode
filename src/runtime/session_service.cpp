@@ -10,9 +10,15 @@
 
 #include "runtime/session_service.hpp"
 
+#include <limits>
+#include <map>
+#include <set>
+
 #include <algorithm>
 #include <chrono>
+#include <exception>
 #include <fstream>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
@@ -21,7 +27,9 @@
 #include "config/config.hpp"  // HomeLubancodeDir:身份裁决的全局件止步
 #include "platform/atomic_write.hpp"  // 原件原子写(ProcessCrashDurability=fsync 档)
 #include "platform/sha256.hpp"
+#include "platform/text_encoding.hpp"
 #include "runtime/command_service.hpp"
+#include "runtime/async_tool_runtime.hpp"
 #include "runtime/goal_coordinator.hpp"
 #include "runtime/loop_scheduler.hpp"
 #include "tools/path_utils.hpp"  // Utf8ToPath/PathToUtf8
@@ -279,12 +287,19 @@ SessionRuntime::Options SessionService::BuildRuntimeOptions(const SessionLaunchR
     options.lubancode_version = request.lubancode_version;
     options.approval_mode = request.approval_mode;
     options.trajectory_resume_at_launch = request.resume_at_launch;
+    options.trajectory_require_v3_resume = request.require_v3_resume;
     options.trajectory_resume_source_session_id = request.resume_source_session_id;
     options.trajectory_workspaces_root = request.workspaces_root;
     options.trajectory_launch_cwd = request.launch_cwd;
     options.trajectory_one_shot = request.one_shot;
     options.trajectory_training_policy = request.training_policy;
     options.trajectory_v3_system_content = request.v3_system_content;
+    options.trajectory_v3_opening_participant = request.v3_opening_participant;
+    options.trajectory_memory_capability_factory = request.memory_capability_factory;
+    options.trajectory_named_result_factory = request.named_result_factory;
+    options.trajectory_recovery_capture = request.recovery_capture;
+    options.trajectory_recovery_factory = request.recovery_factory;
+    options.trajectory_journal_native_io_probe = request.journal_native_io_probe;
     // 身份:显式递的整份吃;否则按 cwd 四级裁决(commondir→marker→
     // config→cwd),home 递进去做全局件止步——与三端被收编前的原装配
     // 逐句对应(终端/one-shot:current_path;app-server:前端指定 cwd)。
@@ -328,6 +343,10 @@ trajectory::CloseOutcome SessionService::CloseRuntime(SessionRuntime& runtime, c
 // ---------------------------------------------------------------------------
 
 SessionService::SessionService(SessionLaunchRequest request) {
+    if (request.resume_at_launch && request.journal_native_io_probe) {
+        launch_error_ = "session.native_probe_resume_unsupported";
+        return;
+    }
     auto runtime = std::make_unique<SessionRuntime>(BuildRuntimeOptions(request));
     if (runtime->trajectory() == nullptr) {
         // 开不出账:错误说明原样透传(ledger Open 的错误串,与三端旧装配
@@ -348,7 +367,59 @@ SessionService::SessionService(SessionLaunchRequest request) {
     SeedOperationLedger();
 }
 
-SessionService::~SessionService() = default;
+SessionService::~SessionService() {
+    (void)ShutdownExecution();
+    if (runtime_ != nullptr && runtime_->async_tool_runtime() != nullptr &&
+        !runtime_->async_tool_runtime()->quiescent()) std::terminate();
+    // Profile/tool capture destructors can still borrow service state. Destroy
+    // the execution now, before any queue, mutex, operation file or ledger.
+    execution_.reset();
+}
+
+void SessionService::InitializeExecution(std::unique_ptr<assembly::SessionResources> resources,
+                                         agent::AgentProfile&& profile,
+                                         std::optional<std::vector<api::Message>> restored_history) {
+    // Validation can reject before the candidate consumes resources. Clear the
+    // referenced source first, while this parameter still owns every borrow.
+    // The guard also covers allocation failure before the constructor starts.
+    struct SourceProfileScope {
+        agent::AgentProfile& profile;
+        ~SourceProfileScope() { ClearExecutionProfileBorrowers(profile); }
+    } source_profile_scope{profile};
+    {
+        std::lock_guard lock(commit_mutex_);
+        if (runtime_ == nullptr) throw std::logic_error("session.execution.session_unavailable");
+        if (execution_ != nullptr) throw std::logic_error("session.execution.already_initialized");
+        if (execution_shutdown_requested_.load()) throw std::logic_error("session.execution.stopping");
+    }
+    // Candidate construction/rollback can destroy user captures that query the
+    // service. Neither construction nor rejected-candidate/source destruction
+    // takes place under its commit mutex.
+    auto candidate = std::make_unique<SessionExecution>(std::move(resources), std::move(profile),
+                                                       std::move(restored_history));
+    {
+        std::lock_guard lock(commit_mutex_);
+        if (execution_ != nullptr) throw std::logic_error("session.execution.already_initialized");
+        if (execution_shutdown_requested_.load()) throw std::logic_error("session.execution.stopping");
+        execution_ = std::move(candidate);
+    }
+}
+
+void SessionService::RequestExecutionShutdown() {
+    execution_shutdown_requested_.store(true);
+    {
+        std::lock_guard lock(commit_mutex_);
+        // Wait for an initialization already in progress to observe the latch.
+    }
+    // Synchronize with first-turn publication without holding a lock while a
+    // worker exits. The runtime latches shutdown even if no async owner exists.
+    if (runtime_ != nullptr) runtime_->RequestAsyncToolShutdown();
+}
+
+bool SessionService::ShutdownExecution() {
+    RequestExecutionShutdown();
+    return runtime_ == nullptr || runtime_->ShutdownAsyncTools();
+}
 
 TrajectorySessionLedger* SessionService::trajectory() {
     return runtime_ != nullptr ? runtime_->trajectory() : nullptr;
@@ -559,6 +630,10 @@ SessionService::InputReceipt SessionService::SubmitInput(const InputRequest& inp
     }
     const std::string payload_hash = platform::Sha256Hex(CanonicalInputPayload(input));
     std::lock_guard<std::mutex> lock(commit_mutex_);
+    if (execution_shutdown_requested_.load()) {
+        receipt.error_code = "session.stopping";
+        return receipt;
+    }
     // 幂等(§4.2):同键同载荷返回原操作;同键不同载荷 conflict。
     if (!input.client_operation_id.empty()) {
         const auto it = operations_.find(input.client_operation_id);
@@ -662,6 +737,11 @@ std::size_t SessionService::pending_input_count() const {
     return pending_inputs_.size();
 }
 
+std::vector<SessionService::QueuedInput> SessionService::PendingInputsSnapshot() const {
+    std::lock_guard<std::mutex> lock(commit_mutex_);
+    return {pending_inputs_.begin(), pending_inputs_.end()};
+}
+
 bool SessionService::RecordTurnFinal(const TurnFinalRecord& record) {
     if (runtime_ == nullptr || trajectory() == nullptr) {
         return false;
@@ -741,6 +821,82 @@ std::vector<SessionService::OperationFact> SessionService::ReadOperationFacts(
     return facts;
 }
 
+std::expected<std::vector<SessionService::OperationFact>, std::string>
+SessionService::ReadOperationFactsOwned(const std::string& bytes) {
+    if (bytes.find('\0') != std::string::npos || !platform::IsValidUtf8(bytes))
+        return std::unexpected("recovery.operations_invalid:invalid_text");
+    auto raw = trajectory::RecoveryStreamLines(bytes, std::nullopt);
+    if (!raw) return std::unexpected("recovery.operations_invalid:" + raw.error());
+    enum class Stage { Accepted, Dispatched, Final };
+    std::map<std::string, Stage> stages;
+    std::set<std::string> client_keys, bound_turns;
+    std::vector<OperationFact> facts;
+    for (const auto& text : *raw) {
+        const auto line = nlohmann::json::parse(text, nullptr, false);
+        const auto bad = [] { return std::unexpected(std::string("recovery.operations_invalid")); };
+        if (!line.is_object() || !line.contains("schemaVersion") ||
+            (line["schemaVersion"] != 1 && line["schemaVersion"] != 2) ||
+            !line["schemaVersion"].is_number_integer()) return bad();
+        const auto string = [&](const char* key, bool required) {
+            const auto value = line.find(key);
+            return value == line.end() ? !required : value->is_string();
+        };
+        const auto integer = [&](const char* key) {
+            const auto value = line.find(key);
+            if (value == line.end()) return false;
+            return value->is_number_unsigned()
+                ? value->get<std::uint64_t>() <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())
+                : value->is_number_integer() && value->get<std::int64_t>() >= 0;
+        };
+        if (!string("kind", true) || !string("operationId", true)) return bad();
+        OperationFact fact;
+        fact.kind = line["kind"].get<std::string>();
+        fact.operation_id = line["operationId"].get<std::string>();
+        if (fact.operation_id.empty() || fact.operation_id.size() > 200 ||
+            fact.operation_id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos) return bad();
+        const auto prior = stages.find(fact.operation_id);
+        if (fact.kind == "operation.accepted") {
+            if (!string("inputId", true) || !string("clientOperationId", true) || !string("payloadHash", true) ||
+                !integer("receivedAtMs") || !string("inputRef", line["schemaVersion"] == 2) ||
+                !string("originSessionId", false) || !string("originOperationId", false)) return bad();
+            fact.input_id = line["inputId"].get<std::string>();
+            fact.client_operation_id = line["clientOperationId"].get<std::string>();
+            fact.payload_hash = line["payloadHash"].get<std::string>();
+            fact.received_at_ms = line["receivedAtMs"].get<std::int64_t>();
+            if (prior != stages.end() || fact.input_id.empty() || fact.payload_hash.size() != 64 ||
+                fact.payload_hash.find_first_not_of("0123456789abcdef") != std::string::npos ||
+                (!fact.client_operation_id.empty() && !client_keys.insert(fact.client_operation_id).second)) return bad();
+            stages.emplace(fact.operation_id, Stage::Accepted);
+        } else if (fact.kind == "operation.dispatched") {
+            if (!integer("dispatchedAtMs")) return bad();
+            if (prior == stages.end() || prior->second != Stage::Accepted) return bad();
+            prior->second = Stage::Dispatched;
+            fact.dispatched_at_ms = line["dispatchedAtMs"].get<std::int64_t>();
+        } else if (fact.kind == "operation.final") {
+            if (!string("turnId", true) || !string("executionStatus", true) || !integer("finalizedAtMs") ||
+                !line.contains("usageReported") || !line["usageReported"].is_boolean() ||
+                !line.contains("finalMessageRefs") || !line["finalMessageRefs"].is_array()) return bad();
+            if (prior == stages.end() || prior->second != Stage::Dispatched) return bad();
+            prior->second = Stage::Final;
+            fact.turn_id = line["turnId"].get<std::string>();
+            if (!fact.turn_id.empty() && (fact.turn_id.size() > 200 ||
+                fact.turn_id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != std::string::npos ||
+                !bound_turns.insert(fact.turn_id).second)) return bad();
+            fact.execution_status = line["executionStatus"].get<std::string>();
+            if (fact.execution_status != "success" && fact.execution_status != "error" &&
+                fact.execution_status != "cancelled" && fact.execution_status != "interrupted") return bad();
+            fact.usage_reported = line["usageReported"].get<bool>();
+            fact.finalized_at_ms = line["finalizedAtMs"].get<std::int64_t>();
+            for (const auto& ref : line["finalMessageRefs"]) {
+                if (!ref.is_string()) return bad();
+                fact.final_message_refs.push_back(ref.get<std::string>());
+            }
+        } else return bad();
+        facts.push_back(std::move(fact));
+    }
+    return facts;
+}
+
 SessionService::OperationLookup SessionService::LookupClientOperation(
     const std::string& client_operation_id) const {
     OperationLookup lookup;
@@ -807,6 +963,12 @@ ClientReceipt SessionService::ExecuteDomainCommand(const std::string& command_la
 // ---------------------------------------------------------------------------
 
 trajectory::CloseOutcome SessionService::Close(const std::string& reason) {
+    if (!ShutdownExecution()) {
+        trajectory::CloseOutcome outcome;
+        outcome.error_code = "close.async_shutdown_failed";
+        outcome.message = "会话后台工具尚未可靠收口";
+        return outcome;
+    }
     if (runtime_ == nullptr) {
         trajectory::CloseOutcome outcome;
         outcome.error_code = "close.no_active_session";

@@ -4,7 +4,7 @@
 - 日期：2026-09-02
 - 级别：P0（边界可信、策略强制、降级可见）
 - 范围：拟新增 `src/execution/`；改造 `src/platform/process.*`、`src/tools/`、`src/runtime/plugin_*`、`src/mcp/`、`src/hooks/`、`src/ptc/`、Package/Agent/Workflow 接线、测试与安全文档
-- 关联：`轻量可塑ExtensionRuntime与动态扩展API设计.todo`、`多AgentEngine统一Runtime与适配层设计.todo`、`后台命令PTY会话与可附着终端设计.todo`、`多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`
+- 关联：`轻量可塑ExtensionRuntime与动态扩展API设计.todo`、`多AgentEngine统一Runtime与适配层设计.todo`、`后台命令PTY会话与可附着终端设计.todo`、`分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo`（原集群畅想单已并入其第二十九章）
 - 不在本单：自造容器内核、声称任一平台绝对安全、把 worktree 当 sandbox、远程执行市场、静默降级到裸进程
 
 ## 一、先下断语

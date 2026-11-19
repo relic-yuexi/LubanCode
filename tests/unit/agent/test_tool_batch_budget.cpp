@@ -61,6 +61,25 @@ TEST_CASE("metadata reservations obey batch capacity and the per-result ceiling"
     CHECK(large.preview_bytes == std::vector<std::size_t>{32768});
 }
 
+TEST_CASE("short framing and separate native payload share the actual batch capacity") {
+    auto source = Batch({10, 10});
+    auto& native = std::get<api::ToolResultBlock>(source.content[1]);
+    native.blocks.push_back(tools::TextContent{"separate original payload"});
+    const auto complete = agent::PlanToolBatchBudget(source, 40000);
+    REQUIRE(complete.error.empty());
+    CHECK_FALSE(complete.reduced);
+    CHECK(complete.preview_bytes == std::vector<std::size_t>{4106, 32768});
+    CHECK(complete.total_preview_bytes == 36874);
+    const auto bounded = agent::PlanToolBatchBudget(source, 10000);
+    REQUIRE(bounded.error.empty());
+    CHECK(bounded.reduced);
+    CHECK(bounded.preview_bytes == std::vector<std::size_t>{4106, 5894});
+    CHECK(bounded.total_preview_bytes == 10000);
+    CHECK(native.content == std::string(10, 'x'));
+    REQUIRE(native.blocks.size() == 1);
+    CHECK(std::get<tools::TextContent>(native.blocks.front()).text == "separate original payload");
+}
+
 TEST_CASE("batch allocation has an explicit minimum failure") {
     const auto source = Batch({32768, 32768});
     const auto plan = agent::PlanToolBatchBudget(source, 4096);

@@ -44,9 +44,12 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -188,13 +191,48 @@ lubancode::api::Request MakeMinimalRequest() {
     return request;
 }
 
+// LOW_SPEED_TIME measures a sustained low rolling-average speed, not time since
+// the last byte. curl 8.22 may retain the initial bytes in a five-second rolling
+// window; the interval starts only after the rolling rate drops below the limit
+// (lib/progress.c, CURL_SPEED_RECORDS in urldata.h).
+// Prove which side ended the request instead of assuming a fixed 2+8s cutoff.
+struct LowSpeedStall {
+    static constexpr auto kHoldLimit = std::chrono::seconds(30);
+    std::atomic<bool> hold_started{false};
+    std::atomic<bool> hold_finished{false};
+    std::atomic<bool> deadline_expired{false};
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool released = false;
+
+    void Hold() {
+        std::unique_lock lock(mutex);
+        hold_started.store(true);
+        if (!cv.wait_for(lock, kHoldLimit, [&] { return released; })) {
+            deadline_expired.store(true);
+        }
+        hold_finished.store(true);
+    }
+    void Release() {
+        std::lock_guard lock(mutex);
+        released = true;
+        cv.notify_all();
+    }
+};
+struct ReleaseStallOnExit {
+    std::shared_ptr<LowSpeedStall> stall;
+    ~ReleaseStallOnExit() { stall->Release(); }
+};
+
 }  // namespace
 
 TEST_CASE("anthropic: SSE 半路断流(收到部分数据后服务器挂起不再吭声)触发空闲读超时") {
     lubancode::cli::SetLanguage("zh-CN");
     constexpr int kIdleTimeoutSecs = 2;
+    const auto stall = std::make_shared<LowSpeedStall>();
+    const ReleaseStallOnExit release{stall};
 
-    const int port = StartFakeServer([](socket_t client) {
+    const int port = StartFakeServer([stall](socket_t client) {
         DrainRequest(client);
         SendAll(client,
                 "HTTP/1.1 200 OK\r\n"
@@ -205,23 +243,37 @@ TEST_CASE("anthropic: SSE 半路断流(收到部分数据后服务器挂起不�
                 "\n");
         // 发完这一帧就装死:不再写数据,也不关闭连接,模拟"连上了、收到了
         // 一部分、后面突然没反应了"这种半路断流。
-        std::this_thread::sleep_for(std::chrono::seconds(30));
+        stall->Hold();
     });
 
     lubancode::api::anthropic::AnthropicBackend backend("http://127.0.0.1:" + std::to_string(port), "test-token",
                                                           /*connect_timeout_ms=*/3000,
-                                                          /*stream_idle_timeout_secs=*/kIdleTimeoutSecs);
+                                                          /*stream_idle_timeout_secs=*/kIdleTimeoutSecs,
+                                                          /*native_web_search=*/false,
+                                                          /*extra_body=*/nlohmann::json::object(),
+                                                          /*extra_headers=*/{},
+                                                          /*request_hard_timeout_secs=*/0);
 
     const auto start = std::chrono::steady_clock::now();
     const auto result =
         backend.send_stream(MakeMinimalRequest(), [](const lubancode::api::StreamEvent&) {});
     const auto elapsed = std::chrono::steady_clock::now() - start;
+    const bool server_hold_started = stall->hold_started.load();
+    const bool server_hold_finished = stall->hold_finished.load();
+    const bool server_hit_deadline = stall->deadline_expired.load();
+    stall->Release();
 
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().kind == lubancode::api::ErrorKind::Network);
     CHECK(result.error().message == lubancode::cli::trf("error.network.stream_idle_timeout", kIdleTimeoutSecs));
-    // 真的是空闲超时提前掐断的,不是傻等了服务器那 30 秒挂起。
-    CHECK(elapsed < std::chrono::seconds(kIdleTimeoutSecs + 8));
+    // The request returned while the peer still held the socket. With the hard
+    // wall disabled and the exact idle error above, neither peer EOF nor another
+    // timeout can masquerade as the configured low-speed timeout.
+    CHECK(server_hold_started);
+    CHECK_FALSE(server_hold_finished);
+    CHECK_FALSE(server_hit_deadline);
+    CHECK(elapsed >= std::chrono::seconds(kIdleTimeoutSecs));
+    CHECK(elapsed < LowSpeedStall::kHoldLimit);
 }
 
 TEST_CASE("anthropic: SSE 半路停住时 cancel 在 2s 内掐断,不等下一枚响应字节") {
@@ -291,8 +343,10 @@ TEST_CASE("anthropic: 服务端连响应头也不回时 cancel 在 2s 内掐断"
 TEST_CASE("responses: SSE 半路断流(收到部分数据后服务器挂起不再吭声)触发空闲读超时") {
     lubancode::cli::SetLanguage("zh-CN");
     constexpr int kIdleTimeoutSecs = 2;
+    const auto stall = std::make_shared<LowSpeedStall>();
+    const ReleaseStallOnExit release{stall};
 
-    const int port = StartFakeServer([](socket_t client) {
+    const int port = StartFakeServer([stall](socket_t client) {
         DrainRequest(client);
         SendAll(client,
                 "HTTP/1.1 200 OK\r\n"
@@ -301,22 +355,34 @@ TEST_CASE("responses: SSE 半路断流(收到部分数据后服务器挂起不�
                 "event: response.created\n"
                 "data: {\"type\":\"response.created\"}\n"
                 "\n");
-        std::this_thread::sleep_for(std::chrono::seconds(30));
+        stall->Hold();
     });
 
     lubancode::api::responses::ResponsesBackend backend("http://127.0.0.1:" + std::to_string(port), "test-token",
                                                           /*connect_timeout_ms=*/3000,
-                                                          /*stream_idle_timeout_secs=*/kIdleTimeoutSecs);
+                                                          /*stream_idle_timeout_secs=*/kIdleTimeoutSecs,
+                                                          /*native_web_search=*/false,
+                                                          /*extra_body=*/nlohmann::json::object(),
+                                                          /*extra_headers=*/{},
+                                                          /*request_hard_timeout_secs=*/0);
 
     const auto start = std::chrono::steady_clock::now();
     const auto result =
         backend.send_stream(MakeMinimalRequest(), [](const lubancode::api::StreamEvent&) {});
     const auto elapsed = std::chrono::steady_clock::now() - start;
+    const bool server_hold_started = stall->hold_started.load();
+    const bool server_hold_finished = stall->hold_finished.load();
+    const bool server_hit_deadline = stall->deadline_expired.load();
+    stall->Release();
 
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().kind == lubancode::api::ErrorKind::Network);
     CHECK(result.error().message == lubancode::cli::trf("error.network.stream_idle_timeout", kIdleTimeoutSecs));
-    CHECK(elapsed < std::chrono::seconds(kIdleTimeoutSecs + 8));
+    CHECK(server_hold_started);
+    CHECK_FALSE(server_hold_finished);
+    CHECK_FALSE(server_hit_deadline);
+    CHECK(elapsed >= std::chrono::seconds(kIdleTimeoutSecs));
+    CHECK(elapsed < LowSpeedStall::kHoldLimit);
 }
 
 TEST_CASE("anthropic: 连不上服务器(端口没人监听)报连接失败,消息走 i18n 文案不是 curl 原始英文串") {

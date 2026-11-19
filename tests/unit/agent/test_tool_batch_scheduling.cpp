@@ -244,11 +244,13 @@ public:
                 !gate_->cv.wait_for(lock, kGateWait, [&] { return gate_->exited >= gate_->exit_target; })) {
                 ++gate_->gate_timeouts;
             }
+            // 先记录退出，再发布“已退出”的闸门状态。若先叫醒慢首枚，
+            // 它可能抢在本枚 Tick/Record 之前记账，量具自己便颠倒完成序。
+            const std::uint64_t exit = log_->Tick();
+            log_->Record(span, enter, exit);
             ++gate_->exited;
             gate_->cv.notify_all();
         }
-        const std::uint64_t exit = log_->Tick();
-        log_->Record(span, enter, exit);
         active_.fetch_sub(1);
         return {"read#" + std::to_string(input.value("i", 0)), false};
     }

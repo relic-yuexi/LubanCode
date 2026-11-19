@@ -18,6 +18,7 @@
 #include <nlohmann/json.hpp>
 
 #include "trajectory/event.hpp"
+#include "trajectory/cas_store.hpp"
 
 namespace lubancode::trajectory {
 
@@ -57,6 +58,12 @@ public:
 
     // 读回并核 sha256:hash 不合给 nullopt(被改/被截一律拒供)。
     std::optional<std::string> ReadVerified(const BlobRef& ref) const;
+
+    // Truthful internal CAS route. Legacy Store remains a best-effort API;
+    // Memory producers only accept the detailed requested-durability receipt.
+    CasWriteReceipt StoreDetailed(const CasWriteRequest& request, const FileCasFault& test_fault = {});
+    std::expected<std::string, CasError> ReadBoundedVerified(
+        const CasReference& reference, std::size_t byte_cap) const;
 
     // 内容地址:<root>/sha256/<hash[0:2]>/<hash>。
     std::filesystem::path PathFor(std::string_view sha256) const;

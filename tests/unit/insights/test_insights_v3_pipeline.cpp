@@ -20,6 +20,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -27,6 +28,7 @@
 #include <nlohmann/json.hpp>
 
 #include "insights/finding.hpp"
+#include "insights/derived_store.hpp"
 #include "insights/friction_classifier.hpp"
 #include "insights/integrity_gate.hpp"
 #include "insights/prompt_auditor.hpp"
@@ -803,6 +805,35 @@ TEST_CASE("prompt v3: 连续三次工具面变化报 V02;usage 关联进视图")
 // ---------------------------------------------------------------------------
 
 TEST_CASE("analyze v3: 摘要 format/limitations/usage owner;重算字节稳定") {
+    SUBCASE("committed v3 owners preserve overflow through summary reuse") {
+        SessionsRoot root("analyze-overflow");
+        {
+            auto writer = StartSession(root, "S-OVERFLOW");
+            REQUIRE(writer.has_value());
+            for (const auto output : {std::numeric_limits<std::int64_t>::max(),
+                                      std::int64_t{1}}) {
+                const auto turn = output == 1 ? "turn-000002" : "turn-000001";
+                InstallRequestedRound(*writer, turn, "问", {},
+                    nlohmann::json{{"inputTokens", 1}, {"outputTokens", output}},
+                    std::nullopt);
+            }
+            Seal(*writer);
+        }
+        const auto dir = root.Dir("S-OVERFLOW");
+        const auto result = AnalyzeSession(dir, SessionAnalyzeOptions{});
+        REQUIRE(result.analyzed);
+        REQUIRE(result.summary_written);
+        CHECK(result.summary.usage.input_tokens == 2);
+        CHECK(result.summary.usage.knowledge.input_tokens);
+        CHECK_FALSE(result.summary.usage.knowledge.output_tokens);
+        const auto restored = ReadExistingSessionSummary(dir);
+        REQUIRE(restored.parse_ok);
+        CHECK(restored.summary.ToJson() == result.summary.ToJson());
+        CHECK(restored.summary.ToJson()["usage"]["output_tokens"].is_null());
+        const auto reused = AnalyzeSession(dir, SessionAnalyzeOptions{});
+        CHECK(reused.summary_reused);
+        CHECK_FALSE(reused.summary.usage.knowledge.output_tokens);
+    }
     EnvGuard guard("LUBANCODE_TRAJECTORY_V3_NEW_SESSIONS", "1");
     SessionsRoot root_a("analyze-a");
     SessionsRoot root_b("analyze-b");

@@ -143,6 +143,18 @@ public:
                                           std::optional<nlohmann::json> input_ref,
                                           Durability durability = Durability::ProcessCrash);
 
+    // The checked caller receives this exact first native receipt, including a
+    // Rejected receipt that left the writer broken. No second append is made.
+    static NestedHookDispatchSession OpenChecked(V3Writer& writer, std::string hook_dispatch_id,
+                                                std::string hook_point,
+                                                std::optional<std::string> turn_id,
+                                                std::optional<std::string> step_id,
+                                                std::optional<std::string> action_id,
+                                                const std::vector<HookHandlerSpec>& handlers,
+                                                std::optional<nlohmann::json> input_ref,
+                                                WriteReceipt& requested_receipt,
+                                                Durability durability = Durability::ProcessCrash);
+
     // 无匹配链项:hook.skipped(汇总一条,不为无关配置刷屏)。
     static WriteReceipt WriteSkip(V3Writer& writer, std::string hook_dispatch_id,
                                   std::string hook_point, std::string reason,
@@ -150,6 +162,14 @@ public:
                                   std::optional<std::string> step_id,
                                   std::optional<std::string> action_id,
                                   Durability durability = Durability::ProcessCrash);
+
+    static WriteReceipt WriteSkipWithInput(V3Writer& writer, std::string hook_dispatch_id,
+                                          std::string hook_point, std::string reason,
+                                          std::optional<std::string> turn_id,
+                                          std::optional<std::string> step_id,
+                                          std::optional<std::string> action_id,
+                                          std::optional<nlohmann::json> input_ref,
+                                          Durability durability = Durability::ProcessCrash);
 
     // 嵌套安全的 invocation 面:调用方显式带 invocation_id(中间件核的
     // InvocationMeta 里已发行);同 dispatch 下多枚可同时开张。

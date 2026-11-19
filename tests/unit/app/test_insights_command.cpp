@@ -117,6 +117,17 @@ TEST_CASE("ParseInsightsCommand:裸敲/flag/子命令/坏词") {
 }
 
 TEST_CASE("FormatInsightsDigestLines:七节齐,路径与覆盖账在册") {
+    SUBCASE("terminal digest preserves independent unknown token buckets") {
+        auto boundary = MakeResult();
+        boundary.aggregate.knowledge.input_tokens = false;
+        boundary.aggregate.knowledge.reasoning_tokens = false;
+        boundary.report.usage.knowledge.cost_micros = false;
+        const auto lines = FormatInsightsDigestLines(boundary, "a.json", "a.html", false,
+                                                     cli::BuiltinTheme("plain"), 0);
+        CHECK(Contains(lines, "输入 未知（溢出）"));
+        CHECK(Contains(lines, "推理 未知（溢出）"));
+        CHECK(Contains(lines, "费用 未知（溢出）"));
+    }
     const insights::InsightsGenerateResult result = MakeResult();
     // 批 4:渲染 frame 化,调用侧递主题与宽(0=自适应);逻辑册钉 plain 形状。
     const cli::Theme plain = cli::BuiltinTheme("plain");

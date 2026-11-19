@@ -7,7 +7,7 @@
 #include <sstream>
 #include <utility>
 
-#include "cli/i18n.hpp"
+#include "text/i18n.hpp"
 #include "tools/text_bits.hpp"  // CountUtf8Codepoints/FormatTokenCount:engine 侧纯函数
 
 namespace lubancode::tools {
@@ -171,8 +171,8 @@ std::string ComposeOutcomeText(const TaskOutcome& outcome) {
 }
 
 std::string ComposeOutputBudgetOutcomeText(const TaskOutcome& outcome) {
-    using lubancode::cli::tr;
-    using lubancode::cli::trf;
+    using lubancode::text::tr;
+    using lubancode::text::trf;
     std::string out = trf("agent_outcome.output_budget.head", outcome.length_continuations_used);
     if (outcome.output_limit_tokens > 0) {
         out += "\n" + trf("agent_outcome.output_budget.limit", outcome.output_limit_tokens);
@@ -609,6 +609,8 @@ std::vector<AgentTaskSummary> TaskLedger::Summaries() const {
         summary.cache_read_tokens = task->snapshot.cache_read_tokens;
         summary.cache_creation_tokens = task->snapshot.cache_creation_tokens;
         summary.output_tokens = task->snapshot.output_tokens;
+        summary.output_reasoning_tokens = task->snapshot.output_reasoning_tokens;
+        summary.usage_coverage = task->snapshot.usage_coverage;
         summary.usage_reported = task->snapshot.usage_reported;
         summary.start_time = task->snapshot.start_time;
         summary.end_time = task->snapshot.end_time;
@@ -1106,13 +1108,13 @@ std::vector<std::string> TaskLedger::CompletionNoticeLines() const {
             snapshot.delivery_target != TaskDeliveryTarget::MainTurnContext) {
             continue;
         }
-        const std::int64_t tokens = snapshot.total_input_tokens() + snapshot.output_tokens;
+        const auto tokens = snapshot.total_tokens();
         // tokens 三态(规格根因三):报告了给数;没报告但已跑过步数就写
         // "未报告";一步没跑才是真 0。不拿 0 冒充"服务端一枚 token 没烧"。
         const std::string token_text =
             snapshot.usage_reported || snapshot.steps_used == 0
-                ? lubancode::tools::FormatTokenCount(tokens)
-                : lubancode::cli::tr("agent_status.tokens_not_reported");
+                ? (tokens ? lubancode::tools::FormatTokenCount(*tokens) : "?")
+                : lubancode::text::tr("agent_status.tokens_not_reported");
         // 短因先行(规格"现场三"):耗尽/停下/失败·接口报错一眼分得开。
         std::string label = StateShortLabel(snapshot.state);
         const std::string reason = ReasonShortLabel(snapshot.outcome.reason);
@@ -1776,7 +1778,7 @@ void TaskLedger::ForceFinalizeWallClock(const std::shared_ptr<TaskRecord>& task,
     task->snapshot.outcome.status = TaskOutcomeStatus::Failed;
     task->snapshot.outcome.reason = TaskOutcomeReason::WallClockTimeout;
     task->snapshot.outcome.message =
-        lubancode::cli::trf("agent_outcome.wall_clock_force", timeout_secs);
+        lubancode::text::trf("agent_outcome.wall_clock_force", timeout_secs);
     task->snapshot.result = task->snapshot.outcome.message;
     AgentTaskEvent forced_event;
     forced_event.kind = AgentTaskEventKind::Failure;

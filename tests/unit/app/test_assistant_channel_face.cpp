@@ -14,8 +14,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -252,6 +254,16 @@ TEST_CASE("channel/list: 枚举配置的全部账号;空配置如实回") {
 
 namespace {
 
+struct PairingForwardObservation {
+    std::uint64_t polls = 0;
+    std::uint64_t commands = 0;
+    std::int64_t elapsed_ms = 0;
+    std::string command_id;
+    std::string command_token;
+    std::string write_error;
+    std::string outcome = "not_started";
+};
+
 // 伪持锁 gateway:占 GatewayLock + 消费 pairing 命令 + 写回执。与
 // ChannelGatewayWiring::ConsumePairingCommands 同款通道(锁/命令/回执
 // 三件),不引真渠道。
@@ -273,11 +285,17 @@ public:
     }
 
     // 消费一枚命令并写成功回执(sender 原样回)。超时没等到回 false。
-    bool ApproveOne(std::string* out_command_token) {
+    bool ApproveOne(std::string* out_command_token, PairingForwardObservation& observation) {
+        const auto started = std::chrono::steady_clock::now();
         const std::int64_t deadline = WallMs() + 15'000;
+        observation.outcome = "polling";
         while (WallMs() < deadline) {
+            ++observation.polls;
             const auto commands = gateway::PollPairingCommands(paths_.control_dir, boot_id_);
+            observation.commands += commands.size();
             if (!commands.empty()) {
+                observation.command_id = commands[0].command_id;
+                observation.command_token = commands[0].token;
                 gateway::GatewayPairingCommandResult result;
                 result.command_id = commands[0].command_id;
                 result.action = commands[0].action;
@@ -285,11 +303,18 @@ public:
                 result.sender_id = commands[0].token;
                 const std::string error =
                     gateway::WritePairingCommandResult(paths_.control_dir, result);
+                observation.write_error = error;
+                observation.outcome = error.empty() ? "receipt_written" : "receipt_write_failed";
+                observation.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started).count();
                 *out_command_token = commands[0].token;
                 return error.empty();
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
+        observation.outcome = "poll_deadline";
+        observation.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
         return false;
     }
 
@@ -309,26 +334,41 @@ TEST_CASE("channel/pairing/respond: 转发到持锁 gateway 的控制面,回执�
     REQUIRE(gateway.Start());
 
     std::string consumed_token;
-    std::thread consumer([&gateway, &consumed_token]() {
+    PairingForwardObservation observation;
+    std::thread consumer([&gateway, &consumed_token, &observation]() {
         std::string token;
         // doctest 断言不进线程——结果收回来主线程断。
-        if (gateway.ApproveOne(&token)) {
+        if (gateway.ApproveOne(&token, observation)) {
             consumed_token = token;
         }
     });
 
     int error_code = 0;
     std::string error_message;
+    const auto client_started = std::chrono::steady_clock::now();
     const nlohmann::json result = fixture.face->HandleChannelPairingRespond(
         nlohmann::json{{"channelId", "qqbot"},
                        {"accountId", "main"},
                        {"token", "owner-openid"},
                        {"action", "approve"}},
         error_code, error_message);
+    const auto client_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - client_started).count();
     consumer.join();
     gateway.Stop();
 
-    CHECK(error_code == 0);
+    // Read the worker-owned observations only after join. Keep the actual client
+    // error and receipt-write outcome before any assertion can abort this case.
+    const nlohmann::json diagnostic{
+        {"clientElapsedMs", client_elapsed_ms}, {"errorCode", error_code},
+        {"errorMessage", error_message}, {"result", result},
+        {"consumer", {{"polls", observation.polls}, {"commands", observation.commands},
+            {"elapsedMs", observation.elapsed_ms}, {"outcome", observation.outcome},
+            {"commandId", observation.command_id}, {"commandToken", observation.command_token},
+            {"writeError", observation.write_error}}}};
+    std::cout << "[assistant-pairing-forwarding] " << diagnostic.dump() << '\n';
+    REQUIRE_MESSAGE(error_code == 0, error_message);
+    REQUIRE_MESSAGE(result.is_object(), result.dump());
     REQUIRE(result.value("resolved", false) == true);
     CHECK(result["senderId"] == "owner-openid");
     CHECK(consumed_token == "owner-openid");  // 命令面收到的是同一笔(转发不换口)

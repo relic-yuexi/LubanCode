@@ -9,6 +9,21 @@
 
 namespace lubancode::api {
 
+// Input measurement is narrower than transport preparation. A Generate-only
+// SDK backend can describe its actual C++ arguments without claiming to know
+// the custom backend's later provider wire, hidden context or tokenizer.
+// These tags are audit metadata; they are never counted as model input bytes.
+struct ModelInputSnapshot {
+    nlohmann::json input;
+    std::string scope;
+    std::string output_limit_scope;
+};
+
+inline constexpr const char* kProviderWireInputScope = "provider_wire_input_v1";
+inline constexpr const char* kSdkModelRequestInputScope = "sdk_model_request_v1";
+inline constexpr const char* kProviderWireOutputLimitScope = "provider_wire";
+inline constexpr const char* kSdkGenerateOutputLimitScope = "sdk_generate_request";
+
 // Select input fields after adapter serialization/extra_body. Output limits,
 // transport flags and sampling options are not input tokens. Keep JSON string
 // arguments as strings; never reparse or reformat a tool's arguments.

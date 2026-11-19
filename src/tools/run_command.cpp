@@ -32,6 +32,7 @@
 #include <span>
 
 #include "platform/base64.hpp"  // Base64Encode:-EncodedCommand 的公共内核(审计 P2)
+#include "platform/process_diagnostics.hpp"
 #endif
 
 namespace lubancode::tools {
@@ -529,6 +530,59 @@ namespace {
 //      代价是这条路径下 $? 会被 Out-String/Write-Output 这两级管道盖掉,
 //      所以退出码改靠 $LASTEXITCODE(外部程序、或者脚本里显式 exit N)来判断,
 //      查不到 $LASTEXITCODE 时才退回去看 $?。
+std::optional<platform::ProcessCommandStartObservation> CurrentCommandStartObservation() noexcept {
+    const auto* buffer = platform::process_diagnostics;
+    const auto* held = buffer ? buffer->CommandStartObservation() : nullptr;
+    if (!held) return std::nullopt;
+    try {
+        if (held->tag.empty() || held->tag.size() > 64 ||
+            held->tag.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-") !=
+                std::string::npos) return std::nullopt;
+        for (const auto& path : held->paths_utf8) {
+            if (path.empty() || path.size() > 32768 || path.find('\0') != std::string::npos ||
+                path.find_first_of("\r\n") != std::string::npos || !platform::IsValidUtf8(path) ||
+                !std::filesystem::u8path(path).is_absolute()) return std::nullopt;
+        }
+        return *held;
+    } catch (...) {
+        // Observation setup must never reject or unwind a command.
+        return std::nullopt;
+    }
+}
+
+std::string CommandStartStatement(const platform::ProcessCommandStartObservation& observation,
+                                  std::size_t index) {
+    constexpr const char* stages[] = {"shell-entry", "wrapper-ready", "user-block-entry"};
+    std::string path;
+    for (const char ch : observation.paths_utf8[index]) {
+        path.push_back(ch);
+        if (ch == '\'') path.push_back(ch);
+    }
+    // The .NET call returns void; neither success nor a caught diagnostic
+    // failure enters the original output/ErrorRecord pipeline.
+    return "try { [System.IO.File]::WriteAllText('" + path + "', ('" + observation.tag +
+        "\t" + stages[index] + "\t' + $PID.ToString() + \"`n\"), [System.Text.Encoding]::ASCII) } catch {}\r\n";
+}
+
+std::optional<std::string> AddCommandStartObservation(const std::string& script, bool scoped) noexcept {
+    const auto observation = CurrentCommandStartObservation();
+    if (!observation) return std::nullopt;
+    try {
+        const std::string needle = scoped ? "& { " : "$oco = & { ";
+        const auto position = script.find(needle);
+        if (position == std::string::npos) return std::nullopt;
+        // Prepare every added value before touching the original script. An
+        // allocation failure leaves its original bytes, never a partial edit.
+        const auto shell = CommandStartStatement(*observation, 0);
+        const auto ready = CommandStartStatement(*observation, 1);
+        const auto user = CommandStartStatement(*observation, 2);
+        return shell + script.substr(0, position) + ready + needle + user +
+            script.substr(position + needle.size());
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 std::string BuildEncodedCommand(const std::string& user_command_utf8) {
     // 退出码契约(进程生命线单 P1"PowerShell 退出码包装会误判"),先定后写:
     //   1. 显式 exit N —— 原样(N 直接终止进程,下面的判定碰不到它);
@@ -554,7 +608,34 @@ std::string BuildEncodedCommand(const std::string& user_command_utf8) {
         "if ($lec -ne $null) { exit $lec }\r\n"  // 末次 native 的码优先
         "if ($errseen) { exit 1 } else { exit 0 }\r\n";  // cmdlet 报错/找不到命令 vs 干净
 
-    const std::wstring wide = platform::Utf8ToWide(script_utf8);
+    const auto observed_script = AddCommandStartObservation(script_utf8, false);
+    const std::wstring wide = platform::Utf8ToWide(observed_script ? *observed_script : script_utf8);
+    return platform::Base64Encode(std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(wide.data()), wide.size() * sizeof(wchar_t)));
+}
+
+// A scoped capture limit must observe output while the native command still
+// runs. The legacy $oco assignment buffers the entire scriptblock, hiding an
+// overflow until exit. Keep that old path intact for calls without an image.
+// This pipeline checks actual ErrorRecords before formatting them as plain
+// text, without retaining an array. Preserve native LASTEXITCODE precedence
+// and explicit exit N; cmdlet-only errors still return a nonzero exit code.
+// Bind the wrapper's own cmdlets to their built-in modules. Keep the same
+// formatting pipeline while avoiding unqualified cross-module discovery.
+std::string BuildScopedEncodedCommand(const std::string& user_command_utf8) {
+    const std::string script_utf8 =
+        "$ProgressPreference='SilentlyContinue'\r\n"
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\r\n"
+        "$LASTEXITCODE = $null\r\n"
+        "$script:lubanCommandErrorSeen = $false\r\n"
+        "& { " + user_command_utf8 + " } 2>&1 | Microsoft.PowerShell.Core\\ForEach-Object { "
+        "if ($_ -is [System.Management.Automation.ErrorRecord]) { $script:lubanCommandErrorSeen = $true }; $_ "
+        "} | Microsoft.PowerShell.Utility\\Out-String -Stream | Microsoft.PowerShell.Utility\\Write-Output\r\n"
+        "$lec = $LASTEXITCODE\r\n"
+        "if ($lec -ne $null) { exit $lec }\r\n"
+        "if ($script:lubanCommandErrorSeen) { exit 1 } else { exit 0 }\r\n";
+    const auto observed_script = AddCommandStartObservation(script_utf8, true);
+    const std::wstring wide = platform::Utf8ToWide(observed_script ? *observed_script : script_utf8);
     return platform::Base64Encode(std::span<const std::byte>(
         reinterpret_cast<const std::byte*>(wide.data()), wide.size() * sizeof(wchar_t)));
 }
@@ -598,11 +679,24 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
 Tool::Result RunCommandTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
     // context 的取消旗优先(本次调用真用的那根:主回合 ESC / 子代理的
     // CancelChain 合并旗);没递进来(旧调用方)退回 SetCancel 灌的那根。
-    return Run(input, context.cancel != nullptr ? context.cancel : cancel_, context.deadline);
+    return Run(input, context.cancel != nullptr ? context.cancel : cancel_,
+               context.command_limits ? &*context.command_limits : nullptr,
+               context.deadline);
 }
 
 Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel,
+                                 const CommandExecutionLimits* limits,
                                  std::optional<std::chrono::steady_clock::time_point> deadline) {
+    if (limits && (limits->timeout_ms == 0 || limits->timeout_ms > kMaxTimeoutMs ||
+                   limits->max_output_bytes == 0 ||
+                   limits->max_output_bytes > platform::kDefaultMaxOutputBytes)) {
+        Tool::Result rejected{"命令执行限额须填正整数：时限不超过 " + std::to_string(kMaxTimeoutMs) +
+                                  " 毫秒，捕获不超过 " +
+                                  std::to_string(platform::kDefaultMaxOutputBytes) + " 字节", true};
+        rejected.outcome = "validation_failed";
+        rejected.error_code = "process.invalid_execution_limits";
+        return rejected;
+    }
     if (!input.contains("command") || !input.at("command").is_string()) {
         return {"缺少必填参数 command(字符串)", true};
     }
@@ -629,6 +723,13 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
             return {"run_in_background 参数必须是布尔值", true};
         }
         run_in_background = it->get<bool>();
+    }
+
+    if (limits && (run_in_background || input.contains("max_runtime_ms"))) {
+        Tool::Result rejected{"本次命令须受时限与捕获上限约束，不能转入 CLI 后台入口", true};
+        rejected.outcome = "validation_failed";
+        rejected.error_code = "process.execution_mode_rejected";
+        return rejected;
     }
 
     // 后台最长运行时间(P2):64 位解析 + 范围检查,与 timeout_ms 同一张
@@ -681,6 +782,12 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
             timeout_ms = capped;
         }
     }
+
+    if (limits) {
+        timeout_ms = std::min(timeout_ms, static_cast<int>(limits->timeout_ms));
+    }
+    const std::size_t max_output_bytes = limits ? static_cast<std::size_t>(limits->max_output_bytes)
+                                                : platform::kDefaultMaxOutputBytes;
 
     // 工作目录(0.27.x):不填用当前会话工作目录。shell 先取个值(完整的
     // 合法性校验在各平台分支里做),隔离两道闸要用。
@@ -799,14 +906,16 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
         return {oss.str(), false};
     }
 
+    const platform::OutputOverflow overflow_mode =
+        limits ? platform::OutputOverflow::KillTree : platform::OutputOverflow::KeepHeadTail;
     platform::ProcessResult proc;
     if (is_cmd) {
         // RunShellCommand 内部已把 cmd.exe 的系统 ANSI 代码页输出转成 UTF-8
         // (跟 PowerShell 路径不一样,那边脚本里显式设了
         // [Console]::OutputEncoding=UTF8),这里拿到手就是合法 UTF-8。
         // cwd 走 lpCurrentDirectory(P1 根治:cmd 的 %VAR% 展开坑一并绕开)。
-        proc = platform::RunShellCommand(command, timeout_ms, effective_cancel, {}, platform::kDefaultMaxOutputBytes,
-                                         effective_cwd, platform::OutputOverflow::KeepHeadTail);
+        proc = platform::RunShellCommand(command, timeout_ms, effective_cancel, {}, max_output_bytes,
+                                         effective_cwd, overflow_mode);
     } else {
         // 前台 PowerShell 同上:cwd 走 lpCurrentDirectory,命令本体只保留
         // wrapper 的编码设置,不再前置 Set-Location。cancel 从前写死
@@ -814,10 +923,10 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
         // 取消,ESC/面板 x 都只能等超时)——现在与 cmd 路同走 effective_cancel,
         // 置位即收整棵树。
         const std::wstring cmdline = std::wstring(ps_exe) + L" -NoProfile -NonInteractive -EncodedCommand " +
-                                      platform::Utf8ToWide(BuildEncodedCommand(command));
-        proc = platform::RunProcess(cmdline, timeout_ms, effective_cancel, {},
-                                    platform::kDefaultMaxOutputBytes,
-                                    effective_cwd, platform::OutputOverflow::KeepHeadTail);
+                                      platform::Utf8ToWide(limits ? BuildScopedEncodedCommand(command)
+                                                                 : BuildEncodedCommand(command));
+        proc = platform::RunProcess(cmdline, timeout_ms, effective_cancel, {}, max_output_bytes,
+                                    effective_cwd, overflow_mode);
     }
 #else
     // POSIX(Terminal-Bench 加固单):不填 shell 时本机有 bash 就走
@@ -878,11 +987,14 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
     }
 
     // 前台 POSIX:cwd 走操作系统参数(子进程 exec 前 chdir),命令文本不
-    // 拼 cd——验收口径"cwd 不再拼进 shell 字符串"的前台半边。输出超帽
-    // 留首尾、不杀(编译报错多在尾巴)。
+    // 拼 cd——验收口径"cwd 不再拼进 shell 字符串"的前台半边。宿主带限额画像
+    // 时走 KillTree,缺省走 KeepHeadTail(留首尾、不杀)。
+    const platform::OutputOverflow overflow_mode =
+        limits ? platform::OutputOverflow::KillTree : platform::OutputOverflow::KeepHeadTail;
     platform::ProcessResult proc =
-        platform::RunProcess({shell_exe, "-c", command}, timeout_ms, effective_cancel, noninteractive_env,
-                             platform::kDefaultMaxOutputBytes, effective_cwd, platform::OutputOverflow::KeepHeadTail);
+        platform::RunProcess({shell_exe, "-c", command}, timeout_ms, effective_cancel,
+                             limits ? platform::EnvPairs{} : noninteractive_env, max_output_bytes,
+                             effective_cwd, overflow_mode);
 #endif
 
     // 捕获侧治本:cmd 分支已经在 platform 层按 CP_ACP 转过一遍,理论上到手
@@ -894,32 +1006,45 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
     // 对话历史。
     proc.output = platform::SanitizeUtf8(proc.output);
 
+    const auto attach_limits = [&](Tool::Result& result) {
+        if (limits) {
+            result.details["timeout_ms"] = timeout_ms;
+            result.details["max_output_bytes"] = max_output_bytes;
+        }
+    };
+
     // 逐枚追踪单:稳定 outcome/error_code 不靠中文正文分辨(spawn/超时/
     // 非零退出/输出超限各自有码;人话照旧给模型)。
     if (proc.spawn_failed) {
         Tool::Result spawn{proc.spawn_error, true};
         spawn.outcome = "spawn_failed";
         spawn.error_code = "process.spawn_failed";
+        attach_limits(spawn);
         return spawn;
     }
     if (proc.timed_out) {
         std::ostringstream oss;
         oss << "命令执行超时(超过 " << timeout_ms << " 毫秒),已强制终止。\n";
-        if (budget_capped_from_ms > 0) {
-            // 预算封顶压出来的超时:加大 timeout_ms 无用,明说,别让模型白重跑。
-            oss << "[墙钟预算所限:本次超时已从 " << budget_capped_from_ms << " 毫秒封顶到 " << timeout_ms
-                << " 毫秒,整场剩余时间不多;加大 timeout_ms 无效,请改用更快的检查或直接收尾]\n";
+        if (limits) {
+            oss << "本次执行受宿主时限约束，增额或改派须由宿主决定。\n";
+        } else {
+            if (budget_capped_from_ms > 0) {
+                // 预算封顶压出来的超时:加大 timeout_ms 无用,明说,别让模型白重跑。
+                oss << "[墙钟预算所限:本次超时已从 " << budget_capped_from_ms << " 毫秒封顶到 " << timeout_ms
+                    << " 毫秒,整场剩余时间不多;加大 timeout_ms 无效,请改用更快的检查或直接收尾]\n";
+            }
+            oss << "可改用以下策略：\n"
+                << "1. 加大 timeout_ms 后重跑。\n"
+                << "2. 传 run_in_background=true 后台运行，再用 background_output 查进度。\n"
+                << "3. 首次构建检查依赖下载是否卡网；离线环境先备好 _deps。\n";
         }
-        oss << "可改用以下策略：\n"
-            << "1. 加大 timeout_ms 后重跑。\n"
-            << "2. 传 run_in_background=true 后台运行，再用 background_output 查进度。\n"
-            << "3. 首次构建检查依赖下载是否卡网；离线环境先备好 _deps。\n";
         if (!proc.output.empty()) {
             oss << "终止前捕获到的输出:\n" << proc.output;
         }
         Tool::Result timed{oss.str(), true};
         timed.outcome = "timed_out";
         timed.error_code = "process.timeout";
+        attach_limits(timed);
         return timed;
     }
     if (proc.cancelled) {
@@ -930,9 +1055,23 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
         }
         Tool::Result cancelled{oss.str(), true};
         cancelled.outcome = "cancelled_during_run";
+        attach_limits(cancelled);
         return cancelled;
     }
-    // 输出超帽(Terminal-Bench 加固单):platform 层走 KeepHeadTail,不再杀
+    if (limits && proc.output_truncated) {
+        std::ostringstream oss;
+        oss << "[输出超过上限(" << max_output_bytes << "字节)已截断,命令已被强制终止。以下是截断前捕获到的输出]\n"
+            << proc.output;
+        // 单子的硬话:输出超限 = 命令被杀,结果不是成功。Agent Loop、workflow
+        // recorder、UI 只看布尔值时也不许把半截构建当成功。
+        Tool::Result truncated{oss.str(), true};
+        truncated.outcome = "output_limit";
+        truncated.error_code = "process.output_limit";
+        attach_limits(truncated);
+        return truncated;
+    }
+
+    // 输出超帽(Terminal-Bench 加固单):缺省走 KeepHeadTail,不再杀
     // 命令——命令照常跑完,退出码照实算;输出只留前 1MB 与后 1MB,中间换成
     // 一行省略标记。成败仍按退出码,截断另在正文头与 details 里注明。
     std::ostringstream oss;
@@ -951,6 +1090,7 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
         exited.outcome = "succeeded";
     }
     exited.details = nlohmann::json{{"exit_code", proc.exit_code}, {"timeout_ms", timeout_ms}};
+    attach_limits(exited);
     if (budget_capped_from_ms > 0) {
         exited.details["timeout_capped_by_budget"] = true;
     }

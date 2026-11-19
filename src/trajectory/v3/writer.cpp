@@ -6,11 +6,13 @@
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <new>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "trajectory/canonical_json.hpp"
 #include "trajectory/journal.hpp"
+#include "trajectory/session_recovery_view.hpp"
 
 namespace lubancode::trajectory::v3 {
 
@@ -82,9 +84,58 @@ std::int64_t V3Clock::WallMs() const {
 // 前置:Impl::AppendLineLocked 落稳事件后统一重放视图(定义在重放节)。
 std::string ApplyCommitEventToView(ContextView& view, const EventLine& line);
 
+namespace {
+// Legacy requests need not contain observations. Once an observation is present,
+// its single physical request must have an unambiguous committed source boundary.
+// Payloads stay in the journal; only boundary identity is retained here.
+class UsageObservationSequence {
+    struct Owner {
+        std::string session, run;
+        std::optional<std::string> turn, step;
+        bool Matches(const EventLine& event) const {
+            return session == event.session_id && run == event.run_id &&
+                   turn == event.turn_id && step == event.step_id;
+        }
+    };
+    struct Request {
+        std::optional<Owner> prepared, sent;
+        bool ambiguous = false;
+        bool observed = false;
+    };
+    std::unordered_map<std::string, Request> requests_;
+public:
+    std::optional<Schema3Error> Check(const EventLine& event) const {
+        if (event.kind != EventKindV3::ModelUsageObserved) return std::nullopt;
+        const auto found = event.request_id ? requests_.find(*event.request_id) : requests_.end();
+        if (found == requests_.end() || !found->second.prepared || !found->second.sent)
+            return Schema3Error{"v3writer.usage_source_missing", "usage observation requires prepared and sent boundaries"};
+        const auto& source = found->second;
+        if (source.ambiguous || !source.prepared->Matches(event) || !source.sent->Matches(event))
+            return Schema3Error{"v3writer.usage_source_mismatch", "usage observation source boundary differs"};
+        if (source.observed)
+            return Schema3Error{"v3writer.usage_observation_duplicate", "physical request already has a usage observation"};
+        return std::nullopt;
+    }
+    void Record(const EventLine& event) {
+        if (!event.request_id) return;
+        if (event.kind != EventKindV3::ModelRequestPrepared &&
+            event.kind != EventKindV3::ModelRequestSent &&
+            event.kind != EventKindV3::ModelUsageObserved) return;
+        auto& source = requests_[*event.request_id];
+        if (event.kind == EventKindV3::ModelRequestPrepared) {
+            if (source.prepared || source.sent) source.ambiguous = true;
+            if (!source.prepared) source.prepared = Owner{event.session_id, event.run_id, event.turn_id, event.step_id};
+        } else if (event.kind == EventKindV3::ModelRequestSent) {
+            if (source.sent || !source.prepared) source.ambiguous = true;
+            if (!source.sent) source.sent = Owner{event.session_id, event.run_id, event.turn_id, event.step_id};
+        } else source.observed = true;
+    }
+};
+} // namespace
+
 struct V3Writer::Impl {
     std::mutex mutex;
-    JournalWriter journal;
+    JournalOwner journal;
     std::string session_id;
     std::string run_id;
     std::uint64_t next_seq = 1;
@@ -93,7 +144,13 @@ struct V3Writer::Impl {
     std::uint64_t id_counters[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     ContextView context;
     std::unordered_set<std::string> message_ids;
+    UsageObservationSequence usage_observations;
+    // Values belong to committed system messages. Only the effective root may
+    // supply bindings to a later switch; an unadopted system cannot replace it.
+    std::unordered_map<std::string, nlohmann::json> system_host_bindings;
     bool broken = false;
+    bool closed = false;
+    std::optional<std::expected<void, std::string>> first_close_result;
     V3WriterOptions options;
     const V3Clock* clock = nullptr;
     V3Clock owned_clock;  // 无注入时的默认钟
@@ -215,12 +272,23 @@ struct V3Writer::Impl {
             receipt.error_message = error->message;
             return receipt;
         }
+        if (auto error = usage_observations.Check(line)) {
+            receipt.error_code = error->code;
+            receipt.error_message = error->message;
+            return receipt;
+        }
         return AppendLineLocked(line.ToJson(), line.event_id, durability);
     }
 
     // 落一行(哈希填好、canonical dump、追加、状态前移)。
     WriteReceipt AppendLineLocked(nlohmann::json json, std::string id, Durability durability) {
         WriteReceipt receipt;
+        if (closed) {
+            receipt.status = WriteReceipt::Status::Rejected;
+            receipt.error_code = "v3writer.closed";
+            receipt.error_message = "写句柄已关闭,停止提交";
+            return receipt;
+        }
         json.erase("prevHash");
         json.erase("lineHash");
         auto canonical = CanonicalJsonDump(json);
@@ -244,27 +312,64 @@ struct V3Writer::Impl {
             receipt.error_message = "注入的提交失败(测试)";
             return receipt;
         }
-        if (!journal.AppendLine(*final_line, durability)) {
+        // Own event decoding before native I/O. A decode allocation refusal
+        // must not strand an already returned usage fact behind a broken writer.
+        const bool message_line = json.at("type").get<std::string>() == "message";
+        std::optional<EventLine> prepared_event;
+        if (!message_line) {
+            std::string error_code, error_message;
+            prepared_event = EventLine::FromJsonStrict(json, &error_code, &error_message);
+            if (!prepared_event) {
+                receipt.error_code = std::move(error_code);
+                receipt.error_message = std::move(error_message);
+                return receipt;
+            }
+        }
+        // All returned identity and diagnostic storage belongs to this call
+        // before actual I/O. The lease keeps the owner gate through every
+        // allocating V3 view update, then freezes before that gate is released.
+        receipt.id = std::move(id);
+        receipt.seq = next_seq;
+        receipt.line_hash = line_hash;
+        receipt.error_code.reserve(96);
+        receipt.error_message.reserve(160);
+        JournalAppendIdentity identity{receipt.id, receipt.seq, receipt.line_hash, final_line->size()};
+        auto lease = journal.AppendLine(*final_line, durability, std::move(identity));
+        receipt.journal_append = lease.native();
+        if (receipt.journal_append->status != JournalAppendStatus::Committed) {
             broken = true;
+            receipt.id.clear(); receipt.seq = 0; receipt.line_hash.clear();
             receipt.error_code = "v3writer.io_failed";
             receipt.error_message = "追加落盘失败,句柄已断";
             return receipt;
         }
-        receipt.status = WriteReceipt::Status::Committed;
-        receipt.id = std::move(id);
-        receipt.seq = next_seq;
-        receipt.line_hash = line_hash;
-        if (json.at("type").get<std::string>() == "message") {
-            message_ids.insert(json.at("messageId").get<std::string>());
-        } else {
-            // 事件落稳后统一重放内存视图(链/版本),便利 API 不各自手工维护。
-            std::string ec, msg;
-            if (auto event = EventLine::FromJsonStrict(json, &ec, &msg)) {
-                ApplyCommitEventToView(context, *event);
+        try {
+            if (options.after_native_append) options.after_native_append();
+            if (message_line) {
+                message_ids.insert(json.at("messageId").get<std::string>());
+                if (json.at("message").value("role", std::string()) == "system" &&
+                    json.contains("systemMeta") && json["systemMeta"].contains("hostBindings")) {
+                    system_host_bindings[json.at("messageId").get<std::string>()] =
+                        json["systemMeta"]["hostBindings"];
+                }
+            } else {
+                // 事件落稳后统一重放内存视图(链/版本),便利 API 不各自手工维护。
+                ApplyCommitEventToView(context, *prepared_event);
+                usage_observations.Record(*prepared_event);
             }
+            ++next_seq;
+            last_hash = line_hash;
+            lease.Complete();
+            receipt.status = WriteReceipt::Status::Committed;
+        } catch (...) {
+            broken = true;
+            lease.UnconfirmSemantic();
+            receipt.status = WriteReceipt::Status::IoFailed;
+            receipt.error_code = "v3writer.completion_unconfirmed";
+            receipt.error_message = "日志已追加,V3 内存更新未确认;停止提交";
+            // Keep the actual committed native witness and row identity. Do not
+            // relabel as not-written or dispatch the same canonical row again.
         }
-        ++next_seq;
-        last_hash = line_hash;
         return receipt;
     }
 };
@@ -274,6 +379,33 @@ V3Writer::V3Writer(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 V3Writer::V3Writer(V3Writer&&) noexcept = default;
 V3Writer& V3Writer::operator=(V3Writer&&) noexcept = default;
 V3Writer::~V3Writer() = default;
+
+std::expected<void, std::string> V3Writer::Close() {
+    if (impl_ == nullptr) return {};
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->first_close_result) return *impl_->first_close_result;
+    impl_->closed = true;
+    if (!impl_->journal.Close()) {
+        impl_->broken = true;
+        impl_->first_close_result.emplace(std::unexpected(
+            std::string("v3writer.close_failed: 日志写句柄关闭失败或已有写入错误")));
+        return *impl_->first_close_result;
+    }
+    if (impl_->journal.semantic_unconfirmed()) {
+        impl_->broken = true;
+        impl_->first_close_result.emplace(std::unexpected(std::string("v3writer.completion_unconfirmed")));
+        return *impl_->first_close_result;
+    }
+    if (impl_->options.inject_close_failure) {
+        if (const auto injected = impl_->options.inject_close_failure()) {
+            impl_->broken = true;
+            impl_->first_close_result.emplace(std::unexpected(*injected));
+            return *impl_->first_close_result;
+        }
+    }
+    impl_->first_close_result.emplace();
+    return *impl_->first_close_result;
+}
 
 // ---------------------------------------------------------------------------
 // Start
@@ -286,7 +418,7 @@ std::expected<V3Writer, std::string> V3Writer::Start(const std::filesystem::path
                                                      nlohmann::json system_extra,
                                                      V3WriterOptions options,
                                                      const V3Clock* clock) {
-    auto journal = JournalWriter::Open(jsonl_path, JournalWriter::OpenMode::CreateNew);
+    auto journal = JournalOwner::CreateNew(jsonl_path, options.journal_native_io_probe);
     if (!journal.has_value()) {
         return std::unexpected(journal.error());
     }
@@ -523,52 +655,20 @@ V3VerifyReport VerifyV3File(const std::filesystem::path& path) {
         report.message = "尾行缺换行(崩溃截断);删尾修复归 §4.60,写入侧不偷偷裁";
         return report;
     }
-    std::string prev_hash{std::string(kGenesisHash)};
-    ContextView view;
-    for (std::size_t i = 0; i < lines->size(); ++i) {
-        nlohmann::json line_json = nlohmann::json::parse((*lines)[i], nullptr, false);
-        if (line_json.is_discarded()) {
-            report.error_code = "v3writer.bad_json";
-            report.message = "第 " + std::to_string(i + 1) + " 行不是合法 JSON";
-            return report;
-        }
-        auto error = VerifyLine(line_json, prev_hash, static_cast<std::uint64_t>(i + 1));
-        if (error.has_value()) {
-            report.error_code = error->code;
-            report.message = "第 " + std::to_string(i + 1) + " 行: " + error->message;
-            return report;
-        }
-        if (line_json.at("type").get<std::string>() == "event") {
-            std::string ec, msg;
-            auto event = EventLine::FromJsonStrict(line_json, &ec, &msg);
-            if (event.has_value()) {
-                std::string apply_error = ApplyCommitEventToView(view, *event);
-                if (!apply_error.empty()) {
-                    report.error_code = apply_error;
-                    report.message = "第 " + std::to_string(i + 1) + " 行: 链重放失败";
-                    return report;
-                }
-            }
-        }
-        prev_hash = line_json.at("lineHash").get<std::string>();
-    }
-    report.lines = lines->size();
-    report.context = std::move(view);
-    report.ok = !lines->empty();
-    if (!report.ok) {
-        report.error_code = "v3writer.empty";
-        report.message = "空卷";
-    }
-    return report;
+    return VerifyV3Lines(*lines);
 }
 
-std::optional<Schema3Error> VerifyLine(const nlohmann::json& line, std::string_view prev_hash,
-                                       std::uint64_t expect_seq) {
+namespace {
+
+std::optional<Schema3Error> VerifyLineInternal(const nlohmann::json& line, std::string_view prev_hash,
+                                               std::uint64_t expect_seq,
+                                               std::optional<MessageLine>* out_message,
+                                               std::optional<EventLine>* out_event) {
     std::string error_code, error_message;
     if (!line.is_object() || !line.contains("type") || !line.at("type").is_string()) {
         return Schema3Error{"v3writer.bad_type", "行缺 type"};
     }
-    const std::string type = line.at("type").get<std::string>();
+    const std::string& type = line.at("type").get_ref<const std::string&>();
     if (type == "message") {
         auto parsed = MessageLine::FromJsonStrict(line, &error_code, &error_message);
         if (!parsed.has_value()) {
@@ -577,6 +677,7 @@ std::optional<Schema3Error> VerifyLine(const nlohmann::json& line, std::string_v
         if (auto error = ValidateMessageLine(*parsed)) {
             return *error;
         }
+        if (out_message) *out_message = std::move(*parsed);
     } else if (type == "event") {
         auto parsed = EventLine::FromJsonStrict(line, &error_code, &error_message);
         if (!parsed.has_value()) {
@@ -585,6 +686,7 @@ std::optional<Schema3Error> VerifyLine(const nlohmann::json& line, std::string_v
         if (auto error = ValidateEventLine(*parsed)) {
             return *error;
         }
+        if (out_event) *out_event = std::move(*parsed);
     } else {
         return Schema3Error{"v3writer.bad_type", "type 只取 message/event"};
     }
@@ -593,33 +695,113 @@ std::optional<Schema3Error> VerifyLine(const nlohmann::json& line, std::string_v
         return Schema3Error{"v3writer.seq_gap", "seq 应为 " + std::to_string(expect_seq)};
     }
     if (!line.contains("prevHash") || !line.at("prevHash").is_string() ||
-        line.at("prevHash").get<std::string>() != prev_hash) {
+        line.at("prevHash").get_ref<const std::string&>() != prev_hash) {
         return Schema3Error{"v3writer.hash_chain_broken", "prevHash 与上一行 lineHash 不衔接"};
     }
-    nlohmann::json stripped = line;
-    stripped.erase("prevHash");
-    stripped.erase("lineHash");
-    auto canonical = CanonicalJsonDump(stripped);
+    auto canonical = CanonicalJsonDumpWithoutLineHashes(line);
     if (!canonical.has_value()) {
         return Schema3Error{"v3writer.canonical_failed", canonical.error()};
     }
     const std::string recomputed = ComputeLineHash(prev_hash, *canonical);
     if (!line.contains("lineHash") || !line.at("lineHash").is_string() ||
-        line.at("lineHash").get<std::string>() != recomputed) {
+        line.at("lineHash").get_ref<const std::string&>() != recomputed) {
         return Schema3Error{"v3writer.hash_mismatch", "lineHash 重算对不上"};
     }
     return std::nullopt;
 }
 
+VerifiedV3ParsedLines VerifyV3LinesImpl(const std::vector<std::string>& lines, bool retain_parsed) {
+    VerifiedV3ParsedLines out;
+    UsageObservationSequence usage_observations;
+    std::string prev_hash{std::string(kGenesisHash)};
+    ContextView view;
+    if (retain_parsed) {
+        out.is_message.reserve(lines.size());
+    }
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        nlohmann::json line_json = nlohmann::json::parse(lines[i], nullptr, false);
+        if (line_json.is_discarded()) {
+            out.report.error_code = "v3writer.bad_json";
+            out.report.message = "第 " + std::to_string(i + 1) + " 行不是合法 JSON";
+            return out;
+        }
+        std::optional<MessageLine> parsed_message;
+        std::optional<EventLine> parsed_event;
+        auto error = VerifyLineInternal(
+            line_json, prev_hash, static_cast<std::uint64_t>(i + 1),
+            retain_parsed ? &parsed_message : nullptr, &parsed_event);
+        if (error.has_value()) {
+            out.report.error_code = error->code;
+            out.report.message = "第 " + std::to_string(i + 1) + " 行: " + error->message;
+            return out;
+        }
+        if (parsed_event.has_value()) {
+            if (auto sequence_error = usage_observations.Check(*parsed_event)) {
+                out.report.error_code = sequence_error->code;
+                out.report.message = "line " + std::to_string(i + 1) + ": " + sequence_error->message;
+                return out;
+            }
+            usage_observations.Record(*parsed_event);
+            std::string apply_error = ApplyCommitEventToView(view, *parsed_event);
+            if (!apply_error.empty()) {
+                out.report.error_code = apply_error;
+                out.report.message = "第 " + std::to_string(i + 1) + " 行: 链重放失败";
+                return out;
+            }
+            if (retain_parsed) {
+                if (out.session_id.empty()) {
+                    out.session_id = parsed_event->session_id;
+                    out.run_id = parsed_event->run_id;
+                }
+                out.events.push_back(std::move(*parsed_event));
+                out.is_message.push_back(false);
+            }
+        } else if (retain_parsed && parsed_message.has_value()) {
+            if (out.session_id.empty()) {
+                out.session_id = parsed_message->session_id;
+                out.run_id = parsed_message->run_id;
+            }
+            out.messages.push_back(std::move(*parsed_message));
+            out.is_message.push_back(true);
+        }
+        prev_hash = line_json.at("lineHash").get_ref<const std::string&>();
+    }
+    out.report.lines = lines.size();
+    out.report.context = std::move(view);
+    out.report.ok = !lines.empty();
+    if (!out.report.ok) {
+        out.report.error_code = "v3writer.empty";
+        out.report.message = "空卷";
+    }
+    return out;
+}
+
+} // namespace
+
+V3VerifyReport VerifyV3Lines(const std::vector<std::string>& lines) {
+    return VerifyV3LinesImpl(lines, false).report;
+}
+
+VerifiedV3ParsedLines VerifyAndParseV3Lines(const std::vector<std::string>& lines) {
+    return VerifyV3LinesImpl(lines, true);
+}
+
+std::optional<Schema3Error> VerifyLine(const nlohmann::json& line, std::string_view prev_hash,
+                                       std::uint64_t expect_seq) {
+    return VerifyLineInternal(line, prev_hash, expect_seq, nullptr, nullptr);
+}
+
 std::expected<V3Writer, std::string> V3Writer::Continue(const std::filesystem::path& jsonl_path,
                                                         V3WriterOptions options,
                                                         const V3Clock* clock) {
+    if (options.journal_native_io_probe)
+        return std::unexpected("v3writer.native_probe_resume_unsupported");
     V3VerifyReport report = VerifyV3File(jsonl_path);
     if (!report.ok) {
         return std::unexpected("v3writer.continue_not_clean: " + report.error_code + " " +
                                report.message);
     }
-    auto journal = JournalWriter::Open(jsonl_path, JournalWriter::OpenMode::Append);
+    auto journal = JournalOwner::ContinueFile(jsonl_path);
     if (!journal.has_value()) {
         return std::unexpected(journal.error());
     }
@@ -643,6 +825,15 @@ std::expected<V3Writer, std::string> V3Writer::Continue(const std::filesystem::p
         last_hash = line.at("lineHash").get<std::string>();
         if (line.at("type").get<std::string>() == "message") {
             impl->message_ids.insert(line.at("messageId").get<std::string>());
+            if (line.at("message").value("role", std::string()) == "system" &&
+                line.contains("systemMeta") && line["systemMeta"].contains("hostBindings")) {
+                impl->system_host_bindings[line.at("messageId").get<std::string>()] =
+                    line["systemMeta"]["hostBindings"];
+            }
+        } else {
+            std::string ec, message;
+            if (auto event = EventLine::FromJsonStrict(line, &ec, &message))
+                impl->usage_observations.Record(*event);
         }
     }
     impl->last_hash = last_hash;
@@ -652,6 +843,80 @@ std::expected<V3Writer, std::string> V3Writer::Continue(const std::filesystem::p
     }
     RestoreIdCounters(impl->id_counters, lines);
     return V3Writer(std::move(impl));
+}
+
+std::expected<V3Writer, std::string> V3Writer::ContinueOwnedPrefix(const std::filesystem::path& jsonl_path,
+    std::string_view prefix, const JournalFileAnchor& anchor, V3WriterOptions options, const V3Clock* clock) {
+    return ContinueOwnedMaterial(jsonl_path, prefix, anchor, nullptr, std::move(options), clock);
+}
+std::expected<V3Writer, std::string> V3Writer::ContinueOwnedMaterial(
+    const std::filesystem::path& jsonl_path, std::string_view prefix, const JournalFileAnchor& anchor,
+    const JournalReadHandle* capture, V3WriterOptions options, const V3Clock* clock) {
+    if (options.journal_native_io_probe)
+        return std::unexpected("v3writer.native_probe_resume_unsupported");
+    auto raw_lines = RecoveryStreamLines(prefix, std::nullopt, true);
+    if (!raw_lines) return std::unexpected(raw_lines.error());
+    V3VerifyReport report = VerifyV3Lines(*raw_lines);
+    if (!report.ok) {
+        return std::unexpected("v3writer.continue_not_clean: " + report.error_code + " " +
+                               report.message);
+    }
+    auto journal = capture ? JournalOwner::ContinueCaptured(*capture)
+                           : JournalOwner::ContinueOwnedPrefix(jsonl_path, prefix, anchor);
+    if (!journal.has_value()) {
+        return std::unexpected(journal.error());
+    }
+    auto impl = std::make_unique<Impl>();
+    impl->journal = std::move(*journal);
+    impl->options = std::move(options);
+    impl->clock = clock;
+    impl->next_seq = report.lines + 1;
+    impl->context = std::move(report.context);
+    // 身份、尾 hash、id 计数器、messageId 集合从重放行恢复。
+    std::vector<nlohmann::json> lines;
+    std::string last_hash;
+    for (const auto& raw : *raw_lines) {
+        auto line = nlohmann::json::parse(raw, nullptr, false);
+        if (line.is_discarded()) {
+            continue;  // VerifyV3Lines 已保证不会走到这
+        }
+        lines.push_back(line);
+        last_hash = line.at("lineHash").get<std::string>();
+        if (line.at("type").get<std::string>() == "message") {
+            impl->message_ids.insert(line.at("messageId").get<std::string>());
+            if (line.at("message").value("role", std::string()) == "system" &&
+                line.contains("systemMeta") && line["systemMeta"].contains("hostBindings")) {
+                impl->system_host_bindings[line.at("messageId").get<std::string>()] =
+                    line["systemMeta"]["hostBindings"];
+            }
+        } else {
+            std::string ec, message;
+            if (auto event = EventLine::FromJsonStrict(line, &ec, &message))
+                impl->usage_observations.Record(*event);
+        }
+    }
+    impl->last_hash = last_hash;
+    if (!lines.empty()) {
+        impl->session_id = lines.front().at("sessionId").get<std::string>();
+        impl->run_id = lines.front().at("runId").get<std::string>();
+    }
+    RestoreIdCounters(impl->id_counters, lines);
+    return V3Writer(std::move(impl));
+}
+
+std::expected<V3Writer, std::string> V3Writer::ContinueCaptured(
+    const JournalReadHandle& capture, V3WriterOptions options, const V3Clock* clock) {
+    if (options.journal_native_io_probe)
+        return std::unexpected("v3writer.native_probe_resume_unsupported");
+    const auto anchor = capture.native_anchor();
+    if (!capture || !anchor) return std::unexpected("recovery.anchor_missing");
+    return ContinueOwnedMaterial(capture.path(), capture.bytes(), *anchor, &capture, std::move(options), clock);
+}
+std::expected<JournalReadHandle, std::string> V3Writer::CaptureJournal(
+    std::optional<std::size_t> max_bytes) const {
+    if (!impl_) return std::unexpected("recovery.anchor_missing");
+    std::lock_guard lock(impl_->mutex);
+    return impl_->journal.Capture(max_bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +939,28 @@ WriteReceipt V3Writer::AppendEvent(EventDraft draft, Durability durability) {
                             "句柄已断,停止提交"};
     }
     return impl_->CommitEvent(std::move(draft), durability);
+}
+
+std::optional<WriteReceipt> V3Writer::AppendPreparedEvent(EventDraftFactory prepare, void* context,
+                                                         Durability durability) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->broken) {
+        return WriteReceipt{WriteReceipt::Status::IoFailed, "", 0, "", "v3writer.broken",
+                            "句柄已断,停止提交"};
+    }
+    for (unsigned attempt = 0; ; ++attempt) {
+        try {
+            auto draft = prepare(context);
+            if (!draft) return std::nullopt;
+            // CommitEvent catches every exception after native append and returns
+            // its owned witness. Only pre-I/O bad_alloc can escape to this catch.
+            auto receipt = impl_->CommitEvent(std::move(*draft), durability);
+            // Never copy allocating receipt strings after a real append.
+            return std::optional<WriteReceipt>{std::in_place, std::move(receipt)};
+        } catch (const std::bad_alloc&) {
+            if (attempt != 0) throw;
+        }
+    }
 }
 
 WriteReceipt V3Writer::AdmitMessages(std::vector<std::string> message_ids,
@@ -711,9 +998,14 @@ V3Writer::ReduceToolPreviewsResult V3Writer::ReduceToolPreviews(
     // 调用方复述——身份对不上宁可拒收,不造错链。
     std::unordered_map<std::string, nlohmann::json> originals;
     {
-        bool truncated = false;
-        auto raw_lines = ReadRawLines(impl_->journal.path(), &truncated);
-        if (!raw_lines.has_value() || truncated) {
+        auto capture = impl_->journal.Capture();
+        if (!capture) {
+            result.error = "v3reducer.read_failed: 原账读不齐";
+            return result;
+        }
+        auto raw_lines = RecoveryStreamLines(capture->bytes(), std::nullopt, true);
+        const auto closed = capture->Close();
+        if (!raw_lines || !closed) {
             result.error = "v3reducer.read_failed: 原账读不齐";
             return result;
         }
@@ -835,6 +1127,7 @@ V3Writer::SwitchSystemResult V3Writer::SwitchSystem(std::string_view new_system_
                                                     MessageOrigin origin, Durability durability) {
     // 调用方已持锁由各步内部自理;三步各自独立提交,失败即停。
     SwitchSystemResult result;
+    std::optional<nlohmann::json> inherited_bindings;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         if (impl_->broken) {
@@ -850,6 +1143,11 @@ V3Writer::SwitchSystemResult V3Writer::SwitchSystem(std::string_view new_system_
             return result;
         }
         nlohmann::json payload = change_payload;
+        if (const auto binding = impl_->system_host_bindings.find(impl_->context.system_message_ref);
+            binding != impl_->system_host_bindings.end()) {
+            inherited_bindings = binding->second;
+            payload["hostBindings"] = *inherited_bindings;
+        }
         payload["oldSystemMessageRef"] = impl_->context.system_message_ref;
         if (!payload.contains("systemChanged")) {
             payload["systemChanged"] = true;
@@ -871,8 +1169,9 @@ V3Writer::SwitchSystemResult V3Writer::SwitchSystem(std::string_view new_system_
         system_draft.system_meta = nlohmann::json::object(
             {{"cause", change_payload.value("cause", std::string("settings_changed"))},
              {"changeEventRef", result.change_event.id},
-             {"settingsVersion", change_payload.value("settingsVersion", 0)},
+             {"settingsVersion", change_payload.value("settingsVersion", nlohmann::json(0))},
              {"systemChanged", change_payload.value("systemChanged", true)}});
+        if (inherited_bindings) (*system_draft.system_meta)["hostBindings"] = *inherited_bindings;
         system_draft.message = nlohmann::json::object(
             {{"role", "system"}, {"content", std::string(new_system_content)}});
         result.system_message = impl_->CommitMessage(std::move(system_draft), durability);
@@ -899,6 +1198,7 @@ V3Writer::SwitchSystemResult V3Writer::SwitchSystem(std::string_view new_system_
              {"afterRevision", before + 1},
              {"rootMessageRef", result.system_message.id},
              {"contextChain", ChainToJson(new_chain)}});
+        if (inherited_bindings) apply.payload["hostBindings"] = *inherited_bindings;
         result.apply_event = impl_->CommitEvent(std::move(apply), durability);
         // 落稳后 CommitEvent 统一重放视图:链根已换新 system、revision 前移。
     }
@@ -911,7 +1211,8 @@ WriteReceipt V3Writer::PrepareRequest(std::string_view request_id, std::string_v
                                       const std::vector<std::string>& input_message_refs,
                                       nlohmann::json provider_snapshot,
                                       std::optional<std::string> compact_id,
-                                      Durability durability) {
+                                      Durability durability,
+                                      std::optional<std::string> parent_turn_id) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->broken) {
         return WriteReceipt{WriteReceipt::Status::IoFailed, "", 0, "", "v3writer.broken",
@@ -933,6 +1234,7 @@ WriteReceipt V3Writer::PrepareRequest(std::string_view request_id, std::string_v
     EventDraft draft;
     draft.kind = EventKindV3::ModelRequestPrepared;
     draft.turn_id = std::string(turn_id);
+    draft.parent_turn_id = std::move(parent_turn_id);
     draft.step_id = std::string(step_id);
     draft.request_id = std::string(request_id);
     draft.compact_id = compact_id;
@@ -1192,13 +1494,26 @@ std::string V3Writer::last_line_hash() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->last_hash;
 }
-void V3Writer::CloseFile() {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    impl_->journal.Close();
-    impl_->broken = true;
-}
+void V3Writer::CloseFile() { (void)Close(); }
 
 bool V3Writer::broken() const { return impl_->broken; }
+bool V3Writer::closed() const {
+    if (impl_ == nullptr) return true;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->closed;
+}
+std::optional<trajectory::JournalAppendReceipt> V3Writer::first_unconfirmed_journal_append() const {
+    if (impl_ == nullptr) return std::nullopt;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->journal.first_unconfirmed_append();
+}
+std::optional<trajectory::JournalOwnerUnconfirmed> V3Writer::first_unconfirmed_journal_completion() const {
+    if (impl_ == nullptr) return std::nullopt;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    auto first = impl_->journal.first_unconfirmed();
+    if (!first || first->phase != JournalOwnerUnconfirmed::Phase::SemanticCompletion) return std::nullopt;
+    return first;
+}
 const ContextView& V3Writer::context() const { return impl_->context; }
 bool V3Writer::HasMessageId(std::string_view message_id) const {
     std::lock_guard<std::mutex> lock(impl_->mutex);

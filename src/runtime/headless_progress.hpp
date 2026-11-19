@@ -5,6 +5,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 
 #include "agent/context.hpp"
@@ -29,8 +30,9 @@ private:
     std::string model_;
     std::map<std::string, std::string> tools_;
     std::chrono::steady_clock::time_point started_ = std::chrono::steady_clock::now();
-    std::int64_t input_ = 0, output_ = 0, cache_read_ = 0, cache_write_ = 0;
-    int requests_ = 0, usage_reports_ = 0, reads_reported_ = 0, writes_reported_ = 0;
+    std::optional<std::int64_t> input_{0}, output_{0}, cache_read_{0}, cache_write_{0};
+    std::optional<std::int64_t> requests_{0}, usage_reports_{0}, reads_reported_{0}, writes_reported_{0};
+    bool has_usage_ = false, has_reads_ = false, has_writes_ = false;
     std::size_t window_ = 0;
 };
 

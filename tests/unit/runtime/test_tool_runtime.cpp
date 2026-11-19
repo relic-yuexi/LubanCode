@@ -1,5 +1,5 @@
 // ToolRuntime 的装配与寿命性状测试:真构造、真查询、真析构(空配置下
-// 不起 MCP 子进程、不配 LSP;用户主目录由 ScopedHomeEnv 钉到空临时目录,
+// 不起 MCP 子进程、不配 LSP;ToolAssemblyPlan 显式给出各场插件与数据根,
 // 插件三路扫描静默空,工具数只剩内置那批)。MCP/DLL/LSP 的真 fixture 见
 // test_mcp_*、test_plugins、test_lsp_*,这边只钉装配结构:哪张表有哪些
 // 工具、agent 工具抓的引用、Explore 硬边界、过滤与补挂。
@@ -8,22 +8,42 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
+#include <sstream>
+#include <stdexcept>
 #include <string>
+#include <thread>
+#include <utility>
+#include <variant>
 #include <vector>
 #include <nlohmann/json.hpp>
 
 #include "api/backend.hpp"
 #include "app/tool_runtime.hpp"
+#include "app/cli_tool_assembly.hpp"
+#include "config/plugin_trust.hpp"
 #include "memory/project_memory.hpp"  // P2 memory gate 清账:真 ProjectMemory 翻档
 #include "platform/paths.hpp"
+#include "platform/process.hpp"
+#include "runtime/plugin_tool.hpp"
+#include "runtime/scoped_turn_bindings.hpp"
+#include "runtime/tool_trace_hub.hpp"
+#include "scoped_turn_fixture.hpp"
+#include "tool_assembly_fixture.hpp"
+#include "trajectory/v3/reader.hpp"
 
 namespace {
 
@@ -53,74 +73,230 @@ const std::vector<lubancode::tools::SkillMeta>& NoSkills() {
     return skills;
 }
 
-// 用户目录闸:把 HomeLubancodeDir() 的根(Windows 读 %USERPROFILE%、别的
-// 平台读 $HOME)钉到一只空临时目录,出了作用域原样还原。MountPlugins 在
-// ToolRuntime 构造里会扫 <主目录>/.lubancode/plugins(DLL/Lua/process 三
-// 路),真机上用户装过插件,插件工具就数进注册表——空配置的"工具数低于
-// 延迟阈值"断言跟着假红(真机实测单 P1-3:一枚 gui-agent 十枚工具就能把
-// deferral 顶成 true)。铁律是 ctest 裸跑即绿,单测不读用户家目录:Config
-// 与 ToolRuntime::Options 都没有插件目录注入口,环境变量是唯一口子,就从
-// 这儿钉。doctest 单进程:设/还原由 RAII 成对保证,异常路径也还原;本册
-// 三只用例各持各的闸,先构造的用例还原后才轮到下一只,不连坐。
-class ScopedHomeEnv {
-public:
-    ScopedHomeEnv() {
-        std::error_code ec;
-        home_ = std::filesystem::temp_directory_path(ec) / "lubancode_tool_runtime_home";
-        std::filesystem::remove_all(home_, ec);  // 上一回跑剩的插件清零
-        std::filesystem::create_directories(home_, ec);
-        const std::string value = lubancode::platform::PathToUtf8(home_);
-#ifdef _WIN32
-        // 旧值按 HomeLubancodeDir 同一条编码链存成 UTF-8(GetEnvVar 拿的是
-        // ACP 字节,先 AcpBytesToUtf8 解回),还原时再转回去,一口进一口出。
-        const auto raw = lubancode::platform::GetEnvVar("USERPROFILE");
-        old_utf8_ = raw.has_value() ? std::optional<std::string>(lubancode::platform::AcpBytesToUtf8(*raw))
-                                    : std::nullopt;
-        // _wputenv 走宽口,同步写 CRT 与进程两块环境;_dupenv_s 读的正是
-        // CRT 块。不经窄口,编码不漂。
-        SetWindowsUserProfiles(value);
-#else
-        const char* raw = std::getenv("HOME");
-        old_utf8_ = raw != nullptr ? std::optional<std::string>(raw) : std::nullopt;
-        setenv("HOME", value.c_str(), /*replace=*/1);
-#endif
-    }
-    ~ScopedHomeEnv() {
-#ifdef _WIN32
-        SetWindowsUserProfiles(old_utf8_.value_or(std::string()));  // 空串即移除
-#else
-        if (old_utf8_.has_value()) {
-            setenv("HOME", old_utf8_->c_str(), /*replace=*/1);
-        } else {
-            unsetenv("HOME");
-        }
-#endif
-    }
-    ScopedHomeEnv(const ScopedHomeEnv&) = delete;
-    ScopedHomeEnv& operator=(const ScopedHomeEnv&) = delete;
+using lubancode::test_support::ToolAssemblyFixture;
 
-private:
-#ifdef _WIN32
-    static void SetWindowsUserProfiles(const std::string& utf8_value) {
-        const std::wstring entry = L"USERPROFILE=" + lubancode::platform::Utf8ToWide(utf8_value);
-        _wputenv(entry.c_str());
+struct CaptureOutput {
+    std::ostringstream output, error;
+    std::streambuf* previous_output = std::cout.rdbuf(output.rdbuf());
+    std::streambuf* previous_error = std::cerr.rdbuf(error.rdbuf());
+    void Restore() {
+        if (!previous_output) return;
+        std::cout.rdbuf(previous_output);
+        std::cerr.rdbuf(previous_error);
+        previous_output = nullptr;
     }
-#endif
-
-    std::filesystem::path home_;
-    std::optional<std::string> old_utf8_;
+    ~CaptureOutput() { Restore(); }
 };
+
+void InstallMarkerPlugin(const std::filesystem::path& plugins, const std::string& marker) {
+    std::filesystem::create_directories(plugins / "isolated");
+    nlohmann::json tool;
+    tool["name"] = "inspect";
+    tool["description"] = marker;
+    tool["input_schema"] = {{"type", "object"}};
+    nlohmann::json manifest;
+    manifest["manifest_version"] = 1;
+    manifest["id"] = "isolated";
+    manifest["version"] = "1.0.0";
+    manifest["language"] = "shell";
+    manifest["runtime"] = {{"kind", "process"}, {"command", "echo"}};
+    manifest["tools"] = nlohmann::json::array({tool});
+    std::ofstream(plugins / "isolated" / "plugin.json", std::ios::binary) << manifest.dump();
+}
+
+void WriteAgent(const std::filesystem::path& directory, const std::string& name) {
+    std::filesystem::create_directories(directory);
+    std::ofstream(directory / (name + ".yaml"), std::ios::binary)
+        << "schema: 1\nname: " << name << "\ndescription: " << name
+        << " marker\nskills:\n  preload:\n    - startup-skill\n";
+}
 
 }  // namespace
 
 using namespace lubancode::app;
 
+namespace {
+namespace parallel_fixture = lubancode::test_support::turn_scope;
+
+struct InvocationObservation {
+    int index;
+    std::thread::id thread;
+    lubancode::tools::ToolInvocationIdentity identity;
+};
+struct InvocationGate {
+    std::mutex mutex;
+    std::condition_variable changed;
+    int entered = 0, completed = 0, timeouts = 0;
+    std::vector<InvocationObservation> execution;
+    std::vector<std::pair<std::thread::id, lubancode::tools::ToolInvocationIdentity>> callbacks;
+};
+class InvocationRead final : public lubancode::tools::Tool {
+public:
+    InvocationRead(std::shared_ptr<InvocationGate> gate, bool stop)
+        : gate_(std::move(gate)), stop_(stop) {}
+    std::string name() const override { return "read_file"; }
+    std::string description() const override { return "Read owned invocation identity."; }
+    nlohmann::json input_schema() const override {
+        return {{"type", "object"}, {"properties", {{"i", {{"type", "integer"}}}}}};
+    }
+    lubancode::tools::EffectClass effect_class() const override {
+        return lubancode::tools::EffectClass::ReadOnlyLocal;
+    }
+    Result execute(const nlohmann::json&) override { return {"context required", true}; }
+    Result execute(const nlohmann::json& input, const lubancode::tools::ToolExecutionContext& context) override {
+        const int index = input.at("i").get<int>();
+        {
+            std::unique_lock lock(gate_->mutex);
+            gate_->execution.push_back({index, std::this_thread::get_id(), context.invocation});
+            ++gate_->entered;
+            gate_->changed.notify_all();
+            if (!gate_->changed.wait_for(lock, std::chrono::seconds(5), [&] { return gate_->entered >= 2; }))
+                ++gate_->timeouts;
+            ++gate_->completed;
+        }
+        Result result{"read#" + std::to_string(index), stop_ && index == 0};
+        if (stop_ && index == 0) {
+            result.execution_control = lubancode::tools::ExecutionControl::StopIndeterminate;
+            result.error_code = "fixture.indeterminate";
+        }
+        return result;
+    }
+private:
+    std::shared_ptr<InvocationGate> gate_;
+    bool stop_;
+};
+class InvocationWrite final : public lubancode::tools::Tool {
+public:
+    std::atomic<int> calls{0};
+    std::string name() const override { return "write_file"; }
+    std::string description() const override { return "Later exclusive probe."; }
+    nlohmann::json input_schema() const override { return {{"type", "object"}}; }
+    Result execute(const nlohmann::json&) override { ++calls; return {"unexpected later write", false}; }
+};
+
+void VerifyParallelOwnedInvocation(bool stop) {
+    using namespace lubancode;
+    const auto main_thread = std::this_thread::get_id();
+    parallel_fixture::SessionFixture session;
+    parallel_fixture::Backend backend;
+    tools::ToolRegistry registry;
+    auto gate = std::make_shared<InvocationGate>();
+    registry.Register(std::make_unique<InvocationRead>(gate, stop));
+    auto write = std::make_unique<InvocationWrite>();
+    auto* write_probe = write.get();
+    registry.Register(std::move(write));
+    std::vector<api::StreamEvent> batch{api::MessageStart{"invocation-message", "scope-model"}};
+    const int calls = stop ? 4 : 2;
+    for (int index = 0; index != calls; ++index) {
+        batch.push_back(api::ToolUseStart{index, "provider-call-" + std::to_string(index),
+                                        index == 2 ? "write_file" : "read_file"});
+        batch.push_back(api::ToolUseInputDelta{index, nlohmann::json{{"i", index}}.dump()});
+        batch.push_back(api::ContentBlockDone{index});
+    }
+    batch.push_back(api::MessageDone{"tool_use", api::Usage{}});
+    backend.replies = {std::move(batch), parallel_fixture::TextReply("finished")};
+    agent::AgentProfile profile;
+    profile.request.model = "scope-model";
+    profile.system_prompt = "Preserve turn bindings.";
+    profile.runtime.max_steps_per_turn = 5;
+    profile.runtime.tool_batch_strategy = agent::ToolBatchStrategy::ParallelRead;
+    profile.runtime.parallel_read_concurrency = 2;
+    agent::Agent loop(backend, registry, std::move(profile));
+    auto* ledger = session.session->trajectory();
+    REQUIRE(ledger->v3_main_writer() != nullptr);
+    auto bridge = ledger->NewTurnBridge({"fixture", "responses", "owned-invocation", {}});
+    REQUIRE(bridge != nullptr);
+    const auto turn = ledger->v3_main_writer()->NewTurnId();
+    runtime::ToolTraceHub hub(session.session->ids());
+    agent::TurnWiring wiring;
+    runtime::ScopedTurnBindings bindings(loop);
+    bindings.Bind(wiring, {.hub = &hub, .trajectory = bridge.get(),
+                          .thread_id = ledger->session_id(), .turn_id = turn});
+    wiring.tool_invocation_identity = [&](const std::string& provider_call) -> std::optional<tools::ToolInvocationIdentity> {
+        const auto actual = bridge->V3ExecutingCallIdentity(provider_call);
+        if (!actual) return std::nullopt; // A callback before started cannot forge identity.
+        tools::ToolInvocationIdentity identity{ledger->session_id(), "host-operation", turn, actual->first, actual->second};
+        std::lock_guard lock(gate->mutex);
+        gate->callbacks.emplace_back(std::this_thread::get_id(), identity);
+        return identity;
+    };
+    bridge->BeginTurn(turn, "external_user");
+    api::Message input;
+    input.role = api::Role::User;
+    input.content.push_back(api::TextBlock{"two concurrent reads"});
+    bridge->RecordInput(input);
+    const auto outcome = loop.Run(std::move(input), wiring);
+    REQUIRE(outcome.has_value());
+    bridge->EndTurn(!stop, false, stop ? "fixture.indeterminate" : "");
+    bindings.Reset(); // The live bridge borrow retires before reading or closing its owner.
+    CHECK_FALSE(wiring.tool_invocation_identity);
+    CHECK(outcome->side_effect_indeterminate == stop);
+    CHECK_FALSE(outcome->cancelled);
+    CHECK(write_probe->calls.load() == 0);
+    CHECK(backend.requests.size() == (stop ? 1 : 2));
+    REQUIRE(gate->execution.size() == 2);
+    REQUIRE(gate->callbacks.size() == 2);
+    CHECK(gate->entered == 2);
+    CHECK(gate->completed == 2); // Both already-started workers exited before the turn returned.
+    CHECK(gate->timeouts == 0); // A serial implementation cannot satisfy the two-entry barrier.
+    const auto source = trajectory::v3::ReadV3Ledger(ledger->v3_main_writer()->path());
+    const auto source_error = source.has_value() ? std::string() : source.error();
+    REQUIRE_MESSAGE(source.has_value(), source_error);
+    std::set<std::string> action_ids;
+    for (const auto& observation : gate->execution) {
+        CHECK(observation.thread != main_thread);
+        const auto& identity = observation.identity;
+        CHECK(identity.session_id == ledger->session_id());
+        CHECK(identity.operation_id == "host-operation");
+        CHECK(identity.turn_id == turn);
+        CHECK(identity.action_id != "provider-call-" + std::to_string(observation.index));
+        CHECK(identity.attempt > 0);
+        CHECK(action_ids.insert(identity.action_id).second);
+        int started = 0, callbacks = 0;
+        for (const auto& event : source->events) {
+            if (event.kind == trajectory::v3::EventKindV3::ToolExecutionStarted && event.action_id == identity.action_id) {
+                ++started;
+                CHECK(event.turn_id == turn);
+                CHECK(event.payload.at("attempt").get<std::uint64_t>() == identity.attempt);
+            }
+        }
+        for (const auto& callback : gate->callbacks) {
+            CHECK(callback.first == main_thread);
+            if (callback.second.action_id == identity.action_id) {
+                ++callbacks;
+                CHECK(callback.second.attempt == identity.attempt);
+            }
+        }
+        CHECK(started == 1);
+        CHECK(callbacks == 1);
+    }
+    std::size_t result_count = 0;
+    for (const auto& message : loop.history()) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+                CHECK(result->tool_use_id == "provider-call-" + std::to_string(result_count));
+                CHECK(result->is_error == (stop && result_count != 1));
+                ++result_count;
+            }
+        }
+    }
+    CHECK(result_count == static_cast<std::size_t>(calls));
+}
+}  // namespace
+
+TEST_CASE("ToolRuntime: parallel reads resolve durable action identity on the main thread") {
+    VerifyParallelOwnedInvocation(false);
+}
+TEST_CASE("ToolRuntime: indeterminate parallel completion joins peers and stops later execution") {
+    VerifyParallelOwnedInvocation(true);
+}
+
 TEST_CASE("默认装配:主表有 agent/todo_write/基础工具,子表同级(含 agent 转发壳与 todo)") {
-    ScopedHomeEnv home_guard;  // 主目录钉空:插件零挂载,下面的工具数口径才可信
+    ToolAssemblyFixture fixture;  // 显式插件根为空,不读也不修改真实 HOME。
     lubancode::config::Config config = EmptyConfig();
     NullBackend backend;
-    ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
-                        /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
+    ToolRuntime runtime(config, backend, NoSkills(),
+                        /*skills_segment=*/"", fixture.Plan(), ToolRuntime::Options{});
 
     CHECK(runtime.main_registry().Find("agent") != nullptr);
     CHECK(runtime.main_registry().Find("todo_write") != nullptr);
@@ -141,7 +317,7 @@ TEST_CASE("默认装配:主表有 agent/todo_write/基础工具,子表同级(含
     CHECK(runtime.agent_tool() != nullptr);
     CHECK(runtime.todo_state() != nullptr);
     CHECK(runtime.loaded_tools() != nullptr);
-    // 空配置 + 零插件(ScopedHomeEnv 钉死):两张表只剩内置工具(主 12、子
+    // 空配置 + 零插件(显式目录钉死):两张表只剩内置工具(主 12、子
     // 11,均低于默认阈值 20),口径直接钉数字——总数严格大于阈值才启用
     // (DeferralEnabled 的合同),所以 deferral 必关、tool_search 不挂、
     // 过滤直通。真机上用户装多少插件都进不来,这几条在谁的家目录下跑都
@@ -158,13 +334,13 @@ TEST_CASE("默认装配:主表有 agent/todo_write/基础工具,子表同级(含
 }
 
 TEST_CASE("with_explore:Explore 只读硬边界,并挂到 agent 工具") {
-    ScopedHomeEnv home_guard;  // 不读用户家目录:Explore 断言不吃全局插件
+    ToolAssemblyFixture fixture;  // 不读用户家目录:Explore 断言不吃全局插件
     lubancode::config::Config config = EmptyConfig();
     NullBackend backend;
     ToolRuntime::Options options;
     options.with_explore = true;
-    ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
-                        /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", std::move(options));
+    ToolRuntime runtime(config, backend, NoSkills(),
+                        /*skills_segment=*/"", fixture.Plan(), std::move(options));
 
     lubancode::tools::ToolRegistry* explore = runtime.explore_registry();
     REQUIRE(explore != nullptr);
@@ -179,12 +355,12 @@ TEST_CASE("with_explore:Explore 只读硬边界,并挂到 agent 工具") {
 }
 
 TEST_CASE("寿命:构造-查询-析构全程不崩,表地址稳定") {
-    ScopedHomeEnv home_guard;  // 不读用户家目录:析构册也不碰真机 DLL
+    ToolAssemblyFixture fixture;  // 不读用户家目录:析构册也不碰真机 DLL
     lubancode::config::Config config = EmptyConfig();
     auto backend = std::make_unique<NullBackend>();
     const std::vector<lubancode::tools::SkillMeta> no_skills;
-    auto runtime = std::make_unique<ToolRuntime>(config, lubancode::cli::BuiltinTheme("plain"), *backend,
-                                                 no_skills, /*skills_segment=*/"", /*cwd_utf8=*/"/tmp",
+    auto runtime = std::make_unique<ToolRuntime>(config, *backend,
+                                                 no_skills, /*skills_segment=*/"", fixture.Plan(),
                                                  ToolRuntime::Options{});
     lubancode::tools::ToolRegistry* main_before = &runtime->main_registry();
     lubancode::tools::ToolRegistry* sub_before = &runtime->sub_registry();
@@ -200,12 +376,12 @@ TEST_CASE("寿命:构造-查询-析构全程不崩,表地址稳定") {
 // 不白断;运行档全在执行侧(MemorySaveTool::execute 自拒 + proxy 路的
 // main_execution_policy_)。册里拿真 ProjectMemory 翻档对账。
 TEST_CASE("P2 清账: memory_save 暴露只认注册,运行档翻面不收定义") {
-    ScopedHomeEnv home_guard;
+    ToolAssemblyFixture fixture;
     lubancode::config::Config config = EmptyConfig();
     NullBackend backend;
 
     lubancode::memory::ProjectIdentity identity;
-    identity.project_root = std::filesystem::temp_directory_path() / "lubancode_p2_memory_project";
+    identity.project_root = fixture.Project();
     identity.workspace_dir = identity.project_root;
     identity.workspace_key = "p2-memory-test";
     lubancode::memory::Options memory_options;
@@ -214,12 +390,12 @@ TEST_CASE("P2 清账: memory_save 暴露只认注册,运行档翻面不收定义
     memory_options.learn = lubancode::memory::LearnMode::Review;
     memory_options.learn_ceiling = lubancode::memory::LearnMode::Review;
     auto memory = std::make_shared<lubancode::memory::ProjectMemory>(
-        identity, std::filesystem::temp_directory_path() / "lubancode_p2_memory_home", memory_options);
+        identity, fixture.root / "memory", memory_options);
 
     ToolRuntime::Options options;
     options.memory = memory;
-    ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
-                        /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", std::move(options));
+    ToolRuntime runtime(config, backend, NoSkills(),
+                        /*skills_segment=*/"", fixture.Plan(), std::move(options));
 
     lubancode::tools::Tool* memory_save = runtime.main_registry().Find("memory_save");
     REQUIRE(memory_save != nullptr);
@@ -242,4 +418,329 @@ TEST_CASE("P2 清账: memory_save 暴露只认注册,运行档翻面不收定义
     const auto refused = memory_save->execute(nlohmann::json{{"kind", "fact"}, {"topic", "x"}, {"content", "y"}});
     CHECK(refused.is_error);
     CHECK(refused.content.find("未开启") != std::string::npos);
+}
+
+TEST_CASE("ToolAssemblyPlan: invalid cwd or roots reject before presenting assembly diagnostics") {
+    ToolAssemblyFixture fixture;
+    auto plan = fixture.Plan();
+    SUBCASE("empty cwd") { plan.cwd_utf8.clear(); }
+    SUBCASE("relative cwd") { plan.cwd_utf8 = "relative project"; }
+    SUBCASE("invalid UTF-8 cwd") { plan.cwd_utf8 = std::string(1, '\xff'); }
+    SUBCASE("relative plugin root") { plan.user_plugins_dir = "relative plugins"; }
+    SUBCASE("relative state root") { plan.package_data_root = "relative state"; }
+    auto config = EmptyConfig();
+    config.mcp_servers["must-not-start"].command = "missing-plan-fixture-command";
+    NullBackend backend;
+    int reports = 0;
+    CHECK_THROWS_AS(ToolRuntime(config, backend, NoSkills(), "", plan, ToolRuntime::Options{},
+        [&](const ToolAssemblyDiagnostic&) { ++reports; }), std::invalid_argument);
+    CHECK(reports == 0);
+}
+
+TEST_CASE("ToolAssemblyPlan: diagnostics remain ordered and silent without a presentation sink") {
+    ToolAssemblyFixture fixture;
+    auto config = EmptyConfig();
+    for (const auto& name : {"alpha", "beta"}) {
+        config.mcp_servers[name].command = "missing-tool-assembly-fixture-command-42";
+    }
+    NullBackend backend;
+    CaptureOutput captured;
+    ToolRuntime runtime(config, backend, NoSkills(), "", fixture.Plan(), ToolRuntime::Options{});
+    captured.Restore();
+    CHECK(captured.output.str().empty());
+    CHECK(captured.error.str().empty());
+    const auto& diagnostics = runtime.diagnostics();
+    REQUIRE(diagnostics.size() >= 2);
+    for (std::size_t index = 0; index != 2; ++index) {
+        CHECK(diagnostics[index].code == "mcp.start_failed");
+        CHECK(diagnostics[index].severity == ToolAssemblyDiagnosticSeverity::Warning);
+        CHECK(diagnostics[index].component == (index == 0 ? "alpha" : "beta"));
+        CHECK(diagnostics[index].scope == ToolAssemblyDiagnosticScope::Shared);
+        CHECK_FALSE(diagnostics[index].arguments.empty());
+    }
+}
+
+TEST_CASE("ToolAssemblyPlan: same project can bind separate same-name plugins and diagnostic owners") {
+    ToolAssemblyFixture first, second;
+    InstallMarkerPlugin(first.Plugins(), "FIRST_OWNER_MARKER");
+    InstallMarkerPlugin(second.Plugins(), "SECOND_OWNER_MARKER");
+    auto first_plan = first.Plan();
+    auto second_plan = second.Plan();
+    second_plan.cwd_utf8 = first_plan.cwd_utf8;
+    auto config = EmptyConfig();
+    NullBackend backend;
+    std::vector<ToolAssemblyDiagnostic> presented;
+    auto presentation_owner = std::make_shared<int>(42);
+    std::weak_ptr<int> presentation_weak = presentation_owner;
+    CaptureOutput captured;
+    ToolRuntime one(config, backend, NoSkills(), "", first_plan, ToolRuntime::Options{},
+        [presentation_owner, &presented](const ToolAssemblyDiagnostic& diagnostic) {
+            presented.push_back(diagnostic);
+        });
+    presentation_owner.reset();
+    const bool presentation_released = presentation_weak.expired();
+    ToolRuntime two(config, backend, NoSkills(), "", second_plan, ToolRuntime::Options{});
+    captured.Restore();
+    CHECK(presentation_released);
+    CHECK(captured.output.str().empty());
+    CHECK(captured.error.str().empty());
+    for (auto* registry : {&one.main_registry(), &one.sub_registry()}) {
+        const auto* tool = registry->Find("plugin__isolated__inspect");
+        REQUIRE(tool != nullptr);
+        CHECK(tool->description().find("FIRST_OWNER_MARKER") != std::string::npos);
+        CHECK(tool->description().find("SECOND_OWNER_MARKER") == std::string::npos);
+    }
+    for (auto* registry : {&two.main_registry(), &two.sub_registry()}) {
+        const auto* tool = registry->Find("plugin__isolated__inspect");
+        REQUIRE(tool != nullptr);
+        CHECK(tool->description().find("SECOND_OWNER_MARKER") != std::string::npos);
+        CHECK(tool->description().find("FIRST_OWNER_MARKER") == std::string::npos);
+    }
+    int main_mounts = 0, sub_mounts = 0, shown_mounts = 0;
+    for (const auto& diagnostic : one.diagnostics()) {
+        if (diagnostic.code != "plugin.mounted_line") continue;
+        if (diagnostic.scope == ToolAssemblyDiagnosticScope::Main) ++main_mounts;
+        if (diagnostic.scope == ToolAssemblyDiagnosticScope::Sub) ++sub_mounts;
+    }
+    for (const auto& diagnostic : presented) {
+        CHECK(diagnostic.scope != ToolAssemblyDiagnosticScope::Sub);
+        if (diagnostic.code == "plugin.mounted_line") ++shown_mounts;
+    }
+    CHECK(main_mounts == 1);
+    CHECK(sub_mounts == 1);
+    CHECK(shown_mounts == 1);
+}
+
+TEST_CASE("ToolAssemblyPlan: CLI presentation uses only its explicit destination and copied theme") {
+    ToolAssemblyFixture fixture;
+    auto config = EmptyConfig();
+    config.mcp_servers["explicit-diagnostic"].command = "missing-tool-assembly-fixture-command-42";
+    NullBackend backend;
+    std::ostringstream destination;
+    auto sink = [&] {
+        auto theme = lubancode::cli::BuiltinTheme("plain");
+        theme.error = "ERROR_BEGIN";
+        theme.reset = "ERROR_END";
+        return MakeCliToolAssemblyDiagnosticSink(theme, destination);
+    }();
+    CaptureOutput captured;
+    ToolRuntime runtime(config, backend, NoSkills(), "", fixture.Plan(), ToolRuntime::Options{}, sink);
+    captured.Restore();
+    CHECK(captured.output.str().empty());
+    CHECK(captured.error.str().empty());
+    CHECK(destination.str().find("ERROR_BEGIN") != std::string::npos);
+    CHECK(destination.str().find("ERROR_END") != std::string::npos);
+    CHECK(destination.str().find("explicit-diagnostic") != std::string::npos);
+    REQUIRE_FALSE(runtime.diagnostics().empty());
+    CHECK(runtime.diagnostics()[0].component == "explicit-diagnostic");
+}
+
+TEST_CASE("ToolAssemblyPlan: same-name Lua plugins keep separate state in a shared project") {
+    ToolAssemblyFixture first, second;
+    const auto write_counter = [](const std::filesystem::path& plugins, const char* marker) {
+        std::ofstream(plugins / "counter.lua", std::ios::binary)
+            << "local count = 0\nreturn { name='probe', description='fixture counter', "
+               "input_schema='{" << "\"type\":\"object\"" << "}', "
+               "execute=function(input) count=count+1 return '" << marker << "' .. count end }\n";
+    };
+    write_counter(first.Plugins(), "FIRST:");
+    write_counter(second.Plugins(), "SECOND:");
+    auto first_plan = first.Plan();
+    auto second_plan = second.Plan();
+    second_plan.cwd_utf8 = first_plan.cwd_utf8;
+    auto config = EmptyConfig();
+    NullBackend backend;
+    auto one = std::make_unique<ToolRuntime>(config, backend, NoSkills(), "", first_plan, ToolRuntime::Options{});
+    auto two = std::make_unique<ToolRuntime>(config, backend, NoSkills(), "", second_plan, ToolRuntime::Options{});
+    const auto invoke = [](lubancode::tools::ToolRegistry& registry, const char* expected) {
+        auto* tool = registry.Find("plugin__counter__probe");
+        REQUIRE(tool != nullptr);
+        const auto result = tool->execute(nlohmann::json::object());
+        REQUIRE_FALSE(result.is_error);
+        CHECK(result.content == expected);
+    };
+    invoke(one->main_registry(), "FIRST:1");
+    invoke(one->sub_registry(), "FIRST:2");
+    invoke(two->main_registry(), "SECOND:1");
+    invoke(two->sub_registry(), "SECOND:2");
+    one.reset();
+    invoke(two->main_registry(), "SECOND:3");
+}
+
+TEST_CASE("ToolAssemblyPlan: agent roots and permission stay late-bound while startup skills are owned") {
+    ToolAssemblyFixture fixture;
+    const auto first_roots = fixture.root / "agents first";
+    const auto second_roots = fixture.root / "agents second";
+    WriteAgent(first_roots, "first-agent");
+    WriteAgent(second_roots, "second-agent");
+    const auto skill_path = fixture.root / "skill with spaces";
+    std::filesystem::create_directories(skill_path);
+    std::ofstream(skill_path / "SKILL.md", std::ios::binary)
+        << "---\nname: startup-skill\ndescription: fixture\n---\nOWNED_STARTUP_SKILL_BODY\n";
+    const auto package_layer = fixture.root / "dev packages";
+    const auto package_root = package_layer / "content";
+    std::filesystem::create_directories(package_root / "skills" / "startup-skill");
+    std::ofstream(package_root / "package.yaml", std::ios::binary)
+        << "schema: 1\nid: fixture.content\nversion: 0.1.0\nname: Fixture\ndescription: fixture\n";
+    WriteAgent(package_root / "agents", "pack-agent");
+    const auto package_skill = package_root / "skills" / "startup-skill" / "SKILL.md";
+    std::ofstream(package_skill, std::ios::binary)
+        << "---\nname: startup-skill\ndescription: fixture\n---\nPINNED_PACKAGE_SKILL_BODY\n";
+    lubancode::package::PackageMountInput mount;
+    mount.scan.dev_roots.push_back(package_layer);
+    auto snapshot = lubancode::package::BuildPackageSnapshot(mount, 1);
+    REQUIRE_FALSE(snapshot->empty());
+    auto roots = std::make_shared<lubancode::agent::AgentCatalogScanRoots>();
+    roots->user_dir = first_roots;
+    lubancode::agent::PackagedAgentEntry injected;
+    injected.canonical_name = "fake.package:rogue";
+    injected.package_id = "fake.package";
+    injected.definition.name = "rogue";
+    injected.definition.description = "Must not override the package snapshot.";
+    roots->packaged.push_back(injected);
+    auto permission = std::make_shared<lubancode::ApprovalMode>(lubancode::ApprovalMode::Default);
+    auto plan = fixture.Plan();
+    plan.agent_scan_roots = [roots] { return *roots; };
+    plan.parent_permission = [permission] { return *permission; };
+    auto config = EmptyConfig();
+    NullBackend backend;
+    std::unique_ptr<ToolRuntime> runtime;
+    ToolRuntime::Options options;
+    auto current_snapshot = std::make_shared<std::shared_ptr<const lubancode::package::PackageSnapshot>>(snapshot);
+    options.package_snapshot = [current_snapshot] { return *current_snapshot; };
+    {
+        lubancode::tools::SkillMeta skill;
+        skill.name = "startup-skill";
+        skill.description = "fixture";
+        skill.dir_path = lubancode::platform::PathToUtf8(skill_path);
+        std::vector<lubancode::tools::SkillMeta> skills{skill};
+        runtime = std::make_unique<ToolRuntime>(config, backend, skills, "", plan, options);
+    }
+    auto* agent = runtime->agent_tool();
+    REQUIRE(agent != nullptr);
+    const auto check_skill = [&](const char* name) {
+        auto material = agent->custom_agent_resolver()(name);
+        REQUIRE(material.has_value());
+        REQUIRE(material->preloaded_skills.size() == 1);
+        CHECK(material->preloaded_skills[0].find("OWNED_STARTUP_SKILL_BODY") != std::string::npos);
+    };
+    check_skill("first-agent");
+    CHECK(agent->input_schema().dump().find("first-agent") != std::string::npos);
+    CHECK(agent->resolve_environment_provider()().parent_permission == lubancode::ApprovalMode::Default);
+    roots->user_dir = second_roots;
+    *permission = lubancode::ApprovalMode::DontAsk;
+    std::ofstream(package_skill, std::ios::binary) << "Changed after the snapshot was pinned.";
+    agent->SetHooks({});  // The real turn-boundary refresh invalidates the type cache.
+    check_skill("second-agent");
+    CHECK_FALSE(agent->custom_agent_resolver()("first-agent").has_value());
+    const auto schema = agent->input_schema().dump();
+    CHECK(schema.find("second-agent") != std::string::npos);
+    CHECK(schema.find("first-agent") == std::string::npos);
+    CHECK(schema.find("fixture.content:pack-agent") != std::string::npos);
+    CHECK(schema.find("fake.package:rogue") == std::string::npos);
+    CHECK_FALSE(agent->custom_agent_resolver()("fake.package:rogue").has_value());
+    const auto packaged = agent->custom_agent_resolver()("fixture.content:pack-agent");
+    REQUIRE(packaged.has_value());
+    REQUIRE(packaged->preloaded_skills.size() == 1);
+    CHECK(packaged->preloaded_skills[0].find("PINNED_PACKAGE_SKILL_BODY") != std::string::npos);
+    CHECK(packaged->preloaded_skills[0].find("Changed after") == std::string::npos);
+    CHECK(agent->resolve_environment_provider()().parent_permission == lubancode::ApprovalMode::DontAsk);
+    roots->user_dir = "relative agents";
+    CHECK_THROWS_AS(agent->custom_agent_resolver()("second-agent"), std::invalid_argument);
+    CHECK_THROWS_AS(agent->SetHooks({}), std::invalid_argument);
+    roots->user_dir = second_roots;
+    agent->SetHooks({});
+    CHECK(agent->input_schema().dump().find("second-agent") != std::string::npos);
+    {
+        ToolRuntime no_snapshot(config, backend, NoSkills(), "", plan, ToolRuntime::Options{});
+        CHECK(no_snapshot.agent_tool()->input_schema().dump().find("fake.package:rogue") == std::string::npos);
+        CHECK_FALSE(no_snapshot.agent_tool()->custom_agent_resolver()("fake.package:rogue").has_value());
+    }
+    REQUIRE(std::filesystem::remove(package_root / "agents" / "pack-agent.yaml"));
+    WriteAgent(package_root / "agents", "pack-next");
+    std::ofstream(package_skill, std::ios::binary)
+        << "---\nname: startup-skill\ndescription: fixture\n---\nNEXT_PACKAGE_SKILL_BODY\n";
+    *current_snapshot = lubancode::package::BuildPackageSnapshot(mount, 2);
+    REQUIRE_FALSE((*current_snapshot)->empty());
+    agent->SetHooks({});
+    const auto refreshed = agent->input_schema().dump();
+    CHECK(refreshed.find("fixture.content:pack-next") != std::string::npos);
+    CHECK(refreshed.find("fixture.content:pack-agent") == std::string::npos);
+    CHECK_FALSE(agent->custom_agent_resolver()("fixture.content:pack-agent").has_value());
+    const auto replacement = agent->custom_agent_resolver()("fixture.content:pack-next");
+    REQUIRE(replacement.has_value());
+    REQUIRE(replacement->preloaded_skills.size() == 1);
+    CHECK(replacement->preloaded_skills[0].find("NEXT_PACKAGE_SKILL_BODY") != std::string::npos);
+    CHECK(packaged->preloaded_skills[0].find("PINNED_PACKAGE_SKILL_BODY") != std::string::npos);
+}
+
+TEST_CASE("ToolAssemblyPlan: project trust stays with the explicit store even in one shared cwd") {
+    ToolAssemblyFixture first, second;
+    const auto project_plugins = first.Project() / ".lubancode" / "plugins";
+    InstallMarkerPlugin(project_plugins, "TRUSTED_PROJECT_MARKER");
+    const auto plugin_dir = project_plugins / "isolated";
+    const auto hash = lubancode::runtime::ComputePluginContentHash(plugin_dir);
+    REQUIRE(hash.has_value());
+    auto first_plan = first.Plan();
+    auto second_plan = second.Plan();
+    second_plan.cwd_utf8 = first_plan.cwd_utf8;
+    auto [trust, error] = lubancode::config::PluginTrustStore::Load(
+        lubancode::platform::PathToUtf8(*first_plan.plugin_trust_path));
+    REQUIRE_FALSE(error.has_value());
+    REQUIRE(trust.SetTrusted(lubancode::platform::PathToUtf8(
+        std::filesystem::weakly_canonical(plugin_dir)), *hash, "fixture"));
+    REQUIRE_FALSE(trust.Save().has_value());
+    auto config = EmptyConfig();
+    NullBackend backend;
+    ToolRuntime accepted(config, backend, NoSkills(), "", first_plan, ToolRuntime::Options{});
+    ToolRuntime refused(config, backend, NoSkills(), "", second_plan, ToolRuntime::Options{});
+    REQUIRE(accepted.main_registry().Find("plugin__isolated__inspect") != nullptr);
+    REQUIRE(accepted.sub_registry().Find("plugin__isolated__inspect") != nullptr);
+    CHECK(refused.main_registry().Find("plugin__isolated__inspect") == nullptr);
+    CHECK(refused.sub_registry().Find("plugin__isolated__inspect") == nullptr);
+    CHECK(accepted.process_manifests().size() == 1);
+    CHECK(refused.process_manifests().empty());
+    CHECK_FALSE(refused.diagnostics().empty());
+    CHECK_FALSE(std::filesystem::exists(*second_plan.plugin_trust_path));
+}
+
+TEST_CASE("ToolAssemblyPlan: real MCP processes use explicit cwd without changing the host directory") {
+    ToolAssemblyFixture first, second;
+    const auto host_cwd = std::filesystem::current_path();
+#ifdef _WIN32
+    const char* python = "python";
+#else
+    const char* python = "python3";
+#endif
+    const auto located = lubancode::platform::RunProcess(
+        {python, "-c", "import json,sys; print(json.dumps(sys.executable))"}, 10000);
+    REQUIRE_FALSE(located.spawn_failed);
+    REQUIRE_FALSE(located.timed_out);
+    REQUIRE(located.exit_code == 0);
+    auto config = EmptyConfig();
+    config.mcp_servers["location"].command = nlohmann::json::parse(located.output).get<std::string>();
+    config.mcp_servers["location"].args = {
+        std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/session_resources_mcp.py"};
+    NullBackend backend;
+    auto one = std::make_unique<ToolRuntime>(config, backend, NoSkills(), "", first.Plan(), ToolRuntime::Options{});
+    auto two = std::make_unique<ToolRuntime>(config, backend, NoSkills(), "", second.Plan(), ToolRuntime::Options{});
+    const auto inspect = [&](ToolRuntime& runtime, const std::filesystem::path& expected) {
+        auto* tool = runtime.main_registry().Find("mcp__location__where");
+        REQUIRE(tool != nullptr);
+        const auto result = tool->execute(nlohmann::json::object());
+        REQUIRE_FALSE(result.is_error);
+        const auto body = nlohmann::json::parse(result.content);
+        CHECK(std::filesystem::equivalent(
+            lubancode::platform::Utf8ToPath(body.at("cwd").get<std::string>()), expected));
+        CHECK(std::filesystem::equivalent(host_cwd, std::filesystem::current_path()));
+        return body.at("pid").get<unsigned long>();
+    };
+    const auto first_pid = inspect(*one, first.Project());
+    const auto second_pid = inspect(*two, second.Project());
+    CHECK(first_pid != second_pid);
+    one.reset();
+    CHECK_FALSE(lubancode::platform::IsProcessAlive(first_pid));
+    CHECK(inspect(*two, second.Project()) == second_pid);
+    two.reset();
+    CHECK_FALSE(lubancode::platform::IsProcessAlive(second_pid));
 }

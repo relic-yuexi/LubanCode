@@ -641,7 +641,9 @@ TEST_CASE("矩阵 B5: 并行工具批事件侧——chat 一只 chunk 两枚 cal
         R"({"id":"1","model":"m","choices":[{"delta":{"tool_calls":[)"
         R"({"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"path\":\""}},)"
         R"({"index":1,"id":"c2","function":{"name":"read_file","arguments":"{}"}}]}}]})"));
-    REQUIRE(events.size() == 1);  // 只有 MessageStart,工具攒着不发
+    REQUIRE(events.size() == 2);  // 身份 + MessageStart,工具攒着不发
+    CHECK(std::get<api::ProviderResponseIdentity>(events[0]).id == "1");
+    CHECK(std::get<api::MessageStart>(events[1]).model == "m");
     auto flushed = chat.Consume(Frame(
         R"({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"a\"}"}}]},)"
         R"("finish_reason":"tool_calls"}]})"));
@@ -789,13 +791,13 @@ TEST_CASE("矩阵 C5: gemini 两代口径——total 对账归一,另计的一�
     CHECK(new_done->usage.output_tokens == 171 + 297);
     CHECK(new_done->usage.output_reasoning_tokens == 297);
 
-    // 没报 total 的旧端:按 2.5 旧口径,宁可少算不瞎加。
+    // 没报 total,无法证实旧端已合并思考:按分项合同归入总输出。
     api::gemini::EventParser no_total;
     const auto legacy_events = no_total.Consume(Frame(
         R"({"candidates":[{"content":{"parts":[{"text":"答"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":90,"thoughtsTokenCount":40}})"));
     const auto* legacy_done = FindEvent<api::MessageDone>(legacy_events);
     REQUIRE(legacy_done != nullptr);
-    CHECK(legacy_done->usage.output_tokens == 90);
+    CHECK(legacy_done->usage.output_tokens == 90 + 40);
     CHECK(legacy_done->usage.output_reasoning_tokens == 40);
 }
 
@@ -822,8 +824,10 @@ TEST_CASE("矩阵 D1: 半截帧——一只事件劈三段喂(刀口切在多字
     REQUIRE_FALSE(framer.overflowed());
     api::chat::EventParser parser;
     const auto events = parser.Consume(frames[0]);
-    REQUIRE(events.size() == 2);
-    CHECK(std::get<api::TextDelta>(events[1]).text == "你好");  // 字节拼齐,UTF-8 完好
+    REQUIRE(events.size() == 3);
+    CHECK(std::get<api::ProviderResponseIdentity>(events[0]).id == "x");
+    CHECK(std::get<api::MessageStart>(events[1]).model == "m");
+    CHECK(std::get<api::TextDelta>(events[2]).text == "你好");  // 字节拼齐,UTF-8 完好
 }
 
 TEST_CASE("矩阵 D2: 坏 UTF-8 字节——帧里有坏字节整帧当没看见,流不断,下一帧照收") {
@@ -837,8 +841,10 @@ TEST_CASE("矩阵 D2: 坏 UTF-8 字节——帧里有坏字节整帧当没看见
     // 不该杀掉整条流。
     const auto events = parser.Consume(Frame(
         R"({"id":"g1","model":"m","choices":[{"delta":{"content":"好帧"},"finish_reason":"stop"}]})"));
-    REQUIRE(events.size() == 2);
-    CHECK(std::get<api::TextDelta>(events[1]).text == "好帧");
+    REQUIRE(events.size() == 3);
+    CHECK(std::get<api::ProviderResponseIdentity>(events[0]).id == "g1");
+    CHECK(std::get<api::MessageStart>(events[1]).model == "m");
+    CHECK(std::get<api::TextDelta>(events[2]).text == "好帧");
     CHECK(std::get<api::MessageDone>(parser.Finish()[0]).stop_reason == "end_turn");
 
     // 四家解析器同一付规矩:坏 UTF-8 帧一律静默跳过,不抛、不崩。
@@ -860,7 +866,9 @@ TEST_CASE("矩阵 D3: 空 delta——chat 的空 content 不吐事件,流不因�
     api::chat::EventParser parser;
     auto events = parser.Consume(Frame(
         R"({"id":"x","model":"m","choices":[{"delta":{"content":""}}]})"));
-    REQUIRE(events.size() == 1);  // 只有 MessageStart
+    REQUIRE(events.size() == 2);  // 身份 + MessageStart,没有正文事件
+    CHECK(std::get<api::ProviderResponseIdentity>(events[0]).id == "x");
+    CHECK(std::get<api::MessageStart>(events[1]).model == "m");
     events = parser.Consume(Frame(
         R"({"choices":[{"delta":{"content":null,"reasoning_content":""},"finish_reason":"stop"}]})"));
     CHECK(events.empty());

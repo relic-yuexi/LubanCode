@@ -13,9 +13,14 @@
 #pragma once
 
 #include <map>
+#include <cstddef>
+#include <cstdint>
+#include <expected>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -28,9 +33,69 @@
 
 namespace lubancode::runtime {
 
+// Native event owner; deliberately no SDK operation identity or authority.
+struct MiddlewareReceiptScope {
+    std::string session_id, run_id, turn_id, step_id, action_id;
+    std::uint64_t attempt = 1, registry_revision = 0;
+    nlohmann::json terminal_ref, persisted_ref;
+    std::size_t receipt_limit = 256;
+};
+
+enum class MiddlewareReceiptStage {
+    Requested, Skipped, Started, Completed, Failed, Cancelled,
+    OutputProposed, ContinuationConsumed, EffectsApplied, EffectsRejected
+};
+enum class MiddlewareReceiptGap {
+    None, OwnerMismatch, InvalidSequence, Overflow, NativeUnconfirmed,
+    NativeException, Abandoned
+};
+struct MiddlewareNativeReceipt {
+    MiddlewareReceiptStage stage = MiddlewareReceiptStage::Requested;
+    std::string dispatch_id, invocation_id, hook_id;
+    // Empty when no native append returned. Never manufacture a receipt.
+    std::optional<trajectory::v3::WriteReceipt> receipt;
+    bool writer_broken = false;
+};
+struct MiddlewareReceiptSnapshot {
+    MiddlewareReceiptScope scope;
+    std::optional<hooks::middleware::DispatchMeta> dispatch;
+    std::vector<MiddlewareNativeReceipt> receipts;
+    std::optional<hooks::middleware::DispatchOutcome::Kind> outcome;
+    MiddlewareReceiptGap gap = MiddlewareReceiptGap::None;
+    bool finished = false, closed = false;
+    // Owned live producer facts only; these tags are not stored V3 events.
+    std::optional<hooks::middleware::DispatchCause> cause;
+    std::optional<hooks::middleware::DispatchFailureSource> failure_source;
+    // This is capture completeness, not successful Post settlement.
+    bool complete() const { return finished && gap == MiddlewareReceiptGap::None; }
+};
+struct MiddlewareReceiptState;
+struct CapturedMiddlewareSink;
+
+class MiddlewareReceiptLease {
+public:
+    MiddlewareReceiptLease() = default;
+    MiddlewareReceiptLease(MiddlewareReceiptLease&&) noexcept;
+    MiddlewareReceiptLease& operator=(MiddlewareReceiptLease&&) noexcept;
+    MiddlewareReceiptLease(const MiddlewareReceiptLease&) = delete;
+    MiddlewareReceiptLease& operator=(const MiddlewareReceiptLease&) = delete;
+    ~MiddlewareReceiptLease();
+
+    MiddlewareReceiptSnapshot Snapshot() const;
+    // Call only after Dispatch and all observer joins have actually returned.
+    std::expected<void, std::string> Finish(const hooks::middleware::DispatchOutcome& outcome);
+    void Close() noexcept;
+private:
+    friend std::expected<CapturedMiddlewareSink, std::string> CaptureMiddlewareReceipts(
+        trajectory::v3::V3Writer&, MiddlewareReceiptScope);
+    explicit MiddlewareReceiptLease(std::shared_ptr<MiddlewareReceiptState> state) : state_(std::move(state)) {}
+    std::shared_ptr<MiddlewareReceiptState> state_;
+};
+
 class V3MiddlewareEventSink final : public hooks::middleware::MiddlewareEventSink {
 public:
     explicit V3MiddlewareEventSink(trajectory::v3::V3Writer& writer) : writer_(&writer) {}
+    ~V3MiddlewareEventSink() override;
 
     // 绑定的写者(BindMiddlewareSessionWriter 幂等判断用)。
     trajectory::v3::V3Writer* writer() const { return writer_; }
@@ -60,6 +125,9 @@ public:
     std::vector<std::string> recent_errors() const;
 
 private:
+    struct CaptureAttempt;
+    friend std::expected<CapturedMiddlewareSink, std::string> CaptureMiddlewareReceipts(
+        trajectory::v3::V3Writer&, MiddlewareReceiptScope);
     struct DispatchBook {
         trajectory::v3::NestedHookDispatchSession session;
         // invocation_id -> started 快照(failurePolicy 随行)。
@@ -72,12 +140,27 @@ private:
     DispatchBook* LockBookFor(const hooks::middleware::DispatchMeta& meta);
 
     void NoteError(const char* where, const trajectory::v3::WriteReceipt& receipt);
+    MiddlewareNativeReceipt* PrepareCaptured(const hooks::middleware::DispatchMeta&, MiddlewareReceiptStage);
+    MiddlewareNativeReceipt* PrepareCaptured(const hooks::middleware::InvocationMeta&, MiddlewareReceiptStage);
+    void StoreCaptured(const char*, MiddlewareNativeReceipt*, trajectory::v3::WriteReceipt);
+    void CaptureException() noexcept;
 
     trajectory::v3::V3Writer* writer_;
     mutable std::mutex mutex_;
     std::map<std::string, std::shared_ptr<DispatchBook>> books_;
     std::vector<std::string> recent_errors_;
+    std::shared_ptr<MiddlewareReceiptState> capture_;
 };
+
+struct CapturedMiddlewareSink {
+    std::unique_ptr<V3MiddlewareEventSink> sink;
+    MiddlewareReceiptLease lease;
+};
+
+// Caller holds the actual writer's host serial gate throughout construction and
+// Dispatch. The returned lease/snapshot never owns or borrows that writer.
+std::expected<CapturedMiddlewareSink, std::string> CaptureMiddlewareReceipts(
+    trajectory::v3::V3Writer& writer, MiddlewareReceiptScope scope);
 
 // ---------------------------------------------------------------------------
 // 生产通电(LuaHook P0-B 遗留①,P1-C 补):dispatcher 的中间件事件 sink 与

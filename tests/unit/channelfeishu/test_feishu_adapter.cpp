@@ -349,7 +349,7 @@ std::optional<nlohmann::json> FindAckPayload(
         const auto payload =
             nlohmann::json::parse(*frame->payload, nullptr, /*allow_exceptions=*/false);
         if (payload.is_object() && payload.contains("code")) {
-            return payload;
+            return std::optional<nlohmann::json>{std::in_place, payload};
         }
     }
     return std::nullopt;

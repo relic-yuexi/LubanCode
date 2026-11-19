@@ -234,7 +234,10 @@ TEST_CASE("流式三件套: 攒批落 delta,completed 定稿唯一 assistant,验
             CHECK(row.value("provider", std::string()) == "moonshot");
             CHECK(row.value("wire", std::string()) == "openai-chat-completions");
             CHECK(row.value("model", std::string()) == "kimi-k2.6");
-            CHECK(row.value("responseModel", std::string()) == "resp-stream-1");
+            REQUIRE(row.contains("responseModel"));
+            CHECK(row.at("responseModel").is_null());
+            CHECK(row.at("message").value("provider_response_id", std::string()) ==
+                  "resp-stream-1");
             REQUIRE(row.contains("usage"));
             CHECK(row.at("usage").value("inputTokens", 0) == 1180);
             // 完整 assistant 的正文是块数组(单文本块;与既有生产桥同形)。

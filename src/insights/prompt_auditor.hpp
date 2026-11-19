@@ -119,6 +119,7 @@ struct RuntimeRequestView {
     std::vector<std::string> tool_names;
     bool has_token_estimate = false;   // tokenEstimateRef 在 prepared
     std::string request_outcome;       // ""|"completed"|"failed"|"cancelled"
+    bool total_input_known = true;
 };
 
 // runtime 的输入:一场 session 的请求序列(按 stream 字典序、stream 内

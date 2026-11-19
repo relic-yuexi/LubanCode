@@ -27,8 +27,8 @@ bool CleanArtifactFilename(const std::string& filename) {
     return filename.find("..") == std::string::npos;
 }
 
-bool ReadFileBytes(const std::string& path_utf8, std::string& out) {
-    std::ifstream in(platform::Utf8ToPath(path_utf8), std::ios::binary);
+bool ReadFileBytes(const std::filesystem::path& path, std::string& out) {
+    std::ifstream in(platform::FileIoPath(path), std::ios::binary);
     if (!in.is_open()) {
         return false;
     }
@@ -108,7 +108,9 @@ std::size_t RehydrateToolResultImages(api::Request& request, const std::string& 
                     continue;  // 解码字节超帽:账面就超了,不用读
                 }
                 std::string bytes;
-                if (!ReadFileBytes(artifact_root + "/" + image->artifact.filename, bytes)) {
+                const auto path = platform::Utf8ToPath(artifact_root) /
+                                  platform::Utf8ToPath(image->artifact.filename);
+                if (!ReadFileBytes(path, bytes)) {
                     continue;
                 }
                 if (bytes.empty() || bytes.size() > kMaxToolResultWireImageBytes) {

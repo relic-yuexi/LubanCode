@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "approval_mode.hpp"
+#include "text/display_width.hpp"
 
 namespace lubancode::cli {
 
@@ -204,12 +205,12 @@ struct SlashSubcommandGroup {
 // 配对两列、keycap 两列、VS16 升两列)不是成员单宽之和,整簇量宽必须用
 // DisplayWidth/ClusterDisplayWidth,不许拿本函数逐码点自算。
 int CharDisplayWidth(char32_t codepoint);
-std::size_t DisplayWidth(const std::u32string& text);
+using text::DisplayWidth;
 
 // UTF-8 版本的显示宽度:内部解码成码点按 DisplayWidth 算。0.17.0 状态行
 // 分段截宽用(先算模式段占了几列,剩余宽度才轮到信息段),跟
 // TruncateUtf8ToDisplayWidth 同一套解码,不另写一份。
-std::size_t DisplayWidthUtf8(const std::string& utf8);
+using text::DisplayWidthUtf8;
 
 // 手写 UTF-32 -> UTF-8 编码,不依赖 Win32 API,核心层和终端层共用
 // (核心层的 RenderState::line 按码点存,真要写到控制台/拼回 std::string
@@ -219,7 +220,7 @@ std::string Utf32ToUtf8(const std::u32string& text);
 // UTF-8 -> UTF-32 解码(0.28.x 取回排队消息装回编辑 buffer 用)。输入都
 // 是本程序自己拼的 UTF-8,非法序列按"跳过一个字节"处理,与
 // TruncateUtf8ToDisplayWidth 的取舍一致。
-std::u32string Utf8ToUtf32(const std::string& text);
+using text::Utf8ToUtf32;
 
 // 按显示宽度截断:从头开始按字素簇累加显示宽度,一旦下一簇会让累计宽度
 // 超过 max_width 就整簇不要——绝不把一个占 2 列的宽字符切成半个字宽,

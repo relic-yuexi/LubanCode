@@ -1,0 +1,32 @@
+# The complete source roster and CTest entries have already been collected.
+# Only the aggregate executable's compilation list changes in this profile.
+if(NOT IS_ABSOLUTE "${LUBANCODE_ASAN_PROFILE_FILE}" OR
+    NOT EXISTS "${LUBANCODE_ASAN_PROFILE_FILE}" OR
+    IS_DIRECTORY "${LUBANCODE_ASAN_PROFILE_FILE}")
+  message(FATAL_ERROR "Private ASan profile requires an absolute existing manifest file")
+endif()
+file(READ "${LUBANCODE_ASAN_PROFILE_FILE}" _asan_manifest)
+string(JSON _asan_schema GET "${_asan_manifest}" schema)
+string(JSON _asan_root GET "${_asan_manifest}" source_root)
+if(NOT _asan_schema EQUAL 1 OR NOT _asan_root STREQUAL CMAKE_SOURCE_DIR)
+  message(FATAL_ERROR "Private ASan manifest schema/source root differs")
+endif()
+string(JSON _asan_count LENGTH "${_asan_manifest}" compile_sources)
+if(_asan_count LESS 1)
+  message(FATAL_ERROR "Private ASan manifest is empty")
+endif()
+math(EXPR _asan_last "${_asan_count} - 1")
+set(LUBANCODE_TEST_COMPILE_SOURCES)
+foreach(_asan_index RANGE 0 ${_asan_last})
+  string(JSON _asan_relative GET "${_asan_manifest}" compile_sources ${_asan_index})
+  if(NOT _asan_relative MATCHES "^tests/(unit|integration)/[A-Za-z0-9_]+/test_[A-Za-z0-9_]+\\.cpp$")
+    message(FATAL_ERROR "Private ASan manifest contains an invalid source: ${_asan_relative}")
+  endif()
+  set(_asan_source "${CMAKE_SOURCE_DIR}/${_asan_relative}")
+  if(NOT _asan_source IN_LIST LUBANCODE_TEST_SOURCES OR
+      _asan_source IN_LIST LUBANCODE_TEST_COMPILE_SOURCES)
+    message(FATAL_ERROR "Private ASan source is foreign or duplicated: ${_asan_relative}")
+  endif()
+  list(APPEND LUBANCODE_TEST_COMPILE_SOURCES "${_asan_source}")
+endforeach()
+message(STATUS "Private ASan profile: compiling ${_asan_count} registered source bodies")

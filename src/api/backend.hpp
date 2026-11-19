@@ -6,8 +6,11 @@
 #include <atomic>
 #include <expected>
 #include <functional>
+#include <optional>
+#include <utility>
 
 #include "api/types.hpp"
+#include "api/model_input_snapshot.hpp"
 
 namespace lubancode::api {
 
@@ -32,6 +35,20 @@ public:
     // 返回空串 = 该 backend(trace/桩/后台派生类)不提供,诊断账记
     // "不可得"(-1),不冒充 0。
     virtual std::string SerializeForDiagnostics(const Request& request) const { (void)request; return {}; }
+
+    // Owned model-input projection for capacity checks, not a provider wire.
+    // unavailable preserves legacy preflight; invalid nonempty material is an
+    // error and must not silently fall back. Production providers keep their
+    // existing final serialization/extra_body selector through this default.
+    virtual std::expected<std::optional<ModelInputSnapshot>, std::string>
+    PrepareModelInput(const Request& request) const {
+        const auto wire = SerializeForDiagnostics(request);
+        if (wire.empty()) return std::optional<ModelInputSnapshot>{};
+        auto input = ModelInputSnapshotFromWire(wire);
+        if (!input) return std::unexpected(input.error());
+        return std::optional<ModelInputSnapshot>{ModelInputSnapshot{
+            std::move(*input), kProviderWireInputScope, kProviderWireOutputLimitScope}};
+    }
 
     // FD-02(请求最终出站状态与影子预算映射收敛)的窄口:一次拼出请求的
     // 最终出站状态——出门体、有效输出上限、拍平映射共享同一条拼装路

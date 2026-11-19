@@ -63,7 +63,7 @@ struct ProjectIdentity {
 
 // ---------------------------------------------------------------------------
 // P0-3:memory 的落账口(召回快照与写入因果边)。memory 域只认这只纯接口,
-// trajectory 侧的实现在装配层(app/memory_ledger_bridge),memory 不反向
+// trajectory 侧的实现在装配层(runtime/memory_ledger_bridge),memory 不反向
 // include trajectory。
 // ---------------------------------------------------------------------------
 

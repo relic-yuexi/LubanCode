@@ -65,6 +65,13 @@ std::optional<std::string> OfficialSkillsDir();
 // 序照常运行——official 层缺席只少一层扫描。
 std::optional<std::string> OfficialPackagesDir();
 
+// Path spelling for native file I/O only, never for workspace identity or
+// persisted references. POSIX and ordinary short Windows paths are unchanged.
+// Long Windows DOS/UNC paths become absolute extended paths without requiring a
+// host executable manifest or machine-wide setting. Explicit device namespaces
+// and DOS reserved names or names ending in a dot/space keep their semantics.
+std::filesystem::path FileIoPath(const std::filesystem::path& path);
+
 // 把 source 原子换到 destination。两条路径须在同一文件系统；成功后
 // source 不复存在。memory/index 这类“先写临时文件，再整份替换”的路径
 // 共用它，免得 Windows 的 rename 不能覆盖目标、POSIX 却能覆盖，业务层

@@ -18,7 +18,7 @@ Telemetry/Insights。眼下欠的不是再添几枚工具，而是把这些地�
 |---|---|---|---|
 | GUI Agent 核心 | Windows 示例包可截图、UIA、点击与输入 | 核心接口、多源定位、动作验证、跨应用泛化评测 | `GUIAgent核心_多模态理解定位执行与泛化评测.todo` |
 | 执行治理 | Schema、权限、Hooks、超时杀树、PTC 资源墙已落 | 强化沙箱、统一熔断、语义降级、故障注入 | 沙箱归 `跨平台ExecutionProvider与通用强化沙箱设计.todo`；治理归 `Agent执行治理_强化沙箱熔断降级与安全边界.todo` |
-| 端云调度 | App Server 多 Session 雏形、本机 Gateway 骨架 | NodeBridge、租约、fencing、多租户配额、断线续跑 | `多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo` |
+| 端云调度 | App Server 多 Session 雏形、本机 Gateway 骨架 | NodeBridge、租约、fencing、多租户配额、断线续跑 | `分布式支持路线图_从单机宿主到集群控制面的分期落地计划.todo`（原集群畅想单已并入其第二十九章） |
 | 记忆与续接 | BM25 召回、写入、review/auto、`/resume` 已落 | 使用回执、收益归因、续接快照、个性化边界 | `智能体记忆效果_个性化适配续接快照与在线评测.todo` |
 | 度量与评测 | Trajectory、OTLP、Insights、确定性 replay 已落 | 真实模型 Harness、GUI 基准、体验与功耗、回归门 | `Agent全链路度量_真实任务Harness回放与功耗评测.todo` |
 

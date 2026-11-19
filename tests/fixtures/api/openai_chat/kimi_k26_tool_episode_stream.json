@@ -13,8 +13,11 @@
     }
   },
   "expected_events": [
+    "ProviderResponseIdentity",
     "MessageStart",
     "ThinkingDelta",
+    "ProviderResponseIdentity",
+    "ProviderResponseIdentity",
     "ContentBlockDone",
     "ToolUseStart",
     "ToolUseInputDelta",

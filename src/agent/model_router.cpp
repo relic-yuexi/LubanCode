@@ -1,7 +1,10 @@
 #include "agent/model_router.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <utility>
+
+#include "api/usage_totals.hpp"
 
 namespace lubancode::agent {
 
@@ -154,14 +157,20 @@ ModelRouteTable ResolveModelRoutes(const ModelRoleSpec& normal_spec, const Model
 void ModelUsageLedger::Record(ModelRole role, std::string_view model, const api::Usage& usage,
                               std::int64_t duration_ms, bool reported) {
     auto& entry = by_role_[role];
-    entry.calls += 1;
-    entry.duration_ms += duration_ms > 0 ? duration_ms : 0;
+    if (entry.calls == (std::numeric_limits<int>::max)()) entry.calls_overflow = true;
+    else ++entry.calls;
+    const auto add = [](std::int64_t& total, bool& overflow, std::optional<std::int64_t> value) {
+        if (overflow) return;
+        const auto sum = value ? api::usage_observation::CheckedAdd(total, *value) : std::nullopt;
+        if (sum) total = *sum;
+        else overflow = true;
+    };
+    add(entry.duration_ms, entry.duration_overflow, duration_ms > 0 ? duration_ms : 0);
     entry.last_model = std::string(model);
     if (reported) {
         entry.reported = true;
-        entry.input_tokens +=
-            usage.input_tokens + usage.cache_read_tokens + usage.cache_creation_tokens;
-        entry.output_tokens += usage.output_tokens;
+        add(entry.input_tokens, entry.input_overflow, api::CheckedTotalInputTokens(usage));
+        add(entry.output_tokens, entry.output_overflow, usage.output_tokens);
     }
 }
 
@@ -187,14 +196,17 @@ std::vector<std::string> ModelUsageLedger::ReportLines(const ModelRouteTable* ro
         // 不拿 normal 的名字顶包)。
         std::string line = ToString(role);
         if (has_calls) {
-            line += " · " + entry->last_model + " · " + std::to_string(entry->calls) + " 次调用";
+            line += " · " + entry->last_model + " · " +
+                    (entry->calls_overflow ? std::string("未知（溢出）") : std::to_string(entry->calls)) + " 次调用";
             if (entry->reported) {
-                line += " · 输入 " + std::to_string(entry->input_tokens) + " tok · 输出 " +
-                        std::to_string(entry->output_tokens) + " tok";
+                line += " · 输入 " + (entry->input_overflow ? std::string("未知（溢出）") : std::to_string(entry->input_tokens)) +
+                        " tok · 输出 " + (entry->output_overflow ? std::string("未知（溢出）") : std::to_string(entry->output_tokens)) + " tok";
             } else {
                 line += " · usage 未报告";
             }
-            if (entry->duration_ms > 0) {
+            if (entry->duration_overflow) {
+                line += " · 用时 未知（溢出）";
+            } else if (entry->duration_ms > 0) {
                 line += " · 用时 " + std::to_string(entry->duration_ms / 1000) + "." +
                         std::to_string((entry->duration_ms % 1000) / 100) + "s";
             }

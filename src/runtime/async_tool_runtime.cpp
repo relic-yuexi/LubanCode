@@ -3,6 +3,9 @@
 #include "runtime/async_tool_runtime.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <exception>
 #include <utility>
 
 #include "platform/log_sink.hpp"
@@ -21,6 +24,7 @@ using tools::JobAuthDecision;
 using tools::JobStartRequest;
 using tools::JobStartResult;
 using tools::ToolJobCoordinator;
+thread_local const void* current_async_shutdown = nullptr;
 
 // 已接单/已派发的调用簿:闸门自己的内存账(dedup、幂等、完成通知路由)。
 struct KnownJob {
@@ -56,8 +60,16 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
     bool capability_recorded = false;
     std::mutex book_mutex;  // known_jobs/early 册(批次路径与流式探针同线程,
                             // 恢复/诊断可能异线程,上锁求稳)
+    std::mutex shutdown_mutex;
+    std::condition_variable shutdown_cv;
+    bool shutdown_in_progress = false;
+    std::atomic<bool> shutdown_requested{false};
+    std::atomic<bool> shutdown_complete{false};
+    bool shutdown_ok = true;
     std::map<std::string, KnownJob> known_by_call;   // provider call id -> job
     std::map<std::string, KnownJob> known_by_job;    // job id -> job(泵路由)
+
+    agent::JobAdmissionMode admission_mode() const noexcept override { return options.admission_mode; }
 
     // ---- 能力闸(单 §4 末):合成 + 快照落账 ------------------------------
     ProviderToolContract ContractFor(bool call_marked_async) const {
@@ -116,6 +128,8 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
     // ---- agent::ToolBatchGate:流式提前档探针 ----------------------------
     bool OnCallItemComplete(const api::ToolUseBlock& call,
                             const StreamCallContext& context) override {
+        if (admission_mode() != agent::JobAdmissionMode::Legacy) return false;
+        if (shutdown_requested.load()) return false;
         const auto policy_it = options.tools.find(call.name);
         if (policy_it == options.tools.end()) {
             return false;  // 不在白名单:不提前
@@ -199,10 +213,19 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
     std::vector<ToolCallAdjudication> AdjudicateBatch(
         const std::vector<api::ToolUseBlock>& calls) override {
         std::vector<ToolCallAdjudication> adjudications(calls.size());
+        if (shutdown_requested.load()) return adjudications;
         bool saw_async_call = false;
         for (std::size_t i = 0; i < calls.size(); ++i) {
             const api::ToolUseBlock& call = calls[i];
             ToolCallAdjudication& adjudication = adjudications[i];
+            if (admission_mode() != agent::JobAdmissionMode::Legacy && hooks.owned_selected) {
+                if (hooks.owned_selected(call)) {
+                    adjudication.mode = ToolProtocolMode::JobHandle;
+                    adjudication.dispatch_point = ToolDispatchPoint::OnAssistantComplete;
+                    adjudication.basis = "owned_session_host";
+                }
+                continue;
+            }
             const auto policy_it = options.tools.find(call.name);
             if (policy_it == options.tools.end()) {
                 continue;  // 缺省 inline
@@ -232,13 +255,29 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
                     "fail-closed,单 §4),按 job_handle 伪异步接单配对";
             }
         }
-        RecordCapabilitySnapshotLocked(saw_async_call);
+        if (!(admission_mode() == agent::JobAdmissionMode::OwnedRequired && hooks.owned_selected))
+            RecordCapabilitySnapshotLocked(saw_async_call);
         return adjudications;
+    }
+
+    agent::OwnedJobAdmissionReceipt TakeOwnedJobOrder(const api::ToolUseBlock& call,
+        const agent::OwnedToolAdmissionContext& context) override {
+        if (admission_mode() != agent::JobAdmissionMode::OwnedRequired ||
+            shutdown_requested.load() || !hooks.owned_admission)
+            return agent::MissingOwnedJobAdmission();
+        TrajectoryTurnBridge* bridge = nullptr;
+        { std::lock_guard lock(book_mutex); bridge = current_bridge; }
+        if (!bridge) return agent::MissingOwnedJobAdmission();
+        // The host owns the bridge through this synchronous turn. Never hold
+        // book_mutex across preparation, approval publication or waiting.
+        return hooks.owned_admission(*bridge, call, context);
     }
 
     // ---- agent::ToolBatchGate:接单 --------------------------------------
     std::optional<tools::Tool::Result> TakeJobOrder(
         const api::ToolUseBlock& call, const ToolCallAdjudication& adjudication) override {
+        if (admission_mode() != agent::JobAdmissionMode::Legacy) return agent::MissingOwnedJobAdmission().result;
+        if (shutdown_requested.load()) return tools::Tool::Result::Error("job.coordinator.closed");
         // 提前档派过的:只补接单(幂等),不重派。
         std::optional<KnownJob> early;
         {
@@ -331,6 +370,11 @@ struct AsyncToolRuntime::Impl final : agent::ToolBatchGate {
 
     // ---- agent::ToolBatchGate:完成信封回灌口 ----------------------------
     void PumpBatchBoundary() override {
+        if (shutdown_requested.load()) return;
+        if (admission_mode() != agent::JobAdmissionMode::Legacy && hooks.owned_pump) {
+            hooks.owned_pump();
+            return;
+        }
         coordinator_->PumpCompletions();
         std::vector<KnownJob> jobs_to_check;
         {
@@ -434,6 +478,7 @@ std::unique_ptr<AsyncToolRuntime> AsyncToolRuntime::Create(Hooks hooks,
             };
     }
     // 协调器与规划器共享会话写者(P1"与主循环共享写者的装配归 P2"落地)。
+    runtime->impl_->options.coordinator.named_results = runtime->impl_->hooks.named_results;
     runtime->impl_->coordinator_ = std::make_shared<ToolJobCoordinator>(
         *runtime->impl_->hooks.writer, runtime->impl_->hooks.auth,
         runtime->impl_->hooks.executor, runtime->impl_->options.coordinator);
@@ -447,8 +492,13 @@ std::unique_ptr<AsyncToolRuntime> AsyncToolRuntime::Create(Hooks hooks,
 }
 
 void AsyncToolRuntime::InstallTurnBridge(TrajectoryTurnBridge* bridge) {
+    (void)ExchangeTurnBridge(bridge);
+}
+
+TrajectoryTurnBridge* AsyncToolRuntime::ExchangeTurnBridge(TrajectoryTurnBridge* bridge) {
     std::lock_guard<std::mutex> lock(impl_->book_mutex);
-    impl_->current_bridge = bridge;
+    if (impl_->shutdown_requested.load()) return nullptr;
+    return std::exchange(impl_->current_bridge, bridge);
 }
 
 void AsyncToolRuntime::NoteModelIdentity(const std::string& provider, const std::string& model) {
@@ -457,16 +507,70 @@ void AsyncToolRuntime::NoteModelIdentity(const std::string& provider, const std:
     impl_->options.model = model;
 }
 
-AsyncToolRuntime::~AsyncToolRuntime() = default;
+AsyncToolRuntime::~AsyncToolRuntime() {
+    (void)Shutdown();
+    if (!quiescent()) std::terminate();  // Destruction inside an owned callback is invalid.
+}
+
+void AsyncToolRuntime::RequestShutdown() {
+    if (impl_ == nullptr) return;
+    impl_->shutdown_requested.store(true);
+    if (impl_->coordinator_ != nullptr) impl_->coordinator_->RequestShutdown();
+}
+
+bool AsyncToolRuntime::Shutdown() {
+    if (impl_ == nullptr) return true;
+    if (current_async_shutdown == impl_.get()) return false;
+    RequestShutdown();
+    const bool settled = impl_->coordinator_ == nullptr || impl_->coordinator_->Shutdown();
+    if (impl_->coordinator_ != nullptr && !impl_->coordinator_->shutdown_complete()) return false;
+    std::unique_lock lock(impl_->shutdown_mutex);
+    impl_->shutdown_cv.wait(lock, [&] { return !impl_->shutdown_in_progress; });
+    if (impl_->shutdown_complete.load()) return impl_->shutdown_ok;
+    impl_->shutdown_in_progress = true;
+    lock.unlock();
+    const void* previous = current_async_shutdown;
+    current_async_shutdown = impl_.get();
+    {
+        std::lock_guard book(impl_->book_mutex);
+        impl_->hooks.writer = nullptr;
+        impl_->current_bridge = nullptr;
+    }
+    // The host has joined its turn worker before Shutdown; the closing latch
+    // also prevents later gate/query entries from reading these callbacks. Do
+    // not move/exchange/swap them under book_mutex: std::function inline targets
+    // can survive a move or be destroyed while clearing its source. Clear every
+    // original copy, including planner hooks and the options clock, lock-free
+    // while their host dependencies and Impl query mutexes still live.
+    impl_->planner_.reset();
+    impl_->hooks = Hooks{};
+    impl_->options.coordinator.clock_ms = nullptr;
+    current_async_shutdown = previous;
+    lock.lock();
+    impl_->shutdown_ok = settled;
+    impl_->shutdown_complete.store(true);
+    impl_->shutdown_in_progress = false;
+    lock.unlock();
+    impl_->shutdown_cv.notify_all();
+    return settled;
+}
+
+bool AsyncToolRuntime::quiescent() const {
+    return impl_ == nullptr || impl_->shutdown_complete.load();
+}
 
 agent::ToolBatchGate* AsyncToolRuntime::gate() { return impl_.get(); }
 
-agent::ResultDeliveryPlanner* AsyncToolRuntime::planner() { return impl_->planner_.get(); }
+agent::ResultDeliveryPlanner* AsyncToolRuntime::planner() {
+    if (impl_->options.admission_mode == agent::JobAdmissionMode::OwnedRequired && impl_->hooks.owned_admission)
+        return nullptr; // owned parent delivery has its own verified single bridge transaction
+    return impl_->shutdown_requested.load() ? nullptr : impl_->planner_.get();
+}
 
 std::shared_ptr<ToolJobCoordinator> AsyncToolRuntime::coordinator() { return impl_->coordinator_; }
 
 void AsyncToolRuntime::RestoreFromLedger() {
-    if (impl_ == nullptr || impl_->hooks.writer == nullptr) {
+    if (impl_ == nullptr || impl_->shutdown_requested.load() || impl_->hooks.writer == nullptr) {
         return;
     }
     auto ledger = trajectory::v3::ReadV3Ledger(impl_->hooks.writer->path());
@@ -475,8 +579,11 @@ void AsyncToolRuntime::RestoreFromLedger() {
             "async-gate", "恢复读账失败,异步欠账不重建: " + ledger.error_or(""));
         return;
     }
-    const auto plan = ToolJobCoordinator::PlanRecovery(*ledger);
+    const auto plan = ToolJobCoordinator::PlanRecovery(*ledger, impl_->options.recovery_policy);
     impl_->coordinator_->AdoptRecovery(plan);
+    // Explicit hold also forbids repairing old deferred delivery messages.
+    // The live planner remains available for newly submitted jobs.
+    if (impl_->options.recovery_policy == tools::JobRecoveryPolicy::Hold) return;
     impl_->planner_->RestoreFromLedger(*ledger);
 }
 
@@ -503,6 +610,7 @@ bool AttachDefaultAsyncToolRuntime(SessionRuntime& session, const std::string& w
     AsyncToolRuntime::Hooks hooks;
     hooks.writer = ledger->v3_main_writer();
     hooks.writer_mutex = ledger->v3_tool_results_mutex();
+    hooks.named_results = ledger->named_result_capability();
     AsyncToolRuntimeOptions options;
     options.wire = wire_name;
     auto runtime = AsyncToolRuntime::Create(std::move(hooks), std::move(options));

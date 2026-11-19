@@ -4,7 +4,16 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
+#include <expected>
+#include <functional>
+#include <memory>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
+
+#include <cpr/error.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -19,6 +28,26 @@ using lubancode::tools::PrepareFetchedBody;
 using lubancode::tools::StripHtml;
 using lubancode::tools::TruncateUtf8;
 using lubancode::tools::WebFetchTool;
+
+namespace {
+class ScriptedWebFetchTransport final : public lubancode::tools::WebFetchTransport {
+public:
+    std::vector<lubancode::net::FullHttpResponse> responses;
+    std::vector<lubancode::net::FullHttpRequest> requests;
+    std::optional<lubancode::net::FullHttpError> error;
+    std::function<void()> returned;
+    std::expected<lubancode::net::FullHttpResponse, lubancode::net::FullHttpError> Get(
+        const lubancode::net::FullHttpRequest& request, const lubancode::net::FullHttpLimits&,
+        const std::atomic<bool>*) override {
+        requests.push_back(request);
+        if (returned) returned();
+        if (error) return std::unexpected(*error);
+        if (requests.size() > responses.size())
+            return std::unexpected(lubancode::net::FullHttpError{});
+        return responses[requests.size() - 1];
+    }
+};
+}
 
 TEST_CASE("StripHtml: 普通标签剥掉,正文保留") {
     const std::string html = "<html><body><p>hello <b>world</b></p></body></html>";
@@ -204,4 +233,87 @@ TEST_CASE("WebFetchTool: 元信息") {
     CHECK_FALSE(tool.needs_confirm());
     const auto schema = tool.input_schema();
     CHECK(schema["required"] == nlohmann::json::array({"url"}));
+}
+
+TEST_CASE("WebFetchTool: cancelled and malformed requests never enter the transport seam") {
+    auto transport = std::make_shared<ScriptedWebFetchTransport>();
+    WebFetchTool tool(lubancode::tools::WebFetchOptions{}, transport);
+    std::atomic<bool> cancelled{true};
+    lubancode::tools::ToolExecutionContext context; context.cancel = &cancelled;
+    REQUIRE(tool.execute({{"url", "https://example.test/page"}}, context).error_code == "web_fetch.cancelled");
+    for (const auto* url : {"file:///private", "https://user:secret@example.test", "https://example.test/\nheader"}) {
+        REQUIRE(tool.execute({{"url", url}}).error_code == "web_fetch.invalid_url");
+    }
+    for (const auto& bytes : {nlohmann::json(0), nlohmann::json(-1), nlohmann::json(1.5), nlohmann::json("123")})
+        REQUIRE(tool.execute({{"url", "https://example.test"}, {"max_bytes", bytes}}).error_code == "web_fetch.invalid_input");
+    REQUIRE(transport->requests.empty());
+}
+
+TEST_CASE("WebFetchTool: HTTPS downgrade and redirect cancellation issue no second request") {
+    {
+        auto transport = std::make_shared<ScriptedWebFetchTransport>();
+        transport->responses.push_back({302, {{"Location", "http://example.test/plain"}}, "", 64});
+        WebFetchTool tool(lubancode::tools::WebFetchOptions{}, transport);
+        const auto result = tool.execute({{"url", "https://example.test/secure"}});
+        REQUIRE(result.error_code == "web_fetch.redirect_downgrade");
+        REQUIRE(transport->requests.size() == 1);
+        REQUIRE(transport->requests[0].url == "https://example.test/secure");
+    }
+    {
+        std::atomic<bool> cancelled{false};
+        auto transport = std::make_shared<ScriptedWebFetchTransport>();
+        transport->responses.push_back({302, {{"Location", "/unvisited"}}, "", 64});
+        transport->returned = [&] { cancelled.store(true); };
+        WebFetchTool tool(lubancode::tools::WebFetchOptions{}, transport);
+        lubancode::tools::ToolExecutionContext context; context.cancel = &cancelled;
+        REQUIRE(tool.execute({{"url", "https://example.test/secure"}}, context).error_code == "web_fetch.cancelled");
+        REQUIRE(transport->requests.size() == 1);
+    }
+    using Kind = lubancode::net::FullHttpErrorKind;
+    for (const auto& [kind, expected] : std::vector<std::pair<Kind, std::string>>{
+             {Kind::Cancelled, "cancelled"}, {Kind::Timeout, "timeout"},
+             {Kind::ResponseHeaderTooLarge, "header_limit"}, {Kind::ResponseBodyTooLarge, "download_limit"},
+             {Kind::NetworkFailed, "unsupported_encoding"}}) {
+        auto transport = std::make_shared<ScriptedWebFetchTransport>();
+        transport->error = lubancode::net::FullHttpError{};
+        transport->error->kind = kind;
+        transport->error->curl_code = static_cast<long>(cpr::ErrorCode::BAD_CONTENT_ENCODING);
+        WebFetchTool tool(lubancode::tools::WebFetchOptions{}, transport);
+        REQUIRE(tool.execute({{"url", "https://example.test/one"}}).error_code == "web_fetch." + expected);
+        REQUIRE(transport->requests.size() == 1);
+    }
+    for (const int status : {0, 200, 301, 302, 303, 304, 307, 308, 404}) {
+        auto transport = std::make_shared<ScriptedWebFetchTransport>();
+        transport->error = lubancode::net::FullHttpError{};
+        transport->error->kind = Kind::NetworkFailed;
+        transport->error->curl_code = static_cast<long>(cpr::ErrorCode::WEIRD_SERVER_REPLY);
+        transport->error->response_status = status;
+        WebFetchTool tool(lubancode::tools::WebFetchOptions{}, transport);
+        const bool redirect = status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+        REQUIRE(tool.execute({{"url", "https://example.test/one"}}).error_code ==
+            (redirect ? "web_fetch.redirect_invalid" : "web_fetch.network_failed"));
+        REQUIRE(transport->requests.size() == 1);
+    }
+    for (const auto& [kind, expected] : std::vector<std::pair<Kind, std::string>>{
+             {Kind::Cancelled, "cancelled"}, {Kind::Timeout, "timeout"},
+             {Kind::ResponseHeaderTooLarge, "header_limit"}, {Kind::ResponseBodyTooLarge, "download_limit"}}) {
+        auto transport = std::make_shared<ScriptedWebFetchTransport>();
+        transport->error = lubancode::net::FullHttpError{};
+        transport->error->kind = kind;
+        transport->error->curl_code = static_cast<long>(cpr::ErrorCode::WEIRD_SERVER_REPLY);
+        transport->error->response_status = 302;
+        WebFetchTool tool(lubancode::tools::WebFetchOptions{}, transport);
+        REQUIRE(tool.execute({{"url", "https://example.test/one"}}).error_code == "web_fetch." + expected);
+        REQUIRE(transport->requests.size() == 1);
+    }
+    {
+        auto transport = std::make_shared<ScriptedWebFetchTransport>();
+        transport->error = lubancode::net::FullHttpError{};
+        transport->error->kind = Kind::NetworkFailed;
+        transport->error->curl_code = static_cast<long>(cpr::ErrorCode::RECV_ERROR);
+        transport->error->response_status = 302;
+        WebFetchTool tool(lubancode::tools::WebFetchOptions{}, transport);
+        REQUIRE(tool.execute({{"url", "https://example.test/one"}}).error_code == "web_fetch.network_failed");
+        REQUIRE(transport->requests.size() == 1);
+    }
 }

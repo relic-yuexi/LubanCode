@@ -327,14 +327,14 @@ std::vector<lubancode::cli::AgentPanelEntry> AgentPanelPresenter::Entries(
         entry.done_delivered = task.state == lubancode::tools::AgentTaskState::Done && task.delivered;
         const auto end = entry.running ? now : task.end_time;
         const double seconds = std::chrono::duration<double>(end - task.start_time).count();
-        const std::int64_t tokens = task.total_input_tokens() + task.output_tokens;
+        const auto tokens = task.total_tokens();
         // tokens 三态(规格根因三):未报告且已跑过步数就写"未报告",不画 0
         // ——0 会误导成"服务端一枚 token 都没跑",实则可能烧满了输出预算。
         // 运行中的一律未报告即写"未报告":首步流中 steps_used 还是 0,但
         // 请求已发出、token 正在烧,"0 tokens"正是用户看着诡异的假信号。
         const std::string token_text =
             task.usage_reported || (!entry.running && task.steps_used == 0)
-                ? lubancode::cli::FormatTokenCount(tokens)
+                ? (tokens ? lubancode::cli::FormatTokenCount(*tokens) : "?")
                 : tr("agent_status.tokens_not_reported");
         // 状态短话(规格"现场三/四"+活跃度单):导航坞只放短因——完成/失败 ·
         // 接口报错/耗尽 · 40/40 轮/停下 · 用户中止;完整错误进 transcript
@@ -469,12 +469,12 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
         const double seconds = end > snapshot->start_time
                                    ? std::chrono::duration<double>(end - snapshot->start_time).count()
                                    : 0.0;
-        const std::int64_t tokens = snapshot->total_input_tokens() + snapshot->output_tokens;
+        const auto tokens = snapshot->total_tokens();
         // tokens 三态(规格根因三):与导航坞行同一套口径——未报告且已跑过
         // 步数写"未报告",一步没跑才是真 0。
         const std::string token_text =
             snapshot->usage_reported || snapshot->steps_used == 0
-                ? lubancode::cli::FormatTokenCount(tokens)
+                ? (tokens ? lubancode::cli::FormatTokenCount(*tokens) : "?")
                 : tr("agent_status.tokens_not_reported");
         const std::size_t waiting_children = snapshot->state == lubancode::tools::AgentTaskState::WaitingChildren &&
                                                      agent_tool != nullptr
@@ -517,7 +517,7 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
                                 std::to_string(snapshot->wall_limit_secs) + "s");
             }
             if (snapshot->token_limit > 0) {
-                parts.push_back(lubancode::cli::FormatTokenCount(tokens) + "/" +
+                parts.push_back((tokens ? lubancode::cli::FormatTokenCount(*tokens) : "?") + std::string("/") +
                                 lubancode::cli::FormatTokenCount(snapshot->token_limit));
             }
             if (!parts.empty()) {

@@ -56,12 +56,12 @@ Client::~Client() {
 
 TransportStartResult Client::StartProcess(const std::string& command, const std::vector<std::string>& args,
                                            const std::vector<std::pair<std::string, std::string>>& env,
-                                           platform::EnvMode env_mode) {
+                                           platform::EnvMode env_mode, const std::string& cwd_utf8) {
     owned_transport_ = std::make_unique<StdioTransportAdapter>();
     transport_ = owned_transport_.get();
     ++transport_generation_;  // 逐枚追踪单:换一代记一笔(重启/换进程分得清)
     return owned_transport_->Start(command, args, env,
-                                   [this](std::string line) { OnLine(std::move(line)); }, env_mode);
+                                   [this](std::string line) { OnLine(std::move(line)); }, env_mode, cwd_utf8);
 }
 
 void Client::AttachTransportForTest(Transport* transport) {
@@ -239,11 +239,11 @@ bool Client::SendNotification(const std::string& method, const nlohmann::json& p
     return transport_->WriteLine(notification.dump());
 }
 
-std::expected<void, std::string> Client::Initialize() {
+std::expected<void, std::string> Client::Initialize(const std::atomic<bool>* cancel) {
     const nlohmann::json params = {{"protocolVersion", kSupportedProtocolVersions[0]},
                                     {"capabilities", nlohmann::json::object()},
                                     {"clientInfo", {{"name", "lubancode"}, {"version", kClientVersion}}}};
-    auto result = SendRequestAndWait("initialize", params, default_timeout_ms_);
+    auto result = SendRequestAndWait("initialize", params, default_timeout_ms_, nullptr, cancel);
     if (!result.has_value()) {
         return std::unexpected(result.error());
     }
@@ -263,8 +263,8 @@ std::expected<void, std::string> Client::Initialize() {
     return {};
 }
 
-std::expected<std::vector<ToolInfo>, std::string> Client::ListTools() {
-    auto result = SendRequestAndWait("tools/list", nlohmann::json::object(), default_timeout_ms_);
+std::expected<std::vector<ToolInfo>, std::string> Client::ListTools(const std::atomic<bool>* cancel) {
+    auto result = SendRequestAndWait("tools/list", nlohmann::json::object(), default_timeout_ms_, nullptr, cancel);
     if (!result.has_value()) {
         return std::unexpected(result.error());
     }

@@ -135,6 +135,17 @@ TEST_CASE("零外链与自包含:页面不出现 http(s) 与 CDN 引用") {
 }
 
 TEST_CASE("七节锚点与筛选器在场;canary 不进页面") {
+    SUBCASE("HTML renders unknown buckets and unrepresentable epoch totals") {
+        auto summary = MakeSummary();
+        summary.usage.knowledge.input_tokens = false;
+        summary.usage.knowledge.output_tokens = false;
+        REQUIRE(!summary.cache_epochs.empty());
+        summary.cache_epochs[0].knowledge.cache_read_tokens = false;
+        const auto page = RenderFixture(summary);
+        CHECK(page.find("未知（溢出）") != std::string::npos);
+        CHECK(page.find("<td>未知（溢出）</td>") != std::string::npos);
+        CHECK(page.find("Cache epoch 分段") != std::string::npos);
+    }
     const std::string html = RenderFixture(MakeSummary());
     for (const char* anchor : {"sec-overview", "sec-usage", "sec-prompt", "sec-friction",
                                "sec-shape", "sec-suggestions", "sec-coverage"}) {

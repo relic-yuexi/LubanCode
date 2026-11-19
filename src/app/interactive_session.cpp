@@ -322,7 +322,7 @@ void TerminalSessionController::StartTitleRefinement(const std::string& first_qu
     inputs.trajectory_wire = session_runtime_.wire_name();
     inputs.provider = detached.route.provider;
     if (titles_.refiner().Start(std::move(inputs))) {
-        // T11-A:起飞事实(title.requested)在真起飞后才记,不冒充发起。
+        // T11-A:Start 已接本次尝试，包括起飞失败终态；物理发送另看 prepared/sent。
         titles_.NoteTitleGenerationStarted(info.model, detached.route.provider);
     }
 }
@@ -334,7 +334,7 @@ void TerminalSessionController::StartTitleRefinement(const std::string& first_qu
 void TerminalSessionController::BackfillTitleOnResume() {
     // 档里首条用户消息的正文(图片消息拿文件名)——与落盘兜底同一条路。
     std::string first_text;
-    for (const auto& message : main_agent->History()) {
+    for (const auto& message : MainAgent()->History()) {
         if (message.role != lubancode::api::Role::User) {
             continue;
         }
@@ -412,9 +412,7 @@ void TerminalSessionController::DrainFinishedTitleRefinement() {
     }
     // usage 分账:记 cheap 台账;context_tracker 一个字不碰——标题采样不
     // 混主会话 context 占用。迟到被弃也照记:token 是真花了的。
-    model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, outcome->model,
-                                  outcome->accounting.usage, outcome->accounting.duration_ms,
-                                  outcome->accounting.usage_reported);
+    (void)lubancode::app::RecordTitleRefinementCall(model_router->ledger(), *outcome);
     // 采纳判定(代数对上/档子活着/落盘成功才换)在 SessionTitleAccount。
     const auto adopted = titles_.AdoptRefined(*outcome);
     if (adopted == lubancode::app::SessionTitleAccount::AdoptResult::WriteFailed) {
@@ -475,9 +473,7 @@ void TerminalSessionController::DrainFinishedTurnMemory() {
     if (!outcome.has_value()) {
         return;
     }
-    model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, outcome->model,
-                                  outcome->accounting.usage, outcome->accounting.duration_ms,
-                                  outcome->accounting.usage_reported);
+    lubancode::app::RecordTurnMemoryCall(model_router->ledger(), *outcome);
     if (outcome->session_generation != view_registry_.session_generation()) {
         // 换代(/clear、/resume)后的迟到:旧场的回合账不写进新场的卷里,
         // 宁缺毋滥(世代拒旧账,先例:审批 DenyStaleGenerations、标题精炼
@@ -668,7 +664,7 @@ void TerminalSessionController::SyncWorktreeDirectory(const std::string& reason)
     if (instructions_changed) {
         // 重拼吃的是冻结基线目录(prompt_options.cwd 未随切换改写),只有
         // 指令段换血。
-        main_agent->SetSystemPrompt(lubancode::agent::AssembleSystemPrompt(prompt_options));
+        MainAgent()->SetSystemPrompt(lubancode::agent::AssembleSystemPrompt(prompt_options));
         std::string scope_line;
         for (const std::string& source : project_instruction_sources) {
             scope_line += scope_line.empty() ? source : ", " + source;
@@ -766,8 +762,8 @@ bool TerminalSessionController::DeliverPendingDirectoryNoticeNow() {
     inject.role = lubancode::api::Role::User;
     inject.content.push_back(lubancode::api::TextBlock{lubancode::runtime::FormatHostDirectoryNoticeText(
         notice.old_cwd_utf8, notice.new_cwd_utf8, notice.reason)});
-    if (main_agent.has_value()) {
-        main_agent->context().InjectIncoming(std::move(inject));
+    if (MainAgent() != nullptr) {
+        MainAgent()->context().InjectIncoming(std::move(inject));
     }
     return true;
 }
@@ -963,7 +959,7 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         BeginSessionTitle(content);
         // 窗口同步(0.27.x):/context、/model 改的是 tracker 的窗口,loop 的
         // mid-turn 评估用同一份,发轮前对齐一次。
-        main_agent->SetContextWindowTokens(context_tracker.window_tokens());
+        MainAgent()->SetContextWindowTokens(context_tracker.window_tokens());
         // 自动压缩:发真正的用户输入前,占用超过触发线(窗口×80% − 4k 压缩
         // 指令 − 8k 摘要预留,§〇.1 用户定案)就先压一压。失败只警告不拦
         // ——超大工具结果的保命索(token 轴口径)还在,不会真的爆掉;
@@ -1035,7 +1031,7 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         caps.loop_control.note = loop_wiring_.ActiveLoopTaskId();
         turn_suffix += lubancode::app::BuildTurnCapabilitiesSegment(caps);
     }
-    main_agent->SetTurnContext(std::move(turn_suffix));
+    MainAgent()->SetTurnContext(std::move(turn_suffix));
     std::size_t history_before = 0;
     lubancode::runtime::TurnUsageStats turn_usage;
     const auto turn_started = std::chrono::steady_clock::now();
@@ -1045,7 +1041,7 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         // 自生灭。终端标题(0.30.x 第四批):跑着/等输入两态,项目·分支跟
         // 着;拿不到焦点状态,不做"未聚焦才通知"的假判断,只在长轮收口时
         // 叫一声铃。
-        history_before = main_agent->History().size();
+        history_before = MainAgent()->History().size();
         if (spinner_enabled) {
             lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_busy")));
         }
@@ -1074,7 +1070,7 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
     lubancode::runtime::TurnEventAdapter turn_events = session_runtime_.MakeTurnAdapter();
     // 批三:RunTurn 二十四参收成一只 TurnContext。
     lubancode::app::TurnContext turn;
-    turn.loop = &*main_agent;
+    turn.loop = MainAgent();
     turn.user_input = content;
     turn.auto_confirm = auto_confirm;
     turn.always_allowed_tools = &always_allowed_tools;
@@ -1156,7 +1152,7 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
             // 本轮段末条 assistant 的首个文本块。
             int turn_actions = 0;
             std::string final_text;
-            const auto& history = main_agent->History();
+            const auto& history = MainAgent()->History();
             for (std::size_t i = history_before; i < history.size(); ++i) {
                 if (history[i].role != lubancode::api::Role::Assistant) {
                     continue;

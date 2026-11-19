@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-#include "cli/i18n.hpp"
+#include "text/i18n.hpp"
 #include "embedded_tool_text.hpp"  // 构建期生成:<build>/generated/embedded_tool_text.hpp
 
 namespace lubancode::tools {
@@ -63,7 +63,7 @@ std::optional<std::string_view> LookupInLang(std::string_view lang, std::string_
 
 std::string ToolText(std::string_view tool, std::string_view key, std::string_view fallback) {
     EnsureLoaded();
-    const std::string& current = cli::CurrentLanguage();
+    const std::string& current = lubancode::text::CurrentLanguage();
     if (const auto hit = LookupInLang(current, tool, key)) {
         return std::string(*hit);
     }

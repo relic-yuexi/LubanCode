@@ -187,6 +187,8 @@ TEST_CASE("清单: LatestResumableSessionId 认 v3 场,识别不改盘、不迁�
     std::error_code ec;
     std::filesystem::remove_all(
         scaffold.sessions_dir / platform::Utf8ToPath(scaffold.open_id), ec);
+    INFO(ec.message());
+    REQUIRE_FALSE(ec);
     {
         SessionManager picker(Opts(scaffold.root));
         CHECK(picker.LatestResumableSessionId() == v3_id);
@@ -588,6 +590,8 @@ TEST_CASE("session_index: v3 场进列表,摘要如实,坏尾标 damaged") {
     std::error_code ec;
     std::filesystem::remove_all(
         scaffold.sessions_dir / platform::Utf8ToPath(scaffold.open_id), ec);
+    INFO(ec.message());
+    REQUIRE_FALSE(ec);
 
     SessionIndexQuery query;
     query.current_workspace_key = scaffold.manager->workspace_key();

@@ -52,8 +52,10 @@ class Agent;  // /doctor 的运行档案来源(指针借用,定义在 agent/agen
 namespace lubancode::runtime {
 class SessionRuntime;  // /doctor 的 wire 名(定义在 runtime/session_runtime.hpp)
 }  // namespace lubancode::runtime
+namespace lubancode::runtime::assembly {
+class RebuildableBackend;
+}
 namespace lubancode::app {
-class RebuildableBackend;  // 探针写回后的重建口(定义在 app/backend_stack.hpp)
 class ToolRuntime;         // explore_registry(定义在 app/tool_runtime.hpp)
 
 
@@ -163,7 +165,8 @@ struct CacheProbeRoundResult {
     bool http_ok = false;
     bool usage_reported = false;
     std::int64_t cache_read = 0;
-    std::int64_t total_input = 0;
+    // nullopt retains an unrepresentable projection without changing raw usage.
+    std::optional<std::int64_t> total_input = 0;
 };
 
 // 多轮探针分型(问题 9):连跑多组固定前缀,区分——
@@ -279,7 +282,7 @@ struct DoctorCommandContext {
     std::string* active_provider = nullptr;
     const std::optional<std::string>* active_provider_write_path = nullptr;
     const std::optional<std::string>* home_lubancode = nullptr;
-    RebuildableBackend* real_backend = nullptr;  // 探针写回 config 后的重建口
+    runtime::assembly::RebuildableBackend* real_backend = nullptr;  // 探针写回 config 后的重建口
     std::shared_ptr<std::string> current_model;
     std::shared_ptr<std::string> current_think;
     lubancode::cli::ContextTracker* context_tracker = nullptr;

@@ -399,8 +399,9 @@ TEST_CASE("ledger:开账出 v3 主账,子代理拿独立 JSONL(五步子账)") {
     child_bridge.OnRequestSent(req);
     REQUIRE(child_bridge.OnOutputCompleted(req, UserMessage("报告:42 行"), "end_turn", "resp-c"));
     child_bridge.EndTurn(true, false, "done");
-    const std::string terminal_hash = (*child)->Finish(true, "done");
-    CHECK_FALSE(terminal_hash.empty());
+    const auto terminal_receipt = (*child)->Finish(SubagentExecutionOutcome::Succeeded, "done");
+    REQUIRE(terminal_receipt.durable());
+    const std::string terminal_hash = terminal_receipt.terminal->hash;
 
     // 子账独立存在(v3 布局 subagents/<childSessionId>/<childSessionId>.jsonl,
     // 首行 system):枚举子账目录定位。
@@ -438,7 +439,7 @@ TEST_CASE("ledger:开账出 v3 主账,子代理拿独立 JSONL(五步子账)") {
     REQUIRE(main_bridge->OnOutputCompleted(parent_req, with_agent, "tool_use", "resp-p"));
     main_bridge->OnToolTrace(TraceEvent(agent::ToolTraceEventKind::Scheduled, "toolu-1"));
     main_bridge->AttachChildRun("toolu-1", (*child)->run_id());
-    main_bridge->NoteChildTerminal((*child)->run_id(), terminal_hash);
+    main_bridge->NoteChildTerminal(terminal_receipt);
     agent::ToolTraceEvent started = TraceEvent(agent::ToolTraceEventKind::ExecutionStarted, "toolu-1");
     started.tool_name = "agent";
     main_bridge->OnToolTrace(started);

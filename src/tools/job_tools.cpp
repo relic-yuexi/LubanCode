@@ -9,6 +9,17 @@
 namespace lubancode::tools {
 namespace {
 
+const char* RecoveryKnowledgeName(JobRecoveryKnowledge knowledge) {
+    switch (knowledge) {
+        case JobRecoveryKnowledge::KnownNotDispatched: return "known_not_dispatched";
+        case JobRecoveryKnowledge::ExecutionUnconfirmed: return "execution_unconfirmed";
+        case JobRecoveryKnowledge::TerminalDeliveryGap: return "terminal_delivery_gap";
+        case JobRecoveryKnowledge::TerminalConfirmed: return "terminal_confirmed";
+        case JobRecoveryKnowledge::UnsupportedMode: return "unsupported_mode";
+    }
+    return "execution_unconfirmed";
+}
+
 nlohmann::json StatusToJson(const JobStatusView& view) {
     nlohmann::json status = nlohmann::json::object({{"jobId", view.job_id},
                                                     {"status", view.state}});
@@ -32,6 +43,18 @@ nlohmann::json StatusToJson(const JobStatusView& view) {
     }
     if (!view.failure.empty()) {
         status["failure"] = view.failure;
+    }
+    if (view.recovery.has_value()) {
+        const auto& facts = *view.recovery;
+        status["recovery"] = {{"policy", "hold"},
+            {"knowledge", RecoveryKnowledgeName(facts.knowledge)},
+            {"originalState", facts.original_state}, {"turnId", facts.turn_id},
+            {"stepId", facts.step_id}, {"dispatchedCount", facts.dispatched_count},
+            {"executionAttempt", facts.execution_attempt},
+            {"executionStarted", facts.execution_started},
+            {"executionState", facts.execution_state},
+            {"executionTerminalEvent", facts.execution_terminal_event},
+            {"admissionComplete", facts.admission_complete}};
     }
     return status;
 }

@@ -7,11 +7,15 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <new>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "trajectory/v3/writer.hpp"
+#include "trajectory/v3/reader.hpp"
+#include "trajectory/canonical_json.hpp"
 
 using namespace lubancode::trajectory::v3;
 
@@ -36,10 +40,10 @@ struct Harness {
         jsonl = dir / "session.jsonl";
     }
 
-    std::optional<V3Writer> Start() {
+    std::optional<V3Writer> Start(V3WriterOptions options = {}) {
         auto writer = V3Writer::Start(jsonl, "20260910-120000-AAAAAA", "run-000001",
                                       "你是 LubanCode。", nlohmann::json::object(),
-                                      V3WriterOptions{}, &clock);
+                                      std::move(options), &clock);
         if (!writer.has_value()) {
             return std::nullopt;
         }
@@ -60,6 +64,259 @@ std::vector<std::string> ReadLines(const std::filesystem::path& path) {
 }
 
 }  // namespace
+
+TEST_CASE("usage observation requires one actual prepared/sent source across write verify and Continue") {
+    Harness harness("usage-observation-source");
+    auto writer = harness.Start();
+    REQUIRE(writer.has_value());
+    EventDraft observation;
+    observation.kind = EventKindV3::ModelUsageObserved;
+    observation.request_id = "request-000001";
+    observation.turn_id = "turn-000001";
+    observation.step_id = "step-000001";
+    observation.payload = {{"version", 1}, {"numbers", nlohmann::json::array({-3, 5, 7, 11, 13})},
+        {"reportedByProvider", true}, {"incomplete", true}, {"providerResponseId", "real-id"}};
+    const auto untouched = writer->next_seq();
+    CHECK(writer->AppendEvent(observation, Durability::PowerLoss).error_code == "v3writer.usage_source_missing");
+    CHECK(writer->next_seq() == untouched);
+    REQUIRE(writer->PrepareRequest("request-000001", "turn-000001", "step-000001", "conversation",
+        writer->context().system_message_ref, {}, {{"provider", "fixture"}, {"model", "fixture-model"},
+        {"wire", "responses"}}).status == WriteReceipt::Status::Committed);
+    CHECK(writer->AppendEvent(observation, Durability::PowerLoss).error_code == "v3writer.usage_source_missing");
+    EventDraft sent;
+    sent.kind = EventKindV3::ModelRequestSent;
+    sent.status = OpStatus::Done;
+    sent.request_id = observation.request_id;
+    sent.turn_id = observation.turn_id;
+    sent.step_id = observation.step_id;
+    sent.payload = {{"deliveryScope", "local_transport"}};
+    REQUIRE(writer->AppendEvent(sent, Durability::PowerLoss).status == WriteReceipt::Status::Committed);
+    auto foreign = observation;
+    foreign.step_id = "other-step";
+    CHECK(writer->AppendEvent(foreign, Durability::PowerLoss).error_code == "v3writer.usage_source_mismatch");
+    REQUIRE(writer->AppendEvent(observation, Durability::PowerLoss).status == WriteReceipt::Status::Committed);
+    CHECK(writer->AppendEvent(observation, Durability::PowerLoss).error_code == "v3writer.usage_observation_duplicate");
+    REQUIRE(writer->Close().has_value());
+    const auto original = ReadLines(harness.jsonl);
+    REQUIRE(VerifyV3Lines(original).ok);
+    REQUIRE(ReadV3LedgerOwned(harness.jsonl, original).has_value());
+    auto continued = V3Writer::Continue(harness.jsonl);
+    REQUIRE(continued.has_value());
+    CHECK(continued->AppendEvent(observation, Durability::PowerLoss).error_code == "v3writer.usage_observation_duplicate");
+    REQUIRE(continued->Close().has_value());
+    CHECK(ReadLines(harness.jsonl) == original);
+
+    // Recomputed hashes are insufficient when the actual source relation is broken.
+    for (int variant = 0; variant < 4; ++variant) {
+        INFO(variant);
+        std::vector<nlohmann::json> rows;
+        for (const auto& raw : original) rows.push_back(nlohmann::json::parse(raw));
+        if (variant == 0) rows.back()["requestId"] = "foreign-request";
+        if (variant == 1) rows.back()["turnId"] = "foreign-turn";
+        if (variant == 2) {
+            rows.push_back(rows.back());
+            rows.back()["eventId"] = "evt-999999";
+        }
+        if (variant == 3) rows.erase(rows.end() - 2); // Remove the committed sent boundary.
+        std::vector<std::string> changed;
+        std::string previous(kGenesisHash);
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            auto& row = rows[i];
+            row.erase("prevHash"); row.erase("lineHash");
+            row["seq"] = std::uint64_t(i + 1);
+            const auto canonical = lubancode::trajectory::CanonicalJsonDump(row);
+            REQUIRE(canonical.has_value());
+            const auto hash = ComputeLineHash(previous, *canonical);
+            row["prevHash"] = previous; row["lineHash"] = hash;
+            const auto encoded = lubancode::trajectory::CanonicalJsonDump(row);
+            REQUIRE(encoded.has_value());
+            changed.push_back(*encoded);
+            previous = hash;
+        }
+        CHECK_FALSE(VerifyV3Lines(changed).ok);
+        CHECK_FALSE(ReadV3LedgerOwned(harness.jsonl, changed).has_value());
+    }
+}
+
+TEST_CASE("usage observation native append and semantic confirmation failures remain distinguishable on recovery") {
+    Harness harness("usage-observation-fault");
+    bool fail_before = false, fail_after = false, fail_after_allocation = false;
+    V3WriterOptions options;
+    options.inject_io_failure = [&]() -> std::optional<std::string> {
+        if (fail_before) return std::string("usage observation append refused");
+        return std::nullopt;
+    };
+    options.after_native_append = [&] {
+        if (fail_after_allocation) throw std::bad_alloc{};
+        if (fail_after) throw 19;
+    };
+    auto writer = harness.Start(std::move(options));
+    REQUIRE(writer.has_value());
+    REQUIRE(writer->PrepareRequest("request-000001", "turn-000001", "step-000001", "conversation",
+        writer->context().system_message_ref, {}, {{"provider", "fixture"}, {"model", "fixture-model"},
+        {"wire", "responses"}}).status == WriteReceipt::Status::Committed);
+    EventDraft sent;
+    sent.kind = EventKindV3::ModelRequestSent;
+    sent.status = OpStatus::Done;
+    sent.request_id = "request-000001";
+    sent.turn_id = "turn-000001";
+    sent.step_id = "step-000001";
+    sent.payload = {{"deliveryScope", "local_transport"}};
+    REQUIRE(writer->AppendEvent(sent, Durability::PowerLoss).status == WriteReceipt::Status::Committed);
+    EventDraft observation = sent;
+    observation.kind = EventKindV3::ModelUsageObserved;
+    observation.status.reset();
+    observation.payload = {{"version", 1}, {"numbers", nlohmann::json::array({3, 5, 7, 11, 13})},
+        {"reportedByProvider", true}, {"incomplete", true}, {"providerResponseId", "real-id"}};
+    SUBCASE("prepared facts survive pre-I/O allocation refusal") {
+        struct Factory { const EventDraft& original; unsigned calls = 0; } factory{observation};
+        const auto receipt = writer->AppendPreparedEvent(+[](void* context) -> std::optional<EventDraft> {
+            auto& factory = *static_cast<Factory*>(context);
+            if (++factory.calls == 1) throw std::bad_alloc{};
+            return factory.original;
+        }, &factory, Durability::PowerLoss);
+        REQUIRE(receipt.has_value());
+        CHECK(receipt->status == WriteReceipt::Status::Committed);
+        REQUIRE(receipt->journal_append.has_value());
+        CHECK(receipt->journal_append->status == lubancode::trajectory::JournalAppendStatus::Committed);
+        CHECK(factory.calls == 2);
+        REQUIRE(writer->Close().has_value());
+        const auto ledger = ReadV3Ledger(harness.jsonl);
+        REQUIRE(ledger.has_value());
+        unsigned observations = 0;
+        for (const auto& event : ledger->events) {
+            if (event.kind != EventKindV3::ModelUsageObserved) continue;
+            ++observations;
+            CHECK(event.payload == observation.payload);
+        }
+        CHECK(observations == 1);
+        return;
+    }
+    SUBCASE("prepared facts never replay after native append allocation refusal") {
+        fail_after_allocation = true;
+        struct Factory { const EventDraft& original; unsigned calls = 0; } factory{observation};
+        const auto receipt = writer->AppendPreparedEvent(+[](void* context) -> std::optional<EventDraft> {
+            auto& factory = *static_cast<Factory*>(context);
+            ++factory.calls;
+            return factory.original;
+        }, &factory, Durability::PowerLoss);
+        REQUIRE(receipt.has_value());
+        CHECK(receipt->status == WriteReceipt::Status::IoFailed);
+        CHECK(receipt->error_code == "v3writer.completion_unconfirmed");
+        REQUIRE(receipt->journal_append.has_value());
+        CHECK(receipt->journal_append->status == lubancode::trajectory::JournalAppendStatus::Committed);
+        CHECK_FALSE(receipt->id.empty());
+        CHECK(factory.calls == 1);
+        CHECK(writer->broken());
+        writer.reset();
+        auto restored = V3Writer::Continue(harness.jsonl);
+        REQUIRE(restored.has_value());
+        CHECK(restored->AppendEvent(observation, Durability::PowerLoss).error_code ==
+              "v3writer.usage_observation_duplicate");
+        REQUIRE(restored->Close().has_value());
+        const auto ledger = ReadV3Ledger(harness.jsonl);
+        REQUIRE(ledger.has_value());
+        unsigned observations = 0;
+        for (const auto& event : ledger->events) {
+            if (event.kind != EventKindV3::ModelUsageObserved) continue;
+            ++observations;
+            CHECK(event.payload == observation.payload);
+        }
+        CHECK(observations == 1);
+        return;
+    }
+    SUBCASE("before append") { fail_before = true; }
+    SUBCASE("after actual append") { fail_after = true; }
+    const auto receipt = writer->AppendEvent(observation, Durability::PowerLoss);
+    CHECK(receipt.status != WriteReceipt::Status::Committed);
+    CHECK(writer->broken());
+    CHECK(receipt.error_code == (fail_before ? "v3writer.injected" : "v3writer.completion_unconfirmed"));
+    writer.reset(); // Retire the broken handle before taking a fresh recovery owner.
+    auto restored = V3Writer::Continue(harness.jsonl);
+    REQUIRE(restored.has_value());
+    if (fail_before) {
+        CHECK(restored->AppendEvent(observation, Durability::PowerLoss).status == WriteReceipt::Status::Committed);
+    } else {
+        CHECK(restored->AppendEvent(observation, Durability::PowerLoss).error_code == "v3writer.usage_observation_duplicate");
+        REQUIRE(receipt.journal_append.has_value());
+        CHECK_FALSE(receipt.id.empty());
+    }
+    REQUIRE(restored->Close().has_value());
+    const auto ledger = ReadV3Ledger(harness.jsonl);
+    REQUIRE(ledger.has_value());
+    int observations = 0;
+    for (const auto& event : ledger->events) {
+        if (event.kind != EventKindV3::ModelUsageObserved) continue;
+        ++observations;
+        CHECK(event.payload.at("numbers") == observation.payload.at("numbers"));
+    }
+    CHECK(observations == 1);
+}
+
+TEST_CASE("V3Writer: effective host binding survives switches and Continue") {
+    Harness harness("host-bindings");
+    const nlohmann::json bindings{{"skills", {{"schemaVersion", 1}, {"sha256", "plan-a"}}}};
+    auto writer = V3Writer::Start(harness.jsonl, "20260910-120000-AAAAAA", "run-000001",
+        "original", {{"settingsVersion", 7}, {"hostBindings", bindings}, {"initialOnly", "old"}});
+    REQUIRE(writer.has_value());
+    const auto first_root = writer->context().system_message_ref;
+    const auto switched = writer->SwitchSystem("replacement",
+        {{"cause", "system_prompt_changed"}, {"settingsVersion", 8}, {"systemChanged", true},
+         {"hostBindings", {{"skills", "caller-must-not-replace"}}}});
+    REQUIRE(switched.change_event.status == WriteReceipt::Status::Committed);
+    REQUIRE(switched.system_message.status == WriteReceipt::Status::Committed);
+    REQUIRE(switched.apply_event.status == WriteReceipt::Status::Committed);
+    auto rows = ReadLines(harness.jsonl);
+    REQUIRE(rows.size() == 5);
+    const auto change = nlohmann::json::parse(rows[2]);
+    const auto system = nlohmann::json::parse(rows[3]);
+    const auto applied = nlohmann::json::parse(rows[4]);
+    CHECK(change["payload"]["oldSystemMessageRef"] == first_root);
+    CHECK(change["payload"]["hostBindings"] == bindings);
+    CHECK(system["systemMeta"]["hostBindings"] == bindings);
+    CHECK(system["systemMeta"]["settingsVersion"] == 8);
+    CHECK(system["systemMeta"]["cause"] == "system_prompt_changed");
+    CHECK_FALSE(system["systemMeta"].contains("initialOnly"));
+    CHECK(applied["payload"]["hostBindings"] == bindings);
+    REQUIRE(writer->Close().has_value());
+    auto continued = V3Writer::Continue(harness.jsonl);
+    REQUIRE(continued.has_value());
+    const auto next = continued->SwitchSystem("third",
+        {{"cause", "system_prompt_changed"}, {"settingsVersion", 9}, {"systemChanged", true}});
+    REQUIRE(next.apply_event.status == WriteReceipt::Status::Committed);
+    rows = ReadLines(harness.jsonl);
+    REQUIRE(rows.size() == 8);
+    CHECK(nlohmann::json::parse(rows[6])["systemMeta"]["hostBindings"] == bindings);
+    CHECK(nlohmann::json::parse(rows[6])["systemMeta"]["settingsVersion"] == 9);
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
+
+TEST_CASE("V3Writer: an unadopted system cannot supply host bindings") {
+    Harness harness("unadopted-host-bindings");
+    const nlohmann::json bindings{{"skills", "adopted-plan"}};
+    auto writer = V3Writer::Start(harness.jsonl, "20260910-120000-AAAAAA", "run-000001",
+        "adopted", {{"settingsVersion", 1}, {"hostBindings", bindings}});
+    REQUIRE(writer.has_value());
+    const auto adopted_id = writer->context().system_message_ref;
+    MessageDraft pending;
+    pending.origin = MessageOrigin::SessionRuntime;
+    pending.message = {{"role", "system"}, {"content", "unadopted"}};
+    pending.system_meta = nlohmann::json{{"cause", "initial"}, {"changeEventRef", nullptr},
+        {"systemChanged", false}, {"settingsVersion", 99},
+        {"hostBindings", {{"skills", "unadopted-plan"}}}};
+    REQUIRE(writer->AppendMessage(std::move(pending), Durability::PowerLoss).status == WriteReceipt::Status::Committed);
+    REQUIRE(writer->Close().has_value());
+    auto continued = V3Writer::Continue(harness.jsonl);
+    REQUIRE(continued.has_value());
+    REQUIRE(continued->context().system_message_ref == adopted_id);
+    REQUIRE(continued->SwitchSystem("next", {{"cause", "system_prompt_changed"},
+        {"settingsVersion", 2}, {"systemChanged", true}}).apply_event.status == WriteReceipt::Status::Committed);
+    const auto rows = ReadLines(harness.jsonl);
+    REQUIRE(rows.size() == 6);
+    CHECK(nlohmann::json::parse(rows[3])["payload"]["oldSystemMessageRef"] == adopted_id);
+    CHECK(nlohmann::json::parse(rows[4])["systemMeta"]["hostBindings"] == bindings);
+    CHECK(VerifyV3File(harness.jsonl).ok);
+}
 
 TEST_CASE("开卷:首行 system,seq=1,turnId=null,不造空回合") {
     Harness harness("start");
@@ -118,6 +375,57 @@ TEST_CASE("哈希链承继 v2:衔接、确定性、VerifyV3File 全绿") {
     // 再开一次同路径的卷:create-new 拒绝。
     auto again = V3Writer::Start(harness.jsonl, "x", "y", "z");
     CHECK(!again.has_value());
+}
+
+TEST_CASE("关柄:保留只读身份,拒绝迟到提交,对象存活时也能改名续接") {
+    Harness harness("close");
+    auto writer = harness.Start();
+    REQUIRE(writer.has_value());
+    const auto before = ReadLines(harness.jsonl);
+    const auto next_seq = writer->next_seq();
+    const std::string last_hash = writer->last_line_hash();
+    const std::string system_id = writer->context().system_message_ref;
+
+    REQUIRE(writer->Close().has_value());
+    REQUIRE(writer->Close().has_value());  // 重复关闭不碰已释放的句柄。
+    CHECK_FALSE(writer->broken());
+    CHECK(writer->path() == harness.jsonl);
+    CHECK(writer->session_id() == "20260910-120000-AAAAAA");
+    CHECK(writer->run_id() == "run-000001");
+    CHECK(writer->context().system_message_ref == system_id);
+    CHECK(writer->HasMessageId(system_id));
+
+    MessageDraft user;
+    user.turn_id = "turn-000001";
+    user.purpose = MessagePurpose::Conversation;
+    user.origin = MessageOrigin::Human;
+    user.message = nlohmann::json{{"role", "user"}, {"content", "迟到输入"}};
+    const auto late_message = writer->AppendMessage(user, Durability::PowerLoss);
+    CHECK(late_message.status == WriteReceipt::Status::Rejected);
+    CHECK(late_message.error_code == "v3writer.closed");
+    EventDraft late;
+    late.kind = EventKindV3::SessionEnded;
+    late.payload = nlohmann::json{{"reason", "exit"}, {"closeQuality", "clean"}};
+    const auto late_event = writer->AppendEvent(std::move(late), Durability::PowerLoss);
+    CHECK(late_event.status == WriteReceipt::Status::Rejected);
+    CHECK(late_event.error_code == "v3writer.closed");
+    CHECK(writer->next_seq() == next_seq);
+    CHECK(writer->last_line_hash() == last_hash);
+    CHECK(writer->context().revision == 1);
+    CHECK(ReadLines(harness.jsonl) == before);
+
+    // Windows 不允许改名仍被写句柄占用的文件;这里故意不析构 writer。
+    const auto moved = harness.dir / "closed.jsonl";
+    std::error_code ec;
+    std::filesystem::rename(harness.jsonl, moved, ec);
+    INFO(ec.message());
+    REQUIRE_FALSE(ec);
+    auto continued = V3Writer::Continue(moved);
+    REQUIRE(continued.has_value());
+    const auto accepted = continued->AppendMessage(std::move(user), Durability::PowerLoss);
+    CHECK(accepted.status == WriteReceipt::Status::Committed);
+    CHECK(accepted.seq == next_seq);
+    CHECK(VerifyV3File(moved).ok);
 }
 
 TEST_CASE("prepared:引用先落稳才许落,空缺引用拒收") {

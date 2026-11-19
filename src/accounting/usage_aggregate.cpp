@@ -3,17 +3,37 @@
 #include <algorithm>
 #include <utility>
 
+#include "api/usage_totals.hpp"
+
 namespace lubancode::accounting {
 namespace {
+
+void Accumulate(std::int64_t& prefix, bool& known, std::optional<std::int64_t> value) {
+    if (!known) return;
+    const auto sum = value ? api::usage_observation::CheckedAdd(prefix, *value) : std::nullopt;
+    if (sum) prefix = *sum;
+    else known = false;
+}
 
 // 四舍五入到整数的百分比;分母 <= 0 由调用方先拦(unknown 不进这里)。
 int RatioPercent(std::int64_t part, std::int64_t whole) {
     if (whole <= 0) {
         return 0;
     }
-    // (part*200 + whole) / (whole*2):int64 内的四舍五入,token 量级不溢出。
-    const std::int64_t scaled = part * 200 + whole;
-    return static_cast<int>(scaled / (whole * 2));
+    // Callers establish 0 <= part <= whole. Accumulate the quotient and
+    // remainder of 100 * part without constructing that overflowing product.
+    std::int64_t remainder = 0;
+    int quotient = 0;
+    for (int index = 0; index < 100; ++index) {
+        if (remainder >= whole - part) {
+            remainder -= whole - part;
+            ++quotient;
+        } else {
+            remainder += part;  // Strictly below whole, hence representable.
+        }
+    }
+    if (remainder >= whole - remainder) ++quotient;
+    return quotient;
 }
 
 // map -> 稳定字典序的 breakdown 行。
@@ -36,8 +56,10 @@ void UsageTotals::Add(const UsageSample& sample) {
     // 终态:没见到的按"未收口"计,不猜成败。
     ++by_outcome[sample.request_outcome.empty() ? std::string("unclosed") : sample.request_outcome];
     if (sample.cost.status == CostStatus::Estimated) {
-        cost_micros += sample.cost.micros;
+        Accumulate(cost_micros, cost_known, sample.cost.micros);
         requests_priced += 1;
+    } else if (sample.cost.status == CostStatus::Overflow) {
+        cost_known = false;
     }
     if (!sample.usage.has_value()) {
         requests_unknown += 1;
@@ -45,30 +67,33 @@ void UsageTotals::Add(const UsageSample& sample) {
     }
     requests_with_usage += 1;
     const api::Usage& usage = *sample.usage;
-    input_tokens += usage.input_tokens;
-    cache_read_tokens += usage.cache_read_tokens;
-    cache_creation_tokens += usage.cache_creation_tokens;
-    output_tokens += usage.output_tokens;
-    reasoning_tokens += usage.output_reasoning_tokens;
-    total_input_tokens += sample.total_input_tokens;
-    total_billed_shape_tokens += sample.total_billed_shape_tokens;
+    Accumulate(input_tokens, input_known, usage.input_tokens);
+    Accumulate(cache_read_tokens, cache_read_known, usage.cache_read_tokens);
+    Accumulate(cache_creation_tokens, cache_creation_known, usage.cache_creation_tokens);
+    Accumulate(output_tokens, output_known, usage.output_tokens);
+    Accumulate(reasoning_tokens, reasoning_known, usage.output_reasoning_tokens);
+    Accumulate(total_input_tokens, total_input_known, sample.TotalInputProjection());
+    Accumulate(total_billed_shape_tokens, billed_shape_known, sample.BilledShapeProjection());
 }
 
 std::optional<int> UsageTotals::cache_read_ratio_percent() const {
-    const std::int64_t base = input_tokens + cache_read_tokens + cache_creation_tokens;
-    if (requests_with_usage <= 0 || base <= 0) {
+    if (!input_known || !cache_read_known || !cache_creation_known) return std::nullopt;
+    const auto base = api::CheckedTotalInputTokens(api::Usage{input_tokens, 0, cache_read_tokens, cache_creation_tokens});
+    if (requests_with_usage <= 0 || !base || *base <= 0 || cache_read_tokens < 0 || cache_read_tokens > *base) {
         return std::nullopt;
     }
-    return RatioPercent(cache_read_tokens, base);
+    return RatioPercent(cache_read_tokens, *base);
 }
 
 std::optional<int> CacheEpochBreakdown::cache_read_ratio_percent() const {
-    const std::int64_t base = cache_reported_input_tokens + cache_reported_read_tokens +
-                              cache_reported_creation_tokens;
-    if (requests_cache_reported <= 0 || base <= 0) {
+    if (!cache_input_known || !cache_read_known || !cache_creation_known) return std::nullopt;
+    const auto base = api::CheckedTotalInputTokens(api::Usage{cache_reported_input_tokens, 0,
+        cache_reported_read_tokens, cache_reported_creation_tokens});
+    if (requests_cache_reported <= 0 || !base || *base <= 0 || cache_reported_read_tokens < 0 ||
+        cache_reported_read_tokens > *base) {
         return std::nullopt;
     }
-    return RatioPercent(cache_reported_read_tokens, base);
+    return RatioPercent(cache_reported_read_tokens, *base);
 }
 
 UsageAggregate AggregateUsage(const std::vector<UsageSample>& samples) {
@@ -124,9 +149,12 @@ UsageAggregate AggregateUsage(const std::vector<UsageSample>& samples) {
             !(sample.usage_anomaly.has_value() && !sample.usage_anomaly->empty())) {
             epoch.requests_cache_reported += 1;
             if (sample.usage.has_value()) {
-                epoch.cache_reported_input_tokens += sample.usage->input_tokens;
-                epoch.cache_reported_read_tokens += sample.usage->cache_read_tokens;
-                epoch.cache_reported_creation_tokens += sample.usage->cache_creation_tokens;
+                Accumulate(epoch.cache_reported_input_tokens, epoch.cache_input_known,
+                           sample.usage->input_tokens);
+                Accumulate(epoch.cache_reported_read_tokens, epoch.cache_read_known,
+                           sample.usage->cache_read_tokens);
+                Accumulate(epoch.cache_reported_creation_tokens, epoch.cache_creation_known,
+                           sample.usage->cache_creation_tokens);
             }
         } else {
             epoch.requests_cache_unknown += 1;
@@ -184,21 +212,24 @@ UsageAggregate AggregateUsage(const std::vector<UsageSample>& samples) {
 }
 
 nlohmann::json UsageAggregate::ToJson() const {
-    const auto breakdown_json = [](const std::vector<UsageBreakdown>& rows) {
+    const auto number = [](std::optional<std::int64_t> value) {
+        return value ? nlohmann::json(*value) : nlohmann::json(nullptr);
+    };
+    const auto breakdown_json = [&](const std::vector<UsageBreakdown>& rows) {
         nlohmann::json array = nlohmann::json::array();
         for (const auto& row : rows) {
             array.push_back(nlohmann::json{{"label", row.label},
                                            {"requests", row.totals.requests_total},
                                            {"requests_with_usage", row.totals.requests_with_usage},
-                                           {"input_tokens", row.totals.input_tokens},
-                                           {"cache_read_tokens", row.totals.cache_read_tokens},
-                                           {"cache_creation_tokens", row.totals.cache_creation_tokens},
-                                           {"output_tokens", row.totals.output_tokens},
-                                           {"reasoning_tokens", row.totals.reasoning_tokens},
-                                           {"total_input_tokens", row.totals.total_input_tokens},
+                                           {"input_tokens", number(row.totals.InputProjection())},
+                                           {"cache_read_tokens", number(row.totals.CacheReadProjection())},
+                                           {"cache_creation_tokens", number(row.totals.CacheCreationProjection())},
+                                           {"output_tokens", number(row.totals.OutputProjection())},
+                                           {"reasoning_tokens", number(row.totals.ReasoningProjection())},
+                                           {"total_input_tokens", number(row.totals.TotalInputProjection())},
                                            {"total_billed_shape_tokens",
-                                            row.totals.total_billed_shape_tokens},
-                                           {"cost_micros", row.totals.cost_micros}});
+                                            number(row.totals.BilledShapeProjection())},
+                                           {"cost_micros", number(row.totals.CostProjection())}});
         }
         return array;
     };
@@ -234,10 +265,10 @@ nlohmann::json UsageAggregate::ToJson() const {
                             {"requests_cache_reported", row.requests_cache_reported},
                             {"requests_cache_unknown", row.requests_cache_unknown},
                             {"anomalous_samples", row.anomalous_samples},
-                            {"input_tokens", row.totals.input_tokens},
-                            {"cache_read_tokens", row.totals.cache_read_tokens},
-                            {"cache_creation_tokens", row.totals.cache_creation_tokens},
-                            {"total_input_tokens", row.totals.total_input_tokens}};
+                            {"input_tokens", number(row.totals.InputProjection())},
+                            {"cache_read_tokens", number(row.totals.CacheReadProjection())},
+                            {"cache_creation_tokens", number(row.totals.CacheCreationProjection())},
+                            {"total_input_tokens", number(row.totals.TotalInputProjection())}};
         if (const auto ratio = row.cache_read_ratio_percent()) {
             item["read_ratio_percent"] = *ratio;
         } else {
@@ -252,15 +283,15 @@ nlohmann::json UsageAggregate::ToJson() const {
                         {"requests_with_usage", totals.requests_with_usage},
                         {"requests_unknown", totals.requests_unknown},
                         {"requests_retry", totals.requests_retry},
-                        {"input_tokens", totals.input_tokens},
-                        {"cache_read_tokens", totals.cache_read_tokens},
-                        {"cache_creation_tokens", totals.cache_creation_tokens},
-                        {"output_tokens", totals.output_tokens},
-                        {"reasoning_tokens", totals.reasoning_tokens},
-                        {"total_input_tokens", totals.total_input_tokens},
-                        {"total_billed_shape_tokens", totals.total_billed_shape_tokens},
+                        {"input_tokens", number(totals.InputProjection())},
+                        {"cache_read_tokens", number(totals.CacheReadProjection())},
+                        {"cache_creation_tokens", number(totals.CacheCreationProjection())},
+                        {"output_tokens", number(totals.OutputProjection())},
+                        {"reasoning_tokens", number(totals.ReasoningProjection())},
+                        {"total_input_tokens", number(totals.TotalInputProjection())},
+                        {"total_billed_shape_tokens", number(totals.BilledShapeProjection())},
                         {"by_outcome", outcomes},
-                        {"cost_micros", totals.cost_micros},
+                        {"cost_micros", number(totals.CostProjection())},
                         {"requests_priced", totals.requests_priced}}},
         {"cache", cache_json},
         {"by_cache_epoch", epoch_json},

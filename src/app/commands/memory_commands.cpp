@@ -950,6 +950,15 @@ TurnMemoryDispatch ExtractTurnMemory(const SessionTailContext& ctx, const std::s
     return TurnMemoryDispatch::Dispatched;
 }
 
+// 真抽取照记；线程未起不凭零 usage 补造一次模型调用。
+bool RecordTurnMemoryCall(lubancode::agent::ModelUsageLedger& ledger,
+                          const TurnMemoryExtractor::Outcome& outcome) {
+    if (!outcome.extraction_invoked) return false;
+    ledger.Record(lubancode::agent::ModelRole::Cheap, outcome.model, outcome.accounting.usage,
+                  outcome.accounting.duration_ms, outcome.accounting.usage_reported);
+    return true;
+}
+
 // 迟到收账(回合总结异步化单;主线程空闲拍调,见控制器的
 // DrainFinishedTurnMemory):完工的抽取结果入队候选、记台账落袋、打
 // 完成/失败行。usage 的分角色记账在调用方(世代门之前——弃账也照记,

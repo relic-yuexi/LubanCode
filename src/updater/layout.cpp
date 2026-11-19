@@ -86,7 +86,7 @@ std::optional<nlohmann::json> ReadJsonFileTolerant(const std::filesystem::path& 
     }
     const nlohmann::json parsed = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
     if (parsed.is_discarded()) return std::nullopt;
-    return parsed;
+    return std::optional<nlohmann::json>{std::in_place, parsed};
 }
 
 std::string UtcNowIso8601() {

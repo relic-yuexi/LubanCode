@@ -248,6 +248,18 @@ NestedHookDispatchSession NestedHookDispatchSession::Open(
     std::optional<std::string> turn_id, std::optional<std::string> step_id,
     std::optional<std::string> action_id, const std::vector<HookHandlerSpec>& handlers,
     std::optional<nlohmann::json> input_ref, Durability durability) {
+    WriteReceipt ignored;
+    return OpenChecked(writer, std::move(hook_dispatch_id), std::move(hook_point),
+                       std::move(turn_id), std::move(step_id), std::move(action_id),
+                       handlers, std::move(input_ref), ignored, durability);
+}
+
+NestedHookDispatchSession NestedHookDispatchSession::OpenChecked(
+    V3Writer& writer, std::string hook_dispatch_id, std::string hook_point,
+    std::optional<std::string> turn_id, std::optional<std::string> step_id,
+    std::optional<std::string> action_id, const std::vector<HookHandlerSpec>& handlers,
+    std::optional<nlohmann::json> input_ref, WriteReceipt& requested_receipt,
+    Durability durability) {
     NestedHookDispatchSession session(std::move(hook_dispatch_id), std::move(hook_point),
                                       std::move(turn_id), std::move(step_id), std::move(action_id));
     nlohmann::json matched = nlohmann::json::array();
@@ -261,7 +273,7 @@ NestedHookDispatchSession NestedHookDispatchSession::Open(
     }
     EventDraft draft = session.BaseDraft(EventKindV3::HookDispatchRequested);
     draft.payload = std::move(payload);
-    writer.AppendEvent(std::move(draft), durability);
+    requested_receipt = writer.AppendEvent(std::move(draft), durability);
     return session;
 }
 
@@ -271,11 +283,22 @@ WriteReceipt NestedHookDispatchSession::WriteSkip(V3Writer& writer, std::string 
                                                   std::optional<std::string> step_id,
                                                   std::optional<std::string> action_id,
                                                   Durability durability) {
+    return WriteSkipWithInput(writer, std::move(hook_dispatch_id), std::move(hook_point),
+                              std::move(reason), std::move(turn_id), std::move(step_id),
+                              std::move(action_id), std::nullopt, durability);
+}
+
+WriteReceipt NestedHookDispatchSession::WriteSkipWithInput(
+    V3Writer& writer, std::string hook_dispatch_id, std::string hook_point, std::string reason,
+    std::optional<std::string> turn_id, std::optional<std::string> step_id,
+    std::optional<std::string> action_id, std::optional<nlohmann::json> input_ref,
+    Durability durability) {
     NestedHookDispatchSession session(std::move(hook_dispatch_id), std::move(hook_point),
                                       std::move(turn_id), std::move(step_id), std::move(action_id));
     EventDraft draft = session.BaseDraft(EventKindV3::HookSkipped);
     draft.payload = nlohmann::json::object({{"hookPoint", session.hook_point_},
                                             {"reason", std::move(reason)}});
+    if (input_ref) draft.payload["inputRef"] = std::move(*input_ref);
     return writer.AppendEvent(std::move(draft), durability);
 }
 

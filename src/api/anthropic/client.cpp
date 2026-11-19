@@ -449,6 +449,7 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     // 流走完却一枚没见着,按协议错误报(见函数尾注释)。
     SseFramer framer;
     EventParser parser(ShouldRecoverTaggedThinking(sanitized_request), parse_server_tool_search);
+    usage_wire::PendingUsageOnUnwind delivery(parser, on_event);
     bool saw_message_done = false;
     bool saw_stream_error = false;
     bool tagged_thinking_warning_logged = false;
@@ -460,7 +461,7 @@ std::expected<void, Error> AnthropicBackend::send_stream(
                 } else if (std::holds_alternative<StreamError>(event)) {
                     saw_stream_error = true;
                 }
-                on_event(event);
+                delivery.Emit(event);
             }
             if (parser.recovered_tagged_thinking() && !tagged_thinking_warning_logged) {
                 tagged_thinking_warning_logged = true;
@@ -519,7 +520,7 @@ std::expected<void, Error> AnthropicBackend::send_stream(
         if (std::holds_alternative<StreamError>(event)) {
             saw_stream_error = true;
         }
-        on_event(event);
+        delivery.Emit(event);
     }
 
     // 流"正常"走完却没等到 MessageDone(message_delta):终止帧丢了或被当坏帧

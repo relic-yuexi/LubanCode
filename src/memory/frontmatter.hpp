@@ -30,7 +30,9 @@ struct ParsedTopic {
 // 解析一份 schema 3 主题全文。text 须以单独一行 --- 开头。YAML 坏、
 // metadata.schema 不是 3、必填字段缺,返回错误。时间一律按字符串读
 // (node 原文),不受 YAML 隐式类型与本机时区牵扯。
-std::expected<ParsedTopic, std::string> Parse(const std::string& text);
+// Strict callers reject malformed policy fields before legacy defaults or
+// filtering can erase them. Existing CLI callers retain their old defaults.
+std::expected<ParsedTopic, std::string> Parse(const std::string& text, bool strict_metadata = false);
 
 // 组整份主题文本:front matter(含首尾 ---)+ 空行 + "# 标题" + 空行 +
 // 正文。entry.paths 与 entry.evidence 合并后进 evidence(schema 3 没有

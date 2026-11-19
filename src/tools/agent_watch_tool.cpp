@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "cli/i18n.hpp"
+#include "text/i18n.hpp"
 #include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
 namespace lubancode::tools {
@@ -159,31 +159,31 @@ nlohmann::json AgentWatchTool::input_schema() const {
 
 Tool::Result AgentWatchTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
     if (coordinator_ == nullptr) {
-        return {lubancode::cli::tr("agent_watch.unavailable"), true};
+        return {lubancode::text::tr("agent_watch.unavailable"), true};
     }
     TaskLedger& ledger = coordinator_->ledger();
 
     // ---- typed 校验(单子 §9.2;additionalProperties=false 由这里执法)----
     if (!input.is_object()) {
-        return {lubancode::cli::tr("agent_watch.invalid"), true};
+        return {lubancode::text::tr("agent_watch.invalid"), true};
     }
     for (const auto& item : input.items()) {
         if (item.key() != "task_ids" && item.key() != "after_revision" && item.key() != "wait_ms" &&
             item.key() != "include") {
-            return {lubancode::cli::trf("agent_watch.unknown_key", item.key()), true};
+            return {lubancode::text::trf("agent_watch.unknown_key", item.key()), true};
         }
     }
     std::vector<int> task_ids;
     if (const auto it = input.find("task_ids"); it != input.end() && !it->is_null()) {
         if (!it->is_array()) {
-            return {lubancode::cli::tr("agent_watch.task_ids_invalid"), true};
+            return {lubancode::text::tr("agent_watch.task_ids_invalid"), true};
         }
         if (it->size() > kMaxTaskIds) {
-            return {lubancode::cli::trf("agent_watch.too_many_tasks", static_cast<int>(kMaxTaskIds)), true};
+            return {lubancode::text::trf("agent_watch.too_many_tasks", static_cast<int>(kMaxTaskIds)), true};
         }
         for (const auto& id : *it) {
             if (!id.is_number_integer()) {
-                return {lubancode::cli::tr("agent_watch.task_ids_invalid"), true};
+                return {lubancode::text::tr("agent_watch.task_ids_invalid"), true};
             }
             task_ids.push_back(id.get<int>());
         }
@@ -191,22 +191,22 @@ Tool::Result AgentWatchTool::execute(const nlohmann::json& input, const ToolExec
     std::uint64_t after_revision = 0;
     if (const auto it = input.find("after_revision"); it != input.end() && !it->is_null()) {
         if (!it->is_number_integer()) {
-            return {lubancode::cli::tr("agent_watch.after_revision_invalid"), true};
+            return {lubancode::text::tr("agent_watch.after_revision_invalid"), true};
         }
         const std::int64_t raw = it->get<std::int64_t>();
         if (raw < 0) {
-            return {lubancode::cli::tr("agent_watch.after_revision_invalid"), true};
+            return {lubancode::text::tr("agent_watch.after_revision_invalid"), true};
         }
         after_revision = static_cast<std::uint64_t>(raw);
     }
     int wait_ms = 0;
     if (const auto it = input.find("wait_ms"); it != input.end() && !it->is_null()) {
         if (!it->is_number_integer()) {
-            return {lubancode::cli::tr("agent_watch.wait_ms_invalid"), true};
+            return {lubancode::text::tr("agent_watch.wait_ms_invalid"), true};
         }
         wait_ms = it->get<int>();
         if (wait_ms < 0) {
-            return {lubancode::cli::tr("agent_watch.wait_ms_invalid"), true};
+            return {lubancode::text::tr("agent_watch.wait_ms_invalid"), true};
         }
         wait_ms = std::min(wait_ms, kMaxWaitMs);  // 超 30 秒的请求钳到上限,不报错
     }
@@ -214,7 +214,7 @@ Tool::Result AgentWatchTool::execute(const nlohmann::json& input, const ToolExec
     bool want_diagnostic = false;
     if (const auto it = input.find("include"); it != input.end() && !it->is_null()) {
         if (!it->is_string()) {
-            return {lubancode::cli::tr("agent_watch.include_invalid"), true};
+            return {lubancode::text::tr("agent_watch.include_invalid"), true};
         }
         const std::string include = it->get<std::string>();
         if (include == "events") {
@@ -223,11 +223,11 @@ Tool::Result AgentWatchTool::execute(const nlohmann::json& input, const ToolExec
             if (caller_task_id_ != 0) {
                 // 单子 §9.2:diagnostic 只给 main——子代理要了就稳定拒绝,
                 // 不降档冒充(降档会让模型以为拿到了诊断账)。
-                return {lubancode::cli::tr("agent_watch.diagnostic_denied"), true};
+                return {lubancode::text::tr("agent_watch.diagnostic_denied"), true};
             }
             want_diagnostic = true;
         } else if (include != "summary") {
-            return {lubancode::cli::tr("agent_watch.include_invalid"), true};
+            return {lubancode::text::tr("agent_watch.include_invalid"), true};
         }
     }
 
@@ -238,13 +238,13 @@ Tool::Result AgentWatchTool::execute(const nlohmann::json& input, const ToolExec
         for (const int id : task_ids) {
             const auto snapshot = ledger.Detail(id);
             if (!snapshot.has_value()) {
-                return {lubancode::cli::trf("agent_watch.not_found", id), true};
+                return {lubancode::text::trf("agent_watch.not_found", id), true};
             }
             // lineage 鉴权(单子 §9.2):main 看整棵树;子代理只看直接孩子
             // ——越 lineage(兄弟/旁系/孙辈/自己)一律稳定拒绝,拒绝文案
             // 不泄露目标的任何细节。
             if (caller_task_id_ != 0 && snapshot->parent_task_id != caller_task_id_) {
-                return {lubancode::cli::trf("agent_watch.not_child", id), true};
+                return {lubancode::text::trf("agent_watch.not_child", id), true};
             }
             targets.push_back(std::move(*snapshot));
         }

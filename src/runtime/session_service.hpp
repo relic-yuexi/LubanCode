@@ -25,6 +25,7 @@
 // 不写 stdout/stderr——成败用返回值交账,人话由前端印。
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -38,6 +39,7 @@
 #include "api/types.hpp"
 #include "approval_mode.hpp"
 #include "runtime/command.hpp"
+#include "runtime/session_execution.hpp"
 #include "runtime/session_runtime.hpp"
 #include "workspace/identity.hpp"
 
@@ -74,6 +76,9 @@ struct SessionLaunchRequest {
     // --continue 启动路(§10.4):开 start_reason=resume 的新场;source
     // 空 = 取本 workspace 最近一场可恢复的,没有就回落普通开张。
     bool resume_at_launch = false;
+    // Explicit embedded recovery: refuse absent/bad/non-v3 sources, never create
+    // a replacement session. Existing CLI quiet-continue behavior stays default.
+    bool require_v3_resume = false;
     std::string resume_source_session_id;
 
     // 单发场(单发轨迹断档单):main run 记 run_kind=one_shot,resume
@@ -90,6 +95,13 @@ struct SessionLaunchRequest {
     // system,第一次模型请求带真 system 时走 §4.3 三步切换。三端现行都
     // 递空,字段立在这让服务成为完整的开张入口。
     std::string v3_system_content;
+    trajectory::V3OpeningParticipant v3_opening_participant;
+    std::shared_ptr<trajectory::MemoryCapabilityFactory> memory_capability_factory;
+    std::shared_ptr<trajectory::NamedResultFactory> named_result_factory;
+    trajectory::RecoveryCaptureRequest recovery_capture;
+    trajectory::SessionRecoveryFactory recovery_factory;
+    // Internal test-only, one fresh journal: observes actual native IO. Never public SDK input.
+    std::shared_ptr<trajectory::JournalNativeIoProbe> journal_native_io_probe;
 };
 
 // ---------------------------------------------------------------------------
@@ -119,6 +131,24 @@ public:
     const std::string& launch_error() const { return launch_error_; }
     // 这场是不是 v3 写侧(建场时开关二选一的结果;v2 场恒 false)。
     bool v3_format() const;
+
+    // Install once, after the host has interpreted its profile/resource plan.
+    // A failed candidate never replaces the installed execution. Only the
+    // session's single turn worker may use the resulting Agent.
+    // Consumes source profile callbacks/resolver even on failure, retaining
+    // value metadata for host diagnostics and later turn assembly.
+    void InitializeExecution(std::unique_ptr<assembly::SessionResources> resources,
+                             agent::AgentProfile&& profile,
+                             std::optional<std::vector<api::Message>> restored_history = std::nullopt);
+    SessionExecution* execution() { return execution_.get(); }
+    const SessionExecution* execution() const { return execution_.get(); }
+
+    // Signal every session before waiting for any session. Hosts first stop
+    // admission and join their turn workers, then call ShutdownExecution/Close.
+    // Shutdown drains in-process async tool workers; it does not release the
+    // execution owner or seal the ledger. Close drains before sealing.
+    void RequestExecutionShutdown();
+    bool ShutdownExecution();
 
     // ---- 输入接纳(§四 input/submit 语义的最小服务面) ----------------------
     struct InputRequest {
@@ -169,6 +199,8 @@ public:
     };
     PendingPop PopPendingInput();
     std::size_t pending_input_count() const;
+    // Read-only recovery reconciliation; does not write dispatched facts or pop.
+    std::vector<QueuedInput> PendingInputsSnapshot() const;
 
     // ---- 回合终态的持久收口(工业化多协议接入单 P1:ResultEnvelope 的
     // 最小持久形状)----
@@ -213,6 +245,10 @@ public:
     // 回空表。协议查询面(operation/read)活场冷场同吃这一口,不在
     // app-server 再解析一遍行格式。
     static std::vector<OperationFact> ReadOperationFacts(const std::filesystem::path& session_dir);
+    // Only locked recovery adoption uses this strict owned-byte parser. The
+    // existing tolerant live/path reader and operations append remain intact.
+    static std::expected<std::vector<OperationFact>, std::string> ReadOperationFactsOwned(
+        const std::string& bytes);
 
     // 只读查重(§4.2 幂等键预查):键在内存去重表里的受理事实。found
     // =false 即无此键;同键异载荷报 operation_conflict 的裁决由调用方比
@@ -281,6 +317,10 @@ private:
     void SeedOperationLedger();
 
     std::unique_ptr<SessionRuntime> runtime_;
+    // Runtime/ledger outlive execution. Explicit shutdown drains tool jobs
+    // before Agent/resources are destroyed, including exceptional host exits.
+    std::unique_ptr<SessionExecution> execution_;
+    std::atomic<bool> execution_shutdown_requested_{false};
     std::string launch_error_;
     bool v3_format_ = false;
     // resume-at-launch 解析出的直接来源场(空 = 非恢复场)。

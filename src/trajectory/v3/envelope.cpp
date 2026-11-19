@@ -352,6 +352,8 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::WorkflowRunFailed: return "workflow.run.failed";
         case EventKindV3::WorkflowRunCancelled: return "workflow.run.cancelled";
         case EventKindV3::ToolJobRegistered: return "tool.job.registered";
+        case EventKindV3::ToolJobAdopted: return "tool.job.adopted";
+        case EventKindV3::SdkOperationTurnBound: return "sdk.operation.turn.bound";
         case EventKindV3::ToolJobDispatched: return "tool.job.dispatched";
         case EventKindV3::ToolJobObserved: return "tool.job.observed";
         case EventKindV3::ToolJobCancelRequested: return "tool.job.cancel_requested";
@@ -375,6 +377,8 @@ const char* EventKindV3Name(EventKindV3 kind) {
         case EventKindV3::ToolObservationLate: return "tool.observation.late";
         case EventKindV3::RecoveryNoteRecorded: return "recovery.note.recorded";
         case EventKindV3::ContextPressureRecorded: return "context.pressure.recorded";
+        case EventKindV3::SdkJobOperationBound: return "sdk.job.operation.bound";
+        case EventKindV3::ModelUsageObserved: return "model.usage.observed";
 
     }
     return "unknown";
@@ -499,6 +503,10 @@ const std::vector<EventKindV3>& AllEventKindsV3() {
             EventKindV3::WorkflowRunCancelled,
             // 异步工具族(单 P0):事实行,全部 statusless。
             EventKindV3::ToolJobRegistered,
+            EventKindV3::ToolJobAdopted,
+            EventKindV3::SdkOperationTurnBound,
+            EventKindV3::SdkJobOperationBound,
+            EventKindV3::ModelUsageObserved,
             EventKindV3::ToolJobDispatched,
             EventKindV3::ToolJobObserved,
             EventKindV3::ToolJobCancelRequested,
@@ -687,7 +695,7 @@ std::optional<MessageLine> MessageLine::FromJsonStrict(const nlohmann::json& jso
         return std::nullopt;
     }
     // 白名单外的键一律拒(未知键策略,schema 文档 §六)。
-    static const std::vector<std::string> kAllowedKeys = {
+    static constexpr std::string_view kAllowedKeys[] = {
         "type",          "schemaVersion", "sessionId",       "runId",
         "seq",           "timestamp",     "messageId",       "turnId",
         "parentTurnId",  "stepId",        "requestId",       "actionId",
@@ -699,7 +707,7 @@ std::optional<MessageLine> MessageLine::FromJsonStrict(const nlohmann::json& jso
         "prevHash",      "lineHash",
     };
     for (auto it = json.begin(); it != json.end(); ++it) {
-        if (std::find(kAllowedKeys.begin(), kAllowedKeys.end(), it.key()) == kAllowedKeys.end()) {
+        if (std::find(std::begin(kAllowedKeys), std::end(kAllowedKeys), std::string_view(it.key())) == std::end(kAllowedKeys)) {
             *error_code = "schema3.unknown_key";
             *message = "message 行未知键: " + it.key();
             return std::nullopt;
@@ -870,7 +878,7 @@ std::optional<EventLine> EventLine::FromJsonStrict(const nlohmann::json& json,
         *message = "event 行应为 JSON object";
         return std::nullopt;
     }
-    static const std::vector<std::string> kAllowedKeys = {
+    static constexpr std::string_view kAllowedKeys[] = {
         "type",       "schemaVersion", "sessionId",   "runId",       "seq",
         "timestamp",  "eventId",       "kind",        "status",      "turnId",
         "parentTurnId", "stepId",      "requestId",   "actionId",    "compactId",
@@ -878,7 +886,7 @@ std::optional<EventLine> EventLine::FromJsonStrict(const nlohmann::json& json,
         "payload",    "effects",       "effectRefs",  "prevHash",    "lineHash",
     };
     for (auto it = json.begin(); it != json.end(); ++it) {
-        if (std::find(kAllowedKeys.begin(), kAllowedKeys.end(), it.key()) == kAllowedKeys.end()) {
+        if (std::find(std::begin(kAllowedKeys), std::end(kAllowedKeys), std::string_view(it.key())) == std::end(kAllowedKeys)) {
             *error_code = "schema3.unknown_key";
             *message = "event 行未知键: " + it.key();
             return std::nullopt;

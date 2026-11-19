@@ -168,6 +168,7 @@ CompactSession::FreezeResult CompactSession::Freeze(V3Writer& writer,
             }
             if (latest_step && expected_steps.count(*latest_step)) valid = false;
             for (const auto& action : FoldToolActions(*ledger)) {
+                if (!action.provider_reply_required) continue;
                 if (action.turn_id != turn || !expected_steps.count(action.step_id)) continue;
                 const bool terminal = action.folded_status == "done" || action.folded_status == "failed" ||
                     action.folded_status == "cancelled" || action.folded_status == "rejected";

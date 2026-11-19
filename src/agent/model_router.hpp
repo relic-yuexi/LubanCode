@@ -140,6 +140,7 @@ struct BackgroundCallAccounting {
     api::Usage usage;  // 各次子请求的 usage 合计
     bool usage_reported = false;
     std::int64_t duration_ms = 0;
+    ::lubancore::usage::v1::Coverage usage_coverage;
 };
 
 // 一档角色的累计账。
@@ -150,6 +151,12 @@ struct ModelUsageEntry {
     std::int64_t duration_ms = 0;
     std::string last_model;          // 最近一次实际用的模型名
     bool reported = false;           // 服务端是否回报过 usage(没回报不拿 0 冒充)
+    // Numeric fields retain their representable prefix after overflow. These
+    // flags close exact display until Clear; later reports cannot heal a gap.
+    bool calls_overflow = false;
+    bool input_overflow = false;
+    bool output_overflow = false;
+    bool duration_overflow = false;
 
     bool empty() const { return calls == 0; }
 };

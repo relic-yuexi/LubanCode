@@ -44,6 +44,7 @@
 #include "runtime/plugin_contract.hpp"
 #include "runtime/plugin_tool.hpp"
 #include "tools/read_file.hpp"
+#include "tools/path_utils.hpp"
 #include "tools/registry.hpp"
 
 namespace fs = std::filesystem;
@@ -70,6 +71,7 @@ std::unique_ptr<api::Backend> MakeFakeBackend() {
 
 SessionAssemblyRequest BaseRequest() {
     SessionAssemblyRequest request;
+    request.cwd_utf8 = tools::PathToUtf8(fs::temp_directory_path());
     request.backend_factory = &MakeFakeBackend;
     request.system_prompt = "test prompt";
     request.max_steps_per_turn = 7;
@@ -227,10 +229,9 @@ TEST_CASE("注入路:backend/registry 工厂各交一件,零 MCP,档案原样") 
     const auto result = AssembleSession(std::move(request));
     REQUIRE(result.assembly != nullptr);
     CHECK(result.error.empty());
-    CHECK(result.assembly->backend != nullptr);
-    REQUIRE(result.assembly->registry != nullptr);
-    CHECK(result.assembly->registry->Find("read_file") != nullptr);
-    CHECK(result.assembly->mcp_servers.empty());
+    REQUIRE(result.assembly->resources != nullptr);
+    CHECK(result.assembly->resources->registry().Find("read_file") != nullptr);
+    CHECK(result.assembly->resources->mcp_servers().empty());
     CHECK(result.assembly->degraded_components.empty());
     CHECK(result.assembly->agent_profile.system_prompt == "test prompt");
     CHECK(result.assembly->agent_profile.runtime.max_steps_per_turn == 7);
@@ -241,9 +242,9 @@ TEST_CASE("无部署档 = 显式零工具默认档:空表,不照搬终端工具"
     SessionAssemblyRequest request = BaseRequest();
     const auto result = AssembleSession(std::move(request));
     REQUIRE(result.assembly != nullptr);
-    REQUIRE(result.assembly->registry != nullptr);
-    CHECK(result.assembly->registry->All().empty());  // 没有 run_command/write_file 一类
-    CHECK(result.assembly->mcp_servers.empty());
+    REQUIRE(result.assembly->resources != nullptr);
+    CHECK(result.assembly->resources->registry().All().empty());  // 没有 run_command/write_file 一类
+    CHECK(result.assembly->resources->mcp_servers().empty());
 }
 
 TEST_CASE("零工具档零启动:config 配了 MCP 也不碰") {
@@ -256,9 +257,9 @@ TEST_CASE("零工具档零启动:config 配了 MCP 也不碰") {
     request.harness = &harness;
     const auto result = AssembleSession(std::move(request));
     REQUIRE(result.assembly != nullptr);
-    CHECK(result.assembly->mcp_servers.empty());  // 合同 §2.3:不启动 MCP 握手
-    REQUIRE(result.assembly->registry != nullptr);
-    CHECK(result.assembly->registry->All().empty());
+    CHECK(result.assembly->resources->mcp_servers().empty());  // 合同 §2.3:不启动 MCP 握手
+    REQUIRE(result.assembly->resources != nullptr);
+    CHECK(result.assembly->resources->registry().All().empty());
 }
 
 TEST_CASE("先解析再启动:必需服务缺上层配置即明拒") {
@@ -322,16 +323,16 @@ TEST_CASE("P2 skill 工具:features 放行且 allow 点名才进面,清单段同
         request.agent_plan = MakePlan();
         const auto result = AssembleSession(std::move(request));
         REQUIRE(result.assembly != nullptr);
-        REQUIRE(result.assembly->registry != nullptr);
-        CHECK(result.assembly->registry->Find("skill") != nullptr);
+        REQUIRE(result.assembly->resources != nullptr);
+        CHECK(result.assembly->resources->registry().Find("skill") != nullptr);
         // 提示来自组合管线:清单段与预装(无)在场,业务 persona 在场。
         const std::string& prompt = result.assembly->agent_profile.system_prompt;
         CHECK(prompt.find("greet") != std::string::npos);
         CHECK(prompt.find("部署材料根的 skills/ 目录") != std::string::npos);
         CHECK(prompt.find("你是 research") != std::string::npos);
         // 装配不混入终端执行工具(AW-08:装技能不开 shell)。
-        CHECK(result.assembly->registry->Find("run_command") == nullptr);
-        CHECK(result.assembly->registry->Find("read_file") == nullptr);
+        CHECK(result.assembly->resources->registry().Find("run_command") == nullptr);
+        CHECK(result.assembly->resources->registry().Find("read_file") == nullptr);
     }
     SUBCASE("放行但 allow 未点名:不起工具、不注清单段") {
         SessionAssemblyRequest request = BaseRequest();
@@ -341,8 +342,8 @@ TEST_CASE("P2 skill 工具:features 放行且 allow 点名才进面,清单段同
         request.agent_plan = MakePlan();
         const auto result = AssembleSession(std::move(request));
         REQUIRE(result.assembly != nullptr);
-        REQUIRE(result.assembly->registry != nullptr);
-        CHECK(result.assembly->registry->Find("skill") == nullptr);
+        REQUIRE(result.assembly->resources != nullptr);
+        CHECK(result.assembly->resources->registry().Find("skill") == nullptr);
         CHECK(result.assembly->agent_profile.system_prompt.find("greet") == std::string::npos);
     }
     SUBCASE("features 未放行:即使 allow 误点名也零装配(解析层另有拦)") {
@@ -353,8 +354,8 @@ TEST_CASE("P2 skill 工具:features 放行且 allow 点名才进面,清单段同
         request.skills_root = skills_root;
         const auto result = AssembleSession(std::move(request));
         REQUIRE(result.assembly != nullptr);
-        REQUIRE(result.assembly->registry != nullptr);
-        CHECK(result.assembly->registry->Find("skill") == nullptr);
+        REQUIRE(result.assembly->resources != nullptr);
+        CHECK(result.assembly->resources->registry().Find("skill") == nullptr);
     }
     SUBCASE("未递 skills_root:不扫描不装(显式来源,无隐式面)") {
         SessionAssemblyRequest request = BaseRequest();
@@ -363,8 +364,8 @@ TEST_CASE("P2 skill 工具:features 放行且 allow 点名才进面,清单段同
         // 本用例不带 agent_plan:system_prompt 走显式件,原样进档案。
         const auto result = AssembleSession(std::move(request));
         REQUIRE(result.assembly != nullptr);
-        REQUIRE(result.assembly->registry != nullptr);
-        CHECK(result.assembly->registry->Find("skill") != nullptr);  // 内置件照进面
+        REQUIRE(result.assembly->resources != nullptr);
+        CHECK(result.assembly->resources->registry().Find("skill") != nullptr);  // 内置件照进面
         CHECK(result.assembly->agent_profile.system_prompt == "test prompt");
     }
 }
@@ -408,14 +409,14 @@ TEST_CASE("P5 插件装配:装载面与注册面分家——点名装载,allow �
         request.plugin_data_root = root / "data";
         const auto result = AssembleSession(std::move(request));
         REQUIRE(result.assembly != nullptr);
-        REQUIRE(result.assembly->registry != nullptr);
-        CHECK(result.assembly->registry->Find("plugin__demo-lua__search") != nullptr);
+        REQUIRE(result.assembly->resources != nullptr);
+        CHECK(result.assembly->resources->registry().Find("plugin__demo-lua__search") != nullptr);
         REQUIRE(result.assembly->manifest_lua != nullptr);
         REQUIRE(result.assembly->manifest_lua->plugins().size() == 1);
         REQUIRE(result.assembly->mounted_plugins.size() == 1);
         CHECK(result.assembly->mounted_plugins[0] == "demo-lua@0.1.0");
         // 统一工具闸:外部代码一律先问,不走旁路(§7.2/§十)。
-        tools::Tool* tool = result.assembly->registry->Find("plugin__demo-lua__search");
+        tools::Tool* tool = result.assembly->resources->registry().Find("plugin__demo-lua__search");
         REQUIRE(tool != nullptr);
         CHECK(tool->needs_confirm());
         CHECK(tool->approval_class() == tools::ApprovalClass::External);
@@ -435,8 +436,8 @@ TEST_CASE("P5 插件装配:装载面与注册面分家——点名装载,allow �
         request.plugin_data_root = root / "data";
         const auto result = AssembleSession(std::move(request));
         REQUIRE(result.assembly != nullptr);
-        REQUIRE(result.assembly->registry != nullptr);
-        CHECK(result.assembly->registry->All().empty());
+        REQUIRE(result.assembly->resources != nullptr);
+        CHECK(result.assembly->resources->registry().All().empty());
         REQUIRE(result.assembly->manifest_lua != nullptr);  // 装载照做
         CHECK(result.assembly->mounted_plugins.size() == 1);
     }
@@ -454,8 +455,8 @@ TEST_CASE("P5 插件装配:装载面与注册面分家——点名装载,allow �
         request.plugin_data_root = root / "data";
         const auto result = AssembleSession(std::move(request));
         REQUIRE(result.assembly != nullptr);
-        REQUIRE(result.assembly->registry != nullptr);
-        CHECK(result.assembly->registry->All().empty());
+        REQUIRE(result.assembly->resources != nullptr);
+        CHECK(result.assembly->resources->registry().All().empty());
         REQUIRE(result.assembly->manifest_lua != nullptr);
     }
     SUBCASE("allow 点名不存在的插件工具:缺工具明拒,不静默降级") {
@@ -546,8 +547,8 @@ TEST_CASE("P2 复验:allow 点名 skill 视为已装(内置件),不冒缺工具"
     request.skills_root = MakeSkillsRoot("reverify");
     const auto result = AssembleSession(std::move(request));
     REQUIRE(result.assembly != nullptr);
-    REQUIRE(result.assembly->registry != nullptr);
-    CHECK(result.assembly->registry->Find("skill") != nullptr);
+    REQUIRE(result.assembly->resources != nullptr);
+    CHECK(result.assembly->resources->registry().Find("skill") != nullptr);
     CHECK(result.error.empty());
 }
 

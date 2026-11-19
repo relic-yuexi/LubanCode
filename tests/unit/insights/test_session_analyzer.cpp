@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -112,6 +113,50 @@ TEST_CASE("A4 验收:同一封口 session 重算字节相同;fresh 复用;stale 
 }
 
 TEST_CASE("A4 摘要合同:work/coverage/usage/friction/版本账齐") {
+    SUBCASE("committed v2 owners preserve unknown output through derived restore") {
+        const auto dir = PrepareDir(std::filesystem::temp_directory_path() /
+                                    "lubancode-a4-overflow-restore");
+        const FixedClock clock;
+        {
+            FixtureStream stream(dir / "main.jsonl", dir / "artifacts", kWorkspaceKey,
+                                 "20260831-000003-AN0003", "main-0001",
+                                 trajectory::RunKind::MainSession, 2, clock);
+            stream.StartRun();
+            stream.StartTurn("turn-0001");
+            UsageSpec usage;
+            usage.input = 1;
+            usage.output = std::numeric_limits<std::int64_t>::max();
+            usage.reasoning = usage.output;
+            stream.ModelExchange("turn-0001", "req-0001", "main_turn", usage);
+            usage.output = 1;
+            usage.reasoning = 1;
+            stream.ModelExchange("turn-0001", "req-0002", "main_turn", usage);
+            stream.EndTurn("turn-0001");
+            stream.Seal();
+        }
+        WriteFixtureSessionJson(dir, kWorkspaceKey, "20260831-000003-AN0003", "closed");
+        const auto analyzed = AnalyzeSession(dir, SessionAnalyzeOptions{});
+        REQUIRE(analyzed.analyzed);
+        REQUIRE(analyzed.summary_written);
+        CHECK(analyzed.summary.usage.input_tokens == 2);
+        CHECK(analyzed.summary.usage.knowledge.input_tokens);
+        CHECK_FALSE(analyzed.summary.usage.knowledge.output_tokens);
+        CHECK_FALSE(analyzed.summary.usage.knowledge.reasoning_tokens);
+        const auto restored = ReadExistingSessionSummary(dir);
+        REQUIRE(restored.parse_ok);
+        CHECK(restored.summary.ToJson() == analyzed.summary.ToJson());
+        CHECK(restored.summary.ToJson()["schema_version"] == 2);
+        CHECK(restored.summary.ToJson()["usage"]["output_tokens"].is_null());
+        const auto reused = AnalyzeSession(dir, SessionAnalyzeOptions{});
+        CHECK(reused.summary_reused);
+        CHECK_FALSE(reused.summary.usage.knowledge.output_tokens);
+        auto old = restored.summary.ToJson();
+        old["analyzer_version"] = "insights-v2.0";
+        WriteFile(SessionSummaryPath(dir), old.dump(2) + "\n");
+        CHECK(IsSummaryStale(ReadExistingSessionSummary(dir),
+                             analyzed.gate.stream_terminal_hashes));
+        CHECK(AnalyzeSession(dir, SessionAnalyzeOptions{}).summary_written);
+    }
     const auto root = std::filesystem::temp_directory_path() / "lubancode-a4-contract";
     const auto dir = PrepareDir(root / "s2");
     WorkingSession(dir, "20260831-000002-AN0002");
@@ -298,6 +343,68 @@ TEST_CASE("one_shot 场: usage 计入 main 侧,不冒充子代理") {
 }
 
 TEST_CASE("功能信号:同类验证反复与子代理 token 超主会话") {
+    SUBCASE("tool percentages retain large facts and exact half boundaries") {
+        const auto maximum = std::numeric_limits<std::int64_t>::max();
+        const auto check_share = [](std::int64_t part, std::int64_t whole, int expected) {
+            FeatureSignalInput input;
+            input.tool_definition_tokens = part; input.total_input_tokens = whole;
+            const auto signals = DetectFeatureSignals(input);
+            REQUIRE(signals.size() == 1);
+            CHECK(signals[0].signal_id == "FS-02");
+            REQUIRE(signals[0].evidence.size() == 3);
+            CHECK(signals[0].evidence[0].value == part);
+            CHECK(signals[0].evidence[1].value == whole);
+            CHECK(signals[0].evidence[2].value == expected);
+        };
+        check_share(maximum - 1, maximum, 100);
+        check_share(79, 200, 40);
+        check_share(3, 2, 150);
+        check_share(std::numeric_limits<int>::max(), 100,
+                    std::numeric_limits<int>::max());
+        for (const auto part : {std::int64_t{-1}, maximum}) {
+            FeatureSignalInput input;
+            input.tool_definition_tokens = part; input.total_input_tokens = 1;
+            CHECK(DetectFeatureSignals(input).empty());
+            input.verification_kinds["build"] = 3;
+            const auto independent = DetectFeatureSignals(input);
+            REQUIRE(independent.size() == 1);
+            CHECK(independent[0].signal_id == "FS-01");
+        }
+        FeatureSignalInput below;
+        below.tool_definition_tokens = 78; below.total_input_tokens = 200;
+        CHECK(DetectFeatureSignals(below).empty());
+        below.tool_definition_tokens = maximum; below.total_input_tokens = 0;
+        CHECK(DetectFeatureSignals(below).empty());
+        below.tool_definition_tokens = static_cast<std::int64_t>(std::numeric_limits<int>::max()) + 1;
+        below.total_input_tokens = 100;
+        CHECK(DetectFeatureSignals(below).empty());
+    }
+    SUBCASE("unknown cache usage cannot justify prefix recommendations") {
+        FeatureSignalInput input;
+        input.cache_read_tokens = 100;
+        input.prefix_breaks_same_epoch = 2;
+        REQUIRE(DetectFeatureSignals(input).size() == 1);
+        input.cache_read_known = false;
+        CHECK(DetectFeatureSignals(input).empty());
+        input.verification_kinds["build"] = 3;
+        const auto signals = DetectFeatureSignals(input);
+        REQUIRE(signals.size() == 1);
+        CHECK(signals[0].signal_id == "FS-01");
+    }
+    SUBCASE("unknown main or subordinate totals cannot borrow numeric prefixes") {
+        for (const bool main_unknown : {false, true}) {
+            FeatureSignalInput input;
+            input.main_tokens = 1;
+            input.subagent_tokens = 100;
+            input.main_tokens_known = !main_unknown;
+            input.subagent_tokens_known = main_unknown;
+            CHECK(DetectFeatureSignals(input).empty());
+            input.verification_kinds["build"] = 3;
+            const auto independent = DetectFeatureSignals(input);
+            REQUIRE(independent.size() == 1);
+            CHECK(independent[0].signal_id == "FS-01");
+        }
+    }
     SUBCASE("同类验证 ≥3 次 → 固化建议(先决写明)") {
         FeatureSignalInput input;
         input.session_id = "s";

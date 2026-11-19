@@ -20,7 +20,7 @@ bool ReadUint(const nlohmann::json& json, const char* key, std::uint64_t* out) {
 nlohmann::json SessionInsightSummary::ToJson() const {
     nlohmann::json json = nlohmann::json::object();
     json["schema"] = kSessionSummarySchema;
-    json["schema_version"] = kSessionSummarySchemaVersion;
+    json["schema_version"] = HasUnknownProjection() ? 2 : kSessionSummarySchemaVersion;
     json["analyzer_version"] = analyzer_version;
     nlohmann::json source_json = nlohmann::json::object();
     source_json["session_id"] = source.session_id;
@@ -52,15 +52,15 @@ nlohmann::json SessionInsightSummary::ToJson() const {
     nlohmann::json usage_json = nlohmann::json::object();
     usage_json["requests_total"] = usage.requests_total;
     usage_json["requests_with_usage"] = usage.requests_with_usage;
-    usage_json["input_tokens"] = usage.input_tokens;
-    usage_json["cache_read_tokens"] = usage.cache_read_tokens;
-    usage_json["cache_creation_tokens"] = usage.cache_creation_tokens;
-    usage_json["output_tokens"] = usage.output_tokens;
-    usage_json["reasoning_tokens"] = usage.reasoning_tokens;
+    usage_json["input_tokens"] = usage_projection::Number(usage.input_tokens, usage.knowledge.input_tokens);
+    usage_json["cache_read_tokens"] = usage_projection::Number(usage.cache_read_tokens, usage.knowledge.cache_read_tokens);
+    usage_json["cache_creation_tokens"] = usage_projection::Number(usage.cache_creation_tokens, usage.knowledge.cache_creation_tokens);
+    usage_json["output_tokens"] = usage_projection::Number(usage.output_tokens, usage.knowledge.output_tokens);
+    usage_json["reasoning_tokens"] = usage_projection::Number(usage.reasoning_tokens, usage.knowledge.reasoning_tokens);
     nlohmann::json cost_json = nlohmann::json::object();
     cost_json["status"] = usage.cost_status;
     cost_json["currency"] = usage.cost_currency;
-    cost_json["micros"] = usage.cost_micros;
+    cost_json["micros"] = usage_projection::Number(usage.cost_micros, usage.knowledge.cost_micros);
     cost_json["price_table_id"] = usage.price_table_id;
     usage_json["cost"] = std::move(cost_json);
     json["usage"] = std::move(usage_json);
@@ -71,9 +71,9 @@ nlohmann::json SessionInsightSummary::ToJson() const {
                                                    {"requests_total", epoch.requests_total},
                                                    {"requests_cache_reported", epoch.requests_cache_reported},
                                                    {"requests_cache_unknown", epoch.requests_cache_unknown},
-                                                   {"input_tokens", epoch.input_tokens},
-                                                   {"cache_read_tokens", epoch.cache_read_tokens},
-                                                   {"cache_creation_tokens", epoch.cache_creation_tokens}});
+                                                   {"input_tokens", usage_projection::Number(epoch.input_tokens, epoch.knowledge.input_tokens)},
+                                                   {"cache_read_tokens", usage_projection::Number(epoch.cache_read_tokens, epoch.knowledge.cache_read_tokens)},
+                                                   {"cache_creation_tokens", usage_projection::Number(epoch.cache_creation_tokens, epoch.knowledge.cache_creation_tokens)}});
     }
     json["cache_epochs"] = std::move(cache_epochs_json);
     nlohmann::json findings = nlohmann::json::array();
@@ -98,11 +98,12 @@ std::optional<SessionInsightSummary> SessionInsightSummary::FromJsonStrict(
         *error = "schema 名不是 " + std::string(kSessionSummarySchema);
         return std::nullopt;
     }
-    if (!json.contains("schema_version") || !json.at("schema_version").is_number_integer() ||
-        json.at("schema_version").get<int>() != kSessionSummarySchemaVersion) {
-        *error = "schema_version 只认 1";
+    const auto version = usage_projection::Version(json);
+    if (!version) {
+        *error = "schema_version 只认 1 或 2";
         return std::nullopt;
     }
+    const bool nullable = *version == 2;
     if (!ReadString(json, "analyzer_version", &summary.analyzer_version)) {
         *error = "analyzer_version 必填";
         return std::nullopt;
@@ -219,17 +220,16 @@ std::optional<SessionInsightSummary> SessionInsightSummary::FromJsonStrict(
         return std::nullopt;
     }
     const auto& usage = json.at("usage");
-    const auto read_int = [&](const char* key, std::int64_t* out) {
-        return usage.contains(key) && usage.at(key).is_number_integer() &&
-               (*out = usage.at(key).get<std::int64_t>(), true);
+    const auto read_int = [&](const char* key, std::int64_t* out, bool* known) {
+        return usage_projection::Read(usage, key, out, known, nullable);
     };
     if (!ReadUint(usage, "requests_total", &summary.usage.requests_total) ||
         !ReadUint(usage, "requests_with_usage", &summary.usage.requests_with_usage) ||
-        !read_int("input_tokens", &summary.usage.input_tokens) ||
-        !read_int("cache_read_tokens", &summary.usage.cache_read_tokens) ||
-        !read_int("cache_creation_tokens", &summary.usage.cache_creation_tokens) ||
-        !read_int("output_tokens", &summary.usage.output_tokens) ||
-        !read_int("reasoning_tokens", &summary.usage.reasoning_tokens)) {
+        !read_int("input_tokens", &summary.usage.input_tokens, &summary.usage.knowledge.input_tokens) ||
+        !read_int("cache_read_tokens", &summary.usage.cache_read_tokens, &summary.usage.knowledge.cache_read_tokens) ||
+        !read_int("cache_creation_tokens", &summary.usage.cache_creation_tokens, &summary.usage.knowledge.cache_creation_tokens) ||
+        !read_int("output_tokens", &summary.usage.output_tokens, &summary.usage.knowledge.output_tokens) ||
+        !read_int("reasoning_tokens", &summary.usage.reasoning_tokens, &summary.usage.knowledge.reasoning_tokens)) {
         *error = "usage 七键不合";
         return std::nullopt;
     }
@@ -240,11 +240,11 @@ std::optional<SessionInsightSummary> SessionInsightSummary::FromJsonStrict(
     const auto& cost = usage.at("cost");
     if (!ReadString(cost, "status", &summary.usage.cost_status) ||
         !ReadString(cost, "currency", &summary.usage.cost_currency) || cost.size() > 4 ||
-        !cost.contains("micros") || !cost.at("micros").is_number_integer()) {
+        !usage_projection::Read(cost, "micros", &summary.usage.cost_micros,
+                               &summary.usage.knowledge.cost_micros, nullable)) {
         *error = "usage.cost 四键不合";
         return std::nullopt;
     }
-    summary.usage.cost_micros = cost.at("micros").get<std::int64_t>();
     ReadString(cost, "price_table_id", &summary.usage.price_table_id);
     if (usage.size() != 8) {
         *error = "usage 未知键";
@@ -266,17 +266,25 @@ std::optional<SessionInsightSummary> SessionInsightSummary::FromJsonStrict(
                 *error = "cache_epochs 条目形状不合";
                 return std::nullopt;
             }
-            epoch.cache_epoch = item.at("cache_epoch").get<int>();
-            for (const auto& [key, target] :
-                 std::initializer_list<std::pair<const char*, std::int64_t*>>{
-                     {"input_tokens", &epoch.input_tokens},
-                     {"cache_read_tokens", &epoch.cache_read_tokens},
-                     {"cache_creation_tokens", &epoch.cache_creation_tokens}}) {
-                if (!item.contains(key) || !item.at(key).is_number_integer()) {
-                    *error = "cache_epochs token 字段不合";
-                    return std::nullopt;
-                }
-                *target = item.at(key).get<std::int64_t>();
+            bool epoch_known = true;
+            if (!usage_projection::Read(item, "cache_epoch", &epoch.cache_epoch, &epoch_known, false)) {
+                *error = "cache_epoch 超出 int 数界";
+                return std::nullopt;
+            }
+            if (!usage_projection::Read(item, "input_tokens", &epoch.input_tokens,
+                                        &epoch.knowledge.input_tokens, nullable)) {
+                *error = "cache_epochs token 字段不合";
+                return std::nullopt;
+            }
+            if (!usage_projection::Read(item, "cache_read_tokens", &epoch.cache_read_tokens,
+                                        &epoch.knowledge.cache_read_tokens, nullable)) {
+                *error = "cache_epochs token 字段不合";
+                return std::nullopt;
+            }
+            if (!usage_projection::Read(item, "cache_creation_tokens", &epoch.cache_creation_tokens,
+                                        &epoch.knowledge.cache_creation_tokens, nullable)) {
+                *error = "cache_epochs token 字段不合";
+                return std::nullopt;
             }
             summary.cache_epochs.push_back(std::move(epoch));
         }

@@ -261,7 +261,7 @@ TEST_CASE("预算 schema: session.context_window.applied 注册、statusless、�
     using lubancode::trajectory::v3::EventKindV3;
     CHECK(lubancode::trajectory::v3::EventKindV3FromName("session.context_window.applied") ==
           EventKindV3::SessionContextWindowApplied);
-    CHECK(lubancode::trajectory::v3::EventKindV3Name(EventKindV3::SessionContextWindowApplied) ==
+    CHECK(std::string(lubancode::trajectory::v3::EventKindV3Name(EventKindV3::SessionContextWindowApplied)) ==
           "session.context_window.applied");
     // 控制状态事实,不带 status(与 session.title.applied 同族)。
     CHECK_FALSE(

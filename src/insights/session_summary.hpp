@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 #include "insights/finding.hpp"
+#include "insights/usage_projection.hpp"
 
 namespace lubancode::insights {
 
@@ -34,6 +35,7 @@ struct SummaryUsage {
     std::string cost_currency;
     std::int64_t cost_micros = 0;
     std::string price_table_id;
+    usage_projection::Knowledge knowledge;
 };
 
 struct SummaryCacheEpoch {
@@ -45,12 +47,13 @@ struct SummaryCacheEpoch {
     std::int64_t input_tokens = 0;
     std::int64_t cache_read_tokens = 0;
     std::int64_t cache_creation_tokens = 0;
+    usage_projection::Knowledge knowledge;
 };
 
 struct SessionInsightSummary {
     // 与 kInsightsAnalyzerVersion 同步(v2.0 起 insights 读 v3 账:T14 领域
     // 读模型;旧摘要判 stale 重算,不误用 insights-v1 缓存)。
-    std::string analyzer_version = "insights-v2.0";
+    std::string analyzer_version = "insights-v2.1-checked-usage";
     struct Source {
         std::string session_id;
         // stream run_id -> terminal event hash;任一变化即 stale。
@@ -83,6 +86,13 @@ struct SessionInsightSummary {
     std::vector<std::string> friction_events;   // 摩擦类名(§9.3 枚举)
     std::vector<std::string> feature_signals;   // 建议引用的信号 id
 
+    bool HasUnknownProjection() const noexcept {
+        if (usage.knowledge.HasUnknown()) return true;
+        for (const auto& epoch : cache_epochs) {
+            if (epoch.knowledge.HasUnknown()) return true;
+        }
+        return false;
+    }
     nlohmann::json ToJson() const;
     static std::optional<SessionInsightSummary> FromJsonStrict(const nlohmann::json& json,
                                                                std::string* error);

@@ -137,7 +137,7 @@ struct SessionHarness {
         for (const std::string& line : written) {
             const nlohmann::json parsed = nlohmann::json::parse(line);
             if (parsed.contains("method") && parsed["method"] == method) {
-                return parsed;
+                return std::optional<nlohmann::json>{std::in_place, parsed};
             }
         }
         return std::nullopt;

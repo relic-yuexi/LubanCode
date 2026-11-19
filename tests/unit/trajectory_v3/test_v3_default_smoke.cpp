@@ -375,7 +375,13 @@ TEST_CASE("默认-v3 冒烟: 子代理入口默认场下子账同 v3,父账 spaw
     REQUIRE(child_bridge.OnOutputCompleted(child_request, AssistantText("文档说入口在 main.cpp"),
                                            "end_turn", "resp-child"));
     child_bridge.EndTurn(true, false, "");
-    REQUIRE_FALSE((*child)->Finish(/*ok=*/true, "done").empty());
+    const auto child_receipt = (*child)->Finish(runtime::SubagentExecutionOutcome::Succeeded, "done");
+    CHECK(child_receipt.execution == runtime::SubagentExecutionOutcome::Succeeded);
+    CHECK(child_receipt.confirmation == runtime::SubagentAppendConfirmation::Committed);
+    CHECK(child_receipt.seal == runtime::SubagentSealState::Closed);
+    REQUIRE(child_receipt.durable());
+    REQUIRE(child_receipt.terminal.has_value());
+    REQUIRE_FALSE(child_receipt.terminal->hash.empty());
 
     {
         agent::ToolTraceEvent finished =
@@ -418,6 +424,13 @@ TEST_CASE("默认-v3 冒烟: 子代理入口默认场下子账同 v3,父账 spaw
         CHECK(child_rows[0].value("type", std::string()) == "message");
         CHECK(child_rows[0].at("message").value("role", std::string()) == "system");
         CHECK(child_rows[0].at("systemMeta").value("cause", std::string()) == "subagent_spawn");
+        const auto& terminal = child_rows.back();
+        CHECK(terminal.value("kind", std::string()) == "session.ended");
+        CHECK(terminal.value("sessionId", std::string()) == child_receipt.terminal->session_id);
+        CHECK(terminal.value("runId", std::string()) == child_receipt.terminal->run_id);
+        CHECK(terminal.value("eventId", std::string()) == child_receipt.terminal->event_id);
+        CHECK(terminal.value("seq", 0ULL) == child_receipt.terminal->seq);
+        CHECK(terminal.value("lineHash", std::string()) == child_receipt.terminal->hash);
         CHECK(lubancode::trajectory::v3::VerifyV3File(child_stream).ok);
     }
     CHECK(found_child);

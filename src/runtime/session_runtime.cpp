@@ -6,6 +6,7 @@
 
 #include "runtime/session_runtime.hpp"
 
+#include <exception>
 #include <utility>
 
 #include "config/config.hpp"      // HomeLubancodeDir:身份裁决的全局件止步
@@ -26,6 +27,7 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
     ledger_options.workspace_identity = options_.trajectory_workspace_identity;
     ledger_options.lubancode_version = options_.lubancode_version;
     ledger_options.resume_at_launch = options_.trajectory_resume_at_launch;
+    ledger_options.require_v3_resume = options_.trajectory_require_v3_resume;
     ledger_options.resume_source_session_id = options_.trajectory_resume_source_session_id;
     ledger_options.approval_mode = options_.approval_mode;
     // AppServer 接 v3 第一棒:单发三料位 + v3 首行 system 从服务层递进
@@ -34,6 +36,12 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
     ledger_options.one_shot = options_.trajectory_one_shot;
     ledger_options.training_policy = options_.trajectory_training_policy;
     ledger_options.v3_system_content = options_.trajectory_v3_system_content;
+    ledger_options.v3_opening_participant = options_.trajectory_v3_opening_participant;
+    ledger_options.memory_capability_factory = options_.trajectory_memory_capability_factory;
+    ledger_options.named_result_factory = options_.trajectory_named_result_factory;
+    ledger_options.recovery_capture = options_.trajectory_recovery_capture;
+    ledger_options.recovery_factory = options_.trajectory_recovery_factory;
+    ledger_options.journal_native_io_probe = std::move(options_.trajectory_journal_native_io_probe);
     auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
     if (ledger.has_value()) {
         trajectory_.emplace(std::move(*ledger));
@@ -42,10 +50,49 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
     }
 }
 
-SessionRuntime::~SessionRuntime() = default;
+SessionRuntime::~SessionRuntime() {
+    (void)ShutdownAsyncTools();
+    if (async_tool_runtime_ != nullptr && !async_tool_runtime_->quiescent()) std::terminate();
+    // The async owner's callbacks may borrow this runtime. Release their
+    // captures while the publication mutex, permissions and ledger still live.
+    async_tool_runtime_.reset();
+}
 
 void SessionRuntime::AttachAsyncToolRuntime(std::unique_ptr<AsyncToolRuntime> runtime) {
-    async_tool_runtime_ = std::move(runtime);
+    std::unique_ptr<AsyncToolRuntime> previous;
+    std::shared_ptr<tools::ToolJobCoordinator> stopping_coordinator;
+    {
+        std::lock_guard lock(async_tool_mutex_);
+        if (async_tool_shutdown_requested_ && runtime != nullptr) stopping_coordinator = runtime->coordinator();
+        previous = std::exchange(async_tool_runtime_, std::move(runtime));
+    }
+    // A gate can hold the coordinator's jobs mutex while querying this runtime.
+    // Never acquire that jobs mutex under the publication mutex in reverse order.
+    if (stopping_coordinator != nullptr) stopping_coordinator->RequestShutdown();
+    // A replacement can own callbacks that need the publication mutex. Drain
+    // and destroy it after releasing that mutex.
+    if (previous != nullptr) (void)previous->Shutdown();
+}
+
+AsyncToolRuntime* SessionRuntime::async_tool_runtime() {
+    std::lock_guard lock(async_tool_mutex_);
+    return async_tool_runtime_.get();
+}
+
+void SessionRuntime::RequestAsyncToolShutdown() {
+    std::shared_ptr<tools::ToolJobCoordinator> stopping_coordinator;
+    {
+        std::lock_guard lock(async_tool_mutex_);
+        async_tool_shutdown_requested_ = true;
+        if (async_tool_runtime_ != nullptr) stopping_coordinator = async_tool_runtime_->coordinator();
+    }
+    if (stopping_coordinator != nullptr) stopping_coordinator->RequestShutdown();
+}
+
+bool SessionRuntime::ShutdownAsyncTools() {
+    RequestAsyncToolShutdown();
+    AsyncToolRuntime* runtime = async_tool_runtime();
+    return runtime == nullptr || runtime->Shutdown();
 }
 
 std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::path& new_cwd) {
@@ -77,6 +124,14 @@ std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::p
         ledger_options.lubancode_version = options_.lubancode_version;
         ledger_options.approval_mode = options_.approval_mode;
         ledger_options.launch_cwd = platform::PathToUtf8(ledger_options.workspace_identity.launch_cwd);
+        ledger_options.v3_opening_participant = options_.trajectory_v3_opening_participant;
+        ledger_options.memory_capability_factory = options_.trajectory_memory_capability_factory;
+        ledger_options.named_result_factory = options_.trajectory_named_result_factory;
+        ledger_options.recovery_capture = options_.trajectory_recovery_capture;
+        ledger_options.recovery_factory = options_.trajectory_recovery_factory;
+        if (ledger_options.v3_opening_participant) {
+            ledger_options.v3_system_content = options_.trajectory_v3_system_content;
+        }
         auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
         if (!ledger.has_value()) {
             return ledger.error();
@@ -90,6 +145,14 @@ std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::p
     ledger_options.workspace_identity = std::move(*identity);
     ledger_options.lubancode_version = options_.lubancode_version;
     ledger_options.launch_cwd = platform::PathToUtf8(ledger_options.workspace_identity.launch_cwd);
+    ledger_options.v3_opening_participant = options_.trajectory_v3_opening_participant;
+    ledger_options.memory_capability_factory = options_.trajectory_memory_capability_factory;
+    ledger_options.named_result_factory = options_.trajectory_named_result_factory;
+    ledger_options.recovery_capture = options_.trajectory_recovery_capture;
+    ledger_options.recovery_factory = options_.trajectory_recovery_factory;
+    if (ledger_options.v3_opening_participant) {
+        ledger_options.v3_system_content = options_.trajectory_v3_system_content;
+    }
     auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
     if (!ledger.has_value()) {
         return ledger.error();

@@ -5,6 +5,7 @@
 
 #include <utility>
 
+#include "api/usage_json.hpp"
 #include "platform/log_sink.hpp"
 #include "runtime/trajectory_bridge_internal.hpp"  // 与主桥共用的事实构造(口径只此一处)
 
@@ -13,6 +14,24 @@ namespace lubancode::runtime {
 // trajectory v3 简称(本件内 v3:: 一律指 trajectory::v3;runtime 命名空间
 // 下裸写 v3:: 解析不到 trajectory::v3)。
 namespace v3 = ::lubancode::trajectory::v3;
+
+std::optional<bool> TrajectoryBypassBridge::OnUsageObservation(const std::string& request_id,
+    const api::Usage& usage, const ::lubancore::usage::v1::Observation* observation,
+    bool reported, std::string_view response_id, bool incomplete) {
+    if (!V3Mode()) return std::nullopt;
+    const auto found = v3_requests_.find(request_id);
+    if (found == v3_requests_.end()) return false;
+    const auto prepared_receipt = AppendUsageObservation(*v3_writer_, request_id,
+        found->second.turn_id, found->second.step_id, usage, observation, reported, response_id, incomplete);
+    if (!prepared_receipt) return false;
+    const auto& receipt = *prepared_receipt;
+    V3NotifyCommitted(receipt);
+    if (receipt.status != v3::WriteReceipt::Status::Committed) {
+        NoteV3Error(receipt, "model.usage.observed(bypass)");
+        return false;
+    }
+    return true;
+}
 
 // 原实现文件顶部的类型简称集随段迁移(与主桥同款)。
 namespace {
@@ -35,17 +54,26 @@ using trajectory::Visibility;
 
 TrajectoryBypassBridge::TrajectoryBypassBridge(trajectory::TrajectoryRecorder& recorder,
                                                trajectory::EventScope base_scope,
-                                               TrajectoryTurnBridge::Identity identity)
-    : recorder_(&recorder), base_scope_(std::move(base_scope)), identity_(std::move(identity)) {}
+                                               TrajectoryTurnBridge::Identity identity,
+                                               std::string id_namespace)
+    : recorder_(&recorder), base_scope_(std::move(base_scope)), identity_(std::move(identity)),
+      id_namespace_(std::move(id_namespace)) {}
 
 TrajectoryBypassBridge::TrajectoryBypassBridge(v3::V3Writer* v3_writer, V3SessionBooks* v3_books,
                                                trajectory::EventScope identity_scope,
                                                TrajectoryTurnBridge::Identity identity,
                                                accounting::RequestPurpose purpose)
-    : v3_writer_(v3_writer), v3_books_(v3_books), purpose_(purpose), base_scope_(std::move(identity_scope)),
-      identity_(std::move(identity)) {}
+    : v3_writer_(v3_writer),
+      v3_trigger_turn_id_(v3_books != nullptr ? v3_books->active_main_turn_id : std::string()),
+      v3_execution_blocked_at_bind_(v3_books != nullptr && v3_books->execution_blocked),
+      v3_execution_gate_(v3_books != nullptr ? v3_books->bypass_execution_blocked : nullptr),
+      purpose_(purpose), base_scope_(std::move(identity_scope)), identity_(std::move(identity)) {}
 
 TrajectoryBypassBridge::~TrajectoryBypassBridge() = default;
+
+void TrajectoryBypassBridge::RetireRecording() {
+    if (!V3Mode()) CloseTurn(false, true, "bypass_recording_retired");
+}
 
 RecordReceipt TrajectoryBypassBridge::Put(EventKind kind, std::optional<std::string> request_id, Actor actor,
                                           Origin origin, nlohmann::json payload, Durability durability) {
@@ -88,19 +116,19 @@ void TrajectoryBypassBridge::NoteError(const RecordReceipt& receipt, const char*
 }
 
 std::string TrajectoryBypassBridge::NextRequestId() {
-    return "bypass-req-" + std::to_string(++request_counter_);
+    return (id_namespace_.empty() ? "bypass-req-" : id_namespace_ + "-req-") + std::to_string(++request_counter_);
 }
 
 std::string TrajectoryBypassBridge::NextTurnId() {
-    return "bypass-" + std::to_string(++turn_counter_);
+    return (id_namespace_.empty() ? "bypass-" : id_namespace_ + "-turn-") + std::to_string(++turn_counter_);
 }
 
 std::string TrajectoryBypassBridge::NextInputId() {
-    return "bypass-input-" + std::to_string(++input_counter_);
+    return (id_namespace_.empty() ? "bypass-input-" : id_namespace_ + "-input-") + std::to_string(++input_counter_);
 }
 
 std::string TrajectoryBypassBridge::NextOutputId() {
-    return "bypass-output-" + std::to_string(++output_counter_);
+    return (id_namespace_.empty() ? "bypass-output-" : id_namespace_ + "-output-") + std::to_string(++output_counter_);
 }
 
 void TrajectoryBypassBridge::OpenTurn() {
@@ -325,7 +353,7 @@ void TrajectoryBypassBridge::NoteV3Error(const v3::WriteReceipt& receipt, const 
                                                             : " (" + receipt.error_message + ")");
     recent_errors_.push_back(note);
     if (error_sink_ != nullptr) {
-        error_sink_->push_back(note);
+        error_sink_->Append(note);
     }
     platform::LogSink::Instance().Error("trajectory", "v3 旁路落账失败: " + note);
 }
@@ -356,7 +384,8 @@ std::string TrajectoryBypassBridge::V3RequestPrepared(const api::Request& reques
     }
     // T12-A 同门:compact 换账失败的场,旁路请求也不放行——不发新模型
     // 请求,空串即"prepared 记不住"的既有语义。
-    if (v3_books_ != nullptr && v3_books_->execution_blocked) {
+    if (v3_execution_blocked_at_bind_ ||
+        (v3_execution_gate_ != nullptr && v3_execution_gate_->load(std::memory_order_acquire))) {
         return std::string();
     }
     // 回合号铺法按用途分:
@@ -364,21 +393,16 @@ std::string TrajectoryBypassBridge::V3RequestPrepared(const api::Request& reques
     //     主回合(在场才挂),不冒充真人回合;
     //   title_refine(T11-A,§4.34)——独立 step 归首问主回合:turnId 直接
     //     用首问回合号,不另铸内部回合,不挂 parentTurnId(自己不挂自己)。
-    //     旁路在回合收口后的空闲边界跑,active_main_turn_id 仍是首问回合
-    //     (BeginTurn 起 EndTurn 不清);取不到主回合号就不接账——不拿内部
-    //     回合冒充,采样本体照跑(丢的只是这笔细账)。
+    //     前台构造时冻结真实触发主轮。后台晚起时主轮可能已换，不能
+    //     再读 active_main_turn_id。取不到主轮就拒准备，不拿内部轮冒充。
     std::string turn_id;
     std::optional<std::string> parent_turn_id;
     if (purpose_ == accounting::RequestPurpose::MemoryExtract) {
         turn_id = v3_writer_->NewMemoryTurnId();
-        if (v3_books_ != nullptr && !v3_books_->active_main_turn_id.empty()) {
-            parent_turn_id = v3_books_->active_main_turn_id;
-        }
+        if (!v3_trigger_turn_id_.empty()) parent_turn_id = v3_trigger_turn_id_;
     } else {
-        if (v3_books_ == nullptr || v3_books_->active_main_turn_id.empty()) {
-            return std::string();
-        }
-        turn_id = v3_books_->active_main_turn_id;
+        if (v3_trigger_turn_id_.empty()) return std::string();
+        turn_id = v3_trigger_turn_id_;
     }
     const char* system_cause = purpose_ == accounting::RequestPurpose::MemoryExtract
                                    ? "memory_extraction_prompt"
@@ -454,7 +478,8 @@ std::string TrajectoryBypassBridge::V3RequestPrepared(const api::Request& reques
     const auto prepared = v3_writer_->PrepareRequest(
         request_id, turn_id, step_id, accounting::PurposeName(ctx.purpose), system_message_id,
         input_message_id.empty() ? std::vector<std::string>{} : std::vector<std::string>{input_message_id},
-        std::move(provider_snapshot), std::nullopt, trajectory::Durability::ProcessCrash);
+        std::move(provider_snapshot), std::nullopt, trajectory::Durability::ProcessCrash,
+        std::move(parent_turn_id));
     V3NotifyCommitted(prepared);
     if (prepared.status != v3::WriteReceipt::Status::Committed) {
         NoteV3Error(prepared, "model.request.prepared(bypass)");
@@ -584,11 +609,11 @@ bool TrajectoryBypassBridge::V3OutputCompleted(const std::string& request_id, co
         // 旁路采样无工具调用,ToolUse/ToolResult 不该出现,出现了也不入账。
     }
     nlohmann::json body = nlohmann::json{{"role", "assistant"}, {"content", std::move(content)}};
+    body["provider_response_id"] = provider_response_id.empty() ? nlohmann::json(nullptr) : nlohmann::json(provider_response_id);
     const auto receipt = v3_writer_->CompleteStreamResponse(
         request_id, book.stream_id, book.turn_id, book.step_id, book.reserved_message_id,
         std::move(body), identity_.provider, identity_.wire, book.model,
-        provider_response_id.empty() ? nlohmann::json(nullptr)
-                                     : nlohmann::json(provider_response_id),
+        nlohmann::json(nullptr), // A response ID never proves the response model.
         book.usage.has_value() ? *book.usage : nlohmann::json(nullptr),
         stop_reason.empty() ? std::string("end_turn") : stop_reason,
         V3MessagePurpose(), std::nullopt,

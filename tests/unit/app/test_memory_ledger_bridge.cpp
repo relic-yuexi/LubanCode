@@ -66,7 +66,7 @@ std::optional<nlohmann::json> FindEvent(const fs::path& stream, const std::strin
     for (const std::string& line : *lines) {
         const auto parsed = nlohmann::json::parse(line, nullptr, false);
         if (parsed.is_discarded() || !parsed.contains("kind")) continue;
-        if (parsed["kind"] == kind) return parsed;
+        if (parsed["kind"] == kind) return std::optional<nlohmann::json>{std::in_place, parsed};
     }
     return std::nullopt;
 }
@@ -95,7 +95,7 @@ std::optional<nlohmann::json> FindV3Event(const fs::path& stream, const std::str
         if (parsed.is_discarded()) continue;
         if (parsed.value("type", std::string()) == "event" &&
             parsed.value("kind", std::string()) == kind) {
-            return parsed;
+            return std::optional<nlohmann::json>{std::in_place, parsed};
         }
     }
     return std::nullopt;

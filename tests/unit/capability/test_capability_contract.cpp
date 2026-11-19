@@ -48,7 +48,7 @@ std::optional<json> ReadJsonFile(const fs::path& path) {
     if (parsed.is_discarded()) {
         return std::nullopt;
     }
-    return parsed;
+    return std::optional<json>{std::in_place, parsed};
 }
 
 // ---------------------------------------------------------------------------

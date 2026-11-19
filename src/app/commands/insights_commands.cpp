@@ -22,6 +22,7 @@
 #include "insights/html_renderer.hpp"
 #include "insights/insights_health.hpp"
 #include "insights/report_store.hpp"
+#include "insights/usage_projection.hpp"
 #include "platform/console.hpp"  // GetScreenInfo:/insights 的框宽同一把尺
 #include "platform/paths.hpp"
 #include "privacy/secret_scan.hpp"
@@ -33,6 +34,7 @@ namespace lubancode::app {
 namespace {
 
 namespace frame = lubancode::cli::frame;
+namespace usage_projection = lubancode::insights::usage_projection;
 
 using lubancode::cli::TermOut;
 
@@ -345,19 +347,21 @@ std::vector<std::string> FormatInsightsDigestLines(
         if (agg.requests_unknown > 0) {
             out << "(" << agg.requests_unknown << " 笔 unknown,不折 0)";
         }
-        out << " · 输入 " << FormatTokenCount(agg.input_tokens) << "(读 "
-            << FormatTokenCount(agg.cache_read_tokens);
+        out << " · 输入 " << FormatTokenCount(usage_projection::Value(agg.input_tokens, agg.knowledge.input_tokens)) << "(读 "
+            << FormatTokenCount(usage_projection::Value(agg.cache_read_tokens, agg.knowledge.cache_read_tokens));
         if (agg.cache_read_ratio_percent.has_value()) {
             out << " " << *agg.cache_read_ratio_percent << "%";
         } else if (agg.requests_with_usage > 0) {
             out << " 比例 unknown";
         }
-        out << "/写 " << FormatTokenCount(agg.cache_creation_tokens) << ") · 输出 "
-            << FormatTokenCount(agg.output_tokens);
-        if (agg.reasoning_tokens > 0) {
-            out << "(推理 " << FormatTokenCount(agg.reasoning_tokens) << ",已含)";
+        out << "/写 " << FormatTokenCount(usage_projection::Value(agg.cache_creation_tokens, agg.knowledge.cache_creation_tokens)) << ") · 输出 "
+            << FormatTokenCount(usage_projection::Value(agg.output_tokens, agg.knowledge.output_tokens));
+        if (!agg.knowledge.reasoning_tokens || agg.reasoning_tokens > 0) {
+            out << "(推理 " << FormatTokenCount(usage_projection::Value(agg.reasoning_tokens, agg.knowledge.reasoning_tokens)) << ",已含)";
         }
-        out << " · 费用 not_priced(逐笔看 /usage)";
+        out << (!report.usage.knowledge.cost_micros
+                    ? " · 费用 未知（溢出）"
+                    : " · 费用 not_priced(逐笔看 /usage)");
         fields.push_back(frame::Field{"Token", out.str()});
     }
     // 三 Prompt 构成。

@@ -14,11 +14,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -130,6 +133,173 @@ bool WaitForExit(const platform::BackgroundSpawnResult& spawned, int* exit_code,
     *exit_code = static_cast<int>(completion.exit_code);
     return true;
 }
+
+// Keep the first actual read as the verdict. Later cleanup/log observations
+// must never replace these bytes with a subsequently published "ok".
+struct RacerRead {
+    std::string bytes;
+    bool opened = false, eof = false, fail = false, bad = false;
+    bool truncated = false;
+};
+
+RacerRead ReadRacerFile(const fs::path& path, std::size_t limit = 0) {
+    RacerRead result;
+    std::ifstream file(path, std::ios::binary);
+    result.opened = file.is_open();
+    if (limit == 0) {
+        result.bytes = std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    } else {
+        result.bytes.resize(limit + 1);
+        file.read(result.bytes.data(), static_cast<std::streamsize>(result.bytes.size()));
+        result.bytes.resize(static_cast<std::size_t>(file.gcount()));
+        result.truncated = result.bytes.size() > limit;
+        if (result.truncated) result.bytes.resize(limit);
+    }
+    result.eof = file.eof(); result.fail = file.fail(); result.bad = file.bad();
+    return result;
+}
+
+std::string RacerHex(const std::string& bytes) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes.size() * 2);
+    for (const unsigned char ch : bytes) {
+        result.push_back(digits[ch >> 4]); result.push_back(digits[ch & 15]);
+    }
+    return result;
+}
+
+nlohmann::json RacerReadJson(const fs::path& path, const RacerRead& read) {
+    return {{"path", platform::PathToUtf8(path)}, {"opened", read.opened},
+        {"eof", read.eof}, {"fail", read.fail}, {"bad", read.bad},
+        {"captured_bytes", read.bytes.size()}, {"bytes_hex", RacerHex(read.bytes)},
+        {"truncated", read.truncated}};
+}
+
+template<class MakeRecord>
+void RacerEvidence(MakeRecord make_record) noexcept {
+    try {
+        const auto text = make_record().dump(-1, ' ', true, nlohmann::json::error_handler_t::replace);
+        std::fprintf(stderr, "[workspace-held-evidence] %s\n", text.c_str());
+        std::fflush(stderr);
+    } catch (...) {
+        std::fputs("[workspace-held-evidence-unavailable]\n", stderr);
+        std::fflush(stderr);
+    }
+}
+
+// This owner is only for the hold helper: writing release cannot start a new
+// registration. The register-mode go file is deliberately not a cleanup action.
+class HeldRacerEvidence {
+public:
+    HeldRacerEvidence(platform::BackgroundSpawnResult spawned, std::vector<std::string> argv,
+                      fs::path ready, fs::path release)
+        : spawned_(std::move(spawned)), argv_(std::move(argv)), ready_(std::move(ready)),
+          release_(std::move(release)) {}
+    ~HeldRacerEvidence() { Finish("scope_exit"); }
+
+    void ObserveFirst(const RacerRead& first) noexcept {
+        RacerEvidence([&] {
+            return nlohmann::json{{"phase", "first_ready"}, {"argv", argv_},
+                {"pid", spawned_.pid}, {"spawn_success", spawned_.success}, {"spawn_error", spawned_.error},
+                {"ready", RacerReadJson(ready_, first)}, {"process", Process()},
+                {"combined_log_path", spawned_.log_path}};
+        });
+    }
+    void OriginalReleaseRequested() noexcept { original_release_requested_ = true; }
+    void OriginalWaitStarting() noexcept { original_wait_used_ = true; }
+    void OriginalWaitFinished(bool result, int exit_code) noexcept {
+        RacerEvidence([&] {
+            return nlohmann::json{{"phase", "original_exit_wait"}, {"wait_ms", 20000},
+                {"returned", result}, {"exit_code", result ? nlohmann::json(exit_code) : nlohmann::json(nullptr)},
+                {"process", Process()}};
+        });
+    }
+    void Finish(const char* reason) noexcept {
+        if (finished_) return;
+        finished_ = true;
+        // Snapshot natural completion before issuing any cleanup signal.
+        RacerEvidence([&] {
+            return nlohmann::json{{"phase", "before_cleanup"}, {"reason", reason},
+                {"argv", argv_}, {"pid", spawned_.pid}, {"spawn_success", spawned_.success},
+                {"spawn_error", spawned_.error}, {"process", Process()},
+                {"original_release_requested", original_release_requested_}, {"original_wait_used", original_wait_used_}};
+        });
+        bool release_attempted = false, release_opened = false, release_write_good = false;
+        bool release_close_failed = false, wait_attempted = false, wait_returned = false;
+        bool stop_attempted = false, stop_returned = false;
+        int exit_code = -1;
+        bool cleanup_exception = false;
+        try {
+            if (spawned_.handle && !spawned_.handle->Wait(0)) {
+                if (!original_release_requested_) {
+                    release_attempted = true;
+                    std::ofstream file(release_, std::ios::binary | std::ios::trunc);
+                    release_opened = file.is_open();
+                    file << "go\n";
+                    release_write_good = file.good();
+                    if (release_opened) file.close();
+                    release_close_failed = file.fail();
+                }
+                if (!original_wait_used_) {
+                    original_wait_used_ = true;
+                    wait_attempted = true;
+                    wait_returned = WaitForExit(spawned_, &exit_code, 20000);
+                }
+                if (!spawned_.handle->Wait(0)) {
+                    stop_attempted = true;
+                    stop_returned = spawned_.handle->TerminateTree(0);
+                }
+            }
+        } catch (...) {
+            cleanup_exception = true;
+            try {
+                if (spawned_.handle && !spawned_.handle->Wait(0)) {
+                    stop_attempted = true;
+                    stop_returned = spawned_.handle->TerminateTree(0);
+                }
+            } catch (...) {}
+        }
+        RacerEvidence([&] {
+            return nlohmann::json{{"phase", "after_cleanup"}, {"reason", reason},
+                {"release_path", platform::PathToUtf8(release_)}, {"release_attempted", release_attempted},
+                {"release_opened", release_opened}, {"release_write_good", release_write_good},
+                {"release_fail_after_close", release_close_failed}, {"wait_attempted", wait_attempted},
+                {"wait_ms", wait_attempted ? 20000 : 0}, {"wait_returned", wait_returned},
+                {"wait_exit_code", wait_returned ? nlohmann::json(exit_code) : nlohmann::json(nullptr)},
+                {"stop_attempted", stop_attempted}, {"stop_returned", stop_returned},
+                {"cleanup_exception", cleanup_exception}, {"process", Process()}};
+        });
+        RacerEvidence([&] {
+            nlohmann::json record{{"phase", "combined_stdout_stderr"}, {"reported_path", spawned_.log_path},
+                                   {"stream_layout", "stdout_and_stderr_share_one_file"}};
+            if (spawned_.log_path.empty()) {
+                record["available"] = false;
+            } else {
+                const auto path = platform::Utf8ToPath(spawned_.log_path);
+                const auto bytes = ReadRacerFile(path, 65536);
+                record["available"] = bytes.opened;
+                record["observation"] = RacerReadJson(path, bytes);
+            }
+            return record;
+        });
+    }
+
+private:
+    nlohmann::json Process() const {
+        if (!spawned_.handle) return {{"handle", false}, {"exit_code", nullptr}};
+        const bool exited = spawned_.handle->Wait(0);
+        const auto completion = spawned_.handle->Peek();
+        return {{"handle", true}, {"wait_exited", exited}, {"known", completion.known},
+            {"exit_code", completion.known ? nlohmann::json(completion.exit_code) : nlohmann::json(nullptr)},
+            {"signal", completion.known ? nlohmann::json(completion.signal) : nlohmann::json(nullptr)},
+            {"terminated_by_stop", completion.terminated_by_stop}};
+    }
+    platform::BackgroundSpawnResult spawned_;
+    std::vector<std::string> argv_;
+    fs::path ready_, release_;
+    bool original_release_requested_ = false, original_wait_used_ = false, finished_ = false;
+};
 
 // 房里有没有 .manifest.lock.stale-* 的隔离留证。
 bool HasStaleLockEvidence(const fs::path& workspace_dir) {
@@ -451,13 +621,19 @@ TEST_CASE("manifest 事务锁: 他进程活持有——有界等待烧完回 wor
     // 真子进程占住登记锁,等放行令。
     const fs::path ready = root / "racer-ready.txt";
     const fs::path release = root / "racer-release.txt";
-    const auto spawned = platform::RunProcessBackground(
-        {std::string(LUBANCODE_WORKSPACE_RACER_EXE), "hold",
-         platform::PathToUtf8(workspace_dir), platform::PathToUtf8(ready),
-         platform::PathToUtf8(release)});
+    const std::vector<std::string> racer_argv{std::string(LUBANCODE_WORKSPACE_RACER_EXE), "hold",
+        platform::PathToUtf8(workspace_dir), platform::PathToUtf8(ready), platform::PathToUtf8(release)};
+    const auto spawned = platform::RunProcessBackground(racer_argv);
+    HeldRacerEvidence evidence(spawned, racer_argv, ready, release);
+    if (!spawned.success) evidence.Finish("spawn_failed");
     REQUIRE(spawned.success);
-    REQUIRE(WaitForFile(ready, 20000));
-    REQUIRE(Read(ready).rfind("ok", 0) == 0);
+    const bool ready_seen = WaitForFile(ready, 20000);
+    if (!ready_seen) evidence.Finish("ready_timeout");
+    REQUIRE(ready_seen);
+    const auto first_ready = ReadRacerFile(ready);
+    evidence.ObserveFirst(first_ready);
+    if (first_ready.bytes.rfind("ok", 0) != 0) evidence.Finish("first_ready_rejected");
+    REQUIRE(first_ready.bytes.rfind("ok", 0) == 0);
 
     // 有界等待(60×100ms,ledger 册间歇红后加宽,见 manifest.cpp kLockWait*)
     // 烧完:如实回 workspace.locked,不悄悄覆盖旧账。
@@ -472,10 +648,16 @@ TEST_CASE("manifest 事务锁: 他进程活持有——有界等待烧完回 wor
     CHECK(read.manifest.checkouts[0].last_seen_at_ms == 1000);
 
     // 放行令 → racer 退出放锁 → 后来者接手。
+    evidence.OriginalReleaseRequested();
     Write(release, "go\n");
     int exit_code = -1;
-    REQUIRE(WaitForExit(spawned, &exit_code, 20000));
+    evidence.OriginalWaitStarting();
+    const bool exited = WaitForExit(spawned, &exit_code, 20000);
+    evidence.OriginalWaitFinished(exited, exit_code);
+    if (!exited || exit_code != 0) evidence.Finish("original_exit_rejected");
+    REQUIRE(exited);
     REQUIRE(exit_code == 0);
+    evidence.Finish("normal_exit");
     auto after = workspace::OpenOrRegisterWorkspace(workspaces, identity, 3000);
     REQUIRE(after.has_value());
     CHECK(after->last_opened_at_ms == 3000);
