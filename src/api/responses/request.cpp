@@ -117,6 +117,17 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
     }
     body["stream"] = true;
     body["store"] = false;  // 无状态:历史全靠自己带,跟 Anthropic 后端行为一致
+    // store:false 的 reasoning 只有带上加密内容才回传得回去(Codex 同款)。
+    // 仅在会回传思考时索取;extra_body 里写了 include 则整个以用户为准。
+    if (!request.reasoning_effort.empty() && ShouldReplayThinking(request)) {
+        body["include"] = json::array({"reasoning.encrypted_content"});
+    }
+    // 会话级缓存分组键:兼容中转常拿它派生上游会话身份(session_id /
+    // conversation_id)并做账号粘性,不只是 OpenAI 的缓存分组。extra_body
+    // 在后面合并,显式写了同名键仍以用户为准。
+    if (!request.prompt_cache_key.empty()) {
+        body["prompt_cache_key"] = request.prompt_cache_key;
+    }
 
     // 四角色换骨(v3 第二棒,差距清单 §8.2 第 4 条):System 角色消息是
     // 上下文根,顶置进顶层 instructions(§4.46 目标表),input 里一条不落。
@@ -187,10 +198,29 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
     bool warned_missing_reasoning_item = false;
     const auto replay_thinking = [&](const ThinkingBlock& thinking, Role role) {
         if (!ShouldReplayThinking(request) || role != Role::Assistant) return false;
-        if (thinking.responses_item.is_object()) return true;
+        // store:false 下服务端不留 rs_ 条目,光有 id 的空壳 item 回传会查无
+        // 此项(或被中转悄悄改写,前缀逐轮变)。带实质内容的才回传:
+        // encrypted_content(OpenAI)、content 原文(vLLM 一类的 reasoning_text)
+        // 或非空 summary(DashScope 等兼容端,既有行为)。其余空壳整条跳过。
+        if (thinking.responses_item.is_object()) {
+            const auto& item = thinking.responses_item;
+            const auto encrypted = item.find("encrypted_content");
+            if (encrypted != item.end() && encrypted->is_string() && !encrypted->get<std::string>().empty()) {
+                return true;
+            }
+            const auto content = item.find("content");
+            if (content != item.end() && content->is_array() && !content->empty()) {
+                return true;
+            }
+            const auto summary = item.find("summary");
+            if (summary != item.end() && summary->is_array() && !summary->empty()) {
+                return true;
+            }
+        }
         if (!warned_missing_reasoning_item) {
             platform::LogSink::Instance().Warn("responses",
-                "历史思考缺少原生 reasoning item,无法回传;旧存档或跨协议消息不能伪造服务端 ID。新响应将完整保存。");
+                "历史思考缺少可回传的 reasoning item(无原生 item,或 item 是无 encrypted_content/content/summary 的空壳),本轮不回传;"
+                "旧存档或跨协议消息不能伪造服务端 ID。");
             warned_missing_reasoning_item = true;
         }
         return false;

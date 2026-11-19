@@ -29,6 +29,15 @@ using Json = nlohmann::json;
 using Receipt = agent::OwnedJobAdmissionReceipt;
 using Admission = agent::OwnedJobAdmissionState;
 Error Failure(std::string code, std::string message = {}) { return {std::move(code), std::move(message)}; }
+bool JsonStrEq(const Json& value, const char* expected) noexcept {
+    return value.is_string() && value.get_ref<const std::string&>() == expected;
+}
+bool JsonMemberStrEq(const Json& object, const char* key, const char* expected) noexcept {
+    if (!object.is_object()) return false;
+    for (const auto& [name, value] : object.get_ref<const Json::object_t&>())
+        if (name == key) return JsonStrEq(value, expected);
+    return false;
+}
 bool Terminal(const std::string& state) {
     return state == "succeeded" || state == "failed" || state == "cancelled" || state == "unknown";
 }
@@ -60,12 +69,12 @@ lubancode::ApprovalMode Mode(ApprovalMode mode) {
     }
 }
 Result<Json> Normalize(const Json& input, const SessionCommandJobPlan& plan) {
-    if (!input.is_object() || input.value("execution_mode", Json()) != "session_job" ||
+    if (!JsonMemberStrEq(input, "execution_mode", "session_job") ||
         input.contains("run_in_background") || input.contains("max_runtime_ms"))
         return std::unexpected(Failure("sdk.job.invalid_mode"));
     Json effective = input;
     const auto cwd = effective.find("cwd");
-    if (cwd == effective.end() || cwd->is_null() || *cwd == "") effective["cwd"] = plan.cwd();
+    if (cwd == effective.end() || cwd->is_null() || JsonStrEq(*cwd, "")) effective["cwd"] = plan.cwd();
     else if (!cwd->is_string()) return std::unexpected(Failure("sdk.job.invalid_cwd"));
     else {
         const auto text = cwd->get<std::string>();
@@ -160,7 +169,7 @@ Result<std::shared_ptr<SessionCommandJobs>> SessionCommandJobs::Build(
     hooks.named_results = service.trajectory()->named_result_capability();
     const auto weak = std::weak_ptr<SessionCommandJobs>(module);
     hooks.owned_selected = [](const auto& call) {
-        return call.name == "run_command" && call.input.is_object() && call.input.value("execution_mode", Json()) == "session_job";
+        return call.name == "run_command" && JsonMemberStrEq(call.input, "execution_mode", "session_job");
     };
     hooks.owned_admission = [weak](auto& bridge, const auto& call, const auto& context) {
         auto owner = weak.lock(); return owner ? owner->Admit(bridge, call, context) : agent::MissingOwnedJobAdmission();
@@ -449,7 +458,7 @@ Result<void> SessionCommandJobs::Restore() {
         const auto registration = v3::ReadOwnedJobRegistration(*ledger, item.job_id);
         if (!registration || registration->job_id != item.job_id || registration->action_id != item.action_id ||
             registration->turn_id != item.turn_id || registration->step_id != item.step_id ||
-            registration->attempt != item.attempt || registration->tool_identity.value("logicalName", Json()) != "run_command")
+            registration->attempt != item.attempt || !JsonMemberStrEq(registration->tool_identity, "logicalName", "run_command"))
             return std::unexpected(Failure("sdk.job.recovery_invalid", "historical Job registration scope is missing or conflicting"));
         const auto* adopted = v3::FindOwnedJobAdoption(*adoptions, item.job_id);
         if (item.owned_layout && (!adopted || adopted->session_id != registration->session_id ||

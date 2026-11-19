@@ -17,7 +17,7 @@ class OpeningStartEvidenceTests(unittest.TestCase):
                           *('[sdk-backend-owner-path] ' + path for path in
                             ('background', 'mutual', 'late-deleter', 'session-deleter', 'exceptions', 'nested', 'allocation-rollback')),
                           *('[sdk-usage-close-path] ' + path for path in
-                            ('callback', 'cancellation', 'retired', 'recovery', 'invalid-material-recovery', 'callback-exception-recovery'))))
+                            ('callback', 'cancellation', 'retired', 'recovery', 'invalid-material-recovery', 'callback-exception-recovery', 'result-persistence-failure-recovery'))))
 
     def test_native_platform_commands(self):
         for executable in ('/real build/lubancore_sdk_tests', 'C:/real build/lubancore_sdk_tests.exe',
@@ -52,7 +52,7 @@ class OpeningStartEvidenceTests(unittest.TestCase):
                 check_opening_start_native(self.body().replace(old, new), self.command)
 
     def test_each_close_usage_path_must_finish_once(self):
-        for path in ('callback', 'cancellation', 'retired', 'recovery', 'invalid-material-recovery', 'callback-exception-recovery'):
+        for path in ('callback', 'cancellation', 'retired', 'recovery', 'invalid-material-recovery', 'callback-exception-recovery', 'result-persistence-failure-recovery'):
             marker = '[sdk-usage-close-path] ' + path
             for body in (self.body().replace(marker, ''), self.body() + '\n' + marker):
                 with self.subTest(path=path), self.assertRaises(RuntimeError):

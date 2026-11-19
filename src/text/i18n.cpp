@@ -430,6 +430,7 @@ const Entry kZhCN[] = {
     {"clipboard.paste_text_failed", "没贴上:{0}"},
     {"transcript.assistant_bg_title", "后台回流 · 分析"},
     {"error.step_limit", "已达 step 上限(max_steps_per_turn;旧名 max_turns),本轮实际跑了 {0} 步,可调大上限或设 0 解除。"},
+    {"error.time_budget", "墙钟预算耗尽(--time-budget / LUBANCODE_TIME_BUDGET_SECS):不再发新请求,本轮按预算耗尽收口,已有结果照常落账导出。"},
     {"error.length_empty_output", "输出预算耗尽(finish_reason=length):共输出 {0} tokens,正文一个字都没落。"},
     {"error.length_empty_reasoning", "usage 拆账:其中 reasoning {0} tokens——输出预算全被思考吃掉。"},
     {"error.length_empty_no_split", "usage 未拆 reasoning 账(服务端没回 reasoning_tokens),预算去向无法核对。"},
@@ -659,6 +660,19 @@ const Entry kZhCN[] = {
     {"cw_panel.not_supported", "此模型声明不吃推理参数,不可调"},
     {"cw_panel.always_on", "思考始终开启,关不掉"},
     {"cw_panel.unknown_caps", "能力未知,不猜档位"},
+    {"cw_panel.selected_effort", "当前选择: {0} 思考"},
+    {"effort.current_line", "当前值: {0}"},
+    {"effort.default_line", "默认值: {0}"},
+    {"effort.default_none", "目录未声明默认档"},
+    {"effort.source_line", "声明来源: {0}"},
+    {"effort.source_catalog", "模型目录"},
+    {"effort.source_provider", "provider 配置(未验证)"},
+    {"effort.source_none", "无(模型目录与 provider 都没声明)"},
+    {"effort.levels_header", "可选档位:"},
+    {"effort.mark_current", "当前"},
+    {"effort.switch_hint", "切换: /effort <档位>;实测服务端是否采纳: /doctor effort。"},
+    {"effort.non_tty", "非交互终端不开选择面板。"},
+    {"effort.cancelled", "已取消,推理强度未改动。"},
     {"cmd.context_window.usage", "用法: /context-window(裸敲开面板,同屏调当前模型的窗口与思考强度;本会话生效)"},
     {"cmd.context_window.non_tty",
      "非交互终端开不了 /context-window 面板。改窗口: /context <档位>(如 /context 256k);改思考: /think <档位>。均只本会话生效。"},
@@ -691,7 +705,7 @@ const Entry kZhCN[] = {
     {"slash.desc.context_window", "同屏调当前模型的上下文窗口与思考强度(交互面板;本会话生效)"},
     {"slash.desc.compact", "手动压缩历史;/compact 重点说明 可指定这次额外保留什么"},
     {"slash.desc.think", "看当前推理强度;/think 档位 切档位,声明未知会如实标注(/effort 同义)"},
-    {"slash.desc.effort", "同 /think(推理强度别名)"},
+    {"slash.desc.effort", "看/选推理强度(裸敲列档位、当前值、默认值、声明来源)"},
     {"slash.desc.skills", "列出扫描到的技能(官方 + 主目录级 + 项目级)"},
     {"slash.desc.skill", "管理技能(裸敲查看安装网址、本地目录等完整示例)"},
     {"slash.desc.mcp", "列出挂载的 MCP 服务器状态和工具清单"},
@@ -1155,11 +1169,12 @@ const Entry kZhCN[] = {
     {"error.network.connect_failed", "连接失败: {0}"},
     {"error.request.failed", "请求失败: {0}"},
     {"error.request.recovery_exhausted", "(已自动重试 {0} 次仍失败,总时长 {1},含退避)"},
-    // 流式请求硬墙钟(cpr 并发挂死单):连接/空闲两道闸都不触发的挂死绝境,
-    // 由这面墙兜底掐断。文案要点:不是网络慢,是挂死;配置键写明,好让人调。
+    // 流式请求无进展墙(cpr 并发挂死单):连接/空闲两道闸都不触发的挂死绝境,
+    // 由这面墙兜底掐断;收字节即顺延,长流不掐。文案要点:不是网络慢,是
+    // 挂死;配置键写明,好让人调。
     {"error.network.hard_timeout",
-     "请求硬超时:整枚请求超过 {0} 秒被强制掐断(request_hard_timeout_secs)。多半是连接被代理/TUN "
-     "截胡或服务端彻底无响应;重试前先排查网络,长任务可调大此值"},
+     "请求硬超时:连续 {0} 秒没收到任何响应数据,请求被强制掐断(request_hard_timeout_secs)。多半是连接被"
+     "代理/TUN 截胡或服务端彻底无响应;重试前先排查网络,模型首字前思考过久可调大此值"},
 
     // ---- transcript 摘要词(彩色主题;plain 的 [RUNNING] 等不进表) ----
     {"transcript.pending", "待确认"},
@@ -1201,6 +1216,9 @@ const Entry kZhCN[] = {
     //      收据行不进 i18n,稳定可解析)----
     {"cli.output_mode_mismatch",
      "--output 只在带任务正文的单发模式有效:lubancode --yes --output <文件路径> \"<任务正文>\";"
+     "交互模式、app-server 与各子命令都不认它"},
+    {"cli.time_budget_mode_mismatch",
+     "--time-budget 只在带任务正文的单发模式有效:lubancode --yes --time-budget 900 \"<任务正文>\";"
      "交互模式、app-server 与各子命令都不认它"},
     {"oneshot.output_invalid", "--output 路径解析不了: {0}({1})"},
     {"oneshot.output_target_is_dir", "--output 的目标是目录,不是文件: {0}"},
@@ -2640,6 +2658,7 @@ const Entry kEn[] = {
     {"clipboard.paste_text_failed", "Nothing pasted: {0}"},
     {"transcript.assistant_bg_title", "background reflow · analysis"},
     {"error.step_limit", "Step limit reached (max_steps_per_turn; formerly max_turns); {0} steps used this turn. Raise the limit or set 0 to remove it."},
+    {"error.time_budget", "Wall-clock budget exhausted (--time-budget / LUBANCODE_TIME_BUDGET_SECS): no new requests; the turn ends as budget exhausted and the results so far are recorded and exported."},
     {"agent_panel.detail_prompt", "Task: "},
     {"agent_panel.detail_pending_head", "{0} queued intervention message(s) not yet delivered: "},
     {"agent_panel.budget_head", "budget: {0}"},
@@ -2869,6 +2888,19 @@ const Entry kEn[] = {
     {"cw_panel.not_supported", "Not supported (model declines reasoning parameters)"},
     {"cw_panel.always_on", "Always enabled, cannot be turned off"},
     {"cw_panel.unknown_caps", "Capabilities unknown; no guessed levels"},
+    {"cw_panel.selected_effort", "Selected: {0} thinking"},
+    {"effort.current_line", "Current: {0}"},
+    {"effort.default_line", "Default: {0}"},
+    {"effort.default_none", "not declared by the catalog"},
+    {"effort.source_line", "Declared by: {0}"},
+    {"effort.source_catalog", "model catalog"},
+    {"effort.source_provider", "provider config (unverified)"},
+    {"effort.source_none", "none (neither catalog nor provider declares levels)"},
+    {"effort.levels_header", "Available levels:"},
+    {"effort.mark_current", "current"},
+    {"effort.switch_hint", "Switch: /effort <level>; probe the server: /doctor effort."},
+    {"effort.non_tty", "No interactive terminal; the picker is not opened."},
+    {"effort.cancelled", "Cancelled; thinking effort unchanged."},
     {"cmd.context_window.usage",
      "Usage: /context-window (bare opens the panel for this model's window and effort; session only)"},
     {"cmd.context_window.non_tty",
@@ -2910,7 +2942,7 @@ const Entry kEn[] = {
     {"slash.desc.context_window", "Set context window for the current model"},
     {"slash.desc.compact", "compact the history; /compact <note> tells what to keep extra"},
     {"slash.desc.think", "show/set reasoning effort; levels are provider-defined (/effort alias)"},
-    {"slash.desc.effort", "same as /think (reasoning effort alias)"},
+    {"slash.desc.effort", "show/pick reasoning effort (levels, current, default, source)"},
     {"slash.desc.skills", "list discovered skills (official + home-level + project-level)"},
     {"slash.desc.skill", "manage skills (run bare for URL and local-path examples)"},
     {"slash.desc.mcp", "list mounted MCP servers and their tools"},
@@ -3520,9 +3552,9 @@ const Entry kEn[] = {
     {"error.request.recovery_exhausted",
      " (failed after {0} automatic retries; total elapsed {1}, including backoff)"},
     {"error.network.hard_timeout",
-     "request hard timeout: the whole request was force-aborted after {0}s (request_hard_timeout_secs). Usually the "
-     "connection was hijacked by a proxy/TUN or the server went silent; check the network before retrying, and raise "
-     "this limit for long tasks"},
+     "request hard timeout: no response data arrived for {0}s, so the request was force-aborted "
+     "(request_hard_timeout_secs). Usually the connection was hijacked by a proxy/TUN or the server went silent; check "
+     "the network before retrying, and raise this limit if the model thinks very long before its first byte"},
 
     // ---- transcript summary words ----
     {"transcript.pending", "Awaiting confirmation"},
@@ -3572,6 +3604,9 @@ const Entry kEn[] = {
     {"cli.output_mode_mismatch",
      "--output is only valid in one-shot mode with a task prompt: lubancode --yes --output "
      "<file-path> \"<task instruction>\"; interactive mode, app-server and subcommands reject it"},
+    {"cli.time_budget_mode_mismatch",
+     "--time-budget is only valid in one-shot mode with a task prompt: lubancode --yes --time-budget 900 "
+     "\"<task instruction>\"; interactive mode, app-server and subcommands reject it"},
     {"oneshot.output_invalid", "--output path cannot be resolved: {0} ({1})"},
     {"oneshot.output_target_is_dir", "--output target is a directory, not a file: {0}"},
     {"oneshot.output_parent_unavailable",
@@ -4182,19 +4217,17 @@ std::string MapLocaleToLanguage(std::string_view locale) {
     if (locale.size() >= 2) {
         const char a = static_cast<char>(std::tolower(static_cast<unsigned char>(locale[0])));
         const char b = static_cast<char>(std::tolower(static_cast<unsigned char>(locale[1])));
-        // 前缀后面要么结束、要么跟分隔符/子标签,别把 "english_custom" 之外
-        // 的 "eo"(世界语)这类两字码误判——只看前两个字母 + 边界。
+        // 前缀后面要么结束、要么跟分隔符/子标签,别把 "zhx" 这类撞前缀的
+        // 码误判——只看前两个字母 + 边界。
         const bool boundary = locale.size() == 2 || !std::isalpha(static_cast<unsigned char>(locale[2]));
-        if (boundary) {
-            if (a == 'z' && b == 'h') {
-                return "zh-CN";
-            }
-            if (a == 'e' && b == 'n') {
-                return "en";
-            }
+        if (boundary && a == 'z' && b == 'h') {
+            return "zh-CN";
         }
     }
-    return "zh-CN";
+    // 明确是 zh 才给中文;未设、C、C.UTF-8、POSIX、en_* 与认不出的一律回落
+    // en(one-shot 无人值守适配:Docker 镜像 LANG 多半未设或是 C.UTF-8,
+    // 旧口径回落 zh-CN,英文题目配了一身中文提示)。
+    return "en";
 }
 
 std::string DetectSystemLanguage() {
@@ -4212,6 +4245,13 @@ std::string DetectSystemLanguage() {
     const char* lang = std::getenv("LANG");
     return MapLocaleToLanguage(lang != nullptr ? lang : "");
 #endif
+}
+
+std::string ResolveLanguage(std::string_view explicit_setting) {
+    if (!explicit_setting.empty()) {
+        return std::string(explicit_setting);
+    }
+    return DetectSystemLanguage();
 }
 
 }  // namespace lubancode::text

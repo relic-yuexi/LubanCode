@@ -77,6 +77,7 @@ nlohmann::json SchedulePatchToJson(const GatewayJobSchedulePatch& patch) {
     if (patch.set_misfire) json["misfirePolicy"] = patch.misfire;
     if (patch.set_deadline) json["deadlineMs"] = patch.deadline_ms;
     if (patch.set_notify_on_change) json["notifyOnChange"] = patch.notify_on_change;
+    if (patch.set_watch_paths) json["watchPaths"] = patch.watch_paths;
     return json;
 }
 
@@ -110,6 +111,14 @@ GatewayJobSchedulePatch SchedulePatchFromJson(const nlohmann::json& json) {
     if (has("notifyOnChange") && json["notifyOnChange"].is_boolean()) {
         patch.set_notify_on_change = true;
         patch.notify_on_change = json["notifyOnChange"].get<bool>();
+    }
+    if (has("watchPaths") && json["watchPaths"].is_array()) {
+        patch.set_watch_paths = true;
+        for (const auto& item : json["watchPaths"]) {
+            if (item.is_string()) {
+                patch.watch_paths.push_back(item.get<std::string>());
+            }
+        }
     }
     return patch;
 }

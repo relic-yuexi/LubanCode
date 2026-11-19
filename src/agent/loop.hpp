@@ -55,6 +55,7 @@ namespace lubancode::agent {
 
 struct ContextPressure;
 class TokenCalibrator;
+class WallClockBudget;  // agent/unattended_guard.hpp:one-shot 墙钟预算
 
 // OnRequestPrepared 随请求一并递的账(Token 账本单 A1)。purpose 是唯一
 // 恒有效的字段(AgentProfile.purpose 总有默认值,§6.2"调用方不知道用途
@@ -240,6 +241,17 @@ struct TurnWiring {
     // ---- 审批(合同形状在 runtime/interaction.hpp,与 InteractionBroker
     // 同源;宿主把"怎么问、怎么答"从那只口子递进来)------------------------
 
+    // Final internal admission on the actual executing thread, after rewrites,
+    // approval and started intent, immediately before Tool::execute. Covers
+    // read-only and preapproved tools too; this is not an approval hook.
+    // Empty preserves LocalTrusted behavior. Concurrent read workers may call
+    // it concurrently; captures must outlive the batch and be thread-safe.
+    // Capture the original execution scope, not a later query actor. Do not
+    // reenter/close the owner here. Failure text is never exported.
+    std::function<std::expected<void, std::string>(const std::string& tool_use_id,
+        const std::string& name, const nlohmann::json& effective_input,
+        const tools::ToolExecutionContext& context)> on_tool_dispatch_gate;
+
     // Runtime 权限预裁定。Allow 直接越过询问，Deny 在 Runtime 边界收口；
     // 只有 Ask 才可进入 PermissionRequest/前端确认。空 = 兼容旧宿主。
     std::function<runtime::PermissionVerdict(const std::string& tool_use_id, const std::string& name,
@@ -382,6 +394,13 @@ struct TurnWiring {
     // host resolves its own active action/attempt and returns owned identity.
     std::function<std::optional<tools::ToolInvocationIdentity>(const std::string&)>
         tool_invocation_identity;
+
+    // ---- one-shot 墙钟预算单:整场墙钟预算 ------------------------------------
+    // 非空 = 三处生效:步顶剩余不足保留余量即不再发新请求(按 hit_time_budget
+    // 收场);工具结果回喂时按档追宿主附注(每档一次);工具执行上下文带
+    // 上死线,run_command 据此封顶单次超时。空 = 没预算(交互/子代理/单测),
+    // 一处不调,行为与从前一字不差。不持有,调用方保证活过整场。
+    WallClockBudget* wall_budget = nullptr;
 
     // ---- Plan 模式(只读研究硬闸单):ModePolicy 硬闸 ------------------------
     // RunOneTool 在 deferred/tool_search 可见性之后、PreToolUse Hook 之前

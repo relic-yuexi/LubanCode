@@ -101,8 +101,18 @@ enum class ThinkEffortControl {
     Unknown,        // 目录外且 provider 未声明:能力未知,不猜档位
 };
 
+// 档位声明的来路(/effort 概览的"声明来源"一行):目录声明优先,provider
+// 配置兜底(未验证),都没有 = None(能力未知,不猜)。
+enum class ThinkEffortSource {
+    None,
+    Catalog,
+    Provider,
+};
+
 struct ThinkEffortCapability {
     ThinkEffortControl control = ThinkEffortControl::Unknown;
+    ThinkEffortSource source = ThinkEffortSource::None;
+    std::string default_effort;  // 目录声明的默认档;空 = 未声明默认
     // control==Adjustable 时非空且含当前值(不在声明表就追加为未验证档,
     // 不偷偷换档);NotSupported/AlwaysOn/Unknown 时为空,行按不可调画。
     std::vector<ThinkEffortOption> options;
@@ -177,6 +187,9 @@ struct ContextWindowPanelView {
     std::size_t focus = 0;
     std::size_t original_window_index = 0;
     std::size_t original_effort_index = 0;
+    // /effort 单行面板:只画思考强度一段(含默认值与声明来源),窗口段整个
+    // 省掉;此时 window 候选可为空,core 以 window_count=0 构造。
+    bool effort_only = false;
 };
 
 struct ContextWindowPanelFrame {
@@ -188,6 +201,12 @@ struct ContextWindowPanelFrame {
 // 行 + 两行操作说明。可调且有多个候选才画 "< >";不可调行保留说明并给
 // 不可调缘由,不画暗示可切换的箭头。
 ContextWindowPanelFrame BuildContextWindowPanelFrame(const ContextWindowPanelView& view, int width);
+
+// /effort 的文字概览(非 TTY / 不可调时的落地,也是面板的同源文案):模型
+// 标题、当前值、默认值、声明来源、可选档位逐档标注(当前/默认/未验证)。
+// 不可调的三态(不支持/始终开启/能力未知)各给一行缘由,不列猜出来的档。
+std::vector<std::string> BuildEffortOverviewLines(const std::string& model_title,
+                                                  const ThinkEffortCapability& capability);
 
 // ---------------------------------------------------------------------------
 // TTY 宿主(归 lubancode_app;非 TTY 不开面板)
