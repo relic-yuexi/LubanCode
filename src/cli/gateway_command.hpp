@@ -30,6 +30,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "gateway/profile.hpp"
 #include "gateway/work_pump.hpp"
@@ -56,6 +57,8 @@ struct GatewayCommandArgs {
     std::string misfire;             // --misfire(coalesce|skip;缺省 coalesce)
     long long deadline_ms = 0;       // --deadline(0 = 不设)
     bool heartbeat = false;          // --heartbeat(notify_on_change)
+    std::vector<std::string> watch_paths;  // --watch <相对路径>
+    bool clear_watch = false;        // --clear-watch(update 清空监控列表)
     long long expected_revision = 0; // --rev(update/pause/resume/cancel 的 CAS)
     std::string source_session_id;   // import-loop 位置参数(原 /loop 会话)
     std::string source_task_id;      // import-loop --task(原 loop-N)

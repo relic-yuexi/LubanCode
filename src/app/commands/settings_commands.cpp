@@ -26,6 +26,7 @@
 #include "api/models.hpp"
 #include "api/types.hpp"
 #include "cli/console_input.hpp"
+#include "cli/context_window_panel.hpp"  // /effort 单行面板与概览
 #include "cli/keymap.hpp"
 #include "cli/markdown.hpp"
 #include "cli/terminal_frame.hpp"  // frame::*(TUI 排版批 4/5b:/model 清单角色表与 /update 渲染段)
@@ -2521,12 +2522,69 @@ CommandFlow HandleSlashLanguage(const SettingsCommandContext& ctx, const lubanco
     return CommandFlow::Continue;
 }
 
+// /effort 裸敲:先按 /context-window 同一把尺裁决档位(目录 → provider →
+// 未知),可调且有多个候选、终端可交互就开单行面板,确认后写 current_think
+// 并让下一份请求即时带上;否则打文字概览(同源文案)。
+static void HandleEffortOverview(const SettingsCommandContext& ctx, const lubancode::config::ModelCatalogEntry* entry) {
+    const std::string identity = *ctx.active_provider + "/" + *ctx.current_model;
+    const std::string display =
+        entry != nullptr && !entry->display_name.empty() && entry->display_name != *ctx.current_model
+            ? entry->display_name + "(" + identity + ")"
+            : identity;
+    lubancode::cli::ContextWindowPanelView view;
+    view.effort_only = true;
+    view.model_title = trf("cw_panel.model_title", display);
+    view.effort = lubancode::cli::ResolveThinkEffortCapability(entry, ctx.config->provider_think_levels,
+                                                               *ctx.current_think);
+    const std::size_t found = lubancode::cli::FindThinkEffortIndex(view.effort, *ctx.current_think);
+    view.effort_index = found == static_cast<std::size_t>(-1) ? 0 : found;
+    view.original_effort_index = view.effort_index;
+    view.focus = 1;
+
+    const bool pickable = view.effort.control == lubancode::cli::ThinkEffortControl::Adjustable &&
+                          view.effort.options.size() > 1;
+    if (pickable) {
+        const lubancode::cli::ContextWindowPanelResult result =
+            lubancode::cli::RunContextWindowPanel(view, *ctx.theme);
+        if (result.opened) {
+            if (!result.saved) {
+                TermOut() << tr("effort.cancelled") << "\n";
+                return;
+            }
+            if (result.effort_index == view.original_effort_index ||
+                result.effort_index >= view.effort.options.size()) {
+                return;  // 无变更:静默关闭
+            }
+            const std::string chosen = view.effort.options[result.effort_index].value;
+            *ctx.current_think = chosen;
+            if (chosen.empty()) {
+                TermOut() << tr("cmd.context_window.effort_cleared") << "\n";
+            } else {
+                TermOut() << trf("cmd.think.switched", chosen) << "\n";
+            }
+            ctx.sync_request_policy();
+            return;
+        }
+        TermOut() << tr("effort.non_tty") << "\n";
+    }
+    for (const std::string& line : lubancode::cli::BuildEffortOverviewLines(view.model_title, view.effort)) {
+        TermOut() << line << "\n";
+    }
+    TermOut() << tr("effort.switch_hint") << "\n";
+}
+
 CommandFlow HandleSlashThink(const SettingsCommandContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     // 目录条目按"此刻的会话模型"现查——/model 切过之后,/think 列的就是
     // 新模型声明的档位。目录没有声明再看当前 provider 配置的声明(Effort
     // 诊断单:未知模型至少列本 provider 配置,不只甩一句"以服务商为准")。
     const lubancode::config::ModelCatalogEntry* entry =
         ctx.model_catalog->FindByProviderAndSlug(*ctx.active_provider, *ctx.current_model);
+    // /effort 裸敲:档位选择面板(TTY)或文字概览(非 TTY / 不可调)——当前
+    // 值、默认值、声明来源、可选档位一屏说清。带参数仍与 /think 同一条路。
+    if (parsed.args.empty() && parsed.raw_word == "effort") {
+        HandleEffortOverview(ctx, entry);
+        return CommandFlow::Continue;
+    }
     // /think history <default|all>(Kimi 保留式思考单 P1):跨轮保留的专用
     // 子命令,不与档位混写。第一个词认出 history 就整段接走。
     const auto [first_word, rest] = SplitSkillCommandArgs(parsed.args);

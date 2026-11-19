@@ -186,6 +186,105 @@ TEST_CASE("恢复环:fake clock 钉住五段等待,第 6 次尝试后收口") {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 流中途断/无进展墙落锤的重试封顶(Terminal-Bench 超时单)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+api::Error StreamBroken() {
+    api::Error error{api::ErrorKind::Network, "stream idle timeout", 0};
+    error.stream_started = true;
+    return error;
+}
+
+api::Error WallHit() {
+    api::Error error{api::ErrorKind::Network, "hard timeout", 0};
+    error.hard_timeout = true;
+    return error;
+}
+
+}  // namespace
+
+TEST_CASE("代价高失败判据:只认 Network 且流已开始或墙落锤") {
+    CHECK(api::IsCostlyNetworkFailure(StreamBroken(), false));
+    CHECK(api::IsCostlyNetworkFailure(WallHit(), false));
+    // 恢复环旁证:本次尝试见过流事件,传输层没留旁证也算。
+    CHECK(api::IsCostlyNetworkFailure(api::Error{api::ErrorKind::Network, "reset", 0}, true));
+    // 连接前失败:照旧不算。
+    CHECK_FALSE(api::IsCostlyNetworkFailure(api::Error{api::ErrorKind::Network, "connect refused", 0}, false));
+    // 429/5xx/Api 码哪怕见过流事件也不算——不动它们的既有阶梯。
+    CHECK_FALSE(api::IsCostlyNetworkFailure(api::Error{api::ErrorKind::HttpStatus, "x", 429}, true));
+    CHECK_FALSE(api::IsCostlyNetworkFailure(api::Error{api::ErrorKind::HttpStatus, "x", 503}, true));
+    CHECK_FALSE(api::IsCostlyNetworkFailure(api::Error{api::ErrorKind::Api, "x", 0, "upstream_error"}, true));
+    // 封顶不改白名单:两类代价高失败仍是可重试错。
+    CHECK(api::IsRetryableError(StreamBroken()));
+    CHECK(api::IsRetryableError(WallHit()));
+}
+
+TEST_CASE("重发判据:代价高失败累计超过封顶即收口,其余照旧") {
+    for (int costly = 0; costly <= api::kMaxCostlyFailureRetries; ++costly) {
+        CHECK(api::ShouldRetryAfterFailure(StreamBroken(), 1, costly));
+    }
+    CHECK_FALSE(api::ShouldRetryAfterFailure(StreamBroken(), 1, api::kMaxCostlyFailureRetries + 1));
+    // 普通网络错不计代价高次数,仍走满阶梯。
+    const api::Error reset{api::ErrorKind::Network, "reset", 0};
+    CHECK(api::ShouldRetryAfterFailure(reset, api::kMaxRequestAttempts - 1, 0));
+    CHECK_FALSE(api::ShouldRetryAfterFailure(reset, api::kMaxRequestAttempts, 0));
+    // 不可重试错不因封顶松口。
+    CHECK_FALSE(api::ShouldRetryAfterFailure(api::Error{api::ErrorKind::HttpStatus, "x", 401}, 1, 0));
+}
+
+TEST_CASE("恢复环:流中途断一路失败,至多再试 kMaxCostlyFailureRetries 次就收口") {
+    for (const api::Error& error : {StreamBroken(), WallHit()}) {
+        SUBCASE(error.hard_timeout ? "无进展墙落锤" : "流已开始后断") {
+            ScriptedSender sender;
+            sender.script.assign(api::kMaxRequestAttempts, std::unexpected(error));
+            const auto result = api::RunRequestWithRecovery(sender.Sender(), RecordingHooks(sender));
+            REQUIRE_FALSE(result.has_value());
+            CHECK(sender.calls == 1 + api::kMaxCostlyFailureRetries);
+            CHECK(sender.waits.size() == static_cast<std::size_t>(api::kMaxCostlyFailureRetries));
+            REQUIRE_FALSE(sender.phases.empty());
+            CHECK(sender.phases.back() == api::RequestAttemptPhase::Exhausted);
+            CHECK(sender.calls < api::kMaxRequestAttempts);  // 不走满六次长阶梯
+        }
+    }
+}
+
+TEST_CASE("恢复环:见过流事件的普通网络错也按代价高封顶(经恢复环旁证)") {
+    ScriptedSender sender;
+    int calls = 0;
+    const api::AttemptSender send = [&calls](api::ModelRequestAttempt& attempt) -> std::expected<void, api::Error> {
+        ++calls;
+        attempt.saw_stream_event = true;  // 吐过事件再断:传输层旁证缺席也认
+        return std::unexpected(api::Error{api::ErrorKind::Network, "reset", 0});
+    };
+    const auto result = api::RunRequestWithRecovery(send, RecordingHooks(sender));
+    REQUIRE_FALSE(result.has_value());
+    CHECK(calls == 1 + api::kMaxCostlyFailureRetries);
+}
+
+TEST_CASE("恢复环:连接前失败与代价高失败混排,封顶只数代价高的那几次") {
+    static_assert(api::kMaxCostlyFailureRetries == 2, "脚本按封顶 2 次排的,改封顶要同步改脚本");
+    ScriptedSender sender;
+    const api::Error reset{api::ErrorKind::Network, "connect reset", 0};
+    // 连接前失败两次不占代价高额度;随后代价高失败第 3 次(累计)才收口。
+    sender.script = {std::unexpected(reset), std::unexpected(StreamBroken()), std::unexpected(reset),
+                     std::unexpected(StreamBroken()), std::unexpected(StreamBroken()), {}};
+    const auto result = api::RunRequestWithRecovery(sender.Sender(), RecordingHooks(sender));
+    REQUIRE_FALSE(result.has_value());
+    CHECK(sender.calls == 5);
+    CHECK(result.error().stream_started);
+}
+
+TEST_CASE("恢复环:流中途断一次后重发成功,不受封顶影响") {
+    ScriptedSender sender;
+    sender.script = {std::unexpected(StreamBroken()), {}};
+    const auto result = api::RunRequestWithRecovery(sender.Sender(), RecordingHooks(sender));
+    REQUIRE(result.has_value());
+    CHECK(sender.calls == 2);
+}
+
 TEST_CASE("恢复环:用户取消压过重试,立即原样交回") {
     ScriptedSender sender;
     sender.script = {
